@@ -1,6 +1,9 @@
 import { prisma } from './prisma';
 import type { WalletBalance } from '@/types';
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type PrismaTx = any; // Will be replaced with Prisma.TransactionClient once schema is generated
+
 // ─── Typed Errors ─────────────────────────────────────────────────────────────
 
 export class WalletError extends Error {
@@ -25,7 +28,7 @@ export class InsufficientPointsError extends WalletError {
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-async function getOrCreateWallet(userId: string, tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) {
+async function getOrCreateWallet(userId: string, tx: PrismaTx) {
   const wallet = await tx.wallet.upsert({
     where: { userId },
     create: {
@@ -56,7 +59,7 @@ export async function creditPoints(
 ): Promise<void> {
   if (amount <= 0) throw new WalletError('Amount must be positive', 'INVALID_AMOUNT');
 
-  await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx: PrismaTx) => {
     const wallet = await getOrCreateWallet(userId, tx);
 
     const updated = await tx.wallet.update({
@@ -93,7 +96,7 @@ export async function debitPoints(
 ): Promise<void> {
   if (amount <= 0) throw new WalletError('Amount must be positive', 'INVALID_AMOUNT');
 
-  await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx: PrismaTx) => {
     const wallet = await getOrCreateWallet(userId, tx);
 
     if (wallet.redeemablePoints < amount) {
@@ -135,7 +138,7 @@ export async function lockPoints(
 ): Promise<void> {
   if (amount <= 0) throw new WalletError('Amount must be positive', 'INVALID_AMOUNT');
 
-  await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx: PrismaTx) => {
     const wallet = await getOrCreateWallet(userId, tx);
 
     if (wallet.earnedPoints < amount) {
@@ -194,7 +197,7 @@ export async function unlockPoints(): Promise<number> {
 
   for (const record of due) {
     try {
-      await prisma.$transaction(async (tx) => {
+      await prisma.$transaction(async (tx: PrismaTx) => {
         const wallet = await tx.wallet.findUnique({ where: { id: record.walletId } });
         if (!wallet) return;
 
@@ -265,7 +268,7 @@ export async function reverseTransaction(
   transactionId: string,
   reason: string
 ): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx: PrismaTx) => {
     const original = await tx.walletTransaction.findUnique({
       where: { id: transactionId },
     });
