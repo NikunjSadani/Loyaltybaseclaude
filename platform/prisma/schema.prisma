@@ -1,13 +1,1963 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserRole {
+  GIFSY_ADMIN
+  CLIENT_ADMIN
+  MIS_USER
+  SALES_HO
+  SALES_STATE_HEAD
+  SALES_ASM
+  SALES_SO
+  SALES_ISR
+  RETAILER
+  WHOLESALER
+  SUB_STOCKIST
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING_VERIFICATION
+}
+
+enum OtpPurpose {
+  LOGIN
+  REGISTRATION
+  PASSWORD_RESET
+  KYC_CONSENT
+  WITHDRAWAL
+  PROFILE_UPDATE
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  APPROVE
+  REJECT
+  EXPORT
+  IMPORT
+}
+
+enum PartnerClassCode {
+  CP_01
+  CP_02
+  CP_03
+}
+
+enum KycStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  PENDING_PENNY_DROP
+  PENDING_AGREEMENT
+  APPROVED
+  REJECTED
+  RE_UPLOAD_REQUIRED
+  SUSPENDED
+}
+
+enum KycDocumentType {
+  AADHAAR_FRONT
+  AADHAAR_BACK
+  PAN_CARD
+  GST_CERTIFICATE
+  TRADE_LICENSE
+  SHOP_ESTABLISHMENT
+  BANK_PASSBOOK
+  CANCELLED_CHEQUE
+  SELFIE
+  SIGNATURE
+  OTHER
+}
+
+enum KycDocumentStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum DataRequestType {
+  ACCESS
+  CORRECTION
+  DELETION
+  PORTABILITY
+}
+
+enum DataRequestStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  REJECTED
+}
+
+enum SchemeType {
+  PURCHASE_INCENTIVE
+  VISIBILITY
+  GROWTH_INCENTIVE
+  REFERRAL
+  WELCOME_BONUS
+  MILESTONE
+  SLAB_BASED
+  TARGET_BASED
+}
+
+enum SchemeStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  EXPIRED
+  CANCELLED
+}
+
+enum RuleType {
+  MIN_PURCHASE_VALUE
+  MIN_PURCHASE_QTY
+  SKU_INCLUSION
+  SKU_EXCLUSION
+  CATEGORY_INCLUSION
+  CATEGORY_EXCLUSION
+  PARTNER_CLASS
+  TIER_CONDITION
+  GEOGRAPHY_CONDITION
+  SLAB_THRESHOLD
+}
+
+enum RewardType {
+  POINTS
+  CASHBACK
+  GIFT_CARD
+  PHYSICAL_GIFT
+  VOUCHER
+}
+
+enum WalletTransactionType {
+  CREDIT_POINTS_EARNED
+  CREDIT_BONUS
+  CREDIT_REVERSAL
+  CREDIT_ADJUSTMENT
+  DEBIT_REDEMPTION
+  DEBIT_EXPIRY
+  DEBIT_ADJUSTMENT
+  LOCK_HOLDING
+  UNLOCK_HOLDING
+}
+
+enum PointsLedgerType {
+  EARN
+  LOCK
+  UNLOCK
+  REDEEM
+  EXPIRE
+  ADJUST
+  REVERSE
+}
+
+enum RedemptionStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  DISPATCHED
+  DELIVERED
+  CANCELLED
+  RETURNED
+  FAILED
+}
+
+enum RewardCatalogStatus {
+  ACTIVE
+  INACTIVE
+  OUT_OF_STOCK
+  DISCONTINUED
+}
+
+enum PayoutMode {
+  GIFT_CARD
+  UPI
+  BANK_TRANSFER
+  PHYSICAL_GIFT
+}
+
+enum PayoutStatus {
+  PENDING
+  INITIATED
+  PROCESSING
+  SUCCESS
+  FAILED
+  REVERSED
+  HOLD
+}
+
+enum PayoutBatchStatus {
+  DRAFT
+  SUBMITTED
+  PROCESSING
+  PARTIALLY_COMPLETED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum FundLedgerType {
+  RECEIPT
+  DISBURSEMENT
+  ADJUSTMENT
+  REVERSAL
+}
+
+enum VisibilityStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  FLAGGED
+}
+
+enum VisibilityProgramStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  EXPIRED
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  PENDING_USER
+  RESOLVED
+  CLOSED
+  ESCALATED
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum TicketCategory {
+  KYC
+  POINTS
+  REDEMPTION
+  PAYOUT
+  SCHEME
+  TECHNICAL
+  ACCOUNT
+  OTHER
+}
+
+enum NotificationChannel {
+  SMS
+  EMAIL
+  PUSH
+  WHATSAPP
+  IN_APP
+}
+
+enum NotificationStatus {
+  QUEUED
+  PROCESSING
+  SENT
+  DELIVERED
+  FAILED
+  CANCELLED
+}
+
+enum ReportFormat {
+  CSV
+  XLSX
+  PDF
+}
+
+enum ReportFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  ON_DEMAND
+}
+
+enum SalesUploadStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  PARTIALLY_COMPLETED
+  FAILED
+}
+
+enum TargetPeriod {
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
+enum TargetStatus {
+  ACTIVE
+  ACHIEVED
+  MISSED
+  CANCELLED
+}
+
+enum LeaderboardType {
+  POINTS_EARNED
+  SALES_VALUE
+  GROWTH_PERCENTAGE
+  REDEMPTION_COUNT
+}
+
+enum LeaderboardPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+  YEARLY
+  ALL_TIME
+}
+
+enum BannerPosition {
+  HOME_TOP
+  HOME_MIDDLE
+  HOME_BOTTOM
+  CATALOG_TOP
+  SCHEME_PAGE
+  DASHBOARD
+}
+
+enum BannerStatus {
+  ACTIVE
+  INACTIVE
+  SCHEDULED
+}
+
+// ============================================================
+// MODULE 1: USERS & AUTH
+// ============================================================
+
+model User {
+  id                String     @id @default(cuid())
+  phone             String     @unique
+  email             String?    @unique
+  passwordHash      String?
+  name              String
+  role              UserRole
+  status            UserStatus @default(PENDING_VERIFICATION)
+  avatarUrl         String?
+  preferredLanguage String     @default("en")
+  fcmToken          String?
+  lastLoginAt       DateTime?
+  loginCount        Int        @default(0)
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  deletedAt         DateTime?
+
+  // Relations
+  sessions              UserSession[]
+  otpCodes              OtpCode[]
+  auditLogs             AuditLog[]            @relation("AuditActor")
+  affectedAuditLogs     AuditLog[]            @relation("AuditTarget")
+  salesUser             SalesUser?
+  channelPartner        ChannelPartner?
+  kycSubmissions        KycSubmission[]
+  tickets               Ticket[]              @relation("TicketCreator")
+  assignedTickets       Ticket[]              @relation("TicketAssignee")
+  ticketMessages        TicketMessage[]
+  notificationQueue     NotificationQueue[]
+  dataRequests          DataRequest[]
+  consentRecords        ConsentRecord[]
+  scheduledReports      ScheduledReport[]
+  reportDeliveryLogs    ReportDeliveryLog[]
+
+  @@index([phone])
+  @@index([email])
+  @@index([role])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+model UserSession {
+  id           String    @id @default(cuid())
+  userId       String
+  token        String    @unique
+  refreshToken String?   @unique
+  deviceId     String?
+  deviceName   String?
+  ipAddress    String?
+  userAgent    String?
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("user_sessions")
+}
+
+model OtpCode {
+  id          String      @id @default(cuid())
+  userId      String?
+  phone       String
+  code        String
+  purpose     OtpPurpose
+  expiresAt   DateTime
+  verifiedAt  DateTime?
+  attempts    Int         @default(0)
+  maxAttempts Int         @default(3)
+  ipAddress   String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([phone])
+  @@index([userId])
+  @@index([purpose])
+  @@index([expiresAt])
+  @@map("otp_codes")
+}
+
+model AuditLog {
+  id           String      @id @default(cuid())
+  actorId      String?
+  targetUserId String?
+  action       AuditAction
+  entityType   String
+  entityId     String
+  oldValues    Json?
+  newValues    Json?
+  ipAddress    String?
+  userAgent    String?
+  metadata     Json?
+  createdAt    DateTime    @default(now())
+
+  actor      User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  targetUser User? @relation("AuditTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  @@index([actorId])
+  @@index([targetUserId])
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================================
+// MODULE 2: HIERARCHY
+// ============================================================
+
+model SalesHierarchyLevel {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  level       Int      @unique
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  salesUsers SalesUser[]
+
+  @@index([level])
+  @@map("sales_hierarchy_levels")
+}
+
+model SalesUser {
+  id              String    @id @default(cuid())
+  userId          String    @unique
+  hierarchyLevelId String
+  employeeCode    String    @unique
+  reportingToId   String?
+  region          String?
+  zone            String?
+  isActive        Boolean   @default(true)
+  joinedAt        DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  hierarchyLevel SalesHierarchyLevel   @relation(fields: [hierarchyLevelId], references: [id])
+  reportingTo    SalesUser?            @relation("SalesUserReporting", fields: [reportingToId], references: [id])
+  subordinates   SalesUser[]           @relation("SalesUserReporting")
+  assignments    SalesUserAssignment[]
+
+  @@index([userId])
+  @@index([hierarchyLevelId])
+  @@index([reportingToId])
+  @@index([employeeCode])
+  @@index([deletedAt])
+  @@map("sales_users")
+}
+
+model SalesUserAssignment {
+  id              String    @id @default(cuid())
+  salesUserId     String
+  partnerId       String?
+  outletId        String?
+  assignedAt      DateTime  @default(now())
+  unassignedAt    DateTime?
+  notes           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  salesUser SalesUser       @relation(fields: [salesUserId], references: [id], onDelete: Cascade)
+  partner   ChannelPartner? @relation(fields: [partnerId], references: [id], onDelete: SetNull)
+  outlet    Outlet?         @relation(fields: [outletId], references: [id], onDelete: SetNull)
+
+  @@index([salesUserId])
+  @@index([partnerId])
+  @@index([outletId])
+  @@map("sales_user_assignments")
+}
+
+// ============================================================
+// MODULE 3: CHANNEL PARTNERS
+// ============================================================
+
+model PartnerClassConfig {
+  id          String          @id @default(cuid())
+  code        PartnerClassCode @unique
+  name        String
+  description String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  channelPartners ChannelPartner[]
+  tierConfigs     TierConfig[]
+
+  @@map("channel_partner_classes")
+}
+
+model TierConfig {
+  id               String              @id @default(cuid())
+  partnerClassId   String
+  tierName         String
+  tierLevel        Int
+  minPoints        Int
+  maxPoints        Int?
+  pointsMultiplier Decimal             @db.Decimal(5, 2)
+  holdingPeriodDays Int               @default(30)
+  benefits         Json?
+  isActive         Boolean             @default(true)
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  partnerClass       PartnerClassConfig    @relation(fields: [partnerClassId], references: [id])
+  partnerTierHistory PartnerTierHistory[]
+  currentTierPartners ChannelPartner[]    @relation("CurrentTier")
+
+  @@unique([partnerClassId, tierLevel])
+  @@index([partnerClassId])
+  @@map("tier_configs")
+}
+
+model ChannelPartner {
+  id               String              @id @default(cuid())
+  userId           String              @unique
+  partnerClassId   String
+  partnerCode      String              @unique
+  businessName     String
+  ownerName        String
+  phone            String
+  email            String?
+  gstNumber        String?             @unique
+  panNumber        String?
+  currentTierConfigId String?
+  totalEarnedPoints   Int             @default(0)
+  referredBy       String?
+  isActive         Boolean             @default(true)
+  onboardedAt      DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  deletedAt        DateTime?
+
+  user             User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  partnerClass     PartnerClassConfig    @relation(fields: [partnerClassId], references: [id])
+  currentTier      TierConfig?           @relation("CurrentTier", fields: [currentTierConfigId], references: [id])
+  tierHistory      PartnerTierHistory[]
+  outlets          Outlet[]
+  kycSubmissions   KycSubmission[]
+  wallets          Wallet[]
+  salesAssignments SalesUserAssignment[]
+  targets          Target[]
+  targetAchievements TargetAchievement[]
+  visibilitySubmissions VisibilitySubmission[]
+  redemptionOrders RedemptionOrder[]
+  payoutTransactions PayoutTransaction[]
+  leaderboardEntries LeaderboardEntry[]
+
+  @@index([userId])
+  @@index([partnerClassId])
+  @@index([partnerCode])
+  @@index([gstNumber])
+  @@index([isActive])
+  @@index([deletedAt])
+  @@map("channel_partners")
+}
+
+model PartnerTierHistory {
+  id             String     @id @default(cuid())
+  partnerId      String
+  tierConfigId   String
+  changedAt      DateTime   @default(now())
+  changedReason  String?
+  previousTierId String?
+  pointsAtChange Int
+  createdAt      DateTime   @default(now())
+
+  partner    ChannelPartner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  tierConfig TierConfig     @relation(fields: [tierConfigId], references: [id])
+
+  @@index([partnerId])
+  @@index([tierConfigId])
+  @@index([changedAt])
+  @@map("partner_tier_history")
+}
+
+// ============================================================
+// MODULE 4: KYC
+// ============================================================
+
+model KycSubmission {
+  id                String    @id @default(cuid())
+  userId            String
+  partnerId         String?
+  status            KycStatus @default(DRAFT)
+  submittedAt       DateTime?
+  reviewedAt        DateTime?
+  approvedAt        DateTime?
+  rejectionReason   String?
+  reviewerNotes     String?
+  pennydropRef      String?
+  pennydropStatus   String?
+  pennydropVerifiedAt DateTime?
+  agreementRef      String?
+  agreementSignedAt DateTime?
+  version           Int       @default(1)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  partner        ChannelPartner?     @relation(fields: [partnerId], references: [id], onDelete: SetNull)
+  documents      KycDocument[]
+  statusHistory  KycStatusHistory[]
+  consentRecords ConsentRecord[]
+
+  @@index([userId])
+  @@index([partnerId])
+  @@index([status])
+  @@index([submittedAt])
+  @@map("kyc_submissions")
+}
+
+model KycDocument {
+  id              String            @id @default(cuid())
+  kycSubmissionId String
+  documentType    KycDocumentType
+  fileUrl         String
+  fileKey         String
+  fileName        String?
+  fileSizeBytes   Int?
+  mimeType        String?
+  status          KycDocumentStatus @default(PENDING)
+  rejectionReason String?
+  verifiedAt      DateTime?
+  expiresAt       DateTime?
+  metadata        Json?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  kycSubmission KycSubmission @relation(fields: [kycSubmissionId], references: [id], onDelete: Cascade)
+
+  @@index([kycSubmissionId])
+  @@index([documentType])
+  @@index([status])
+  @@map("kyc_documents")
+}
+
+model KycStatusHistory {
+  id              String    @id @default(cuid())
+  kycSubmissionId String
+  fromStatus      KycStatus?
+  toStatus        KycStatus
+  changedByUserId String?
+  notes           String?
+  metadata        Json?
+  createdAt       DateTime  @default(now())
+
+  kycSubmission KycSubmission @relation(fields: [kycSubmissionId], references: [id], onDelete: Cascade)
+
+  @@index([kycSubmissionId])
+  @@index([createdAt])
+  @@map("kyc_status_history")
+}
+
+model ConsentRecord {
+  id              String    @id @default(cuid())
+  userId          String
+  kycSubmissionId String?
+  consentType     String
+  consentText     String
+  version         String
+  ipAddress       String?
+  deviceInfo      String?
+  consentedAt     DateTime  @default(now())
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kycSubmission KycSubmission? @relation(fields: [kycSubmissionId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([kycSubmissionId])
+  @@index([consentType])
+  @@map("consent_records")
+}
+
+model DataRequest {
+  id          String            @id @default(cuid())
+  userId      String
+  requestType DataRequestType
+  status      DataRequestStatus @default(PENDING)
+  notes       String?
+  processedBy String?
+  processedAt DateTime?
+  responseUrl String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([requestType])
+  @@map("data_requests")
+}
+
+// ============================================================
+// MODULE 5: OUTLET
+// ============================================================
+
+model OutletType {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  outlets Outlet[]
+
+  @@map("outlet_types")
+}
+
+model Outlet {
+  id             String    @id @default(cuid())
+  partnerId      String
+  outletTypeId   String
+  outletCode     String    @unique
+  name           String
+  ownerName      String?
+  phone          String?
+  addressLine1   String
+  addressLine2   String?
+  city           String
+  district       String?
+  state          String
+  pincode        String
+  country        String    @default("IN")
+  latitude       Decimal?  @db.Decimal(10, 8)
+  longitude      Decimal?  @db.Decimal(11, 8)
+  isActive       Boolean   @default(true)
+  isPrimary      Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  partner          ChannelPartner        @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  outletType       OutletType            @relation(fields: [outletTypeId], references: [id])
+  geoHistory       OutletGeoHistory[]
+  salesAssignments SalesUserAssignment[]
+  visibilitySubmissions VisibilitySubmission[]
+
+  @@index([partnerId])
+  @@index([outletTypeId])
+  @@index([pincode])
+  @@index([state])
+  @@index([isActive])
+  @@index([deletedAt])
+  @@map("outlets")
+}
+
+model OutletGeoHistory {
+  id          String   @id @default(cuid())
+  outletId    String
+  latitude    Decimal  @db.Decimal(10, 8)
+  longitude   Decimal  @db.Decimal(11, 8)
+  capturedAt  DateTime @default(now())
+  deviceInfo  String?
+  accuracy    Decimal? @db.Decimal(8, 2)
+  createdAt   DateTime @default(now())
+
+  outlet Outlet @relation(fields: [outletId], references: [id], onDelete: Cascade)
+
+  @@index([outletId])
+  @@index([capturedAt])
+  @@map("outlet_geo_history")
+}
+
+// ============================================================
+// MODULE 6: SKU / PRODUCT
+// ============================================================
+
+model Category {
+  id          String    @id @default(cuid())
+  parentId    String?
+  code        String    @unique
+  name        String
+  description String?
+  imageUrl    String?
+  sortOrder   Int       @default(0)
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryHierarchy")
+  skuMappings SkuCategoryMapping[]
+
+  @@index([parentId])
+  @@index([isActive])
+  @@map("categories")
+}
+
+model Sku {
+  id              String    @id @default(cuid())
+  skuCode         String    @unique
+  name            String
+  description     String?
+  brand           String?
+  uom             String
+  packSize        Decimal?  @db.Decimal(10, 3)
+  mrpPaise        Int
+  dealerPricePaise Int?
+  imageUrl        String?
+  isActive        Boolean   @default(true)
+  isTaxable       Boolean   @default(true)
+  hsn             String?
+  gstRate         Decimal?  @db.Decimal(5, 2)
+  metadata        Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  categoryMappings  SkuCategoryMapping[]
+  invoiceLineItems  InvoiceLineItem[]
+  invoiceReturns    InvoiceReturn[]
+  rewardInventories RewardInventory[]
+
+  @@index([skuCode])
+  @@index([brand])
+  @@index([isActive])
+  @@map("skus")
+}
+
+model SkuCategoryMapping {
+  id         String   @id @default(cuid())
+  skuId      String
+  categoryId String
+  isPrimary  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  sku      Sku      @relation(fields: [skuId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([skuId, categoryId])
+  @@index([skuId])
+  @@index([categoryId])
+  @@map("sku_category_mappings")
+}
+
+// ============================================================
+// MODULE 7: SALES DATA
+// ============================================================
+
+model SalesUpload {
+  id              String            @id @default(cuid())
+  uploadedByUserId String
+  fileName        String
+  fileUrl         String
+  fileKey         String
+  fileSizeBytes   Int?
+  mimeType        String?
+  status          SalesUploadStatus @default(PENDING)
+  totalRows       Int               @default(0)
+  processedRows   Int               @default(0)
+  successRows     Int               @default(0)
+  failedRows      Int               @default(0)
+  errorSummary    Json?
+  processedAt     DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  invoices SalesInvoice[]
+
+  @@index([uploadedByUserId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("sales_uploads")
+}
+
+model SalesInvoice {
+  id               String    @id @default(cuid())
+  salesUploadId    String?
+  partnerId        String
+  outletId         String?
+  invoiceNumber    String    @unique
+  invoiceDate      DateTime
+  distributorCode  String?
+  distributorName  String?
+  totalAmountPaise Int
+  totalQty         Decimal   @db.Decimal(10, 3)
+  discountPaise    Int       @default(0)
+  taxPaise         Int       @default(0)
+  netAmountPaise   Int
+  isValid          Boolean   @default(true)
+  isDuplicate      Boolean   @default(false)
+  invalidReason    String?
+  processedAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  salesUpload SalesUpload?      @relation(fields: [salesUploadId], references: [id], onDelete: SetNull)
+  lineItems   InvoiceLineItem[]
+  returns     InvoiceReturn[]
+
+  @@index([partnerId])
+  @@index([outletId])
+  @@index([invoiceDate])
+  @@index([salesUploadId])
+  @@index([isDuplicate])
+  @@map("sales_invoices")
+}
+
+model InvoiceLineItem {
+  id             String   @id @default(cuid())
+  invoiceId      String
+  skuId          String
+  quantity       Decimal  @db.Decimal(10, 3)
+  unitPricePaise Int
+  totalPaise     Int
+  discountPaise  Int      @default(0)
+  taxPaise       Int      @default(0)
+  netPaise       Int
+  batchNumber    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  invoice SalesInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  sku     Sku          @relation(fields: [skuId], references: [id])
+
+  @@index([invoiceId])
+  @@index([skuId])
+  @@map("invoice_line_items")
+}
+
+model InvoiceReturn {
+  id              String   @id @default(cuid())
+  invoiceId       String
+  skuId           String
+  quantity        Decimal  @db.Decimal(10, 3)
+  returnAmountPaise Int
+  returnReason    String?
+  returnDate      DateTime
+  creditNoteNumber String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  invoice SalesInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  sku     Sku          @relation(fields: [skuId], references: [id])
+
+  @@index([invoiceId])
+  @@index([skuId])
+  @@index([returnDate])
+  @@map("invoice_returns")
+}
+
+// ============================================================
+// MODULE 8: SCHEMES & TARGETS
+// ============================================================
+
+model Scheme {
+  id                   String       @id @default(cuid())
+  code                 String       @unique
+  name                 String
+  description          String?
+  schemeType           SchemeType
+  status               SchemeStatus @default(DRAFT)
+  startDate            DateTime
+  endDate              DateTime
+  holdingPeriodDays    Int          @default(30)
+  rewardType           RewardType
+  pointsPerRupee       Decimal?     @db.Decimal(10, 4)
+  fixedPoints          Int?
+  maxPointsPerCycle    Int?
+  budgetPaise          Int?
+  spentPaise           Int          @default(0)
+  termsAndConditions   String?
+  isStackable          Boolean      @default(false)
+  priority             Int          @default(0)
+  imageUrl             String?
+  metadata             Json?
+  createdByUserId      String?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+  deletedAt            DateTime?
+
+  rules              SchemeRule[]
+  eligibility        SchemeEligibility[]
+  pointsLedger       PointsLedger[]
+  targets            Target[]
+
+  @@index([status])
+  @@index([startDate, endDate])
+  @@index([schemeType])
+  @@index([deletedAt])
+  @@map("schemes")
+}
+
+model SchemeRule {
+  id          String   @id @default(cuid())
+  schemeId    String
+  ruleType    RuleType
+  operator    String
+  value       Json
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  scheme Scheme @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+
+  @@index([schemeId])
+  @@index([ruleType])
+  @@map("scheme_rules")
+}
+
+model SchemeEligibility {
+  id              String   @id @default(cuid())
+  schemeId        String
+  partnerClassCode PartnerClassCode?
+  tierConfigId    String?
+  specificPartnerId String?
+  stateCode       String?
+  cityCode        String?
+  pincodePattern  String?
+  isExclusion     Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  scheme Scheme @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+
+  @@index([schemeId])
+  @@index([specificPartnerId])
+  @@map("scheme_eligibility")
+}
+
+model Target {
+  id              String       @id @default(cuid())
+  schemeId        String?
+  partnerId       String
+  salesUserId     String?
+  period          TargetPeriod
+  periodStartDate DateTime
+  periodEndDate   DateTime
+  targetValuePaise Int?
+  targetQty       Decimal?     @db.Decimal(10, 3)
+  targetPoints    Int?
+  status          TargetStatus @default(ACTIVE)
+  metadata        Json?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  scheme       Scheme?            @relation(fields: [schemeId], references: [id], onDelete: SetNull)
+  partner      ChannelPartner     @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  achievements TargetAchievement[]
+
+  @@index([partnerId])
+  @@index([schemeId])
+  @@index([status])
+  @@index([periodStartDate, periodEndDate])
+  @@map("targets")
+}
+
+model TargetAchievement {
+  id                  String   @id @default(cuid())
+  targetId            String
+  partnerId           String
+  achievedValuePaise  Int      @default(0)
+  achievedQty         Decimal  @default(0) @db.Decimal(10, 3)
+  achievedPoints      Int      @default(0)
+  achievementPercent  Decimal  @default(0) @db.Decimal(5, 2)
+  rewardPoints        Int      @default(0)
+  calculatedAt        DateTime @default(now())
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  target  Target         @relation(fields: [targetId], references: [id], onDelete: Cascade)
+  partner ChannelPartner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  @@index([targetId])
+  @@index([partnerId])
+  @@index([calculatedAt])
+  @@map("target_achievements")
+}
+
+// ============================================================
+// MODULE 9: WALLET & POINTS
+// ============================================================
+
+model Wallet {
+  id                  String   @id @default(cuid())
+  partnerId           String   @unique
+  earnedPoints        Int      @default(0)
+  lockedPoints        Int      @default(0)
+  redeemablePoints    Int      @default(0)
+  redeemedPoints      Int      @default(0)
+  expiredPoints       Int      @default(0)
+  lifetimeEarned      Int      @default(0)
+  lifetimeRedeemed    Int      @default(0)
+  lifetimeExpired     Int      @default(0)
+  lastTransactionAt   DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  partner      ChannelPartner       @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  transactions WalletTransaction[]
+  pointsLedger PointsLedger[]
+
+  @@index([partnerId])
+  @@map("wallets")
+}
+
+model WalletTransaction {
+  id              String                @id @default(cuid())
+  walletId        String
+  transactionType WalletTransactionType
+  points          Int
+  balanceBefore   Int
+  balanceAfter    Int
+  balanceType     String
+  referenceType   String?
+  referenceId     String?
+  description     String?
+  metadata        Json?
+  createdAt       DateTime              @default(now())
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
+  @@index([transactionType])
+  @@index([referenceType, referenceId])
+  @@index([createdAt])
+  @@map("wallet_transactions")
+}
+
+model PointsLedger {
+  id              String           @id @default(cuid())
+  walletId        String
+  schemeId        String?
+  transactionType PointsLedgerType
+  points          Int
+  lockedUntil     DateTime?
+  expiresAt       DateTime?
+  isExpired       Boolean          @default(false)
+  isClaimed       Boolean          @default(false)
+  claimedAt       DateTime?
+  sourceType      String?
+  sourceId        String?
+  notes           String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  wallet Wallet  @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  scheme Scheme? @relation(fields: [schemeId], references: [id], onDelete: SetNull)
+
+  @@index([walletId])
+  @@index([schemeId])
+  @@index([lockedUntil])
+  @@index([expiresAt])
+  @@index([isExpired])
+  @@index([createdAt])
+  @@map("points_ledger")
+}
+
+model PointExpiryConfig {
+  id                 String           @id @default(cuid())
+  partnerClassCode   PartnerClassCode?
+  schemeId           String?
+  expiryDays         Int
+  warningDaysBefore  Int              @default(7)
+  isDefault          Boolean          @default(false)
+  isActive           Boolean          @default(true)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([schemeId])
+  @@map("point_expiry_config")
+}
+
+// ============================================================
+// MODULE 10: REWARD CATALOG
+// ============================================================
+
+model RewardCategory {
+  id          String    @id @default(cuid())
+  parentId    String?
+  code        String    @unique
+  name        String
+  description String?
+  imageUrl    String?
+  sortOrder   Int       @default(0)
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  parent   RewardCategory?  @relation("RewardCategoryHierarchy", fields: [parentId], references: [id])
+  children RewardCategory[] @relation("RewardCategoryHierarchy")
+  rewards  RewardCatalog[]
+
+  @@index([parentId])
+  @@map("reward_categories")
+}
+
+model RewardCatalog {
+  id                  String              @id @default(cuid())
+  categoryId          String
+  code                String              @unique
+  name                String
+  description         String?
+  imageUrls           Json?
+  pointsCost          Int
+  mrpPaise            Int?
+  redemptionMode      PayoutMode
+  status              RewardCatalogStatus @default(ACTIVE)
+  minRedemptionPoints Int?
+  maxRedemptionPoints Int?
+  eligibleClasses     PartnerClassCode[]
+  termsAndConditions  String?
+  metadata            Json?
+  sortOrder           Int                 @default(0)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  deletedAt           DateTime?
+
+  category   RewardCategory   @relation(fields: [categoryId], references: [id])
+  inventory  RewardInventory[]
+  orders     RedemptionOrder[]
+
+  @@index([categoryId])
+  @@index([status])
+  @@index([redemptionMode])
+  @@index([deletedAt])
+  @@map("reward_catalog")
+}
+
+model RewardInventory {
+  id              String   @id @default(cuid())
+  rewardId        String
+  skuId           String?
+  totalStock      Int      @default(0)
+  reservedStock   Int      @default(0)
+  availableStock  Int      @default(0)
+  reorderLevel    Int      @default(0)
+  lastRestockedAt DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  reward RewardCatalog @relation(fields: [rewardId], references: [id], onDelete: Cascade)
+  sku    Sku?          @relation(fields: [skuId], references: [id], onDelete: SetNull)
+
+  @@unique([rewardId])
+  @@index([rewardId])
+  @@map("reward_inventory")
+}
+
+model RedemptionOrder {
+  id                  String           @id @default(cuid())
+  partnerId           String
+  rewardId            String
+  orderNumber         String           @unique
+  status              RedemptionStatus @default(PENDING)
+  pointsDeducted      Int
+  quantity            Int              @default(1)
+  totalPointsCost     Int
+  redemptionMode      PayoutMode
+  deliveryName        String?
+  deliveryPhone       String?
+  deliveryAddressLine1 String?
+  deliveryAddressLine2 String?
+  deliveryCity        String?
+  deliveryState       String?
+  deliveryPincode     String?
+  trackingNumber      String?
+  trackingUrl         String?
+  dispatchedAt        DateTime?
+  deliveredAt         DateTime?
+  cancelledAt         DateTime?
+  cancelReason        String?
+  notes               String?
+  metadata            Json?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  partner        ChannelPartner           @relation(fields: [partnerId], references: [id], onDelete: Restrict)
+  reward         RewardCatalog            @relation(fields: [rewardId], references: [id])
+  statusHistory  RedemptionStatusHistory[]
+
+  @@index([partnerId])
+  @@index([rewardId])
+  @@index([status])
+  @@index([orderNumber])
+  @@index([createdAt])
+  @@map("redemption_orders")
+}
+
+model RedemptionStatusHistory {
+  id          String           @id @default(cuid())
+  orderId     String
+  fromStatus  RedemptionStatus?
+  toStatus    RedemptionStatus
+  changedById String?
+  notes       String?
+  metadata    Json?
+  createdAt   DateTime         @default(now())
+
+  order RedemptionOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([createdAt])
+  @@map("redemption_status_history")
+}
+
+// ============================================================
+// MODULE 11: VISIBILITY
+// ============================================================
+
+model VisibilityProgram {
+  id                  String                  @id @default(cuid())
+  code                String                  @unique
+  name                String
+  description         String?
+  status              VisibilityProgramStatus @default(DRAFT)
+  startDate           DateTime
+  endDate             DateTime
+  pointsPerSubmission Int
+  maxSubmissionsPerMonth Int?
+  eligibleClasses     PartnerClassCode[]
+  checklistItems      Json?
+  imageRequirements   Json?
+  createdByUserId     String?
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+  deletedAt           DateTime?
+
+  submissions VisibilitySubmission[]
+
+  @@index([status])
+  @@index([startDate, endDate])
+  @@index([deletedAt])
+  @@map("visibility_programs")
+}
+
+model VisibilitySubmission {
+  id               String           @id @default(cuid())
+  programId        String
+  partnerId        String
+  outletId         String
+  status           VisibilityStatus @default(DRAFT)
+  submittedAt      DateTime?
+  imageUrls        Json?
+  checklistData    Json?
+  latitude         Decimal?         @db.Decimal(10, 8)
+  longitude        Decimal?         @db.Decimal(11, 8)
+  deviceInfo       String?
+  pointsAwarded    Int?
+  reviewedByUserId String?
+  reviewedAt       DateTime?
+  rejectionReason  String?
+  isFraudFlagged   Boolean          @default(false)
+  fraudScore       Decimal?         @db.Decimal(5, 2)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  program   VisibilityProgram      @relation(fields: [programId], references: [id])
+  partner   ChannelPartner         @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  outlet    Outlet                 @relation(fields: [outletId], references: [id])
+  approvals VisibilityApproval[]
+  fraudLogs VisibilityFraudLog[]
+
+  @@index([programId])
+  @@index([partnerId])
+  @@index([outletId])
+  @@index([status])
+  @@index([submittedAt])
+  @@map("visibility_submissions")
+}
+
+model VisibilityApproval {
+  id             String           @id @default(cuid())
+  submissionId   String
+  reviewerUserId String
+  fromStatus     VisibilityStatus?
+  toStatus       VisibilityStatus
+  notes          String?
+  createdAt      DateTime         @default(now())
+
+  submission VisibilitySubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+  @@index([reviewerUserId])
+  @@map("visibility_approvals")
+}
+
+model VisibilityFraudLog {
+  id            String   @id @default(cuid())
+  submissionId  String
+  flagType      String
+  flagDetails   Json?
+  fraudScore    Decimal  @db.Decimal(5, 2)
+  isConfirmed   Boolean  @default(false)
+  reviewedAt    DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  submission VisibilitySubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+  @@index([flagType])
+  @@index([isConfirmed])
+  @@map("visibility_fraud_log")
+}
+
+model VisibilityImageHash {
+  id           String   @id @default(cuid())
+  submissionId String
+  imageUrl     String
+  imageHash    String
+  hashAlgorithm String  @default("phash")
+  isDuplicate  Boolean  @default(false)
+  duplicateOf  String?
+  createdAt    DateTime @default(now())
+
+  @@unique([imageHash])
+  @@index([submissionId])
+  @@index([imageHash])
+  @@map("visibility_image_hashes")
+}
+
+// ============================================================
+// MODULE 12: PAYMENTS
+// ============================================================
+
+model PayoutBatch {
+  id              String            @id @default(cuid())
+  batchCode       String            @unique
+  status          PayoutBatchStatus @default(DRAFT)
+  payoutMode      PayoutMode
+  totalAmountPaise Int              @default(0)
+  transactionCount Int              @default(0)
+  successCount    Int               @default(0)
+  failureCount    Int               @default(0)
+  processedAt     DateTime?
+  submittedAt     DateTime?
+  completedAt     DateTime?
+  notes           String?
+  createdByUserId String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  transactions PayoutTransaction[]
+
+  @@index([status])
+  @@index([payoutMode])
+  @@index([createdAt])
+  @@map("payout_batches")
+}
+
+model PayoutTransaction {
+  id               String        @id @default(cuid())
+  batchId          String?
+  partnerId        String
+  redemptionOrderId String?
+  payoutMode       PayoutMode
+  status           PayoutStatus  @default(PENDING)
+  amountPaise      Int
+  beneficiaryName  String?
+  beneficiaryPhone String?
+  upiId            String?
+  bankAccountNumber String?
+  ifscCode         String?
+  bankName         String?
+  giftCardCode     String?
+  giftCardProvider String?
+  providerRefId    String?
+  providerResponse Json?
+  failureReason    String?
+  initiatedAt      DateTime?
+  completedAt      DateTime?
+  reversedAt       DateTime?
+  tdsApplicable    Boolean       @default(false)
+  tdsPaise         Int           @default(0)
+  netAmountPaise   Int
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  batch   PayoutBatch?   @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  partner ChannelPartner @relation(fields: [partnerId], references: [id], onDelete: Restrict)
+  tdsRecord TdsRecord?
+
+  @@index([batchId])
+  @@index([partnerId])
+  @@index([status])
+  @@index([payoutMode])
+  @@index([createdAt])
+  @@map("payout_transactions")
+}
+
+model FundLedger {
+  id            String          @id @default(cuid())
+  ledgerType    FundLedgerType
+  amountPaise   Int
+  balancePaise  Int
+  referenceType String?
+  referenceId   String?
+  description   String?
+  metadata      Json?
+  createdAt     DateTime        @default(now())
+
+  @@index([ledgerType])
+  @@index([referenceType, referenceId])
+  @@index([createdAt])
+  @@map("fund_ledger")
+}
+
+model FundReceipt {
+  id              String   @id @default(cuid())
+  receiptNumber   String   @unique
+  amountPaise     Int
+  receivedAt      DateTime
+  paymentMode     String
+  referenceNumber String?
+  bankName        String?
+  notes           String?
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([receivedAt])
+  @@index([referenceNumber])
+  @@map("fund_receipts")
+}
+
+model TdsRecord {
+  id                  String   @id @default(cuid())
+  payoutTransactionId String   @unique
+  partnerId           String
+  panNumber           String?
+  tdsPaise            Int
+  tdsRate             Decimal  @db.Decimal(5, 2)
+  assessmentYear      String?
+  quarterPeriod       String?
+  formType            String?
+  certificateNumber   String?
+  certificateIssuedAt DateTime?
+  certificateUrl      String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  payoutTransaction PayoutTransaction @relation(fields: [payoutTransactionId], references: [id], onDelete: Cascade)
+
+  @@index([partnerId])
+  @@index([panNumber])
+  @@index([quarterPeriod])
+  @@map("tds_records")
+}
+
+model AutoInvoice {
+  id              String   @id @default(cuid())
+  invoiceNumber   String   @unique
+  partnerId       String
+  invoiceDate     DateTime
+  periodStartDate DateTime?
+  periodEndDate   DateTime?
+  lineItems       Json
+  subtotalPaise   Int
+  gstPaise        Int      @default(0)
+  totalPaise      Int
+  pdfUrl          String?
+  emailSentAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([partnerId])
+  @@index([invoiceDate])
+  @@map("auto_invoices")
+}
+
+// ============================================================
+// MODULE 13: LEADERBOARD
+// ============================================================
+
+model LeaderboardConfig {
+  id              String            @id @default(cuid())
+  code            String            @unique
+  name            String
+  description     String?
+  leaderboardType LeaderboardType
+  period          LeaderboardPeriod
+  eligibleClasses PartnerClassCode[]
+  topN            Int               @default(10)
+  rewardPoints    Int?
+  isActive        Boolean           @default(true)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  snapshots LeaderboardSnapshot[]
+
+  @@index([leaderboardType])
+  @@index([period])
+  @@index([isActive])
+  @@map("leaderboard_configs")
+}
+
+model LeaderboardSnapshot {
+  id              String    @id @default(cuid())
+  configId        String
+  snapshotDate    DateTime
+  periodStartDate DateTime
+  periodEndDate   DateTime
+  isPublished     Boolean   @default(false)
+  publishedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  config  LeaderboardConfig  @relation(fields: [configId], references: [id], onDelete: Cascade)
+  entries LeaderboardEntry[]
+
+  @@index([configId])
+  @@index([snapshotDate])
+  @@index([isPublished])
+  @@map("leaderboard_snapshots")
+}
+
+model LeaderboardEntry {
+  id           String   @id @default(cuid())
+  snapshotId   String
+  partnerId    String
+  rank         Int
+  score        Decimal  @db.Decimal(15, 2)
+  previousRank Int?
+  rankChange   Int?
+  metadata     Json?
+  createdAt    DateTime @default(now())
+
+  snapshot LeaderboardSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  partner  ChannelPartner      @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  @@unique([snapshotId, rank])
+  @@unique([snapshotId, partnerId])
+  @@index([snapshotId])
+  @@index([partnerId])
+  @@index([rank])
+  @@map("leaderboard_entries")
+}
+
+// ============================================================
+// MODULE 14: SUPPORT
+// ============================================================
+
+model Ticket {
+  id           String         @id @default(cuid())
+  ticketNumber String         @unique
+  createdById  String
+  assignedToId String?
+  category     TicketCategory
+  priority     TicketPriority @default(MEDIUM)
+  status       TicketStatus   @default(OPEN)
+  subject      String
+  description  String
+  referenceType String?
+  referenceId  String?
+  resolvedAt   DateTime?
+  closedAt     DateTime?
+  firstResponseAt DateTime?
+  slaBreached  Boolean        @default(false)
+  metadata     Json?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  deletedAt    DateTime?
+
+  createdBy    User                 @relation("TicketCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  assignedTo   User?                @relation("TicketAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  messages     TicketMessage[]
+  statusHistory TicketStatusHistory[]
+
+  @@index([createdById])
+  @@index([assignedToId])
+  @@index([status])
+  @@index([category])
+  @@index([priority])
+  @@index([createdAt])
+  @@index([deletedAt])
+  @@map("tickets")
+}
+
+model TicketMessage {
+  id          String   @id @default(cuid())
+  ticketId    String
+  senderId    String
+  message     String
+  isInternal  Boolean  @default(false)
+  attachments Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  sender User   @relation(fields: [senderId], references: [id], onDelete: Restrict)
+
+  @@index([ticketId])
+  @@index([senderId])
+  @@index([createdAt])
+  @@map("ticket_messages")
+}
+
+model TicketStatusHistory {
+  id          String       @id @default(cuid())
+  ticketId    String
+  fromStatus  TicketStatus?
+  toStatus    TicketStatus
+  changedById String?
+  notes       String?
+  createdAt   DateTime     @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@index([createdAt])
+  @@map("ticket_status_history")
+}
+
+// ============================================================
+// MODULE 15: NOTIFICATIONS
+// ============================================================
+
+model NotificationTemplate {
+  id          String              @id @default(cuid())
+  code        String              @unique
+  name        String
+  channel     NotificationChannel
+  subject     String?
+  bodyTemplate String
+  variables   Json?
+  isActive    Boolean             @default(true)
+  metadata    Json?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  queue NotificationQueue[]
+
+  @@index([channel])
+  @@index([isActive])
+  @@map("notification_templates")
+}
+
+model NotificationQueue {
+  id           String              @id @default(cuid())
+  userId       String
+  templateId   String?
+  channel      NotificationChannel
+  status       NotificationStatus  @default(QUEUED)
+  subject      String?
+  body         String
+  recipientPhone String?
+  recipientEmail String?
+  recipientFcm   String?
+  variables    Json?
+  scheduledAt  DateTime?
+  processedAt  DateTime?
+  retryCount   Int                 @default(0)
+  maxRetries   Int                 @default(3)
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  user          User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template      NotificationTemplate?     @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  deliveryLogs  NotificationDeliveryLog[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([channel])
+  @@index([scheduledAt])
+  @@index([createdAt])
+  @@map("notification_queue")
+}
+
+model NotificationDeliveryLog {
+  id              String             @id @default(cuid())
+  queueId         String
+  channel         NotificationChannel
+  status          NotificationStatus
+  providerRef     String?
+  providerResponse Json?
+  deliveredAt     DateTime?
+  failureReason   String?
+  createdAt       DateTime           @default(now())
+
+  queue NotificationQueue @relation(fields: [queueId], references: [id], onDelete: Cascade)
+
+  @@index([queueId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("notification_delivery_log")
+}
+
+// ============================================================
+// MODULE 16: ADMIN
+// ============================================================
+
+model AdminConfig {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       Json
+  description String?
+  isPublic    Boolean  @default(false)
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([key])
+  @@index([isPublic])
+  @@map("admin_configs")
+}
+
+model BannerManagement {
+  id          String       @id @default(cuid())
+  title       String
+  imageUrl    String
+  linkUrl     String?
+  position    BannerPosition
+  status      BannerStatus  @default(INACTIVE)
+  targetClasses PartnerClassCode[]
+  startDate   DateTime?
+  endDate     DateTime?
+  sortOrder   Int          @default(0)
+  metadata    Json?
+  createdByUserId String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  deletedAt   DateTime?
+
+  @@index([position])
+  @@index([status])
+  @@index([startDate, endDate])
+  @@index([deletedAt])
+  @@map("banner_management")
+}
+
+model ProgramSetting {
+  id          String   @id @default(cuid())
+  settingKey  String   @unique
+  settingValue Json
+  category    String?
+  description String?
+  isEditable  Boolean  @default(true)
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([settingKey])
+  @@index([category])
+  @@map("program_settings")
+}
+
+// ============================================================
+// MODULE 17: REPORTS
+// ============================================================
+
+model ScheduledReport {
+  id              String          @id @default(cuid())
+  createdByUserId String
+  reportCode      String
+  reportName      String
+  description     String?
+  frequency       ReportFrequency
+  format          ReportFormat    @default(XLSX)
+  filters         Json?
+  recipientEmails Json?
+  isActive        Boolean         @default(true)
+  nextRunAt       DateTime?
+  lastRunAt       DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  deletedAt       DateTime?
+
+  createdBy    User                @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+  deliveryLogs ReportDeliveryLog[]
+
+  @@index([createdByUserId])
+  @@index([frequency])
+  @@index([isActive])
+  @@index([nextRunAt])
+  @@index([deletedAt])
+  @@map("scheduled_reports")
+}
+
+model ReportDeliveryLog {
+  id              String      @id @default(cuid())
+  reportId        String
+  triggeredById   String?
+  status          String
+  format          ReportFormat
+  fileUrl         String?
+  fileKey         String?
+  fileSizeBytes   Int?
+  rowCount        Int?
+  errorMessage    String?
+  startedAt       DateTime    @default(now())
+  completedAt     DateTime?
+  emailSentAt     DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  report      ScheduledReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  triggeredBy User?           @relation(fields: [triggeredById], references: [id], onDelete: SetNull)
+
+  @@index([reportId])
+  @@index([triggeredById])
+  @@index([status])
+  @@index([startedAt])
+  @@map("report_delivery_log")
 }
