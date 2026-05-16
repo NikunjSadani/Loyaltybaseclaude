@@ -120,6 +120,19 @@ export async function compareHash(
   return bcrypt.compare(data, hash);
 }
 
+// ─── Request Helper ───────────────────────────────────────────────────────────
+
+/**
+ * Extract and verify the JWT from an Authorization: Bearer <token> header.
+ * Returns the payload or null if missing/invalid.
+ */
+export function getAuthUser(req: { headers: { get: (key: string) => string | null } }): TokenPayload | null {
+  const authHeader = req.headers.get('Authorization') ?? req.headers.get('authorization');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+  const token = authHeader.slice(7);
+  return verifyToken(token);
+}
+
 // ─── Legacy exports for backward compatibility ────────────────────────────────
 
 /** @deprecated Use generateToken instead */
