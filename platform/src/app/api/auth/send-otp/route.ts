@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
-import { sendOtp } from '@/lib/notifications'
+import { generateOTP } from '@/lib/auth'
+import { sendOTP } from '@/lib/notifications'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -24,24 +25,44 @@ export async function POST(req: NextRequest) {
     const user = await prisma.user.findFirst({ where: { mobile } })
 
     // Generate 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString()
+    const otp = generateOTP()
     const expiresAt = new Date(Date.now() + 6 * 60 * 60 * 1000) // 6 hours
 
-    // Store OTP in DB
-    await prisma.otpCode.create({
-      data: {
-        mobile,
-        otp,
-        channel,
-        expiresAt,
-        used: false,
-        attempts: 0,
-        userId: user?.id ?? null,
-      },
-    })
+    if (user) {
+      // Store OTP using the OTP model
+      await prisma.oTP.create({
+        data: {
+          userId: user.id,
+          otp,
+          type: `OTP_${channel}`,
+          expiresAt,
+          isUsed: false,
+        },
+      })
+    } else {
+      // For new users we create a temporary OTP record tied to mobile
+      // Store in a separate table or use a temp user approach
+      // Create a provisional user entry
+      const provisionalUser = await prisma.user.create({
+        data: {
+          mobile,
+          role: 'RETAILER',
+          status: 'PENDING',
+        },
+      })
+      await prisma.oTP.create({
+        data: {
+          userId: provisionalUser.id,
+          otp,
+          type: `OTP_${channel}`,
+          expiresAt,
+          isUsed: false,
+        },
+      })
+    }
 
     // Send OTP via notification service
-    await sendOtp({ mobile, otp, channel })
+    await sendOTP(mobile, otp, channel)
 
     return ok({ message: 'OTP sent', channel })
   } catch (e: any) {
