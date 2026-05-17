@@ -1,128 +1,70 @@
-/**
- * Next.js 16 Proxy (formerly Middleware).
- *
- * Handles JWT-based route protection and role-based access control.
- * The `middleware.ts` convention was renamed to `proxy.ts` in Next.js 16.
- *
- * Reads the JWT from:
- *   1. Authorization: Bearer <token> header
- *   2. `auth_token` cookie
- *
- * Route access matrix:
- *   /admin/*   → GIFSY_ADMIN, CLIENT_ADMIN, MIS_USER
- *   /sales/*   → SALES_MANAGER, AREA_SALES_MANAGER, TERRITORY_SALES_OFFICER, SALES_EXECUTIVE
- *   /partner/* → RETAILER, WHOLESALER, SUB_STOCKIST
- *   /api/*     → all authenticated users (per-route handlers enforce finer ACL)
- *   /login, /  → public
- */
-import { NextResponse } from 'next/server';
-import type { NextRequest } from 'next/server';
-import { verifyToken } from '@/lib/auth';
-import type { TokenPayload } from '@/lib/auth';
+import { NextRequest, NextResponse } from 'next/server'
+import { jwtVerify } from 'jose'
 
-// ─── Role sets ────────────────────────────────────────────────────────────────
+const PUBLIC_PATHS = [
+  '/auth/login',
+  '/api/auth/send-otp',
+  '/api/auth/verify-otp',
+  '/_next',
+  '/favicon.ico',
+]
 
-const ADMIN_ROLES = new Set(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER']);
-
-const SALES_ROLES = new Set([
-  'SALES_MANAGER',
-  'AREA_SALES_MANAGER',
-  'TERRITORY_SALES_OFFICER',
-  'SALES_EXECUTIVE',
-]);
-
-const PARTNER_ROLES = new Set(['RETAILER', 'WHOLESALER', 'SUB_STOCKIST']);
-
-// ─── Public paths ─────────────────────────────────────────────────────────────
-
-const PUBLIC_PATHS = new Set(['/', '/login', '/signup', '/forgot-password']);
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function extractToken(request: NextRequest): string | null {
-  // 1. Authorization header
-  const authHeader = request.headers.get('authorization');
-  if (authHeader?.startsWith('Bearer ')) {
-    return authHeader.slice(7);
-  }
-
-  // 2. Cookie
-  const cookieToken = request.cookies.get('auth_token')?.value;
-  return cookieToken ?? null;
+const ROLE_ROUTES: Record<string, string[]> = {
+  '/admin': ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'],
+  '/sales': ['HO', 'STATE_HEAD', 'ASM', 'SO', 'ISR'],
+  '/partner': ['RETAILER', 'WHOLESALER', 'SUB_STOCKIST'],
 }
 
-function isAuthorized(role: string, pathname: string): boolean {
-  if (pathname.startsWith('/admin')) return ADMIN_ROLES.has(role);
-  if (pathname.startsWith('/sales')) return SALES_ROLES.has(role);
-  if (pathname.startsWith('/partner')) return PARTNER_ROLES.has(role);
-  // /api/* and other authenticated routes: any valid role allowed
-  return true;
-}
+export async function proxy(request: NextRequest) {
+  const { pathname } = request.nextUrl
 
-// ─── Proxy function ───────────────────────────────────────────────────────────
+  if (PUBLIC_PATHS.some(p => pathname.startsWith(p))) return NextResponse.next()
 
-export async function proxy(request: NextRequest): Promise<NextResponse> {
-  const { pathname } = request.nextUrl;
-
-  // Allow static assets, Next.js internals and public paths through
-  if (
-    pathname.startsWith('/_next') ||
-    pathname.startsWith('/api/auth') || // auth endpoints are always public
-    pathname.includes('.') // static files (favicon.ico, etc.)
-  ) {
-    return NextResponse.next();
+  if (pathname === '/') {
+    return NextResponse.redirect(new URL('/auth/login', request.url))
   }
 
-  if (PUBLIC_PATHS.has(pathname)) {
-    return NextResponse.next();
-  }
+  const token =
+    request.headers.get('authorization')?.replace('Bearer ', '') ||
+    request.cookies.get('token')?.value
 
-  // Extract + verify JWT
-  const token = extractToken(request);
   if (!token) {
-    const loginUrl = new URL('/login', request.url);
-    loginUrl.searchParams.set('from', pathname);
-    return NextResponse.redirect(loginUrl);
+    if (pathname.startsWith('/api/')) {
+      return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
+    }
+    return NextResponse.redirect(new URL('/auth/login', request.url))
   }
 
-  let payload: TokenPayload | null = null;
   try {
-    payload = verifyToken(token);
+    const secret = new TextEncoder().encode(
+      process.env.JWT_SECRET || 'changeme-in-production-use-strong-secret'
+    )
+    const { payload } = await jwtVerify(token, secret)
+    const role = payload.role as string
+
+    for (const [prefix, allowedRoles] of Object.entries(ROLE_ROUTES)) {
+      if (pathname.startsWith(prefix) && !allowedRoles.includes(role)) {
+        if (pathname.startsWith('/api/')) {
+          return NextResponse.json({ success: false, error: 'Forbidden' }, { status: 403 })
+        }
+        return NextResponse.redirect(new URL('/auth/login', request.url))
+      }
+    }
+
+    const headers = new Headers(request.headers)
+    headers.set('x-user-id', payload.userId as string)
+    headers.set('x-user-role', role)
+    if (payload.partnerId) headers.set('x-partner-id', payload.partnerId as string)
+
+    return NextResponse.next({ request: { headers } })
   } catch {
-    payload = null;
+    if (pathname.startsWith('/api/')) {
+      return NextResponse.json({ success: false, error: 'Invalid token' }, { status: 401 })
+    }
+    return NextResponse.redirect(new URL('/auth/login', request.url))
   }
-
-  if (!payload) {
-    const loginUrl = new URL('/login', request.url);
-    loginUrl.searchParams.set('from', pathname);
-    return NextResponse.redirect(loginUrl);
-  }
-
-  // Role-based access control
-  if (!isAuthorized(payload.role, pathname)) {
-    return NextResponse.json(
-      { success: false, error: 'Forbidden: insufficient role' },
-      { status: 403 }
-    );
-  }
-
-  // Attach user identity to request headers for downstream route handlers
-  const requestHeaders = new Headers(request.headers);
-  requestHeaders.set('x-user-id', payload.userId);
-  requestHeaders.set('x-user-role', payload.role);
-  if (payload.partnerId) {
-    requestHeaders.set('x-partner-id', payload.partnerId);
-  }
-
-  return NextResponse.next({
-    request: { headers: requestHeaders },
-  });
 }
-
-// ─── Matcher ──────────────────────────────────────────────────────────────────
 
 export const config = {
-  matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt).*)',
-  ],
-};
+  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+}

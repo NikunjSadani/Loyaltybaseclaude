@@ -52,7 +52,7 @@ export async function GET(req: NextRequest) {
       },
     })
 
-    const userMap = new Map(users.map((u) => [u.id, u]))
+    const userMap = new Map<string, typeof users[0]>(users.map((u) => [u.id, u]))
 
     // Get previous period scores for movement calculation
     const prevMonth = month === 1 ? 12 : month - 1

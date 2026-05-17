@@ -20,15 +20,15 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json()
     const parsed = schema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
     const { batchId } = parsed.data
 
-    const batch = await prisma.uploadBatch.findUnique({ where: { id: batchId } })
+    const batch = await prisma.salesUpload.findUnique({ where: { id: batchId } })
     if (!batch) return err('Upload batch not found', 404)
 
     // Get all invoices for this batch
-    const invoices = await prisma.invoice.findMany({
+    const invoices = await prisma.salesInvoice.findMany({
       where: { uploadBatchId: batchId, status: 'PENDING' },
       include: { sku: true },
     })
@@ -81,7 +81,7 @@ export async function POST(req: NextRequest) {
       }
 
       // Mark invoice as processed
-      await prisma.invoice.update({
+      await prisma.salesInvoice.update({
         where: { id: invoice.id },
         data: { status: 'PROCESSED', pointsEarned: computeTotalPoints(schemes, invoice.totalAmountPaise / 100), processedAt: new Date() },
       })

@@ -30,7 +30,7 @@ export async function GET(req: NextRequest) {
     }
 
     const [logs, total] = await Promise.all([
-      prisma.fraudLog.findMany({
+      prisma.visibilityFraudLog.findMany({
         where,
         include: {
           user: { select: { id: true, name: true, mobile: true } },
@@ -40,7 +40,7 @@ export async function GET(req: NextRequest) {
         take: limit,
         orderBy: { createdAt: 'desc' },
       }),
-      prisma.fraudLog.count({ where }),
+      prisma.visibilityFraudLog.count({ where }),
     ])
 
     return ok({

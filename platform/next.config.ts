@@ -10,21 +10,23 @@ const nextConfig: NextConfig = {
       },
       {
         protocol: "https",
-        hostname: "loyaltybase-assets.s3.ap-south-1.amazonaws.com",
+        hostname: "*.cloudfront.net",
         pathname: "/**",
       },
     ],
   },
+  // Expose selected env vars to the client bundle
   env: {
     NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
+    NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
   },
-  async rewrites() {
-    return [
-      {
-        source: "/api/v1/:path*",
-        destination: "/api/:path*",
-      },
-    ];
+  // Compress responses
+  compress: true,
+  // Strict mode for catching issues early
+  reactStrictMode: true,
+  // Log level
+  logging: {
+    fetches: { fullUrl: false },
   },
 };
 

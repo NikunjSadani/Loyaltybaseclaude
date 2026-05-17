@@ -40,13 +40,13 @@ export async function GET(req: NextRequest) {
     }
 
     const [skus, total] = await Promise.all([
-      prisma.sKU.findMany({
+      prisma.sku.findMany({
         where,
         skip,
         take: limit,
         orderBy: { code: 'asc' },
       }),
-      prisma.sKU.count({ where }),
+      prisma.sku.count({ where }),
     ])
 
     return ok({ skus, pagination: { page, limit, total, pages: Math.ceil(total / limit) } })
@@ -64,12 +64,12 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json()
     const parsed = createSchema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const existing = await prisma.sKU.findFirst({ where: { code: parsed.data.code } })
+    const existing = await prisma.sku.findFirst({ where: { code: parsed.data.code } })
     if (existing) return err(`SKU code ${parsed.data.code} already exists`)
 
-    const sku = await prisma.sKU.create({ data: parsed.data })
+    const sku = await prisma.sku.create({ data: parsed.data })
 
     return ok({ sku }, 201)
   } catch (e: any) {

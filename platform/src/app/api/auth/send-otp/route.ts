@@ -17,46 +17,44 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
     const parsed = schema.safeParse(body)
     if (!parsed.success) {
-      return err(parsed.error.errors[0].message)
+      return err(parsed.error.issues[0].message)
     }
     const { mobile, channel } = parsed.data
 
     // Check if user exists
-    const user = await prisma.user.findFirst({ where: { mobile } })
+    const user = await prisma.user.findFirst({ where: { phone: mobile } })
 
     // Generate 6-digit OTP
     const otp = generateOTP()
     const expiresAt = new Date(Date.now() + 6 * 60 * 60 * 1000) // 6 hours
 
     if (user) {
-      // Store OTP using the OTP model
-      await prisma.oTP.create({
+      await prisma.otpCode.create({
         data: {
-          userId: user.id,
-          otp,
-          type: `OTP_${channel}`,
+          phone: mobile,
+          code: otp,
+          purpose: 'LOGIN',
           expiresAt,
-          isUsed: false,
+          userId: user.id,
         },
       })
     } else {
-      // For new users we create a temporary OTP record tied to mobile
-      // Store in a separate table or use a temp user approach
       // Create a provisional user entry
       const provisionalUser = await prisma.user.create({
         data: {
-          mobile,
-          role: 'RETAILER',
-          status: 'PENDING',
+          phone: mobile,
+          name: mobile,
+          role: 'CHANNEL_PARTNER',
+          status: 'PENDING_VERIFICATION',
         },
       })
-      await prisma.oTP.create({
+      await prisma.otpCode.create({
         data: {
-          userId: provisionalUser.id,
-          otp,
-          type: `OTP_${channel}`,
+          phone: mobile,
+          code: otp,
+          purpose: 'REGISTRATION',
           expiresAt,
-          isUsed: false,
+          userId: provisionalUser.id,
         },
       })
     }

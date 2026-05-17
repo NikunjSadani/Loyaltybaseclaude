@@ -27,7 +27,7 @@ export async function GET(req: NextRequest) {
       if (dateTo) where.createdAt.lte = dateTo
     }
 
-    const records = await prisma.tDSRecord.findMany({
+    const records = await prisma.tdsRecord.findMany({
       where,
       include: {
         user: { select: { name: true, mobile: true } },

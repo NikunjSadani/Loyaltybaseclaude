@@ -27,7 +27,7 @@ export async function GET(req: NextRequest) {
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') return err('Forbidden', 403)
 
-    const settings = await prisma.programSettings.findFirst()
+    const settings = await prisma.programSetting.findFirst()
 
     if (!settings) {
       // Return defaults
@@ -64,18 +64,18 @@ export async function PUT(req: NextRequest) {
 
     const body = await req.json()
     const parsed = settingsSchema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const existing = await prisma.programSettings.findFirst()
+    const existing = await prisma.programSetting.findFirst()
 
     let settings
     if (existing) {
-      settings = await prisma.programSettings.update({
+      settings = await prisma.programSetting.update({
         where: { id: existing.id },
         data: { ...parsed.data, updatedAt: new Date() },
       })
     } else {
-      settings = await prisma.programSettings.create({ data: parsed.data })
+      settings = await prisma.programSetting.create({ data: parsed.data })
     }
 
     await prisma.auditLog.create({

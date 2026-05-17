@@ -48,7 +48,7 @@ export async function POST(
     })
 
     steps.validation.count = transactions.length
-    const validTransactions = []
+    const validTransactions: any[] = []
 
     for (const tx of transactions) {
       const errors: string[] = []
@@ -79,7 +79,7 @@ export async function POST(
       if (tx.amountPaise >= TDS_THRESHOLD_PAISE) {
         const tdsAmount = Math.round(tx.amountPaise * TDS_RATE_DEFAULT)
         totalTds += tdsAmount
-        await prisma.tDSRecord.create({
+        await prisma.tdsRecord.create({
           data: {
             payoutTransactionId: tx.id,
             userId: tx.userId,

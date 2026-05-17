@@ -120,7 +120,7 @@ export async function POST(req: NextRequest) {
 
     // Auto-reject if fraud detected
     if (fraudReason) {
-      await prisma.fraudLog.create({
+      await prisma.visibilityFraudLog.create({
         data: {
           userId: authUser.userId,
           outletId: outletId ?? null,

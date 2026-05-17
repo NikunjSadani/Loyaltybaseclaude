@@ -11,8 +11,8 @@ const patchSchema = z.object({
   description: z.string().optional(),
   status: z.enum(['ACTIVE', 'PAUSED', 'ENDED']).optional(),
   endDate: z.string().transform((s) => new Date(s)).optional(),
-  rules: z.record(z.any()).optional(),
-  eligibility: z.record(z.any()).optional(),
+  rules: z.record(z.string(), z.any()).optional(),
+  eligibility: z.record(z.string(), z.any()).optional(),
 })
 
 export async function GET(
@@ -53,7 +53,7 @@ export async function PATCH(
     const { id } = await params
     const body = await req.json()
     const parsed = patchSchema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
     const scheme = await prisma.scheme.update({
       where: { id, isDeleted: false },

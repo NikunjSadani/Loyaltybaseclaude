@@ -15,7 +15,7 @@ export async function GET(
 
     const { id } = await params
 
-    const item = await prisma.rewardItem.findUnique({
+    const item = await prisma.rewardCatalog.findUnique({
       where: { id, isDeleted: false },
     })
 

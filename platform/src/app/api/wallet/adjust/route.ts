@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json()
     const parsed = schema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
     const { partnerId, amount, type, reason, approvedBy } = parsed.data
 

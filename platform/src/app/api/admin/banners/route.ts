@@ -10,11 +10,12 @@ const createSchema = z.object({
   title: z.string().min(1),
   imageUrl: z.string().url(),
   linkUrl: z.string().url().optional(),
-  targetAudience: z.enum(['ALL', 'RETAILER', 'WHOLESALER', 'SUB_STOCKIST']).default('ALL'),
-  startDate: z.string().transform((s) => new Date(s)),
+  position: z.enum(['HOME_TOP', 'HOME_MIDDLE', 'HOME_BOTTOM', 'CATALOG_TOP', 'SCHEME_PAGE', 'DASHBOARD']),
+  status: z.enum(['ACTIVE', 'INACTIVE', 'SCHEDULED']).default('INACTIVE'),
+  targetClasses: z.array(z.enum(['CP_01', 'CP_02', 'CP_03'])).default([]),
+  startDate: z.string().transform((s) => new Date(s)).optional(),
   endDate: z.string().transform((s) => new Date(s)).optional(),
-  priority: z.number().int().min(0).default(0),
-  isActive: z.boolean().default(true),
+  sortOrder: z.number().int().min(0).default(0),
 })
 
 export async function GET(req: NextRequest) {
@@ -22,25 +23,16 @@ export async function GET(req: NextRequest) {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
 
-    const sp = req.nextUrl.searchParams
-    const isActive = sp.get('isActive')
-    const audience = sp.get('audience') ?? undefined
-
     const where: any = {}
-    if (isActive !== null && isActive !== undefined) where.isActive = isActive === 'true'
-    if (audience) {
-      where.OR = [{ targetAudience: 'ALL' }, { targetAudience: audience.toUpperCase() }]
-    }
-    // Only show non-expired banners for non-admin
+    // Only show active banners for non-admins
     if (authUser.role !== 'GIFSY_ADMIN') {
-      where.isActive = true
-      where.startDate = { lte: new Date() }
+      where.status = 'ACTIVE'
       where.OR = [{ endDate: null }, { endDate: { gte: new Date() } }]
     }
 
-    const banners = await prisma.banner.findMany({
+    const banners = await prisma.bannerManagement.findMany({
       where,
-      orderBy: [{ priority: 'desc' }, { createdAt: 'desc' }],
+      orderBy: [{ sortOrder: 'desc' }, { createdAt: 'desc' }],
     })
 
     return ok({ banners })
@@ -58,10 +50,12 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json()
     const parsed = createSchema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const banner = await prisma.banner.create({
-      data: { ...parsed.data, createdById: authUser.userId },
+    const { ...data } = parsed.data
+
+    const banner = await prisma.bannerManagement.create({
+      data: { ...data, createdByUserId: authUser.userId },
     })
 
     return ok({ banner }, 201)
@@ -81,7 +75,7 @@ export async function DELETE(req: NextRequest) {
     const id = sp.get('id')
     if (!id) return err('Banner ID is required')
 
-    await prisma.banner.delete({ where: { id } })
+    await prisma.bannerManagement.delete({ where: { id } })
 
     return ok({ message: 'Banner deleted successfully' })
   } catch (e: any) {

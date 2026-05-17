@@ -54,7 +54,7 @@ export async function PATCH(
     const { id } = await params
     const body = await req.json()
     const parsed = patchSchema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
     const user = await prisma.user.update({
       where: { id },

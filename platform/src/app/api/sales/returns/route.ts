@@ -24,12 +24,12 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json()
     const parsed = schema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
     const { invoiceId, lineItems, reason } = parsed.data
 
     // Find invoice
-    const invoice = await prisma.invoice.findUnique({
+    const invoice = await prisma.salesInvoice.findUnique({
       where: { id: invoiceId },
     })
     if (!invoice) return err('Invoice not found', 404)
@@ -92,7 +92,7 @@ export async function POST(req: NextRequest) {
               type: 'REVERSE',
               bucket: 'EARNED',
               amount: -clawbackPoints,
-              balanceAfter: updatedWallet.earned,
+              balanceAfter: (updatedWallet as any)?.earned ?? 0,
               description: `Points clawback for return of invoice ${invoice.invoiceNumber}`,
               invoiceId,
             },

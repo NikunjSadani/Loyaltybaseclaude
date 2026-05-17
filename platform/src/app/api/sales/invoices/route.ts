@@ -36,7 +36,7 @@ export async function GET(req: NextRequest) {
     if (skuCode) where.skuCode = skuCode
 
     const [invoices, total] = await Promise.all([
-      prisma.invoice.findMany({
+      prisma.salesInvoice.findMany({
         where,
         include: {
           outlet: { select: { name: true, city: true } },
@@ -46,7 +46,7 @@ export async function GET(req: NextRequest) {
         take: limit,
         orderBy: { invoiceDate: 'desc' },
       }),
-      prisma.invoice.count({ where }),
+      prisma.salesInvoice.count({ where }),
     ])
 
     return ok({

@@ -36,13 +36,13 @@ export async function GET(req: NextRequest) {
     const userBalance = wallet ? Math.max(0, wallet.earned - wallet.locked - wallet.redeemed) : 0
 
     const [items, total] = await Promise.all([
-      prisma.rewardItem.findMany({
+      prisma.rewardCatalog.findMany({
         where,
         skip,
         take: limit,
         orderBy: { pointsCost: 'asc' },
       }),
-      prisma.rewardItem.count({ where }),
+      prisma.rewardCatalog.count({ where }),
     ])
 
     const enriched = items.map((item) => ({

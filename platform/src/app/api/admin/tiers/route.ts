@@ -7,12 +7,14 @@ const ok = (data: any, status = 200) => NextResponse.json({ success: true, data 
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
 const createSchema = z.object({
-  name: z.string().min(1),
-  partnerClass: z.enum(['RETAILER', 'WHOLESALER', 'SUB_STOCKIST']),
+  partnerClassId: z.string().min(1),
+  tierName: z.string().min(1),
+  tierLevel: z.number().int().min(1),
   minPoints: z.number().int().min(0),
   maxPoints: z.number().int().optional(),
-  benefits: z.record(z.any()).optional(),
-  multiplier: z.number().positive().default(1),
+  pointsMultiplier: z.number().positive().default(1),
+  holdingPeriodDays: z.number().int().min(0).default(30),
+  benefits: z.record(z.string(), z.any()).optional(),
 })
 
 export async function GET(req: NextRequest) {
@@ -22,11 +24,11 @@ export async function GET(req: NextRequest) {
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') return err('Forbidden', 403)
 
     const sp = req.nextUrl.searchParams
-    const partnerClass = sp.get('class') ?? undefined
+    const partnerClassId = sp.get('partnerClassId') ?? undefined
 
-    const tiers = await prisma.tier.findMany({
-      where: { ...(partnerClass && { partnerClass }) },
-      orderBy: [{ partnerClass: 'asc' }, { minPoints: 'asc' }],
+    const tiers = await prisma.tierConfig.findMany({
+      where: { ...(partnerClassId && { partnerClassId }) },
+      orderBy: [{ partnerClassId: 'asc' }, { minPoints: 'asc' }],
     })
 
     return ok({ tiers })
@@ -44,9 +46,9 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json()
     const parsed = createSchema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const tier = await prisma.tier.create({ data: parsed.data })
+    const tier = await prisma.tierConfig.create({ data: parsed.data })
 
     return ok({ tier }, 201)
   } catch (e: any) {

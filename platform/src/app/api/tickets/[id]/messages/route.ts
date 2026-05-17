@@ -23,7 +23,7 @@ export async function POST(
     const { id } = await params
     const body = await req.json()
     const parsed = schema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
     const { content, attachments, isInternal } = parsed.data
 

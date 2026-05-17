@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
 
     // Pre-fetch valid SKU codes and outlet IDs
     const [validSkus, validOutlets] = await Promise.all([
-      prisma.sKU.findMany({ select: { code: true } }),
+      prisma.sku.findMany({ select: { code: true } }),
       prisma.outlet.findMany({ where: { status: 'ACTIVE' }, select: { id: true } }),
     ])
     const skuSet = new Set(validSkus.map((s) => s.code))
@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
       .filter(Boolean)
       .map(String)
 
-    const existingInvoices = await prisma.invoice.findMany({
+    const existingInvoices = await prisma.salesInvoice.findMany({
       where: { invoiceNumber: { in: allInvoiceNos } },
       select: { invoiceNumber: true },
     })
@@ -104,7 +104,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Create upload batch
-    const batch = await prisma.uploadBatch.create({
+    const batch = await prisma.salesUpload.create({
       data: {
         uploadedBy: authUser.userId,
         fileName: file.name,
@@ -120,7 +120,7 @@ export async function POST(req: NextRequest) {
     let uploaded = 0
     if (valid.length > 0) {
       for (const row of valid) {
-        await prisma.invoice.create({
+        await prisma.salesInvoice.create({
           data: {
             invoiceNumber: row.invoiceNumber,
             invoiceDate: new Date(row.invoiceDate),
@@ -138,7 +138,7 @@ export async function POST(req: NextRequest) {
       }
 
       // Update batch status
-      await prisma.uploadBatch.update({
+      await prisma.salesUpload.update({
         where: { id: batch.id },
         data: {
           status: errors.length > 0 ? 'PARTIAL' : 'COMPLETED',
@@ -150,7 +150,7 @@ export async function POST(req: NextRequest) {
       // In production, enqueue to a job queue (e.g. BullMQ)
       console.log(`[sales/upload] Triggering incentive calculation for batch ${batch.id}`)
     } else {
-      await prisma.uploadBatch.update({
+      await prisma.salesUpload.update({
         where: { id: batch.id },
         data: { status: 'FAILED' },
       })

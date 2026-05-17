@@ -15,8 +15,8 @@ const schemeSchema = z.object({
   endDate: z.string().transform((s) => new Date(s)),
   holdingPeriodDays: z.number().int().min(0).default(0),
   targetValue: z.number().optional(),
-  eligibility: z.record(z.any()).optional(),
-  rules: z.record(z.any()).optional(),
+  eligibility: z.record(z.string(), z.any()).optional(),
+  rules: z.record(z.string(), z.any()).optional(),
   slabs: z
     .array(
       z.object({
@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
     let where: any = { status: 'ACTIVE', isDeleted: false }
 
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') {
-      const enrollments = await prisma.schemeEnrollment.findMany({
+      const enrollments = await prisma.schemeEligibility.findMany({
         where: { userId: authUser.userId, status: 'ACTIVE' },
         select: { schemeId: true },
       })
@@ -80,7 +80,7 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json()
     const parsed = schemeSchema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
     const { slabs, ...schemeData } = parsed.data
 

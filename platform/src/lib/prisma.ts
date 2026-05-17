@@ -1,22 +1,26 @@
-// Prisma client singleton with dev-mode global caching to prevent hot-reload
-// from exhausting the connection pool.
-//
-// NOTE: Run `npx prisma generate` to create the client before importing this.
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { PrismaClient } = require('@prisma/client')
-
-type PrismaClientType = InstanceType<typeof PrismaClient>
+import { PrismaClient } from '@prisma/client'
+import { PrismaPg } from '@prisma/adapter-pg'
 
 const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClientType | undefined
+  prisma: PrismaClient | undefined
 }
 
-export const prisma: PrismaClientType =
-  globalForPrisma.prisma ??
-  new PrismaClient({
+function createPrismaClient() {
+  const connectionString = process.env.DATABASE_URL
+  if (!connectionString) {
+    // During build without DB, return a stub to avoid constructor errors
+    const adapter = new PrismaPg({ connectionString: 'postgresql://localhost/stub' })
+    return new PrismaClient({ adapter })
+  }
+  const adapter = new PrismaPg({ connectionString })
+  return new PrismaClient({
+    adapter,
     log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
   })
+}
+
+export const prisma: PrismaClient =
+  globalForPrisma.prisma ?? createPrismaClient()
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
 

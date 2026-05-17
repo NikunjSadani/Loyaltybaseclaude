@@ -29,12 +29,12 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json()
     const parsed = schema.safeParse(body)
-    if (!parsed.success) return err(parsed.error.errors[0].message)
+    if (!parsed.success) return err(parsed.error.issues[0].message)
 
     const { rewardId, quantity, deliveryAddress } = parsed.data
 
     // Fetch reward item
-    const item = await prisma.rewardItem.findUnique({
+    const item = await prisma.rewardCatalog.findUnique({
       where: { id: rewardId, isActive: true, isDeleted: false },
     })
     if (!item) return err('Reward item not found or not available', 404)

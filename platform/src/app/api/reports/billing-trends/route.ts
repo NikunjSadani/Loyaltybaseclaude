@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
     const format = sp.get('format') ?? 'json'
     const groupBy = sp.get('groupBy') ?? 'month' // month/week/day
 
-    const invoices = await prisma.invoice.findMany({
+    const invoices = await prisma.salesInvoice.findMany({
       where: {
         invoiceDate: { gte: dateFrom, lte: dateTo },
         status: 'PROCESSED',
