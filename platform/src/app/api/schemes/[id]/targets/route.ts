@@ -16,7 +16,7 @@ export async function GET(
     const { id: schemeId } = await params
 
     const scheme = await prisma.scheme.findUnique({
-      where: { id: schemeId, isDeleted: false },
+      where: { id: schemeId },
     })
     if (!scheme) return err('Scheme not found', 404)
 

@@ -7,11 +7,8 @@ const ok = (data: any, status = 200) => NextResponse.json({ success: true, data 
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
 const patchSchema = z.object({
-  partnerClass: z.enum(['GOLD', 'SILVER', 'BRONZE', 'PLATINUM', 'STANDARD']).optional(),
-  tier: z.string().optional(),
-  regionId: z.string().optional(),
   isActive: z.boolean().optional(),
-  kycStatus: z.string().optional(),
+  currentTierConfigId: z.string().optional(),
 })
 
 export async function GET(
@@ -30,8 +27,8 @@ export async function GET(
     const partner = await prisma.channelPartner.findUnique({
       where: { id },
       include: {
-        user: { select: { id: true, name: true, mobile: true, email: true, status: true } },
-        wallet: true,
+        user: { select: { id: true, name: true, phone: true, email: true, status: true } },
+        wallets: true,
         outlets: true,
         kycSubmissions: {
           orderBy: { createdAt: 'desc' },
@@ -70,10 +67,10 @@ export async function PATCH(
 
     await prisma.auditLog.create({
       data: {
-        action: 'PARTNER_UPDATED',
+        action: 'UPDATE',
         entityType: 'CHANNEL_PARTNER',
         entityId: id,
-        performedById: authUser.userId,
+        actorId: authUser.userId,
         metadata: parsed.data,
       },
     })

@@ -21,8 +21,6 @@ export async function GET(req: NextRequest) {
     const dateTo = sp.get('dateTo') ? new Date(sp.get('dateTo')!) : undefined
 
     const where: any = {}
-    if (userId) where.userId = userId
-    if (outletId) where.outletId = outletId
     if (dateFrom || dateTo) {
       where.createdAt = {}
       if (dateFrom) where.createdAt.gte = dateFrom
@@ -33,8 +31,7 @@ export async function GET(req: NextRequest) {
       prisma.visibilityFraudLog.findMany({
         where,
         include: {
-          user: { select: { id: true, name: true, mobile: true } },
-          outlet: { select: { id: true, name: true, city: true } },
+          submission: { select: { id: true, partnerId: true, outletId: true } },
         },
         skip,
         take: limit,

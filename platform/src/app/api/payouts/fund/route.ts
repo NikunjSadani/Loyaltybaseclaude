@@ -13,8 +13,6 @@ export async function GET(req: NextRequest) {
       return err('Forbidden', 403)
     }
 
-    // Opening balance
-    const firstEntry = await prisma.fundLedger.findFirst({ orderBy: { createdAt: 'asc' } })
     const latestEntry = await prisma.fundLedger.findFirst({ orderBy: { createdAt: 'desc' } })
 
     // Total received
@@ -24,8 +22,8 @@ export async function GET(req: NextRequest) {
 
     // Total utilised by mode
     const utilisedByMode = await prisma.payoutTransaction.groupBy({
-      by: ['mode'],
-      where: { status: { in: ['COMPLETED', 'READY_FOR_DISBURSEMENT'] } },
+      by: ['payoutMode'],
+      where: { status: { in: ['SUCCESS', 'INITIATED'] } },
       _sum: { amountPaise: true },
     })
 
@@ -36,17 +34,14 @@ export async function GET(req: NextRequest) {
     })
 
     const utilised = utilisedByMode.reduce((sum, m) => sum + (m._sum.amountPaise ?? 0), 0)
-    const opening = firstEntry?.openingBalancePaise ?? 0
     const totalReceived = received._sum.amountPaise ?? 0
-    const closingBalance = latestEntry?.availableBalancePaise ?? opening + totalReceived - utilised
+    const closingBalance = latestEntry?.balancePaise ?? totalReceived - utilised
 
     return ok({
-      openingBalancePaise: opening,
-      openingBalance: opening / 100,
       totalReceivedPaise: totalReceived,
       totalReceived: totalReceived / 100,
       utilisedByMode: utilisedByMode.map((m) => ({
-        mode: m.mode,
+        mode: m.payoutMode,
         amountPaise: m._sum.amountPaise ?? 0,
         amount: (m._sum.amountPaise ?? 0) / 100,
       })),

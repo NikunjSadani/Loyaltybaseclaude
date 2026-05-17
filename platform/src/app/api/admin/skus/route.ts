@@ -7,13 +7,16 @@ const ok = (data: any, status = 200) => NextResponse.json({ success: true, data 
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
 const createSchema = z.object({
-  code: z.string().min(1),
+  skuCode: z.string().min(1),
   name: z.string().min(1),
-  category: z.string().min(1),
   brand: z.string().optional(),
-  unitOfMeasure: z.string().default('UNIT'),
-  pricePerUnitPaise: z.number().int().min(0),
+  uom: z.string().default('UNIT'),
+  mrpPaise: z.number().int().min(0),
+  dealerPricePaise: z.number().int().min(0).optional(),
   isActive: z.boolean().default(true),
+  isTaxable: z.boolean().default(true),
+  hsn: z.string().optional(),
+  description: z.string().optional(),
 })
 
 export async function GET(req: NextRequest) {
@@ -22,19 +25,17 @@ export async function GET(req: NextRequest) {
     if (!authUser) return err('Unauthorized', 401)
 
     const sp = req.nextUrl.searchParams
-    const category = sp.get('category') ?? undefined
     const search = sp.get('search') ?? undefined
     const isActive = sp.get('isActive')
     const page = parseInt(sp.get('page') ?? '1', 10)
     const limit = parseInt(sp.get('limit') ?? '20', 10)
     const skip = (page - 1) * limit
 
-    const where: any = {}
-    if (category) where.category = category
+    const where: any = { deletedAt: null }
     if (isActive !== null && isActive !== undefined) where.isActive = isActive === 'true'
     if (search) {
       where.OR = [
-        { code: { contains: search, mode: 'insensitive' } },
+        { skuCode: { contains: search, mode: 'insensitive' } },
         { name: { contains: search, mode: 'insensitive' } },
       ]
     }
@@ -44,7 +45,7 @@ export async function GET(req: NextRequest) {
         where,
         skip,
         take: limit,
-        orderBy: { code: 'asc' },
+        orderBy: { skuCode: 'asc' },
       }),
       prisma.sku.count({ where }),
     ])
@@ -66,8 +67,8 @@ export async function POST(req: NextRequest) {
     const parsed = createSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const existing = await prisma.sku.findFirst({ where: { code: parsed.data.code } })
-    if (existing) return err(`SKU code ${parsed.data.code} already exists`)
+    const existing = await prisma.sku.findFirst({ where: { skuCode: parsed.data.skuCode } })
+    if (existing) return err(`SKU code ${parsed.data.skuCode} already exists`)
 
     const sku = await prisma.sku.create({ data: parsed.data })
 

@@ -8,9 +8,11 @@ const err = (message: string, status = 400) => NextResponse.json({ success: fals
 
 const schema = z.object({
   amount: z.number().positive('Amount must be positive'),
-  referenceNumber: z.string().min(1, 'Reference number is required'),
+  referenceNumber: z.string().optional(),
   paymentDate: z.string().transform((s) => new Date(s)),
-  remarks: z.string().optional(),
+  paymentMode: z.string().default('BANK_TRANSFER'),
+  bankName: z.string().optional(),
+  notes: z.string().optional(),
 })
 
 export async function POST(req: NextRequest) {
@@ -23,48 +25,46 @@ export async function POST(req: NextRequest) {
     const parsed = schema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const { amount, referenceNumber, paymentDate, remarks } = parsed.data
+    const { amount, referenceNumber, paymentDate, paymentMode, bankName, notes } = parsed.data
     const amountPaise = Math.round(amount * 100)
-
-    // Check for duplicate reference number
-    const existing = await prisma.fundReceipt.findFirst({ where: { referenceNumber } })
-    if (existing) return err(`Reference number ${referenceNumber} already recorded`)
 
     // Get current balance
     const latestEntry = await prisma.fundLedger.findFirst({ orderBy: { createdAt: 'desc' } })
-    const currentBalance = latestEntry?.availableBalancePaise ?? 0
+    const currentBalance = latestEntry?.balancePaise ?? 0
     const newBalance = currentBalance + amountPaise
 
     const result = await prisma.$transaction(async (tx) => {
+      const receiptNumber = `FR-${Date.now()}`
       const receipt = await tx.fundReceipt.create({
         data: {
+          receiptNumber,
           amountPaise,
-          referenceNumber,
-          paymentDate,
-          remarks: remarks ?? null,
-          recordedById: authUser.userId,
-          source: 'DEOLEO',
+          receivedAt: paymentDate,
+          paymentMode,
+          referenceNumber: referenceNumber ?? null,
+          bankName: bankName ?? null,
+          notes: notes ?? null,
+          createdByUserId: authUser.userId,
         },
       })
 
       const ledgerEntry = await tx.fundLedger.create({
         data: {
-          type: 'CREDIT',
+          ledgerType: 'RECEIPT',
           amountPaise,
+          balancePaise: newBalance,
+          referenceType: 'FUND_RECEIPT',
           referenceId: receipt.id,
-          description: `Fund receipt from Deoleo. Ref: ${referenceNumber}`,
-          openingBalancePaise: currentBalance,
-          availableBalancePaise: newBalance,
-          recordedById: authUser.userId,
+          description: notes ?? `Fund receipt. Ref: ${referenceNumber ?? 'N/A'}`,
         },
       })
 
       await tx.auditLog.create({
         data: {
-          action: 'FUND_RECEIVED',
+          action: 'CREATE',
           entityType: 'FUND_RECEIPT',
           entityId: receipt.id,
-          performedById: authUser.userId,
+          actorId: authUser.userId,
           metadata: { amountPaise, referenceNumber, newBalance },
         },
       })

@@ -31,34 +31,34 @@ export async function POST(
     if (submission.status === 'REJECTED') return err('Already rejected')
 
     await prisma.$transaction(async (tx) => {
+      const prevStatus = submission.status
+
       await tx.visibilitySubmission.update({
         where: { id },
         data: {
           status: 'REJECTED',
           rejectionReason: reason,
-          rejectedAt: new Date(),
-          rejectedById: authUser.userId,
+          reviewedByUserId: authUser.userId,
+          reviewedAt: new Date(),
         },
       })
 
-      // Assign rework task to the submitter's manager
-      await tx.task.create({
+      await tx.visibilityApproval.create({
         data: {
-          type: 'VISIBILITY_REWORK',
-          assignedToId: submission.submittedById,
-          entityType: 'VISIBILITY_SUBMISSION',
-          entityId: id,
-          status: 'OPEN',
-          description: `Visibility submission rejected. Reason: ${reason}`,
+          submissionId: id,
+          reviewerUserId: authUser.userId,
+          fromStatus: prevStatus,
+          toStatus: 'REJECTED',
+          notes: reason,
         },
       })
 
       await tx.auditLog.create({
         data: {
-          action: 'VISIBILITY_REJECTED',
+          action: 'REJECT',
           entityType: 'VISIBILITY_SUBMISSION',
           entityId: id,
-          performedById: authUser.userId,
+          actorId: authUser.userId,
           metadata: { reason },
         },
       })

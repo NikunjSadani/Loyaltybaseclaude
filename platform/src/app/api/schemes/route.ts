@@ -7,16 +7,23 @@ const ok = (data: any, status = 200) => NextResponse.json({ success: true, data 
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
 const schemeSchema = z.object({
+  code: z.string().min(1),
   name: z.string().min(1),
   description: z.string().optional(),
-  incentiveType: z.string().min(1),
-  calculationMethod: z.enum(['FLAT', 'PERCENTAGE', 'SLAB', 'PER_UNIT', 'HYBRID']),
+  schemeType: z.enum(['PURCHASE_INCENTIVE', 'VISIBILITY', 'GROWTH_INCENTIVE', 'REFERRAL', 'WELCOME_BONUS', 'MILESTONE', 'SLAB_BASED', 'TARGET_BASED']),
+  rewardType: z.enum(['POINTS', 'CASHBACK', 'GIFT_CARD', 'PHYSICAL_GIFT', 'VOUCHER']),
   startDate: z.string().transform((s) => new Date(s)),
   endDate: z.string().transform((s) => new Date(s)),
-  holdingPeriodDays: z.number().int().min(0).default(0),
-  targetValue: z.number().optional(),
-  eligibility: z.record(z.string(), z.any()).optional(),
-  rules: z.record(z.string(), z.any()).optional(),
+  holdingPeriodDays: z.number().int().min(0).default(30),
+  pointsPerRupee: z.number().optional(),
+  fixedPoints: z.number().int().optional(),
+  maxPointsPerCycle: z.number().int().optional(),
+  budgetPaise: z.number().int().optional(),
+  termsAndConditions: z.string().optional(),
+  isStackable: z.boolean().default(false),
+  priority: z.number().int().default(0),
+  imageUrl: z.string().optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
   slabs: z
     .array(
       z.object({
@@ -39,22 +46,23 @@ export async function GET(req: NextRequest) {
     const limit = parseInt(sp.get('limit') ?? '20', 10)
     const skip = (page - 1) * limit
 
-    // For non-admin users: return only schemes they are enrolled in
-    let where: any = { status: 'ACTIVE', isDeleted: false }
+    // For non-admin users: return only schemes they are eligible for
+    let where: any = { status: 'ACTIVE', deletedAt: null }
 
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') {
-      const enrollments = await prisma.schemeEligibility.findMany({
-        where: { userId: authUser.userId, status: 'ACTIVE' },
+      const eligibilities = await prisma.schemeEligibility.findMany({
+        where: { specificPartnerId: authUser.userId },
         select: { schemeId: true },
       })
-      where.id = { in: enrollments.map((e) => e.schemeId) }
+      where.id = { in: eligibilities.map((e) => e.schemeId) }
     }
 
     const [schemes, total] = await Promise.all([
       prisma.scheme.findMany({
         where,
         include: {
-          slabs: { orderBy: { minValue: 'asc' } },
+          rules: { orderBy: { createdAt: 'asc' } },
+          eligibility: true,
         },
         skip,
         take: limit,
@@ -82,21 +90,14 @@ export async function POST(req: NextRequest) {
     const parsed = schemeSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const { slabs, ...schemeData } = parsed.data
+    const { slabs: _slabs, ...schemeData } = parsed.data
 
     const scheme = await prisma.scheme.create({
       data: {
         ...schemeData,
         status: 'ACTIVE',
-        isDeleted: false,
-        createdById: authUser.userId,
-        slabs: slabs
-          ? {
-              create: slabs,
-            }
-          : undefined,
+        createdByUserId: authUser.userId,
       },
-      include: { slabs: true },
     })
 
     return ok({ scheme }, 201)

@@ -38,8 +38,6 @@ export async function POST(
           status: 'ESCALATED',
           priority,
           assignedToId: escalateTo,
-          escalatedAt: new Date(),
-          escalatedById: authUser.userId,
           updatedAt: new Date(),
         },
       })
@@ -47,18 +45,18 @@ export async function POST(
       await tx.ticketMessage.create({
         data: {
           ticketId: id,
-          content: `Ticket escalated. Reason: ${reason}`,
-          authorId: authUser.userId,
+          message: `Ticket escalated. Reason: ${reason}`,
+          senderId: authUser.userId,
           isInternal: true,
         },
       })
 
       await tx.auditLog.create({
         data: {
-          action: 'TICKET_ESCALATED',
+          action: 'UPDATE',
           entityType: 'TICKET',
           entityId: id,
-          performedById: authUser.userId,
+          actorId: authUser.userId,
           metadata: { escalateTo, reason, priority },
         },
       })

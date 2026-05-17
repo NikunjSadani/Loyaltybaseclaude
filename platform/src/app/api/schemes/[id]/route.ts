@@ -9,7 +9,7 @@ const err = (message: string, status = 400) => NextResponse.json({ success: fals
 const patchSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
-  status: z.enum(['ACTIVE', 'PAUSED', 'ENDED']).optional(),
+  status: z.enum(['DRAFT', 'ACTIVE', 'PAUSED', 'EXPIRED', 'CANCELLED']).optional(),
   endDate: z.string().transform((s) => new Date(s)).optional(),
   rules: z.record(z.string(), z.any()).optional(),
   eligibility: z.record(z.string(), z.any()).optional(),
@@ -26,9 +26,11 @@ export async function GET(
     const { id } = await params
 
     const scheme = await prisma.scheme.findUnique({
-      where: { id, isDeleted: false },
-      include: { slabs: { orderBy: { minValue: 'asc' } } },
+      where: { id },
+      include: { rules: true, eligibility: true },
     })
+
+    if (scheme && scheme.deletedAt !== null) return err('Scheme not found', 404)
 
     if (!scheme) return err('Scheme not found', 404)
 
@@ -56,7 +58,7 @@ export async function PATCH(
     if (!parsed.success) return err(parsed.error.issues[0].message)
 
     const scheme = await prisma.scheme.update({
-      where: { id, isDeleted: false },
+      where: { id },
       data: { ...parsed.data, updatedAt: new Date() },
     })
 
@@ -80,7 +82,7 @@ export async function DELETE(
 
     await prisma.scheme.update({
       where: { id },
-      data: { isDeleted: true, status: 'ENDED', updatedAt: new Date() },
+      data: { deletedAt: new Date(), status: 'CANCELLED', updatedAt: new Date() },
     })
 
     return ok({ message: 'Scheme deleted successfully' })

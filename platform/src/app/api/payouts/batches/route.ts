@@ -7,7 +7,7 @@ const ok = (data: any, status = 200) => NextResponse.json({ success: true, data 
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
 const createSchema = z.object({
-  period: z.string().regex(/^\d{4}-\d{2}$/, 'Period must be in YYYY-MM format'),
+  payoutMode: z.enum(['UPI', 'BANK_TRANSFER', 'GIFT_CARD', 'PHYSICAL_GIFT']),
   notes: z.string().optional(),
 })
 
@@ -53,23 +53,18 @@ export async function POST(req: NextRequest) {
     const parsed = createSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const { period, notes } = parsed.data
+    const { payoutMode, notes } = parsed.data
 
-    // Check if batch already exists for period
-    const existing = await prisma.payoutBatch.findFirst({ where: { period } })
-    if (existing) return err(`Payout batch already exists for period ${period}`)
-
+    const batchCode = `PB-${Date.now()}`
     const batch = await prisma.payoutBatch.create({
       data: {
-        period,
-        status: 'PENDING',
+        batchCode,
+        payoutMode,
+        status: 'DRAFT',
         notes: notes ?? null,
-        createdById: authUser.userId,
+        createdByUserId: authUser.userId,
       },
     })
-
-    // In production: enqueue month-end calculation job
-    console.log(`[payouts/batches] Created batch ${batch.id} for period ${period}`)
 
     return ok({ batch }, 201)
   } catch (e: any) {

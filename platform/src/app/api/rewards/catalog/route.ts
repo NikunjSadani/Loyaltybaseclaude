@@ -20,20 +20,19 @@ export async function GET(req: NextRequest) {
     const skip = (page - 1) * limit
 
     const where: any = {
-      isActive: true,
-      isDeleted: false,
+      status: 'ACTIVE',
+      deletedAt: null,
     }
-    if (category) where.category = category
     if (minPoints !== undefined || maxPoints !== undefined) {
       where.pointsCost = {}
       if (minPoints !== undefined) where.pointsCost.gte = minPoints
       if (maxPoints !== undefined) where.pointsCost.lte = maxPoints
     }
-    if (inStock === 'true') where.inventoryCount = { gt: 0 }
 
     // Get user's wallet balance to filter eligible items
-    const wallet = await prisma.wallet.findFirst({ where: { userId: authUser.userId } })
-    const userBalance = wallet ? Math.max(0, wallet.earned - wallet.locked - wallet.redeemed) : 0
+    const partner = await prisma.channelPartner.findFirst({ where: { userId: authUser.userId } })
+    const wallet = partner ? await prisma.wallet.findFirst({ where: { partnerId: partner.id } }) : null
+    const userBalance = wallet ? wallet.redeemablePoints : 0
 
     const [items, total] = await Promise.all([
       prisma.rewardCatalog.findMany({

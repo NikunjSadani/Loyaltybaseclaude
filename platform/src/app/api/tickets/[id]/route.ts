@@ -18,11 +18,11 @@ export async function GET(
     const ticket = await prisma.ticket.findUnique({
       where: { id },
       include: {
-        createdBy: { select: { id: true, name: true, mobile: true } },
+        createdBy: { select: { id: true, name: true, phone: true } },
         assignedTo: { select: { id: true, name: true } },
         messages: {
           include: {
-            author: { select: { id: true, name: true, role: true } },
+            sender: { select: { id: true, name: true, role: true } },
           },
           orderBy: { createdAt: 'asc' },
         },

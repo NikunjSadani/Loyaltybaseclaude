@@ -29,53 +29,39 @@ export async function GET(req: NextRequest) {
 
     const records = await prisma.tdsRecord.findMany({
       where,
-      include: {
-        user: { select: { name: true, mobile: true } },
-      },
       orderBy: { createdAt: 'desc' },
     })
 
     // PAN-level aggregation
-    const panSummary: Record<string, { pan: string; name: string; grossPaise: number; tdsPaise: number; netPaise: number; count: number }> = {}
+    const panSummary: Record<string, { pan: string; tdsPaise: number; count: number }> = {}
     for (const r of records) {
-      const pan = r.pan ?? 'NO_PAN'
+      const pan = r.panNumber ?? 'NO_PAN'
       if (!panSummary[pan]) {
         panSummary[pan] = {
           pan,
-          name: r.user?.name ?? '',
-          grossPaise: 0,
           tdsPaise: 0,
-          netPaise: 0,
           count: 0,
         }
       }
-      panSummary[pan].grossPaise += r.grossAmountPaise
-      panSummary[pan].tdsPaise += r.tdsAmountPaise
-      panSummary[pan].netPaise += r.netAmountPaise
+      panSummary[pan].tdsPaise += r.tdsPaise
       panSummary[pan].count++
     }
 
     const data = records.map((r, i) => ({
       'S.No': i + 1,
-      'Name': r.user?.name ?? '',
-      'Mobile': r.user?.mobile ?? '',
-      PAN: r.pan ?? 'N/A',
-      Section: r.section,
-      'Financial Year': r.financialYear,
-      'Gross Amount (₹)': (r.grossAmountPaise / 100).toFixed(2),
-      'TDS Rate %': (r.tdsRate * 100).toFixed(1),
-      'TDS Amount (₹)': (r.tdsAmountPaise / 100).toFixed(2),
-      'Net Amount (₹)': (r.netAmountPaise / 100).toFixed(2),
+      PAN: r.panNumber ?? 'N/A',
+      'Partner ID': r.partnerId,
+      'Assessment Year': r.assessmentYear ?? '',
+      'Quarter Period': r.quarterPeriod ?? '',
+      'TDS Rate %': (Number(r.tdsRate) * 100).toFixed(1),
+      'TDS Amount (₹)': (r.tdsPaise / 100).toFixed(2),
       'Date': r.createdAt.toISOString().split('T')[0],
     }))
 
     const panData = Object.values(panSummary).map((p) => ({
       PAN: p.pan,
-      Name: p.name,
       'Transaction Count': p.count,
-      'Total Gross (₹)': (p.grossPaise / 100).toFixed(2),
       'Total TDS (₹)': (p.tdsPaise / 100).toFixed(2),
-      'Total Net (₹)': (p.netPaise / 100).toFixed(2),
     }))
 
     if (format === 'xlsx') {

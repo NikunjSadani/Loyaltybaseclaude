@@ -13,13 +13,13 @@ export async function GET(req: NextRequest) {
     const user = await prisma.user.findUnique({
       where: { id: authUser.userId },
       include: {
-        partner: {
+        channelPartner: {
           include: {
             outlets: true,
-            wallet: true,
+            wallets: true,
           },
         },
-        salesProfile: true,
+        salesUser: true,
       },
     })
 

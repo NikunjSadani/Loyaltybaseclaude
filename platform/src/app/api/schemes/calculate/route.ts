@@ -27,20 +27,19 @@ export async function POST(req: NextRequest) {
     const batch = await prisma.salesUpload.findUnique({ where: { id: batchId } })
     if (!batch) return err('Upload batch not found', 404)
 
-    // Get all invoices for this batch
+    // Get all invoices for this batch that are valid and not yet processed
     const invoices = await prisma.salesInvoice.findMany({
-      where: { uploadBatchId: batchId, status: 'PENDING' },
-      include: { sku: true },
+      where: { salesUploadId: batchId, isValid: true },
     })
 
     if (invoices.length === 0) {
-      return ok({ message: 'No pending invoices found for this batch', processed: 0 })
+      return ok({ message: 'No valid invoices found for this batch', processed: 0 })
     }
 
     // Get all active schemes
     const schemes = await prisma.scheme.findMany({
-      where: { status: 'ACTIVE', isDeleted: false },
-      include: { slabs: { orderBy: { minValue: 'asc' } } },
+      where: { status: 'ACTIVE', deletedAt: null },
+      include: { rules: true },
     })
 
     let processed = 0
@@ -52,26 +51,31 @@ export async function POST(req: NextRequest) {
 
         if (points > 0) {
           const wallet = await prisma.wallet.findFirst({
-            where: { userId: invoice.uploadedById },
+            where: { partnerId: invoice.partnerId },
           })
 
           if (wallet) {
             const updatedWallet = await prisma.wallet.update({
               where: { id: wallet.id },
-              data: { earned: { increment: points } },
+              data: {
+                earnedPoints: { increment: points },
+                redeemablePoints: { increment: points },
+                lifetimeEarned: { increment: points },
+                lastTransactionAt: new Date(),
+              },
             })
 
             await prisma.walletTransaction.create({
               data: {
                 walletId: wallet.id,
-                userId: invoice.uploadedById,
-                type: 'CREDIT',
-                bucket: 'EARNED',
-                amount: points,
-                balanceAfter: updatedWallet.earned,
+                transactionType: 'CREDIT_POINTS_EARNED',
+                points,
+                balanceBefore: updatedWallet.earnedPoints - points,
+                balanceAfter: updatedWallet.earnedPoints,
+                balanceType: 'EARNED',
+                referenceType: 'SALES_INVOICE',
+                referenceId: invoice.id,
                 description: `Incentive for invoice ${invoice.invoiceNumber} under scheme ${scheme.name}`,
-                invoiceId: invoice.id,
-                schemeId: scheme.id,
               },
             })
 
@@ -80,21 +84,15 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Mark invoice as processed
-      await prisma.salesInvoice.update({
-        where: { id: invoice.id },
-        data: { status: 'PROCESSED', pointsEarned: computeTotalPoints(schemes, invoice.totalAmountPaise / 100), processedAt: new Date() },
-      })
-
       processed++
     }
 
     await prisma.auditLog.create({
       data: {
-        action: 'INCENTIVE_RECALCULATION',
+        action: 'UPDATE',
         entityType: 'UPLOAD_BATCH',
         entityId: batchId,
-        performedById: authUser.userId,
+        actorId: authUser.userId,
         metadata: { processed, totalPointsAwarded },
       },
     })
@@ -107,22 +105,9 @@ export async function POST(req: NextRequest) {
 }
 
 function computeIncentive(scheme: any, amount: number): number {
-  if (scheme.calculationMethod === 'FLAT') return scheme.flatPoints ?? 0
-  if (scheme.calculationMethod === 'PERCENTAGE') {
-    return Math.round((amount * (scheme.ratePercent ?? 0)) / 100)
-  }
-  if (scheme.calculationMethod === 'PER_UNIT') {
-    return Math.round(amount * (scheme.pointsPerUnit ?? 0))
-  }
-  if (scheme.calculationMethod === 'SLAB' && scheme.slabs?.length > 0) {
-    const slab = [...scheme.slabs]
-      .reverse()
-      .find((s: any) => amount >= s.minValue && (s.maxValue == null || amount <= s.maxValue))
-    return slab ? slab.payoutValue : 0
+  if (scheme.fixedPoints != null) return scheme.fixedPoints
+  if (scheme.pointsPerRupee != null) {
+    return Math.round(amount * parseFloat(scheme.pointsPerRupee.toString()))
   }
   return 0
-}
-
-function computeTotalPoints(schemes: any[], amount: number): number {
-  return schemes.reduce((sum, s) => sum + computeIncentive(s, amount), 0)
 }

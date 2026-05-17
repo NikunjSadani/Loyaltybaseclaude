@@ -15,7 +15,7 @@ export async function GET(req: NextRequest) {
 
     const sp = req.nextUrl.searchParams
     const status = sp.get('status') ?? undefined
-    const mode = sp.get('mode') ?? undefined
+    const payoutMode = sp.get('mode') ?? undefined
     const partnerId = sp.get('partnerId') ?? undefined
     const dateFrom = sp.get('dateFrom') ? new Date(sp.get('dateFrom')!) : undefined
     const dateTo = sp.get('dateTo') ? new Date(sp.get('dateTo')!) : undefined
@@ -25,8 +25,8 @@ export async function GET(req: NextRequest) {
 
     const where: any = {}
     if (status) where.status = status
-    if (mode) where.mode = mode
-    if (partnerId) where.userId = partnerId
+    if (payoutMode) where.payoutMode = payoutMode
+    if (partnerId) where.partnerId = partnerId
     if (dateFrom || dateTo) {
       where.createdAt = {}
       if (dateFrom) where.createdAt.gte = dateFrom
@@ -37,8 +37,8 @@ export async function GET(req: NextRequest) {
       prisma.payoutTransaction.findMany({
         where,
         include: {
-          user: { select: { id: true, name: true, mobile: true } },
-          batch: { select: { id: true, period: true } },
+          partner: { select: { id: true, businessName: true } },
+          batch: { select: { id: true, batchCode: true } },
         },
         skip,
         take: limit,

@@ -9,8 +9,8 @@ const err = (message: string, status = 400) => NextResponse.json({ success: fals
 const patchSchema = z.object({
   name: z.string().min(1).optional(),
   email: z.string().email().optional(),
-  status: z.enum(['ACTIVE', 'INACTIVE', 'SUSPENDED']).optional(),
-  role: z.string().optional(),
+  status: z.enum(['ACTIVE', 'INACTIVE', 'SUSPENDED', 'PENDING_VERIFICATION']).optional(),
+  role: z.enum(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR', 'RETAILER', 'WHOLESALER', 'SUB_STOCKIST']).optional(),
 })
 
 export async function GET(
@@ -27,9 +27,8 @@ export async function GET(
     const user = await prisma.user.findUnique({
       where: { id },
       include: {
-        partner: true,
-        salesProfile: true,
-        wallet: { select: { earned: true, redeemed: true, locked: true } },
+        channelPartner: true,
+        salesUser: true,
       },
     })
 
@@ -63,10 +62,10 @@ export async function PATCH(
 
     await prisma.auditLog.create({
       data: {
-        action: 'USER_UPDATED',
+        action: 'UPDATE',
         entityType: 'USER',
         entityId: id,
-        performedById: authUser.userId,
+        actorId: authUser.userId,
         metadata: parsed.data,
       },
     })
@@ -94,15 +93,15 @@ export async function DELETE(
     // Soft delete
     await prisma.user.update({
       where: { id },
-      data: { status: 'DELETED', deletedAt: new Date() },
+      data: { status: 'INACTIVE', deletedAt: new Date() },
     })
 
     await prisma.auditLog.create({
       data: {
-        action: 'USER_DELETED',
+        action: 'DELETE',
         entityType: 'USER',
         entityId: id,
-        performedById: authUser.userId,
+        actorId: authUser.userId,
       },
     })
 

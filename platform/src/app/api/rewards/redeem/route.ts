@@ -35,58 +35,47 @@ export async function POST(req: NextRequest) {
 
     // Fetch reward item
     const item = await prisma.rewardCatalog.findUnique({
-      where: { id: rewardId, isActive: true, isDeleted: false },
+      where: { id: rewardId, status: 'ACTIVE', deletedAt: null },
     })
     if (!item) return err('Reward item not found or not available', 404)
 
-    // Check inventory
-    if (item.inventoryCount < quantity) {
-      return err(`Insufficient inventory. Only ${item.inventoryCount} available.`)
-    }
-
     const requiredPoints = item.pointsCost * quantity
 
+    // Find partner record
+    const partner = await prisma.channelPartner.findFirst({
+      where: { userId: authUser.userId },
+    })
+    if (!partner) return err('Partner account not found', 404)
+
     // Check wallet balance
-    const wallet = await prisma.wallet.findFirst({ where: { userId: authUser.userId } })
+    const wallet = await prisma.wallet.findFirst({ where: { partnerId: partner.id } })
     if (!wallet) return err('Wallet not found', 404)
 
-    const available = Math.max(0, wallet.earned - wallet.locked - wallet.redeemed)
+    const available = wallet.redeemablePoints
     if (available < requiredPoints) {
       return err(`Insufficient points. Required: ${requiredPoints}, Available: ${available}`)
     }
 
-    // Lock points
-    const updatedWallet = await prisma.$transaction(async (tx) => {
-      const w = await tx.wallet.update({
-        where: { id: wallet.id },
-        data: { locked: { increment: requiredPoints } },
-      })
-
-      await tx.walletTransaction.create({
-        data: {
-          walletId: wallet.id,
-          userId: authUser.userId,
-          type: 'LOCK',
-          bucket: 'LOCKED',
-          amount: requiredPoints,
-          balanceAfter: w.earned,
-          description: `Points locked for redemption of ${item.name} x${quantity}`,
-        },
-      })
-
-      return w
-    })
+    // Generate order number
+    const orderNumber = `RDM-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
 
     // Create pending redemption order
     const order = await prisma.redemptionOrder.create({
       data: {
-        userId: authUser.userId,
-        rewardItemId: rewardId,
+        partnerId: partner.id,
+        rewardId,
+        orderNumber,
         quantity,
-        pointsCost: requiredPoints,
-        status: 'PENDING_OTP',
-        deliveryAddress: deliveryAddress as any,
-        walletId: wallet.id,
+        pointsDeducted: 0,
+        totalPointsCost: requiredPoints,
+        redemptionMode: item.redemptionMode,
+        deliveryName: deliveryAddress.name,
+        deliveryPhone: deliveryAddress.mobile,
+        deliveryAddressLine1: deliveryAddress.address,
+        deliveryCity: deliveryAddress.city,
+        deliveryState: deliveryAddress.state,
+        deliveryPincode: deliveryAddress.pincode,
+        status: 'PENDING',
       },
     })
 
@@ -99,6 +88,7 @@ export async function POST(req: NextRequest) {
 
     return ok({
       orderId: order.id,
+      orderNumber,
       requiredPoints,
       message: 'OTP sent to your registered mobile. Please confirm the redemption.',
     })

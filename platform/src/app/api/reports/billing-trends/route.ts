@@ -22,9 +22,9 @@ export async function GET(req: NextRequest) {
     const invoices = await prisma.salesInvoice.findMany({
       where: {
         invoiceDate: { gte: dateFrom, lte: dateTo },
-        status: 'PROCESSED',
+        isValid: true,
       },
-      select: { invoiceDate: true, totalAmountPaise: true, skuCode: true, outletId: true },
+      select: { invoiceDate: true, totalAmountPaise: true, outletId: true },
       orderBy: { invoiceDate: 'asc' },
     })
 

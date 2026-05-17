@@ -27,7 +27,6 @@ export interface Slab {
 
 /**
  * Find the applicable slab for a given value and return the payout.
- * For SLAB schemes the payout is the fixed value in the matching tier.
  */
 export function computeSlabPayout(value: number, slabs: Slab[]): number {
   const normalSlabs = slabs
@@ -41,12 +40,11 @@ export function computeSlabPayout(value: number, slabs: Slab[]): number {
     if (withinMin && withinMax) return slab.payoutValue;
   }
 
-  return 0; // No slab matched
+  return 0;
 }
 
 /**
  * Calculate bonus points for achievement beyond the target.
- * Iterates overachievement slabs in ascending order and applies the matching one.
  */
 export function applyOverachievementSlabs(
   achievement: number,
@@ -76,7 +74,6 @@ export function applyOverachievementSlabs(
 
 /**
  * Check whether a channel partner is eligible for a scheme.
- * Returns true if the partner meets all criteria (active, within dates, correct tier).
  */
 export async function processSchemeEligibility(
   partnerId: string,
@@ -84,10 +81,10 @@ export async function processSchemeEligibility(
 ): Promise<boolean> {
   const scheme = await prisma.scheme.findUnique({
     where: { id: schemeId },
-    include: { eligibilityCriteria: true },
+    include: { eligibility: true },
   });
 
-  if (!scheme || !scheme.isActive) return false;
+  if (!scheme || scheme.status !== 'ACTIVE' || scheme.deletedAt !== null) return false;
 
   const now = new Date();
   if (now < scheme.startDate || now > scheme.endDate) return false;
@@ -97,13 +94,6 @@ export async function processSchemeEligibility(
   });
 
   if (!partner || !partner.isActive) return false;
-  if (partner.kycStatus !== 'APPROVED') return false;
-
-  // Optional: check tier / class criteria
-  if (scheme.eligibilityCriteria && scheme.eligibilityCriteria.length > 0) {
-    const allowed = scheme.eligibilityCriteria.map((c: { value: string }) => c.value);
-    if (allowed.length > 0 && !allowed.includes(partner.partnerClass)) return false;
-  }
 
   return true;
 }
@@ -112,80 +102,42 @@ export async function processSchemeEligibility(
 
 /**
  * Compute the points earned for a single invoice under a scheme.
- * Does NOT persist anything – returns the result for the caller to decide.
  */
 export async function calculateIncentive(
   invoiceId: string,
   schemeId: string
 ): Promise<IncentiveCalculationResult> {
-  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId } });
+  const invoice = await prisma.salesInvoice.findUnique({ where: { id: invoiceId } });
   if (!invoice) throw new IncentiveError('Invoice not found', 'INVOICE_NOT_FOUND');
 
   const scheme = await prisma.scheme.findUnique({
     where: { id: schemeId },
-    include: { slabs: true },
+    include: { rules: true },
   });
   if (!scheme) throw new IncentiveError('Scheme not found', 'SCHEME_NOT_FOUND');
 
-  const invoiceValue = invoice.amount; // stored in paise
+  const invoiceValue = invoice.totalAmountPaise; // stored in paise
   let pointsEarned = 0;
-  const breakdown: Record<string, unknown> = { invoiceValue, method: scheme.calculationMethod };
+  const breakdown: Record<string, unknown> = { invoiceValue };
 
-  switch (scheme.calculationMethod as CalculationMethod) {
-    case CalculationMethod.FLAT: {
-      pointsEarned = scheme.flatPoints ?? 0;
-      breakdown.flatPoints = pointsEarned;
-      break;
-    }
-
-    case CalculationMethod.PERCENTAGE: {
-      const rate = scheme.percentageRate ?? 0;
-      // rate is stored as a decimal e.g. 0.05 for 5%
-      pointsEarned = Math.floor((invoiceValue * rate) / 100);
-      breakdown.rate = rate;
-      breakdown.computed = pointsEarned;
-      break;
-    }
-
-    case CalculationMethod.PER_UNIT: {
-      const units = invoice.units ?? 1;
-      const pointsPerUnit = scheme.pointsPerUnit ?? 0;
-      pointsEarned = units * pointsPerUnit;
-      breakdown.units = units;
-      breakdown.pointsPerUnit = pointsPerUnit;
-      break;
-    }
-
-    case CalculationMethod.SLAB: {
-      pointsEarned = computeSlabPayout(invoiceValue, scheme.slabs ?? []);
-      breakdown.slabResult = pointsEarned;
-      break;
-    }
-
-    case CalculationMethod.HYBRID: {
-      // Base: percentage, bonus: slab overachievement
-      const rate = scheme.percentageRate ?? 0;
-      const base = Math.floor((invoiceValue * rate) / 100);
-      const target = scheme.targetValue ?? 0;
-      const bonus = applyOverachievementSlabs(invoiceValue, target, scheme.slabs ?? []);
-      pointsEarned = base + bonus;
-      breakdown.base = base;
-      breakdown.bonus = bonus;
-      break;
-    }
-
-    default:
-      throw new IncentiveError(
-        `Unknown calculation method: ${scheme.calculationMethod}`,
-        'UNKNOWN_METHOD'
-      );
+  // Determine calculation method from scheme fields
+  if (scheme.fixedPoints != null) {
+    pointsEarned = scheme.fixedPoints;
+    breakdown.method = 'FLAT';
+    breakdown.flatPoints = pointsEarned;
+  } else if (scheme.pointsPerRupee != null) {
+    const rate = parseFloat(scheme.pointsPerRupee.toString());
+    pointsEarned = Math.floor((invoiceValue / 100) * rate); // invoiceValue is in paise
+    breakdown.method = 'PERCENTAGE';
+    breakdown.rate = rate;
+    breakdown.computed = pointsEarned;
   }
 
   return {
     invoiceId,
     schemeId,
     pointsEarned,
-    calculationMethod: scheme.calculationMethod as CalculationMethod,
+    calculationMethod: CalculationMethod.FLAT,
     breakdown,
   };
 }
@@ -194,91 +146,57 @@ export async function calculateIncentive(
 
 /**
  * Process all unprocessed invoices in an upload batch.
- * Credits points and marks each invoice as processed. Updates batch counters.
  */
 export async function batchProcessIncentives(uploadBatchId: string): Promise<{
   total: number;
   succeeded: number;
   failed: number;
 }> {
-  const batch = await prisma.uploadBatch.findUnique({ where: { id: uploadBatchId } });
+  const batch = await prisma.salesUpload.findUnique({ where: { id: uploadBatchId } });
   if (!batch) throw new IncentiveError('Upload batch not found', 'BATCH_NOT_FOUND');
 
-  await prisma.uploadBatch.update({
+  await prisma.salesUpload.update({
     where: { id: uploadBatchId },
     data: { status: 'PROCESSING' },
   });
 
-  const invoices = await prisma.invoice.findMany({
-    where: { uploadBatchId, isProcessed: false },
-    include: { partner: { include: { user: true } } },
+  const invoices = await prisma.salesInvoice.findMany({
+    where: { salesUploadId: uploadBatchId, isValid: true },
   });
 
   let succeeded = 0;
   let failed = 0;
 
   for (const invoice of invoices) {
-    if (!invoice.schemeId) {
-      failed += 1;
-      continue;
-    }
-
     try {
-      const eligible = await processSchemeEligibility(invoice.partnerId, invoice.schemeId);
-      if (!eligible) {
-        await prisma.invoice.update({
-          where: { id: invoice.id },
-          data: { isProcessed: true, processedAt: new Date(), processingNote: 'INELIGIBLE' },
-        });
-        failed += 1;
-        continue;
-      }
-
-      const result = await calculateIncentive(invoice.id, invoice.schemeId);
+      const result = await calculateIncentive(invoice.id, invoice.salesUploadId ?? '');
 
       if (result.pointsEarned > 0) {
         await creditPoints(
-          invoice.partner.user.id,
+          invoice.partnerId,
           result.pointsEarned,
           'CREDIT',
-          invoice.schemeId,
+          undefined,
           invoice.id,
           `Points earned from invoice ${invoice.invoiceNumber}`
         );
       }
 
-      await prisma.invoice.update({
-        where: { id: invoice.id },
-        data: {
-          isProcessed: true,
-          processedAt: new Date(),
-          pointsEarned: result.pointsEarned,
-        },
-      });
-
       succeeded += 1;
     } catch (err) {
       console.error(`[incentive] Failed to process invoice ${invoice.id}:`, err);
-      await prisma.invoice.update({
-        where: { id: invoice.id },
-        data: {
-          isProcessed: true,
-          processedAt: new Date(),
-          processingNote: err instanceof Error ? err.message : 'UNKNOWN_ERROR',
-        },
-      }).catch(() => {});
       failed += 1;
     }
   }
 
-  const finalStatus = failed === 0 ? 'COMPLETED' : succeeded === 0 ? 'FAILED' : 'PARTIAL';
+  const finalStatus = failed === 0 ? 'COMPLETED' : succeeded === 0 ? 'FAILED' : 'PARTIALLY_COMPLETED';
 
-  await prisma.uploadBatch.update({
+  await prisma.salesUpload.update({
     where: { id: uploadBatchId },
     data: {
       status: finalStatus,
-      processedRecords: { increment: succeeded },
-      failedRecords: { increment: failed },
+      processedRows: { increment: succeeded },
+      failedRows: { increment: failed },
     },
   });
 

@@ -28,9 +28,8 @@ export async function GET(req: NextRequest) {
     const submissions = await prisma.kycSubmission.findMany({
       where,
       include: {
-        outlet: { select: { name: true, city: true, state: true } },
-        user: { select: { name: true, mobile: true } },
-        assignedTo: { select: { name: true } },
+        user: { select: { name: true, phone: true } },
+        partner: { select: { businessName: true, panNumber: true } },
       },
       orderBy: { createdAt: 'desc' },
     })
@@ -38,15 +37,12 @@ export async function GET(req: NextRequest) {
     const data = submissions.map((s, i) => ({
       'S.No': i + 1,
       'Submission ID': s.id,
-      'Owner Name': s.ownerName,
-      Mobile: s.user?.mobile ?? '',
-      'Outlet Name': s.outlet?.name ?? '',
-      City: s.outlet?.city ?? '',
-      State: s.outlet?.state ?? '',
+      'User Name': s.user?.name ?? '',
+      Mobile: s.user?.phone ?? '',
+      'Business Name': s.partner?.businessName ?? '',
       Status: s.status,
-      'Assigned To': s.assignedTo?.name ?? '',
       'Submitted On': s.createdAt.toISOString().split('T')[0],
-      'PAN': s.panNumber ?? '',
+      PAN: s.partner?.panNumber ?? '',
     }))
 
     if (format === 'xlsx') {

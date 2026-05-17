@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
     const loginLogs = await prisma.loginLog.findMany({
       where: { createdAt: { gte: dateFrom, lte: dateTo } },
       include: {
-        user: { select: { id: true, name: true, mobile: true, role: true } },
+        user: { select: { id: true, name: true, phone: true, role: true } },
       },
       orderBy: { createdAt: 'desc' },
     })
@@ -49,7 +49,7 @@ export async function GET(req: NextRequest) {
     const data = loginLogs.map((l, i) => ({
       'S.No': i + 1,
       'User Name': l.user?.name ?? '',
-      Mobile: l.user?.mobile ?? '',
+      Mobile: l.user?.phone ?? '',
       Role: l.user?.role ?? '',
       'Login Time': l.createdAt.toISOString(),
       'IP Address': l.ipAddress ?? '',

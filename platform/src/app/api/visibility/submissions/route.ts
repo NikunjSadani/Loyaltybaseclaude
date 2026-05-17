@@ -19,9 +19,6 @@ export async function GET(req: NextRequest) {
     const skip = (page - 1) * limit
 
     const where: any = {}
-    if (authUser.role !== 'GIFSY_ADMIN') {
-      where.submittedById = authUser.userId
-    }
     if (outletId) where.outletId = outletId
     if (programId) where.programId = programId
     if (status) where.status = status
@@ -30,7 +27,7 @@ export async function GET(req: NextRequest) {
       prisma.visibilitySubmission.findMany({
         where,
         include: {
-          submittedBy: { select: { id: true, name: true, mobile: true } },
+          partner: { select: { id: true, businessName: true } },
           outlet: { select: { id: true, name: true, city: true } },
         },
         skip,

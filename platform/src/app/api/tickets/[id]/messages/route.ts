@@ -7,8 +7,8 @@ const ok = (data: any, status = 200) => NextResponse.json({ success: true, data 
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
 const schema = z.object({
-  content: z.string().min(1),
-  attachments: z.array(z.string().url()).optional(),
+  message: z.string().min(1),
+  attachments: z.array(z.string()).optional(),
   isInternal: z.boolean().default(false),
 })
 
@@ -25,7 +25,7 @@ export async function POST(
     const parsed = schema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const { content, attachments, isInternal } = parsed.data
+    const { message: messageText, attachments, isInternal } = parsed.data
 
     const ticket = await prisma.ticket.findUnique({ where: { id } })
     if (!ticket) return err('Ticket not found', 404)
@@ -45,13 +45,10 @@ export async function POST(
       const msg = await tx.ticketMessage.create({
         data: {
           ticketId: id,
-          content,
+          message: messageText,
           attachments: attachments ?? [],
-          authorId: authUser.userId,
+          senderId: authUser.userId,
           isInternal,
-        },
-        include: {
-          author: { select: { id: true, name: true, role: true } },
         },
       })
 

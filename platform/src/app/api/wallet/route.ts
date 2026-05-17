@@ -12,33 +12,47 @@ export async function GET(req: NextRequest) {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
 
-    const wallet = await prisma.wallet.findFirst({
+    // Look up the channel partner for this user
+    const channelPartner = await prisma.channelPartner.findUnique({
       where: { userId: authUser.userId },
     })
 
-    if (!wallet) {
+    if (!channelPartner) {
       return ok({
-        earned: 0,
-        locked: 0,
-        redeemable: 0,
-        redeemed: 0,
-        expired: 0,
-        available: 0,
+        earnedPoints: 0,
+        lockedPoints: 0,
+        redeemablePoints: 0,
+        redeemedPoints: 0,
+        expiredPoints: 0,
         currency: 'POINTS',
         conversionRate: CONVERSION_RATE,
       })
     }
 
-    const redeemable = Math.max(0, wallet.earned - wallet.locked - wallet.redeemed)
-    const available = Math.max(0, redeemable - wallet.expired)
+    const wallet = await prisma.wallet.findFirst({
+      where: { partnerId: channelPartner.id },
+    })
+
+    if (!wallet) {
+      return ok({
+        earnedPoints: 0,
+        lockedPoints: 0,
+        redeemablePoints: 0,
+        redeemedPoints: 0,
+        expiredPoints: 0,
+        currency: 'POINTS',
+        conversionRate: CONVERSION_RATE,
+      })
+    }
 
     return ok({
-      earned: wallet.earned,
-      locked: wallet.locked,
-      redeemable,
-      redeemed: wallet.redeemed,
-      expired: wallet.expired ?? 0,
-      available,
+      earnedPoints: wallet.earnedPoints,
+      lockedPoints: wallet.lockedPoints,
+      redeemablePoints: wallet.redeemablePoints,
+      redeemedPoints: wallet.redeemedPoints,
+      expiredPoints: wallet.expiredPoints,
+      lifetimeEarned: wallet.lifetimeEarned,
+      lifetimeRedeemed: wallet.lifetimeRedeemed,
       currency: 'POINTS',
       conversionRate: CONVERSION_RATE,
     })

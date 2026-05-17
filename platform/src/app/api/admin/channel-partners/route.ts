@@ -40,9 +40,9 @@ export async function GET(req: NextRequest) {
       prisma.channelPartner.findMany({
         where,
         include: {
-          user: { select: { id: true, name: true, mobile: true, email: true, status: true } },
-          wallet: { select: { earned: true, redeemed: true, locked: true } },
-          outlets: { select: { id: true, name: true, city: true, status: true } },
+          user: { select: { id: true, name: true, phone: true, email: true, status: true } },
+          wallets: { select: { earnedPoints: true, redeemedPoints: true, lockedPoints: true } },
+          outlets: { select: { id: true, name: true, city: true, isActive: true } },
         },
         skip,
         take: limit,

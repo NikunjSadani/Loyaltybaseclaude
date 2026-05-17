@@ -15,10 +15,10 @@ const WHATSAPP_API_KEY = process.env.WHATSAPP_API_KEY ?? '';
 // ─── OTP delivery ─────────────────────────────────────────────────────────────
 
 /**
- * Send an OTP to the given mobile number via SMS or WhatsApp.
+ * Send an OTP to the given phone number via SMS or WhatsApp.
  */
 export async function sendOTP(
-  mobile: string,
+  phone: string,
   otp: string,
   channel: 'SMS' | 'WHATSAPP'
 ): Promise<void> {
@@ -26,7 +26,7 @@ export async function sendOTP(
     await axios.post(
       WHATSAPP_GATEWAY_URL,
       {
-        phone: mobile,
+        phone,
         templateName: 'otp_verification',
         params: [otp],
       },
@@ -36,7 +36,7 @@ export async function sendOTP(
     await axios.post(
       SMS_GATEWAY_URL,
       {
-        to: mobile,
+        to: phone,
         message: `Your OTP is ${otp}. Valid for 10 minutes. Do not share it with anyone.`,
       },
       { headers: { 'x-api-key': SMS_GATEWAY_API_KEY } }
@@ -47,7 +47,7 @@ export async function sendOTP(
 // ─── Template-based notification ──────────────────────────────────────────────
 
 /**
- * Look up the notification template for the given event, interpolate the data,
+ * Look up the notification template by code, interpolate the data,
  * and dispatch the message via the configured channel.
  */
 export async function sendNotification(
@@ -58,44 +58,43 @@ export async function sendNotification(
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) throw new Error(`User not found: ${userId}`);
 
+  // Use event name as template code
   const template = await prisma.notificationTemplate.findFirst({
-    where: { event, isActive: true },
+    where: { code: String(event), isActive: true },
   });
   if (!template) {
     console.warn(`[NOTIFICATION] No active template for event: ${event}`);
     return;
   }
 
-  const body = interpolate(template.templateBody, data);
+  const body = interpolate(template.bodyTemplate, data);
 
-  if (template.channel === NotificationChannel.SMS && user.mobile) {
+  if (template.channel === 'SMS' && user.phone) {
     await axios.post(
       SMS_GATEWAY_URL,
-      { to: user.mobile, message: body },
+      { to: user.phone, message: body },
       { headers: { 'x-api-key': SMS_GATEWAY_API_KEY } }
     );
-  } else if (template.channel === NotificationChannel.WHATSAPP && user.mobile) {
+  } else if (template.channel === 'WHATSAPP' && user.phone) {
     await axios.post(
       WHATSAPP_GATEWAY_URL,
-      { phone: user.mobile, message: body, templateId: template.templateId },
+      { phone: user.phone, message: body },
       { headers: { Authorization: `Bearer ${WHATSAPP_API_KEY}` } }
     );
   }
 
-  // Persist as sent
-  await prisma.notificationQueue.update({
-    where: {
-      // best-effort: find the most recent unsent queue entry for this user+template
-      id: (
-        await prisma.notificationQueue.findFirst({
-          where: { userId, templateId: template.id, sentAt: null },
-          orderBy: { createdAt: 'desc' },
-        })
-      )?.id ?? '',
+  // Queue as sent
+  await prisma.notificationQueue.create({
+    data: {
+      userId,
+      templateId: template.id,
+      channel: template.channel,
+      body,
+      status: 'QUEUED',
+      processedAt: new Date(),
     },
-    data: { sentAt: new Date(), status: 'SENT' },
   }).catch(() => {
-    // No queued record – that's fine, fire-and-forget notifications need no queue entry.
+    // Non-critical: log and continue
   });
 }
 
@@ -115,14 +114,16 @@ export async function queueNotification(
   });
   if (!template) throw new Error(`Template not found: ${templateId}`);
 
+  const body = interpolate(template.bodyTemplate, data);
+
   await prisma.notificationQueue.create({
     data: {
       userId,
       templateId,
       channel: template.channel,
-      payload: data,
+      body,
       scheduledAt: scheduledAt ?? null,
-      status: 'PENDING',
+      status: 'QUEUED',
     },
   });
 }

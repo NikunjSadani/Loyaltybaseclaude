@@ -20,7 +20,7 @@ export async function POST(
 
     const submission = await prisma.kycSubmission.findUnique({
       where: { id },
-      include: { user: true, outlet: true },
+      include: { user: true, partner: true },
     })
 
     if (!submission) return err('KYC submission not found', 404)
@@ -30,22 +30,16 @@ export async function POST(
       // Transition to APPROVED
       await tx.kycSubmission.update({
         where: { id },
-        data: { status: 'APPROVED', updatedAt: new Date() },
+        data: { status: 'APPROVED', approvedAt: new Date() },
       })
 
       // Log status history
       await tx.kycStatusHistory.create({
         data: {
-          submissionId: id,
-          status: 'APPROVED',
-          changedById: authUser.userId,
+          kycSubmissionId: id,
+          toStatus: 'APPROVED',
+          changedByUserId: authUser.userId,
         },
-      })
-
-      // Activate outlet
-      await tx.outlet.update({
-        where: { id: submission.outletId },
-        data: { status: 'ACTIVE' },
       })
 
       // Activate user account
@@ -54,44 +48,15 @@ export async function POST(
         data: { status: 'ACTIVE' },
       })
 
-      // Create or activate wallet for user
-      const existingWallet = await tx.wallet.findFirst({
-        where: { userId: submission.userId },
-      })
-      if (!existingWallet) {
-        await tx.wallet.create({
-          data: {
-            userId: submission.userId,
-            earned: 0,
-            locked: 0,
-            redeemed: 0,
-            expired: 0,
-            status: 'ACTIVE',
-          },
+      // Create wallet for channel partner if they don't have one
+      if (submission.partnerId) {
+        const existingWallet = await tx.wallet.findFirst({
+          where: { partnerId: submission.partnerId },
         })
-      } else {
-        await tx.wallet.update({
-          where: { id: existingWallet.id },
-          data: { status: 'ACTIVE' },
-        })
-      }
-
-      // Assign applicable schemes (find active schemes for the user's class)
-      const activeSchemes = await tx.scheme.findMany({
-        where: { status: 'ACTIVE', isDeleted: false },
-      })
-
-      for (const scheme of activeSchemes) {
-        const existing = await tx.schemeEnrollment.findFirst({
-          where: { userId: submission.userId, schemeId: scheme.id },
-        })
-        if (!existing) {
-          await tx.schemeEnrollment.create({
+        if (!existingWallet) {
+          await tx.wallet.create({
             data: {
-              userId: submission.userId,
-              schemeId: scheme.id,
-              enrolledAt: new Date(),
-              status: 'ACTIVE',
+              partnerId: submission.partnerId,
             },
           })
         }
@@ -100,10 +65,10 @@ export async function POST(
       // Log audit entry
       await tx.auditLog.create({
         data: {
-          action: 'KYC_APPROVED',
+          action: 'APPROVE',
           entityType: 'KYC_SUBMISSION',
           entityId: id,
-          performedById: authUser.userId,
+          actorId: authUser.userId,
           metadata: { submissionId: id, userId: submission.userId },
         },
       })
@@ -111,7 +76,7 @@ export async function POST(
 
     // Send notification
     await sendNotification(submission.userId, NotificationEvent.KYC_APPROVED, {
-      name: submission.ownerName ?? submission.user.mobile,
+      name: submission.user.name ?? submission.user.phone,
     }).catch((e) => console.error('[kyc/approve notification]', e))
 
     return ok({ message: 'KYC approved successfully' })

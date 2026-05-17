@@ -28,8 +28,8 @@ export async function GET(req: NextRequest) {
     const transactions = await prisma.payoutTransaction.findMany({
       where,
       include: {
-        user: { select: { name: true, mobile: true } },
-        batch: { select: { period: true } },
+        partner: { select: { businessName: true } },
+        batch: { select: { batchCode: true } },
       },
       orderBy: { amountPaise: 'desc' },
     })
@@ -38,11 +38,10 @@ export async function GET(req: NextRequest) {
 
     const data = transactions.map((t, i) => ({
       'S.No': i + 1,
-      'Partner Name': t.user?.name ?? '',
-      Mobile: t.user?.mobile ?? '',
-      Period: t.batch?.period ?? '',
+      'Partner Name': t.partner?.businessName ?? '',
+      'Batch Code': t.batch?.batchCode ?? '',
       'Amount (₹)': (t.amountPaise / 100).toFixed(2),
-      Mode: t.mode,
+      Mode: t.payoutMode,
       Status: t.status,
       'Created On': t.createdAt.toISOString().split('T')[0],
     }))

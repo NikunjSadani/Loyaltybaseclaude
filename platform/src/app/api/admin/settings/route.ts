@@ -6,20 +6,20 @@ import { getAuthUser } from '@/lib/auth'
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
-const settingsSchema = z.object({
-  holdingPeriodDays: z.number().int().min(0).optional(),
-  conversionRate: z.number().positive().optional(),
-  slaTargetHours: z.number().int().positive().optional(),
-  maxOtpAttempts: z.number().int().positive().optional(),
-  otpExpiryMinutes: z.number().int().positive().optional(),
-  minRedemptionPoints: z.number().int().min(0).optional(),
-  maxDailyVisibilitySubmissions: z.number().int().positive().optional(),
-  tdsRate: z.number().min(0).max(1).optional(),
-  tdsThresholdPaise: z.number().int().min(0).optional(),
-  programName: z.string().optional(),
-  supportEmail: z.string().email().optional(),
-  supportPhone: z.string().optional(),
-})
+const DEFAULTS: Record<string, any> = {
+  holdingPeriodDays: 30,
+  conversionRate: 1,
+  slaTargetHours: 48,
+  maxOtpAttempts: 3,
+  otpExpiryMinutes: 10,
+  minRedemptionPoints: 100,
+  maxDailyVisibilitySubmissions: 10,
+  tdsRate: 0.1,
+  tdsThresholdPaise: 2000000,
+  programName: 'Loyalty Program',
+  supportEmail: 'support@platform.com',
+  supportPhone: '1800-XXX-XXXX',
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -27,26 +27,12 @@ export async function GET(req: NextRequest) {
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') return err('Forbidden', 403)
 
-    const settings = await prisma.programSetting.findFirst()
+    const rows = await prisma.programSetting.findMany()
 
-    if (!settings) {
-      // Return defaults
-      return ok({
-        settings: {
-          holdingPeriodDays: 30,
-          conversionRate: 1,
-          slaTargetHours: 48,
-          maxOtpAttempts: 3,
-          otpExpiryMinutes: 10,
-          minRedemptionPoints: 100,
-          maxDailyVisibilitySubmissions: 10,
-          tdsRate: 0.1,
-          tdsThresholdPaise: 2000000,
-          programName: 'Loyalty Program',
-          supportEmail: 'support@platform.com',
-          supportPhone: '1800-XXX-XXXX',
-        },
-      })
+    // Build settings object from key-value rows
+    const settings: Record<string, any> = { ...DEFAULTS }
+    for (const row of rows) {
+      settings[row.settingKey] = row.settingValue
     }
 
     return ok({ settings })
@@ -55,6 +41,13 @@ export async function GET(req: NextRequest) {
     return err('Failed to fetch settings', 500)
   }
 }
+
+const settingsSchema = z.object({
+  key: z.string().min(1),
+  value: z.any(),
+  category: z.string().optional(),
+  description: z.string().optional(),
+})
 
 export async function PUT(req: NextRequest) {
   try {
@@ -66,29 +59,25 @@ export async function PUT(req: NextRequest) {
     const parsed = settingsSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const existing = await prisma.programSetting.findFirst()
+    const { key, value, category, description } = parsed.data
 
-    let settings
-    if (existing) {
-      settings = await prisma.programSetting.update({
-        where: { id: existing.id },
-        data: { ...parsed.data, updatedAt: new Date() },
-      })
-    } else {
-      settings = await prisma.programSetting.create({ data: parsed.data })
-    }
+    const setting = await prisma.programSetting.upsert({
+      where: { settingKey: key },
+      update: { settingValue: value, updatedById: authUser.userId },
+      create: { settingKey: key, settingValue: value, category, description, updatedById: authUser.userId },
+    })
 
     await prisma.auditLog.create({
       data: {
-        action: 'SETTINGS_UPDATED',
+        action: 'UPDATE',
         entityType: 'PROGRAM_SETTINGS',
-        entityId: settings.id,
-        performedById: authUser.userId,
-        metadata: parsed.data,
+        entityId: setting.id,
+        actorId: authUser.userId,
+        metadata: { key, value },
       },
     })
 
-    return ok({ settings })
+    return ok({ setting })
   } catch (e: any) {
     console.error('[admin/settings PUT]', e)
     return err('Failed to update settings', 500)

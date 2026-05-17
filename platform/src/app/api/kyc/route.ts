@@ -7,24 +7,10 @@ const ok = (data: any, status = 200) => NextResponse.json({ success: true, data 
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
 const kycSchema = z.object({
-  // Outlet details
-  outletName: z.string().min(1),
-  outletAddress: z.string().min(1),
-  outletCity: z.string().min(1),
-  outletState: z.string().min(1),
-  outletPincode: z.string().length(6),
-  outletType: z.string().min(1),
-  // Partner details
-  ownerName: z.string().min(1),
-  ownerMobile: z.string().regex(/^\d{10}$/),
-  ownerEmail: z.string().email().optional(),
+  // Partner details (must already have channel partner record or partnerId)
   panNumber: z.string().regex(/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/).optional(),
   gstNumber: z.string().optional(),
-  // Bank details
-  bankAccountNumber: z.string().min(8),
-  bankIfscCode: z.string().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/),
-  bankAccountHolderName: z.string().min(1),
-  bankName: z.string().min(1),
+  reviewerNotes: z.string().optional(),
 })
 
 export async function POST(req: NextRequest) {
@@ -39,41 +25,27 @@ export async function POST(req: NextRequest) {
     }
     const data = parsed.data
 
-    // Create outlet record and KYC submission in a transaction
-    const result = await prisma.$transaction(async (tx) => {
-      const outlet = await tx.outlet.create({
-        data: {
-          name: data.outletName,
-          address: data.outletAddress,
-          city: data.outletCity,
-          state: data.outletState,
-          pincode: data.outletPincode,
-          type: data.outletType,
-          status: 'PENDING',
-        },
-      })
-
-      const submission = await tx.kycSubmission.create({
-        data: {
-          userId: authUser.userId,
-          outletId: outlet.id,
-          status: 'DRAFT',
-          ownerName: data.ownerName,
-          ownerMobile: data.ownerMobile,
-          ownerEmail: data.ownerEmail ?? null,
-          panNumber: data.panNumber ?? null,
-          gstNumber: data.gstNumber ?? null,
-          bankAccountNumber: data.bankAccountNumber,
-          bankIfscCode: data.bankIfscCode,
-          bankAccountHolderName: data.bankAccountHolderName,
-          bankName: data.bankName,
-        },
-      })
-
-      return { submission, outlet }
+    // Find channel partner for this user
+    const partner = await prisma.channelPartner.findFirst({
+      where: { userId: authUser.userId },
     })
 
-    return ok({ submissionId: result.submission.id, outletId: result.outlet.id }, 201)
+    // Check for existing pending submission
+    const existing = await prisma.kycSubmission.findFirst({
+      where: { userId: authUser.userId, status: { in: ['DRAFT', 'SUBMITTED', 'UNDER_REVIEW'] } },
+    })
+    if (existing) return err('You already have a pending KYC submission')
+
+    const submission = await prisma.kycSubmission.create({
+      data: {
+        userId: authUser.userId,
+        partnerId: partner?.id ?? null,
+        status: 'DRAFT',
+        reviewerNotes: data.reviewerNotes ?? null,
+      },
+    })
+
+    return ok({ submissionId: submission.id }, 201)
   } catch (e: any) {
     console.error('[kyc POST]', e)
     return err('Failed to create KYC submission', 500)
@@ -87,30 +59,25 @@ export async function GET(req: NextRequest) {
 
     const sp = req.nextUrl.searchParams
     const status = sp.get('status') ?? undefined
-    const state = sp.get('state') ?? undefined
-    const assignedTo = sp.get('assigned_to') ?? undefined
     const page = parseInt(sp.get('page') ?? '1', 10)
     const limit = parseInt(sp.get('limit') ?? '20', 10)
     const skip = (page - 1) * limit
 
     // Build where clause based on role
     const where: any = {}
-    if (authUser.role !== 'GIFSY_ADMIN') {
-      // Sales users see only their assigned submissions
-      where.assignedToId = authUser.userId
+    if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') {
+      // Non-admin users see only their own submissions
+      where.userId = authUser.userId
     }
     if (status) where.status = status
-    if (assignedTo) where.assignedToId = assignedTo
-    if (state) {
-      where.outlet = { state }
-    }
 
     const [submissions, total] = await Promise.all([
       prisma.kycSubmission.findMany({
         where,
         include: {
-          outlet: { select: { name: true, city: true, state: true } },
-          assignedTo: { select: { id: true, name: true } },
+          user: { select: { id: true, name: true, phone: true } },
+          partner: { select: { id: true, businessName: true } },
+          documents: { select: { id: true, documentType: true, status: true } },
         },
         skip,
         take: limit,
@@ -122,7 +89,7 @@ export async function GET(req: NextRequest) {
     // Count by status
     const statusCounts = await prisma.kycSubmission.groupBy({
       by: ['status'],
-      where: authUser.role !== 'GIFSY_ADMIN' ? { assignedToId: authUser.userId } : {},
+      where: authUser.role !== 'GIFSY_ADMIN' ? { userId: authUser.userId } : {},
       _count: { status: true },
     })
 

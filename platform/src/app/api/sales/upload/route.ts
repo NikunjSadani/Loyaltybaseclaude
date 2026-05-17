@@ -45,10 +45,10 @@ export async function POST(req: NextRequest) {
 
     // Pre-fetch valid SKU codes and outlet IDs
     const [validSkus, validOutlets] = await Promise.all([
-      prisma.sku.findMany({ select: { code: true } }),
-      prisma.outlet.findMany({ where: { status: 'ACTIVE' }, select: { id: true } }),
+      prisma.sku.findMany({ select: { skuCode: true } }),
+      prisma.outlet.findMany({ where: { isActive: true, deletedAt: null }, select: { id: true } }),
     ])
-    const skuSet = new Set(validSkus.map((s) => s.code))
+    const skuSet = new Set(validSkus.map((s) => s.skuCode))
     const outletSet = new Set(validOutlets.map((o) => o.id))
 
     // Check existing invoice numbers in DB
@@ -106,13 +106,14 @@ export async function POST(req: NextRequest) {
     // Create upload batch
     const batch = await prisma.salesUpload.create({
       data: {
-        uploadedBy: authUser.userId,
+        uploadedByUserId: authUser.userId,
         fileName: file.name,
         fileUrl: '',
+        fileKey: '',
         status: 'PROCESSING',
-        totalRecords: rows.length,
-        processedRecords: 0,
-        failedRecords: errors.length,
+        totalRows: rows.length,
+        processedRows: 0,
+        failedRows: errors.length,
       },
     })
 
@@ -122,16 +123,14 @@ export async function POST(req: NextRequest) {
       for (const row of valid) {
         await prisma.salesInvoice.create({
           data: {
+            salesUploadId: batch.id,
+            partnerId: authUser.userId,
             invoiceNumber: row.invoiceNumber,
             invoiceDate: new Date(row.invoiceDate),
             outletId: row.outletId,
-            skuCode: row.skuCode,
-            quantity: row.quantity,
-            unitPricePaise: Math.round(row.unitPrice * 100),
             totalAmountPaise: Math.round(row.totalAmount * 100),
-            uploadBatchId: batch.id,
-            uploadedById: authUser.userId,
-            status: 'PENDING',
+            totalQty: row.quantity,
+            netAmountPaise: Math.round(row.totalAmount * 100),
           },
         })
         uploaded++
@@ -141,8 +140,8 @@ export async function POST(req: NextRequest) {
       await prisma.salesUpload.update({
         where: { id: batch.id },
         data: {
-          status: errors.length > 0 ? 'PARTIAL' : 'COMPLETED',
-          processedRecords: uploaded,
+          status: errors.length > 0 ? 'PARTIALLY_COMPLETED' : 'COMPLETED',
+          processedRows: uploaded,
         },
       })
 

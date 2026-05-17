@@ -7,7 +7,7 @@ const ok = (data: any, status = 200) => NextResponse.json({ success: true, data 
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
 const patchSchema = z.object({
-  status: z.enum(['CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED', 'FAILED', 'CANCELLED']).optional(),
+  status: z.enum(['CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED', 'FAILED', 'CANCELLED', 'RETURNED']).optional(),
   trackingNumber: z.string().optional(),
   trackingUrl: z.string().url().optional(),
   notes: z.string().optional(),
@@ -26,13 +26,15 @@ export async function GET(
     const order = await prisma.redemptionOrder.findUnique({
       where: { id },
       include: {
-        rewardItem: true,
-        user: { select: { id: true, name: true, mobile: true } },
+        reward: true,
+        partner: { select: { id: true, businessName: true, userId: true } },
       },
     })
 
     if (!order) return err('Order not found', 404)
-    if (authUser.role !== 'GIFSY_ADMIN' && order.userId !== authUser.userId) {
+
+    // Check access - non-admin users can only see their own orders
+    if (authUser.role !== 'GIFSY_ADMIN' && order.partner?.userId !== authUser.userId) {
       return err('Forbidden', 403)
     }
 
@@ -59,10 +61,7 @@ export async function PATCH(
 
     const order = await prisma.redemptionOrder.update({
       where: { id },
-      data: {
-        ...parsed.data,
-        updatedAt: new Date(),
-      },
+      data: parsed.data,
     })
 
     return ok({ order })

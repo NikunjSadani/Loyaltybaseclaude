@@ -20,7 +20,7 @@ export async function GET(req: NextRequest) {
       where: { status: 'APPROVED' },
       include: {
         statusHistory: {
-          where: { status: 'APPROVED' },
+          where: { toStatus: 'APPROVED' },
           orderBy: { createdAt: 'asc' },
           take: 1,
         },
@@ -70,13 +70,13 @@ export async function GET(req: NextRequest) {
 
     // Rejection by reason
     const rejectionHistory = await prisma.kycStatusHistory.findMany({
-      where: { status: 'REJECTED', reason: { not: null } },
-      select: { reason: true },
+      where: { toStatus: 'REJECTED', notes: { not: null } },
+      select: { notes: true },
     })
 
     const rejectionByReason: Record<string, number> = {}
     for (const r of rejectionHistory) {
-      const reason = r.reason ?? 'Unknown'
+      const reason = r.notes ?? 'Unknown'
       rejectionByReason[reason] = (rejectionByReason[reason] ?? 0) + 1
     }
 

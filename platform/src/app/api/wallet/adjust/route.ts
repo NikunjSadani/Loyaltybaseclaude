@@ -26,39 +26,45 @@ export async function POST(req: NextRequest) {
 
     const { partnerId, amount, type, reason, approvedBy } = parsed.data
 
-    const wallet = await prisma.wallet.findFirst({ where: { userId: partnerId } })
+    const wallet = await prisma.wallet.findFirst({ where: { partnerId } })
     if (!wallet) return err('Wallet not found for this partner', 404)
 
-    if (type === 'DEBIT' && wallet.earned < amount) {
+    if (type === 'DEBIT' && wallet.redeemablePoints < amount) {
       return err('Insufficient wallet balance for debit')
     }
+
+    const transactionType = type === 'CREDIT' ? 'CREDIT_ADJUSTMENT' : 'DEBIT_ADJUSTMENT'
+    const balanceBefore = wallet.redeemablePoints
 
     const result = await prisma.$transaction(async (tx) => {
       const updatedWallet = await tx.wallet.update({
         where: { id: wallet.id },
         data: {
-          earned: type === 'CREDIT' ? { increment: amount } : { decrement: amount },
+          earnedPoints: type === 'CREDIT' ? { increment: amount } : { decrement: amount },
+          redeemablePoints: type === 'CREDIT' ? { increment: amount } : { decrement: amount },
+          lifetimeEarned: type === 'CREDIT' ? { increment: amount } : undefined,
+          lastTransactionAt: new Date(),
         },
       })
 
       const txRecord = await tx.walletTransaction.create({
         data: {
           walletId: wallet.id,
-          userId: partnerId,
-          type,
-          bucket: 'EARNED',
-          amount: type === 'CREDIT' ? amount : -amount,
-          balanceAfter: updatedWallet.earned,
+          transactionType,
+          points: type === 'CREDIT' ? amount : -amount,
+          balanceBefore,
+          balanceAfter: updatedWallet.redeemablePoints,
+          balanceType: 'REDEEMABLE',
           description: `Manual ${type.toLowerCase()} by admin. Reason: ${reason}`,
         },
       })
 
       await tx.auditLog.create({
         data: {
-          action: `WALLET_MANUAL_${type}`,
+          action: 'UPDATE',
           entityType: 'WALLET',
           entityId: wallet.id,
-          performedById: authUser.userId,
+          actorId: authUser.userId,
           metadata: {
             partnerId,
             amount,
@@ -75,7 +81,7 @@ export async function POST(req: NextRequest) {
 
     return ok({
       transactionId: result.txRecord.id,
-      newBalance: result.updatedWallet.earned,
+      newBalance: result.updatedWallet.redeemablePoints,
     })
   } catch (e: any) {
     console.error('[wallet/adjust]', e)

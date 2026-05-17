@@ -27,54 +27,60 @@ export async function POST(req: NextRequest) {
     // Find pending order
     const order = await prisma.redemptionOrder.findUnique({
       where: { id: orderId },
-      include: { rewardItem: true },
+      include: {
+        reward: true,
+        partner: true,
+      },
     })
     if (!order) return err('Redemption order not found', 404)
-    if (order.userId !== authUser.userId) return err('Forbidden', 403)
-    if (order.status !== 'PENDING_OTP') return err('Order is not awaiting OTP confirmation')
+    if (order.partner?.userId !== authUser.userId) return err('Forbidden', 403)
+    if (order.status !== 'PENDING') return err('Order is not awaiting confirmation')
 
     // Verify OTP
     const valid = await verifyOTP(authUser.userId, otp, 'REDEMPTION_CONFIRM')
     if (!valid) return err('Invalid or expired OTP', 401)
 
+    const requiredPoints = order.totalPointsCost
+
     // Complete redemption in transaction
     const result = await prisma.$transaction(async (tx) => {
-      const wallet = await tx.wallet.findUnique({ where: { id: order.walletId } })
+      const wallet = await tx.wallet.findFirst({ where: { partnerId: order.partnerId } })
       if (!wallet) throw new Error('Wallet not found')
 
-      // Deduct points from wallet (from locked bucket to redeemed)
+      if (wallet.redeemablePoints < requiredPoints) {
+        throw new Error('Insufficient redeemable points')
+      }
+
+      // Deduct points from wallet
       const updatedWallet = await tx.wallet.update({
-        where: { id: order.walletId },
+        where: { id: wallet.id },
         data: {
-          locked: { decrement: order.pointsCost },
-          redeemed: { increment: order.pointsCost },
+          redeemablePoints: { decrement: requiredPoints },
+          redeemedPoints: { increment: requiredPoints },
+          lifetimeRedeemed: { increment: requiredPoints },
         },
       })
 
       await tx.walletTransaction.create({
         data: {
-          walletId: order.walletId,
-          userId: authUser.userId,
-          type: 'DEBIT',
-          bucket: 'REDEEMED',
-          amount: -order.pointsCost,
-          balanceAfter: updatedWallet.earned,
+          walletId: wallet.id,
+          transactionType: 'DEBIT_REDEMPTION',
+          points: -requiredPoints,
+          balanceBefore: wallet.redeemablePoints,
+          balanceAfter: updatedWallet.redeemablePoints,
+          balanceType: 'REDEEMABLE',
+          referenceType: 'REDEMPTION_ORDER',
+          referenceId: orderId,
           description: `Redemption confirmed for order ${orderId}`,
         },
       })
 
-      // Reserve inventory
-      await tx.rewardItem.update({
-        where: { id: order.rewardItemId },
-        data: { inventoryCount: { decrement: order.quantity } },
-      })
-
-      // Create confirmed order
+      // Update order status
       const confirmedOrder = await tx.redemptionOrder.update({
         where: { id: orderId },
         data: {
           status: 'CONFIRMED',
-          confirmedAt: new Date(),
+          pointsDeducted: requiredPoints,
         },
       })
 
@@ -84,8 +90,8 @@ export async function POST(req: NextRequest) {
     // Send confirmation notification
     await sendNotification(authUser.userId, NotificationEvent.REDEMPTION_CONFIRMED, {
       orderId,
-      itemName: order.rewardItem.name,
-      points: order.pointsCost,
+      itemName: order.reward?.name ?? '',
+      points: requiredPoints,
     }).catch((e) => console.error('[rewards/redeem/confirm notification]', e))
 
     return ok({

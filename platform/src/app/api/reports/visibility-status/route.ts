@@ -28,7 +28,7 @@ export async function GET(req: NextRequest) {
     const submissions = await prisma.visibilitySubmission.findMany({
       where,
       include: {
-        submittedBy: { select: { name: true, mobile: true } },
+        partner: { select: { businessName: true } },
         outlet: { select: { name: true, city: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -37,14 +37,13 @@ export async function GET(req: NextRequest) {
     const data = submissions.map((s, i) => ({
       'S.No': i + 1,
       'Submission ID': s.id,
-      'Submitted By': s.submittedBy?.name ?? '',
-      Mobile: s.submittedBy?.mobile ?? '',
+      'Partner Name': s.partner?.businessName ?? '',
       'Outlet Name': s.outlet?.name ?? '',
       City: s.outlet?.city ?? '',
       'Program ID': s.programId,
       Status: s.status,
-      'Geo Lat': s.geoLat ?? '',
-      'Geo Lng': s.geoLng ?? '',
+      'Latitude': s.latitude?.toString() ?? '',
+      'Longitude': s.longitude?.toString() ?? '',
       'Submitted On': s.createdAt.toISOString().split('T')[0],
     }))
 

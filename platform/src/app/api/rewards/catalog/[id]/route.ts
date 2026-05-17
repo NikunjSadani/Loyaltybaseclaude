@@ -16,7 +16,7 @@ export async function GET(
     const { id } = await params
 
     const item = await prisma.rewardCatalog.findUnique({
-      where: { id, isDeleted: false },
+      where: { id, deletedAt: null },
     })
 
     if (!item) return err('Reward item not found', 404)

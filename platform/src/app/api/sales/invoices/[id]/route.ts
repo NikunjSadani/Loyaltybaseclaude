@@ -18,10 +18,7 @@ export async function GET(
     const invoice = await prisma.salesInvoice.findUnique({
       where: { id },
       include: {
-        outlet: true,
-        sku: true,
-        uploadBatch: { select: { id: true, fileName: true, createdAt: true } },
-        uploadedBy: { select: { id: true, name: true } },
+        salesUpload: { select: { id: true, fileName: true, createdAt: true } },
         lineItems: true,
       },
     })
@@ -32,7 +29,7 @@ export async function GET(
     if (
       authUser.role !== 'GIFSY_ADMIN' &&
       authUser.role !== 'CLIENT_ADMIN' &&
-      invoice.uploadedById !== authUser.userId
+      invoice.partnerId !== authUser.userId
     ) {
       return err('Forbidden', 403)
     }

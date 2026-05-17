@@ -17,18 +17,15 @@ export async function GET(req: NextRequest) {
     }
 
     const sp = req.nextUrl.searchParams
-    const period = sp.get('period') ?? undefined
     const batchId = sp.get('batchId') ?? undefined
 
     const where: any = {}
     if (batchId) where.batchId = batchId
-    if (period) where.batch = { period }
 
     const transactions = await prisma.payoutTransaction.findMany({
       where,
       include: {
-        user: { select: { name: true, mobile: true } },
-        batch: { select: { period: true } },
+        partner: { select: { businessName: true, panNumber: true } },
         tdsRecord: true,
       },
       orderBy: { createdAt: 'asc' },
@@ -37,19 +34,13 @@ export async function GET(req: NextRequest) {
     // Build Excel workbook
     const rows = transactions.map((t, i) => ({
       'S.No': i + 1,
-      Period: t.batch?.period ?? '',
-      'User Name': t.user?.name ?? '',
-      Mobile: t.user?.mobile ?? '',
+      'Partner Name': t.partner?.businessName ?? '',
+      PAN: t.partner?.panNumber ?? t.tdsRecord?.panNumber ?? 'N/A',
       'Gross Amount (₹)': (t.amountPaise / 100).toFixed(2),
-      'TDS Amount (₹)': t.tdsRecord ? (t.tdsRecord.tdsAmountPaise / 100).toFixed(2) : '0.00',
-      'Net Amount (₹)': t.tdsRecord
-        ? (t.tdsRecord.netAmountPaise / 100).toFixed(2)
-        : (t.amountPaise / 100).toFixed(2),
-      'TDS Section': t.tdsRecord?.section ?? 'N/A',
-      PAN: t.tdsRecord?.pan ?? 'N/A',
-      Mode: t.mode,
+      'TDS Amount (₹)': t.tdsRecord ? (t.tdsRecord.tdsPaise / 100).toFixed(2) : '0.00',
+      'Net Amount (₹)': (t.netAmountPaise / 100).toFixed(2),
+      Mode: t.payoutMode,
       Status: t.status,
-      'Invoice Number': t.invoiceNumber ?? '',
       Date: t.createdAt.toISOString().split('T')[0],
     }))
 
@@ -58,7 +49,7 @@ export async function GET(req: NextRequest) {
     XLSX.utils.book_append_sheet(wb, ws, 'Reconciliation')
 
     const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })
-    const key = generateKey('reports/reconciliation', `reconciliation-${period ?? Date.now()}.xlsx`)
+    const key = generateKey('reports/reconciliation', `reconciliation-${Date.now()}.xlsx`)
     await uploadFile(buffer, key, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     const downloadUrl = await getSignedUrl(key, 3600)
 

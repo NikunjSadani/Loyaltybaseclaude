@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
         data: {
           phone: mobile,
           name: mobile,
-          role: 'CHANNEL_PARTNER',
+          role: 'RETAILER',
           status: 'PENDING_VERIFICATION',
         },
       })

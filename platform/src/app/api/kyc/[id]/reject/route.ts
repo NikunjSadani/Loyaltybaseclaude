@@ -46,33 +46,19 @@ export async function POST(
 
       await tx.kycStatusHistory.create({
         data: {
-          submissionId: id,
-          status,
-          reason,
-          changedById: authUser.userId,
+          kycSubmissionId: id,
+          toStatus: status,
+          notes: reason,
+          changedByUserId: authUser.userId,
         },
       })
 
-      // Assign rework task to sales user if assigned
-      if (submission.assignedToId) {
-        await tx.task.create({
-          data: {
-            type: 'KYC_REWORK',
-            assignedToId: submission.assignedToId,
-            entityType: 'KYC_SUBMISSION',
-            entityId: id,
-            status: 'OPEN',
-            description: `KYC ${status} for outlet. Reason: ${reason}. ${requiredAction ? `Required action: ${requiredAction}` : ''}`,
-          },
-        })
-      }
-
       await tx.auditLog.create({
         data: {
-          action: `KYC_${status}`,
+          action: 'REJECT' as const,
           entityType: 'KYC_SUBMISSION',
           entityId: id,
-          performedById: authUser.userId,
+          actorId: authUser.userId,
           metadata: { reason, requiredAction },
         },
       })

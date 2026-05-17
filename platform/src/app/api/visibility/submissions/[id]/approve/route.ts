@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
-import { sendNotification } from '@/lib/notifications'
-import { NotificationEvent } from '@/types'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -25,35 +23,35 @@ export async function POST(
     if (submission.status === 'APPROVED') return err('Already approved')
 
     await prisma.$transaction(async (tx) => {
+      const prevStatus = submission.status
+
       await tx.visibilitySubmission.update({
         where: { id },
-        data: { status: 'APPROVED', approvedAt: new Date(), approvedById: authUser.userId },
+        data: {
+          status: 'APPROVED',
+          reviewedByUserId: authUser.userId,
+          reviewedAt: new Date(),
+        },
       })
 
-      // Generate visibility payout eligibility
-      await tx.visibilityPayout.create({
+      await tx.visibilityApproval.create({
         data: {
           submissionId: id,
-          userId: submission.submittedById,
-          status: 'ELIGIBLE',
-          programId: submission.programId,
+          reviewerUserId: authUser.userId,
+          fromStatus: prevStatus,
+          toStatus: 'APPROVED',
         },
       })
 
       await tx.auditLog.create({
         data: {
-          action: 'VISIBILITY_APPROVED',
+          action: 'APPROVE',
           entityType: 'VISIBILITY_SUBMISSION',
           entityId: id,
-          performedById: authUser.userId,
+          actorId: authUser.userId,
         },
       })
     })
-
-    await sendNotification(submission.submittedById, NotificationEvent.REDEMPTION_CONFIRMED, {
-      type: 'visibility_approved',
-      submissionId: id,
-    }).catch((e) => console.error('[visibility/approve notification]', e))
 
     return ok({ message: 'Submission approved successfully' })
   } catch (e: any) {

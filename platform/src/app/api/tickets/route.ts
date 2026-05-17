@@ -7,10 +7,9 @@ const ok = (data: any, status = 200) => NextResponse.json({ success: true, data 
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
 const createSchema = z.object({
-  category: z.string().min(1),
+  category: z.enum(['KYC', 'POINTS', 'REDEMPTION', 'PAYOUT', 'SCHEME', 'TECHNICAL', 'ACCOUNT', 'OTHER']),
   subject: z.string().min(1).max(255),
   description: z.string().min(1),
-  attachments: z.array(z.string().url()).optional(),
 })
 
 export async function GET(req: NextRequest) {
@@ -36,7 +35,7 @@ export async function GET(req: NextRequest) {
       prisma.ticket.findMany({
         where,
         include: {
-          createdBy: { select: { id: true, name: true, mobile: true } },
+          createdBy: { select: { id: true, name: true, phone: true } },
           assignedTo: { select: { id: true, name: true } },
           _count: { select: { messages: true } },
         },
@@ -66,7 +65,7 @@ export async function POST(req: NextRequest) {
     const parsed = createSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const { category, subject, description, attachments } = parsed.data
+    const { category, subject, description } = parsed.data
 
     const ticketNumber = `TKT-${Date.now().toString(36).toUpperCase()}`
 
@@ -76,14 +75,13 @@ export async function POST(req: NextRequest) {
         category,
         subject,
         description,
-        attachments: attachments ?? [],
         status: 'OPEN',
         priority: 'MEDIUM',
         createdById: authUser.userId,
         messages: {
           create: {
-            content: description,
-            authorId: authUser.userId,
+            message: description,
+            senderId: authUser.userId,
             isInternal: false,
           },
         },

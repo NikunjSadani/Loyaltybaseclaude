@@ -11,18 +11,34 @@ export async function GET(req: NextRequest) {
     if (!authUser) return err('Unauthorized', 401)
 
     const sp = req.nextUrl.searchParams
-    const type = sp.get('type') ?? undefined
+    const transactionType = sp.get('type') ?? undefined
     const page = parseInt(sp.get('page') ?? '1', 10)
     const limit = parseInt(sp.get('limit') ?? '20', 10)
     const skip = (page - 1) * limit
 
-    // Admins can view any user's wallet; partners see their own
+    // Resolve target partner ID
     const targetUserId = sp.get('userId') && authUser.role === 'GIFSY_ADMIN'
       ? sp.get('userId')!
       : authUser.userId
 
-    const where: any = { userId: targetUserId }
-    if (type) where.type = type
+    const channelPartner = await prisma.channelPartner.findUnique({
+      where: { userId: targetUserId },
+    })
+
+    if (!channelPartner) {
+      return ok({ transactions: [], pagination: { page, limit, total: 0, pages: 0 } })
+    }
+
+    const wallet = await prisma.wallet.findFirst({
+      where: { partnerId: channelPartner.id },
+    })
+
+    if (!wallet) {
+      return ok({ transactions: [], pagination: { page, limit, total: 0, pages: 0 } })
+    }
+
+    const where: any = { walletId: wallet.id }
+    if (transactionType) where.transactionType = transactionType
 
     const [transactions, total] = await Promise.all([
       prisma.walletTransaction.findMany({
@@ -30,23 +46,20 @@ export async function GET(req: NextRequest) {
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
-        include: {
-          invoice: { select: { invoiceNumber: true } },
-        },
       }),
       prisma.walletTransaction.count({ where }),
     ])
 
     const passbook = transactions.map((t) => ({
       id: t.id,
-      type: t.type,
-      description: t.description ?? getDefaultDescription(t.type),
-      points: t.amount,
+      transactionType: t.transactionType,
+      description: t.description ?? getDefaultDescription(t.transactionType),
+      points: t.points,
       date: t.createdAt,
-      status: 'COMPLETED',
-      reference: t.invoice?.invoiceNumber ?? t.id,
-      bucket: t.bucket,
+      balanceType: t.balanceType,
       balanceAfter: t.balanceAfter,
+      referenceType: t.referenceType,
+      referenceId: t.referenceId,
     }))
 
     return ok({
@@ -59,14 +72,17 @@ export async function GET(req: NextRequest) {
   }
 }
 
-function getDefaultDescription(type: string): string {
+function getDefaultDescription(transactionType: string): string {
   const map: Record<string, string> = {
-    CREDIT: 'Points credited',
-    DEBIT: 'Points debited',
-    LOCK: 'Points locked for redemption',
-    UNLOCK: 'Points unlocked',
-    EXPIRE: 'Points expired',
-    REVERSE: 'Points reversed',
+    CREDIT_POINTS_EARNED: 'Points earned',
+    CREDIT_BONUS: 'Bonus points credited',
+    CREDIT_REVERSAL: 'Points reversed to wallet',
+    CREDIT_ADJUSTMENT: 'Manual credit adjustment',
+    DEBIT_REDEMPTION: 'Points redeemed',
+    DEBIT_EXPIRY: 'Points expired',
+    DEBIT_ADJUSTMENT: 'Manual debit adjustment',
+    LOCK_HOLDING: 'Points locked',
+    UNLOCK_HOLDING: 'Points unlocked',
   }
-  return map[type] ?? 'Wallet transaction'
+  return map[transactionType] ?? 'Wallet transaction'
 }

@@ -18,7 +18,9 @@ export async function GET(req: NextRequest) {
 
     const where: any = {}
     if (authUser.role !== 'GIFSY_ADMIN') {
-      where.userId = authUser.userId
+      // Find channel partner for this user
+      const partner = await prisma.channelPartner.findFirst({ where: { userId: authUser.userId } })
+      where.partnerId = partner?.id ?? 'none'
     }
     if (status) where.status = status
 
@@ -26,7 +28,8 @@ export async function GET(req: NextRequest) {
       prisma.redemptionOrder.findMany({
         where,
         include: {
-          rewardItem: { select: { id: true, name: true, category: true, imageUrl: true } },
+          reward: { select: { id: true, name: true, imageUrls: true } },
+          partner: { select: { id: true, businessName: true } },
         },
         skip,
         take: limit,

@@ -7,9 +7,9 @@ const ok = (data: any, status = 200) => NextResponse.json({ success: true, data 
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
 const patchSchema = z.object({
-  status: z.enum(['DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'RE_UPLOAD_REQUIRED']).optional(),
-  reason: z.string().optional(),
-  assignedToId: z.string().optional(),
+  status: z.enum(['DRAFT', 'SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'REJECTED', 'RE_UPLOAD_REQUIRED', 'PENDING_PENNY_DROP', 'PENDING_AGREEMENT', 'SUSPENDED']).optional(),
+  rejectionReason: z.string().optional(),
+  reviewerNotes: z.string().optional(),
 })
 
 export async function GET(
@@ -25,20 +25,19 @@ export async function GET(
     const submission = await prisma.kycSubmission.findUnique({
       where: { id },
       include: {
-        outlet: true,
         documents: true,
         statusHistory: {
           orderBy: { createdAt: 'desc' },
         },
-        assignedTo: { select: { id: true, name: true, mobile: true } },
-        user: { select: { id: true, name: true, mobile: true, role: true } },
+        user: { select: { id: true, name: true, phone: true, role: true } },
+        partner: true,
       },
     })
 
     if (!submission) return err('KYC submission not found', 404)
 
-    // Sales users can only view their assigned submissions
-    if (authUser.role !== 'GIFSY_ADMIN' && submission.userId !== authUser.userId && submission.assignedToId !== authUser.userId) {
+    // Non-admin users can only view their own submissions
+    if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN' && submission.userId !== authUser.userId) {
       return err('Forbidden', 403)
     }
 
@@ -63,11 +62,11 @@ export async function PATCH(
     const parsed = patchSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const { status, reason, assignedToId } = parsed.data
+    const { status, rejectionReason, reviewerNotes } = parsed.data
 
     // Reason is mandatory for REJECTED and RE_UPLOAD_REQUIRED
-    if ((status === 'REJECTED' || status === 'RE_UPLOAD_REQUIRED') && !reason) {
-      return err('Reason is mandatory for REJECTED or RE_UPLOAD_REQUIRED status')
+    if ((status === 'REJECTED' || status === 'RE_UPLOAD_REQUIRED') && !rejectionReason) {
+      return err('Rejection reason is mandatory for REJECTED or RE_UPLOAD_REQUIRED status')
     }
 
     const submission = await prisma.kycSubmission.findUnique({ where: { id } })
@@ -78,18 +77,19 @@ export async function PATCH(
         where: { id },
         data: {
           ...(status && { status }),
-          ...(assignedToId && { assignedToId }),
-          updatedAt: new Date(),
+          ...(rejectionReason && { rejectionReason }),
+          ...(reviewerNotes && { reviewerNotes }),
         },
       })
 
       if (status) {
         await tx.kycStatusHistory.create({
           data: {
-            submissionId: id,
-            status,
-            reason: reason ?? null,
-            changedById: authUser.userId,
+            kycSubmissionId: id,
+            fromStatus: submission.status,
+            toStatus: status,
+            notes: rejectionReason ?? null,
+            changedByUserId: authUser.userId,
           },
         })
       }

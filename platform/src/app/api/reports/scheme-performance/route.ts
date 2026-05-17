@@ -20,34 +20,32 @@ export async function GET(req: NextRequest) {
 
     const schemes = await prisma.scheme.findMany({
       where: {
-        isDeleted: false,
+        deletedAt: null,
         ...(dateFrom && { startDate: { gte: dateFrom } }),
         ...(dateTo && { endDate: { lte: dateTo } }),
       },
       include: {
-        _count: { select: { enrollments: true } },
+        _count: { select: { eligibility: true, pointsLedger: true } },
         targets: {
-          select: { targetValue: true, achievedValue: true },
+          select: { targetValuePaise: true, targetPoints: true },
         },
       },
     })
 
     const data = schemes.map((s, i) => {
-      const totalTarget = s.targets.reduce((sum, t) => sum + t.targetValue, 0)
-      const totalAchieved = s.targets.reduce((sum, t) => sum + t.achievedValue, 0)
-      const achievementPct = totalTarget > 0 ? Math.round((totalAchieved / totalTarget) * 100) : 0
+      const totalTarget = s.targets.reduce((sum, t) => sum + (t.targetValuePaise ?? 0), 0)
+      const achievementPct = 0 // Would need TargetAchievement join for accurate data
 
       return {
         'S.No': i + 1,
         'Scheme ID': s.id,
         'Scheme Name': s.name,
-        'Incentive Type': s.incentiveType,
-        'Calc Method': s.calculationMethod,
+        'Scheme Type': s.schemeType,
+        'Reward Type': s.rewardType,
         'Start Date': s.startDate.toISOString().split('T')[0],
         'End Date': s.endDate.toISOString().split('T')[0],
-        'Enrolled Partners': s._count.enrollments,
-        'Total Target': totalTarget,
-        'Total Achieved': totalAchieved,
+        'Eligible Partners': s._count.eligibility,
+        'Total Target (paise)': totalTarget,
         'Achievement %': achievementPct,
         Status: s.status,
       }

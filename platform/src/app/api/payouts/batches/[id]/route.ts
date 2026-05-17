@@ -26,7 +26,6 @@ export async function GET(
     const batch = await prisma.payoutBatch.findUnique({
       where: { id },
       include: {
-        createdBy: { select: { id: true, name: true } },
         _count: { select: { transactions: true } },
       },
     })
@@ -37,7 +36,7 @@ export async function GET(
       prisma.payoutTransaction.findMany({
         where: { batchId: id },
         include: {
-          user: { select: { id: true, name: true, mobile: true } },
+          partner: { select: { id: true, businessName: true } },
         },
         skip,
         take: limit,

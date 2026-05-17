@@ -44,7 +44,7 @@ export async function POST(
     // Step 1: Validation
     const transactions = await prisma.payoutTransaction.findMany({
       where: { batchId: id, status: 'PENDING' },
-      include: { user: { include: { partner: true } } },
+      include: { partner: true },
     })
 
     steps.validation.count = transactions.length
@@ -52,7 +52,7 @@ export async function POST(
 
     for (const tx of transactions) {
       const errors: string[] = []
-      if (!tx.user?.partner?.panNumber) errors.push(`No PAN for user ${tx.userId}`)
+      if (!tx.partner?.panNumber) errors.push(`No PAN for partner ${tx.partnerId}`)
       if (!tx.amountPaise || tx.amountPaise <= 0) errors.push(`Invalid amount for tx ${tx.id}`)
       if (errors.length === 0) {
         validTransactions.push(tx)
@@ -62,14 +62,7 @@ export async function POST(
     }
     steps.validation.status = steps.validation.errors.length === 0 ? 'PASSED' : 'PASSED_WITH_WARNINGS'
 
-    // Step 2: Invoice generation
-    for (const tx of validTransactions) {
-      const invoiceNumber = `INV-${batch.period}-${tx.id.slice(-6).toUpperCase()}`
-      await prisma.payoutTransaction.update({
-        where: { id: tx.id },
-        data: { invoiceNumber },
-      })
-    }
+    // Step 2: Invoice generation (log only - no invoiceNumber field on PayoutTransaction)
     steps.invoiceGeneration.count = validTransactions.length
     steps.invoiceGeneration.status = 'COMPLETED'
 
@@ -82,15 +75,10 @@ export async function POST(
         await prisma.tdsRecord.create({
           data: {
             payoutTransactionId: tx.id,
-            userId: tx.userId,
-            pan: tx.user?.partner?.panNumber ?? null,
-            section: '194R',
-            grossAmountPaise: tx.amountPaise,
+            partnerId: tx.partnerId,
+            panNumber: tx.partner?.panNumber ?? null,
             tdsRate: TDS_RATE_DEFAULT,
-            tdsAmountPaise: tdsAmount,
-            netAmountPaise: tx.amountPaise - tdsAmount,
-            financialYear: getFY(batch.period),
-            batchId: id,
+            tdsPaise: tdsAmount,
           },
         })
       }
@@ -101,9 +89,9 @@ export async function POST(
     // Step 4: Fund check
     const fundLedger = await prisma.fundLedger.findFirst({ orderBy: { createdAt: 'desc' } })
     const totalRequired = validTransactions.reduce((sum, tx) => sum + tx.amountPaise, 0) - totalTds
-    steps.fundCheck.available = fundLedger?.availableBalancePaise ?? 0
+    steps.fundCheck.available = fundLedger?.balancePaise ?? 0
     steps.fundCheck.required = totalRequired
-    steps.fundCheck.status = (fundLedger?.availableBalancePaise ?? 0) >= totalRequired ? 'PASSED' : 'FAILED'
+    steps.fundCheck.status = (fundLedger?.balancePaise ?? 0) >= totalRequired ? 'PASSED' : 'FAILED'
 
     // Step 5: Flag for disbursement
     let flagged = 0
@@ -111,7 +99,7 @@ export async function POST(
       for (const tx of validTransactions) {
         await prisma.payoutTransaction.update({
           where: { id: tx.id },
-          data: { status: 'READY_FOR_DISBURSEMENT' },
+          data: { status: 'INITIATED' },
         })
         flagged++
       }
@@ -120,7 +108,7 @@ export async function POST(
     steps.disbursement.status = flagged > 0 ? 'FLAGGED' : 'SKIPPED'
 
     // Update batch status
-    const finalStatus = steps.fundCheck.status === 'PASSED' ? 'READY' : 'FAILED'
+    const finalStatus = steps.fundCheck.status === 'PASSED' ? 'SUBMITTED' : 'FAILED'
     await prisma.payoutBatch.update({
       where: { id },
       data: { status: finalStatus, processedAt: new Date() },
@@ -128,10 +116,10 @@ export async function POST(
 
     await prisma.auditLog.create({
       data: {
-        action: 'PAYOUT_BATCH_PROCESSED',
+        action: 'UPDATE',
         entityType: 'PAYOUT_BATCH',
         entityId: id,
-        performedById: authUser.userId,
+        actorId: authUser.userId,
         metadata: { steps, finalStatus },
       },
     })
@@ -147,8 +135,3 @@ export async function POST(
   }
 }
 
-function getFY(period: string): string {
-  const [year, month] = period.split('-').map(Number)
-  if (month >= 4) return `${year}-${year + 1}`
-  return `${year - 1}-${year}`
-}

@@ -30,28 +30,28 @@ export function generateOTP(): string {
 }
 
 /**
- * Verify an OTP for a given user and type. Marks it as used on success.
+ * Verify an OTP for a given phone and purpose. Marks it as verified on success.
  */
 export async function verifyOTP(
-  userId: string,
+  phone: string,
   otp: string,
-  type: string
+  purpose: string
 ): Promise<boolean> {
-  const record = await prisma.oTP.findFirst({
+  const record = await prisma.otpCode.findFirst({
     where: {
-      userId,
-      type,
-      otp,
-      isUsed: false,
+      phone,
+      purpose: purpose as any,
+      code: otp,
+      verifiedAt: null,
       expiresAt: { gt: new Date() },
     },
   });
 
   if (!record) return false;
 
-  await prisma.oTP.update({
+  await prisma.otpCode.update({
     where: { id: record.id },
-    data: { isUsed: true },
+    data: { verifiedAt: new Date() },
   });
 
   return true;
@@ -61,13 +61,14 @@ export async function verifyOTP(
  * Persist a new OTP record to the database (call after generateOTP).
  */
 export async function storeOTP(
-  userId: string,
+  phone: string,
   otp: string,
-  type: string
+  purpose: string,
+  userId?: string
 ): Promise<void> {
   const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
-  await prisma.oTP.create({
-    data: { userId, otp, type, expiresAt, isUsed: false },
+  await prisma.otpCode.create({
+    data: { phone, code: otp, purpose: purpose as any, expiresAt, userId: userId ?? null },
   });
 }
 

@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
         where: { userId: targetUserId },
         include: {
           scheme: {
-            select: { id: true, name: true, endDate: true, calculationMethod: true },
+            select: { id: true, name: true, endDate: true },
           },
         },
         skip,

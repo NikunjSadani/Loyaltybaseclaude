@@ -7,11 +7,10 @@ const ok = (data: any, status = 200) => NextResponse.json({ success: true, data 
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
 
 const createSchema = z.object({
-  mobile: z.string().regex(/^\d{10}$/, 'Mobile must be 10 digits'),
+  phone: z.string().regex(/^\d{10}$/, 'Phone must be 10 digits'),
   name: z.string().min(1),
-  role: z.enum(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'SALES_MANAGER', 'AREA_SALES_MANAGER', 'TERRITORY_SALES_OFFICER', 'SALES_EXECUTIVE']),
+  role: z.enum(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR', 'RETAILER', 'WHOLESALER', 'SUB_STOCKIST']),
   email: z.string().email().optional(),
-  regionId: z.string().optional(),
 })
 
 export async function GET(req: NextRequest) {
@@ -34,7 +33,7 @@ export async function GET(req: NextRequest) {
     if (search) {
       where.OR = [
         { name: { contains: search, mode: 'insensitive' } },
-        { mobile: { contains: search } },
+        { phone: { contains: search } },
         { email: { contains: search, mode: 'insensitive' } },
       ]
     }
@@ -44,13 +43,13 @@ export async function GET(req: NextRequest) {
         where,
         select: {
           id: true,
-          mobile: true,
+          phone: true,
           name: true,
           email: true,
           role: true,
           status: true,
           createdAt: true,
-          salesProfile: { select: { regionId: true, territory: true } },
+          salesUser: { select: { id: true } },
         },
         skip,
         take: limit,
@@ -76,34 +75,28 @@ export async function POST(req: NextRequest) {
     const parsed = createSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
 
-    const { mobile, name, role, email, regionId } = parsed.data
+    const { phone, name, role, email } = parsed.data
 
-    const existing = await prisma.user.findFirst({ where: { mobile } })
-    if (existing) return err('User with this mobile already exists')
+    const existing = await prisma.user.findFirst({ where: { phone } })
+    if (existing) return err('User with this phone already exists')
 
     const user = await prisma.user.create({
       data: {
-        mobile,
+        phone,
         name,
         role,
         email: email ?? null,
         status: 'ACTIVE',
-        ...(regionId && {
-          salesProfile: {
-            create: { regionId },
-          },
-        }),
       },
-      include: { salesProfile: true },
     })
 
     await prisma.auditLog.create({
       data: {
-        action: 'USER_CREATED',
+        action: 'CREATE',
         entityType: 'USER',
         entityId: user.id,
-        performedById: authUser.userId,
-        metadata: { role, mobile },
+        actorId: authUser.userId,
+        metadata: { role, phone },
       },
     })
 
