@@ -82,12 +82,12 @@ resource "google_sql_user" "gifsy_user" {
 
 resource "google_secret_manager_secret_version" "database_url_prod" {
   secret      = google_secret_manager_secret.database_url.id
-  secret_data = "postgresql://gifsy_user:${var.db_password}@/gifsy_prod?host=/cloudsql/${local.sql_connection}"
+  secret_data = "postgresql://gifsy_user:${urlencode(var.db_password)}@localhost/gifsy_prod?host=/cloudsql/${local.sql_connection}"
   depends_on  = [google_sql_database_instance.gifsy_db]
 }
 
 resource "google_secret_manager_secret_version" "database_url_staging" {
   secret      = google_secret_manager_secret.database_url_staging.id
-  secret_data = "postgresql://gifsy_user:${var.db_password}@/gifsy_staging?host=/cloudsql/${local.sql_connection}"
+  secret_data = "postgresql://gifsy_user:${urlencode(var.db_password)}@localhost/gifsy_staging?host=/cloudsql/${local.sql_connection}"
   depends_on  = [google_sql_database_instance.gifsy_db]
 }
