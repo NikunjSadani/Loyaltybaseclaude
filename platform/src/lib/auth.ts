@@ -14,12 +14,24 @@ export interface TokenPayload {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET && process.env.NODE_ENV === 'production') {
-  throw new Error('JWT_SECRET environment variable is not set. Refusing to start.');
-}
-const _JWT_SECRET = JWT_SECRET ?? 'dev-only-insecure-secret-do-not-use-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? '7d';
+
+/**
+ * Lazy getter for JWT secret — validated at request time, not build time.
+ * This prevents next build from crashing when the env var is absent during
+ * static page-data collection (Next.js internally sets NODE_ENV=production
+ * during the build, so a module-level check would throw in the Docker builder).
+ */
+function getJWTSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('JWT_SECRET environment variable is not set. Refusing to start.');
+    }
+    return 'dev-only-insecure-secret-do-not-use-in-production';
+  }
+  return secret;
+}
 const BCRYPT_ROUNDS = 12;
 const OTP_EXPIRY_MINUTES = 10;
 
@@ -89,7 +101,7 @@ export function generateToken(
   const payload: Omit<TokenPayload, 'iat' | 'exp'> = { userId, role };
   if (partnerId) payload.partnerId = partnerId;
 
-  return jwt.sign(payload, _JWT_SECRET, {
+  return jwt.sign(payload, getJWTSecret(), {
     expiresIn: JWT_EXPIRES_IN,
   } as jwt.SignOptions);
 }
@@ -99,7 +111,7 @@ export function generateToken(
  */
 export function verifyToken(token: string): TokenPayload | null {
   try {
-    const decoded = jwt.verify(token, _JWT_SECRET);
+    const decoded = jwt.verify(token, getJWTSecret());
     return decoded as TokenPayload;
   } catch {
     return null;
