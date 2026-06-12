@@ -19,7 +19,7 @@ export function StatsCard({
   change,
   changeLabel = 'vs last period',
   className,
-  accentColor = '#C8102E',
+  accentColor = 'var(--brand-primary)',
 }: StatsCardProps) {
   const isPositive = change !== undefined && change > 0;
   const isNegative = change !== undefined && change < 0;

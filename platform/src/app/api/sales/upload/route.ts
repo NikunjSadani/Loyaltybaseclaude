@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import * as XLSX from 'xlsx'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -20,6 +21,7 @@ export async function POST(req: NextRequest) {
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const formData = await req.formData()
     const file = formData.get('file') as File | null
@@ -43,10 +45,10 @@ export async function POST(req: NextRequest) {
     const valid: SalesRow[] = []
     const seenInvoiceNumbers = new Set<string>()
 
-    // Pre-fetch valid SKU codes and outlet IDs
+    // Pre-fetch valid SKU codes and outlet IDs (scoped to tenant)
     const [validSkus, validOutlets] = await Promise.all([
-      prisma.sku.findMany({ select: { skuCode: true } }),
-      prisma.outlet.findMany({ where: { isActive: true, deletedAt: null }, select: { id: true } }),
+      prisma.sku.findMany({ select: { skuCode: true }, where: { clientId } }),
+      prisma.outlet.findMany({ where: { isActive: true, deletedAt: null, partner: { user: { clientId } } }, select: { id: true } }),
     ])
     const skuSet = new Set(validSkus.map((s) => s.skuCode))
     const outletSet = new Set(validOutlets.map((o) => o.id))
@@ -114,6 +116,7 @@ export async function POST(req: NextRequest) {
         totalRows: rows.length,
         processedRows: 0,
         failedRows: errors.length,
+        clientId,
       },
     })
 
@@ -123,6 +126,7 @@ export async function POST(req: NextRequest) {
       for (const row of valid) {
         await prisma.salesInvoice.create({
           data: {
+            clientId,
             salesUploadId: batch.id,
             partnerId: authUser.userId,
             invoiceNumber: row.invoiceNumber,

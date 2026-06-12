@@ -45,7 +45,7 @@ export function Input({
           'transition-colors',
           hasError
             ? 'border-red-400 focus:border-red-400 focus:ring-red-200'
-            : 'border-gray-300 focus:border-[#C8102E] focus:ring-[#C8102E]/20',
+            : 'border-gray-300 focus:border-[var(--brand-primary)] focus:ring-[var(--brand-primary)]/20',
           className,
         )}
       />

@@ -1,8 +1,9 @@
-import { NextRequest, NextResponse } from 'next/server'
+﻿import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { generateOTP } from '@/lib/auth'
 import { sendOTP } from '@/lib/notifications'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -20,9 +21,15 @@ export async function POST(req: NextRequest) {
       return err(parsed.error.issues[0].message)
     }
     const { mobile, channel } = parsed.data
+    const clientId = getClientIdFromRequest(req)
+
+    // DEMO MODE: bypass DB and SMS — use OTP 000000 to log in
+    if (process.env.DEMO_MODE === 'true') {
+      return ok({ message: 'OTP sent (demo mode — use 000000)', channel })
+    }
 
     // Check if user exists
-    const user = await prisma.user.findFirst({ where: { phone: mobile } })
+    const user = await prisma.user.findFirst({ where: { phone: mobile, clientId } })
 
     // Generate 6-digit OTP
     const otp = generateOTP()
@@ -42,10 +49,11 @@ export async function POST(req: NextRequest) {
       // Create a provisional user entry
       const provisionalUser = await prisma.user.create({
         data: {
-          phone: mobile,
-          name: mobile,
-          role: 'RETAILER',
-          status: 'PENDING_VERIFICATION',
+          phone:    mobile,
+          name:     mobile,
+          role:     'SSS',
+          status:   'PENDING_VERIFICATION',
+          clientId,
         },
       })
       await prisma.otpCode.create({

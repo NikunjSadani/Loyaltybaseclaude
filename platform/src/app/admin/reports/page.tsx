@@ -17,6 +17,7 @@ interface ReportConfig {
 
 const reports: ReportConfig[] = [
   // Operational
+  { id: 'outlet-master', name: 'Outlet Master', description: 'Complete outlet dump with KYC status, banking details, account holder name, signature, sales hierarchy, and lifecycle timestamps', category: 'operational', endpoint: '/api/admin/reports/outlet-master', filters: [] },
   { id: 'kyc-status', name: 'KYC Status Report', description: 'All KYC submissions with current status, age, and assigned sales user', category: 'operational', endpoint: '/api/reports/kyc-status', filters: ['dateFrom', 'dateTo', 'status', 'state'] },
   { id: 'visibility-status', name: 'Visibility Status Report', description: 'Visibility submissions with approval status, outlet, and payout eligibility', category: 'operational', endpoint: '/api/reports/visibility-status', filters: ['dateFrom', 'dateTo', 'status', 'programId'] },
   { id: 'ticket-aging', name: 'Ticket Aging Report', description: 'Open tickets aged by priority bucket with SLA breach flags', category: 'operational', endpoint: '/api/reports/ticket-aging', filters: ['category', 'priority', 'assignedTo'] },
@@ -82,7 +83,7 @@ function ReportCard({ report }: { report: ReportConfig }) {
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2">
             <div className="p-2 rounded-lg bg-red-50">
-              <FileSpreadsheet className="h-4 w-4 text-[#C8102E]" />
+              <FileSpreadsheet className="h-4 w-4 text-[var(--brand-primary)]" />
             </div>
             <div>
               <CardTitle className="text-sm font-semibold">{report.name}</CardTitle>
@@ -105,7 +106,7 @@ function ReportCard({ report }: { report: ReportConfig }) {
             </div>
           </div>
         )}
-        <Button onClick={handleExport} disabled={loading} size="sm" className="w-full bg-[#C8102E] hover:bg-[#a00d24] text-white text-xs">
+        <Button onClick={handleExport} disabled={loading} size="sm" className="w-full bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white text-xs">
           {loading ? <><RefreshCw className="h-3 w-3 mr-1 animate-spin" />Generating...</> : <><Download className="h-3 w-3 mr-1" />Export Excel</>}
         </Button>
       </CardContent>
@@ -128,8 +129,8 @@ export default function ReportsPage() {
       <div className="flex gap-2 flex-wrap">
         {categories.map(cat => (
           <button key={cat} onClick={() => setActiveCategory(cat)}
-            className={`px-3 py-1.5 rounded-full text-sm font-medium capitalize transition-colors ${activeCategory === cat ? 'bg-[#C8102E] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
-            {cat === 'all' ? `All (${reports.length})` : `${categoryLabels[cat as keyof typeof categoryLabels]?.label} (${reports.filter(r => r.category === cat).length})`}
+            className={`px-3 py-1.5 rounded-full text-sm font-medium capitalize transition-colors ${activeCategory === cat ? 'bg-[var(--brand-primary)] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+            {cat === 'all' ? `All (${reports.length})` : `${categoryLabels[cat as keyof typeof categoryLabels]?.label} (${reports.filter((r: ReportConfig) => r.category === cat).length})`}
           </button>
         ))}
       </div>

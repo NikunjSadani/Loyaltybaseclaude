@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -17,6 +18,7 @@ export async function GET(req: NextRequest) {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
 
+    const clientId = getClientIdFromRequest(req)
     const sp = req.nextUrl.searchParams
     const status = sp.get('status') ?? undefined
     const category = sp.get('category') ?? undefined
@@ -24,7 +26,7 @@ export async function GET(req: NextRequest) {
     const limit = parseInt(sp.get('limit') ?? '20', 10)
     const skip = (page - 1) * limit
 
-    const where: any = {}
+    const where: any = { clientId }
     if (authUser.role !== 'GIFSY_ADMIN') {
       where.createdById = authUser.userId
     }
@@ -61,6 +63,7 @@ export async function POST(req: NextRequest) {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
 
+    const clientId = getClientIdFromRequest(req)
     const body = await req.json()
     const parsed = createSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
@@ -78,6 +81,7 @@ export async function POST(req: NextRequest) {
         status: 'OPEN',
         priority: 'MEDIUM',
         createdById: authUser.userId,
+        clientId,
         messages: {
           create: {
             message: description,

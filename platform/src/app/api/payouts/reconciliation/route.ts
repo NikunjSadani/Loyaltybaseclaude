@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import * as XLSX from 'xlsx'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 import { uploadFile, generateKey } from '@/lib/s3'
 import { getSignedUrl } from '@/lib/s3'
 
@@ -15,11 +16,12 @@ export async function GET(req: NextRequest) {
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'MIS_USER') {
       return err('Forbidden', 403)
     }
+    const clientId = getClientIdFromRequest(req)
 
     const sp = req.nextUrl.searchParams
     const batchId = sp.get('batchId') ?? undefined
 
-    const where: any = {}
+    const where: any = { batch: { clientId } }
     if (batchId) where.batchId = batchId
 
     const transactions = await prisma.payoutTransaction.findMany({

@@ -22,14 +22,20 @@ resource "google_compute_global_address" "lb_ip" {
 # Google provisions and auto-renews these once DNS points to lb_ip
 
 resource "google_compute_managed_ssl_certificate" "gifsy_cert" {
-  name = "gifsy-ssl-cert"
+  name = "gifsy-ssl-cert-v2"
   managed {
+    # Note: Google managed SSL certs do NOT support wildcard domains.
+    # Tenant subdomains (*.gifsy.in) must be added explicitly here,
+    # or handled via a separate wildcard cert (requires DNS-01 challenge).
+    # gifsy.in (root) is excluded — it points to a separate server.
     domains = [
-      "gifsy.in",
       "platform.gifsy.in",
       "api.gifsy.in",
-      "*.gifsy.in",        # covers all tenant subdomains
     ]
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
@@ -117,7 +123,7 @@ resource "google_compute_url_map" "gifsy_lb" {
   }
 
   host_rule {
-    hosts        = ["platform.gifsy.in", "*.gifsy.in", "gifsy.in"]
+    hosts        = ["platform.gifsy.in", "*.gifsy.in"]
     path_matcher = "frontend-paths"
   }
 

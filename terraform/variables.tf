@@ -39,27 +39,29 @@ variable "redis_memory_gb" {
 # ── Cloud Run — production ────────────────────────────────────────────────────
 
 variable "prod_api_image" {
-  description = "Production API Docker image"
+  description = "Production API Docker image. Defaults to a public placeholder until the first GitHub Actions build+push."
   type        = string
-  default     = "asia-south1-docker.pkg.dev/gifsy-platform/gifsy-images/api:latest"
+  # Placeholder — GitHub Actions will deploy the real image via `gcloud run deploy`.
+  # After first real deploy, update this to the actual digest if you want Terraform to pin it.
+  default = "us-docker.pkg.dev/cloudrun/container/hello:latest"
 }
 
 variable "prod_frontend_image" {
-  description = "Production frontend Docker image"
+  description = "Production frontend Docker image. Defaults to a public placeholder until the first GitHub Actions build+push."
   type        = string
-  default     = "asia-south1-docker.pkg.dev/gifsy-platform/gifsy-images/frontend:latest"
+  default     = "us-docker.pkg.dev/cloudrun/container/hello:latest"
 }
 
 # ── Cloud Run — staging ───────────────────────────────────────────────────────
 
 variable "staging_api_image" {
-  description = "Staging API Docker image"
+  description = "Staging API Docker image. Defaults to a public placeholder until the first GitHub Actions build+push."
   type        = string
-  default     = "asia-south1-docker.pkg.dev/gifsy-platform/gifsy-images/api:staging"
+  default     = "us-docker.pkg.dev/cloudrun/container/hello:latest"
 }
 
 variable "staging_frontend_image" {
-  description = "Staging frontend Docker image"
+  description = "Staging frontend Docker image. Defaults to a public placeholder until the first GitHub Actions build+push."
   type        = string
-  default     = "asia-south1-docker.pkg.dev/gifsy-platform/gifsy-images/frontend:staging"
+  default     = "us-docker.pkg.dev/cloudrun/container/hello:latest"
 }

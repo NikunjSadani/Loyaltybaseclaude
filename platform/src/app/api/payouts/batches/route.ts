@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -19,6 +20,7 @@ export async function GET(req: NextRequest) {
       return err('Forbidden', 403)
     }
 
+    const clientId = getClientIdFromRequest(req)
     const sp = req.nextUrl.searchParams
     const page = parseInt(sp.get('page') ?? '1', 10)
     const limit = parseInt(sp.get('limit') ?? '20', 10)
@@ -26,6 +28,7 @@ export async function GET(req: NextRequest) {
 
     const [batches, total] = await Promise.all([
       prisma.payoutBatch.findMany({
+        where: { clientId },
         skip,
         take: limit,
         orderBy: { createdAt: 'desc' },
@@ -33,7 +36,7 @@ export async function GET(req: NextRequest) {
           _count: { select: { transactions: true } },
         },
       }),
-      prisma.payoutBatch.count(),
+      prisma.payoutBatch.count({ where: { clientId } }),
     ])
 
     return ok({ batches, pagination: { page, limit, total, pages: Math.ceil(total / limit) } })
@@ -49,6 +52,7 @@ export async function POST(req: NextRequest) {
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN') return err('Forbidden - Gifsy Admin only', 403)
 
+    const clientId = getClientIdFromRequest(req)
     const body = await req.json()
     const parsed = createSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
@@ -63,6 +67,7 @@ export async function POST(req: NextRequest) {
         status: 'DRAFT',
         notes: notes ?? null,
         createdByUserId: authUser.userId,
+        clientId,
       },
     })
 

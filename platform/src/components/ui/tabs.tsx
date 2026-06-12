@@ -35,7 +35,7 @@ export function Tabs({ defaultValue, value, onValueChange, items, className }: T
               'px-4 py-2.5 text-sm font-medium text-gray-500 whitespace-nowrap',
               'border-b-2 border-transparent -mb-px',
               'hover:text-gray-700 transition-colors',
-              'data-[state=active]:text-[#C8102E] data-[state=active]:border-[#C8102E]',
+              'data-[state=active]:text-[var(--brand-primary)] data-[state=active]:border-[var(--brand-primary)]',
               'focus:outline-none',
             )}
           >

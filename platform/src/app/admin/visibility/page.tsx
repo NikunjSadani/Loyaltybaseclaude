@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import {
   CheckCircle,
   XCircle,
@@ -12,9 +12,19 @@ import {
   ChevronLeft,
   ChevronRight,
   Search,
+  Upload,
+  Download,
+  FileSpreadsheet,
+  Loader2,
+  CheckCircle2,
 } from 'lucide-react';
+import {
+  generateVisibilityTemplate,
+  DEMO_VISIBILITY_MAP,
+} from '@/lib/visibility-upload';
+import { getGifsySettings } from '@/lib/gifsy-settings';
 
-type VisTab = 'queue' | 'fraud';
+type VisTab = 'queue' | 'fraud' | 'upload';
 
 interface VisibilityItem {
   id: string;
@@ -106,12 +116,168 @@ const VIS_TYPE_COLORS: Record<string, string> = {
   'Floor Stand': 'bg-amber-100 text-amber-700',
 };
 
+// ─── Auth header helper ───────────────────────────────────────────────────────
+function adminAuthHeader(): Record<string, string> {
+  if (typeof window === 'undefined') return {};
+  const token = localStorage.getItem('token');
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// ─── Upload result type ───────────────────────────────────────────────────────
+interface UploadResult {
+  batchId:        string;
+  rowCount:       number;
+  successCount:   number;
+  errorCount:     number;
+  errorFileBase64: string | null;
+}
+
+interface VisibilityRecord {
+  id:            string;
+  outletCode:    string;
+  month:         string;
+  status:        'PENDING' | 'UNDER_REVIEW' | 'APPROVED';
+  dateOfCapture: string | null;
+  approvedBy:    string | null;
+  uploadBatch:   { fileName: string; createdAt: string; uploadedByUserId: string } | null;
+}
+
 export default function VisibilityPage() {
-  const [tab, setTab] = useState<VisTab>('queue');
+  // When visibilityPhotoEnabled=false the tenant captures photos via their own
+  // portal — the Approval Queue and Fraud Log are not applicable.
+  const photoApprovalEnabled = getGifsySettings().visibilityPhotoEnabled;
+
+  const [tab, setTab] = useState<VisTab>('upload');
   const [currentIndex, setCurrentIndex] = useState(0);
   const [approved, setApproved] = useState<Set<string>>(new Set());
   const [rejected, setRejected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
+
+  // ── Bulk upload state ───────────────────────────────────────────────────────
+  const fileInputRef             = useRef<HTMLInputElement>(null);
+  const [uploadFile, setUploadFile]   = useState<File | null>(null);
+  const [uploading,  setUploading]    = useState(false);
+  const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [uploadError, setUploadError]   = useState<string | null>(null);
+  const [recMonth,          setRecMonth]          = useState(
+    () => new Date().toISOString().slice(0, 7),
+  );
+  const [downloadingReport, setDownloadingReport] = useState(false);
+
+  const handleReportDownload = useCallback(async () => {
+    setDownloadingReport(true);
+    try {
+      // Fetch all records for the month (high limit — data stays out of React state)
+      const res  = await fetch(
+        `/api/admin/visibility/records?month=${recMonth}&limit=10000`,
+        { headers: adminAuthHeader() },
+      );
+      if (!res.ok) return;
+      const json    = await res.json();
+      const rows: VisibilityRecord[] = json.data?.records ?? [];
+
+      // Build Excel client-side with xlsx
+      const XLSX = await import('xlsx');
+      const sheetData = [
+        ['Outlet Code', 'Month', 'Status', 'Capture Date', 'Approved By', 'Captured By', 'Source File', 'Uploaded At'],
+        ...rows.map((r) => [
+          r.outletCode,
+          r.month,
+          r.status,
+          r.dateOfCapture ?? '',
+          r.approvedBy ?? '',
+          r.uploadBatch?.fileName ?? '',
+          r.uploadBatch?.createdAt
+            ? new Date(r.uploadBatch.createdAt).toLocaleString()
+            : '',
+        ]),
+      ];
+      const ws  = XLSX.utils.aoa_to_sheet(sheetData);
+      const wb  = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Visibility Records');
+      const buf  = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+      const blob = new Blob([buf], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url  = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href     = url;
+      link.download = `visibility_records_${recMonth}.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setDownloadingReport(false);
+    }
+  }, [recMonth]);
+
+  const handleTemplateDownload = () => {
+    const raw      = generateVisibilityTemplate();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const blob     = new Blob([raw as any], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const url  = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href     = url;
+    link.download = 'visibility_upload_template.xlsx';
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0] ?? null;
+    setUploadFile(f);
+    setUploadResult(null);
+    setUploadError(null);
+  };
+
+  const handleUpload = async () => {
+    if (!uploadFile) return;
+    setUploading(true);
+    setUploadResult(null);
+    setUploadError(null);
+    try {
+      const fd = new FormData();
+      fd.append('file', uploadFile);
+      const res = await fetch('/api/admin/visibility/bulk-upload', {
+        method:  'POST',
+        headers: adminAuthHeader(),
+        body:    fd,
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setUploadError(json.error ?? 'Upload failed');
+      } else {
+        setUploadResult(json.data as UploadResult);
+      }
+    } catch {
+      setUploadError('Network error — please try again');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleErrorDownload = (base64: string) => {
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)).buffer as ArrayBuffer;
+    const blob  = new Blob([bytes], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const url  = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href     = url;
+    link.download = 'visibility_upload_errors.xlsx';
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const STATUS_CHIP: Record<string, string> = {
+    PENDING:      'bg-amber-50 text-amber-700 border border-amber-200',
+    UNDER_REVIEW: 'bg-blue-50 text-blue-700 border border-blue-200',
+    APPROVED:     'bg-emerald-50 text-emerald-700 border border-emerald-200',
+  };
+  const STATUS_LABEL: Record<string, string> = {
+    PENDING: 'Pending', UNDER_REVIEW: 'Under Review', APPROVED: 'Approved',
+  };
 
   const pendingItems = VISIBILITY_QUEUE.filter(
     (v) => !approved.has(v.id) && !rejected.has(v.id)
@@ -142,13 +308,17 @@ export default function VisibilityPage() {
 
   return (
     <div className="space-y-5 fade-in">
-      {/* Stats row */}
+      {/* Stats row — Pending Review / Suspected Duplicate only shown when photo approval is enabled */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         {[
-          { label: 'Pending Review', value: pendingItems.length, color: 'text-amber-600 bg-amber-50', icon: Clock },
-          { label: 'Approved Today', value: approvedToday, color: 'text-green-600 bg-green-50', icon: CheckCircle },
-          { label: 'Rejected Today', value: rejectedToday, color: 'text-red-600 bg-red-50', icon: XCircle },
-          { label: 'Suspected Duplicate', value: FRAUD_LOG.filter((f) => f.status === 'FLAGGED').length, color: 'text-orange-600 bg-orange-50', icon: AlertTriangle },
+          ...(photoApprovalEnabled ? [
+            { label: 'Pending Review',      value: pendingItems.length,                                         color: 'text-amber-600 bg-amber-50',  icon: Clock },
+          ] : []),
+          { label: 'Approved Today',        value: approvedToday,                                               color: 'text-green-600 bg-green-50',  icon: CheckCircle },
+          { label: 'Rejected Today',        value: rejectedToday,                                               color: 'text-red-600 bg-red-50',      icon: XCircle },
+          ...(photoApprovalEnabled ? [
+            { label: 'Suspected Duplicate', value: FRAUD_LOG.filter((f) => f.status === 'FLAGGED').length,     color: 'text-orange-600 bg-orange-50', icon: AlertTriangle },
+          ] : []),
         ].map((s) => {
           const Icon = s.icon;
           return (
@@ -168,27 +338,42 @@ export default function VisibilityPage() {
       {/* Tabs */}
       <div className="flex gap-1 bg-white border border-gray-200 rounded-xl p-1 w-fit">
         <button
-          onClick={() => setTab('queue')}
+          onClick={() => setTab('upload')}
           className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-            tab === 'queue' ? 'bg-[#C8102E] text-white' : 'text-gray-600 hover:bg-gray-100'
+            tab === 'upload' ? 'bg-[var(--brand-primary)] text-white' : 'text-gray-600 hover:bg-gray-100'
           }`}
         >
           <span className="flex items-center gap-2">
-            <Eye className="w-4 h-4" />
-            Approval Queue ({pendingItems.length})
+            <Upload className="w-4 h-4" />
+            Bulk Upload
           </span>
         </button>
-        <button
-          onClick={() => setTab('fraud')}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-            tab === 'fraud' ? 'bg-[#C8102E] text-white' : 'text-gray-600 hover:bg-gray-100'
-          }`}
-        >
-          <span className="flex items-center gap-2">
-            <Flag className="w-4 h-4" />
-            Fraud Log ({FRAUD_LOG.filter((f) => f.status === 'FLAGGED').length})
-          </span>
-        </button>
+        {photoApprovalEnabled && (
+          <button
+            onClick={() => setTab('queue')}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+              tab === 'queue' ? 'bg-[var(--brand-primary)] text-white' : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <span className="flex items-center gap-2">
+              <Eye className="w-4 h-4" />
+              Approval Queue ({pendingItems.length})
+            </span>
+          </button>
+        )}
+        {photoApprovalEnabled && (
+          <button
+            onClick={() => setTab('fraud')}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+              tab === 'fraud' ? 'bg-[var(--brand-primary)] text-white' : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <span className="flex items-center gap-2">
+              <Flag className="w-4 h-4" />
+              Fraud Log ({FRAUD_LOG.filter((f) => f.status === 'FLAGGED').length})
+            </span>
+          </button>
+        )}
       </div>
 
       {/* Queue Tab */}
@@ -295,7 +480,7 @@ export default function VisibilityPage() {
 
                     <div className="bg-white rounded-xl border border-gray-200 p-4">
                       <h3 className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
-                        <MapPin className="w-4 h-4 text-[#C8102E]" />
+                        <MapPin className="w-4 h-4 text-[var(--brand-primary)]" />
                         Geo-tag Verification
                       </h3>
                       <div className="space-y-2 text-xs">
@@ -367,6 +552,156 @@ export default function VisibilityPage() {
         </>
       )}
 
+      {/* ── Bulk Upload Tab ── */}
+      {tab === 'upload' && (
+        <div className="space-y-5">
+          {/* ── Step 1: Download template ── */}
+          <div className="bg-white rounded-xl border border-gray-200 p-5">
+            <div className="flex items-center justify-between gap-4 flex-wrap">
+              <div>
+                <p className="text-sm font-semibold text-gray-800">1. Download the upload template</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Fill in outlet codes, month (YYYY-MM), status, and optional capture details.
+                  Do not change or reorder column headers.
+                </p>
+              </div>
+              <button
+                onClick={handleTemplateDownload}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-200 text-sm font-semibold hover:bg-indigo-100 transition-colors shrink-0"
+              >
+                <Download className="w-4 h-4" />
+                Download Template
+              </button>
+            </div>
+            <div className="mt-3 rounded-lg bg-gray-50 border border-gray-100 p-3">
+              <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Required columns</p>
+              <div className="flex flex-wrap gap-1.5">
+                {['outlet_id','month','status','date_of_capture','approved_by',
+                  'captured_by_employee_id','captured_by_employee_name','captured_by_employee_phone'
+                ].map((col) => (
+                  <span key={col} className="text-[11px] font-mono bg-white border border-gray-200 px-2 py-0.5 rounded text-gray-600">{col}</span>
+                ))}
+              </div>
+              <p className="text-[11px] text-gray-400 mt-2">
+                Status values: <strong>PENDING</strong> · <strong>UNDER_REVIEW</strong> · <strong>APPROVED</strong> (case-insensitive).
+                &nbsp;Date format: <strong>DD-MM-YYYY</strong>.
+              </p>
+            </div>
+          </div>
+
+          {/* ── Step 2: Upload file ── */}
+          <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
+            <p className="text-sm font-semibold text-gray-800">2. Upload completed file</p>
+
+            <div className="flex items-center gap-3 flex-wrap">
+              <label className="flex items-center gap-2 cursor-pointer px-4 py-2 rounded-xl border-2 border-dashed border-gray-300 text-gray-600 text-sm font-medium hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-colors">
+                <FileSpreadsheet className="w-4 h-4" />
+                {uploadFile ? uploadFile.name : 'Choose .xlsx / .xls file'}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".xlsx,.xls"
+                  className="hidden"
+                  onChange={handleFileChange}
+                />
+              </label>
+
+              <button
+                onClick={handleUpload}
+                disabled={!uploadFile || uploading}
+                className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[var(--brand-primary)] text-white text-sm font-semibold hover:opacity-90 disabled:opacity-40 transition-opacity"
+              >
+                {uploading ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Uploading…</>
+                ) : (
+                  <><Upload className="w-4 h-4" /> Upload</>
+                )}
+              </button>
+            </div>
+
+            {/* Error banner */}
+            {uploadError && (
+              <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+                <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                {uploadError}
+              </div>
+            )}
+
+            {/* Success / partial-success result */}
+            {uploadResult && (
+              <div className={`rounded-xl border p-4 space-y-3 ${
+                uploadResult.errorCount === 0
+                  ? 'bg-emerald-50 border-emerald-200'
+                  : 'bg-amber-50 border-amber-200'
+              }`}>
+                <div className="flex items-center gap-2">
+                  {uploadResult.errorCount === 0 ? (
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                  ) : (
+                    <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+                  )}
+                  <p className={`text-sm font-semibold ${
+                    uploadResult.errorCount === 0 ? 'text-emerald-800' : 'text-amber-800'
+                  }`}>
+                    {uploadResult.errorCount === 0
+                      ? `All ${uploadResult.successCount} rows uploaded successfully`
+                      : `${uploadResult.successCount} of ${uploadResult.rowCount} rows saved — ${uploadResult.errorCount} errors`
+                    }
+                  </p>
+                </div>
+                <div className="flex gap-4 text-xs">
+                  <span className="text-gray-600">Total rows: <strong>{uploadResult.rowCount}</strong></span>
+                  <span className="text-emerald-700">Saved: <strong>{uploadResult.successCount}</strong></span>
+                  {uploadResult.errorCount > 0 && (
+                    <span className="text-red-600">Errors: <strong>{uploadResult.errorCount}</strong></span>
+                  )}
+                </div>
+                {uploadResult.errorFileBase64 && (
+                  <button
+                    onClick={() => handleErrorDownload(uploadResult.errorFileBase64!)}
+                    className="flex items-center gap-2 text-sm font-semibold text-red-700 hover:underline"
+                  >
+                    <Download className="w-4 h-4" />
+                    Download Error Report (.xlsx)
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* ── Step 3: Download records report ── */}
+          <div className="bg-white rounded-xl border border-gray-200 p-5">
+            <div className="flex items-center justify-between gap-4 flex-wrap">
+              <div>
+                <p className="text-sm font-semibold text-gray-800">3. Download records report</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Export all visibility records for a month as an Excel file.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <input
+                  type="month"
+                  value={recMonth}
+                  onChange={(e) => setRecMonth(e.target.value)}
+                  className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:border-[var(--brand-primary)]"
+                />
+                <button
+                  onClick={handleReportDownload}
+                  disabled={downloadingReport}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 text-sm font-semibold hover:bg-emerald-100 disabled:opacity-40 transition-colors"
+                >
+                  {downloadingReport ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /> Generating…</>
+                  ) : (
+                    <><Download className="w-4 h-4" /> Download Report</>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Fraud Log Tab */}
       {tab === 'fraud' && (
         <div className="space-y-4">
@@ -377,7 +712,7 @@ export default function VisibilityPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search fraud log..."
-              className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#C8102E]"
+              className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
             />
           </div>
 

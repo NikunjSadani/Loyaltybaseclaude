@@ -1,16 +1,26 @@
 import type { NextConfig } from "next";
+import path from "path";
 
 const nextConfig: NextConfig = {
+  // Required for Docker standalone build (Cloud Run)
+  output: 'standalone',
+  // Pin the Turbopack root to this package so Next.js ignores
+  // any stray lockfiles higher up in the directory tree.
+  turbopack: {
+    root: path.resolve(__dirname),
+  },
   images: {
     remotePatterns: [
+      // GCS — KYC docs, invoices, visibility images, logos
       {
         protocol: "https",
-        hostname: "*.amazonaws.com",
+        hostname: "storage.googleapis.com",
         pathname: "/**",
       },
+      // Cloud CDN delivery hostname (*.gifsy.in CDN origin)
       {
         protocol: "https",
-        hostname: "*.cloudfront.net",
+        hostname: "*.gifsy.in",
         pathname: "/**",
       },
     ],

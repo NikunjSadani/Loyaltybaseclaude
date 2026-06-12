@@ -1,8 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
-import { useState } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
+import { useState, useMemo } from 'react';
 import {
   LayoutDashboard,
   FileCheck,
@@ -11,6 +11,7 @@ import {
   Eye,
   CreditCard,
   BarChart2,
+  FileBarChart2,
   Settings,
   ChevronLeft,
   ChevronRight,
@@ -19,36 +20,145 @@ import {
   ChevronDown,
   Wallet,
   Building2,
+  Megaphone,
+  TicketCheck,
+  Target,
+  Gift,
+  BadgeCheck,
+  Banknote,
+  ShoppingBag,
+  TrendingUp,
+  Coins,
 } from 'lucide-react';
+import { useClientConfig } from '@/lib/platform/client-config-context';
+import { useAdminSession, setDemoAdminRole } from '@/lib/admin-session';
 
-const navItems = [
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/kyc', label: 'KYC Management', icon: FileCheck },
-  { href: '/users', label: 'User Management', icon: Users },
-  { href: '/schemes', label: 'Scheme Management', icon: Tag },
-  { href: '/visibility', label: 'Visibility Approval', icon: Eye },
+// All possible nav items — feature flags control which are visible
+const ALL_NAV_ITEMS = [
+  { href: '/admin/dashboard', label: 'Overview', icon: LayoutDashboard, featureFlag: null },
   {
-    href: '/payouts',
-    label: 'Payout Management',
-    icon: CreditCard,
+    href: '/admin/dashboards',
+    label: 'Dashboards',
+    icon: BarChart2,
+    featureFlag: null,
     children: [
-      { href: '/payouts', label: 'Payout Batches' },
-      { href: '/payouts/fund', label: 'Fund Management' },
+      { href: '/admin/dashboards/kyc',          label: 'KYC Dashboard'             },
+      { href: '/admin/dashboards/payments',     label: 'Payments Dashboard'        },
+      { href: '/admin/dashboards/redemptions',  label: 'Gift Redemption Dashboard' },
+      { href: '/admin/dashboards/engagement',   label: 'Engagement Dashboard'      },
     ],
   },
-  { href: '/reports', label: 'Reports', icon: BarChart2 },
-  { href: '/settings', label: 'Settings', icon: Settings },
+  {
+    href: '/admin/kyc',
+    label: 'KYC Management',
+    icon: FileCheck,
+    featureFlag: 'kycApprovalFlow' as const,
+    children: [
+      { href: '/admin/kyc',        label: 'KYC Submissions'  },
+      { href: '/admin/approvals',  label: 'KYC Approvals'    },
+    ],
+  },
+  {
+    href: '/admin/users',
+    label: 'User Management',
+    icon: Users,
+    featureFlag: null,
+    children: [
+      { href: '/admin/users/outlets', label: 'Outlet Management'   },
+      { href: '/admin/hierarchy',     label: 'Employee Hierarchy'  },
+    ],
+  },
+  { href: '/admin/schemes',  label: 'Scheme Management',icon: Tag,          featureFlag: null, gifsyOnly: true  },
+  { href: '/admin/visibility', label: 'Visibility Approval', icon: Eye,     featureFlag: null },
+  {
+    href: '/admin/invoices',
+    label: 'Visibility Invoices',
+    icon: FileCheck,
+    featureFlag: 'visibilityInvoiceModule' as const,
+    children: [
+      { href: '/admin/invoices',        label: 'Invoice List'    },
+      { href: '/admin/invoices/upload', label: 'Upload Payouts'  },
+    ],
+  },
+  {
+    href: '/admin/payouts',
+    label: 'Payout Management',
+    icon: CreditCard,
+    featureFlag: 'walletModule' as const,
+    children: [
+      { href: '/admin/payouts',      label: 'Payout Batches'  },
+      { href: '/admin/payouts/fund', label: 'Fund Management' },
+    ],
+  },
+  { href: '/admin/gifts',    label: 'Gift Catalogue',  icon: Gift,          featureFlag: 'walletModule' as const },
+  { href: process.env.NEXT_PUBLIC_EXCEL_TARGETS_ONLY === 'true' ? '/admin/targets/upload' : '/admin/targets', label: 'Targets', icon: Target, featureFlag: null },
+  { href: '/admin/sales',    label: 'Sales Data',       icon: TrendingUp,    featureFlag: null },
+  {
+    href: '/admin/credits-payouts',
+    label: 'Credits & Payouts',
+    icon: Coins,
+    featureFlag: null,
+    children: [
+      { href: '/admin/credits-payouts/upload',  label: 'Upload Credits'    },
+      { href: '/admin/credits-payouts/status',  label: 'Payout Status'     },
+      { href: '/admin/credits-payouts/payout',  label: 'Payout Download', gifsyOnly: true },
+      { href: '/admin/credits-payouts/fields',  label: 'Field Configuration' },
+    ],
+  },
+  { href: '/admin/tickets',  label: 'Tickets',          icon: TicketCheck,   featureFlag: null },
+  { href: '/admin/banners',  label: 'Banners',          icon: Megaphone,     featureFlag: null },
+  { href: '/admin/reports',  label: 'Reports',          icon: FileBarChart2, featureFlag: null },
+  { href: '/admin/settings', label: 'Settings',         icon: Settings,      featureFlag: null },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
+  const pathname     = usePathname();
+  const router       = useRouter();
+  const clientConfig = useClientConfig();
+  const features     = clientConfig.features;
+  const adminSession = useAdminSession();
+
+  function handleLogout() {
+    // Clear session and navigate to root (L5 fix)
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('admin_role_demo');
+    }
+    router.push('/');
+  }
   const [collapsed, setCollapsed] = useState(false);
-  const [expandedItem, setExpandedItem] = useState<string | null>('/payouts');
   const [notifOpen, setNotifOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
 
-  const isActive = (href: string) => {
-    if (href === '/payouts') return pathname.startsWith('/payouts');
+  // Filter nav items by feature flags AND role
+  const navItems = useMemo(
+    () =>
+      ALL_NAV_ITEMS.filter((item) => {
+        // gifsyOnly items (e.g. Scheme Management) are hidden from CLIENT_ADMIN
+        if ((item as { gifsyOnly?: boolean }).gifsyOnly && !adminSession.canManageSchemes) return false;
+        if (!item.featureFlag) return true;
+        return !!(features as unknown as Record<string, boolean>)[item.featureFlag];
+      }),
+    [features, adminSession.canManageSchemes],
+  );
+
+  // Auto-expand the parent whose child matches the current path
+  const getInitialExpanded = (): string | null => {
+    for (const item of navItems) {
+      if (item.children) {
+        if (item.children.some((c) => pathname === c.href || pathname.startsWith(c.href + '/'))) {
+          return item.href;
+        }
+      }
+    }
+    return null;
+  };
+  const [expandedItem, setExpandedItem] = useState<string | null>(getInitialExpanded);
+
+  // A nav item is "active" if the current path matches it OR any of its children
+  const isActive = (href: string, children?: { href: string }[]) => {
+    if (children) {
+      return children.some((c) => pathname === c.href || pathname.startsWith(c.href + '/'));
+    }
     return pathname === href || pathname.startsWith(href + '/');
   };
 
@@ -64,7 +174,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         <div className="flex items-center justify-between px-4 py-4 border-b border-slate-700">
           {!collapsed && (
             <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-[#C8102E] flex items-center justify-center">
+              <div className="w-8 h-8 rounded-lg bg-[var(--brand-primary)] flex items-center justify-center">
                 <Wallet className="w-4 h-4 text-white" />
               </div>
               <div>
@@ -74,7 +184,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             </div>
           )}
           {collapsed && (
-            <div className="w-8 h-8 rounded-lg bg-[#C8102E] flex items-center justify-center mx-auto">
+            <div className="w-8 h-8 rounded-lg bg-[var(--brand-primary)] flex items-center justify-center mx-auto">
               <Wallet className="w-4 h-4 text-white" />
             </div>
           )}
@@ -90,10 +200,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         {!collapsed && (
           <div className="px-4 py-3 border-b border-slate-700">
             <div className="flex items-center gap-2 bg-[#16213E] rounded-lg px-3 py-2">
-              <Building2 className="w-4 h-4 text-[#C8102E]" />
+              <Building2 className="w-4 h-4 text-[var(--brand-primary)]" />
               <div>
-                <div className="text-xs font-semibold text-white">Parle Agro Ltd</div>
-                <div className="text-xs text-slate-400">Client Admin</div>
+                <div className="text-xs font-semibold text-white">{clientConfig.branding.displayName}</div>
+                <div className="text-xs text-slate-400">
+                  {adminSession.role === 'GIFSY_ADMIN' ? 'Gifsy Admin' : 'Client Admin'}
+                </div>
               </div>
             </div>
           </div>
@@ -103,7 +215,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         <nav className="flex-1 overflow-y-auto py-4 space-y-1 px-2">
           {navItems.map((item) => {
             const Icon = item.icon;
-            const active = isActive(item.href);
+            const active = isActive(item.href, item.children);
             const hasChildren = item.children && item.children.length > 0;
 
             return (
@@ -116,7 +228,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                       }
                       className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
                         active
-                          ? 'bg-[#C8102E] text-white'
+                          ? 'bg-[var(--brand-primary)] text-white'
                           : 'text-slate-300 hover:bg-[#16213E] hover:text-white'
                       }`}
                     >
@@ -134,13 +246,15 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                     </button>
                     {!collapsed && expandedItem === item.href && (
                       <div className="ml-7 mt-1 space-y-1">
-                        {item.children!.map((child) => (
+                        {item.children!
+                          .filter((child) => !(child as { gifsyOnly?: boolean }).gifsyOnly || adminSession.canManageSchemes)
+                          .map((child) => (
                           <Link
                             key={child.href}
                             href={child.href}
                             className={`block px-3 py-2 rounded-lg text-xs font-medium transition-all ${
                               pathname === child.href
-                                ? 'bg-[#C8102E]/20 text-[#e8294d]'
+                                ? 'bg-[var(--brand-primary)]/20 text-[#22c55e]'
                                 : 'text-slate-400 hover:text-white hover:bg-[#16213E]'
                             }`}
                           >
@@ -155,7 +269,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                     href={item.href}
                     className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
                       active
-                        ? 'bg-[#C8102E] text-white'
+                        ? 'bg-[var(--brand-primary)] text-white'
                         : 'text-slate-300 hover:bg-[#16213E] hover:text-white'
                     }`}
                     title={collapsed ? item.label : undefined}
@@ -170,8 +284,28 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         </nav>
 
         {/* Footer */}
-        <div className="border-t border-slate-700 p-3">
+        <div className="border-t border-slate-700 p-3 space-y-1">
+          {/* Dev role switcher — demo only */}
+          {!collapsed && (
+            <div className="flex gap-1 mb-2">
+              {(['CLIENT_ADMIN', 'GIFSY_ADMIN'] as const).map((r) => (
+                <button
+                  key={r}
+                  onClick={() => setDemoAdminRole(r)}
+                  className={`flex-1 py-1 rounded text-[10px] font-semibold transition-all ${
+                    adminSession.role === r
+                      ? 'bg-[var(--brand-primary)] text-white'
+                      : 'bg-slate-700 text-slate-400 hover:bg-slate-600 hover:text-white'
+                  }`}
+                  title={`Switch to ${r}`}
+                >
+                  {r === 'CLIENT_ADMIN' ? 'Client' : 'Gifsy'}
+                </button>
+              ))}
+            </div>
+          )}
           <button
+            onClick={handleLogout}
             className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-slate-400 hover:text-white hover:bg-[#16213E] transition-all"
             title={collapsed ? 'Logout' : undefined}
           >
@@ -187,7 +321,16 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         <header className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between flex-shrink-0 z-10">
           <div>
             <h1 className="text-lg font-semibold text-gray-900">
-              {navItems.find((n) => isActive(n.href))?.label ?? 'Admin Portal'}
+              {(() => {
+                for (const n of navItems) {
+                  if (n.children) {
+                    const child = n.children.find((c) => pathname === c.href || pathname.startsWith(c.href + '/'));
+                    if (child) return child.label;
+                  }
+                  if (isActive(n.href)) return n.label;
+                }
+                return 'Admin Portal';
+              })()}
             </h1>
             <p className="text-xs text-gray-500">
               {new Date().toLocaleDateString('en-IN', {
@@ -207,7 +350,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                 className="relative p-2 rounded-lg text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors"
               >
                 <Bell className="w-5 h-5" />
-                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[#C8102E]"></span>
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[var(--brand-primary)]"></span>
               </button>
               {notifOpen && (
                 <div className="absolute right-0 top-11 w-80 bg-white rounded-xl shadow-lg border border-gray-200 z-50">
@@ -237,12 +380,14 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                 onClick={() => { setUserMenuOpen(!userMenuOpen); setNotifOpen(false); }}
                 className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors"
               >
-                <div className="w-7 h-7 rounded-full bg-[#C8102E] flex items-center justify-center text-white text-xs font-bold">
+                <div className="w-7 h-7 rounded-full bg-[var(--brand-primary)] flex items-center justify-center text-white text-xs font-bold">
                   RA
                 </div>
                 <div className="text-left hidden sm:block">
-                  <div className="text-xs font-semibold text-gray-800">Rahul Agarwal</div>
-                  <div className="text-xs text-gray-500">Client Admin</div>
+                  <div className="text-xs font-semibold text-gray-800">{adminSession.name}</div>
+                  <div className="text-xs text-gray-500">
+                    {adminSession.role === 'GIFSY_ADMIN' ? 'Gifsy Admin' : 'Client Admin'}
+                  </div>
                 </div>
                 <ChevronDown className="w-3 h-3 text-gray-400" />
               </button>

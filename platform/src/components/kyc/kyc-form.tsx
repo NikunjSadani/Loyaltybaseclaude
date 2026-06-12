@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import React, { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
@@ -12,7 +12,7 @@ import { Select } from '@/components/ui/select';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 
-type PartnerType = 'RETAILER' | 'WHOLESALER' | 'SUB_STOCKIST';
+type PartnerType = 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
 
 interface KYCFormData {
   // Step 1
@@ -84,7 +84,7 @@ function FileUploadField({
       </label>
       <label className={cn(
         'flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-dashed cursor-pointer transition-colors',
-        value ? 'border-emerald-400 bg-emerald-50' : 'border-gray-200 hover:border-[#C8102E] hover:bg-[#C8102E]/5',
+        value ? 'border-emerald-400 bg-emerald-50' : 'border-gray-200 hover:border-[var(--brand-primary)] hover:bg-[var(--brand-primary)]/5',
       )}>
         <input
           type="file"
@@ -202,14 +202,14 @@ export function KYCForm({ initialData, onSuccess, redirectOnSuccess = '/sales/ky
                   className={cn(
                     'w-8 h-8 rounded-full flex items-center justify-center transition-colors',
                     done ? 'bg-emerald-500 text-white' :
-                    active ? 'bg-[#C8102E] text-white' : 'bg-gray-100 text-gray-400',
+                    active ? 'bg-[var(--brand-primary)] text-white' : 'bg-gray-100 text-gray-400',
                   )}
                 >
                   {done ? <Check className="h-4 w-4" /> : <Icon className="h-4 w-4" />}
                 </div>
                 <span className={cn(
                   'text-[9px] font-medium hidden sm:block',
-                  active ? 'text-[#C8102E]' : done ? 'text-emerald-600' : 'text-gray-400',
+                  active ? 'text-[var(--brand-primary)]' : done ? 'text-emerald-600' : 'text-gray-400',
                 )}>
                   {s.title}
                 </span>
@@ -231,7 +231,7 @@ export function KYCForm({ initialData, onSuccess, redirectOnSuccess = '/sales/ky
         {step === 0 && (
           <div className="space-y-3">
             {[
-              { value: 'RETAILER', label: 'Retailer', desc: 'Direct seller to end consumers' },
+              { value: 'SSS', label: 'SSS', desc: 'Direct seller to end consumers' },
               { value: 'WHOLESALER', label: 'Wholesaler', desc: 'Bulk distributor to retailers' },
               { value: 'SUB_STOCKIST', label: 'Sub-Stockist', desc: 'Regional distributor under stockist' },
             ].map((opt) => (
@@ -241,7 +241,7 @@ export function KYCForm({ initialData, onSuccess, redirectOnSuccess = '/sales/ky
                 className={cn(
                   'w-full flex items-center gap-4 p-4 rounded-xl border-2 text-left transition-all',
                   data.partnerType === opt.value
-                    ? 'border-[#C8102E] bg-[#C8102E]/5'
+                    ? 'border-[var(--brand-primary)] bg-[var(--brand-primary)]/5'
                     : 'border-gray-200 hover:border-gray-300',
                 )}
               >
@@ -249,7 +249,7 @@ export function KYCForm({ initialData, onSuccess, redirectOnSuccess = '/sales/ky
                   className={cn(
                     'w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0',
                     data.partnerType === opt.value
-                      ? 'border-[#C8102E] bg-[#C8102E]'
+                      ? 'border-[var(--brand-primary)] bg-[var(--brand-primary)]'
                       : 'border-gray-300',
                   )}
                 >

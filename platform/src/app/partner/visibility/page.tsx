@@ -105,7 +105,7 @@ export default function VisibilityPage() {
           </div>
         )}
 
-        <Button onClick={() => setShowUpload(true)} className="w-full bg-[#C8102E] hover:bg-[#a00d24] text-white py-3">
+        <Button onClick={() => setShowUpload(true)} className="w-full bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white py-3">
           <Camera className="h-5 w-5 mr-2" /> Submit New Visibility Photo
         </Button>
 
@@ -149,7 +149,7 @@ export default function VisibilityPage() {
 
             <div>
               <label className="text-xs font-medium text-gray-700 block mb-2">Visibility Program *</label>
-              <select value={selectedProgram} onChange={e => setSelectedProgram(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#C8102E]">
+              <select value={selectedProgram} onChange={e => setSelectedProgram(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]">
                 <option value="">Select program...</option>
                 {programs.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
@@ -165,7 +165,7 @@ export default function VisibilityPage() {
                   <button onClick={() => { setImageFile(null); setImagePreview(null) }} className="absolute top-2 right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs">✕</button>
                 </div>
               ) : (
-                <button onClick={() => fileRef.current?.click()} className="w-full h-32 border-2 border-dashed border-gray-300 rounded-lg flex flex-col items-center justify-center gap-2 hover:border-[#C8102E] transition-colors">
+                <button onClick={() => fileRef.current?.click()} className="w-full h-32 border-2 border-dashed border-gray-300 rounded-lg flex flex-col items-center justify-center gap-2 hover:border-[var(--brand-primary)] transition-colors">
                   <Upload className="h-6 w-6 text-gray-400" />
                   <span className="text-sm text-gray-500">Tap to capture or upload photo</span>
                 </button>
@@ -181,7 +181,7 @@ export default function VisibilityPage() {
                   <button onClick={() => setGeoLocation(null)} className="ml-auto text-xs text-gray-400">✕</button>
                 </div>
               ) : (
-                <Button onClick={captureGeo} disabled={geoLoading} variant="outline" className="w-full border-[#C8102E] text-[#C8102E]">
+                <Button onClick={captureGeo} disabled={geoLoading} variant="outline" className="w-full border-[var(--brand-primary)] text-[var(--brand-primary)]">
                   {geoLoading ? <><RefreshCw className="h-4 w-4 mr-2 animate-spin" />Getting location...</> : <><MapPin className="h-4 w-4 mr-2" />Capture Current Location</>}
                 </Button>
               )}
@@ -189,7 +189,7 @@ export default function VisibilityPage() {
 
             <div className="pt-2">
               <p className="text-xs text-gray-400 mb-3">Images are automatically checked for duplicates. Geo-tag and timestamp are required.</p>
-              <Button onClick={handleSubmit} disabled={!imageFile || !selectedProgram || !geoLocation || uploading} className="w-full bg-[#C8102E] hover:bg-[#a00d24] text-white">
+              <Button onClick={handleSubmit} disabled={!imageFile || !selectedProgram || !geoLocation || uploading} className="w-full bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white">
                 {uploading ? <><RefreshCw className="h-4 w-4 mr-2 animate-spin" />Submitting...</> : 'Submit Visibility Photo'}
               </Button>
             </div>

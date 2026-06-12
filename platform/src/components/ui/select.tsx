@@ -50,7 +50,7 @@ export function Select({
             'transition-colors',
             error
               ? 'border-red-400 focus:border-red-400 focus:ring-red-200'
-              : 'border-gray-300 focus:border-[#C8102E] focus:ring-[#C8102E]/20',
+              : 'border-gray-300 focus:border-[var(--brand-primary)] focus:ring-[var(--brand-primary)]/20',
           )}
         >
           <SelectPrimitive.Value placeholder={placeholder} className="text-gray-500" />
@@ -76,7 +76,7 @@ export function Select({
                     'cursor-pointer select-none outline-none',
                     'text-gray-700 hover:bg-gray-50 focus:bg-gray-50',
                     'data-[disabled]:opacity-50 data-[disabled]:cursor-not-allowed',
-                    'data-[highlighted]:bg-[#C8102E]/5 data-[highlighted]:text-[#C8102E]',
+                    'data-[highlighted]:bg-[var(--brand-primary)]/5 data-[highlighted]:text-[var(--brand-primary)]',
                   )}
                 >
                   <SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText>

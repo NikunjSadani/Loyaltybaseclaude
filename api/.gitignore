@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# Environment files — never commit secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Scripts that contain credentials — use .env.secrets locally
+scripts/push-secrets.sh
+
+# GCP service account keys
+gifsy-platform-*.json
+kwality-gift-*.json
+*-service-account*.json
+service-account-key.json
+
+# Test coverage
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Prisma
+# Keep schema and migrations; ignore generated client (re-generated on build)
+prisma/generated/

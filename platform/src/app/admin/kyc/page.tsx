@@ -149,7 +149,7 @@ export default function KYCPage() {
               key={s.label}
               onClick={() => setStatusFilter(s.filter as KYCStatusType | 'ALL')}
               className={`bg-white border border-gray-200 rounded-xl p-4 flex items-center gap-3 hover:shadow-md transition-all text-left ${
-                statusFilter === s.filter ? 'border-[#C8102E] ring-1 ring-[#C8102E]/20' : ''
+                statusFilter === s.filter ? 'border-[var(--brand-primary)] ring-1 ring-[var(--brand-primary)]/20' : ''
               }`}
             >
               <div className={`p-2 rounded-lg ${s.color}`}>
@@ -175,13 +175,13 @@ export default function KYCPage() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search outlet, mobile, sales user..."
-                className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#C8102E]"
+                className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
               />
             </div>
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value as KYCStatusType | 'ALL')}
-              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#C8102E]"
+              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
             >
               <option value="ALL">All Statuses</option>
               <option value="PENDING">Pending</option>
@@ -193,7 +193,7 @@ export default function KYCPage() {
             <select
               value={classFilter}
               onChange={(e) => setClassFilter(e.target.value)}
-              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#C8102E]"
+              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
             >
               <option value="ALL">All Classes</option>
               <option value="PLATINUM">Platinum</option>
@@ -236,7 +236,7 @@ export default function KYCPage() {
                     type="checkbox"
                     checked={allPendingSelected}
                     onChange={toggleSelectAll}
-                    className="rounded accent-[#C8102E]"
+                    className="rounded accent-[var(--brand-primary)]"
                   />
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Outlet</th>
@@ -257,15 +257,19 @@ export default function KYCPage() {
                   </td>
                 </tr>
               ) : (
-                filtered.map((k) => (
-                  <tr key={k.id} className="hover:bg-gray-50 transition-colors">
+                filtered.map((k) => {
+                  const SLA_HRS = 48;
+                  const slaPct = Math.min(Math.round((k.ageHrs / SLA_HRS) * 100), 100);
+                  const slaBarColor = k.slaBreached ? 'bg-red-400' : k.ageHrs > 36 ? 'bg-amber-400' : 'bg-emerald-400';
+                  return (
+                  <tr key={k.id} className={`hover:bg-gray-50 transition-colors ${k.slaBreached ? 'border-l-2 border-l-red-400' : ''}`}>
                     <td className="px-4 py-3">
                       {k.status === 'PENDING' && (
                         <input
                           type="checkbox"
                           checked={selected.has(k.id)}
                           onChange={() => toggleOne(k.id)}
-                          className="rounded accent-[#C8102E]"
+                          className="rounded accent-[var(--brand-primary)]"
                         />
                       )}
                     </td>
@@ -289,21 +293,25 @@ export default function KYCPage() {
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-600">{k.submittedDate}</td>
                     <td className="px-4 py-3">
-                      <span
-                        className={`text-sm font-semibold ${
-                          k.slaBreached ? 'text-red-600' : k.ageHrs > 36 ? 'text-amber-600' : 'text-gray-700'
-                        }`}
-                      >
-                        {k.ageHrs}h
-                        {k.slaBreached && (
-                          <AlertTriangle className="w-3 h-3 inline ml-1 text-red-500" />
-                        )}
-                      </span>
+                      <div className="space-y-1 min-w-[72px]">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-sm font-bold ${k.slaBreached ? 'text-red-600' : k.ageHrs > 36 ? 'text-amber-600' : 'text-gray-700'}`}>
+                            {k.ageHrs}h
+                          </span>
+                          {k.slaBreached && (
+                            <span className="text-[9px] font-bold bg-red-100 text-red-600 px-1 py-0.5 rounded">SLA!</span>
+                          )}
+                        </div>
+                        <div className="h-1 bg-gray-100 rounded-full overflow-hidden w-16">
+                          <div className={`h-full rounded-full ${slaBarColor}`} style={{ width: `${slaPct}%` }} />
+                        </div>
+                        <p className="text-[9px] text-gray-400">{slaPct}% of {SLA_HRS}h SLA</p>
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       <Link
-                        href={`/kyc/${k.id}`}
-                        className="inline-flex items-center gap-1 text-xs text-[#C8102E] hover:text-[#a00d25] font-medium"
+                        href={`/admin/kyc/${k.id}`}
+                        className="inline-flex items-center gap-1 text-xs text-[var(--brand-primary)] hover:text-[var(--brand-primary-dark)] font-medium"
                       >
                         <Eye className="w-3.5 h-3.5" />
                         Review
@@ -311,7 +319,8 @@ export default function KYCPage() {
                       </Link>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>

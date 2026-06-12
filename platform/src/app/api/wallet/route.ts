@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -11,10 +12,11 @@ export async function GET(req: NextRequest) {
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     // Look up the channel partner for this user
-    const channelPartner = await prisma.channelPartner.findUnique({
-      where: { userId: authUser.userId },
+    const channelPartner = await prisma.channelPartner.findFirst({
+      where: { userId: authUser.userId, user: { clientId } },
     })
 
     if (!channelPartner) {

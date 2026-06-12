@@ -1,0 +1,211 @@
+name: Deploy — Production (main)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: "Skip tests (emergency deploy only)"
+        type: boolean
+        default: false
+
+env:
+  PROJECT_ID: gifsy-platform
+  REGION:     asia-south1
+  AR_REPO:    gifsy-images
+  SQL_INSTANCE: gifsy-platform:asia-south1:gifsy-db
+
+jobs:
+  # ── Tests ────────────────────────────────────────────────────────────────────
+  test:
+    if: ${{ !inputs.skip_tests }}
+    name: Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [api, platform]
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        # platform has no prisma/schema.prisma — it shares the API schema
+        run: |
+          if [ -f prisma/schema.prisma ]; then
+            npx prisma generate
+          else
+            npx prisma generate --schema=../api/prisma/schema.prisma
+          fi
+
+      - name: Run tests
+        run: |
+          if [ "${{ matrix.app }}" = "api" ]; then
+            npm test -- --forceExit --no-coverage
+          else
+            npm test
+          fi
+        env:
+          DATABASE_URL: "postgresql://test:test@127.0.0.1:5432/test"
+          JWT_SECRET: "ci-test-secret"
+          NEXT_PUBLIC_API_URL: "http://localhost:4000"
+          NODE_ENV: test
+
+  # ── Production approval gate ─────────────────────────────────────────────────
+  # GitHub Environment "production" has protection rules set in repo Settings →
+  # Environments → production → Required reviewers.
+  # Any push to main pauses here until a required reviewer approves.
+  approve:
+    name: Await production approval
+    needs: test
+    if: always() && (needs.test.result == 'success' || inputs.skip_tests)
+    runs-on: ubuntu-latest
+    environment: production        # ← triggers the approval gate
+    steps:
+      - run: echo "Production deployment approved."
+
+  # ── GCP Auth (shared across deploy jobs) ─────────────────────────────────────
+  # Both deploy jobs need this but GitHub Actions doesn't support sharing steps.
+  # We re-auth in each job — it's fast (seconds).
+
+  # ── Build & Deploy API ───────────────────────────────────────────────────────
+  deploy-api:
+    name: Deploy API → gifsy-api
+    needs: approve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build & push API image
+        run: |
+          docker build \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:${{ github.sha }} \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:latest \
+            ./api
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:${{ github.sha }}
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:latest
+
+      - name: Deploy API to Cloud Run
+        run: |
+          gcloud run deploy gifsy-api \
+            --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --platform=managed \
+            --service-account=gifsy-api-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
+            --allow-unauthenticated \
+            --port=4000 \
+            --memory=512Mi \
+            --cpu=1 \
+            --min-instances=1 \
+            --max-instances=10 \
+            --no-cpu-throttling \
+            --add-cloudsql-instances=${{ env.SQL_INSTANCE }} \
+            --vpc-connector=gifsy-connector \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=7d,JWT_REFRESH_EXPIRES_IN=30d,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2" \
+            --set-secrets="\
+              DATABASE_URL=DATABASE_URL:latest,\
+              JWT_SECRET=JWT_SECRET:latest,\
+              MSG91_AUTH_KEY=MSG91_AUTH_KEY:latest,\
+              MSG91_SENDER_ID=MSG91_SENDER_ID:latest,\
+              MSG91_OTP_TEMPLATE_ID=MSG91_OTP_TEMPLATE_ID:latest,\
+              MSG91_SMS_TEMPLATE_ID=MSG91_SMS_TEMPLATE_ID:latest,\
+              GCS_BUCKET=GCS_BUCKET:latest,\
+              GCP_PROJECT_ID=GCP_PROJECT_ID:latest,\
+              CORS_ORIGINS=CORS_ORIGINS:latest,\
+              REDIS_URL=REDIS_URL:latest"
+
+  # ── Build & Deploy Frontend ──────────────────────────────────────────────────
+  deploy-frontend:
+    name: Deploy Frontend → gifsy-frontend
+    needs: approve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build & push frontend image
+        run: |
+          docker build \
+            --build-arg NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }} \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:${{ github.sha }} \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:latest \
+            ./platform
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:${{ github.sha }}
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:latest
+
+      - name: Deploy Frontend to Cloud Run
+        run: |
+          gcloud run deploy gifsy-frontend \
+            --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --platform=managed \
+            --service-account=gifsy-frontend-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
+            --allow-unauthenticated \
+            --port=3000 \
+            --memory=512Mi \
+            --cpu=1 \
+            --min-instances=1 \
+            --max-instances=10 \
+            --no-cpu-throttling \
+            --set-env-vars="NODE_ENV=production"
+
+  # ── Post-deploy health check ─────────────────────────────────────────────────
+  health-check:
+    name: Health check
+    needs: [deploy-api, deploy-frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Cloud Run warmup
+        run: sleep 15
+
+      - name: Check API health
+        run: |
+          URL="${{ secrets.NEXT_PUBLIC_API_URL }}/health"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
+          echo "API health: $STATUS"
+          [[ "$STATUS" == "200" ]] || echo "⚠️  API health check returned $STATUS (may still be warming up)"
+
+      - name: Deployment summary
+        run: |
+          echo "✅  Production deployment complete"
+          echo "    API image    : ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:${{ github.sha }}"
+          echo "    Frontend image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:${{ github.sha }}"

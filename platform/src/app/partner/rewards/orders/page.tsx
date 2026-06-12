@@ -129,7 +129,7 @@ export default function OrdersPage() {
                         </Badge>
                       </div>
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1">
-                        <span className="text-xs text-[#C8102E] font-medium">
+                        <span className="text-xs text-[var(--brand-primary)] font-medium">
                           -{formatPoints(order.pointsSpent)} pts
                         </span>
                         <span className="text-xs text-gray-400">
@@ -147,7 +147,7 @@ export default function OrdersPage() {
                   {/* Timeline toggle */}
                   <button
                     onClick={() => setExpanded(isExpanded ? null : order.id)}
-                    className="mt-3 w-full text-xs text-[#C8102E] font-medium text-left hover:underline"
+                    className="mt-3 w-full text-xs text-[var(--brand-primary)] font-medium text-left hover:underline"
                   >
                     {isExpanded ? 'Hide timeline' : 'View timeline'}
                   </button>
@@ -161,7 +161,7 @@ export default function OrdersPage() {
                           <div key={idx} className="relative flex items-start gap-3">
                             <div
                               className={`w-2 h-2 rounded-full mt-1.5 shrink-0 -ml-[17px] ${
-                                isLast ? 'bg-[#C8102E]' : 'bg-gray-300'
+                                isLast ? 'bg-[var(--brand-primary)]' : 'bg-gray-300'
                               }`}
                             />
                             <div>

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -20,6 +21,7 @@ export async function POST(
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN') return err('Forbidden - Admin only', 403)
+    const clientId = getClientIdFromRequest(req)
 
     const { id } = await params
     const body = await req.json()
@@ -28,7 +30,7 @@ export async function POST(
 
     const { escalateTo, reason, priority } = parsed.data
 
-    const ticket = await prisma.ticket.findUnique({ where: { id } })
+    const ticket = await prisma.ticket.findFirst({ where: { id, clientId } })
     if (!ticket) return err('Ticket not found', 404)
 
     await prisma.$transaction(async (tx) => {

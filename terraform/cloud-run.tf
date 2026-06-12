@@ -213,6 +213,12 @@ resource "google_cloud_run_v2_service" "api_prod" {
     google_sql_database_instance.gifsy_db,
     google_redis_instance.gifsy_redis_prod,
   ]
+
+  # GitHub Actions deploys real images via `gcloud run deploy`.
+  # Ignore template changes so subsequent `terraform apply` runs don't revert the image.
+  lifecycle {
+    ignore_changes = [template]
+  }
 }
 
 resource "google_cloud_run_v2_service_iam_member" "api_prod_public" {
@@ -259,6 +265,10 @@ resource "google_cloud_run_v2_service" "frontend_prod" {
   }
 
   depends_on = [google_project_service.apis]
+
+  lifecycle {
+    ignore_changes = [template]
+  }
 }
 
 resource "google_cloud_run_v2_service_iam_member" "frontend_prod_public" {
@@ -454,6 +464,10 @@ resource "google_cloud_run_v2_service" "api_staging" {
     google_project_service.apis,
     google_sql_database_instance.gifsy_db,
   ]
+
+  lifecycle {
+    ignore_changes = [template]
+  }
 }
 
 resource "google_cloud_run_v2_service_iam_member" "api_staging_public" {
@@ -500,6 +514,10 @@ resource "google_cloud_run_v2_service" "frontend_staging" {
   }
 
   depends_on = [google_project_service.apis]
+
+  lifecycle {
+    ignore_changes = [template]
+  }
 }
 
 resource "google_cloud_run_v2_service_iam_member" "frontend_staging_public" {

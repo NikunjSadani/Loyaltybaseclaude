@@ -19,28 +19,34 @@ output "dns_instructions" {
 
 # Production URLs (custom domain after LB setup)
 output "prod_api_url" {
-  value       = "https://api.gifsy.in (Cloud Run: ${google_cloud_run_v2_service.api_prod.uri})"
+  value = try(
+    "https://api.gifsy.in (Cloud Run: ${google_cloud_run_v2_service.api_prod.uri})",
+    "https://api.gifsy.in (Cloud Run: not deployed yet)"
+  )
   description = "Production API"
 }
 
 output "prod_frontend_url" {
-  value       = "https://platform.gifsy.in (Cloud Run: ${google_cloud_run_v2_service.frontend_prod.uri})"
+  value = try(
+    "https://platform.gifsy.in (Cloud Run: ${google_cloud_run_v2_service.frontend_prod.uri})",
+    "https://platform.gifsy.in (Cloud Run: not deployed yet)"
+  )
   description = "Production frontend"
 }
 
 # Staging URLs — use Cloud Run default .run.app URLs (no LB for staging)
 output "staging_api_url" {
-  value       = google_cloud_run_v2_service.api_staging.uri
+  value       = try(google_cloud_run_v2_service.api_staging.uri, "not deployed yet")
   description = "Staging API — use this URL directly or set up staging.gifsy.in DNS manually"
 }
 
 output "staging_frontend_url" {
-  value       = google_cloud_run_v2_service.frontend_staging.uri
+  value       = try(google_cloud_run_v2_service.frontend_staging.uri, "not deployed yet")
   description = "Staging frontend"
 }
 
 output "cloud_sql_connection_name" {
-  value       = google_sql_database_instance.gifsy_db.connection_name
+  value       = try(google_sql_database_instance.gifsy_db.connection_name, "not deployed yet")
   description = "Used in --add-cloudsql-instances and for running migrations via proxy"
 }
 

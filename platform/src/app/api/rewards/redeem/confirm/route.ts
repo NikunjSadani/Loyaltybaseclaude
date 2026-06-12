@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser, verifyOTP } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 import { sendNotification } from '@/lib/notifications'
 import { NotificationEvent } from '@/types'
 
@@ -17,6 +18,7 @@ export async function POST(req: NextRequest) {
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const body = await req.json()
     const parsed = schema.safeParse(body)
@@ -25,8 +27,8 @@ export async function POST(req: NextRequest) {
     const { orderId, otp } = parsed.data
 
     // Find pending order
-    const order = await prisma.redemptionOrder.findUnique({
-      where: { id: orderId },
+    const order = await prisma.redemptionOrder.findFirst({
+      where: { id: orderId, partner: { user: { clientId } } },
       include: {
         reward: true,
         partner: true,

@@ -1,4 +1,4 @@
-'use server';
+﻿'use server';
 
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
@@ -58,7 +58,7 @@ export async function verifyOTP(
 
     // Set session cookie
     const cookieStore = await cookies();
-    cookieStore.set('session', data.data?.token ?? '', {
+    cookieStore.set('token', data.data?.token ?? '', {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
@@ -73,7 +73,7 @@ export async function verifyOTP(
 }
 
 export async function redirectByRole(role: string) {
-  const partnerRoles = ['RETAILER', 'WHOLESALER', 'SUB_STOCKIST'];
+  const partnerRoles = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
   const salesRoles = [
     'SALES_EXECUTIVE',
     'TERRITORY_SALES_OFFICER',

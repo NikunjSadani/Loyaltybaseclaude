@@ -10,13 +10,13 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
       {/* Brand panel – desktop left / mobile top strip */}
       <div className="hidden lg:flex lg:w-1/2 bg-[#1A1A2E] flex-col items-center justify-center p-12 relative overflow-hidden">
         {/* Decorative circles */}
-        <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#C8102E]/10" />
-        <div className="absolute -bottom-32 -right-16 w-80 h-80 rounded-full bg-[#C8102E]/5" />
+        <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[var(--brand-primary)]/10" />
+        <div className="absolute -bottom-32 -right-16 w-80 h-80 rounded-full bg-[var(--brand-primary)]/5" />
 
         <div className="relative z-10 text-center max-w-sm">
           {/* Logo placeholder */}
           <div className="flex items-center justify-center gap-3 mb-8">
-            <div className="w-14 h-14 bg-[#C8102E] rounded-2xl flex items-center justify-center shadow-lg">
+            <div className="w-14 h-14 bg-[var(--brand-primary)] rounded-2xl flex items-center justify-center shadow-lg">
               <svg viewBox="0 0 40 40" className="w-8 h-8 fill-white">
                 <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
               </svg>
@@ -51,7 +51,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
 
       {/* Mobile top strip */}
       <div className="lg:hidden bg-[#1A1A2E] px-6 pt-10 pb-8 flex items-center gap-3">
-        <div className="w-10 h-10 bg-[#C8102E] rounded-xl flex items-center justify-center">
+        <div className="w-10 h-10 bg-[var(--brand-primary)] rounded-xl flex items-center justify-center">
           <svg viewBox="0 0 40 40" className="w-6 h-6 fill-white">
             <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
           </svg>

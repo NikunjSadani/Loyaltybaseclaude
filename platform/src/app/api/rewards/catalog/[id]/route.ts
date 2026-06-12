@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -12,11 +13,12 @@ export async function GET(
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const { id } = await params
 
-    const item = await prisma.rewardCatalog.findUnique({
-      where: { id, deletedAt: null },
+    const item = await prisma.rewardCatalog.findFirst({
+      where: { id, deletedAt: null, clientId },
     })
 
     if (!item) return err('Reward item not found', 404)

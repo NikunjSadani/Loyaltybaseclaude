@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import * as XLSX from 'xlsx'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 import { uploadFile, generateKey, getSignedUrl } from '@/lib/s3'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
@@ -12,6 +13,7 @@ export async function GET(req: NextRequest) {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'MIS_USER') return err('Forbidden', 403)
+    const clientId = getClientIdFromRequest(req)
 
     const sp = req.nextUrl.searchParams
     const dateFrom = sp.get('dateFrom') ? new Date(sp.get('dateFrom')!) : undefined
@@ -19,7 +21,7 @@ export async function GET(req: NextRequest) {
     const financialYear = sp.get('fy') ?? undefined
     const format = sp.get('format') ?? 'json'
 
-    const where: any = {}
+    const where: any = { payoutTransaction: { batch: { clientId } } }
     if (financialYear) where.financialYear = financialYear
     if (dateFrom || dateTo) {
       where.createdAt = {}

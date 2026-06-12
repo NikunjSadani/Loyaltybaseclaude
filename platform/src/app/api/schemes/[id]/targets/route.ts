@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -12,11 +13,12 @@ export async function GET(
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const { id: schemeId } = await params
 
-    const scheme = await prisma.scheme.findUnique({
-      where: { id: schemeId },
+    const scheme = await prisma.scheme.findFirst({
+      where: { id: schemeId, clientId },
     })
     if (!scheme) return err('Scheme not found', 404)
 

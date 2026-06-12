@@ -45,7 +45,7 @@ export function Sidebar({
     >
       {/* Logo */}
       <div className="flex items-center gap-3 px-4 py-5 border-b border-white/10">
-        <div className="w-8 h-8 bg-[#C8102E] rounded-lg flex items-center justify-center shrink-0">
+        <div className="w-8 h-8 bg-[var(--brand-primary)] rounded-lg flex items-center justify-center shrink-0">
           <svg viewBox="0 0 40 40" className="w-5 h-5 fill-white">
             <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
           </svg>
@@ -77,7 +77,7 @@ export function Sidebar({
                   className={cn(
                     'flex items-center gap-3 px-4 py-2.5 mx-2 rounded-lg text-sm transition-colors',
                     isActive
-                      ? 'bg-[#C8102E] text-white font-medium'
+                      ? 'bg-[var(--brand-primary)] text-white font-medium'
                       : 'text-white/70 hover:bg-white/10 hover:text-white',
                     collapsed && 'justify-center px-2',
                   )}
@@ -87,7 +87,7 @@ export function Sidebar({
                     <span className="flex-1 truncate">{item.label}</span>
                   )}
                   {!collapsed && item.badge !== undefined && item.badge > 0 && (
-                    <span className="ml-auto bg-[#C8102E] text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+                    <span className="ml-auto bg-[var(--brand-primary)] text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
                       {item.badge > 99 ? '99+' : item.badge}
                     </span>
                   )}

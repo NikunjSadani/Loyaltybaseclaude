@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 import { uploadFile, generateKey } from '@/lib/s3'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
@@ -12,6 +13,7 @@ export async function POST(req: NextRequest) {
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     // Sales/partner users only
     const allowedRoles = ['CHANNEL_PARTNER', 'SALES_EXECUTIVE', 'TERRITORY_SALES_OFFICER', 'AREA_SALES_MANAGER', 'SALES_MANAGER']
@@ -33,6 +35,10 @@ export async function POST(req: NextRequest) {
     if (!ALLOWED_MIME.includes(imageFile.type)) {
       return err('Invalid image format. Allowed: JPEG, PNG, WEBP')
     }
+
+    // Verify the visibility program belongs to this client
+    const program = await prisma.visibilityProgram.findFirst({ where: { id: programId, clientId } })
+    if (!program) return err('Visibility program not found', 404)
 
     const imageBuffer = Buffer.from(await imageFile.arrayBuffer())
 

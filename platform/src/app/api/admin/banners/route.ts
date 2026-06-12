@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -23,7 +24,8 @@ export async function GET(req: NextRequest) {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
 
-    const where: any = {}
+    const clientId = getClientIdFromRequest(req)
+    const where: any = { clientId }
     // Only show active banners for non-admins
     if (authUser.role !== 'GIFSY_ADMIN') {
       where.status = 'ACTIVE'
@@ -48,6 +50,7 @@ export async function POST(req: NextRequest) {
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') return err('Forbidden', 403)
 
+    const clientId = getClientIdFromRequest(req)
     const body = await req.json()
     const parsed = createSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
@@ -55,7 +58,7 @@ export async function POST(req: NextRequest) {
     const { ...data } = parsed.data
 
     const banner = await prisma.bannerManagement.create({
-      data: { ...data, createdByUserId: authUser.userId },
+      data: { ...data, createdByUserId: authUser.userId, clientId },
     })
 
     return ok({ banner }, 201)

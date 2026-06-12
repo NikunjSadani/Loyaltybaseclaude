@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -19,6 +20,7 @@ export async function POST(req: NextRequest) {
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const body = await req.json()
     const parsed = schema.safeParse(body)
@@ -26,9 +28,9 @@ export async function POST(req: NextRequest) {
 
     const { invoiceId, skuId, quantity, returnAmountPaise, returnReason, returnDate } = parsed.data
 
-    // Find invoice
-    const invoice = await prisma.salesInvoice.findUnique({
-      where: { id: invoiceId },
+    // Find invoice (scoped to tenant)
+    const invoice = await prisma.salesInvoice.findFirst({
+      where: { id: invoiceId, salesUpload: { clientId } },
     })
     if (!invoice) return err('Invoice not found', 404)
 

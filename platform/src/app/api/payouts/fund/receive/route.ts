@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -20,6 +21,7 @@ export async function POST(req: NextRequest) {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN') return err('Forbidden - Gifsy Admin only', 403)
+    const clientId = getClientIdFromRequest(req)
 
     const body = await req.json()
     const parsed = schema.safeParse(body)
@@ -29,7 +31,7 @@ export async function POST(req: NextRequest) {
     const amountPaise = Math.round(amount * 100)
 
     // Get current balance
-    const latestEntry = await prisma.fundLedger.findFirst({ orderBy: { createdAt: 'desc' } })
+    const latestEntry = await prisma.fundLedger.findFirst({ where: { clientId }, orderBy: { createdAt: 'desc' } })
     const currentBalance = latestEntry?.balancePaise ?? 0
     const newBalance = currentBalance + amountPaise
 
@@ -45,6 +47,7 @@ export async function POST(req: NextRequest) {
           bankName: bankName ?? null,
           notes: notes ?? null,
           createdByUserId: authUser.userId,
+          clientId,
         },
       })
 
@@ -56,6 +59,7 @@ export async function POST(req: NextRequest) {
           referenceType: 'FUND_RECEIPT',
           referenceId: receipt.id,
           description: notes ?? `Fund receipt. Ref: ${referenceNumber ?? 'N/A'}`,
+          clientId,
         },
       })
 

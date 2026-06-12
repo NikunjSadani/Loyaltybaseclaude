@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
@@ -15,7 +15,7 @@ type Step = 'mobile' | 'otp';
 const RESEND_COUNTDOWN = 60;
 
 function getRoleDashboard(role?: string): string {
-  const partnerRoles = ['RETAILER', 'WHOLESALER', 'SUB_STOCKIST'];
+  const partnerRoles = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
   const salesRoles = ['SALES_EXECUTIVE', 'TERRITORY_SALES_OFFICER', 'AREA_SALES_MANAGER', 'SALES_MANAGER'];
   if (partnerRoles.includes(role ?? '')) return '/dashboard';
   if (salesRoles.includes(role ?? '')) return '/sales/dashboard';
@@ -115,7 +115,7 @@ export default function LoginPage() {
     }
 
     toast.success('Logged in successfully!');
-    router.push(getRoleDashboard(result.role));
+    window.location.href = getRoleDashboard(result.role);
   }, [otp, mobile, router, toast]);
 
   // Auto-submit when all 6 digits filled
@@ -161,7 +161,7 @@ export default function LoginPage() {
             <label className="text-sm font-medium text-gray-700 block mb-1.5">
               Mobile Number
             </label>
-            <div className="flex items-stretch rounded-lg border border-gray-300 overflow-hidden focus-within:border-[#C8102E] focus-within:ring-2 focus-within:ring-[#C8102E]/20 transition-all">
+            <div className="flex items-stretch rounded-lg border border-gray-300 overflow-hidden focus-within:border-[var(--brand-primary)] focus-within:ring-2 focus-within:ring-[var(--brand-primary)]/20 transition-all">
               <div className="px-3 py-2.5 bg-gray-50 border-r border-gray-300 text-sm text-gray-500 font-medium flex items-center">
                 +91
               </div>
@@ -202,7 +202,7 @@ export default function LoginPage() {
                   className={cn(
                     'flex items-center gap-2 px-4 py-3 rounded-lg border-2 text-sm font-medium transition-all',
                     channel === value
-                      ? 'border-[#C8102E] bg-[#C8102E]/5 text-[#C8102E]'
+                      ? 'border-[var(--brand-primary)] bg-[var(--brand-primary)]/5 text-[var(--brand-primary)]'
                       : 'border-gray-200 text-gray-600 hover:border-gray-300',
                   )}
                 >
@@ -244,8 +244,8 @@ export default function LoginPage() {
                   onPaste={idx === 0 ? handleOTPPaste : undefined}
                   className={cn(
                     'w-11 h-12 text-center text-lg font-semibold rounded-lg border-2 transition-all',
-                    'focus:outline-none focus:border-[#C8102E] focus:ring-2 focus:ring-[#C8102E]/20',
-                    digit ? 'border-[#C8102E] bg-[#C8102E]/5 text-[#C8102E]' : 'border-gray-300 bg-white',
+                    'focus:outline-none focus:border-[var(--brand-primary)] focus:ring-2 focus:ring-[var(--brand-primary)]/20',
+                    digit ? 'border-[var(--brand-primary)] bg-[var(--brand-primary)]/5 text-[var(--brand-primary)]' : 'border-gray-300 bg-white',
                     otpError && !digit ? 'border-red-400' : '',
                   )}
                 />
@@ -270,14 +270,14 @@ export default function LoginPage() {
           <div className="text-center">
             <p className="text-sm text-gray-500">
               {countdown > 0 ? (
-                <>Resend OTP in <span className="font-semibold text-[#C8102E]">{countdown}s</span></>
+                <>Resend OTP in <span className="font-semibold text-[var(--brand-primary)]">{countdown}s</span></>
               ) : (
                 <>
                   Didn&apos;t receive it?{' '}
                   <button
                     onClick={handleResend}
                     disabled={sending}
-                    className="font-semibold text-[#C8102E] hover:underline disabled:opacity-50"
+                    className="font-semibold text-[var(--brand-primary)] hover:underline disabled:opacity-50"
                   >
                     Resend OTP
                   </button>

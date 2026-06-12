@@ -11,7 +11,7 @@ interface ProgressBarProps {
 }
 
 function getColor(pct: number): string {
-  if (pct < 50) return 'bg-[#C8102E]';
+  if (pct < 50) return 'bg-[var(--brand-primary)]';
   if (pct <= 80) return 'bg-amber-500';
   return 'bg-emerald-500';
 }

@@ -1,7 +1,7 @@
 'use client';
 
 import { use } from 'react';
-import { ArrowLeft, Tag, Users, Wallet } from 'lucide-react';
+import { ArrowLeft, Tag, Users, Wallet, ClipboardList } from 'lucide-react';
 import Link from 'next/link';
 import { SchemeBuilder } from '@/components/admin/scheme-builder';
 import { IncentiveType, CalculationMethod, ChannelPartnerClass } from '@/types';
@@ -86,7 +86,7 @@ export default function SchemeDetailPage({ params }: { params: Promise<{ id: str
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Link
-            href="/schemes"
+            href="/admin/schemes"
             className="p-2 rounded-lg hover:bg-gray-100 text-gray-500 transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
@@ -100,11 +100,22 @@ export default function SchemeDetailPage({ params }: { params: Promise<{ id: str
             </p>
           </div>
         </div>
-        {!scheme.isNew && (
-          <span className={`px-3 py-1 rounded-full text-xs font-semibold ${STATUS_COLORS[scheme.status]}`}>
-            {scheme.status}
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {!scheme.isNew && (
+            <>
+              <Link
+                href={`/admin/schemes/${scheme.id}/enrollments`}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-[var(--brand-primary)] text-[var(--brand-primary)] rounded-lg hover:bg-green-50 transition-colors"
+              >
+                <ClipboardList className="w-3.5 h-3.5" />
+                Enrollments
+              </Link>
+              <span className={`px-3 py-1 rounded-full text-xs font-semibold ${STATUS_COLORS[scheme.status]}`}>
+                {scheme.status}
+              </span>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Stats (only for existing schemes) */}

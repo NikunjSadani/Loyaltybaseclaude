@@ -173,13 +173,13 @@ export default function PayoutsPage() {
                 onClick={() => setSelectedBatch(batch)}
                 className={`w-full text-left p-3 rounded-xl border transition-all ${
                   selectedBatch.id === batch.id
-                    ? 'border-[#C8102E] bg-red-50'
+                    ? 'border-[var(--brand-primary)] bg-red-50'
                     : 'border-gray-200 bg-white hover:border-gray-300'
                 }`}
               >
                 <div className="flex items-center justify-between mb-1">
                   <p className="text-sm font-semibold text-gray-900">{batch.month}</p>
-                  <ChevronRight className={`w-4 h-4 ${selectedBatch.id === batch.id ? 'text-[#C8102E]' : 'text-gray-400'}`} />
+                  <ChevronRight className={`w-4 h-4 ${selectedBatch.id === batch.id ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} />
                 </div>
                 <p className="text-xs text-gray-500 mb-1">{batch.partnerCount.toLocaleString()} partners</p>
                 <div className="flex items-center justify-between">
@@ -215,7 +215,7 @@ export default function PayoutsPage() {
                 <button
                   onClick={handleProcessBatch}
                   disabled={processing}
-                  className="flex items-center gap-2 px-4 py-2 bg-[#C8102E] text-white text-sm font-medium rounded-lg hover:bg-[#a00d25] transition-colors disabled:opacity-60"
+                  className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-medium rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60"
                 >
                   <RefreshCw className={`w-4 h-4 ${processing ? 'animate-spin' : ''}`} />
                   {processing ? 'Processing...' : 'Process Batch'}
@@ -243,14 +243,14 @@ export default function PayoutsPage() {
                           done
                             ? 'bg-green-500 text-white'
                             : current
-                            ? 'bg-[#C8102E] text-white'
+                            ? 'bg-[var(--brand-primary)] text-white'
                             : 'bg-gray-100 text-gray-400'
                         }`}
                       >
                         {done ? <CheckCircle className="w-4 h-4" /> : idx + 1}
                       </div>
                       <span className={`text-xs font-medium whitespace-nowrap ${
-                        done ? 'text-green-600' : current ? 'text-[#C8102E]' : 'text-gray-400'
+                        done ? 'text-green-600' : current ? 'text-[var(--brand-primary)]' : 'text-gray-400'
                       }`}>
                         {BATCH_STATUS_LABELS[status]}
                       </span>
@@ -292,7 +292,7 @@ export default function PayoutsPage() {
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     placeholder="Search partner or UTR..."
-                    className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[#C8102E] w-48"
+                    className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] w-48"
                   />
                 </div>
                 <button className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-700 hover:bg-gray-50 transition-colors">

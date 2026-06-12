@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -9,6 +10,7 @@ export async function GET(req: NextRequest) {
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const sp = req.nextUrl.searchParams
     const page = parseInt(sp.get('page') ?? '1', 10)
@@ -21,7 +23,7 @@ export async function GET(req: NextRequest) {
 
     const [targets, total] = await Promise.all([
       prisma.schemeTarget.findMany({
-        where: { userId: targetUserId },
+        where: { userId: targetUserId, scheme: { clientId } },
         include: {
           scheme: {
             select: { id: true, name: true, endDate: true },
@@ -31,7 +33,7 @@ export async function GET(req: NextRequest) {
         take: limit,
         orderBy: { createdAt: 'desc' },
       }),
-      prisma.schemeTarget.count({ where: { userId: targetUserId } }),
+      prisma.schemeTarget.count({ where: { userId: targetUserId, scheme: { clientId } } }),
     ])
 
     const enriched = targets.map((t) => ({

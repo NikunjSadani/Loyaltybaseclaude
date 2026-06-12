@@ -3,6 +3,7 @@ import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
 import { generateOTP, storeOTP } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -26,6 +27,7 @@ export async function POST(req: NextRequest) {
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const body = await req.json()
     const parsed = schema.safeParse(body)
@@ -34,8 +36,8 @@ export async function POST(req: NextRequest) {
     const { rewardId, quantity, deliveryAddress } = parsed.data
 
     // Fetch reward item
-    const item = await prisma.rewardCatalog.findUnique({
-      where: { id: rewardId, status: 'ACTIVE', deletedAt: null },
+    const item = await prisma.rewardCatalog.findFirst({
+      where: { id: rewardId, status: 'ACTIVE', deletedAt: null, clientId },
     })
     if (!item) return err('Reward item not found or not available', 404)
 
@@ -43,7 +45,7 @@ export async function POST(req: NextRequest) {
 
     // Find partner record
     const partner = await prisma.channelPartner.findFirst({
-      where: { userId: authUser.userId },
+      where: { userId: authUser.userId, user: { clientId } },
     })
     if (!partner) return err('Partner account not found', 404)
 

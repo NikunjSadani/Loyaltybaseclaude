@@ -19,7 +19,7 @@ enum UserRole {
   SALES_ASM
   SALES_SO
   SALES_ISR
-  RETAILER
+  SSS
   WHOLESALER
   SUB_STOCKIST
 }
@@ -64,10 +64,23 @@ enum KycStatus {
   UNDER_REVIEW
   PENDING_PENNY_DROP
   PENDING_AGREEMENT
+  PENDING_SO_APPROVAL    // XSR submitted → awaiting SO (or escalated approver)
+  PENDING_ASM_APPROVAL   // SO submitted or escalated past SO → awaiting ASM
+  PENDING_RSM_APPROVAL   // Escalated past ASM → awaiting RSM (SALES_STATE_HEAD)
+  PENDING_GIFSY          // First approver done → awaiting Gifsy final approval
   APPROVED
   REJECTED
   RE_UPLOAD_REQUIRED
+  RESUBMISSION_REQUIRED  // Alias used by frontend — maps to RE_UPLOAD_REQUIRED
+  RE_KYC_REQUIRED        // Full re-KYC needed (e.g. KYC expired)
   SUSPENDED
+  NOT_INTERESTED         // Sales agent marked outlet as not interested — deactivated
+}
+
+/// Outlet-level KYC intent; stored directly on the Outlet row.
+/// Separate from KycStatus which tracks individual submission lifecycle.
+enum OutletKycIntent {
+  NOT_INTERESTED
 }
 
 enum KycDocumentType {
@@ -351,8 +364,9 @@ enum BannerStatus {
 
 model User {
   id                String     @id @default(cuid())
-  phone             String     @unique
-  email             String?    @unique
+  clientId          String
+  phone             String
+  email             String?
   passwordHash      String?
   name              String
   role              UserRole
@@ -386,6 +400,9 @@ model User {
   schemeTargets         SchemeTarget[]
   loginLogs             LoginLog[]
 
+  @@unique([clientId, phone])              // same phone can exist across different clients
+  @@unique([clientId, email])              // email scoped per client (nullable handled by Postgres partial index)
+  @@index([clientId])
   @@index([phone])
   @@index([email])
   @@index([role])
@@ -470,7 +487,8 @@ model AuditLog {
 
 model SalesHierarchyLevel {
   id          String   @id @default(cuid())
-  code        String   @unique
+  clientId    String
+  code        String
   name        String
   level       Int      @unique
   description String?
@@ -479,6 +497,8 @@ model SalesHierarchyLevel {
 
   salesUsers SalesUser[]
 
+  @@unique([clientId, code])
+  @@index([clientId])
   @@index([level])
   @@map("sales_hierarchy_levels")
 }
@@ -538,7 +558,8 @@ model SalesUserAssignment {
 
 model PartnerClassConfig {
   id          String          @id @default(cuid())
-  code        PartnerClassCode @unique
+  clientId    String
+  code        PartnerClassCode 
   name        String
   description String?
   createdAt   DateTime        @default(now())
@@ -547,6 +568,7 @@ model PartnerClassConfig {
   channelPartners ChannelPartner[]
   tierConfigs     TierConfig[]
 
+  @@index([clientId])
   @@map("channel_partner_classes")
 }
 
@@ -575,15 +597,23 @@ model TierConfig {
 
 model ChannelPartner {
   id               String              @id @default(cuid())
+  clientId         String                                    // denormalised for efficient tenant filtering
   userId           String              @unique
   partnerClassId   String
-  partnerCode      String              @unique
+  partnerCode      String
   businessName     String
   ownerName        String
   phone            String
   email            String?
-  gstNumber        String?             @unique
+  gstNumber        String?
   panNumber        String?
+  // ── Bank / payout details (set on KYC approval) ──────────────────────────────
+  bankName            String?
+  bankAccountNumber   String?
+  bankAccountHolder   String?
+  ifscCode            String?
+  upiId               String?
+  paymentMode         String?   // 'bank' | 'upi'
   currentTierConfigId String?
   totalEarnedPoints   Int             @default(0)
   referredBy       String?
@@ -608,6 +638,9 @@ model ChannelPartner {
   payoutTransactions PayoutTransaction[]
   leaderboardEntries LeaderboardEntry[]
 
+  @@unique([clientId, partnerCode])
+  @@unique([clientId, gstNumber])
+  @@index([clientId])
   @@index([userId])
   @@index([partnerClassId])
   @@index([partnerCode])
@@ -655,7 +688,21 @@ model KycSubmission {
   pennydropVerifiedAt DateTime?
   agreementRef      String?
   agreementSignedAt DateTime?
+  escalatedFrom     String?   // SalesRole that was skipped due to resignation (e.g. 'SO')
   version           Int       @default(1)
+
+  // ── Geo capture #1 — taken when the outlet board photo is shot ──────────────
+  boardPhotoLat         Decimal?  @db.Decimal(10, 8)
+  boardPhotoLng         Decimal?  @db.Decimal(11, 8)
+  boardPhotoGeoAccuracy Decimal?  @db.Decimal(8, 2)
+  boardPhotoGeoAt       DateTime?
+
+  // ── Geo capture #2 — taken when the cancelled cheque is uploaded or UPI QR is scanned ──
+  paymentLat            Decimal?  @db.Decimal(10, 8)
+  paymentLng            Decimal?  @db.Decimal(11, 8)
+  paymentGeoAccuracy    Decimal?  @db.Decimal(8, 2)
+  paymentGeoAt          DateTime?
+
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -763,16 +810,42 @@ model DataRequest {
 
 model OutletType {
   id          String   @id @default(cuid())
-  code        String   @unique
+  code        String
   name        String
   description String?
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  outlets Outlet[]
+  outlets       Outlet[]
+  clientConfigs OutletTypeClientConfig[]
 
   @@map("outlet_types")
+}
+
+model OutletTypeClientConfig {
+  id          String   @id @default(cuid())
+  clientId    String
+  outletTypeId String
+
+  isEnabled          Boolean  @default(true)
+  displayName        String?
+  loyaltyEnabled     Boolean  @default(true)
+  schemesEnabled     Boolean  @default(true)
+  visibilityEnabled  Boolean  @default(true)
+  payoutsEnabled     Boolean  @default(true)
+  leaderboardEnabled Boolean  @default(true)
+  targetsEnabled     Boolean  @default(true)
+  kycRequired        Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  outletType OutletType @relation(fields: [outletTypeId], references: [id])
+
+  @@unique([clientId, outletTypeId], name: "clientId_outletTypeId")
+  @@index([clientId])
+  @@map("outlet_type_client_configs")
 }
 
 model Outlet {
@@ -792,11 +865,18 @@ model Outlet {
   country        String    @default("IN")
   latitude       Decimal?  @db.Decimal(10, 8)
   longitude      Decimal?  @db.Decimal(11, 8)
-  isActive       Boolean   @default(true)
-  isPrimary      Boolean   @default(false)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  isActive       Boolean          @default(true)
+  isPrimary      Boolean          @default(false)
+  // Outlet-level KYC intent — set when a sales agent marks the outlet as not interested.
+  // When NOT_INTERESTED: outlet is also deactivated (isActive = false).
+  kycIntent      OutletKycIntent?
+  kycIntentBy    String?          // userId of the sales agent who marked it
+  kycIntentAt    DateTime?        // when it was marked
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
   deletedAt      DateTime?
+  deactivatedAt  DateTime?
+  reactivatedAt  DateTime?
 
   partner          ChannelPartner        @relation(fields: [partnerId], references: [id], onDelete: Cascade)
   outletType       OutletType            @relation(fields: [outletTypeId], references: [id])
@@ -836,8 +916,9 @@ model OutletGeoHistory {
 
 model Category {
   id          String    @id @default(cuid())
+  clientId    String    
   parentId    String?
-  code        String    @unique
+  code        String    
   name        String
   description String?
   imageUrl    String?
@@ -851,6 +932,7 @@ model Category {
   children Category[] @relation("CategoryHierarchy")
   skuMappings SkuCategoryMapping[]
 
+  @@index([clientId])
   @@index([parentId])
   @@index([isActive])
   @@map("categories")
@@ -858,7 +940,8 @@ model Category {
 
 model Sku {
   id              String    @id @default(cuid())
-  skuCode         String    @unique
+  clientId        String
+  skuCode         String    
   name            String
   description     String?
   brand           String?
@@ -881,6 +964,7 @@ model Sku {
   invoiceReturns    InvoiceReturn[]
   rewardInventories RewardInventory[]
 
+  @@index([clientId])
   @@index([skuCode])
   @@index([brand])
   @@index([isActive])
@@ -909,6 +993,7 @@ model SkuCategoryMapping {
 
 model SalesUpload {
   id              String            @id @default(cuid())
+  clientId        String
   uploadedByUserId String
   fileName        String
   fileUrl         String
@@ -927,6 +1012,7 @@ model SalesUpload {
 
   invoices SalesInvoice[]
 
+  @@index([clientId])
   @@index([uploadedByUserId])
   @@index([status])
   @@index([createdAt])
@@ -935,10 +1021,11 @@ model SalesUpload {
 
 model SalesInvoice {
   id               String    @id @default(cuid())
+  clientId         String                          // denormalised for efficient tenant filtering
   salesUploadId    String?
   partnerId        String
   outletId         String?
-  invoiceNumber    String    @unique
+  invoiceNumber    String
   invoiceDate      DateTime
   distributorCode  String?
   distributorName  String?
@@ -958,6 +1045,8 @@ model SalesInvoice {
   lineItems   InvoiceLineItem[]
   returns     InvoiceReturn[]
 
+  @@unique([clientId, invoiceNumber])
+  @@index([clientId])
   @@index([partnerId])
   @@index([outletId])
   @@index([invoiceDate])
@@ -1015,7 +1104,8 @@ model InvoiceReturn {
 
 model Scheme {
   id                   String       @id @default(cuid())
-  code                 String       @unique
+  clientId             String       
+  code                 String       
   name                 String
   description          String?
   schemeType           SchemeType
@@ -1046,6 +1136,7 @@ model Scheme {
   enrollments        SchemeEnrollment[]
   schemeTargets      SchemeTarget[]
 
+  @@index([clientId])
   @@index([status])
   @@index([startDate, endDate])
   @@index([schemeType])
@@ -1221,6 +1312,7 @@ model PointsLedger {
 
 model PointExpiryConfig {
   id                 String           @id @default(cuid())
+  clientId           String           
   partnerClassCode   PartnerClassCode?
   schemeId           String?
   expiryDays         Int
@@ -1230,6 +1322,7 @@ model PointExpiryConfig {
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
 
+  @@index([clientId])
   @@index([schemeId])
   @@map("point_expiry_config")
 }
@@ -1240,8 +1333,9 @@ model PointExpiryConfig {
 
 model RewardCategory {
   id          String    @id @default(cuid())
+  clientId    String    
   parentId    String?
-  code        String    @unique
+  code        String    
   name        String
   description String?
   imageUrl    String?
@@ -1254,14 +1348,16 @@ model RewardCategory {
   children RewardCategory[] @relation("RewardCategoryHierarchy")
   rewards  RewardCatalog[]
 
+  @@index([clientId])
   @@index([parentId])
   @@map("reward_categories")
 }
 
 model RewardCatalog {
   id                  String              @id @default(cuid())
+  clientId            String              
   categoryId          String
-  code                String              @unique
+  code                String              
   name                String
   description         String?
   imageUrls           Json?
@@ -1283,6 +1379,7 @@ model RewardCatalog {
   inventory  RewardInventory[]
   orders     RedemptionOrder[]
 
+  @@index([clientId])
   @@index([categoryId])
   @@index([status])
   @@index([redemptionMode])
@@ -1373,7 +1470,8 @@ model RedemptionStatusHistory {
 
 model VisibilityProgram {
   id                  String                  @id @default(cuid())
-  code                String                  @unique
+  clientId            String                  
+  code                String                  
   name                String
   description         String?
   status              VisibilityProgramStatus @default(DRAFT)
@@ -1391,6 +1489,7 @@ model VisibilityProgram {
 
   submissions VisibilitySubmission[]
 
+  @@index([clientId])
   @@index([status])
   @@index([startDate, endDate])
   @@index([deletedAt])
@@ -1489,7 +1588,8 @@ model VisibilityImageHash {
 
 model PayoutBatch {
   id              String            @id @default(cuid())
-  batchCode       String            @unique
+  clientId        String
+  batchCode       String            
   status          PayoutBatchStatus @default(DRAFT)
   payoutMode      PayoutMode
   totalAmountPaise Int              @default(0)
@@ -1506,6 +1606,7 @@ model PayoutBatch {
 
   transactions PayoutTransaction[]
 
+  @@index([clientId])
   @@index([status])
   @@index([payoutMode])
   @@index([createdAt])
@@ -1554,6 +1655,7 @@ model PayoutTransaction {
 
 model FundLedger {
   id            String          @id @default(cuid())
+  clientId      String          
   ledgerType    FundLedgerType
   amountPaise   Int
   balancePaise  Int
@@ -1563,6 +1665,7 @@ model FundLedger {
   metadata      Json?
   createdAt     DateTime        @default(now())
 
+  @@index([clientId])
   @@index([ledgerType])
   @@index([referenceType, referenceId])
   @@index([createdAt])
@@ -1571,7 +1674,8 @@ model FundLedger {
 
 model FundReceipt {
   id              String   @id @default(cuid())
-  receiptNumber   String   @unique
+  clientId        String   
+  receiptNumber   String   
   amountPaise     Int
   receivedAt      DateTime
   paymentMode     String
@@ -1582,6 +1686,7 @@ model FundReceipt {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
+  @@index([clientId])
   @@index([receivedAt])
   @@index([referenceNumber])
   @@map("fund_receipts")
@@ -1613,6 +1718,7 @@ model TdsRecord {
 
 model AutoInvoice {
   id              String   @id @default(cuid())
+  clientId        String   
   invoiceNumber   String   @unique
   partnerId       String
   invoiceDate     DateTime
@@ -1627,6 +1733,7 @@ model AutoInvoice {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
+  @@index([clientId])
   @@index([partnerId])
   @@index([invoiceDate])
   @@map("auto_invoices")
@@ -1638,7 +1745,8 @@ model AutoInvoice {
 
 model LeaderboardConfig {
   id              String            @id @default(cuid())
-  code            String            @unique
+  clientId        String
+  code            String            
   name            String
   description     String?
   leaderboardType LeaderboardType
@@ -1652,6 +1760,7 @@ model LeaderboardConfig {
 
   snapshots LeaderboardSnapshot[]
 
+  @@index([clientId])
   @@index([leaderboardType])
   @@index([period])
   @@index([isActive])
@@ -1706,7 +1815,8 @@ model LeaderboardEntry {
 
 model Ticket {
   id           String         @id @default(cuid())
-  ticketNumber String         @unique
+  clientId     String         
+  ticketNumber String         
   createdById  String
   assignedToId String?
   category     TicketCategory
@@ -1730,6 +1840,7 @@ model Ticket {
   messages     TicketMessage[]
   statusHistory TicketStatusHistory[]
 
+  @@index([clientId])
   @@index([createdById])
   @@index([assignedToId])
   @@index([status])
@@ -1781,7 +1892,8 @@ model TicketStatusHistory {
 
 model NotificationTemplate {
   id          String              @id @default(cuid())
-  code        String              @unique
+  clientId    String              
+  code        String              
   name        String
   channel     NotificationChannel
   subject     String?
@@ -1794,6 +1906,7 @@ model NotificationTemplate {
 
   queue NotificationQueue[]
 
+  @@index([clientId])
   @@index([channel])
   @@index([isActive])
   @@map("notification_templates")
@@ -1855,7 +1968,8 @@ model NotificationDeliveryLog {
 
 model AdminConfig {
   id          String   @id @default(cuid())
-  key         String   @unique
+  clientId    String
+  key         String   
   value       Json
   description String?
   isPublic    Boolean  @default(false)
@@ -1863,6 +1977,7 @@ model AdminConfig {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  @@index([clientId])
   @@index([key])
   @@index([isPublic])
   @@map("admin_configs")
@@ -1870,6 +1985,7 @@ model AdminConfig {
 
 model BannerManagement {
   id          String       @id @default(cuid())
+  clientId    String       
   title       String
   imageUrl    String
   linkUrl     String?
@@ -1885,6 +2001,7 @@ model BannerManagement {
   updatedAt   DateTime     @updatedAt
   deletedAt   DateTime?
 
+  @@index([clientId])
   @@index([position])
   @@index([status])
   @@index([startDate, endDate])
@@ -1894,7 +2011,8 @@ model BannerManagement {
 
 model ProgramSetting {
   id          String   @id @default(cuid())
-  settingKey  String   @unique
+  clientId    String
+  settingKey  String
   settingValue Json
   category    String?
   description String?
@@ -1903,6 +2021,8 @@ model ProgramSetting {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  @@unique([clientId, settingKey], name: "clientId_settingKey")
+  @@index([clientId])
   @@index([settingKey])
   @@index([category])
   @@map("program_settings")
@@ -1914,6 +2034,7 @@ model ProgramSetting {
 
 model ScheduledReport {
   id              String          @id @default(cuid())
+  clientId        String          
   createdByUserId String
   reportCode      String
   reportName      String
@@ -1932,6 +2053,7 @@ model ScheduledReport {
   createdBy    User                @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
   deliveryLogs ReportDeliveryLog[]
 
+  @@index([clientId])
   @@index([createdByUserId])
   @@index([frequency])
   @@index([isActive])
@@ -2017,4 +2139,122 @@ model LoginLog {
   @@index([userId])
   @@index([createdAt])
   @@map("login_logs")
+}
+
+// ─── MODULE 11b: Outlet Visibility Upload (admin Excel bulk-upload workflow) ──
+
+enum OutletVisibilityStatus {
+  PENDING
+  UNDER_REVIEW
+  APPROVED
+}
+
+model OutletVisibilityUploadBatch {
+  id               String   @id @default(cuid())
+  clientId         String
+  uploadedByUserId String
+  fileName         String
+  rowCount         Int
+  successCount     Int
+  errorCount       Int
+  errors           Json?
+  createdAt        DateTime @default(now())
+
+  records   OutletVisibilityRecord[]
+  auditLogs OutletVisibilityAuditLog[]
+
+  @@index([clientId])
+  @@index([createdAt])
+  @@map("outlet_visibility_upload_batches")
+}
+
+model OutletVisibilityRecord {
+  id                      String                 @id @default(cuid())
+  clientId                String
+  outletCode              String
+  month                   String
+  status                  OutletVisibilityStatus
+  dateOfCapture           DateTime?
+  approvedBy              String?
+  capturedByEmployeeId    String?
+  capturedByEmployeeName  String?
+  capturedByEmployeePhone String?
+  uploadBatchId           String
+  createdAt               DateTime               @default(now())
+  updatedAt               DateTime               @updatedAt
+
+  uploadBatch OutletVisibilityUploadBatch @relation(fields: [uploadBatchId], references: [id])
+
+  @@unique([clientId, outletCode, month])
+  @@index([clientId, month])
+  @@index([clientId, outletCode])
+  @@map("outlet_visibility_records")
+}
+
+model OutletVisibilityAuditLog {
+  id               String                  @id @default(cuid())
+  clientId         String
+  outletCode       String
+  month            String
+  previousStatus   OutletVisibilityStatus?
+  newStatus        OutletVisibilityStatus
+  uploadBatchId    String
+  uploadedByUserId String
+  changedAt        DateTime                @default(now())
+
+  uploadBatch OutletVisibilityUploadBatch @relation(fields: [uploadBatchId], references: [id])
+
+  @@index([clientId, outletCode, month])
+  @@index([uploadBatchId])
+  @@map("outlet_visibility_audit_logs")
+}
+
+
+
+
+// ============================================================
+// MODULE 12 — Sales Data Upload
+// ============================================================
+
+model SalesUploadBatch {
+  id             String   @id @default(cuid())
+  clientId       String
+  uploadedById   String
+  month          String
+  totalRows      Int      @default(0)
+  acceptedCount  Int      @default(0)
+  rejectedCount  Int      @default(0)
+  status         String   @default("COMPLETED")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  salesRecords  OutletSalesRecord[]
+
+  @@index([clientId])
+  @@index([month])
+  @@index([uploadedById])
+  @@map("sales_upload_batches")
+}
+
+model OutletSalesRecord {
+  id          String   @id @default(cuid())
+  clientId    String
+  outletCode  String
+  outletName  String
+  outletType  String
+  month       String
+  kpiValues   Json
+  batchId     String
+
+  batch     SalesUploadBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([clientId, outletCode, month])
+  @@index([clientId])
+  @@index([month])
+  @@index([outletCode])
+  @@index([batchId])
+  @@map("outlet_sales_records")
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -12,12 +13,13 @@ export async function GET(req: NextRequest) {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN') return err('Forbidden - Gifsy Admin only', 403)
+    const clientId = getClientIdFromRequest(req)
 
     const now = new Date()
 
     // Fetch all submissions with approval history
     const approved = await prisma.kycSubmission.findMany({
-      where: { status: 'APPROVED' },
+      where: { status: 'APPROVED', user: { clientId } },
       include: {
         statusHistory: {
           where: { toStatus: 'APPROVED' },
@@ -49,6 +51,7 @@ export async function GET(req: NextRequest) {
     const pending = await prisma.kycSubmission.findMany({
       where: {
         status: { in: ['SUBMITTED', 'UNDER_REVIEW', 'DRAFT'] },
+        user: { clientId },
       },
       select: { createdAt: true },
     })
@@ -82,9 +85,9 @@ export async function GET(req: NextRequest) {
 
     // Re-upload rate
     const reUploadCount = await prisma.kycSubmission.count({
-      where: { status: 'RE_UPLOAD_REQUIRED' },
+      where: { status: 'RE_UPLOAD_REQUIRED', user: { clientId } },
     })
-    const totalCount = await prisma.kycSubmission.count()
+    const totalCount = await prisma.kycSubmission.count({ where: { user: { clientId } } })
     const reUploadRate = totalCount > 0 ? (reUploadCount / totalCount) * 100 : 0
 
     return ok({

@@ -17,6 +17,22 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { KYCReviewer } from '@/components/admin/kyc-reviewer';
+import type { EntityType, GSTRegistrationType } from '@/lib/invoice';
+
+const ENTITY_TYPE_LABELS: Record<EntityType, string> = {
+  INDIVIDUAL: 'Individual / Proprietor',
+  HUF: 'Hindu Undivided Family (HUF)',
+  COMPANY: 'Private / Public Limited Company',
+  FIRM: 'Partnership Firm',
+  LLP: 'Limited Liability Partnership (LLP)',
+  OTHERS: 'Others',
+};
+
+const GST_REG_LABELS: Record<GSTRegistrationType, string> = {
+  REGULAR: 'Regular',
+  UNREGISTERED: 'Unregistered',
+  COMPOSITE: 'Composition Scheme',
+};
 
 const KYC_DATA: Record<string, {
   id: string;
@@ -112,11 +128,16 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
   const kyc = KYC_DATA[id];
   const [actionResult, setActionResult] = useState<string | null>(null);
 
+  // Gifsy-admin-only fields set during KYC approval
+  const [entityType, setEntityType] = useState<EntityType>('INDIVIDUAL');
+  const [gstRegType, setGstRegType] = useState<GSTRegistrationType>('UNREGISTERED');
+  const [taxFieldsSaved, setTaxFieldsSaved] = useState(false);
+
   if (!kyc) {
     return (
       <div className="text-center py-20">
         <p className="text-gray-500 text-sm">KYC submission not found</p>
-        <Link href="/kyc" className="text-[#C8102E] text-sm mt-2 inline-block">← Back to KYC List</Link>
+        <Link href="/kyc" className="text-[var(--brand-primary)] text-sm mt-2 inline-block">← Back to KYC List</Link>
       </div>
     );
   }
@@ -165,7 +186,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           {/* Partner Info */}
           <div className="bg-white rounded-xl border border-gray-200 p-4">
             <h2 className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
-              <Building2 className="w-4 h-4 text-[#C8102E]" />
+              <Building2 className="w-4 h-4 text-[var(--brand-primary)]" />
               Partner Information
             </h2>
             <div className="space-y-2.5 text-xs">
@@ -199,17 +220,70 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           {/* Tax Info */}
           <div className="bg-white rounded-xl border border-gray-200 p-4">
             <h2 className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
-              <FileText className="w-4 h-4 text-[#C8102E]" />
+              <FileText className="w-4 h-4 text-[var(--brand-primary)]" />
               Tax & Registration
             </h2>
             <div className="space-y-2 text-xs">
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">PAN</span>
-                <span className="font-mono text-gray-800 font-medium">{kyc.panNumber}</span>
+                <span className="font-mono text-gray-800 font-medium">{kyc.panNumber || '—'}</span>
               </div>
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">GSTIN</span>
-                <span className="font-mono text-gray-800 font-medium">{kyc.gstNumber}</span>
+                <span className="font-mono text-gray-800 font-medium">{kyc.gstNumber || '—'}</span>
+              </div>
+            </div>
+
+            {/* ── Gifsy Admin fields — set at time of KYC approval ── */}
+            <div className="mt-4 pt-4 border-t border-gray-100">
+              <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-3">
+                Classification · Set by Gifsy Admin
+              </p>
+              <div className="space-y-3">
+                {/* Entity Type */}
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Entity Type</label>
+                  <select
+                    value={entityType}
+                    onChange={(e) => { setEntityType(e.target.value as EntityType); setTaxFieldsSaved(false); }}
+                    className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-2 bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30 focus:border-[var(--brand-primary)]"
+                  >
+                    {(Object.keys(ENTITY_TYPE_LABELS) as EntityType[]).map((k) => (
+                      <option key={k} value={k}>{ENTITY_TYPE_LABELS[k]}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* GST Registration Type */}
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">GST Registration Type</label>
+                  <select
+                    value={gstRegType}
+                    onChange={(e) => { setGstRegType(e.target.value as GSTRegistrationType); setTaxFieldsSaved(false); }}
+                    className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-2 bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30 focus:border-[var(--brand-primary)]"
+                  >
+                    {(Object.keys(GST_REG_LABELS) as GSTRegistrationType[]).map((k) => (
+                      <option key={k} value={k}>{GST_REG_LABELS[k]}</option>
+                    ))}
+                  </select>
+                  {gstRegType === 'REGULAR' && (
+                    <p className="text-[10px] text-green-600 mt-1">
+                      GST will be applied to visibility invoices for this retailer.
+                    </p>
+                  )}
+                  {(gstRegType === 'UNREGISTERED' || gstRegType === 'COMPOSITE') && (
+                    <p className="text-[10px] text-gray-400 mt-1">
+                      Invoices for this retailer will not include GST.
+                    </p>
+                  )}
+                </div>
+
+                <button
+                  onClick={() => setTaxFieldsSaved(true)}
+                  className="w-full text-xs py-1.5 rounded-lg border border-[var(--brand-primary)] text-[var(--brand-primary)] hover:bg-green-50 transition-colors font-medium"
+                >
+                  {taxFieldsSaved ? '✓ Classification Saved' : 'Save Classification'}
+                </button>
               </div>
             </div>
           </div>
@@ -217,7 +291,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           {/* Bank Details */}
           <div className="bg-white rounded-xl border border-gray-200 p-4">
             <h2 className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
-              <CreditCard className="w-4 h-4 text-[#C8102E]" />
+              <CreditCard className="w-4 h-4 text-[var(--brand-primary)]" />
               Bank Details
             </h2>
             <div className="space-y-2 text-xs">
@@ -249,7 +323,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           {/* Agreement & Sales */}
           <div className="bg-white rounded-xl border border-gray-200 p-4">
             <h2 className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
-              <MapPin className="w-4 h-4 text-[#C8102E]" />
+              <MapPin className="w-4 h-4 text-[var(--brand-primary)]" />
               Assignment & Agreement
             </h2>
             <div className="space-y-2 text-xs">
@@ -295,7 +369,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           {/* Status History Timeline */}
           <div className="bg-white rounded-xl border border-gray-200 p-4">
             <h2 className="text-sm font-semibold text-gray-800 mb-4 flex items-center gap-2">
-              <Clock className="w-4 h-4 text-[#C8102E]" />
+              <Clock className="w-4 h-4 text-[var(--brand-primary)]" />
               Status History
             </h2>
             <div className="relative">
@@ -324,7 +398,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           {/* Audit Log */}
           <div className="bg-white rounded-xl border border-gray-200 p-4">
             <h2 className="text-sm font-semibold text-gray-800 mb-4 flex items-center gap-2">
-              <FileText className="w-4 h-4 text-[#C8102E]" />
+              <FileText className="w-4 h-4 text-[var(--brand-primary)]" />
               Audit Log
             </h2>
             <div className="space-y-3">

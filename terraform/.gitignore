@@ -1,0 +1,22 @@
+# Terraform working directory — never commit
+.terraform/
+
+# Plan files may contain secrets
+*.tfplan
+tfplan
+
+# Local override files
+*.tfvars.local
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# State files — stored in GCS, not git
+*.tfstate
+*.tfstate.backup
+terraform.tfstate.d/
+
+# Crash log
+crash.log
+crash.*.log

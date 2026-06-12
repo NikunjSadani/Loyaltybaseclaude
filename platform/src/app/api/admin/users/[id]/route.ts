@@ -10,7 +10,7 @@ const patchSchema = z.object({
   name: z.string().min(1).optional(),
   email: z.string().email().optional(),
   status: z.enum(['ACTIVE', 'INACTIVE', 'SUSPENDED', 'PENDING_VERIFICATION']).optional(),
-  role: z.enum(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR', 'RETAILER', 'WHOLESALER', 'SUB_STOCKIST']).optional(),
+  role: z.enum(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR', 'SSS', 'WHOLESALER', 'SUB_STOCKIST']).optional(),
 })
 
 export async function GET(

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -19,11 +20,12 @@ export async function GET(
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const { id } = await params
 
-    const submission = await prisma.kycSubmission.findUnique({
-      where: { id },
+    const submission = await prisma.kycSubmission.findFirst({
+      where: { id, user: { clientId } },
       include: {
         documents: true,
         statusHistory: {
@@ -56,6 +58,7 @@ export async function PATCH(
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN') return err('Forbidden - Admin only', 403)
+    const clientId = getClientIdFromRequest(req)
 
     const { id } = await params
     const body = await req.json()
@@ -69,7 +72,7 @@ export async function PATCH(
       return err('Rejection reason is mandatory for REJECTED or RE_UPLOAD_REQUIRED status')
     }
 
-    const submission = await prisma.kycSubmission.findUnique({ where: { id } })
+    const submission = await prisma.kycSubmission.findFirst({ where: { id, user: { clientId } } })
     if (!submission) return err('KYC submission not found', 404)
 
     const updated = await prisma.$transaction(async (tx) => {

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -17,6 +18,7 @@ export async function POST(req: NextRequest) {
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') {
       return err('Forbidden - Admin only', 403)
     }
+    const clientId = getClientIdFromRequest(req)
 
     const body = await req.json()
     const parsed = schema.safeParse(body)
@@ -24,7 +26,7 @@ export async function POST(req: NextRequest) {
 
     const { batchId } = parsed.data
 
-    const batch = await prisma.salesUpload.findUnique({ where: { id: batchId } })
+    const batch = await prisma.salesUpload.findFirst({ where: { id: batchId, clientId } })
     if (!batch) return err('Upload batch not found', 404)
 
     // Get all invoices for this batch that are valid and not yet processed
@@ -38,7 +40,7 @@ export async function POST(req: NextRequest) {
 
     // Get all active schemes
     const schemes = await prisma.scheme.findMany({
-      where: { status: 'ACTIVE', deletedAt: null },
+      where: { status: 'ACTIVE', deletedAt: null, clientId },
       include: { rules: true },
     })
 

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -10,6 +11,7 @@ export async function GET(req: NextRequest) {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN') return err('Forbidden - Gifsy Admin only', 403)
+    const clientId = getClientIdFromRequest(req)
 
     const sp = req.nextUrl.searchParams
     const page = parseInt(sp.get('page') ?? '1', 10)
@@ -20,7 +22,7 @@ export async function GET(req: NextRequest) {
     const dateFrom = sp.get('dateFrom') ? new Date(sp.get('dateFrom')!) : undefined
     const dateTo = sp.get('dateTo') ? new Date(sp.get('dateTo')!) : undefined
 
-    const where: any = {}
+    const where: any = { submission: { partner: { user: { clientId } } } }
     if (dateFrom || dateTo) {
       where.createdAt = {}
       if (dateFrom) where.createdAt.gte = dateFrom

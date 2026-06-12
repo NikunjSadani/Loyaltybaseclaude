@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -9,6 +10,7 @@ export async function GET(req: NextRequest) {
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const sp = req.nextUrl.searchParams
     const category = sp.get('category') ?? undefined
@@ -22,6 +24,7 @@ export async function GET(req: NextRequest) {
     const where: any = {
       status: 'ACTIVE',
       deletedAt: null,
+      clientId,
     }
     if (minPoints !== undefined || maxPoints !== undefined) {
       where.pointsCost = {}
@@ -30,7 +33,7 @@ export async function GET(req: NextRequest) {
     }
 
     // Get user's wallet balance to filter eligible items
-    const partner = await prisma.channelPartner.findFirst({ where: { userId: authUser.userId } })
+    const partner = await prisma.channelPartner.findFirst({ where: { userId: authUser.userId, user: { clientId } } })
     const wallet = partner ? await prisma.wallet.findFirst({ where: { partnerId: partner.id } }) : null
     const userBalance = wallet ? wallet.redeemablePoints : 0
 

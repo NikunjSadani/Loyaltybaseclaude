@@ -80,7 +80,7 @@ export default function FundPage() {
     URL.revokeObjectURL(url)
   }
 
-  if (loading) return <div className="p-6 flex items-center justify-center"><RefreshCw className="animate-spin h-6 w-6 text-[#C8102E]" /></div>
+  if (loading) return <div className="p-6 flex items-center justify-center"><RefreshCw className="animate-spin h-6 w-6 text-[var(--brand-primary)]" /></div>
 
   const isLowBalance = ledger && ledger.availableBalance < 100000 * 100
 
@@ -92,10 +92,10 @@ export default function FundPage() {
           <p className="text-sm text-gray-500 mt-1">Program fund ledger and reconciliation</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={handleExport} className="text-sm border-[#C8102E] text-[#C8102E]">
+          <Button variant="outline" onClick={handleExport} className="text-sm border-[var(--brand-primary)] text-[var(--brand-primary)]">
             <Download className="h-4 w-4 mr-1" /> Export Reconciliation
           </Button>
-          <Button onClick={() => setShowForm(true)} className="bg-[#C8102E] hover:bg-[#a00d24] text-white text-sm">
+          <Button onClick={() => setShowForm(true)} className="bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white text-sm">
             <PlusCircle className="h-4 w-4 mr-1" /> Record Payment Received
           </Button>
         </div>
@@ -186,24 +186,24 @@ export default function FundPage() {
             <div className="space-y-3">
               <div>
                 <label className="text-xs font-medium text-gray-700 block mb-1">Amount (₹)</label>
-                <input type="number" value={form.amount} onChange={e => setForm(p => ({ ...p, amount: e.target.value }))} className="w-full border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#C8102E]" placeholder="0.00" />
+                <input type="number" value={form.amount} onChange={e => setForm(p => ({ ...p, amount: e.target.value }))} className="w-full border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]" placeholder="0.00" />
               </div>
               <div>
                 <label className="text-xs font-medium text-gray-700 block mb-1">UTR / Reference Number</label>
-                <input value={form.referenceNumber} onChange={e => setForm(p => ({ ...p, referenceNumber: e.target.value }))} className="w-full border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#C8102E]" placeholder="UTR123456789" />
+                <input value={form.referenceNumber} onChange={e => setForm(p => ({ ...p, referenceNumber: e.target.value }))} className="w-full border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]" placeholder="UTR123456789" />
               </div>
               <div>
                 <label className="text-xs font-medium text-gray-700 block mb-1">Payment Date</label>
-                <input type="date" value={form.paymentDate} onChange={e => setForm(p => ({ ...p, paymentDate: e.target.value }))} className="w-full border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#C8102E]" />
+                <input type="date" value={form.paymentDate} onChange={e => setForm(p => ({ ...p, paymentDate: e.target.value }))} className="w-full border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]" />
               </div>
               <div>
                 <label className="text-xs font-medium text-gray-700 block mb-1">Remarks</label>
-                <textarea value={form.remarks} onChange={e => setForm(p => ({ ...p, remarks: e.target.value }))} rows={2} className="w-full border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#C8102E]" placeholder="Optional notes" />
+                <textarea value={form.remarks} onChange={e => setForm(p => ({ ...p, remarks: e.target.value }))} rows={2} className="w-full border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]" placeholder="Optional notes" />
               </div>
             </div>
             <div className="flex gap-2 pt-2">
               <Button variant="outline" onClick={() => setShowForm(false)} className="flex-1">Cancel</Button>
-              <Button onClick={handleRecordPayment} disabled={submitting || !form.amount || !form.referenceNumber || !form.paymentDate} className="flex-1 bg-[#C8102E] hover:bg-[#a00d24] text-white">
+              <Button onClick={handleRecordPayment} disabled={submitting || !form.amount || !form.referenceNumber || !form.paymentDate} className="flex-1 bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white">
                 {submitting ? 'Saving...' : 'Record Payment'}
               </Button>
             </div>

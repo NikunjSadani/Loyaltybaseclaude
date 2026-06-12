@@ -1,0 +1,179 @@
+name: Deploy — Staging (develop)
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID:   gifsy-platform
+  REGION:       asia-south1
+  AR_REPO:      gifsy-images
+  SQL_INSTANCE: gifsy-platform:asia-south1:gifsy-db
+
+jobs:
+  # ── Tests ────────────────────────────────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [api, platform]
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        # platform has no prisma/schema.prisma — it shares the API schema
+        run: |
+          if [ -f prisma/schema.prisma ]; then
+            npx prisma generate
+          else
+            npx prisma generate --schema=../api/prisma/schema.prisma
+          fi
+
+      - name: Run tests
+        run: |
+          if [ "${{ matrix.app }}" = "api" ]; then
+            npm test -- --forceExit --no-coverage
+          else
+            npm test
+          fi
+        env:
+          DATABASE_URL: "postgresql://test:test@127.0.0.1:5432/test"
+          JWT_SECRET: "ci-test-secret"
+          NEXT_PUBLIC_API_URL: "http://localhost:4000"
+          NODE_ENV: test
+
+  # ── Build & Deploy API (staging) ─────────────────────────────────────────────
+  deploy-api-staging:
+    name: Deploy API → gifsy-api-staging
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build & push API staging image
+        run: |
+          docker build \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:staging-${{ github.sha }} \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:staging \
+            ./api
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:staging-${{ github.sha }}
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:staging
+
+      - name: Deploy API to Cloud Run staging
+        run: |
+          gcloud run deploy gifsy-api-staging \
+            --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:staging-${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --platform=managed \
+            --service-account=gifsy-api-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
+            --allow-unauthenticated \
+            --port=4000 \
+            --memory=512Mi \
+            --cpu=1 \
+            --min-instances=0 \
+            --max-instances=3 \
+            --cpu-throttling \
+            --add-cloudsql-instances=${{ env.SQL_INSTANCE }} \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},FIXED_OTP=123456,PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=7d,JWT_REFRESH_EXPIRES_IN=30d,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2" \
+            --set-secrets="\
+              DATABASE_URL=DATABASE_URL_STAGING:latest,\
+              JWT_SECRET=JWT_SECRET_STAGING:latest,\
+              MSG91_AUTH_KEY=MSG91_AUTH_KEY:latest,\
+              MSG91_SENDER_ID=MSG91_SENDER_ID:latest,\
+              MSG91_OTP_TEMPLATE_ID=MSG91_OTP_TEMPLATE_ID:latest,\
+              MSG91_SMS_TEMPLATE_ID=MSG91_SMS_TEMPLATE_ID:latest,\
+              GCS_BUCKET=GCS_BUCKET:latest,\
+              GCP_PROJECT_ID=GCP_PROJECT_ID:latest,\
+              CORS_ORIGINS=CORS_ORIGINS_STAGING:latest"
+
+  # ── Build & Deploy Frontend (staging) ────────────────────────────────────────
+  deploy-frontend-staging:
+    name: Deploy Frontend → gifsy-frontend-staging
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build & push frontend staging image
+        run: |
+          docker build \
+            --build-arg NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL_STAGING }} \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:staging-${{ github.sha }} \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:staging \
+            ./platform
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:staging-${{ github.sha }}
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:staging
+
+      - name: Deploy Frontend to Cloud Run staging
+        run: |
+          gcloud run deploy gifsy-frontend-staging \
+            --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:staging-${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --platform=managed \
+            --service-account=gifsy-frontend-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
+            --allow-unauthenticated \
+            --port=3000 \
+            --memory=512Mi \
+            --cpu=1 \
+            --min-instances=0 \
+            --max-instances=3 \
+            --set-env-vars="NODE_ENV=production"
+
+  # ── Summary ──────────────────────────────────────────────────────────────────
+  summary:
+    name: Staging summary
+    needs: [deploy-api-staging, deploy-frontend-staging]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "✅  Staging deployment complete"
+          echo "    SHA: ${{ github.sha }}"
+          echo ""
+          echo "Staging URLs (after DNS setup):"
+          echo "    API      : https://api.staging.gifsy.in"
+          echo "    Platform : https://staging.platform.gifsy.in"
+          echo ""
+          echo "⚠️  FIXED_OTP=123456 is active on staging — never use real OTPs here."

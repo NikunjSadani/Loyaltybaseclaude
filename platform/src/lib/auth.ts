@@ -1,4 +1,4 @@
-import jwt from 'jsonwebtoken';
+﻿import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { prisma } from './prisma';
 
@@ -14,7 +14,11 @@ export interface TokenPayload {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const JWT_SECRET = process.env.JWT_SECRET ?? 'loyalty-platform-secret-key-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET && process.env.NODE_ENV === 'production') {
+  throw new Error('JWT_SECRET environment variable is not set. Refusing to start.');
+}
+const _JWT_SECRET = JWT_SECRET ?? 'dev-only-insecure-secret-do-not-use-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? '7d';
 const BCRYPT_ROUNDS = 12;
 const OTP_EXPIRY_MINUTES = 10;
@@ -85,7 +89,7 @@ export function generateToken(
   const payload: Omit<TokenPayload, 'iat' | 'exp'> = { userId, role };
   if (partnerId) payload.partnerId = partnerId;
 
-  return jwt.sign(payload, JWT_SECRET, {
+  return jwt.sign(payload, _JWT_SECRET, {
     expiresIn: JWT_EXPIRES_IN,
   } as jwt.SignOptions);
 }
@@ -95,7 +99,7 @@ export function generateToken(
  */
 export function verifyToken(token: string): TokenPayload | null {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, _JWT_SECRET);
     return decoded as TokenPayload;
   } catch {
     return null;
@@ -124,10 +128,26 @@ export async function compareHash(
 // ─── Request Helper ───────────────────────────────────────────────────────────
 
 /**
- * Extract and verify the JWT from an Authorization: Bearer <token> header.
- * Returns the payload or null if missing/invalid.
+ * Extract the authenticated user from a request.
+ *
+ * Priority:
+ *  1. Proxy-injected headers (x-user-id / x-user-role) — set by the Edge
+ *     proxy after JWT verification, and also in DEMO_MODE. Trusting these is
+ *     safe because they can only be set by the proxy, not by the client.
+ *  2. Authorization: Bearer <token> — fallback for direct API calls that
+ *     explicitly pass a JWT (e.g. server-side fetch calls).
+ *
+ * Returns null if neither source provides a valid identity.
  */
 export function getAuthUser(req: { headers: { get: (key: string) => string | null } }): TokenPayload | null {
+  // 1. Proxy-injected headers (DEMO_MODE + normal authenticated requests)
+  const userId = req.headers.get('x-user-id');
+  const role   = req.headers.get('x-user-role');
+  if (userId && role) {
+    return { userId, role } as TokenPayload;
+  }
+
+  // 2. Bearer token fallback
   const authHeader = req.headers.get('Authorization') ?? req.headers.get('authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   const token = authHeader.slice(7);
@@ -149,7 +169,7 @@ export const ROLES = {
   AREA_SALES_MANAGER: 'AREA_SALES_MANAGER',
   TERRITORY_SALES_OFFICER: 'TERRITORY_SALES_OFFICER',
   SALES_EXECUTIVE: 'SALES_EXECUTIVE',
-  RETAILER: 'RETAILER',
+  SSS: 'SSS',
   WHOLESALER: 'WHOLESALER',
   SUB_STOCKIST: 'SUB_STOCKIST',
 } as const;

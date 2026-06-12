@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
-import { signToken } from '@/lib/auth'
+import { signToken, generateToken } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -19,6 +20,19 @@ export async function POST(req: NextRequest) {
       return err(parsed.error.issues[0].message)
     }
     const { mobile, otp } = parsed.data
+    const clientId = getClientIdFromRequest(req)
+
+    // DEMO MODE: accept 000000 as a valid OTP for any number
+    if (process.env.DEMO_MODE === 'true') {
+      if (otp !== '000000') {
+        return err('Invalid OTP. Use 000000 in demo mode.', 401)
+      }
+      const token = generateToken('demo-admin-id', 'GIFSY_ADMIN')
+      return ok({
+        token,
+        user: { id: 'demo-admin-id', role: 'GIFSY_ADMIN', name: 'Demo Admin' },
+      })
+    }
 
     // Find latest valid OTP for phone
     const otpRecord = await prisma.otpCode.findFirst({
@@ -60,9 +74,24 @@ export async function POST(req: NextRequest) {
     })
 
     // Find user
-    const user = await prisma.user.findFirst({ where: { phone: mobile } })
+    const user = await prisma.user.findFirst({ where: { phone: mobile, clientId } })
     if (!user) {
       return err('User not found', 404)
+    }
+
+    // Block inactive / pending accounts from logging in.
+    // Channel partners are created with PENDING_VERIFICATION and only become
+    // ACTIVE after the full KYC → Gifsy-approval cycle completes.
+    // Admin roles (GIFSY_ADMIN, CLIENT_ADMIN) are always created as ACTIVE,
+    // so this gate only affects partners in practice.
+    if (user.status !== 'ACTIVE') {
+      const statusMessages: Record<string, string> = {
+        PENDING_VERIFICATION: 'Your account is pending KYC verification. Please complete your KYC to activate your account.',
+        INACTIVE:   'Your account has been deactivated. Please contact your supervisor.',
+        SUSPENDED:  'Your account has been suspended. Please contact support.',
+      }
+      const message = statusMessages[user.status] ?? 'Your account is not active. Please contact support.'
+      return err(message, 403)
     }
 
     // Generate JWT

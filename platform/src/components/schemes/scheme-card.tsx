@@ -1,11 +1,13 @@
 'use client';
 
 import React, { useState } from 'react';
-import { ChevronDown, ChevronUp, Clock, Trophy } from 'lucide-react';
+import { ChevronDown, ChevronUp, Clock, Trophy, TrendingUp, Package } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { ProgressRing } from './progress-ring';
 import { formatDate, formatPoints } from '@/lib/utils';
 import { cn } from '@/lib/utils';
+import { classifyPaceGap } from '@/lib/pace';
+import { getGifsySettings } from '@/lib/gifsy-settings';
 
 type SchemeStatus = 'ACTIVE' | 'ACHIEVED' | 'MISSED' | 'UPCOMING';
 
@@ -37,53 +39,136 @@ interface SchemeCardProps {
 }
 
 const statusConfig: Record<SchemeStatus, { variant: 'success' | 'danger' | 'warning' | 'info'; label: string }> = {
-  ACTIVE: { variant: 'info', label: 'Active' },
-  ACHIEVED: { variant: 'success', label: 'Achieved' },
-  MISSED: { variant: 'danger', label: 'Missed' },
-  UPCOMING: { variant: 'warning', label: 'Upcoming' },
+  ACTIVE:   { variant: 'info',    label: 'Active'    },
+  ACHIEVED: { variant: 'success', label: 'Achieved'  },
+  MISSED:   { variant: 'danger',  label: 'Missed'    },
+  UPCOMING: { variant: 'warning', label: 'Upcoming'  },
 };
+
+/* ─── Helpers ──────────────────────────────────────────────────────────────────── */
+
+function daysRemaining(endDate: string): number {
+  const end   = new Date(endDate);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  end.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.ceil((end.getTime() - today.getTime()) / 86_400_000));
+}
+
+function schemeElapsedPct(startDate: string, endDate: string): number {
+  const start   = new Date(startDate).getTime();
+  const end     = new Date(endDate).getTime();
+  const now     = Math.min(Date.now(), end);
+  const total   = end - start;
+  if (total <= 0) return 100;
+  return Math.round(((now - start) / total) * 100);
+}
+
+function paceLabel(achievePct: number, timePct: number, threshold: number): { text: string; bg: string; textColor: string } {
+  const gap    = timePct - achievePct;
+  const status = classifyPaceGap(gap, timePct, threshold);
+  if (status === 'green') return { text: 'On pace',          bg: 'bg-emerald-50', textColor: 'text-emerald-700' };
+  if (status === 'amber') return { text: `${gap}% behind`,   bg: 'bg-amber-50',   textColor: 'text-amber-700'   };
+  return                         { text: `${gap}% behind pace`, bg: 'bg-red-50',  textColor: 'text-red-600'     };
+}
+
+function paceStripColor(achievePct: number, timePct: number, threshold: number): string {
+  const gap    = timePct - achievePct;
+  const status = classifyPaceGap(gap, timePct, threshold);
+  if (status === 'green') return 'bg-emerald-400';
+  if (status === 'amber') return 'bg-amber-400';
+  return                         'bg-red-400';
+}
+
+/* ─── Component ────────────────────────────────────────────────────────────────── */
 
 export function SchemeCard({ scheme }: SchemeCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const threshold = getGifsySettings().paceAmberThreshold ?? 10;
 
-  const pct = scheme.targetValue && scheme.achievedValue !== undefined
-    ? Math.round((scheme.achievedValue / scheme.targetValue) * 100)
+  const achievePct = scheme.targetValue && scheme.achievedValue !== undefined
+    ? Math.min(Math.round((scheme.achievedValue / scheme.targetValue) * 100), 100)
     : 0;
 
   const { variant, label } = statusConfig[scheme.status];
+  const daysLeft  = daysRemaining(scheme.endDate);
+  const timePct   = scheme.status === 'ACTIVE'   ? schemeElapsedPct(scheme.startDate, scheme.endDate)
+                  : scheme.status === 'UPCOMING' ? 0
+                  : 100;
+  const remaining = scheme.targetValue !== undefined && scheme.achievedValue !== undefined
+    ? Math.max(0, scheme.targetValue - scheme.achievedValue)
+    : null;
+
+  const pace      = scheme.status === 'ACTIVE' ? paceLabel(achievePct, timePct, threshold) : null;
+  const stripColor = scheme.status === 'ACTIVE'
+    ? paceStripColor(achievePct, timePct, threshold)
+    : scheme.status === 'ACHIEVED' ? 'bg-emerald-400'
+    : scheme.status === 'MISSED'   ? 'bg-red-400'
+    : 'bg-gray-200';
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      {/* Pace strip */}
+      <div className={`h-1 ${stripColor}`} />
+
       {/* Main row */}
       <div className="p-4">
         <div className="flex items-start gap-4">
           {scheme.targetValue !== undefined && (
-            <ProgressRing value={pct} size={60} />
+            <ProgressRing value={achievePct} size={60} />
           )}
           <div className="flex-1 min-w-0">
             <div className="flex items-start justify-between gap-2">
-              <p className="text-sm font-semibold text-gray-900 leading-snug">{scheme.name}</p>
-              <Badge variant={variant}>{label}</Badge>
+              <p className="min-w-0 flex-1 text-sm font-semibold text-gray-900 leading-snug">{scheme.name}</p>
+              <Badge variant={variant} className="flex-shrink-0">{label}</Badge>
             </div>
             {scheme.description && (
               <p className="text-xs text-gray-500 mt-0.5 line-clamp-1">{scheme.description}</p>
             )}
+
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2">
-              <span className="text-xs text-gray-400 flex items-center gap-1">
-                <Clock className="h-3 w-3" />
-                Ends {formatDate(scheme.endDate)}
-              </span>
-              {scheme.incentiveEarned !== undefined && (
+              {/* Days remaining */}
+              {scheme.status === 'ACTIVE' && (
+                <span className={`text-xs font-semibold flex items-center gap-1 ${daysLeft <= 7 ? 'text-red-500' : daysLeft <= 14 ? 'text-amber-600' : 'text-gray-400'}`}>
+                  <Clock className="h-3 w-3" />
+                  {daysLeft === 0 ? 'Ends today' : `${daysLeft} day${daysLeft !== 1 ? 's' : ''} left`}
+                </span>
+              )}
+              {scheme.status !== 'ACTIVE' && (
+                <span className="text-xs text-gray-400 flex items-center gap-1">
+                  <Clock className="h-3 w-3" />
+                  Ends {formatDate(scheme.endDate)}
+                </span>
+              )}
+              {scheme.incentiveEarned !== undefined && scheme.incentiveEarned > 0 && (
                 <span className="text-xs text-emerald-600 font-medium flex items-center gap-1">
                   <Trophy className="h-3 w-3" />
                   {formatPoints(scheme.incentiveEarned)} pts earned
                 </span>
               )}
             </div>
+
+            {/* Achievement values */}
             {scheme.targetValue !== undefined && scheme.achievedValue !== undefined && (
-              <p className="text-xs text-gray-600 mt-1">
-                {formatPoints(scheme.achievedValue)} / {formatPoints(scheme.targetValue)} units
-              </p>
+              <div className="flex items-center gap-3 mt-1.5">
+                <p className="text-xs text-gray-600">
+                  {formatPoints(scheme.achievedValue)} / {formatPoints(scheme.targetValue)} units
+                </p>
+                {remaining !== null && remaining > 0 && scheme.status === 'ACTIVE' && (
+                  <span className="flex items-center gap-1 text-[10px] font-semibold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded-full">
+                    <Package className="h-2.5 w-2.5" />
+                    {formatPoints(remaining)} to go
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Pace badge */}
+            {pace && (
+              <div className={`flex items-center gap-1.5 mt-2 text-[10px] font-semibold px-2 py-1 rounded-lg ${pace.bg} ${pace.textColor}`}>
+                <TrendingUp className="h-2.5 w-2.5 shrink-0" />
+                {pace.text} · {timePct}% of scheme duration elapsed
+              </div>
             )}
           </div>
         </div>

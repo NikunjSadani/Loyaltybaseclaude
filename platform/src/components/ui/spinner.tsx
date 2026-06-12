@@ -17,7 +17,7 @@ const sizeMap: Record<SpinnerSize, string> = {
   xl: 'h-12 w-12',
 };
 
-export function Spinner({ size = 'md', className, color = 'text-[#C8102E]' }: SpinnerProps) {
+export function Spinner({ size = 'md', className, color = 'text-[var(--brand-primary)]' }: SpinnerProps) {
   return (
     <svg
       className={cn('animate-spin', sizeMap[size], color, className)}

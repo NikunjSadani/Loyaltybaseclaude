@@ -102,7 +102,7 @@ export function KYCReviewer({
               onClick={() => setSelectedDoc(doc)}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
                 selectedDoc?.id === doc.id
-                  ? 'border-[#C8102E] bg-red-50 text-[#C8102E]'
+                  ? 'border-[var(--brand-primary)] bg-red-50 text-[var(--brand-primary)]'
                   : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
               }`}
             >
@@ -278,7 +278,7 @@ export function KYCReviewer({
                       value={reason}
                       checked={selectedReason === reason}
                       onChange={() => setSelectedReason(reason)}
-                      className="accent-[#C8102E]"
+                      className="accent-[var(--brand-primary)]"
                     />
                     <span className="text-xs text-gray-700">{reason}</span>
                   </label>
@@ -296,7 +296,7 @@ export function KYCReviewer({
                   onChange={(e) => setCustomReason(e.target.value)}
                   rows={3}
                   placeholder="Describe the issue in detail..."
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#C8102E] resize-none"
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] resize-none"
                 />
               </div>
             )}

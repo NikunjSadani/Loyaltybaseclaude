@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -21,11 +22,12 @@ export async function GET(
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN' && authUser.role !== 'MIS_USER') {
       return err('Forbidden', 403)
     }
+    const clientId = getClientIdFromRequest(req)
 
     const { id } = await params
 
-    const partner = await prisma.channelPartner.findUnique({
-      where: { id },
+    const partner = await prisma.channelPartner.findFirst({
+      where: { id, user: { clientId } },
       include: {
         user: { select: { id: true, name: true, phone: true, email: true, status: true } },
         wallets: true,
@@ -54,11 +56,16 @@ export async function PATCH(
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') return err('Forbidden', 403)
+    const clientId = getClientIdFromRequest(req)
 
     const { id } = await params
     const body = await req.json()
     const parsed = patchSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
+
+    // Verify ownership before update
+    const existing = await prisma.channelPartner.findFirst({ where: { id, user: { clientId } } })
+    if (!existing) return err('Channel partner not found', 404)
 
     const partner = await prisma.channelPartner.update({
       where: { id },

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -13,23 +14,29 @@ export async function GET(req: NextRequest) {
       return err('Forbidden', 403)
     }
 
-    const latestEntry = await prisma.fundLedger.findFirst({ orderBy: { createdAt: 'desc' } })
+    const clientId = getClientIdFromRequest(req)
+
+    const latestEntry = await prisma.fundLedger.findFirst({
+      where: { clientId },
+      orderBy: { createdAt: 'desc' },
+    })
 
     // Total received
     const received = await prisma.fundReceipt.aggregate({
+      where: { clientId },
       _sum: { amountPaise: true },
     })
 
     // Total utilised by mode
     const utilisedByMode = await prisma.payoutTransaction.groupBy({
       by: ['payoutMode'],
-      where: { status: { in: ['SUCCESS', 'INITIATED'] } },
+      where: { batch: { clientId }, status: { in: ['SUCCESS', 'INITIATED'] } },
       _sum: { amountPaise: true },
     })
 
     // Pending liability
     const pendingLiability = await prisma.payoutTransaction.aggregate({
-      where: { status: 'PENDING' },
+      where: { batch: { clientId }, status: 'PENDING' },
       _sum: { amountPaise: true },
     })
 

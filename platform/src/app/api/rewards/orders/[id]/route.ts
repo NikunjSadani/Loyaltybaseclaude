@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -20,11 +21,12 @@ export async function GET(
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const { id } = await params
 
-    const order = await prisma.redemptionOrder.findUnique({
-      where: { id },
+    const order = await prisma.redemptionOrder.findFirst({
+      where: { id, partner: { user: { clientId } } },
       include: {
         reward: true,
         partner: { select: { id: true, businessName: true, userId: true } },
@@ -53,11 +55,16 @@ export async function PATCH(
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN') return err('Forbidden - Admin only', 403)
+    const clientId = getClientIdFromRequest(req)
 
     const { id } = await params
     const body = await req.json()
     const parsed = patchSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
+
+    // Verify ownership before update
+    const existingOrder = await prisma.redemptionOrder.findFirst({ where: { id, partner: { user: { clientId } } } })
+    if (!existingOrder) return err('Order not found', 404)
 
     const order = await prisma.redemptionOrder.update({
       where: { id },

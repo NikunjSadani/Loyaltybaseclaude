@@ -36,6 +36,26 @@ const config: Record<
     label: 'Under Review',
     variant: 'info',
   },
+  [KYCStatus.PENDING_SO_APPROVAL]: {
+    icon: <Clock className="h-3.5 w-3.5" />,
+    label: 'Awaiting SO',
+    variant: 'warning',
+  },
+  [KYCStatus.PENDING_ASM_APPROVAL]: {
+    icon: <Clock className="h-3.5 w-3.5" />,
+    label: 'Awaiting ASM',
+    variant: 'warning',
+  },
+  [KYCStatus.PENDING_RSM_APPROVAL]: {
+    icon: <Clock className="h-3.5 w-3.5" />,
+    label: 'Awaiting RSM',
+    variant: 'warning',
+  },
+  [KYCStatus.PENDING_GIFSY]: {
+    icon: <Clock className="h-3.5 w-3.5" />,
+    label: 'Awaiting Gifsy',
+    variant: 'info',
+  },
   [KYCStatus.REJECTED]: {
     icon: <XCircle className="h-3.5 w-3.5" />,
     label: 'Rejected',
@@ -45,6 +65,21 @@ const config: Record<
     icon: <RotateCcw className="h-3.5 w-3.5" />,
     label: 'Re-upload Required',
     variant: 'danger',
+  },
+  [KYCStatus.RE_KYC_REQUIRED]: {
+    icon: <RotateCcw className="h-3.5 w-3.5" />,
+    label: 'Re-KYC Required',
+    variant: 'warning',
+  },
+  [KYCStatus.NOT_STARTED]: {
+    icon: <Clock className="h-3.5 w-3.5" />,
+    label: 'KYC Pending',
+    variant: 'default',
+  },
+  [KYCStatus.NOT_INTERESTED]: {
+    icon: <Clock className="h-3.5 w-3.5" />,
+    label: 'Not Interested',
+    variant: 'default',
   },
 };
 

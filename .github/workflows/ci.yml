@@ -1,0 +1,78 @@
+name: CI — Tests & Type-check
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [develop]   # also run on develop pushes before staging deploy
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── NestJS API ──────────────────────────────────────────────────────────────
+  api-test:
+    name: API (NestJS) — Jest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        run: npm test -- --forceExit --no-coverage
+        env:
+          DATABASE_URL: "postgresql://test:test@127.0.0.1:5432/test"
+          JWT_SECRET: "ci-test-secret"
+          NODE_ENV: test
+
+  # ── Next.js Platform ─────────────────────────────────────────────────────────
+  platform-test:
+    name: Platform (Next.js) — Vitest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: platform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: platform/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        # platform has no prisma/schema.prisma — it shares the API schema
+        run: npx prisma generate --schema=../api/prisma/schema.prisma
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        run: npm test
+        env:
+          NEXT_PUBLIC_API_URL: "http://localhost:4000"
+          JWT_SECRET: "ci-test-secret"

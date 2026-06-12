@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -9,6 +10,7 @@ export async function GET(req: NextRequest) {
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const sp = req.nextUrl.searchParams
     const partnerId = sp.get('partnerId') ?? undefined
@@ -18,7 +20,7 @@ export async function GET(req: NextRequest) {
     const limit = parseInt(sp.get('limit') ?? '20', 10)
     const skip = (page - 1) * limit
 
-    const where: any = {}
+    const where: any = { salesUpload: { clientId } }
 
     // Partners see only their own invoices
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') {

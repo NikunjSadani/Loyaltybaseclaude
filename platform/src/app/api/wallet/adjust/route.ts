@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -19,6 +20,7 @@ export async function POST(req: NextRequest) {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN') return err('Forbidden - Gifsy Admin only', 403)
+    const clientId = getClientIdFromRequest(req)
 
     const body = await req.json()
     const parsed = schema.safeParse(body)
@@ -26,7 +28,7 @@ export async function POST(req: NextRequest) {
 
     const { partnerId, amount, type, reason, approvedBy } = parsed.data
 
-    const wallet = await prisma.wallet.findFirst({ where: { partnerId } })
+    const wallet = await prisma.wallet.findFirst({ where: { partnerId, partner: { user: { clientId } } } })
     if (!wallet) return err('Wallet not found for this partner', 404)
 
     if (type === 'DEBIT' && wallet.redeemablePoints < amount) {

@@ -11,7 +11,7 @@ interface ProgressRingProps {
 }
 
 function getColor(pct: number): string {
-  if (pct < 50) return '#C8102E';
+  if (pct < 50) return 'var(--brand-primary)';
   if (pct <= 80) return '#f59e0b';
   return '#10b981';
 }

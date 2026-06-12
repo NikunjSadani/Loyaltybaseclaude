@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -9,6 +10,7 @@ export async function GET(req: NextRequest) {
   try {
     const authUser = getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
+    const clientId = getClientIdFromRequest(req)
 
     const sp = req.nextUrl.searchParams
     const transactionType = sp.get('type') ?? undefined
@@ -21,8 +23,8 @@ export async function GET(req: NextRequest) {
       ? sp.get('userId')!
       : authUser.userId
 
-    const channelPartner = await prisma.channelPartner.findUnique({
-      where: { userId: targetUserId },
+    const channelPartner = await prisma.channelPartner.findFirst({
+      where: { userId: targetUserId, user: { clientId } },
     })
 
     if (!channelPartner) {

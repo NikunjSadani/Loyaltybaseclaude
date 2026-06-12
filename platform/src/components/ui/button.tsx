@@ -17,7 +17,7 @@ const variantStyles: Record<ButtonVariant, string> = {
   default:
     'bg-gray-900 text-white hover:bg-gray-700 focus-visible:outline-gray-900',
   primary:
-    'bg-[#C8102E] text-white hover:bg-[#a50d26] focus-visible:outline-[#C8102E]',
+    'bg-[var(--brand-primary)] text-white hover:bg-[#a50d26] focus-visible:outline-[var(--brand-primary)]',
   secondary:
     'bg-[#1A1A2E] text-white hover:bg-[#16213E] focus-visible:outline-[#1A1A2E]',
   destructive:
