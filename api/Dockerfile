@@ -7,7 +7,7 @@ RUN npm ci --ignore-scripts
 
 COPY . .
 RUN npx prisma generate
-RUN npm run build && ls dist/main.js
+RUN ./node_modules/.bin/tsc -p tsconfig.build.json && ls dist/main.js
 
 # ── Stage 2: Production ───────────────────────────────────────────────────────
 FROM node:24-alpine AS runner
