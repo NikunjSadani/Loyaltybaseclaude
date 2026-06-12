@@ -150,7 +150,7 @@ function authHeader(): Record<string, string> {
  */
 export async function fetchBanners(): Promise<{ banners: Banner[]; popups: Popup[] }> {
   try {
-    const res = await fetch('/api/admin/banner-config', {
+    const res = await fetch('/api/partner/banners', {
       headers: { ...authHeader() },
     });
     if (!res.ok) return { banners: [], popups: [] };
