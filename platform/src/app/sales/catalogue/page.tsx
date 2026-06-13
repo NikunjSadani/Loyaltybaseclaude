@@ -9,7 +9,8 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
-import { type GiftCatalogueItem, loadGifts } from '@/lib/gifts';
+import { type GiftCatalogueItem, loadGifts, GIFT_CATALOGUE } from '@/lib/gifts';
+import { api } from '@/lib/api-client';
 
 type GiftItem = GiftCatalogueItem;
 
@@ -110,11 +111,44 @@ function CatalogueInner() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      setGifts(loadGifts()); // includes all gifts (available + out-of-stock shown to sales team)
-      setLoading(false);
-    }, 350);
-    return () => clearTimeout(t);
+    interface ApiCatalogItem {
+      id: string; name: string; brand: string; category: string;
+      pointsCost: number; description: string; imageUrl: string;
+      available: boolean; popular: boolean; isAffordable: boolean;
+    }
+    interface ApiCatalogResponse { items: ApiCatalogItem[]; userBalance: number }
+    api.get<ApiCatalogResponse>('/api/rewards/catalog')
+      .then(result => {
+        if (result.success && result.data.items.length > 0) {
+          const mapped: GiftCatalogueItem[] = result.data.items.map(item => {
+            const ref = GIFT_CATALOGUE.find(g => g.id === item.id);
+            return {
+              id:           item.id,
+              name:         item.name,
+              brand:        item.brand,
+              category:     item.category,
+              points:       item.pointsCost,
+              description:  item.description,
+              imageDataUrl: item.imageUrl ?? null,
+              available:    item.available,
+              popular:      item.popular,
+              emoji:        ref?.emoji         ?? '🎁',
+              gradientFrom: ref?.gradientFrom  ?? '#f3f4f6',
+              gradientTo:   ref?.gradientTo    ?? '#e5e7eb',
+              features:     ref?.features      ?? [],
+              details:      ref?.details       ?? '',
+              addedDate:    ref?.addedDate     ?? new Date().toISOString().slice(0, 10),
+              voucherType:  ref?.voucherType,
+              fixedAmount:  ref?.fixedAmount,
+            };
+          });
+          setGifts(mapped);
+        } else {
+          setGifts(loadGifts());
+        }
+      })
+      .catch(() => setGifts(loadGifts()))
+      .finally(() => setLoading(false));
   }, []);
 
   // Countdown ticker

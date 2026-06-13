@@ -12,6 +12,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { KYCStatus } from '@/types';
 import { cn } from '@/lib/utils';
 import { type SalesRole, getRole, hasTeamView } from '@/lib/sales-role';
+import { api } from '@/lib/api-client';
 
 interface KYCEntry {
   id: string;
@@ -176,8 +177,33 @@ function KYCListContent() {
   }, [statusParam]);
 
   useEffect(() => {
-    const t = setTimeout(() => { setEntries(MOCK_KYC); setLoading(false); }, 500);
-    return () => clearTimeout(t);
+    interface ApiSubmission {
+      id: string; status: string; createdAt: string; updatedAt: string; userId: string;
+      reviewerNotes?: string | null;
+      user: { id: string; name: string; phone: string };
+      partner?: { id: string; businessName: string } | null;
+    }
+    api.get<{ submissions: ApiSubmission[] }>('/api/kyc')
+      .then(result => {
+        if (result.success && result.data.submissions.length > 0) {
+          setEntries(result.data.submissions.map(s => ({
+            id:              s.id,
+            partnerName:     s.user.name,
+            firmName:        s.partner?.businessName ?? s.user.name,
+            outletCode:      '',
+            mobile:          s.user.phone,
+            status:          s.status as KYCStatus,
+            submittedAt:     s.createdAt,
+            updatedAt:       s.updatedAt,
+            rejectionReason: s.reviewerNotes ?? undefined,
+            submittedById:   s.userId,
+          })));
+        } else {
+          setEntries(MOCK_KYC);
+        }
+      })
+      .catch(() => setEntries(MOCK_KYC))
+      .finally(() => setLoading(false));
   }, []);
 
   const filtered = entries

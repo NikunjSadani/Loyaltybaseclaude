@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Target, TrendingUp, Calendar, Award, AlertTriangle, AlertCircle, CheckCircle } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import {
@@ -132,61 +132,54 @@ export default function PartnerTargetsPage() {
   const [period,  setPeriod]  = useState(currentPeriod);
   const [loading, setLoading] = useState(true);
   const [config,  setConfig]  = useState<GeoTargetConfig | null>(null);
-  // Start with mock achievements so data is visible immediately
-  const [achievement, setAchievement] = useState<OutletAchievement | null>(
-    OUTLET_ACHIEVEMENTS[session.outletId] ?? null,
-  );
+  const [achievement, setAchievement] = useState<OutletAchievement | null>(null);
 
-  // Tracks whether the API has responded; guards the DEMO setTimeout from
-  // overwriting real data when the API is faster than the 250ms delay.
-  const apiRespondedRef = React.useRef(false);
-
-  // Reload DEMO config when period changes — skipped if API has already responded
   useEffect(() => {
     setLoading(true);
-    apiRespondedRef.current = false;
-    const t = setTimeout(() => {
-      if (!apiRespondedRef.current) {
-        // Use period-specific DEMO config; fall back to DEMO_PERIOD so the page
-        // always shows placeholder structure even for months without DEMO data.
-        setConfig(
-          resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, period) ??
-          resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD),
-        );
-      }
-      setLoading(false);
-    }, 250);
-    return () => clearTimeout(t);
-  }, [period]);
+    setConfig(null);
+    const controller = new AbortController();
 
-  // API hydration — leaderboard pattern: mock shown first, API updates silently
-  useEffect(() => {
-    fetch(`/api/partner/targets?period=${period}`)
+    fetch(`/api/partner/targets?period=${period}`, { signal: controller.signal })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { targets: ApiSchemeTarget[] } }) => {
         if (json.success && json.data?.targets && json.data.targets.length > 0) {
           const primary = getPrimarySchemeTarget(json.data.targets);
-          if (!primary) return;
-          apiRespondedRef.current = true;
-          setAchievement(prev => {
-            const next: OutletAchievement = prev
-              ? { ...prev, achievements: { ...prev.achievements, p_sv: primary.achievedValue } }
-              : { outletId: session.outletId, period, achievements: { p_sv: primary.achievedValue, p_fp1: 0, p_fp2: 0, p_fc: 0, p_ln: 0 } };
-            return next;
-          });
-          setConfig(prev => {
-            const base = prev ?? resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD);
-            if (!base) return prev;
-            return {
-              ...base,
-              params: base.params.map(p =>
-                p.isPrimary ? { ...p, target: primary.targetValue } : p,
-              ),
-            };
-          });
+          if (primary) {
+            setAchievement(prev => {
+              const next: OutletAchievement = prev
+                ? { ...prev, achievements: { ...prev.achievements, p_sv: primary.achievedValue } }
+                : { outletId: session.outletId, period, achievements: { p_sv: primary.achievedValue, p_fp1: 0, p_fp2: 0, p_fc: 0, p_ln: 0 } };
+              return next;
+            });
+            setConfig(prev => {
+              const base = prev ?? resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD);
+              if (!base) return prev;
+              return {
+                ...base,
+                params: base.params.map(p =>
+                  p.isPrimary ? { ...p, target: primary.targetValue } : p,
+                ),
+              };
+            });
+            return;
+          }
         }
+        // API returned no usable data — use DEMO config as fallback
+        setConfig(
+          resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, period) ??
+          resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD),
+        );
       })
-      .catch(() => {}); // silent — mock data already shown
+      .catch((err) => {
+        if ((err as Error).name === 'AbortError') return;
+        setConfig(
+          resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, period) ??
+          resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD),
+        );
+      })
+      .finally(() => setLoading(false));
+
+    return () => controller.abort();
   }, [session.outletId, period]);
 
   const pace = useMemo(() => computePace(period), [period]);
