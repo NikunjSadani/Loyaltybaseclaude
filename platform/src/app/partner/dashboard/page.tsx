@@ -24,6 +24,7 @@ import {
   OUTLET_ACHIEVEMENTS, resolveConfig, pct,
   DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD,
   getPrimaryParam, currentPeriod, getPrimarySchemeTarget,
+  type OutletAchievement,
 } from '@/lib/targets';
 import type { ApiSchemeTarget } from '@/types';
 import { useClientConfig } from '@/lib/platform/client-config-context';
@@ -825,26 +826,10 @@ export default function PartnerDashboard() {
           if (!primary) return;
           setAchievements(prev => {
             const existing = prev[session.outletId];
-            return {
-              ...prev,
-              [session.outletId]: existing
-                ? {
-                    ...existing,
-                    achievements: {
-                      ...existing.achievements,
-                      // Map primary scheme's achievedValue onto the primary param (p_sv)
-                      p_sv: primary.achievedValue,
-                    },
-                  }
-                : {
-                    outletId: session.outletId,
-                    period,
-                    achievements: {
-                      p_sv:  primary.achievedValue,
-                      p_fp1: 0, p_fp2: 0, p_fc: 0, p_ln: 0,
-                    },
-                  },
-            };
+            const next: OutletAchievement = existing
+              ? { ...existing, achievements: { ...existing.achievements, p_sv: primary.achievedValue } }
+              : { outletId: session.outletId, period, achievements: { p_sv: primary.achievedValue, p_fp1: 0, p_fp2: 0, p_fc: 0, p_ln: 0 } };
+            return { ...prev, [session.outletId]: next };
           });
         }
       })

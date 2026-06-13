@@ -4,7 +4,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Target, TrendingUp, Calendar, Award, AlertTriangle, AlertCircle, CheckCircle } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import {
-  type GeoTargetConfig,
+  type GeoTargetConfig, type OutletAchievement,
   PERIODS, PARAM_TYPE_LABELS,
   resolveConfig, OUTLET_ACHIEVEMENTS,
   pct, pctColor, pctBg, pctBarColor,
@@ -168,23 +168,12 @@ export default function PartnerTargetsPage() {
           const primary = getPrimarySchemeTarget(json.data.targets);
           if (!primary) return;
           apiRespondedRef.current = true;
-          setAchievement(prev => prev
-            ? {
-                ...prev,
-                achievements: {
-                  ...prev.achievements,
-                  p_sv: primary.achievedValue,
-                },
-              }
-            : {
-                outletId: session.outletId,
-                period,
-                achievements: {
-                  p_sv:  primary.achievedValue,
-                  p_fp1: 0, p_fp2: 0, p_fc: 0, p_ln: 0,
-                },
-              }
-          );
+          setAchievement(prev => {
+            const next: OutletAchievement = prev
+              ? { ...prev, achievements: { ...prev.achievements, p_sv: primary.achievedValue } }
+              : { outletId: session.outletId, period, achievements: { p_sv: primary.achievedValue, p_fp1: 0, p_fp2: 0, p_fc: 0, p_ln: 0 } };
+            return next;
+          });
           setConfig(prev => {
             const base = prev ?? resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD);
             if (!base) return prev;
