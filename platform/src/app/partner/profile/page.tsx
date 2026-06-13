@@ -15,6 +15,7 @@ import { Modal } from '@/components/ui/modal';
 import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { KYCStatus, ChannelPartnerClass } from '@/types';
 import { usePartnerSession, type OutletType } from '@/lib/partner-session';
+import { api } from '@/lib/api-client';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -99,11 +100,54 @@ export default function ProfilePage() {
   const [photoIndex,   setPhotoIndex]   = useState(0);
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      setProfile(MOCK_PROFILE);
-      setLoading(false);
-    }, 500);
-    return () => clearTimeout(t);
+    // Fetch full user+partner profile from API; fall back to mock if not available
+    api.get<{
+      user: {
+        name?:  string;
+        phone?: string;
+        channelPartner?: {
+          businessName?: string;
+          partnerCode?:  string;
+          gstNumber?:    string;
+          panNumber?:    string;
+          kycStatus?:    string;
+          wallets?: Array<{ redeemablePoints?: number; lockedPoints?: number }>;
+        } | null;
+      };
+    }>('/api/auth/me')
+      .then((result) => {
+        if (result.success && result.data?.user) {
+          const u = result.data.user;
+          const cp = u.channelPartner;
+          const wallet0 = cp?.wallets?.[0];
+          setProfile({
+            user: {
+              name:   u.name  ?? MOCK_PROFILE.user.name,
+              mobile: u.phone ?? MOCK_PROFILE.user.mobile,
+            },
+            partner: {
+              firmName:     cp?.businessName ?? MOCK_PROFILE.partner.firmName,
+              partnerClass: MOCK_PROFILE.partner.partnerClass,
+              kycStatus:    (cp?.kycStatus as KYCStatus) ?? MOCK_PROFILE.partner.kycStatus,
+              tier:         MOCK_PROFILE.partner.tier,
+              outletCode:   cp?.partnerCode ?? MOCK_PROFILE.partner.outletCode,
+              gstNumber:    cp?.gstNumber   ?? MOCK_PROFILE.partner.gstNumber,
+              panNumber:    cp?.panNumber   ?? MOCK_PROFILE.partner.panNumber,
+              kycPhotos:    MOCK_PROFILE.partner.kycPhotos,
+            },
+            wallet: {
+              available:  wallet0?.redeemablePoints ?? MOCK_PROFILE.wallet.available,
+              locked:     wallet0?.lockedPoints     ?? MOCK_PROFILE.wallet.locked,
+              redeemable: wallet0?.redeemablePoints ?? MOCK_PROFILE.wallet.redeemable,
+            },
+            bank: MOCK_PROFILE.bank,
+          });
+        } else {
+          setProfile(MOCK_PROFILE);
+        }
+      })
+      .catch(() => setProfile(MOCK_PROFILE))
+      .finally(() => setLoading(false));
   }, []);
 
   const handleLogout = () => {

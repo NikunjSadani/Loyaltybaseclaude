@@ -15,7 +15,8 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { useToast } from '@/components/ui/toast';
 import { formatPoints } from '@/lib/utils';
 import { cn } from '@/lib/utils';
-import { type GiftCatalogueItem, loadGifts } from '@/lib/gifts';
+import { type GiftCatalogueItem, loadGifts, GIFT_CATALOGUE } from '@/lib/gifts';
+import { api } from '@/lib/api-client';
 import { usePartnerSession } from '@/lib/partner-session';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { saveRedemption } from '@/lib/redemption-store';
@@ -590,9 +591,51 @@ export default function RewardsPage() {
 
   useEffect(() => {
     setBalance(session.pointsBalance);
-    const all = loadGifts();
-    setGifts(all);
-    setLoading(false);
+
+    // Try to load catalog from API; fall back to localStorage/mock on failure
+    api.get<{
+      items: Array<{
+        id: string; name: string; brand?: string; category: string;
+        pointsCost: number; description?: string; imageUrl?: string | null;
+        available?: boolean; popular?: boolean; isAffordable?: boolean;
+      }>;
+      userBalance?: number;
+    }>('/api/rewards/catalog')
+      .then((result) => {
+        if (result.success && result.data?.items?.length) {
+          const { items, userBalance } = result.data;
+          if (userBalance !== undefined) setBalance(userBalance);
+          // Map API items to GiftCatalogueItem, using GIFT_CATALOGUE for UI-only fields (emoji, gradient)
+          const catalogById = new Map(GIFT_CATALOGUE.map(g => [g.id, g]));
+          const mapped: GiftCatalogueItem[] = items.map((item) => {
+            const fallback = catalogById.get(item.id) ?? GIFT_CATALOGUE[0];
+            return {
+              id:           item.id,
+              name:         item.name,
+              brand:        item.brand ?? fallback.brand,
+              category:     item.category,
+              points:       item.pointsCost,
+              description:  item.description ?? fallback.description,
+              details:      fallback.details,
+              features:     fallback.features,
+              emoji:        fallback.emoji,
+              gradientFrom: fallback.gradientFrom,
+              gradientTo:   fallback.gradientTo,
+              imageDataUrl: item.imageUrl ?? null,
+              available:    item.available ?? true,
+              popular:      item.popular ?? false,
+              addedDate:    fallback.addedDate,
+              voucherType:  fallback.voucherType,
+              fixedAmount:  fallback.fixedAmount,
+            };
+          });
+          setGifts(mapped);
+        } else {
+          setGifts(loadGifts());
+        }
+      })
+      .catch(() => setGifts(loadGifts()))
+      .finally(() => setLoading(false));
   }, [session.pointsBalance]);
 
   /* ── Gate: non-wholesalers don't have a points balance ── */
