@@ -17,12 +17,10 @@ const nextConfig: NextConfig = {
         hostname: "storage.googleapis.com",
         pathname: "/**",
       },
-      // Cloud CDN delivery hostname (*.gifsy.in CDN origin)
-      {
-        protocol: "https",
-        hostname: "*.gifsy.in",
-        pathname: "/**",
-      },
+      // Tenant subdomains — images hosted on gifsy.in tenant domains
+      { protocol: "https", hostname: "platform.gifsy.in", pathname: "/**" },
+      { protocol: "https", hostname: "deoleo.gifsy.in",   pathname: "/**" },
+      { protocol: "https", hostname: "clientb.gifsy.in",  pathname: "/**" },
     ],
   },
   // Expose selected env vars to the client bundle

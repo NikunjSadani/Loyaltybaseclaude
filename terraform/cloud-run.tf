@@ -217,7 +217,7 @@ resource "google_cloud_run_v2_service" "api_prod" {
   # GitHub Actions deploys real images via `gcloud run deploy`.
   # Ignore template changes so subsequent `terraform apply` runs don't revert the image.
   lifecycle {
-    ignore_changes = [template]
+    ignore_changes = [template, client, client_version]
   }
 }
 
@@ -267,7 +267,7 @@ resource "google_cloud_run_v2_service" "frontend_prod" {
   depends_on = [google_project_service.apis]
 
   lifecycle {
-    ignore_changes = [template]
+    ignore_changes = [template, client, client_version]
   }
 }
 
@@ -466,7 +466,7 @@ resource "google_cloud_run_v2_service" "api_staging" {
   ]
 
   lifecycle {
-    ignore_changes = [template]
+    ignore_changes = [template, client, client_version]
   }
 }
 
@@ -516,7 +516,7 @@ resource "google_cloud_run_v2_service" "frontend_staging" {
   depends_on = [google_project_service.apis]
 
   lifecycle {
-    ignore_changes = [template]
+    ignore_changes = [template, client, client_version]
   }
 }
 

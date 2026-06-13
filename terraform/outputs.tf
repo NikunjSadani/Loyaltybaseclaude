@@ -1,43 +1,35 @@
-output "lb_ip_address" {
-  description = "Point *.gifsy.in A records here"
-  value       = google_compute_global_address.lb_ip.address
-}
-
 output "dns_instructions" {
-  description = "DNS records to create after terraform apply"
+  description = "DNS records to create after terraform apply (domain-mappings phase)"
   value       = <<-EOT
-    Create these 2 A records at your domain registrar:
+    All subdomains use CNAME -> ghs.googlehosted.com. at your registrar.
+    Remove the old A records that pointed to the LB IP (8.232.60.239).
 
-      Type  Name       Value
-      A     gifsy.in   ${google_compute_global_address.lb_ip.address}
-      A     *.gifsy.in ${google_compute_global_address.lb_ip.address}
+      Type   Name                 Value
+      CNAME  api.gifsy.in         ghs.googlehosted.com.
+      CNAME  platform.gifsy.in    ghs.googlehosted.com.
+      CNAME  deoleo.gifsy.in      ghs.googlehosted.com.
+      CNAME  clientb.gifsy.in     ghs.googlehosted.com.
 
-    After DNS propagates (~15 min), Google auto-provisions the managed SSL cert.
-    Check: gcloud compute ssl-certificates describe gifsy-ssl-cert --global
+    SSL certs auto-provision after DNS propagates (~5-60 min).
+    New client: add one more CNAME + google_cloud_run_domain_mapping in domain-mappings.tf.
   EOT
 }
 
-# Production URLs (custom domain after LB setup)
+# Production URLs
 output "prod_api_url" {
-  value = try(
-    "https://api.gifsy.in (Cloud Run: ${google_cloud_run_v2_service.api_prod.uri})",
-    "https://api.gifsy.in (Cloud Run: not deployed yet)"
-  )
+  value       = "https://api.gifsy.in (Cloud Run: ${google_cloud_run_v2_service.api_prod.uri})"
   description = "Production API"
 }
 
 output "prod_frontend_url" {
-  value = try(
-    "https://platform.gifsy.in (Cloud Run: ${google_cloud_run_v2_service.frontend_prod.uri})",
-    "https://platform.gifsy.in (Cloud Run: not deployed yet)"
-  )
+  value       = "https://platform.gifsy.in (Cloud Run: ${google_cloud_run_v2_service.frontend_prod.uri})"
   description = "Production frontend"
 }
 
 # Staging URLs — use Cloud Run default .run.app URLs (no LB for staging)
 output "staging_api_url" {
   value       = try(google_cloud_run_v2_service.api_staging.uri, "not deployed yet")
-  description = "Staging API — use this URL directly or set up staging.gifsy.in DNS manually"
+  description = "Staging API"
 }
 
 output "staging_frontend_url" {
@@ -62,17 +54,20 @@ output "deployer_sa_email" {
 
 output "monthly_cost_estimate" {
   value = <<-EOT
-    Estimated monthly cost (asia-south1):
+    Estimated monthly cost (asia-south1, no Load Balancer):
 
       Cloud SQL ${var.db_tier}        ~$12
-      Redis BASIC 1GB (prod only)     ~$30
-      Cloud Run prod (min 1 each)     ~$20
+      Redis BASIC 1GB (prod only)     ~$16
+      Cloud Run prod (min 1 each)     ~$9
       Cloud Run staging (scale-to-0)  ~$1
-      Load Balancer + CDN             ~$25
-      VPC connector (prod)            ~$5
-      GCS + Artifact Registry         ~$2
+      VPC connector (prod)            ~$14
+      GCS + Artifact Registry         ~$5
+      Secret Manager                  ~$1
+      Domain mappings (SSL)           free
       ─────────────────────────────────────
-      Total                           ~$95/month (~₹8,000)
+      Total                           ~$58/month (~Rs 4,900)
+
+    Removed: Load Balancer + CDN (was ~$38/month)
 
     To upgrade Cloud SQL when needed:
       terraform apply -var="db_tier=db-custom-2-3840"   (+$80/month)

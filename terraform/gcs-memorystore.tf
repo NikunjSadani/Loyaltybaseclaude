@@ -10,7 +10,14 @@ resource "google_storage_bucket" "uploads" {
   uniform_bucket_level_access = true
 
   cors {
-    origin          = ["https://*.gifsy.in"]
+    # Explicit domains required — wildcard certs/origins are not used after LB removal.
+    # Add new client subdomain here when onboarding: "https://<slug>.gifsy.in"
+    origin = [
+      "https://platform.gifsy.in",
+      "https://api.gifsy.in",
+      "https://deoleo.gifsy.in",
+      "https://clientb.gifsy.in",
+    ]
     method          = ["GET", "PUT", "POST", "DELETE", "HEAD"]
     response_header = ["Content-Type", "x-goog-resumable"]
     max_age_seconds = 3600

@@ -17,6 +17,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { jwtVerify } from 'jose'
 import { resolveSlugFromHostname, resolveClientConfig } from '@/lib/platform/tenant-resolution'
 
+// Refuse to run in production without a real JWT_SECRET — never fall back to a weak default.
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET environment variable must be set in production')
+}
+
 const PUBLIC_PATHS = [
   '/auth/login',
   '/api/auth/send-otp',
@@ -37,7 +42,10 @@ export async function proxy(request: NextRequest) {
   const headers = new Headers(request.headers)
 
   // ── Step 1: Tenant resolution ──────────────────────────────────────────────
-  const hostname = request.headers.get('host') ?? request.nextUrl.hostname
+  const hostname =
+    request.headers.get('x-forwarded-host') ??
+    request.headers.get('host') ??
+    request.nextUrl.hostname
   const slug     = resolveSlugFromHostname(hostname)
 
   if (slug === null) {
@@ -91,9 +99,7 @@ export async function proxy(request: NextRequest) {
   }
 
   try {
-    const secret = new TextEncoder().encode(
-      process.env.JWT_SECRET || 'changeme-in-production-use-strong-secret'
-    )
+    const secret = new TextEncoder().encode(process.env.JWT_SECRET ?? '')
     const { payload } = await jwtVerify(token, secret)
     const role = payload.role as string
 
