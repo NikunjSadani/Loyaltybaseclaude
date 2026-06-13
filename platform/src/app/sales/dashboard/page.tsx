@@ -19,6 +19,7 @@ import {
   DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE,
 } from '@/lib/targets';
 import { type SalesRole, getRole } from '@/lib/sales-role';
+import { api } from '@/lib/api-client';
 import { classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
@@ -223,15 +224,33 @@ export default function SalesDashboard() {
     // Schemes are localStorage — also synchronous
     setPendingSchemes(getAllPendingSchemes());
 
-    // Only real async ops: task config + banners (run in parallel)
+    // Async: task config, banners, and outlet list from API
+    interface ApiKycSub {
+      id: string; status: string; createdAt: string;
+      user: { phone: string };
+      partner?: { id: string; businessName: string } | null;
+    }
     Promise.all([
       fetchTaskConfig(),
       fetchBanners(),
-    ]).then(([config, { banners }]) => {
+      api.get<{ submissions: ApiKycSub[] }>('/api/kyc'),
+    ]).then(([config, { banners }, kycResult]) => {
       setTaskConfig(config);
       setSalesBanners(getActiveSalesBanners(banners));
+      if (kycResult.success && kycResult.data.submissions.length > 0) {
+        setOutlets(kycResult.data.submissions.map(s => ({
+          id:             s.partner?.id ?? s.id,
+          kycId:          s.id,
+          name:           s.partner?.businessName ?? '',
+          mobile:         s.user.phone,
+          location:       '',
+          type:           'SSS' as OutletType,
+          kycStatus:      s.status as KYCStatus,
+          kycSubmittedAt: s.createdAt,
+        })));
+      }
       setLoading(false);
-    });
+    }).catch(() => setLoading(false));
   }, []);
 
   useEffect(() => {

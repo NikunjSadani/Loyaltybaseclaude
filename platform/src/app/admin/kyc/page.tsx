@@ -70,20 +70,6 @@ function mapApiKyc(s: ApiKycSub): KYCEntry {
   };
 }
 
-const ALL_KYC: KYCEntry[] = [
-  { id: 'KYC001', outletName: 'Sharma General Store', mobile: '9820184321', partnerClass: 'GOLD', salesUser: 'Rohit Verma', territory: 'Mumbai West', status: 'PENDING', submittedDate: '2025-04-30', ageHrs: 18, slaBreached: false },
-  { id: 'KYC002', outletName: 'Ramesh Traders', mobile: '9811034021', partnerClass: 'SILVER', salesUser: 'Sanjay Kumar', territory: 'Delhi NCR', status: 'PENDING', submittedDate: '2025-04-29', ageHrs: 36, slaBreached: false },
-  { id: 'KYC003', outletName: 'Patel Kirana', mobile: '9898123456', partnerClass: 'BRONZE', salesUser: 'Anita Patel', territory: 'Ahmedabad', status: 'UNDER_REVIEW', submittedDate: '2025-04-28', ageHrs: 52, slaBreached: true },
-  { id: 'KYC004', outletName: 'Lalitha Stores', mobile: '9945223311', partnerClass: 'GOLD', salesUser: 'Kiran Rao', territory: 'Bengaluru', status: 'RESUBMISSION_REQUIRED', submittedDate: '2025-04-27', ageHrs: 72, slaBreached: true },
-  { id: 'KYC005', outletName: 'Krishnamurthy & Sons', mobile: '9444181920', partnerClass: 'PLATINUM', salesUser: 'Mohan Raj', territory: 'Chennai', status: 'APPROVED', submittedDate: '2025-04-26', ageHrs: 24, slaBreached: false },
-  { id: 'KYC006', outletName: 'Gupta Provisions', mobile: '9311402841', partnerClass: 'SILVER', salesUser: 'Deepak Singh', territory: 'Lucknow', status: 'REJECTED', submittedDate: '2025-04-25', ageHrs: 41, slaBreached: false },
-  { id: 'KYC007', outletName: 'Mehta Mart', mobile: '9820011234', partnerClass: 'GOLD', salesUser: 'Rohit Verma', territory: 'Mumbai West', status: 'PENDING', submittedDate: '2025-04-30', ageHrs: 12, slaBreached: false },
-  { id: 'KYC008', outletName: 'Suresh Wholesalers', mobile: '9533201102', partnerClass: 'BRONZE', salesUser: 'Prasad N.', territory: 'Hyderabad', status: 'PENDING', submittedDate: '2025-04-29', ageHrs: 42, slaBreached: false },
-  { id: 'KYC009', outletName: 'Aggarwal General Store', mobile: '9210401120', partnerClass: 'SILVER', salesUser: 'Sanjay Kumar', territory: 'Delhi NCR', status: 'UNDER_REVIEW', submittedDate: '2025-04-28', ageHrs: 60, slaBreached: true },
-  { id: 'KYC010', outletName: 'Banerjee Traders', mobile: '9830221412', partnerClass: 'STANDARD', salesUser: 'Tanmoy Das', territory: 'Kolkata', status: 'APPROVED', submittedDate: '2025-04-24', ageHrs: 28, slaBreached: false },
-  { id: 'KYC011', outletName: 'Nair Beverages Hub', mobile: '9446102312', partnerClass: 'GOLD', salesUser: 'Vijayan P.', territory: 'Kochi', status: 'PENDING', submittedDate: '2025-04-30', ageHrs: 8, slaBreached: false },
-  { id: 'KYC012', outletName: 'Tiwari Kirana', mobile: '9425011824', partnerClass: 'BRONZE', salesUser: 'Manoj Dubey', territory: 'Bhopal', status: 'REJECTED', submittedDate: '2025-04-22', ageHrs: 92, slaBreached: true },
-];
 
 const STATUS_STYLES: Record<KYCStatusType, string> = {
   PENDING: 'bg-amber-100 text-amber-700',
