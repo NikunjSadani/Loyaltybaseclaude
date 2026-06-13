@@ -47,6 +47,7 @@ export const DEOLEO_CONFIG: ClientConfig = {
       showInvoices: true,
       showWallet: true,
       showTeam: true,
+      showLeaderboard: false,  // Deoleo opted out — leaderboard hidden from partner app
     },
   },
 
@@ -152,6 +153,7 @@ export const CLIENT_B_CONFIG: ClientConfig = {
       showInvoices: false,            // follows visibilityInvoiceModule
       showWallet: true,
       showTeam: true,
+      showLeaderboard: true,          // Client B wants leaderboard enabled
     },
   },
 

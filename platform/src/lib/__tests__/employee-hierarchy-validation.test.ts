@@ -59,13 +59,13 @@ const BASE_EMPLOYEES: HierarchyEmployee[] = [
     hasOutlets: false,       hasSubReports: true,
   },
   {
-    id: 'ISR-M001', tenantId: 'deoleo', roleCode: 'ISR', roleLabel: 'ISR',
+    id: 'ISR-M001', tenantId: 'deoleo', roleCode: 'XSR', roleLabel: 'XSR',
     reportsToId: 'SO-MUM1', hierarchyPath: '/NSM-01/ZNM-W1/RSM-MH/ASM-MUM/SO-MUM1/ISR-M001/',
     name: 'Anil Sharma',     mobile: '9900000041', status: 'ACTIVE',
     hasOutlets: true,        hasSubReports: false,
   },
   {
-    id: 'ISR-M002', tenantId: 'deoleo', roleCode: 'ISR', roleLabel: 'ISR',
+    id: 'ISR-M002', tenantId: 'deoleo', roleCode: 'XSR', roleLabel: 'XSR',
     reportsToId: 'SO-MUM1', hierarchyPath: '/NSM-01/ZNM-W1/RSM-MH/ASM-MUM/SO-MUM1/ISR-M002/',
     name: null,              mobile: null,         status: 'PLACEHOLDER',
     hasOutlets: false,       hasSubReports: false,
@@ -76,7 +76,7 @@ const BASE_EMPLOYEES: HierarchyEmployee[] = [
 function makeRow(overrides: Partial<EmployeeUploadRow> = {}): EmployeeUploadRow {
   return {
     rowNum: 2,
-    hierarchy: 'ISR',
+    hierarchy: 'XSR',
     employeeId: 'ISR-P999',
     employeeName: 'Test Person',
     employeePhone: '9876500000',
@@ -144,7 +144,7 @@ describe('H6–H13 — Valid row scenarios', () => {
   it('H7: existing employee, same role and manager → action UPDATE_INFO', () => {
     const row = makeRow({
       employeeId: 'ISR-M001',
-      hierarchy: 'ISR',
+      hierarchy: 'XSR',
       employeeName: 'Anil Sharma Updated',
       employeePhone: '9900000041',   // same phone
       reportingManagerHierarchy: 'SO',
@@ -179,8 +179,8 @@ describe('H6–H13 — Valid row scenarios', () => {
     expect(result.rows[0].action).toBe('CREATE');
   });
 
-  it('H10: role names are case-insensitive ("isr" → valid ISR)', () => {
-    const row = makeRow({ hierarchy: 'isr', employeeId: 'ISR-CASE1' });
+  it('H10: role names are case-insensitive ("xsr" → valid XSR)', () => {
+    const row = makeRow({ hierarchy: 'xsr', employeeId: 'ISR-CASE1' });
     const result = validateEmployeeUpload([row], BASE_EMPLOYEES, config);
     expect(result.hasErrors).toBe(false);
   });
@@ -188,7 +188,7 @@ describe('H6–H13 — Valid row scenarios', () => {
   it('H11: updating name on existing placeholder (ISR-M002) → UPDATE_INFO, no errors', () => {
     const row = makeRow({
       employeeId: 'ISR-M002',
-      hierarchy: 'ISR',
+      hierarchy: 'XSR',
       employeeName: 'Now Has Person',
       employeePhone: '9876500099',
       reportingManagerHierarchy: 'SO',
@@ -277,7 +277,7 @@ describe('H14–H25 — Row error cases', () => {
     const result = validateEmployeeUpload([row], BASE_EMPLOYEES, config);
     expect(result.rows[0].errors.some(e => /not a valid hierarchy level/i.test(e))).toBe(true);
     // Error should list valid roles
-    expect(result.rows[0].errors.some(e => /ISR/i.test(e))).toBe(true);
+    expect(result.rows[0].errors.some(e => /XSR/i.test(e))).toBe(true);
   });
 
   it('H22: manager Employee ID not in system or upload → error', () => {
@@ -288,7 +288,7 @@ describe('H14–H25 — Row error cases', () => {
 
   it('H23: manager is correct ID but wrong level (ISR reporting to RSM, skipping SO and ASM) → error', () => {
     const row = makeRow({
-      hierarchy: 'ISR',
+      hierarchy: 'XSR',
       reportingManagerHierarchy: 'RSM',
       reportingManagerEmployeeId: 'RSM-MH',
     });
@@ -299,7 +299,7 @@ describe('H14–H25 — Row error cases', () => {
   it('H24: Reporting Manager Hierarchy column contradicts manager\'s actual role → error', () => {
     // SO-MUM1 is actually a SO, but we claim it's an ASM
     const row = makeRow({
-      hierarchy: 'ISR',
+      hierarchy: 'XSR',
       reportingManagerHierarchy: 'ASM',    // wrong — SO-MUM1 is SO
       reportingManagerEmployeeId: 'SO-MUM1',
     });
@@ -323,12 +323,12 @@ describe('H14–H25 — Row error cases', () => {
 
   it('H25b: non-root employee with no reporting manager → error', () => {
     const row = makeRow({
-      hierarchy: 'ISR',
+      hierarchy: 'XSR',
       reportingManagerHierarchy: '',
       reportingManagerEmployeeId: '',
     });
     const result = validateEmployeeUpload([row], BASE_EMPLOYEES, config);
-    expect(result.rows[0].errors.some(e => /required for ISR/i.test(e))).toBe(true);
+    expect(result.rows[0].errors.some(e => /required for XSR/i.test(e))).toBe(true);
   });
 });
 
@@ -347,7 +347,7 @@ describe('H26–H28 — Business rules', () => {
 
     const row = makeRow({
       employeeId: 'ISR-M001',
-      hierarchy: 'ISR',
+      hierarchy: 'XSR',
       employeeName: 'Anil Sharma',
       employeePhone: '9900000041',
       reportingManagerHierarchy: 'SO',
@@ -383,7 +383,7 @@ describe('H26–H28 — Business rules', () => {
     // ISR-M001 has hasOutlets: true, but we're only updating phone
     const row = makeRow({
       employeeId: 'ISR-M001',
-      hierarchy: 'ISR',
+      hierarchy: 'XSR',
       employeeName: 'Anil Sharma Renamed',
       employeePhone: '9900000041',       // same phone, same manager
       reportingManagerHierarchy: 'SO',
@@ -403,7 +403,7 @@ describe('H29–H32 — Edge cases', () => {
     const rows: EmployeeUploadRow[] = [
       {
         rowNum: 2,
-        hierarchy: 'ISR',
+        hierarchy: 'XSR',
         employeeId: 'ISR-LATEMGR',
         employeeName: 'Field Person',
         employeePhone: '9700000001',
@@ -442,7 +442,7 @@ describe('H29–H32 — Edge cases', () => {
     // Neither A nor B exist yet; both in this upload
     const rows: EmployeeUploadRow[] = [
       {
-        rowNum: 2, hierarchy: 'ISR', employeeId: 'ISR-AA',
+        rowNum: 2, hierarchy: 'XSR', employeeId: 'ISR-AA',
         employeeName: 'A', employeePhone: '9500000001',
         reportingManagerHierarchy: 'SO',
         reportingManagerEmployeeId: 'SO-BB',  // A reports to B
@@ -499,7 +499,7 @@ describe('Utility functions', () => {
   });
 
   it('resolveRole: case-insensitive match', () => {
-    expect(resolveRole('isr', DEOLEO_HIERARCHY)).not.toBeNull();
+    expect(resolveRole('xsr', DEOLEO_HIERARCHY)).not.toBeNull();
     expect(resolveRole('NSM', DEOLEO_HIERARCHY)).not.toBeNull();
     expect(resolveRole('GHOST', DEOLEO_HIERARCHY)).toBeNull();
   });
@@ -507,7 +507,7 @@ describe('Utility functions', () => {
   it('parseUploadRows: maps raw objects to EmployeeUploadRow[]', () => {
     const raw = [
       {
-        'Hierarchy': 'ISR', 'Employee ID': 'ISR-001', 'Employee Name': 'Test',
+        'Hierarchy': 'XSR', 'Employee ID': 'ISR-001', 'Employee Name': 'Test',
         'Employee Phone Number': '9876543210',
         'Reporting Manager Hierarchy': 'SO',
         'Reporting Manager Employee ID': 'SO-001',
@@ -517,6 +517,6 @@ describe('Utility functions', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].employeeId).toBe('ISR-001');
     expect(rows[0].rowNum).toBe(2);
-    expect(rows[0].hierarchy).toBe('ISR');
+    expect(rows[0].hierarchy).toBe('XSR');
   });
 });

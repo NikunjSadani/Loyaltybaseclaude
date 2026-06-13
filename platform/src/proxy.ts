@@ -28,7 +28,7 @@ const PUBLIC_PATHS = [
 const ROLE_ROUTES: Record<string, string[]> = {
   '/admin/gifsy': ['GIFSY_ADMIN'],                                                // Gifsy-internal only — checked before /admin
   '/admin':   ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'],
-  '/sales':   ['HO', 'STATE_HEAD', 'ASM', 'SO', 'ISR', 'SALES_EXECUTIVE', 'TERRITORY_SALES_OFFICER', 'AREA_SALES_MANAGER', 'SALES_MANAGER'],
+  '/sales':   ['HO', 'STATE_HEAD', 'ASM', 'SO', 'XSR', 'SALES_EXECUTIVE', 'TERRITORY_SALES_OFFICER', 'AREA_SALES_MANAGER', 'SALES_MANAGER'],
   '/partner': ['SSS', 'WHOLESALER', 'SUB_STOCKIST'],
 }
 

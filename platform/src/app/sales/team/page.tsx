@@ -67,10 +67,10 @@ const MOCK_RSMS: MemberStats[] = [
 ];
 
 const MOCK_ZMS: MemberStats[] = [
-  { id: 'zm1', name: 'Vikram Singh',  role: 'ZM', territory: 'West Zone',  outlets: 1409, kycPending: 308, kycDone: 1101, visibilityPending: 169, targetPct: 74, targetValue: 61400, teamSize: 4, lastSeen: '2026-05-29' },
-  { id: 'zm2', name: 'Ravi Menon',    role: 'ZM', territory: 'South Zone', outlets: 1124, kycPending: 241, kycDone:  883, visibilityPending: 128, targetPct: 71, targetValue: 52000, teamSize: 4, lastSeen: '2026-05-28' },
-  { id: 'zm3', name: 'Kavita Sharma', role: 'ZM', territory: 'North Zone', outlets:  987, kycPending: 196, kycDone:  791, visibilityPending: 103, targetPct: 68, targetValue: 45000, teamSize: 3, lastSeen: '2026-05-26' },
-  { id: 'zm4', name: 'Arun Gupta',    role: 'ZM', territory: 'East Zone',  outlets:  834, kycPending: 179, kycDone:  655, visibilityPending:  92, targetPct: 66, targetValue: 38000, teamSize: 3, lastSeen: '2026-05-24' },
+  { id: 'zm1', name: 'Vikram Singh',  role: 'ZNM', territory: 'West Zone',  outlets: 1409, kycPending: 308, kycDone: 1101, visibilityPending: 169, targetPct: 74, targetValue: 61400, teamSize: 4, lastSeen: '2026-05-29' },
+  { id: 'zm2', name: 'Ravi Menon',    role: 'ZNM', territory: 'South Zone', outlets: 1124, kycPending: 241, kycDone:  883, visibilityPending: 128, targetPct: 71, targetValue: 52000, teamSize: 4, lastSeen: '2026-05-28' },
+  { id: 'zm3', name: 'Kavita Sharma', role: 'ZNM', territory: 'North Zone', outlets:  987, kycPending: 196, kycDone:  791, visibilityPending: 103, targetPct: 68, targetValue: 45000, teamSize: 3, lastSeen: '2026-05-26' },
+  { id: 'zm4', name: 'Arun Gupta',    role: 'ZNM', territory: 'East Zone',  outlets:  834, kycPending: 179, kycDone:  655, visibilityPending:  92, targetPct: 66, targetValue: 38000, teamSize: 3, lastSeen: '2026-05-24' },
 ];
 
 /* ─── Helpers ───────────────────────────────────────────────────────────────── */
@@ -343,8 +343,8 @@ export default function SalesTeamPage() {
       case 'SO':  return { members: MOCK_XSRS, heading: 'My Team', subheading: 'XSRs · Mumbai West',               memberRole: 'XSR' as SalesRole };
       case 'ASM': return { members: MOCK_SOS,  heading: 'My Team', subheading: 'Sales Officers · Mumbai Zone',     memberRole: 'SO'  as SalesRole };
       case 'RSM': return { members: MOCK_ASMS, heading: 'My Team', subheading: 'Area Sales Managers · Maharashtra', memberRole: 'ASM' as SalesRole };
-      case 'ZM':  return { members: MOCK_RSMS, heading: 'My Team', subheading: 'Regional Managers · West Zone',    memberRole: 'RSM' as SalesRole };
-      case 'NM':  return { members: MOCK_ZMS,  heading: 'National Team', subheading: 'Zonal Managers · Pan India', memberRole: 'ZM'  as SalesRole };
+      case 'ZNM': return { members: MOCK_RSMS, heading: 'My Team', subheading: 'Regional Managers · West Zone',    memberRole: 'RSM' as SalesRole };
+      case 'NSM': return { members: MOCK_ZMS,  heading: 'National Team', subheading: 'Zonal Managers · Pan India', memberRole: 'ZNM' as SalesRole };
       default:    return { members: [],        heading: 'Team',    subheading: '',                                  memberRole: 'XSR' as SalesRole };
     }
   }, [role]);

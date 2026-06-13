@@ -23,7 +23,7 @@ const MY_NAME      = 'Rajesh Kumar';
 /* ─── Sales team contacts (would come from outlet's assigned team in production) */
 
 const SALES_TEAM = [
-  { role: 'ISR',            name: 'Anil Sharma',   phone: '9876543210', initials: 'AS', color: 'var(--brand-primary)' },
+  { role: 'XSR',            name: 'Anil Sharma',   phone: '9876543210', initials: 'AS', color: 'var(--brand-primary)' },
   { role: 'Sales Officer',  name: 'Rajesh Kumar',  phone: '9765432109', initials: 'RK', color: '#1A1A2E' },
 ];
 

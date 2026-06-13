@@ -22,8 +22,8 @@ const ALL_PRESENT: RolePhones = {
   SO:  '9900000028',
   ASM: '9900000007',
   RSM: '9900000003',
-  ZM:  '9900000002',
-  NM:  '9900000001',
+  ZNM: '9900000002',
+  NSM: '9900000001',
 };
 
 const SO_RESIGNED: RolePhones  = { ...ALL_PRESENT, SO: '' };
@@ -61,9 +61,9 @@ describe('resolveApprover — higher submitters', () => {
     expect(resolveApprover('ASM', ALL_PRESENT)).toBe('RSM');
   });
 
-  it('returns ZM when ASM submits and RSM is resigned', () => {
+  it('returns ZNM when ASM submits and RSM is resigned', () => {
     const RSM_RESIGNED: RolePhones = { ...ALL_PRESENT, RSM: '' };
-    expect(resolveApprover('ASM', RSM_RESIGNED)).toBe('ZM');
+    expect(resolveApprover('ASM', RSM_RESIGNED)).toBe('ZNM');
   });
 });
 

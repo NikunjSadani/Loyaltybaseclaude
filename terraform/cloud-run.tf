@@ -46,7 +46,7 @@ resource "google_cloud_run_v2_service" "api_prod" {
           cpu    = "1"
           memory = "512Mi"
         }
-        cpu_idle = false # keep CPU allocated between requests — paid service, avoids cold-start penalty
+        cpu_idle = true # CPU throttled between requests — correct for B2B traffic at this scale; upgrade min_instance_count before revisiting this
       }
 
       ports {
@@ -250,7 +250,7 @@ resource "google_cloud_run_v2_service" "frontend_prod" {
           cpu    = "1"
           memory = "512Mi"
         }
-        cpu_idle = false
+        cpu_idle = true # CPU throttled between requests — correct for B2B traffic at this scale
       }
 
       ports {

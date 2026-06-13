@@ -25,6 +25,22 @@ vi.mock('next/link', () => ({
     <a href={href} {...props}>{children}</a>,
 }));
 
+// Leaderboard is opt-in per tenant; these tests always render with showLeaderboard=true
+vi.mock('@/lib/platform/client-config-context', () => ({
+  useClientConfig: () => ({
+    features: {
+      walletModule: true,
+      partnerApp: {
+        showSchemes: true, showInvoices: true, showWallet: true,
+        showTeam: true, showLeaderboard: true,
+      },
+    },
+    branding: { displayName: 'Test', primaryColor: '#16a34a' },
+  }),
+  ClientConfigProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  useFeatureFlag: () => true,
+}));
+
 import LeaderboardPage from '../page';
 
 describe('V — Leaderboard: absolute primary-KPI ranking', () => {

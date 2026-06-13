@@ -111,6 +111,10 @@ const OUTLET_MAP: Record<string, string> = {
   o2: 'k2', o3: 'k3', o6: 'k6', o7: 'k7', o8: 'k8',
 };
 
+/** Only real UUIDs from the database should trigger an API fetch.
+ *  Mock keys like 'k2', 'o2' would 404 unconditionally — skip them. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
 const STEP_LABELS: Record<EditStep, string> = {
@@ -214,6 +218,46 @@ export default function EditKYCPage({ params }: { params: Promise<{ id: string }
     const t = setInterval(() => setOtpCountdown(c => c - 1), 1000);
     return () => clearInterval(t);
   }, [otpCountdown]);
+
+  /* ── API hydration — silently pre-fills form from server (leaderboard pattern) ── */
+  useEffect(() => {
+    // Only fetch for real UUIDs — mock keys (k2, o2, etc.) would 404 unconditionally.
+    if (!UUID_RE.test(id)) return;
+
+    fetch(`/api/kyc/${id}`)
+      .then(r => r.json())
+      .then((json) => {
+        if (json.success && json.data?.submission) {
+          const s = json.data.submission;
+          const apiMobile = (s.user?.phone as string) ?? '';
+          setForm(prev => ({
+            ...prev,
+            partnerName:       s.user?.name                     ?? prev.partnerName,
+            mobile:            apiMobile                        || prev.mobile,
+            gstNumber:         s.partner?.gstNumber             ?? prev.gstNumber,
+            panNumber:         s.partner?.panNumber             ?? prev.panNumber,
+            address:           s.partner?.address               ?? prev.address,
+            city:              s.partner?.city                  ?? prev.city,
+            state:             s.partner?.state                 ?? prev.state,
+            bankName:          s.partner?.bankName              ?? prev.bankName,
+            accountHolderName: s.partner?.accountHolderName     ?? prev.accountHolderName,
+            accountNumber:     s.partner?.bankAccountNumber     ?? prev.accountNumber,
+            ifscCode:          s.partner?.ifscCode              ?? prev.ifscCode,
+            upiId:             s.partner?.upiId                 ?? prev.upiId,
+          }));
+          // If the server has a different mobile than the locally-known original,
+          // the user has not verified this number — force re-verification to
+          // prevent bypassing OTP for a number that was never confirmed in session.
+          if (apiMobile && apiMobile !== originalMobile) {
+            setPhoneVerified(false);
+            setOtpSent(false);
+            setOtp('');
+            setOtpError('');
+          }
+        }
+      })
+      .catch(() => {}); // keep mock form data on any error
+  }, [id, originalMobile]);
 
   if (!kyc) {
     return (

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { use } from 'react';
 import {
   ArrowLeft,
@@ -16,6 +16,7 @@ import {
   FileText,
 } from 'lucide-react';
 import Link from 'next/link';
+import { Spinner } from '@/components/ui/spinner';
 import { KYCReviewer } from '@/components/admin/kyc-reviewer';
 import type { EntityType, GSTRegistrationType } from '@/lib/invoice';
 
@@ -33,6 +34,90 @@ const GST_REG_LABELS: Record<GSTRegistrationType, string> = {
   UNREGISTERED: 'Unregistered',
   COMPOSITE: 'Composition Scheme',
 };
+
+/* ─── API types ──────────────────────────────────────────────────────────────── */
+
+interface ApiKycDetail {
+  id: string;
+  status: string;
+  submittedAt?: string | null;
+  createdAt?: string;
+  rejectionReason?: string | null;
+  reviewerNotes?: string | null;
+  user: { id: string; name: string; phone: string; role?: string };
+  partner?: {
+    id: string; businessName: string;
+    gstNumber?: string | null; panNumber?: string | null;
+    address?: string | null; city?: string | null; state?: string | null; pincode?: string | null;
+    bankName?: string | null; bankAccountNumber?: string | null; ifscCode?: string | null;
+  } | null;
+  documents?: { id: string; documentType: string; fileUrl?: string; status: string }[];
+  statusHistory?: { id: string; toStatus: string; createdAt: string; notes?: string | null }[];
+}
+
+type KycDetailShape = {
+  id: string; outletName: string; firmName: string; mobile: string; email: string;
+  partnerClass: string; gstNumber: string; panNumber: string;
+  address: string; city: string; state: string; pincode: string;
+  salesUser: string; territory: string; region: string;
+  submittedDate: string; ageHrs: number; status: string;
+  bankName: string; accountNumber: string; ifscCode: string;
+  pennyDropStatus: 'verified' | 'failed' | 'pending';
+  agreementStatus: 'signed' | 'pending'; agreementDate: string;
+  statusHistory: Array<{ status: string; timestamp: string; user: string; remark?: string }>;
+  auditLog: Array<{ action: string; user: string; timestamp: string; detail: string }>;
+  documents: Array<{ id: string; type: string; label: string; url: string; status: 'pending' | 'verified' | 'rejected' }>;
+};
+
+function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
+  const submittedAt = s.submittedAt ?? s.createdAt ?? '';
+  const ageHrs = submittedAt
+    ? Math.round((Date.now() - new Date(submittedAt).getTime()) / (1000 * 60 * 60))
+    : 0;
+  const docStatusMap: Record<string, 'pending' | 'verified' | 'rejected'> = {
+    SUBMITTED: 'pending', APPROVED: 'verified', REJECTED: 'rejected',
+  };
+  return {
+    id:               s.id,
+    outletName:       s.partner?.businessName ?? s.user.name,
+    firmName:         s.partner?.businessName ?? s.user.name,
+    mobile:           s.user.phone,
+    email:            '',
+    partnerClass:     '',
+    gstNumber:        s.partner?.gstNumber ?? '',
+    panNumber:        s.partner?.panNumber ?? '',
+    address:          s.partner?.address ?? '',
+    city:             s.partner?.city ?? '',
+    state:            s.partner?.state ?? '',
+    pincode:          s.partner?.pincode ?? '',
+    salesUser:        '',
+    territory:        '',
+    region:           '',
+    submittedDate:    submittedAt.slice(0, 10),
+    ageHrs,
+    status:           s.status,
+    bankName:         s.partner?.bankName ?? '',
+    accountNumber:    s.partner?.bankAccountNumber ?? '',
+    ifscCode:         s.partner?.ifscCode ?? '',
+    pennyDropStatus:  'pending',
+    agreementStatus:  'pending',
+    agreementDate:    '',
+    statusHistory:    (s.statusHistory ?? []).map(h => ({
+      status:    h.toStatus,
+      timestamp: new Date(h.createdAt).toLocaleString('en-IN'),
+      user:      'System',
+      remark:    h.notes ?? undefined,
+    })),
+    auditLog:  [],
+    documents: (s.documents ?? []).map(d => ({
+      id:     d.id,
+      type:   d.documentType.toLowerCase(),
+      label:  d.documentType.replace(/_/g, ' '),
+      url:    d.fileUrl ?? `https://placehold.co/600x400/e2e8f0/1a1a2e?text=${d.documentType}`,
+      status: docStatusMap[d.status] ?? 'pending',
+    })),
+  };
+}
 
 const KYC_DATA: Record<string, {
   id: string;
@@ -125,7 +210,9 @@ const PENNY_ICONS = {
 
 export default function KYCDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const kyc = KYC_DATA[id];
+  const [kyc, setKyc] = useState<KycDetailShape | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState<string | null>(null);
   const [actionResult, setActionResult] = useState<string | null>(null);
 
   // Gifsy-admin-only fields set during KYC approval
@@ -133,10 +220,33 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
   const [gstRegType, setGstRegType] = useState<GSTRegistrationType>('UNREGISTERED');
   const [taxFieldsSaved, setTaxFieldsSaved] = useState(false);
 
-  if (!kyc) {
+  useEffect(() => {
+    if (!id) return;
+    fetch(`/api/kyc/${id}`)
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { submission: ApiKycDetail }; error?: string }) => {
+        if (json.success && json.data) {
+          setKyc(mapApiKycDetail(json.data.submission));
+        } else {
+          setError(json.error ?? 'KYC submission not found');
+        }
+      })
+      .catch(() => setError('Failed to load KYC submission'))
+      .finally(() => setLoading(false));
+  }, [id]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (error || !kyc) {
     return (
       <div className="text-center py-20">
-        <p className="text-gray-500 text-sm">KYC submission not found</p>
+        <p className="text-gray-500 text-sm">{error ?? 'KYC submission not found'}</p>
         <Link href="/kyc" className="text-[var(--brand-primary)] text-sm mt-2 inline-block">← Back to KYC List</Link>
       </div>
     );

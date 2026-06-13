@@ -76,17 +76,66 @@ const MOCK_ORDERS: Order[] = [
   },
 ];
 
+interface ApiOrder {
+  id: string;
+  reward: { id: string; name: string; imageUrls: string[] };
+  status: string;
+  totalPointsCost: number;
+  trackingNumber?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  dispatchedAt?: string | null;
+  deliveredAt?: string | null;
+  cancelledAt?: string | null;
+}
+
+function mapApiOrder(o: ApiOrder): Order {
+  const timeline: Order['timeline'] = [
+    { status: 'Order Placed', date: o.createdAt },
+  ];
+  if (o.dispatchedAt) {
+    timeline.push({
+      status: 'Dispatched', date: o.dispatchedAt,
+      note: o.trackingNumber ? `Tracking: ${o.trackingNumber}` : undefined,
+    });
+  }
+  if (o.deliveredAt) {
+    timeline.push({ status: 'Delivered', date: o.deliveredAt });
+  }
+  if (o.cancelledAt) {
+    timeline.push({ status: 'Cancelled', date: o.cancelledAt });
+  }
+
+  return {
+    id:             o.id,
+    rewardName:     o.reward.name,
+    pointsSpent:    o.totalPointsCost,
+    status:         o.status as RedemptionStatus,
+    trackingNumber: o.trackingNumber ?? undefined,
+    createdAt:      o.createdAt,
+    updatedAt:      o.updatedAt,
+    timeline,
+  };
+}
+
 export default function OrdersPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      setOrders(MOCK_ORDERS);
-      setLoading(false);
-    }, 500);
-    return () => clearTimeout(t);
+    fetch('/api/rewards/orders')
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { orders: ApiOrder[] }; error?: string }) => {
+        if (json.success && json.data) {
+          setOrders(json.data.orders.map(mapApiOrder));
+        } else {
+          setError(json.error ?? 'Failed to load orders');
+        }
+      })
+      .catch(() => setError('Failed to load orders'))
+      .finally(() => setLoading(false));
   }, []);
 
   return (
@@ -100,6 +149,8 @@ export default function OrdersPage() {
         <div className="flex items-center justify-center min-h-48">
           <Spinner size="lg" />
         </div>
+      ) : error ? (
+        <div className="text-sm text-red-500 text-center py-8">{error}</div>
       ) : orders.length === 0 ? (
         <EmptyState
           icon={<Package className="h-8 w-8" />}

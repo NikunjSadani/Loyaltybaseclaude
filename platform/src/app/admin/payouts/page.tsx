@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   ChevronRight,
   CreditCard,
@@ -14,6 +14,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import Link from 'next/link';
+import { Spinner } from '@/components/ui/spinner';
 
 type PayoutBatchStatus =
   | 'CALCULATED'
@@ -48,22 +49,67 @@ interface PayoutTransaction {
   status: 'PENDING' | 'PROCESSED' | 'FAILED' | 'HOLD';
 }
 
-const BATCHES: PayoutBatch[] = [
-  { id: 'BAT-2025-04', month: 'April 2025', status: 'DISBURSED', partnerCount: 1243, grossAmount: '₹28.4L', tdsAmount: '₹2.84L', netAmount: '₹25.56L', processedAt: '2025-05-02' },
-  { id: 'BAT-2025-03', month: 'March 2025', status: 'RECONCILED', partnerCount: 1198, grossAmount: '₹24.7L', tdsAmount: '₹2.47L', netAmount: '₹22.23L', processedAt: '2025-04-04' },
-  { id: 'BAT-2025-02', month: 'February 2025', status: 'RECONCILED', partnerCount: 1054, grossAmount: '₹19.8L', tdsAmount: '₹1.98L', netAmount: '₹17.82L', processedAt: '2025-03-06' },
-  { id: 'BAT-2025-01', month: 'January 2025', status: 'RECONCILED', partnerCount: 987, grossAmount: '₹17.3L', tdsAmount: '₹1.73L', netAmount: '₹15.57L', processedAt: '2025-02-05' },
-  { id: 'BAT-2025-05', month: 'May 2025', status: 'CALCULATED', partnerCount: 1312, grossAmount: '₹31.8L', tdsAmount: '₹3.18L', netAmount: '₹28.62L' },
-];
+/* ─── API types & mapping ──────────────────────────────────────────────────── */
 
-const TRANSACTIONS: PayoutTransaction[] = [
-  { id: 'TXN001', partnerId: 'P005', partnerName: 'K. Krishnamurthy & Sons', partnerClass: 'PLATINUM', territory: 'Chennai', grossAmount: '₹48,500', tdsAmount: '₹4,850', netAmount: '₹43,650', payoutMode: 'BANK_TRANSFER', utrNumber: 'ICIC325001234', status: 'PROCESSED' },
-  { id: 'TXN002', partnerId: 'P001', partnerName: 'Rakesh Sharma', partnerClass: 'GOLD', territory: 'Mumbai West', grossAmount: '₹22,000', tdsAmount: '₹2,200', netAmount: '₹19,800', payoutMode: 'UPI', utrNumber: 'UPI428001892', status: 'PROCESSED' },
-  { id: 'TXN003', partnerId: 'P002', partnerName: 'Ramesh Gupta', partnerClass: 'SILVER', territory: 'Delhi NCR', grossAmount: '₹14,500', tdsAmount: '₹1,450', netAmount: '₹13,050', payoutMode: 'BANK_TRANSFER', utrNumber: 'HDFC921003412', status: 'PROCESSED' },
-  { id: 'TXN004', partnerId: 'P003', partnerName: 'Vijay Patel', partnerClass: 'BRONZE', territory: 'Ahmedabad', grossAmount: '₹8,200', tdsAmount: '₹820', netAmount: '₹7,380', payoutMode: 'UPI', status: 'FAILED' },
-  { id: 'TXN005', partnerId: 'P010', partnerName: 'Suresh Wholesalers', partnerClass: 'SILVER', territory: 'Hyderabad', grossAmount: '₹18,400', tdsAmount: '₹1,840', netAmount: '₹16,560', payoutMode: 'BANK_TRANSFER', status: 'PENDING' },
-  { id: 'TXN006', partnerId: 'P012', partnerName: 'Banerjee Traders', partnerClass: 'STANDARD', territory: 'Kolkata', grossAmount: '₹5,600', tdsAmount: '₹560', netAmount: '₹5,040', payoutMode: 'UPI', status: 'HOLD' },
-];
+interface ApiBatch {
+  id: string;
+  batchCode: string;
+  status: PayoutBatchStatus;
+  totalAmountPaise: number;
+  transactionCount: number;
+  payoutMode: string;
+  processedAt?: string | null;
+  createdAt: string;
+  _count?: { transactions: number };
+}
+
+interface ApiTransaction {
+  id: string;
+  payoutMode: string;
+  status: string;
+  amountPaise: number;
+  beneficiaryName?: string | null;
+  partner: { id: string; businessName: string };
+  batch?: { id: string; batchCode: string } | null;
+  providerRefId?: string | null;
+}
+
+function formatPaise(paise: number): string {
+  const rupees = paise / 100;
+  if (rupees >= 100000) return `₹${(rupees / 100000).toFixed(1)}L`;
+  return `₹${rupees.toLocaleString('en-IN')}`;
+}
+
+function mapApiBatch(b: ApiBatch): PayoutBatch {
+  const tds = Math.round(b.totalAmountPaise * 0.1);
+  return {
+    id:           b.id,
+    month:        b.batchCode,
+    status:       b.status,
+    partnerCount: b._count?.transactions ?? b.transactionCount ?? 0,
+    grossAmount:  formatPaise(b.totalAmountPaise),
+    tdsAmount:    formatPaise(tds),
+    netAmount:    formatPaise(b.totalAmountPaise - tds),
+    processedAt:  b.processedAt?.slice(0, 10),
+  };
+}
+
+function mapApiTransaction(t: ApiTransaction): PayoutTransaction {
+  const tds = Math.round(t.amountPaise * 0.1);
+  return {
+    id:           t.id,
+    partnerId:    t.partner.id,
+    partnerName:  t.partner.businessName,
+    partnerClass: '',
+    territory:    '',
+    grossAmount:  formatPaise(t.amountPaise),
+    tdsAmount:    formatPaise(tds),
+    netAmount:    formatPaise(t.amountPaise - tds),
+    payoutMode:   t.payoutMode,
+    utrNumber:    t.providerRefId ?? undefined,
+    status:       t.status as PayoutTransaction['status'],
+  };
+}
 
 const BATCH_STATUS_ORDER: PayoutBatchStatus[] = [
   'CALCULATED', 'VALIDATED', 'INVOICED', 'TDS_DEDUCTED', 'DISBURSED', 'RECONCILED',
@@ -102,11 +148,52 @@ const PAYOUT_MODE_LABELS: Record<string, string> = {
 };
 
 export default function PayoutsPage() {
-  const [selectedBatch, setSelectedBatch] = useState<PayoutBatch>(BATCHES[0]);
+  const [batches, setBatches] = useState<PayoutBatch[]>([]);
+  const [transactions, setTransactions] = useState<PayoutTransaction[]>([]);
+  const [selectedBatch, setSelectedBatch] = useState<PayoutBatch | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [processing, setProcessing] = useState(false);
 
-  const filtered = TRANSACTIONS.filter(
+  useEffect(() => {
+    Promise.all([
+      fetch('/api/payouts/batches').then(r => r.json()),
+      fetch('/api/payouts/transactions').then(r => r.json()),
+    ])
+      .then(([batchJson, txnJson]) => {
+        if (batchJson.success && batchJson.data) {
+          const mapped = batchJson.data.batches.map(mapApiBatch);
+          setBatches(mapped);
+          setSelectedBatch(mapped[0] ?? null);
+        } else {
+          setError(batchJson.error ?? 'Failed to load payout batches');
+        }
+        if (txnJson.success && txnJson.data) {
+          setTransactions(txnJson.data.transactions.map(mapApiTransaction));
+        }
+      })
+      .catch(() => setError('Failed to load payouts'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-center py-20">
+        <p className="text-gray-500 text-sm">{error}</p>
+      </div>
+    );
+  }
+
+  const filtered = transactions.filter(
     (t) =>
       !search ||
       t.partnerName.toLowerCase().includes(search.toLowerCase()) ||
@@ -120,7 +207,7 @@ export default function PayoutsPage() {
     alert('Batch processing initiated. You will be notified when complete.');
   };
 
-  const currentStatusIdx = BATCH_STATUS_ORDER.indexOf(selectedBatch.status);
+  const currentStatusIdx = selectedBatch ? BATCH_STATUS_ORDER.indexOf(selectedBatch.status) : -1;
 
   return (
     <div className="space-y-5 fade-in">
@@ -167,19 +254,19 @@ export default function PayoutsPage() {
         <div className="lg:col-span-1 space-y-3">
           <h2 className="text-sm font-semibold text-gray-800">Payout Batches</h2>
           <div className="space-y-2">
-            {BATCHES.map((batch) => (
+            {batches.map((batch) => (
               <button
                 key={batch.id}
                 onClick={() => setSelectedBatch(batch)}
                 className={`w-full text-left p-3 rounded-xl border transition-all ${
-                  selectedBatch.id === batch.id
+                  selectedBatch?.id === batch.id
                     ? 'border-[var(--brand-primary)] bg-red-50'
                     : 'border-gray-200 bg-white hover:border-gray-300'
                 }`}
               >
                 <div className="flex items-center justify-between mb-1">
                   <p className="text-sm font-semibold text-gray-900">{batch.month}</p>
-                  <ChevronRight className={`w-4 h-4 ${selectedBatch.id === batch.id ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} />
+                  <ChevronRight className={`w-4 h-4 ${selectedBatch?.id === batch.id ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} />
                 </div>
                 <p className="text-xs text-gray-500 mb-1">{batch.partnerCount.toLocaleString()} partners</p>
                 <div className="flex items-center justify-between">
@@ -200,7 +287,7 @@ export default function PayoutsPage() {
         {/* Batch detail */}
         <div className="lg:col-span-3 space-y-4">
           {/* Batch header */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5">
+          {selectedBatch && <div className="bg-white rounded-xl border border-gray-200 p-5">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="text-base font-semibold text-gray-900">
@@ -278,7 +365,7 @@ export default function PayoutsPage() {
                 <p className="text-lg font-bold text-green-700 mt-0.5">{selectedBatch.netAmount}</p>
               </div>
             </div>
-          </div>
+          </div>}
 
           {/* Transaction table */}
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -348,7 +435,7 @@ export default function PayoutsPage() {
 
             <div className="px-4 py-3 border-t border-gray-100 bg-gray-50">
               <p className="text-xs text-gray-500">
-                Showing {filtered.length} of {TRANSACTIONS.length} transactions
+                Showing {filtered.length} of {transactions.length} transactions
               </p>
             </div>
           </div>

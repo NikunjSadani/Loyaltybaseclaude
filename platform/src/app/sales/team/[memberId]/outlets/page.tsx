@@ -62,7 +62,7 @@ const MEMBER_NAMES: Record<string, { name: string; role: string; territory: stri
   asm3: { name: 'Sonal Agrawal',   role: 'ASM', territory: 'Nashik Zone'   },
   asm4: { name: 'Vikram Bhosale',  role: 'ASM', territory: 'Nagpur Zone'   },
   rsm1: { name: 'Suresh Nair',     role: 'RSM', territory: 'Maharashtra'   },
-  zm1:  { name: 'Deepak Gupta',    role: 'ZM',  territory: 'West Zone'     },
+  zm1:  { name: 'Deepak Gupta',    role: 'ZNM', territory: 'West Zone'     },
 };
 
 /** Direct-report member IDs (manager → [reportIds]) */

@@ -27,7 +27,7 @@ const BASE_NAV: NavItem[] = [
 
 const TEAM_NAV: NavItem = { href: '/sales/team', label: 'Team', icon: Users };
 
-const ALL_ROLES: SalesRole[] = ['XSR', 'SO', 'ASM', 'RSM', 'ZM', 'NM'];
+const ALL_ROLES: SalesRole[] = ['XSR', 'SO', 'ASM', 'RSM', 'ZNM', 'NSM'];
 
 const NOTIFICATIONS = [
   { id: 1, icon: FileCheck,    iconBg: 'bg-green-100 text-green-600',  title: 'KYC Approved',       body: 'Kumar General Store KYC has been approved.', time: '10 min ago', unread: true },

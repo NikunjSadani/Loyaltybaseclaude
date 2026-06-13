@@ -1,11 +1,23 @@
 'use client';
 
-import { use } from 'react';
+import { use, useState, useEffect } from 'react';
 import { ArrowLeft, Tag, Users, Wallet, ClipboardList } from 'lucide-react';
 import Link from 'next/link';
 import { SchemeBuilder } from '@/components/admin/scheme-builder';
 import { IncentiveType, CalculationMethod, ChannelPartnerClass } from '@/types';
+import { Spinner } from '@/components/ui/spinner';
 
+/* ─── API types ────────────────────────────────────────────────────────────── */
+interface ApiScheme {
+  id: string;
+  name: string;
+  description?: string | null;
+  status: string;
+  startDate: string;
+  endDate: string;
+}
+
+/* ─── Static fallback data ─────────────────────────────────────────────────── */
 const SCHEME_DATA: Record<string, {
   id: string;
   name: string;
@@ -62,7 +74,57 @@ const STATUS_COLORS: Record<string, string> = {
 
 export default function SchemeDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const scheme = SCHEME_DATA[id] ?? SCHEME_DATA['new'];
+
+  const staticFallback = SCHEME_DATA[id] ?? SCHEME_DATA['new'];
+  const isNew = id === 'new';
+
+  // Merge API data over static fallback for live fields
+  type SchemeOverrides = Partial<Pick<typeof staticFallback, 'name' | 'description' | 'status' | 'startDate' | 'endDate'>>;
+  const [apiOverrides, setApiOverrides] = useState<SchemeOverrides>({});
+  const [loading, setLoading] = useState(!isNew);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isNew) return;
+    fetch(`/api/schemes/${id}`)
+      .then((r) => r.json())
+      .then((json: { success: boolean; data?: { scheme: ApiScheme }; error?: string }) => {
+        if (json.success && json.data?.scheme) {
+          const s = json.data.scheme;
+          setApiOverrides({
+            name: s.name,
+            description: s.description ?? '',
+            status: s.status,
+            startDate: s.startDate.slice(0, 10),
+            endDate: s.endDate.slice(0, 10),
+          });
+        } else {
+          setError(json.error ?? 'Failed to load scheme');
+        }
+      })
+      .catch(() => setError('Failed to load scheme'))
+      .finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, isNew]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-center py-20">
+        <p className="text-red-500">{error}</p>
+      </div>
+    );
+  }
+
+  // Merge static fallback with any live overrides from API
+  const scheme = { ...staticFallback, ...apiOverrides };
 
   const handleSave = (data: unknown) => {
     console.log('Save draft:', data);
@@ -110,7 +172,7 @@ export default function SchemeDetailPage({ params }: { params: Promise<{ id: str
                 <ClipboardList className="w-3.5 h-3.5" />
                 Enrollments
               </Link>
-              <span className={`px-3 py-1 rounded-full text-xs font-semibold ${STATUS_COLORS[scheme.status]}`}>
+              <span className={`px-3 py-1 rounded-full text-xs font-semibold ${STATUS_COLORS[scheme.status] ?? 'bg-gray-100 text-gray-600'}`}>
                 {scheme.status}
               </span>
             </>

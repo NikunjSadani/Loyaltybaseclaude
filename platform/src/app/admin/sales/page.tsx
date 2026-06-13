@@ -1,9 +1,9 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Download, Upload, FileSpreadsheet,
-  CheckCircle2, Info,
+  CheckCircle2, Info, Trash2, History, AlertTriangle,
 } from 'lucide-react';
 import {
   generateSalesTemplate,
@@ -14,6 +14,18 @@ import {
 import { getTenantKpiDefs } from '@/lib/platform/tenant-kpi-config';
 import { MOCK_OUTLETS, formatMonth } from '@/lib/targets';
 import type { NewOutletType } from '@/lib/targets';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+interface UploadBatch {
+  id:            string;
+  month:         string;
+  totalRows:     number;
+  acceptedCount: number;
+  rejectedCount: number;
+  status:        string;
+  createdAt:     string;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -50,6 +62,128 @@ function getSalesMonthOptions(): Array<{ value: string; label: string }> {
   return opts;
 }
 
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleDateString('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
+
+// ── Upload History Component ──────────────────────────────────────────────────
+
+function UploadHistory({ refreshKey }: { refreshKey: number }) {
+  const [batches,   setBatches]   = useState<UploadBatch[]>([]);
+  const [loading,   setLoading]   = useState(true);
+  const [fetchError, setFetchError] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [confirmId,  setConfirmId]  = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    setFetchError(false);
+    fetch('/api/admin/sales/batches')
+      .then(r => r.json())
+      .then(body => {
+        if (body.success) setBatches(body.data);
+        else setFetchError(true);
+      })
+      .catch(() => setFetchError(true))
+      .finally(() => setLoading(false));
+  }, [refreshKey]);
+
+  async function handleDelete(batchId: string) {
+    setDeletingId(batchId);
+    setConfirmId(null);
+    try {
+      const res  = await fetch(`/api/admin/sales/batches/${batchId}`, { method: 'DELETE' });
+      const body = await res.json();
+      if (body.success) {
+        setBatches(prev => prev.filter(b => b.id !== batchId));
+      }
+    } catch (e) {
+      console.error('Delete batch failed:', e);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-gray-400 py-4">
+        <div className="w-4 h-4 border-2 border-gray-200 border-t-gray-400 rounded-full animate-spin" />
+        Loading upload history…
+      </div>
+    );
+  }
+
+  if (fetchError) {
+    return (
+      <p className="text-sm text-amber-600 py-2">Could not load upload history — try refreshing the page.</p>
+    );
+  }
+
+  if (batches.length === 0) {
+    return (
+      <p className="text-sm text-gray-400 py-2">No uploads yet for this tenant.</p>
+    );
+  }
+
+  return (
+    <div className="divide-y divide-gray-100">
+      {batches.map(batch => (
+        <div key={batch.id} className="flex items-center justify-between py-3 gap-4">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-gray-800">{formatMonth(batch.month)}</span>
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                {batch.acceptedCount} rows saved
+              </span>
+              {batch.rejectedCount > 0 && (
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                  {batch.rejectedCount} skipped
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-gray-400 mt-0.5">{formatDate(batch.createdAt)}</p>
+          </div>
+
+          {/* Confirm → Delete flow */}
+          {confirmId === batch.id ? (
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="text-xs text-red-600 font-medium flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                Delete all {batch.acceptedCount} records?
+              </span>
+              <button
+                onClick={() => handleDelete(batch.id)}
+                disabled={deletingId === batch.id}
+                className="px-3 py-1.5 text-xs font-semibold bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
+              >
+                {deletingId === batch.id ? 'Deleting…' : 'Yes, delete'}
+              </button>
+              <button
+                onClick={() => setConfirmId(null)}
+                className="px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmId(batch.id)}
+              disabled={deletingId === batch.id}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-500 border border-red-200 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-40 shrink-0"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function SalesUploadPage() {
@@ -58,8 +192,11 @@ export default function SalesUploadPage() {
   const [kpiDefs]                   = useState(() => getTenantKpiDefs());
   const [fileName,    setFileName]  = useState('');
   const [parsing,     setParsing]   = useState(false);
+  const [saving,      setSaving]    = useState(false);
   const [parseResult, setParseResult] = useState<SalesParseResult | null>(null);
   const [saved,       setSaved]     = useState(false);
+  const [savedBatchId, setSavedBatchId] = useState<string | null>(null);
+  const [historyKey,  setHistoryKey] = useState(0);   // bump to refresh history
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ── Template download ──────────────────────────────────────────────────
@@ -76,6 +213,7 @@ export default function SalesUploadPage() {
     setParsing(true);
     setParseResult(null);
     setSaved(false);
+    setSavedBatchId(null);
     try {
       const arrayBuf = await file.arrayBuffer();
       const result   = parseSalesUpload(arrayBuf, kpiDefs, getAllOutletIds());
@@ -98,13 +236,33 @@ export default function SalesUploadPage() {
     if (file) handleFile(file);
   }
 
-  // ── Save ───────────────────────────────────────────────────────────────
+  // ── Save — wired to real API ───────────────────────────────────────────
 
-  function handleSave() {
+  async function handleSave() {
     if (!parseResult || parseResult.summary.saved === 0) return;
-    // Production: POST { salesMonth, salesData } to /api/admin/sales/bulk-upload
-    console.info('[SALES] Saving sales data for', salesMonth, parseResult.salesData);
-    setSaved(true);
+    setSaving(true);
+    try {
+      const res = await fetch('/api/admin/sales/bulk-upload', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          month:        salesMonth,
+          acceptedRows: parseResult.salesData,
+        }),
+      });
+      const body = await res.json();
+      if (res.ok && body.batchId) {
+        setSaved(true);
+        setSavedBatchId(body.batchId);
+        setHistoryKey(k => k + 1);   // refresh history list
+      } else {
+        console.error('[SALES] Save failed:', body);
+      }
+    } catch (e) {
+      console.error('[SALES] Save error:', e);
+    } finally {
+      setSaving(false);
+    }
   }
 
   // ── Download report ────────────────────────────────────────────────────
@@ -145,7 +303,7 @@ export default function SalesUploadPage() {
             {monthOptions.map((m, i) => (
               <button
                 key={m.value}
-                onClick={() => { setSalesMonth(m.value); setParseResult(null); setSaved(false); }}
+                onClick={() => { setSalesMonth(m.value); setParseResult(null); setSaved(false); setSavedBatchId(null); }}
                 className={`px-4 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
                   salesMonth === m.value
                     ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)]'
@@ -228,7 +386,8 @@ export default function SalesUploadPage() {
             {saved && (
               <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
                 <CheckCircle2 className="w-3.5 h-3.5" />
-                Sales data saved for {currentMonthLabel}
+                Saved for {currentMonthLabel}
+                {savedBatchId && <span className="opacity-60 font-normal ml-1">· {savedBatchId.slice(-8)}</span>}
               </span>
             )}
           </div>
@@ -272,10 +431,13 @@ export default function SalesUploadPage() {
             {parseResult.summary.saved > 0 && !saved && (
               <button
                 onClick={handleSave}
-                className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-xl hover:opacity-90 transition-opacity"
+                disabled={saving}
+                className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-xl hover:opacity-90 transition-opacity disabled:opacity-60"
               >
-                <CheckCircle2 className="w-4 h-4" />
-                Save {parseResult.summary.saved} row{parseResult.summary.saved !== 1 ? 's' : ''} for {currentMonthLabel}
+                {saving
+                  ? <><div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" /> Saving…</>
+                  : <><CheckCircle2 className="w-4 h-4" /> Save {parseResult.summary.saved} row{parseResult.summary.saved !== 1 ? 's' : ''} for {currentMonthLabel}</>
+                }
               </button>
             )}
             <button
@@ -288,6 +450,23 @@ export default function SalesUploadPage() {
           </div>
         </div>
       )}
+
+      {/* ── Upload History ────────────────────────────────────────────────── */}
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-6 py-5 space-y-3">
+        <div className="flex items-center gap-3">
+          <div className="p-2 rounded-xl bg-purple-50">
+            <History className="w-4 h-4 text-purple-600" />
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-gray-900">Upload History</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Delete test uploads before going live. Deleting removes all saved records for that month.
+            </p>
+          </div>
+        </div>
+        <UploadHistory refreshKey={historyKey} />
+      </div>
+
     </div>
   );
 }

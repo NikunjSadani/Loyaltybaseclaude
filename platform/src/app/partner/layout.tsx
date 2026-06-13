@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   Home, Wallet, Gift, User, Bell, CheckCircle,
-  Coins, Trophy, X, HeadphonesIcon, Target, Banknote,
+  Coins, Trophy, X, HeadphonesIcon, Target, Banknote, Medal,
 } from 'lucide-react';
 import { NavBottom } from '@/components/layout/nav-bottom';
 import { Sidebar } from '@/components/layout/sidebar';
@@ -77,26 +77,29 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
   };
 
   /* ── Nav items — gated by feature flags ── */
-  const walletOn  = features.walletModule;
-  const rewardsOn = features.walletModule && session.track === 'POINTS';
+  const walletOn      = features.walletModule;
+  const rewardsOn     = features.walletModule && session.track === 'POINTS';
+  const leaderboardOn = features.partnerApp.showLeaderboard;
 
   const mobileNavItems: NavItem[] = [
-    { href: '/partner/dashboard', label: 'Home',    icon: Home    },
-    ...(walletOn  ? [{ href: '/partner/wallet',  label: 'Wallet',  icon: Wallet } as NavItem] : []),
-    { href: '/partner/targets',   label: 'Targets', icon: Target  },
-    { href: '/partner/support',   label: 'Support', icon: HeadphonesIcon },
-    ...(rewardsOn ? [{ href: '/partner/rewards', label: 'Redeem',  icon: Gift   } as NavItem] : []),
+    { href: '/partner/dashboard',    label: 'Home',       icon: Home          },
+    ...(walletOn      ? [{ href: '/partner/wallet',      label: 'Wallet',     icon: Wallet } as NavItem] : []),
+    { href: '/partner/targets',      label: 'Targets',    icon: Target        },
+    ...(leaderboardOn ? [{ href: '/partner/leaderboard', label: 'Ranking',    icon: Medal  } as NavItem] : []),
+    { href: '/partner/support',      label: 'Support',    icon: HeadphonesIcon },
+    ...(rewardsOn     ? [{ href: '/partner/rewards',     label: 'Redeem',     icon: Gift   } as NavItem] : []),
   ];
 
   const sidebarSections: SidebarSection[] = [
     {
       items: [
-        { href: '/partner/dashboard', label: 'Dashboard', icon: Home          },
-        ...(walletOn  ? [{ href: '/partner/wallet',  label: 'My Wallet', icon: Wallet }] : []),
-        ...(rewardsOn ? [{ href: '/partner/rewards', label: 'Rewards',   icon: Gift   }] : []),
-        { href: '/partner/targets',  label: 'Targets',   icon: Target         },
-        { href: '/partner/support',  label: 'Support',   icon: HeadphonesIcon },
-        { href: '/partner/profile',  label: 'Profile',   icon: User           },
+        { href: '/partner/dashboard',    label: 'Dashboard',    icon: Home          },
+        ...(walletOn      ? [{ href: '/partner/wallet',      label: 'My Wallet',  icon: Wallet }] : []),
+        ...(rewardsOn     ? [{ href: '/partner/rewards',     label: 'Rewards',    icon: Gift   }] : []),
+        { href: '/partner/targets',      label: 'Targets',      icon: Target        },
+        ...(leaderboardOn ? [{ href: '/partner/leaderboard', label: 'Leaderboard', icon: Medal  }] : []),
+        { href: '/partner/support',      label: 'Support',      icon: HeadphonesIcon },
+        { href: '/partner/profile',      label: 'Profile',      icon: User          },
       ],
     },
   ];

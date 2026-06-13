@@ -504,7 +504,7 @@ export default function SalesDashboard() {
                       className="flex items-center gap-3 px-1 py-2.5 hover:bg-gray-50 active:bg-gray-100 rounded-lg transition-colors"
                     >
                       <Tag className="h-4 w-4 text-emerald-600 shrink-0" />
-                      <p className="text-sm text-gray-700 flex-1">Scheme Enrollment</p>
+                      <p className="text-sm text-gray-700 flex-1">Activation Enrollment</p>
                       <span className="text-[11px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
                         {schemeCount}
                       </span>
@@ -631,8 +631,9 @@ export default function SalesDashboard() {
               </p>
               <div className="flex gap-1.5 mt-2 flex-wrap">
                 {([
-                  { value: 'ALL', label: 'All' }, { value: 'SSS', label: 'SSS' },
-                  { value: 'WHOLESALER', label: 'Wholesaler' }, { value: 'SUB_STOCKIST', label: 'Sub-Stockist' },
+                  { value: 'ALL', label: 'All' },
+                  { value: 'VRIDDHI', label: 'Vriddhi' },
+                  { value: 'SAMBANDH', label: 'Sambandh 2.0' },
                 ] as { value: SalesOutletFilter; label: string }[]).map((opt) => (
                   <button key={opt.value} onClick={() => setOutletFilter(opt.value)}
                     className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition-all ${

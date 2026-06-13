@@ -1,15 +1,18 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Users, Search, ShieldCheck, UserCog, Building2, Activity } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 
-// ─── Mock data ────────────────────────────────────────────────────────────────
-const MOCK_USERS = [
-  { id: '1', name: 'Rahul Agarwal',    email: 'rahul@deoleo.in',   role: 'CLIENT_ADMIN',  client: 'Deoleo India',     status: 'ACTIVE',   lastLogin: '2026-06-03' },
-  { id: '2', name: 'Sneha Sharma',     email: 'sneha@deoleo.in',   role: 'MIS_USER',      client: 'Deoleo India',     status: 'ACTIVE',   lastLogin: '2026-06-02' },
-  { id: '3', name: 'Platform Ops',     email: 'ops@gifsy.in',      role: 'GIFSY_ADMIN',   client: 'Gifsy Platform',   status: 'ACTIVE',   lastLogin: '2026-06-03' },
-  { id: '4', name: 'Client B Admin',   email: 'admin@clientb.in',  role: 'CLIENT_ADMIN',  client: 'Client B (Demo)',  status: 'ACTIVE',   lastLogin: '2026-05-30' },
-];
+interface GifsyUser {
+  id: string;
+  name: string;
+  email?: string | null;
+  phone?: string;
+  role: string;
+  status: string;
+  createdAt?: string;
+}
 
 const ROLE_META: Record<string, { label: string; color: string }> = {
   GIFSY_ADMIN:   { label: 'Gifsy Admin',   color: 'text-purple-400 bg-purple-500/20 border-purple-500/30' },
@@ -18,12 +21,29 @@ const ROLE_META: Record<string, { label: string; color: string }> = {
 };
 
 export default function GifsyUsersPage() {
+  const [users, setUsers] = useState<GifsyUser[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
 
-  const filtered = MOCK_USERS.filter((u) =>
+  useEffect(() => {
+    fetch('/api/admin/users')
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { users: GifsyUser[] }; error?: string }) => {
+        if (json.success && json.data) {
+          setUsers(json.data.users);
+        } else {
+          setError(json.error ?? 'Failed to load users');
+        }
+      })
+      .catch(() => setError('Failed to load users'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const filtered = users.filter((u) =>
     !search ||
     u.name.toLowerCase().includes(search.toLowerCase()) ||
-    u.email.toLowerCase().includes(search.toLowerCase()) ||
+    (u.email ?? '').toLowerCase().includes(search.toLowerCase()) ||
     u.role.toLowerCase().includes(search.toLowerCase())
   );
 
@@ -42,9 +62,9 @@ export default function GifsyUsersPage() {
       {/* Stat strip */}
       <div className="grid grid-cols-3 gap-3">
         {[
-          { label: 'Gifsy Admins',  value: MOCK_USERS.filter(u => u.role === 'GIFSY_ADMIN').length,  icon: ShieldCheck, color: 'text-purple-400' },
-          { label: 'Client Admins', value: MOCK_USERS.filter(u => u.role === 'CLIENT_ADMIN').length, icon: UserCog,     color: 'text-blue-400'   },
-          { label: 'MIS Users',     value: MOCK_USERS.filter(u => u.role === 'MIS_USER').length,     icon: Activity,    color: 'text-amber-400'  },
+          { label: 'Gifsy Admins',  value: users.filter(u => u.role === 'GIFSY_ADMIN').length,  icon: ShieldCheck, color: 'text-purple-400' },
+          { label: 'Client Admins', value: users.filter(u => u.role === 'CLIENT_ADMIN').length, icon: UserCog,     color: 'text-blue-400'   },
+          { label: 'MIS Users',     value: users.filter(u => u.role === 'MIS_USER').length,     icon: Activity,    color: 'text-amber-400'  },
         ].map(({ label, value, icon: Icon, color }) => (
           <div key={label} className="bg-white/5 border border-white/10 rounded-xl p-4 flex items-center gap-3">
             <Icon className={`w-5 h-5 shrink-0 ${color}`} />
@@ -68,7 +88,17 @@ export default function GifsyUsersPage() {
         />
       </div>
 
+      {loading && (
+        <div className="flex items-center justify-center py-12">
+          <Spinner size="lg" />
+        </div>
+      )}
+      {error && (
+        <div className="text-sm text-red-400 text-center py-8">{error}</div>
+      )}
+
       {/* Table */}
+      {!loading && !error && (
       <div className="border border-white/10 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead>
@@ -97,10 +127,12 @@ export default function GifsyUsersPage() {
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1.5 text-white/60 text-xs">
                       <Building2 className="w-3.5 h-3.5 shrink-0" />
-                      {u.client}
+                      —
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-white/40 text-xs">{u.lastLogin}</td>
+                  <td className="px-4 py-3 text-white/40 text-xs">
+                    {u.createdAt ? u.createdAt.slice(0, 10) : '—'}
+                  </td>
                   <td className="px-4 py-3 text-center">
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-500/20 text-green-400 text-xs font-medium border border-green-500/30">
                       Active
@@ -112,6 +144,7 @@ export default function GifsyUsersPage() {
           </tbody>
         </table>
       </div>
+      )}
 
       <p className="text-xs text-white/30 text-center">
         Platform user management (invite, role change, deactivate) coming in Phase 2 — DB integration required.

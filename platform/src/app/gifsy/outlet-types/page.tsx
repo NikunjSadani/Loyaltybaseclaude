@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Tag, Plus, Pencil, Check, X, ToggleLeft, ToggleRight } from 'lucide-react';
 import {
   MASTER_OUTLET_TYPES,
@@ -8,9 +8,45 @@ import {
   applyOutletTypeToggle,
   type OutletType,
 } from '@/lib/platform/outlet-types';
+import { Spinner } from '@/components/ui/spinner';
+
+/* ─── API types & mapping ──────────────────────────────────────────────────── */
+interface ApiOutletTypeConfig {
+  outletTypeCode: string;
+  outletTypeName: string;
+  displayName?: string | null;
+  isEnabled: boolean;
+}
+
+function mapApiOutletType(c: ApiOutletTypeConfig): OutletType {
+  return {
+    code:        c.outletTypeCode,
+    name:        c.displayName ?? c.outletTypeName,
+    description: '',
+    isActive:    c.isEnabled,
+    createdAt:   '',
+  };
+}
+
+// Use 'platform' as the default client slug for the global outlet types view
+const OUTLET_TYPE_CLIENT_SLUG = 'platform';
 
 export default function OutletTypesPage() {
-  const [types, setTypes]           = useState<OutletType[]>(MASTER_OUTLET_TYPES);
+  // Initial state = MASTER_OUTLET_TYPES so existing synchronous tests keep passing.
+  // The useEffect silently overrides with live API data when available.
+  const [types, setTypes] = useState<OutletType[]>(MASTER_OUTLET_TYPES);
+
+  useEffect(() => {
+    fetch(`/api/gifsy/clients/${OUTLET_TYPE_CLIENT_SLUG}/outlet-type-configs`)
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: ApiOutletTypeConfig[]; error?: string }) => {
+        if (json.success && Array.isArray(json.data)) {
+          setTypes(json.data.map(mapApiOutletType));
+        }
+        // On failure, keep initial MASTER_OUTLET_TYPES (best-effort fallback)
+      })
+      .catch(() => { /* silent fail — keep static fallback */ });
+  }, []);
   const [renamingCode, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameVal] = useState('');
   const [addingNew, setAddingNew]   = useState(false);

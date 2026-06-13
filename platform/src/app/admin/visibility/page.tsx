@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   CheckCircle,
   XCircle,
@@ -23,6 +23,7 @@ import {
   DEMO_VISIBILITY_MAP,
 } from '@/lib/visibility-upload';
 import { getGifsySettings } from '@/lib/gifsy-settings';
+import { Spinner } from '@/components/ui/spinner';
 
 type VisTab = 'queue' | 'fraud' | 'upload';
 
@@ -53,6 +54,38 @@ interface FraudItem {
   similarity: number;
   uploadTime: string;
   status: 'FLAGGED' | 'DISMISSED';
+}
+
+/* ─── API types & mapping ──────────────────────────────────────────────────── */
+
+interface ApiVisibilityItem {
+  id: string;
+  status: string;
+  createdAt: string;
+  imageUrls?: string[];
+  geoLat?: number | null;
+  geoLng?: number | null;
+  partner: { id: string; businessName: string };
+  outlet: { id: string; name: string; city: string };
+}
+
+function mapApiVisibilityItem(s: ApiVisibilityItem): VisibilityItem {
+  return {
+    id:             s.id,
+    partnerId:      s.partner.id,
+    partnerName:    s.partner.businessName,
+    outletId:       s.outlet.id,
+    territory:      s.outlet.city ?? '',
+    visibilityType: '',
+    imageUrl:       s.imageUrls?.[0] ?? '',
+    uploadTime:     s.createdAt.slice(0, 16).replace('T', ' '),
+    geoLat:         s.geoLat ?? 0,
+    geoLng:         s.geoLng ?? 0,
+    geoAccuracy:    '',
+    captureTime:    '',
+    exifValid:      true,
+    submittedBy:    '',
+  };
 }
 
 const VISIBILITY_QUEUE: VisibilityItem[] = [
@@ -147,7 +180,25 @@ export default function VisibilityPage() {
   // portal — the Approval Queue and Fraud Log are not applicable.
   const photoApprovalEnabled = getGifsySettings().visibilityPhotoEnabled;
 
-  const [tab, setTab] = useState<VisTab>('upload');
+  const [queueItems, setQueueItems] = useState<VisibilityItem[]>([]);
+  const [queueLoading, setQueueLoading] = useState(true);
+  const [queueError, setQueueError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch('/api/visibility/submissions?status=SUBMITTED')
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { submissions: ApiVisibilityItem[] }; error?: string }) => {
+        if (json.success && json.data) {
+          setQueueItems(json.data.submissions.map(mapApiVisibilityItem));
+        } else {
+          setQueueError(json.error ?? 'Failed to load submissions');
+        }
+      })
+      .catch(() => setQueueError('Failed to load submissions'))
+      .finally(() => setQueueLoading(false));
+  }, []);
+
+  const [tab, setTab] = useState<VisTab>(photoApprovalEnabled ? 'queue' : 'upload');
   const [currentIndex, setCurrentIndex] = useState(0);
   const [approved, setApproved] = useState<Set<string>>(new Set());
   const [rejected, setRejected] = useState<Set<string>>(new Set());
@@ -279,11 +330,27 @@ export default function VisibilityPage() {
     PENDING: 'Pending', UNDER_REVIEW: 'Under Review', APPROVED: 'Approved',
   };
 
-  const pendingItems = VISIBILITY_QUEUE.filter(
+  if (queueLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (queueError) {
+    return (
+      <div className="text-center py-20">
+        <p className="text-gray-500 text-sm">{queueError}</p>
+      </div>
+    );
+  }
+
+  const pendingItems = queueItems.filter(
     (v) => !approved.has(v.id) && !rejected.has(v.id)
   );
 
-  const currentItem = pendingItems[currentIndex] ?? VISIBILITY_QUEUE[0];
+  const currentItem = pendingItems[currentIndex] ?? queueItems[0];
   const approvedToday = approved.size;
   const rejectedToday = rejected.size;
 

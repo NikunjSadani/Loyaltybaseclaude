@@ -163,6 +163,26 @@ export const OUTLET_ACHIEVEMENTS: Record<string, OutletAchievement> = {
   },
 };
 
+/* ─── Period helpers ─────────────────────────────────────────────────────────── */
+
+/** Returns the current calendar month as 'YYYY-MM'. Used for live API fetches
+ *  so pages always request data for today's month, not a hardcoded demo value. */
+export function currentPeriod(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+/** Selects the "primary" scheme target from an API targets array.
+ *  Picks the first entry with targetValue > 0 (real scheme), falling back to
+ *  the first entry. Returns null for an empty array.
+ *  Single source of truth — used by both the Targets page and the Dashboard. */
+export function getPrimarySchemeTarget<T extends { targetValue: number }>(
+  targets: T[],
+): T | null {
+  if (!targets.length) return null;
+  return targets.find((t) => t.targetValue > 0) ?? targets[0];
+}
+
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
 export function pct(achieved: number, target: number): number {

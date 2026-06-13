@@ -9,19 +9,21 @@ import {
 import Link from 'next/link';
 import * as XLSX from 'xlsx';
 import {
-  validateHeaders,
   validateEmployeeUpload,
-  parseUploadRows,
   getEmployees,
   saveEmployees,
   DEOLEO_HIERARCHY,
-  getTemplateData,
   generateGuideHtml,
+  validateHierarchyChainHeaders,
+  parseHierarchyChainRows,
+  generateHierarchyChainErrorReport,
+  getHierarchyChainTemplateData,
 } from '@/lib/employee-hierarchy';
 import type {
   HierarchyEmployee,
   EmployeeUploadValidationResult,
   EmployeeRowValidationResult,
+  HierarchyChainParseResult,
 } from '@/types';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -133,26 +135,25 @@ function ValidationRowItem({ row }: { row: EmployeeRowValidationResult }) {
 // ─── Downloads ────────────────────────────────────────────────────────────────
 
 function downloadTemplate() {
-  const { headers, exampleRows, dosAndDontsRows } = getTemplateData(CONFIG);
+  const { headers, exampleRows, dosAndDontsRows } = getHierarchyChainTemplateData(CONFIG);
 
   const wb = XLSX.utils.book_new();
 
   // ── Sheet 1: Dos & Don'ts ── opens first so users read it before data entry
   const ddSheet = XLSX.utils.aoa_to_sheet(dosAndDontsRows);
   ddSheet['!cols'] = [
-    { wch: 28 },   // Col A — label / symbol
+    { wch: 32 },   // Col A — label
     { wch: 90 },   // Col B — explanation
   ];
   XLSX.utils.book_append_sheet(wb, ddSheet, 'Dos & Don\'ts');
 
-  // ── Sheet 2: Employee Upload ── the actual data entry sheet
-  const dataRows = [headers as unknown as string[], ...exampleRows];
+  // ── Sheet 2: Hierarchy Chain ── 18-column data entry sheet (leaf → root)
+  const dataRows = [headers, ...exampleRows];
   const dataSheet = XLSX.utils.aoa_to_sheet(dataRows);
-  dataSheet['!cols'] = headers.map((h) => ({
-    // Wider columns for the ID and explanation columns
-    wch: h.includes('Manager') ? 34 : h === 'Employee Name' ? 26 : 22,
+  dataSheet['!cols'] = headers.map(h => ({
+    wch: h.endsWith('Phone') ? 16 : h.endsWith('Name') ? 24 : 18,
   }));
-  XLSX.utils.book_append_sheet(wb, dataSheet, 'Employee Upload');
+  XLSX.utils.book_append_sheet(wb, dataSheet, 'Hierarchy Chain');
 
   const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   const blob   = new Blob(
@@ -162,7 +163,23 @@ function downloadTemplate() {
   const url  = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'Employee_Hierarchy_Upload_Template.xlsx';
+  link.download = 'Employee_Hierarchy_Chain_Template.xlsx';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+function downloadErrorReport(
+  rawRows: Record<string, string>[],
+  parseResult: HierarchyChainParseResult,
+) {
+  const bytes  = generateHierarchyChainErrorReport(rawRows, parseResult, CONFIG);
+  const blob   = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url    = URL.createObjectURL(blob);
+  const link   = document.createElement('a');
+  link.href    = url;
+  link.download = 'Hierarchy_Error_Report.xlsx';
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
@@ -187,8 +204,12 @@ function downloadGuide() {
 export default function HierarchyPage() {
   const [employees, setEmployees] = useState<HierarchyEmployee[]>(() => getEmployees());
   const [search, setSearch] = useState('');
+  // Phase 1: chain parse result (cross-row conflicts, missing IDs, etc.)
+  const [chainResult, setChainResult] = useState<HierarchyChainParseResult | null>(null);
+  // Phase 2: employee-level validation (outlet guards, circular deps, etc.)
   const [validation, setValidation] = useState<EmployeeUploadValidationResult | null>(null);
-  const [pendingRows, setPendingRows] = useState<Record<string, string>[]>([]);
+  // Raw rows kept for error-report download
+  const [rawRows, setRawRows] = useState<Record<string, string>[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -214,8 +235,9 @@ export default function HierarchyPage() {
   // ── File parsing ───────────────────────────────────────────────────────────
   const processFile = useCallback((file: File) => {
     setParseError(null);
+    setChainResult(null);
     setValidation(null);
-    setPendingRows([]);
+    setRawRows([]);
     setSuccessMsg(null);
 
     const reader = new FileReader();
@@ -223,34 +245,41 @@ export default function HierarchyPage() {
       try {
         const data     = e.target?.result;
         const workbook = XLSX.read(data, { type: 'array' });
-        const sheet    = workbook.Sheets[workbook.SheetNames[0]];
-        const rawRows  = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, { defval: '' });
+        // Read the first sheet that contains data (skip Dos & Don'ts if present)
+        const sheetName = workbook.SheetNames.find(
+          n => n !== 'Dos & Don\'ts',
+        ) ?? workbook.SheetNames[0];
+        const sheet   = workbook.Sheets[sheetName];
+        const rows    = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, { defval: '' });
 
-        if (rawRows.length === 0) {
+        if (rows.length === 0) {
           setParseError('The uploaded file has no data rows.');
           return;
         }
 
-        // Pass 1: headers
-        const headers = Object.keys(rawRows[0]);
-        const headerErr = validateHeaders(headers);
+        // Pass 1: validate the 18-column chain headers
+        const headers   = Object.keys(rows[0]);
+        const headerErr = validateHierarchyChainHeaders(headers, CONFIG);
         if (headerErr) {
-          setValidation({
+          setChainResult({
             headerError: headerErr,
-            rows: [],
+            chainErrors: [],
+            employeeRows: [],
             hasErrors: true,
-            canProceed: false,
-            summary: { total: 0, creates: 0, updates: 0, errors: 1 },
           });
           return;
         }
 
-        // Pass 2: rows
-        const uploadRows = parseUploadRows(rawRows);
-        const result     = validateEmployeeUpload(uploadRows, employees, CONFIG);
+        // Pass 2: parse + cross-row conflict detection
+        const cr = parseHierarchyChainRows(rows, CONFIG);
+        setChainResult(cr);
+        setRawRows(rows);
 
-        setValidation(result);
-        setPendingRows(rawRows);
+        if (cr.hasErrors) return; // show chain errors + download button; stop here
+
+        // Pass 3: employee-level validation (outlet guards, circular deps, etc.)
+        const empResult = validateEmployeeUpload(cr.employeeRows, employees, CONFIG);
+        setValidation(empResult);
       } catch {
         setParseError('Could not read the file. Please ensure it is a valid Excel (.xlsx) file.');
       }
@@ -274,11 +303,11 @@ export default function HierarchyPage() {
 
   // ── Confirm upload ─────────────────────────────────────────────────────────
   const confirmUpload = () => {
-    if (!validation?.canProceed) return;
+    if (!validation?.canProceed || !chainResult) return;
     setConfirming(true);
 
-    // Apply changes from pending rows to employees list
-    const uploadRows = parseUploadRows(pendingRows);
+    // Use the already-deduplicated employeeRows from the chain parse result
+    const uploadRows = chainResult.employeeRows;
     const updatedMap = new Map<string, HierarchyEmployee>(
       employees.map(e => [e.id, e]),
     );
@@ -318,7 +347,8 @@ export default function HierarchyPage() {
       `${updates} updated.`,
     );
     setValidation(null);
-    setPendingRows([]);
+    setChainResult(null);
+    setRawRows([]);
     setConfirming(false);
   };
 
@@ -422,25 +452,70 @@ export default function HierarchyPage() {
           </div>
         )}
 
-        {/* Validation panel */}
-        {validation && (
+        {/* ── Chain parse results (Phase 1 + 2) ────────────────────────────── */}
+        {(chainResult || validation) && (
           <div data-testid="validation-panel" className="mx-4 mb-4 space-y-3">
-            {/* Header error (Pass 1 failure) */}
-            {validation.headerError && (
+
+            {/* Header error */}
+            {chainResult?.headerError && (
               <div className="bg-red-50 border border-red-200 rounded-xl p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <Shield className="h-4 w-4 text-red-600" />
                   <p className="text-sm font-semibold text-red-800">Header Error — Upload Rejected</p>
                 </div>
-                <p className="text-sm text-red-700">{validation.headerError}</p>
+                <p className="text-sm text-red-700">{chainResult.headerError}</p>
                 <p className="text-xs text-red-600 mt-2">
-                  Download the template to get the correct column headers, then re-upload.
+                  Download the template to get the correct 18-column layout, then re-upload.
                 </p>
               </div>
             )}
 
-            {/* Summary */}
-            {!validation.headerError && (
+            {/* Chain-level errors (cross-row conflicts, missing IDs, etc.) */}
+            {chainResult && !chainResult.headerError && chainResult.hasErrors && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <XCircle className="h-4 w-4 text-red-600" />
+                    <p className="text-sm font-semibold text-red-800">
+                      {chainResult.chainErrors.length} issue{chainResult.chainErrors.length !== 1 ? 's' : ''} found — fix and re-upload
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => downloadErrorReport(rawRows, chainResult)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-300 bg-white text-red-700 text-xs font-semibold hover:bg-red-50 transition-colors flex-shrink-0"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Download Error Report
+                  </button>
+                </div>
+                <p className="text-xs text-red-600">
+                  The error report is an Excel file with your original data and a Remarks column
+                  explaining each issue in plain English. Fix all errors and re-upload.
+                </p>
+                <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                  {chainResult.chainErrors.map((err, i) => (
+                    <div key={i} className="bg-white border border-red-200 rounded-lg px-3 py-2 text-xs text-red-700 space-y-0.5">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold uppercase text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded flex-shrink-0">
+                          {err.type.replace(/_/g, ' ')}
+                        </span>
+                        {err.employeeId && (
+                          <span className="font-mono font-semibold text-gray-700">{err.employeeId}</span>
+                        )}
+                        <span className="text-gray-400 text-[10px]">
+                          row{err.rowNums.length > 1 ? 's' : ''} {err.rowNums.join(', ')}
+                        </span>
+                      </div>
+                      <p className="text-red-600">{err.message}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Employee-level validation (Phase 3 — only shown when chain is clean) */}
+            {validation && (
               <>
                 <div className={`rounded-xl p-4 border ${
                   validation.hasErrors
@@ -463,7 +538,7 @@ export default function HierarchyPage() {
                       </p>
                     </div>
                     <div className="flex gap-3 text-xs text-gray-500">
-                      <span>{validation.summary.total} rows</span>
+                      <span>{validation.summary.total} employees</span>
                       <span className="text-blue-600 font-medium">+{validation.summary.creates} new</span>
                       <span className="text-purple-600 font-medium">~{validation.summary.updates} updates</span>
                     </div>
@@ -517,7 +592,7 @@ export default function HierarchyPage() {
         {filtered.length === 0 ? (
           <div className="px-4 py-8 text-center">
             <Users className="h-8 w-8 text-gray-200 mx-auto mb-2" />
-            <p className="text-sm text-gray-400">No employees match "{search}"</p>
+            <p className="text-sm text-gray-400">No employees match &ldquo;{search}&rdquo;</p>
           </div>
         ) : (
           <div className="divide-y divide-gray-50">

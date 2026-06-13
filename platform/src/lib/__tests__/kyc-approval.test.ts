@@ -45,8 +45,8 @@ describe('backendRoleToSalesRole', () => {
   it('maps SALES_STATE_HEAD → RSM', () => {
     expect(backendRoleToSalesRole('SALES_STATE_HEAD')).toBe('RSM');
   });
-  it('maps SALES_HO → NM', () => {
-    expect(backendRoleToSalesRole('SALES_HO')).toBe('NM');
+  it('maps SALES_HO → NSM', () => {
+    expect(backendRoleToSalesRole('SALES_HO')).toBe('NSM');
   });
   it('returns null for non-sales roles', () => {
     expect(backendRoleToSalesRole('GIFSY_ADMIN')).toBeNull();

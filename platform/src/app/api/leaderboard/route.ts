@@ -27,7 +27,7 @@ export async function GET(req: NextRequest) {
       return ok({ leaderboard: [], pagination: { page, limit, total: 0, pages: 0 } })
     }
 
-    const [entries, total] = await Promise.all([
+    const [entries, total, currentPartner] = await Promise.all([
       prisma.leaderboardEntry.findMany({
         where: { snapshotId: snapshot.id },
         include: {
@@ -38,7 +38,10 @@ export async function GET(req: NextRequest) {
         take: limit,
       }),
       prisma.leaderboardEntry.count({ where: { snapshotId: snapshot.id } }),
+      prisma.channelPartner.findUnique({ where: { userId: authUser.userId }, select: { id: true } }),
     ])
+
+    const currentPartnerId = currentPartner?.id ?? null
 
     const ranked = entries.map((e) => ({
       rank: e.rank,
@@ -50,6 +53,7 @@ export async function GET(req: NextRequest) {
 
     return ok({
       leaderboard: ranked,
+      currentPartnerId,
       snapshotDate: snapshot.snapshotDate,
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     })

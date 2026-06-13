@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useContext, createContext } from 'react';
 import {
   TrendingUp, Gift, Trophy, Wallet, Target,
   HeadphonesIcon, CheckCircle,
@@ -11,7 +11,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
 import { AchievementChart, type ChartView } from '@/components/charts/achievement-chart';
 import {
-  getActiveBanners, saveBanners, savePopups, fetchBanners,
+  getActiveBannersFromList, saveBanners, savePopups, loadBanners, fetchBanners,
   getBgStyle, toEmbedUrl,
   getActivePopup, shouldShowPopup, markPopupSeen,
   type Banner, type Popup,
@@ -23,8 +23,10 @@ import { usePartnerSession, type OutletType } from '@/lib/partner-session';
 import {
   OUTLET_ACHIEVEMENTS, resolveConfig, pct,
   DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD,
-  getPrimaryParam,
+  getPrimaryParam, currentPeriod, getPrimarySchemeTarget,
 } from '@/lib/targets';
+import type { ApiSchemeTarget } from '@/types';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 import {
   getPendingSchemes, acceptScheme, formatDeadline,
   hasEnrollmentForm, getEnrollmentFields,
@@ -34,6 +36,19 @@ import { applyPrefillValues } from '@/lib/campaign';
 import { seedOutletData, getOutletPrefillData } from '@/lib/outlet-data';
 import { EnrollmentFormRenderer } from '@/components/partner/enrollment-form-renderer';
 import { formatLastUpdated, getLastSalesUploadDate } from '@/lib/sales-upload-utils';
+
+/* ─── Real-data context ──────────────────────────────────────────────────── */
+
+/**
+ * Leaderboard pattern for achievements: sub-components start with OUTLET_ACHIEVEMENTS
+ * (mock, always present), then the page root silently replaces with real API data.
+ */
+type AchievementsMap = typeof OUTLET_ACHIEVEMENTS;
+const DashboardAchievementsContext = createContext<AchievementsMap>(OUTLET_ACHIEVEMENTS);
+
+function useDashboardAchievements(): AchievementsMap {
+  return useContext(DashboardAchievementsContext);
+}
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -118,9 +133,9 @@ function PerformanceChart({ outletId }: { outletId: string }) {
   const [chartView, setChartView] = useState<ChartView>('monthly');
   const { timePct, daysLeft } = computePace();
 
-  // Resolve real target data — same source of truth as WholesalerHero / Targets page
+  // Resolve real target data — reads from context (updated by API via PartnerDashboard)
   const config      = resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD);
-  const achievement = OUTLET_ACHIEVEMENTS[outletId];
+  const achievement = useDashboardAchievements()[outletId];
   const svParam     = config ? getPrimaryParam(config.params) : null;
   const achieved    = svParam ? (achievement?.achievements[svParam.id] ?? 0) : 0;
   const target      = svParam?.target ?? 0;
@@ -211,8 +226,9 @@ function WholesalerHero({ session, lastUpdatedLabel }: { session: ReturnType<typ
   const { daysLeft, timePct } = computePace();
 
   // ── Single source of truth: same data as the Targets page ──────────────
+  // Reads from context — PartnerDashboard updates context with real API data
   const config      = resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD);
-  const achievement = OUTLET_ACHIEVEMENTS[session.outletId];
+  const achievement = useDashboardAchievements()[session.outletId];
   const svParam     = config ? getPrimaryParam(config.params) : null;
   const achieved    = svParam ? (achievement?.achievements[svParam.id] ?? 0) : 0;
   const target      = svParam?.target ?? 0;
@@ -300,9 +316,9 @@ function WholesalerHero({ session, lastUpdatedLabel }: { session: ReturnType<typ
 ══════════════════════════════════════════════════════════════════════════ */
 
 function WholesalerLower({ session }: { session: ReturnType<typeof usePartnerSession> }) {
-  return (
-    <Link href="/partner/leaderboard"
-      className="bg-white rounded-xl border border-gray-200 px-4 py-3 flex items-center gap-3 hover:border-gray-300 hover:shadow-sm active:scale-95 transition-all">
+  const { features } = useClientConfig();
+  const inner = (
+    <>
       <div className="w-9 h-9 rounded-full bg-amber-100 flex items-center justify-center shrink-0">
         <Trophy className="h-4 w-4 text-amber-500" />
       </div>
@@ -313,8 +329,12 @@ function WholesalerLower({ session }: { session: ReturnType<typeof usePartnerSes
         </p>
       </div>
       <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />
-    </Link>
+    </>
   );
+  const cls = 'bg-white rounded-xl border border-gray-200 px-4 py-3 flex items-center gap-3';
+  return features.partnerApp.showLeaderboard
+    ? <Link href="/partner/leaderboard" className={`${cls} hover:border-gray-300 hover:shadow-sm active:scale-95 transition-all`}>{inner}</Link>
+    : <div className={cls}>{inner}</div>;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -324,9 +344,9 @@ function WholesalerLower({ session }: { session: ReturnType<typeof usePartnerSes
 function RetailerHero({ outletId, lastUpdatedLabel }: { outletId: string; lastUpdatedLabel?: string }) {
   const { daysLeft, timePct } = computePace();
 
-  // ── Same data source as targets page ─────────────────────────────────────
+  // ── Same data source as targets page (from context) ───────────────────────
   const config      = resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD);
-  const achievement = OUTLET_ACHIEVEMENTS[outletId];
+  const achievement = useDashboardAchievements()[outletId];
   const svParam     = config ? getPrimaryParam(config.params) : null;
   const achieved    = svParam ? (achievement?.achievements[svParam.id] ?? 0) : 0;
   const target      = svParam?.target ?? 0;
@@ -403,9 +423,9 @@ function RetailerHero({ outletId, lastUpdatedLabel }: { outletId: string; lastUp
 function MTHero({ outletId, lastUpdatedLabel }: { outletId: string; lastUpdatedLabel?: string }) {
   const { daysLeft, timePct } = computePace();
 
-  // ── Same data source as targets page ─────────────────────────────────────
+  // ── Same data source as targets page (from context) ───────────────────────
   const config      = resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD);
-  const achievement = OUTLET_ACHIEVEMENTS[outletId];
+  const achievement = useDashboardAchievements()[outletId];
   const params      = config?.params ?? [];
 
   // Build per-KPI rows from config (same params as targets page)
@@ -764,6 +784,8 @@ export default function PartnerDashboard() {
   const [bannerIndex,       setBannerIndex]       = useState(0);
   const [popup,             setPopup]             = useState<Popup | null>(null);
   const [lastUpdatedLabel,  setLastUpdatedLabel]  = useState<string>('');
+  // Achievements state — starts with mock data, silently updated by API (leaderboard pattern)
+  const [achievements, setAchievements]           = useState<AchievementsMap>(OUTLET_ACHIEVEMENTS);
 
   // Touch / swipe state
   const touchStartX = React.useRef<number | null>(null);
@@ -774,12 +796,12 @@ export default function PartnerDashboard() {
     fetchBanners().then(({ banners: b, popups: p }) => {
       saveBanners(b);
       savePopups(p);
-      setBanners(getActiveBanners());
+      setBanners(getActiveBannersFromList(b));
       const activePopup = getActivePopup();
       if (activePopup && shouldShowPopup(activePopup)) setPopup(activePopup);
     }).catch(() => {
       // Network error or DEMO_MODE — fall back to whatever is in localStorage
-      setBanners(getActiveBanners());
+      setBanners(getActiveBannersFromList(loadBanners()));
       const activePopup = getActivePopup();
       if (activePopup && shouldShowPopup(activePopup)) setPopup(activePopup);
     });
@@ -791,6 +813,43 @@ export default function PartnerDashboard() {
 
     return () => clearTimeout(t);
   }, []);
+
+  // API hydration — leaderboard pattern: mock shown first, API updates silently
+  useEffect(() => {
+    const period = currentPeriod();
+    fetch(`/api/partner/targets?period=${period}`)
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { targets: ApiSchemeTarget[] } }) => {
+        if (json.success && json.data?.targets && json.data.targets.length > 0) {
+          const primary = getPrimarySchemeTarget(json.data.targets);
+          if (!primary) return;
+          setAchievements(prev => {
+            const existing = prev[session.outletId];
+            return {
+              ...prev,
+              [session.outletId]: existing
+                ? {
+                    ...existing,
+                    achievements: {
+                      ...existing.achievements,
+                      // Map primary scheme's achievedValue onto the primary param (p_sv)
+                      p_sv: primary.achievedValue,
+                    },
+                  }
+                : {
+                    outletId: session.outletId,
+                    period,
+                    achievements: {
+                      p_sv:  primary.achievedValue,
+                      p_fp1: 0, p_fp2: 0, p_fc: 0, p_ln: 0,
+                    },
+                  },
+            };
+          });
+        }
+      })
+      .catch(() => {}); // silent — mock data already shown
+  }, [session.outletId]);
 
   // Auto-advance carousel every 5 s when multiple banners exist
   useEffect(() => {
@@ -826,6 +885,8 @@ export default function PartnerDashboard() {
   const isWholesaler = session.outletType === 'WHOLESALER';
 
   return (
+    <DashboardAchievementsContext.Provider value={achievements}>
+
     <div className="space-y-4 fade-in">
 
       {/* ── Admin announcement carousel (stays at top) ── */}
@@ -960,5 +1021,6 @@ export default function PartnerDashboard() {
         </div>
       )}
     </div>
+    </DashboardAchievementsContext.Provider>
   );
 }

@@ -6,7 +6,7 @@
  * Dismissible info banner explaining self-billing.
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import {
   FileText,
@@ -16,17 +16,40 @@ import {
   CheckCircle,
   Clock,
 } from 'lucide-react';
-import { MOCK_VISIBILITY_INVOICES } from '@/lib/invoice';
-import { DEMO_SESSIONS } from '@/lib/partner-session';
+import { Spinner } from '@/components/ui/spinner';
 
-// ── Demo: use SSS demo session outlet ────────────────────────────────────────
-const SESSION = DEMO_SESSIONS['SSS'];
+// ── Display-only shape (subset of VisibilityInvoice) ─────────────────────────
+interface InvoiceListItem {
+  id: string;
+  invoiceNumber: string;
+  periodLabel: string;
+  description: string;
+  baseAmount: number;
+  status: 'GENERATED' | 'PAID';
+}
 
-// Demo retailer is o2 in mock data
-const DEMO_OUTLET_ID = SESSION.outletId; // 'o2'
-const partnerInvoices = MOCK_VISIBILITY_INVOICES.filter(
-  (inv) => inv.outletId === DEMO_OUTLET_ID
-);
+// ── API types & mapping ───────────────────────────────────────────────────────
+interface ApiSalesInvoice {
+  id: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  totalAmountPaise: number;
+  netAmountPaise: number;
+  processedAt?: string | null;
+  lineItems?: { id: string; quantity: number; unitPricePaise: number }[];
+}
+
+function mapApiInvoice(s: ApiSalesInvoice): InvoiceListItem {
+  const date = new Date(s.invoiceDate);
+  return {
+    id:            s.id,
+    invoiceNumber: s.invoiceNumber,
+    periodLabel:   date.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }),
+    description:   `${s.lineItems?.length ?? 0} line item(s)`,
+    baseAmount:    s.totalAmountPaise / 100,
+    status:        s.processedAt ? 'PAID' : 'GENERATED',
+  };
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const STATUS_STYLES = {
@@ -40,6 +63,39 @@ const STATUS_LABEL = {
 
 export default function PartnerInvoiceListPage() {
   const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [invoices, setInvoices] = useState<InvoiceListItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch('/api/sales/invoices')
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { invoices: ApiSalesInvoice[] }; error?: string }) => {
+        if (json.success && json.data) {
+          setInvoices(json.data.invoices.map(mapApiInvoice));
+        } else {
+          setError(json.error ?? 'Failed to load invoices');
+        }
+      })
+      .catch(() => setError('Failed to load invoices'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-center py-20">
+        <p className="text-gray-500 text-sm">{error}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4 fade-in">
@@ -73,7 +129,7 @@ export default function PartnerInvoiceListPage() {
       )}
 
       {/* Invoice list */}
-      {partnerInvoices.length === 0 ? (
+      {invoices.length === 0 ? (
         <div className="bg-white border border-gray-200 rounded-xl py-16 flex flex-col items-center gap-3 text-gray-400">
           <FileText className="w-10 h-10" />
           <p className="text-sm font-medium">No invoices yet</p>
@@ -81,7 +137,7 @@ export default function PartnerInvoiceListPage() {
         </div>
       ) : (
         <div className="space-y-3">
-          {partnerInvoices.map((inv) => (
+          {invoices.map((inv) => (
             <Link
               key={inv.id}
               href={`/partner/invoices/${inv.id}`}

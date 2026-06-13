@@ -176,6 +176,10 @@ const MOCK_KYC: Record<string, KYCDetail> = {
 
 const OUTLET_MAP: Record<string, string> = { o1: 'k1', o2: 'k2', o3: 'k3', o4: 'k4', o5: 'k5' };
 
+/** Only real UUIDs from the database should trigger an API fetch.
+ *  Mock keys like 'k1', 'o1' would 404 unconditionally — skip them. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /* ─── Camera-only documents ──────────────────────────────────────────────────── */
 
 /** Documents that must be captured on-site via camera (not gallery/PDF). */
@@ -185,24 +189,77 @@ const CAMERA_ONLY_DOCS = new Set(['Owner Photo', 'Board Photo', 'Shop Photo']);
 
 const PAST_PERF: Record<string, { month: string; achievePct: number }[]> = {
   k1: [
-    { month: 'Dec', achievePct: 82 }, { month: 'Jan', achievePct: 91 },
-    { month: 'Feb', achievePct: 78 }, { month: 'Mar', achievePct: 95 },
-    { month: 'Apr', achievePct: 88 }, { month: 'May', achievePct: 71 },
+    { month: 'Dec', achievePct: 102 }, { month: 'Jan', achievePct: 91 },
+    { month: 'Feb', achievePct: 88 },  { month: 'Mar', achievePct: 100 },
+    { month: 'Apr', achievePct: 94 },  { month: 'May', achievePct: 85 },
   ],
   k2: [
+    { month: 'Dec', achievePct: 72 }, { month: 'Jan', achievePct: 65 },
     { month: 'Feb', achievePct: 55 }, { month: 'Mar', achievePct: 62 },
     { month: 'Apr', achievePct: 48 }, { month: 'May', achievePct: 40 },
   ],
   k3: [
+    { month: 'Dec', achievePct: 50 }, { month: 'Jan', achievePct: 44 },
     { month: 'Feb', achievePct: 44 }, { month: 'Mar', achievePct: 50 },
     { month: 'Apr', achievePct: 35 }, { month: 'May', achievePct: 28 },
   ],
   k4: [
-    { month: 'Jan', achievePct: 95 }, { month: 'Feb', achievePct: 88 },
-    { month: 'Mar', achievePct: 92 }, { month: 'Apr', achievePct: 97 },
-    { month: 'May', achievePct: 85 },
+    { month: 'Dec', achievePct: 98 },  { month: 'Jan', achievePct: 105 },
+    { month: 'Feb', achievePct: 100 }, { month: 'Mar', achievePct: 92 },
+    { month: 'Apr', achievePct: 97 },  { month: 'May', achievePct: 91 },
   ],
 };
+
+/* ─── API types & mapping (leaderboard pattern) ─────────────────────────────── */
+
+interface ApiSalesKYC {
+  id: string;
+  status: string;
+  submittedAt: string;
+  rejectionReason?: string | null;
+  user: { id: string; name: string; phone: string; role: string };
+  partner: {
+    id: string;
+    businessName: string;
+    gstNumber?: string;
+    panNumber?: string;
+    address: string;
+    city: string;
+    state: string;
+    bankName?: string;
+    bankAccountNumber?: string;
+    ifscCode?: string;
+  };
+  documents?: { label: string; status?: string }[];
+}
+
+function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
+  return {
+    id: s.id,
+    partnerName: s.user.name,
+    firmName: s.partner.businessName,
+    mobile: s.user.phone,
+    address: s.partner.address,
+    city: s.partner.city,
+    state: s.partner.state,
+    partnerClass: '',
+    status: (s.status as KYCStatus) ?? KYCStatus.SUBMITTED,
+    submittedAt: s.submittedAt,
+    submittedByRole: (s.user.role as KYCSubmitterRole) ?? 'SO',
+    submittedByName: s.user.name,
+    rejectionReason: s.rejectionReason ?? undefined,
+    gstNumber: s.partner.gstNumber,
+    panNumber: s.partner.panNumber,
+    bankName: s.partner.bankName,
+    accountNumber: s.partner.bankAccountNumber,
+    ifscCode: s.partner.ifscCode,
+    documents: (s.documents ?? []).map(d => ({
+      label: d.label,
+      status: (d.status as 'uploaded' | 'missing' | 'verified') ?? 'uploaded',
+    })),
+    approvalHistory: [],
+  };
+}
 
 /* ─── Status config ──────────────────────────────────────────────────────────── */
 
@@ -439,6 +496,81 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
     setTargetConfig(resolveConfig('Andheri Beat', 'Mumbai West', 'Maharashtra', currentPeriod));
     setSettings(getGifsySettings());
   }, [currentPeriod]);
+
+  /* ── API hydration — silent background update (leaderboard pattern) ── */
+  useEffect(() => {
+    // Only fetch for real UUIDs — mock keys (k1, o1, etc.) would 404 unconditionally.
+    if (!UUID_RE.test(id)) return;
+
+    fetch(`/api/kyc/${id}`)
+      .then(r => r.json())
+      .then((json) => {
+        if (json.success && json.data?.submission) {
+          const s = json.data.submission;
+          // Merge pattern: selectively overwrite only fields the API returns.
+          // This preserves approvalHistory, partnerClass, outletCode,
+          // lastOrderDate, and any other fields not present in the API shape.
+          setKyc(prev => {
+            if (prev) {
+              return {
+                ...prev,
+                partnerName:     s.user?.name                    ?? prev.partnerName,
+                firmName:        s.partner?.businessName         ?? prev.firmName,
+                mobile:          s.user?.phone                   ?? prev.mobile,
+                address:         s.partner?.address              ?? prev.address,
+                city:            s.partner?.city                 ?? prev.city,
+                state:           s.partner?.state                ?? prev.state,
+                status:          (s.status as KYCStatus)         ?? prev.status,
+                submittedAt:     s.submittedAt                   ?? prev.submittedAt,
+                submittedByRole: (s.user?.role as KYCSubmitterRole) ?? prev.submittedByRole,
+                submittedByName: s.user?.name                    ?? prev.submittedByName,
+                rejectionReason: s.rejectionReason               ?? prev.rejectionReason,
+                gstNumber:       s.partner?.gstNumber            ?? prev.gstNumber,
+                panNumber:       s.partner?.panNumber            ?? prev.panNumber,
+                bankName:        s.partner?.bankName             ?? prev.bankName,
+                accountNumber:   s.partner?.bankAccountNumber    ?? prev.accountNumber,
+                ifscCode:        s.partner?.ifscCode             ?? prev.ifscCode,
+                documents:       s.documents?.length
+                  ? (s.documents as { label: string; status?: string }[]).map(d => ({
+                      label:  d.label,
+                      status: (d.status as 'uploaded' | 'missing' | 'verified') ?? 'uploaded',
+                    }))
+                  : prev.documents,
+                // approvalHistory and partnerClass are NOT returned by the API.
+                // They stay as whatever is already in state.
+              };
+            }
+            // prev is null → UUID not in MOCK_KYC → hydrate fresh from API data
+            return {
+              id:              s.id,
+              partnerName:     s.user?.name                    ?? '',
+              firmName:        s.partner?.businessName         ?? '',
+              mobile:          s.user?.phone                   ?? '',
+              address:         s.partner?.address              ?? '',
+              city:            s.partner?.city                 ?? '',
+              state:           s.partner?.state                ?? '',
+              partnerClass:    '',
+              status:          (s.status as KYCStatus)         ?? KYCStatus.SUBMITTED,
+              submittedAt:     s.submittedAt                   ?? new Date().toISOString(),
+              submittedByRole: (s.user?.role as KYCSubmitterRole) ?? 'SO',
+              submittedByName: s.user?.name                    ?? '',
+              rejectionReason: s.rejectionReason               ?? undefined,
+              gstNumber:       s.partner?.gstNumber,
+              panNumber:       s.partner?.panNumber,
+              bankName:        s.partner?.bankName,
+              accountNumber:   s.partner?.bankAccountNumber,
+              ifscCode:        s.partner?.ifscCode,
+              documents:       (s.documents ?? []).map((d: { label: string; status?: string }) => ({
+                label:  d.label,
+                status: (d.status as 'uploaded' | 'missing' | 'verified') ?? 'uploaded',
+              })),
+              approvalHistory: [],
+            };
+          });
+        }
+      })
+      .catch(() => {}); // keep MOCK_KYC fallback on any error
+  }, [id]);
 
   const achievement = OUTLET_ACHIEVEMENTS[resolvedId];
 
@@ -898,8 +1030,8 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
               {PAST_PERF[resolvedId].map((m) => (
                 <div key={m.month} data-testid="perf-month-bar" className="flex-1 flex flex-col items-center gap-1">
                   <div
-                    className={`w-full rounded-t-sm ${m.achievePct >= 80 ? 'bg-emerald-400' : m.achievePct >= 60 ? 'bg-amber-400' : 'bg-red-400'}`}
-                    style={{ height: `${Math.round((m.achievePct / 100) * 64)}px` }}
+                    className={`w-full rounded-t-sm ${m.achievePct >= 100 ? 'bg-emerald-400' : m.achievePct >= 90 ? 'bg-amber-400' : 'bg-red-400'}`}
+                    style={{ height: `${Math.round((Math.min(m.achievePct, 100) / 100) * 64)}px` }}
                   />
                   <span className="text-[9px] text-gray-400">{m.month}</span>
                 </div>

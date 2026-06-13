@@ -48,40 +48,40 @@ const BEATS: Record<string, string[]> = {
 };
 
 const SALES_USERS: SalesUser[] = [
-  { id: 'u1',  name: 'Anil Sharma',    role: 'ISR', territory: 'Mumbai West',  beat: 'Andheri Beat'       },
-  { id: 'u2',  name: 'Ravi Pillai',    role: 'ISR', territory: 'Mumbai West',  beat: 'Borivali Beat'      },
-  { id: 'u3',  name: 'Deepa Nair',     role: 'ISR', territory: 'Mumbai West',  beat: 'Kandivali Beat'     },
-  { id: 'u4',  name: 'Kiran Joshi',    role: 'ISR', territory: 'Mumbai East',  beat: 'Thane Beat'         },
-  { id: 'u5',  name: 'Sanjay Kumar',   role: 'ISR', territory: 'Delhi NCR',    beat: 'Noida Beat'         },
+  { id: 'u1',  name: 'Anil Sharma',    role: 'XSR', territory: 'Mumbai West',  beat: 'Andheri Beat'       },
+  { id: 'u2',  name: 'Ravi Pillai',    role: 'XSR', territory: 'Mumbai West',  beat: 'Borivali Beat'      },
+  { id: 'u3',  name: 'Deepa Nair',     role: 'XSR', territory: 'Mumbai West',  beat: 'Kandivali Beat'     },
+  { id: 'u4',  name: 'Kiran Joshi',    role: 'XSR', territory: 'Mumbai East',  beat: 'Thane Beat'         },
+  { id: 'u5',  name: 'Sanjay Kumar',   role: 'XSR', territory: 'Delhi NCR',    beat: 'Noida Beat'         },
   { id: 'u6',  name: 'Priya Mehta',    role: 'SO',  territory: 'Mumbai West',  beat: 'Andheri Beat'       },
-  { id: 'u7',  name: 'Anita Rao',      role: 'ISR', territory: 'Bengaluru',    beat: 'Koramangala Beat'   },
-  { id: 'u8',  name: 'Manoj Desai',    role: 'ISR', territory: 'Ahmedabad',    beat: 'Satellite Beat'     },
+  { id: 'u7',  name: 'Anita Rao',      role: 'XSR', territory: 'Bengaluru',    beat: 'Koramangala Beat'   },
+  { id: 'u8',  name: 'Manoj Desai',    role: 'XSR', territory: 'Ahmedabad',    beat: 'Satellite Beat'     },
 ];
 
 const OUTLET_MASTER: OutletMaster[] = [
   /* ── Approved KYC ── */
-  { outletId: 'OUT-2026-K01', name: 'Kumar General Store',   type: 'SSS',     beat: 'Andheri Beat',   territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'ISR', kycStatus: 'APPROVED',     addedDate: '2026-03-01', phoneVerified: true  },
-  { outletId: 'OUT-2026-K04', name: 'Singh Supermart',       type: 'WHOLESALER',   beat: 'Malad Beat',     territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'ISR', kycStatus: 'APPROVED',     addedDate: '2026-03-01', phoneVerified: true  },
-  { outletId: 'OUT-2026-K10', name: 'Sharma General Store',  type: 'SSS',     beat: 'Connaught Place Beat', territory: 'Delhi NCR',  assignedTo: 'Sanjay Kumar', assignedRole: 'ISR', kycStatus: 'APPROVED', addedDate: '2026-03-15', phoneVerified: true  },
-  { outletId: 'OUT-2026-K11', name: 'Krishnamurthy & Sons',  type: 'WHOLESALER',   beat: 'Koramangala Beat', territory: 'Bengaluru',  assignedTo: 'Anita Rao',    assignedRole: 'ISR', kycStatus: 'APPROVED',    addedDate: '2026-03-10', phoneVerified: true  },
+  { outletId: 'OUT-2026-K01', name: 'Kumar General Store',   type: 'SSS',     beat: 'Andheri Beat',   territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'XSR', kycStatus: 'APPROVED',     addedDate: '2026-03-01', phoneVerified: true  },
+  { outletId: 'OUT-2026-K04', name: 'Singh Supermart',       type: 'WHOLESALER',   beat: 'Malad Beat',     territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'XSR', kycStatus: 'APPROVED',     addedDate: '2026-03-01', phoneVerified: true  },
+  { outletId: 'OUT-2026-K10', name: 'Sharma General Store',  type: 'SSS',     beat: 'Connaught Place Beat', territory: 'Delhi NCR',  assignedTo: 'Sanjay Kumar', assignedRole: 'XSR', kycStatus: 'APPROVED', addedDate: '2026-03-15', phoneVerified: true  },
+  { outletId: 'OUT-2026-K11', name: 'Krishnamurthy & Sons',  type: 'WHOLESALER',   beat: 'Koramangala Beat', territory: 'Bengaluru',  assignedTo: 'Anita Rao',    assignedRole: 'XSR', kycStatus: 'APPROVED',    addedDate: '2026-03-10', phoneVerified: true  },
   /* ── KYC in progress ── */
-  { outletId: 'OUT-2026-K02', name: 'Sharma Kirana',         type: 'SSS',     beat: 'Borivali Beat',  territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'ISR', kycStatus: 'IN_PROGRESS',  addedDate: '2026-04-01', phoneVerified: true  },
-  { outletId: 'OUT-2026-K05', name: 'Mehta Provisions',      type: 'SUB_STOCKIST', beat: 'Kandivali Beat', territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'ISR', kycStatus: 'SUBMITTED',    addedDate: '2026-04-15', phoneVerified: true  },
-  { outletId: 'OUT-2026-K06', name: 'Desai Grocers',         type: 'SSS',     beat: 'Goregaon Beat',  territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'ISR', kycStatus: 'IN_PROGRESS',  addedDate: '2026-04-15', phoneVerified: false },
+  { outletId: 'OUT-2026-K02', name: 'Sharma Kirana',         type: 'SSS',     beat: 'Borivali Beat',  territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'XSR', kycStatus: 'IN_PROGRESS',  addedDate: '2026-04-01', phoneVerified: true  },
+  { outletId: 'OUT-2026-K05', name: 'Mehta Provisions',      type: 'SUB_STOCKIST', beat: 'Kandivali Beat', territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'XSR', kycStatus: 'SUBMITTED',    addedDate: '2026-04-15', phoneVerified: true  },
+  { outletId: 'OUT-2026-K06', name: 'Desai Grocers',         type: 'SSS',     beat: 'Goregaon Beat',  territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'XSR', kycStatus: 'IN_PROGRESS',  addedDate: '2026-04-15', phoneVerified: false },
   /* ── Rejected ── */
-  { outletId: 'OUT-2026-K03', name: 'Patel Grocery',         type: 'SSS',     beat: 'Thane Beat',     territory: 'Mumbai East', assignedTo: 'Kiran Joshi',  assignedRole: 'ISR', kycStatus: 'REJECTED',     addedDate: '2026-04-01', phoneVerified: true  },
-  { outletId: 'OUT-2026-K09', name: 'Gupta Provisions',      type: 'SSS',     beat: 'Noida Beat',     territory: 'Delhi NCR',   assignedTo: 'Sanjay Kumar', assignedRole: 'ISR', kycStatus: 'REJECTED',     addedDate: '2026-04-05', phoneVerified: true  },
+  { outletId: 'OUT-2026-K03', name: 'Patel Grocery',         type: 'SSS',     beat: 'Thane Beat',     territory: 'Mumbai East', assignedTo: 'Kiran Joshi',  assignedRole: 'XSR', kycStatus: 'REJECTED',     addedDate: '2026-04-01', phoneVerified: true  },
+  { outletId: 'OUT-2026-K09', name: 'Gupta Provisions',      type: 'SSS',     beat: 'Noida Beat',     territory: 'Delhi NCR',   assignedTo: 'Sanjay Kumar', assignedRole: 'XSR', kycStatus: 'REJECTED',     addedDate: '2026-04-05', phoneVerified: true  },
   /* ── Not started (feeds the sales KYC new-flow dropdown) ── */
-  { outletId: 'OUT-2026-001', name: 'Verma Traders',         type: 'SSS',     beat: 'Andheri Beat',   territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'ISR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
-  { outletId: 'OUT-2026-002', name: 'Joshi Provisions',      type: 'SSS',     beat: 'Andheri Beat',   territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'ISR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
-  { outletId: 'OUT-2026-003', name: 'Nair General Store',    type: 'WHOLESALER',   beat: 'Andheri Beat',   territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'ISR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
-  { outletId: 'OUT-2026-004', name: 'Gupta Kirana',          type: 'SSS',     beat: 'Andheri Beat',   territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'ISR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
-  { outletId: 'OUT-2026-005', name: 'Agarwal Mart',          type: 'SUB_STOCKIST', beat: 'Kandivali Beat', territory: 'Mumbai West', assignedTo: 'Deepa Nair',   assignedRole: 'ISR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
-  { outletId: 'OUT-2026-006', name: 'Rao Superstore',        type: 'WHOLESALER',   beat: 'Kandivali Beat', territory: 'Mumbai West', assignedTo: 'Deepa Nair',   assignedRole: 'ISR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
-  { outletId: 'OUT-2026-007', name: 'Mishra Brothers',       type: 'SSS',     beat: 'Borivali Beat',  territory: 'Mumbai West', assignedTo: 'Ravi Pillai',  assignedRole: 'ISR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-05' },
-  { outletId: 'OUT-2026-008', name: 'Shetty Provision Mart', type: 'SSS',     beat: 'Borivali Beat',  territory: 'Mumbai West', assignedTo: 'Ravi Pillai',  assignedRole: 'ISR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-05' },
-  { outletId: 'OUT-2026-009', name: 'Ahuja Stores',          type: 'SSS',     beat: 'Noida Beat',     territory: 'Delhi NCR',   assignedTo: 'Sanjay Kumar', assignedRole: 'ISR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-10' },
-  { outletId: 'OUT-2026-010', name: 'Khatri Mart',           type: 'WHOLESALER',   beat: 'Gurgaon Beat',   territory: 'Delhi NCR',   assignedTo: 'Sanjay Kumar', assignedRole: 'ISR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-10' },
+  { outletId: 'OUT-2026-001', name: 'Verma Traders',         type: 'SSS',     beat: 'Andheri Beat',   territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'XSR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
+  { outletId: 'OUT-2026-002', name: 'Joshi Provisions',      type: 'SSS',     beat: 'Andheri Beat',   territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'XSR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
+  { outletId: 'OUT-2026-003', name: 'Nair General Store',    type: 'WHOLESALER',   beat: 'Andheri Beat',   territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'XSR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
+  { outletId: 'OUT-2026-004', name: 'Gupta Kirana',          type: 'SSS',     beat: 'Andheri Beat',   territory: 'Mumbai West', assignedTo: 'Anil Sharma',  assignedRole: 'XSR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
+  { outletId: 'OUT-2026-005', name: 'Agarwal Mart',          type: 'SUB_STOCKIST', beat: 'Kandivali Beat', territory: 'Mumbai West', assignedTo: 'Deepa Nair',   assignedRole: 'XSR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
+  { outletId: 'OUT-2026-006', name: 'Rao Superstore',        type: 'WHOLESALER',   beat: 'Kandivali Beat', territory: 'Mumbai West', assignedTo: 'Deepa Nair',   assignedRole: 'XSR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-01' },
+  { outletId: 'OUT-2026-007', name: 'Mishra Brothers',       type: 'SSS',     beat: 'Borivali Beat',  territory: 'Mumbai West', assignedTo: 'Ravi Pillai',  assignedRole: 'XSR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-05' },
+  { outletId: 'OUT-2026-008', name: 'Shetty Provision Mart', type: 'SSS',     beat: 'Borivali Beat',  territory: 'Mumbai West', assignedTo: 'Ravi Pillai',  assignedRole: 'XSR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-05' },
+  { outletId: 'OUT-2026-009', name: 'Ahuja Stores',          type: 'SSS',     beat: 'Noida Beat',     territory: 'Delhi NCR',   assignedTo: 'Sanjay Kumar', assignedRole: 'XSR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-10' },
+  { outletId: 'OUT-2026-010', name: 'Khatri Mart',           type: 'WHOLESALER',   beat: 'Gurgaon Beat',   territory: 'Delhi NCR',   assignedTo: 'Sanjay Kumar', assignedRole: 'XSR', kycStatus: 'NOT_STARTED',  addedDate: '2026-05-10' },
 ];
 
 /* ─── Constants ──────────────────────────────────────────────────────────────── */

@@ -29,9 +29,10 @@ export interface FeatureFlags {
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {
     showSchemes: boolean;
-    showInvoices: boolean;   // follows visibilityInvoiceModule
-    showWallet: boolean;     // follows walletModule
+    showInvoices: boolean;    // follows visibilityInvoiceModule
+    showWallet: boolean;      // follows walletModule
     showTeam: boolean;
+    showLeaderboard: boolean; // opt-in per tenant; Deoleo = false
   };
 }
 

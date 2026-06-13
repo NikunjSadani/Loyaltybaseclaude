@@ -9,7 +9,7 @@
  * - PDF download via jsPDF
  */
 
-import { useState, use } from 'react';
+import { useState, useEffect, use } from 'react';
 import Link from 'next/link';
 import {
   ArrowLeft,
@@ -23,7 +23,66 @@ import {
   FileText,
   Loader2,
 } from 'lucide-react';
-import { MOCK_VISIBILITY_INVOICES, type VisibilityInvoice } from '@/lib/invoice';
+import { type VisibilityInvoice } from '@/lib/invoice';
+import { Spinner } from '@/components/ui/spinner';
+
+/* ─── API types ──────────────────────────────────────────────────────────────── */
+interface ApiSalesInvoiceDetail {
+  id: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  totalAmountPaise: number;
+  netAmountPaise: number;
+  processedAt?: string | null;
+  salesUploadId?: string | null;
+  outletId?: string | null;
+  lineItems?: { id: string; quantity: number; unitPricePaise: number }[];
+}
+
+function mapApiToVisibilityInvoice(s: ApiSalesInvoiceDetail): VisibilityInvoice {
+  const date = new Date(s.invoiceDate);
+  const period = s.invoiceDate.slice(0, 7);
+  const periodLabel = date.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const baseAmount = s.totalAmountPaise / 100;
+  return {
+    id:                   s.id,
+    invoiceNumber:        s.invoiceNumber,
+    invoiceNumberEdited:  false,
+    status:               s.processedAt ? 'PAID' : 'GENERATED',
+    period,
+    periodLabel,
+    outletId:             s.outletId ?? '',
+    outletCode:           '',
+    outletName:           '',
+    firmName:             '',
+    partnerName:          '',
+    mobile:               '',
+    retailerState:        '',
+    panNumber:            null,
+    gstNumber:            null,
+    entityType:           'INDIVIDUAL',
+    gstRegistrationType:  'UNREGISTERED',
+    bankName:             '',
+    accountNumber:        '',
+    ifscCode:             '',
+    baseAmount,
+    gstApplicable:        false,
+    gstType:              null,
+    cgst:                 0,
+    sgst:                 0,
+    igst:                 0,
+    totalGST:             0,
+    totalInvoiceAmount:   baseAmount,
+    tdsRate:              0,
+    tdsAmount:            0,
+    netDisbursed:         s.netAmountPaise / 100,
+    generatedAt:          s.invoiceDate,
+    paidAt:               s.processedAt ?? null,
+    uploadBatchId:        s.salesUploadId ?? '',
+    sacCode:              '998361',
+    description:          `Marketing visibility services — ${periodLabel}`,
+  };
+}
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 export default function PartnerInvoiceDetailPage({
@@ -33,21 +92,45 @@ export default function PartnerInvoiceDetailPage({
 }) {
   const { id } = use(params);
 
-  const original = MOCK_VISIBILITY_INVOICES.find((inv) => inv.id === id);
-
-  // Local state — in a real app this would hit an API
-  const [inv, setInv] = useState<VisibilityInvoice | undefined>(original);
+  const [inv, setInv] = useState<VisibilityInvoice | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [editingNumber, setEditingNumber] = useState(false);
-  const [draftNumber, setDraftNumber] = useState(original?.invoiceNumber ?? '');
+  const [draftNumber, setDraftNumber] = useState('');
   const [numberError, setNumberError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
-  if (!inv) {
+  useEffect(() => {
+    if (!id) return;
+    fetch(`/api/sales/invoices/${id}`)
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { invoice: ApiSalesInvoiceDetail }; error?: string }) => {
+        if (json.success && json.data) {
+          const mapped = mapApiToVisibilityInvoice(json.data.invoice);
+          setInv(mapped);
+          setDraftNumber(mapped.invoiceNumber);
+        } else {
+          setFetchError(json.error ?? 'Invoice not found');
+        }
+      })
+      .catch(() => setFetchError('Failed to load invoice'))
+      .finally(() => setLoading(false));
+  }, [id]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (fetchError || !inv) {
     return (
       <div className="text-center py-20">
-        <p className="text-gray-500 text-sm">Invoice not found</p>
+        <p className="text-gray-500 text-sm">{fetchError ?? 'Invoice not found'}</p>
         <Link href="/partner/invoices" className="text-[var(--brand-primary)] text-sm mt-2 inline-block">
           ← Back to invoices
         </Link>

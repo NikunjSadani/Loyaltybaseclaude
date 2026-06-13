@@ -20,15 +20,17 @@ vi.mock('@/components/charts/achievement-chart', () => ({
   AchievementChart: () => <div data-testid="achievement-chart" />,
 }));
 vi.mock('@/lib/banner', () => ({
-  fetchBanners:      () => Promise.resolve({ banners: [], popups: [] }),
-  saveBanners:       () => undefined,
-  savePopups:        () => undefined,
-  getActiveBanners:  () => [],
-  getActivePopup:    () => null,
-  shouldShowPopup:   () => false,
-  markPopupSeen:     () => undefined,
-  getBgStyle:        () => ({}),
-  toEmbedUrl:        (u: string) => u,
+  fetchBanners:              () => Promise.resolve({ banners: [], popups: [] }),
+  saveBanners:               () => undefined,
+  savePopups:                () => undefined,
+  loadBanners:               () => [],
+  getActiveBanners:          () => [],
+  getActiveBannersFromList:  () => [],
+  getActivePopup:            () => null,
+  shouldShowPopup:           () => false,
+  markPopupSeen:             () => undefined,
+  getBgStyle:                () => ({}),
+  toEmbedUrl:                (u: string) => u,
 }));
 
 import PartnerDashboardPage from '../page';

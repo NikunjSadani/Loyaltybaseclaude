@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   CheckCircle, XCircle, Clock, Building2, User,
   Phone, FileCheck, AlertTriangle, ChevronDown, ChevronUp,
@@ -8,6 +8,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus, type ApprovalEvent, type KYCSubmitterRole } from '@/types';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -25,6 +26,41 @@ interface PendingKYC {
   firstApprovedBy: string;
   firstApprovedAt: string;
   documents:       { label: string; status: 'uploaded' | 'verified' | 'missing' }[];
+}
+
+/* ─── API mapping ────────────────────────────────────────────────────────────── */
+
+interface ApiKycSubmission {
+  id: string;
+  status: string;
+  submittedAt?: string | null;
+  createdAt?: string;
+  user: { id: string; name: string; phone: string };
+  partner?: { id: string; businessName: string } | null;
+  documents?: { id: string; documentType: string; status: string }[];
+}
+
+function mapApiSubmission(s: ApiKycSubmission): PendingKYC {
+  const docStatusMap: Record<string, 'uploaded' | 'verified' | 'missing'> = {
+    SUBMITTED: 'uploaded', APPROVED: 'verified', REJECTED: 'missing',
+  };
+  return {
+    id:              s.id,
+    firmName:        s.partner?.businessName ?? s.user.name,
+    partnerName:     s.user.name,
+    mobile:          s.user.phone,
+    city:            '',
+    partnerClass:    '',
+    submittedAt:     (s.submittedAt ?? s.createdAt ?? '').slice(0, 10),
+    submittedByRole: 'XSR' as KYCSubmitterRole,
+    submittedByName: s.user.name,
+    firstApprovedBy: '—',
+    firstApprovedAt: '',
+    documents: (s.documents ?? []).map(d => ({
+      label:  d.documentType,
+      status: docStatusMap[d.status] ?? 'uploaded',
+    })),
+  };
 }
 
 /* ─── Mock data — these are entries in PENDING_GIFSY state ──────────────────── */
@@ -193,10 +229,30 @@ function KYCApprovalCard({
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function AdminApprovalsPage() {
-  const [pending,       setPending]       = useState<PendingKYC[]>(MOCK_PENDING);
+  const [pending,       setPending]       = useState<PendingKYC[]>([]);
   const [approved,      setApproved]      = useState<string[]>([]);
   const [rejected,      setRejected]      = useState<{ id: string; remarks: string }[]>([]);
   const [rejectTarget,  setRejectTarget]  = useState<string | null>(null);
+  const [loading,       setLoading]       = useState(true);
+  const [error,         setError]         = useState<string | null>(null);
+  // Keep a snapshot of all fetched entries for the "Actioned Today" section
+  const [allFetched,    setAllFetched]    = useState<PendingKYC[]>(MOCK_PENDING);
+
+  useEffect(() => {
+    fetch('/api/kyc?status=PENDING_GIFSY')
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { submissions: ApiKycSubmission[] }; error?: string }) => {
+        if (json.success && json.data) {
+          const mapped = json.data.submissions.map(mapApiSubmission);
+          setPending(mapped);
+          setAllFetched(mapped);
+        } else {
+          setError(json.error ?? 'Failed to load approvals');
+        }
+      })
+      .catch(() => setError('Failed to load approvals'))
+      .finally(() => setLoading(false));
+  }, []);
 
   const handleApprove = (id: string) => {
     setPending((p) => p.filter((e) => e.id !== id));
@@ -209,6 +265,22 @@ export default function AdminApprovalsPage() {
     setRejected((r) => [...r, { id: rejectTarget, remarks }]);
     setRejectTarget(null);
   };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center min-h-screen px-6 text-center text-sm text-red-500">
+        {error}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -276,7 +348,7 @@ export default function AdminApprovalsPage() {
           <h2 className="text-sm font-bold text-gray-800 mb-3">Actioned Today</h2>
           <div className="space-y-2">
             {approved.map((id) => {
-              const entry = MOCK_PENDING.find((e) => e.id === id);
+              const entry = allFetched.find((e) => e.id === id);
               return entry ? (
                 <div key={id} className="flex items-center gap-3 px-4 py-3 bg-emerald-50 border border-emerald-200 rounded-xl">
                   <CheckCircle className="h-4 w-4 text-emerald-600 shrink-0" />
@@ -289,7 +361,7 @@ export default function AdminApprovalsPage() {
               ) : null;
             })}
             {rejected.map(({ id, remarks }) => {
-              const entry = MOCK_PENDING.find((e) => e.id === id);
+              const entry = allFetched.find((e) => e.id === id);
               return entry ? (
                 <div key={id} className="flex items-start gap-3 px-4 py-3 bg-red-50 border border-red-200 rounded-xl">
                   <XCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />

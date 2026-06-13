@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
   BG_OPTIONS, getBgStyle, toEmbedUrl,
-  fetchBanners, updateBanners, newBanner, getActiveBanners,
+  fetchBanners, updateBanners, newBanner, getActiveBannersFromList,
   loadPopups, savePopups, newPopup,
   type Banner, type Popup, type BannerAudience, type PopupFrequency,
 } from '@/lib/banner';
@@ -437,7 +437,7 @@ export default function BannersPage() {
   const togglePopup = (id: string) => persistPopups(popups.map((p) => ({ ...p, active: p.id === id ? !p.active : false })));
   const deletePopup = (id: string) => persistPopups(popups.filter((p) => p.id !== id));
 
-  const activeBanners = getActiveBanners().filter((b) => banners.some((x) => x.id === b.id));
+  const activeBanners = getActiveBannersFromList(banners);
   const activePopup   = popups.find((p) => p.active);
   const isEditing = creatingBanner || editingBanner || creatingPopup || editingPopup;
 

@@ -103,10 +103,25 @@ export function getActiveBanner(): Banner | null {
  *  - startDate empty → no lower bound
  *  - endDate   empty → no upper bound
  *  - Both empty      → always in window when active
+ *
+ * Reads from localStorage. Prefer getActiveBannersFromList() when you already
+ * have the server-fetched array to avoid a localStorage round-trip.
  */
 export function getActiveBanners(): Banner[] {
+  return getActiveBannersFromList(loadBanners());
+}
+
+/**
+ * Pure version of getActiveBanners() — operates on the provided array instead
+ * of reading from localStorage.
+ *
+ * Use this in components that already hold the server-fetched banners array
+ * (partner dashboard, admin "Currently Live" strip, etc.) so the result always
+ * reflects the latest server state rather than whatever is in localStorage.
+ */
+export function getActiveBannersFromList(banners: Banner[]): Banner[] {
   const today = todayDateString();
-  return loadBanners()
+  return banners
     .filter((b) => {
       if (!b.active) return false;
       if (b.startDate && today < b.startDate) return false;

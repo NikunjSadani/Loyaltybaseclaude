@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   Search,
   Download,
@@ -14,6 +14,7 @@ import {
   Eye,
 } from 'lucide-react';
 import Link from 'next/link';
+import { Spinner } from '@/components/ui/spinner';
 
 type KYCStatusType = 'PENDING' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
 
@@ -28,6 +29,45 @@ interface KYCEntry {
   submittedDate: string;
   ageHrs: number;
   slaBreached: boolean;
+}
+
+/* ─── API mapping ────────────────────────────────────────────────────────────── */
+
+interface ApiKycSub {
+  id: string;
+  status: string;
+  submittedAt?: string | null;
+  createdAt?: string;
+  user: { id: string; name: string; phone: string };
+  partner?: { id: string; businessName: string } | null;
+  documents?: { id: string; documentType: string; status: string }[];
+}
+
+const DB_STATUS_MAP: Record<string, KYCStatusType> = {
+  SUBMITTED: 'PENDING', PENDING_SO_APPROVAL: 'PENDING',
+  PENDING_ASM_APPROVAL: 'PENDING', PENDING_RSM_APPROVAL: 'PENDING',
+  PENDING_GIFSY: 'PENDING', UNDER_REVIEW: 'UNDER_REVIEW',
+  APPROVED: 'APPROVED', REJECTED: 'REJECTED',
+  RESUBMISSION_REQUIRED: 'RESUBMISSION_REQUIRED', DRAFT: 'PENDING',
+};
+
+function mapApiKyc(s: ApiKycSub): KYCEntry {
+  const submittedAt = s.submittedAt ?? s.createdAt ?? '';
+  const ageMs = submittedAt ? Date.now() - new Date(submittedAt).getTime() : 0;
+  const ageHrs = Math.round(ageMs / (1000 * 60 * 60));
+  const slaBreached = ageHrs > 48;
+  return {
+    id:            s.id,
+    outletName:    s.partner?.businessName ?? s.user.name,
+    mobile:        s.user.phone,
+    partnerClass:  '',
+    salesUser:     s.user.name,
+    territory:     '',
+    status:        DB_STATUS_MAP[s.status] ?? 'PENDING',
+    submittedDate: submittedAt.slice(0, 10),
+    ageHrs,
+    slaBreached,
+  };
 }
 
 const ALL_KYC: KYCEntry[] = [
@@ -70,22 +110,39 @@ const CLASS_COLORS: Record<string, string> = {
 };
 
 export default function KYCPage() {
+  const [kycList, setKycList] = useState<KYCEntry[]>([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<KYCStatusType | 'ALL'>('ALL');
   const [classFilter, setClassFilter] = useState('ALL');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkApproving, setBulkApproving] = useState(false);
 
+  useEffect(() => {
+    fetch('/api/kyc')
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { submissions: ApiKycSub[] }; error?: string }) => {
+        if (json.success && json.data) {
+          setKycList(json.data.submissions.map(mapApiKyc));
+        } else {
+          setError(json.error ?? 'Failed to load KYC submissions');
+        }
+      })
+      .catch(() => setError('Failed to load KYC submissions'))
+      .finally(() => setLoading(false));
+  }, []);
+
   const stats = useMemo(() => ({
-    total: ALL_KYC.length,
-    pending: ALL_KYC.filter((k) => k.status === 'PENDING' || k.status === 'UNDER_REVIEW').length,
-    approved: ALL_KYC.filter((k) => k.status === 'APPROVED').length,
-    rejected: ALL_KYC.filter((k) => k.status === 'REJECTED').length,
-    breached: ALL_KYC.filter((k) => k.slaBreached).length,
-  }), []);
+    total:    kycList.length,
+    pending:  kycList.filter((k) => k.status === 'PENDING' || k.status === 'UNDER_REVIEW').length,
+    approved: kycList.filter((k) => k.status === 'APPROVED').length,
+    rejected: kycList.filter((k) => k.status === 'REJECTED').length,
+    breached: kycList.filter((k) => k.slaBreached).length,
+  }), [kycList]);
 
   const filtered = useMemo(() => {
-    return ALL_KYC.filter((k) => {
+    return kycList.filter((k) => {
       const matchSearch =
         !search ||
         k.outletName.toLowerCase().includes(search.toLowerCase()) ||
@@ -95,7 +152,7 @@ export default function KYCPage() {
       const matchClass = classFilter === 'ALL' || k.partnerClass === classFilter;
       return matchSearch && matchStatus && matchClass;
     });
-  }, [search, statusFilter, classFilter]);
+  }, [search, statusFilter, classFilter, kycList]);
 
   const pendingIds = filtered.filter((k) => k.status === 'PENDING').map((k) => k.id);
   const allPendingSelected = pendingIds.length > 0 && pendingIds.every((id) => selected.has(id));
@@ -131,6 +188,22 @@ export default function KYCPage() {
   const handleExport = () => {
     alert('Exporting KYC data to Excel...');
   };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center min-h-screen px-6 text-center text-sm text-red-500">
+        {error}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5 fade-in">
@@ -327,7 +400,7 @@ export default function KYCPage() {
         </div>
         <div className="px-4 py-3 border-t border-gray-100 bg-gray-50">
           <p className="text-xs text-gray-500">
-            Showing {filtered.length} of {ALL_KYC.length} KYC submissions
+            Showing {filtered.length} of {kycList.length} KYC submissions
           </p>
         </div>
       </div>

@@ -6,9 +6,9 @@ import {
 } from 'recharts';
 
 export type SalesChartView    = 'monthly' | 'yoy';
-export type SalesOutletFilter = 'ALL' | 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
+export type SalesOutletFilter = 'ALL' | 'VRIDDHI' | 'SAMBANDH';
 
-// ── Mock data per outlet type ────────────────────────────────────────────────
+// ── Mock data per program ────────────────────────────────────────────────────
 const MONTHLY: Record<SalesOutletFilter, { month: string; target: number; achieved: number }[]> = {
   ALL: [
     { month: 'Dec', target: 8.0,  achieved: 6.2 },
@@ -18,7 +18,7 @@ const MONTHLY: Record<SalesOutletFilter, { month: string; target: number; achiev
     { month: 'Apr', target: 13.0, achieved: 11.9 },
     { month: 'May', target: 14.0, achieved: 8.4 },
   ],
-  SSS: [
+  VRIDDHI: [
     { month: 'Dec', target: 4.0, achieved: 3.1 },
     { month: 'Jan', target: 4.5, achieved: 4.0 },
     { month: 'Feb', target: 5.0, achieved: 4.9 },
@@ -26,21 +26,13 @@ const MONTHLY: Record<SalesOutletFilter, { month: string; target: number; achiev
     { month: 'Apr', target: 6.5, achieved: 5.9 },
     { month: 'May', target: 7.0, achieved: 4.2 },
   ],
-  WHOLESALER: [
+  SAMBANDH: [
     { month: 'Dec', target: 3.0, achieved: 2.4 },
     { month: 'Jan', target: 3.2, achieved: 3.0 },
     { month: 'Feb', target: 3.5, achieved: 3.4 },
     { month: 'Mar', target: 4.0, achieved: 4.6 },
     { month: 'Apr', target: 4.5, achieved: 4.2 },
     { month: 'May', target: 5.0, achieved: 3.1 },
-  ],
-  SUB_STOCKIST: [
-    { month: 'Dec', target: 1.0, achieved: 0.7 },
-    { month: 'Jan', target: 1.3, achieved: 1.1 },
-    { month: 'Feb', target: 1.5, achieved: 1.5 },
-    { month: 'Mar', target: 2.0, achieved: 1.7 },
-    { month: 'Apr', target: 2.0, achieved: 1.8 },
-    { month: 'May', target: 2.0, achieved: 1.1 },
   ],
 };
 
@@ -59,7 +51,7 @@ const YOY: Record<SalesOutletFilter, { month: string; target: number; fy25: numb
     { month: 'Feb', target: 12.5, fy25: 11.4, fy26: 9.8 },
     { month: 'Mar', target: 14.0, fy25: 14.2, fy26: 13.1 },
   ],
-  SSS: [
+  VRIDDHI: [
     { month: 'Apr', target: 5.0, fy25: 4.1,  fy26: 5.9 },
     { month: 'May', target: 5.5, fy25: 4.7,  fy26: 4.2 },
     { month: 'Jun', target: 5.8, fy25: 5.4,  fy26: null },
@@ -73,7 +65,7 @@ const YOY: Record<SalesOutletFilter, { month: string; target: number; fy25: numb
     { month: 'Feb', target: 6.2, fy25: 5.7,  fy26: 4.9 },
     { month: 'Mar', target: 7.0, fy25: 7.1,  fy26: 6.8 },
   ],
-  WHOLESALER: [
+  SAMBANDH: [
     { month: 'Apr', target: 3.5, fy25: 3.0,  fy26: 4.2 },
     { month: 'May', target: 3.8, fy25: 3.4,  fy26: 3.1 },
     { month: 'Jun', target: 4.0, fy25: 3.9,  fy26: null },
@@ -86,20 +78,6 @@ const YOY: Record<SalesOutletFilter, { month: string; target: number; fy25: numb
     { month: 'Jan', target: 4.0, fy25: 3.8,  fy26: 3.0 },
     { month: 'Feb', target: 4.2, fy25: 4.0,  fy26: 3.4 },
     { month: 'Mar', target: 5.0, fy25: 5.2,  fy26: 4.6 },
-  ],
-  SUB_STOCKIST: [
-    { month: 'Apr', target: 1.5, fy25: 1.1,  fy26: 1.8 },
-    { month: 'May', target: 1.7, fy25: 1.3,  fy26: 1.1 },
-    { month: 'Jun', target: 1.7, fy25: 1.5,  fy26: null },
-    { month: 'Jul', target: 1.8, fy25: 1.6,  fy26: null },
-    { month: 'Aug', target: 1.8, fy25: 1.6,  fy26: null },
-    { month: 'Sep', target: 2.0, fy25: 1.8,  fy26: null },
-    { month: 'Oct', target: 2.0, fy25: 2.1,  fy26: null },
-    { month: 'Nov', target: 2.0, fy25: 1.8,  fy26: null },
-    { month: 'Dec', target: 2.0, fy25: 1.3,  fy26: 0.7 },
-    { month: 'Jan', target: 2.0, fy25: 1.6,  fy26: 1.1 },
-    { month: 'Feb', target: 2.1, fy25: 1.7,  fy26: 1.5 },
-    { month: 'Mar', target: 2.0, fy25: 1.9,  fy26: 1.7 },
   ],
 };
 

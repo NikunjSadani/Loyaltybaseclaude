@@ -12,17 +12,26 @@
  *  • A manager can be defined anywhere in the same upload file (two-pass safe).
  */
 
+import * as XLSX from 'xlsx';
 import type {
   TenantHierarchyLevel,
   HierarchyEmployee,
   EmployeeUploadRow,
   EmployeeRowValidationResult,
   EmployeeUploadValidationResult,
+  HierarchyChainRowError,
+  HierarchyChainParseResult,
 } from '@/types';
 
 // ─── Re-export types for convenience ─────────────────────────────────────────
 
-export type { TenantHierarchyLevel, HierarchyEmployee, EmployeeUploadRow };
+export type {
+  TenantHierarchyLevel,
+  HierarchyEmployee,
+  EmployeeUploadRow,
+  HierarchyChainRowError,
+  HierarchyChainParseResult,
+};
 
 // ─── Required columns (user-specified order) ─────────────────────────────────
 
@@ -36,10 +45,10 @@ export const REQUIRED_HEADERS = [
 ] as const;
 
 // ─── Deoleo hierarchy config (tenant default) ─────────────────────────────────
-// ISR < SO < ASM < RSM < ZNM < NSM
+// XSR < SO < ASM < RSM < ZNM < NSM
 
 export const DEOLEO_HIERARCHY: TenantHierarchyLevel[] = [
-  { tenantId: 'deoleo', level: 1, roleCode: 'ISR', roleLabel: 'ISR', isLeaf: true,  isRoot: false },
+  { tenantId: 'deoleo', level: 1, roleCode: 'XSR', roleLabel: 'XSR', isLeaf: true,  isRoot: false },
   { tenantId: 'deoleo', level: 2, roleCode: 'SO',  roleLabel: 'SO',  isLeaf: false, isRoot: false },
   { tenantId: 'deoleo', level: 3, roleCode: 'ASM', roleLabel: 'ASM', isLeaf: false, isRoot: false },
   { tenantId: 'deoleo', level: 4, roleCode: 'RSM', roleLabel: 'RSM', isLeaf: false, isRoot: false },
@@ -101,19 +110,19 @@ export const MOCK_EMPLOYEES: HierarchyEmployee[] = [
     hasOutlets: false,       hasSubReports: false,
   },
   {
-    id: 'ISR-M001', tenantId: 'deoleo', roleCode: 'ISR', roleLabel: 'ISR',
+    id: 'ISR-M001', tenantId: 'deoleo', roleCode: 'XSR', roleLabel: 'XSR',
     reportsToId: 'SO-MUM1', hierarchyPath: '/NSM-01/ZNM-W1/RSM-MH/ASM-MUM/SO-MUM1/ISR-M001/',
     name: 'Anil Sharma',     mobile: '9900000041', status: 'ACTIVE',
     hasOutlets: true,        hasSubReports: false,
   },
   {
-    id: 'ISR-M002', tenantId: 'deoleo', roleCode: 'ISR', roleLabel: 'ISR',
+    id: 'ISR-M002', tenantId: 'deoleo', roleCode: 'XSR', roleLabel: 'XSR',
     reportsToId: 'SO-MUM1', hierarchyPath: '/NSM-01/ZNM-W1/RSM-MH/ASM-MUM/SO-MUM1/ISR-M002/',
     name: null,              mobile: null,         status: 'PLACEHOLDER',
     hasOutlets: false,       hasSubReports: false,
   },
   {
-    id: 'ISR-P001', tenantId: 'deoleo', roleCode: 'ISR', roleLabel: 'ISR',
+    id: 'ISR-P001', tenantId: 'deoleo', roleCode: 'XSR', roleLabel: 'XSR',
     reportsToId: 'SO-PUN1', hierarchyPath: '/NSM-01/ZNM-W1/RSM-MH/ASM-PUN/SO-PUN1/ISR-P001/',
     name: 'Sanjay Patel',    mobile: '9900000042', status: 'ACTIVE',
     hasOutlets: true,        hasSubReports: false,
@@ -554,7 +563,7 @@ export function getTemplateData(config: TenantHierarchyLevel[]): TemplateData {
     ['Column', 'Rule'],
     [
       'Hierarchy',
-      `REQUIRED. Enter one of: ${rolesStr}. Case-insensitive (e.g. "isr" and "ISR" both work).`,
+      `REQUIRED. Enter one of: ${rolesStr}. Case-insensitive (e.g. "xsr" and "XSR" both work).`,
     ],
     [
       'Employee ID',
@@ -897,4 +906,442 @@ ${config.filter(l => !l.isLeaf && !l.isRoot)
 </p>
 </body>
 </html>`;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// DENORMALIZED 18-COLUMN HIERARCHY CHAIN FORMAT
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Each row = one XSR (leaf employee) plus their complete reporting chain
+// up to the root (NSM).  Columns: {ROLE} ID | {ROLE} Name | {ROLE} Phone
+// for each level in the hierarchy, leaf-first.
+//
+// Outlet-master integration note:
+//   Outlets are tagged to XSR IDs.  The outlet-master report derives the
+//   full hierarchy chain (L1…L6) from the SalesUser table at query time.
+//   Uploading a new hierarchy automatically updates those derived columns
+//   for all outlets under affected XSRs — no outlet re-upload required.
+//
+// ─── Column helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Returns the 18 column header strings for the given hierarchy config,
+ * ordered leaf-first: "{ROLE} ID", "{ROLE} Name", "{ROLE} Phone" × 6 levels.
+ */
+export function getHierarchyChainHeaders(config: TenantHierarchyLevel[]): string[] {
+  return [...config]
+    .sort((a, b) => a.level - b.level)
+    .flatMap(l => [`${l.roleCode} ID`, `${l.roleCode} Name`, `${l.roleCode} Phone`]);
+}
+
+/**
+ * Pass 1 header validation for the chain format.
+ * Returns null if all expected columns are present; otherwise an error string
+ * that names every missing column.
+ */
+export function validateHierarchyChainHeaders(
+  headers: string[],
+  config: TenantHierarchyLevel[],
+): string | null {
+  const expected = getHierarchyChainHeaders(config);
+  const normalised = headers.map(h => h.trim());
+  const missing = expected.filter(h => !normalised.includes(h));
+  if (missing.length === 0) return null;
+  return (
+    `Missing required column(s): ${missing.join(', ')}. ` +
+    `Expected ${expected.length} columns: ${expected.join(', ')}.`
+  );
+}
+
+// ─── Core parser ──────────────────────────────────────────────────────────────
+
+/**
+ * Parse and validate the denormalized 18-column hierarchy chain Excel.
+ *
+ * Algorithm (two-phase):
+ *   Phase 1 — scan all rows: collect employee data, flag MISSING_ID and
+ *             SELF_REFERENCE errors immediately, accumulate per-ID data for
+ *             cross-row conflict detection.
+ *   Phase 2 — cross-row checks: NAME_CONFLICT, PHONE_CONFLICT, LEVEL_CONFLICT,
+ *             PARENT_CONFLICT, DUPLICATE_XSR.
+ *   Emit     — deduplicated EmployeeUploadRow[] only when hasErrors = false.
+ *
+ * Every error carries plain-English `message` suitable for the Remarks column
+ * of the downloadable error report.
+ */
+export function parseHierarchyChainRows(
+  rawRows: Record<string, string>[],
+  config: TenantHierarchyLevel[],
+): HierarchyChainParseResult {
+  const sorted = [...config].sort((a, b) => a.level - b.level); // leaf→root
+  const leafLevel = sorted.find(l => l.isLeaf) ?? sorted[0];
+  const levelCodes = sorted.map(l => l.roleCode);
+
+  const chainErrors: HierarchyChainRowError[] = [];
+
+  // Accumulator: employeeId → aggregated data across all rows where it appears
+  type EmpEntry = {
+    roleCodes:   string[];
+    names:       string[];          // all non-blank names seen
+    phones:      string[];          // all non-blank phones seen
+    reportsToIds: (string | null)[];
+    rowNums:     number[];
+  };
+  const empMap = new Map<string, EmpEntry>();
+
+  // Track leaf IDs for C1 (DUPLICATE_XSR)
+  const leafRowNums = new Map<string, number[]>(); // leafId → all rowNums
+
+  // ── Phase 1: row-by-row scan ───────────────────────────────────────────────
+  let rowNum = 2; // row 1 = header
+  for (const raw of rawRows) {
+    // Extract per-level data
+    const levels = sorted.map((l, i) => ({
+      cfg:       l,
+      id:        (raw[`${l.roleCode} ID`]    ?? '').trim(),
+      name:      (raw[`${l.roleCode} Name`]  ?? '').trim(),
+      phone:     (raw[`${l.roleCode} Phone`] ?? '').trim(),
+      parentId:  i + 1 < sorted.length
+        ? (raw[`${sorted[i + 1].roleCode} ID`] ?? '').trim()
+        : null, // root has no parent
+    }));
+
+    // Skip entirely blank rows
+    const allBlank = levels.every(l => !l.id && !l.name && !l.phone);
+    if (allBlank) { rowNum++; continue; }
+
+    // B-rules: every ID column must be non-blank
+    for (const { cfg, id } of levels) {
+      if (!id) {
+        chainErrors.push({
+          type:       'MISSING_ID',
+          rowNums:    [rowNum],
+          employeeId: '',
+          message:
+            `Row ${rowNum}: ${cfg.roleCode} ID is missing. ` +
+            `All levels (${levelCodes.join(' → ')}) must have an ID — ` +
+            `the full chain is required for the KYC flow to work.`,
+        });
+      }
+    }
+
+    // C3: same ID value in two level columns of the same row
+    const rowIds = levels.map(l => l.id).filter(Boolean);
+    const seenInRow = new Set<string>();
+    for (const id of rowIds) {
+      if (seenInRow.has(id)) {
+        chainErrors.push({
+          type:       'SELF_REFERENCE',
+          rowNums:    [rowNum],
+          employeeId: id,
+          message:
+            `Row ${rowNum}: The same ID "${id}" appears in more than one level column. ` +
+            `Each position must have a unique ID across all hierarchy levels.`,
+        });
+      }
+      seenInRow.add(id);
+    }
+
+    // C1: track leaf IDs for DUPLICATE_XSR check (done in Phase 2)
+    const leafId = levels.find(l => l.cfg.isLeaf)?.id ?? '';
+    if (leafId) {
+      const existing = leafRowNums.get(leafId) ?? [];
+      existing.push(rowNum);
+      leafRowNums.set(leafId, existing);
+    }
+
+    // Accumulate employee entries
+    for (const { cfg, id, name, phone, parentId } of levels) {
+      if (!id) continue; // blank IDs already flagged above
+
+      // B4: phone format check (must be blank or exactly 10 digits)
+      if (phone && !validatePhone(phone)) {
+        chainErrors.push({
+          type:       'INVALID_PHONE',
+          rowNums:    [rowNum],
+          employeeId: id,
+          message:
+            `Row ${rowNum}: ${cfg.roleCode} phone "${phone}" for ID "${id}" is invalid. ` +
+            `Phone must be exactly 10 digits with no spaces or +91 prefix. ` +
+            `Leave blank if the number is not available.`,
+        });
+      }
+
+      const reportsToId = parentId || null;
+
+      if (empMap.has(id)) {
+        const entry = empMap.get(id)!;
+        entry.rowNums.push(rowNum);
+        entry.roleCodes.push(cfg.roleCode);
+        if (name)  entry.names.push(name);
+        if (phone) entry.phones.push(phone);
+        entry.reportsToIds.push(reportsToId);
+      } else {
+        empMap.set(id, {
+          roleCodes:    [cfg.roleCode],
+          names:        name  ? [name]  : [],
+          phones:       phone ? [phone] : [],
+          reportsToIds: [reportsToId],
+          rowNums:      [rowNum],
+        });
+      }
+    }
+
+    rowNum++;
+  }
+
+  // ── Phase 2: cross-row conflict detection ──────────────────────────────────
+
+  // C1: DUPLICATE_XSR
+  for (const [id, rows] of leafRowNums) {
+    if (rows.length > 1) {
+      chainErrors.push({
+        type:       'DUPLICATE_XSR',
+        rowNums:    rows,
+        employeeId: id,
+        message:
+          `${leafLevel.roleCode} ID "${id}" appears in more than one row ` +
+          `(rows ${rows.join(', ')}). Each ${leafLevel.roleCode} can only appear once per upload.`,
+      });
+    }
+  }
+
+  // A3/A1/A2/A4 — per accumulated employee
+  for (const [id, entry] of empMap) {
+    const uniqueRoles   = new Set(entry.roleCodes);
+    const uniqueNames   = new Set(entry.names);
+    const uniquePhones  = new Set(entry.phones);
+    // Represent null as a sentinel string so Set works correctly
+    const uniqueParents = new Set(entry.reportsToIds.map(r => r ?? '__ROOT__'));
+
+    const dedupedRowNums = [...new Set(entry.rowNums)];
+
+    if (uniqueRoles.size > 1) {
+      chainErrors.push({
+        type:       'LEVEL_CONFLICT',
+        rowNums:    dedupedRowNums,
+        employeeId: id,
+        message:
+          `Employee ID "${id}" has a different role in different rows ` +
+          `(${[...uniqueRoles].join(' vs ')}). ` +
+          `An employee can only have one role — fix to use the same role in all rows.`,
+      });
+      continue; // skip further checks for this ID if the role itself conflicts
+    }
+
+    if (uniqueNames.size > 1) {
+      chainErrors.push({
+        type:       'NAME_CONFLICT',
+        rowNums:    dedupedRowNums,
+        employeeId: id,
+        message:
+          `Employee ID "${id}" has a different name in different rows ` +
+          `(${[...uniqueNames].join(' vs ')}). ` +
+          `Fix to use the same name in all rows, or leave blank for a placeholder.`,
+      });
+    }
+
+    if (uniquePhones.size > 1) {
+      chainErrors.push({
+        type:       'PHONE_CONFLICT',
+        rowNums:    dedupedRowNums,
+        employeeId: id,
+        message:
+          `Employee ID "${id}" has a different phone number in different rows ` +
+          `(${[...uniquePhones].join(' vs ')}). ` +
+          `Fix to use the same phone in all rows, or leave blank if unknown.`,
+      });
+    }
+
+    if (uniqueParents.size > 1) {
+      const humanParents = [...entry.reportsToIds]
+        .map(r => r ?? '(none)')
+        .filter((v, i, a) => a.indexOf(v) === i); // dedupe for display
+      chainErrors.push({
+        type:       'PARENT_CONFLICT',
+        rowNums:    dedupedRowNums,
+        employeeId: id,
+        message:
+          `Employee ID "${id}" (${entry.roleCodes[0]}) has a different reporting manager ` +
+          `in different rows (${humanParents.join(' vs ')}). ` +
+          `Fix to use the same reporting manager in all rows.`,
+      });
+    }
+  }
+
+  // ── Emit EmployeeUploadRow[] (only when no errors) ─────────────────────────
+  const employeeRows: EmployeeUploadRow[] = [];
+
+  if (chainErrors.length === 0) {
+    for (const [id, entry] of empMap) {
+      const roleCode  = entry.roleCodes[0];
+      const levelCfg  = sorted.find(l => l.roleCode === roleCode)!;
+      const parentCfg = sorted.find(l => l.level === levelCfg.level + 1);
+
+      employeeRows.push({
+        rowNum:                     entry.rowNums[0],
+        hierarchy:                  roleCode,
+        employeeId:                 id,
+        employeeName:               entry.names[0]  ?? '',
+        employeePhone:              entry.phones[0] ?? '',
+        reportingManagerHierarchy:  parentCfg?.roleCode ?? '',
+        reportingManagerEmployeeId: entry.reportsToIds[0] ?? '',
+      });
+    }
+  }
+
+  return {
+    headerError: null,
+    chainErrors,
+    employeeRows,
+    hasErrors: chainErrors.length > 0,
+  };
+}
+
+// ─── Error report (Excel with Remarks column) ─────────────────────────────────
+
+/**
+ * Generates an Excel error report from a chain parse result.
+ *
+ * Layout:
+ *   Row 1  — the 18 chain column headers + "Remarks"
+ *   Row 2… — original data rows; rows with errors have plain-English messages
+ *             in the Remarks column (multiple errors joined by " | ").
+ *             Rows with no errors have an empty Remarks cell.
+ *
+ * The client opens this file, fixes the highlighted rows, and re-uploads.
+ */
+export function generateHierarchyChainErrorReport(
+  rawRows: Record<string, string>[],
+  parseResult: HierarchyChainParseResult,
+  config: TenantHierarchyLevel[],
+): Uint8Array {
+  const chainHeaders = getHierarchyChainHeaders(config);
+  const allHeaders   = [...chainHeaders, 'Remarks'];
+
+  // Build a map: rowNum (1-based, row 1 = header) → error messages[]
+  const errorsByRow = new Map<number, string[]>();
+  for (const err of parseResult.chainErrors) {
+    for (const rn of err.rowNums) {
+      const msgs = errorsByRow.get(rn) ?? [];
+      msgs.push(err.message);
+      errorsByRow.set(rn, msgs);
+    }
+  }
+
+  const dataRows = rawRows.map((raw, idx) => {
+    const rn      = idx + 2; // idx 0 → rowNum 2
+    const values  = chainHeaders.map(h => (raw[h] ?? '').toString());
+    const remarks = (errorsByRow.get(rn) ?? []).join(' | ');
+    return [...values, remarks];
+  });
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([allHeaders, ...dataRows]);
+  ws['!cols'] = allHeaders.map(h => ({ wch: h === 'Remarks' ? 80 : 20 }));
+  XLSX.utils.book_append_sheet(wb, ws, 'Hierarchy Chain');
+
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+}
+
+// ─── 18-column template data ─────────────────────────────────────────────────
+
+/**
+ * Returns template headers and example rows for the 18-column chain format.
+ * Used by the admin/hierarchy page to generate the downloadable .xlsx template.
+ */
+export function getHierarchyChainTemplateData(config: TenantHierarchyLevel[]): {
+  headers: string[];
+  exampleRows: string[][];
+  dosAndDontsRows: string[][];
+} {
+  const sorted   = [...config].sort((a, b) => a.level - b.level);
+  const headers  = getHierarchyChainHeaders(config);
+  const leaf     = sorted.find(l => l.isLeaf)  ?? sorted[0];
+  const root     = sorted.find(l => l.isRoot)  ?? sorted[sorted.length - 1];
+  const levelStr = sorted.map(l => l.roleCode).join(' → ');
+
+  // ── Example rows ──────────────────────────────────────────────────────────
+  // All non-leaf levels use generic, config-derived values so the template
+  // works for any hierarchy (not just Deoleo's 6-level chain).
+  const makeExampleRow = (
+    leafId: string, leafName: string, leafPhone: string,
+  ): string[] => {
+    const row: string[] = [];
+    sorted.forEach((l, i) => {
+      if (l.isLeaf) {
+        row.push(leafId, leafName, leafPhone);
+      } else {
+        const phone = `990000${String(i + 1).padStart(4, '0')}`;
+        row.push(`${l.roleCode}-EX${i + 1}`, `${l.roleCode} Example`, phone);
+      }
+    });
+    return row;
+  };
+
+  const exampleRows: string[][] = [
+    makeExampleRow('XSR-M001', 'Anil Sharma',   '9900000041'),
+    makeExampleRow('XSR-M002', '',               ''),           // PLACEHOLDER
+    makeExampleRow('XSR-P001', 'Deepa Nair',    '9900000042'),
+  ];
+
+  // ── Dos & Don'ts sheet ────────────────────────────────────────────────────
+  const dosAndDontsRows: string[][] = [
+    ['EMPLOYEE HIERARCHY — CHAIN FORMAT  Dos & Don\'ts', ''],
+    ['Read this sheet before filling the "Hierarchy Chain" sheet.', ''],
+    ['', ''],
+
+    ['━━━  FORMAT OVERVIEW  ━━━', ''],
+    ['Each row = one field-level employee + their full reporting chain.', ''],
+    [`Column order: ${levelStr} — three columns per level (ID, Name, Phone).`, ''],
+    ['The same SO/ASM/RSM/ZNM/NSM will appear in multiple rows (once per XSR under them).', ''],
+    ['That is expected and correct — the system deduplicates automatically.', ''],
+    ['', ''],
+
+    ['━━━  COLUMN RULES  ━━━', ''],
+    ['Column', 'Rule'],
+    ['{ROLE} ID',    'REQUIRED for every level. Blank ID = whole file rejected.'],
+    ['{ROLE} Name',  'Optional. Leave blank for a PLACEHOLDER (vacant position).'],
+    ['{ROLE} Phone', 'Optional. If provided: exactly 10 digits, no +91 prefix.'],
+    ['', ''],
+
+    ['━━━  CRITICAL RULES  ━━━', ''],
+    ['Rule', 'Why it matters'],
+    ['All 6 ID columns must be filled in every row.',
+     'The KYC flow requires the complete chain from XSR all the way to NSM.'],
+    ['The same manager ID must have the same name/phone in every row it appears.',
+     'Any mismatch is a hard error — the system cannot guess which version is correct.'],
+    ['The same manager ID must report to the same parent in every row.',
+     'Conflicting chains are rejected — the system cannot resolve them automatically.'],
+    ['Each XSR ID must appear in exactly one row.',
+     'Duplicate XSR rows are rejected — two chains for the same XSR is ambiguous.'],
+    ['IDs must be unique across all level columns in the same row.',
+     'An XSR and their SO cannot share the same ID code.'],
+    ['', ''],
+
+    ['━━━  ✓ DOs  ━━━', ''],
+    ['✓ DO', 'Export this file directly from your HR system if it supports this format.'],
+    ['✓ DO', 'Leave Name and Phone blank for positions that are currently vacant.'],
+    ['✓ DO', 'Include the NSM row even if the NSM manages everyone in the file.'],
+    ['✓ DO', `Use consistent IDs — the same person must always use the same ${root.roleCode} ID.`],
+    ['', ''],
+
+    ['━━━  ✗ DON\'TS  ━━━', ''],
+    ['✗ DON\'T', 'Leave any ID column blank in a non-blank row.'],
+    ['✗ DON\'T', 'Use the same ID for two different people or two different levels.'],
+    ['✗ DON\'T', 'Enter inconsistent manager data across rows (e.g. SO-001 under ASM-001 in row 2, but ASM-002 in row 5).'],
+    ['✗ DON\'T', `List the same ${leaf.roleCode} in more than one row.`],
+    ['✗ DON\'T', 'Mix +91 prefix into phone numbers — use 10 digits only.'],
+    ['', ''],
+
+    ['━━━  COMMON MISTAKES  ━━━', ''],
+    ['Mistake', 'Fix'],
+    ['NSM row is blank in some rows', 'Every row must have the full chain including NSM ID.'],
+    ['Same NSM ID has different names in different rows', 'Use the exact same spelling in all rows.'],
+    ['Same SO ID has two different ASMs across rows', 'An SO can only report to one ASM — fix the chain.'],
+    ['XSR appears twice with different managers', 'Remove the duplicate row or fix the manager.'],
+  ];
+
+  return { headers, exampleRows, dosAndDontsRows };
 }

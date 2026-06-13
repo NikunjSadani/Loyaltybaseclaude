@@ -19,13 +19,13 @@ export enum UserRole {
   GIFSY_ADMIN  = 'GIFSY_ADMIN',
   CLIENT_ADMIN = 'CLIENT_ADMIN',
   MIS_USER     = 'MIS_USER',
-  // Sales hierarchy — XSR → SO → ASM → RSM → ZM → NM
+  // Sales hierarchy — XSR → SO → ASM → RSM → ZNM → NSM
   XSR = 'XSR',  // Executive Sales Representative (field-level)
   SO  = 'SO',   // Sales Officer
   ASM = 'ASM',  // Area Sales Manager
   RSM = 'RSM',  // Regional Sales Manager
-  ZM  = 'ZM',   // Zonal Manager
-  NM  = 'NM',   // National Manager
+  ZNM = 'ZNM',  // Zonal National Manager
+  NSM = 'NSM',  // National Sales Manager
   // Channel partners
   SSS          = 'SSS',
   WHOLESALER   = 'WHOLESALER',
@@ -172,6 +172,22 @@ export enum UploadBatchStatus {
 export enum TDSSection {
   SECTION_194R = '194R',
   SECTION_194C = '194C',
+}
+
+// ─── Partner Scheme Target API type ──────────────────────────────────────────
+
+/** Shape returned by /api/partner/targets — single source of truth for both
+ *  the Targets page and the Dashboard API hydration. */
+export interface ApiSchemeTarget {
+  id: string;
+  schemeId: string;
+  schemeName: string;
+  period: string;
+  targetValue: number;
+  achievedValue: number;
+  percentage: number;
+  status: string;
+  incentiveEarnable: number;
 }
 
 // ─── API Response Types ───────────────────────────────────────────────────────
@@ -545,7 +561,7 @@ export interface ExifValidationResult {
 export interface TenantHierarchyLevel {
   tenantId: string;
   level: number;      // 1 = leaf (owns outlets), highest = root (no manager)
-  roleCode: string;   // e.g. 'ISR', 'SO', 'NSM'
+  roleCode: string;   // e.g. 'XSR', 'SO', 'NSM'
   roleLabel: string;  // display name
   isLeaf: boolean;    // can own outlets directly
   isRoot: boolean;    // no reporting manager required
@@ -601,6 +617,45 @@ export interface EmployeeUploadValidationResult {
     updates: number;
     errors: number;
   };
+}
+
+// ─── Hierarchy Chain Upload (denormalized 18-column format) ──────────────────
+
+/**
+ * A parse-phase error from the 18-column hierarchy chain format.
+ * Each error carries the affected row numbers and a plain-English message
+ * suitable for the Remarks column in the downloadable error report.
+ */
+export interface HierarchyChainRowError {
+  type:
+    | 'MISSING_ID'       // B1-B3: a required ID column is blank in this row
+    | 'DUPLICATE_XSR'    // C1: same leaf ID appears in more than one row
+    | 'SELF_REFERENCE'   // C3: same ID value in two level columns of the same row
+    | 'INVALID_PHONE'    // B4: a phone column is non-blank but not exactly 10 digits
+    | 'NAME_CONFLICT'    // A1: same employee ID, different names across rows
+    | 'PHONE_CONFLICT'   // A2: same employee ID, different phone numbers across rows
+    | 'LEVEL_CONFLICT'   // A3: same employee ID, different role across rows
+    | 'PARENT_CONFLICT'; // A4: same employee ID, different reporting manager across rows
+  /** All row numbers (1-based, row 1 = header) affected by this error */
+  rowNums: number[];
+  /** The employee ID at the centre of the conflict; empty string for MISSING_ID */
+  employeeId: string;
+  /** Plain-English description — written into the Remarks column of the error report */
+  message: string;
+}
+
+/** Full result of parsing the denormalized 18-column hierarchy chain format */
+export interface HierarchyChainParseResult {
+  /** Non-null when the column headers do not match the expected 18-column layout */
+  headerError: string | null;
+  /** All parse-phase errors found across the entire file (full scan — never stops early) */
+  chainErrors: HierarchyChainRowError[];
+  /**
+   * Deduplicated EmployeeUploadRow[] ready for validateEmployeeUpload.
+   * Populated only when chainErrors is empty — callers should check hasErrors first.
+   */
+  employeeRows: EmployeeUploadRow[];
+  hasErrors: boolean;
 }
 
 // ─── Outlet Upload ────────────────────────────────────────────────────────────

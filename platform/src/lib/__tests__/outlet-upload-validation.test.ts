@@ -44,7 +44,7 @@ import { MOCK_EMPLOYEES, DEOLEO_HIERARCHY } from '../employee-hierarchy';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-const LEAF_ROLE_CODE = 'ISR'; // for Deoleo
+const LEAF_ROLE_CODE = 'XSR'; // for Deoleo
 
 const VALID_PROGRAMS   = ['Trade Loyalty', 'Gold Programme'];
 const VALID_CATEGORIES = ['Premium', 'Standard', 'Economy'];
@@ -269,7 +269,7 @@ describe('outlet master row validation — errors (CREATE)', () => {
   it('O26 — XSR ID exists but is NOT a leaf-level role is an error', () => {
     const result = validateOutletUpload([makeRow({ xsrId: 'NSM-01' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
-    expect(result.rows[0].errors.some(e => /leaf|ISR/i.test(e))).toBe(true);
+    expect(result.rows[0].errors.some(e => /leaf|XSR/i.test(e))).toBe(true);
   });
 });
 
@@ -572,7 +572,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
       OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('ERROR');
-    expect(result.rows[0].errors.some(e => /leaf|ISR/i.test(e))).toBe(true);
+    expect(result.rows[0].errors.some(e => /leaf|XSR/i.test(e))).toBe(true);
   });
 
   it('O76 — UPDATE with outlet name provided → silently ignored (no error, action stays UPDATE)', () => {
@@ -721,7 +721,7 @@ describe('O82–O87 — Zone column in outlet addition template', () => {
     const { headers } = getOutletAdditionTemplateData(
       ['Trade Loyalty'],
       ['Standard'],
-      'ISR',
+      'XSR',
     );
     expect(headers).toContain('Zone');
   });

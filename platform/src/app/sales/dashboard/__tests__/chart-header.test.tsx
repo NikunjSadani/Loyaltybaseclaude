@@ -23,12 +23,13 @@ vi.mock('@/lib/task-config', () => ({
   fetchTaskConfig: () => Promise.resolve(null),
 }));
 vi.mock('@/lib/banner', () => ({
-  fetchBanners:         () => Promise.resolve({ banners: [] }),
-  getActiveSalesBanners: () => [],
-  getBgStyle:           () => ({}),
-  getActivePopup:       () => null,
-  shouldShowPopup:      () => false,
-  markPopupSeen:        () => undefined,
+  fetchBanners:              () => Promise.resolve({ banners: [] }),
+  getActiveSalesBanners:     () => [],
+  getActiveBannersFromList:  () => [],
+  getBgStyle:                () => ({}),
+  getActivePopup:            () => null,
+  shouldShowPopup:           () => false,
+  markPopupSeen:             () => undefined,
 }));
 
 import SalesDashboardPage from '../page';

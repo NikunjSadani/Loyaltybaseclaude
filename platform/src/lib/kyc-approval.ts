@@ -21,7 +21,7 @@ export function backendRoleToSalesRole(backendRole: string): SalesRole | null {
     SALES_SO:         'SO',
     SALES_ASM:        'ASM',
     SALES_STATE_HEAD: 'RSM',
-    SALES_HO:         'NM',
+    SALES_HO:         'NSM',
   };
   return MAP[backendRole] ?? null;
 }

@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Trophy, Medal, ArrowLeft, TrendingUp, MapPin, Globe, Map } from 'lucide-react';
 import Link from 'next/link';
 import { formatPoints } from '@/lib/utils';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 
 type Scope = 'india' | 'state' | 'district';
 
@@ -69,23 +70,83 @@ const SCOPE_CONFIG: Record<Scope, { label: string; icon: React.ReactNode; sublab
   district: { label: 'District',   icon: <MapPin className="h-3.5 w-3.5" />, sublabel: MY.district },
 };
 
+interface ApiLeaderboardEntry {
+  rank: number;
+  partnerId: string;
+  partnerName: string;
+  score: number;
+  rankChange: number | null;
+}
+
+function mapApiLeaderboard(
+  entries: ApiLeaderboardEntry[],
+  currentPartnerId: string | null,
+): Partner[] {
+  return entries.map(e => ({
+    name:            e.partnerName,
+    city:            e.partnerName, // city column shows partner name when location not available
+    district:        '',
+    state:           '',
+    primaryKpiLabel: 'Score',
+    primaryKpiValue: e.score,
+    change:          e.rankChange ?? 0,
+    isMe:            currentPartnerId !== null && e.partnerId === currentPartnerId,
+  }));
+}
+
 export default function LeaderboardPage() {
+  const { features } = useClientConfig();
   const [scope, setScope] = useState<Scope>('india');
+  const [partners, setPartners] = useState<Partner[]>(ALL_PARTNERS);
+  // When API data is loaded, state/district are not available — disable those scope tabs
+  const [hasLocationData, setHasLocationData] = useState(true);
+
+  useEffect(() => {
+    if (!features.partnerApp.showLeaderboard) return;
+    fetch('/api/leaderboard')
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { leaderboard: ApiLeaderboardEntry[]; currentPartnerId?: string | null } }) => {
+        if (json.success && json.data?.leaderboard && json.data.leaderboard.length > 0) {
+          const currentPartnerId = json.data.currentPartnerId ?? null;
+          setPartners(mapApiLeaderboard(json.data.leaderboard, currentPartnerId));
+          // API entries have no state/district — disable those scope tabs to avoid empty views
+          setHasLocationData(false);
+          if (scope !== 'india') setScope('india');
+        }
+        // On empty or error response: keep ALL_PARTNERS as fallback
+      })
+      .catch(() => {}); // silent — initial mock data kept on failure
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = useMemo(() => {
-    let list = ALL_PARTNERS;
-    if (scope === 'state')    list = list.filter(p => p.state === MY.state);
-    if (scope === 'district') list = list.filter(p => p.district === MY.district);
+    let list = partners;
+    if (hasLocationData && scope === 'state')    list = list.filter(p => p.state === MY.state);
+    if (hasLocationData && scope === 'district') list = list.filter(p => p.district === MY.district);
     // Re-rank after filter — sorted by ABSOLUTE primary KPI value (highest = rank 1)
     return list
+      .slice()
       .sort((a, b) => b.primaryKpiValue - a.primaryKpiValue)
       .map((p, i) => ({ ...p, rank: i + 1 }));
-  }, [scope]);
+  }, [scope, partners]);
 
   const myEntry = filtered.find((e) => e.isMe);
   const top3 = filtered.slice(0, 3);
   const nextRankEntry = myEntry && myEntry.rank > 1 ? filtered[myEntry.rank - 2] : null;
   const kpiGapToNext  = nextRankEntry ? nextRankEntry.primaryKpiValue - myEntry!.primaryKpiValue : null;
+
+  // Feature-flag gate — all hooks called above; safe to return early now
+  if (!features.partnerApp.showLeaderboard) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center space-y-3">
+        <Trophy className="h-10 w-10 text-gray-300" />
+        <p className="text-base font-semibold text-gray-500">Leaderboard not available</p>
+        <p className="text-sm text-gray-400">This feature is not enabled for your account.</p>
+        <Link href="/partner/dashboard" className="mt-2 text-sm text-[var(--brand-primary)] font-medium hover:underline">
+          ← Back to Dashboard
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4 fade-in">
@@ -104,20 +165,26 @@ export default function LeaderboardPage() {
 
       {/* Scope filter tabs */}
       <div className="flex gap-2 bg-gray-100 rounded-xl p-1">
-        {(Object.keys(SCOPE_CONFIG) as Scope[]).map((s) => (
-          <button
-            key={s}
-            onClick={() => setScope(s)}
-            className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-2 rounded-lg text-xs font-semibold transition-all ${
-              scope === s
-                ? 'bg-white text-[var(--brand-primary)] shadow-sm'
-                : 'text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            {SCOPE_CONFIG[s].icon}
-            {SCOPE_CONFIG[s].label}
-          </button>
-        ))}
+        {(Object.keys(SCOPE_CONFIG) as Scope[]).map((s) => {
+          const disabled = !hasLocationData && s !== 'india';
+          return (
+            <button
+              key={s}
+              onClick={() => !disabled && setScope(s)}
+              disabled={disabled}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-2 rounded-lg text-xs font-semibold transition-all ${
+                disabled
+                  ? 'text-gray-300 cursor-not-allowed'
+                  : scope === s
+                    ? 'bg-white text-[var(--brand-primary)] shadow-sm'
+                    : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {SCOPE_CONFIG[s].icon}
+              {SCOPE_CONFIG[s].label}
+            </button>
+          );
+        })}
       </div>
 
       {/* My rank summary — visual hero card; test IDs live on the full-list row instead */}

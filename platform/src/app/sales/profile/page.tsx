@@ -65,17 +65,61 @@ function MenuItem({ icon, label, value, onClick, danger }: MenuItemProps) {
   );
 }
 
+function mapUserToProfile(user: {
+  name: string;
+  phone?: string;
+  email?: string;
+  role?: string;
+  salesUser?: {
+    employeeCode?: string;
+    region?: string;
+    zone?: string;
+    joinedAt?: string;
+    reportingTo?: { user?: { name?: string }; hierarchyLevel?: { name?: string } } | null;
+  } | null;
+}): SalesProfile {
+  const su = user.salesUser;
+  const territory = su?.region ?? su?.zone ?? '';
+  const joinedDate = su?.joinedAt ? su.joinedAt.slice(0, 10) : '';
+  const reportingName = su?.reportingTo?.user?.name ?? '';
+  const reportingLevel = su?.reportingTo?.hierarchyLevel?.name ?? '';
+  const reportingManager = reportingName
+    ? reportingLevel ? `${reportingName} (${reportingLevel})` : reportingName
+    : '';
+
+  return {
+    name:            user.name,
+    mobile:          user.phone ?? '',
+    email:           user.email,
+    role:            MOCK_PROFILE.role,   // hierarchyLevel not included in basic /me response; fallback
+    territory,
+    employeeId:      su?.employeeCode ?? '',
+    reportingManager,
+    joinedDate,
+    totalOutlets:         0,
+    kycCompleted:         0,
+    visibilitySubmissions: 0,
+  };
+}
+
 export default function SalesProfilePage() {
   const router = useRouter();
   const [profile, setProfile] = useState<SalesProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      setProfile(MOCK_PROFILE);
-      setLoading(false);
-    }, 400);
-    return () => clearTimeout(t);
+    fetch('/api/auth/me')
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { user: Parameters<typeof mapUserToProfile>[0] }; error?: string }) => {
+        if (json.success && json.data) {
+          setProfile(mapUserToProfile(json.data.user));
+        } else {
+          setError(json.error ?? 'Failed to load profile');
+        }
+      })
+      .catch(() => setError('Failed to load profile'))
+      .finally(() => setLoading(false));
   }, []);
 
   const handleLogout = () => {
@@ -87,6 +131,14 @@ export default function SalesProfilePage() {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center min-h-screen px-6 text-center text-sm text-red-500">
+        {error}
       </div>
     );
   }

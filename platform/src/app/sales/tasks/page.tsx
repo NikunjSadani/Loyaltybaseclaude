@@ -282,7 +282,7 @@ function SchemeEnrollmentSheet({
             <div className="px-5 pt-5 pb-4 border-b border-gray-100 shrink-0">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1 min-w-0">
-                  <p className="text-[10px] font-semibold text-emerald-600 uppercase tracking-widest mb-0.5">Scheme Enrollment</p>
+                  <p className="text-[10px] font-semibold text-emerald-600 uppercase tracking-widest mb-0.5">Activation Enrollment</p>
                   <h2 className="text-base font-bold text-gray-900 leading-snug">{scheme.name}</h2>
                   <p className="text-[12px] text-gray-400 mt-0.5">{scheme.period} · Accept by {formatDeadline(scheme.acceptDeadline)}</p>
                 </div>
@@ -517,7 +517,7 @@ function SchemeEnrollmentGroup({ schemes, outlets }: { schemes: Scheme[]; outlet
           <div className="p-2 rounded-xl bg-emerald-50 shrink-0">
             <Tag className="h-4 w-4 text-emerald-600" />
           </div>
-          <p className="text-sm font-semibold text-gray-800 flex-1 text-left leading-snug">Scheme Enrollment</p>
+          <p className="text-sm font-semibold text-gray-800 flex-1 text-left leading-snug">Activation Enrollment</p>
           <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 shrink-0">
             {schemes.length}
           </span>

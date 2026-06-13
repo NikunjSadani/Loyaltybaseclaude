@@ -32,7 +32,7 @@ import type {
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
-const LEAF_ROLE_CODE    = 'ISR';     // Deoleo config
+const LEAF_ROLE_CODE    = 'XSR';     // Deoleo config
 const VALID_PROGRAMS    = ['Trade Loyalty', 'Gold Programme'];
 const VALID_CATEGORIES  = ['Premium', 'Standard', 'Economy'];
 

@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Coins, Calendar, X, Download, Banknote } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Spinner } from '@/components/ui/spinner';
@@ -71,6 +71,80 @@ const MOCK_INR_PAYOUTS: Record<string, PayoutLedgerEntry[]> = {
     { id: 'p9b',   period: '2026-03', kpiLabel: 'Others',               achievedPct: 100, payoutAmountInr:  1_000, uploadedAt: '2026-04-03', utr: '506210004322', paidAt: '2026-04-05', status: 'PAID', narration: 'One-time incentive for participation in brand event.' },
   ],
 };
+
+/* ─── API types & mappers (wallet wiring) ────────────────────────────────────── */
+
+/** Exact shape returned by GET /api/wallet (flat — no nesting under .balance) */
+interface ApiWalletBalance {
+  earnedPoints:     number;
+  lockedPoints:     number;
+  redeemablePoints: number;
+  redeemedPoints:   number;
+  expiredPoints:    number;
+  lifetimeEarned:   number;
+  lifetimeRedeemed: number;
+  currency:         string;
+  conversionRate:   number;
+}
+
+/** Exact shape returned by each item in GET /api/wallet/transactions */
+interface ApiWalletTransaction {
+  id:              string;
+  transactionType: string;   // e.g. 'CREDIT_POINTS_EARNED', 'DEBIT_REDEMPTION'
+  description:     string;
+  points:          number;   // signed or unsigned — always positive for CREDIT, positive for DEBIT
+  date:            string;   // ISO string
+  balanceType:     string;   // 'EARNED' | 'REDEEMED' | 'EXPIRED' | 'LOCKED'
+  balanceAfter:    number;
+  referenceType:   string | null;
+  referenceId:     string | null;
+}
+
+function mapTransactionType(apiType: string): TransactionType {
+  if (apiType.startsWith('CREDIT'))                            return TransactionType.CREDIT;
+  if (apiType.startsWith('DEBIT'))                             return TransactionType.DEBIT;
+  if (apiType.includes('EXPIRE') || apiType.includes('EXPIR')) return TransactionType.EXPIRE;
+  if (apiType.includes('UNLOCK'))                              return TransactionType.UNLOCK;
+  if (apiType.includes('LOCK'))                                return TransactionType.LOCK;
+  return TransactionType.CREDIT;
+}
+
+function mapBucket(balanceType: string): WalletBucket {
+  if (balanceType === 'REDEEMED') return WalletBucket.REDEEMED;
+  if (balanceType === 'EXPIRED')  return WalletBucket.EXPIRED;
+  if (balanceType === 'LOCKED')   return WalletBucket.LOCKED;
+  return WalletBucket.EARNED;
+}
+
+function mapApiBalance(api: ApiWalletBalance, storedRedemptionTotal: number): WalletBalance {
+  const redeemable = Math.max(0, api.redeemablePoints - storedRedemptionTotal);
+  return {
+    earned:     api.earnedPoints,
+    locked:     api.lockedPoints,
+    redeemable,
+    redeemed:   api.redeemedPoints + storedRedemptionTotal,
+    expired:    api.expiredPoints,
+    available:  redeemable,
+  };
+}
+
+function mapApiTransaction(t: ApiWalletTransaction): WalletTransaction {
+  return {
+    id:             t.id,
+    walletId:       'w1',
+    userId:         'u1',
+    type:           mapTransactionType(t.transactionType),
+    bucket:         mapBucket(t.balanceType),
+    amount:         t.points,
+    balanceAfter:   t.balanceAfter,
+    description:    t.description,
+    schemeId:       t.referenceId,
+    invoiceId:      null,
+    reversedById:   null,
+    reversalReason: null,
+    createdAt:      new Date(t.date),
+  };
+}
 
 function fmtInr(n: number) { return `₹${n.toLocaleString('en-IN')}`; }
 function monthLabel(period: string) {
@@ -355,48 +429,78 @@ export default function WalletPage() {
   const [pendingTo,   setPendingTo]   = useState(DEFAULT_TO);
   const [calOpen,     setCalOpen]     = useState(false);
 
+  // storedTxsRef: capture locally-computed redemption transactions so the async
+  // API callbacks can re-merge them after replacing state — prevents them from
+  // disappearing when the API transaction list overwrites setTransactions.
+  const storedTxsRef = useRef<WalletTransaction[]>([]);
+
   useEffect(() => {
-    const t = setTimeout(() => {
-      const stored = loadRedemptions();
-      const storedTotal = stored.reduce((s, r) => s + r.points, 0);
+    // ── Seed from mock + locally-stored redemptions immediately (no delay) ──
+    const stored = loadRedemptions();
+    const storedTotal = stored.reduce((s, r) => s + r.points, 0);
 
-      setBalance({
-        ...MOCK_BALANCE,
-        redeemable: Math.max(0, MOCK_BALANCE.redeemable - storedTotal),
-        available:  Math.max(0, MOCK_BALANCE.available  - storedTotal),
-        redeemed:   MOCK_BALANCE.redeemed + storedTotal,
-      });
+    setBalance({
+      ...MOCK_BALANCE,
+      redeemable: Math.max(0, MOCK_BALANCE.redeemable - storedTotal),
+      available:  Math.max(0, MOCK_BALANCE.available  - storedTotal),
+      redeemed:   MOCK_BALANCE.redeemed + storedTotal,
+    });
 
-      // Sort oldest-first so we can compute a correct running balance for each entry
-      const sortedStored = [...stored].sort(
-        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-      );
-      // Running balance starts at MOCK_BALANCE.redeemable (pre-session baseline)
-      // and is decremented for each stored redemption in chronological order.
-      let runningBal = MOCK_BALANCE.redeemable;
-      const storedTxs: WalletTransaction[] = sortedStored.map((r) => {
-        runningBal = Math.max(0, runningBal - r.points);
-        return {
-          id:             r.id,
-          walletId:       'w1',
-          userId:         'u1',
-          type:           TransactionType.DEBIT,
-          bucket:         WalletBucket.REDEEMED,
-          amount:         r.points,
-          balanceAfter:   runningBal,   // ← correct balance after this redemption
-          description:    r.description,
-          schemeId:       null,
-          invoiceId:      null,
-          reversedById:   null,
-          reversalReason: null,
-          createdAt:      new Date(r.createdAt),
-        };
-      });
+    // Sort oldest-first so we can compute a correct running balance for each entry
+    const sortedStored = [...stored].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+    );
+    // Running balance starts at MOCK_BALANCE.redeemable (pre-session baseline)
+    // and is decremented for each stored redemption in chronological order.
+    let runningBal = MOCK_BALANCE.redeemable;
+    const storedTxs: WalletTransaction[] = sortedStored.map((r) => {
+      runningBal = Math.max(0, runningBal - r.points);
+      return {
+        id:             r.id,
+        walletId:       'w1',
+        userId:         'u1',
+        type:           TransactionType.DEBIT,
+        bucket:         WalletBucket.REDEEMED,
+        amount:         r.points,
+        balanceAfter:   runningBal,
+        description:    r.description,
+        schemeId:       null,
+        invoiceId:      null,
+        reversedById:   null,
+        reversalReason: null,
+        createdAt:      new Date(r.createdAt),
+      };
+    });
 
-      setTransactions([...storedTxs, ...MOCK_TRANSACTIONS]);
-      setLoading(false);
-    }, 450);
-    return () => clearTimeout(t);
+    storedTxsRef.current = storedTxs; // capture for async callbacks below
+    setTransactions([...storedTxs, ...MOCK_TRANSACTIONS]);
+    setLoading(false);
+
+    // ── Background API fetch — silent update (leaderboard pattern) ──
+    fetch('/api/wallet')
+      .then(r => r.json())
+      .then((json) => {
+        // Guard: API returns flat earnedPoints, NOT nested under .balance
+        if (json.success && json.data?.earnedPoints !== undefined) {
+          const currentStoredTotal = storedTxsRef.current.reduce((s, t) => s + t.amount, 0);
+          setBalance(mapApiBalance(json.data as ApiWalletBalance, currentStoredTotal));
+        }
+      })
+      .catch(() => {});
+
+    fetch('/api/wallet/transactions')
+      .then(r => r.json())
+      .then((json) => {
+        if (json.success && json.data?.transactions) {
+          const apiTxs = (json.data.transactions as ApiWalletTransaction[]).map(mapApiTransaction);
+          // Re-merge stored redemptions — deduplicate by id (server may have
+          // already synced some; avoid duplicates in the statement).
+          const apiIds = new Set(apiTxs.map(t => t.id));
+          const unsynced = storedTxsRef.current.filter(t => !apiIds.has(t.id));
+          setTransactions([...unsynced, ...apiTxs]);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   /* Earliest and latest month in data */

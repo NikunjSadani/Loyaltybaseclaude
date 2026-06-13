@@ -20,9 +20,10 @@ vi.mock('@/lib/task-config', () => ({
   fetchTaskConfig: () => Promise.resolve(null),
 }));
 vi.mock('@/lib/banner', () => ({
-  fetchBanners:         () => Promise.resolve({ banners: [] }),
-  getActiveSalesBanners: () => [],
-  getBgStyle:           () => ({}),
+  fetchBanners:              () => Promise.resolve({ banners: [] }),
+  getActiveSalesBanners:     () => [],
+  getActiveBannersFromList:  () => [],
+  getBgStyle:                () => ({}),
 }));
 
 import TeamPage from '../page';

@@ -52,18 +52,54 @@ const MOCK_SUBMISSIONS: VisibilitySubmission[] = [
   { id: 'v7', outletName: 'Desai Grocers', city: 'Goregaon, Mumbai', submittedAt: '2026-05-07', status: 'REJECTED', rejectionReason: 'Duplicate submission detected', imageCount: 3 },
 ];
 
+interface ApiSubmission {
+  id: string;
+  status: string;
+  submittedAt?: string | null;
+  createdAt?: string;
+  imageUrls?: string[] | null;
+  pointsAwarded?: number | null;
+  rejectionReason?: string | null;
+  outlet: { id: string; name: string; city: string };
+}
+
+function mapApiSubmission(s: ApiSubmission): VisibilitySubmission {
+  const knownStatuses: VisibilityStatus[] = ['SUBMITTED', 'APPROVED', 'REJECTED', 'UNDER_REVIEW'];
+  const status: VisibilityStatus = knownStatuses.includes(s.status as VisibilityStatus)
+    ? (s.status as VisibilityStatus)
+    : 'SUBMITTED';
+
+  return {
+    id:               s.id,
+    outletName:       s.outlet.name,
+    city:             s.outlet.city,
+    submittedAt:      (s.submittedAt ?? s.createdAt ?? '').slice(0, 10),
+    status,
+    pointsEarned:     s.pointsAwarded ?? undefined,
+    rejectionReason:  s.rejectionReason ?? undefined,
+    imageCount:       Array.isArray(s.imageUrls) ? s.imageUrls.length : 0,
+  };
+}
+
 export default function SalesVisibilityPage() {
   const [submissions, setSubmissions] = useState<VisibilitySubmission[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | VisibilityStatus>('ALL');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      setSubmissions(MOCK_SUBMISSIONS);
-      setLoading(false);
-    }, 500);
-    return () => clearTimeout(t);
+    fetch('/api/visibility/submissions')
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: { submissions: ApiSubmission[] }; error?: string }) => {
+        if (json.success && json.data) {
+          setSubmissions(json.data.submissions.map(mapApiSubmission));
+        } else {
+          setError(json.error ?? 'Failed to load submissions');
+        }
+      })
+      .catch(() => setError('Failed to load submissions'))
+      .finally(() => setLoading(false));
   }, []);
 
   const filtered = submissions.filter((s) => {
@@ -125,6 +161,8 @@ export default function SalesVisibilityPage() {
         <div className="flex items-center justify-center min-h-48">
           <Spinner size="lg" />
         </div>
+      ) : error ? (
+        <div className="text-sm text-red-500 text-center py-8">{error}</div>
       ) : filtered.length === 0 ? (
         <EmptyState
           icon={<Eye className="h-8 w-8" />}

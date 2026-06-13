@@ -5,7 +5,7 @@
  * Full invoice list with filter, status badge, and CSV export.
  */
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import Link from 'next/link';
 import {
   Search,
@@ -17,7 +17,66 @@ import {
   CheckCircle,
   Clock,
 } from 'lucide-react';
-import { MOCK_VISIBILITY_INVOICES, type VisibilityInvoice } from '@/lib/invoice';
+import { type VisibilityInvoice } from '@/lib/invoice';
+import { Spinner } from '@/components/ui/spinner';
+
+/* ─── API types & mapping ──────────────────────────────────────────────────── */
+interface ApiAdminSalesInvoice {
+  id: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  totalAmountPaise: number;
+  netAmountPaise: number;
+  processedAt?: string | null;
+  outletId?: string | null;
+  distributorName?: string | null;
+  lineItems?: { id: string; quantity: number; unitPricePaise: number }[];
+}
+
+function mapApiAdminInvoice(s: ApiAdminSalesInvoice): VisibilityInvoice {
+  const date = new Date(s.invoiceDate);
+  const period = s.invoiceDate.slice(0, 7);
+  const periodLabel = date.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const baseAmount = s.totalAmountPaise / 100;
+  return {
+    id: s.id,
+    invoiceNumber: s.invoiceNumber,
+    invoiceNumberEdited: false,
+    status: s.processedAt ? 'PAID' : 'GENERATED',
+    period,
+    periodLabel,
+    outletId: s.outletId ?? '',
+    outletCode: '',
+    outletName: s.distributorName ?? s.outletId ?? '',
+    firmName: s.distributorName ?? '',
+    partnerName: '',
+    mobile: '',
+    retailerState: '',
+    panNumber: null,
+    gstNumber: null,
+    entityType: 'INDIVIDUAL',
+    gstRegistrationType: 'UNREGISTERED',
+    bankName: '',
+    accountNumber: '',
+    ifscCode: '',
+    baseAmount,
+    gstApplicable: false,
+    gstType: null,
+    cgst: 0,
+    sgst: 0,
+    igst: 0,
+    totalGST: 0,
+    totalInvoiceAmount: baseAmount,
+    tdsRate: 0,
+    tdsAmount: 0,
+    netDisbursed: s.netAmountPaise / 100,
+    generatedAt: s.invoiceDate,
+    paidAt: s.processedAt ?? null,
+    uploadBatchId: '',
+    sacCode: '998361',
+    description: `Sales invoice — ${periodLabel}`,
+  };
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const STATUS_STYLES: Record<VisibilityInvoice['status'], string> = {
@@ -66,17 +125,35 @@ function exportCSV(invoices: VisibilityInvoice[]) {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function AdminInvoiceListPage() {
+  const [invoices, setInvoices] = useState<VisibilityInvoice[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | VisibilityInvoice['status']>('ALL');
   const [periodFilter, setPeriodFilter] = useState('ALL');
 
-  const allPeriods = useMemo(() => {
-    const s = new Set(MOCK_VISIBILITY_INVOICES.map((i) => i.period));
-    return Array.from(s).sort().reverse();
+  useEffect(() => {
+    fetch('/api/sales/invoices')
+      .then((r) => r.json())
+      .then((json: { success: boolean; data?: { invoices: ApiAdminSalesInvoice[] }; error?: string }) => {
+        if (json.success && json.data) {
+          setInvoices(json.data.invoices.map(mapApiAdminInvoice));
+        } else {
+          setError(json.error ?? 'Failed to load invoices');
+        }
+      })
+      .catch(() => setError('Failed to load invoices'))
+      .finally(() => setLoading(false));
   }, []);
 
+  const allPeriods = useMemo(() => {
+    const s = new Set(invoices.map((i) => i.period));
+    return Array.from(s).sort().reverse();
+  }, [invoices]);
+
   const filtered = useMemo(() => {
-    return MOCK_VISIBILITY_INVOICES.filter((inv) => {
+    return invoices.filter((inv) => {
       if (statusFilter !== 'ALL' && inv.status !== statusFilter) return false;
       if (periodFilter !== 'ALL' && inv.period !== periodFilter) return false;
       if (search) {
@@ -90,11 +167,27 @@ export default function AdminInvoiceListPage() {
       }
       return true;
     });
-  }, [search, statusFilter, periodFilter]);
+  }, [invoices, search, statusFilter, periodFilter]);
 
   const totalBase = filtered.reduce((s, i) => s + i.baseAmount, 0);
   const totalGST = filtered.reduce((s, i) => s + i.totalGST, 0);
   const totalInvoice = filtered.reduce((s, i) => s + i.totalInvoiceAmount, 0);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-center py-20">
+        <p className="text-red-500">{error}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5 fade-in">
