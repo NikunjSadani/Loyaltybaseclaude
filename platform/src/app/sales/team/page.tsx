@@ -179,7 +179,7 @@ const OUTLET_TYPE_MAP: Record<string, 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST'> = {
 
 /** Viewer's own member ID for each demo role */
 const ROLE_VIEWER: Partial<Record<SalesRole, string>> = {
-  SO: 'so1', ASM: 'asm1', RSM: 'rsm1', ZM: 'zm1', NM: 'zm1',
+  SO: 'so1', ASM: 'asm1', RSM: 'rsm1', ZNM: 'zm1', NSM: 'zm1',
 };
 
 /** Manager → direct-report member IDs (demo data only) */

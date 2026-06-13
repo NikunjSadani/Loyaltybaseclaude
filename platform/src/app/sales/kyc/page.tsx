@@ -51,13 +51,13 @@ const TEAM_MEMBERS_BY_ROLE: Partial<Record<SalesRole, TeamMember[]>> = {
     { id: 'asm3', name: 'Sonal Agrawal'   },
     { id: 'asm4', name: 'Vikram Bhosale'  },
   ],
-  ZM:  [
+  ZNM:  [
     { id: 'rsm1', name: 'Suresh Nair'    },
     { id: 'rsm2', name: 'Leela Iyer'     },
     { id: 'rsm3', name: 'Deepak Tiwari'  },
     { id: 'rsm4', name: 'Ananya Bose'    },
   ],
-  NM:  [
+  NSM:  [
     { id: 'zm1', name: 'Vikram Singh'   },
     { id: 'zm2', name: 'Ravi Menon'     },
     { id: 'zm3', name: 'Kavita Sharma'  },

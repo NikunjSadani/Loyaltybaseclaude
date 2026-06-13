@@ -159,8 +159,8 @@ const PEERS: Record<SalesRole, Record<ScopeFilter, SalesEntry[]>> = {
     ],
   },
 
-  /* ─── ZM — source of truth: MOCK_ZMS in team/page.tsx ─── */
-  ZM: {
+  /* ─── ZNM — source of truth: MOCK_ZMS in team/page.tsx ─── */
+  ZNM: {
     rm: [
       { name: 'Vikram Singh',  territory: 'West Zone',  achievementPct: 74, activeOutlets: 1409, change: -1, isMe: true },
       { name: 'Ravi Menon',    territory: 'South Zone', achievementPct: 71, activeOutlets: 1124, change: +2 },
@@ -181,8 +181,8 @@ const PEERS: Record<SalesRole, Record<ScopeFilter, SalesEntry[]>> = {
     ],
   },
 
-  /* ─── NM — sees MOCK_ZMS; no isMe (NM is above the leaderboard) ─── */
-  NM: {
+  /* ─── NSM — sees MOCK_ZMS; no isMe (NSM is above the leaderboard) ─── */
+  NSM: {
     rm: [
       { name: 'Vikram Singh',  territory: 'West Zone',  achievementPct: 74, activeOutlets: 1409, change: -1 },
       { name: 'Ravi Menon',    territory: 'South Zone', achievementPct: 71, activeOutlets: 1124, change: +2 },
@@ -211,8 +211,8 @@ const SCOPE_SUB: Record<SalesRole, Record<ScopeFilter, string>> = {
   SO:  { rm: 'Your ASM\'s team · Mumbai Zone', state: 'Maharashtra · All SOs',  national: 'National · All SOs'  },
   ASM: { rm: 'Your RSM\'s region · Maharashtra', state: 'Maharashtra · All ASMs', national: 'National · All ASMs' },
   RSM: { rm: 'Your ZM\'s zone · West Zone',    state: 'West Zone · All RSMs',   national: 'National · All RSMs' },
-  ZM:  { rm: 'Pan-India · All Zones',          state: 'All Zones',              national: 'National · All ZMs'  },
-  NM:  { rm: 'National overview',              state: 'All Zones',              national: 'National · All ZMs'  },
+  ZNM: { rm: 'Pan-India · All Zones',          state: 'All Zones',              national: 'National · All ZNMs' },
+  NSM: { rm: 'National overview',              state: 'All Zones',              national: 'National · All ZNMs' },
 };
 
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */

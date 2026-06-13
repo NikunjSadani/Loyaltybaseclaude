@@ -24,7 +24,7 @@ import type { RolePhones } from '../sales-role';
 
 const ALL_PRESENT: RolePhones = {
   XSR: '9900000041', SO: '9900000028', ASM: '9900000007',
-  RSM: '9900000003', ZM: '9900000002', NM: '9900000001',
+  RSM: '9900000003', ZNM: '9900000002', NSM: '9900000001',
 };
 const SO_RESIGNED: RolePhones  = { ...ALL_PRESENT, SO: '' };
 const ASM_RESIGNED: RolePhones = { ...ALL_PRESENT, ASM: '' };
