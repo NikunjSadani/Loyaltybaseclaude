@@ -32,19 +32,16 @@ the dev DB is empty/auth-gated — and will fold in the user's admin revamp). Ba
 is "no NEW reds vs reconcile/baseline-red-snapshot.txt" (the suite is red throughout a TDD build —
 never gate on "zero reds").
 
-START P1 (Identity, tenancy & access). P1 is almost entirely BACKEND and does not touch admin UI, so it
-runs cleanly in parallel with the user's admin-UX revamp — no need to avoid the admin portal wholesale.
-The ONLY admin-UI bits are 1.4 (admin config UI) and 1.6 (admin role-gating UI): defer just those two
-(and 0.5) until the user's revamp lands, so we don't edit the same pages at once. Minor overlaps elsewhere
-are fixable later, not blockers. Do 1.1/1.2(backend)/1.3/1.5/1.7/1.8/1.9 now. When P3 (KYC) and P8
-(dashboards/reports) arrive, their 3.0/8.0 Reconcile builds against the user's REVAMPED pages (code wins).
+START P1 (Identity, tenancy & access) — run the FULL track in order (1.0→1.9). It's almost entirely
+backend and does not touch the user's revamp areas (admin dashboards, reports, Gifsy KYC-approval — those
+are P8/P3). The admin-UI bits 1.4 (admin config UI) and 1.6 (admin role-gating) ARE fine to do now (user
+confirmed); just avoid the specific pages under active revamp. When P3 (KYC) and P8 (dashboards/reports)
+arrive, their 3.0/8.0 Reconcile builds against the user's REVAMPED pages (code wins).
 
 Before assigning each task show me the task, its context bundle, and what you'll verify; wait for my
 go on anything irreversible. Begin by confirming the dev DB is reachable and giving me the P1 backend
 task list.
 
-(Still open, user action — NON-blocking: rotate the prod `postgres` superuser password. It was
-hardcoded in credits-migration-live.test.ts, removed in 0.1 but still in git history. Zero-disruption:
-nothing uses `postgres` (app uses gifsy_user). One command:
-`gcloud sql users set-password postgres --instance=gifsy-db --project=gifsy-platform --prompt-for-password`.)
+(Prod `postgres` superuser password — ROTATED by the user (done). Old value is now inert. The app +
+Cloud Run use `gifsy_user`, unaffected. No open user actions blocking P1.)
 ```
