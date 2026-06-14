@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig, configDefaults } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
@@ -8,6 +8,10 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./vitest.setup.ts'],
+    // Default lane = deterministic unit/component tests only (per docs/plans/01-how-we-test.md:
+    // "No real network/DB/clock"). Live DB-integration tests use the `*-live.test.ts` suffix and
+    // run in a separate lane: `npm run test:integration` (vitest.integration.config.ts).
+    exclude: [...configDefaults.exclude, '**/*-live.test.ts'],
   },
   resolve: {
     alias: {

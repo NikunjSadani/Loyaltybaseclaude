@@ -1,17 +1,11 @@
 /**
  * Phase 0 — Live DB integration test
  *
- * Verifies the add_credit_batch_models.sql migration was applied to the
- * running Prisma database. Requires:
- *   - DATABASE_URL set to a live PostgreSQL instance
- *   - cloud-sql-proxy running (for GCP Cloud SQL)
- *
- * NOTE: gifsy_prod has no public IP — cannot run from local machine.
- * Run inside Cloud Run (which has VPC + unix socket access):
- *   gcloud run jobs execute gifsy-verify-migration
- *
- * The migration was applied via `gcloud sql import sql` on 2026-06-14
- * and verified via Cloud Run job (exit 0, all 5 tables confirmed).
+ * Verifies the credit-batch models exist in the live database that DATABASE_URL
+ * points at. Requires:
+ *   - DATABASE_URL set to a live PostgreSQL instance (dev DB locally)
+ *   - cloud-sql-proxy running on 127.0.0.1:5433 (see docs/plans/DEV-DB.md)
+ * Run with: `npm run test:integration` (the default `npm test` lane excludes *-live.test.ts).
  *
  * Groups:
  *   A — Prisma can reach the database
@@ -20,18 +14,13 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
+import { prisma } from '@/lib/prisma';
 
-// URL-encode special chars in password so the driver can parse it.
-// Raw in .env: postgresql://postgres:Gifsy@DB#2026Prod@localhost:5432/gifsy_prod
-// @ → %40, # → %23
-const DB_URL =
-  process.env.DATABASE_URL_ENCODED ??
-  'postgresql://postgres:Gifsy%40DB%232026Prod@localhost:5432/gifsy_prod';
-
-const adapter = new PrismaPg({ connectionString: DB_URL });
-const prisma = new PrismaClient({ adapter });
+// Uses the shared prisma singleton, which connects to whatever DATABASE_URL points at:
+// the dev DB locally (Cloud SQL gifsy-db-dev via the Auth Proxy on 127.0.0.1:5433 — see
+// docs/plans/DEV-DB.md), or prod inside Cloud Run. The integration lane loads .env via
+// vitest.integration.setup.ts. NO hardcoded credentials (a prior version embedded a prod
+// password — removed; rotate that prod password, it remains in earlier git history).
 
 beforeAll(async () => {
   await prisma.$connect();

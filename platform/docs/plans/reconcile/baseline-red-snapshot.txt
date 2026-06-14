@@ -1,5 +1,7 @@
-# Baseline red snapshot — known-failing tests at start of P0 (inherited, pre-existing).
-# Captured 2026-06-14 from `npx vitest run`. Total: 29 files / 115 tests.
+# Baseline red snapshot — known-failing tests (inherited, pre-existing).
+# DEFAULT LANE (`npm test`): 28 files / 105 tests failing. Updated 2026-06-14 after 0.1.
+# INTEGRATION LANE (`npm run test:integration`, *-live.test.ts): GREEN — credits-migration-live 10/10
+#   (was in the default lane as 10 reds; moved to its own lane in 0.1 and now passes vs the dev DB).
 #
 # PURPOSE: the suite is RED throughout a TDD build, so the gate is DIFFERENTIAL, not absolute.
 # After any task, re-run the suite and diff the failing set against this file:
@@ -35,6 +37,5 @@
   9  src/app/sales/kyc/new/__tests__/not-interested.test.tsx                  # P3
   2  src/app/sales/team/__tests__/member-card-id.test.tsx                     # P2
   3  src/app/sales/team/[memberId]/__tests__/member-detail.test.tsx           # P2
- 10  src/lib/__tests__/credits-migration-live.test.ts                         # P6 (live-DB; fails only b/c vitest doesn't load .env — fixable in 0.1)
   1  src/lib/__tests__/sales-excel-upload.test.ts                             # P4 (source-structure: getTenantKpiDefs)
   1  src/lib/__tests__/target-excel-upload.test.ts                            # P4 (source-structure: getTenantKpiDefs)
