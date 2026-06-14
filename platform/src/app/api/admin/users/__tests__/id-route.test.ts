@@ -59,7 +59,7 @@ function makeRequest(tenantSlug = TENANT_A) {
     headers: { get: (key: string) => (key === 'x-tenant-slug' ? tenantSlug : null) },
     url: `http://localhost/api/admin/users/${USER_ID}`,
     json: async () => ({ name: 'Updated Name' }),
-  } as any;
+  } as unknown as Parameters<typeof GET>[0];
 }
 
 function makeParams(id = USER_ID) {
