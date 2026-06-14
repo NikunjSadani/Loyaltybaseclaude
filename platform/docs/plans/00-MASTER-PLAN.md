@@ -84,6 +84,14 @@ solid. **Existing build:** mostly present — this phase is mostly VERIFY + smal
 
 **Exit:** fresh checkout → `npm test`/`tsc`/`lint` clean; shared helpers documented; Milestone A merged.
 
+> **P0 status (live).** 0.0 reconcile ✅ · 0.1 env/DB + green baseline (two test lanes; dev DB validated
+> through Prisma) ✅ · 0.2 `lib/api-response.ts` ok/err ✅ · 0.3 `getAuthUser` contract+tests ✅ ·
+> 0.4a domain rename (gap #1 closed) ✅ · 0.4b dead `ROLES` removed ✅ · 0.4c messaging decision —
+> **MSG91 = sole provider** (gap #21) ✅ · **0.5 portal layout/UI-kit ⏸ deferred** (user is revamping
+> admin UX; do 0.5's admin sign-off *after* that lands). Commits `215a63e`/`e707879`/`102f5a5`/`23f60bd`,
+> local/unpushed. Inherited tree carries 105 known-red tests (default lane) tracked in
+> `reconcile/baseline-red-snapshot.txt`; gate = **no NEW reds vs snapshot**.
+
 ## P1 · Identity, tenancy & access  (4–6 wk)
 **Objective:** anyone can authenticate, tenants are isolated, and admin access is role-configurable.
 **Existing build:** auth/OTP partial; RBAC + DB tenant model are largely BUILD.
@@ -122,6 +130,10 @@ tenant config served from DB. **Depends on:** P0.
 
 ## P3 · Onboarding & KYC  (3–5 wk)
 **Objective:** the full enroll→KYC→approve→credential journey (spec §02 WF1) works end-to-end.
+
+> ⚠️ **User UX revamp incoming — the Gifsy KYC-approval page is being redesigned by the user.** Task 3.0
+> Reconcile must build against the **revamped** approval UX (whatever is in the code when P3 starts), not
+> the current page. Coordinate before touching `sales/kyc/[id]` / approval routes.
 
 | Task | What | Key files / area | Test |
 |---|---|---|---|
@@ -198,6 +210,10 @@ visibility self-bills. **This phase contains the most High-severity gaps.**
 
 ## P8 · Reporting, analytics, compliance & hardening  (3–5 wk)
 **Objective:** visibility into the system + production-readiness.
+
+> ⚠️ **User UX revamp incoming — admin dashboards and reports are being reworked by the user** (report
+> *contents* will change; report-page UX is otherwise fine). Task 8.0 Reconcile builds against the
+> reworked dashboards/reports. Coordinate before touching `admin/dashboards/*` and `app/api/reports/*`.
 
 | Task | What | Key files / area | Test |
 |---|---|---|---|

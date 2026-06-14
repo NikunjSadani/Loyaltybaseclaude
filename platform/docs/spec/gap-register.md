@@ -5,7 +5,7 @@ and where it surfaced. Severity is a first pass, to be refined.
 
 | # | Title | Current state | Target / resolution | Severity |
 |---|-------|---------------|---------------------|----------|
-| 1 | Domain mismatch | Code references `loyaltybase.in` (`tenant.ts`, `client-registry.ts` — subdomains, support emails) | Actual domain is `gifsy.in`; update references | Low |
+| 1 | Domain mismatch | ~~Code references `loyaltybase.in`~~ | **✅ CLOSED (0.4a):** all `loyaltybase.in` → `gifsy.in` (8 files; 0 residual). | Low |
 | 2 | RBAC is hardcoded | Fixed 11-value `UserRole` enum; coarse `if role !==` checks scattered in routes | **Admin-side:** per-tenant configurable roles (Reporting/Finance/HR…) with **sections/features tagged** to roles. **Sales:** data scoped by hierarchy (mapped outlets) + team rollup for seniors — not configurable roles. **Partner:** own data only | **High** |
 | 3 | No permission/capability catalog | No master list of taggable features/permissions | Build a capability catalog (= Phase 1 module catalog) that becomes the permission set | **High** |
 | 4 | Partner/Outlet level split | Modeled 1:many but operated 1:1; login+wallet on Partner, KYC+visibility on Outlet | Document canonical 1:1 mapping + which level each feature binds to; keep two-level for future | Medium |
