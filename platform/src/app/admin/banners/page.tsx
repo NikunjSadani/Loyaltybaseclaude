@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   BG_OPTIONS, getBgStyle, toEmbedUrl,
   fetchBanners, updateBanners, newBanner, getActiveBannersFromList,
-  loadPopups, savePopups, newPopup,
+  newPopup,
   type Banner, type Popup, type BannerAudience, type PopupFrequency,
 } from '@/lib/banner';
 
@@ -412,9 +412,8 @@ export default function BannersPage() {
 
   useEffect(() => {
     fetchBanners().then(({ banners: b, popups: p }) => {
-      // Merge with localStorage popups as fallback (popups not yet on API)
-      setBanners(b.length > 0 ? b : []);
-      setPopups(p.length > 0 ? p : loadPopups());
+      setBanners(b);
+      setPopups(p);
     });
   }, []);
 
@@ -429,7 +428,7 @@ export default function BannersPage() {
   const deleteBanner = (id: string) => persistBanners(banners.filter((b) => b.id !== id));
 
   // Popup handlers
-  const persistPopups = (p: Popup[]) => { setPopups(p); savePopups(p); updateBanners({ banners, popups: p }); };
+  const persistPopups = (p: Popup[]) => { setPopups(p); updateBanners({ banners, popups: p }); };
   const savePopup = (p: Popup) => {
     persistPopups(popups.find((x) => x.id === p.id) ? popups.map((x) => x.id === p.id ? p : x) : [...popups, p]);
     setEditingPopup(null); setCreatingPopup(false);

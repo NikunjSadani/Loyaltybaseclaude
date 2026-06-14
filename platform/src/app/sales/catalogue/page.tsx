@@ -9,12 +9,12 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
-import { type GiftCatalogueItem, loadGifts, GIFT_CATALOGUE } from '@/lib/gifts';
+import { type GiftCatalogueItem, GIFT_CATALOGUE } from '@/lib/gifts';
 import { api } from '@/lib/api-client';
 
 type GiftItem = GiftCatalogueItem;
 
-/* ─── Outlet mock data ───────────────────────────────────────────────────────── */
+/* ─── Outlet types ───────────────────────────────────────────────────────────── */
 
 interface Outlet {
   id: string;
@@ -23,16 +23,6 @@ interface Outlet {
   mobile: string;
   balance: number;
 }
-
-const OUTLET_MAP: Record<string, string> = { o1: 'k1', o2: 'k2', o3: 'k3', o4: 'k4', o5: 'k5' };
-
-const OUTLETS: Outlet[] = [
-  { id: 'o1', kycId: 'k1', name: 'Kumar General Store', mobile: '9876543210', balance: 3_240 },
-  { id: 'o2', kycId: 'k2', name: 'Sharma Kirana',       mobile: '9765432109', balance:   820 },
-  { id: 'o3', kycId: 'k3', name: 'Patel Grocery',       mobile: '9654321098', balance:   145 },
-  { id: 'o4', kycId: 'k4', name: 'Singh Supermart',     mobile: '9543210987', balance: 5_900 },
-  { id: 'o5', kycId: 'k5', name: 'Mehta Provisions',    mobile: '9432109876', balance: 1_060 },
-];
 
 /* ─── Flow types ─────────────────────────────────────────────────────────────── */
 
@@ -92,11 +82,10 @@ function GiftImage({
 /* ─── Catalogue inner ────────────────────────────────────────────────────────── */
 
 function CatalogueInner() {
-  const searchParams   = useSearchParams();
-  const preselectedId  = searchParams.get('outletId') ?? '';
-  const preselectedKyc = OUTLET_MAP[preselectedId] ?? preselectedId;
-  const preOutlet      = OUTLETS.find((o) => o.kycId === preselectedKyc || o.id === preselectedId) ?? null;
+  const searchParams  = useSearchParams();
+  const preselectedId = searchParams.get('outletId') ?? '';
 
+  const [outlets,      setOutlets]      = useState<Outlet[]>([]);
   const [gifts,        setGifts]        = useState<GiftItem[]>([]);
   const [loading,      setLoading]      = useState(true);
   const [category,     setCategory]     = useState('All');
@@ -105,10 +94,39 @@ function CatalogueInner() {
   // Sheet state
   const [selectedGift, setSelectedGift] = useState<GiftItem | null>(null);
   const [sheetStep,    setSheetStep]    = useState<SheetStep | null>(null);
-  const [redeem,       setRedeem]       = useState<RedeemState>({ ...INITIAL_REDEEM, outlet: preOutlet });
+  const [redeem,       setRedeem]       = useState<RedeemState>({ ...INITIAL_REDEEM, outlet: null });
+
+  const preOutlet = useMemo(
+    () => preselectedId ? outlets.find((o) => o.kycId === preselectedId || o.id === preselectedId) ?? null : null,
+    [outlets, preselectedId],
+  );
 
   const otpRef   = useRef<ReturnType<typeof setInterval> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Fetch outlets from API
+  useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/sales/outlets', { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((body) => {
+        if (body.success) {
+          const mapped: Outlet[] = (body.data.outlets ?? []).map((o: any) => ({
+            id:      o.id,
+            kycId:   o.kycId ?? '',
+            name:    o.name,
+            mobile:  o.mobile ?? '',
+            balance: 0,
+          }));
+          setOutlets(mapped);
+          if (preselectedId) {
+            const found = mapped.find((o) => o.kycId === preselectedId || o.id === preselectedId);
+            if (found) setRedeem((r) => ({ ...r, outlet: found }));
+          }
+        }
+      })
+      .catch(() => {});
+  }, [preselectedId]);
 
   useEffect(() => {
     interface ApiCatalogItem {
@@ -144,10 +162,10 @@ function CatalogueInner() {
           });
           setGifts(mapped);
         } else {
-          setGifts(loadGifts());
+          setGifts([]);
         }
       })
-      .catch(() => setGifts(loadGifts()))
+      .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 
@@ -448,7 +466,7 @@ function CatalogueInner() {
                     </div>
                   </div>
                   <p className="text-sm text-gray-500">Which outlet is redeeming?</p>
-                  {OUTLETS.map((o) => {
+                  {outlets.map((o) => {
                     const canAfford = o.balance >= (selectedGift?.points ?? 0);
                     return (
                       <button

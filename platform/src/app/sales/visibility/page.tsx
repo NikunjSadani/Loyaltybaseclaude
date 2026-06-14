@@ -42,15 +42,6 @@ const statusConfig: Record<VisibilityStatus, {
   REJECTED: { variant: 'danger', label: 'Rejected', icon: <XCircle className="h-3.5 w-3.5 text-red-500" /> },
 };
 
-const MOCK_SUBMISSIONS: VisibilitySubmission[] = [
-  { id: 'v1', outletName: 'Kumar General Store', city: 'Andheri, Mumbai', submittedAt: '2026-05-14', status: 'APPROVED', pointsEarned: 100, imageCount: 3 },
-  { id: 'v2', outletName: 'Singh Supermart', city: 'Malad, Mumbai', submittedAt: '2026-05-13', status: 'REJECTED', rejectionReason: 'Product display not clearly visible', imageCount: 2 },
-  { id: 'v3', outletName: 'Sharma Kirana', city: 'Borivali, Mumbai', submittedAt: '2026-05-12', status: 'UNDER_REVIEW', imageCount: 4 },
-  { id: 'v4', outletName: 'Patel Grocery', city: 'Thane', submittedAt: '2026-05-11', status: 'APPROVED', pointsEarned: 150, imageCount: 5 },
-  { id: 'v5', outletName: 'Mehta Provisions', city: 'Kandivali, Mumbai', submittedAt: '2026-05-10', status: 'SUBMITTED', imageCount: 3 },
-  { id: 'v6', outletName: 'Verma Traders', city: 'Mira Road, Thane', submittedAt: '2026-05-08', status: 'APPROVED', pointsEarned: 100, imageCount: 2 },
-  { id: 'v7', outletName: 'Desai Grocers', city: 'Goregaon, Mumbai', submittedAt: '2026-05-07', status: 'REJECTED', rejectionReason: 'Duplicate submission detected', imageCount: 3 },
-];
 
 interface ApiSubmission {
   id: string;

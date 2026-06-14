@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import { useState, useRef, useCallback, useMemo } from 'react';
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import {
   Store, Search, Upload, Download, X, AlertCircle, CheckCircle2,
@@ -22,7 +22,7 @@ import {
   getDeactivateTemplateData,
   generateOutletGuideHtml,
 } from '@/lib/outlet-upload';
-import { MOCK_EMPLOYEES } from '@/lib/employee-hierarchy';
+import type { HierarchyEmployee } from '@/types';
 import type {
   OutletUploadValidationResult,
   ReKYCFlagValidationResult,
@@ -58,18 +58,6 @@ interface MockOutlet {
   addedDate:       string;
   phone?:          string;
 }
-
-const MOCK_OUTLETS: MockOutlet[] = [
-  { outletId: 'OUT-2026-K01', outletName: 'Kumar General Store',  outletType: 'SSS',     programName: 'Trade Loyalty', programCategory: 'Standard', beat: 'Andheri Beat',   distributorId: 'DIST-01', city: 'Mumbai',    state: 'Maharashtra', metro: true,  xsrId: 'ISR-M001', xsrName: 'Anil Sharma',  kycStatus: 'APPROVED',       isActive: true,  addedDate: '2026-03-01' },
-  { outletId: 'OUT-2026-K04', outletName: 'Singh Supermart',      outletType: 'WHOLESALER',   programName: 'Trade Loyalty', programCategory: 'Premium',  beat: 'Malad Beat',     distributorId: 'DIST-01', city: 'Mumbai',    state: 'Maharashtra', metro: true,  xsrId: 'ISR-M001', xsrName: 'Anil Sharma',  kycStatus: 'APPROVED',       isActive: true,  addedDate: '2026-03-01' },
-  { outletId: 'OUT-2026-K10', outletName: 'Sharma General Store', outletType: 'SSS',     programName: 'Trade Loyalty', programCategory: 'Standard', beat: 'Noida Beat',     distributorId: 'DIST-03', city: 'Delhi',     state: 'Delhi',       metro: true,  xsrId: 'ISR-P001', xsrName: 'Deepa Nair',   kycStatus: 'APPROVED',       isActive: true,  addedDate: '2026-03-15' },
-  { outletId: 'OUT-2026-K02', outletName: 'Sharma Kirana',        outletType: 'SSS',     programName: 'Trade Loyalty', programCategory: 'Standard', beat: 'Borivali Beat',  distributorId: 'DIST-01', city: 'Mumbai',    state: 'Maharashtra', metro: true,  xsrId: 'ISR-M001', xsrName: 'Anil Sharma',  kycStatus: 'IN_PROGRESS',    isActive: false, addedDate: '2026-04-01' },
-  { outletId: 'OUT-2026-K05', outletName: 'Mehta Provisions',     outletType: 'SUB_STOCKIST', programName: 'Trade Loyalty', programCategory: 'Economy',  beat: 'Kandivali Beat', distributorId: 'DIST-02', city: 'Mumbai',    state: 'Maharashtra', metro: false, xsrId: 'ISR-M001', xsrName: 'Anil Sharma',  kycStatus: 'SUBMITTED',      isActive: false, addedDate: '2026-04-15' },
-  { outletId: 'OUT-2026-K03', outletName: 'Patel Grocery',        outletType: 'SSS',     programName: 'Trade Loyalty', programCategory: 'Standard', beat: 'Thane Beat',     distributorId: 'DIST-02', city: 'Thane',     state: 'Maharashtra', metro: false, xsrId: 'ISR-M002', xsrName: 'PLACEHOLDER',  kycStatus: 'REJECTED',       isActive: false, addedDate: '2026-04-01' },
-  { outletId: 'OUT-2026-001', outletName: 'Verma Traders',        outletType: 'SSS',     programName: 'Trade Loyalty', programCategory: 'Standard', beat: 'Andheri Beat',   distributorId: '',        city: 'Mumbai',    state: 'Maharashtra', metro: true,  xsrId: 'ISR-M001', xsrName: 'Anil Sharma',  kycStatus: 'NOT_STARTED',    isActive: false, addedDate: '2026-05-01' },
-  { outletId: 'OUT-2026-002', outletName: 'Joshi Provisions',     outletType: 'SSS',     programName: 'Trade Loyalty', programCategory: 'Standard', beat: 'Andheri Beat',   distributorId: '',        city: 'Mumbai',    state: 'Maharashtra', metro: true,  xsrId: 'ISR-M001', xsrName: 'Anil Sharma',  kycStatus: 'NOT_STARTED',    isActive: false, addedDate: '2026-05-01' },
-  { outletId: 'OUT-2026-K11', outletName: 'Krishnamurthy & Sons', outletType: 'WHOLESALER',   programName: 'Gold Programme',programCategory: 'Premium',  beat: 'Koramangala Beat',distributorId: 'DIST-05', city: 'Bengaluru', state: 'Karnataka',   metro: true,  xsrId: 'ISR-P001', xsrName: 'Deepa Nair',   kycStatus: 'RE_KYC_REQUIRED', isActive: true, addedDate: '2026-03-10' },
-];
 
 // ─── KYC status config ─────────────────────────────────────────────────────────
 
@@ -318,7 +306,8 @@ export default function OutletsPage() {
   const [activeTab, setActiveTab] = useState<TabId>('master');
 
   // Outlet list state
-  const [outlets]                     = useState<MockOutlet[]>(MOCK_OUTLETS);
+  const [outlets, setOutlets]         = useState<MockOutlet[]>([]);
+  const [employees, setEmployees]     = useState<HierarchyEmployee[]>([]);
   const [search,        setSearch]    = useState('');
   const [kycFilter,     setKycFilter] = useState<KYCStatusLocal | 'ALL'>('ALL');
 
@@ -333,6 +322,20 @@ export default function OutletsPage() {
   // Deactivate upload state
   const [deactivateValidation, setDeactivateValidation] = useState<OutletDeactivateValidationResult | null>(null);
   const [deactivateUploadState, setDeactivateUploadState] = useState<UploadState>('idle');
+
+  // ── API fetch on mount ──
+  useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    const headers = { Authorization: `Bearer ${token}` };
+    fetch('/api/admin/outlets', { headers })
+      .then(r => r.json())
+      .then(j => { if (j.success && Array.isArray(j.data.outlets)) setOutlets(j.data.outlets); })
+      .catch(() => {});
+    fetch('/api/admin/hierarchy-config', { headers })
+      .then(r => r.json())
+      .then(j => { if (j.success && Array.isArray(j.data.employees)) setEmployees(j.data.employees); })
+      .catch(() => {});
+  }, []);
 
   // ── Derived stats ──
   const stats = useMemo(() => ({
@@ -407,7 +410,7 @@ export default function OutletsPage() {
       }
       const parsed   = parseOutletUploadRows(rows as Record<string, string>[]);
       const existing = outlets.map(o => ({ outletId: o.outletId, isActive: o.isActive }));
-      const result   = validateOutletUpload(parsed, existing, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      const result   = validateOutletUpload(parsed, existing, VALID_PROGRAMS, VALID_CATEGORIES, employees, LEAF_ROLE_CODE);
       setOutletValidation(result);
       setOutletUploadState('parsed');
     } catch {
@@ -675,7 +678,16 @@ export default function OutletsPage() {
               onFileChange={handleOutletFile}
               validationResult={outletValidation}
               uploadState={outletUploadState}
-              onConfirm={() => setOutletUploadState('confirmed')}
+              onConfirm={async () => {
+                const rows = outletValidation?.rows.filter(r => r.status === 'OK') ?? [];
+                const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+                await fetch('/api/admin/outlets/upsert', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                  body: JSON.stringify({ rows }),
+                }).catch(() => {});
+                setOutletUploadState('confirmed');
+              }}
               onClear={() => { setOutletValidation(null); setOutletUploadState('idle'); }}
               confirmLabel="Apply Changes"
             />
@@ -845,7 +857,16 @@ export default function OutletsPage() {
               onFileChange={handleReKYCFile}
               validationResult={rekycValidation}
               uploadState={rekycUploadState}
-              onConfirm={() => setRekycUploadState('confirmed')}
+              onConfirm={async () => {
+                const rows = rekycValidation?.rows.filter(r => r.status === 'OK') ?? [];
+                const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+                await fetch('/api/admin/outlets/rekyc-flag', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                  body: JSON.stringify({ rows }),
+                }).catch(() => {});
+                setRekycUploadState('confirmed');
+              }}
               onClear={() => { setRekycValidation(null); setRekycUploadState('idle'); }}
               confirmLabel="Flag for Re-KYC"
             />
@@ -922,7 +943,16 @@ export default function OutletsPage() {
               onFileChange={handleDeactivateFile}
               validationResult={deactivateValidation}
               uploadState={deactivateUploadState}
-              onConfirm={() => setDeactivateUploadState('confirmed')}
+              onConfirm={async () => {
+                const codes = deactivateValidation?.rows.filter(r => r.status === 'OK').map(r => r.outletId) ?? [];
+                const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+                await fetch('/api/admin/outlets/deactivate', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                  body: JSON.stringify({ outletCodes: codes }),
+                }).catch(() => {});
+                setDeactivateUploadState('confirmed');
+              }}
               onClear={() => { setDeactivateValidation(null); setDeactivateUploadState('idle'); }}
               confirmLabel="Deactivate Outlets"
             />

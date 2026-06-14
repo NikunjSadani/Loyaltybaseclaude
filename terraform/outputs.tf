@@ -1,17 +1,19 @@
 output "dns_instructions" {
-  description = "DNS records to create after terraform apply (domain-mappings phase)"
+  description = "Cloudflare Worker routing — how to add new tenant subdomains"
   value       = <<-EOT
-    All subdomains use CNAME -> ghs.googlehosted.com. at your registrar.
-    Remove the old A records that pointed to the LB IP (8.232.60.239).
+    Traffic routes through Cloudflare Workers (no GCP Load Balancer).
+    NS records for gifsy.in point to Cloudflare.
 
-      Type   Name                 Value
-      CNAME  api.gifsy.in         ghs.googlehosted.com.
-      CNAME  platform.gifsy.in    ghs.googlehosted.com.
-      CNAME  deoleo.gifsy.in      ghs.googlehosted.com.
-      CNAME  clientb.gifsy.in     ghs.googlehosted.com.
+    To add a new tenant subdomain (e.g. newclient.gifsy.in):
+      1. Add route to cloudflare-worker/wrangler.toml
+      2. Run: cd cloudflare-worker && npx wrangler deploy
+      3. Add slug+config to platform/src/lib/platform/client-registry.ts
 
-    SSL certs auto-provision after DNS propagates (~5-60 min).
-    New client: add one more CNAME + google_cloud_run_domain_mapping in domain-mappings.tf.
+    Worker file: cloudflare-worker/worker.js
+    Routes active: api / platform / deoleo / clientb (all *.gifsy.in)
+
+    Wildcard A record (*.gifsy.in) in Cloudflare dashboard still exists —
+    update or delete it (was pointing to released LB IP 8.232.60.239).
   EOT
 }
 

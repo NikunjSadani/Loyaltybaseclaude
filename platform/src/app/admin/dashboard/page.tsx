@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import Link from 'next/link';
 import {
   Users,
@@ -277,6 +277,16 @@ function TargetAchievementCard({ config }: { config: GeoTargetConfig }) {
   );
 }
 
+/* ─── API types ──────────────────────────────────────────────────────────────── */
+
+interface ApiKpiData {
+  activePartners:        number;
+  pendingKyc:            number;
+  pendingVisibility:     number;
+  totalRedeemablePoints: number;
+  payoutSummary:         Record<string, { count: number; amountPaise: number }>;
+}
+
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function DashboardPage() {
@@ -295,6 +305,42 @@ export default function DashboardPage() {
 
   const regionOptions = REGION_OPTIONS[state] ?? REGION_OPTIONS.all;
   const kpiCards      = useMemo(() => getKpiCards(period, state, partnerClass), [period, state, partnerClass]);
+
+  // Live KPIs from API — silently overlaid on computed cards
+  const [liveKpis, setLiveKpis] = useState<ApiKpiData | null>(null);
+
+  useEffect(() => {
+    fetch('/api/admin/dashboard/kpis')
+      .then(r => r.json())
+      .then(json => { if (json.success && json.data) setLiveKpis(json.data); })
+      .catch(() => {});
+  }, []);
+
+  // Overlay real counts on the hardcoded KPI cards (keep growth % as-is — needs time-series)
+  const displayedKpiCards = useMemo(() => {
+    if (!liveKpis) return kpiCards;
+    return kpiCards.map((card, i) => {
+      if (i === 0) return { ...card, value: liveKpis.activePartners.toLocaleString('en-IN') };
+      if (i === 1) return { ...card, value: liveKpis.pendingKyc.toLocaleString('en-IN') };
+      if (i === 2) return { ...card, value: liveKpis.pendingVisibility.toLocaleString('en-IN') };
+      if (i === 3) return { ...card, value: `₹${(liveKpis.totalRedeemablePoints / 10_000_000).toFixed(2)} Cr` };
+      return card;
+    });
+  }, [kpiCards, liveKpis]);
+
+  // Overlay real payout counts/amounts (groups by raw DB status)
+  const displayedPayoutSummary = useMemo(() => {
+    if (!liveKpis?.payoutSummary) return payoutSummary;
+    const ps = liveKpis.payoutSummary;
+    const sum = (keys: string[], field: 'count' | 'amountPaise') =>
+      keys.reduce((acc, k) => acc + (ps[k]?.[field] ?? 0), 0);
+    const fmtL = (p: number) => `₹${(p / 10_000_000).toFixed(1)}L`;
+    return [
+      { ...payoutSummary[0], count: sum(['PAID', 'COMPLETED'], 'count'),                        amount: fmtL(sum(['PAID', 'COMPLETED'], 'amountPaise'))                        },
+      { ...payoutSummary[1], count: sum(['PENDING', 'INITIATED', 'PROCESSING'], 'count'),        amount: fmtL(sum(['PENDING', 'INITIATED', 'PROCESSING'], 'amountPaise'))        },
+      { ...payoutSummary[2], count: sum(['FAILED', 'REVERSED'], 'count'),                        amount: fmtL(sum(['FAILED', 'REVERSED'], 'amountPaise'))                        },
+    ];
+  }, [liveKpis]);
 
   // Resolve target config based on region/state
   const targetConfig: GeoTargetConfig | null = useMemo(() => {
@@ -431,7 +477,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
-          {kpiCards.map((card) => {
+          {displayedKpiCards.map((card) => {
             const Icon = card.icon;
             const growthPct  = growthView === 'mom' ? card.mom : card.yoy;
             const growthIsGood = card.growthGood ? growthPct >= 0 : growthPct <= 0;
@@ -639,7 +685,7 @@ export default function DashboardPage() {
               </a>
             </div>
             <div className="grid grid-cols-3 gap-2">
-              {payoutSummary.map((p) => {
+              {displayedPayoutSummary.map((p) => {
                 const Icon = p.icon;
                 return (
                   <div key={p.label} className={`rounded-lg border ${p.border} ${p.bg} px-3 py-2.5`}>

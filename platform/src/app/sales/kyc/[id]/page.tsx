@@ -49,166 +49,10 @@ interface KYCDetail {
   approvalHistory: ApprovalEvent[];
 }
 
-/* ─── Mock data ──────────────────────────────────────────────────────────────── */
-
-const MOCK_KYC: Record<string, KYCDetail> = {
-  k1: {
-    id: 'k1', partnerName: 'Rajesh Kumar', firmName: 'Kumar General Store',
-    mobile: '9876543210', address: '12 Market Road, Andheri', city: 'Mumbai', state: 'Maharashtra',
-    partnerClass: 'GOLD', outletCode: 'OUT-MH-0101', outletType: 'SSS',
-    status: KYCStatus.APPROVED, submittedAt: '2026-04-01',
-    submittedByRole: 'XSR', submittedByName: 'Ramesh Iyer',
-    lastOrderDate: '2026-05-20',
-    gstNumber: '27AAPFU0939F1ZV', panNumber: 'AAPFU0939F',
-    bankName: 'HDFC Bank', accountNumber: '****7890', ifscCode: 'HDFC0001234',
-    documents: [
-      { label: 'GST Certificate', status: 'verified' }, { label: 'PAN Card', status: 'verified' },
-      { label: 'Owner Photo', status: 'verified' },     { label: 'Board Photo', status: 'verified' },
-      { label: 'Bank Passbook', status: 'verified' },
-    ],
-    approvalHistory: [
-      { stage: 'FIRST_APPROVER', action: 'APPROVED', by: 'Rajesh Kumar', role: 'SO', timestamp: '2026-04-03T10:30:00' },
-      { stage: 'GIFSY',          action: 'APPROVED', by: 'Gifsy Admin',  role: 'GIFSY', timestamp: '2026-04-05T14:20:00' },
-    ],
-  },
-  k2: {
-    id: 'k2', partnerName: 'Amit Sharma', firmName: 'Sharma Kirana',
-    mobile: '9765432109', address: '5 Station Road, Borivali', city: 'Mumbai', state: 'Maharashtra',
-    partnerClass: 'SILVER', status: KYCStatus.PENDING_SO_APPROVAL, submittedAt: '2026-05-10',
-    submittedByRole: 'XSR', submittedByName: 'Ramesh Iyer',
-    documents: [
-      { label: 'GST Certificate', status: 'uploaded' }, { label: 'PAN Card', status: 'uploaded' },
-      { label: 'Shop Photo', status: 'uploaded' },      { label: 'Bank Passbook', status: 'missing' },
-    ],
-    approvalHistory: [],
-  },
-  k3: {
-    id: 'k3', partnerName: 'Suresh Patel', firmName: 'Patel Grocery',
-    mobile: '9654321098', address: 'Shop 3, MG Road', city: 'Thane', state: 'Maharashtra',
-    partnerClass: 'BRONZE', outletCode: 'OUT-MH-0103', outletType: 'SSS',
-    status: KYCStatus.REJECTED, submittedAt: '2026-04-20',
-    submittedByRole: 'XSR', submittedByName: 'Ramesh Iyer',
-    rejectionReason: 'GST certificate invalid — number mismatch with shop name.',
-    documents: [
-      { label: 'GST Certificate', status: 'uploaded' }, { label: 'PAN Card', status: 'verified' },
-      { label: 'Owner Photo', status: 'uploaded' },     { label: 'Board Photo', status: 'uploaded' },
-      { label: 'Bank Passbook', status: 'uploaded' },
-    ],
-    approvalHistory: [
-      { stage: 'FIRST_APPROVER', action: 'REJECTED', by: 'Rajesh Kumar', role: 'SO', timestamp: '2026-05-01T09:15:00', remarks: 'GST certificate invalid — number mismatch with shop name.' },
-    ],
-  },
-  k4: {
-    id: 'k4', partnerName: 'Gurpreet Singh', firmName: 'Singh Supermart',
-    mobile: '9543210987', address: '78 Link Road, Malad', city: 'Mumbai', state: 'Maharashtra',
-    partnerClass: 'GOLD', outletCode: 'OUT-MH-0104', outletType: 'WHOLESALER',
-    status: KYCStatus.APPROVED, submittedAt: '2026-03-15',
-    submittedByRole: 'SO', submittedByName: 'Rajesh Kumar',
-    lastOrderDate: '2026-05-25',
-    gstNumber: '27AAPFU0939F1ZV', panNumber: 'BBBPS1234C',
-    bankName: 'ICICI Bank', accountNumber: '****4567', ifscCode: 'ICIC0001122',
-    documents: [
-      { label: 'GST Certificate', status: 'verified' }, { label: 'PAN Card', status: 'verified' },
-      { label: 'Shop Photo', status: 'verified' },      { label: 'Bank Passbook', status: 'verified' },
-    ],
-    approvalHistory: [
-      { stage: 'FIRST_APPROVER', action: 'APPROVED', by: 'Sanjay Kapoor', role: 'ASM', timestamp: '2026-03-17T11:00:00' },
-      { stage: 'GIFSY',          action: 'APPROVED', by: 'Gifsy Admin',   role: 'GIFSY', timestamp: '2026-03-20T16:30:00' },
-    ],
-  },
-  k5: {
-    id: 'k5', partnerName: 'Vijay Mehta', firmName: 'Mehta Provisions',
-    mobile: '9432109876', address: 'Plot 22, New Link Road, Kandivali', city: 'Mumbai', state: 'Maharashtra',
-    partnerClass: 'SILVER', status: KYCStatus.PENDING_GIFSY, submittedAt: '2026-05-14',
-    submittedByRole: 'SO', submittedByName: 'Rajesh Kumar',
-    lastOrderDate: '2026-05-10',
-    documents: [
-      { label: 'GST Certificate', status: 'uploaded' }, { label: 'PAN Card', status: 'uploaded' },
-      { label: 'Shop Photo', status: 'uploaded' },      { label: 'Bank Passbook', status: 'uploaded' },
-    ],
-    approvalHistory: [
-      { stage: 'FIRST_APPROVER', action: 'APPROVED', by: 'Sanjay Kapoor', role: 'ASM', timestamp: '2026-05-15T14:00:00' },
-    ],
-  },
-  k6: {
-    id: 'k6', partnerName: 'Priya Desai', firmName: 'Desai Grocers',
-    mobile: '9321098765', address: '1 Old Market, Goregaon', city: 'Mumbai', state: 'Maharashtra',
-    partnerClass: 'BRONZE', status: KYCStatus.PENDING_ASM_APPROVAL, submittedAt: '2026-05-12',
-    submittedByRole: 'SO', submittedByName: 'Rajesh Kumar',
-    documents: [
-      { label: 'GST Certificate', status: 'uploaded' }, { label: 'PAN Card', status: 'verified' },
-      { label: 'Shop Photo', status: 'uploaded' },      { label: 'Bank Passbook', status: 'uploaded' },
-    ],
-    approvalHistory: [],
-  },
-  k7: {
-    id: 'k7', partnerName: 'Suresh Nair', firmName: 'Suresh Wholesale',
-    mobile: '9210987654', address: '11 Station Rd, Kurla', city: 'Mumbai', state: 'Maharashtra',
-    partnerClass: 'SILVER', status: KYCStatus.RE_KYC_REQUIRED, submittedAt: '2026-03-10',
-    submittedByRole: 'SO', submittedByName: 'Rajesh Kumar',
-    lastOrderDate: '2026-05-18',
-    gstNumber: '27BBBFU1234F1ZV', panNumber: 'BBBFU1234F',
-    bankName: 'SBI', accountNumber: '****3210', ifscCode: 'SBIN0001234',
-    documents: [
-      { label: 'GST Certificate', status: 'verified' }, { label: 'PAN Card', status: 'verified' },
-      { label: 'Shop Photo', status: 'verified' },      { label: 'Bank Passbook', status: 'verified' },
-    ],
-    rejectionReason: 'KYC expired — renewal required.',
-    approvalHistory: [
-      { stage: 'FIRST_APPROVER', action: 'APPROVED', by: 'Sanjay Kapoor', role: 'ASM', timestamp: '2026-03-12T10:00:00' },
-      { stage: 'GIFSY',          action: 'APPROVED', by: 'Gifsy Admin',   role: 'GIFSY', timestamp: '2026-03-14T09:00:00' },
-    ],
-  },
-  k8: {
-    id: 'k8', partnerName: 'Gurpreet Singh', firmName: 'Singh Supermart',
-    mobile: '9543210987', address: '78 Link Road, Malad', city: 'Mumbai', state: 'Maharashtra',
-    partnerClass: 'GOLD', status: KYCStatus.RE_KYC_REQUIRED, submittedAt: '2026-03-15',
-    submittedByRole: 'SO', submittedByName: 'Rajesh Kumar',
-    lastOrderDate: '2026-05-22',
-    rejectionReason: 'GST number updated — re-verify required.',
-    documents: [
-      { label: 'GST Certificate', status: 'uploaded' }, { label: 'PAN Card', status: 'verified' },
-      { label: 'Shop Photo', status: 'verified' },      { label: 'Bank Passbook', status: 'verified' },
-    ],
-    approvalHistory: [],
-  },
-};
-
-const OUTLET_MAP: Record<string, string> = { o1: 'k1', o2: 'k2', o3: 'k3', o4: 'k4', o5: 'k5' };
-
-/** Only real UUIDs from the database should trigger an API fetch.
- *  Mock keys like 'k1', 'o1' would 404 unconditionally — skip them. */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /* ─── Camera-only documents ──────────────────────────────────────────────────── */
 
 /** Documents that must be captured on-site via camera (not gallery/PDF). */
 const CAMERA_ONLY_DOCS = new Set(['Owner Photo', 'Board Photo', 'Shop Photo']);
-
-/* ─── Past performance mock data ─────────────────────────────────────────────── */
-
-const PAST_PERF: Record<string, { month: string; achievePct: number }[]> = {
-  k1: [
-    { month: 'Dec', achievePct: 102 }, { month: 'Jan', achievePct: 91 },
-    { month: 'Feb', achievePct: 88 },  { month: 'Mar', achievePct: 100 },
-    { month: 'Apr', achievePct: 94 },  { month: 'May', achievePct: 85 },
-  ],
-  k2: [
-    { month: 'Dec', achievePct: 72 }, { month: 'Jan', achievePct: 65 },
-    { month: 'Feb', achievePct: 55 }, { month: 'Mar', achievePct: 62 },
-    { month: 'Apr', achievePct: 48 }, { month: 'May', achievePct: 40 },
-  ],
-  k3: [
-    { month: 'Dec', achievePct: 50 }, { month: 'Jan', achievePct: 44 },
-    { month: 'Feb', achievePct: 44 }, { month: 'Mar', achievePct: 50 },
-    { month: 'Apr', achievePct: 35 }, { month: 'May', achievePct: 28 },
-  ],
-  k4: [
-    { month: 'Dec', achievePct: 98 },  { month: 'Jan', achievePct: 105 },
-    { month: 'Feb', achievePct: 100 }, { month: 'Mar', achievePct: 92 },
-    { month: 'Apr', achievePct: 97 },  { month: 'May', achievePct: 91 },
-  ],
-};
 
 /* ─── API types & mapping (leaderboard pattern) ─────────────────────────────── */
 
@@ -470,8 +314,8 @@ function RejectionModal({
 
 export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id }        = use(params);
-  const resolvedId    = OUTLET_MAP[id] ?? id;
-  const [kyc, setKyc] = useState<KYCDetail | null>(MOCK_KYC[resolvedId] ?? null);
+  const [kyc,     setKyc]     = useState<KYCDetail | null>(null);
+  const [loadingKyc, setLoadingKyc] = useState(true);
 
   const [submitting,        setSubmitting]        = useState(false);
   const [approving,         setApproving]         = useState(false);
@@ -497,82 +341,55 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
     setSettings(getGifsySettings());
   }, [currentPeriod]);
 
-  /* ── API hydration — silent background update (leaderboard pattern) ── */
+  /* ── Fetch KYC from API ── */
   useEffect(() => {
-    // Only fetch for real UUIDs — mock keys (k1, o1, etc.) would 404 unconditionally.
-    if (!UUID_RE.test(id)) return;
-
-    fetch(`/api/kyc/${id}`)
-      .then(r => r.json())
+    setLoadingKyc(true);
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch(`/api/kyc/${id}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
       .then((json) => {
         if (json.success && json.data?.submission) {
           const s = json.data.submission;
-          // Merge pattern: selectively overwrite only fields the API returns.
-          // This preserves approvalHistory, partnerClass, outletCode,
-          // lastOrderDate, and any other fields not present in the API shape.
-          setKyc(prev => {
-            if (prev) {
-              return {
-                ...prev,
-                partnerName:     s.user?.name                    ?? prev.partnerName,
-                firmName:        s.partner?.businessName         ?? prev.firmName,
-                mobile:          s.user?.phone                   ?? prev.mobile,
-                address:         s.partner?.address              ?? prev.address,
-                city:            s.partner?.city                 ?? prev.city,
-                state:           s.partner?.state                ?? prev.state,
-                status:          (s.status as KYCStatus)         ?? prev.status,
-                submittedAt:     s.submittedAt                   ?? prev.submittedAt,
-                submittedByRole: (s.user?.role as KYCSubmitterRole) ?? prev.submittedByRole,
-                submittedByName: s.user?.name                    ?? prev.submittedByName,
-                rejectionReason: s.rejectionReason               ?? prev.rejectionReason,
-                gstNumber:       s.partner?.gstNumber            ?? prev.gstNumber,
-                panNumber:       s.partner?.panNumber            ?? prev.panNumber,
-                bankName:        s.partner?.bankName             ?? prev.bankName,
-                accountNumber:   s.partner?.bankAccountNumber    ?? prev.accountNumber,
-                ifscCode:        s.partner?.ifscCode             ?? prev.ifscCode,
-                documents:       s.documents?.length
-                  ? (s.documents as { label: string; status?: string }[]).map(d => ({
-                      label:  d.label,
-                      status: (d.status as 'uploaded' | 'missing' | 'verified') ?? 'uploaded',
-                    }))
-                  : prev.documents,
-                // approvalHistory and partnerClass are NOT returned by the API.
-                // They stay as whatever is already in state.
-              };
-            }
-            // prev is null → UUID not in MOCK_KYC → hydrate fresh from API data
-            return {
-              id:              s.id,
-              partnerName:     s.user?.name                    ?? '',
-              firmName:        s.partner?.businessName         ?? '',
-              mobile:          s.user?.phone                   ?? '',
-              address:         s.partner?.address              ?? '',
-              city:            s.partner?.city                 ?? '',
-              state:           s.partner?.state                ?? '',
-              partnerClass:    '',
-              status:          (s.status as KYCStatus)         ?? KYCStatus.SUBMITTED,
-              submittedAt:     s.submittedAt                   ?? new Date().toISOString(),
-              submittedByRole: (s.user?.role as KYCSubmitterRole) ?? 'SO',
-              submittedByName: s.user?.name                    ?? '',
-              rejectionReason: s.rejectionReason               ?? undefined,
-              gstNumber:       s.partner?.gstNumber,
-              panNumber:       s.partner?.panNumber,
-              bankName:        s.partner?.bankName,
-              accountNumber:   s.partner?.bankAccountNumber,
-              ifscCode:        s.partner?.ifscCode,
-              documents:       (s.documents ?? []).map((d: { label: string; status?: string }) => ({
-                label:  d.label,
-                status: (d.status as 'uploaded' | 'missing' | 'verified') ?? 'uploaded',
-              })),
-              approvalHistory: [],
-            };
+          setKyc({
+            id:              s.id,
+            partnerName:     s.user?.name                       ?? '',
+            firmName:        s.partner?.businessName            ?? '',
+            mobile:          s.user?.phone                      ?? '',
+            address:         s.partner?.address                 ?? '',
+            city:            s.partner?.city                    ?? '',
+            state:           s.partner?.state                   ?? '',
+            partnerClass:    '',
+            status:          (s.status as KYCStatus)            ?? KYCStatus.SUBMITTED,
+            submittedAt:     s.submittedAt                      ?? new Date().toISOString(),
+            submittedByRole: (s.user?.role as KYCSubmitterRole) ?? 'SO',
+            submittedByName: s.user?.name                       ?? '',
+            rejectionReason: s.rejectionReason                  ?? undefined,
+            gstNumber:       s.partner?.gstNumber,
+            panNumber:       s.partner?.panNumber,
+            bankName:        s.partner?.bankName,
+            accountNumber:   s.partner?.bankAccountNumber,
+            ifscCode:        s.partner?.ifscCode,
+            documents:       (s.documents ?? []).map((d: { label: string; status?: string }) => ({
+              label:  d.label,
+              status: (d.status as 'uploaded' | 'missing' | 'verified') ?? 'uploaded',
+            })),
+            approvalHistory: [],
           });
         }
       })
-      .catch(() => {}); // keep MOCK_KYC fallback on any error
+      .catch(() => {})
+      .finally(() => setLoadingKyc(false));
   }, [id]);
 
-  const achievement = OUTLET_ACHIEVEMENTS[resolvedId];
+  const achievement = OUTLET_ACHIEVEMENTS[id];
+
+  if (loadingKyc) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <span className="text-sm text-gray-400">Loading…</span>
+      </div>
+    );
+  }
 
   if (!kyc) {
     return (
@@ -1019,26 +836,6 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
             </Button>
           </CardContent>
         </Card>
-      )}
-
-      {/* Past Performance */}
-      {(PAST_PERF[resolvedId]?.length ?? 0) > 0 && (
-        <div data-testid="past-performance" className="space-y-2">
-          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide px-0.5">Past Performance</p>
-          <div className="bg-white rounded-xl border border-gray-200 p-4">
-            <div className="flex items-end gap-2 h-20">
-              {PAST_PERF[resolvedId].map((m) => (
-                <div key={m.month} data-testid="perf-month-bar" className="flex-1 flex flex-col items-center gap-1">
-                  <div
-                    className={`w-full rounded-t-sm ${m.achievePct >= 100 ? 'bg-emerald-400' : m.achievePct >= 90 ? 'bg-amber-400' : 'bg-red-400'}`}
-                    style={{ height: `${Math.round((Math.min(m.achievePct, 100) / 100) * 64)}px` }}
-                  />
-                  <span className="text-[9px] text-gray-400">{m.month}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
       )}
 
       {/* Quick actions */}

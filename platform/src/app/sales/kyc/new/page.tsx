@@ -51,62 +51,11 @@ const MAX_FILE_BYTES    = 5 * 1024 * 1024;
 const COMPRESS_QUALITY  = 0.82;
 const COMPRESS_MAX_DIM  = 1920;
 
-/* ─── Mock data ──────────────────────────────────────────────────────────────── */
-
-const ASSIGNED_OUTLETS: AssignedOutlet[] = [
-  { outletId: 'OUT-2026-001', name: 'Verma Traders',         beat: 'Andheri Beat', type: 'SSS'     },
-  { outletId: 'OUT-2026-002', name: 'Joshi Provisions',      beat: 'Andheri Beat', type: 'SSS'     },
-  { outletId: 'OUT-2026-003', name: 'Nair General Store',    beat: 'Andheri Beat', type: 'WHOLESALER'   },
-  { outletId: 'OUT-2026-004', name: 'Gupta Kirana',          beat: 'Andheri Beat', type: 'SSS'     },
-  { outletId: 'OUT-2026-005', name: 'Agarwal Mart',          beat: 'Kandivali',    type: 'SUB_STOCKIST' },
-  { outletId: 'OUT-2026-006', name: 'Rao Superstore',        beat: 'Kandivali',    type: 'WHOLESALER'   },
-  { outletId: 'OUT-2026-007', name: 'Mishra Brothers',       beat: 'Borivali',     type: 'SSS'     },
-  { outletId: 'OUT-2026-008', name: 'Shetty Provision Mart', beat: 'Borivali',     type: 'SSS'     },
-  // Re-KYC outlet — admin flagged specific fields for re-capture
-  {
-    outletId:  'OUT-2026-K11',
-    name:      'Krishnamurthy & Sons',
-    beat:      'Koramangala Beat',
-    type:      'WHOLESALER',
-    kycStatus: 'RE_KYC_REQUIRED',
-    reKycRemarks: 'GST certificate expired. PAN number update requested by compliance team.',
-    reKycFlags: {
-      gstNumber:    true,
-      panNumber:    true,
-      businessDoc:  true,   // GST Certificate re-upload
-      accountNumber: true,  // bank detail correction
-    },
-    existingKyc: {
-      partnerName:   'K. Krishnamurthy',
-      mobile:        '9444181920',
-      gstNumber:     '',   // blanked — must be re-entered
-      panNumber:     '',   // blanked — must be re-entered
-      address:       '14, 2nd Main, Koramangala 4th Block',
-      city:          'Bengaluru',
-      state:         'Karnataka',
-      pincode:       '560034',
-      bankName:      'HDFC Bank',
-      accountNumber: '',   // blanked — must be re-entered
-      ifscCode:      'HDFC0001234',
-      upiId:         '',
-    },
-  },
-];
 
 const TYPE_LABEL: Record<AssignedOutlet['type'], string> = {
   SSS: 'SSS', WHOLESALER: 'Wholesaler', SUB_STOCKIST: 'Sub-Stockist',
 };
 
-const REGISTERED_OUTLET_PHONES: Record<string, { name: string; outletId: string }> = {
-  '9876543210': { name: 'Kumar General Store',  outletId: 'OUT-2026-K01' },
-  '9765432109': { name: 'Sharma Kirana',        outletId: 'OUT-2026-K02' },
-  '9654321098': { name: 'Patel Grocery',        outletId: 'OUT-2026-K03' },
-  '9543210987': { name: 'Singh Supermart',      outletId: 'OUT-2026-K04' },
-  '9432109876': { name: 'Mehta Provisions',     outletId: 'OUT-2026-K05' },
-  '9321098765': { name: 'Desai Grocers',        outletId: 'OUT-2026-K06' },
-  '9820184321': { name: 'Sharma General Store', outletId: 'OUT-2026-K10' },
-  '9444181920': { name: 'Krishnamurthy & Sons', outletId: 'OUT-2026-K11' },
-};
 
 const EMPLOYEE_PHONES: Record<string, string> = {
   '9800000001': 'Anil Sharma (ISR)',   '9800000002': 'Rajesh Kumar (SO)',
@@ -174,6 +123,10 @@ export default function NewKYCPage() {
   const [outletSearch,   setOutletSearch]   = useState('');
   const [dropOpen,       setDropOpen]       = useState(false);
   const dropRef = useRef<HTMLDivElement>(null);
+
+  /* Assigned outlets (from API) */
+  const [assignedOutlets, setAssignedOutlets] = useState<AssignedOutlet[]>([]);
+  const [registeredPhones, setRegisteredPhones] = useState<Map<string, { name: string; outletId: string }>>(new Map());
 
   /* Not Interested flow */
   const [confirmNotInterestedId, setConfirmNotInterestedId] = useState<string | null>(null);
@@ -253,6 +206,35 @@ export default function NewKYCPage() {
 
   /* File error */
   const [fileError, setFileError] = useState('');
+
+  /* ── Load assigned outlets from API ── */
+  useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/sales/outlets', { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((body) => {
+        if (body.success) {
+          const outlets: AssignedOutlet[] = (body.data.outlets ?? []).map((o: any) => ({
+            outletId:  o.id,
+            name:      o.name,
+            beat:      o.beat || o.district || '',
+            type:      (o.type ?? 'SSS') as AssignedOutlet['type'],
+            kycStatus: o.kycStatus === 'RE_KYC_REQUIRED' ? 'RE_KYC_REQUIRED' : undefined,
+          }));
+          setAssignedOutlets(outlets);
+          // Build registered phones map from outlet mobiles for conflict detection
+          const phones = new Map<string, { name: string; outletId: string }>();
+          (body.data.outlets ?? []).forEach((o: any) => {
+            if (o.mobile) {
+              const normalized = String(o.mobile).replace(/^(\+91|91)/, '');
+              phones.set(normalized, { name: o.name, outletId: o.id });
+            }
+          });
+          setRegisteredPhones(phones);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   /* ── Outside-click: outlet dropdown ── */
   useEffect(() => {
@@ -381,7 +363,7 @@ export default function NewKYCPage() {
     if (val.length === 10) {
       setMobileCheck('checking');
       await new Promise((r) => setTimeout(r, 400));
-      const existingOutlet = REGISTERED_OUTLET_PHONES[val];
+      const existingOutlet = registeredPhones.get(val);
       if (existingOutlet) {
         setMobileCheck('outlet_conflict');
         setMobileCheckMsg(`Already registered to ${existingOutlet.name} (${existingOutlet.outletId}). Each outlet must have a unique contact number.`);
@@ -728,7 +710,7 @@ export default function NewKYCPage() {
   };
 
   /* Filtered outlets — excludes dismissed (not interested) outlets */
-  const filteredOutlets = ASSIGNED_OUTLETS.filter(
+  const filteredOutlets = assignedOutlets.filter(
     (o) =>
       !dismissedOutlets.has(o.outletId) && (
         o.name.toLowerCase().includes(outletSearch.toLowerCase()) ||
@@ -740,7 +722,7 @@ export default function NewKYCPage() {
   /* ── Not Interested handler ── */
   const handleConfirmNotInterested = useCallback(async () => {
     if (!confirmNotInterestedId) return;
-    const outletName = ASSIGNED_OUTLETS.find((o) => o.outletId === confirmNotInterestedId)?.name ?? confirmNotInterestedId;
+    const outletName = assignedOutlets.find((o) => o.outletId === confirmNotInterestedId)?.name ?? confirmNotInterestedId;
     setNotInterestedLoading(true);
     try {
       await fetch('/api/kyc/not-interested', {
@@ -1142,7 +1124,7 @@ export default function NewKYCPage() {
                     ))}
                   </div>
                   <div className="px-4 py-2 border-t border-gray-100 bg-gray-50">
-                    <p className="text-[11px] text-gray-400">{filteredOutlets.length} of {ASSIGNED_OUTLETS.filter(o => !dismissedOutlets.has(o.outletId)).length} outlets shown</p>
+                    <p className="text-[11px] text-gray-400">{filteredOutlets.length} of {assignedOutlets.filter(o => !dismissedOutlets.has(o.outletId)).length} outlets shown</p>
                   </div>
                 </div>
               )}
@@ -1214,7 +1196,7 @@ export default function NewKYCPage() {
 
       {/* ── Not Interested confirmation modal — rendered outside the card ── */}
       {confirmNotInterestedId && (() => {
-        const outlet = ASSIGNED_OUTLETS.find((o) => o.outletId === confirmNotInterestedId);
+        const outlet = assignedOutlets.find((o) => o.outletId === confirmNotInterestedId);
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             {/* Backdrop */}

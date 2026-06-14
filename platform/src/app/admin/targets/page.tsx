@@ -19,7 +19,6 @@ import {
   OUTLET_TYPE_LABELS, OUTLET_TYPE_DESC,
   NEW_GEO_LEVEL_LABELS, KPI_TYPE_LABELS, KPI_TYPE_UNITS, NEW_GEO_OPTIONS,
   MOCK_OUTLETS,
-  getAllTargetConfigs, upsertTargetConfig, deleteTargetConfig,
   detectConflict, isMonthLocked, formatMonth, getMonthOptions,
   getOutletsForConfig, resolveNewConfig, getResolvedTargetsData, CURRENT_MONTH,
 } from '@/lib/targets';
@@ -1175,25 +1174,36 @@ export default function AdminTargetsPage() {
   const [downloading,   setDownloading]   = useState(false);
 
   const reload = useCallback(() => {
-    setConfigs(getAllTargetConfigs());
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/admin/target-config', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(j => { if (j.success) setConfigs(j.data.configs ?? []); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
-    const t = setTimeout(() => { reload(); setLoading(false); }, 300);
-    return () => clearTimeout(t);
+    reload();
   }, [reload]);
 
   const handleSave = (cfg: TargetConfig) => {
-    upsertTargetConfig(cfg);
-    reload();
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/admin/target-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(cfg),
+    }).then(() => reload()).catch(() => {});
     setWizardOpen(false);
     setEditingCfg(null);
   };
 
   const handleDelete = (id: string) => {
     if (!confirm('Delete this target configuration?')) return;
-    deleteTargetConfig(id);
-    reload();
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch(`/api/admin/target-config/${id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(() => reload()).catch(() => {});
   };
 
   const handleDuplicate = (src: TargetConfig) => {
@@ -1212,8 +1222,12 @@ export default function AdminTargetsPage() {
   };
 
   const handleActivated = (updated: TargetConfig) => {
-    upsertTargetConfig(updated);
-    reload();
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/admin/target-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(updated),
+    }).then(() => reload()).catch(() => {});
     setUploadCfg(null);
     // Notify partners (mock — in production POST to /api/notifications)
     console.info('[TARGET] Config activated, partner notifications queued:', updated.id);

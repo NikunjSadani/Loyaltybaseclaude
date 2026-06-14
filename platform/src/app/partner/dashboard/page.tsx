@@ -21,7 +21,7 @@ import { buildCasesToGoMsg, classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { usePartnerSession, type OutletType } from '@/lib/partner-session';
 import {
-  OUTLET_ACHIEVEMENTS, resolveConfig, pct,
+  resolveConfig, pct,
   DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD,
   getPrimaryParam, currentPeriod, getPrimarySchemeTarget,
   type OutletAchievement,
@@ -40,12 +40,8 @@ import { formatLastUpdated, getLastSalesUploadDate } from '@/lib/sales-upload-ut
 
 /* ─── Real-data context ──────────────────────────────────────────────────── */
 
-/**
- * Leaderboard pattern for achievements: sub-components start with OUTLET_ACHIEVEMENTS
- * (mock, always present), then the page root silently replaces with real API data.
- */
-type AchievementsMap = typeof OUTLET_ACHIEVEMENTS;
-const DashboardAchievementsContext = createContext<AchievementsMap>(OUTLET_ACHIEVEMENTS);
+type AchievementsMap = Record<string, OutletAchievement>;
+const DashboardAchievementsContext = createContext<AchievementsMap>({});
 
 function useDashboardAchievements(): AchievementsMap {
   return useContext(DashboardAchievementsContext);
@@ -786,7 +782,7 @@ export default function PartnerDashboard() {
   const [popup,             setPopup]             = useState<Popup | null>(null);
   const [lastUpdatedLabel,  setLastUpdatedLabel]  = useState<string>('');
   // Achievements state — starts with mock data, silently updated by API (leaderboard pattern)
-  const [achievements, setAchievements]           = useState<AchievementsMap>(OUTLET_ACHIEVEMENTS);
+  const [achievements, setAchievements]           = useState<AchievementsMap>({});
 
   // Touch / swipe state
   const touchStartX = React.useRef<number | null>(null);

@@ -12,65 +12,6 @@ import type { PayoutLedgerEntry } from '@/types';
 import { usePartnerSession } from '@/lib/partner-session';
 import { loadRedemptions } from '@/lib/redemption-store';
 
-/* ─── Mock data — POINTS track ───────────────────────────────────────────────── */
-
-const MOCK_BALANCE: WalletBalance = {
-  earned:     8_550,
-  locked:     0,
-  redeemable: 4_250,
-  redeemed:   3_100,
-  expired:      500,
-  available:  4_250,
-};
-
-const MOCK_TRANSACTIONS: WalletTransaction[] = [
-  { id: 't1',  walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:   200, balanceAfter: 4_250, description: 'Monthly Target — May 2026',      schemeId: '1',  kpiLabel: 'Monthly Target',    invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-05-14'), narration: 'May secondary billing verified against submitted invoices.' },
-  { id: 't1b', walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:    80, balanceAfter: 4_330, description: 'Consistency — May 2026',         schemeId: '1',  kpiLabel: 'Consistency',       invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-05-14') },
-  { id: 't2',  walletId: 'w1', userId: 'u1', type: TransactionType.DEBIT,  bucket: WalletBucket.REDEEMED, amount:   500, balanceAfter: 4_050, description: 'Redemption – Amazon voucher ₹500', schemeId: null, invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-05-10') },
-  { id: 't3',  walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:   350, balanceAfter: 4_550, description: 'Monthly Target — Apr 2026',      schemeId: '1',  kpiLabel: 'Monthly Target',    invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-05-08'), narration: 'Apr billing confirmed. Full payout released.' },
-  { id: 't3b', walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:   120, balanceAfter: 4_670, description: 'Focus Product 1 — Apr 2026',     schemeId: '1',  kpiLabel: 'Focus Product 1',   invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-05-08') },
-  { id: 't3c', walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:    90, balanceAfter: 4_760, description: 'Focus Product 2 — Apr 2026',     schemeId: '1',  kpiLabel: 'Focus Product 2',   invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-05-08'), narration: 'New SKU push target met for April.' },
-  { id: 't5',  walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:   100, balanceAfter: 4_500, description: 'Visibility — Apr 2026',          schemeId: '2',  kpiLabel: 'Visibility',        invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-05-05') },
-  { id: 't7',  walletId: 'w1', userId: 'u1', type: TransactionType.DEBIT,  bucket: WalletBucket.REDEEMED, amount: 1_000, balanceAfter: 3_950, description: 'Redemption – bank transfer',       schemeId: null, invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-04-20') },
-  { id: 't9',  walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:   600, balanceAfter: 4_950, description: 'Monthly Target — Mar 2026',      schemeId: '1',  kpiLabel: 'Monthly Target',    invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-04-15') },
-  { id: 't9b', walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:   150, balanceAfter: 5_100, description: 'Promo Pack — Mar 2026',          schemeId: '1',  kpiLabel: 'Promo Pack',        invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-04-15'), narration: 'Q1 promo pack offtake target achieved.' },
-  { id: 't9c', walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:    60, balanceAfter: 5_160, description: 'Lines — Mar 2026',               schemeId: '1',  kpiLabel: 'Lines',             invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-04-15'), narration: 'Minimum 8 SKU lines stocked and invoiced.' },
-  { id: 't10', walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:   250, balanceAfter: 4_350, description: 'Differential Margin — Apr 2026', schemeId: '1',  kpiLabel: 'Differential Margin', invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-04-10') },
-  { id: 't8',  walletId: 'w1', userId: 'u1', type: TransactionType.EXPIRE, bucket: WalletBucket.EXPIRED,  amount:   500, balanceAfter: 4_950, description: 'Points expired – Q4 FY25 scheme', schemeId: null, invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-03-31') },
-  { id: 't11', walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:   450, balanceAfter: 5_450, description: 'Monthly Target — Feb 2026',      schemeId: '1',  kpiLabel: 'Monthly Target',    invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-03-25') },
-  { id: 't11b',walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:    75, balanceAfter: 5_525, description: 'Others — Feb 2026',              schemeId: '1',  kpiLabel: 'Others',            invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-03-25'), narration: 'One-time incentive for participation in brand event.' },
-  { id: 't12', walletId: 'w1', userId: 'u1', type: TransactionType.CREDIT, bucket: WalletBucket.EARNED,   amount:   320, balanceAfter: 5_000, description: 'Monthly Target — Jan 2026',      schemeId: '1',  kpiLabel: 'Monthly Target',    invoiceId: null, reversedById: null, reversalReason: null, createdAt: new Date('2026-03-15') },
-];
-
-/* ─── Mock data — INR track ──────────────────────────────────────────────────── */
-
-const MOCK_INR_PAYOUTS: Record<string, PayoutLedgerEntry[]> = {
-  o2: [
-    { id: 'p1',    period: '2026-04', kpiLabel: 'Monthly Target',  achievedPct: 102, payoutAmountInr: 8_000, uploadedAt: '2026-05-03', utr: '506210001234', paidAt: '2026-05-05', status: 'PAID',       narration: 'Apr secondary billing verified against submitted invoices.' },
-    { id: 'p2',    period: '2026-05', kpiLabel: 'Monthly Target',  achievedPct: 100, payoutAmountInr: 4_500, uploadedAt: '2026-05-28', status: 'PROCESSING' },
-    { id: 'p3',    period: '2026-03', kpiLabel: 'Monthly Target',  achievedPct: 100, payoutAmountInr: 7_500, uploadedAt: '2026-04-04', utr: '506210000987', paidAt: '2026-04-06', status: 'PAID',       narration: 'Mar billing confirmed. Full payout released.' },
-    { id: 'p4',    period: '2026-02', kpiLabel: 'Monthly Target',  achievedPct: 98,  payoutAmountInr: 0,     uploadedAt: '2026-03-03', status: 'FAILED',     narration: 'Target achievement fell below 100% threshold — payout not applicable.' },
-    { id: 'p_vis', period: '2026-04', kpiLabel: 'Visibility',      achievedPct: 100, payoutAmountInr: 1_500, uploadedAt: '2026-05-03', utr: '506210009999', paidAt: '2026-05-04', status: 'PAID'       },
-    { id: 'p_con', period: '2026-04', kpiLabel: 'Consistency',     achievedPct: 100, payoutAmountInr: 2_000, uploadedAt: '2026-05-03', utr: '506210008888', paidAt: '2026-05-05', status: 'PAID',       narration: 'Consistent ordering across all 4 weeks of April.' },
-    { id: 'p_fp1', period: '2026-03', kpiLabel: 'Focus Product 1', achievedPct: 100, payoutAmountInr: 1_200, uploadedAt: '2026-04-04', utr: '506210007777', paidAt: '2026-04-06', status: 'PAID'       },
-    { id: 'p_fp2', period: '2026-03', kpiLabel: 'Focus Product 2', achievedPct: 100, payoutAmountInr:   800, uploadedAt: '2026-04-04', utr: '506210006666', paidAt: '2026-04-06', status: 'PAID'       },
-    { id: 'p_promo', period: '2026-03', kpiLabel: 'Promo Pack',    achievedPct: 100, payoutAmountInr: 3_000, uploadedAt: '2026-04-04', utr: '506210005555', paidAt: '2026-04-06', status: 'PAID',       narration: 'Q1 promo pack offtake target achieved.' },
-  ],
-  o3: [
-    { id: 'p5',    period: '2026-05', kpiLabel: 'Monthly Target',       achievedPct: 100, payoutAmountInr: 7_200, uploadedAt: '2026-05-25', status: 'PROCESSING' },
-    { id: 'p6',    period: '2026-04', kpiLabel: 'Monthly Target',       achievedPct: 100, payoutAmountInr: 6_800, uploadedAt: '2026-05-02', utr: '506210002345', paidAt: '2026-05-04', status: 'PAID' },
-    { id: 'p6b',   period: '2026-04', kpiLabel: 'Lines',                achievedPct: 100, payoutAmountInr: 1_000, uploadedAt: '2026-05-02', utr: '506210002346', paidAt: '2026-05-04', status: 'PAID',   narration: 'Minimum 8 SKU lines stocked and invoiced.' },
-    { id: 'p6c',   period: '2026-04', kpiLabel: 'Differential Margin',  achievedPct: 100, payoutAmountInr: 1_500, uploadedAt: '2026-05-02', utr: '506210002347', paidAt: '2026-05-04', status: 'PAID' },
-  ],
-  o4: [
-    { id: 'p7',    period: '2026-05', kpiLabel: 'Monthly Target',       achievedPct: 100, payoutAmountInr: 25_000, uploadedAt: '2026-05-28', status: 'PENDING'    },
-    { id: 'p8',    period: '2026-04', kpiLabel: 'Monthly Target',       achievedPct: 105, payoutAmountInr: 20_000, uploadedAt: '2026-05-02', utr: '506210005678', paidAt: '2026-05-04', status: 'PAID', narration: 'Overachievement bonus applied at 105% slab.'  },
-    { id: 'p8b',   period: '2026-04', kpiLabel: 'Focus Product 3',      achievedPct: 100, payoutAmountInr:  5_000, uploadedAt: '2026-05-02', utr: '506210005679', paidAt: '2026-05-04', status: 'PAID' },
-    { id: 'p8c',   period: '2026-04', kpiLabel: 'Liquidation',          achievedPct: 100, payoutAmountInr:  2_500, uploadedAt: '2026-05-02', utr: '506210005680', paidAt: '2026-05-04', status: 'PAID', narration: 'Old batch liquidated before expiry cutoff.' },
-    { id: 'p9',    period: '2026-03', kpiLabel: 'Monthly Target',       achievedPct: 100, payoutAmountInr: 20_000, uploadedAt: '2026-04-03', utr: '506210004321', paidAt: '2026-04-05', status: 'PAID' },
-    { id: 'p9b',   period: '2026-03', kpiLabel: 'Others',               achievedPct: 100, payoutAmountInr:  1_000, uploadedAt: '2026-04-03', utr: '506210004322', paidAt: '2026-04-05', status: 'PAID', narration: 'One-time incentive for participation in brand event.' },
-  ],
-};
 
 /* ─── API types & mappers (wallet wiring) ────────────────────────────────────── */
 
@@ -197,8 +138,23 @@ const DEFAULT_TO   = '2026-05';
 
 /* ─── INR Wallet View ────────────────────────────────────────────────────────── */
 
-function InrWalletView({ outletId }: { outletId: string }) {
-  const allPayouts = useMemo(() => MOCK_INR_PAYOUTS[outletId] ?? [], [outletId]);
+function InrWalletView() {
+  const [allPayouts, setAllPayouts] = useState<PayoutLedgerEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch('/api/partner/payouts', { signal: controller.signal })
+      .then(r => r.json())
+      .then((json) => {
+        if (json.success && json.data?.payouts?.length > 0) {
+          setAllPayouts(json.data.payouts);
+        }
+      })
+      .catch((e) => { if ((e as Error).name === 'AbortError') return; })
+      .finally(() => setLoading(false));
+    return () => controller.abort();
+  }, []);
 
   // Only confirmed PAID entries are relevant
   const paidEntries = useMemo(() => allPayouts.filter(p => p.status === 'PAID'), [allPayouts]);
@@ -242,6 +198,15 @@ function InrWalletView({ outletId }: { outletId: string }) {
   }, [paidEntries, fromPeriod, toPeriod, kpiFilter]);
 
   const periodDisp = rangeLabel(fromPeriod, toPeriod);
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 space-y-3">
+        <div className="w-8 h-8 border-2 border-[var(--brand-primary)] border-t-transparent rounded-full animate-spin" />
+        <p className="text-sm text-gray-500">Loading payouts…</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5">
@@ -435,72 +400,46 @@ export default function WalletPage() {
   const storedTxsRef = useRef<WalletTransaction[]>([]);
 
   useEffect(() => {
-    // ── Seed from mock + locally-stored redemptions immediately (no delay) ──
     const stored = loadRedemptions();
     const storedTotal = stored.reduce((s, r) => s + r.points, 0);
-
-    setBalance({
-      ...MOCK_BALANCE,
-      redeemable: Math.max(0, MOCK_BALANCE.redeemable - storedTotal),
-      available:  Math.max(0, MOCK_BALANCE.available  - storedTotal),
-      redeemed:   MOCK_BALANCE.redeemed + storedTotal,
-    });
-
-    // Sort oldest-first so we can compute a correct running balance for each entry
     const sortedStored = [...stored].sort(
       (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
     );
-    // Running balance starts at MOCK_BALANCE.redeemable (pre-session baseline)
-    // and is decremented for each stored redemption in chronological order.
-    let runningBal = MOCK_BALANCE.redeemable;
-    const storedTxs: WalletTransaction[] = sortedStored.map((r) => {
-      runningBal = Math.max(0, runningBal - r.points);
-      return {
-        id:             r.id,
-        walletId:       'w1',
-        userId:         'u1',
-        type:           TransactionType.DEBIT,
-        bucket:         WalletBucket.REDEEMED,
-        amount:         r.points,
-        balanceAfter:   runningBal,
-        description:    r.description,
-        schemeId:       null,
-        invoiceId:      null,
-        reversedById:   null,
-        reversalReason: null,
-        createdAt:      new Date(r.createdAt),
-      };
-    });
 
-    storedTxsRef.current = storedTxs; // capture for async callbacks below
-    setTransactions([...storedTxs, ...MOCK_TRANSACTIONS]);
-    setLoading(false);
+    Promise.all([
+      fetch('/api/wallet').then(r => r.json()).catch(() => null),
+      fetch('/api/wallet/transactions').then(r => r.json()).catch(() => null),
+    ]).then(([walletJson, txJson]) => {
+      // Balance — API returns flat earnedPoints, NOT nested under .balance
+      if (walletJson?.success && walletJson.data?.earnedPoints !== undefined) {
+        setBalance(mapApiBalance(walletJson.data as ApiWalletBalance, storedTotal));
+      }
 
-    // ── Background API fetch — silent update (leaderboard pattern) ──
-    fetch('/api/wallet')
-      .then(r => r.json())
-      .then((json) => {
-        // Guard: API returns flat earnedPoints, NOT nested under .balance
-        if (json.success && json.data?.earnedPoints !== undefined) {
-          const currentStoredTotal = storedTxsRef.current.reduce((s, t) => s + t.amount, 0);
-          setBalance(mapApiBalance(json.data as ApiWalletBalance, currentStoredTotal));
-        }
-      })
-      .catch(() => {});
+      // Build stored-redemption txs using API redeemable as the running baseline
+      const baseline: number = walletJson?.data?.redeemablePoints ?? 0;
+      let runningBal = baseline;
+      const storedTxs: WalletTransaction[] = sortedStored.map((r) => {
+        runningBal = Math.max(0, runningBal - r.points);
+        return {
+          id: r.id, walletId: 'w1', userId: 'u1',
+          type: TransactionType.DEBIT, bucket: WalletBucket.REDEEMED,
+          amount: r.points, balanceAfter: runningBal, description: r.description,
+          schemeId: null, invoiceId: null, reversedById: null, reversalReason: null,
+          createdAt: new Date(r.createdAt),
+        };
+      });
+      storedTxsRef.current = storedTxs;
 
-    fetch('/api/wallet/transactions')
-      .then(r => r.json())
-      .then((json) => {
-        if (json.success && json.data?.transactions) {
-          const apiTxs = (json.data.transactions as ApiWalletTransaction[]).map(mapApiTransaction);
-          // Re-merge stored redemptions — deduplicate by id (server may have
-          // already synced some; avoid duplicates in the statement).
-          const apiIds = new Set(apiTxs.map(t => t.id));
-          const unsynced = storedTxsRef.current.filter(t => !apiIds.has(t.id));
-          setTransactions([...unsynced, ...apiTxs]);
-        }
-      })
-      .catch(() => {});
+      // Transactions — merge API list with any unsynced stored redemptions
+      if (txJson?.success && txJson.data?.transactions) {
+        const apiTxs = (txJson.data.transactions as ApiWalletTransaction[]).map(mapApiTransaction);
+        const apiIds = new Set(apiTxs.map(t => t.id));
+        const unsynced = storedTxs.filter(t => !apiIds.has(t.id));
+        setTransactions([...unsynced, ...apiTxs]);
+      } else {
+        setTransactions(storedTxs);
+      }
+    }).finally(() => setLoading(false));
   }, []);
 
   /* Earliest and latest month in data */
@@ -551,7 +490,7 @@ export default function WalletPage() {
           <h1 className="text-lg font-bold text-gray-900">My Wallet</h1>
           <p className="text-xs text-gray-500 mt-0.5">Incentive payouts for {session.firmName}</p>
         </div>
-        <InrWalletView outletId={session.outletId} />
+        <InrWalletView />
       </div>
     );
   }

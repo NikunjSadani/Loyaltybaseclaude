@@ -100,7 +100,7 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">{config.branding.displayName}</h1>
-              <p className="text-sm text-white/40">{config.internalName} · <code className="font-mono text-xs">{config.slug}.loyaltybase.in</code></p>
+              <p className="text-sm text-white/40">{config.internalName} · <code className="font-mono text-xs">{config.slug}.gifsy.in</code></p>
             </div>
           </div>
         </div>

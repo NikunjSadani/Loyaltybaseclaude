@@ -22,16 +22,16 @@ export const DEFAULT_DEV_SLUG = 'deoleo';
  * Top-level domains / subdomains that are reserved for the platform itself
  * and should NOT be treated as client slugs.
  */
-const PLATFORM_RESERVED = new Set(['www', 'app', 'api', 'admin', 'status', 'mail']);
+const PLATFORM_RESERVED = new Set(['www', 'app', 'api', 'admin', 'status', 'mail', 'platform']);
 
 /**
  * Extracts the tenant slug from an incoming hostname.
  *
  * Examples:
- *   deoleo.loyaltybase.in        → "deoleo"
- *   clientb.app.loyaltybase.in   → "clientb"
- *   loyaltybase.in               → null   (bare domain — platform root)
- *   www.loyaltybase.in           → null   (reserved)
+ *   deoleo.gifsy.in        → "deoleo"
+ *   clientb.app.gifsy.in   → "clientb"
+ *   gifsy.in               → null   (bare domain — platform root)
+ *   www.gifsy.in           → null   (reserved)
  *   localhost                    → DEFAULT_DEV_SLUG
  *   localhost:3000               → DEFAULT_DEV_SLUG
  *   ""                           → DEFAULT_DEV_SLUG
@@ -47,7 +47,7 @@ export function resolveSlugFromHostname(hostname: string): string | null {
 
   const parts = host.split('.');
 
-  // Bare domain (e.g. "loyaltybase.in") — 2 parts or fewer
+  // Bare domain (e.g. "gifsy.in") — 2 parts or fewer
   if (parts.length <= 2) return null;
 
   const subdomain = parts[0];

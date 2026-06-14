@@ -22,7 +22,7 @@ const ROUTES = {
   'platform.gifsy.in': 'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app',
   'deoleo.gifsy.in':   'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app',
   'clientb.gifsy.in':  'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app',
-  'gifsy.in':          'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app',
+  // gifsy.in root is a separate website — not routed through this Worker
 }
 
 export default {

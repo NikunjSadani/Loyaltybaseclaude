@@ -12,20 +12,57 @@ import { Spinner } from '@/components/ui/spinner';
 import {
   type Ticket, type TicketCategory, type TicketPriority, type TicketStatus,
   CATEGORY_LABELS, STATUS_LABELS, PRIORITY_LABELS,
-  getAllTickets, addTicket, getNextTicketNumber,
 } from '@/lib/tickets';
 import { ROLE_NAMES, ROLE_LABELS, getRole, type SalesRole } from '@/lib/sales-role';
 
-/* ─── Outlets (mirrors ledger / catalogue mock) ─────────────────────────────── */
+/* ─── Outlets (from /api/sales/outlets) ─────────────────────────────────────── */
 
 interface Outlet { id: string; name: string; mobile: string; }
-const OUTLETS: Outlet[] = [
-  { id: 'k1', name: 'Kumar General Store', mobile: '9876543210' },
-  { id: 'k2', name: 'Sharma Kirana',       mobile: '9765432109' },
-  { id: 'k3', name: 'Patel Grocery',       mobile: '9654321098' },
-  { id: 'k4', name: 'Singh Supermart',     mobile: '9543210987' },
-  { id: 'k5', name: 'Mehta Provisions',    mobile: '9432109876' },
-];
+
+/* ─── DB ↔ local category / status / priority mappings ─────────────────────── */
+
+const CAT_TO_DB: Record<TicketCategory, string> = {
+  billing: 'PAYOUT', points: 'POINTS', kyc: 'KYC',
+  redemption: 'REDEMPTION', delivery: 'PAYOUT', technical: 'TECHNICAL', other: 'OTHER',
+};
+const CAT_FROM_DB: Record<string, TicketCategory> = {
+  KYC: 'kyc', POINTS: 'points', REDEMPTION: 'redemption',
+  PAYOUT: 'billing', SCHEME: 'other', TECHNICAL: 'technical',
+  ACCOUNT: 'other', OTHER: 'other',
+};
+const STATUS_FROM_DB: Record<string, TicketStatus> = {
+  OPEN: 'open', IN_PROGRESS: 'in_progress', WAITING: 'waiting',
+  RESOLVED: 'resolved', CLOSED: 'closed',
+};
+const PRIO_FROM_DB: Record<string, TicketPriority> = {
+  HIGH: 'high', MEDIUM: 'medium', LOW: 'low',
+};
+
+function mapDbTicket(t: any): Ticket {
+  return {
+    id:              t.id,
+    ticketNumber:    t.ticketNumber,
+    title:           t.subject,
+    description:     t.description,
+    category:        CAT_FROM_DB[t.category]  ?? 'other',
+    priority:        PRIO_FROM_DB[t.priority] ?? 'medium',
+    status:          STATUS_FROM_DB[t.status] ?? 'open',
+    source:          'sales',
+    outletId:        t.id,
+    outletName:      t.createdBy?.name ?? '',
+    raisedByName:    t.createdBy?.name ?? '',
+    salesPersonName: t.createdBy?.name,
+    createdAt:       t.createdAt,
+    updatedAt:       t.updatedAt,
+    messages:        (t.messages ?? []).map((m: any) => ({
+      id:        m.id,
+      from:      'sales' as const,
+      fromName:  m.sender?.name ?? 'Unknown',
+      text:      m.message,
+      createdAt: m.createdAt,
+    })),
+  };
+}
 
 /* ─── Config ────────────────────────────────────────────────────────────────── */
 
@@ -173,6 +210,7 @@ interface NewForm {
 export default function SalesSupportPage() {
   const [role,       setRoleState] = useState<SalesRole>('SO');
   const [tickets,    setTickets]   = useState<Ticket[]>([]);
+  const [outlets,    setOutlets]   = useState<Outlet[]>([]);
   const [loading,    setLoading]   = useState(true);
   const [newOpen,    setNewOpen]   = useState(false);
   const [selected,   setSelected]  = useState<Ticket | null>(null);
@@ -184,63 +222,79 @@ export default function SalesSupportPage() {
 
   useEffect(() => {
     setRoleState(getRole());
-    const t = setTimeout(() => {
-      // Show tickets raised by this sales person (all sources)
-      setTickets(getAllTickets().filter((t) => t.source === 'sales' || t.salesPersonName));
-      setLoading(false);
-    }, 350);
-    return () => clearTimeout(t);
+    const onStorage = () => setRoleState(getRole());
+    window.addEventListener('storage', onStorage);
+
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    const headers = { Authorization: `Bearer ${token}` };
+    Promise.all([
+      fetch('/api/tickets', { headers }).then((r) => r.json()),
+      fetch('/api/sales/outlets', { headers }).then((r) => r.json()),
+    ]).then(([tBody, oBody]) => {
+      if (tBody.success) setTickets((tBody.data.tickets ?? []).map(mapDbTicket));
+      if (oBody.success) setOutlets((oBody.data.outlets ?? []).map((o: any) => ({ id: o.id, name: o.name, mobile: o.mobile ?? '' })));
+    }).catch(() => {}).finally(() => setLoading(false));
+
+    return () => window.removeEventListener('storage', onStorage);
   }, []);
 
   const myName   = `${ROLE_NAMES[role]} (${ROLE_LABELS[role]})`;
-  const filtered = OUTLETS.filter((o) => o.name.toLowerCase().includes(form.outletSearch.toLowerCase()));
+  const filtered = outlets.filter((o) => o.name.toLowerCase().includes(form.outletSearch.toLowerCase()));
 
-  const isSelf      = form.ticketFor === 'self';
-  const canSubmit   = !!form.category && !!form.title.trim() && !!form.description.trim() && (isSelf || !!form.outlet);
+  const isSelf    = form.ticketFor === 'self';
+  const canSubmit = !!form.category && !!form.title.trim() && !!form.description.trim() && (isSelf || !!form.outlet);
   const BLANK_FORM: NewForm = { ticketFor: 'outlet', outletSearch: '', outlet: null, category: '', priority: 'medium', title: '', description: '' };
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
     setSubmitting(true);
-    await new Promise((r) => setTimeout(r, 800));
-
-    const now = new Date().toISOString();
-    const ticket: Ticket = {
-      id:              `t_${Date.now()}`,
-      ticketNumber:    getNextTicketNumber(),
-      title:           form.title.trim(),
-      description:     form.description.trim(),
-      category:        form.category as TicketCategory,
-      priority:        form.priority,
-      status:          'open',
-      source:          'sales',
-      outletId:        isSelf ? 'self' : form.outlet!.id,
-      outletName:      isSelf ? `My Issue · ${myName}` : form.outlet!.name,
-      raisedByName:    myName,
-      salesPersonName: myName,
-      createdAt:       now,
-      updatedAt:       now,
-      messages: [{
-        id: 'm1', from: 'sales', fromName: myName,
-        text: form.description.trim(), createdAt: now,
-      }],
-    };
-
-    addTicket(ticket);
-    setTickets((prev) => [ticket, ...prev]);
-    setForm(BLANK_FORM);
-    setNewOpen(false);
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    const outletPrefix = !isSelf && form.outlet ? `[${form.outlet.name}] ` : '';
+    const outletDesc   = !isSelf && form.outlet ? `Outlet: ${form.outlet.name} (${form.outlet.mobile})\n\n` : '';
+    try {
+      const res = await fetch('/api/tickets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          category:    CAT_TO_DB[form.category as TicketCategory],
+          subject:     `${outletPrefix}${form.title.trim()}`,
+          description: `${outletDesc}${form.description.trim()}`,
+        }),
+      });
+      const body = await res.json();
+      if (body.success) {
+        setTickets((prev) => [mapDbTicket(body.data.ticket), ...prev]);
+        setForm(BLANK_FORM);
+        setNewOpen(false);
+      }
+    } catch {}
     setSubmitting(false);
   };
 
-  const handleReply = (ticketId: string, text: string) => {
-    const now = new Date().toISOString();
-    const updated = tickets.map((t) => {
-      if (t.id !== ticketId) return t;
-      return { ...t, updatedAt: now, messages: [...t.messages, { id: `m_${Date.now()}`, from: 'sales' as const, fromName: myName, text, createdAt: now }] };
-    });
-    setTickets(updated);
-    if (selected?.id === ticketId) setSelected(updated.find((t) => t.id === ticketId) ?? null);
+  const handleSelectTicket = async (ticket: Ticket) => {
+    setSelected(ticket);
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    const res = await fetch(`/api/tickets/${ticket.id}`, { headers: { Authorization: `Bearer ${token}` } });
+    const body = await res.json();
+    if (body.success) setSelected(mapDbTicket(body.data.ticket));
+  };
+
+  const handleReply = async (ticketId: string, text: string) => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    try {
+      await fetch(`/api/tickets/${ticketId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ message: text }),
+      });
+      const res = await fetch(`/api/tickets/${ticketId}`, { headers: { Authorization: `Bearer ${token}` } });
+      const body = await res.json();
+      if (body.success) {
+        const updated = mapDbTicket(body.data.ticket);
+        setTickets((prev) => prev.map((t) => (t.id === ticketId ? updated : t)));
+        if (selected?.id === ticketId) setSelected(updated);
+      }
+    } catch {}
   };
 
   const active = tickets.filter((t) => t.status !== 'resolved' && t.status !== 'closed');
@@ -287,7 +341,7 @@ export default function SalesSupportPage() {
                   {active.map((t) => {
                     const { variant, dot } = STATUS_STYLE[t.status];
                     return (
-                      <button key={t.id} onClick={() => setSelected(t)} className="w-full text-left flex items-start gap-3 py-3.5 hover:bg-gray-50 -mx-1 px-1 rounded-xl transition-colors">
+                      <button key={t.id} onClick={() => handleSelectTicket(t)} className="w-full text-left flex items-start gap-3 py-3.5 hover:bg-gray-50 -mx-1 px-1 rounded-xl transition-colors">
                         <span className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${dot}`} />
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
@@ -327,7 +381,7 @@ export default function SalesSupportPage() {
               <CardContent className="pt-2">
                 <div className="divide-y divide-gray-50">
                   {done.map((t) => (
-                    <button key={t.id} onClick={() => setSelected(t)} className="w-full text-left flex items-start gap-3 py-3 hover:bg-gray-50 -mx-1 px-1 rounded-xl transition-colors opacity-60">
+                    <button key={t.id} onClick={() => handleSelectTicket(t)} className="w-full text-left flex items-start gap-3 py-3 hover:bg-gray-50 -mx-1 px-1 rounded-xl transition-colors opacity-60">
                       <CheckCircle className="h-4 w-4 text-emerald-400 mt-0.5 shrink-0" />
                       <div className="flex-1 min-w-0">
                         <p className="text-sm text-gray-700 truncate">{t.title}</p>

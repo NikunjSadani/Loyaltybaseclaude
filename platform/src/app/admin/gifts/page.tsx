@@ -1,13 +1,13 @@
 'use client';
 
-import React, { useState, useRef, useMemo, useEffect } from 'react';
+import React, { useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import {
   Gift, Plus, Search, Edit2, Trash2, ToggleLeft, ToggleRight,
   Upload, X, Star, Zap, Package, Check, AlertCircle, ImageIcon,
   ChevronDown, RefreshCw, Tag, Settings2, Banknote, Ticket,
   DollarSign, Save, Info,
 } from 'lucide-react';
-import { type GiftCatalogueItem, type VoucherDenominationType, loadGifts, saveGifts } from '@/lib/gifts';
+import { type GiftCatalogueItem, type VoucherDenominationType } from '@/lib/gifts';
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 import type { GifsySettings } from '@/types';
 
@@ -712,13 +712,31 @@ function GifsySettingsPanel() {
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function AdminGiftsPage() {
-  const [gifts, setGifts]         = useState<GiftCatalogueItem[]>(() => loadGifts());
+  const [gifts, setGifts]         = useState<GiftCatalogueItem[]>([]);
   const [search, setSearch]       = useState('');
   const [catFilter, setCatFilter] = useState('All');
   const [avFilter, setAvFilter]   = useState<'all' | 'active' | 'inactive'>('all');
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing]     = useState<GiftCatalogueItem | null>(null);
   const [deleting, setDeleting]   = useState<GiftCatalogueItem | null>(null);
+
+  useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/admin/gift-config', { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((j) => { if (j.success) setGifts(j.data.gifts ?? []); })
+      .catch(() => {});
+  }, []);
+
+  const persistGifts = useCallback((updated: GiftCatalogueItem[]) => {
+    setGifts(updated);
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/admin/gift-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(updated),
+    }).catch(() => {});
+  }, []);
 
   /* ── Derived stats ── */
   const totalGifts    = gifts.length;
@@ -742,30 +760,19 @@ export default function AdminGiftsPage() {
   const openEdit = (g: GiftCatalogueItem) => { setEditing(g); setModalOpen(true); };
 
   const saveGift = (data: FormState) => {
-    setGifts((gs) => {
-      const updated = editing
-        ? gs.map((g) => g.id === editing.id ? { ...editing, ...data } : g)
-        : [{ ...data, id: `g${Date.now()}`, addedDate: new Date().toISOString().slice(0, 10) }, ...gs];
-      saveGifts(updated);
-      return updated;
-    });
+    const updated = editing
+      ? gifts.map((g) => g.id === editing.id ? { ...editing, ...data } : g)
+      : [{ ...data, id: `g${Date.now()}`, addedDate: new Date().toISOString().slice(0, 10) }, ...gifts];
+    persistGifts(updated);
     setModalOpen(false);
   };
 
   const toggleAvailability = (id: string) => {
-    setGifts((gs) => {
-      const updated = gs.map((g) => g.id === id ? { ...g, available: !g.available } : g);
-      saveGifts(updated);
-      return updated;
-    });
+    persistGifts(gifts.map((g) => g.id === id ? { ...g, available: !g.available } : g));
   };
 
   const deleteGift = (id: string) => {
-    setGifts((gs) => {
-      const updated = gs.filter((g) => g.id !== id);
-      saveGifts(updated);
-      return updated;
-    });
+    persistGifts(gifts.filter((g) => g.id !== id));
     setDeleting(null);
   };
 

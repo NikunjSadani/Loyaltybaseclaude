@@ -2,14 +2,13 @@ name = "gifsy-proxy"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = false
 
-# Custom domains are configured in the Cloudflare dashboard after deploying,
-# not in wrangler.toml, so that the nameserver cutover can happen independently.
-# Dashboard path: Workers & Pages → gifsy-proxy → Settings → Triggers → Custom Domains
-#
-# Domains to add:
-#   api.gifsy.in
-#   platform.gifsy.in
-#   deoleo.gifsy.in
-#   clientb.gifsy.in
-#   gifsy.in
+# Route all four subdomains through this worker.
+# zone_name tells Cloudflare which zone owns the domain.
+routes = [
+  { pattern = "api.gifsy.in/*",      zone_name = "gifsy.in" },
+  { pattern = "platform.gifsy.in/*", zone_name = "gifsy.in" },
+  { pattern = "deoleo.gifsy.in/*",   zone_name = "gifsy.in" },
+  { pattern = "clientb.gifsy.in/*",  zone_name = "gifsy.in" },
+]

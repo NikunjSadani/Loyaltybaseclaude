@@ -7,11 +7,11 @@
  *
  * Workflow:
  *  1. Select period + group type (STANDARD or SEPARATE field)
- *  2. Click "Generate Payout File" → downloads xlsx + creates PayoutBatch
+ *  2. Click "Generate Payout File" → POST /api/admin/credits/payout-downloads
+ *     returns binary xlsx + creates CreditPayoutDownload record
  *  3. Gifsy fills UTR numbers in the downloaded file
- *  4. Upload the filled file → preview UTR rows → apply
- *     ↳ On apply, outlets are notified via WhatsApp (notifyPayoutConfirmed)
- *  5. Pending reversal requests (from client admin) shown for approval/rejection
+ *  4. Upload filled file → preview UTR rows → confirm to apply
+ *  5. Pending reversal requests shown for approval/rejection
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
@@ -32,31 +32,8 @@ import {
   ThumbsUp,
   ThumbsDown,
 } from 'lucide-react';
-import { useAdminSession }         from '@/lib/admin-session';
-import { getActiveFields }         from '@/lib/credits-payouts-fields';
-import {
-  createPayoutBatch,
-  generatePayoutFileBuffer,
-  PAYOUT_FILE_HEADERS,
-} from '@/lib/credits-payouts-payout-download';
-import {
-  getAllPayoutBatches,
-  getBankDetail,
-} from '@/lib/credits-payouts-payout-store';
-import { parseUtrUpload, applyUtrResult } from '@/lib/credits-payouts-utr';
-import {
-  approveReversal,
-  rejectReversal,
-  getAllReversals,
-} from '@/lib/credits-payouts-reversal';
-import { notifyPayoutConfirmed }   from '@/lib/credits-payouts-notify';
-import type {
-  CreditField,
-  PayoutBatch,
-  PayoutGroupType,
-  UtrParseResult,
-  ReversalRequest,
-} from '@/types';
+import { useAdminSession } from '@/lib/admin-session';
+import type { UtrParseResult } from '@/types';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -72,16 +49,6 @@ function monthLabel(yyyyMm: string): string {
   return new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
 }
 
-function downloadBuffer(buf: ArrayBuffer, fileName: string) {
-  const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 const STATUS_COLOR: Record<string, string> = {
   OPEN:          'bg-blue-100 text-blue-800',
   PAID:          'bg-emerald-100 text-emerald-800',
@@ -89,7 +56,44 @@ const STATUS_COLOR: Record<string, string> = {
   FAILED:        'bg-red-100 text-red-800',
 };
 
-// ─── Gate wrapper ──────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface CreditField {
+  id:              string;
+  name:            string;
+  isActive:        boolean;
+  isSeparatePayout: boolean;
+}
+
+interface PayoutDownload {
+  id:            string;
+  downloadCode:  string;
+  period:        string;
+  groupType:     string;
+  fieldId?:      string;
+  fieldName?:    string;
+  status:        string;
+  downloadedAt:  string;
+  totalAmountInr: string | number;
+  _count?: { entries: number };
+}
+
+interface Reversal {
+  id:             string;
+  outletId:       string;
+  outletName:     string;
+  fieldName:      string;
+  period:         string;
+  awardType:      string;
+  originalAmount: string | number;
+  requestedAmount: string | number;
+  approvedAmount?: string | number;
+  requestedAt:    string;
+  status:         string;
+  remarks?:       string;
+}
+
+// ─── Gate wrapper ─────────────────────────────────────────────────────────────
 
 export default function PayoutDownloadPage() {
   const session = useAdminSession();
@@ -97,633 +101,570 @@ export default function PayoutDownloadPage() {
   if (session.role !== 'GIFSY_ADMIN') {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-4 text-gray-500">
-        <Lock className="w-10 h-10" />
-        <p className="text-sm font-medium">This section is restricted to Gifsy administrators.</p>
+        <Lock className="w-8 h-8 text-gray-300" />
+        <p className="text-sm font-medium">Gifsy Admin Access Only</p>
+        <p className="text-xs text-gray-400">This page is restricted to Gifsy administrators.</p>
       </div>
     );
   }
 
-  return <PayoutDownloadContent />;
+  return <PayoutPageInner />;
 }
 
-// ─── Main content ──────────────────────────────────────────────────────────────
+// ─── Inner component ──────────────────────────────────────────────────────────
 
-function PayoutDownloadContent() {
+function PayoutPageInner() {
   const session = useAdminSession();
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+  const authHeaders = { Authorization: `Bearer ${token}` };
 
-  // ── Generate form state ────────────────────────────────────────────────────
-  const [period,      setPeriod]     = useState(getPreviousMonth());
-  const [fields,      setFields]     = useState<CreditField[]>([]);
-  const [groupType,   setGroupType]  = useState<PayoutGroupType>('STANDARD');
-  const [sepField,    setSepField]   = useState<string>('');
-  const [generating,  setGenerating] = useState(false);
-  const [openWarning, setOpenWarning] = useState<string | null>(null);
+  const [period,    setPeriod]    = useState(getPreviousMonth());
+  const [groupType, setGroupType] = useState<'STANDARD' | 'SEPARATE'>('STANDARD');
+  const [fields,    setFields]    = useState<CreditField[]>([]);
+  const [fieldId,   setFieldId]   = useState('');
+  const [downloads, setDownloads] = useState<PayoutDownload[]>([]);
+  const [reversals, setReversals] = useState<Reversal[]>([]);
+  const [generating, setGenerating] = useState(false);
+  const [genError,   setGenError]   = useState('');
 
-  // ── Batch list state ───────────────────────────────────────────────────────
-  const [batches,  setBatches]  = useState<PayoutBatch[]>([]);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  // UTR upload state
+  const [utrDownloadId,  setUtrDownloadId]  = useState('');
+  const [utrFile,        setUtrFile]        = useState<File | null>(null);
+  const [utrParsing,     setUtrParsing]     = useState(false);
+  const [utrResult,      setUtrResult]      = useState<UtrParseResult | null>(null);
+  const [utrApplying,    setUtrApplying]    = useState(false);
+  const [utrApplied,     setUtrApplied]     = useState(false);
+  const [utrMsg,         setUtrMsg]         = useState('');
+  const [expandedUtr,    setExpandedUtr]    = useState(false);
 
-  // ── UTR upload state ───────────────────────────────────────────────────────
-  const [utrBatchId,  setUtrBatchId]  = useState<string | null>(null);
-  const [utrFileName, setUtrFileName] = useState('');
-  const [utrDragging, setUtrDragging] = useState(false);
-  const [utrParsing,  setUtrParsing]  = useState(false);
-  const [utrResult,   setUtrResult]   = useState<UtrParseResult | null>(null);
-  const [utrApplied,  setUtrApplied]  = useState(false);
+  // Reversal state
+  const [revAction,  setRevAction]  = useState<{ id: string; action: 'approve' | 'reject' } | null>(null);
+  const [revAmount,  setRevAmount]  = useState('');
+  const [revRemarks, setRevRemarks] = useState('');
+  const [revMsg,     setRevMsg]     = useState('');
+  const [revLoading, setRevLoading] = useState(false);
 
-  // ── Reversal approval state ────────────────────────────────────────────────
-  const [reversals,      setReversals]      = useState<ReversalRequest[]>([]);
-  const [approvalId,     setApprovalId]     = useState<string | null>(null);
-  const [approvalAmt,    setApprovalAmt]    = useState('');
-  const [rejectionId,    setRejectionId]    = useState<string | null>(null);
-  const [rejectionNote,  setRejectionNote]  = useState('');
-  const [revMsg,         setRevMsg]         = useState<{ id: string; type: 'ok' | 'err'; text: string } | null>(null);
+  const utrFileRef = useRef<HTMLInputElement>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  // ─── Load data ───────────────────────────────────────────────────────────────
 
-  function loadAll() {
-    setFields(getActiveFields());
-    setBatches(getAllPayoutBatches().sort((a, b) => b.downloadedAt.localeCompare(a.downloadedAt)));
-    setReversals(getAllReversals().filter((r) => r.status === 'PENDING_GIFSY'));
-  }
+  const loadAll = useCallback(async () => {
+    const [fieldsRes, downloadsRes, reversalsRes] = await Promise.all([
+      fetch('/api/admin/credits/fields?active=true', { headers: authHeaders }).then((r) => r.json()),
+      fetch(`/api/admin/credits/payout-downloads?period=${period}`, { headers: authHeaders }).then((r) => r.json()),
+      fetch('/api/admin/credits/reversals?status=PENDING_GIFSY', { headers: authHeaders }).then((r) => r.json()),
+    ]);
+    if (fieldsRes.success)    setFields(fieldsRes.data);
+    if (downloadsRes.success) setDownloads(downloadsRes.data);
+    if (reversalsRes.success) setReversals(reversalsRes.data);
+  }, [period, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { loadAll(); }, []);
+  useEffect(() => { loadAll(); }, [loadAll]);
 
-  const separateFields = fields.filter((f) => f.isSeparatePayout && f.isActive);
+  const separateFields = fields.filter((f) => f.isSeparatePayout);
 
-  // ── Generate payout file ───────────────────────────────────────────────────
+  // ─── Generate payout file ─────────────────────────────────────────────────
 
-  function handleGenerate() {
+  async function handleGeneratePayoutFile() {
     setGenerating(true);
-    setOpenWarning(null);
+    setGenError('');
     try {
-      const selectedField = fields.find((f) => f.id === sepField);
-      const result = createPayoutBatch({
-        period,
-        groupType,
-        fieldId:      groupType === 'SEPARATE' ? sepField   : undefined,
-        fieldName:    groupType === 'SEPARATE' ? selectedField?.name : undefined,
-        downloadedBy: session.name,
-        fields,
+      const body: Record<string, unknown> = { period, groupType };
+      if (groupType === 'SEPARATE' && fieldId) {
+        const field = fields.find((f) => f.id === fieldId);
+        body.fieldId   = fieldId;
+        body.fieldName = field?.name;
+      }
+
+      const res = await fetch('/api/admin/credits/payout-downloads', {
+        method:  'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body:    JSON.stringify(body),
       });
-      if (result.openWarning) setOpenWarning(result.openWarning);
-      if (result.batch.rows.length === 0) {
-        alert('No pending payout entries found for this period and group. Upload credits first.');
-        setGenerating(false);
+
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({ error: 'Request failed' }));
+        setGenError(json.error ?? `HTTP ${res.status}`);
         return;
       }
-      downloadBuffer(result.buffer, `payout-${period}-${result.batch.id}.xlsx`);
+
+      // Binary response — trigger download
+      const blob     = await res.blob();
+      const url      = URL.createObjectURL(blob);
+      const a        = document.createElement('a');
+      a.href         = url;
+      a.download     = `payout-${period}-${groupType.toLowerCase()}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+
       loadAll();
-    } catch (err) {
-      alert(String(err));
+    } catch (e) {
+      setGenError(String(e));
+    } finally {
+      setGenerating(false);
     }
-    setGenerating(false);
   }
 
-  function handleRedownload(batch: PayoutBatch) {
-    downloadBuffer(generatePayoutFileBuffer(batch), `payout-${batch.period}-${batch.id}.xlsx`);
-  }
+  // ─── UTR Upload ───────────────────────────────────────────────────────────
 
-  // ── UTR upload ─────────────────────────────────────────────────────────────
-
-  function startUtrUpload(batchId: string) {
-    setUtrBatchId(batchId);
-    setUtrFileName('');
-    setUtrResult(null);
-    setUtrApplied(false);
-  }
-
-  async function processUtrFile(file: File) {
-    setUtrFileName(file.name);
+  async function handleUtrFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file || !utrDownloadId) return;
+    setUtrFile(file);
     setUtrParsing(true);
     setUtrResult(null);
-    const buf    = await file.arrayBuffer();
-    const result = parseUtrUpload(buf, { batchId: utrBatchId! });
-    setUtrResult(result);
+    setUtrApplied(false);
+    setUtrMsg('');
+
+    const fd = new FormData();
+    fd.append('file', file);
+
+    const res = await fetch(
+      `/api/admin/credits/payout-downloads/${utrDownloadId}/utr`,
+      { method: 'POST', headers: authHeaders, body: fd },
+    );
+    const json = await res.json();
     setUtrParsing(false);
-  }
 
-  const handleUtrDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setUtrDragging(false);
-    const file = e.dataTransfer.files[0];
-    if (file) processUtrFile(file);
-  }, [utrBatchId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function handleUtrApply() {
-    if (!utrResult || !utrBatchId) return;
-
-    // Snapshot batch rows BEFORE apply (need phone numbers for notifications)
-    const batch = getAllPayoutBatches().find((b) => b.id === utrBatchId);
-
-    applyUtrResult(utrResult, utrBatchId);
-    setUtrApplied(true);
-    loadAll();
-
-    // Gap 1 fix: notify each successfully paid outlet via WhatsApp
-    if (batch) {
-      for (const row of utrResult.rows) {
-        if (row.status === 'OK' && row.success && row.utr) {
-          const batchRow = batch.rows.find((r) => r.outletId === row.outletId);
-          if (batchRow?.phone) {
-            void notifyPayoutConfirmed({
-              phone:      batchRow.phone,
-              outletName: batchRow.outletName,
-              amountInr:  batchRow.amount,
-              utr:        row.utr,
-              period:     batch.period,
-            });
-          }
-        }
-      }
+    if (!json.success) {
+      setUtrMsg(json.error ?? 'Failed to parse UTR file');
+    } else {
+      setUtrResult(json.data.parseResult);
     }
   }
 
-  // ── Reversal approval ──────────────────────────────────────────────────────
+  async function handleApplyUtr() {
+    if (!utrResult?.canProceed || !utrDownloadId || !utrFile) return;
+    setUtrApplying(true);
 
-  function openApproval(rev: ReversalRequest) {
-    setApprovalId(rev.id);
-    setApprovalAmt(String(rev.requestedAmount));
-    setRejectionId(null);
-    setRevMsg(null);
-  }
+    const fd = new FormData();
+    fd.append('file', utrFile);
+    fd.append('apply', 'true');
 
-  function openRejection(rev: ReversalRequest) {
-    setRejectionId(rev.id);
-    setRejectionNote('');
-    setApprovalId(null);
-    setRevMsg(null);
-  }
+    const res  = await fetch(
+      `/api/admin/credits/payout-downloads/${utrDownloadId}/utr`,
+      { method: 'POST', headers: authHeaders, body: fd },
+    );
+    const json = await res.json();
+    setUtrApplying(false);
 
-  function submitApproval() {
-    if (!approvalId) return;
-    try {
-      const updated = approveReversal(approvalId, session.name, Number(approvalAmt));
-      setRevMsg({ id: approvalId, type: 'ok', text: `Reversal ${updated.status === 'PARTIAL' ? 'partially' : 'fully'} approved — ₹${updated.approvedAmount} for ${updated.outletName}.` });
-      setApprovalId(null);
+    if (!json.success) {
+      setUtrMsg(json.error ?? 'Failed to apply UTR results');
+    } else {
+      setUtrApplied(true);
+      setUtrMsg(`Applied: ${json.data.paidCount} paid, ${json.data.failedCount} failed, ${json.data.skippedCount} skipped.`);
       loadAll();
-    } catch (err) {
-      setRevMsg({ id: approvalId, type: 'err', text: String(err) });
     }
   }
 
-  function submitRejection() {
-    if (!rejectionId) return;
-    try {
-      const updated = rejectReversal(rejectionId, session.name, rejectionNote || 'Rejected by Gifsy');
-      setRevMsg({ id: rejectionId, type: 'ok', text: `Reversal rejected for ${updated.outletName}.` });
-      setRejectionId(null);
+  function resetUtrForm() {
+    setUtrDownloadId('');
+    setUtrFile(null);
+    setUtrResult(null);
+    setUtrApplied(false);
+    setUtrMsg('');
+    setExpandedUtr(false);
+    if (utrFileRef.current) utrFileRef.current.value = '';
+  }
+
+  // ─── Reversals ────────────────────────────────────────────────────────────
+
+  async function handleReversalAction() {
+    if (!revAction) return;
+    setRevLoading(true);
+    setRevMsg('');
+
+    const body: Record<string, unknown> = { action: revAction.action };
+    if (revAction.action === 'approve' && revAmount) body.approvedAmount = Number(revAmount);
+    if (revRemarks) body.remarks = revRemarks;
+
+    const res  = await fetch(`/api/admin/credits/reversals/${revAction.id}`, {
+      method:  'PATCH',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    });
+    const json = await res.json();
+    setRevLoading(false);
+
+    if (!json.success) {
+      setRevMsg(json.error ?? 'Failed to process reversal');
+    } else {
+      setRevAction(null);
+      setRevAmount('');
+      setRevRemarks('');
       loadAll();
-    } catch (err) {
-      setRevMsg({ id: rejectionId, type: 'err', text: String(err) });
     }
   }
-
-  // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
-
+    <div className="max-w-4xl mx-auto space-y-8">
       {/* Header */}
       <div className="flex items-center gap-3">
         <Coins className="w-5 h-5 text-[var(--brand-primary)]" />
         <div>
-          <h2 className="text-lg font-bold text-gray-900">Payout Download</h2>
-          <p className="text-xs text-gray-500">Download payout files, upload UTRs, and approve reversal requests</p>
+          <h2 className="text-lg font-bold text-gray-900">Payout Management</h2>
+          <p className="text-xs text-gray-500">Generate payout files, upload UTR results, approve reversals.</p>
         </div>
       </div>
 
-      {/* ── Generate section ──────────────────────────────────────────────── */}
+      {/* ── Section 1: Generate Payout File ─────────────────────────────────── */}
       <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
-        <h3 className="font-semibold text-gray-900 text-sm">Generate Payout File</h3>
+        <h3 className="font-semibold text-gray-900 text-sm flex items-center gap-2">
+          <Download className="w-4 h-4 text-gray-400" />
+          Generate Payout File
+        </h3>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="flex flex-wrap gap-4 items-end">
           {/* Period */}
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">Period</label>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-gray-600">Period</label>
             <input
               type="month"
               value={period}
               onChange={(e) => setPeriod(e.target.value)}
-              max={getPreviousMonth()}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[var(--brand-primary)] focus:outline-none"
+              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30"
             />
           </div>
 
-          {/* Gap 3 fix: clean STANDARD / SEPARATE toggle — not one-per-field */}
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">Payout Group</label>
-            <select
-              value={groupType}
-              onChange={(e) => {
-                setGroupType(e.target.value as PayoutGroupType);
-                setSepField(''); // reset when switching
-              }}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[var(--brand-primary)] focus:outline-none"
-            >
-              <option value="STANDARD">STANDARD — all non-separate fields</option>
-              {separateFields.length > 0 && (
-                <option value="SEPARATE">SEPARATE — single field</option>
-              )}
-            </select>
+          {/* Group type */}
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-gray-600">Group Type</label>
+            <div className="flex gap-2">
+              {(['STANDARD', 'SEPARATE'] as const).map((g) => (
+                <button
+                  key={g}
+                  onClick={() => { setGroupType(g); setFieldId(''); }}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors
+                    ${groupType === g
+                      ? 'bg-[var(--brand-primary)] text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {/* Field selector — only visible when SEPARATE chosen */}
+          {/* Separate field picker */}
           {groupType === 'SEPARATE' && (
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Select Field</label>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-gray-600">Field</label>
               <select
-                value={sepField}
-                onChange={(e) => setSepField(e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[var(--brand-primary)] focus:outline-none"
+                value={fieldId}
+                onChange={(e) => setFieldId(e.target.value)}
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30"
               >
-                <option value="">— select a field —</option>
+                <option value="">Select field…</option>
                 {separateFields.map((f) => (
                   <option key={f.id} value={f.id}>{f.name}</option>
                 ))}
               </select>
             </div>
           )}
-        </div>
 
-        {openWarning && (
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex gap-2 text-xs text-amber-800">
-            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-            {openWarning}
-          </div>
-        )}
-
-        <button
-          onClick={handleGenerate}
-          disabled={generating || (groupType === 'SEPARATE' && !sepField)}
-          className="flex items-center gap-2 px-4 py-2.5 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
-        >
-          <Download className="w-4 h-4" />
-          {generating ? 'Generating…' : 'Generate Payout File'}
-        </button>
-      </div>
-
-      {/* ── Payout batch list ─────────────────────────────────────────────── */}
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
-          <h3 className="font-semibold text-gray-900 text-sm">Payout Batches</h3>
-          <button onClick={loadAll} className="p-1.5 rounded-lg hover:bg-gray-100" title="Refresh">
-            <RefreshCw className="w-3.5 h-3.5 text-gray-500" />
+          <button
+            onClick={handleGeneratePayoutFile}
+            disabled={generating || (groupType === 'SEPARATE' && !fieldId)}
+            className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Download className="w-4 h-4" />
+            {generating ? 'Generating…' : 'Generate & Download'}
           </button>
         </div>
 
-        {batches.length === 0 ? (
-          <div className="px-5 py-8 text-center text-sm text-gray-400">
-            No payout batches yet. Generate one above.
+        {genError && (
+          <div className="flex items-center gap-2 text-xs text-red-700 bg-red-50 rounded-xl px-4 py-3">
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+            {genError}
           </div>
-        ) : (
-          <div className="divide-y divide-gray-100">
-            {batches.map((batch) => (
-              <div key={batch.id}>
-                <div className="px-5 py-3 flex items-center gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <code className="text-xs font-mono text-gray-700">{batch.id}</code>
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLOR[batch.status] ?? 'bg-gray-100 text-gray-700'}`}>
-                        {batch.status}
-                      </span>
-                      {batch.groupType === 'SEPARATE' && (
-                        <span className="px-2 py-0.5 rounded-full text-xs bg-purple-100 text-purple-800">
-                          {batch.fieldName ?? 'Separate'}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      {monthLabel(batch.period)} · ₹{batch.totalAmount.toLocaleString('en-IN')} · {batch.rows.length} outlets
-                      · Downloaded {new Date(batch.downloadedAt).toLocaleDateString('en-IN')}
-                    </p>
+        )}
+
+        {/* Download history */}
+        {downloads.length > 0 && (
+          <div className="border border-gray-100 rounded-xl overflow-hidden">
+            <div className="px-4 py-2 bg-gray-50 border-b border-gray-100">
+              <p className="text-xs font-semibold text-gray-600">Download History — {monthLabel(period)}</p>
+            </div>
+            <div className="divide-y divide-gray-50">
+              {downloads.map((d) => (
+                <div key={d.id} className="flex items-center justify-between px-4 py-3 text-xs">
+                  <div>
+                    <p className="font-mono font-medium text-gray-800">{d.downloadCode}</p>
+                    <p className="text-gray-500">{d.groupType}{d.fieldName ? ` · ${d.fieldName}` : ''}</p>
                   </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => handleRedownload(batch)}
-                      title="Re-download payout file"
-                      className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                    </button>
-
-                    {(batch.status === 'OPEN' || batch.status === 'PARTIALLY_PAID') && (
-                      <button
-                        onClick={() => startUtrUpload(batch.id)}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[var(--brand-primary)] text-white text-xs font-medium hover:opacity-90"
-                      >
-                        <Upload className="w-3 h-3" />
-                        Upload UTR
-                      </button>
-                    )}
-
-                    <button
-                      onClick={() => setExpanded(expanded === batch.id ? null : batch.id)}
-                      className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500"
-                    >
-                      {expanded === batch.id
-                        ? <ChevronUp className="w-3.5 h-3.5" />
-                        : <ChevronDown className="w-3.5 h-3.5" />}
-                    </button>
+                  <div className="flex items-center gap-3">
+                    <span className="text-gray-600">₹{Number(d.totalAmountInr).toLocaleString('en-IN')}</span>
+                    <span className={`px-2 py-0.5 rounded-full font-medium ${STATUS_COLOR[d.status] ?? 'bg-gray-100 text-gray-600'}`}>
+                      {d.status}
+                    </span>
                   </div>
                 </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
 
-                {/* Expanded rows */}
-                {expanded === batch.id && (
-                  <div className="border-t border-gray-100 overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          {['Outlet ID', 'Outlet Name', 'Amount', 'Bank', 'KYC', 'UTR', 'Status'].map((h) => (
-                            <th key={h} className="px-4 py-2 text-left font-medium text-gray-600 whitespace-nowrap">{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-50">
-                        {batch.rows.map((row) => (
-                          <tr key={row.outletId} className={row.isDeactivated ? 'bg-amber-50' : ''}>
-                            <td className="px-4 py-2 font-mono text-gray-700">{row.outletId}</td>
-                            <td className="px-4 py-2 text-gray-700">{row.outletName}</td>
-                            <td className="px-4 py-2 text-right text-gray-700">₹{row.amount.toLocaleString('en-IN')}</td>
-                            <td className="px-4 py-2 text-gray-500">{row.bankName}</td>
-                            <td className="px-4 py-2">
-                              <span className={`px-1.5 py-0.5 rounded text-xs ${row.kycStatus === 'VERIFIED' ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'}`}>
-                                {row.kycStatus}
-                              </span>
-                            </td>
-                            <td className="px-4 py-2 font-mono text-gray-600">{row.utr ?? '—'}</td>
-                            <td className="px-4 py-2">
-                              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                                row.utrStatus === 'PAID'   ? 'bg-emerald-100 text-emerald-700'
-                                : row.utrStatus === 'FAILED' ? 'bg-red-100 text-red-700'
-                                : 'bg-gray-100 text-gray-600'
-                              }`}>
-                                {row.utrStatus}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+      {/* ── Section 2: UTR Upload ────────────────────────────────────────────── */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
+        <h3 className="font-semibold text-gray-900 text-sm flex items-center gap-2">
+          <Upload className="w-4 h-4 text-gray-400" />
+          Upload UTR Results
+        </h3>
+
+        {/* Select download */}
+        <div className="space-y-1">
+          <label className="text-xs font-medium text-gray-600">Select Payout Download</label>
+          <select
+            value={utrDownloadId}
+            onChange={(e) => { setUtrDownloadId(e.target.value); resetUtrForm(); setUtrDownloadId(e.target.value); }}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30 w-full max-w-sm"
+          >
+            <option value="">Select a download batch…</option>
+            {downloads
+              .filter((d) => d.status !== 'PAID')
+              .map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.downloadCode} · {d.groupType}{d.fieldName ? ` / ${d.fieldName}` : ''} · {d.status}
+                </option>
+              ))}
+          </select>
+        </div>
+
+        {utrDownloadId && (
+          <>
+            <div
+              className="border-2 border-dashed border-gray-300 hover:border-gray-400 rounded-xl p-6 text-center cursor-pointer transition-colors"
+              onClick={() => utrFileRef.current?.click()}
+            >
+              <FileSpreadsheet className="w-7 h-7 text-gray-400 mx-auto mb-2" />
+              <p className="text-sm text-gray-600">
+                {utrFile ? utrFile.name : 'Click to upload UTR result file (.xlsx)'}
+              </p>
+              <input
+                ref={utrFileRef}
+                type="file"
+                accept=".xlsx"
+                className="hidden"
+                onChange={handleUtrFileChange}
+              />
+            </div>
+
+            {utrParsing && (
+              <p className="text-xs text-gray-500 animate-pulse">Parsing file…</p>
+            )}
+
+            {utrMsg && !utrResult && (
+              <div className={`text-xs px-4 py-3 rounded-xl ${utrApplied ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+                {utrMsg}
+              </div>
+            )}
+
+            {utrResult && !utrApplied && (
+              <div className="space-y-3">
+                {utrResult.headerError && (
+                  <div className="bg-red-50 text-red-700 text-xs px-4 py-3 rounded-xl">
+                    {utrResult.headerError}
                   </div>
                 )}
+
+                {/* Summary */}
+                <div className="grid grid-cols-4 gap-2">
+                  {[
+                    { label: 'OK',      value: utrResult.summary.ok,          color: 'text-emerald-600' },
+                    { label: 'Errors',  value: utrResult.summary.errors,       color: 'text-red-600' },
+                    { label: 'Skipped', value: utrResult.summary.skipped,      color: 'text-gray-500' },
+                    { label: 'Paid',    value: utrResult.summary.paidCount,    color: 'text-blue-600' },
+                  ].map((c) => (
+                    <div key={c.label} className="bg-gray-50 rounded-xl p-3 text-center">
+                      <p className={`text-lg font-bold ${c.color}`}>{c.value}</p>
+                      <p className="text-xs text-gray-500">{c.label}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Row details toggle */}
+                {utrResult.rows.length > 0 && (
+                  <button
+                    onClick={() => setExpandedUtr((v) => !v)}
+                    className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800"
+                  >
+                    {expandedUtr ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                    {expandedUtr ? 'Hide' : 'Show'} row details
+                  </button>
+                )}
+
+                {expandedUtr && (
+                  <div className="max-h-52 overflow-y-auto border border-gray-100 rounded-xl divide-y divide-gray-50">
+                    {utrResult.rows.map((r, i) => (
+                      <div key={i} className={`flex items-center justify-between px-4 py-2.5 text-xs
+                        ${r.status === 'ERROR' ? 'bg-red-50' : r.status === 'SKIP' ? 'bg-gray-50' : ''}`}
+                      >
+                        <div>
+                          <span className="font-mono text-gray-700">{r.outletId}</span>
+                          {r.utr && <span className="ml-2 text-gray-500">UTR: {r.utr}</span>}
+                          {r.errors.length > 0 && (
+                            <p className="text-red-600 mt-0.5">{r.errors.join(' · ')}</p>
+                          )}
+                        </div>
+                        <span className={`px-2 py-0.5 rounded-full font-medium
+                          ${r.status === 'OK' ? 'bg-emerald-100 text-emerald-700'
+                           : r.status === 'ERROR' ? 'bg-red-100 text-red-700'
+                           : 'bg-gray-100 text-gray-500'}`}>
+                          {r.status}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Apply / Reset */}
+                <div className="flex gap-3">
+                  {utrResult.canProceed && (
+                    <button
+                      onClick={handleApplyUtr}
+                      disabled={utrApplying}
+                      className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40"
+                    >
+                      <BadgeCheck className="w-4 h-4" />
+                      {utrApplying ? 'Applying…' : 'Apply UTR Results'}
+                    </button>
+                  )}
+                  <button
+                    onClick={resetUtrForm}
+                    className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-50"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Reset
+                  </button>
+                </div>
               </div>
-            ))}
-          </div>
+            )}
+
+            {utrApplied && (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 flex items-center gap-3">
+                <CheckCircle className="w-5 h-5 text-emerald-600" />
+                <div>
+                  <p className="text-sm font-semibold text-emerald-800">UTR results applied</p>
+                  <p className="text-xs text-emerald-700 mt-0.5">{utrMsg}</p>
+                </div>
+                <button onClick={resetUtrForm} className="ml-auto text-xs text-emerald-700 hover:underline">
+                  Upload another
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
 
-      {/* ── UTR upload panel ──────────────────────────────────────────────── */}
-      {utrBatchId && (
-        <div className="bg-white rounded-xl border border-blue-200 p-5 space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="font-semibold text-gray-900 text-sm">
-              Upload UTR File —{' '}
-              <code className="font-mono text-[var(--brand-primary)]">{utrBatchId}</code>
-            </h3>
-            <button
-              onClick={() => { setUtrBatchId(null); setUtrResult(null); }}
-              className="text-xs text-gray-400 hover:text-gray-600"
-            >
-              ✕ Close
-            </button>
-          </div>
-
-          {!utrApplied ? (
-            <>
-              <div
-                className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors
-                  ${utrDragging ? 'border-[var(--brand-primary)] bg-[var(--brand-primary)]/5' : 'border-gray-300 hover:border-gray-400'}`}
-                onDragOver={(e) => { e.preventDefault(); setUtrDragging(true); }}
-                onDragLeave={() => setUtrDragging(false)}
-                onDrop={handleUtrDrop}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <FileSpreadsheet className="w-8 h-8 text-gray-400 mx-auto mb-3" />
-                <p className="text-sm text-gray-600 font-medium">
-                  {utrFileName || 'Drop filled payout file here or click to browse'}
-                </p>
-                <p className="text-xs text-gray-400 mt-1">.xlsx only — use the file downloaded from this page</p>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".xlsx"
-                  className="hidden"
-                  onChange={(e) => { const f = e.target.files?.[0]; if (f) processUtrFile(f); }}
-                />
-              </div>
-
-              {utrParsing && (
-                <p className="text-xs text-gray-500 text-center animate-pulse">Parsing file…</p>
-              )}
-
-              {utrResult && (
-                <div className="space-y-3">
-                  {utrResult.headerError ? (
-                    <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex gap-2 text-xs text-red-700">
-                      <XCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                      {utrResult.headerError}
-                    </div>
-                  ) : (
-                    <>
-                      <div className="grid grid-cols-4 gap-2">
-                        {[
-                          { label: 'OK',      value: utrResult.summary.ok,         color: 'text-emerald-600' },
-                          { label: 'Errors',  value: utrResult.summary.errors,      color: 'text-red-600' },
-                          { label: 'Skipped', value: utrResult.summary.skipped,     color: 'text-gray-500' },
-                          { label: 'Paid',    value: utrResult.summary.paidCount,   color: 'text-blue-600' },
-                        ].map((c) => (
-                          <div key={c.label} className="bg-gray-50 rounded-lg p-2.5 text-center">
-                            <p className={`text-lg font-bold ${c.color}`}>{c.value}</p>
-                            <p className="text-xs text-gray-500">{c.label}</p>
-                          </div>
-                        ))}
-                      </div>
-
-                      {utrResult.hasErrors && (
-                        <div className="bg-red-50 border border-red-200 rounded-lg overflow-hidden">
-                          <div className="px-3 py-2 bg-red-100 text-xs font-semibold text-red-800">
-                            <AlertTriangle className="w-3 h-3 inline mr-1" />
-                            {utrResult.summary.errors} error(s) — fix and re-upload
-                          </div>
-                          <div className="max-h-48 overflow-y-auto divide-y divide-red-100">
-                            {utrResult.rows.filter((r) => r.status === 'ERROR').map((r, i) => (
-                              <div key={i} className="px-3 py-2">
-                                <p className="text-xs font-medium text-gray-800">Row {r.rowNum} · {r.outletId}</p>
-                                {r.errors.map((e, j) => <p key={j} className="text-xs text-red-600">• {e}</p>)}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {utrResult.canProceed && (
-                        <button
-                          onClick={handleUtrApply}
-                          className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:opacity-90"
-                        >
-                          <BadgeCheck className="w-4 h-4" />
-                          Apply UTR Results ({utrResult.summary.ok} rows)
-                        </button>
-                      )}
-                    </>
-                  )}
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 text-center space-y-2">
-              <CheckCircle className="w-8 h-8 text-emerald-500 mx-auto" />
-              <p className="font-semibold text-gray-900 text-sm">UTR Results Applied</p>
-              <p className="text-xs text-gray-500">
-                Paid: {utrResult?.summary.paidCount} · Failed: {utrResult?.summary.failedCount} · Skipped: {utrResult?.summary.skipped}
-              </p>
-              <p className="text-xs text-gray-400">Outlets notified via WhatsApp.</p>
-              <button
-                onClick={() => { setUtrBatchId(null); setUtrResult(null); setUtrApplied(false); }}
-                className="text-xs text-[var(--brand-primary)] hover:underline"
-              >
-                Close
-              </button>
-            </div>
+      {/* ── Section 3: Pending Reversals ────────────────────────────────────── */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
+        <h3 className="font-semibold text-gray-900 text-sm flex items-center gap-2">
+          <RotateCcw className="w-4 h-4 text-gray-400" />
+          Pending Reversal Requests
+          {reversals.length > 0 && (
+            <span className="ml-auto bg-amber-100 text-amber-700 text-xs px-2 py-0.5 rounded-full font-medium">
+              {reversals.length}
+            </span>
           )}
-        </div>
-      )}
-
-      {/* ── Gap 2 fix: Pending reversal requests ─────────────────────────── */}
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
-          <h3 className="font-semibold text-gray-900 text-sm flex items-center gap-2">
-            <RotateCcw className="w-4 h-4 text-amber-600" />
-            Pending Reversal Requests
-            {reversals.length > 0 && (
-              <span className="ml-1 px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-800 font-bold">
-                {reversals.length}
-              </span>
-            )}
-          </h3>
-          <button onClick={loadAll} className="p-1.5 rounded-lg hover:bg-gray-100" title="Refresh">
-            <RefreshCw className="w-3.5 h-3.5 text-gray-500" />
-          </button>
-        </div>
+        </h3>
 
         {reversals.length === 0 ? (
-          <div className="px-5 py-6 text-center text-sm text-gray-400">
-            No pending reversal requests.
-          </div>
+          <p className="text-xs text-gray-400 text-center py-4">No pending reversal requests.</p>
         ) : (
-          <div className="divide-y divide-gray-100">
+          <div className="space-y-3">
             {reversals.map((rev) => (
-              <div key={rev.id} className="px-5 py-4 space-y-3">
-                {/* Request summary */}
-                <div className="flex items-start justify-between gap-4">
+              <div key={rev.id} className="border border-amber-200 bg-amber-50 rounded-xl p-4 space-y-3">
+                <div className="flex flex-wrap gap-4 text-xs">
                   <div>
-                    <p className="text-sm font-medium text-gray-900">
-                      {rev.outletName}
-                      <span className="ml-2 text-xs font-normal text-gray-500">{rev.outletId}</span>
-                    </p>
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      {rev.fieldName} · {rev.awardType} · {monthLabel(rev.period)}
-                    </p>
-                    <p className="text-xs text-gray-500">
-                      Requested by <strong>{rev.requestedBy}</strong> on {new Date(rev.requestedAt).toLocaleDateString('en-IN')}
-                      {rev.remarks && <> · "{rev.remarks}"</>}
+                    <p className="text-gray-500">Outlet</p>
+                    <p className="font-medium text-gray-800">{rev.outletName}</p>
+                    <p className="text-gray-400 font-mono">{rev.outletId}</p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Field</p>
+                    <p className="font-medium text-gray-800">{rev.fieldName}</p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Period</p>
+                    <p className="font-medium text-gray-800">{monthLabel(rev.period)}</p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Award</p>
+                    <p className="font-medium text-gray-800">{rev.awardType}</p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Requested Amount</p>
+                    <p className="font-medium text-gray-800">
+                      {rev.awardType === 'PAYOUT'
+                        ? `₹${Number(rev.requestedAmount).toLocaleString('en-IN')}`
+                        : `${Number(rev.requestedAmount).toLocaleString('en-IN')} pts`}
                     </p>
                   </div>
-                  <div className="text-right flex-shrink-0">
-                    <p className="text-sm font-semibold text-gray-900">
-                      {rev.awardType === 'PAYOUT'
-                        ? `₹${rev.requestedAmount.toLocaleString('en-IN')}`
-                        : `${rev.requestedAmount.toLocaleString('en-IN')} pts`}
-                    </p>
-                    <p className="text-xs text-gray-400">
-                      of {rev.awardType === 'PAYOUT'
-                        ? `₹${rev.originalAmount.toLocaleString('en-IN')}`
-                        : `${rev.originalAmount.toLocaleString('en-IN')} pts`} original
-                    </p>
+                  <div>
+                    <p className="text-gray-500">Requested At</p>
+                    <p className="font-medium text-gray-800">{new Date(rev.requestedAt).toLocaleDateString('en-IN')}</p>
                   </div>
                 </div>
 
-                {/* Per-request message */}
-                {revMsg?.id === rev.id && (
-                  <div className={`rounded-lg p-2.5 text-xs ${revMsg.type === 'ok' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
-                    {revMsg.text}
-                  </div>
-                )}
-
-                {/* Approve inline form */}
-                {approvalId === rev.id && (
-                  <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 space-y-2">
-                    <p className="text-xs font-medium text-emerald-800">Approve — enter amount to approve</p>
-                    <div className="flex gap-2">
-                      <input
-                        type="number"
-                        min={1}
-                        max={rev.requestedAmount}
-                        value={approvalAmt}
-                        onChange={(e) => setApprovalAmt(e.target.value)}
-                        className="flex-1 border border-emerald-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
-                      />
-                      <button
-                        onClick={submitApproval}
-                        className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:opacity-90"
-                      >
-                        Confirm
-                      </button>
-                      <button
-                        onClick={() => setApprovalId(null)}
-                        className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-600 hover:bg-gray-50"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Reject inline form */}
-                {rejectionId === rev.id && (
-                  <div className="bg-red-50 border border-red-200 rounded-lg p-3 space-y-2">
-                    <p className="text-xs font-medium text-red-800">Reject — enter reason</p>
-                    <div className="flex gap-2">
+                {revAction?.id === rev.id ? (
+                  <div className="bg-white rounded-xl p-3 space-y-3 border border-gray-200">
+                    <p className="text-xs font-semibold text-gray-800 capitalize">{revAction.action} Reversal</p>
+                    {revAction.action === 'approve' && (
+                      <div className="space-y-1">
+                        <label className="text-xs text-gray-600">Approved Amount (leave blank for full amount)</label>
+                        <input
+                          type="number"
+                          value={revAmount}
+                          onChange={(e) => setRevAmount(e.target.value)}
+                          placeholder={String(Number(rev.requestedAmount))}
+                          max={Number(rev.requestedAmount)}
+                          min={1}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none"
+                        />
+                      </div>
+                    )}
+                    <div className="space-y-1">
+                      <label className="text-xs text-gray-600">Remarks (optional)</label>
                       <input
                         type="text"
-                        value={rejectionNote}
-                        onChange={(e) => setRejectionNote(e.target.value)}
-                        placeholder="Reason for rejection"
-                        className="flex-1 border border-red-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-red-400"
+                        value={revRemarks}
+                        onChange={(e) => setRevRemarks(e.target.value)}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none"
                       />
+                    </div>
+                    {revMsg && <p className="text-xs text-red-600">{revMsg}</p>}
+                    <div className="flex gap-2">
                       <button
-                        onClick={submitRejection}
-                        className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:opacity-90"
+                        onClick={handleReversalAction}
+                        disabled={revLoading}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white rounded-lg disabled:opacity-50
+                          ${revAction.action === 'approve' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-red-600 hover:bg-red-700'}`}
                       >
-                        Confirm
+                        {revLoading ? 'Processing…' : revAction.action === 'approve' ? 'Confirm Approve' : 'Confirm Reject'}
                       </button>
                       <button
-                        onClick={() => setRejectionId(null)}
-                        className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-600 hover:bg-gray-50"
+                        onClick={() => { setRevAction(null); setRevMsg(''); }}
+                        className="px-3 py-1.5 text-xs text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50"
                       >
                         Cancel
                       </button>
                     </div>
                   </div>
-                )}
-
-                {/* Approve / Reject buttons (hidden when inline forms are open) */}
-                {approvalId !== rev.id && rejectionId !== rev.id && !revMsg?.id && (
+                ) : (
                   <div className="flex gap-2">
                     <button
-                      onClick={() => openApproval(rev)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:opacity-90"
+                      onClick={() => { setRevAction({ id: rev.id, action: 'approve' }); setRevAmount(''); setRevRemarks(''); setRevMsg(''); }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs font-medium rounded-lg hover:bg-emerald-700"
                     >
-                      <ThumbsUp className="w-3 h-3" />
+                      <ThumbsUp className="w-3.5 h-3.5" />
                       Approve
                     </button>
                     <button
-                      onClick={() => openRejection(rev)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-medium hover:opacity-90"
+                      onClick={() => { setRevAction({ id: rev.id, action: 'reject' }); setRevAmount(''); setRevRemarks(''); setRevMsg(''); }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-red-100 text-red-700 text-xs font-medium rounded-lg hover:bg-red-200"
                     >
-                      <ThumbsDown className="w-3 h-3" />
+                      <ThumbsDown className="w-3.5 h-3.5" />
                       Reject
                     </button>
                   </div>
@@ -733,7 +674,6 @@ function PayoutDownloadContent() {
           </div>
         )}
       </div>
-
     </div>
   );
 }

@@ -45,16 +45,17 @@ Tests at: `src/lib/__tests__/api-client.test.ts`
 | partner/visibility | DONE | fetches visibility submissions |
 | partner/payouts | DONE | just redirects to /partner/wallet |
 | partner/dashboard | PARTIAL | loads OUTLET_ACHIEVEMENTS mock first, then patches from /api/partner/targets |
-| partner/targets | PARTIAL | same leaderboard pattern as dashboard |
+| partner/targets | DONE | API-first with AbortController; DEMO config fallback on failure |
 | partner/leaderboard | PARTIAL | fetch('/api/leaderboard') with silent mock fallback |
-| partner/wallet | PARTIAL | huge MOCK_BALANCE + MOCK_TRANSACTIONS, has ApiWalletBalance type — needs /api/wallet wiring |
-| partner/rewards/orders | PARTIAL | fetch('/api/rewards/orders') but mock fallback |
-| partner/profile | MOCK | no API call, all hardcoded profile data. Needs GET /api/auth/me or similar |
-| partner/rewards | MOCK | loads from lib/gifts (localStorage), needs GET /api/rewards/catalog |
-| partner/support | STATIC | no data, appears to be a static page (ticket form etc.) — decide if wiring needed |
+| partner/wallet | PARTIAL | points track: API (silent update); INR track: GET /api/partner/payouts built — silent update over MOCK_INR_PAYOUTS |
+| partner/rewards/orders | DONE | fetch('/api/rewards/orders'), API-first |
+| partner/profile | DONE | GET /api/auth/me, API-first |
+| partner/rewards | DONE | GET /api/rewards/catalog; fallback to loadGifts() |
+| partner/support | STATIC | static page, no data layer needed |
 
 ### Partner API Routes Available (backend ready)
 - GET /api/partner/targets — scheme targets for logged-in partner
+- GET /api/partner/payouts — INR payout ledger for logged-in partner (maps PayoutTransaction → PayoutLedgerEntry)
 - GET /api/wallet — wallet balance (flat response, no nesting under .balance)
 - GET /api/wallet/transactions — transaction history
 - GET /api/rewards/catalog — gift catalogue
@@ -83,8 +84,9 @@ Tests at: `src/lib/__tests__/api-client.test.ts`
 | admin/kyc | PARTIAL | mapApiKyc() but falls back to ALL_KYC (12 hardcoded entries) |
 | admin/sales | PARTIAL | GET /api/admin/sales/batches + MOCK_OUTLETS from targets.ts |
 | admin/users/outlets | PARTIAL | fetch + mock mix |
-| admin/banners | MOCK | uses fetchBanners() from lib/banner.ts but page itself has mock state |
-| admin/dashboard | MOCK | BIGGEST GAP — KPI cards, growth metrics, schemes, payouts, territory — ALL hardcoded. Backend: /api/reports/* exists |
+| admin/banners | DONE | uses fetchBanners() from lib/banner.ts, properly API-first |
+| admin/kyc | DONE | GET /api/kyc; dead ALL_KYC constant removed |
+| admin/dashboard | PARTIAL | GET /api/admin/dashboard/kpis built. Real counts overlay hardcoded KPI cards + payout summary. Growth % (MoM/YoY) still hardcoded — needs time-series data |
 | admin/invoices/upload | MOCK | upload flow, has mock state |
 | admin/schemes/[id]/enrollments | MOCK | hardcoded enrollment list |
 | admin/targets | MOCK | SEED_CONFIGS, MOCK_OUTLETS, DEFAULT_PARAMS all hardcoded |
@@ -111,16 +113,16 @@ Tests at: `src/lib/__tests__/api-client.test.ts`
 | sales/kyc/[id]/edit | PARTIAL | GET + PUT /api/kyc/[id] + mock |
 | sales/profile | PARTIAL | fetch + mock mix |
 | sales/visibility | PARTIAL | fetch + mock mix |
-| sales/catalogue | MOCK | uses loadGifts() from localStorage |
-| sales/dashboard | MOCK | hardcoded KPIs |
-| sales/kyc | MOCK | hardcoded KYC list (no fetch) |
-| sales/leaderboard | MOCK | hardcoded leaderboard data |
-| sales/outlets | MOCK | MOCK_OUTLETS from targets.ts |
-| sales/support | MOCK | static/mock tickets |
-| sales/tasks | MOCK | hardcoded task list |
-| sales/team | MOCK | hardcoded team members |
-| sales/team/[id]/outlets | MOCK | hardcoded outlets |
-| sales/wallet | MOCK | same mock wallet data as partner |
+| sales/catalogue | DONE | GET /api/rewards/catalog; fallback to loadGifts() |
+| sales/dashboard | PARTIAL | outlets from GET /api/kyc (location/type not in API); tasks+banners already wired |
+| sales/kyc | DONE | GET /api/kyc; falls back to MOCK_KYC |
+| sales/leaderboard | MOCK | no sales leaderboard API exists |
+| sales/outlets | MOCK | no sales-specific outlets API |
+| sales/support | MOCK | API/local schema mismatch (different category enums) |
+| sales/tasks | PARTIAL | task config + visibility API already wired; outlet list is mock |
+| sales/team | PARTIAL | GET /api/sales/team built (SalesUser hierarchy from DB). Mock stats (kycPending, targetPct) kept — no per-SalesUser stats model |
+| sales/team/[id]/outlets | MOCK | no team hierarchy API |
+| sales/wallet | MOCK | no sales commission model in DB — genuinely blocked |
 | sales/kyc/[id]/ledger | NOT STARTED | shell |
 | sales/team/[id] | NOT STARTED | shell |
 
@@ -132,7 +134,8 @@ Tests at: `src/lib/__tests__/api-client.test.ts`
 |------|--------|-------|
 | gifsy/outlet-types | DONE | API wired |
 | gifsy/users | DONE | GET /api/admin/users |
-| gifsy/* (6 pages) | NOT STARTED | internal admin, low priority |
+| gifsy (client list) | DONE | GET /api/gifsy/clients built — serves CLIENT_REGISTRY as JSON (GIFSY_ADMIN only) |
+| gifsy/* (other pages) | NOT STARTED | internal admin, low priority |
 
 ---
 

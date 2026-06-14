@@ -13,14 +13,11 @@ import {
   Coins,
 } from 'lucide-react';
 import { useAdminSession } from '@/lib/admin-session';
-import { getActiveFields }       from '@/lib/credits-payouts-fields';
-import { generateCreditTemplate, getEligibleOutlets } from '@/lib/credits-payouts-template';
-import { parseCreditUpload }     from '@/lib/credits-payouts-parser';
-import { saveBatch, confirmBatch, newBatchId, isUploadWindowOpen } from '@/lib/credits-payouts-store';
-import { createPayoutEntriesFromBatch }         from '@/lib/credits-payouts-payout-store';
-import { notifyGifsyNewBatch, notifyBatchOutlets } from '@/lib/credits-payouts-notify';
-import { getGifsySettings }      from '@/lib/gifsy-settings';
-import type { CreditField, CreditParseResult, CreditBatch } from '@/types';
+import { generateCreditTemplate } from '@/lib/credits-payouts-template';
+import { parseCreditUpload }      from '@/lib/credits-payouts-parser';
+import { getGifsySettings }       from '@/lib/gifsy-settings';
+import type { CreditField, CreditParseResult } from '@/types';
+import type { TemplateOutlet } from '@/lib/credits-payouts-template';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -46,7 +43,19 @@ function downloadBuffer(buf: ArrayBuffer, fileName: string) {
   URL.revokeObjectURL(url);
 }
 
+function isUploadWindowOpen(cutoffDay: number): boolean {
+  return new Date().getDate() <= cutoffDay;
+}
+
 type Step = 'template' | 'upload' | 'preview' | 'done';
+
+interface SavedBatch {
+  id:             string;
+  batchCode:      string;
+  totalOutlets:   number;
+  totalPoints:    number;
+  totalPayoutInr: number;
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -61,34 +70,43 @@ export default function CreditsPayoutsUploadPage() {
     notifyEmails:    [],
   };
 
-  /** true while we are still within the monthly upload window */
   const uploadWindowOpen = isUploadWindowOpen(cp.monthCutoffDay);
 
   const [step,        setStep]        = useState<Step>('template');
   const [period]                      = useState(getPreviousMonth());
   const [fields,      setFields]      = useState<CreditField[]>([]);
+  const [outlets,     setOutlets]     = useState<TemplateOutlet[]>([]);
   const [fileName,    setFileName]    = useState('');
   const [dragging,    setDragging]    = useState(false);
   const [parsing,     setParsing]     = useState(false);
   const [parseResult, setParseResult] = useState<CreditParseResult | null>(null);
+  const [confirming,  setConfirming]  = useState(false);
   const [saved,       setSaved]       = useState(false);
-  const [savedBatch,  setSavedBatch]  = useState<CreditBatch | null>(null);
+  const [savedBatch,  setSavedBatch]  = useState<SavedBatch | null>(null);
+  const [confirmError, setConfirmError] = useState('');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
 
   useEffect(() => {
-    setFields(getActiveFields());
-  }, []);
+    const headers = { Authorization: `Bearer ${token}` };
+    Promise.all([
+      fetch('/api/admin/credits/fields?active=true', { headers }).then((r) => r.json()),
+      fetch('/api/admin/credits/eligible-outlets',   { headers }).then((r) => r.json()),
+    ]).then(([fieldsRes, outletsRes]) => {
+      if (fieldsRes.success)  setFields(fieldsRes.data);
+      if (outletsRes.success) setOutlets(outletsRes.data);
+    }).catch(() => {});
+  }, [token]);
 
-  // ─── Step 1: Download template ─────────────────────────────────────────────
+  // ─── Step 1: Download template ──────────────────────────────────────────────
 
   function handleDownloadTemplate() {
-    const outlets = getEligibleOutlets();
-    const buf     = generateCreditTemplate(fields, period, outlets);
+    const buf = generateCreditTemplate(fields, period, outlets);
     downloadBuffer(buf, `credits-payouts-${period}-template.xlsx`);
   }
 
-  // ─── Step 2: Upload file ───────────────────────────────────────────────────
+  // ─── Step 2: Upload file ────────────────────────────────────────────────────
 
   async function processFile(file: File) {
     setFileName(file.name);
@@ -96,8 +114,7 @@ export default function CreditsPayoutsUploadPage() {
     setParseResult(null);
 
     const buf    = await file.arrayBuffer();
-    const outlets = getEligibleOutlets();
-    const result  = parseCreditUpload(buf, {
+    const result = parseCreditUpload(buf, {
       fields,
       outlets,
       month:           period,
@@ -120,74 +137,72 @@ export default function CreditsPayoutsUploadPage() {
     setDragging(false);
     const file = e.dataTransfer.files[0];
     if (file) processFile(file);
-  }, [fields, period, cp]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fields, period, outlets, cp]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── Step 3: Confirm ───────────────────────────────────────────────────────
+  // ─── Step 3: Confirm ────────────────────────────────────────────────────────
 
-  function handleConfirm() {
+  async function handleConfirm() {
     if (!parseResult?.canProceed) return;
+    setConfirming(true);
+    setConfirmError('');
 
-    const batchId = newBatchId(period);
-    const batch: CreditBatch = {
-      id:             batchId,
-      period,
-      status:         cp.fourEyesEnabled ? 'PENDING_CONFIRM' : 'CONFIRMED',
-      uploadedBy:     session.name,
-      uploadedAt:     new Date().toISOString(),
-      confirmedAt:    cp.fourEyesEnabled ? undefined : new Date().toISOString(),
-      confirmedBy:    cp.fourEyesEnabled ? undefined : session.name,
-      totalOutlets:   [...new Set(parseResult.rows.filter((r) => r.status === 'OK').map((r) => r.outletId))].length,
-      totalPoints:    parseResult.summary.totalPoints,
-      totalPayoutInr: parseResult.summary.totalPayoutInr,
-      rows:           parseResult.rows,
-    };
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
-    saveBatch(batch);
+    try {
+      // Save batch
+      const okRows = parseResult.rows.filter((r) => r.status === 'OK');
+      const uniqueOutlets = new Set(okRows.map((r) => r.outletId));
 
-    // If 4-eyes not enabled, auto-confirm
-    if (!cp.fourEyesEnabled) {
-      confirmBatch(batchId, session.name);
+      const saveRes = await fetch('/api/admin/credits/batches', {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          period,
+          totalOutlets:   uniqueOutlets.size,
+          totalPoints:    parseResult.summary.totalPoints,
+          totalPayoutInr: parseResult.summary.totalPayoutInr,
+          rows:           parseResult.rows,
+        }),
+      });
+      const saveJson = await saveRes.json();
+      if (!saveJson.success) {
+        setConfirmError(saveJson.error ?? 'Failed to save batch');
+        setConfirming(false);
+        return;
+      }
+
+      const batchId = saveJson.data.id;
+
+      // Confirm (creates payout entries + notifies Gifsy)
+      const confirmRes = await fetch(`/api/admin/credits/batches/${batchId}/confirm`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}` },
+      });
+      const confirmJson = await confirmRes.json();
+      if (!confirmJson.success) {
+        setConfirmError(confirmJson.error ?? 'Failed to confirm batch');
+        setConfirming(false);
+        return;
+      }
+
+      setSavedBatch({
+        id:             saveJson.data.id,
+        batchCode:      saveJson.data.batchCode,
+        totalOutlets:   saveJson.data.totalOutlets,
+        totalPoints:    Number(saveJson.data.totalPoints),
+        totalPayoutInr: Number(saveJson.data.totalPayoutInr),
+      });
+      setSaved(true);
+      setStep('done');
+    } catch (e) {
+      setConfirmError(String(e));
+    } finally {
+      setConfirming(false);
     }
-
-    // Phase 2: create pending payout entries for all PAYOUT-type rows
-    createPayoutEntriesFromBatch(batch);
-
-    // Phase 2: notify Gifsy team of new batch
-    const outlets    = getEligibleOutlets();
-    const outletMap  = new Map(outlets.map((o) => [o.id, o]));
-    const phoneMap:  Record<string, string>  = {};
-    const nameMap:   Record<string, string>  = {};
-    const pointsMap: Record<string, number>  = {};
-    for (const row of parseResult.rows.filter((r) => r.status === 'OK' && r.awardType === 'POINTS')) {
-      const phone = outletMap.get(row.outletId)?.phone;
-      if (phone) phoneMap[row.outletId] = phone;
-      nameMap[row.outletId]   = row.outletName;
-      pointsMap[row.outletId] = (pointsMap[row.outletId] ?? 0) + row.amount;
-    }
-
-    // Fire-and-forget notifications (no await — don't block UI)
-    void notifyBatchOutlets({ phoneMap, pointsMap, period, outletNames: nameMap });
-    void notifyGifsyNewBatch({
-      tenantName:      'Client',
-      period,
-      batchId,
-      totalOutlets:    batch.totalOutlets,
-      totalPoints:     batch.totalPoints,
-      totalPayoutInr:  batch.totalPayoutInr,
-      uploadedBy:      session.name,
-      recipientEmails: cp.notifyEmails ?? [],
-    });
-
-    setSavedBatch(batch);
-    setSaved(true);
-    setStep('done');
   }
 
-  // ─── Download report ────────────────────────────────────────────────────────
+  // ─── Download report ─────────────────────────────────────────────────────────
 
   function handleDownloadReport() {
     if (!parseResult) return;
-    // Build a simple report: OK rows + error rows
     import('xlsx').then((XLSX) => {
       const rows = parseResult.rows.map((r) => ({
         'Outlet ID':   r.outletId,
@@ -213,10 +228,11 @@ export default function CreditsPayoutsUploadPage() {
     setParseResult(null);
     setSaved(false);
     setSavedBatch(null);
+    setConfirmError('');
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
-  // ─── Render ────────────────────────────────────────────────────────────────
+  // ─── Render ─────────────────────────────────────────────────────────────────
 
   const stepLabel = (s: Step, n: number, title: string) => (
     <div className={`flex items-center gap-2 ${step === s ? 'text-[var(--brand-primary)]' : step > s || saved ? 'text-emerald-600' : 'text-gray-400'}`}>
@@ -241,7 +257,6 @@ export default function CreditsPayoutsUploadPage() {
         </div>
       </div>
 
-      {/* Cutoff banner — shown when the upload window for this period has closed */}
       {!uploadWindowOpen && (
         <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
           <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
@@ -250,8 +265,6 @@ export default function CreditsPayoutsUploadPage() {
             <p className="text-xs text-amber-700 mt-0.5">
               The cutoff for <strong>{monthLabel(period)}</strong> was day&nbsp;
               <strong>{cp.monthCutoffDay}</strong> of this month.
-              New uploads for this period are no longer accepted.
-              Contact your Gifsy admin if you need a manual override.
             </p>
           </div>
         </div>
@@ -269,12 +282,12 @@ export default function CreditsPayoutsUploadPage() {
         <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
           <h3 className="font-semibold text-gray-900 text-sm">Step 1 — Download Template</h3>
           <p className="text-xs text-gray-500">
-            The template is pre-populated with {fields.length} active field{fields.length !== 1 ? 's' : ''} for {monthLabel(period)}.
-            Fill in the values and upload below.
+            Template includes {fields.length} active field{fields.length !== 1 ? 's' : ''} for {monthLabel(period)}.
+            Outlets: {outlets.length} eligible.
           </p>
           {fields.length === 0 ? (
             <div className="bg-amber-50 rounded-lg p-4 text-xs text-amber-700">
-              No active fields configured. Please ask your Gifsy admin to set up fields before uploading.
+              No active fields configured. Ask your Gifsy admin to set up fields first.
             </div>
           ) : (
             <button
@@ -331,7 +344,6 @@ export default function CreditsPayoutsUploadPage() {
       {/* Step 3: Preview & Confirm */}
       {step === 'preview' && parseResult && (
         <div className="space-y-4">
-          {/* Header error */}
           {parseResult.headerError && (
             <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-start gap-3">
               <XCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
@@ -342,13 +354,20 @@ export default function CreditsPayoutsUploadPage() {
             </div>
           )}
 
+          {confirmError && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+              <p className="text-sm text-red-700">{confirmError}</p>
+            </div>
+          )}
+
           {/* Summary cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {[
-              { label: 'OK Rows',      value: parseResult.summary.ok,             color: 'text-emerald-600' },
-              { label: 'Skipped',      value: parseResult.summary.skipped,        color: 'text-gray-500' },
-              { label: 'Errors',       value: parseResult.summary.errors,         color: 'text-red-600' },
-              { label: 'Total Pts',    value: parseResult.summary.totalPoints.toLocaleString('en-IN'), color: 'text-blue-600' },
+              { label: 'OK Rows',   value: parseResult.summary.ok,      color: 'text-emerald-600' },
+              { label: 'Skipped',   value: parseResult.summary.skipped,  color: 'text-gray-500' },
+              { label: 'Errors',    value: parseResult.summary.errors,   color: 'text-red-600' },
+              { label: 'Total Pts', value: parseResult.summary.totalPoints.toLocaleString('en-IN'), color: 'text-blue-600' },
             ].map((c) => (
               <div key={c.label} className="bg-white rounded-xl border border-gray-200 p-3 text-center">
                 <p className={`text-xl font-bold ${c.color}`}>{c.value}</p>
@@ -365,7 +384,6 @@ export default function CreditsPayoutsUploadPage() {
             </div>
           )}
 
-          {/* Error rows (first 10) */}
           {parseResult.hasErrors && (
             <div className="bg-white rounded-xl border border-red-200 overflow-hidden">
               <div className="px-4 py-3 bg-red-50 border-b border-red-100">
@@ -392,17 +410,15 @@ export default function CreditsPayoutsUploadPage() {
             </div>
           )}
 
-          {/* Actions */}
           <div className="flex flex-wrap gap-3">
             {parseResult.canProceed && !saved && (
               <button
                 onClick={handleConfirm}
-                disabled={!uploadWindowOpen}
-                title={!uploadWindowOpen ? `Upload window closed (cutoff: day ${cp.monthCutoffDay})` : undefined}
+                disabled={!uploadWindowOpen || confirming}
                 className="flex items-center gap-2 px-4 py-2.5 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <CheckCircle className="w-4 h-4" />
-                {cp.fourEyesEnabled ? 'Submit for Approval' : 'Confirm & Credit'}
+                {confirming ? 'Saving…' : 'Confirm & Credit'}
               </button>
             )}
             <button
@@ -428,11 +444,9 @@ export default function CreditsPayoutsUploadPage() {
         <div className="bg-white rounded-xl border border-emerald-200 p-6 text-center space-y-3">
           <CheckCircle className="w-10 h-10 text-emerald-500 mx-auto" />
           <div>
-            <p className="font-semibold text-gray-900">
-              {cp.fourEyesEnabled ? 'Submitted for approval' : 'Credits confirmed successfully'}
-            </p>
+            <p className="font-semibold text-gray-900">Credits confirmed successfully</p>
             <p className="text-xs text-gray-500 mt-1">
-              Batch ID: <code className="font-mono bg-gray-100 px-1 rounded">{savedBatch.id}</code>
+              Batch: <code className="font-mono bg-gray-100 px-1 rounded">{savedBatch.batchCode}</code>
             </p>
             <p className="text-xs text-gray-500">
               {savedBatch.totalOutlets} outlet{savedBatch.totalOutlets !== 1 ? 's' : ''}

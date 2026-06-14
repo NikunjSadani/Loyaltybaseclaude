@@ -33,53 +33,9 @@ interface OutletMeta {
   redeemed: number;
 }
 
-/* ─── Mock data ──────────────────────────────────────────────────────────────── */
+/* ─── (mock data removed — wired to /api/kyc/[id]/ledger) ─────────────────── */
 
-const OUTLET_MAP: Record<string, string> = { o1: 'k1', o2: 'k2', o3: 'k3', o4: 'k4', o5: 'k5' };
-
-const OUTLET_META: Record<string, OutletMeta> = {
-  k1: { name: 'Kumar General Store', outletCode: 'OUT-MH-2841', mobile: '9876543210', balance: 3_240, lifetime: 8_550, redeemed: 5_310 },
-  k2: { name: 'Sharma Kirana',       outletCode: 'OUT-MH-2842', mobile: '9765432109', balance:   820, lifetime: 1_200, redeemed:   380 },
-  k3: { name: 'Patel Grocery',       outletCode: 'OUT-MH-2843', mobile: '9654321098', balance:   145, lifetime:   600, redeemed:   455 },
-  k4: { name: 'Singh Supermart',     outletCode: 'OUT-MH-2844', mobile: '9543210987', balance: 5_900, lifetime: 12_100,redeemed: 6_200 },
-  k5: { name: 'Mehta Provisions',    outletCode: 'OUT-MH-2845', mobile: '9432109876', balance: 1_060, lifetime: 1_060, redeemed:     0 },
-};
-
-const LEDGER_DATA: Record<string, LedgerEntry[]> = {
-  k1: [
-    { id: 'l1',  date: '2026-05-14', description: 'Invoice #INV-2026-0183 — Volume bonus',    type: 'earn',   points:  +400, balance: 3_240, ref: 'INV-2026-0183', kpiLabel: 'Secondary Sales Target' },
-    { id: 'l2',  date: '2026-05-10', description: 'Visibility display — Andheri outlet',       type: 'earn',   points:  +200, balance: 2_840, ref: 'VIS-0092',       kpiLabel: 'Visibility'             },
-    { id: 'l3',  date: '2026-05-01', description: 'Redeemed — Bluetooth Speaker (2500 pts)',   type: 'redeem', points: -2_500, balance: 2_640, ref: 'RDM-0041' },
-    { id: 'l4',  date: '2026-04-28', description: 'Invoice #INV-2026-0149 — Purchase earn',    type: 'earn',   points: +1_800, balance: 5_140, ref: 'INV-2026-0149', kpiLabel: 'Secondary Sales Target' },
-    { id: 'l5',  date: '2026-04-15', description: 'KYC verification bonus',                    type: 'credit', points:  +500, balance: 3_340 },
-    { id: 'l6',  date: '2026-04-10', description: 'Invoice #INV-2026-0112 — Purchase earn',    type: 'earn',   points:  +900, balance: 2_840, ref: 'INV-2026-0112', kpiLabel: 'Secondary Sales Target' },
-    { id: 'l7',  date: '2026-03-30', description: 'Points on hold — scheme audit',              type: 'hold',   points:  -300, balance: 1_940 },
-    { id: 'l8',  date: '2026-03-28', description: 'Invoice #INV-2026-0098 — Purchase earn',    type: 'earn',   points: +1_200, balance: 2_240, ref: 'INV-2026-0098', kpiLabel: 'Secondary Sales Target' },
-    { id: 'l9',  date: '2026-03-15', description: 'Redeemed — Amazon Voucher ₹500 (500 pts)',  type: 'redeem', points:  -500, balance: 1_040, ref: 'RDM-0029' },
-    { id: 'l10', date: '2026-03-01', description: 'Invoice #INV-2026-0072 — Volume bonus',     type: 'earn',   points:  +600, balance: 1_540, ref: 'INV-2026-0072', kpiLabel: 'Secondary Sales Target' },
-  ],
-  k2: [
-    { id: 'l1', date: '2026-05-10', description: 'Invoice #INV-2026-0177 — Purchase earn',     type: 'earn',   points:  +400, balance:   820, ref: 'INV-2026-0177' },
-    { id: 'l2', date: '2026-04-22', description: 'Invoice #INV-2026-0130 — Purchase earn',     type: 'earn',   points:  +420, balance:   420, ref: 'INV-2026-0130' },
-  ],
-  k3: [
-    { id: 'l1', date: '2026-04-20', description: 'Invoice #INV-2026-0118 — Purchase earn',     type: 'earn',   points:  +300, balance:   145 },
-    { id: 'l2', date: '2026-04-05', description: 'Redeemed — Shopping voucher (150 pts)',       type: 'redeem', points:  -155, balance:  -155, ref: 'RDM-0018' },
-  ],
-  k4: [
-    { id: 'l1', date: '2026-05-12', description: 'Invoice #INV-2026-0180 — Platinum volume',  type: 'earn',   points: +1_500, balance: 5_900, ref: 'INV-2026-0180' },
-    { id: 'l2', date: '2026-05-05', description: 'Redeemed — Smart Watch (3000 pts)',          type: 'redeem', points: -3_000, balance: 4_400, ref: 'RDM-0055' },
-    { id: 'l3', date: '2026-04-30', description: 'Invoice #INV-2026-0162 — Purchase earn',    type: 'earn',   points: +2_200, balance: 7_400, ref: 'INV-2026-0162' },
-    { id: 'l4', date: '2026-04-15', description: 'Invoice #INV-2026-0141 — Quarterly bonus',  type: 'earn',   points: +1_800, balance: 5_200, ref: 'INV-2026-0141' },
-    { id: 'l5', date: '2026-04-01', description: 'Redeemed — Dinner Voucher (500 pts)',        type: 'redeem', points:  -500, balance: 3_400, ref: 'RDM-0044' },
-    { id: 'l6', date: '2026-03-15', description: 'Invoice #INV-2026-0099 — Purchase earn',    type: 'earn',   points: +1_000, balance: 3_900, ref: 'INV-2026-0099' },
-  ],
-  k5: [
-    { id: 'l1', date: '2026-05-14', description: 'Invoice #INV-2026-0185 — Purchase earn',    type: 'earn',   points:  +600, balance: 1_060, ref: 'INV-2026-0185' },
-    { id: 'l2', date: '2026-05-08', description: 'KYC onboarding bonus',                       type: 'credit', points:  +200, balance:   460 },
-    { id: 'l3', date: '2026-05-03', description: 'Invoice #INV-2026-0170 — Purchase earn',    type: 'earn',   points:  +260, balance:   260, ref: 'INV-2026-0170' },
-  ],
-};
+/* (ledger data wired to /api/kyc/[id]/ledger) */
 
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
@@ -133,8 +89,9 @@ function rangeLabel(from: string, to: string): string {
   return fk === tk ? monthLabel(fk) : `${monthLabel(fk)} – ${monthLabel(tk)}`;
 }
 
-const DEFAULT_FROM = '2026-05';
-const DEFAULT_TO   = '2026-05';
+const CURRENT_MONTH = new Date().toISOString().slice(0, 7);
+const DEFAULT_FROM  = CURRENT_MONTH;
+const DEFAULT_TO    = CURRENT_MONTH;
 
 /* ─── Excel download ─────────────────────────────────────────────────────────── */
 
@@ -160,14 +117,14 @@ function downloadLedger(entries: LedgerEntry[], outletName: string, period: stri
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function OutletLedgerPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id }     = use(params);
-  const resolvedId = OUTLET_MAP[id] ?? id;
-  const outlet     = OUTLET_META[resolvedId];
-  const rawEntries = LEDGER_DATA[resolvedId] ?? [];
+  const { id } = use(params);
 
-  const [loading,         setLoading]         = useState(true);
-  const [earnBurnFilter,  setEarnBurnFilter]  = useState<EarnBurnFilter>('all');
-  const [kpiFilter,       setKpiFilter]       = useState('');
+  const [outlet,        setOutlet]        = useState<OutletMeta | null>(null);
+  const [rawEntries,    setRawEntries]    = useState<LedgerEntry[]>([]);
+  const [loading,       setLoading]       = useState(true);
+  const [fetchError,    setFetchError]    = useState('');
+  const [earnBurnFilter, setEarnBurnFilter] = useState<EarnBurnFilter>('all');
+  const [kpiFilter,     setKpiFilter]     = useState('');
 
   /* Date-range state */
   const [fromMonth,   setFromMonth]   = useState(DEFAULT_FROM);
@@ -177,9 +134,30 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
   const [calOpen,     setCalOpen]     = useState(false);
 
   useEffect(() => {
-    const t = setTimeout(() => setLoading(false), 350);
-    return () => clearTimeout(t);
-  }, []);
+    setLoading(true);
+    fetch(`/api/kyc/${id}/ledger`, {
+      headers: { Authorization: `Bearer ${typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : ''}` },
+    })
+      .then((r) => r.json())
+      .then((body) => {
+        if (!body.success) { setFetchError(body.error ?? 'Failed to load'); return; }
+        const { meta, transactions } = body.data;
+        setOutlet(meta);
+        setRawEntries(transactions ?? []);
+        if (transactions?.length) {
+          const dates = transactions.map((t: LedgerEntry) => t.date);
+          const min   = dates.reduce((a: string, b: string) => (a < b ? a : b));
+          const max   = dates.reduce((a: string, b: string) => (a > b ? a : b));
+          const toKey = (d: string) => d.slice(0, 7);
+          setFromMonth(toKey(min));
+          setToMonth(toKey(max));
+          setPendingFrom(toKey(min));
+          setPendingTo(toKey(max));
+        }
+      })
+      .catch(() => setFetchError('Network error'))
+      .finally(() => setLoading(false));
+  }, [id]);
 
   /* Bounds for <input type="month"> */
   const [minMonth, maxMonth] = useMemo(() => {
@@ -216,15 +194,18 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
     setCalOpen(false);
   }
 
-  if (!outlet) {
+  if (!loading && (fetchError || !outlet)) {
     return (
       <div className="flex flex-col items-center justify-center py-20 gap-3">
         <AlertTriangle className="h-10 w-10 text-amber-400" />
-        <p className="text-sm text-gray-500">Outlet not found</p>
+        <p className="text-sm text-gray-500">{fetchError || 'Outlet not found'}</p>
         <Link href="/sales/kyc" className="text-sm text-[var(--brand-primary)] font-medium">← Back</Link>
       </div>
     );
   }
+
+  // Safe after the early-return guard above
+  const o = outlet!;
 
   return (
     <div className="space-y-5 fade-in">
@@ -235,11 +216,11 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
           <ArrowLeft className="h-4 w-4 text-gray-600" />
         </Link>
         <div>
-          <h1 className="text-base font-bold text-gray-900">{outlet.name}</h1>
+          <h1 className="text-base font-bold text-gray-900">{o.name}</h1>
           <div className="flex items-center gap-1.5 mt-0.5">
             <p className="text-xs text-gray-500">Points Ledger</p>
             <span className="text-[10px] font-mono font-semibold text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
-              {outlet.outletCode}
+              {o.outletCode}
             </span>
           </div>
         </div>
@@ -258,21 +239,21 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
               Lifetime Earned
             </p>
             <p className="text-3xl font-extrabold tracking-tight leading-none mt-1 mb-4">
-              {outlet.lifetime.toLocaleString()}
+              {o.lifetime.toLocaleString()}
               <span className="text-base font-normal text-white/40 ml-1.5">pts</span>
             </p>
             <div className="grid grid-cols-2 gap-2">
               <div className="bg-white/10 rounded-xl px-3 py-2.5">
                 <p className="text-[10px] text-white/40 font-medium uppercase tracking-wide">Available</p>
                 <p className="text-lg font-bold text-white mt-0.5">
-                  {outlet.balance.toLocaleString()}
+                  {o.balance.toLocaleString()}
                   <span className="text-xs font-normal text-white/50 ml-1">pts</span>
                 </p>
               </div>
               <div className="bg-white/10 rounded-xl px-3 py-2.5">
                 <p className="text-[10px] text-white/40 font-medium uppercase tracking-wide">Redeemed</p>
                 <p className="text-lg font-bold text-white mt-0.5">
-                  {outlet.redeemed.toLocaleString()}
+                  {o.redeemed.toLocaleString()}
                   <span className="text-xs font-normal text-white/50 ml-1">pts</span>
                 </p>
               </div>
@@ -295,7 +276,7 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
                   {/* Excel download */}
                   {filtered.length > 0 && (
                     <button
-                      onClick={() => downloadLedger(filtered, outlet.name, `${fromMonth}_${toMonth}`)}
+                      onClick={() => downloadLedger(filtered, o.name, `${fromMonth}_${toMonth}`)}
                       title="Download as Excel"
                       className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border border-gray-200 bg-white text-gray-600 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-all"
                     >

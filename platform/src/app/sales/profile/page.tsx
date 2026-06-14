@@ -10,6 +10,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
+import { ROLE_LABELS, type SalesRole } from '@/lib/sales-role';
 
 interface SalesProfile {
   name: string;
@@ -25,19 +26,6 @@ interface SalesProfile {
   visibilitySubmissions: number;
 }
 
-const MOCK_PROFILE: SalesProfile = {
-  name: 'Rajesh Kumar',
-  mobile: '9876543210',
-  email: 'rajesh.kumar@deoleo.com',
-  role: 'Sales Officer',
-  territory: 'Mumbai West',
-  employeeId: 'EMP-2023-0028',
-  reportingManager: 'Priya Mehta (ASM)',
-  joinedDate: '2023-06-10',
-  totalOutlets: 59,
-  kycCompleted: 44,
-  visibilitySubmissions: 95,
-};
 
 interface MenuItemProps {
   icon: React.ReactNode;
@@ -86,12 +74,13 @@ function mapUserToProfile(user: {
   const reportingManager = reportingName
     ? reportingLevel ? `${reportingName} (${reportingLevel})` : reportingName
     : '';
+  const role = ROLE_LABELS[user.role as SalesRole] ?? user.role ?? '';
 
   return {
     name:            user.name,
     mobile:          user.phone ?? '',
     email:           user.email,
-    role:            MOCK_PROFILE.role,   // hierarchyLevel not included in basic /me response; fallback
+    role,
     territory,
     employeeId:      su?.employeeCode ?? '',
     reportingManager,

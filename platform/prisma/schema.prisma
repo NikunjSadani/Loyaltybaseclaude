@@ -2258,3 +2258,159 @@ model OutletSalesRecord {
   @@index([batchId])
   @@map("outlet_sales_records")
 }
+
+// ============================================================
+// MODULE: CREDITS & PAYOUTS (DB-backed)
+// ============================================================
+
+enum CreditBatchStatus {
+  PENDING_CONFIRM
+  CONFIRMED
+  PARTIALLY_REVERSED
+}
+
+enum CreditAwardType {
+  POINTS
+  PAYOUT
+}
+
+enum CreditReversalStatus {
+  PENDING_GIFSY
+  APPROVED
+  PARTIAL
+  REJECTED
+}
+
+enum CreditEntryStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
+}
+
+model CreditField {
+  id               String   @id @default(cuid())
+  clientId         String
+  name             String
+  isActive         Boolean  @default(true)
+  isSeparatePayout Boolean  @default(false)
+  outletTypeAwards Json
+  order            Int
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([clientId, name])
+  @@index([clientId])
+  @@index([isActive])
+  @@map("credit_fields")
+}
+
+model CreditBatch {
+  id             String            @id @default(cuid())
+  clientId       String
+  batchCode      String            @unique
+  period         String
+  status         CreditBatchStatus @default(PENDING_CONFIRM)
+  uploadedBy     String
+  uploadedAt     DateTime          @default(now())
+  confirmedAt    DateTime?
+  confirmedBy    String?
+  totalOutlets   Int               @default(0)
+  totalPoints    Decimal           @default(0) @db.Decimal(15, 2)
+  totalPayoutInr Decimal           @default(0) @db.Decimal(15, 2)
+  rows           Json              @default("[]")
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  payoutEntries CreditPayoutEntry[]
+  reversals     CreditReversal[]
+
+  @@index([clientId])
+  @@index([period])
+  @@index([status])
+  @@map("credit_batches")
+}
+
+model CreditPayoutEntry {
+  id          String            @id @default(cuid())
+  clientId    String
+  batchId     String
+  downloadId  String?
+  outletId    String
+  outletName  String
+  fieldId     String
+  fieldName   String
+  period      String
+  amountInr   Decimal           @db.Decimal(15, 2)
+  narration   String            @default("")
+  status      CreditEntryStatus @default(PENDING)
+  utr         String?
+  paidAt      DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  batch    CreditBatch           @relation(fields: [batchId], references: [id])
+  download CreditPayoutDownload? @relation(fields: [downloadId], references: [id])
+
+  @@index([clientId])
+  @@index([batchId])
+  @@index([outletId])
+  @@index([period])
+  @@index([status])
+  @@map("credit_payout_entries")
+}
+
+model CreditPayoutDownload {
+  id             String   @id @default(cuid())
+  clientId       String
+  downloadCode   String   @unique
+  period         String
+  groupType      String
+  fieldId        String?
+  fieldName      String?
+  status         String   @default("OPEN")
+  downloadedBy   String
+  downloadedAt   DateTime @default(now())
+  totalAmountInr Decimal  @db.Decimal(15, 2)
+  bankSnapshots  Json     @default("[]")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  entries CreditPayoutEntry[]
+
+  @@index([clientId])
+  @@index([period])
+  @@index([status])
+  @@map("credit_payout_downloads")
+}
+
+model CreditReversal {
+  id              String               @id @default(cuid())
+  clientId        String
+  batchId         String
+  outletId        String
+  outletName      String
+  fieldId         String
+  fieldName       String
+  period          String
+  awardType       CreditAwardType
+  originalAmount  Decimal              @db.Decimal(15, 2)
+  requestedAmount Decimal              @db.Decimal(15, 2)
+  approvedAmount  Decimal?             @db.Decimal(15, 2)
+  requestedBy     String
+  requestedAt     DateTime             @default(now())
+  approvedBy      String?
+  approvedAt      DateTime?
+  status          CreditReversalStatus @default(PENDING_GIFSY)
+  remarks         String?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  batch CreditBatch @relation(fields: [batchId], references: [id])
+
+  @@index([clientId])
+  @@index([batchId])
+  @@index([outletId])
+  @@index([status])
+  @@map("credit_reversals")
+}

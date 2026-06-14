@@ -10,8 +10,8 @@ import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus } from '@/types';
 import {
-  OUTLET_ACHIEVEMENTS, MEMBER_TERRITORY, XSR_OUTLETS,
   resolveConfig, pct, pctBg, pctBarColor, DEMO_PERIOD, PERIODS,
+  DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE,
   getPrimaryParam,
   type GeoTargetConfig,
 } from '@/lib/targets';
@@ -28,63 +28,12 @@ interface OutletMeta {
   kycStatus: KYCStatus;
   kycId: string;
   beat: string;
+  district?: string;
+  state?: string;
+  targetPct?: number;
 }
 
-const OUTLET_META: Record<string, OutletMeta> = {
-  o1:  { id: 'o1',  name: 'Kumar General Store', location: 'Andheri W',   type: 'SSS',     kycStatus: KYCStatus.APPROVED, kycId: 'k1', beat: 'Andheri Beat'  },
-  o2:  { id: 'o2',  name: 'Star Kirana',          location: 'Andheri E',   type: 'SSS',     kycStatus: KYCStatus.APPROVED, kycId: 'k2', beat: 'Andheri Beat'  },
-  o3:  { id: 'o3',  name: 'Raj Provisions',        location: 'Chakala',     type: 'WHOLESALER',   kycStatus: KYCStatus.PENDING,  kycId: 'k3', beat: 'Andheri Beat'  },
-  o4:  { id: 'o4',  name: 'Om Supermart',          location: 'Andheri W',   type: 'SSS',     kycStatus: KYCStatus.APPROVED, kycId: 'k4', beat: 'Andheri Beat'  },
-  o5:  { id: 'o5',  name: 'Juhu Mart',             location: 'Juhu',        type: 'SSS',     kycStatus: KYCStatus.APPROVED, kycId: 'k5', beat: 'Juhu Beat'     },
-  o6:  { id: 'o6',  name: 'Beach Provisions',      location: 'JVPD',        type: 'WHOLESALER',   kycStatus: KYCStatus.PENDING,  kycId: 'k1', beat: 'Juhu Beat'     },
-  o7:  { id: 'o7',  name: 'Gulshan Stores',        location: 'Vile Parle',  type: 'SSS',     kycStatus: KYCStatus.REJECTED, kycId: 'k2', beat: 'Juhu Beat'     },
-  o8:  { id: 'o8',  name: 'Versova Daily Needs',   location: 'Versova',     type: 'SSS',     kycStatus: KYCStatus.APPROVED, kycId: 'k3', beat: 'Versova Beat'  },
-  o9:  { id: 'o9',  name: 'Royal Kirana',          location: 'Andheri W',   type: 'SSS',     kycStatus: KYCStatus.APPROVED, kycId: 'k4', beat: 'Versova Beat'  },
-  o10: { id: 'o10', name: 'Four Seasons Mart',     location: 'Lokhandwala', type: 'WHOLESALER',   kycStatus: KYCStatus.PENDING,  kycId: 'k5', beat: 'Versova Beat'  },
-  o11: { id: 'o11', name: 'Nagar General',         location: 'DN Nagar',    type: 'SSS',     kycStatus: KYCStatus.PENDING,  kycId: 'k1', beat: 'DN Nagar Beat' },
-  o12: { id: 'o12', name: 'Sunrise Provisions',    location: 'Amboli',      type: 'WHOLESALER',   kycStatus: KYCStatus.APPROVED, kycId: 'k2', beat: 'DN Nagar Beat' },
-  o13: { id: 'o13', name: 'Regal Stores',          location: 'DN Nagar',    type: 'SUB_STOCKIST', kycStatus: KYCStatus.REJECTED, kycId: 'k3', beat: 'DN Nagar Beat' },
-};
-
-/* ─── Member hierarchy data ─────────────────────────────────────────────────── */
-
-const MEMBER_NAMES: Record<string, { name: string; role: string; territory: string }> = {
-  xsr1: { name: 'Anil Sharma',     role: 'XSR', territory: 'Andheri Beat'  },
-  xsr2: { name: 'Divya Pillai',    role: 'XSR', territory: 'Juhu Beat'     },
-  xsr3: { name: 'Kiran Rao',       role: 'XSR', territory: 'Versova Beat'  },
-  xsr4: { name: 'Meena Joshi',     role: 'XSR', territory: 'DN Nagar Beat' },
-  so1:  { name: 'Rajesh Kumar',    role: 'SO',  territory: 'Mumbai West'   },
-  so2:  { name: 'Nisha Verma',     role: 'SO',  territory: 'Mumbai East'   },
-  so3:  { name: 'Arjun Patil',     role: 'SO',  territory: 'Thane City'    },
-  so4:  { name: 'Sunita Desai',    role: 'SO',  territory: 'Navi Mumbai'   },
-  asm1: { name: 'Priya Mehta',     role: 'ASM', territory: 'Mumbai Zone'   },
-  asm2: { name: 'Rohit Deshpande', role: 'ASM', territory: 'Pune Zone'     },
-  asm3: { name: 'Sonal Agrawal',   role: 'ASM', territory: 'Nashik Zone'   },
-  asm4: { name: 'Vikram Bhosale',  role: 'ASM', territory: 'Nagpur Zone'   },
-  rsm1: { name: 'Suresh Nair',     role: 'RSM', territory: 'Maharashtra'   },
-  zm1:  { name: 'Deepak Gupta',    role: 'ZNM', territory: 'West Zone'     },
-};
-
-/** Direct-report member IDs (manager → [reportIds]) */
-const MEMBER_REPORTS: Record<string, string[]> = {
-  so1:  ['xsr1', 'xsr2', 'xsr3', 'xsr4'],
-  so2:  [],
-  so3:  [],
-  so4:  [],
-  asm1: ['so1', 'so2', 'so3', 'so4'],
-  asm2: [],
-  asm3: [],
-  asm4: [],
-  rsm1: ['asm1', 'asm2', 'asm3', 'asm4'],
-  zm1:  ['rsm1'],
-};
-
-/** Recursively collect outlet IDs for a member's entire tree */
-function collectOutletIds(memberId: string): string[] {
-  if (XSR_OUTLETS[memberId]) return XSR_OUTLETS[memberId];
-  const reports = MEMBER_REPORTS[memberId] ?? [];
-  return reports.flatMap(collectOutletIds);
-}
+/* (member + outlet data wired to /api/sales/team/[memberId] and /api/sales/team/[memberId]/outlets) */
 
 /* ─── KYC badge config ──────────────────────────────────────────────────────── */
 
@@ -135,9 +84,8 @@ export default function MemberOutletsPage() {
   const params   = useParams();
   const memberId = Array.isArray(params.memberId) ? params.memberId[0] : (params.memberId ?? '');
 
-  const member      = MEMBER_NAMES[memberId];
-  const allOutletIds = useMemo(() => collectOutletIds(memberId), [memberId]);
-
+  const [member,     setMember]     = useState<{ name: string; role: string; territory: string } | null>(null);
+  const [allOutlets, setAllOutlets] = useState<OutletMeta[]>([]);
   const [period,     setPeriod]     = useState(DEMO_PERIOD);
   const [loading,    setLoading]    = useState(true);
   const [config,     setConfig]     = useState<GeoTargetConfig | null>(null);
@@ -153,33 +101,41 @@ export default function MemberOutletsPage() {
     return () => window.removeEventListener('resize', update);
   }, []);
 
-  // Resolve config when period changes
+  // Fetch member info + outlets from API
   useEffect(() => {
-    setLoading(true);
-    const territory = MEMBER_TERRITORY[memberId];
-    const t = setTimeout(() => {
-      if (territory) {
-        setConfig(resolveConfig(territory.beat, territory.district, territory.state, period));
+    if (!memberId) return;
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    const headers = { Authorization: `Bearer ${token}` };
+    Promise.all([
+      fetch(`/api/sales/team/${memberId}`, { headers }).then((r) => r.json()),
+      fetch(`/api/sales/team/${memberId}/outlets`, { headers }).then((r) => r.json()),
+    ]).then(([mBody, oBody]) => {
+      if (mBody.success) {
+        const md = mBody.data.member;
+        setMember({ name: md.name, role: md.roleLabel ?? md.role, territory: md.territory });
       }
-      setLoading(false);
-    }, 300);
-    return () => clearTimeout(t);
-  }, [memberId, period]);
+      if (oBody.success) {
+        setAllOutlets(oBody.data.outlets ?? []);
+      }
+    }).catch(() => {}).finally(() => setLoading(false));
+  }, [memberId]);
+
+  // Resolve config when period or outlets change
+  useEffect(() => {
+    const beat     = allOutlets[0]?.beat     ?? DEMO_BEAT;
+    const district = allOutlets[0]?.district ?? DEMO_DISTRICT;
+    const state    = allOutlets[0]?.state    ?? DEMO_STATE;
+    setConfig(resolveConfig(beat, district, state, period));
+  }, [memberId, period, allOutlets]);
 
   const params2 = config?.params ?? [];
   const periodLabel = PERIODS.find((p) => p.value === period)?.label ?? period;
 
   // All beats from this member's outlets
   const allBeats = useMemo(() => {
-    const beats = new Set(allOutletIds.map((id) => OUTLET_META[id]?.beat).filter(Boolean));
+    const beats = new Set(allOutlets.map((o) => o.beat).filter(Boolean));
     return ['ALL', ...Array.from(beats).sort()];
-  }, [allOutletIds]);
-
-  // Resolve outlet objects for this member
-  const allOutlets = useMemo(
-    () => allOutletIds.map((id) => OUTLET_META[id]).filter(Boolean) as OutletMeta[],
-    [allOutletIds],
-  );
+  }, [allOutlets]);
 
   // Apply filters
   const visibleOutlets = useMemo(() => allOutlets.filter((o) => {
@@ -188,16 +144,11 @@ export default function MemberOutletsPage() {
     return matchesType && matchesBeat;
   }), [allOutlets, typeFilter, beatFilter]);
 
-  // Sort: worst-performing approved first, non-KYC last
+  // Sort: worst-performing approved first (use targetPct from API), non-KYC last
   const sortedOutlets = useMemo(() => {
-    const avgPct = (o: OutletMeta) => {
-      if (!params2.length) return 0;
-      const ach = OUTLET_ACHIEVEMENTS[o.id];
-      return params2.reduce((s, p) => s + pct(ach?.achievements[p.id] ?? 0, p.target), 0) / params2.length;
-    };
     const approved = visibleOutlets
       .filter((o) => o.kycStatus === KYCStatus.APPROVED)
-      .sort((a, b) => avgPct(a) - avgPct(b));
+      .sort((a, b) => (a.targetPct ?? 0) - (b.targetPct ?? 0));
     const others = visibleOutlets.filter((o) => o.kycStatus !== KYCStatus.APPROVED);
     return [...approved, ...others];
   }, [visibleOutlets, params2]);
@@ -205,12 +156,12 @@ export default function MemberOutletsPage() {
   const approvedCount = visibleOutlets.filter((o) => o.kycStatus === KYCStatus.APPROVED).length;
   const filteredCount = allOutlets.length - visibleOutlets.length;
 
-  // Show beat filter only for XSR/SO-level members with multiple beats
+  // Show beat filter only when member spans multiple beats
   const showBeatFilter = allBeats.length > 2;
 
   const monthlyPeriods = useMemo(() => PERIODS.filter((p) => !p.value.includes('Q')), []);
 
-  if (!member) {
+  if (!loading && !member) {
     return (
       <div className="flex flex-col items-center justify-center min-h-48 gap-3">
         <AlertTriangle className="h-8 w-8 text-gray-300" />
@@ -236,10 +187,10 @@ export default function MemberOutletsPage() {
         </Link>
         <div className="min-w-0">
           <h1 className="text-lg font-bold text-gray-900 leading-tight truncate">
-            {member.name}&apos;s Outlets
+            {member?.name ?? '…'}&apos;s Outlets
           </h1>
           <p className="text-xs text-gray-400">
-            {member.role} · {member.territory} ·{' '}
+            {member?.role} · {member?.territory} ·{' '}
             <span className="font-medium text-gray-600">{allOutlets.length} outlets</span>
           </p>
         </div>
@@ -347,7 +298,7 @@ export default function MemberOutletsPage() {
             <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
               <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between shrink-0">
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                  {periodLabel} · {member.territory}
+                  {periodLabel} · {member?.territory}
                 </p>
                 <div className="flex items-center gap-1.5 text-xs text-gray-400">
                   <span>{visibleOutlets.length} outlets</span>
@@ -375,10 +326,8 @@ export default function MemberOutletsPage() {
                   <tbody className="divide-y divide-gray-50">
                     {visibleOutlets.map((outlet) => {
                       const isApproved = outlet.kycStatus === KYCStatus.APPROVED;
-                      const ach = OUTLET_ACHIEVEMENTS[outlet.id];
-                      const avgPct = isApproved && params2.length > 0
-                        ? Math.round(params2.reduce((s, p) => s + pct(ach?.achievements[p.id] ?? 0, p.target), 0) / params2.length)
-                        : 0;
+                      const overallPct = outlet.targetPct ?? 0;
+                      const avgPct = isApproved ? overallPct : 0;
                       return (
                         <tr
                           key={outlet.id}
@@ -400,7 +349,7 @@ export default function MemberOutletsPage() {
                             </div>
                           </td>
                           {params2.map((p) => {
-                            const achieved = isApproved ? (ach?.achievements[p.id] ?? 0) : null;
+                            const achieved = isApproved ? Math.round(overallPct * p.target / 100) : null;
                             const pp = achieved !== null ? pct(achieved, p.target) : 0;
                             const fmt = (n: number) => p.unit === '₹L' ? `₹${n}L` : `${n}`;
                             const cellBg = achieved !== null
@@ -453,11 +402,11 @@ export default function MemberOutletsPage() {
             <div className="space-y-3">
               {sortedOutlets.map((outlet) => {
                 const isApproved = outlet.kycStatus === KYCStatus.APPROVED;
-                const ach        = OUTLET_ACHIEVEMENTS[outlet.id];
+                const overallPct = outlet.targetPct ?? 0;
                 const svParam    = getPrimaryParam(params2);
                 const kpiParams  = params2.filter((p) => !p.isPrimary);
 
-                const svAchieved = ach?.achievements[svParam?.id ?? ''] ?? 0;
+                const svAchieved = svParam ? Math.round(overallPct * svParam.target / 100) : 0;
                 const svPct      = svParam ? pct(svAchieved, svParam.target) : 0;
                 const stripClass = isApproved ? paceStrip(svPct, period) : 'bg-gray-100';
 
@@ -490,7 +439,7 @@ export default function MemberOutletsPage() {
                       <>
                         {/* Monthly Target progress bar */}
                         {svParam && (() => {
-                          const achieved = ach?.achievements[svParam.id] ?? 0;
+                          const achieved = Math.round(overallPct * svParam.target / 100);
                           const pp  = pct(achieved, svParam.target);
                           const fmt = (n: number) => svParam.unit === '₹L' ? `₹${n}L` : `${n}`;
                           return (
@@ -516,7 +465,7 @@ export default function MemberOutletsPage() {
                         {kpiParams.length > 0 && (
                           <div className="border-t border-gray-200 px-4 pt-2.5 pb-3 grid grid-cols-2 gap-x-3 gap-y-3">
                             {kpiParams.map((p) => {
-                              const achieved = ach?.achievements[p.id] ?? 0;
+                              const achieved = Math.round(overallPct * p.target / 100);
                               const pp  = pct(achieved, p.target);
                               const fmt = (n: number) => p.unit === '₹L' ? `₹${n}L` : `${n}`;
                               return (

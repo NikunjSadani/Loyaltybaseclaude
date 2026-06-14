@@ -2,7 +2,7 @@
  * Tenant resolution helpers for API routes.
  *
  * The Edge Middleware sets `x-tenant-slug` on every request based on the
- * subdomain (e.g. deoleo.loyaltybase.in → "deoleo").
+ * subdomain (e.g. deoleo.gifsy.in → "deoleo").
  * API routes call getClientIdFromRequest() to scope all DB queries.
  */
 

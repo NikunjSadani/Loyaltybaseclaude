@@ -19,7 +19,6 @@ import {
   DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE,
 } from '@/lib/targets';
 import { type SalesRole, getRole } from '@/lib/sales-role';
-import { api } from '@/lib/api-client';
 import { classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
@@ -55,31 +54,6 @@ interface TaskGroup {
   href:     string;
 }
 
-/* ─── Mock data ──────────────────────────────────────────────────────────────── */
-
-const MOCK_OUTLETS: OutletRow[] = [
-  { id: 'o1', kycId: 'k1', name: 'Kumar General Store', mobile: '9876543210', location: 'Andheri, Mumbai',  type: 'SSS',     kycStatus: KYCStatus.APPROVED,              lastVisit: '2026-05-14' },
-  { id: 'o2', kycId: 'k2', name: 'Sharma Kirana',       mobile: '9765432109', location: 'Borivali, Mumbai', type: 'SSS',     kycStatus: KYCStatus.PENDING,               lastVisit: '2026-05-10', kycSubmittedAt: '2026-05-01' },
-  { id: 'o3', kycId: 'k3', name: 'Patel Grocery',       mobile: '9654321098', location: 'Thane West',       type: 'SSS',     kycStatus: KYCStatus.REJECTED,              lastVisit: '2026-05-08', kycSubmittedAt: '2026-04-20' },
-  { id: 'o4', kycId: 'k4', name: 'Singh Supermart',     mobile: '9543210987', location: 'Malad East',       type: 'WHOLESALER',   kycStatus: KYCStatus.APPROVED,              lastVisit: '2026-05-12' },
-  { id: 'o5', kycId: 'k5', name: 'Mehta Provisions',    mobile: '9432109876', location: 'Kandivali',        type: 'SUB_STOCKIST', kycStatus: KYCStatus.PENDING_GIFSY,                                   },
-  { id: 'o6', kycId: 'k6', name: 'Ravi Traders',        mobile: '9321098765', location: 'Bandra, Mumbai',   type: 'SSS',     kycStatus: KYCStatus.RESUBMISSION_REQUIRED, lastVisit: '2026-04-30', kycSubmittedAt: '2026-04-28' },
-  { id: 'o7', kycId: 'k7', name: 'Suresh Wholesale',    mobile: '9210987654', location: 'Kurla, Mumbai',    type: 'WHOLESALER',   kycStatus: KYCStatus.APPROVED,              lastVisit: '2026-05-01' },
-  { id: 'o8', kycId: 'k8', name: 'Desai Mart',          mobile: '9123456780', location: 'Goregaon, Mumbai', type: 'SSS',     kycStatus: KYCStatus.PENDING,                                         kycSubmittedAt: '2026-05-05' },
-  { id: 'o9', kycId: 'k9', name: 'Verma Stores',        mobile: '9001234567', location: 'Andheri, Mumbai',  type: 'SSS',     kycStatus: KYCStatus.PENDING_SO_APPROVAL,                             kycSubmittedAt: '2026-05-15' },
-];
-
-// Outlets that need Re-KYC (e.g. KYC expired / flagged for re-verification)
-const REKYC_OUTLETS = [
-  { id: 'o7', name: 'Suresh Wholesale',  location: 'Kurla, Mumbai',  reason: 'KYC expired — renewal required', submittedAt: '2026-03-10' },
-  { id: 'o4', name: 'Singh Supermart',   location: 'Malad East',     reason: 'GST number updated — re-verify',  submittedAt: '2026-03-15' },
-];
-
-// Visibility tasks
-const VISIBILITY_TASKS: TaskItem[] = [
-  { id: 'v1', title: 'Kumar General Store', subtitle: 'Display submission overdue — 3 days',         href: '/sales/visibility', priority: 'high',   ageDays: 3 },
-  { id: 'v2', title: 'Mehta Provisions',    subtitle: 'New display cycle started — submit by 31 May', href: '/sales/visibility', priority: 'medium', ageDays: 1 },
-];
 
 /* ─── Age helper ─────────────────────────────────────────────────────────────── */
 
@@ -216,37 +190,30 @@ export default function SalesDashboard() {
   useEffect(() => {
     setRoleState(getRole());
 
-    // Outlets are mock data — set synchronously, no delay needed
-    setOutlets(MOCK_OUTLETS);
     const cp = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
     setTargetConfig(resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, cp));
-
-    // Schemes are localStorage — also synchronous
     setPendingSchemes(getAllPendingSchemes());
 
-    // Async: task config, banners, and outlet list from API
-    interface ApiKycSub {
-      id: string; status: string; createdAt: string;
-      user: { phone: string };
-      partner?: { id: string; businessName: string } | null;
-    }
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    const authHeaders = { Authorization: `Bearer ${token}` };
+
     Promise.all([
       fetchTaskConfig(),
       fetchBanners(),
-      api.get<{ submissions: ApiKycSub[] }>('/api/kyc'),
-    ]).then(([config, { banners }, kycResult]) => {
+      fetch('/api/sales/outlets', { headers: authHeaders }).then((r) => r.json()),
+    ]).then(([config, { banners }, outletResult]) => {
       setTaskConfig(config);
       setSalesBanners(getActiveSalesBanners(banners));
-      if (kycResult.success && kycResult.data.submissions.length > 0) {
-        setOutlets(kycResult.data.submissions.map(s => ({
-          id:             s.partner?.id ?? s.id,
-          kycId:          s.id,
-          name:           s.partner?.businessName ?? '',
-          mobile:         s.user.phone,
-          location:       '',
-          type:           'SSS' as OutletType,
-          kycStatus:      s.status as KYCStatus,
-          kycSubmittedAt: s.createdAt,
+      if (outletResult.success) {
+        setOutlets((outletResult.data.outlets ?? []).map((o: any) => ({
+          id:             o.id,
+          kycId:          o.kycId ?? '',
+          name:           o.name,
+          mobile:         o.mobile,
+          location:       o.location ?? o.city ?? '',
+          type:           (o.type ?? 'SSS') as OutletType,
+          kycStatus:      (o.kycStatus ?? 'NOT_STARTED') as KYCStatus,
+          kycSubmittedAt: o.kycSubmittedAt,
         })));
       }
       setLoading(false);
@@ -300,14 +267,15 @@ export default function SalesDashboard() {
 
     if (isFieldRole) {
       // Re-KYC
-      if (REKYC_OUTLETS.length > 0) {
+      const rekycOutlets = outlets.filter((o) => o.kycStatus === KYCStatus.RE_KYC_REQUIRED);
+      if (rekycOutlets.length > 0) {
         groups.push({
           id: 're_kyc', label: 'Re-KYC Required',
           icon: <RefreshCw className="h-4 w-4 text-purple-600" />,
-          items: REKYC_OUTLETS.map((o) => ({
-            id: o.id, title: o.name, subtitle: o.reason,
-            href: `/sales/kyc/${o.id}`, priority: 'high' as const,
-            ageDays: ageInDays(o.submittedAt),
+          items: rekycOutlets.map((o) => ({
+            id: o.kycId || o.id, title: o.name, subtitle: 'Re-KYC required',
+            href: `/sales/kyc/${o.kycId || o.id}`, priority: 'high' as const,
+            ageDays: ageInDays(o.kycSubmittedAt),
           })),
           accentBg: 'bg-purple-50', accentBorder: 'border-purple-200',
           accentText: 'text-purple-700', badgeBg: 'bg-purple-100',
@@ -378,17 +346,6 @@ export default function SalesDashboard() {
         });
       }
 
-      // Visibility
-      if (VISIBILITY_TASKS.length > 0) {
-        groups.push({
-          id: 'visibility', label: 'Visibility',
-          icon: <FileCheck className="h-4 w-4 text-blue-600" />,
-          items: VISIBILITY_TASKS,
-          accentBg: 'bg-blue-50', accentBorder: 'border-blue-200',
-          accentText: 'text-blue-700', badgeBg: 'bg-blue-100',
-          href: '/sales/tasks',
-        });
-      }
     }
 
     // HO Notifications / Reminders (admin-configurable via Settings → Task Configuration)

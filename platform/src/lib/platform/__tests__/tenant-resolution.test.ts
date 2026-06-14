@@ -16,11 +16,11 @@ import {
 
 describe('resolveSlugFromHostname', () => {
   it('extracts subdomain from a 3-part hostname', () => {
-    expect(resolveSlugFromHostname('deoleo.loyaltybase.in')).toBe('deoleo');
+    expect(resolveSlugFromHostname('deoleo.gifsy.in')).toBe('deoleo');
   });
 
   it('extracts subdomain from a 4-part hostname (www.x.y.z)', () => {
-    expect(resolveSlugFromHostname('clientb.app.loyaltybase.in')).toBe('clientb');
+    expect(resolveSlugFromHostname('clientb.app.gifsy.in')).toBe('clientb');
   });
 
   it('returns the dev default for localhost', () => {
@@ -32,19 +32,19 @@ describe('resolveSlugFromHostname', () => {
   });
 
   it('returns null for the bare platform domain (no subdomain)', () => {
-    expect(resolveSlugFromHostname('loyaltybase.in')).toBeNull();
+    expect(resolveSlugFromHostname('gifsy.in')).toBeNull();
   });
 
   it('returns null for the www root', () => {
-    expect(resolveSlugFromHostname('www.loyaltybase.in')).toBeNull();
+    expect(resolveSlugFromHostname('www.gifsy.in')).toBeNull();
   });
 
   it('returns null for app root (admin platform domain)', () => {
-    expect(resolveSlugFromHostname('app.loyaltybase.in')).toBeNull();
+    expect(resolveSlugFromHostname('app.gifsy.in')).toBeNull();
   });
 
   it('is case-insensitive — normalises to lowercase', () => {
-    expect(resolveSlugFromHostname('DEOLEO.loyaltybase.in')).toBe('deoleo');
+    expect(resolveSlugFromHostname('DEOLEO.gifsy.in')).toBe('deoleo');
   });
 
   it('handles an empty string gracefully', () => {
@@ -78,7 +78,7 @@ describe('resolveClientConfig', () => {
   });
 
   it('full round-trip: hostname → slug → config', () => {
-    const slug = resolveSlugFromHostname('deoleo.loyaltybase.in');
+    const slug = resolveSlugFromHostname('deoleo.gifsy.in');
     const cfg  = resolveClientConfig(slug!);
     expect(cfg!.slug).toBe('deoleo');
     expect(cfg!.branding.primaryColor).toBe('#16a34a');

@@ -1,13 +1,13 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Upload, Download, Plus, Trash2, ChevronDown, ChevronUp,
   CheckCircle2, XCircle, AlertTriangle, FileSpreadsheet,
   ArrowUp, ArrowDown, Settings2, Info,
 } from 'lucide-react';
 import {
-  getTenantKpiDefs, saveTenantKpiDefs, makeKpiId,
+  makeKpiId,
   DEOLEO_DEFAULT_KPIS,
   type TenantKpiDef,
 } from '@/lib/platform/tenant-kpi-config';
@@ -19,8 +19,7 @@ import {
 } from '@/lib/target-excel-upload';
 import {
   buildMonthRange, MOCK_OUTLETS,
-  upsertTargetConfig, getAllTargetConfigs,
-  type NewOutletType,
+  type NewOutletType, type TargetConfig,
 } from '@/lib/targets';
 
 // ── Roles permitted to access this page ──────────────────────────────────────
@@ -53,7 +52,7 @@ function downloadBuffer(buf: ArrayBuffer, filename: string) {
 
 export default function TargetUploadPage() {
   // KPI config
-  const [kpiDefs,             setKpiDefs]            = useState<TenantKpiDef[]>(() => getTenantKpiDefs());
+  const [kpiDefs,             setKpiDefs]            = useState<TenantKpiDef[]>(DEOLEO_DEFAULT_KPIS);
   const [kpiOpen,             setKpiOpen]            = useState(false);
   const [addingKpi,           setAddingKpi]          = useState(false);
   const [newKpiLabel,         setNewKpiLabel]        = useState('');
@@ -73,11 +72,25 @@ export default function TargetUploadPage() {
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
   const [savedConfig, setSavedConfig] = useState(false);
 
+  // ── Load KPI defs from API on mount ───────────────────────────────────
+  useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/admin/kpi-config', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(j => { if (j.success && Array.isArray(j.data.kpiDefs) && j.data.kpiDefs.length > 0) setKpiDefs(j.data.kpiDefs); })
+      .catch(() => {});
+  }, []);
+
   // ── KPI helpers ────────────────────────────────────────────────────────
 
   function saveKpis(defs: TenantKpiDef[]) {
     setKpiDefs(defs);
-    saveTenantKpiDefs(defs);
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/admin/kpi-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(defs),
+    }).catch(() => {});
   }
 
   function toggleKpi(id: string) {
@@ -216,13 +229,20 @@ export default function TargetUploadPage() {
 
   // ── Save ───────────────────────────────────────────────────────────────
 
-  function handleSaveTargets() {
+  async function handleSaveTargets() {
     if (!parseResult || parseResult.summary.updated === 0) return;
-    const now        = new Date().toISOString();
-    const allConfigs = getAllTargetConfigs();
-    const months     = Object.keys(parseResult.targetValues);
-    const existing   = allConfigs.find(c => c.id === 'excel_upload_config');
-    const base = existing ?? {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    const now   = new Date().toISOString();
+    const months = Object.keys(parseResult.targetValues);
+
+    let existing: TargetConfig | undefined;
+    try {
+      const r = await fetch('/api/admin/target-config', { headers: { Authorization: `Bearer ${token}` } });
+      const j = await r.json();
+      if (j.success) existing = (j.data.configs as TargetConfig[]).find(c => c.id === 'excel_upload_config');
+    } catch { /* use undefined */ }
+
+    const base: TargetConfig = existing ?? {
       id: 'excel_upload_config',
       outletType:  'SSS' as NewOutletType,
       geoLevel:    'INDIA' as const,
@@ -236,15 +256,21 @@ export default function TargetUploadPage() {
       kpiNameOverrides: {},
       createdAt: now, updatedAt: now,
     };
-    const merged = {
+    const merged: TargetConfig = {
       ...base,
       months:           Array.from(new Set([...(base.months ?? []), ...months])).sort(),
       targetValues:     { ...(base.targetValues ?? {}),     ...parseResult.targetValues     },
       kpiNameOverrides: { ...(base.kpiNameOverrides ?? {}), ...parseResult.kpiNameOverrides },
       updatedAt: now,
     };
-    upsertTargetConfig(merged);
-    setSavedConfig(true);
+    try {
+      await fetch('/api/admin/target-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(merged),
+      });
+      setSavedConfig(true);
+    } catch { /* ignore */ }
   }
 
   // ── Download report ────────────────────────────────────────────────────

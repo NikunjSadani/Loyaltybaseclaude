@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Plus,
   ToggleRight,
@@ -8,12 +8,7 @@ import {
   Settings2,
   ChevronRight,
 } from 'lucide-react';
-import {
-  getAllFields,
-  createField,
-  deactivateField,
-  reactivateField,
-} from '@/lib/credits-payouts-fields';
+import { useAdminSession } from '@/lib/admin-session';
 import type { CreditField, FieldAwardType } from '@/types';
 
 const OUTLET_TYPES = ['WHOLESALER', 'SSS', 'SUB_STOCKIST', 'SSS_TOT'] as const;
@@ -30,38 +25,64 @@ const AWARD_COLORS: Record<FieldAwardType, string> = {
 };
 
 export default function FieldConfigPage() {
+  const session = useAdminSession();
   const [fields,   setFields]   = useState<CreditField[]>([]);
   const [newName,  setNewName]  = useState('');
   const [newSep,   setNewSep]   = useState(false);
   const [creating, setCreating] = useState(false);
   const [error,    setError]    = useState('');
+  const [loading,  setLoading]  = useState(true);
 
-  useEffect(() => {
-    setFields(getAllFields());
-  }, []);
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
 
-  function refresh() {
-    setFields(getAllFields());
-  }
+  const fetchFields = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/credits/fields', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = await res.json();
+      if (json.success) setFields(json.data);
+    } catch {
+      // silently fail — fields will just be empty
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
 
-  function handleCreate() {
+  useEffect(() => { fetchFields(); }, [fetchFields]);
+
+  async function handleCreate() {
     setError('');
     if (!newName.trim()) { setError('Field name is required.'); return; }
     try {
-      createField(newName.trim(), { isSeparatePayout: newSep });
+      const res = await fetch('/api/admin/credits/fields', {
+        method:  'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName.trim(), isSeparatePayout: newSep }),
+      });
+      const json = await res.json();
+      if (!json.success) { setError(json.error ?? 'Failed to create field'); return; }
       setNewName('');
       setNewSep(false);
       setCreating(false);
-      refresh();
+      fetchFields();
     } catch (e) {
       setError(String(e));
     }
   }
 
-  function handleToggleActive(f: CreditField) {
-    if (f.isActive) deactivateField(f.id);
-    else            reactivateField(f.id);
-    refresh();
+  async function handleToggleActive(f: CreditField) {
+    const action = f.isActive ? 'deactivate' : 'activate';
+    try {
+      await fetch(`/api/admin/credits/fields/${f.id}`, {
+        method:  'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      fetchFields();
+    } catch {
+      // silently fail
+    }
   }
 
   return (
@@ -130,7 +151,11 @@ export default function FieldConfigPage() {
       )}
 
       {/* Field list */}
-      {fields.length === 0 ? (
+      {loading ? (
+        <div className="bg-gray-50 rounded-xl border border-gray-200 p-8 text-center">
+          <p className="text-sm text-gray-500">Loading fields…</p>
+        </div>
+      ) : fields.length === 0 ? (
         <div className="bg-gray-50 rounded-xl border border-dashed border-gray-300 p-8 text-center">
           <p className="text-sm text-gray-500">No fields configured yet. Click "Add Field" to start.</p>
         </div>
@@ -141,12 +166,10 @@ export default function FieldConfigPage() {
               key={f.id}
               className={`flex items-center gap-4 px-5 py-4 ${!f.isActive ? 'opacity-50' : ''}`}
             >
-              {/* Order badge */}
               <span className="w-6 h-6 rounded-full bg-gray-100 text-gray-500 text-xs flex items-center justify-center font-mono flex-shrink-0">
                 {f.order}
               </span>
 
-              {/* Field info */}
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-sm font-medium text-gray-900">{f.name}</span>
@@ -161,10 +184,9 @@ export default function FieldConfigPage() {
                     </span>
                   )}
                 </div>
-                {/* Award type pills per outlet type */}
                 <div className="flex gap-1.5 mt-1.5 flex-wrap">
                   {OUTLET_TYPES.map((ot) => {
-                    const award = (f.outletTypeAwards[ot] ?? 'NA') as FieldAwardType;
+                    const award = ((f.outletTypeAwards as Record<string, string>)[ot] ?? 'NA') as FieldAwardType;
                     return (
                       <span
                         key={ot}
@@ -177,7 +199,6 @@ export default function FieldConfigPage() {
                 </div>
               </div>
 
-              {/* Toggle */}
               <button
                 onClick={() => handleToggleActive(f)}
                 className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-800 transition-colors"
@@ -196,7 +217,6 @@ export default function FieldConfigPage() {
         </div>
       )}
 
-      {/* Info */}
       <p className="text-xs text-gray-400">
         Field order is permanent. Deactivated fields are hidden from templates but preserved in historical records.
       </p>

@@ -50,12 +50,12 @@ describe('A — credits-payouts-template.ts: exports', () => {
     expect(code).toMatch(/export\s+function\s+generateCreditTemplate/);
   });
 
-  it('A2: getEligibleOutlets is exported', () => {
-    expect(code).toMatch(/export\s+function\s+getEligibleOutlets/);
+  it('A2: getEligibleOutlets is NOT exported (removed — API route provides outlets)', () => {
+    expect(code).not.toMatch(/export\s+function\s+getEligibleOutlets/);
   });
 
-  it('A3: imports MOCK_OUTLETS from targets (for demo pre-population)', () => {
-    expect(code).toMatch(/MOCK_OUTLETS/);
+  it('A3: does NOT import MOCK_OUTLETS (outlets come from DB via API)', () => {
+    expect(code).not.toMatch(/MOCK_OUTLETS/);
   });
 
   it('A4: TemplateOutlet interface is defined', () => {
@@ -264,22 +264,4 @@ describe('E — Outlet pre-population', () => {
     expect(String(ws001Row![1])).toBe('Anand Wholesale');
   });
 
-  it('E4: getEligibleOutlets returns non-empty list from MOCK_OUTLETS', async () => {
-    const { getEligibleOutlets } = await import('../credits-payouts-template');
-    const outlets = getEligibleOutlets();
-    expect(outlets.length).toBeGreaterThan(0);
-    expect(outlets[0]).toHaveProperty('id');
-    expect(outlets[0]).toHaveProperty('name');
-    expect(outlets[0]).toHaveProperty('type');
-  });
-
-  it('E5: getEligibleOutlets covers all outlet types', async () => {
-    const { getEligibleOutlets } = await import('../credits-payouts-template');
-    const outlets = getEligibleOutlets();
-    const types   = new Set(outlets.map((o) => o.type));
-    expect(types.has('WHOLESALER')).toBe(true);
-    expect(types.has('SSS')).toBe(true);
-    expect(types.has('SUB_STOCKIST')).toBe(true);
-    expect(types.has('SSS_TOT')).toBe(true);
-  });
 });

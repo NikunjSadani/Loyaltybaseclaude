@@ -10,7 +10,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { Badge } from '@/components/ui/badge';
 import {
   type GeoTargetConfig, type TargetParam,
-  PERIODS, OUTLET_ACHIEVEMENTS,
+  PERIODS,
   resolveConfig, pct, pctBg, pctBarColor,
   DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE,
   getPrimaryParam,
@@ -22,7 +22,6 @@ import { getGifsySettings } from '@/lib/gifsy-settings';
 import {
   fetchOutletVisibilityStatuses,
   VISIBILITY_ELIGIBLE_OUTLET_TYPES,
-  DEMO_VISIBILITY_MAP,
   type VisibilityStatusMap,
 } from '@/lib/visibility-upload';
 
@@ -41,26 +40,10 @@ interface Outlet {
   state:      string;
   type:       OutletType;
   kycStatus:  KYCStatus;
+  targetPct?: number;  // overall achievement % from API
 }
 
-const OUTLETS: Outlet[] = [
-  // Andheri Beat
-  { id: 'o1',  kycId: 'k1', outletCode: 'OUT-MH-2841', name: 'Kumar General Store', location: 'Andheri West',    beat: 'Andheri Beat',  district: 'Mumbai West', state: 'Maharashtra', type: 'SSS',     kycStatus: KYCStatus.APPROVED  },
-  { id: 'o2',  kycId: 'k2', outletCode: 'OUT-MH-2842', name: 'Sharma Kirana',       location: 'Andheri East',    beat: 'Andheri Beat',  district: 'Mumbai West', state: 'Maharashtra', type: 'SSS',     kycStatus: KYCStatus.PENDING   },
-  { id: 'o9',  kycId: 'k1', outletCode: 'OUT-MH-2849', name: 'Andheri Mart',        location: 'Andheri Station', beat: 'Andheri Beat',  district: 'Mumbai West', state: 'Maharashtra', type: 'WHOLESALER',   kycStatus: KYCStatus.APPROVED  },
-  // Juhu Beat
-  { id: 'o3',  kycId: 'k3', outletCode: 'OUT-MH-2843', name: 'Patel Grocery',       location: 'Juhu Scheme',     beat: 'Juhu Beat',     district: 'Mumbai West', state: 'Maharashtra', type: 'SSS',     kycStatus: KYCStatus.REJECTED  },
-  { id: 'o4',  kycId: 'k4', outletCode: 'OUT-MH-2844', name: 'Singh Supermart',     location: 'Vile Parle West', beat: 'Juhu Beat',     district: 'Mumbai West', state: 'Maharashtra', type: 'WHOLESALER',   kycStatus: KYCStatus.APPROVED  },
-  { id: 'o10', kycId: 'k4', outletCode: 'OUT-MH-2850', name: 'Juhu Corner Store',   location: 'Juhu Beach Road', beat: 'Juhu Beat',     district: 'Mumbai West', state: 'Maharashtra', type: 'SSS',     kycStatus: KYCStatus.APPROVED  },
-  // Versova Beat
-  { id: 'o5',  kycId: 'k5', outletCode: 'OUT-MH-2845', name: 'Mehta Provisions',    location: 'Versova Village', beat: 'Versova Beat',  district: 'Mumbai West', state: 'Maharashtra', type: 'SUB_STOCKIST', kycStatus: KYCStatus.SUBMITTED },
-  { id: 'o6',  kycId: 'k1', outletCode: 'OUT-MH-2846', name: 'Versova Traders',     location: 'Four Bungalows',  beat: 'Versova Beat',  district: 'Mumbai West', state: 'Maharashtra', type: 'SSS',     kycStatus: KYCStatus.APPROVED  },
-  { id: 'o11', kycId: 'k4', outletCode: 'OUT-MH-2851', name: 'Madh Island Stores',  location: 'Madh Island',     beat: 'Versova Beat',  district: 'Mumbai West', state: 'Maharashtra', type: 'WHOLESALER',   kycStatus: KYCStatus.APPROVED  },
-  // DN Nagar Beat
-  { id: 'o7',  kycId: 'k2', outletCode: 'OUT-MH-2847', name: 'DN Nagar Mart',       location: 'DN Nagar',        beat: 'DN Nagar Beat', district: 'Mumbai West', state: 'Maharashtra', type: 'SSS',     kycStatus: KYCStatus.APPROVED  },
-  { id: 'o8',  kycId: 'k3', outletCode: 'OUT-MH-2848', name: 'Azad Nagar Grocers',  location: 'Azad Nagar',      beat: 'DN Nagar Beat', district: 'Mumbai West', state: 'Maharashtra', type: 'SUB_STOCKIST', kycStatus: KYCStatus.APPROVED  },
-  { id: 'o12', kycId: 'k5', outletCode: 'OUT-MH-2852', name: 'Gilbert Hill Store',  location: 'Gilbert Hill',    beat: 'DN Nagar Beat', district: 'Mumbai West', state: 'Maharashtra', type: 'SSS',     kycStatus: KYCStatus.PENDING   },
-];
+/* (outlet data wired to /api/sales/outlets) */
 
 const TYPE_FILTERS: { value: OutletType | 'ALL'; label: string }[] = [
   { value: 'ALL',          label: 'All'          },
@@ -141,6 +124,7 @@ const VIS_LABEL: Record<string, string> = {
 
 export default function SalesOutletsPage() {
   const router = useRouter();
+  const [outlets,    setOutlets]    = useState<Outlet[]>([]);
   const [period,     setPeriod]     = useState('2026-05');
   const [loading,    setLoading]    = useState(true);
   const [config,     setConfig]     = useState<GeoTargetConfig | null>(null);
@@ -149,8 +133,7 @@ export default function SalesOutletsPage() {
   const [beatFilter, setBeatFilter] = useState<string>('ALL');
   const [role,       setRoleState]  = useState<SalesRole>('SO');
 
-  // Visibility status map — starts with demo data, overwritten by API in production
-  const [visibilityMap, setVisibilityMap] = useState<VisibilityStatusMap>(DEMO_VISIBILITY_MAP);
+  const [visibilityMap, setVisibilityMap] = useState<VisibilityStatusMap>({});
 
   // Cards on portrait mobile, table on landscape / desktop
   useEffect(() => {
@@ -162,6 +145,11 @@ export default function SalesOutletsPage() {
 
   useEffect(() => {
     setRoleState(getRole());
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/sales/outlets', { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((body) => { if (body.success) setOutlets(body.data.outlets ?? []); })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -174,8 +162,8 @@ export default function SalesOutletsPage() {
 
   // Unique beats sorted alphabetically
   const allBeats = useMemo(
-    () => ['ALL', ...Array.from(new Set(OUTLETS.map((o) => o.beat))).sort()],
-    [],
+    () => ['ALL', ...Array.from(new Set(outlets.map((o) => o.beat))).sort()],
+    [outlets],
   );
 
   // Monthly periods only (no quarters)
@@ -187,48 +175,44 @@ export default function SalesOutletsPage() {
 
   useEffect(() => {
     setLoading(true);
+    const beat     = outlets[0]?.beat     ?? DEMO_BEAT;
+    const district = outlets[0]?.district ?? DEMO_DISTRICT;
+    const state    = outlets[0]?.state    ?? DEMO_STATE;
     const t = setTimeout(() => {
-      setConfig(resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, period));
+      setConfig(resolveConfig(beat, district, state, period));
       setLoading(false);
     }, 300);
     return () => clearTimeout(t);
-  }, [period]);
+  }, [period, outlets]);
 
   // Fetch visibility statuses for the selected month (RETAILER + MT outlets only)
   useEffect(() => {
-    const eligibleCodes = OUTLETS
+    const eligibleCodes = outlets
       .filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type))
       .map((o) => o.outletCode);
     if (eligibleCodes.length === 0) return;
     fetchOutletVisibilityStatuses(eligibleCodes, period)
       .then((map) => {
-        // Merge: API data takes precedence; demo data fills any gaps
         if (Object.keys(map).length > 0) {
-          setVisibilityMap({ ...DEMO_VISIBILITY_MAP, ...map });
+          setVisibilityMap(map);
         }
-        // If API returns empty (dev/demo mode), keep DEMO_VISIBILITY_MAP as-is
       });
-  }, [period]);
+  }, [period, outlets]);
 
   const params      = config?.params ?? [];
   const periodLabel = PERIODS.find((p) => p.value === period)?.label ?? period;
 
-  const visibleOutlets = useMemo(() => OUTLETS.filter((o) => {
+  const visibleOutlets = useMemo(() => outlets.filter((o) => {
     const matchesType = typeFilter === 'ALL' || o.type === typeFilter;
     const matchesBeat = beatFilter === 'ALL' || o.beat === beatFilter;
     return matchesType && matchesBeat;
-  }), [typeFilter, beatFilter]);
+  }), [outlets, typeFilter, beatFilter]);
 
   // Worst-performing approved outlets first (actionable), non-KYC at the bottom
   const sortedVisibleOutlets = useMemo(() => {
-    const avgPct = (o: Outlet) => {
-      if (!params.length) return 0;
-      const ach = OUTLET_ACHIEVEMENTS[o.kycId];
-      return params.reduce((s, p) => s + pct(ach?.achievements[p.id] ?? 0, p.target), 0) / params.length;
-    };
     const approved = visibleOutlets
       .filter((o) => o.kycStatus === KYCStatus.APPROVED)
-      .sort((a, b) => avgPct(a) - avgPct(b));
+      .sort((a, b) => (a.targetPct ?? 0) - (b.targetPct ?? 0));
     const others = visibleOutlets.filter((o) => o.kycStatus !== KYCStatus.APPROVED);
     return [...approved, ...others];
   }, [visibleOutlets, params]);
@@ -243,9 +227,11 @@ export default function SalesOutletsPage() {
     visibleOutlets
       .filter((o) => o.kycStatus === KYCStatus.APPROVED)
       .forEach((o) => {
-        const ach = OUTLET_ACHIEVEMENTS[o.kycId];
+        // Use targetPct (overall %) from API to derive a per-param achieved value.
+        // Individual KPI breakdowns are not yet returned by the API.
+        const overallPct = o.targetPct ?? 0;
         params.forEach((p) => {
-          totals[p.id].achieved += ach?.achievements[p.id] ?? 0;
+          totals[p.id].achieved += Math.round(overallPct * p.target / 100);
           totals[p.id].target   += p.target;
         });
       });
@@ -253,7 +239,7 @@ export default function SalesOutletsPage() {
   }, [params, visibleOutlets]);
 
   const approvedCount  = visibleOutlets.filter((o) => o.kycStatus === KYCStatus.APPROVED).length;
-  const filteredCount  = OUTLETS.length - visibleOutlets.length;
+  const filteredCount  = outlets.length - visibleOutlets.length;
 
   return (
     <div className="space-y-2.5 fade-in">
@@ -262,7 +248,7 @@ export default function SalesOutletsPage() {
         <h1 className="text-xl font-bold text-gray-900">
           Outlets
           <span className="text-base font-normal text-gray-400 ml-1.5">
-            ({visibleOutlets.length}/{OUTLETS.length})
+            ({visibleOutlets.length}/{outlets.length})
           </span>
         </h1>
         <div className="flex bg-gray-100 rounded-lg p-0.5 gap-0.5 shrink-0">
@@ -399,10 +385,8 @@ export default function SalesOutletsPage() {
                   <tbody className="divide-y divide-gray-50">
                     {visibleOutlets.map((outlet) => {
                       const isKycApproved = outlet.kycStatus === KYCStatus.APPROVED;
-                      const ach    = OUTLET_ACHIEVEMENTS[outlet.id];
-                      const avgPct = isKycApproved && params.length > 0
-                        ? Math.round(params.reduce((s, p) => s + pct(ach?.achievements[p.id] ?? 0, p.target), 0) / params.length)
-                        : 0;
+                      const overallPct = outlet.targetPct ?? 0;
+                      const avgPct = isKycApproved ? overallPct : 0;
                       // Link to the KYC record for this outlet
                       const href = `/sales/kyc/${outlet.kycId}`;
                       return (
@@ -440,7 +424,7 @@ export default function SalesOutletsPage() {
                           {/* Parameter cells */}
                           {params.map((p) => (
                             isKycApproved
-                              ? <AchCell key={p.id} param={p} achieved={ach?.achievements[p.id] ?? 0} />
+                              ? <AchCell key={p.id} param={p} achieved={Math.round(overallPct * p.target / 100)} />
                               : <td key={p.id} className="px-3 py-2.5 text-center"><span className="text-[10px] text-gray-300">–</span></td>
                           ))}
 
@@ -506,11 +490,11 @@ export default function SalesOutletsPage() {
             <div className="space-y-3">
               {sortedVisibleOutlets.map((outlet) => {
                 const isKycApproved = outlet.kycStatus === KYCStatus.APPROVED;
-                const ach = OUTLET_ACHIEVEMENTS[outlet.id];
+                const overallPct    = outlet.targetPct ?? 0;
                 const svParam   = getPrimaryParam(params);
                 const kpiParams = params.filter((p) => !p.isPrimary);
 
-                const svAchieved  = ach?.achievements[svParam?.id ?? ''] ?? 0;
+                const svAchieved  = svParam ? Math.round(overallPct * svParam.target / 100) : 0;
                 const svPct       = svParam ? pct(svAchieved, svParam.target) : 0;
                 const stripClass  = isKycApproved ? paceStrip(svPct, period) : 'bg-gray-100';
 
@@ -543,7 +527,7 @@ export default function SalesOutletsPage() {
                       <>
                         {/* Monthly Target progress bar — acts as header/body divider */}
                         {svParam && (() => {
-                          const achieved = ach?.achievements[svParam.id] ?? 0;
+                          const achieved = Math.round(overallPct * svParam.target / 100);
                           const pp  = pct(achieved, svParam.target);
                           const fmt = (n: number) => `₹${n}L`;
                           return (
@@ -568,7 +552,7 @@ export default function SalesOutletsPage() {
                         {kpiParams.length > 0 && (
                           <div className="border-t border-gray-200 px-4 pt-2.5 pb-3 grid grid-cols-2 gap-x-3 gap-y-3">
                             {kpiParams.map((p) => {
-                              const achieved = ach?.achievements[p.id] ?? 0;
+                              const achieved = Math.round(overallPct * p.target / 100);
                               const pp  = pct(achieved, p.target);
                               const fmt = (n: number) => p.unit === '₹L' ? `₹${n}L` : `${n}`;
                               return (

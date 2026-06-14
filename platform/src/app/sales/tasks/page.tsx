@@ -13,7 +13,6 @@ import { fetchTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig } from '@/lib/tas
 import {
   fetchOutletVisibilityStatuses,
   VISIBILITY_ELIGIBLE_OUTLET_TYPES,
-  DEMO_TASK_VISIBILITY_MAP,
   type VisibilityStatusMap,
 } from '@/lib/visibility-upload';
 import { getRole, type SalesRole } from '@/lib/sales-role';
@@ -56,34 +55,22 @@ interface TaskGroup {
   href?:        string;
 }
 
-/* ─── Mock data ──────────────────────────────────────────────────────────────── */
+// Outlets are loaded from /api/sales/outlets; visibility tasks computed dynamically.
 
-const MOCK_OUTLETS: OutletRow[] = [
-  { id: 'o1', kycId: 'k1', outletCode: 'OUT-TASK-001', name: 'Kumar General Store', mobile: '9876543210', location: 'Andheri, Mumbai',  type: 'SSS',     kycStatus: KYCStatus.APPROVED              },
-  { id: 'o2', kycId: 'k2', outletCode: 'OUT-TASK-002', name: 'Sharma Kirana',       mobile: '9765432109', location: 'Borivali, Mumbai', type: 'SSS',     kycStatus: KYCStatus.PENDING,               kycSubmittedAt: '2026-05-01' },
-  { id: 'o3', kycId: 'k3', outletCode: 'OUT-TASK-003', name: 'Patel Grocery',       mobile: '9654321098', location: 'Thane West',       type: 'SSS',     kycStatus: KYCStatus.REJECTED,              kycSubmittedAt: '2026-04-20' },
-  { id: 'o4', kycId: 'k4', outletCode: 'OUT-TASK-004', name: 'Singh Supermart',     mobile: '9543210987', location: 'Malad East',       type: 'WHOLESALER',   kycStatus: KYCStatus.APPROVED              },
-  { id: 'o5', kycId: 'k5', outletCode: 'OUT-TASK-005', name: 'Mehta Provisions',    mobile: '9432109876', location: 'Kandivali',        type: 'SUB_STOCKIST', kycStatus: KYCStatus.PENDING_GIFSY         },
-  { id: 'o6', kycId: 'k6', outletCode: 'OUT-TASK-006', name: 'Ravi Traders',        mobile: '9321098765', location: 'Bandra, Mumbai',   type: 'SSS',     kycStatus: KYCStatus.RESUBMISSION_REQUIRED, kycSubmittedAt: '2026-04-28' },
-  { id: 'o7', kycId: 'k7', outletCode: 'OUT-TASK-007', name: 'Suresh Wholesale',    mobile: '9210987654', location: 'Kurla, Mumbai',    type: 'WHOLESALER',   kycStatus: KYCStatus.APPROVED              },
-  { id: 'o8', kycId: 'k8', outletCode: 'OUT-TASK-008', name: 'Desai Mart',          mobile: '9123456780', location: 'Goregaon, Mumbai', type: 'SSS',     kycStatus: KYCStatus.PENDING,               kycSubmittedAt: '2026-05-05' },
-  { id: 'o9', kycId: 'k9', outletCode: 'OUT-TASK-009', name: 'Verma Stores',        mobile: '9001234567', location: 'Andheri, Mumbai',  type: 'SSS',     kycStatus: KYCStatus.PENDING_SO_APPROVAL,   kycSubmittedAt: '2026-05-15' },
-];
+function mapOutlet(o: any): OutletRow {
+  return {
+    id:             o.id,
+    kycId:          o.kycId ?? '',
+    outletCode:     o.outletCode ?? '',
+    name:           o.name,
+    mobile:         o.mobile ?? '',
+    location:       o.location ?? [o.beat, o.district].filter(Boolean).join(', '),
+    type:           (o.type as OutletType) ?? 'SSS',
+    kycStatus:      o.kycStatus as KYCStatus,
+    kycSubmittedAt: o.kycSubmittedAt,
+  };
+}
 
-const REKYC_OUTLETS = [
-  { id: 'o7', name: 'Suresh Wholesale', location: 'Kurla, Mumbai',  reason: 'KYC expired — renewal required', submittedAt: '2026-03-10' },
-  { id: 'o4', name: 'Singh Supermart',  location: 'Malad East',     reason: 'GST number updated — re-verify',  submittedAt: '2026-03-15' },
-];
-
-// VISIBILITY_TASKS is now computed dynamically from API data in TasksPage.
-// RETAILER and MT outlets without an APPROVED status for the current month
-// appear as pending visibility tasks.  See state: visibilityItems.
-
-const HO_TASKS: TaskItem[] = [
-  { id: 'h1', title: 'May MTD review call',       subtitle: 'Tomorrow 10:00 AM — join via Teams',    priority: 'high',   ageDays: 0 },
-  { id: 'h2', title: 'Submit beat plan for June', subtitle: 'Deadline: 30 May — pending submission', priority: 'high',   ageDays: 2 },
-  { id: 'h3', title: 'Festival scheme briefing',  subtitle: 'Watch recorded session before Friday',  priority: 'medium', ageDays: 1 },
-];
 
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
@@ -575,45 +562,43 @@ export default function TasksPage() {
 
   useEffect(() => {
     setRoleState(getRole());
-
-    // Synchronous data (localStorage / mock)
-    setOutlets(MOCK_OUTLETS);
     setPendingSchemes(getAllPendingSchemes());
 
-    // Async: task config + visibility statuses — run in parallel, single loading gate
-    const currentMonth   = new Date().toISOString().slice(0, 7);
-    const visibleOutlets = MOCK_OUTLETS.filter((o) =>
-      VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type),
-    );
-    const codes = visibleOutlets.map((o) => o.outletCode);
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    const headers = { Authorization: `Bearer ${token}` };
+    const currentMonth = new Date().toISOString().slice(0, 7);
 
+    // Fetch outlets + task config in parallel, then visibility (needs outlet codes)
     Promise.all([
+      fetch('/api/sales/outlets', { headers }).then((r) => r.json()),
       fetchTaskConfig(),
-      fetchOutletVisibilityStatuses(codes, currentMonth),
-    ]).then(([config, apiMap]) => {
+    ]).then(([oBody, config]) => {
+      const apiOutlets: OutletRow[] = (oBody.data?.outlets ?? []).map(mapOutlet);
+      setOutlets(apiOutlets);
       setTaskConfig(config);
 
-      // Merge API data over demo data (API wins; demo fills gaps)
-      const merged: VisibilityStatusMap = { ...DEMO_TASK_VISIBILITY_MAP, ...apiMap };
+      const visibleOutlets = apiOutlets.filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type));
+      const codes = visibleOutlets.map((o) => o.outletCode);
 
-      const items: TaskItem[] = visibleOutlets
-        .filter((o) => merged[o.outletCode]?.status !== 'APPROVED')
-        .map((o) => {
-          const s = merged[o.outletCode]?.status;
-          return {
-            id:       `vis-${o.id}`,
-            title:    o.name,
-            subtitle: s === 'UNDER_REVIEW'
-              ? 'Visibility submitted — awaiting approval'
-              : `${o.location} · Visibility capture pending this month`,
-            href:     '/sales/visibility',
-            priority: s === 'UNDER_REVIEW' ? ('medium' as const) : ('high' as const),
-          };
-        });
-
-      setVisibilityItems(items);
-      setLoading(false);
-    });
+      return fetchOutletVisibilityStatuses(codes, currentMonth).then((apiMap) => {
+        const merged: VisibilityStatusMap = apiMap;
+        const items: TaskItem[] = visibleOutlets
+          .filter((o) => merged[o.outletCode]?.status !== 'APPROVED')
+          .map((o) => {
+            const s = merged[o.outletCode]?.status;
+            return {
+              id:       `vis-${o.id}`,
+              title:    o.name,
+              subtitle: s === 'UNDER_REVIEW'
+                ? 'Visibility submitted — awaiting approval'
+                : `${o.location} · Visibility capture pending this month`,
+              href:     '/sales/visibility',
+              priority: s === 'UNDER_REVIEW' ? ('medium' as const) : ('high' as const),
+            };
+          });
+        setVisibilityItems(items);
+      });
+    }).catch(() => {}).finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
@@ -641,14 +626,17 @@ export default function TasksPage() {
     const groups: TaskGroup[] = [];
 
     if (isFieldRole) {
-      if (REKYC_OUTLETS.length > 0) {
+      const reKycOutlets = outlets.filter((o) => o.kycStatus === KYCStatus.RE_KYC_REQUIRED);
+      if (reKycOutlets.length > 0) {
         groups.push({
           id: 're_kyc', label: 'Re-KYC Required',
           icon: <RefreshCw className="h-4 w-4 text-purple-600" />,
-          items: REKYC_OUTLETS.map((o) => ({
-            id: o.id, title: o.name, subtitle: o.reason,
-            href: `/sales/kyc/${o.id}`, priority: 'high' as const,
-            ageDays: ageInDays(o.submittedAt),
+          items: reKycOutlets.map((o) => ({
+            id: o.id, title: o.name,
+            subtitle: `${o.location} · Re-KYC required`,
+            href: o.kycId ? `/sales/kyc/${o.kycId}` : '/sales/kyc',
+            priority: 'high' as const,
+            ageDays: ageInDays(o.kycSubmittedAt),
           })),
           accentBg: 'bg-purple-50', accentBorder: 'border-purple-200',
           accentText: 'text-purple-700', badgeBg: 'bg-purple-100',
@@ -724,16 +712,6 @@ export default function TasksPage() {
           accentText: 'text-blue-700', badgeBg: 'bg-blue-100',
         });
       }
-    }
-
-    if (HO_TASKS.length > 0) {
-      groups.push({
-        id: 'ho_notification', label: 'HO Notifications / Reminders',
-        icon: <Bell className="h-4 w-4 text-indigo-600" />,
-        items: HO_TASKS,
-        accentBg: 'bg-indigo-50', accentBorder: 'border-indigo-200',
-        accentText: 'text-indigo-700', badgeBg: 'bg-indigo-100',
-      });
     }
 
     // HO Notifications / Reminders (admin-configurable, date-filtered)

@@ -51,69 +51,6 @@ interface KYCDetail {
   documents: { label: string; status: 'uploaded' | 'missing' | 'verified' }[];
 }
 
-/* ─── Mock data ──────────────────────────────────────────────────────────────── */
-
-const MOCK_KYC: Record<string, KYCDetail> = {
-  k2: {
-    id: 'k2', partnerName: 'Amit Sharma', firmName: 'Sharma Kirana',
-    mobile: '9765432109', address: '5 Station Road, Borivali', city: 'Mumbai', state: 'Maharashtra', pincode: '400066',
-    partnerClass: 'SILVER', status: KYCStatus.PENDING,
-    documents: [
-      { label: 'GST Certificate', status: 'uploaded' }, { label: 'PAN Card', status: 'uploaded' },
-      { label: 'Shop Photo',      status: 'uploaded' }, { label: 'Bank Passbook', status: 'missing' },
-    ],
-  },
-  k3: {
-    id: 'k3', partnerName: 'Suresh Patel', firmName: 'Patel Grocery',
-    mobile: '9654321098', address: 'Shop 3, MG Road', city: 'Thane', state: 'Maharashtra', pincode: '400601',
-    partnerClass: 'BRONZE', status: KYCStatus.REJECTED,
-    rejectionReason: 'GST certificate invalid — number mismatch with shop name.',
-    documents: [
-      { label: 'GST Certificate', status: 'uploaded' }, { label: 'PAN Card', status: 'verified' },
-      { label: 'Shop Photo',      status: 'uploaded' }, { label: 'Bank Passbook', status: 'uploaded' },
-    ],
-  },
-  k6: {
-    id: 'k6', partnerName: 'Priya Desai', firmName: 'Desai Grocers',
-    mobile: '9321098765', address: '1 Old Market, Goregaon', city: 'Mumbai', state: 'Maharashtra', pincode: '400063',
-    partnerClass: 'BRONZE', status: KYCStatus.RESUBMISSION_REQUIRED,
-    rejectionReason: 'Shop photo is blurry — please re-upload a clear front-facing photo.',
-    documents: [
-      { label: 'GST Certificate', status: 'verified' }, { label: 'PAN Card', status: 'verified' },
-      { label: 'Shop Photo',      status: 'uploaded' }, { label: 'Bank Passbook', status: 'uploaded' },
-    ],
-  },
-  k7: {
-    id: 'k7', partnerName: 'Suresh Nair', firmName: 'Suresh Wholesale',
-    mobile: '9210987654', address: '11 Station Rd, Kurla', city: 'Mumbai', state: 'Maharashtra', pincode: '400070',
-    partnerClass: 'SILVER', status: KYCStatus.RE_KYC_REQUIRED,
-    rejectionReason: 'KYC expired — renewal required.',
-    gstNumber: '27BBBFU1234F1ZV', panNumber: 'BBBFU1234F',
-    bankName: 'SBI', accountNumber: '****3210', ifscCode: 'SBIN0001234',
-    documents: [
-      { label: 'GST Certificate', status: 'verified' }, { label: 'PAN Card', status: 'verified' },
-      { label: 'Shop Photo',      status: 'verified' }, { label: 'Bank Passbook', status: 'verified' },
-    ],
-  },
-  k8: {
-    id: 'k8', partnerName: 'Gurpreet Singh', firmName: 'Singh Supermart',
-    mobile: '9543210987', address: '78 Link Road, Malad', city: 'Mumbai', state: 'Maharashtra', pincode: '400064',
-    partnerClass: 'GOLD', status: KYCStatus.RE_KYC_REQUIRED,
-    rejectionReason: 'GST number updated — re-verify required.',
-    documents: [
-      { label: 'GST Certificate', status: 'uploaded' }, { label: 'PAN Card', status: 'verified' },
-      { label: 'Shop Photo',      status: 'verified'  }, { label: 'Bank Passbook', status: 'verified' },
-    ],
-  },
-};
-
-const OUTLET_MAP: Record<string, string> = {
-  o2: 'k2', o3: 'k3', o6: 'k6', o7: 'k7', o8: 'k8',
-};
-
-/** Only real UUIDs from the database should trigger an API fetch.
- *  Mock keys like 'k2', 'o2' would 404 unconditionally — skip them. */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
@@ -164,51 +101,32 @@ const STATUS_BANNER: Partial<Record<KYCStatus, {
 export default function EditKYCPage({ params }: { params: Promise<{ id: string }> }) {
   const { id }     = use(params);
   const router     = useRouter();
-  const resolvedId = OUTLET_MAP[id] ?? id;
-  const kyc        = MOCK_KYC[resolvedId];
 
+  const [kycData,    setKycData]    = useState<KYCDetail | null>(null);
+  const [loadingKyc, setLoadingKyc] = useState(true);
   const [step,       setStep]       = useState<EditStep>('details');
   const [submitting, setSubmitting] = useState(false);
 
-  /* ── Form state (pre-filled) ── */
+  /* ── Form state (empty until API fills) ── */
   const [form, setForm] = useState({
-    partnerName:       kyc?.partnerName       ?? '',
-    mobile:            kyc?.mobile            ?? '',
-    partnerClass:      kyc?.partnerClass      ?? 'SSS',
-    gstNumber:         kyc?.gstNumber         ?? '',
-    panNumber:         kyc?.panNumber         ?? '',
-    address:           kyc?.address           ?? '',
-    city:              kyc?.city              ?? '',
-    state:             kyc?.state             ?? '',
-    pincode:           kyc?.pincode           ?? '',
-    bankName:          kyc?.bankName          ?? '',
-    accountHolderName: kyc?.accountHolderName ?? '',
-    accountNumber:     kyc?.accountNumber     ?? '',
-    ifscCode:          kyc?.ifscCode          ?? '',
-    upiId:             kyc?.upiId             ?? '',
+    partnerName: '', mobile: '', partnerClass: 'SSS',
+    gstNumber: '', panNumber: '', address: '', city: '', state: '', pincode: '',
+    bankName: '', accountHolderName: '', accountNumber: '', ifscCode: '', upiId: '',
   });
 
-  const [paymentMode, setPaymentMode] = useState<PaymentMode>(
-    kyc?.paymentMode === 'upi' ? 'upi' : 'bank',
-  );
+  const [paymentMode, setPaymentMode] = useState<PaymentMode>('bank');
 
   /* ── Mobile verification ── */
-  const originalMobile                        = kyc?.mobile ?? '';
-  const [phoneVerified, setPhoneVerified]     = useState(true); // existing mobile = pre-verified
-  const [otpSent,       setOtpSent]           = useState(false);
-  const [otp,           setOtp]               = useState('');
-  const [otpError,      setOtpError]          = useState('');
-  const [otpCountdown,  setOtpCountdown]      = useState(0);
-  const [otpVerifying,  setOtpVerifying]      = useState(false);
+  const [originalMobile, setOriginalMobile] = useState('');
+  const [phoneVerified, setPhoneVerified]   = useState(true);
+  const [otpSent,       setOtpSent]         = useState(false);
+  const [otp,           setOtp]             = useState('');
+  const [otpError,      setOtpError]        = useState('');
+  const [otpCountdown,  setOtpCountdown]    = useState(0);
+  const [otpVerifying,  setOtpVerifying]    = useState(false);
 
   /* ── Document state ── */
-  const [docs, setDocs] = useState<DocEntry[]>(
-    (kyc?.documents ?? []).map(d => ({
-      label:          d.label,
-      originalStatus: d.status,
-      action:         d.status === 'missing' ? 'pending' : 'keep',
-    })),
-  );
+  const [docs, setDocs] = useState<DocEntry[]>([]);
 
   const fileRefs = useRef<Map<string, HTMLInputElement>>(new Map());
 
@@ -219,47 +137,78 @@ export default function EditKYCPage({ params }: { params: Promise<{ id: string }
     return () => clearInterval(t);
   }, [otpCountdown]);
 
-  /* ── API hydration — silently pre-fills form from server (leaderboard pattern) ── */
+  /* ── Fetch KYC from API ── */
   useEffect(() => {
-    // Only fetch for real UUIDs — mock keys (k2, o2, etc.) would 404 unconditionally.
-    if (!UUID_RE.test(id)) return;
-
-    fetch(`/api/kyc/${id}`)
-      .then(r => r.json())
+    setLoadingKyc(true);
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch(`/api/kyc/${id}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
       .then((json) => {
         if (json.success && json.data?.submission) {
-          const s = json.data.submission;
-          const apiMobile = (s.user?.phone as string) ?? '';
-          setForm(prev => ({
-            ...prev,
-            partnerName:       s.user?.name                     ?? prev.partnerName,
-            mobile:            apiMobile                        || prev.mobile,
-            gstNumber:         s.partner?.gstNumber             ?? prev.gstNumber,
-            panNumber:         s.partner?.panNumber             ?? prev.panNumber,
-            address:           s.partner?.address               ?? prev.address,
-            city:              s.partner?.city                  ?? prev.city,
-            state:             s.partner?.state                 ?? prev.state,
-            bankName:          s.partner?.bankName              ?? prev.bankName,
-            accountHolderName: s.partner?.accountHolderName     ?? prev.accountHolderName,
-            accountNumber:     s.partner?.bankAccountNumber     ?? prev.accountNumber,
-            ifscCode:          s.partner?.ifscCode              ?? prev.ifscCode,
-            upiId:             s.partner?.upiId                 ?? prev.upiId,
-          }));
-          // If the server has a different mobile than the locally-known original,
-          // the user has not verified this number — force re-verification to
-          // prevent bypassing OTP for a number that was never confirmed in session.
-          if (apiMobile && apiMobile !== originalMobile) {
-            setPhoneVerified(false);
-            setOtpSent(false);
-            setOtp('');
-            setOtpError('');
-          }
+          const s       = json.data.submission;
+          const mobile  = (s.user?.phone as string) ?? '';
+          const detail: KYCDetail = {
+            id:                s.id,
+            partnerName:       s.user?.name                  ?? '',
+            firmName:          s.partner?.businessName       ?? '',
+            mobile,
+            address:           s.partner?.address            ?? '',
+            city:              s.partner?.city               ?? '',
+            state:             s.partner?.state              ?? '',
+            partnerClass:      '',
+            status:            s.status as KYCStatus,
+            rejectionReason:   s.rejectionReason             ?? undefined,
+            gstNumber:         s.partner?.gstNumber,
+            panNumber:         s.partner?.panNumber,
+            bankName:          s.partner?.bankName,
+            accountNumber:     s.partner?.bankAccountNumber,
+            ifscCode:          s.partner?.ifscCode,
+            upiId:             s.partner?.upiId,
+            paymentMode:       s.partner?.paymentMode,
+            documents:         (s.documents ?? []).map((d: { label: string; status?: string }) => ({
+              label: d.label,
+              status: (d.status as 'uploaded' | 'missing' | 'verified') ?? 'uploaded',
+            })),
+          };
+          setKycData(detail);
+          setOriginalMobile(mobile);
+          setForm({
+            partnerName:       detail.partnerName,
+            mobile:            detail.mobile,
+            partnerClass:      detail.partnerClass || 'SSS',
+            gstNumber:         detail.gstNumber         ?? '',
+            panNumber:         detail.panNumber         ?? '',
+            address:           detail.address,
+            city:              detail.city,
+            state:             detail.state,
+            pincode:           detail.pincode           ?? '',
+            bankName:          detail.bankName          ?? '',
+            accountHolderName: detail.accountHolderName ?? '',
+            accountNumber:     detail.accountNumber     ?? '',
+            ifscCode:          detail.ifscCode          ?? '',
+            upiId:             detail.upiId             ?? '',
+          });
+          setPaymentMode(detail.paymentMode === 'upi' ? 'upi' : 'bank');
+          setDocs(detail.documents.map((d) => ({
+            label:          d.label,
+            originalStatus: d.status,
+            action:         d.status === 'missing' ? 'pending' : 'keep',
+          })));
         }
       })
-      .catch(() => {}); // keep mock form data on any error
-  }, [id, originalMobile]);
+      .catch(() => {})
+      .finally(() => setLoadingKyc(false));
+  }, [id]);
 
-  if (!kyc) {
+  if (loadingKyc) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <span className="text-sm text-gray-400">Loading…</span>
+      </div>
+    );
+  }
+
+  if (!kycData) {
     return (
       <div className="flex flex-col items-center justify-center py-20 gap-4">
         <AlertCircle className="h-10 w-10 text-amber-400" />
@@ -269,6 +218,7 @@ export default function EditKYCPage({ params }: { params: Promise<{ id: string }
     );
   }
 
+  const kyc    = kycData;
   const banner = STATUS_BANNER[kyc.status];
 
   /* ── Helpers ── */

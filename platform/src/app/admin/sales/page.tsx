@@ -11,7 +11,7 @@ import {
   buildSalesReportBuffer,
   type SalesParseResult,
 } from '@/lib/sales-excel-upload';
-import { getTenantKpiDefs } from '@/lib/platform/tenant-kpi-config';
+import { DEOLEO_DEFAULT_KPIS } from '@/lib/platform/tenant-kpi-config';
 import { MOCK_OUTLETS, formatMonth } from '@/lib/targets';
 import type { NewOutletType } from '@/lib/targets';
 
@@ -189,7 +189,7 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
 export default function SalesUploadPage() {
   const monthOptions               = getSalesMonthOptions();
   const [salesMonth, setSalesMonth] = useState(monthOptions[0].value);
-  const [kpiDefs]                   = useState(() => getTenantKpiDefs());
+  const [kpiDefs, setKpiDefs]       = useState(DEOLEO_DEFAULT_KPIS);
   const [fileName,    setFileName]  = useState('');
   const [parsing,     setParsing]   = useState(false);
   const [saving,      setSaving]    = useState(false);
@@ -198,6 +198,14 @@ export default function SalesUploadPage() {
   const [savedBatchId, setSavedBatchId] = useState<string | null>(null);
   const [historyKey,  setHistoryKey] = useState(0);   // bump to refresh history
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/admin/kpi-config', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(j => { if (j.success && Array.isArray(j.data.kpiDefs) && j.data.kpiDefs.length > 0) setKpiDefs(j.data.kpiDefs); })
+      .catch(() => {});
+  }, []);
 
   // ── Template download ──────────────────────────────────────────────────
 

@@ -58,7 +58,7 @@ export default function GifsyOverviewPage() {
 
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-white truncate">{s.displayName}</p>
-                <p className="text-xs text-white/40">{s.slug}.loyaltybase.in</p>
+                <p className="text-xs text-white/40">{s.slug}.gifsy.in</p>
               </div>
 
               <div className="flex items-center gap-4 text-xs text-white/50 shrink-0">

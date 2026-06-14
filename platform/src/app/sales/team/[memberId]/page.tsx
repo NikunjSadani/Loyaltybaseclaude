@@ -65,115 +65,43 @@ const kycBadge: Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 
   [KYCStatus.NOT_INTERESTED]:        { variant: 'default', label: 'Not Interested' },
 };
 
-const MEMBER_DATA: Record<string, MemberDetail> = {
-  xsr1: {
-    id: 'xsr1', name: 'Anil Sharma', role: 'XSR', territory: 'Andheri Beat',
-    employeeId: 'EMP-2024-0041',
-    mobile: '9876543210', targetPct: 82, kycDone: 15, kycPending: 3, visibilityPending: 2,
-    outlets: [
-      { id: 'o1', name: 'Kumar General Store',  location: 'Andheri W',   outletCode: 'OUT-MH-2801', kycId: 'k1', kycStatus: KYCStatus.APPROVED, targetPct: 91, lastVisit: '2026-05-14' },
-      { id: 'o2', name: 'Star Kirana',          location: 'Andheri E',   outletCode: 'OUT-MH-2802', kycId: 'k2', kycStatus: KYCStatus.APPROVED, targetPct: 74, lastVisit: '2026-05-12' },
-      { id: 'o3', name: 'Raj Provisions',       location: 'Chakala',     outletCode: 'OUT-MH-2803', kycId: 'k3', kycStatus: KYCStatus.PENDING,  targetPct: 38, lastVisit: '2026-05-10' },
-      { id: 'o4', name: 'Om Supermart',         location: 'Andheri W',   outletCode: 'OUT-MH-2804', kycId: 'k4', kycStatus: KYCStatus.APPROVED, targetPct: 88 },
-    ],
-    activity: [
-      { id: 'a1', text: 'KYC submitted for Raj Provisions',  time: '2 hours ago', type: 'kyc' },
-      { id: 'a2', text: 'Visited Star Kirana outlet',        time: 'Yesterday',   type: 'visit' },
-      { id: 'a3', text: 'Kumar General Store KYC approved',  time: '2 days ago',  type: 'approval' },
-    ],
-  },
-  xsr2: {
-    id: 'xsr2', name: 'Divya Pillai', role: 'XSR', territory: 'Juhu Beat',
-    employeeId: 'EMP-2024-0042',
-    mobile: '9765432109', targetPct: 58, kycDone: 9, kycPending: 5, visibilityPending: 4,
-    outlets: [
-      { id: 'o1', name: 'Juhu Mart',            location: 'Juhu',        outletCode: 'OUT-MH-2811', kycId: 'k5', kycStatus: KYCStatus.APPROVED, targetPct: 65, lastVisit: '2026-05-13' },
-      { id: 'o2', name: 'Beach Provisions',     location: 'JVPD',        outletCode: 'OUT-MH-2812', kycId: 'k6', kycStatus: KYCStatus.PENDING,  targetPct: 42 },
-      { id: 'o3', name: 'Gulshan Stores',       location: 'Vile Parle',  outletCode: 'OUT-MH-2813', kycId: 'k7', kycStatus: KYCStatus.REJECTED, targetPct: 22, lastVisit: '2026-05-09' },
-    ],
-    activity: [
-      { id: 'a1', text: 'Visibility rejected – Gulshan Stores', time: '1 day ago',  type: 'visibility' },
-      { id: 'a2', text: 'Visited Juhu Mart',                    time: '2 days ago', type: 'visit' },
-    ],
-  },
-  xsr3: {
-    id: 'xsr3', name: 'Kiran Rao', role: 'XSR', territory: 'Versova Beat',
-    employeeId: 'EMP-2024-0051',
-    mobile: '9654321098', targetPct: 91, kycDone: 10, kycPending: 1, visibilityPending: 0,
-    outlets: [
-      { id: 'o1', name: 'Versova Daily Needs',  location: 'Versova',     outletCode: 'OUT-MH-2821', kycId: 'k1', kycStatus: KYCStatus.APPROVED, targetPct: 95, lastVisit: '2026-05-15' },
-      { id: 'o2', name: 'Royal Kirana',         location: 'Andheri W',   outletCode: 'OUT-MH-2822', kycId: 'k2', kycStatus: KYCStatus.APPROVED, targetPct: 88, lastVisit: '2026-05-14' },
-      { id: 'o3', name: 'Four Seasons Mart',    location: 'Lokhandwala', outletCode: 'OUT-MH-2823', kycId: 'k3', kycStatus: KYCStatus.PENDING,  targetPct: 60 },
-    ],
-    activity: [
-      { id: 'a1', text: 'Visited Versova Daily Needs',          time: '1 day ago',  type: 'visit' },
-      { id: 'a2', text: 'Royal Kirana KYC approved',            time: '3 days ago', type: 'approval' },
-    ],
-  },
-  xsr4: {
-    id: 'xsr4', name: 'Meena Joshi', role: 'XSR', territory: 'DN Nagar Beat',
-    employeeId: 'EMP-2024-0063',
-    mobile: '9543210987', targetPct: 44, kycDone: 10, kycPending: 6, visibilityPending: 3,
-    outlets: [
-      { id: 'o1', name: 'Nagar General',        location: 'DN Nagar',    outletCode: 'OUT-MH-2861', kycId: 'k1', kycStatus: KYCStatus.PENDING,  targetPct: 35 },
-      { id: 'o2', name: 'Sunrise Provisions',   location: 'Amboli',      outletCode: 'OUT-MH-2862', kycId: 'k2', kycStatus: KYCStatus.APPROVED, targetPct: 52, lastVisit: '2026-05-11' },
-      { id: 'o3', name: 'Regal Stores',         location: 'DN Nagar',    outletCode: 'OUT-MH-2863', kycId: 'k3', kycStatus: KYCStatus.REJECTED, targetPct: 18 },
-    ],
-    activity: [
-      { id: 'a1', text: 'KYC submitted for Nagar General',      time: '3 hours ago', type: 'kyc' },
-      { id: 'a2', text: 'Visibility pending – Regal Stores',    time: 'Yesterday',   type: 'visibility' },
-    ],
-  },
-  so1: {
-    id: 'so1', name: 'Rajesh Kumar', role: 'SO', territory: 'Mumbai West',
-    mobile: '9876543211', targetPct: 76, kycDone: 44, kycPending: 15, visibilityPending: 9, teamSize: 4,
-    outlets: [],
-    activity: [
-      { id: 'a1', text: 'Team KYC count updated',    time: '1 hour ago',  type: 'kyc' },
-      { id: 'a2', text: 'Target review completed',   time: 'Yesterday',   type: 'approval' },
-    ],
-  },
-  so2: {
-    id: 'so2', name: 'Nisha Verma', role: 'SO', territory: 'Mumbai East',
-    mobile: '9765432110', targetPct: 88, kycDone: 39, kycPending: 8, visibilityPending: 5, teamSize: 3,
-    outlets: [], activity: [],
-  },
-  so3: {
-    id: 'so3', name: 'Arjun Patil', role: 'SO', territory: 'Thane City',
-    mobile: '9654321099', targetPct: 55, kycDone: 32, kycPending: 20, visibilityPending: 12, teamSize: 4,
-    outlets: [], activity: [],
-  },
-  so4: {
-    id: 'so4', name: 'Sunita Desai', role: 'SO', territory: 'Navi Mumbai',
-    mobile: '9543210988', targetPct: 93, kycDone: 34, kycPending: 4, visibilityPending: 2, teamSize: 3,
-    outlets: [], activity: [],
-  },
-};
+/* (member data wired to /api/sales/team/[memberId]) */
 
 /* ─── Page ─────────────────────────────────────────────────────────────────── */
 
 export default function MemberDetailPage() {
   const { memberId } = useParams<{ memberId: string }>();
   const router = useRouter();
-  const [loading, setLoading] = useState(true);
+  const [loading,     setLoading]  = useState(true);
+  const [member,      setMember]   = useState<MemberDetail | null>(null);
+  const [fetchError,  setError]    = useState('');
 
   useEffect(() => {
-    const t = setTimeout(() => setLoading(false), 300);
-    return () => clearTimeout(t);
-  }, []);
+    if (!memberId) return;
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch(`/api/sales/team/${memberId}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((body) => {
+        if (body.success) setMember(body.data.member);
+        else setError(body.error ?? 'Failed to load');
+      })
+      .catch(() => setError('Network error'))
+      .finally(() => setLoading(false));
+  }, [memberId]);
 
-  const member = MEMBER_DATA[memberId ?? ''];
-
-  if (!loading && !member) {
+  if (!loading && (fetchError || !member)) {
     return (
       <div className="space-y-4 fade-in">
         <button onClick={() => router.back()} className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-800">
           <ArrowLeft className="h-4 w-4" /> Back
         </button>
-        <p className="text-gray-500">Member not found.</p>
+        <p className="text-gray-500">{fetchError || 'Member not found.'}</p>
       </div>
     );
   }
+
+  // Safe after the early-return guard above
+  const m = member as MemberDetail;
 
   return (
     <div className="space-y-5 fade-in">
@@ -192,20 +120,20 @@ export default function MemberDetailPage() {
           <div className="bg-white rounded-2xl border border-gray-100 p-5 flex items-center gap-4">
             <div className="w-14 h-14 rounded-full bg-[#16a34a]/10 flex items-center justify-center shrink-0">
               <span className="text-[#16a34a] font-bold text-lg">
-                {member.name.split(' ').map((w) => w[0]).join('').slice(0, 2)}
+                {m.name.split(' ').map((w) => w[0]).join('').slice(0, 2)}
               </span>
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-base font-bold text-gray-900">{member.name}</p>
-              <p className="text-sm text-gray-500">{ROLE_LABELS[member.role]}</p>
-              {member.employeeId && (
-                <p className="text-xs text-gray-400 mt-0.5 font-mono">{member.employeeId}</p>
+              <p className="text-base font-bold text-gray-900">{m.name}</p>
+              <p className="text-sm text-gray-500">{ROLE_LABELS[m.role]}</p>
+              {m.employeeId && (
+                <p className="text-xs text-gray-400 mt-0.5 font-mono">{m.employeeId}</p>
               )}
-              <p className="text-xs text-gray-400 mt-0.5">{member.mobile}</p>
+              <p className="text-xs text-gray-400 mt-0.5">{m.mobile}</p>
             </div>
             <div className="text-right shrink-0">
-              <p className={`text-2xl font-bold ${member.targetPct >= 80 ? 'text-emerald-600' : member.targetPct >= 60 ? 'text-amber-600' : 'text-red-600'}`}>
-                {member.targetPct}%
+              <p className={`text-2xl font-bold ${m.targetPct >= 80 ? 'text-emerald-600' : m.targetPct >= 60 ? 'text-amber-600' : 'text-red-600'}`}>
+                {m.targetPct}%
               </p>
               <p className="text-[10px] text-gray-400">target</p>
             </div>
@@ -214,12 +142,12 @@ export default function MemberDetailPage() {
           {/* Quick stats */}
           <div className="grid grid-cols-4 gap-2">
             {[
-              { label: 'KYC Done',    value: member.kycDone,            icon: FileCheck,    color: 'text-emerald-600' },
-              { label: 'KYC Pending', value: member.kycPending,         icon: AlertTriangle,color: 'text-amber-600' },
-              { label: 'Visibility',  value: member.visibilityPending,  icon: Eye,          color: 'text-blue-500' },
-              { label: member.teamSize !== undefined ? 'Team' : 'Outlets',
-                value: member.teamSize ?? member.outlets.length,
-                icon: member.teamSize !== undefined ? Users : MapPin,
+              { label: 'KYC Done',    value: m.kycDone,            icon: FileCheck,    color: 'text-emerald-600' },
+              { label: 'KYC Pending', value: m.kycPending,         icon: AlertTriangle,color: 'text-amber-600' },
+              { label: 'Visibility',  value: m.visibilityPending,  icon: Eye,          color: 'text-blue-500' },
+              { label: m.teamSize !== undefined ? 'Team' : 'Outlets',
+                value: m.teamSize ?? m.outlets.length,
+                icon: m.teamSize !== undefined ? Users : MapPin,
                 color: 'text-gray-600' },
             ].map((s) => (
               <div key={s.label} className="bg-white rounded-xl border border-gray-100 p-3 flex flex-col items-center gap-1">
@@ -231,7 +159,7 @@ export default function MemberDetailPage() {
           </div>
 
           {/* Outlets (only shown for ISR) */}
-          {member.outlets.length > 0 && (
+          {m.outlets.length > 0 && (
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -241,7 +169,7 @@ export default function MemberDetailPage() {
               </CardHeader>
               <CardContent>
                 <div className="divide-y divide-gray-50">
-                  {member.outlets.map((o) => {
+                  {m.outlets.map((o) => {
                     const { variant, label } = kycBadge[o.kycStatus];
                     const inner = (
                       <>
@@ -286,14 +214,14 @@ export default function MemberDetailPage() {
           )}
 
           {/* Recent activity */}
-          {member.activity.length > 0 && (
+          {m.activity.length > 0 && (
             <Card>
               <CardHeader>
                 <CardTitle>Recent Activity</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
-                  {member.activity.map((item) => (
+                  {m.activity.map((item) => (
                     <div key={item.id} className="flex items-start gap-3">
                       <div className="p-1.5 bg-gray-50 rounded-lg shrink-0 mt-0.5">
                         {item.type === 'kyc'        && <FileCheck   className="h-3.5 w-3.5 text-blue-500"    />}

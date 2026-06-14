@@ -7,7 +7,7 @@
  * Adding a new client:
  *   1. Create a ClientConfig object below.
  *   2. Add it to CLIENT_REGISTRY.
- *   3. Provision subdomain DNS: <slug>.loyaltybase.in
+ *   3. Provision subdomain DNS: <slug>.gifsy.in
  */
 
 import type { ClientConfig } from './client-config';
@@ -27,7 +27,7 @@ export const DEOLEO_CONFIG: ClientConfig = {
     primaryColor: '#16a34a',
     logoUrl: '/logos/deoleo.svg',
     faviconUrl: '/favicons/deoleo.ico',
-    supportEmail: 'support@deoleo.loyaltybase.in',
+    supportEmail: 'support@deoleo.gifsy.in',
     supportPhone: '+91-1800-000-0001',
     productBrands: ['Bertolli', 'Figaro'],
   },
@@ -133,7 +133,7 @@ export const CLIENT_B_CONFIG: ClientConfig = {
     primaryColor: '#2563eb',          // blue — different from Deoleo
     logoUrl: '/logos/clientb.svg',
     faviconUrl: '/favicons/clientb.ico',
-    supportEmail: 'support@clientb.loyaltybase.in',
+    supportEmail: 'support@clientb.gifsy.in',
     supportPhone: '+91-1800-000-0002',
     productBrands: [],
   },

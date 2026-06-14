@@ -218,7 +218,7 @@ function IdentityStep({
     <div className="space-y-4">
       <StepHeader title="Client Identity" description="Basic identifiers for the new client tenant." />
 
-      <Field label="Slug" hint="Lowercase, alphanumeric, hyphens only. Drives the subdomain (e.g. clientb.loyaltybase.in).">
+      <Field label="Slug" hint="Lowercase, alphanumeric, hyphens only. Drives the subdomain (e.g. clientb.gifsy.in).">
         <input
           value={form.slug}
           onChange={(e) => onChange({ slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
@@ -233,7 +233,7 @@ function IdentityStep({
         {form.slug && errors.length === 0 && (
           <p className="text-xs text-green-400 mt-1 flex items-center gap-1">
             <Check className="w-3.5 h-3.5" />
-            Domain: <span className="font-mono">{form.slug}.loyaltybase.in</span>
+            Domain: <span className="font-mono">{form.slug}.gifsy.in</span>
           </p>
         )}
       </Field>
@@ -308,7 +308,7 @@ function BrandingStep({
           <input
             value={form.supportEmail}
             onChange={(e) => onChange({ supportEmail: e.target.value })}
-            placeholder={`support@${form.slug || 'client'}.loyaltybase.in`}
+            placeholder={`support@${form.slug || 'client'}.gifsy.in`}
             className={INPUT_CLS}
           />
         </Field>
@@ -396,7 +396,7 @@ function ReviewStep({ form }: { form: OnboardingForm }) {
           <ReviewRow label="Slug"         value={form.slug} mono />
           <ReviewRow label="Internal name" value={form.internalName} />
           <ReviewRow label="Status"        value={form.status} />
-          <ReviewRow label="Domain"        value={`${form.slug}.loyaltybase.in`} mono />
+          <ReviewRow label="Domain"        value={`${form.slug}.gifsy.in`} mono />
         </ReviewSection>
 
         <ReviewSection title="Branding">
@@ -418,7 +418,7 @@ function ReviewStep({ form }: { form: OnboardingForm }) {
         </ReviewSection>
 
         <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3 text-xs text-blue-300">
-          After onboarding: provision DNS <code className="font-mono">{form.slug}.loyaltybase.in</code>, upload logo, and configure MSG91 credentials in environment variables.
+          After onboarding: provision DNS <code className="font-mono">{form.slug}.gifsy.in</code>, upload logo, and configure MSG91 credentials in environment variables.
         </div>
       </div>
     </div>

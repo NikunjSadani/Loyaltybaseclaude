@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import {
   Users, Download, Upload, Search, AlertTriangle, CheckCircle,
   XCircle, FileSpreadsheet, BookOpen, ArrowLeft, Info, ChevronDown,
@@ -10,8 +10,6 @@ import Link from 'next/link';
 import * as XLSX from 'xlsx';
 import {
   validateEmployeeUpload,
-  getEmployees,
-  saveEmployees,
   DEOLEO_HIERARCHY,
   generateGuideHtml,
   validateHierarchyChainHeaders,
@@ -202,7 +200,7 @@ function downloadGuide() {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function HierarchyPage() {
-  const [employees, setEmployees] = useState<HierarchyEmployee[]>(() => getEmployees());
+  const [employees, setEmployees] = useState<HierarchyEmployee[]>([]);
   const [search, setSearch] = useState('');
   // Phase 1: chain parse result (cross-row conflicts, missing IDs, etc.)
   const [chainResult, setChainResult] = useState<HierarchyChainParseResult | null>(null);
@@ -215,6 +213,25 @@ export default function HierarchyPage() {
   const [confirming, setConfirming] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // ── Load from API ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/admin/hierarchy-config', { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((j) => { if (j.success) setEmployees(j.data.employees ?? []); })
+      .catch(() => {});
+  }, []);
+
+  const persistEmployees = useCallback((list: HierarchyEmployee[]) => {
+    setEmployees(list);
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/admin/hierarchy-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ employees: list }),
+    }).catch(() => {});
+  }, []);
 
   // ── Stats ──────────────────────────────────────────────────────────────────
   const totalCount       = employees.length;
@@ -338,8 +355,7 @@ export default function HierarchyPage() {
     }
 
     const newList = Array.from(updatedMap.values());
-    setEmployees(newList);
-    saveEmployees(newList);
+    persistEmployees(newList);
 
     const { creates, updates } = validation.summary;
     setSuccessMsg(

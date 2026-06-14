@@ -1,0 +1,40 @@
+# Baseline red snapshot — known-failing tests at start of P0 (inherited, pre-existing).
+# Captured 2026-06-14 from `npx vitest run`. Total: 29 files / 115 tests.
+#
+# PURPOSE: the suite is RED throughout a TDD build, so the gate is DIFFERENTIAL, not absolute.
+# After any task, re-run the suite and diff the failing set against this file:
+#   - a file/test here that is now GREEN  → progress (remove it from this snapshot).
+#   - a file/test NOT here that is now RED → REGRESSION introduced by the task → reject/fix.
+# "Green main" is not the gate; "no NEW reds vs this snapshot" is.
+#
+# Format: <failing-test-count>  <path>   (counts as of capture; update as phases finish them)
+
+  8  src/app/admin/hierarchy/__tests__/hierarchy-page.test.tsx                 # P2
+  2  src/app/admin/users/outlets/__tests__/outlets-page.test.tsx              # P2
+  2  src/app/partner/leaderboard/__tests__/leaderboard-api.test.tsx           # P7
+  1  src/app/partner/leaderboard/__tests__/leaderboard-feature-flag.test.tsx  # P7
+  5  src/app/partner/leaderboard/__tests__/primary-kpi-ranking.test.tsx       # P7
+  1  src/app/partner/targets/__tests__/targets-api.test.tsx                   # P4
+  2  src/app/partner/wallet/__tests__/kpi-filter.test.tsx                     # P5
+  2  src/app/partner/wallet/__tests__/narration.test.tsx                      # P5
+  1  src/app/partner/wallet/__tests__/statement-layout.test.tsx               # P5
+  3  src/app/sales/kyc/__tests__/filter-dropdown.test.tsx                     # P3
+  5  src/app/sales/kyc/__tests__/filter-mutual-exclusive.test.tsx             # P3
+ 13  src/app/sales/kyc/__tests__/kyc-list.test.tsx                            # P3
+  3  src/app/sales/kyc/__tests__/outlet-code-kyc-list.test.tsx                # P3
+  5  src/app/sales/kyc/[id]/__tests__/camera-only-docs.test.tsx               # P3
+  2  src/app/sales/kyc/[id]/__tests__/gst-pan-store-info.test.tsx             # P3
+  5  src/app/sales/kyc/[id]/__tests__/kyc-detail-api.test.tsx                 # P3
+  5  src/app/sales/kyc/[id]/__tests__/outlet-code-kyc-detail.test.tsx         # P3
+  5  src/app/sales/kyc/[id]/__tests__/outlet-quick-actions.test.tsx           # P3
+  2  src/app/sales/kyc/[id]/__tests__/resubmit-flow.test.tsx                  # P3
+  2  src/app/sales/kyc/[id]/__tests__/visibility-photo-flag.test.tsx          # P3
+  6  src/app/sales/kyc/[id]/edit/__tests__/kyc-edit-api.test.tsx              # P3
+  5  src/app/sales/kyc/[id]/ledger/__tests__/kpi-filter-ledger.test.tsx       # P3 (real bug: page.tsx:219 o.name null-deref)
+  4  src/app/sales/kyc/new/__tests__/new-kyc.test.tsx                         # P3
+  9  src/app/sales/kyc/new/__tests__/not-interested.test.tsx                  # P3
+  2  src/app/sales/team/__tests__/member-card-id.test.tsx                     # P2
+  3  src/app/sales/team/[memberId]/__tests__/member-detail.test.tsx           # P2
+ 10  src/lib/__tests__/credits-migration-live.test.ts                         # P6 (live-DB; fails only b/c vitest doesn't load .env — fixable in 0.1)
+  1  src/lib/__tests__/sales-excel-upload.test.ts                             # P4 (source-structure: getTenantKpiDefs)
+  1  src/lib/__tests__/target-excel-upload.test.ts                            # P4 (source-structure: getTenantKpiDefs)

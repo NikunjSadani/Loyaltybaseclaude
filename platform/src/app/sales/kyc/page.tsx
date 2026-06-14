@@ -29,42 +29,7 @@ interface KYCEntry {
   submittedById?: string;
 }
 
-/* ─── Team member data (mirrors team page mock hierarchy) ────────────────────── */
-
 interface TeamMember { id: string; name: string; }
-
-const TEAM_MEMBERS_BY_ROLE: Partial<Record<SalesRole, TeamMember[]>> = {
-  SO:  [
-    { id: 'xsr1', name: 'Anil Sharma'     },
-    { id: 'xsr2', name: 'Divya Pillai'    },
-    { id: 'xsr3', name: 'Kiran Rao'       },
-    { id: 'xsr4', name: 'Meena Joshi'     },
-  ],
-  ASM: [
-    { id: 'so1', name: 'Rajesh Kumar'    },
-    { id: 'so2', name: 'Nisha Verma'     },
-    { id: 'so3', name: 'Arjun Patil'     },
-    { id: 'so4', name: 'Sunita Desai'    },
-  ],
-  RSM: [
-    { id: 'asm1', name: 'Priya Mehta'      },
-    { id: 'asm2', name: 'Rohit Deshpande' },
-    { id: 'asm3', name: 'Sonal Agrawal'   },
-    { id: 'asm4', name: 'Vikram Bhosale'  },
-  ],
-  ZNM:  [
-    { id: 'rsm1', name: 'Suresh Nair'    },
-    { id: 'rsm2', name: 'Leela Iyer'     },
-    { id: 'rsm3', name: 'Deepak Tiwari'  },
-    { id: 'rsm4', name: 'Ananya Bose'    },
-  ],
-  NSM:  [
-    { id: 'zm1', name: 'Vikram Singh'   },
-    { id: 'zm2', name: 'Ravi Menon'     },
-    { id: 'zm3', name: 'Kavita Sharma'  },
-    { id: 'zm4', name: 'Arun Gupta'     },
-  ],
-};
 
 const APPROVAL_REQUIRED_KEY = 'APPROVAL_REQUIRED' as const;
 const UNDER_REVIEW_KEY      = 'UNDER_REVIEW'      as const;
@@ -119,16 +84,6 @@ const kycBadge: Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 
   [KYCStatus.NOT_INTERESTED]:        { variant: 'default', label: 'Not Interested'    },
 };
 
-const MOCK_KYC: KYCEntry[] = [
-  { id: 'k1', partnerName: 'Rajesh Kumar',   firmName: 'Kumar General Store', outletCode: 'OUT-MH-2841', mobile: '9876543210', status: KYCStatus.APPROVED,            submittedAt: '2026-04-01', updatedAt: '2026-04-05', submittedById: 'xsr1' },
-  { id: 'k2', partnerName: 'Amit Sharma',    firmName: 'Sharma Kirana',       outletCode: 'OUT-MH-2842', mobile: '9765432109', status: KYCStatus.PENDING_SO_APPROVAL,  submittedAt: '2026-05-10', updatedAt: '2026-05-10', submittedById: 'xsr2' },
-  { id: 'k3', partnerName: 'Suresh Patel',   firmName: 'Patel Grocery',       outletCode: 'OUT-MH-2843', mobile: '9654321098', status: KYCStatus.REJECTED,             submittedAt: '2026-04-20', updatedAt: '2026-05-01', rejectionReason: 'GST certificate invalid', submittedById: 'xsr3' },
-  { id: 'k4', partnerName: 'Gurpreet Singh', firmName: 'Singh Supermart',     outletCode: 'OUT-MH-2844', mobile: '9543210987', status: KYCStatus.APPROVED,             submittedAt: '2026-03-15', updatedAt: '2026-03-20', submittedById: 'xsr4' },
-  { id: 'k5', partnerName: 'Vijay Mehta',    firmName: 'Mehta Provisions',    outletCode: 'OUT-MH-2845', mobile: '9432109876', status: KYCStatus.PENDING_GIFSY,        submittedAt: '2026-05-14', updatedAt: '2026-05-15', submittedById: 'xsr1' },
-  { id: 'k6', partnerName: 'Priya Desai',    firmName: 'Desai Grocers',       outletCode: 'OUT-MH-2853', mobile: '9321098765', status: KYCStatus.PENDING_ASM_APPROVAL, submittedAt: '2026-05-12', updatedAt: '2026-05-12', submittedById: 'xsr2' },
-  { id: 'k7', partnerName: 'Suresh Nair',    firmName: 'Suresh Wholesale',    outletCode: 'OUT-MH-2847', mobile: '9210987654', status: KYCStatus.RE_KYC_REQUIRED,      submittedAt: '2026-03-10', updatedAt: '2026-05-20', rejectionReason: 'KYC expired — renewal required', submittedById: 'xsr3' },
-  { id: 'k8', partnerName: 'Gurpreet Singh', firmName: 'Singh Supermart',     outletCode: 'OUT-MH-2848', mobile: '9543210987', status: KYCStatus.RE_KYC_REQUIRED,      submittedAt: '2026-03-15', updatedAt: '2026-05-22', rejectionReason: 'GST number updated — re-verify', submittedById: 'xsr4' },
-];
 
 /* ─── Relative date ──────────────────────────────────────────────────────────── */
 function relativeDate(dateStr: string): string {
@@ -169,24 +124,28 @@ function KYCListContent() {
   const [loading,      setLoading]      = useState(true);
   const [sortOrder,    setSortOrder]    = useState<SortOrder>('newest');
   const [memberFilter, setMemberFilter] = useState('');
-
-  const teamMembers = TEAM_MEMBERS_BY_ROLE[role] ?? [];
+  const [teamMembers,  setTeamMembers]  = useState<TeamMember[]>([]);
 
   useEffect(() => {
     if (statusParam) setFilter(statusParam);
   }, [statusParam]);
 
   useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    const authHeaders = { Authorization: `Bearer ${token}` };
+
     interface ApiSubmission {
       id: string; status: string; createdAt: string; updatedAt: string; userId: string;
       reviewerNotes?: string | null;
       user: { id: string; name: string; phone: string };
       partner?: { id: string; businessName: string } | null;
     }
-    api.get<{ submissions: ApiSubmission[] }>('/api/kyc')
-      .then(result => {
-        if (result.success && result.data.submissions.length > 0) {
-          setEntries(result.data.submissions.map(s => ({
+
+    const kycFetch = fetch('/api/kyc', { headers: authHeaders })
+      .then((r) => r.json())
+      .then((result) => {
+        if (result.success) {
+          setEntries((result.data.submissions as ApiSubmission[]).map((s) => ({
             id:              s.id,
             partnerName:     s.user.name,
             firmName:        s.partner?.businessName ?? s.user.name,
@@ -198,13 +157,23 @@ function KYCListContent() {
             rejectionReason: s.reviewerNotes ?? undefined,
             submittedById:   s.userId,
           })));
-        } else {
-          setEntries(MOCK_KYC);
         }
       })
-      .catch(() => setEntries(MOCK_KYC))
-      .finally(() => setLoading(false));
-  }, []);
+      .catch(() => {});
+
+    const teamFetch = hasTeamView(role)
+      ? fetch('/api/sales/team', { headers: authHeaders })
+          .then((r) => r.json())
+          .then((body) => {
+            if (body.success) {
+              setTeamMembers((body.data.members ?? []).map((m: any) => ({ id: m.id, name: m.name })));
+            }
+          })
+          .catch(() => {})
+      : Promise.resolve();
+
+    Promise.all([kycFetch, teamFetch]).finally(() => setLoading(false));
+  }, [role]);
 
   const filtered = entries
     .filter((e) => {

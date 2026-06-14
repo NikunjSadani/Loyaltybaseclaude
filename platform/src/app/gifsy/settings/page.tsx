@@ -55,7 +55,7 @@ export default function GifsySettingsPage() {
           <input defaultValue="Gifsy Loyalty Platform" className={INPUT_CLS} />
         </Field>
         <Field label="Default domain">
-          <input defaultValue="loyaltybase.in" className={INPUT_CLS + ' font-mono'} />
+          <input defaultValue="gifsy.in" className={INPUT_CLS + ' font-mono'} />
         </Field>
         <Field label="Support email">
           <input defaultValue="support@gifsy.in" className={INPUT_CLS} />

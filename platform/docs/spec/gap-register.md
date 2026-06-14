@@ -1,0 +1,47 @@
+# Gap & Inconsistency Register (living)
+
+Accumulated while reverse-engineering the spec. Each entry: current state vs target,
+and where it surfaced. Severity is a first pass, to be refined.
+
+| # | Title | Current state | Target / resolution | Severity |
+|---|-------|---------------|---------------------|----------|
+| 1 | Domain mismatch | Code references `loyaltybase.in` (`tenant.ts`, `client-registry.ts` — subdomains, support emails) | Actual domain is `gifsy.in`; update references | Low |
+| 2 | RBAC is hardcoded | Fixed 11-value `UserRole` enum; coarse `if role !==` checks scattered in routes | **Admin-side:** per-tenant configurable roles (Reporting/Finance/HR…) with **sections/features tagged** to roles. **Sales:** data scoped by hierarchy (mapped outlets) + team rollup for seniors — not configurable roles. **Partner:** own data only | **High** |
+| 3 | No permission/capability catalog | No master list of taggable features/permissions | Build a capability catalog (= Phase 1 module catalog) that becomes the permission set | **High** |
+| 4 | Partner/Outlet level split | Modeled 1:many but operated 1:1; login+wallet on Partner, KYC+visibility on Outlet | Document canonical 1:1 mapping + which level each feature binds to; keep two-level for future | Medium |
+| 5 | "Payout" is overloaded (not duplicated) | Traced: `Credit*` = admin-**push** awards (target/focus/visibility → points or INR, offline UTR, reversals); `Payout*`+Fund+TDS = partner-**pull** redemptions (→ INR via provider from prepaid float). Two legitimate flows, but both use the word "payout" (`CreditPayoutEntry` vs `PayoutTransaction`) | Rename for clarity; keep as distinct contexts (Awards & Credits vs Redemption Payouts). Not a consolidation | Medium |
+| 6 | Dynamic enrollment forms | Feature flags exist (`campaignEnrollmentForm`, `selfEnrollmentAllowed`, `nonKycOutletCampaigns`) + `SchemeEnrollment` model | Field-configurable activation forms with conditional pre-fill + enrollment-mode toggle; verify real vs stub | Medium |
+| 7 | Visibility "separate UTR / never clubbed" rule | `CreditField.isSeparatePayout` models it; visibility flagged separate, incentive parameters club into one UTR | Verify the payout/bank-download generation actually enforces no-clubbing for `isSeparatePayout` fields | Medium |
+| 8 | Visibility = self-billed invoicing (resolved) | Outlet renders visibility *service*; **Gifsy auto-generates the outlet→Gifsy invoice on the outlet's behalf** (self-billing), GST logic from outlet registration. Outlet views in portal + **edits invoice number** (`AutoInvoice.invoiceNumber`). **Gifsy→Client billing is off-platform (external accounting) — out of scope by design.** | In scope: validate partner-edited invoice number (uniqueness/format/lock-after-finalize). Not a modeling gap | Low |
+| 9 | KYC approval routing has 3 sources of truth | `ClientConfig.approvalHierarchy` (L1/L2 config) + hardcoded SO→ASM→RSM chain in `kyc-approval.ts` + flat per-role `ROLE_PHONES` table; relational `SalesUser.reportingToId` tree unused | **Target:** route to direct reporting manager via the tree; escalate up when manager inactive (resigned ⇒ phone blank; ideally use `SalesUser.isActive`); then Gifsy final. Retire `ROLE_PHONES`; config only sets whether Gifsy is final | **High** |
+| 10 | Award computation over-built vs upload reality | `SchemeRule` rule engine + `api/schemes/calculate` + auto `SchemeTarget`; "target/achievement" also in `Target`/`TargetAchievement` and `CreditBatch` rows | Canonical = **tenant computes externally → uploads via Credits (#12a)** with header+narration → Wallet. Schemes = define+enroll only; Targets = tracking. Decide: keep rule-engine for future or prune | Medium |
+| 11 | Fixed sales-role enum vs configurable hierarchy | `UserRole` hardcodes 5 sales levels (HO/State-Head/ASM/SO/ISR); industry norm is 6 (ISR/SO/ASM/RSM/**ZNM**/NSM) — no Zonal rung; names fixed | Hierarchy is tenant-driven via relational `SalesHierarchyLevel`; derive level/role from that. Enum becomes a coarse portal bucket at most | Medium |
+| 12 | GST+bank validation is Excel-batch; agreement unused | Gifsy validates GST# + bank (penny-drop) via **Excel upload in a separate portal**, records GST reg type (Regular/Composition/Unregistered), validates name/address vs docs + store pics, then approves. `PENDING_AGREEMENT` appears unused | Decide automate (API) vs keep Excel-batch; remove/clarify `PENDING_AGREEMENT` | Medium |
+| 13 | Re-KYC trigger undefined | `RE_KYC_REQUIRED` exists but nothing sets it | Define trigger (KYC expiry period? admin action? data change?) | Medium |
+| 14 | Rejection is single-string, not field-level | `reject` stores one `rejectionReason`; intent is to **mark each field requiring input** so ISR sees exactly what to fix | Model per-field rejection annotations on `KycSubmission`/`KycDocument` | Medium |
+| 15 | GST reg type → invoice GST logic (cross-context) | GST registration type captured at KYC drives visibility self-bill invoice GST (#12c); link not formalized | Make GST reg type a first-class outlet attribute consumed by invoicing | Medium |
+| 16 | POINTS awards never credit the wallet | Credits confirm creates `CreditPayoutEntry` only for PAYOUT rows; **no `Wallet`/`PointsLedger` write anywhere in the credits module** (grep-confirmed). POINTS rows are stored + summed but inert | Post POINTS rows to `PointsLedger`/`Wallet` on confirm (and debit on reversal). Core value model depends on this | **High** |
+| 17 | Visibility has two modes; no selector flag | App photo-capture+approval+fraud (`VisibilitySubmission*`) vs admin amount upload (`OutletVisibilityUploadBatch`/Credits). Both legitimate, **tenant-selected** | Add per-tenant "visibility capture mode" config flag; both settle via Credits (sep UTR) + self-bill invoice | Low |
+| 18 | JSON-blob configs shadow relational models | `ProgramSetting` stores hierarchy/target-config/kpi/banner/gift as JSON, duplicating relational `SalesUser`/`Target`/etc.; admin flows read the blob, not the rows | Pick blob vs relational per domain; one source of truth | **High** |
+| 19 | Inconsistent money units | Payouts use integer **paise** (`amountPaise`); Credits use **`Decimal` INR** (`amountInr`) | Standardise money representation across the money contexts; guard the Credits↔Payouts boundary | Medium |
+| 20 | Security boundary lives in an external proxy not in the repo | JWT verification + `x-tenant-slug`/`x-user-*` injection expected from an edge proxy; repo has only fallbacks (`DEFAULT_CLIENT_ID='deoleo'`, Bearer). `clientId` not in token | Verify the proxy exists and **binds token↔tenant**; document it; consider in-app middleware as defence-in-depth | **High** |
+| 21 | Two messaging paths | `lib/msg91.ts` vs `lib/notifications.ts` (generic SMS/WhatsApp gateway env vars) | Pick the canonical messaging integration; retire/merge the other | Low |
+| 22 | Tenant config lives in code, not data | Most settings in `CLIENT_REGISTRY` (`lib/platform/`); onboarding/flag change = code change + redeploy | DB-backed `Client` config managed by Gifsy/Client Admin (ties to #2, #18) | **High** |
+| 23 | No DB-level tenant isolation | Isolation is per-query `where: { clientId }` discipline; no RLS / Prisma auto-scoping / `Client` FK | Add Prisma tenant-scoping middleware or Postgres RLS so a missed filter can't leak cross-tenant | **High** |
+| 24 | Erasure vs audit tension (DPDP) | `DataRequest` DELETION vs append-only audit/ledger + soft-delete | Define retention + anonymisation policy (hard-delete vs pseudonymise) | Medium |
+| 25 | TDS section not differentiated | `TdsRecord` exists but doesn't distinguish incentive (194R) vs visibility service (194C/194J) | Encode section by relationship type; align with §00 direct vs indirect | Medium |
+| 26 | Pagination unconfirmed on lists | Risk of unbounded `findMany` on outlets/transactions/tickets | Verify/add pagination on all tenant-scoped list endpoints | Medium |
+| 27 | No observability baseline | Only `console.error`; no structured logs/metrics/tracing/alerting documented | Define prod observability baseline | Medium |
+| 28 | Points expiry/locking is inert — no `PointsLedger` writes | `lib/wallet.ts` `creditPoints`/`debitPoints` update wallet aggregate counters + `WalletTransaction`, but **never write `PointsLedger`**. Expiry/locking (`PointExpiryConfig`, `lockedUntil`, `expiresAt`) read `PointsLedger` → effectively dead for all credited points | Write `PointsLedger` entries on credit/debit (EARN/REVERSE/REDEEM) so expiry/holding actually work; tie to tenant points-lifecycle config | Medium |
+
+**Severity tally:** 8 High (#2, #3, #9, #16, #18, #20, #22, #23) · 14 Medium · 6 Low.
+
+### Also noted (to formalize)
+- Gifsy's own post-first-approval KYC steps (penny-drop, agreement, final validation) — to be
+  documented in §02 Workflows.
+- "Inactive manager" signal is currently *blank phone*; prefer an explicit `SalesUser.isActive`/status flag.
+- Stale `ROLES` constant in `auth.ts` lists `SALES_MANAGER`/`AREA_SALES_MANAGER`/etc. that
+  do **not** match the `UserRole` enum (`SALES_HO`/`SALES_STATE_HEAD`/…). → dead/inconsistent code.
+- `clientId` is **not** in the JWT (`TokenPayload`); tenant is resolved from the
+  `x-tenant-slug` header. A valid token on the wrong subdomain could mismatch tenant scope
+  — verify the proxy/middleware binds them. (Tenant-isolation review, Phase 2.)

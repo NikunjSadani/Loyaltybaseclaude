@@ -2,6 +2,7 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { Trophy, Medal, TrendingUp, TrendingDown, Minus, Users, MapPin } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import { getRole, ROLE_NAMES, ROLE_TERRITORY, type SalesRole } from '@/lib/sales-role';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -23,197 +24,7 @@ const SCOPE_LABELS: Record<ScopeFilter, string> = {
   national: 'National',
 };
 
-/* ─── Mock data — three scopes per role ──────────────────────────────────────── */
-
-const PEERS: Record<SalesRole, Record<ScopeFilter, SalesEntry[]>> = {
-  /* ─── XSR — source of truth: MOCK_XSRS in team/page.tsx ─── */
-  XSR: {
-    // Exact 4 XSRs under SO Rajesh Kumar (Mumbai West)
-    rm: [
-      { name: 'Kiran Rao',    territory: 'Versova Beat',  achievementPct: 91, activeOutlets: 11, change: +1 },
-      { name: 'Anil Sharma',  territory: 'Andheri Beat',  achievementPct: 82, activeOutlets: 18, change: +1, isMe: true },
-      { name: 'Divya Pillai', territory: 'Juhu Beat',     achievementPct: 58, activeOutlets: 14, change: -2 },
-      { name: 'Meena Joshi',  territory: 'DN Nagar Beat', achievementPct: 44, activeOutlets: 16, change:  0 },
-    ],
-    // Maharashtra: rm members + broader state XSRs
-    state: [
-      { name: 'Varun Kulkarni', territory: 'Pune Central',   achievementPct: 118, activeOutlets: 52, change: +3 },
-      { name: 'Deepak Rane',    territory: 'Versova Beat',   achievementPct: 112, activeOutlets: 48, change: +2 },
-      { name: 'Swati Pawar',    territory: 'Juhu Beat',      achievementPct: 104, activeOutlets: 44, change:  0 },
-      { name: 'Manish Shinde',  territory: 'Nagpur East',    achievementPct: 101, activeOutlets: 43, change: +1 },
-      { name: 'Kiran Rao',      territory: 'Versova Beat',   achievementPct:  91, activeOutlets: 11, change: +1 },
-      { name: 'Anil Sharma',    territory: 'Andheri Beat',   achievementPct:  82, activeOutlets: 18, change: +1, isMe: true },
-      { name: 'Rahul Desai',    territory: 'Goregaon Beat',  achievementPct:  76, activeOutlets: 36, change: -2 },
-      { name: 'Divya Pillai',   territory: 'Juhu Beat',      achievementPct:  58, activeOutlets: 14, change: -2 },
-      { name: 'Suresh Gaikwad', territory: 'Nashik West',    achievementPct:  51, activeOutlets: 30, change:  0 },
-      { name: 'Meena Joshi',    territory: 'DN Nagar Beat',  achievementPct:  44, activeOutlets: 16, change:  0 },
-      { name: 'Nitin More',     territory: 'Kandivali Beat', achievementPct:  39, activeOutlets: 28, change:  0 },
-    ],
-    national: [
-      { name: 'Pradeep Iyer',   territory: 'Bengaluru Central', achievementPct: 124, activeOutlets: 58, change: +4 },
-      { name: 'Lakshmi Nair',   territory: 'Chennai South',     achievementPct: 119, activeOutlets: 55, change: +2 },
-      { name: 'Varun Kulkarni', territory: 'Pune Central',      achievementPct: 118, activeOutlets: 52, change: +3 },
-      { name: 'Deepak Rane',    territory: 'Versova Beat',      achievementPct: 112, activeOutlets: 48, change: +2 },
-      { name: 'Swati Pawar',    territory: 'Juhu Beat',         achievementPct: 104, activeOutlets: 44, change:  0 },
-      { name: 'Manish Shinde',  territory: 'Nagpur East',       achievementPct: 101, activeOutlets: 43, change: +1 },
-      { name: 'Kiran Rao',      territory: 'Versova Beat',      achievementPct:  91, activeOutlets: 11, change: +1 },
-      { name: 'Rajan Pillai',   territory: 'Kochi Beat',        achievementPct:  86, activeOutlets: 40, change: -1 },
-      { name: 'Anil Sharma',    territory: 'Andheri Beat',      achievementPct:  82, activeOutlets: 18, change: +1, isMe: true },
-      { name: 'Rahul Desai',    territory: 'Goregaon Beat',     achievementPct:  76, activeOutlets: 36, change: -2 },
-      { name: 'Divya Pillai',   territory: 'Juhu Beat',         achievementPct:  58, activeOutlets: 14, change: -2 },
-      { name: 'Suresh Gaikwad', territory: 'Nashik West',       achievementPct:  51, activeOutlets: 30, change:  0 },
-      { name: 'Meena Joshi',    territory: 'DN Nagar Beat',     achievementPct:  44, activeOutlets: 16, change:  0 },
-      { name: 'Pawan Mishra',   territory: 'Delhi North',       achievementPct:  41, activeOutlets: 23, change: -1 },
-      { name: 'Nitin More',     territory: 'Kandivali Beat',    achievementPct:  39, activeOutlets: 28, change:  0 },
-    ],
-  },
-
-  /* ─── SO — source of truth: MOCK_SOS in team/page.tsx ─── */
-  SO: {
-    // Exact 4 SOs under ASM Priya Mehta (Mumbai Zone)
-    rm: [
-      { name: 'Sunita Desai', territory: 'Navi Mumbai', achievementPct: 93, activeOutlets:  38, change:  0 },
-      { name: 'Nisha Verma',  territory: 'Mumbai East', achievementPct: 88, activeOutlets:  47, change: +2 },
-      { name: 'Rajesh Kumar', territory: 'Mumbai West', achievementPct: 76, activeOutlets:  59, change: -1, isMe: true },
-      { name: 'Arjun Patil',  territory: 'Thane City',  achievementPct: 55, activeOutlets:  52, change: -1 },
-    ],
-    state: [
-      { name: 'Smita Wagh',     territory: 'Mumbai Central', achievementPct: 108, activeOutlets: 71, change: +1 },
-      { name: 'Amey Joshi',     territory: 'Pune West',      achievementPct: 105, activeOutlets: 68, change: +2 },
-      { name: 'Sunita Desai',   territory: 'Navi Mumbai',    achievementPct:  93, activeOutlets: 38, change:  0 },
-      { name: 'Nisha Verma',    territory: 'Mumbai East',    achievementPct:  88, activeOutlets: 47, change: +2 },
-      { name: 'Harish Tawde',   territory: 'Mumbai North',   achievementPct:  84, activeOutlets: 63, change: -1 },
-      { name: 'Rajesh Kumar',   territory: 'Mumbai West',    achievementPct:  76, activeOutlets: 59, change: -1, isMe: true },
-      { name: 'Sandesh More',   territory: 'Nashik',         achievementPct:  69, activeOutlets: 55, change:  0 },
-      { name: 'Arjun Patil',    territory: 'Thane City',     achievementPct:  55, activeOutlets: 52, change: -1 },
-      { name: 'Tushar Bhosale', territory: 'Aurangabad',     achievementPct:  48, activeOutlets: 44, change: -2 },
-    ],
-    national: [
-      { name: 'Venkat Raman',   territory: 'Bengaluru North', achievementPct: 114, activeOutlets:  82, change: +3 },
-      { name: 'Smita Wagh',     territory: 'Mumbai Central',  achievementPct: 108, activeOutlets:  71, change: +1 },
-      { name: 'Amey Joshi',     territory: 'Pune West',       achievementPct: 105, activeOutlets:  68, change: +2 },
-      { name: 'Sunita Desai',   territory: 'Navi Mumbai',     achievementPct:  93, activeOutlets:  38, change:  0 },
-      { name: 'Nisha Verma',    territory: 'Mumbai East',     achievementPct:  88, activeOutlets:  47, change: +2 },
-      { name: 'Harish Tawde',   territory: 'Mumbai North',    achievementPct:  84, activeOutlets:  63, change: -1 },
-      { name: 'Sunita Sharma',  territory: 'Delhi East',      achievementPct:  81, activeOutlets:  60, change:  0 },
-      { name: 'Rajesh Kumar',   territory: 'Mumbai West',     achievementPct:  76, activeOutlets:  59, change: -1, isMe: true },
-      { name: 'Sandesh More',   territory: 'Nashik',          achievementPct:  69, activeOutlets:  55, change:  0 },
-      { name: 'Arjun Patil',    territory: 'Thane City',      achievementPct:  55, activeOutlets:  52, change: -1 },
-      { name: 'Tushar Bhosale', territory: 'Aurangabad',      achievementPct:  48, activeOutlets:  44, change: -2 },
-      { name: 'Karthik Menon',  territory: 'Chennai Central', achievementPct:  43, activeOutlets:  41, change: -1 },
-    ],
-  },
-
-  /* ─── ASM — source of truth: MOCK_ASMS in team/page.tsx ─── */
-  ASM: {
-    // Exact 4 ASMs under RSM Suresh Nair (Maharashtra)
-    rm: [
-      { name: 'Priya Mehta',     territory: 'Mumbai Zone', achievementPct: 78, activeOutlets: 196, change:  0, isMe: true },
-      { name: 'Sonal Agrawal',   territory: 'Nashik Zone', achievementPct: 71, activeOutlets:  98, change:  0 },
-      { name: 'Rohit Deshpande', territory: 'Pune Zone',   achievementPct: 64, activeOutlets: 143, change: -2 },
-      { name: 'Vikram Bhosale',  territory: 'Nagpur Zone', achievementPct: 57, activeOutlets:  74, change: -1 },
-    ],
-    state: [
-      { name: 'Priya Mehta',     territory: 'Mumbai Zone',   achievementPct: 78, activeOutlets: 196, change:  0, isMe: true },
-      { name: 'Sonal Agrawal',   territory: 'Nashik Zone',   achievementPct: 71, activeOutlets:  98, change:  0 },
-      { name: 'Rohit Deshpande', territory: 'Pune Zone',     achievementPct: 64, activeOutlets: 143, change: -2 },
-      { name: 'Vikram Bhosale',  territory: 'Nagpur Zone',   achievementPct: 57, activeOutlets:  74, change: -1 },
-      { name: 'Meera Deshpande', territory: 'Solapur Zone',  achievementPct: 52, activeOutlets:  62, change: -2 },
-      { name: 'Vijay Salunkhe',  territory: 'Kolhapur Zone', achievementPct: 47, activeOutlets:  55, change:  0 },
-    ],
-    national: [
-      { name: 'Ravi Shankar',    territory: 'Karnataka North', achievementPct: 91, activeOutlets: 218, change: +3 },
-      { name: 'Priya Mehta',     territory: 'Mumbai Zone',     achievementPct: 78, activeOutlets: 196, change:  0, isMe: true },
-      { name: 'Sonal Agrawal',   territory: 'Nashik Zone',     achievementPct: 71, activeOutlets:  98, change:  0 },
-      { name: 'Rohit Deshpande', territory: 'Pune Zone',       achievementPct: 64, activeOutlets: 143, change: -2 },
-      { name: 'Vikram Bhosale',  territory: 'Nagpur Zone',     achievementPct: 57, activeOutlets:  74, change: -1 },
-      { name: 'Arun Krishnan',   territory: 'Hyderabad Zone',  achievementPct: 54, activeOutlets:  81, change: -1 },
-      { name: 'Meera Deshpande', territory: 'Solapur Zone',    achievementPct: 52, activeOutlets:  62, change: -2 },
-      { name: 'Vijay Salunkhe',  territory: 'Kolhapur Zone',   achievementPct: 47, activeOutlets:  55, change:  0 },
-    ],
-  },
-
-  /* ─── RSM — source of truth: MOCK_RSMS in team/page.tsx ─── */
-  RSM: {
-    // Exact 4 RSMs under ZM Vikram Singh (West Zone)
-    rm: [
-      { name: 'Deepak Tiwari', territory: 'Gujarat',     achievementPct: 81, activeOutlets: 289, change: +2 },
-      { name: 'Ananya Bose',   territory: 'Rajasthan',   achievementPct: 74, activeOutlets: 267, change:  0 },
-      { name: 'Suresh Nair',   territory: 'Maharashtra', achievementPct: 72, activeOutlets: 511, change: -1, isMe: true },
-      { name: 'Leela Iyer',    territory: 'Karnataka',   achievementPct: 68, activeOutlets: 342, change: -1 },
-    ],
-    state: [
-      { name: 'Deepak Tiwari', territory: 'Gujarat',     achievementPct: 81, activeOutlets: 289, change: +2 },
-      { name: 'Ananya Bose',   territory: 'Rajasthan',   achievementPct: 74, activeOutlets: 267, change:  0 },
-      { name: 'Suresh Nair',   territory: 'Maharashtra', achievementPct: 72, activeOutlets: 511, change: -1, isMe: true },
-      { name: 'Leela Iyer',    territory: 'Karnataka',   achievementPct: 68, activeOutlets: 342, change: -1 },
-    ],
-    national: [
-      { name: 'Rajiv Menon',   territory: 'Tamil Nadu',     achievementPct: 88, activeOutlets: 410, change: +2 },
-      { name: 'Deepak Tiwari', territory: 'Gujarat',        achievementPct: 81, activeOutlets: 289, change: +2 },
-      { name: 'Pradeep Kumar', territory: 'Delhi NCR',      achievementPct: 77, activeOutlets: 380, change:  0 },
-      { name: 'Ananya Bose',   territory: 'Rajasthan',      achievementPct: 74, activeOutlets: 267, change:  0 },
-      { name: 'Suresh Nair',   territory: 'Maharashtra',    achievementPct: 72, activeOutlets: 511, change: -1, isMe: true },
-      { name: 'Anand Verma',   territory: 'Uttar Pradesh',  achievementPct: 69, activeOutlets: 290, change: -1 },
-      { name: 'Leela Iyer',    territory: 'Karnataka',      achievementPct: 68, activeOutlets: 342, change: -1 },
-    ],
-  },
-
-  /* ─── ZNM — source of truth: MOCK_ZMS in team/page.tsx ─── */
-  ZNM: {
-    rm: [
-      { name: 'Vikram Singh',  territory: 'West Zone',  achievementPct: 74, activeOutlets: 1409, change: -1, isMe: true },
-      { name: 'Ravi Menon',    territory: 'South Zone', achievementPct: 71, activeOutlets: 1124, change: +2 },
-      { name: 'Kavita Sharma', territory: 'North Zone', achievementPct: 68, activeOutlets:  987, change: +2 },
-      { name: 'Arun Gupta',    territory: 'East Zone',  achievementPct: 66, activeOutlets:  834, change:  0 },
-    ],
-    state: [
-      { name: 'Vikram Singh',  territory: 'West Zone',  achievementPct: 74, activeOutlets: 1409, change: -1, isMe: true },
-      { name: 'Ravi Menon',    territory: 'South Zone', achievementPct: 71, activeOutlets: 1124, change: +2 },
-      { name: 'Kavita Sharma', territory: 'North Zone', achievementPct: 68, activeOutlets:  987, change: +2 },
-      { name: 'Arun Gupta',    territory: 'East Zone',  achievementPct: 66, activeOutlets:  834, change:  0 },
-    ],
-    national: [
-      { name: 'Vikram Singh',  territory: 'West Zone',  achievementPct: 74, activeOutlets: 1409, change: -1, isMe: true },
-      { name: 'Ravi Menon',    territory: 'South Zone', achievementPct: 71, activeOutlets: 1124, change: +2 },
-      { name: 'Kavita Sharma', territory: 'North Zone', achievementPct: 68, activeOutlets:  987, change: +2 },
-      { name: 'Arun Gupta',    territory: 'East Zone',  achievementPct: 66, activeOutlets:  834, change:  0 },
-    ],
-  },
-
-  /* ─── NSM — sees MOCK_ZMS; no isMe (NSM is above the leaderboard) ─── */
-  NSM: {
-    rm: [
-      { name: 'Vikram Singh',  territory: 'West Zone',  achievementPct: 74, activeOutlets: 1409, change: -1 },
-      { name: 'Ravi Menon',    territory: 'South Zone', achievementPct: 71, activeOutlets: 1124, change: +2 },
-      { name: 'Kavita Sharma', territory: 'North Zone', achievementPct: 68, activeOutlets:  987, change: +2 },
-      { name: 'Arun Gupta',    territory: 'East Zone',  achievementPct: 66, activeOutlets:  834, change:  0 },
-    ],
-    state: [
-      { name: 'Vikram Singh',  territory: 'West Zone',  achievementPct: 74, activeOutlets: 1409, change: -1 },
-      { name: 'Ravi Menon',    territory: 'South Zone', achievementPct: 71, activeOutlets: 1124, change: +2 },
-      { name: 'Kavita Sharma', territory: 'North Zone', achievementPct: 68, activeOutlets:  987, change: +2 },
-      { name: 'Arun Gupta',    territory: 'East Zone',  achievementPct: 66, activeOutlets:  834, change:  0 },
-    ],
-    national: [
-      { name: 'Vikram Singh',  territory: 'West Zone',  achievementPct: 74, activeOutlets: 1409, change: -1 },
-      { name: 'Ravi Menon',    territory: 'South Zone', achievementPct: 71, activeOutlets: 1124, change: +2 },
-      { name: 'Kavita Sharma', territory: 'North Zone', achievementPct: 68, activeOutlets:  987, change: +2 },
-      { name: 'Arun Gupta',    territory: 'East Zone',  achievementPct: 66, activeOutlets:  834, change:  0 },
-    ],
-  },
-};
-
-/* ─── Scope sub-label ────────────────────────────────────────────────────────── */
-
-const SCOPE_SUB: Record<SalesRole, Record<ScopeFilter, string>> = {
-  XSR: { rm: 'Your SO\'s team · Mumbai West', state: 'Maharashtra · All XSRs', national: 'National · All XSRs' },
-  SO:  { rm: 'Your ASM\'s team · Mumbai Zone', state: 'Maharashtra · All SOs',  national: 'National · All SOs'  },
-  ASM: { rm: 'Your RSM\'s region · Maharashtra', state: 'Maharashtra · All ASMs', national: 'National · All ASMs' },
-  RSM: { rm: 'Your ZM\'s zone · West Zone',    state: 'West Zone · All RSMs',   national: 'National · All RSMs' },
-  ZNM: { rm: 'Pan-India · All Zones',          state: 'All Zones',              national: 'National · All ZNMs' },
-  NSM: { rm: 'National overview',              state: 'All Zones',              national: 'National · All ZNMs' },
-};
+/* (leaderboard data loaded from /api/sales/leaderboard) */
 
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
@@ -248,8 +59,10 @@ function pctBg(p: number) {
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function SalesLeaderboardPage() {
-  const [role,  setRoleState] = useState<SalesRole>('SO');
-  const [scope, setScope]     = useState<ScopeFilter>('rm');
+  const [role,       setRoleState] = useState<SalesRole>('SO');
+  const [scope,      setScope]     = useState<ScopeFilter>('rm');
+  const [entries,    setEntries]   = useState<SalesEntry[]>([]);
+  const [loading,    setLoading]   = useState(false);
 
   useEffect(() => {
     setRoleState(getRole());
@@ -258,12 +71,22 @@ export default function SalesLeaderboardPage() {
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
-  const ranked = useMemo(() => {
-    const list = PEERS[role]?.[scope] ?? [];
-    return [...list]
-      .sort((a, b) => b.achievementPct - a.achievementPct)
-      .map((e, i) => ({ ...e, rank: i + 1 }));
-  }, [role, scope]);
+  useEffect(() => {
+    setLoading(true);
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch(`/api/sales/leaderboard?scope=${scope}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((body) => { if (body.success) setEntries(body.data.entries ?? []); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [scope]);
+
+  const ranked = useMemo(
+    () => entries.map((e, i) => ({ ...e, rank: i + 1 })),
+    [entries],
+  );
 
   const myEntry   = ranked.find((e) => e.isMe);
   const nextEntry = myEntry && myEntry.rank > 1 ? ranked[myEntry.rank - 2] : null;
@@ -275,7 +98,10 @@ export default function SalesLeaderboardPage() {
       {/* Header */}
       <div>
         <h1 className="text-2xl font-black text-gray-900 tracking-tight">Leaderboard</h1>
-        <p className="text-xs font-medium text-gray-500 mt-0.5">{SCOPE_SUB[role][scope]} · May 2026</p>
+        <p className="text-xs font-medium text-gray-500 mt-0.5">
+          {SCOPE_LABELS[scope]} peers · {ROLE_NAMES[role]}
+          {loading && <span className="ml-2 text-gray-300">loading…</span>}
+        </p>
       </div>
 
       {/* ── Scope filter pills ── */}
@@ -330,7 +156,7 @@ export default function SalesLeaderboardPage() {
             <Users className="h-6 w-6 text-white/40" />
             <div>
               <p className="text-sm font-bold">National Overview</p>
-              <p className="text-xs text-white/50">Zonal rankings · May 2026</p>
+              <p className="text-xs text-white/50">National overview · {SCOPE_LABELS[scope]} peers</p>
             </div>
           </div>
         </div>
@@ -371,6 +197,12 @@ export default function SalesLeaderboardPage() {
         </div>
 
         <div className="divide-y divide-gray-50">
+          {loading && ranked.length === 0 && (
+            <div className="flex items-center justify-center py-12"><Spinner size="lg" /></div>
+          )}
+          {!loading && ranked.length === 0 && (
+            <p className="text-sm text-gray-400 text-center py-8">No leaderboard data available</p>
+          )}
           {ranked.map((entry) => (
             <div key={entry.name}
               className={`flex items-center gap-3 px-4 py-3 ${

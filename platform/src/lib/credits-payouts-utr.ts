@@ -1,19 +1,14 @@
 /**
- * Credits & Payouts — UTR Upload Parser & Applier
+ * Credits & Payouts — UTR Upload Parser (pure / injectable)
  *
- * Gifsy uploads the payout file back with UTR numbers filled in.
- * This module parses and validates the uploaded file, then updates
- * payout batch rows + payout entries accordingly.
+ * parseUtrUpload accepts all batch data as parameters — no localStorage.
+ * The API route loads data from DB before calling this function.
  *
  * UTR validations:
  *  - Format: 8–22 alphanumeric characters (covers NEFT/IMPS/RTGS/UPI)
- *  - Duplicate UTR detection across ALL batches in storage
- *  - Outlet ID must exist in the referenced payout batch
+ *  - Duplicate UTR detection via injected knownUtrs set
+ *  - Outlet ID must exist in the injected batchRows
  *  - Already-PAID rows are skipped (idempotency)
- *
- * Amount reconciliation:
- *  - Warns if the sum of amounts in the UTR file differs from batch total
- *  - Does NOT block processing (just a warning)
  *
  * Success/Failure column accepts: "Success", "1", "Y", "Yes", "TRUE" → success
  * Anything else → failure
@@ -25,13 +20,7 @@
  */
 
 import * as XLSX from 'xlsx';
-import type { PayoutBatch, UtrParseResult, UtrUploadRow } from '@/types';
-import {
-  getPayoutBatch,
-  savePayoutBatch,
-  updatePayoutEntryStatus,
-  getAllPayoutBatches,
-} from './credits-payouts-payout-store';
+import type { UtrParseResult, UtrUploadRow } from '@/types';
 
 // ─── UTR format validator ─────────────────────────────────────────────────────
 
@@ -48,35 +37,31 @@ function parseSuccess(raw: string): boolean {
   return ['SUCCESS', '1', 'Y', 'YES', 'TRUE'].includes(v);
 }
 
-// ─── Collect all known UTRs (for duplicate detection) ────────────────────────
+// ─── Injectable batch row type ────────────────────────────────────────────────
 
-function collectKnownUtrs(): Set<string> {
-  const known = new Set<string>();
-  for (const batch of getAllPayoutBatches()) {
-    for (const row of batch.rows) {
-      if (row.utr) known.add(row.utr.trim().toUpperCase());
-    }
-  }
-  return known;
+export interface UtrBatchRow {
+  outletId:  string;
+  utrStatus: 'PENDING' | 'PAID' | 'FAILED';
+  utr?:      string;
+}
+
+export interface ParseUtrUploadOpts {
+  downloadCode: string;       // Expected "Batch ID" in the file (the payout download code)
+  batchRows:    UtrBatchRow[]; // Pre-loaded from DB (CreditPayoutEntry rows for this download)
+  knownUtrs:    Set<string>;   // Already-used UTRs across all downloads, for dup detection
 }
 
 // ─── Parser ───────────────────────────────────────────────────────────────────
-
-export interface ParseUtrUploadOpts {
-  batchId: string;   // which PayoutBatch this file belongs to
-}
 
 export function parseUtrUpload(
   buffer: ArrayBuffer,
   opts:   ParseUtrUploadOpts,
 ): UtrParseResult {
-  const { batchId } = opts;
+  const { downloadCode, batchRows, knownUtrs } = opts;
 
-  // Load the batch
-  const batch = getPayoutBatch(batchId);
-  if (!batch) {
+  if (!batchRows.length) {
     return {
-      headerError: `Payout batch "${batchId}" not found. Please use the file downloaded from the payout screen.`,
+      headerError: `No payout entries found for download "${downloadCode}".`,
       rows: [], hasErrors: false, canProceed: false,
       summary: { total: 0, ok: 0, skipped: 0, errors: 0, paidCount: 0, failedCount: 0 },
     };
@@ -122,14 +107,9 @@ export function parseUtrUpload(
     };
   }
 
-  // Build outlet lookup from batch rows
-  const batchRowMap = new Map(batch.rows.map((r) => [r.outletId, r]));
-
-  // Collect all known UTRs (for dup detection)
-  const knownUtrs = collectKnownUtrs();
-
-  const rows: UtrUploadRow[] = [];
+  const batchRowMap = new Map(batchRows.map((r) => [r.outletId, r]));
   const seenUtrs = new Set<string>();
+  const rows: UtrUploadRow[] = [];
   let paidCount = 0; let failedCount = 0;
 
   for (let rIdx = 2; rIdx < allRows.length; rIdx++) {
@@ -149,7 +129,7 @@ export function parseUtrUpload(
     if (batchRow?.utrStatus === 'PAID') {
       rows.push({
         rowNum: rIdx + 1, outletId,
-        batchId: fileBatchId || batchId,
+        batchId: fileBatchId || downloadCode,
         utr: utrRaw, success: true, remarks: remarksRaw,
         status: 'SKIP', errors: [],
       });
@@ -158,31 +138,27 @@ export function parseUtrUpload(
 
     // Outlet not in batch
     if (!batchRow) {
-      errors.push(`Outlet ID "${outletId}" not found in batch "${batchId}".`);
+      errors.push(`Outlet ID "${outletId}" not found in batch "${downloadCode}".`);
     }
 
     // Batch ID mismatch
-    if (fileBatchId && fileBatchId !== batchId) {
-      errors.push(`Batch ID "${fileBatchId}" does not match expected "${batchId}".`);
+    if (fileBatchId && fileBatchId !== downloadCode) {
+      errors.push(`Batch ID "${fileBatchId}" does not match expected "${downloadCode}".`);
     }
 
     const success = parseSuccess(successRaw);
 
-    // UTR required for success rows
     if (success) {
       if (!utrRaw) {
         errors.push('UTR is required for successful payments.');
       } else {
-        // Format check
         if (!isValidUtr(utrRaw)) {
           errors.push(`UTR "${utrRaw}" is not valid (must be 8–22 alphanumeric characters).`);
         }
-        // Duplicate check (across all batches)
         const normUtr = utrRaw.toUpperCase();
         if (knownUtrs.has(normUtr) && !(batchRow?.utr?.toUpperCase() === normUtr)) {
           errors.push(`UTR "${utrRaw}" has already been used in a previous batch.`);
         }
-        // Within-file duplicate
         if (seenUtrs.has(normUtr)) {
           errors.push(`UTR "${utrRaw}" appears more than once in this upload.`);
         } else if (errors.length === 0) {
@@ -199,7 +175,7 @@ export function parseUtrUpload(
     rows.push({
       rowNum:  rIdx + 1,
       outletId,
-      batchId: fileBatchId || batchId,
+      batchId: fileBatchId || downloadCode,
       utr:     utrRaw,
       success,
       remarks: remarksRaw,
@@ -226,74 +202,4 @@ export function parseUtrUpload(
       failedCount,
     },
   };
-}
-
-// ─── Apply UTR result to batch + entries ──────────────────────────────────────
-
-export interface ApplyUtrResult {
-  paidCount:   number;
-  failedCount: number;
-  skippedCount: number;
-}
-
-export function applyUtrResult(
-  parseResult: UtrParseResult,
-  batchId:     string,
-): ApplyUtrResult {
-  const batch = getPayoutBatch(batchId);
-  if (!batch || !parseResult.canProceed) {
-    return { paidCount: 0, failedCount: 0, skippedCount: 0 };
-  }
-
-  let paidCount = 0; let failedCount = 0; let skippedCount = 0;
-
-  const updatedBatch = { ...batch, rows: [...batch.rows] };
-
-  for (const row of parseResult.rows) {
-    if (row.status === 'SKIP') { skippedCount++; continue; }
-    if (row.status !== 'OK')   continue;
-
-    // Update batch row
-    const batchRowIdx = updatedBatch.rows.findIndex((r) => r.outletId === row.outletId);
-    if (batchRowIdx !== -1) {
-      const batchRow = updatedBatch.rows[batchRowIdx];
-      updatedBatch.rows[batchRowIdx] = {
-        ...batchRow,
-        utrStatus:     row.success ? 'PAID' : 'FAILED',
-        utr:           row.success ? row.utr : undefined,
-        paidAt:        row.success ? new Date().toISOString() : undefined,
-        failureReason: row.success ? undefined : row.remarks || 'Bank transfer failed',
-      };
-    }
-
-    // Update individual payout entries
-    const batchRow = batch.rows.find((r) => r.outletId === row.outletId);
-    if (batchRow) {
-      for (const entryId of batchRow.entryIds) {
-        updatePayoutEntryStatus(
-          entryId,
-          row.success ? 'PAID' : 'FAILED',
-          row.success ? row.utr : undefined,
-        );
-      }
-    }
-
-    if (row.success) paidCount++; else failedCount++;
-  }
-
-  // Update batch status
-  const allRows = updatedBatch.rows;
-  const pendingRows = allRows.filter((r) => r.utrStatus === 'PENDING');
-  const paidRows    = allRows.filter((r) => r.utrStatus === 'PAID');
-  const failedRows  = allRows.filter((r) => r.utrStatus === 'FAILED');
-
-  updatedBatch.status =
-    pendingRows.length === 0 && failedRows.length === 0 ? 'PAID'
-    : pendingRows.length === 0                          ? 'FAILED'
-    : paidRows.length > 0                              ? 'PARTIALLY_PAID'
-    :                                                    'OPEN';
-
-  savePayoutBatch(updatedBatch);
-
-  return { paidCount, failedCount, skippedCount };
 }

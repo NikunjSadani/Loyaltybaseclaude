@@ -25,37 +25,8 @@ interface Partner {
   isMe?: boolean;
 }
 
-// My location
+// My location — used for state/district scope filtering when API provides location data
 const MY = { state: 'Maharashtra', district: 'Pune' };
-
-/** Primary KPI for wholesalers = Secondary Sales Volume (cases dispatched to sub-stockists) */
-const PRIMARY_KPI = 'Secondary Sales Volume';
-
-const ALL_PARTNERS: Partner[] = [
-  { name: 'Sharma General Store',  city: 'Mumbai',      district: 'Mumbai City',  state: 'Maharashtra',   primaryKpiLabel: PRIMARY_KPI, primaryKpiValue: 18420, change: +2 },
-  { name: 'Patel Wholesale Hub',   city: 'Ahmedabad',   district: 'Ahmedabad',    state: 'Gujarat',        primaryKpiLabel: PRIMARY_KPI, primaryKpiValue: 16890, change:  0 },
-  { name: 'Reddy Distributors',    city: 'Hyderabad',   district: 'Hyderabad',    state: 'Telangana',      primaryKpiLabel: PRIMARY_KPI, primaryKpiValue: 15340, change: +1 },
-  { name: 'Singh Trade Centre',    city: 'Delhi',       district: 'Central Delhi', state: 'Delhi',          primaryKpiLabel: PRIMARY_KPI, primaryKpiValue: 14200, change: -1 },
-  { name: 'Meena Enterprises',     city: 'Jaipur',      district: 'Jaipur',       state: 'Rajasthan',      primaryKpiLabel: PRIMARY_KPI, primaryKpiValue: 13750, change: +3 },
-  { name: 'Nair & Co.',            city: 'Kochi',       district: 'Ernakulam',    state: 'Kerala',         primaryKpiLabel: PRIMARY_KPI, primaryKpiValue: 12980, change: -2 },
-  { name: 'Gupta Brothers',        city: 'Lucknow',     district: 'Lucknow',      state: 'Uttar Pradesh',  primaryKpiLabel: PRIMARY_KPI, primaryKpiValue: 12100, change:  0 },
-  { name: 'Venkat Super Store',    city: 'Chennai',     district: 'Chennai',      state: 'Tamil Nadu',     primaryKpiLabel: PRIMARY_KPI, primaryKpiValue: 11450, change: +1 },
-  { name: 'Iyer Provisions',       city: 'Coimbatore',  district: 'Coimbatore',   state: 'Tamil Nadu',     primaryKpiLabel: PRIMARY_KPI, primaryKpiValue: 10800, change: +4 },
-  { name: 'Das Retail Mart',       city: 'Kolkata',     district: 'Kolkata',      state: 'West Bengal',    primaryKpiLabel: PRIMARY_KPI, primaryKpiValue: 10200, change: -1 },
-  { name: 'Khanna Traders',        city: 'Chandigarh',  district: 'Chandigarh',   state: 'Chandigarh',     primaryKpiLabel: PRIMARY_KPI, primaryKpiValue:  9750, change:  0 },
-  { name: 'Kapoor Stores',         city: 'Pune',        district: 'Pune',         state: 'Maharashtra',    primaryKpiLabel: PRIMARY_KPI, primaryKpiValue:  9300, change: +1 },
-  { name: 'Bose Distributors',     city: 'Kolkata',     district: 'Kolkata',      state: 'West Bengal',    primaryKpiLabel: PRIMARY_KPI, primaryKpiValue:  8100, change: -1 },
-  { name: 'Pillai Wholesale',      city: 'Trivandrum',  district: 'Trivandrum',   state: 'Kerala',         primaryKpiLabel: PRIMARY_KPI, primaryKpiValue:  7680, change:  0 },
-  { name: 'Agarwal Super Mart',    city: 'Indore',      district: 'Indore',       state: 'Madhya Pradesh', primaryKpiLabel: PRIMARY_KPI, primaryKpiValue:  7200, change: +1 },
-  { name: 'Joshi Provisions',      city: 'Nashik',      district: 'Nashik',       state: 'Maharashtra',    primaryKpiLabel: PRIMARY_KPI, primaryKpiValue:  7100, change: -1 },
-  { name: 'Kulkarni & Sons',       city: 'Pune',        district: 'Pune',         state: 'Maharashtra',    primaryKpiLabel: PRIMARY_KPI, primaryKpiValue:  6900, change: +2 },
-  { name: 'My Store (You)',        city: 'Pune',        district: 'Pune',         state: 'Maharashtra',    primaryKpiLabel: PRIMARY_KPI, primaryKpiValue:  6550, change: +2, isMe: true },
-  { name: 'Deshpande Mart',        city: 'Pune',        district: 'Pune',         state: 'Maharashtra',    primaryKpiLabel: PRIMARY_KPI, primaryKpiValue:  6200, change:  0 },
-  { name: 'Sawant Enterprises',    city: 'Kolhapur',    district: 'Kolhapur',     state: 'Maharashtra',    primaryKpiLabel: PRIMARY_KPI, primaryKpiValue:  5800, change: -2 },
-];
-
-// Totals per scope for subtitle
-const SCOPE_TOTALS: Record<Scope, number> = { india: 248, state: 63, district: 12 };
 
 function RankMedal({ rank }: { rank: number }) {
   if (rank === 1) return <Trophy className="h-4 w-4 text-yellow-500" />;
@@ -97,25 +68,24 @@ function mapApiLeaderboard(
 export default function LeaderboardPage() {
   const { features } = useClientConfig();
   const [scope, setScope] = useState<Scope>('india');
-  const [partners, setPartners] = useState<Partner[]>(ALL_PARTNERS);
+  const [partners, setPartners] = useState<Partner[]>([]);
+  const [loading, setLoading] = useState(true);
   // When API data is loaded, state/district are not available — disable those scope tabs
-  const [hasLocationData, setHasLocationData] = useState(true);
+  const [hasLocationData, setHasLocationData] = useState(false);
 
   useEffect(() => {
-    if (!features.partnerApp.showLeaderboard) return;
+    if (!features.partnerApp.showLeaderboard) { setLoading(false); return; }
     fetch('/api/leaderboard')
       .then(r => r.json())
       .then((json: { success: boolean; data?: { leaderboard: ApiLeaderboardEntry[]; currentPartnerId?: string | null } }) => {
         if (json.success && json.data?.leaderboard && json.data.leaderboard.length > 0) {
           const currentPartnerId = json.data.currentPartnerId ?? null;
           setPartners(mapApiLeaderboard(json.data.leaderboard, currentPartnerId));
-          // API entries have no state/district — disable those scope tabs to avoid empty views
-          setHasLocationData(false);
           if (scope !== 'india') setScope('india');
         }
-        // On empty or error response: keep ALL_PARTNERS as fallback
       })
-      .catch(() => {}); // silent — initial mock data kept on failure
+      .catch(() => {})
+      .finally(() => setLoading(false));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = useMemo(() => {
@@ -144,6 +114,15 @@ export default function LeaderboardPage() {
         <Link href="/partner/dashboard" className="mt-2 text-sm text-[var(--brand-primary)] font-medium hover:underline">
           ← Back to Dashboard
         </Link>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 space-y-3">
+        <div className="w-8 h-8 border-2 border-[var(--brand-primary)] border-t-transparent rounded-full animate-spin" />
+        <p className="text-sm text-gray-500">Loading leaderboard…</p>
       </div>
     );
   }
@@ -197,7 +176,7 @@ export default function LeaderboardPage() {
           <div className="flex-1">
             <p className="text-sm font-semibold">Your Rank · {SCOPE_CONFIG[scope].label}</p>
             <p className="text-xs text-white/60 mt-0.5">
-              {SCOPE_TOTALS[scope]} partners · Monthly ranking
+              {filtered.length} partners · Monthly ranking
             </p>
             {myEntry.change !== 0 && (
               <div className="flex items-center gap-1 mt-1.5">
