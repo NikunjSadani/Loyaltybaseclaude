@@ -67,6 +67,26 @@ First OTP for an unknown phone auto-creates a `PENDING_VERIFICATION` user with r
 - **1.8** **Human-gate:** token↔tenant binding (#20) with the proxy owner — put `clientId` in the token vs keep header-trust. Pure compare once decided.
 - **1.9** Write `LoginLog` + bump `lastLoginAt`/`loginCount` on successful login; optional `lib/audit` helper to DRY the inline `auditLog.create` calls.
 
+### 🟠 F6 (Med, → 1.7) — `api/admin/banners` DELETE is not tenant-scoped (found by the 1.2a validation auditor)
+`src/app/api/admin/banners/route.ts:81` does `prisma.bannerManagement.delete({ where: { id } })` with the id from a query param and **no `clientId`** — a CLIENT_ADMIN can hard-delete another tenant's banner by id. Same class as F1, different resource. **1.7's isolation audit test must enumerate ALL tenant-scoped routes and fail on this; fix it there.** (Note: this is a *hard* delete, unlike the user soft-delete — worth converting to soft-delete too.)
+
+## Progress & validation log
+
+| Task | Status | Gate (orchestrator) | Independent audit |
+|---|---|---|---|
+| 1.0 | ✅ done | n/a (audit) | n/a |
+| 1.2a (F1 fix) | ✅ committed `341b9a3` | tsc 0 / lint clean / tests +11, no new reds | **PASS-WITH-NOTES** — confirmed all 3 handlers scoped & no-mutation; surfaced F6 (banners) + soft-deleted-target + findFirst-arg test-strengthening (folded into 1.7) |
+| 1.1 (F2/F3/F4) | ✅ committed `4dd30d5` | tsc 0 / lint clean / tests +9, no new reds | running |
+| 1.5 (catalog) | ✅ committed `a8b2e6e` | tsc 0 (fixed union-type test) / lint clean / tests +17 | running |
+
+**Differential gate evidence (whole wave):** full `npm test` = 28 failed files / 105 failed tests = **exact match to baseline-red-snapshot.txt** (zero new reds, zero regressions); +37 new green tests; `tsc --noEmit` = 0 errors; lint clean on all wave files (pre-existing project-wide `any` debt untouched, matching surrounding convention).
+
+**Deferred decisions raised by this wave (for just-in-time resolution):**
+- **OTP validity window** — route uses 6 h, helper uses 10 min. Executor + I recommend **10 min** (6 h is a security anti-pattern). Decide when 1.1's follow-up / messaging convergence lands.
+- **Auto-registration (F5)** — first OTP for an unknown phone silently creates a `PENDING_VERIFICATION/SSS` user. Confirm this is the intended self-enrollment funnel.
+- **OTP channel routing** — `msg91.sendOtp` picks channel from the MSG91 template, so the request's `SMS`/`WHATSAPP` field is now cosmetic. If explicit per-channel OTP is required, needs separate templateIds. → P7 messaging.
+- **1.5 taxonomy** (5 questions): sales data-scoping vs permission keys; single `kyc:approve` vs level-bound; per-feature-flag granularity; partner-app permissions; scheme rule-engine key. → resolve before 1.6 maps roles.
+
 ## Spec corrections emitted by this audit
 - §01 / gap-register: confirm #2 (fixed `UserRole` enum), #3 (no permission catalog), #20 (clientId not in token), #22 (registry in code), #23 (silent `deoleo` fallback **+** un-scoped `[id]` route) all still **open** and now have file:line evidence.
 - Note that `UserSession` and `LoginLog` tables exist but are **unwired** — the spec's "sessions / login audit" capability is modelled, not implemented.
