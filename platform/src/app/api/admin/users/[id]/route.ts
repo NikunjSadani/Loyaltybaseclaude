@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -23,9 +24,10 @@ export async function GET(
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') return err('Forbidden', 403)
 
     const { id } = await params
+    const clientId = getClientIdFromRequest(req)
 
-    const user = await prisma.user.findUnique({
-      where: { id },
+    const user = await prisma.user.findFirst({
+      where: { id, clientId },
       include: {
         channelPartner: true,
         salesUser: true,
@@ -51,9 +53,13 @@ export async function PATCH(
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') return err('Forbidden', 403)
 
     const { id } = await params
+    const clientId = getClientIdFromRequest(req)
     const body = await req.json()
     const parsed = patchSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
+
+    const target = await prisma.user.findFirst({ where: { id, clientId } })
+    if (!target) return err('User not found', 404)
 
     const user = await prisma.user.update({
       where: { id },
@@ -87,8 +93,12 @@ export async function DELETE(
     if (authUser.role !== 'GIFSY_ADMIN') return err('Forbidden - Gifsy Admin only', 403)
 
     const { id } = await params
+    const clientId = getClientIdFromRequest(req)
 
     if (id === authUser.userId) return err('Cannot delete your own account')
+
+    const target = await prisma.user.findFirst({ where: { id, clientId } })
+    if (!target) return err('User not found', 404)
 
     // Soft delete
     await prisma.user.update({
