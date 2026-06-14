@@ -20,13 +20,14 @@ Audit of the cross-cutting building blocks every later phase reuses. Tag legend:
 | I | Domain refs `loyaltybase.in` → `gifsy.in` | 8 src files | **COMPLETE (in progress)** | Gap #1. 12 occurrences, all comments/UI/seed/fixtures; logic is domain-agnostic. Executor task **0.4a** dispatched. |
 | J | Dead `ROLES` const | `lib/auth.ts:176` | **COMPLETE** | `ROLES`/`Role` legacy enum; `\bROLES\b` matches only its own definition in `src`. Confirm `Role` *type* has no importers, then remove. |
 
-## #21 — the messaging-path decision (needs human sign-off)
-Resolving this is a P7 dependency but the fork should be **named now**. Options:
-- **(rec) Canonical = `msg91.ts` for delivery + keep `notifications.ts`'s DB template/queue model for the engine.** Route all sends through MSG91; retire the duplicate axios gateway senders in `notifications.ts`; fold the 3 OTP paths into one. Build the P7 notification engine on top.
-- Keep `notifications.ts` as the generic gateway and make MSG91 one adapter behind it.
-- Defer entirely to P7 (risk: more code piles onto the fork meanwhile).
+## #21 — messaging-path decision · ✅ DECIDED (0.4c)
+**MSG91 is the sole provider for all channels: SMS, OTP, WhatsApp, and email.** Consequences (implement in **P7**, not now):
+- Canonical delivery = `lib/msg91.ts`; extend it with an MSG91 **email** sender.
+- Retire `notifications.ts`'s axios gateway senders **and** the `nodemailer` email path; keep its DB **template/queue model** (`NotificationTemplate`/`NotificationQueue`) for the engine.
+- Converge the 3 OTP flows (auth DB-OTP / msg91 provider-OTP / notifications send) onto one MSG91-based path.
+- No multi-provider abstraction — single provider by design.
 
-Not resolving here — flagged for the orchestrator to bring to the human at P0.4 / P7.
+Until P7: **don't add new code to `notifications.ts`'s senders or `nodemailer`** — route any messaging need through `msg91.ts`.
 
 ## P0 to-do refined from this audit
 - **0.1** Establish green baseline (`npm test`/`tsc`/`lint`) + confirm env/DB (DB ✅ verified, 79 tables). *(run after 0.4a executor finishes to avoid file-state contention)*
