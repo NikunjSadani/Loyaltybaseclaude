@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
-import { signToken, generateToken } from '@/lib/auth'
+import { generateToken } from '@/lib/auth'
 import { getClientIdFromRequest } from '@/lib/tenant'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
@@ -34,12 +34,14 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // Find latest valid OTP for phone
+    // Find latest valid OTP for phone, scoped to this tenant so an OTP from
+    // another tenant cannot match (F4).
     const otpRecord = await prisma.otpCode.findFirst({
       where: {
         phone: mobile,
         verifiedAt: null,
         expiresAt: { gt: new Date() },
+        user: { clientId },
       },
       orderBy: { createdAt: 'desc' },
     })
@@ -94,12 +96,9 @@ export async function POST(req: NextRequest) {
       return err(message, 403)
     }
 
-    // Generate JWT
-    const token = signToken({
-      userId: user.id,
-      role: user.role,
-      mobile: user.phone,
-    })
+    // Generate JWT (F3 — use canonical generateToken; partnerId not set here
+    // because the auth flow does not have it at login time).
+    const token = generateToken(user.id, user.role)
 
     return ok({
       token,

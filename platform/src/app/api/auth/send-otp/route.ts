@@ -2,8 +2,9 @@
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { generateOTP } from '@/lib/auth'
-import { sendOTP } from '@/lib/notifications'
+import { sendOtp } from '@/lib/msg91'
 import { getClientIdFromRequest } from '@/lib/tenant'
+import { CLIENT_REGISTRY } from '@/lib/platform/client-registry'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -67,8 +68,11 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // Send OTP via notification service
-    await sendOTP(mobile, otp, channel)
+    // Send OTP via MSG91 (canonical provider — F2).
+    // templateId comes from the per-tenant client registry config.
+    const clientConfig = CLIENT_REGISTRY[clientId]
+    const templateId = clientConfig?.notifications?.templateIds?.otpVerification ?? ''
+    await sendOtp({ phone: mobile, templateId })
 
     return ok({ message: 'OTP sent', channel })
   } catch (e: any) {
