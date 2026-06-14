@@ -27,7 +27,7 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
   from `x-tenant-slug`, **not** in the token.
 - **Target/gaps.** Three access models: **Admin** = configurable roles with sections/features
   tagged (catalog = permission set, Gap #2/#3); **Sales** = data scoped by hierarchy + team
-  rollup for seniors; **Partner** = own data only. Stale `ROLES` constant in `auth.ts`;
+  rollup for seniors; **Partner** = own data only. (Dead `ROLES` constant removed, 0.4b.)
   tenant–token binding to verify (register, "Also noted").
 
 ### 2 · Tenancy & Platform Configuration
@@ -40,7 +40,7 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
   `ProgramSetting` (banner/gift/hierarchy/target/kpi JSON). Subdomain → `x-tenant-slug` →
   `clientId`.
 - **Target/gaps.** No DB `Client`/`Tenant` model — feature flags have no DB home (registry
-  says "in production these live in the database"). Domain refs say `loyaltybase.in` (Gap #1).
+  says "in production these live in the database"). Domain refs now `gifsy.in` (Gap #1 closed, 0.4a).
 
 ### 3 · Sales Organization
 - **Purpose.** Model the field-sales reporting tree and outlet assignments.

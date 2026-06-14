@@ -40,8 +40,8 @@ and where it surfaced. Severity is a first pass, to be refined.
 - Gifsy's own post-first-approval KYC steps (penny-drop, agreement, final validation) — to be
   documented in §02 Workflows.
 - "Inactive manager" signal is currently *blank phone*; prefer an explicit `SalesUser.isActive`/status flag.
-- Stale `ROLES` constant in `auth.ts` lists `SALES_MANAGER`/`AREA_SALES_MANAGER`/etc. that
-  do **not** match the `UserRole` enum (`SALES_HO`/`SALES_STATE_HEAD`/…). → dead/inconsistent code.
+- ~~Stale `ROLES` constant in `auth.ts`~~ → **removed in 0.4b** (was dead + inconsistent with the
+  `UserRole` enum).
 - `clientId` is **not** in the JWT (`TokenPayload`); tenant is resolved from the
   `x-tenant-slug` header. A valid token on the wrong subdomain could mismatch tenant scope
   — verify the proxy/middleware binds them. (Tenant-isolation review, Phase 2.)

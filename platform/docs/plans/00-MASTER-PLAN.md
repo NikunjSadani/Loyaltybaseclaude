@@ -87,10 +87,11 @@ solid. **Existing build:** mostly present — this phase is mostly VERIFY + smal
 > **P0 status (live).** 0.0 reconcile ✅ · 0.1 env/DB + green baseline (two test lanes; dev DB validated
 > through Prisma) ✅ · 0.2 `lib/api-response.ts` ok/err ✅ · 0.3 `getAuthUser` contract+tests ✅ ·
 > 0.4a domain rename (gap #1 closed) ✅ · 0.4b dead `ROLES` removed ✅ · 0.4c messaging decision —
-> **MSG91 = sole provider** (gap #21) ✅ · **0.5 portal layout/UI-kit ⏸ deferred** (user is revamping
-> admin UX; do 0.5's admin sign-off *after* that lands). Commits `215a63e`/`e707879`/`102f5a5`/`23f60bd`,
-> local/unpushed. Inherited tree carries 105 known-red tests (default lane) tracked in
-> `reconcile/baseline-red-snapshot.txt`; gate = **no NEW reds vs snapshot**.
+> **MSG91 = sole provider** (gap #21) ✅ · **0.5 portal layout/UI-kit ✅ signed off by user** (4 portal
+> shells present + render-test-covered; *live* authenticated visual pass deferred to P1 — dev DB is
+> empty/auth-gated — and will fold in the admin revamp). **→ P0 COMPLETE.** Commits
+> `215a63e`/`e707879`/`102f5a5`/`23f60bd`/`09fbc3b`, local/unpushed. Inherited tree carries 105 known-red
+> tests (default lane) tracked in `reconcile/baseline-red-snapshot.txt`; gate = **no NEW reds vs snapshot**.
 
 ## P1 · Identity, tenancy & access  (4–6 wk)
 **Objective:** anyone can authenticate, tenants are isolated, and admin access is role-configurable.

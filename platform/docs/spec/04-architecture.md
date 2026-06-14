@@ -55,7 +55,7 @@ flowchart TB
 |---|---|---|
 | Object storage | `lib/s3.ts` (**GCS**, name is legacy) | ADC on Cloud Run; signed URLs need `serviceAccountTokenCreator` |
 | Messaging/OTP | `lib/msg91.ts` | WhatsApp/SMS/OTP; `DEMO_MODE` simulates |
-| Notifications | `lib/notifications.ts` | **Generic SMS/WhatsApp gateway env vars — second path, may overlap MSG91** (→ Gap #21) |
+| Notifications | `lib/notifications.ts` | DB template/queue model **kept**; its generic axios senders + `nodemailer` to be **retired** — MSG91 is the sole provider (Gap #21 **DECIDED** 0.4c; build in P7) |
 | Payments | — | **No gateway integrated**; `PayoutTransaction.provider*` unused → payouts are **offline** (bank file + UTR) |
 
 ## 6 · Deployment
@@ -77,7 +77,7 @@ flowchart TB
 - **→ Gap #20 (High):** the security boundary (JWT verify + tenant binding) lives in an **edge
   proxy not in this repo**. Without it, fallbacks apply (`DEFAULT_CLIENT_ID`, Bearer) — a valid
   token on the wrong subdomain could mismatch tenant scope. Verify the proxy exists + binds them.
-- **→ Gap #21 (Low):** two messaging paths (`msg91.ts` vs `notifications.ts` generic gateway) —
-  pick the canonical one.
+- **→ Gap #21 (Low, DECIDED 0.4c):** MSG91 is the sole provider (SMS/OTP/WhatsApp/email); retire
+  `notifications.ts`'s axios senders + `nodemailer`, keep its DB template/queue model. Build in P7.
 - **Config-in-code** (`CLIENT_REGISTRY`) means tenant onboarding is a code deploy, not data
   (ties to Gap #2 / tenancy).

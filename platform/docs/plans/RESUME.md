@@ -27,9 +27,10 @@ check port 5433; if nothing's listening, restart it (command in DEV-DB.md). Conf
 DATABASE_URL points at 127.0.0.1:5433/gifsy_dev and DEMO_MODE=false, and SELECT 1 before
 migrating. NEVER point dev at the prod instance gifsy-db.
 
-P0 is DONE except 0.5 (portal UI sign-off, intentionally deferred — the user is revamping admin
-UX). Baseline committed; gate is "no NEW reds vs reconcile/baseline-red-snapshot.txt" (the suite is
-red throughout a TDD build — never gate on "zero reds").
+P0 is COMPLETE (0.5 signed off by the user; a live authenticated visual pass was deferred to P1 —
+the dev DB is empty/auth-gated — and will fold in the user's admin revamp). Baseline committed; gate
+is "no NEW reds vs reconcile/baseline-red-snapshot.txt" (the suite is red throughout a TDD build —
+never gate on "zero reds").
 
 START P1 (Identity, tenancy & access) — but run the BACKEND track only and keep OUT of the admin
 portal: the user is revamping admin dashboards, reports, and the Gifsy KYC-approval page in parallel.
