@@ -172,18 +172,3 @@ export function getAuthUser(req: { headers: { get: (key: string) => string | nul
 export function signToken(payload: { userId: string; role: string; mobile?: string }): string {
   return generateToken(payload.userId, payload.role);
 }
-
-export const ROLES = {
-  GIFSY_ADMIN: 'GIFSY_ADMIN',
-  CLIENT_ADMIN: 'CLIENT_ADMIN',
-  MIS_USER: 'MIS_USER',
-  SALES_MANAGER: 'SALES_MANAGER',
-  AREA_SALES_MANAGER: 'AREA_SALES_MANAGER',
-  TERRITORY_SALES_OFFICER: 'TERRITORY_SALES_OFFICER',
-  SALES_EXECUTIVE: 'SALES_EXECUTIVE',
-  SSS: 'SSS',
-  WHOLESALER: 'WHOLESALER',
-  SUB_STOCKIST: 'SUB_STOCKIST',
-} as const;
-
-export type Role = (typeof ROLES)[keyof typeof ROLES];
