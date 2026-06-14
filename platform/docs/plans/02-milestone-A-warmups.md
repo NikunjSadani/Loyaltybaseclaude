@@ -1,5 +1,8 @@
 # Milestone A · Warm-up cleanups (low risk)
 
+> **✅ DONE in P0.** A1 domain rename → 0.4a, A2 dead `ROLES` → 0.4b, messaging path → 0.4c.
+> Kept as reference for the test→commit loop; do not re-run the find-replace.
+
 Goal: learn the branch → test → commit → PR loop on changes that can't break money or auth.
 Small, safe, high-confidence. Do these first.
 

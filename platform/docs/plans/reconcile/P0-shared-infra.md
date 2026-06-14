@@ -1,5 +1,8 @@
 # Reconcile — Task 0.0 · Shared infra (P0) vs spec §04
 
+> **✅ P0 COMPLETE.** This is the point-in-time audit from 0.0. All to-dos below (0.1–0.5) are now done —
+> see the live status in [`../00-MASTER-PLAN.md`](../00-MASTER-PLAN.md) (P0 status block).
+
 Audit of the cross-cutting building blocks every later phase reuses. Tag legend:
 **VERIFY** (looks done — prove with a test) · **COMPLETE** (partial/stub/duplicated — finish/consolidate) · **BUILD** (missing).
 
@@ -17,7 +20,7 @@ Audit of the cross-cutting building blocks every later phase reuses. Tag legend:
 | F | Shared utils (currency=paise, points, dates, `paginate`, geo, FY, mask) | `lib/utils.ts` | **VERIFY** | `formatCurrency` expects **paise**; a `paginate(page,limit)` helper already exists (relevant to #26, P8). Pure — easy to lock with tests. |
 | G | Object storage (GCS) | `lib/s3.ts` | **VERIFY (defer)** | Used by KYC/visibility uploads; deep-verify in P3 §3.1. |
 | H | Messaging — **two stacks + a third OTP path** | `lib/msg91.ts`, `lib/notifications.ts`, `lib/auth.ts` | **COMPLETE (decision)** | `msg91.ts` = canonical MSG91 v5 (pure builders, DEMO_MODE, sender `GIFSY`). `notifications.ts` = *separate* axios gateway (`SMS_GATEWAY_URL`/`WHATSAPP_GATEWAY_URL`) **+ the DB `NotificationTemplate`/`NotificationQueue` model**. OTP exists in 3 places (auth DB-OTP, msg91 provider-OTP, notifications send). → **Gap #21 / human-gate decision** (see below). |
-| I | Domain refs `loyaltybase.in` → `gifsy.in` | 8 src files | **COMPLETE (in progress)** | Gap #1. 12 occurrences, all comments/UI/seed/fixtures; logic is domain-agnostic. Executor task **0.4a** dispatched. |
+| I | Domain refs `loyaltybase.in` → `gifsy.in` | 8 src files | **✅ DONE (0.4a)** | Gap #1 closed; 0 residual. |
 | J | Dead `ROLES` const | `lib/auth.ts:176` | **COMPLETE** | `ROLES`/`Role` legacy enum; `\bROLES\b` matches only its own definition in `src`. Confirm `Role` *type* has no importers, then remove. |
 
 ## #21 — messaging-path decision · ✅ DECIDED (0.4c)
