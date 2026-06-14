@@ -32,11 +32,12 @@ the dev DB is empty/auth-gated — and will fold in the user's admin revamp). Ba
 is "no NEW reds vs reconcile/baseline-red-snapshot.txt" (the suite is red throughout a TDD build —
 never gate on "zero reds").
 
-START P1 (Identity, tenancy & access) — but run the BACKEND track only and keep OUT of the admin
-portal: the user is revamping admin dashboards, reports, and the Gifsy KYC-approval page in parallel.
-So defer P1's admin-UI bits (1.4 admin config UI, 1.6 admin role-gating UI) and 0.5 until those land;
-do 1.1/1.2(backend)/1.3/1.5/1.7/1.8/1.9 now. When P3 (KYC) and P8 (dashboards/reports) arrive, their
-3.0/8.0 Reconcile must build against the user's REVAMPED UX (code wins), not the current pages.
+START P1 (Identity, tenancy & access). P1 is almost entirely BACKEND and does not touch admin UI, so it
+runs cleanly in parallel with the user's admin-UX revamp — no need to avoid the admin portal wholesale.
+The ONLY admin-UI bits are 1.4 (admin config UI) and 1.6 (admin role-gating UI): defer just those two
+(and 0.5) until the user's revamp lands, so we don't edit the same pages at once. Minor overlaps elsewhere
+are fixable later, not blockers. Do 1.1/1.2(backend)/1.3/1.5/1.7/1.8/1.9 now. When P3 (KYC) and P8
+(dashboards/reports) arrive, their 3.0/8.0 Reconcile builds against the user's REVAMPED pages (code wins).
 
 Before assigning each task show me the task, its context bundle, and what you'll verify; wait for my
 go on anything irreversible. Begin by confirming the dev DB is reachable and giving me the P1 backend
