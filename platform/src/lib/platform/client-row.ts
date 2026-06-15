@@ -1,14 +1,15 @@
 /**
- * client-row.ts — pure mapping from ClientConfig to the Prisma Client
- * create/upsert input shape.
+ * client-row.ts — pure bidirectional mapping between ClientConfig and the
+ * Prisma Client row shape.
  *
  * Rules:
- *  - Pure function; no I/O, no side effects. Safe to import in tests.
- *  - msg91AuthKey is EXCLUDED from the mapped notifications block.
+ *  - Pure functions; no I/O, no side effects. Safe to import in tests.
+ *  - msg91AuthKey is EXCLUDED from the mapped notifications block written to DB.
  *    The auth key is a secret; it must live in env / Secret Manager,
  *    never in the clients table.
  *  - onboardedAt (ISO string in ClientConfig) is converted to Date for
- *    Prisma's DateTime field.
+ *    Prisma's DateTime field (clientConfigToRow) and back to ISO string on
+ *    read (rowToClientConfig).
  */
 
 import type { ClientConfig, NotificationsConfig } from './client-config';
@@ -100,5 +101,76 @@ export function clientConfigToRow(config: ClientConfig): ClientRow {
 
     invoicing: config.invoicing,
     wallet:    config.wallet,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inverse mapping — DB row → ClientConfig
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The minimal shape of a Prisma Client row as returned by findUnique / findFirst.
+ * We use this looser type so the function works without importing the full
+ * generated Prisma types (which aren't available in edge-safe / test contexts).
+ */
+export interface ClientRowFromDb {
+  id: string;
+  internalName: string;
+  status: string;
+  onboardedAt: Date;
+  branding: unknown;
+  features: unknown;
+  partnerClasses: unknown;
+  approvalHierarchy: unknown;
+  notifications: unknown;
+  invoicing: unknown;
+  wallet: unknown;
+}
+
+/**
+ * Reconstructs a full ClientConfig from a Client DB row and the per-tenant
+ * MSG91 auth key (sourced from env / Secret Manager by the caller).
+ *
+ * This is the exact inverse of clientConfigToRow:
+ *   rowToClientConfig(clientConfigToRow(cfg), cfg.notifications.msg91AuthKey)
+ *   deep-equals cfg.
+ *
+ * Key inversions:
+ *  - row.id                → config.slug
+ *  - row.onboardedAt (Date) → config.onboardedAt (ISO date string "YYYY-MM-DD")
+ *  - row.status (string)   → config.status (union literal — same values)
+ *  - secretAuthKey         → config.notifications.msg91AuthKey (re-attached)
+ *
+ * Pure — no I/O, no Prisma imports.
+ */
+export function rowToClientConfig(
+  row: ClientRowFromDb,
+  secretAuthKey: string,
+): ClientConfig {
+  // Convert the Date back to a YYYY-MM-DD ISO date string.
+  // toISOString() returns "2025-01-01T00:00:00.000Z" — take the date part.
+  const onboardedAt = row.onboardedAt.toISOString().slice(0, 10);
+
+  const safeNotifications = row.notifications as SafeNotificationsConfig;
+
+  return {
+    slug:         row.id,
+    internalName: row.internalName,
+    status:       row.status as ClientConfig['status'],
+    onboardedAt,
+
+    branding:          row.branding as ClientConfig['branding'],
+    features:          row.features as ClientConfig['features'],
+    partnerClasses:    row.partnerClasses as ClientConfig['partnerClasses'],
+    approvalHierarchy: row.approvalHierarchy as ClientConfig['approvalHierarchy'],
+
+    // Re-attach the secret that was intentionally stripped before DB write
+    notifications: {
+      ...safeNotifications,
+      msg91AuthKey: secretAuthKey,
+    },
+
+    invoicing: row.invoicing as ClientConfig['invoicing'],
+    wallet:    row.wallet as ClientConfig['wallet'],
   };
 }
