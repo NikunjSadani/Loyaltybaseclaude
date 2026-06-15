@@ -247,15 +247,24 @@ visibility self-bills. **This phase contains the most High-severity gaps.**
 ## P9 · Infra, Deployment & Go-Live  (cross-cutting track + launch)
 **Objective:** everything needed to actually run in production. **This is a TRACK, not a tail phase** —
 the CI + staging parts (9.1–9.3) should stand up **early** (around P1–P2) so every later phase is
-deploy-validated; the launch parts (9.7–9.9) gate the first real tenant. (Infra already exists: GCP
-Cloud Run, Cloud SQL `gifsy-db`/`gifsy-db-dev`, Secret Manager, Terraform — see `terraform/`, `DEV-DB.md`.)
+deploy-validated; the launch parts (9.7–9.9) gate the first real tenant.
+> **Much of this ALREADY EXISTS** — so P9 is mostly RECONCILE/FINISH, not build-from-scratch:
+> `.github/workflows/ci.yml` (tsc + tests on PR), `deploy-staging.yml` (`develop`→staging Cloud Run),
+> `deploy.yml` (**`main`→production Cloud Run**, gated by a `test` job + a `production` environment
+> manual approval), full `terraform/` (cloud-run, cloud-sql, artifact-registry, load-balancer, iam,
+> `environments/gifsy.tfvars`), Cloud SQL `gifsy-db`/`gifsy-db-dev`, Secret Manager. **⚠️ KEY BLOCKER:**
+> CI runs the full `npm test` and requires PASS, but our suite is **red-by-design** (~105 TDD-baseline
+> failures until P8) — so the test gate fails and **no deploy proceeds via the normal path** until either
+> (a) CI adopts the **differential gate** ("no NEW reds vs the snapshot") or (b) the baseline reds are
+> quarantined/skipped in CI. Reconcile in 9.1. (`main`→prod also means a push to main triggers the prod
+> pipeline — currently blocked only by the failing tests + the approval gate.)
 
 | Task | What | Key area | Gate |
 |---|---|---|---|
-| 9.0 | Reconcile current infra (Cloud Run, Cloud SQL, Secret Manager, Terraform) vs target; list gaps | `terraform/`, `Dockerfile` | — |
-| 9.1 | **CI pipeline**: on push/PR run `tsc` + `npm test` (+ lint); block merge on new reds vs the differential baseline | GitHub Actions | green CI |
-| 9.2 | **Environments**: stand up **staging** (Cloud Run + Cloud SQL) mirroring prod; promote dev→staging→prod | `terraform/`, Cloud Run | deploys |
-| 9.3 | **CD**: build image + deploy to staging on merge; manual-approve promote to prod | GitHub Actions / Cloud Run | deploy run |
+| 9.0 | Reconcile EXISTING infra (`.github/workflows/*`, `terraform/*`, `Dockerfile`, Cloud SQL, Secret Manager) vs target; list real gaps | `terraform/`, `.github/` | — |
+| 9.1 | **Fix the CI gate** (`ci.yml` EXISTS): its `npm test` all-pass requirement is incompatible with the red-by-design TDD baseline → switch CI to the **differential gate** (no NEW reds vs `baseline-red-snapshot.txt`) or quarantine the baseline reds, so CI can be green and deploys can proceed | `.github/workflows/ci.yml` | CI green-able |
+| 9.2 | **Environments** (`deploy-staging.yml` + terraform EXIST): verify staging is stood up & mirrors prod; confirm dev→staging→prod promotion | `terraform/`, Cloud Run | deploys |
+| 9.3 | **CD** (`deploy.yml`/`deploy-staging.yml` EXIST): verify the `main`→prod (approval-gated) + `develop`→staging flows end-to-end; **add the DB-migration step** (none in the pipeline today — see 9.5) | `.github/workflows/*` | deploy run |
 | 9.4 | **Secrets/env per environment**: `JWT_SECRET`, MSG91 keys, `DATABASE_URL`, `DEMO_MODE=false` in prod, RBAC flag — via Secret Manager; **never `DEMO_MODE=true` in prod** | Secret Manager | audit |
 | 9.5 | **Prod DB migration process** (prod is private-IP): the diff-SQL / `db push` runbook + a `_prisma_migrations` strategy if adopting Prisma migrate; apply P0–P8 schema to prod; backups + PITR enabled | `prisma/`, Cloud SQL | dry-run on staging |
 | 9.6 | **Observability/alerting** beyond logs (8.4): uptime checks, error-rate + latency alerts, DB metrics; **RLS/tenant-isolation hardening** finalize (8.6, #23) | Cloud Monitoring, `lib/prisma` | alerts fire |
