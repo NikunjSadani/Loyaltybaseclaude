@@ -1,7 +1,8 @@
 'use client'
 
 import { useState } from 'react'
-import { FileSpreadsheet, Download, RefreshCw } from 'lucide-react'
+import Link from 'next/link'
+import { FileSpreadsheet, Download, RefreshCw, ExternalLink } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -13,6 +14,8 @@ interface ReportConfig {
   category: 'operational' | 'business' | 'finance' | 'engagement'
   endpoint: string
   filters: string[]
+  /** When set, ReportCard shows an "Open report" button that navigates to this path. */
+  href?: string
 }
 
 const reports: ReportConfig[] = [
@@ -23,6 +26,7 @@ const reports: ReportConfig[] = [
   { id: 'ticket-aging', name: 'Ticket Aging Report', description: 'Open tickets aged by priority bucket with SLA breach flags', category: 'operational', endpoint: '/api/reports/ticket-aging', filters: ['category', 'priority', 'assignedTo'] },
   { id: 'approval-pendency', name: 'Approval Pendency Report', description: 'Pending approvals across KYC and visibility with age in hours', category: 'operational', endpoint: '/api/reports/approval-pendency', filters: ['type', 'state'] },
   // Business
+  { id: 'points-ledger', name: 'Outlet Points Ledger', description: 'Per-outlet points movement (opening, monthly earn/burn, expiry, closing) over a selected period — up to 24 months.', category: 'business', endpoint: '/api/admin/reports/points-ledger', href: '/admin/reports/points-ledger', filters: [] },
   { id: 'billing-trends', name: 'Billing Trends Report', description: 'Month-over-month billing by channel partner class, territory, and SKU', category: 'business', endpoint: '/api/reports/billing-trends', filters: ['dateFrom', 'dateTo', 'partnerClass', 'state', 'skuCode'] },
   { id: 'scheme-performance', name: 'Scheme Performance Report', description: 'Target vs achievement per scheme, with payout accrued and eligibility rate', category: 'business', endpoint: '/api/reports/scheme-performance', filters: ['schemeId', 'dateFrom', 'dateTo', 'partnerClass'] },
   { id: 'sku-performance', name: 'SKU Performance Report', description: 'Sales volume and value by SKU across channel partner types', category: 'business', endpoint: '/api/reports/sku-performance', filters: ['dateFrom', 'dateTo', 'category', 'state'] },
@@ -106,9 +110,17 @@ function ReportCard({ report }: { report: ReportConfig }) {
             </div>
           </div>
         )}
-        <Button onClick={handleExport} disabled={loading} size="sm" className="w-full bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white text-xs">
-          {loading ? <><RefreshCw className="h-3 w-3 mr-1 animate-spin" />Generating...</> : <><Download className="h-3 w-3 mr-1" />Export Excel</>}
-        </Button>
+        {report.href ? (
+          <Link href={report.href}>
+            <Button size="sm" className="w-full bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white text-xs">
+              <ExternalLink className="h-3 w-3 mr-1" />Open report
+            </Button>
+          </Link>
+        ) : (
+          <Button onClick={handleExport} disabled={loading} size="sm" className="w-full bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white text-xs">
+            {loading ? <><RefreshCw className="h-3 w-3 mr-1 animate-spin" />Generating...</> : <><Download className="h-3 w-3 mr-1" />Export Excel</>}
+          </Button>
+        )}
       </CardContent>
     </Card>
   )

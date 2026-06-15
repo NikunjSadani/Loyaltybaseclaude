@@ -135,10 +135,10 @@ tenant config served from DB. **Depends on:** P0.
 | Task | What | Key files / area | Test |
 |---|---|---|---|
 | 2.0 | Reconcile Sales Org + Partners/Outlets + Catalog | `lib/employee-hierarchy.ts`, `lib/outlet-*` | — |
-| 2.1 | Sales hierarchy levels + reporting tree; derive role from `SalesHierarchyLevel` (#11) | `api/admin/hierarchy-config`, `admin/hierarchy` | pure tree + wiring |
+| 2.1 | Sales hierarchy levels + reporting tree; derive role from `SalesHierarchyLevel` (#11) — **feeds the Outlet Points Ledger Zone/ZNM/RSM/ASM/SO/XSR columns** ([`REPORTING-REVAMP.md`](REPORTING-REVAMP.md)) | `api/admin/hierarchy-config`, `admin/hierarchy` | pure tree + wiring |
 | 2.2 | Sales user CRUD + outlet/partner assignment | `api/sales/team*`, `SalesUserAssignment` | unit |
 | 2.3 | Partner classes + tiers + tier history | `api/admin/tiers`, `TierConfig` | unit |
-| 2.4 | Partner + Outlet model; outlet master upload/upsert; finalize 1:1 binding (#4) | `lib/outlet-upload.ts`, `api/admin/outlets*` | pure parser + wiring |
+| 2.4 | Partner + Outlet model; outlet master upload/upsert; finalize 1:1 binding (#4); **define Distributor entity + outlet→distributor link** (the Outlet Points Ledger report's distributor columns + 1:1-points attribution depend on this — [`REPORTING-REVAMP.md`](REPORTING-REVAMP.md)) | `lib/outlet-upload.ts`, `api/admin/outlets*` | pure parser + wiring |
 | 2.5 | Outlet management UI (search/filter/deactivate/re-KYC flag) | `admin/users/outlets` | render + interaction |
 | 2.6 | Product catalog: categories + SKUs | `api/admin/skus`, `Category`/`Sku` | unit |
 
@@ -231,12 +231,17 @@ visibility self-bills. **This phase contains the most High-severity gaps.**
 > ⚠️ **User UX revamp incoming — admin dashboards and reports are being reworked by the user** (report
 > *contents* will change; report-page UX is otherwise fine). Task 8.0 Reconcile builds against the
 > reworked dashboards/reports. Coordinate before touching `admin/dashboards/*` and `app/api/reports/*`.
+>
+> 📌 **Early build (ahead of P8) for client sign-off:** the user-driven reporting track is being built now
+> on `develop` for look-and-feel approval — see [`REPORTING-REVAMP.md`](REPORTING-REVAMP.md). First report:
+> **R1 Outlet Points Ledger** (business). DEMO_MODE is fully populated; prod-wiring of its sales-hierarchy,
+> distributor, and program/category columns is **deferred to P2/P4** (those entities aren't built yet).
 
 | Task | What | Key files / area | Test |
 |---|---|---|---|
 | 8.0 | Reconcile Reporting + cross-cutting NFRs (spec §07) | `app/api/reports/*`, `admin/dashboards` | — |
 | 8.1 | Role-scoped dashboards (KYC/payments/engagement/redemptions) | `admin/dashboards/*` | render |
-| 8.2 | Report endpoints + scheduled reports + exports | `api/reports/*`, `ScheduledReport` | unit |
+| 8.2 | Report endpoints + scheduled reports + exports (incl. **R1 Outlet Points Ledger**, early-built — see [`REPORTING-REVAMP.md`](REPORTING-REVAMP.md)) | `api/reports/*`, `ScheduledReport` | unit |
 | 8.3 | **Pagination** on all tenant-scoped list endpoints (#26) | list routes | unit |
 | 8.4 | **Observability baseline** (structured logs/metrics) (#27) | `lib/`, infra | smoke |
 | 8.5 | **DPDP retention/erasure policy** + implementation (#24) | `DataRequest`, `lib/` | unit |

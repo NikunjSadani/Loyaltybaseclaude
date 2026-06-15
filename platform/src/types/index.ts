@@ -1091,6 +1091,50 @@ export interface OutletMasterRow {
   reactivatedAt?:       string;   // ISO
 }
 
+// ─── Outlet Points Ledger Report ─────────────────────────────────────────────
+//
+// One cell in the dynamic monthly columns of the Points Ledger report.
+
+export interface PointsLedgerMonthCell {
+  monthKey: string;   // 'YYYY-MM'
+  label:    string;   // 'Apr 2026'
+  earn:     number;
+  burn:     number;
+}
+
+/** One row in the Outlet Points Ledger Excel / on-screen report. */
+export interface PointsLedgerReportRow {
+  outletId:   string;
+  outletName: string;
+
+  // Sales hierarchy — P2 columns (blank in production until P2.1/2.2)
+  zone?:    string;
+  znmId?:   string;
+  rsmId?:   string;
+  asmId?:   string;
+  soId?:    string;
+  xsrId?:   string;
+
+  // Distribution — P2.4 columns (blank in production until distributor entity exists)
+  distributorCode?: string;
+  distributorName?: string;
+
+  // Program — P4 columns (blank in production until Program entity is defined)
+  programName?:     string;
+  programCategory?: string;
+  outletType?:      string;
+
+  openingBalance: number;
+
+  /** One cell per month in the report range, aligned 1:1 with the month list, same order. */
+  months: PointsLedgerMonthCell[];
+
+  totalEarn:      number;
+  totalBurn:      number;
+  totalExpired:   number;
+  closingBalance: number;
+}
+
 // ─── Reversal Request ─────────────────────────────────────────────────────────
 
 export type ReversalStatus = 'PENDING_GIFSY' | 'APPROVED' | 'REJECTED' | 'PARTIAL';

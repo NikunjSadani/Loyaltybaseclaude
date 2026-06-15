@@ -13,6 +13,7 @@ C:\Users\nikun\Loyaltybaseclaude\platform). Reload context by reading:
 - docs/plans/reconcile/baseline-red-snapshot.txt   (the gate: NO NEW reds vs this snapshot)
 - docs/plans/reconcile/P1-identity-tenancy.md + docs/plans/P1-sessions-design.md   (P1 detail, audits, deferred)
 - docs/plans/RBAC-ENABLEMENT.md           (how to turn RBAC enforcement on — it's OFF by default)
+- docs/plans/REPORTING-REVAMP.md          (user-driven reporting track, built ahead of P8 for client sign-off)
 - docs/spec/gap-register.md               (open gaps + what P0/P1 resolved)
 - your memory note: loyaltybase-spec-effort.md
 
@@ -56,6 +57,11 @@ DEFERRED / OPEN (none block P2):
   AST hardening, force-logout-all audit-durability ordering, vitest.integration server-only alias,
   requirePermission per-tenant-config caching, RBAC per-tenant override storage/UI.
 - INFRA P9.1 (fix CI differential gate) is the gating item before the deploy pipeline can deploy.
+- **Reporting track** (user-driven, isolated on `develop`, built AHEAD of P8 for client look-and-feel
+  sign-off) — see REPORTING-REVAMP.md. **R1 Outlet Points Ledger DONE** (engine + period picker + on-screen
+  preview + xlsx; gated + independently audited; DEMO_MODE fully populated). Prod-wiring of its
+  sales-hierarchy / distributor / program columns is **deferred to P2/P4** (those entities aren't built yet);
+  points attribution decision = 1 partner = 1 outlet (rides on P2.4 #4).
 
 NEXT: either **P2 (Organization & master data)** — sales org tree, partners/outlets, catalog (per
 00-MASTER-PLAN.md; note: an outlet/phone can belong to MULTIPLE tenants → separate per-tenant records)
