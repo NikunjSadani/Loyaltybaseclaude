@@ -16,6 +16,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_ROLE_PERMISSIONS,
+  GIFSY_OPERATED_PERMISSIONS,
   permissionsForRole,
   can,
   type TenantRoleOverrides,
@@ -129,12 +130,25 @@ describe('CLIENT_ADMIN', () => {
     expect(can('CLIENT_ADMIN', 'credits:confirm_payout')).toBe(true);
   });
 
-  it('has payouts:manage_fund', () => {
-    expect(can('CLIENT_ADMIN', 'payouts:manage_fund')).toBe(true);
+  it('does NOT have any Gifsy-operated permission (operating split)', () => {
+    for (const p of GIFSY_OPERATED_PERMISSIONS) {
+      expect(can('CLIENT_ADMIN', p), `CLIENT_ADMIN must NOT have Gifsy-operated "${p}"`).toBe(false);
+    }
   });
 
-  it('has all permissions that are NOT tenancy:write or tenancy:manage_flags', () => {
-    const excluded = new Set(['tenancy:write', 'tenancy:manage_flags']);
+  it('retains the client-side keys (reward upload, payout view, activation view/enrollments)', () => {
+    const retained: Permission[] = [
+      'credits:read', 'credits:upload', 'credits:confirm_payout', 'credits:manage_fields',
+      'payouts:read', 'schemes:read', 'schemes:manage_enrollments', 'schemes:export',
+      'tenancy:read', 'visibility:approve', 'users:write', 'kyc:approve',
+    ];
+    for (const p of retained) {
+      expect(can('CLIENT_ADMIN', p), `CLIENT_ADMIN should have "${p}"`).toBe(true);
+    }
+  });
+
+  it('is exactly ALL_PERMISSIONS minus GIFSY_OPERATED_PERMISSIONS', () => {
+    const excluded = new Set<string>(GIFSY_OPERATED_PERMISSIONS);
     const clientAdminSet = new Set(DEFAULT_ROLE_PERMISSIONS.CLIENT_ADMIN);
     for (const p of ALL_PERMISSIONS) {
       if (excluded.has(p)) {
@@ -143,6 +157,39 @@ describe('CLIENT_ADMIN', () => {
         expect(clientAdminSet.has(p), `CLIENT_ADMIN should have "${p}"`).toBe(true);
       }
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Engine invariants (1.6a-rev)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('engine invariants', () => {
+  it('GIFSY is over and above every role — every role default ⊆ GIFSY_ADMIN', () => {
+    const gifsy = new Set<string>(permissionsForRole('GIFSY_ADMIN'));
+    for (const role of Object.keys(DEFAULT_ROLE_PERMISSIONS)) {
+      for (const p of permissionsForRole(role)) {
+        expect(gifsy.has(p), `role ${role} has "${p}" which GIFSY_ADMIN lacks`).toBe(true);
+      }
+    }
+  });
+
+  it('permissionsForRole returns a copy — mutating the result does not leak', () => {
+    const a = permissionsForRole('SALES_HO');
+    a.push('users:read' as Permission);
+    expect(permissionsForRole('SALES_HO')).toHaveLength(0);
+    const b = permissionsForRole('CLIENT_ADMIN');
+    const before = b.length;
+    b.push('tenancy:write' as Permission);
+    expect(permissionsForRole('CLIENT_ADMIN')).toHaveLength(before);
+  });
+
+  it('drift guard — DEFAULT_ROLE_PERMISSIONS keys match the UserRole enum exactly', () => {
+    const expected = [
+      'GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'SALES_HO', 'SALES_STATE_HEAD',
+      'SALES_ASM', 'SALES_SO', 'SALES_ISR', 'SSS', 'WHOLESALER', 'SUB_STOCKIST',
+    ].sort();
+    expect(Object.keys(DEFAULT_ROLE_PERMISSIONS).sort()).toEqual(expected);
   });
 });
 

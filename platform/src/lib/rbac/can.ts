@@ -23,6 +23,27 @@
 import { ALL_PERMISSIONS, type Permission } from './permissions';
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GIFSY_OPERATED_PERMISSIONS — areas Gifsy operates on the client's behalf.
+// These are HIDDEN from CLIENT_ADMIN by default (tenant-overridable).
+//
+// Operating model (user-confirmed):
+//   - tenancy config is Gifsy-owned
+//   - visibility self-billing INVOICES are Gifsy-generated (client can't even view)
+//   - money SETTLEMENT (bank file, UTR/mark-paid, reversals, fund, batch,
+//     reconcile, TDS) is Gifsy-run
+//   - ACTIVATION creation/deletion is Gifsy (client can VIEW activations,
+//     manage enrollments, see reports)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const GIFSY_OPERATED_PERMISSIONS: Permission[] = [
+  'tenancy:write', 'tenancy:manage_flags',
+  'invoices:read', 'invoices:manage', 'invoices:upload',
+  'credits:download_bank_file', 'credits:mark_paid', 'credits:approve_reversal',
+  'payouts:manage_fund', 'payouts:process_batch', 'payouts:reconcile', 'payouts:view_tds',
+  'schemes:write', 'schemes:delete',
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // UserRole — mirrors prisma/schema.prisma enum UserRole (line 13).
 // Defined locally so this pure module has no @prisma/client dependency.
 // Keep in sync with the schema enum; if a value is added/removed there,
@@ -53,18 +74,20 @@ export type UserRole =
 const GIFSY_ADMIN_PERMISSIONS: Permission[] = [...ALL_PERMISSIONS];
 
 /**
- * CLIENT_ADMIN: full admin within the tenant, but GIFSY owns platform/tenancy config.
+ * CLIENT_ADMIN: full admin within the tenant, but Gifsy operates certain
+ * platform areas on the client's behalf (see GIFSY_OPERATED_PERMISSIONS above).
  *
- * Includes `tenancy:read` (so they can see their own config) but excludes
- * `tenancy:write` and `tenancy:manage_flags` (only GIFSY_ADMIN may change them —
- * see src/lib/platform/client-config.ts header comment).
+ * CLIENT_ADMIN RETAINS (among others): tenancy:read, credits:read,
+ * credits:upload, credits:confirm_payout, credits:manage_fields, payouts:read,
+ * schemes:read, schemes:manage_enrollments, schemes:export, all visibility/*
+ * (capture/approve/reject/fraud-log), users/partners/kyc/catalog/targets/
+ * wallet/rewards/engagement/reports/support.
  *
- * All other groups (users, sales_org, partners, kyc, catalog, schemes, targets,
- * wallet, rewards, visibility, credits, payouts, invoices, engagement, reports,
- * support) get their full permission sets.
+ * CLIENT_ADMIN LOSES everything in GIFSY_OPERATED_PERMISSIONS.
  */
+const _GIFSY_OPERATED_SET = new Set<string>(GIFSY_OPERATED_PERMISSIONS);
 const CLIENT_ADMIN_PERMISSIONS: Permission[] = ALL_PERMISSIONS.filter(
-  (p) => p !== 'tenancy:write' && p !== 'tenancy:manage_flags',
+  (p) => !_GIFSY_OPERATED_SET.has(p),
 );
 
 /**
@@ -156,13 +179,16 @@ export function permissionsForRole(
   role: string,
   overrides?: TenantRoleOverrides,
 ): Permission[] {
+  // Return a COPY in every branch so a caller mutating the result can't corrupt
+  // the shared default constants (esp. the single EMPTY array shared by the
+  // sales/partner roles).
   // Tenant override takes full precedence
   if (overrides && Object.prototype.hasOwnProperty.call(overrides, role)) {
-    return overrides[role] ?? [];
+    return [...(overrides[role] ?? [])];
   }
   // Default map
   if (Object.prototype.hasOwnProperty.call(DEFAULT_ROLE_PERMISSIONS, role)) {
-    return DEFAULT_ROLE_PERMISSIONS[role as UserRole];
+    return [...DEFAULT_ROLE_PERMISSIONS[role as UserRole]];
   }
   // Unknown role
   return [];
