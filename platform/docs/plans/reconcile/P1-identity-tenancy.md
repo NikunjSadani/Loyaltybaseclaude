@@ -77,9 +77,15 @@ First OTP for an unknown phone auto-creates a `PENDING_VERIFICATION` user with r
 | 1.0 | ✅ done | n/a (audit) | n/a |
 | 1.2a (F1 fix) | ✅ committed `341b9a3` | tsc 0 / lint clean / tests +11, no new reds | **PASS-WITH-NOTES** — confirmed all 3 handlers scoped & no-mutation; surfaced F6 (banners) + soft-deleted-target + findFirst-arg test-strengthening (folded into 1.7) |
 | 1.1 (F2/F3/F4) | ✅ committed `4dd30d5` | tsc 0 / lint clean / tests +9, no new reds | **PASS-WITH-NOTES** — F3/F4 correct; surfaced **F7** (send-otp silent-failure) → fixed in **1.1a**; noted wiring tests are source-greps not behavioral |
-| 1.1a (F7 fix) | ✅ committed `9c3d4f7` | tsc 0 / lint clean / +14 behavioral, no new reds | running |
-| 1.7 (F6 + isolation) | ✅ committed `16a72b1` | tsc 0 / lint clean (banners `any` pre-existing) / +4, no new reds | running |
-| 1.3 (Client model — code only) | ✅ committed `24613a4` | tsc 0 (after Prisma Json cast in backfill) / lint clean / +23 | running · **migration NOT yet run (human gate)** |
+| 1.1a (F7 fix) | ✅ committed `9c3d4f7` | tsc 0 / lint clean / +14 behavioral, no new reds | **PASS-WITH-NOTES** — fix correct, tests behavioral; note: 502 leaves orphaned OTP/user rows (deferred transactional reorder) |
+| 1.7 (F6 + isolation) | ✅ committed `16a72b1` | tsc 0 / lint clean (banners `any` pre-existing) / +4, no new reds | **PASS-WITH-NOTES** — banners fix sound; audit heuristic was per-file (false-NEGATIVE on mixed files) → hardened in **1.7a** |
+| 1.7a (audit hardening) | dispatched | — | — |
+| 1.3 (Client model — code only) | ✅ committed `24613a4` | tsc 0 (after Prisma Json cast in backfill) / lint clean / +23 | **PASS** — model faithful, secret excluded (type+runtime), id=slug consistent, migration additive/non-destructive; **migration NOT yet run (human gate)** |
+
+**Wave-2 deferred follow-ups (tracked):**
+- **1.1a orphaned rows** — on a 502/failed send, the OTP + provisional-user rows were already written. Transactional reorder (create-after-send, or compensating cleanup) — schedule with the OTP-window decision.
+- **1.7 audit blind spot** — being closed by 1.7a (per-handler segmentation); residual: still string-based, not AST (a where-clause built via an external helper could slip).
+- **1.3 invoicing bank details in JSON** — Gifsy's own seller bank fields live in the `invoicing` JSON column; if column-level access control is ever needed, that needs a separate table. Revisit if/when RBAC granularity (1.6) demands it.
 | 1.5 (catalog) | ✅ committed `a8b2e6e` | tsc 0 (fixed union-type test) / lint clean / tests +17 | **PASS** — 17 §-refs verified 1:1 vs spec, union type exhaustive, unwired, helpers correct |
 
 ### 🟠 F7 (Med, → 1.1a) — `send-otp` reports success even when delivery didn't happen
