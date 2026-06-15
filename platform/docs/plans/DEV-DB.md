@@ -30,6 +30,22 @@ Prod is `gifsy-db` (database `gifsy_prod`), **private-IP only**. Dev migrations/
 ## Verify connectivity
 `npx prisma db push` (idempotent) — or a `SELECT 1` against `127.0.0.1:5433/gifsy_dev`.
 
+## Applying schema changes — do NOT use `prisma migrate dev`
+This DB is **db-push / manual-SQL managed**: there is **no `_prisma_migrations` table** and no
+Prisma migration-folder history (`prisma/migrations/` holds only loose `*.sql` records).
+`npx prisma migrate dev` would see the populated schema with no migration history, detect "drift",
+and **reset (drop all tables)**. Never run it here.
+
+To apply a schema change to dev, either:
+- **`npx prisma db push`** — syncs the whole `schema.prisma` to the DB (additive; warns on data loss); or
+- **surgical diff-SQL** for a single change (what 1.3 did): generate the exact delta read-only with
+  `npx prisma migrate diff --from-schema <old-schema> --to-schema prisma/schema.prisma --script`,
+  review it, save it under `prisma/migrations/<name>.sql`, and apply it in a transaction (with a
+  `current_database() = 'gifsy_dev'` guard). Then `npx prisma generate` to refresh the client.
+
+Backfill/seed scripts must reuse the `lib/prisma` singleton (Prisma 7 + `@prisma/adapter-pg`);
+a bare `new PrismaClient()` throws. Load `dotenv/config` first so `DATABASE_URL` is set.
+
 ## Reset the dev DB (safe — isolated, empty by default)
 `npx prisma db push --force-reset`
 

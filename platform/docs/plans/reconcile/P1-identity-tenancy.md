@@ -79,8 +79,11 @@ First OTP for an unknown phone auto-creates a `PENDING_VERIFICATION` user with r
 | 1.1 (F2/F3/F4) | ✅ committed `4dd30d5` | tsc 0 / lint clean / tests +9, no new reds | **PASS-WITH-NOTES** — F3/F4 correct; surfaced **F7** (send-otp silent-failure) → fixed in **1.1a**; noted wiring tests are source-greps not behavioral |
 | 1.1a (F7 fix) | ✅ committed `9c3d4f7` | tsc 0 / lint clean / +14 behavioral, no new reds | **PASS-WITH-NOTES** — fix correct, tests behavioral; note: 502 leaves orphaned OTP/user rows (deferred transactional reorder) |
 | 1.7 (F6 + isolation) | ✅ committed `16a72b1` | tsc 0 / lint clean (banners `any` pre-existing) / +4, no new reds | **PASS-WITH-NOTES** — banners fix sound; audit heuristic was per-file (false-NEGATIVE on mixed files) → hardened in **1.7a** |
-| 1.7a (audit hardening) | dispatched | — | — |
-| 1.3 (Client model — code only) | ✅ committed `24613a4` | tsc 0 (after Prisma Json cast in backfill) / lint clean / +23 | **PASS** — model faithful, secret excluded (type+runtime), id=slug consistent, migration additive/non-destructive; **migration NOT yet run (human gate)** |
+| 1.7a (audit hardening) | ✅ committed `5c96b21` | tsc 0 / lint clean / +2, no new reds | per-handler segmentation closes the false-negative; synthetic cases prove it; offender set still empty |
+| 1.3 (Client model — code only) | ✅ committed `24613a4` | tsc 0 / lint clean / +23 | **PASS** — model faithful, secret excluded, id=slug consistent, migration additive |
+| 1.3a (migration applied) | ✅ committed `efee563` | dev migration + backfill **verified on gifsy_dev** | **2 rows** (deoleo ACTIVE, clientb ONBOARDING), `msg91AuthKey` absent, nested JSON intact |
+
+**1.3 migration — applied to dev (gifsy_dev) 2026-06-15.** Used **surgical diff-SQL** (`prisma migrate diff` → reviewed → applied in a txn with a `current_database='gifsy_dev'` guard), NOT `prisma migrate dev`: this dev DB has **no `_prisma_migrations` history** (db-push managed), so `migrate dev` would have **reset** it. Recorded in `prisma/migrations/add_client_tenant_table.sql` and in `DEV-DB.md` (new "Applying schema changes" section). Backfill fixed to reuse the adapter-configured `lib/prisma` singleton (1.3a).
 
 **Wave-2 deferred follow-ups (tracked):**
 - **1.1a orphaned rows** — on a 502/failed send, the OTP + provisional-user rows were already written. Transactional reorder (create-after-send, or compensating cleanup) — schedule with the OTP-window decision.
