@@ -25,6 +25,9 @@ export interface FeatureFlags {
   selfEnrollmentAllowed: boolean;   // Partners can self-accept schemes
   nonKycOutletCampaigns: boolean;   // Campaigns can target non-KYC outlets
   multiLevelApproval: boolean;      // ≥2 approval levels in hierarchy
+  // Gate for RBAC route enforcement — see lib/rbac/require-permission.ts;
+  // only active when env RBAC_ENFORCEMENT=true (the global master switch).
+  rbacEnforcement: boolean;
 
   // Partner app tab visibility (CLIENT_ADMIN cannot change these)
   partnerApp: {

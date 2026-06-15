@@ -40,6 +40,7 @@ const DEFAULT_FEATURES: Record<FeatureKey, boolean> = {
   selfEnrollmentAllowed:   true,
   nonKycOutletCampaigns:   false,
   multiLevelApproval:      true,
+  rbacEnforcement:         false,
 };
 
 const FEATURE_META: Record<FeatureKey, { label: string; description: string }> = {
@@ -52,6 +53,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   selfEnrollmentAllowed:    { label: 'Self-Enrollment',      description: 'Partners can self-accept schemes' },
   nonKycOutletCampaigns:    { label: 'Non-KYC Campaigns',   description: 'Campaigns can target non-KYC outlets' },
   multiLevelApproval:       { label: 'Multi-Level Approval', description: 'Require two or more approval levels' },
+  rbacEnforcement:          { label: 'RBAC Enforcement',     description: 'Enforce permission checks on admin routes (requires RBAC_ENFORCEMENT env=true)' },
 };
 
 const STEPS: { key: Step; label: string }[] = [

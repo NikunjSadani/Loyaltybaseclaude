@@ -26,6 +26,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   selfEnrollmentAllowed:    { label: 'Self-Enrollment',      description: 'Partners can self-accept schemes (no sales team required)' },
   nonKycOutletCampaigns:    { label: 'Non-KYC Campaigns',   description: 'Campaigns can target outlets that have not completed KYC' },
   multiLevelApproval:       { label: 'Multi-Level Approval', description: 'Require two or more approval levels in hierarchy' },
+  rbacEnforcement:          { label: 'RBAC Enforcement',     description: 'Enforce permission checks on admin routes for this tenant (requires RBAC_ENFORCEMENT env=true)' },
 };
 
 const FEATURE_KEYS = Object.keys(FEATURE_META) as FeatureKey[];

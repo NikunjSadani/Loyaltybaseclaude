@@ -42,6 +42,7 @@ export const DEOLEO_CONFIG: ClientConfig = {
     selfEnrollmentAllowed: true,
     nonKycOutletCampaigns: true,
     multiLevelApproval: true,
+    rbacEnforcement: false,
     partnerApp: {
       showSchemes: true,
       showInvoices: true,
@@ -148,6 +149,7 @@ export const CLIENT_B_CONFIG: ClientConfig = {
     selfEnrollmentAllowed: true,
     nonKycOutletCampaigns: false,
     multiLevelApproval: false,        // single-level approval only
+    rbacEnforcement: false,
     partnerApp: {
       showSchemes: true,
       showInvoices: false,            // follows visibilityInvoiceModule
