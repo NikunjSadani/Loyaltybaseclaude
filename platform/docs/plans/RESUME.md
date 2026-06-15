@@ -57,6 +57,16 @@ the live per-task log (tags, gates, audits, findings F1-F7, deferred items).
   green ✓ · admin RBAC engine + route enforcement built (flag-gated; section-visibility UI lands with
   the admin revamp). NEXT PHASE: P2 (Organization & master data) — see 00-MASTER-PLAN.md.**
   Reminder: phone-change→logout hooks for sales(P2 bulk upload)/outlets(P3 re-KYC) still to wire in those phases.
+
+INFRA / CI-CD (discovered 2026-06-15 — exists, see MASTER-PLAN P9): `.github/workflows/ci.yml` (tsc+tests on
+PR), `deploy-staging.yml` (`develop`→staging Cloud Run), `deploy.yml` (**`main`→PRODUCTION Cloud Run**, gated
+by a `test` job + a `production` environment manual approval) + full `terraform/`. **⚠️ `main` push = prod
+deploy trigger** (currently blocked because CI's all-pass `npm test` fails on the ~105 red TDD-baseline →
+approve/deploy jobs skip → NO deploy). The 63 P1 commits were pushed to `main` (harmless — gated). **OPEN
+DECISIONS for the user:** (1) branch strategy — keep WIP on `main` (deploys controlled by the approval gate)
+vs move WIP to `develop` (auto staging, main = releases only); (2) fix CI to the **differential gate** (no
+NEW reds vs baseline-red-snapshot.txt) so CI is green-able & deploys can proceed (P9.1). One local doc commit
+(P9 correction) is unpushed pending the branch decision.
   Deferred follow-ups: OTP validity window (6h→10min decision), send-otp orphaned-rows on failure,
   auto-registration confirmation, isolation-audit AST hardening, 1.9 audit-txn-blocks-login tradeoff,
   vitest.integration server-only alias. Migration note: this dev DB has NO prisma migration history —
