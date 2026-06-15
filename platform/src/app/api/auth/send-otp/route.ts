@@ -29,6 +29,15 @@ export async function POST(req: NextRequest) {
       return ok({ message: 'OTP sent (demo mode — use 000000)', channel })
     }
 
+    // Fail-fast: resolve templateId BEFORE creating any DB rows.
+    // If this tenant has no configured OTP templateId, return 503 immediately.
+    // An empty templateId would cause MSG91 to silently fail while we'd return
+    // a false 200 success — the silent-failure bug described in finding F7.
+    const templateId = CLIENT_REGISTRY[clientId]?.notifications?.templateIds?.otpVerification ?? ''
+    if (!templateId) {
+      return err('OTP delivery is not configured for this tenant', 503)
+    }
+
     // Check if user exists
     const user = await prisma.user.findFirst({ where: { phone: mobile, clientId } })
 
@@ -69,10 +78,16 @@ export async function POST(req: NextRequest) {
     }
 
     // Send OTP via MSG91 (canonical provider — F2).
-    // templateId comes from the per-tenant client registry config.
-    const clientConfig = CLIENT_REGISTRY[clientId]
-    const templateId = clientConfig?.notifications?.templateIds?.otpVerification ?? ''
-    await sendOtp({ phone: mobile, templateId })
+    // templateId was resolved above (fail-fast guard already ensured it is non-empty).
+    // Capture the result: if delivery fails, surface the error rather than silently
+    // returning success (F7 fix).
+    // Known limitation: the OTP/user rows were already created before this call.
+    // A full transactional reorder is deferred; the key correctness goal is that
+    // callers never receive a 200 when delivery did not happen.
+    const result = await sendOtp({ phone: mobile, templateId })
+    if (!result.success) {
+      return err('Failed to send OTP', 502)
+    }
 
     return ok({ message: 'OTP sent', channel })
   } catch (e: any) {
