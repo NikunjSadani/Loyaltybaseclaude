@@ -84,7 +84,7 @@ First OTP for an unknown phone auto-creates a `PENDING_VERIFICATION` user with r
 | 1.3a (migration applied) | ✅ committed `efee563` | dev migration + backfill **verified on gifsy_dev** | **2 rows** (deoleo ACTIVE, clientb ONBOARDING), `msg91AuthKey` absent, nested JSON intact |
 | 1.9 (login/audit writes) | ✅ committed `83824b7` | tsc 0 / lint clean / +22 behavioral | **PASS-WITH-NOTES** — correct & atomic; tradeoff: if the audit txn throws, login 500s after OTP consumed (acceptable — same DB served the prior lookups) |
 | 1.4 (DB-backed config read) | ✅ committed `4dc64e3` | tsc 0 / lint clean / +32 | **FAIL** → fixed in **1.4a**. Real bug: secret env-name derived `CLIENTB_MSG91_AUTH_KEY` but registry uses `CLIENT_B_MSG91_AUTH_KEY` (+ `DEMO_KEY_B`); DB path silently dropped Client B's key; the test masked it. Also: no `server-only` guard, empty catch-log, onboardedAt tz latent risk |
-| 1.4a (secret-resolution fix) | dispatched | — | — |
+| 1.4a (secret-resolution fix) | ✅ committed | tsc 0 / lint clean / full suite no new reds (vitest `server-only` alias safe) | re-audit running (confirm F8 closed) |
 
 **F8 (Med, 1.4a — confirmed by audit, was a real production bug):** DB-backed config re-derived the per-tenant MSG91 env var name from the slug, which cannot reproduce the registry's hand-named vars (`clientb`→`CLIENT_B_…`). Fix: source the secret from the registry's own resolution (the authoritative secret source, since secrets aren't in the DB). Adds `server-only` guard + real catch logging.
 
