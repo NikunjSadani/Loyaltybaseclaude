@@ -55,7 +55,9 @@ const ALL_NAV_ITEMS = [
     featureFlag: 'kycApprovalFlow' as const,
     children: [
       { href: '/admin/kyc',            label: 'KYC Submissions'  },
-      { href: '/admin/kyc/approvals',  label: 'KYC Approvals'    },
+      // NOTE(P3): mark gifsyOnly:true once real roles are wired — KYC approval is Gifsy-operated.
+      // Left visible for now so the DEMO surfaces it (gifsyOnly links are hidden in demo mode).
+      { href: '/admin/kyc/approvals',  label: 'KYC Approvals' },
     ],
   },
   {

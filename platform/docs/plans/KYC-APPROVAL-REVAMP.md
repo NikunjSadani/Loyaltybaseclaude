@@ -5,14 +5,23 @@
 > KYC-approval revamp the owner is doing. Captures decisions; the exact schema is finalized at P3.0/3.4
 > reconcile (the approval page is being redesigned — code wins at reconcile).
 
-## Demo status (built 2026-06-15)
-The **bulk workflow is built in DEMO mode on `develop`** for client look-and-feel + process sign-off, gated +
-independently audited: `lib/kyc-review-dump.ts` (the dump export), `lib/kyc-bulk-verify.ts` (parser/validator),
-`api/admin/kyc/review-dump` (GET, GIFSY-only) + `api/admin/kyc/bulk-verify` (POST upload, preview/commit;
-commit is a **no-op** — `TODO(P3)` persist), and `admin/kyc/approvals` (the 3-step page). **No schema, no DB
-writes yet.** Remaining for P3: **3.4a** schema + migration, **3.4e** real persistence + invoicing wiring, and
-field-level rejection on the single-record detail page. (Verified end-to-end in DEMO: export → fill → upload →
-per-row preview/errors → commit summary.)
+## Demo status (built 2026-06-15; rebuilt to the 7-field hybrid model)
+The **full field-level hybrid workspace is built in DEMO mode on `develop`** (gated + independently audited):
+`lib/kyc-review-dump.ts` (40-col dump: all enrollment fields + clickable document hyperlinks + a Decision+Remark
+column per field), `lib/kyc-bulk-verify.ts` (`parseKycApprovalSheet` → per-field updates + concise-English error
+report), `api/admin/kyc/{approvals,review-dump,bulk-verify}` (GIFSY-only), and `admin/kyc/approvals` — a unified
+workspace: queue with *n/7* progress → export → upload-**merge** (blank cells never clear a status) → per-entry
+detail (photos w/ **click-to-enlarge lightbox**, per-field Approve/Reject + remark) → completion banner (all
+approved → credentials+WhatsApp; any reject → re-share to sales). Sidebar **KYC Management → KYC Approvals**
+points here. **No schema, no DB writes** (demo). Verified end-to-end in DEMO (queue, export, upload→merge,
+error report, lightbox, completion).
+
+**Remaining for P3:** **3.4a** schema + dev-DB migration (entityType/gstRegistrationType + persisted per-field
+verification), **3.4e** real persistence (commit writes + status transitions + audit) + credential creation
+(3.3) + **WhatsApp (P7/MSG91)** + the rejection→Re-KYC re-share wiring (reuse `reKycFlags`), and the
+single-record detail-page field-level rejection. **Audit notes folded forward:** N1 — mark the nav link
+`gifsyOnly:true` once real roles are wired (left visible now because gifsyOnly links are hidden in demo mode);
+N2 — cosmetic (`remark:undefined` on approved merges).
 
 ## Expanded approval model (owner, 2026-06-15)
 **7 approval fields**, each independently `PENDING → APPROVED / REJECTED(+remark)`, with **source (Excel|Portal)
