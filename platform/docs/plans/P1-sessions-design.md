@@ -75,8 +75,13 @@ for review given its blast radius.
 - **S3 ✅** committed — `verify-otp` mints `sid` (crypto.randomUUID), `createSession(token=sid)`, JWT via
   `generateAccessToken` (claims userId/role/clientId/sid; 365d). Gate: tsc 0, no new reds, +19 tests.
   **Audit PASS** (sid↔session linkage exact; demo/failure create no session; 1.9 assertions intact).
-- **S4 ⏸ AWAITING USER GO** — `getAuthUser` → async session-validated + returns session `clientId`.
-  Blast radius measured: **134 call sites across 107 route files** need `await` added (tsc guarantees
-  completeness). Recommend: S4 = the getAuthUser rewrite + await sweep (delivers revocation/idle/
-  logout-all/phone-change); **S4b** = migrate the ~95 `getClientIdFromRequest` routes to session-tenant
-  (finishes 1.8 / gap #23); **S5** = logout + logout-all endpoints + phone-change revoke hook.
+- **S4 ✅** committed (96 files) — `getAuthUser` now async + session-validated (token from Bearer/cookie →
+  verify → require sid → validateSession → return session userId/clientId + token role/partnerId).
+  `await` added at all sync call sites (94 route files). Gate: **tsc 0** (proves await-completeness),
+  full suite no new reds (exact 28/105 — zero route regressions), no new lint. DEMO_MODE preserved.
+  Audit running. Follow-up: the per-request sliding bump is a write on every authenticated request
+  (optimize later — only bump if lastSeenAt is stale).
+- **S4b ⏭** — migrate the ~95 `getClientIdFromRequest` routes to use the session `clientId` from
+  getAuthUser (finishes 1.8 / removes the silent-`deoleo` fallback, gap #23). Stage by portal.
+- **S5 ⏭** — logout (revoke current) + logout-all (revoke all for user) endpoints + revoke-on-phone-change
+  hook in the user-update path.
