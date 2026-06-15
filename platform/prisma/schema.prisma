@@ -455,13 +455,15 @@ model User {
 model UserSession {
   id           String    @id @default(cuid())
   userId       String
+  clientId     String                        // tenant slug bound at login (1.8)
   token        String    @unique
   refreshToken String?   @unique
   deviceId     String?
   deviceName   String?
   ipAddress    String?
   userAgent    String?
-  expiresAt    DateTime
+  expiresAt    DateTime                      // sliding idle marker: bumped to now+365d on every valid request
+  lastSeenAt   DateTime?                     // last activity timestamp (display / audit)
   revokedAt    DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
@@ -469,6 +471,7 @@ model UserSession {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([clientId])
   @@index([token])
   @@index([expiresAt])
   @@map("user_sessions")
