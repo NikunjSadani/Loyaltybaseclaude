@@ -249,11 +249,13 @@ export async function getAuthUser(
   if (!session) return null;
 
   // 2d. Return the merged identity: userId+clientId from the session (authoritative),
-  //     role+partnerId from the JWT claims.
+  //     role+partnerId from the JWT claims. sid is included so callers (e.g. logout)
+  //     can revoke exactly the current device's session.
   const result: TokenPayload = {
     userId: session.userId,
     role: payload.role,
     clientId: session.clientId,
+    sid: payload.sid,
   };
   if (payload.partnerId) result.partnerId = payload.partnerId;
   return result;
