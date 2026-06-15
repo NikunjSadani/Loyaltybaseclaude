@@ -5,6 +5,15 @@
 > KYC-approval revamp the owner is doing. Captures decisions; the exact schema is finalized at P3.0/3.4
 > reconcile (the approval page is being redesigned — code wins at reconcile).
 
+## Demo status (built 2026-06-15)
+The **bulk workflow is built in DEMO mode on `develop`** for client look-and-feel + process sign-off, gated +
+independently audited: `lib/kyc-review-dump.ts` (the dump export), `lib/kyc-bulk-verify.ts` (parser/validator),
+`api/admin/kyc/review-dump` (GET, GIFSY-only) + `api/admin/kyc/bulk-verify` (POST upload, preview/commit;
+commit is a **no-op** — `TODO(P3)` persist), and `admin/kyc/approvals` (the 3-step page). **No schema, no DB
+writes yet.** Remaining for P3: **3.4a** schema + migration, **3.4e** real persistence + invoicing wiring, and
+field-level rejection on the single-record detail page. (Verified end-to-end in DEMO: export → fill → upload →
+per-row preview/errors → commit summary.)
+
 ## The operation (owner's description)
 Gifsy takes the **entire dump** of what field agents filled, **validates bank-account details + GSTIN
 offline** (penny-drop tool + GST portal), then **bulk-uploads** the validated results back to the portal —
