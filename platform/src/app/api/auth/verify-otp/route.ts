@@ -96,6 +96,36 @@ export async function POST(req: NextRequest) {
       return err(message, 403)
     }
 
+    // Derive request metadata for LoginLog / AuditLog
+    const rawForwardedFor = req.headers.get('x-forwarded-for')
+    const ipAddress: string | null = rawForwardedFor
+      ? rawForwardedFor.split(',')[0].trim()
+      : (req.headers.get('x-real-ip') ?? null)
+    const deviceInfo: string | null = req.headers.get('user-agent') ?? null
+
+    // Write LoginLog, bump lastLoginAt/loginCount, and create AuditLog in one
+    // atomic transaction.  This runs ONLY after status === 'ACTIVE' is confirmed
+    // above; failed/locked OTPs and non-ACTIVE users never reach this point.
+    await prisma.$transaction(async (tx) => {
+      await tx.loginLog.create({
+        data: { userId: user.id, ipAddress, deviceInfo },
+      })
+      await tx.user.update({
+        where: { id: user.id },
+        data: { lastLoginAt: new Date(), loginCount: { increment: 1 } },
+      })
+      await tx.auditLog.create({
+        data: {
+          action: 'LOGIN',
+          entityType: 'USER',
+          entityId: user.id,
+          actorId: user.id,
+          ipAddress,
+          userAgent: deviceInfo,
+        },
+      })
+    })
+
     // Generate JWT (F3 — use canonical generateToken; partnerId not set here
     // because the auth flow does not have it at login time).
     const token = generateToken(user.id, user.role)
