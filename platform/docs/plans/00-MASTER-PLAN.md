@@ -42,6 +42,7 @@ commits · conventional-commit messages · **every DB query scoped by `clientId`
 | **P6** | Finance: credits, payouts, visibility, invoicing | Awards&Credits · Payouts&Fund · Visibility · Invoicing | #5, #7, #8, #16, #17, #19, #25 | 5–7 wk |
 | **P7** | Engagement & support | Engagement · Support | (—) | 2–4 wk |
 | **P8** | Reporting, analytics, compliance & hardening | Reporting · cross-cutting | #24, #26, #27 | 3–5 wk |
+| **P9** | Infra, Deployment & Go-Live (CI/CD, staging/prod, migrations, RBAC enablement, launch) — **cross-cutting track**: CI/staging early, launch at the end | cross-cutting | #23 (RLS), #27 | 3–5 wk (spread) |
 
 **Total ≈ 28–44 weeks (~7–11 months)** for **1–2 engineers**, building on the existing partial
 code (it's complete-and-correct, not build-from-zero). Ranges only — **re-estimate at each phase's
@@ -203,7 +204,7 @@ visibility self-bills. **This phase contains the most High-severity gaps.**
 | 6.1 | Credit fields/params + batch upload + confirm | `api/admin/credits/*` | pure selector |
 | 6.2 | **Credit POINTS → wallet on confirm** (#16) | Milestone B | pure + wiring |
 | 6.3 | Bank download grouping: **separate-UTR for Visibility** (#7) | Milestone C / `lib/credits-download.ts` | pure grouping |
-| 6.4 | UTR upload + dup detection; reversals → wallet debit | `api/admin/credits/*` | pure + wiring |
+| 6.4 | UTR upload + dup detection; **reversal flow with maker-checker built into the portal** — Client Admin *requests* (`credits:request_reversal`) → Gifsy *approves/executes* (`credits:approve_reversal`, Gifsy-only) → wallet debit. Separation of duties; surface the request→approve states + reason in the reversal UI. (RBAC perms already exist, 1.6.) | `api/admin/credits/*`, reversal UI | pure + wiring |
 | 6.5 | Redemption payouts + Fund ledger/receipts; **TDS sections** (#25) | `api/payouts/*`, `TdsRecord` | unit |
 | 6.6 | Visibility: submit + approve + image-hash fraud; **two modes + flag** (#17) | `api/visibility/*` | pure + wiring |
 | 6.7 | Self-bill invoicing + **number validation/lock** (#8); GST logic from reg-type (#15) | `api/partner/invoices/[id]`, `lib/invoice.ts` | pure validator |
@@ -242,6 +243,28 @@ visibility self-bills. **This phase contains the most High-severity gaps.**
 | 8.6 | Perf pass + systemic tenant isolation (RLS/extension) finalize (#23) | `lib/prisma`, infra | audit |
 
 **Exit:** dashboards/reports live; lists paginated; observability + retention policy in place.
+
+## P9 · Infra, Deployment & Go-Live  (cross-cutting track + launch)
+**Objective:** everything needed to actually run in production. **This is a TRACK, not a tail phase** —
+the CI + staging parts (9.1–9.3) should stand up **early** (around P1–P2) so every later phase is
+deploy-validated; the launch parts (9.7–9.9) gate the first real tenant. (Infra already exists: GCP
+Cloud Run, Cloud SQL `gifsy-db`/`gifsy-db-dev`, Secret Manager, Terraform — see `terraform/`, `DEV-DB.md`.)
+
+| Task | What | Key area | Gate |
+|---|---|---|---|
+| 9.0 | Reconcile current infra (Cloud Run, Cloud SQL, Secret Manager, Terraform) vs target; list gaps | `terraform/`, `Dockerfile` | — |
+| 9.1 | **CI pipeline**: on push/PR run `tsc` + `npm test` (+ lint); block merge on new reds vs the differential baseline | GitHub Actions | green CI |
+| 9.2 | **Environments**: stand up **staging** (Cloud Run + Cloud SQL) mirroring prod; promote dev→staging→prod | `terraform/`, Cloud Run | deploys |
+| 9.3 | **CD**: build image + deploy to staging on merge; manual-approve promote to prod | GitHub Actions / Cloud Run | deploy run |
+| 9.4 | **Secrets/env per environment**: `JWT_SECRET`, MSG91 keys, `DATABASE_URL`, `DEMO_MODE=false` in prod, RBAC flag — via Secret Manager; **never `DEMO_MODE=true` in prod** | Secret Manager | audit |
+| 9.5 | **Prod DB migration process** (prod is private-IP): the diff-SQL / `db push` runbook + a `_prisma_migrations` strategy if adopting Prisma migrate; apply P0–P8 schema to prod; backups + PITR enabled | `prisma/`, Cloud SQL | dry-run on staging |
+| 9.6 | **Observability/alerting** beyond logs (8.4): uptime checks, error-rate + latency alerts, DB metrics; **RLS/tenant-isolation hardening** finalize (8.6, #23) | Cloud Monitoring, `lib/prisma` | alerts fire |
+| 9.7 | **Security hardening**: rate limiting, security headers, dependency/secret scanning, rotate prod creds | proxy/infra | review |
+| 9.8 | **RBAC enablement** per `RBAC-ENABLEMENT.md` (validate on staging → flip `RBAC_ENFORCEMENT` in prod) | env flag | staging validation |
+| 9.9 | **Launch/cutover runbook**: first-tenant onboarding + seed data, forced re-login comms, smoke tests, rollback plan, DR drill | runbook | go-live checklist |
+
+**Exit:** CI/CD green; staging mirrors prod; prod migrated + backed up; observability + alerting live;
+RBAC validated; a repeatable launch runbook. **Depends on:** runs alongside P1→P8; 9.7–9.9 before first tenant.
 
 ---
 
