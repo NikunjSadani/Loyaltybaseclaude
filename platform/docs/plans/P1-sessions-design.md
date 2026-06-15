@@ -86,11 +86,14 @@ for review given its blast radius.
 - **S5 part 1 ✅** committed — `POST /api/auth/logout` (revoke current session + clear token cookie) +
   `POST /api/auth/logout-all` (revoke all of the user's sessions). getAuthUser now returns `sid`. Gate:
   tsc 0, no new reds, +15 tests.
-- **S5b ⏳** (building) — admin can edit a user's login phone (`admin/users/[id]` PATCH); when the phone
-  actually changes → `revokeAllSessionsForUser(id)` (force re-login everywhere) + phone-uniqueness guard.
-- **S5c ⏳** (building) — Gifsy-admin **platform-wide force-logout** (`POST /api/admin/force-logout-all`,
-  GIFSY_ADMIN only): new `revokeAllSessions()` revokes EVERY session across all tenants (rollout kill
-  switch); audit-logged.
+- **S5b ✅** committed — admin edit-phone (`admin/users/[id]` PATCH): phone in schema, per-tenant
+  uniqueness 409 guard, `revokeAllSessionsForUser(id)` on actual phone change. Gate: tsc 0, no new reds.
+- **S5c ✅** committed — Gifsy `POST /api/admin/force-logout-all` (GIFSY_ADMIN only, CLIENT_ADMIN 403) +
+  global `revokeAllSessions()` (no userId/clientId filter) + audit. Gate: tsc 0, no new reds. Combined
+  S5 audit running.
+
+**1.2 + 1.8 core is functionally complete** (S1–S5). Remaining: **S4b** (point ~95 routes at the session
+`clientId` to finish the 1.8 binding / remove the silent-`deoleo` fallback) and **1.6** (RBAC `can()`).
 
 ### Phone-change → logout: attach points (user decision 2026-06-15)
 The revoke-on-phone-change rule attaches wherever a phone is actually mutated:
