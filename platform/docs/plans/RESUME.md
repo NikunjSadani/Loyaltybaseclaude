@@ -65,12 +65,29 @@ DEFERRED / OPEN (none block P2):
   points attribution decision = 1 partner = 1 outlet (rides on P2.4 #4).
   **R2 Ticket Aging DONE** (operational; status/category/priority filters, aging buckets, SLA flag, summary
   chips + preview + xlsx; gated + independently audited). Fully backed by `Ticket` model — **prod path
-  complete, no deferral.** User has MORE reports/workflow changes queued on this track before P2.
+  complete, no deferral.** User has MORE reports/workflow changes queued on this track.
+- **KYC approval revamp (P3 design + DEMO built on `develop`)** — see KYC-APPROVAL-REVAMP.md. Two-lane
+  (bulk export→offline-validate→upload-with-preview→commit + single-page exceptions), **7 field-level
+  approvals** (Payment, GST validation, GST document, Address, Address document, Store board photo, Owner
+  photo), structured evidence, hybrid Excel+portal merge, completion (all approved→credentials+WhatsApp /
+  any reject→re-share via existing Re-KYC `reKycFlags`). DEMO at `admin/kyc/approvals` (GIFSY-only; nav link
+  repointed there; commit is a no-op). **P3 remainder:** 3.4a schema + **human-gated dev-DB migration**
+  (entityType/gstRegistrationType + per-field verification), 3.4e real persistence + invoicing wiring +
+  field-level rejection on the detail page; N1 nav `gifsyOnly` when real roles wired.
+- **Scheme form-builder EXTENDED** (the rich `EnrollmentFormBuilder` already existed; wired admin SchemeBuilder
+  → partner EnrollmentFormRenderer). Added **CALCULATED** field (safe shunting-yard `computeFormula`, no eval)
+  + **single-condition `visibleWhen`** ("if X→show Y") to `lib/campaign.ts` + builder + renderer. Gated +
+  audited (PASS, concat fix folded in). Real persistence of form-schema/submissions + Excel-dataset binding =
+  **P4**; circular-visibleWhen validation = P4 polish.
 
-NEXT: either **P2 (Organization & master data)** — sales org tree, partners/outlets, catalog (per
-00-MASTER-PLAN.md; note: an outlet/phone can belong to MULTIPLE tenants → separate per-tenant records)
-— or **P9.1 (unblock CI/deploy)** first if the user wants the pipeline green. Confirm the dev DB is
-reachable, confirm you're on the `develop` branch, then propose the chosen phase's task list. Before
+NEXT = **P2 (Organization & master data)** — sales org tree, partners/outlets, catalog (per 00-MASTER-PLAN.md
+§P2; note: an outlet/phone can belong to MULTIPLE tenants → separate per-tenant records; P2.1/2.2 also unblock
+the Outlet Points Ledger hierarchy columns, P2.4 the distributor columns + 1:1 binding). The user chose P2 as
+the post-compaction starting point. **All session demo work (reporting R1/R2, KYC demo, scheme form-builder
+extension) is committed on `develop` but UNPUSHED** (owner holding push) — offer to batch-push before/while
+starting P2. Local: dev-DB Auth Proxy on 127.0.0.1:5433 (UP) + `.env.development.local` DEMO_MODE=true; a
+preview dev server runs on :3000. Confirm dev DB reachable + you're on `develop`, then propose the P2 task
+list (start with 2.0 Reconcile). Before
 assigning each task show the task + context bundle + what you'll verify; wait for the user's go on
 anything irreversible (esp. prod/main, deploys, prod DB).
 ```
