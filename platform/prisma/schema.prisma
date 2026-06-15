@@ -358,9 +358,50 @@ enum BannerStatus {
   SCHEDULED
 }
 
+enum ClientStatus {
+  ACTIVE
+  INACTIVE
+  ONBOARDING
+}
+
 // ============================================================
 // MODULE 1: USERS & AUTH
 // ============================================================
+
+// ──────────────────────────────────────────────────────────
+// Client (tenant) — the authoritative tenant registry.
+//
+// IMPORTANT: id holds the tenant SLUG (e.g. "deoleo"), NOT a cuid.
+//   id = the tenant slug; matches clientId across all other models.
+//
+// Foreign-key relations from User/etc. → Client are deferred
+// (task 1.3 introduces the table; FK constraints land in 1.4+).
+//
+// Secrets note: notifications.msg91AuthKey is intentionally
+// excluded from this table; it stays in env / Secret Manager only.
+// ──────────────────────────────────────────────────────────
+model Client {
+  // id = the tenant slug; matches clientId across all other models
+  id           String       @id          // e.g. "deoleo" — NOT a cuid
+  internalName String
+  status       ClientStatus
+  onboardedAt  DateTime
+
+  // Nested config blocks stored as JSON for schema flexibility.
+  // msg91AuthKey is deliberately omitted from `notifications` — see above.
+  branding         Json
+  features         Json
+  partnerClasses   Json
+  approvalHierarchy Json
+  notifications    Json  // excludes msg91AuthKey
+  invoicing        Json
+  wallet           Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("clients")
+}
 
 model User {
   id                String     @id @default(cuid())
