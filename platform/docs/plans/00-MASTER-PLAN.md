@@ -170,9 +170,9 @@ wallet are created. **Depends on:** P2.
 
 | Task | What | Key files / area | Test |
 |---|---|---|---|
-| 4.0 | Reconcile Schemes + Targets; decide Scheme rule-engine keep/prune (#10) | `lib/schemes.ts`, `lib/targets.ts` | — |
+| 4.0 | Reconcile Schemes + Targets; decide Scheme rule-engine keep/prune (#10). **Owner-flagged 2026-06-15:** the `SchemeBuilder` retains stale in-platform-compute fields that contradict the upload-final-amounts model — **prune §6 Incentive Calculation** (Flat/%/per-unit/**slab**/**overachievement**) + **§7 Target Configuration**, and **reconcile the legacy Incentive Type enum vs the new Campaign Type** (Loyalty/Open/Mixed). | `components/admin/scheme-builder.tsx`, `lib/schemes.ts`, `lib/targets.ts` | — |
 | 4.1 | Scheme/activation CRUD + status lifecycle + eligibility/geo targeting | `api/admin/schemes*`, `Scheme*` | unit |
-| 4.2 | **Configurable enrollment form** (field defs + values model) (#6) | `prisma`, `lib/enrollment-form*` | pure validation |
+| 4.2 | **Configurable enrollment form** (field defs + values model) (#6) — the rich `EnrollmentFormBuilder` + partner renderer ALREADY EXIST and were extended this session with **CALCULATED** + single-condition **`visibleWhen`** fields (`lib/campaign.ts`); 4.2 = persist the form-schema + submission values + Excel-dataset binding | `prisma`, `lib/campaign.ts`, `lib/enrollment-form*` | pure validation |
 | 4.3 | Enrollment: self vs sales mode + conditional pre-fill (#6) | `api/schemes/[id]/enrollments` | pure prefill + wiring |
 | 4.4 | Target config (wizard + Excel) | `admin/targets*`, `lib/target-excel-upload.ts` | pure parser |
 | 4.5 | Achievement upload + pace; partner target view (tracking only) | `admin/sales`, `partner/targets`, `lib/pace.ts` | pure pace |
