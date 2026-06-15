@@ -37,16 +37,21 @@ the live per-task log (tags, gates, audits, findings F1-F7, deferred items).
   DONE & committed (each gated + independently audited): 1.0 reconcile · 1.2a (cross-tenant users/[id]
   fix, F1) · 1.1 + 1.1a (OTP→msg91, generateToken, tenant-scoped OTP, silent-failure fix) · 1.5
   (permission catalog) · 1.7 + 1.7a (banners F6 fix + per-handler tenant-isolation audit test) · 1.3 +
-  1.3a (Client tenant model — MIGRATION APPLIED to dev gifsy_dev, 2 rows backfilled, secret stripped).
-  REMAINING: 1.2 (decide JWT-only vs persisted UserSession + verify user CRUD/auth-me; sessions table
-  exists but is UNWIRED) · 1.4 (read flags/branding from the new Client row + admin config UI) · 1.6
-  (can() gate + tenant-configurable role→permission map on top of 1.5; resolve the 5 taxonomy Qs first) ·
-  1.8 (token↔tenant binding #20 — HUMAN-GATE with proxy owner) · 1.9 (write LoginLog + lastLoginAt/
-  loginCount on login — both currently UNWIRED).
+  1.3a (Client tenant model — MIGRATION APPLIED to dev gifsy_dev, 2 rows backfilled, secret stripped) ·
+  1.9 (LoginLog + lastLoginAt/loginCount + AuditLog on login) · 1.4 + 1.4a (DB-backed tenant config read
+  with registry fallback; F8 secret-resolution bug found by audit + fixed).
+  IN PROGRESS: 1.2 + 1.8 COMBINED — persisted sessions + tenant binding (user-approved; design in
+  docs/plans/P1-sessions-design.md). 365-day sliding idle, revoke on phone-change, logout-all-devices;
+  tenant from subdomain at login then bound to the session; app-layer (not proxy) session validation.
+  Staged S1 (schema: UserSession.clientId/lastSeenAt) → S2 (lib/session.ts) → S3 (login wiring) → S4
+  (getAuthUser upgrade — HIGH blast radius, pause for review) → S5 (logout/logout-all + phone-change hook).
+  REMAINING after that: 1.6 (can() gate + tenant-configurable role→permission map on top of 1.5; the 5
+  taxonomy Qs resolved with defaults — see P1-identity-tenancy.md).
   Deferred follow-ups: OTP validity window (6h→10min decision), send-otp orphaned-rows on failure,
-  auto-registration confirmation, isolation-audit AST hardening. Migration note: this dev DB has NO
-  prisma migration history — use db push / diff-SQL, NEVER `prisma migrate dev` (it would reset). See
-  DEV-DB.md. Admin-UI bits 1.4/1.6 are fine now; avoid the user's revamp pages (P8/P3).
+  auto-registration confirmation, isolation-audit AST hardening, 1.9 audit-txn-blocks-login tradeoff,
+  vitest.integration server-only alias. Migration note: this dev DB has NO prisma migration history —
+  use db push / diff-SQL, NEVER `prisma migrate dev` (it would reset). See DEV-DB.md. Admin-UI bits
+  1.6 are fine now; avoid the user's revamp pages (P8/P3).
 
 Before assigning each task show me the task, its context bundle, and what you'll verify; wait for my
 go on anything irreversible. Begin by confirming the dev DB is reachable and giving me the P1 backend
