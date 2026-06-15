@@ -113,25 +113,28 @@ describe('getAuthUser — S4 async session-validated', () => {
     });
 
     it('reads token from Authorization: Bearer header (case-insensitive key)', async () => {
-      const token = makeSessionToken({ sid: 'sid-1' });
+      const token = makeSessionToken({ sid: 'sid-1', clientId: 'c1' });
       mockValidateSession.mockResolvedValue({ userId: 'u1', clientId: 'c1' });
-      // lowercase header key
-      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}` }));
+      // lowercase header key; x-tenant-slug matches session clientId
+      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}`, 'x-tenant-slug': 'c1' }));
       expect(result).toMatchObject({ userId: 'u1', role: 'CLIENT_ADMIN', clientId: 'c1' });
       expect(mockValidateSession).toHaveBeenCalledWith('sid-1');
     });
 
     it('reads token from Authorization: Bearer header (uppercase key)', async () => {
-      const token = makeSessionToken({ sid: 'sid-2' });
+      const token = makeSessionToken({ sid: 'sid-2', clientId: 'c2' });
       mockValidateSession.mockResolvedValue({ userId: 'u2', clientId: 'c2' });
-      const result = await getAuthUser(makeReq({ Authorization: `Bearer ${token}` }));
+      const result = await getAuthUser(makeReq({ Authorization: `Bearer ${token}`, 'x-tenant-slug': 'c2' }));
       expect(result).toMatchObject({ userId: 'u2', clientId: 'c2' });
     });
 
     it('reads token from `token` cookie in raw Cookie header', async () => {
-      const token = makeSessionToken({ sid: 'sid-cookie' });
+      const token = makeSessionToken({ sid: 'sid-cookie', clientId: 'tenant-cookie' });
       mockValidateSession.mockResolvedValue({ userId: 'u-cookie', clientId: 'tenant-cookie' });
-      const result = await getAuthUser(makeReq({ cookie: `other=xyz; token=${token}; session=abc` }));
+      const result = await getAuthUser(makeReq({
+        cookie: `other=xyz; token=${token}; session=abc`,
+        'x-tenant-slug': 'tenant-cookie',
+      }));
       expect(result).toMatchObject({ userId: 'u-cookie', clientId: 'tenant-cookie' });
       expect(mockValidateSession).toHaveBeenCalledWith('sid-cookie');
     });
@@ -143,6 +146,7 @@ describe('getAuthUser — S4 async session-validated', () => {
       const result = await getAuthUser(makeReq({
         authorization: `Bearer ${headerToken}`,
         cookie: `token=${cookieToken}`,
+        'x-tenant-slug': 'hc',
       }));
       expect(mockValidateSession).toHaveBeenCalledWith('sid-header');
       expect(result?.userId).toBe('from-header');
@@ -185,29 +189,79 @@ describe('getAuthUser — S4 async session-validated', () => {
     });
 
     it('returns merged identity for a valid live session', async () => {
-      const token = makeSessionToken({ sid: 'sid-live', role: 'CLIENT_ADMIN', partnerId: undefined });
+      const token = makeSessionToken({ sid: 'sid-live', role: 'CLIENT_ADMIN', clientId: 'session-tenant', partnerId: undefined });
       mockValidateSession.mockResolvedValue({ userId: 'session-user', clientId: 'session-tenant' });
-      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}` }));
+      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}`, 'x-tenant-slug': 'session-tenant' }));
       expect(result).toMatchObject({ userId: 'session-user', role: 'CLIENT_ADMIN', clientId: 'session-tenant' });
       // No partnerId on this token — should not appear in result
       expect(result?.partnerId).toBeUndefined();
     });
 
     it('includes partnerId from JWT when present', async () => {
-      const token = makeSessionToken({ sid: 'sid-p', partnerId: 'partner-99' });
+      const token = makeSessionToken({ sid: 'sid-p', clientId: 'pc', partnerId: 'partner-99' });
       mockValidateSession.mockResolvedValue({ userId: 'pu', clientId: 'pc' });
-      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}` }));
+      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}`, 'x-tenant-slug': 'pc' }));
       expect(result?.partnerId).toBe('partner-99');
     });
 
     it('userId and clientId come from the session, not the JWT', async () => {
-      // JWT carries different userId/clientId than what the session returns
+      // JWT carries different userId/clientId than what the session returns.
+      // x-tenant-slug must match the session's clientId (session-tenant), not the JWT claim.
       const token = makeSessionToken({ sid: 'sid-mismatch', userId: 'jwt-user', clientId: 'jwt-tenant' });
       mockValidateSession.mockResolvedValue({ userId: 'session-user', clientId: 'session-tenant' });
-      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}` }));
+      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}`, 'x-tenant-slug': 'session-tenant' }));
       // Session data wins
       expect(result?.userId).toBe('session-user');
       expect(result?.clientId).toBe('session-tenant');
+    });
+  });
+
+  // ── Tenant-match guard (S4b) ─────────────────────────────────────────────────
+
+  describe('tenant-match guard', () => {
+    it('non-GIFSY role: matching x-tenant-slug === session.clientId → returns identity', async () => {
+      const token = makeSessionToken({ sid: 'sid-match', role: 'CLIENT_ADMIN', clientId: 'acme' });
+      mockValidateSession.mockResolvedValue({ userId: 'u-match', clientId: 'acme' });
+      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}`, 'x-tenant-slug': 'acme' }));
+      expect(result).toMatchObject({ userId: 'u-match', role: 'CLIENT_ADMIN', clientId: 'acme' });
+    });
+
+    it('non-GIFSY role: x-tenant-slug !== session.clientId → returns null (mismatch rejected)', async () => {
+      const token = makeSessionToken({ sid: 'sid-wrong-tenant', role: 'CLIENT_ADMIN', clientId: 'tenant-a' });
+      mockValidateSession.mockResolvedValue({ userId: 'u-a', clientId: 'tenant-a' });
+      // Request arrives on tenant-b's subdomain — must be rejected
+      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}`, 'x-tenant-slug': 'tenant-b' }));
+      expect(result).toBeNull();
+    });
+
+    it('non-GIFSY role: x-tenant-slug absent/empty → returns null', async () => {
+      const token = makeSessionToken({ sid: 'sid-no-slug', role: 'CLIENT_ADMIN', clientId: 'some-tenant' });
+      mockValidateSession.mockResolvedValue({ userId: 'u-ns', clientId: 'some-tenant' });
+      // No x-tenant-slug header at all
+      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}` }));
+      expect(result).toBeNull();
+    });
+
+    it('non-GIFSY role: empty string x-tenant-slug → returns null', async () => {
+      const token = makeSessionToken({ sid: 'sid-empty-slug', role: 'CLIENT_ADMIN', clientId: 'some-tenant' });
+      mockValidateSession.mockResolvedValue({ userId: 'u-es', clientId: 'some-tenant' });
+      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}`, 'x-tenant-slug': '' }));
+      expect(result).toBeNull();
+    });
+
+    it('GIFSY_ADMIN role: x-tenant-slug !== session.clientId → returns identity (exempt from check)', async () => {
+      const token = makeSessionToken({ sid: 'sid-gifsy', role: 'GIFSY_ADMIN', clientId: 'gifsy' });
+      mockValidateSession.mockResolvedValue({ userId: 'u-gifsy', clientId: 'gifsy' });
+      // Gifsy admin operating on a different tenant's subdomain — allowed
+      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}`, 'x-tenant-slug': 'tenant-x' }));
+      expect(result).toMatchObject({ userId: 'u-gifsy', role: 'GIFSY_ADMIN', clientId: 'gifsy' });
+    });
+
+    it('case-insensitivity: header "DEOLEO" vs session "deoleo" → match (returns identity)', async () => {
+      const token = makeSessionToken({ sid: 'sid-case', role: 'CLIENT_ADMIN', clientId: 'deoleo' });
+      mockValidateSession.mockResolvedValue({ userId: 'u-case', clientId: 'deoleo' });
+      const result = await getAuthUser(makeReq({ authorization: `Bearer ${token}`, 'x-tenant-slug': 'DEOLEO' }));
+      expect(result).toMatchObject({ userId: 'u-case', clientId: 'deoleo' });
     });
   });
 });

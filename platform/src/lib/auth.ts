@@ -248,7 +248,18 @@ export async function getAuthUser(
   const session = await validateSession(payload.sid);
   if (!session) return null;
 
-  // 2d. Return the merged identity: userId+clientId from the session (authoritative),
+  // 2d. Tenant-match guard (gap #20/#23): reject when the request's subdomain
+  //     doesn't match the session's tenant.  This closes the cross-tenant
+  //     header-swap: a CLIENT_ADMIN of tenant A cannot use their valid token on
+  //     tenant B's subdomain.  GIFSY_ADMIN is exempt — the platform operator
+  //     legitimately operates across tenants.
+  if (payload.role !== 'GIFSY_ADMIN') {
+    const requestSlug = req.headers.get('x-tenant-slug')?.trim().toLowerCase() ?? '';
+    const sessionSlug = (session.clientId ?? '').trim().toLowerCase();
+    if (requestSlug !== sessionSlug) return null; // tenant mismatch
+  }
+
+  // 2e. Return the merged identity: userId+clientId from the session (authoritative),
   //     role+partnerId from the JWT claims. sid is included so callers (e.g. logout)
   //     can revoke exactly the current device's session.
   const result: TokenPayload = {
