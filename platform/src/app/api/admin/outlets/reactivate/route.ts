@@ -50,14 +50,15 @@ export async function POST(req: NextRequest) {
     return ok({ reactivated: outletCodes.length, message: 'Reactivation complete (demo mode)' })
   }
 
-  // Verify outlets exist and are currently inactive (not soft-deleted)
-  // Scoped to tenant via partnerId → user.clientId
+  // Verify outlets exist and are currently inactive (not soft-deleted).
+  // Scope by the outlet's OWN clientId — outlets uploaded via the master file
+  // have no partner until KYC, so a partner→user join would miss them.
   const outlets = await prisma.outlet.findMany({
     where: {
       outletCode: { in: outletCodes as string[] },
       isActive:   false,
       deletedAt:  null,
-      partner: { user: { clientId } },
+      clientId,
     },
     select: { id: true, outletCode: true },
   })

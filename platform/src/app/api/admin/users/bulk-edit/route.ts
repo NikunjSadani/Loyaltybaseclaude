@@ -134,18 +134,21 @@ export async function POST(req: NextRequest) {
       return err('Maximum 200 outlets per reassignment request')
     }
 
-    // Validate new XSR
+    // Validate new XSR — MUST be tenant-scoped, else an admin of tenant A could
+    // reassign their outlets to a sales user of tenant B (cross-tenant assignment).
     const newXsr = await prisma.salesUser.findFirst({
-      where:  { employeeCode: newXsrEmployeeCode.trim(), deletedAt: null, isActive: true },
+      where:  { employeeCode: newXsrEmployeeCode.trim(), deletedAt: null, isActive: true, clientId },
       select: { id: true },
     })
     if (!newXsr) {
       return err(`XSR with employee code ${newXsrEmployeeCode} not found or inactive`)
     }
 
-    // Verify outlets exist (scoped to tenant)
+    // Verify outlets exist. Scope by the outlet's OWN clientId — outlets uploaded
+    // via the master file have no partner until KYC, so a partner→user join would
+    // miss ownerless outlets.
     const outlets = await prisma.outlet.findMany({
-      where:  { id: { in: outletIds }, deletedAt: null, partner: { user: { clientId } } },
+      where:  { id: { in: outletIds }, deletedAt: null, clientId },
       select: { id: true, partnerId: true },
     })
     if (outlets.length === 0) {

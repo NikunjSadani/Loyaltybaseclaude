@@ -51,9 +51,11 @@ export async function POST(req: NextRequest) {
     return ok({ deleted: outletIds.length, message: 'Bulk delete complete (demo mode)' })
   }
 
-  // Verify outlets exist and are not already deleted (scoped to tenant)
+  // Verify outlets exist and are not already deleted. Scope by the outlet's OWN
+  // clientId — outlets uploaded via the master file have no partner until KYC,
+  // so a partner→user join would miss every ownerless outlet.
   const outlets = await prisma.outlet.findMany({
-    where:  { id: { in: outletIds }, deletedAt: null, partner: { user: { clientId } } },
+    where:  { id: { in: outletIds }, deletedAt: null, clientId },
     select: { id: true },
   })
 
