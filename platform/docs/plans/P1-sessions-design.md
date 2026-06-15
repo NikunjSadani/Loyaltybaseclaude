@@ -104,7 +104,19 @@ mass-revoke unlogged (500 surfaces) — harden later (audit-before-respond / dur
   keep using `getClientIdFromRequest`, which is now trustworthy because getAuthUser guarantees
   header==session for non-Gifsy. (Full route→authUser.clientId migration is now optional defense-in-depth,
   not required.) Multi-tenant outlets unaffected (each subdomain = a separate single-tenant login).
-- **1.6 ⏭** — RBAC `can()` gate + tenant-configurable role→permission map on the 1.5 catalog.
+  **S4b audit PASS-WITH-NOTES** — header-swap CLOSED; role-exemption anchored to the verified JWT (not
+  spoofable); no legitimate flow broken (Gifsy cross-tenant ✓, multi-tenant outlets ✓, no internal
+  cross-tenant callers). ⚠️ **Production note:** DEMO_MODE trusts the `x-user-role` header by design —
+  **never enable DEMO_MODE in production** (add to the prod hardening checklist).
+- **1.6 ⏭** — RBAC `can()` gate + tenant-configurable role→permission map on the 1.5 catalog (last P1 task).
+
+## ✅ 1.2 + 1.8 COMPLETE (S1–S5 + S4b, all gated + independently audited)
+Delivered: persisted sessions; 365-day sliding idle; logout / logout-all-devices; Gifsy platform-wide
+force-logout (rollout kill switch); admin edit-phone → auto-logout; tenant chosen by subdomain at login
+then bound to the session; `getAuthUser` validates the session (revocable) AND enforces
+subdomain==session-tenant for non-Gifsy. Closes gap #20 (token↔tenant binding) and the #23 header-swap.
+Deferred follow-ups: phone-change revoke for sales(P2 bulk upload)/outlets(P3 re-KYC); per-request
+sliding-bump write optimization; force-logout-all audit-durability ordering; DEMO_MODE prod-hardening doc.
 
 ### Phone-change → logout: attach points (user decision 2026-06-15)
 The revoke-on-phone-change rule attaches wherever a phone is actually mutated:
