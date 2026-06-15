@@ -534,7 +534,7 @@ model SalesHierarchyLevel {
   clientId    String
   code        String
   name        String
-  level       Int      @unique
+  level       Int
   description String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -542,6 +542,7 @@ model SalesHierarchyLevel {
   salesUsers SalesUser[]
 
   @@unique([clientId, code])
+  @@unique([clientId, level])
   @@index([clientId])
   @@index([level])
   @@map("sales_hierarchy_levels")
@@ -896,6 +897,8 @@ model Outlet {
   id             String    @id @default(cuid())
   partnerId      String
   outletTypeId   String
+  distributorCode String?  // reference-only, from outlet upload — for report grouping/summary
+  distributorName String?  // reference-only, from outlet upload — for report grouping/summary
   outletCode     String    @unique
   name           String
   ownerName      String?
@@ -930,6 +933,7 @@ model Outlet {
 
   @@index([partnerId])
   @@index([outletTypeId])
+  @@index([distributorCode])
   @@index([pincode])
   @@index([state])
   @@index([isActive])

@@ -159,8 +159,14 @@ tenant config served from DB. **Depends on:** P0.
 > no binding migration); **RF1–RF3 folded in now**. **Wave 1 ✅ DONE** (gated: tsc 0, pure test 10/10, no new
 > reds/lint): RF1 fixed (`user:{clientId}` scope + `isSelfOrDescendant` ownership gate, fails closed → 403),
 > RF2 fixed (clientId on dup-check), RF3 fixed (partnerId from outlet→partner). New `lib/sales-hierarchy-access.ts`.
-> **NEXT:** Wave 2 — draft 2.4 (Distributor + `Outlet.distributorId`) + 2.1 (`level` constraint, RF4) migration
-> diff-SQL for the human gate before any `db push`.
+> **Wave 2 migration ✅ APPLIED to `gifsy_dev`** (human-gated; guarded by `current_database()='gifsy_dev'`;
+> verified `No difference detected`; client regenerated). **Owner decision 2026-06-15:** NO separate Distributor
+> master table — distributor is **reference-only `distributorCode`/`distributorName` text columns on `Outlet`**,
+> populated from the outlet upload, used **only for report grouping/summary** (mirrors `SalesInvoice`'s existing
+> scalar pattern). Also fixed RF4: `SalesHierarchyLevel.level` now `@@unique([clientId, level])`. SQL saved at
+> `prisma/migrations/20260615_p2_distributor_hierarchy_level.sql`. **NEXT (no migration):** build waves — 2.4 wire
+> `outlets/upsert` to real clientId-scoped writes incl. the 2 distributor columns; 2.1 hierarchy relational write
+> + ZNM; 2.6 catalog (Category CRUD + admin UI).
 
 ## P3 · Onboarding & KYC  (3–5 wk)
 **Objective:** the full enroll→KYC→approve→credential journey (spec §02 WF1) works end-to-end.

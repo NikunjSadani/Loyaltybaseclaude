@@ -86,7 +86,7 @@
 | **2.1** Hierarchy | Reconcile the JSON-blob vs relational source of truth (#11/#18); wire admin upload → relational tree; add ZNM rung; **fix RF4** (`@@unique([clientId,level])`) | COMPLETE + VERIFY | ⚠️ migration (additive + constraint) |
 | **2.2** Sales user CRUD + assignment | Verify CRUD; **fix RF1** (scope+ownership on drill-down), **RF2/RF3** (scope dup-check, correct partner FK) | VERIFY + bug-fix | no |
 | **2.3** Partner classes + tiers | Verify `tiers`; add tier-history if missing | VERIFY | maybe |
-| **2.4** Partner+Outlet + Distributor | Finalize 1:1 binding decision (#4); **define `Distributor` entity + `Outlet.distributorId`**; **wire `outlets/upsert` + `rekyc-flag`**; consider RF5 (`outletCode` per-tenant) | BUILD + COMPLETE | ⚠️ **migration — human gate** |
+| **2.4** Partner+Outlet + Distributor | 1:1 = **kept 1:many + `isPrimary`** (no binding migration). Distributor = **`distributorCode`/`distributorName` text columns on `Outlet`** (✅ migration applied; report-only, no master table). **NEXT:** wire `outlets/upsert` + `rekyc-flag` to real clientId-scoped writes incl. the 2 columns; consider RF5 (`outletCode` per-tenant) | BUILD + COMPLETE | ✅ migration applied |
 | **2.5** Outlet management UI | Verify search/filter/deactivate/re-KYC flows end-to-end | VERIFY | no |
 | **2.6** Catalog | Category CRUD route + mapping writes; tiers/SKUs/category admin UI | BUILD | no |
 
