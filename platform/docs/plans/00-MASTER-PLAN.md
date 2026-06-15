@@ -144,6 +144,12 @@ tenant config served from DB. **Depends on:** P0.
 
 **Exit:** an admin can build the org tree, load outlets, and manage SKUs; team views scoped correctly.
 **Depends on:** P1.
+> **2.6 ✅ DONE** — Category CRUD API (`api/admin/categories` + `[id]`, tenant-scoped, reparent cycle check,
+> delete guarded vs children/SKU-mappings) + SKU `[id]` PATCH/DELETE + categoryIds↔SkuCategoryMapping sync +
+> a polished admin Catalog page (`/admin/catalog`, Categories/SKUs tabs, nav link). `lib/category-tree.ts` +
+> tests. Gated: tsc 0, suite 28/105 = baseline, page verified rendering, DB smoke clean. No migration.
+> **P2 DONE so far: 2.0, 2.1, 2.4, 2.6 + RF1–RF7. Remaining: 2.2 (sales-user CRUD — mostly VERIFY), 2.3 (tiers/
+> tier-history), 2.5 (outlet mgmt UI — VERIFY).**
 
 > **P2 status (live).** **2.0 Reconcile ✅** — full audit in [`reconcile/P2-org-master-data.md`](reconcile/P2-org-master-data.md)
 > (Opus independently re-verified every load-bearing claim by direct file read). Headlines: much is
