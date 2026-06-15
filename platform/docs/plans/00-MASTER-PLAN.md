@@ -145,6 +145,23 @@ tenant config served from DB. **Depends on:** P0.
 **Exit:** an admin can build the org tree, load outlets, and manage SKUs; team views scoped correctly.
 **Depends on:** P1.
 
+> **P2 status (live).** **2.0 Reconcile ✅** — full audit in [`reconcile/P2-org-master-data.md`](reconcile/P2-org-master-data.md)
+> (Opus independently re-verified every load-bearing claim by direct file read). Headlines: much is
+> VERIFY/COMPLETE, not build-from-zero. **Net-new BUILD:** `Distributor` entity (unblocks R1 ledger),
+> wire `outlets/upsert` + `rekyc-flag` (currently no-op stubs), Category CRUD + catalog/SKU/tier admin UI,
+> hierarchy source-of-truth reconcile (live admin upload writes a `ProgramSetting` JSON blob, not the
+> relational `SalesHierarchyLevel`/`SalesUser` tree; `UserRole` enum lacks the ZNM rung). **🚩 Pre-existing
+> prod defects surfaced** (not exploitable under DEMO/RBAC-off, but must close before real traffic):
+> RF1 cross-tenant IDOR on `sales/team/[memberId]` (no clientId/ownership), RF2 unscoped invoice dup-check,
+> RF3 `partnerId:userId` wrong-FK write, RF4 `SalesHierarchyLevel.level` global-unique, RF5 `Outlet.outletCode`
+> global-unique. **Migrations (human-gated):** 2.4 (Distributor + 1:1 binding) and 2.1 (level constraint fix).
+> **Owner decisions (2026-06-15):** Partner↔Outlet stays **1:many + `isPrimary`** (document 1:1 as convention,
+> no binding migration); **RF1–RF3 folded in now**. **Wave 1 ✅ DONE** (gated: tsc 0, pure test 10/10, no new
+> reds/lint): RF1 fixed (`user:{clientId}` scope + `isSelfOrDescendant` ownership gate, fails closed → 403),
+> RF2 fixed (clientId on dup-check), RF3 fixed (partnerId from outlet→partner). New `lib/sales-hierarchy-access.ts`.
+> **NEXT:** Wave 2 — draft 2.4 (Distributor + `Outlet.distributorId`) + 2.1 (`level` constraint, RF4) migration
+> diff-SQL for the human gate before any `db push`.
+
 ## P3 · Onboarding & KYC  (3–5 wk)
 **Objective:** the full enroll→KYC→approve→credential journey (spec §02 WF1) works end-to-end.
 

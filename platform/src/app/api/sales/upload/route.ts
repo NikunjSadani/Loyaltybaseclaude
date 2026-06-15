@@ -48,10 +48,11 @@ export async function POST(req: NextRequest) {
     // Pre-fetch valid SKU codes and outlet IDs (scoped to tenant)
     const [validSkus, validOutlets] = await Promise.all([
       prisma.sku.findMany({ select: { skuCode: true }, where: { clientId } }),
-      prisma.outlet.findMany({ where: { isActive: true, deletedAt: null, partner: { user: { clientId } } }, select: { id: true } }),
+      prisma.outlet.findMany({ where: { isActive: true, deletedAt: null, partner: { user: { clientId } } }, select: { id: true, partnerId: true } }),
     ])
     const skuSet = new Set(validSkus.map((s) => s.skuCode))
     const outletSet = new Set(validOutlets.map((o) => o.id))
+    const outletPartnerMap = new Map(validOutlets.map((o) => [o.id, o.partnerId]))
 
     // Check existing invoice numbers in DB
     const allInvoiceNos = rows
@@ -60,7 +61,7 @@ export async function POST(req: NextRequest) {
       .map(String)
 
     const existingInvoices = await prisma.salesInvoice.findMany({
-      where: { invoiceNumber: { in: allInvoiceNos } },
+      where: { clientId, invoiceNumber: { in: allInvoiceNos } },
       select: { invoiceNumber: true },
     })
     const existingInvoiceSet = new Set(existingInvoices.map((i) => i.invoiceNumber))
@@ -124,11 +125,18 @@ export async function POST(req: NextRequest) {
     let uploaded = 0
     if (valid.length > 0) {
       for (const row of valid) {
+        const partnerId = outletPartnerMap.get(row.outletId)
+        if (!partnerId) {
+          // Defensive: outletId was validated against outletSet above, so this
+          // should never happen. Record an error rather than writing a bad FK.
+          errors.push({ row: -1, error: `Could not resolve partner for outlet ${row.outletId} (invoice ${row.invoiceNumber})` })
+          continue
+        }
         await prisma.salesInvoice.create({
           data: {
             clientId,
             salesUploadId: batch.id,
-            partnerId: authUser.userId,
+            partnerId,
             invoiceNumber: row.invoiceNumber,
             invoiceDate: new Date(row.invoiceDate),
             outletId: row.outletId,

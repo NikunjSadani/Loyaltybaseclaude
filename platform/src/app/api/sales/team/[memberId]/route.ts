@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
+import { getClientIdFromRequest } from '@/lib/tenant'
+import { isSelfOrDescendant } from '@/lib/sales-hierarchy-access'
 
 const ok  = (data: any, status = 200) => NextResponse.json({ success: true,  data  }, { status })
 const err = (msg: string, status = 400) => NextResponse.json({ success: false, error: msg }, { status })
@@ -14,13 +16,31 @@ export async function GET(
     if (!authUser) return err('Unauthorized', 401)
 
     const { memberId } = await params
+    const clientId = getClientIdFromRequest(req)
+
+    // ── Tenant scope + ownership check (cross-tenant IDOR guard) ──────────────
+    // Resolve the caller's own SalesUser and load this tenant's reporting edges,
+    // then verify the target is the caller or a descendant in their subtree.
+    const callerSalesUser = await prisma.salesUser.findFirst({
+      where: { userId: authUser.userId, user: { clientId }, deletedAt: null },
+      select: { id: true },
+    })
+    if (!callerSalesUser) return err('Forbidden', 403)
+
+    const edges = await prisma.salesUser.findMany({
+      where: { user: { clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true },
+    })
+    if (!isSelfOrDescendant(memberId, callerSalesUser.id, edges)) {
+      return err('Forbidden', 403)
+    }
 
     const now        = new Date()
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
     const monthEnd   = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59)
 
     const salesUser = await prisma.salesUser.findFirst({
-      where: { id: memberId, deletedAt: null },
+      where: { id: memberId, deletedAt: null, user: { clientId } },
       include: {
         user:           { select: { name: true, phone: true } },
         hierarchyLevel: { select: { code: true, name: true, level: true } },
