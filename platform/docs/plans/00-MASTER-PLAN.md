@@ -158,7 +158,7 @@ tenant config served from DB. **Depends on:** P0.
 | 3.1 | KYC submission form + document upload (GCS) | `sales/kyc/*`, `lib/s3.ts`, `api/kyc` | wiring + pure validation |
 | 3.2 | **Tree-based approval routing**, retire `ROLE_PHONES` (#9) | `lib/kyc-approval.ts` (pure `resolveApprover`) | pure (escalation) |
 | 3.3 | First-approve / approve / reject routes; activate user + create wallet on approve | `api/kyc/[id]/*` | wiring + manual |
-| 3.4 | **Field-level rejection** (#14); Gifsy GST/bank validation + reg-type capture (#12, #15) | `api/kyc/*`, schema | unit |
+| 3.4 | **Field-level rejection** (#14); Gifsy GST/bank validation + reg-type capture (#12, #15) — **bulk export→offline-validate→upload-with-preview→commit** flow + single-page exceptions, field-level verification w/ structured evidence. Full design + schema + 3.4a–e breakdown in [`KYC-APPROVAL-REVAMP.md`](KYC-APPROVAL-REVAMP.md). ⚠️ adds an additive dev-DB migration | `api/kyc/*`, `admin/kyc/*`, `lib/kyc-approval.ts`, schema | unit |
 | 3.5 | Consent capture + DPDP data requests | `api/kyc/consent`, `DataRequest` | unit |
 | 3.6 | **Re-KYC trigger** (#13) + SLA metrics | `api/kyc/sla-metrics` | unit |
 

@@ -14,6 +14,7 @@ C:\Users\nikun\Loyaltybaseclaude\platform). Reload context by reading:
 - docs/plans/reconcile/P1-identity-tenancy.md + docs/plans/P1-sessions-design.md   (P1 detail, audits, deferred)
 - docs/plans/RBAC-ENABLEMENT.md           (how to turn RBAC enforcement on — it's OFF by default)
 - docs/plans/REPORTING-REVAMP.md          (user-driven reporting track, built ahead of P8 for client sign-off)
+- docs/plans/KYC-APPROVAL-REVAMP.md        (P3 design: Gifsy bulk KYC verify/approve — agreed, not yet built)
 - docs/spec/gap-register.md               (open gaps + what P0/P1 resolved)
 - your memory note: loyaltybase-spec-effort.md
 
