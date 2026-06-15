@@ -1161,6 +1161,78 @@ export interface TicketAgingSummary {
   byBucket:   Record<string, number>;
 }
 
+// ─── KYC Approval (Gifsy bulk workflow) ──────────────────────────────────────
+
+export type KycFieldKey =
+  | 'PAYMENT'
+  | 'GST_VALIDATION'
+  | 'GST_DOCUMENT'
+  | 'ADDRESS'
+  | 'ADDRESS_DOCUMENT'
+  | 'BOARD_PHOTO'
+  | 'OWNER_PHOTO'
+
+export type KycFieldDecision = 'PENDING' | 'APPROVED' | 'REJECTED'
+
+export interface KycFieldState {
+  decision: KycFieldDecision
+  remark?:  string
+  source?:  'EXCEL' | 'PORTAL'
+}
+
+export interface KycApprovalEntry {
+  submissionId:        string
+  outletCode:          string
+  outletName:          string
+  ownerName:           string
+  mobile:              string
+  partnerClass:        string
+  gstNumber:           string
+  panNumber:           string
+  address:             string
+  city:                string
+  state:               string
+  pincode:             string
+  paymentMode:         'bank' | 'upi'
+  bankName?:           string
+  accountHolderName?:  string
+  accountNumber?:      string
+  ifscCode?:           string
+  upiId?:              string
+  nameMismatch?:       boolean
+  boardGeo?:           { lat: number; lng: number }
+  documents: {
+    gstCertificateUrl?:  string
+    addressDocUrl?:      string
+    selfDeclarationUrl?: string
+    boardPhotoUrl?:      string
+    ownerPhotoUrl?:      string
+    chequeUrl?:          string
+  }
+  fields: Record<KycFieldKey, KycFieldState>
+}
+
+export interface KycVerifyUpdate {
+  submissionId: string
+  fields:       Partial<Record<KycFieldKey, { decision: 'APPROVED' | 'REJECTED'; remark?: string }>>
+}
+
+export interface KycVerifyRowError {
+  rowNumber:    number
+  submissionId: string
+  message:      string
+}
+
+export interface KycVerifyResult {
+  updates: KycVerifyUpdate[]
+  errors:  KycVerifyRowError[]
+  summary: {
+    rowsParsed: number
+    fieldsSet:  number
+    errors:     number
+  }
+}
+
 // ─── Reversal Request ─────────────────────────────────────────────────────────
 
 export type ReversalStatus = 'PENDING_GIFSY' | 'APPROVED' | 'REJECTED' | 'PARTIAL';

@@ -54,8 +54,8 @@ const ALL_NAV_ITEMS = [
     icon: FileCheck,
     featureFlag: 'kycApprovalFlow' as const,
     children: [
-      { href: '/admin/kyc',        label: 'KYC Submissions'  },
-      { href: '/admin/approvals',  label: 'KYC Approvals'    },
+      { href: '/admin/kyc',            label: 'KYC Submissions'  },
+      { href: '/admin/kyc/approvals',  label: 'KYC Approvals'    },
     ],
   },
   {

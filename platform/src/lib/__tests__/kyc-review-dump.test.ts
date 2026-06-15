@@ -1,11 +1,11 @@
 /// <reference types="vitest/globals" />
 /**
- * TDD — KYC Review Dump Export
+ * TDD — KYC Review Dump Export (revamped contract)
  *
  * Groups:
- *   A — Column constants: header counts and labels
- *   B — generateKycReviewDumpExcel: returns Uint8Array, sheet structure, verification labels
- *   C — demoKycReviewRows: determinism, required fields, submissionId format
+ *   A — Column constants: KYC_DUMP_TOTAL_COLUMN_COUNT, headers
+ *   B — generateKycReviewDumpExcel: Uint8Array, structure, hyperlinks
+ *   C — demoKycApprovalEntries: determinism, fields, documents, EXCEL entries
  */
 
 import { describe, it, expect, beforeAll } from 'vitest'
@@ -13,241 +13,264 @@ import { describe, it, expect, beforeAll } from 'vitest'
 // ─── A: Column constants ──────────────────────────────────────────────────────
 
 describe('A — Column constants', () => {
-  let KYC_DUMP_CONTEXT_HEADERS:       typeof import('../kyc-review-dump').KYC_DUMP_CONTEXT_HEADERS
-  let KYC_DUMP_VERIFICATION_HEADERS:  typeof import('../kyc-review-dump').KYC_DUMP_VERIFICATION_HEADERS
+  let mod: typeof import('../kyc-review-dump')
 
-  beforeAll(async () => {
-    const mod = await import('../kyc-review-dump')
-    KYC_DUMP_CONTEXT_HEADERS      = mod.KYC_DUMP_CONTEXT_HEADERS
-    KYC_DUMP_VERIFICATION_HEADERS = mod.KYC_DUMP_VERIFICATION_HEADERS
+  beforeAll(async () => { mod = await import('../kyc-review-dump') })
+
+  it('A1: KYC_DUMP_TOTAL_COLUMN_COUNT === 40', () => {
+    expect(mod.KYC_DUMP_TOTAL_COLUMN_COUNT).toBe(40)
   })
 
-  it('A1: KYC_DUMP_CONTEXT_HEADERS has exactly 16 entries', () => {
-    expect(KYC_DUMP_CONTEXT_HEADERS).toHaveLength(16)
+  it('A2: KYC_DUMP_CONTEXT_HEADERS has exactly 20 entries', () => {
+    expect(mod.KYC_DUMP_CONTEXT_HEADERS).toHaveLength(20)
   })
 
-  it('A2: KYC_DUMP_VERIFICATION_HEADERS has exactly 10 entries', () => {
-    expect(KYC_DUMP_VERIFICATION_HEADERS).toHaveLength(10)
+  it('A3: KYC_DUMP_DOC_HEADERS has exactly 6 entries', () => {
+    expect(mod.KYC_DUMP_DOC_HEADERS).toHaveLength(6)
   })
 
-  it('A3: context headers start with "Submission ID"', () => {
-    expect(KYC_DUMP_CONTEXT_HEADERS[0]).toBe('Submission ID')
+  it('A4: KYC_FIELD_ORDER has exactly 7 entries', () => {
+    expect(mod.KYC_FIELD_ORDER).toHaveLength(7)
   })
 
-  it('A4: context headers end with "Sales User"', () => {
-    expect(KYC_DUMP_CONTEXT_HEADERS[KYC_DUMP_CONTEXT_HEADERS.length - 1]).toBe('Sales User')
+  it('A5: KYC_FIELD_ORDER keys are the 7 canonical field keys in order', () => {
+    const keys = mod.KYC_FIELD_ORDER.map(f => f.key)
+    expect(keys).toEqual([
+      'PAYMENT', 'GST_VALIDATION', 'GST_DOCUMENT',
+      'ADDRESS', 'ADDRESS_DOCUMENT', 'BOARD_PHOTO', 'OWNER_PHOTO',
+    ])
   })
 
-  it('A5: context headers include all required context labels', () => {
-    const required = [
-      'Submission ID', 'Outlet Code', 'Outlet Name', 'Owner Name', 'Phone',
-      'GST Number', 'PAN Number', 'Address', 'City', 'State', 'Pincode',
-      'Bank Name', 'Account Number', 'IFSC', 'Submitted At', 'Sales User',
-    ]
-    for (const label of required) {
-      expect(KYC_DUMP_CONTEXT_HEADERS).toContain(label)
-    }
+  it('A6: context headers start with "Submission ID"', () => {
+    expect(mod.KYC_DUMP_CONTEXT_HEADERS[0]).toBe('Submission ID')
   })
 
-  it('A6: verification headers include all required verification labels', () => {
-    const required = [
-      'Bank Verified', 'Bank Name Match', 'Penny-drop Ref',
-      'GST Registration Type', 'GST Legal Name', 'GST Status',
-      'Address Approved', 'Owner Approved', 'Decision', 'Reason',
-    ]
-    for (const label of required) {
-      expect(KYC_DUMP_VERIFICATION_HEADERS).toContain(label)
-    }
+  it('A7: doc headers include "GST Certificate" and "Owner Photo"', () => {
+    const h = mod.KYC_DUMP_DOC_HEADERS as readonly string[]
+    expect(h).toContain('GST Certificate')
+    expect(h).toContain('Owner Photo')
   })
 
-  it('A7: verification headers start with "Bank Verified"', () => {
-    expect(KYC_DUMP_VERIFICATION_HEADERS[0]).toBe('Bank Verified')
+  it('A8: kycFieldDecisionHeader returns "<label> — Decision"', () => {
+    expect(mod.kycFieldDecisionHeader('Payment (Bank/UPI)')).toBe('Payment (Bank/UPI) — Decision')
   })
 
-  it('A8: verification headers end with "Reason"', () => {
-    expect(KYC_DUMP_VERIFICATION_HEADERS[KYC_DUMP_VERIFICATION_HEADERS.length - 1]).toBe('Reason')
+  it('A9: kycFieldRemarkHeader returns "<label> — Remark"', () => {
+    expect(mod.kycFieldRemarkHeader('Owner Photo')).toBe('Owner Photo — Remark')
+  })
+
+  it('A10: 20 context + 6 doc + 14 per-field = 40', () => {
+    const perField = mod.KYC_FIELD_ORDER.length * 2   // Decision + Remark each
+    expect(mod.KYC_DUMP_CONTEXT_HEADERS.length + mod.KYC_DUMP_DOC_HEADERS.length + perField)
+      .toBe(mod.KYC_DUMP_TOTAL_COLUMN_COUNT)
   })
 })
 
 // ─── B: generateKycReviewDumpExcel ───────────────────────────────────────────
 
 describe('B — generateKycReviewDumpExcel', () => {
-  let generateKycReviewDumpExcel:     typeof import('../kyc-review-dump').generateKycReviewDumpExcel
-  let demoKycReviewRows:              typeof import('../kyc-review-dump').demoKycReviewRows
-  let KYC_DUMP_CONTEXT_HEADERS:       typeof import('../kyc-review-dump').KYC_DUMP_CONTEXT_HEADERS
-  let KYC_DUMP_VERIFICATION_HEADERS:  typeof import('../kyc-review-dump').KYC_DUMP_VERIFICATION_HEADERS
+  let mod: typeof import('../kyc-review-dump')
 
-  beforeAll(async () => {
-    const mod = await import('../kyc-review-dump')
-    generateKycReviewDumpExcel    = mod.generateKycReviewDumpExcel
-    demoKycReviewRows             = mod.demoKycReviewRows
-    KYC_DUMP_CONTEXT_HEADERS      = mod.KYC_DUMP_CONTEXT_HEADERS
-    KYC_DUMP_VERIFICATION_HEADERS = mod.KYC_DUMP_VERIFICATION_HEADERS
-  })
+  beforeAll(async () => { mod = await import('../kyc-review-dump') })
 
-  it('B1: returns a non-empty Uint8Array', () => {
-    const bytes = generateKycReviewDumpExcel([])
+  it('B1: returns a non-empty Uint8Array for empty input', () => {
+    const bytes = mod.generateKycReviewDumpExcel([])
     expect(bytes).toBeInstanceOf(Uint8Array)
     expect(bytes.length).toBeGreaterThan(100)
   })
 
-  it('B2: works with an empty rows array', () => {
-    const bytes = generateKycReviewDumpExcel([])
-    expect(bytes).toBeInstanceOf(Uint8Array)
-    expect(bytes.length).toBeGreaterThan(0)
-  })
-
-  it('B3: returns a non-empty Uint8Array for demo rows', () => {
-    const bytes = generateKycReviewDumpExcel(demoKycReviewRows())
+  it('B2: returns a non-empty Uint8Array for demo entries', () => {
+    const bytes = mod.generateKycReviewDumpExcel(mod.demoKycApprovalEntries())
     expect(bytes).toBeInstanceOf(Uint8Array)
     expect(bytes.length).toBeGreaterThan(500)
   })
 
-  it('B4: header row has exactly 26 columns (16 context + 10 verification)', async () => {
+  it('B3: header row has exactly 40 columns', async () => {
     const XLSX  = await import('xlsx')
-    const bytes = generateKycReviewDumpExcel([])
+    const bytes = mod.generateKycReviewDumpExcel([])
     const wb    = XLSX.read(bytes, { type: 'buffer' })
     const ws    = wb.Sheets[wb.SheetNames[0]]
     const aoa   = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1 }) as string[][]
-    expect(aoa[0]).toHaveLength(16 + 10)
+    expect(aoa[0]).toHaveLength(40)
   })
 
-  it('B5: header includes all context column labels', async () => {
+  it('B4: header includes all 14 per-field headers', async () => {
     const XLSX   = await import('xlsx')
-    const bytes  = generateKycReviewDumpExcel([])
+    const bytes  = mod.generateKycReviewDumpExcel([])
     const wb     = XLSX.read(bytes, { type: 'buffer' })
     const ws     = wb.Sheets[wb.SheetNames[0]]
     const aoa    = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1 }) as string[][]
     const header = aoa[0]
-    for (const label of KYC_DUMP_CONTEXT_HEADERS) {
+    for (const { label } of mod.KYC_FIELD_ORDER) {
+      expect(header).toContain(mod.kycFieldDecisionHeader(label))
+      expect(header).toContain(mod.kycFieldRemarkHeader(label))
+    }
+  })
+
+  it('B5: header includes all 6 doc headers', async () => {
+    const XLSX   = await import('xlsx')
+    const bytes  = mod.generateKycReviewDumpExcel([])
+    const wb     = XLSX.read(bytes, { type: 'buffer' })
+    const ws     = wb.Sheets[wb.SheetNames[0]]
+    const aoa    = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1 }) as string[][]
+    const header = aoa[0]
+    for (const label of mod.KYC_DUMP_DOC_HEADERS) {
       expect(header).toContain(label)
     }
   })
 
-  it('B6: header includes all verification column labels', async () => {
-    const XLSX   = await import('xlsx')
-    const bytes  = generateKycReviewDumpExcel([])
-    const wb     = XLSX.read(bytes, { type: 'buffer' })
-    const ws     = wb.Sheets[wb.SheetNames[0]]
-    const aoa    = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1 }) as string[][]
-    const header = aoa[0]
-    for (const label of KYC_DUMP_VERIFICATION_HEADERS) {
-      expect(header).toContain(label)
-    }
+  it('B6: a doc-link cell carries .l.Target when URL is present', async () => {
+    const XLSX    = await import('xlsx')
+    const entries = mod.demoKycApprovalEntries()
+    const bytes   = mod.generateKycReviewDumpExcel(entries)
+    const wb      = XLSX.read(bytes, { type: 'buffer' })
+    const ws      = wb.Sheets[wb.SheetNames[0]]
+    // GST Certificate is doc col index 20 (0-based), data row 1 (r=1)
+    // Entry 0 has gstCertificateUrl set
+    const cellAddr = XLSX.utils.encode_cell({ r: 1, c: 20 })
+    const cell = ws[cellAddr]
+    expect(cell).toBeDefined()
+    expect(cell.l).toBeDefined()
+    expect(typeof cell.l.Target).toBe('string')
+    expect(cell.l.Target).toContain('KYC-2026-0001')
   })
 
-  it('B7: context columns come before verification columns in header order', async () => {
-    const XLSX   = await import('xlsx')
-    const bytes  = generateKycReviewDumpExcel([])
-    const wb     = XLSX.read(bytes, { type: 'buffer' })
-    const ws     = wb.Sheets[wb.SheetNames[0]]
-    const aoa    = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1 }) as string[][]
-    const header = aoa[0]
-    const submissionIdIdx  = header.indexOf('Submission ID')
-    const bankVerifiedIdx  = header.indexOf('Bank Verified')
-    expect(submissionIdIdx).toBeGreaterThanOrEqual(0)
-    expect(bankVerifiedIdx).toBeGreaterThan(submissionIdIdx)
+  it('B7: PENDING field Decision cell is empty string', async () => {
+    const XLSX    = await import('xlsx')
+    const entries = mod.demoKycApprovalEntries()
+    // entry 0 has all fields PENDING
+    const bytes   = mod.generateKycReviewDumpExcel([entries[0]])
+    const wb      = XLSX.read(bytes, { type: 'buffer' })
+    const ws      = wb.Sheets[wb.SheetNames[0]]
+    const aoa     = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' }) as string[][]
+    // Decision cols start at index 26 (20 context + 6 doc)
+    const dataRow = aoa[1]
+    expect(dataRow[26]).toBe('')  // PAYMENT Decision
   })
 
-  it('B8: verification columns are blank in data rows', async () => {
-    const XLSX   = await import('xlsx')
-    const rows   = demoKycReviewRows()
-    const bytes  = generateKycReviewDumpExcel(rows)
-    const wb     = XLSX.read(bytes, { type: 'buffer' })
-    const ws     = wb.Sheets[wb.SheetNames[0]]
-    const aoa    = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '' }) as unknown[][]
-    // Verification columns start at index 16 (0-based)
-    const dataRow = aoa[1] as string[]
-    for (let i = 16; i < 26; i++) {
-      expect(dataRow[i]).toBe('')
-    }
+  it('B8: APPROVED field Decision cell is "APPROVE"', async () => {
+    const XLSX    = await import('xlsx')
+    const entries = mod.demoKycApprovalEntries()
+    // entry index 1 (Singh Supermart) has PAYMENT=APPROVED
+    const bytes   = mod.generateKycReviewDumpExcel([entries[1]])
+    const wb      = XLSX.read(bytes, { type: 'buffer' })
+    const ws      = wb.Sheets[wb.SheetNames[0]]
+    const aoa     = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' }) as string[][]
+    const dataRow = aoa[1]
+    expect(dataRow[26]).toBe('APPROVE')  // PAYMENT Decision col
   })
 
-  it('B9: first data row Submission ID matches first demo row', async () => {
-    const XLSX   = await import('xlsx')
-    const rows   = demoKycReviewRows()
-    const bytes  = generateKycReviewDumpExcel(rows)
-    const wb     = XLSX.read(bytes, { type: 'buffer' })
-    const ws     = wb.Sheets[wb.SheetNames[0]]
-    const aoa    = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1 }) as unknown[][]
-    // Submission ID is column 0
-    expect(aoa[1][0]).toBe(rows[0].submissionId)
-  })
-
-  it('B10: data row count matches input rows count', async () => {
-    const XLSX   = await import('xlsx')
-    const rows   = demoKycReviewRows()
-    const bytes  = generateKycReviewDumpExcel(rows)
-    const wb     = XLSX.read(bytes, { type: 'buffer' })
-    const ws     = wb.Sheets[wb.SheetNames[0]]
-    const aoa    = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1 }) as unknown[][]
-    // Row 0 = header; rows 1..N = data
-    expect(aoa.length).toBe(rows.length + 1)
+  it('B9: data row count matches input entries count', async () => {
+    const XLSX    = await import('xlsx')
+    const entries = mod.demoKycApprovalEntries()
+    const bytes   = mod.generateKycReviewDumpExcel(entries)
+    const wb      = XLSX.read(bytes, { type: 'buffer' })
+    const ws      = wb.Sheets[wb.SheetNames[0]]
+    const aoa     = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1 }) as string[][]
+    expect(aoa.length).toBe(entries.length + 1)
   })
 })
 
-// ─── C: demoKycReviewRows ─────────────────────────────────────────────────────
+// ─── C: demoKycApprovalEntries ────────────────────────────────────────────────
 
-describe('C — demoKycReviewRows', () => {
-  let demoKycReviewRows: typeof import('../kyc-review-dump').demoKycReviewRows
+describe('C — demoKycApprovalEntries', () => {
+  let mod: typeof import('../kyc-review-dump')
 
-  beforeAll(async () => {
-    const mod = await import('../kyc-review-dump')
-    demoKycReviewRows = mod.demoKycReviewRows
+  beforeAll(async () => { mod = await import('../kyc-review-dump') })
+
+  it('C1: returns 8 entries', () => {
+    expect(mod.demoKycApprovalEntries()).toHaveLength(8)
   })
 
-  it('C1: returns ~8 rows', () => {
-    const rows = demoKycReviewRows()
-    expect(rows.length).toBeGreaterThanOrEqual(8)
+  it('C2: deterministic — two calls produce deep-equal output', () => {
+    expect(mod.demoKycApprovalEntries()).toEqual(mod.demoKycApprovalEntries())
   })
 
-  it('C2: deterministic — calling twice returns deep-equal output', () => {
-    expect(demoKycReviewRows()).toEqual(demoKycReviewRows())
+  it('C3: every entry has exactly 7 fields', () => {
+    for (const e of mod.demoKycApprovalEntries()) {
+      expect(Object.keys(e.fields)).toHaveLength(7)
+    }
   })
 
-  it('C3: every row has a non-empty submissionId', () => {
-    demoKycReviewRows().forEach(r => expect(r.submissionId).toBeTruthy())
+  it('C4: every entry has all 7 canonical field keys', () => {
+    const expectedKeys = mod.KYC_FIELD_ORDER.map(f => f.key)
+    for (const e of mod.demoKycApprovalEntries()) {
+      for (const key of expectedKeys) {
+        expect(e.fields).toHaveProperty(key)
+      }
+    }
   })
 
-  it('C4: submissionIds follow the KYC-2026-NNNN pattern', () => {
-    demoKycReviewRows().forEach(r =>
-      expect(r.submissionId).toMatch(/^KYC-2026-\d{4}$/)
+  it('C5: at least one entry has a pre-set EXCEL field', () => {
+    const entries = mod.demoKycApprovalEntries()
+    const hasExcel = entries.some(e =>
+      Object.values(e.fields).some(f => f.source === 'EXCEL')
     )
+    expect(hasExcel).toBe(true)
   })
 
-  it('C5: every row has a non-empty outletCode', () => {
-    demoKycReviewRows().forEach(r => expect(r.outletCode).toBeTruthy())
+  it('C6: at least one entry has an APPROVED EXCEL field', () => {
+    const entries = mod.demoKycApprovalEntries()
+    const hasApprovedExcel = entries.some(e =>
+      Object.values(e.fields).some(f => f.source === 'EXCEL' && f.decision === 'APPROVED')
+    )
+    expect(hasApprovedExcel).toBe(true)
   })
 
-  it('C6: every row has a non-empty outletName', () => {
-    demoKycReviewRows().forEach(r => expect(r.outletName).toBeTruthy())
+  it('C7: at least one entry has a REJECTED EXCEL field with a remark', () => {
+    const entries = mod.demoKycApprovalEntries()
+    const hasRejectedExcel = entries.some(e =>
+      Object.values(e.fields).some(f => f.source === 'EXCEL' && f.decision === 'REJECTED' && !!f.remark)
+    )
+    expect(hasRejectedExcel).toBe(true)
   })
 
-  it('C7: every row has a non-empty ownerName', () => {
-    demoKycReviewRows().forEach(r => expect(r.ownerName).toBeTruthy())
+  it('C8: every entry has a documents object', () => {
+    for (const e of mod.demoKycApprovalEntries()) {
+      expect(e.documents).toBeDefined()
+      expect(typeof e.documents).toBe('object')
+    }
   })
 
-  it('C8: every row has a non-empty bankName', () => {
-    demoKycReviewRows().forEach(r => expect(r.bankName).toBeTruthy())
+  it('C9: at least one entry has a gstCertificateUrl', () => {
+    const hasGstUrl = mod.demoKycApprovalEntries().some(e => !!e.documents.gstCertificateUrl)
+    expect(hasGstUrl).toBe(true)
   })
 
-  it('C9: every row has a non-empty submittedAt', () => {
-    demoKycReviewRows().forEach(r => expect(r.submittedAt).toBeTruthy())
-  })
-
-  it('C10: submissionIds are all unique', () => {
-    const rows = demoKycReviewRows()
-    const ids  = rows.map(r => r.submissionId)
+  it('C10: all submissionIds are unique', () => {
+    const entries = mod.demoKycApprovalEntries()
+    const ids     = entries.map(e => e.submissionId)
     expect(new Set(ids).size).toBe(ids.length)
   })
 
-  it('C11: first row is Kumar General Store', () => {
-    const rows = demoKycReviewRows()
-    expect(rows[0].outletName).toBe('Kumar General Store')
+  it('C11: first entry is Kumar General Store', () => {
+    expect(mod.demoKycApprovalEntries()[0].outletName).toBe('Kumar General Store')
   })
 
-  it('C12: second row is Singh Supermart', () => {
-    const rows = demoKycReviewRows()
-    expect(rows[1].outletName).toBe('Singh Supermart')
+  it('C12: second entry is Singh Supermart', () => {
+    expect(mod.demoKycApprovalEntries()[1].outletName).toBe('Singh Supermart')
+  })
+
+  it('C13: at least one entry uses UPI payment mode', () => {
+    const hasUpi = mod.demoKycApprovalEntries().some(e => e.paymentMode === 'upi')
+    expect(hasUpi).toBe(true)
+  })
+
+  it('C14: UPI entries have upiId and no bankName', () => {
+    for (const e of mod.demoKycApprovalEntries()) {
+      if (e.paymentMode === 'upi') {
+        expect(e.upiId).toBeTruthy()
+        // bank fields should be absent or empty
+        expect(e.bankName ?? '').toBe('')
+      }
+    }
+  })
+
+  it('C15: all entries have boardGeo', () => {
+    for (const e of mod.demoKycApprovalEntries()) {
+      expect(e.boardGeo).toBeDefined()
+      expect(typeof e.boardGeo!.lat).toBe('number')
+      expect(typeof e.boardGeo!.lng).toBe('number')
+    }
   })
 })

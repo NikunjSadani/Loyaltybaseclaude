@@ -2,8 +2,8 @@
  * GET /api/admin/kyc/review-dump
  *
  * Exports the PENDING_GIFSY KYC submission queue as a review dump:
- *   xlsx → Excel with context cols pre-filled + blank verification cols for Gifsy
- *   json → { success:true, data:{ rows } } (for the pending-queue UI table)
+ *   xlsx → Excel with all 40 columns (context + doc hyperlinks + per-field Decision/Remark)
+ *   json → { success:true, data:{ entries } } (for the pending-queue UI table)
  *
  * Auth: Gifsy-operated — GIFSY_ADMIN only, requires kyc:gifsy_approve permission.
  *
@@ -12,13 +12,13 @@
  * Spec: docs/plans/KYC-APPROVAL-REVAMP.md § 3.4b
  */
 
-import { NextRequest, NextResponse } from 'next/server'
-import { getAuthUser }               from '@/lib/auth'
-import { requirePermission }         from '@/lib/rbac/require-permission'
+import { NextRequest, NextResponse }  from 'next/server'
+import { getAuthUser }                from '@/lib/auth'
+import { requirePermission }          from '@/lib/rbac/require-permission'
 import {
-  demoKycReviewRows,
+  demoKycApprovalEntries,
   generateKycReviewDumpExcel,
-}                                    from '@/lib/kyc-review-dump'
+}                                     from '@/lib/kyc-review-dump'
 
 // ─── Route handler ────────────────────────────────────────────────────────────
 
@@ -38,16 +38,21 @@ export async function GET(req: NextRequest) {
   )
   if (denied) return denied
 
+  const clientId = (authUser as { clientId?: string }).clientId
+  if (!clientId) {
+    return NextResponse.json({ success: false, error: 'No tenant bound to the session.' }, { status: 400 })
+  }
+
   // ── Parse params ───────────────────────────────────────────────────────────
   const format = req.nextUrl.searchParams.get('format') ?? 'json'
 
   // ── Data: always demo for now ──────────────────────────────────────────────
   // TODO(P3): query real PENDING_GIFSY submissions from prisma.kycSubmission.findMany(…)
-  const rows = demoKycReviewRows()
+  const entries = demoKycApprovalEntries()
 
   // ── Response ───────────────────────────────────────────────────────────────
   if (format === 'xlsx') {
-    const bytes  = generateKycReviewDumpExcel(rows)
+    const bytes  = generateKycReviewDumpExcel(entries)
     const buf    = Buffer.from(bytes)
     const today  = new Date().toISOString().split('T')[0]
     return new NextResponse(buf, {
@@ -60,9 +65,9 @@ export async function GET(req: NextRequest) {
     })
   }
 
-  // Default: JSON (pending-queue table in the UI)
+  // Default: JSON
   return NextResponse.json({
     success: true,
-    data:    { rows },
+    data:    { entries },
   })
 }

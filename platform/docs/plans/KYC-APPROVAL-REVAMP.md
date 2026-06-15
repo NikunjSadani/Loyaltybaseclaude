@@ -14,6 +14,35 @@ writes yet.** Remaining for P3: **3.4a** schema + migration, **3.4e** real persi
 field-level rejection on the single-record detail page. (Verified end-to-end in DEMO: export → fill → upload →
 per-row preview/errors → commit summary.)
 
+## Expanded approval model (owner, 2026-06-15)
+**7 approval fields**, each independently `PENDING → APPROVED / REJECTED(+remark)`, with **source (Excel|Portal)
++ who/when** recorded:
+1. **Payment** (bank: name/holder/acct/IFSC **or** UPI) + cancelled-cheque doc + payment geo
+2. **GST validation** (the GSTIN; reg type/legal name from offline check)
+3. **GST document** (certificate)
+4. **Address** (address/city/state/pincode; name-mismatch flag)
+5. **Address document** (shop-establishment + self-declaration)
+6. **Store board photo** (+ board geo)
+7. **Owner photo** (selfie)
+PAN rides with GST (auto-derived at enrollment); signature/consent handled via OTP, not separately approved.
+
+**Hybrid Excel + portal (merge, never overwrite).** The Excel dump must contain **ALL enrollment fields**
+(see `sales/kyc/new`: outlet/owner, mobile, class, GST/PAN, address, bank/UPI, geo, name-mismatch) **+ a
+clickable hyperlink to every document** (GST cert, address doc, self-declaration, board photo, owner photo,
+cheque) **+ a Decision + Remark column for each of the 7 fields**. The approver fills some fields in Excel and
+the rest on the portal; an upload **merges** parsed statuses in — a blank Excel cell never clears a status set
+on the portal, and vice-versa (last-write-wins per field). The portal detail view shows all photos/details +
+each field's current status (reflecting what Excel set) and lets the approver change any field there.
+
+**Completion + re-share.** An outlet is processed only when **all 7 fields are terminal** (a REJECT requires a
+remark). **All approved → create outlet credentials + send WhatsApp** (credentials = P3.3 activate+wallet;
+WhatsApp = P7/MSG91). **Any rejected → send back to the outlet's sales owner**, re-opening only the rejected
+fields — this **reuses the existing per-field Re-KYC mechanism** (`reKycFlags` + the amber "Re-enter required"
+badges already in `sales/kyc/new`). No new re-share concept needed.
+
+**Excel error report:** invalid rows are returned with a concise-English **`Errors`** column (e.g. "Owner Photo
+rejected without a remark; GST Validation decision 'OK' is not APPROVE/REJECT").
+
 ## The operation (owner's description)
 Gifsy takes the **entire dump** of what field agents filled, **validates bank-account details + GSTIN
 offline** (penny-drop tool + GST portal), then **bulk-uploads** the validated results back to the portal —
