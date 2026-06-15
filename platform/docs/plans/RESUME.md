@@ -79,6 +79,11 @@ DEFERRED / OPEN (none block P2):
   + **single-condition `visibleWhen`** ("if X→show Y") to `lib/campaign.ts` + builder + renderer. Gated +
   audited (PASS, concat fix folded in). Real persistence of form-schema/submissions + Excel-dataset binding =
   **P4**; circular-visibleWhen validation = P4 polish.
+- **Scheme builder PRUNED** (owner demo cleanup, audited PASS): removed the stale **Incentive Calculation** +
+  **Target Configuration** sections from `scheme-builder.tsx` (the platform does NOT compute incentives →
+  tenants upload final amounts). Kept Incentive Type. Deeper rule-engine/schema + **Incentive-Type vs
+  Campaign-Type** reconcile (gap #10) = **P4.0**; `[id]/page.tsx` `CalculationMethod` static-fixture leftover
+  = P4 cleanup. (`admin/schemes/new` = Open Campaign → the form builder w/ the new fields.)
 
 NEXT = **P2 (Organization & master data)** — sales org tree, partners/outlets, catalog (per 00-MASTER-PLAN.md
 §P2; note: an outlet/phone can belong to MULTIPLE tenants → separate per-tenant records; P2.1/2.2 also unblock
