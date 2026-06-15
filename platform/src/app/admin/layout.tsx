@@ -71,6 +71,7 @@ const ALL_NAV_ITEMS = [
     ],
   },
   { href: '/admin/schemes',  label: 'Scheme Management',icon: Tag,          featureFlag: null, gifsyOnly: true  },
+  { href: '/admin/catalog',  label: 'Catalog',          icon: ShoppingBag,   featureFlag: null },
   { href: '/admin/visibility', label: 'Visibility Approval', icon: Eye,     featureFlag: null },
   {
     href: '/admin/invoices',

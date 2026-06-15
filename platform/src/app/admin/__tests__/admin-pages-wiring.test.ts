@@ -10,6 +10,7 @@
  *   E — admin/targets/upload  : no getTenantKpiDefs/saveTenantKpiDefs; API-backed kpi-config route
  *   F — admin/sales           : no getTenantKpiDefs; API-backed kpi-config fetch
  *   G — admin/users/outlets   : no MOCK_OUTLETS const / MOCK_EMPLOYEES import; API-backed outlet & hierarchy fetches; confirm handlers wired to APIs
+ *   H — admin/catalog         : API-backed categories & SKUs; CRUD routes exist
  */
 
 import { describe, it, expect } from 'vitest';
@@ -285,5 +286,54 @@ describe('G — admin/users/outlets page', () => {
   it('G9: re-KYC confirm calls POST /api/admin/outlets/rekyc-flag', () => {
     const code = src('app/admin/users/outlets/page.tsx');
     expect(code).toMatch(/\/api\/admin\/outlets\/rekyc-flag/);
+  });
+});
+
+// ─── H — admin/catalog ───────────────────────────────────────────────────────
+
+describe('H — admin/catalog page', () => {
+  it('H1: fetches categories from /api/admin/categories', () => {
+    const code = src('app/admin/catalog/page.tsx');
+    expect(code).toMatch(/\/api\/admin\/categories/);
+  });
+
+  it('H2: fetches SKUs from /api/admin/skus', () => {
+    const code = src('app/admin/catalog/page.tsx');
+    expect(code).toMatch(/\/api\/admin\/skus/);
+  });
+
+  it('H3: uses the Bearer token auth pattern from localStorage', () => {
+    const code = src('app/admin/catalog/page.tsx');
+    expect(code).toMatch(/localStorage\.getItem\('token'\)/);
+    expect(code).toMatch(/Bearer/);
+  });
+
+  it('H4: categories collection route handles GET and POST', () => {
+    const code = src('app/api/admin/categories/route.ts');
+    expect(code).toMatch(/export\s+async\s+function\s+GET/);
+    expect(code).toMatch(/export\s+async\s+function\s+POST/);
+  });
+
+  it('H5: categories [id] route handles PATCH and DELETE', () => {
+    const code = src('app/api/admin/categories/[id]/route.ts');
+    expect(code).toMatch(/export\s+async\s+function\s+PATCH/);
+    expect(code).toMatch(/export\s+async\s+function\s+DELETE/);
+  });
+
+  it('H6: skus [id] route handles PATCH and DELETE', () => {
+    const code = src('app/api/admin/skus/[id]/route.ts');
+    expect(code).toMatch(/export\s+async\s+function\s+PATCH/);
+    expect(code).toMatch(/export\s+async\s+function\s+DELETE/);
+  });
+
+  it('H7: catalog nav link is registered in the admin layout', () => {
+    const code = src('app/admin/layout.tsx');
+    expect(code).toMatch(/\/admin\/catalog/);
+  });
+
+  it('H8: categories routes gate on catalog permissions', () => {
+    const code = src('app/api/admin/categories/route.ts');
+    expect(code).toMatch(/catalog:read/);
+    expect(code).toMatch(/catalog:write/);
   });
 });
