@@ -17,11 +17,10 @@
  * clientConfigToRow). It must remain in env / Secret Manager.
  */
 
-import { PrismaClient } from '@prisma/client';
+import 'dotenv/config';
+import { prisma } from '../src/lib/prisma';
 import { CLIENT_REGISTRY } from '../src/lib/platform/client-registry';
 import { clientConfigToRow } from '../src/lib/platform/client-row';
-
-const prisma = new PrismaClient();
 
 async function main() {
   const entries = Object.values(CLIENT_REGISTRY);
