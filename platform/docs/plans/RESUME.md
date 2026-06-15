@@ -40,13 +40,15 @@ the live per-task log (tags, gates, audits, findings F1-F7, deferred items).
   1.3a (Client tenant model — MIGRATION APPLIED to dev gifsy_dev, 2 rows backfilled, secret stripped) ·
   1.9 (LoginLog + lastLoginAt/loginCount + AuditLog on login) · 1.4 + 1.4a (DB-backed tenant config read
   with registry fallback; F8 secret-resolution bug found by audit + fixed).
-  IN PROGRESS: 1.2 + 1.8 COMBINED — persisted sessions + tenant binding (user-approved; design in
-  docs/plans/P1-sessions-design.md). 365-day sliding idle, revoke on phone-change, logout-all-devices;
-  tenant from subdomain at login then bound to the session; app-layer (not proxy) session validation.
-  Staged S1 (schema: UserSession.clientId/lastSeenAt) → S2 (lib/session.ts) → S3 (login wiring) → S4
-  (getAuthUser upgrade — HIGH blast radius, pause for review) → S5 (logout/logout-all + phone-change hook).
-  REMAINING after that: 1.6 (can() gate + tenant-configurable role→permission map on top of 1.5; the 5
-  taxonomy Qs resolved with defaults — see P1-identity-tenancy.md).
+  1.2 + 1.8 ✅ DONE & audited (persisted sessions + tenant binding; design+build log in
+  docs/plans/P1-sessions-design.md). Delivered: 365-day sliding idle, logout + logout-all-devices, Gifsy
+  platform-wide force-logout (rollout kill switch), admin edit-phone→auto-logout; tenant chosen by
+  subdomain at login, bound to the session, and getAuthUser enforces subdomain==session-tenant for
+  non-Gifsy (GIFSY_ADMIN exempt) — closes the cross-tenant header-swap (#20 resolved, #23 reduced).
+  Stages S1–S5 + S4b all committed/gated/audited. Phone-change revoke for sales(bulk upload→P2) &
+  outlets(re-KYC→P3) deferred to those phases (mechanism ready).
+  REMAINING IN P1: **1.6** (can() gate + tenant-configurable role→permission map on top of 1.5; the 5
+  taxonomy Qs resolved with defaults — see P1-identity-tenancy.md). Then P1 exit.
   Deferred follow-ups: OTP validity window (6h→10min decision), send-otp orphaned-rows on failure,
   auto-registration confirmation, isolation-audit AST hardening, 1.9 audit-txn-blocks-login tradeoff,
   vitest.integration server-only alias. Migration note: this dev DB has NO prisma migration history —

@@ -97,7 +97,7 @@ no cross-user revoke, no escalation to the global logout; phone-change revokes t
 (deferred): `force-logout-all` writes its audit AFTER the revoke, so a transient DB error there leaves a
 mass-revoke unlogged (500 surfaces) — harden later (audit-before-respond / durable log).
 
-- **S4b ⏳** (building) — **REVISED to a single enforcement point** (better than the 95-route migration):
+- **S4b ✅** committed + audited — **single enforcement point** (better than the 95-route migration):
   `getAuthUser` rejects when a non-GIFSY session's tenant ≠ the subdomain (`x-tenant-slug`) it's on —
   closes the cross-tenant header-swap (gaps #20/#23) in one auditable place. **GIFSY_ADMIN is exempt**
   (platform operator works cross-tenant via each tenant's subdomain — user-confirmed assumption). Routes
