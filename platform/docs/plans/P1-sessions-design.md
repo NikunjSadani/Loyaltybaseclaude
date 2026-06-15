@@ -66,3 +66,17 @@ is safe; no existing rows to backfill.)
 
 DEMO_MODE keeps bypassing (no session). Each stage is committed + audited before the next; S4 pauses
 for review given its blast radius.
+
+## Build log
+- **S1+S2 ✅** committed — `UserSession.clientId`/`lastSeenAt` (additive migration applied to dev
+  `gifsy_dev`, empty-table guarded) + `lib/session.ts` (create/validate-slide/revoke/revoke-all).
+  Gate: tsc 0, full suite no new reds, +23 tests. **Audit PASS** (note: tiny TOCTOU in validateSession's
+  read-then-bump — harden later to `updateMany({where:{token,revokedAt:null}})`; not blocking).
+- **S3 ✅** committed — `verify-otp` mints `sid` (crypto.randomUUID), `createSession(token=sid)`, JWT via
+  `generateAccessToken` (claims userId/role/clientId/sid; 365d). Gate: tsc 0, no new reds, +19 tests.
+  **Audit PASS** (sid↔session linkage exact; demo/failure create no session; 1.9 assertions intact).
+- **S4 ⏸ AWAITING USER GO** — `getAuthUser` → async session-validated + returns session `clientId`.
+  Blast radius measured: **134 call sites across 107 route files** need `await` added (tsc guarantees
+  completeness). Recommend: S4 = the getAuthUser rewrite + await sweep (delivers revocation/idle/
+  logout-all/phone-change); **S4b** = migrate the ~95 `getClientIdFromRequest` routes to session-tenant
+  (finishes 1.8 / gap #23); **S5** = logout + logout-all endpoints + phone-change revoke hook.
