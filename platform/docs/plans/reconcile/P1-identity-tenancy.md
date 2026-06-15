@@ -82,6 +82,10 @@ First OTP for an unknown phone auto-creates a `PENDING_VERIFICATION` user with r
 | 1.7a (audit hardening) | ✅ committed `5c96b21` | tsc 0 / lint clean / +2, no new reds | per-handler segmentation closes the false-negative; synthetic cases prove it; offender set still empty |
 | 1.3 (Client model — code only) | ✅ committed `24613a4` | tsc 0 / lint clean / +23 | **PASS** — model faithful, secret excluded, id=slug consistent, migration additive |
 | 1.3a (migration applied) | ✅ committed `efee563` | dev migration + backfill **verified on gifsy_dev** | **2 rows** (deoleo ACTIVE, clientb ONBOARDING), `msg91AuthKey` absent, nested JSON intact |
+| 1.9 (login/audit writes) | ✅ committed `83824b7` | tsc 0 / lint clean (verify-otp `any` pre-existing) / +22 behavioral, no new reds | running |
+| 1.4 (DB-backed config read) | ✅ committed `4dc64e3` | tsc 0 / lint clean / +32, no new reds | running |
+
+**1.4 minor follow-ups (logged, non-blocking):** `getClientConfigFromDb` catch swallows the error without the `console.error` its comment promises; no `import 'server-only'` guard on `client-config-db.ts`; `getTenantConfig` now does a DB read per server render (caching candidate — React `cache()`/`unstable_cache`).
 
 **1.3 migration — applied to dev (gifsy_dev) 2026-06-15.** Used **surgical diff-SQL** (`prisma migrate diff` → reviewed → applied in a txn with a `current_database='gifsy_dev'` guard), NOT `prisma migrate dev`: this dev DB has **no `_prisma_migrations` history** (db-push managed), so `migrate dev` would have **reset** it. Recorded in `prisma/migrations/add_client_tenant_table.sql` and in `DEV-DB.md` (new "Applying schema changes" section). Backfill fixed to reuse the adapter-configured `lib/prisma` singleton (1.3a).
 
