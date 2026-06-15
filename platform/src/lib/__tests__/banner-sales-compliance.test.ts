@@ -170,7 +170,7 @@ function makeReq(opts: { body?: unknown; role?: string | null } = {}) {
   const payload =
     role === 'CLIENT_ADMIN' ? clientAdmin :
     role === 'GIFSY_ADMIN'  ? gifsyAdmin  : null;
-  (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue(payload);
+  (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue(payload);
   return {
     headers: { get: (k: string) => (k === 'x-tenant-slug' ? 'testclient' : null) },
     json: () => Promise.resolve(body),
@@ -189,7 +189,7 @@ describe('E — API route runtime', () => {
   });
 
   it('E2: GET returns 200 for SALES_SO role', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: 'u_x', role: 'SALES_SO' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: 'u_x', role: 'SALES_SO' });
     (prisma.programSetting.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     const req = {
       headers: { get: () => 'testclient' },
@@ -227,7 +227,7 @@ describe('E — API route runtime', () => {
   });
 
   it('E6: PUT returns 403 for SALES_SO (only admins can write)', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: 'u_x', role: 'SALES_SO' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: 'u_x', role: 'SALES_SO' });
     const req = {
       headers: { get: () => 'testclient' },
       json: () => Promise.resolve({ banners: DEFAULT_BANNERS }),

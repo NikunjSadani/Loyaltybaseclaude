@@ -60,19 +60,19 @@ const MOCK_BATCHES = [
 describe('GET /api/admin/sales/batches', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: 'u_1', role: 'CLIENT_ADMIN' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: 'u_1', role: 'CLIENT_ADMIN' });
     (getClientIdFromRequest as ReturnType<typeof vi.fn>).mockReturnValue('tenant-abc');
     (prisma.salesUploadBatch.findMany as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_BATCHES);
   });
 
   it('SB1: returns 401 when unauthenticated', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     const res = await GET(makeRequest());
     expect(res.status).toBe(401);
   });
 
   it('SB2: returns 403 when role is SALES_XSR (not admin)', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: 'u_2', role: 'SALES_XSR' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: 'u_2', role: 'SALES_XSR' });
     const res = await GET(makeRequest());
     expect(res.status).toBe(403);
   });

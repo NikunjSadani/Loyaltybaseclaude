@@ -59,13 +59,13 @@ const UPLOAD_ROW = {
 describe('GET /api/sales/last-upload', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: 'u_1', role: 'CLIENT_ADMIN' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: 'u_1', role: 'CLIENT_ADMIN' });
     (getClientIdFromRequest as ReturnType<typeof vi.fn>).mockReturnValue('tenant-abc');
     (prisma.salesUpload.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(UPLOAD_ROW);
   });
 
   it('B1: returns 401 when no auth token', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     const res = await GET(makeRequest({ authed: false }));
     expect(res.status).toBe(401);
   });

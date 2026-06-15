@@ -55,7 +55,7 @@ const MOCK_BATCH = {
 describe('DELETE /api/admin/sales/batches/[batchId]', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: 'u_1', role: 'CLIENT_ADMIN' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: 'u_1', role: 'CLIENT_ADMIN' });
     (getClientIdFromRequest as ReturnType<typeof vi.fn>).mockReturnValue('tenant-abc');
     (prisma.salesUploadBatch.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_BATCH);
     (prisma.outletSalesRecord.count as ReturnType<typeof vi.fn>).mockResolvedValue(100);
@@ -63,13 +63,13 @@ describe('DELETE /api/admin/sales/batches/[batchId]', () => {
   });
 
   it('SD1: returns 401 when unauthenticated', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     const res = await DELETE(makeRequest(), { params: makeParams() });
     expect(res.status).toBe(401);
   });
 
   it('SD2: returns 403 when role is SALES_XSR', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: 'u_2', role: 'SALES_XSR' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: 'u_2', role: 'SALES_XSR' });
     const res = await DELETE(makeRequest(), { params: makeParams() });
     expect(res.status).toBe(403);
   });

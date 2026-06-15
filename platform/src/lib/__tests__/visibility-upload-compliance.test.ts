@@ -353,7 +353,7 @@ function makeReq(opts: {
     role === 'GIFSY_ADMIN'  ? { userId: 'u2', role: 'GIFSY_ADMIN'  } :
     role                    ? { userId: 'u3', role                  } :
     null;
-  (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue(user);
+  (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue(user);
   const url = new URL(`http://localhost/api/test${query ? '?' + new URLSearchParams(query).toString() : ''}`);
   return {
     headers: { get: (k: string) => (k === 'x-tenant-slug' ? 'testclient' : null) },
@@ -440,7 +440,7 @@ describe('K — Runtime: outlet-statuses GET', () => {
 
   it('K4: SALES_SO can read (non-partner role)', async () => {
     (prisma.outletVisibilityRecord.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: 'u5', role: 'SALES_SO' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: 'u5', role: 'SALES_SO' });
     const req = {
       headers: { get: () => 'testclient' },
       url: 'http://localhost/api/visibility/outlet-statuses?outletCodes=OUT-1&month=2026-06',

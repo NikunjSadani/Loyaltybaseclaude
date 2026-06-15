@@ -62,25 +62,25 @@ const clientAdminPayload = { userId: 'u_2', role: 'CLIENT_ADMIN' };
 describe('GET /api/gifsy/clients/[slug]/outlet-type-configs', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue(gifsyAdminPayload);
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue(gifsyAdminPayload);
     (prisma.outletType.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([SSS_TYPE, WHOLESALER_TYPE]);
     (prisma.outletTypeClientConfig.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([]);
   });
 
   it('A1: returns 401 when no auth token', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     const res = await GET(makeRequest({}), { params: Promise.resolve({ slug: 'deoleo' }) });
     expect(res.status).toBe(401);
   });
 
   it('A2: returns 403 for non-admin roles', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: 'u_3', role: 'SALES_ASM' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: 'u_3', role: 'SALES_ASM' });
     const res = await GET(makeRequest({}), { params: Promise.resolve({ slug: 'deoleo' }) });
     expect(res.status).toBe(403);
   });
 
   it('A3: CLIENT_ADMIN blocked from reading another client slug', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue(clientAdminPayload);
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue(clientAdminPayload);
     const res = await GET(
       makeRequest({ slug: 'other-client' }),
       { params: Promise.resolve({ slug: 'other-client' }) },
@@ -126,7 +126,7 @@ describe('GET /api/gifsy/clients/[slug]/outlet-type-configs', () => {
 describe('PUT /api/gifsy/clients/[slug]/outlet-type-configs/[code]', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue(gifsyAdminPayload);
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue(gifsyAdminPayload);
     (prisma.outletType.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(SSS_TYPE);
     (prisma.outletTypeClientConfig.upsert as ReturnType<typeof vi.fn>).mockResolvedValue({
       ...DEFAULT_ROW, isEnabled: false,
@@ -134,7 +134,7 @@ describe('PUT /api/gifsy/clients/[slug]/outlet-type-configs/[code]', () => {
   });
 
   it('B1: returns 401 when no auth token', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     const res = await PUT(
       makeRequest({ body: { isEnabled: false } }),
       { params: Promise.resolve({ slug: 'deoleo', code: 'SSS' }) },
@@ -143,7 +143,7 @@ describe('PUT /api/gifsy/clients/[slug]/outlet-type-configs/[code]', () => {
   });
 
   it('B2: returns 403 for non-admin roles', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: 'u_3', role: 'SALES_ISR' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: 'u_3', role: 'SALES_ISR' });
     const res = await PUT(
       makeRequest({ body: { isEnabled: false } }),
       { params: Promise.resolve({ slug: 'deoleo', code: 'SSS' }) },
