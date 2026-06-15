@@ -24,6 +24,7 @@ import {
 } from '@/lib/outlet-upload';
 import type { HierarchyEmployee } from '@/types';
 import type {
+  OutletUploadRow,
   OutletUploadValidationResult,
   ReKYCFlagValidationResult,
   OutletDeactivateValidationResult,
@@ -313,6 +314,7 @@ export default function OutletsPage() {
 
   // Outlet master (upsert) upload state
   const [outletValidation, setOutletValidation] = useState<OutletUploadValidationResult | null>(null);
+  const [outletParsedRows, setOutletParsedRows] = useState<OutletUploadRow[]>([]);
   const [outletUploadState, setOutletUploadState] = useState<UploadState>('idle');
 
   // Re-KYC upload state
@@ -350,7 +352,7 @@ export default function OutletsPage() {
   // ── Tab switch — resets upload state to prevent stale panels ──
   const handleTabSwitch = useCallback((tabId: TabId) => {
     setActiveTab(tabId);
-    setOutletValidation(null);    setOutletUploadState('idle');
+    setOutletValidation(null);    setOutletParsedRows([]); setOutletUploadState('idle');
     setRekycValidation(null);     setRekycUploadState('idle');
     setDeactivateValidation(null); setDeactivateUploadState('idle');
   }, []);
@@ -411,6 +413,7 @@ export default function OutletsPage() {
       const parsed   = parseOutletUploadRows(rows as Record<string, string>[]);
       const existing = outlets.map(o => ({ outletId: o.outletId, isActive: o.isActive }));
       const result   = validateOutletUpload(parsed, existing, VALID_PROGRAMS, VALID_CATEGORIES, employees, LEAF_ROLE_CODE);
+      setOutletParsedRows(parsed);
       setOutletValidation(result);
       setOutletUploadState('parsed');
     } catch {
@@ -679,7 +682,10 @@ export default function OutletsPage() {
               validationResult={outletValidation}
               uploadState={outletUploadState}
               onConfirm={async () => {
-                const rows = outletValidation?.rows.filter(r => r.status === 'OK') ?? [];
+                // Send the full parsed rows (the field data) for the OK rows, not the
+                // gutted validation results — the route needs name/type/xsr/etc to persist.
+                const okIds = new Set((outletValidation?.rows ?? []).filter(r => r.status === 'OK').map(r => r.outletId));
+                const rows = outletParsedRows.filter(r => okIds.has(r.outletId));
                 const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
                 await fetch('/api/admin/outlets/upsert', {
                   method: 'POST',
@@ -688,7 +694,7 @@ export default function OutletsPage() {
                 }).catch(() => {});
                 setOutletUploadState('confirmed');
               }}
-              onClear={() => { setOutletValidation(null); setOutletUploadState('idle'); }}
+              onClear={() => { setOutletValidation(null); setOutletParsedRows([]); setOutletUploadState('idle'); }}
               confirmLabel="Apply Changes"
             />
           </div>

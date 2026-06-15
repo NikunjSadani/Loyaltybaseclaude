@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import prisma from '@/lib/prisma';
 import { getAuthUser } from '@/lib/auth';
+import { getClientIdFromRequest } from '@/lib/tenant';
 
 const ok  = (data: unknown, status = 200) => NextResponse.json({ success: true,  data   }, { status });
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status });
@@ -31,10 +32,11 @@ export async function POST(req: NextRequest) {
     if (!parsed.success) return err(parsed.error.issues[0].message);
 
     const { outletId } = parsed.data;
+    const clientId = getClientIdFromRequest(req);
 
-    // Look up the outlet by its outletCode (the public ID like OUT-2026-001)
+    // Look up the outlet by its per-tenant (clientId, outletCode) key.
     const outlet = await prisma.outlet.findUnique({
-      where: { outletCode: outletId },
+      where: { clientId_outletCode: { clientId, outletCode: outletId } },
     });
 
     if (!outlet) return err(`Outlet "${outletId}" not found`, 404);
@@ -45,7 +47,7 @@ export async function POST(req: NextRequest) {
 
     // Mark as not interested and deactivate
     await prisma.outlet.update({
-      where: { outletCode: outletId },
+      where: { clientId_outletCode: { clientId, outletCode: outletId } },
       data: {
         kycIntent:   'NOT_INTERESTED',
         kycIntentBy: authUser.userId,

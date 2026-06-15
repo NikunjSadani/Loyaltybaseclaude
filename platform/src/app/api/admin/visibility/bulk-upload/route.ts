@@ -207,7 +207,7 @@ export async function POST(req: NextRequest) {
 
       // Outlet must exist in DB
       const outlet = await prisma.outlet.findUnique({
-        where:  { outletCode },
+        where:  { clientId_outletCode: { clientId, outletCode } },
         select: { id: true },
       });
       if (!outlet) {

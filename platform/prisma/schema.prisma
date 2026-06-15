@@ -550,9 +550,10 @@ model SalesHierarchyLevel {
 
 model SalesUser {
   id              String    @id @default(cuid())
+  clientId        String                  // tenant slug — employeeCode is unique per tenant (RF7)
   userId          String    @unique
   hierarchyLevelId String
-  employeeCode    String    @unique
+  employeeCode    String
   reportingToId   String?
   region          String?
   zone            String?
@@ -568,6 +569,8 @@ model SalesUser {
   subordinates   SalesUser[]           @relation("SalesUserReporting")
   assignments    SalesUserAssignment[]
 
+  @@unique([clientId, employeeCode])
+  @@index([clientId])
   @@index([userId])
   @@index([hierarchyLevelId])
   @@index([reportingToId])
@@ -895,20 +898,27 @@ model OutletTypeClientConfig {
 
 model Outlet {
   id             String    @id @default(cuid())
-  partnerId      String
+  clientId       String                  // tenant slug — outlet carries its own tenant tag (may exist before its owner/partner)
+  partnerId      String?                 // owner attached at KYC; outlet can be created (via upload) before its owner exists
   outletTypeId   String
-  distributorCode String?  // reference-only, from outlet upload — for report grouping/summary
-  distributorName String?  // reference-only, from outlet upload — for report grouping/summary
-  outletCode     String    @unique
+  // ── Reference-only master-file columns (from the outlet upload) — used for report grouping/summary ──
+  distributorCode String?
+  distributorName String?
+  beat            String?
+  metro           String?
+  zone            String?
+  programName     String?
+  programCategory String?
+  outletCode     String
   name           String
   ownerName      String?
   phone          String?
-  addressLine1   String
+  addressLine1   String?                 // captured at KYC, not in the outlet master file
   addressLine2   String?
   city           String
   district       String?
   state          String
-  pincode        String
+  pincode        String?                 // captured at KYC, not in the outlet master file
   country        String    @default("IN")
   latitude       Decimal?  @db.Decimal(10, 8)
   longitude      Decimal?  @db.Decimal(11, 8)
@@ -925,12 +935,14 @@ model Outlet {
   deactivatedAt  DateTime?
   reactivatedAt  DateTime?
 
-  partner          ChannelPartner        @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  partner          ChannelPartner?       @relation(fields: [partnerId], references: [id], onDelete: SetNull)
   outletType       OutletType            @relation(fields: [outletTypeId], references: [id])
   geoHistory       OutletGeoHistory[]
   salesAssignments SalesUserAssignment[]
   visibilitySubmissions VisibilitySubmission[]
 
+  @@unique([clientId, outletCode])
+  @@index([clientId])
   @@index([partnerId])
   @@index([outletTypeId])
   @@index([distributorCode])

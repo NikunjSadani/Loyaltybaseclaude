@@ -183,9 +183,10 @@ export async function persistHierarchy(
       });
       usersUpserted++;
 
-      // Upsert SalesUser on employeeCode (globally unique).
+      // Upsert SalesUser on the per-tenant compound key (clientId, employeeCode).
+      // employeeCode is NO LONGER globally unique (RF7) — it is unique within a tenant.
       const salesUser = await tx.salesUser.upsert({
-        where: { employeeCode: emp.id },
+        where: { clientId_employeeCode: { clientId, employeeCode: emp.id } },
         update: {
           userId: user.id,
           hierarchyLevelId: levelId,
@@ -193,6 +194,7 @@ export async function persistHierarchy(
           deletedAt: null,
         },
         create: {
+          clientId,
           employeeCode: emp.id,
           userId: user.id,
           hierarchyLevelId: levelId,

@@ -82,10 +82,11 @@ export async function GET(
     })
 
     const outlets = assignments
-      .filter((a) => a.outlet !== null)
+      // partnerId is nullable — skip outlets with no owner/partner yet (pre-KYC).
+      .filter((a) => a.outlet !== null && a.outlet.partner !== null)
       .map((a) => {
         const outlet      = a.outlet!
-        const partner     = outlet.partner
+        const partner     = outlet.partner!
         const latestKyc   = partner.kycSubmissions[0] ?? null
         const target      = partner.targets[0] ?? null
         const achievement = target?.achievements[0] ?? null

@@ -47,10 +47,12 @@ async function buildOutlets(salesUserId: string) {
   })
 
   return assignments
-    .filter((a) => a.outlet !== null)
+    // partnerId is now nullable — an outlet uploaded via the master file has no
+    // owner/partner until KYC. Skip those here (no partner-derived data to show).
+    .filter((a) => a.outlet !== null && a.outlet.partner !== null)
     .map((a) => {
       const outlet     = a.outlet!
-      const partner    = outlet.partner
+      const partner    = outlet.partner!
       const latestKyc  = partner.kycSubmissions[0] ?? null
       const target     = partner.targets[0] ?? null
       const achievement = target?.achievements[0] ?? null

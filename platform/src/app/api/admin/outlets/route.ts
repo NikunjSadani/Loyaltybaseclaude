@@ -23,43 +23,61 @@ export async function GET(req: NextRequest) {
       return ok({ outlets: [] });
     }
 
+    // Scope by the outlet's OWN clientId — an outlet uploaded via the master file
+    // has no partner until KYC, so it must not be reached via the partner relation.
     const outlets = await prisma.outlet.findMany({
       where: {
         deletedAt: null,
-        partner: { user: { clientId } },
+        clientId,
       },
       select: {
-        outletCode:   true,
-        name:         true,
-        outletTypeId: true,
-        city:         true,
-        state:        true,
-        isActive:     true,
-        createdAt:    true,
-        partner: {
-          select: { partnerCode: true },
+        outletCode:      true,
+        name:            true,
+        outletTypeId:    true,
+        city:            true,
+        state:           true,
+        isActive:        true,
+        createdAt:       true,
+        distributorCode: true,
+        beat:            true,
+        metro:           true,
+        programName:     true,
+        programCategory: true,
+        // Active XSR assignment (the sales rep covering this outlet).
+        salesAssignments: {
+          where:   { unassignedAt: null },
+          take:    1,
+          orderBy: { assignedAt: 'desc' },
+          select: {
+            salesUser: {
+              select: { employeeCode: true, user: { select: { name: true } } },
+            },
+          },
         },
       },
       orderBy: { createdAt: 'desc' },
     });
 
-    const mapped = outlets.map(o => ({
-      outletId:        o.outletCode,
-      outletName:      o.name,
-      outletType:      o.outletTypeId,
-      programName:     '',
-      programCategory: '',
-      beat:            '',
-      distributorId:   o.partner?.partnerCode ?? '',
-      city:            o.city,
-      state:           o.state,
-      metro:           false,
-      xsrId:           '',
-      xsrName:         '',
-      kycStatus:       'NOT_STARTED',
-      isActive:        o.isActive,
-      addedDate:       o.createdAt.toISOString().slice(0, 10),
-    }));
+    const mapped = outlets.map(o => {
+      const xsr = o.salesAssignments[0]?.salesUser;
+      return {
+        outletId:        o.outletCode,
+        outletName:      o.name,
+        outletType:      o.outletTypeId,
+        programName:     o.programName ?? '',
+        programCategory: o.programCategory ?? '',
+        beat:            o.beat ?? '',
+        distributorId:   o.distributorCode ?? '',
+        city:            o.city,
+        state:           o.state,
+        metro:           !!(o.metro && o.metro.trim()),
+        xsrId:           xsr?.employeeCode ?? '',
+        xsrName:         xsr?.user?.name ?? '',
+        kycStatus:       'NOT_STARTED',
+        isActive:        o.isActive,
+        addedDate:       o.createdAt.toISOString().slice(0, 10),
+      };
+    });
 
     return ok({ outlets: mapped });
   } catch (e: any) {

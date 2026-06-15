@@ -79,19 +79,21 @@ export async function GET(
 
     if (!salesUser) return err('Member not found', 404)
 
-    const outletAssignments = salesUser.assignments.filter((a) => a.outlet)
+    // partnerId is nullable — an uploaded outlet has no partner until KYC.
+    // Restrict the partner-derived metrics to assignments that have a partner.
+    const outletAssignments = salesUser.assignments.filter((a) => a.outlet && a.outlet.partner)
 
     const kycDone = outletAssignments.filter(
-      (a) => a.outlet!.partner.kycSubmissions[0]?.status === 'APPROVED',
+      (a) => a.outlet!.partner!.kycSubmissions[0]?.status === 'APPROVED',
     ).length
 
     const kycPending = outletAssignments.filter((a) => {
-      const s = a.outlet!.partner.kycSubmissions[0]?.status
+      const s = a.outlet!.partner!.kycSubmissions[0]?.status
       return !s || !['APPROVED', 'REJECTED', 'NOT_INTERESTED'].includes(s)
     }).length
 
     const pcts = outletAssignments
-      .map((a) => a.outlet!.partner.targets[0]?.achievements[0]?.achievementPercent)
+      .map((a) => a.outlet!.partner!.targets[0]?.achievements[0]?.achievementPercent)
       .filter((p): p is NonNullable<typeof p> => p !== undefined && p !== null)
       .map(Number)
 
@@ -101,7 +103,7 @@ export async function GET(
 
     const outlets = outletAssignments.map((a) => {
       const outlet    = a.outlet!
-      const latestKyc = outlet.partner.kycSubmissions[0] ?? null
+      const latestKyc = outlet.partner!.kycSubmissions[0] ?? null
       return {
         id:        outlet.id,
         name:      outlet.name,

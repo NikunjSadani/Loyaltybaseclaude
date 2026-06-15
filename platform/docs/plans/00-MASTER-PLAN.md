@@ -174,9 +174,21 @@ tenant config served from DB. **Depends on:** P0.
 > **Audit surfaced RF7** (`SalesUser.employeeCode` global-unique → cross-tenant overwrite risk; latent, single-tenant
 > safe). **Owner model decision:** partner≠outlet — keep separate linked records (schema already 1:many); 1:1 is
 > convention only; future 1:many is free; outlet created pre-owner (needs nullable `partnerId`).
-> **NEXT:** 2.4 outlet upload — wire `outlets/upsert` to real writes (validate XSR vs `SalesUser`, persist
-> distributor columns), **needs a migration** (nullable `Outlet.partnerId` + RF5 outletCode + RF7 employeeCode →
-> human gate). Then 2.6 catalog (no migration).
+> **2.4 ✅ DONE** (2 human-gated migrations applied to gifsy_dev + verified in sync; build gated: tsc 0,
+> new pure tests + 4/4 real-DB smoke, full suite 28/105 = baseline exactly → no new reds). **Migrations:**
+> `Outlet` gained own `clientId` (ownerless outlets can't derive tenant from a null partner), `partnerId` now
+> nullable (owner attached at KYC, FK `SetNull`), `addressLine1`/`pincode` nullable (KYC-captured), reference
+> columns `beat/metro/zone/programName/programCategory` (owner: also used for dashboard filters → index at P8);
+> **RF5** `@@unique([clientId, outletCode])` + **RF7** `SalesUser.clientId` + `@@unique([clientId, employeeCode])`.
+> **Build:** `outlets/upsert` now persists outlets (tenant-tagged, distributor/reference columns, partnerId null),
+> resolves OutletType via `OutletTypeClientConfig` + **validates XSR against the 2.1 `SalesUser` tree**, tags via
+> `SalesUserAssignment`. New pure `lib/outlet-persist.ts`. `persistHierarchy` upsert key updated for RF7. Migration
+> fallout repaired across `kyc/not-interested`, `visibility/bulk-upload`, `sales/outlets`, `sales/leaderboard`,
+> both `sales/team/[memberId]` routes (RF1 fix preserved). admin/outlets GET re-scoped to `outlet.clientId` so
+> ownerless outlets show. **2 open items for owner:** (a) `outlets/upsert` has a DEMO_MODE no-op → won't persist
+> in the local preview (hierarchy DOES persist in demo — inconsistent); decide whether outlets should write in demo
+> too. (b) `outlets/rekyc-flag` still a stub — no storage column; recommend a `Json? reKycFlags` column on `Outlet`
+> (needs a small migration). **NEXT:** resolve (a)/(b), then 2.6 catalog (no migration).
 
 ## P3 · Onboarding & KYC  (3–5 wk)
 **Objective:** the full enroll→KYC→approve→credential journey (spec §02 WF1) works end-to-end.

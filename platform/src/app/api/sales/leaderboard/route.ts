@@ -69,7 +69,7 @@ export async function GET(req: NextRequest) {
     /* salesUserId → unique partnerIds */
     const userPartners: Record<string, Set<string>> = {}
     for (const a of assignments) {
-      if (!a.outlet) continue
+      if (!a.outlet?.partnerId) continue
       if (!userPartners[a.salesUserId]) userPartners[a.salesUserId] = new Set()
       userPartners[a.salesUserId].add(a.outlet.partnerId)
     }
