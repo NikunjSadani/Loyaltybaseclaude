@@ -12,6 +12,13 @@
  * UI8: GET returns 403 when role is not GIFSY_ADMIN or CLIENT_ADMIN
  * UI9: DELETE returns 403 when role is CLIENT_ADMIN (Gifsy Admin only)
  * UI10: DELETE returns 400 when deleting own account
+ *
+ * Phone-change tests (S5b):
+ * UI11: PATCH changing phone to a new value → update called with phone AND revokeAllSessionsForUser called once
+ * UI12: PATCH with same phone as current → revokeAllSessionsForUser NOT called
+ * UI13: PATCH with no phone field → revokeAllSessionsForUser NOT called
+ * UI14: PATCH with phone already used by another user in same tenant → 409, update NOT called, no revoke
+ * UI15: PATCH cross-tenant target (findFirst null) → 404, no revoke (unchanged behavior)
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -30,11 +37,13 @@ vi.mock('@/lib/prisma', () => ({
 }));
 vi.mock('@/lib/auth', () => ({ getAuthUser: vi.fn() }));
 vi.mock('@/lib/tenant', () => ({ getClientIdFromRequest: vi.fn() }));
+vi.mock('@/lib/session', () => ({ revokeAllSessionsForUser: vi.fn() }));
 
 import { GET, PATCH, DELETE } from '../[id]/route';
 import prisma from '@/lib/prisma';
 import { getAuthUser } from '@/lib/auth';
 import { getClientIdFromRequest } from '@/lib/tenant';
+import { revokeAllSessionsForUser } from '@/lib/session';
 
 const USER_ID = 'user_target_1';
 const ACTOR_ID = 'user_actor_1';
@@ -68,20 +77,20 @@ function makeParams(id = USER_ID) {
 
 describe('GET /api/admin/users/[id]', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: ACTOR_ID, role: 'CLIENT_ADMIN' });
+    vi.resetAllMocks();
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: ACTOR_ID, role: 'CLIENT_ADMIN' });
     (getClientIdFromRequest as ReturnType<typeof vi.fn>).mockReturnValue(TENANT_A);
     (prisma.user.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_USER);
   });
 
   it('UI7: returns 401 when unauthenticated', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     const res = await GET(makeRequest(), { params: makeParams() });
     expect(res.status).toBe(401);
   });
 
   it('UI8: returns 403 when role is not GIFSY_ADMIN or CLIENT_ADMIN', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: ACTOR_ID, role: 'SSS' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: ACTOR_ID, role: 'SSS' });
     const res = await GET(makeRequest(), { params: makeParams() });
     expect(res.status).toBe(403);
   });
@@ -113,12 +122,13 @@ describe('GET /api/admin/users/[id]', () => {
 
 describe('PATCH /api/admin/users/[id]', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: ACTOR_ID, role: 'CLIENT_ADMIN' });
+    vi.resetAllMocks();
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: ACTOR_ID, role: 'CLIENT_ADMIN' });
     (getClientIdFromRequest as ReturnType<typeof vi.fn>).mockReturnValue(TENANT_A);
     (prisma.user.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_USER);
     (prisma.user.update as ReturnType<typeof vi.fn>).mockResolvedValue({ ...MOCK_USER, name: 'Updated Name' });
     (prisma.auditLog.create as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (revokeAllSessionsForUser as ReturnType<typeof vi.fn>).mockResolvedValue(1);
   });
 
   it('UI3: does NOT call prisma.user.update when target user is in a different tenant → 404', async () => {
@@ -136,12 +146,101 @@ describe('PATCH /api/admin/users/[id]', () => {
       expect.objectContaining({ where: expect.objectContaining({ id: USER_ID }) }),
     );
   });
+
+  // ── S5b: phone-change tests ──────────────────────────────────────────────
+
+  it('UI11: PATCH changing phone to a new value → update called with new phone AND revokeAllSessionsForUser called once', async () => {
+    const NEW_PHONE = '1234567890';
+    // MOCK_USER.phone is '9876543210', so NEW_PHONE is different
+    // findFirst: first call returns target (tenant check), second call (clash check) returns null
+    (prisma.user.findFirst as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(MOCK_USER)   // tenant-scoped target lookup
+      .mockResolvedValueOnce(null);        // uniqueness clash check → no clash
+
+    const req = {
+      headers: { get: (key: string) => (key === 'x-tenant-slug' ? TENANT_A : null) },
+      url: `http://localhost/api/admin/users/${USER_ID}`,
+      json: async () => ({ phone: NEW_PHONE }),
+    } as unknown as Parameters<typeof PATCH>[0];
+
+    const res = await PATCH(req, { params: makeParams() });
+    expect(res.status).toBe(200);
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: USER_ID }),
+        data: expect.objectContaining({ phone: NEW_PHONE }),
+      }),
+    );
+    expect(revokeAllSessionsForUser).toHaveBeenCalledTimes(1);
+    expect(revokeAllSessionsForUser).toHaveBeenCalledWith(USER_ID);
+  });
+
+  it('UI12: PATCH with same phone as current → revokeAllSessionsForUser NOT called', async () => {
+    const SAME_PHONE = MOCK_USER.phone; // '9876543210'
+    (prisma.user.findFirst as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(MOCK_USER)  // tenant-scoped target lookup
+      .mockResolvedValueOnce(null);      // clash check (shouldn't reach it, but safe)
+
+    const req = {
+      headers: { get: (key: string) => (key === 'x-tenant-slug' ? TENANT_A : null) },
+      url: `http://localhost/api/admin/users/${USER_ID}`,
+      json: async () => ({ phone: SAME_PHONE }),
+    } as unknown as Parameters<typeof PATCH>[0];
+
+    const res = await PATCH(req, { params: makeParams() });
+    expect(res.status).toBe(200);
+    expect(revokeAllSessionsForUser).not.toHaveBeenCalled();
+  });
+
+  it('UI13: PATCH with no phone field → revokeAllSessionsForUser NOT called', async () => {
+    // makeRequest() sends { name: 'Updated Name' } — no phone field
+    const res = await PATCH(makeRequest(), { params: makeParams() });
+    expect(res.status).toBe(200);
+    expect(revokeAllSessionsForUser).not.toHaveBeenCalled();
+  });
+
+  it('UI14: PATCH with phone already used by another user in same tenant → 409, update NOT called, no revoke', async () => {
+    const TAKEN_PHONE = '5555555555';
+    const CLASH_USER = { id: 'other-user', clientId: TENANT_A, phone: TAKEN_PHONE };
+
+    (prisma.user.findFirst as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(MOCK_USER)   // tenant-scoped target lookup
+      .mockResolvedValueOnce(CLASH_USER); // clash check → phone taken
+
+    const req = {
+      headers: { get: (key: string) => (key === 'x-tenant-slug' ? TENANT_A : null) },
+      url: `http://localhost/api/admin/users/${USER_ID}`,
+      json: async () => ({ phone: TAKEN_PHONE }),
+    } as unknown as Parameters<typeof PATCH>[0];
+
+    const res = await PATCH(req, { params: makeParams() });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.success).toBe(false);
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(revokeAllSessionsForUser).not.toHaveBeenCalled();
+  });
+
+  it('UI15: cross-tenant target (findFirst null) → 404, no revoke (unchanged tenant guard)', async () => {
+    (getClientIdFromRequest as ReturnType<typeof vi.fn>).mockReturnValue(TENANT_B);
+    (prisma.user.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+
+    const req = {
+      headers: { get: (key: string) => (key === 'x-tenant-slug' ? TENANT_B : null) },
+      url: `http://localhost/api/admin/users/${USER_ID}`,
+      json: async () => ({ phone: '1234567890' }),
+    } as unknown as Parameters<typeof PATCH>[0];
+
+    const res = await PATCH(req, { params: makeParams() });
+    expect(res.status).toBe(404);
+    expect(revokeAllSessionsForUser).not.toHaveBeenCalled();
+  });
 });
 
 describe('DELETE /api/admin/users/[id]', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: ACTOR_ID, role: 'GIFSY_ADMIN' });
+    vi.resetAllMocks();
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: ACTOR_ID, role: 'GIFSY_ADMIN' });
     (getClientIdFromRequest as ReturnType<typeof vi.fn>).mockReturnValue(TENANT_A);
     (prisma.user.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_USER);
     (prisma.user.update as ReturnType<typeof vi.fn>).mockResolvedValue({ ...MOCK_USER, status: 'INACTIVE' });
@@ -149,13 +248,13 @@ describe('DELETE /api/admin/users/[id]', () => {
   });
 
   it('UI9: returns 403 when role is CLIENT_ADMIN (Gifsy Admin only)', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: ACTOR_ID, role: 'CLIENT_ADMIN' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: ACTOR_ID, role: 'CLIENT_ADMIN' });
     const res = await DELETE(makeRequest(), { params: makeParams() });
     expect(res.status).toBe(403);
   });
 
   it('UI10: returns 400 when deleting own account', async () => {
-    (getAuthUser as ReturnType<typeof vi.fn>).mockReturnValue({ userId: USER_ID, role: 'GIFSY_ADMIN' });
+    (getAuthUser as ReturnType<typeof vi.fn>).mockResolvedValue({ userId: USER_ID, role: 'GIFSY_ADMIN' });
     const res = await DELETE(makeRequest(), { params: makeParams() });
     const body = await res.json();
     expect(res.status).toBe(400);

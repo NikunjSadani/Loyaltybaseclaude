@@ -3,6 +3,7 @@ import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
 import { getClientIdFromRequest } from '@/lib/tenant'
+import { revokeAllSessionsForUser } from '@/lib/session'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -12,6 +13,7 @@ const patchSchema = z.object({
   email: z.string().email().optional(),
   status: z.enum(['ACTIVE', 'INACTIVE', 'SUSPENDED', 'PENDING_VERIFICATION']).optional(),
   role: z.enum(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR', 'SSS', 'WHOLESALER', 'SUB_STOCKIST']).optional(),
+  phone: z.string().regex(/^\d{10}$/, 'Phone must be 10 digits').optional(),
 })
 
 export async function GET(
@@ -61,10 +63,25 @@ export async function PATCH(
     const target = await prisma.user.findFirst({ where: { id, clientId } })
     if (!target) return err('User not found', 404)
 
+    // Phone-uniqueness guard: check BEFORE update to avoid Prisma P2002
+    if (parsed.data.phone && parsed.data.phone !== target.phone) {
+      const clash = await prisma.user.findFirst({
+        where: { phone: parsed.data.phone, clientId, id: { not: id } },
+      })
+      if (clash) return err('Phone number already in use', 409)
+    }
+
+    const phoneChanged = Boolean(parsed.data.phone && parsed.data.phone !== target.phone)
+
     const user = await prisma.user.update({
       where: { id },
       data: { ...parsed.data, updatedAt: new Date() },
     })
+
+    // Force re-login on all devices when login identity (phone) changes
+    if (phoneChanged) {
+      await revokeAllSessionsForUser(id)
+    }
 
     await prisma.auditLog.create({
       data: {
