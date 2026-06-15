@@ -83,5 +83,20 @@ for review given its blast radius.
   (optimize later — only bump if lastSeenAt is stale).
 - **S4b ⏭** — migrate the ~95 `getClientIdFromRequest` routes to use the session `clientId` from
   getAuthUser (finishes 1.8 / removes the silent-`deoleo` fallback, gap #23). Stage by portal.
-- **S5 ⏭** — logout (revoke current) + logout-all (revoke all for user) endpoints + revoke-on-phone-change
-  hook in the user-update path.
+- **S5 part 1 ✅** committed — `POST /api/auth/logout` (revoke current session + clear token cookie) +
+  `POST /api/auth/logout-all` (revoke all of the user's sessions). getAuthUser now returns `sid`. Gate:
+  tsc 0, no new reds, +15 tests.
+- **S5b ⏳** (building) — admin can edit a user's login phone (`admin/users/[id]` PATCH); when the phone
+  actually changes → `revokeAllSessionsForUser(id)` (force re-login everywhere) + phone-uniqueness guard.
+- **S5c ⏳** (building) — Gifsy-admin **platform-wide force-logout** (`POST /api/admin/force-logout-all`,
+  GIFSY_ADMIN only): new `revokeAllSessions()` revokes EVERY session across all tenants (rollout kill
+  switch); audit-logged.
+
+### Phone-change → logout: attach points (user decision 2026-06-15)
+The revoke-on-phone-change rule attaches wherever a phone is actually mutated:
+- **Admin** — edit-phone option on the admin user form → **S5b (now)**.
+- **Sales team** — phone edited via the **bulk sales-hierarchy upload** → wire the revoke into that
+  upload path in **P2** (2.1/2.2). TODO marker for P2.
+- **Outlets/partners** — phone changed via the **re-KYC route** → wire the revoke into re-KYC in **P3**
+  (3.x). TODO marker for P3.
+The mechanism (`revokeAllSessionsForUser`) is ready; P2/P3 just call it when they implement phone edits.
