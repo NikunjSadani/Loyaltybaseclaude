@@ -185,10 +185,17 @@ tenant config served from DB. **Depends on:** P0.
 > `SalesUserAssignment`. New pure `lib/outlet-persist.ts`. `persistHierarchy` upsert key updated for RF7. Migration
 > fallout repaired across `kyc/not-interested`, `visibility/bulk-upload`, `sales/outlets`, `sales/leaderboard`,
 > both `sales/team/[memberId]` routes (RF1 fix preserved). admin/outlets GET re-scoped to `outlet.clientId` so
-> ownerless outlets show. **2 open items for owner:** (a) `outlets/upsert` has a DEMO_MODE no-op → won't persist
-> in the local preview (hierarchy DOES persist in demo — inconsistent); decide whether outlets should write in demo
-> too. (b) `outlets/rekyc-flag` still a stub — no storage column; recommend a `Json? reKycFlags` column on `Outlet`
-> (needs a small migration). **NEXT:** resolve (a)/(b), then 2.6 catalog (no migration).
+> ownerless outlets show.
+> **Owner decisions (2026-06-15):** (a) outlets PERSIST in demo too (removed the `outlets/upsert` DEMO_MODE no-op,
+> consistent with hierarchy) ✅; (b) re-KYC flags built now ✅ — added `Outlet.reKycFlags Json?` (migration applied),
+> wired `outlets/rekyc-flag` to persist the 20-flag+remarks shape via the lib's map-driven `buildReKycFlags`
+> (all-false row → clears to null), demo no-op removed, page fixed to POST full parsed rows. Gated: tsc 0, full
+> suite 28/105 = baseline, pure test + DB smoke green. **The three outlet master files now all persist for real
+> (hierarchy → outlets → re-KYC flags), in demo too.**
+> **⚠️ DEMO DATA PREREQUISITE:** the dev DB has **0 OutletType rows** — the outlet upload validates outlet type
+> against `OutletTypeClientConfig` (enabled per tenant), so until OutletTypes (SSS/WHOLESALER/SUB_STOCKIST/SSS_TOT)
+> are seeded + enabled for the demo tenant, every outlet row errors "Unknown outlet type." **NEXT:** seed demo
+> OutletTypes so the pipeline runs end-to-end in the local preview, then 2.6 catalog (Category CRUD + admin UI).
 
 ## P3 · Onboarding & KYC  (3–5 wk)
 **Objective:** the full enroll→KYC→approve→credential journey (spec §02 WF1) works end-to-end.

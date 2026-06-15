@@ -26,6 +26,7 @@ import type { HierarchyEmployee } from '@/types';
 import type {
   OutletUploadRow,
   OutletUploadValidationResult,
+  ReKYCFlagRow,
   ReKYCFlagValidationResult,
   OutletDeactivateValidationResult,
   KYCStatus,
@@ -319,6 +320,7 @@ export default function OutletsPage() {
 
   // Re-KYC upload state
   const [rekycValidation, setRekycValidation] = useState<ReKYCFlagValidationResult | null>(null);
+  const [rekycParsedRows, setRekycParsedRows] = useState<ReKYCFlagRow[]>([]);
   const [rekycUploadState, setRekycUploadState] = useState<UploadState>('idle');
 
   // Deactivate upload state
@@ -353,7 +355,7 @@ export default function OutletsPage() {
   const handleTabSwitch = useCallback((tabId: TabId) => {
     setActiveTab(tabId);
     setOutletValidation(null);    setOutletParsedRows([]); setOutletUploadState('idle');
-    setRekycValidation(null);     setRekycUploadState('idle');
+    setRekycValidation(null);     setRekycParsedRows([]); setRekycUploadState('idle');
     setDeactivateValidation(null); setDeactivateUploadState('idle');
   }, []);
 
@@ -436,6 +438,7 @@ export default function OutletsPage() {
       const parsed          = parseReKYCFlagRows(rows as Record<string, string>[]);
       const existingOutlets = outlets.map(o => ({ outletId: o.outletId, kycStatus: o.kycStatus as unknown as KYCStatus }));
       const result          = validateReKYCFlagUpload(parsed, existingOutlets);
+      setRekycParsedRows(parsed);
       setRekycValidation(result);
       setRekycUploadState('parsed');
     } catch {
@@ -864,7 +867,13 @@ export default function OutletsPage() {
               validationResult={rekycValidation}
               uploadState={rekycUploadState}
               onConfirm={async () => {
-                const rows = rekycValidation?.rows.filter(r => r.status === 'OK') ?? [];
+                // Post the full parsed ReKYCFlagRow[] (raw per-field "Yes"/blank cells),
+                // not the gutted validation results — the route maps each row to the
+                // persisted ReKYCFlags JSON. Filter to the rows validation marked OK.
+                const okOutletIds = new Set(
+                  (rekycValidation?.rows ?? []).filter(r => r.status === 'OK').map(r => r.outletId),
+                );
+                const rows = rekycParsedRows.filter(r => okOutletIds.has(r.outletId));
                 const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
                 await fetch('/api/admin/outlets/rekyc-flag', {
                   method: 'POST',

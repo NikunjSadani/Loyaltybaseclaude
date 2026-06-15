@@ -61,9 +61,9 @@ export async function POST(req: NextRequest) {
       return err('Maximum 500 outlets per upsert request');
     }
 
-    if (process.env.DEMO_MODE === 'true') {
-      return ok({ created: 0, updated: rows.length, errors: [], message: 'Outlet upsert complete (demo mode)' });
-    }
+    // Note: no DEMO_MODE short-circuit — the outlet master upload persists for real
+    // even in the local demo (consistent with the hierarchy upload), so the full
+    // master-data pipeline + reports can be exercised end-to-end.
 
     const uploadRows: OutletUploadRow[] = [];
     for (const r of rows) {

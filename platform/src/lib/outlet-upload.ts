@@ -79,7 +79,7 @@ export const REKYC_FLAG_HEADERS = [
 ] as const;
 
 /** Mapping from REKYC_FIELD_KEYS to ReKYCFlags property names */
-const REKYC_KEY_TO_FLAG: Record<string, keyof Omit<ReKYCFlags, 'remarks'>> = {
+export const REKYC_KEY_TO_FLAG: Record<string, keyof Omit<ReKYCFlags, 'remarks'>> = {
   'Outlet Name':                    'outletName',
   'Owner / Contact Name':          'ownerName',
   'Mobile Number':                  'mobileNumber',
@@ -441,30 +441,28 @@ export function validateReKYCFlagUpload(
 
 // ─── Convert ReKYCFlagRow to ReKYCFlags ───────────────────────────────────────
 
-export function toReKYCFlags(row: ReKYCFlagRow): ReKYCFlags {
-  return {
-    outletName:      isYes(row.outletName),
-    ownerName:       isYes(row.ownerName),
-    mobileNumber:    isYes(row.mobileNumber),
-    gstNumber:       isYes(row.gstNumber),
-    panNumber:       isYes(row.panNumber),
-    streetAddress:   isYes(row.streetAddress),
-    city:            isYes(row.city),
-    pincode:         isYes(row.pincode),
-    state:           isYes(row.state),
-    bankName:          isYes(row.bankName),
-    accountHolderName: isYes(row.accountHolderName),
-    accountNumber:     isYes(row.accountNumber),
-    ifscCode:        isYes(row.ifscCode),
-    upiId:           isYes(row.upiId),
-    gstCertificate:  isYes(row.gstCertificate),
-    ownerPhoto:      isYes(row.ownerPhoto),
-    addressProof:    isYes(row.addressProof),
-    storeBoardPhoto: isYes(row.storeBoardPhoto),
-    cancelledCheque: isYes(row.cancelledCheque),
-    selfDeclaration: isYes(row.selfDeclaration),
-    remarks:         row.remarks,
-  };
+/**
+ * Build the persisted `ReKYCFlags` object from a parsed `ReKYCFlagRow`.
+ *
+ * Map-driven: it walks `REKYC_KEY_TO_FLAG` so the set of boolean flags is exactly
+ * the 20 known KYC fields. Each flag prop name (the map's value) is also the
+ * property name on `ReKYCFlagRow`, so we read the raw "Yes"/blank string from the
+ * row and coerce it via `isYes`. Any extra/unknown property on the row is ignored
+ * because only mapped keys are written. `remarks` is carried through verbatim.
+ */
+export function buildReKycFlags(row: ReKYCFlagRow): ReKYCFlags {
+  // Seed every flag false so the result always has the full 20-boolean shape.
+  const flags = { remarks: row.remarks ?? '' } as ReKYCFlags;
+  const rowAsRecord = row as unknown as Record<string, string>;
+  for (const flagProp of Object.values(REKYC_KEY_TO_FLAG)) {
+    flags[flagProp] = isYes(rowAsRecord[flagProp] ?? '');
+  }
+  return flags;
+}
+
+/** True when no field is flagged for re-capture (an all-false / blank row). */
+export function isReKycFlagsEmpty(flags: ReKYCFlags): boolean {
+  return Object.values(REKYC_KEY_TO_FLAG).every(flagProp => flags[flagProp] === false);
 }
 
 // ─── Template data ────────────────────────────────────────────────────────────

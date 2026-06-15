@@ -929,6 +929,9 @@ model Outlet {
   kycIntent      OutletKycIntent?
   kycIntentBy    String?          // userId of the sales agent who marked it
   kycIntentAt    DateTime?        // when it was marked
+  // Re-KYC flags: which KYC fields must be re-captured (ReKYCFlags shape — 20 booleans + remarks),
+  // set via the Re-KYC flag upload. Read/written atomically per outlet; null = no re-KYC pending.
+  reKycFlags     Json?
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
   deletedAt      DateTime?
