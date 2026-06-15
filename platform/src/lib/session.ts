@@ -146,3 +146,28 @@ export async function revokeAllSessionsForUser(userId: string): Promise<number> 
   });
   return result.count;
 }
+
+/**
+ * Platform-wide session kill switch — revokes EVERY non-revoked session across
+ * ALL users and ALL tenants in one operation.
+ *
+ * This is intentionally global: it does NOT filter by userId or clientId.
+ * Use it only when you need to force all users to re-authenticate platform-wide,
+ * e.g. before rolling out a security update or rotating JWT secrets.
+ *
+ * GIFSY_ADMIN only — callers must enforce role before invoking this function.
+ * See POST /api/admin/force-logout-all.
+ *
+ * Contrast with revokeAllSessionsForUser (scoped to a single user).
+ *
+ * @returns The number of sessions revoked.
+ */
+export async function revokeAllSessions(): Promise<number> {
+  const result = await prisma.userSession.updateMany({
+    where: {
+      revokedAt: null,  // only touch rows not already revoked — NO userId filter (global)
+    },
+    data: { revokedAt: new Date() },
+  });
+  return result.count;
+}
