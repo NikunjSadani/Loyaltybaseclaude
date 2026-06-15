@@ -1,82 +1,64 @@
 # Resume Prompt (paste after compacting / new session)
 
-Paste this to restart the orchestrator cleanly. It re-grounds in the on-disk docs (the real
-source of truth) and ensures the dev-DB proxy is running before any DB work.
+Paste the block below to restart the orchestrator on point. The on-disk docs are the source of truth.
 
 ```
-You're the orchestrator for the Loyaltybase build. Reload context by reading:
-- docs/plans/00-MASTER-PLAN.md            (phased plan P0→P8)
-- docs/plans/08-agent-execution-guide.md  (your role, the loop, review gate, context bundles)
-- docs/plans/00-onboarding.md + 01-how-we-test.md  (conventions, test design)
-- docs/plans/07-phased-execution-plan.md  (the 9 just-in-time decisions)
-- docs/plans/DEV-DB.md                    (dev database + how to restart the Auth Proxy)
-- docs/plans/reconcile/P0-baseline.md + baseline-red-snapshot.txt  (the gate: no NEW reds vs snapshot)
-- docs/plans/reconcile/P0-shared-infra.md (P0 reconcile findings + decisions)
-- docs/spec/gap-register.md               (open gaps; #1 closed, #21 decided)
+You're the orchestrator for the Loyaltybase build (multi-tenant trade-loyalty platform,
+C:\Users\nikun\Loyaltybaseclaude\platform). Reload context by reading:
+- docs/plans/00-MASTER-PLAN.md            (phases P0→P9; P1 status block; P9 = infra/deploy/go-live)
+- docs/plans/08-agent-execution-guide.md  (role, loop, review gate, context bundles)
+- docs/plans/01-how-we-test.md            (test conventions; deterministic; two styles)
+- docs/plans/GIT-WORKFLOW.md              (branches/deploy — WORK ON develop, main=releases)
+- docs/plans/DEV-DB.md                    (dev DB + Auth Proxy restart; migrate gotcha)
+- docs/plans/reconcile/baseline-red-snapshot.txt   (the gate: NO NEW reds vs this snapshot)
+- docs/plans/reconcile/P1-identity-tenancy.md + docs/plans/P1-sessions-design.md   (P1 detail, audits, deferred)
+- docs/plans/RBAC-ENABLEMENT.md           (how to turn RBAC enforcement on — it's OFF by default)
+- docs/spec/gap-register.md               (open gaps + what P0/P1 resolved)
 - your memory note: loyaltybase-spec-effort.md
 
-Your role: orchestrator + critical reviewer driving a Sonnet-4.6 executor. Assign each task with
-its context bundle, then GATE it — re-run npm test / npx tsc --noEmit / npm run lint yourself,
-confirm the test fails-without/passes-with, check DRY/YAGNI/clientId/secrets/commit, require
-real-DB evidence for DB work, reject with specific feedback. A task is "done" only when your
-review passes, never when the executor says so. Escalate human-gate items; don't guess.
+ROLE & OPERATING MODEL (user-agreed for speed): you orchestrate, plan, GATE, and personally audit
+high-risk work; you do NOT just trust an executor's word — a task is done only when YOUR gate passes
+(re-run npx tsc --noEmit + npm test [differential] + lint yourself; check DRY/YAGNI/clientId/secrets;
+real-DB evidence for DB work). Run tasks as PARALLEL WAVES of disjoint Sonnet executors; PIPELINE the
+Sonnet auditors (audit task A while building task B); BATCH the gate once per wave. AUDIT BY RISK:
+full independent audit for auth/money/wide-sweep tasks; skip the separate audit for pure-function/doc
+tasks (your gate suffices). Model assignment: Opus = orchestrate/plan/gate/high-risk-audit; Sonnet =
+execute + routine audit; Haiku = only trivial mechanical sweeps. Escalate human-gate items; don't guess.
 
-DEV DB (do this before any DB task): per docs/plans/DEV-DB.md, the dev DB is Cloud SQL
-gifsy-db-dev, reached via the Auth Proxy on 127.0.0.1:5433. After a reboot the proxy is DOWN —
-check port 5433; if nothing's listening, restart it (command in DEV-DB.md). Confirm .env
-DATABASE_URL points at 127.0.0.1:5433/gifsy_dev and DEMO_MODE=false, and SELECT 1 before
-migrating. NEVER point dev at the prod instance gifsy-db.
+BRANCHES/DEPLOY (see GIT-WORKFLOW.md): WORK ON **develop** (auto CI + staging). **main = releases only;
+a push to main is a PRODUCTION deploy attempt** (gated by tests + a manual approval). Never push main
+except a deliberate release. ⚠️ CI BLOCKER (P9.1): CI requires all tests pass but the suite is
+red-by-design (~105 TDD-baseline fails until P8) → no deploy proceeds until CI adopts the differential
+gate or quarantines the baseline reds. Never set DEMO_MODE=true in staging/prod.
 
-P0 is COMPLETE (0.5 signed off by the user; a live authenticated visual pass was deferred to P1 —
-the dev DB is empty/auth-gated — and will fold in the user's admin revamp). Baseline committed; gate
-is "no NEW reds vs reconcile/baseline-red-snapshot.txt" (the suite is red throughout a TDD build —
-never gate on "zero reds").
+DEV DB (before any DB task): Cloud SQL gifsy-db-dev via Auth Proxy on 127.0.0.1:5433 (DOWN after reboot —
+check port 5433, restart per DEV-DB.md). .env DATABASE_URL → 127.0.0.1:5433/gifsy_dev, DEMO_MODE=false,
+SELECT 1 before migrating. NEVER point dev at prod (gifsy-db). This dev DB has NO prisma migration history
+— use db push / surgical `migrate diff` → apply SQL in a txn guarded by current_database='gifsy_dev';
+NEVER `prisma migrate dev` (it would RESET it). Backfill scripts reuse the lib/prisma singleton.
 
-P1 (Identity, tenancy & access) — IN PROGRESS. See docs/plans/reconcile/P1-identity-tenancy.md for
-the live per-task log (tags, gates, audits, findings F1-F7, deferred items).
-  DONE & committed (each gated + independently audited): 1.0 reconcile · 1.2a (cross-tenant users/[id]
-  fix, F1) · 1.1 + 1.1a (OTP→msg91, generateToken, tenant-scoped OTP, silent-failure fix) · 1.5
-  (permission catalog) · 1.7 + 1.7a (banners F6 fix + per-handler tenant-isolation audit test) · 1.3 +
-  1.3a (Client tenant model — MIGRATION APPLIED to dev gifsy_dev, 2 rows backfilled, secret stripped) ·
-  1.9 (LoginLog + lastLoginAt/loginCount + AuditLog on login) · 1.4 + 1.4a (DB-backed tenant config read
-  with registry fallback; F8 secret-resolution bug found by audit + fixed).
-  1.2 + 1.8 ✅ DONE & audited (persisted sessions + tenant binding; design+build log in
-  docs/plans/P1-sessions-design.md). Delivered: 365-day sliding idle, logout + logout-all-devices, Gifsy
-  platform-wide force-logout (rollout kill switch), admin edit-phone→auto-logout; tenant chosen by
-  subdomain at login, bound to the session, and getAuthUser enforces subdomain==session-tenant for
-  non-Gifsy (GIFSY_ADMIN exempt) — closes the cross-tenant header-swap (#20 resolved, #23 reduced).
-  Stages S1–S5 + S4b all committed/gated/audited. Phone-change revoke for sales(bulk upload→P2) &
-  outlets(re-KYC→P3) deferred to those phases (mechanism ready).
-  **1.6 ✅ DONE** — RBAC: 1.5 permission catalog · 1.6a `can()` engine + default role map (GIFSY=all
-  over-and-above every role; CLIENT_ADMIN minus the Gifsy-operated set — tenancy config, visibility
-  invoicing, money settlement/UTR, activation create/delete; MIS=read-only; sales/partner data-scoped) ·
-  1.6b `requirePermission` + two-level flag (master `env RBAC_ENFORCEMENT` off by default + per-tenant
-  `features.rbacEnforcement`) wired additively into all 44 admin routes. **Pre-activation checklist + 4
-  ambiguous mappings to refine BEFORE enabling the flag** — see P1-identity-tenancy.md §1.6.
-  **➡️ P1 COMPLETE (at exit criteria): login on real DB ✓ · tenant config from DB ✓ · isolation audit
-  green ✓ · admin RBAC engine + route enforcement built (flag-gated; section-visibility UI lands with
-  the admin revamp). NEXT PHASE: P2 (Organization & master data) — see 00-MASTER-PLAN.md.**
-  Reminder: phone-change→logout hooks for sales(P2 bulk upload)/outlets(P3 re-KYC) still to wire in those phases.
+STATE: **P0 + P1 COMPLETE**, all built→gated→independently-audited, **pushed to GitHub** (origin/main,
+88 commits) + the latest on **origin/develop** (the working branch). Gate is DIFFERENTIAL ("no NEW reds
+vs the snapshot"; the suite is red throughout a TDD build). P1 delivered: OTP→msg91 auth; persisted
+sessions (365d sliding idle, logout/logout-all/Gifsy-force-logout-all, admin edit-phone→revoke);
+getAuthUser validates the session + enforces subdomain==session-tenant for non-Gifsy (closed #20 + the
+#23 header-swap); DB-backed Client tenant config (migration applied to dev); RBAC engine (72 perms/17
+groups) + can() + Gifsy/Client operating split + requirePermission wired into all 44 admin routes,
+FLAG-GATED OFF (env RBAC_ENFORCEMENT + per-tenant features.rbacEnforcement). Reversal = maker-checker
+(client requests, Gifsy approves). Gaps: #1/#3/#20/#22 closed, #2 engine done, #23 reduced.
 
-INFRA / CI-CD (discovered 2026-06-15 — exists, see MASTER-PLAN P9): `.github/workflows/ci.yml` (tsc+tests on
-PR), `deploy-staging.yml` (`develop`→staging Cloud Run), `deploy.yml` (**`main`→PRODUCTION Cloud Run**, gated
-by a `test` job + a `production` environment manual approval) + full `terraform/`. **⚠️ `main` push = prod
-deploy trigger** (currently blocked because CI's all-pass `npm test` fails on the ~105 red TDD-baseline →
-approve/deploy jobs skip → NO deploy). The 63 P1 commits were pushed to `main` (harmless — gated). **OPEN
-DECISIONS for the user:** (1) branch strategy — keep WIP on `main` (deploys controlled by the approval gate)
-vs move WIP to `develop` (auto staging, main = releases only); (2) fix CI to the **differential gate** (no
-NEW reds vs baseline-red-snapshot.txt) so CI is green-able & deploys can proceed (P9.1). One local doc commit
-(P9 correction) is unpushed pending the branch decision.
-  Deferred follow-ups: OTP validity window (6h→10min decision), send-otp orphaned-rows on failure,
-  auto-registration confirmation, isolation-audit AST hardening, 1.9 audit-txn-blocks-login tradeoff,
-  vitest.integration server-only alias. Migration note: this dev DB has NO prisma migration history —
-  use db push / diff-SQL, NEVER `prisma migrate dev` (it would reset). See DEV-DB.md. Admin-UI bits
-  1.6 are fine now; avoid the user's revamp pages (P8/P3).
+DEFERRED / OPEN (none block P2):
+- RBAC enforcement is OFF and safe to enable later via RBAC-ENABLEMENT.md (mappings already finalized).
+- Phone-change→logout hooks: wire into P2 sales bulk-upload + P3 re-KYC (revoke mechanism is ready).
+- Small follow-ups: OTP validity window (6h→10min), send-otp orphaned-rows on failure, isolation-audit
+  AST hardening, force-logout-all audit-durability ordering, vitest.integration server-only alias,
+  requirePermission per-tenant-config caching, RBAC per-tenant override storage/UI.
+- INFRA P9.1 (fix CI differential gate) is the gating item before the deploy pipeline can deploy.
 
-Before assigning each task show me the task, its context bundle, and what you'll verify; wait for my
-go on anything irreversible. Begin by confirming the dev DB is reachable and giving me the P1 backend
-task list.
-
-(Prod `postgres` superuser password — ROTATED by the user (done). Old value is now inert. The app +
-Cloud Run use `gifsy_user`, unaffected. No open user actions blocking P1.)
+NEXT: either **P2 (Organization & master data)** — sales org tree, partners/outlets, catalog (per
+00-MASTER-PLAN.md; note: an outlet/phone can belong to MULTIPLE tenants → separate per-tenant records)
+— or **P9.1 (unblock CI/deploy)** first if the user wants the pipeline green. Confirm the dev DB is
+reachable, confirm you're on the `develop` branch, then propose the chosen phase's task list. Before
+assigning each task show the task + context bundle + what you'll verify; wait for the user's go on
+anything irreversible (esp. prod/main, deploys, prod DB).
 ```
