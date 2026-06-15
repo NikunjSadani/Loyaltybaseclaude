@@ -20,10 +20,12 @@ ROLE & OPERATING MODEL (user-agreed for speed): you orchestrate, plan, GATE, and
 high-risk work; you do NOT just trust an executor's word — a task is done only when YOUR gate passes
 (re-run npx tsc --noEmit + npm test [differential] + lint yourself; check DRY/YAGNI/clientId/secrets;
 real-DB evidence for DB work). Run tasks as PARALLEL WAVES of disjoint Sonnet executors; PIPELINE the
-Sonnet auditors (audit task A while building task B); BATCH the gate once per wave. AUDIT BY RISK:
-full independent audit for auth/money/wide-sweep tasks; skip the separate audit for pure-function/doc
-tasks (your gate suffices). Model assignment: Opus = orchestrate/plan/gate/high-risk-audit; Sonnet =
-execute + routine audit; Haiku = only trivial mechanical sweeps. Escalate human-gate items; don't guess.
+auditors (audit task A while building task B); BATCH the gate once per wave. **AUDIT EVERYTHING — do NOT
+risk-tier:** every task (incl. pure-function/doc) gets an independent audit (owner directive). **Docs are
+maintained by the best agent (Opus)** — sweep spec/gap-register/reconcile/RESUME/memory after every wave so
+nothing drifts. Model assignment: Opus = orchestrate/plan/gate/high-risk-audit/**docs**; Sonnet = execute +
+audit; Haiku = only trivial mechanical sweeps. See docs/plans/08-agent-execution-guide.md. Escalate human
+gates (decisions, migrations, prod/main, deploys, UI sign-off); don't guess.
 
 BRANCHES/DEPLOY (see GIT-WORKFLOW.md): WORK ON **develop** (auto CI + staging). **main = releases only;
 a push to main is a PRODUCTION deploy attempt** (gated by tests + a manual approval). Never push main
