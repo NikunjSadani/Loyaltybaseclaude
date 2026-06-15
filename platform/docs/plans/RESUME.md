@@ -85,14 +85,28 @@ DEFERRED / OPEN (none block P2):
   Campaign-Type** reconcile (gap #10) = **P4.0**; `[id]/page.tsx` `CalculationMethod` static-fixture leftover
   = P4 cleanup. (`admin/schemes/new` = Open Campaign → the form builder w/ the new fields.)
 
-NEXT = **P2 (Organization & master data)** — sales org tree, partners/outlets, catalog (per 00-MASTER-PLAN.md
-§P2; note: an outlet/phone can belong to MULTIPLE tenants → separate per-tenant records; P2.1/2.2 also unblock
-the Outlet Points Ledger hierarchy columns, P2.4 the distributor columns + 1:1 binding). The user chose P2 as
-the post-compaction starting point. **All session demo work (reporting R1/R2, KYC design+demo+rebuild, scheme
-form-builder extend+prune) is committed AND pushed to `origin/develop`** (CI red-by-design → no deploy
-proceeds). Local: dev-DB Auth Proxy on 127.0.0.1:5433 (UP) + `.env.development.local` DEMO_MODE=true; a
-preview dev server runs on :3000. Confirm dev DB reachable + you're on `develop`, then propose the P2 task
-list (start with 2.0 Reconcile). Before
-assigning each task show the task + context bundle + what you'll verify; wait for the user's go on
-anything irreversible (esp. prod/main, deploys, prod DB).
+**P2 IN PROGRESS** (full live status in 00-MASTER-PLAN.md §P2). DONE + committed to `develop` (NOT pushed yet):
+- **2.0 Reconcile** (`reconcile/P2-org-master-data.md`) — tagged BUILD/COMPLETE/VERIFY; found defects RF1–RF7.
+- **Security RF1–RF3 fixed** (`2734aeb`): RF1 cross-tenant IDOR on `sales/team/[memberId]` (clientId scope +
+  `lib/sales-hierarchy-access.ts isSelfOrDescendant` ownership gate, fails closed→403); RF2 unscoped invoice
+  dup-check; RF3 `partnerId:userId` wrong-FK in `sales/upload`.
+- **2.1 Sales hierarchy → relational** (`b1e0baf`): hierarchy save now persists `SalesHierarchyLevel` (incl. ZNM)
+  + `User`+`SalesUser` tree (two-pass reportingTo) — `lib/hierarchy-persistence.ts`; the XSR→NSM 18-col chain
+  template flows in correctly.
+- **2.4 Outlet master upload** (`5ee7fbe`,`b1e0baf` schema + outlet commits): outlets persist tenant-tagged,
+  validate XSR vs the SalesUser tree, tag via SalesUserAssignment; `lib/outlet-persist.ts`. Re-KYC flag upload
+  persists (`Outlet.reKycFlags Json?`). All three outlet master files persist FOR REAL **in demo too**.
+- **Owner model decisions:** partner≠outlet (kept 1:many + `isPrimary`; 1:1 is convention; future 1:many free);
+  outlet created pre-owner (nullable `partnerId`, owner at KYC); distributor + beat/metro/zone/program = report-only
+  reference columns on Outlet (NO master table); RF4/RF5/RF7 = per-tenant unique constraints.
+- **5 dev-DB migrations applied** (all human-gated, `current_database='gifsy_dev'` guarded, in `prisma/migrations/`).
+- **Seeded** 4 OutletTypes for both tenants (`scripts/seed-outlet-types.ts`) so the outlet upload validates.
+
+**P2 REMAINING:** 2.2 (sales-user CRUD — mostly VERIFY), 2.3 (tiers/tier-history), 2.5 (outlet mgmt UI — VERIFY),
+2.6 (Category CRUD + tiers/SKU/catalog admin UI — BUILD). Deferred: replace mock `sales-role.ts`/`partner-session.ts`
+with DB; per-field re-KYC consumption (P3). **Not pushed this session — user must say "push".**
+
+Local: dev-DB Auth Proxy on 127.0.0.1:5433 (drops intermittently — restart per DEV-DB.md); `.env.development.local`
+DEMO_MODE=true; preview on :3000. Confirm dev DB reachable + on `develop`; continue P2 (propose 2.6 or 2.2 next).
+Before any migration/irreversible step show the SQL/plan + wait for the user's go.
 ```
