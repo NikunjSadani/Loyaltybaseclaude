@@ -36,9 +36,7 @@ export interface SchemeBuilderCampaignForm {
   campaignType: CampaignType;
   // Eligibility (used for LOYALTY_ONLY and MIXED)
   applicableClasses: string[];
-  // Incentive
-  calculationMethod: string;
-  flatAmount: string;
+  // Advanced
   holdingPeriodDays: string;
   // Outlet targeting
   outletTargeting: 'ALL' | 'SPECIFIC';

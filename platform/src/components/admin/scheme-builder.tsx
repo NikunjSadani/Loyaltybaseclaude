@@ -2,13 +2,13 @@
 
 import { useState, useRef, useCallback } from 'react';
 import {
-  Plus, Trash2, Save, Send, Archive, ChevronDown, ChevronUp,
+  Save, Send, Archive, ChevronDown, ChevronUp,
   AlertCircle, Upload, Download, X, Users, UserCheck,
   Layers, UserCog, Shuffle, Bell, Tag, ShieldCheck,
   MessageSquare, Smartphone,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { IncentiveType, CalculationMethod, ChannelPartnerClass } from '@/types';
+import { IncentiveType, ChannelPartnerClass } from '@/types';
 import { saveAdminScheme as persistAdminScheme } from '@/lib/schemes';
 import { EnrollmentFormBuilder } from '@/components/admin/EnrollmentFormBuilder';
 import type { EnrollmentFormConfig, FormField } from '@/lib/campaign';
@@ -27,29 +27,12 @@ import type { OutletRecord } from '@/lib/campaign';
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface SlabRow {
-  id: string;
-  from: string;
-  to: string;
-  rate: string;
-}
-
 interface SchemeFormData {
   name: string;
   description: string;
   startDate: string;
   endDate: string;
   incentiveType: IncentiveType;
-  calculationMethod: CalculationMethod;
-  flatAmount: string;
-  percentageRate: string;
-  perUnitRate: string;
-  slabs: SlabRow[];
-  overachievementSlabs: SlabRow[];
-  enableOverachievement: boolean;
-  targetValue: string;
-  targetQuantity: string;
-  targetGrowthPct: string;
   holdingPeriodDays: string;
   applicableClasses: ChannelPartnerClass[];
   // Campaign type
@@ -82,11 +65,6 @@ interface SchemeFormData {
 // Defaults
 // ─────────────────────────────────────────────────────────────────────────────
 
-const defaultSlab = (): SlabRow => ({
-  id: Math.random().toString(36).slice(2),
-  from: '', to: '', rate: '',
-});
-
 const defaultEnrollmentForm = (): EnrollmentFormConfig => ({
   captureGpsOnSubmit: false,
   requireOtp: true,
@@ -112,13 +90,6 @@ const INCENTIVE_TYPES = [
   { value: IncentiveType.LOYALTY,         label: 'Loyalty Points'       },
   { value: IncentiveType.REFERRAL,        label: 'Referral Bonus'       },
   { value: IncentiveType.MILESTONE,       label: 'Milestone Achievement'},
-];
-
-const CALC_METHODS = [
-  { value: CalculationMethod.FLAT,       label: 'Flat Amount'          },
-  { value: CalculationMethod.PERCENTAGE, label: 'Percentage of Billing'},
-  { value: CalculationMethod.SLAB,       label: 'Slab-based'           },
-  { value: CalculationMethod.PER_UNIT,   label: 'Per Unit / Case'      },
 ];
 
 const CLASS_COLORS: Record<ChannelPartnerClass, string> = {
@@ -157,16 +128,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
     startDate:            initialData?.startDate ?? '',
     endDate:              initialData?.endDate ?? '',
     incentiveType:        initialData?.incentiveType ?? IncentiveType.SALES,
-    calculationMethod:    initialData?.calculationMethod ?? CalculationMethod.SLAB,
-    flatAmount:           initialData?.flatAmount ?? '',
-    percentageRate:       initialData?.percentageRate ?? '',
-    perUnitRate:          initialData?.perUnitRate ?? '',
-    slabs:                initialData?.slabs ?? [defaultSlab()],
-    overachievementSlabs: initialData?.overachievementSlabs ?? [defaultSlab()],
-    enableOverachievement:initialData?.enableOverachievement ?? false,
-    targetValue:          initialData?.targetValue ?? '',
-    targetQuantity:       initialData?.targetQuantity ?? '',
-    targetGrowthPct:      initialData?.targetGrowthPct ?? '',
     holdingPeriodDays:    initialData?.holdingPeriodDays ?? '30',
     applicableClasses:    initialData?.applicableClasses ?? [ChannelPartnerClass.GOLD, ChannelPartnerClass.SILVER],
     campaignType:         initialData?.campaignType ?? 'LOYALTY_ONLY',
@@ -193,8 +154,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
     eligibility:      true,
     outletTargeting:  true,
     enrollmentForm:   true,
-    incentive:        true,
-    target:           false,
     notifications:    false,
     advanced:         false,
   });
@@ -211,20 +170,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
       : [...form.applicableClasses, cls];
     set('applicableClasses', classes);
   };
-
-  const addSlab = (field: 'slabs' | 'overachievementSlabs') =>
-    set(field, [...form[field], defaultSlab()]);
-
-  const removeSlab = (field: 'slabs' | 'overachievementSlabs', id: string) =>
-    set(field, form[field].filter((s) => s.id !== id));
-
-  const updateSlab = (
-    field: 'slabs' | 'overachievementSlabs',
-    id: string,
-    key: keyof SlabRow,
-    value: string,
-  ) =>
-    set(field, form[field].map((s) => (s.id === id ? { ...s, [key]: value } : s)));
 
   // ── Excel upload ──────────────────────────────────────────────────────────
 
@@ -312,8 +257,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
       endDate:               form.endDate,
       campaignType:          form.campaignType,
       applicableClasses:     form.applicableClasses,
-      calculationMethod:     form.calculationMethod,
-      flatAmount:            form.flatAmount,
       holdingPeriodDays:     form.holdingPeriodDays,
       outletTargeting:       form.outletTargeting,
       targetedOutlets:       form.targetedOutlets,
@@ -333,13 +276,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
       form.enableNotifications ? form.notificationConfig : null,
     );
 
-    // Extra incentive validation
-    if (form.calculationMethod === CalculationMethod.FLAT && !form.flatAmount) {
-      validationErrors.push({ field: 'flatAmount', message: 'Enter flat amount.' });
-    }
-    if (form.calculationMethod === CalculationMethod.PERCENTAGE && !form.percentageRate) {
-      validationErrors.push({ field: 'percentageRate', message: 'Enter percentage rate.' });
-    }
     if (!form.holdingPeriodDays) {
       validationErrors.push({ field: 'holdingPeriodDays', message: 'Holding period is required.' });
     }
@@ -391,7 +327,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
       // Enriched display fields
       status:                   derivedStatus,
       incentiveType:            form.incentiveType,
-      calculationMethod:        form.calculationMethod,
       applicableClasses:        form.applicableClasses,
       partnersEnrolled:         0,
       totalPayout:              '—',
@@ -402,67 +337,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
   };
 
   // ── Sub-components ────────────────────────────────────────────────────────
-
-  const SlabTable = ({
-    field, label, unit,
-  }: { field: 'slabs' | 'overachievementSlabs'; label: string; unit: string }) => (
-    <div>
-      <h4 className="text-xs font-semibold text-gray-600 mb-2">{label}</h4>
-      <div className="border border-gray-200 rounded-lg overflow-hidden">
-        <table className="w-full text-xs">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-3 py-2 text-left text-gray-500 font-medium">From ({unit})</th>
-              <th className="px-3 py-2 text-left text-gray-500 font-medium">To ({unit})</th>
-              <th className="px-3 py-2 text-left text-gray-500 font-medium">
-                {form.calculationMethod === CalculationMethod.PERCENTAGE ? 'Rate (%)' : 'Points / ₹'}
-              </th>
-              <th className="px-3 py-2 w-10"></th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {form[field].map((slab, idx) => (
-              <tr key={slab.id} className="hover:bg-gray-50">
-                <td className="px-2 py-1.5">
-                  <input type="number" value={slab.from}
-                    onChange={(e) => updateSlab(field, slab.id, 'from', e.target.value)}
-                    placeholder="0"
-                    className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)]"
-                  />
-                </td>
-                <td className="px-2 py-1.5">
-                  <input type="number" value={slab.to}
-                    onChange={(e) => updateSlab(field, slab.id, 'to', e.target.value)}
-                    placeholder={idx === form[field].length - 1 ? '∞' : ''}
-                    className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)]"
-                  />
-                </td>
-                <td className="px-2 py-1.5">
-                  <input type="number" value={slab.rate}
-                    onChange={(e) => updateSlab(field, slab.id, 'rate', e.target.value)}
-                    placeholder="0"
-                    className="w-full border border-gray-200 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)]"
-                  />
-                </td>
-                <td className="px-2 py-1.5">
-                  {form[field].length > 1 && (
-                    <button onClick={() => removeSlab(field, slab.id)}
-                      className="p-1 text-gray-400 hover:text-red-500 transition-colors">
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <button onClick={() => addSlab(field)}
-        className="mt-2 flex items-center gap-1 text-xs text-[var(--brand-primary)] hover:text-[var(--brand-primary-dark)] font-medium">
-        <Plus className="w-3.5 h-3.5" /> Add Slab Row
-      </button>
-    </div>
-  );
 
   const SectionHeader = ({
     title, section, badge,
@@ -918,111 +792,7 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
         </div>
       )}
 
-      {/* ── 6. Incentive Calculation ──────────────────────────────────────── */}
-      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-        <SectionHeader title="Incentive Calculation" section="incentive" />
-        {sectionsOpen.incentive && (
-          <div className="p-4 space-y-4">
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-2">
-                Calculation Method <span className="text-red-500">*</span>
-              </label>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                {CALC_METHODS.map((m) => (
-                  <button key={m.value} onClick={() => set('calculationMethod', m.value)}
-                    className={`py-2.5 px-3 rounded-lg text-xs font-medium border-2 transition-all ${
-                      form.calculationMethod === m.value
-                        ? 'border-[var(--brand-primary)] bg-green-50 text-[var(--brand-primary)]'
-                        : 'border-gray-200 text-gray-600 hover:border-gray-300'
-                    }`}>
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {form.calculationMethod === CalculationMethod.FLAT && (
-              <div className="max-w-xs">
-                <label className="block text-xs font-medium text-gray-700 mb-1">Flat Amount (₹) <span className="text-red-500">*</span></label>
-                <input type="number" value={form.flatAmount}
-                  onChange={(e) => set('flatAmount', e.target.value)}
-                  placeholder="500"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
-                />
-                {errors.flatAmount && <p className="text-xs text-red-500 mt-1">{errors.flatAmount}</p>}
-              </div>
-            )}
-
-            {form.calculationMethod === CalculationMethod.PERCENTAGE && (
-              <div className="max-w-xs">
-                <label className="block text-xs font-medium text-gray-700 mb-1">Rate (% of billing) <span className="text-red-500">*</span></label>
-                <input type="number" value={form.percentageRate}
-                  onChange={(e) => set('percentageRate', e.target.value)}
-                  placeholder="2.5" step="0.1" min="0" max="100"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
-                />
-                {errors.percentageRate && <p className="text-xs text-red-500 mt-1">{errors.percentageRate}</p>}
-              </div>
-            )}
-
-            {form.calculationMethod === CalculationMethod.PER_UNIT && (
-              <div className="max-w-xs">
-                <label className="block text-xs font-medium text-gray-700 mb-1">Rate per Unit / Case (₹)</label>
-                <input type="number" value={form.perUnitRate}
-                  onChange={(e) => set('perUnitRate', e.target.value)}
-                  placeholder="10"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
-                />
-              </div>
-            )}
-
-            {form.calculationMethod === CalculationMethod.SLAB && (
-              <SlabTable field="slabs" label="Incentive Slabs" unit="₹" />
-            )}
-
-            {/* Overachievement */}
-            <div className="border-t border-gray-100 pt-4">
-              <Toggle
-                value={form.enableOverachievement}
-                onChange={(v) => set('enableOverachievement', v)}
-                label="Enable Overachievement Slabs"
-              />
-              {form.enableOverachievement && (
-                <div className="mt-3">
-                  <SlabTable field="overachievementSlabs" label="Overachievement Slabs (above target)" unit="₹" />
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* ── 7. Target Configuration ───────────────────────────────────────── */}
-      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-        <SectionHeader title="Target Configuration" section="target" />
-        {sectionsOpen.target && (
-          <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
-            {[
-              { key: 'targetValue',      label: 'Value Target (₹ Lakh)', placeholder: '25',  hint: 'Minimum billing value' },
-              { key: 'targetQuantity',   label: 'Quantity Target (Cases)', placeholder: '500', hint: 'Minimum case quantity' },
-              { key: 'targetGrowthPct',  label: 'Growth Target (%)',       placeholder: '15',  hint: 'vs. previous period'   },
-            ].map(({ key, label, placeholder, hint }) => (
-              <div key={key}>
-                <label className="block text-xs font-medium text-gray-700 mb-1">{label}</label>
-                <input type="number"
-                  value={form[key as keyof SchemeFormData] as string}
-                  onChange={(e) => set(key as keyof SchemeFormData, e.target.value as never)}
-                  placeholder={placeholder}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
-                />
-                <p className="text-xs text-gray-400 mt-1">{hint}</p>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* ── 8. Notifications (MSG91) ─────────────────────────────────────── */}
+      {/* ── 6. Notifications (MSG91) ─────────────────────────────────────── */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
         <SectionHeader
           title="Notifications (MSG91)"
@@ -1116,7 +886,7 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
         )}
       </div>
 
-      {/* ── 9. Advanced Settings ──────────────────────────────────────────── */}
+      {/* ── 7. Advanced Settings ──────────────────────────────────────────── */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
         <SectionHeader title="Advanced Settings" section="advanced" />
         {sectionsOpen.advanced && (

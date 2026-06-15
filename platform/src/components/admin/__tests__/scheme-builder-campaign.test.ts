@@ -28,8 +28,6 @@ describe('validateCampaignSchemeForm', () => {
     endDate: '2025-09-30',
     campaignType: 'LOYALTY_ONLY',
     applicableClasses: ['GOLD'],
-    calculationMethod: 'FLAT',
-    flatAmount: '500',
     holdingPeriodDays: '30',
     outletTargeting: 'ALL',
     targetedOutlets: [],

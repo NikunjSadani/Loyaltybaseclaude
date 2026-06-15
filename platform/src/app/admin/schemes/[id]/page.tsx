@@ -222,14 +222,8 @@ export default function SchemeDetailPage({ params }: { params: Promise<{ id: str
           startDate: scheme.startDate,
           endDate: scheme.endDate,
           incentiveType: scheme.incentiveType,
-          calculationMethod: scheme.calculationMethod,
           applicableClasses: scheme.applicableClasses,
           holdingPeriodDays: scheme.holdingPeriodDays,
-          slabs: [
-            { id: 's1', from: '0', to: '100000', rate: '1.5' },
-            { id: 's2', from: '100000', to: '250000', rate: '2.0' },
-            { id: 's3', from: '250000', to: '', rate: '2.5' },
-          ],
         }}
         onSave={handleSave}
         onPublish={handlePublish}
