@@ -95,3 +95,20 @@
 - **2.4 schema** — the 1:1-binding decision (enforce unique `partnerId`, or keep 1:many + `isPrimary`?) and the new `Distributor` shape both define an **additive dev-DB migration**. Needs sign-off + the exact diff-SQL shown before apply (per DEV-DB.md; `current_database()='gifsy_dev'` guard; never `migrate dev`).
 - **2.1 migration** — the `level` unique-constraint fix (RF4) is also a migration.
 - **Security** — RF1/RF2/RF3 are pre-existing prod defects surfaced by this reconcile; recommend folding their fixes into 2.1/2.2 rather than deferring.
+
+---
+
+## Addendum (2026-06-16) — Catalog reverted + sales-upload model correction
+
+**Owner correction:** the sales/achievement upload is **target-parameter based** (upload final amounts per outlet
+per parameter), NOT SKU-invoice based. Consequences:
+
+- **2.6 Catalog (SKU/Category CRUD + admin UI) was built then REVERTED** (`git revert 798aafe`). Under the
+  parameter model, **nothing consumes a SKU or Category master** — categories only group SKUs, and SKUs only had
+  one "live" consumer (`sales/upload` skuCode validation) which is itself wrong-model scaffolding. YAGNI →
+  removed from the demo so it does not imply a SKU-based billing model the platform does not have. Recoverable
+  from git history if a future tenant ever needs SKU-level reporting (P8 SKU-Performance / Billing-Trends).
+  `Category`/`Sku`/`SkuCategoryMapping` schema models left in place (pre-existing, harmless empty tables).
+- **FINDING (P4 — Targets):** `api/sales/upload/route.ts` (invoice/skuCode → SalesInvoice) is the WRONG model;
+  reconcile/replace with parameter-based achievement upload when P4 builds Targets. This supersedes the
+  capability-table note that treated SKU validation in sales-upload as a real consumer.

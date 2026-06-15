@@ -19,7 +19,6 @@ const createSchema = z.object({
   isTaxable: z.boolean().default(true),
   hsn: z.string().optional(),
   description: z.string().optional(),
-  categoryIds: z.array(z.string().min(1)).optional(),
 })
 
 export async function GET(req: NextRequest) {
@@ -52,7 +51,6 @@ export async function GET(req: NextRequest) {
         skip,
         take: limit,
         orderBy: { skuCode: 'asc' },
-        include: { categoryMappings: { select: { categoryId: true, isPrimary: true } } },
       }),
       prisma.sku.count({ where }),
     ])
@@ -80,25 +78,7 @@ export async function POST(req: NextRequest) {
     const existing = await prisma.sku.findFirst({ where: { skuCode: parsed.data.skuCode, clientId } })
     if (existing) return err(`SKU code ${parsed.data.skuCode} already exists`)
 
-    const { categoryIds, ...skuData } = parsed.data
-
-    // If categoryIds provided, verify they all belong to this client (tenant-scoped).
-    if (categoryIds && categoryIds.length > 0) {
-      const valid = await prisma.category.count({
-        where: { id: { in: categoryIds }, clientId, deletedAt: null },
-      })
-      if (valid !== categoryIds.length) return err('One or more categories not found for this client', 404)
-    }
-
-    const sku = await prisma.sku.create({
-      data: {
-        ...skuData,
-        clientId,
-        ...(categoryIds && categoryIds.length > 0
-          ? { categoryMappings: { create: categoryIds.map((categoryId, i) => ({ categoryId, isPrimary: i === 0 })) } }
-          : {}),
-      },
-    })
+    const sku = await prisma.sku.create({ data: { ...parsed.data, clientId } })
 
     return ok({ sku }, 201)
   } catch (e: any) {

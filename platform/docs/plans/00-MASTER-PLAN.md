@@ -144,12 +144,18 @@ tenant config served from DB. **Depends on:** P0.
 
 **Exit:** an admin can build the org tree, load outlets, and manage SKUs; team views scoped correctly.
 **Depends on:** P1.
-> **2.6 ✅ DONE** — Category CRUD API (`api/admin/categories` + `[id]`, tenant-scoped, reparent cycle check,
-> delete guarded vs children/SKU-mappings) + SKU `[id]` PATCH/DELETE + categoryIds↔SkuCategoryMapping sync +
-> a polished admin Catalog page (`/admin/catalog`, Categories/SKUs tabs, nav link). `lib/category-tree.ts` +
-> tests. Gated: tsc 0, suite 28/105 = baseline, page verified rendering, DB smoke clean. No migration.
-> **P2 DONE so far: 2.0, 2.1, 2.4, 2.6 + RF1–RF7. Remaining: 2.2 (sales-user CRUD — mostly VERIFY), 2.3 (tiers/
-> tier-history), 2.5 (outlet mgmt UI — VERIFY).**
+> **2.6 (Catalog) BUILT then REVERTED (owner call, 2026-06-16).** Was built (Category CRUD + SKU mgmt + admin UI,
+> gated) but **reverted** (`git revert 798aafe`) as **YAGNI / model-mismatch**: the platform's sales/achievement
+> upload is **target-parameter based**, NOT SKU-invoice based, so nothing consumes a SKU/Category master. The only
+> "live" SKU consumer (`sales/upload` SKU-code validation) is itself **stale invoice/SKU scaffolding that
+> contradicts the parameter model** (see finding below). Catalog code remains recoverable in git history if a
+> future tenant ever needs SKU-level reporting (P8 SKU-Performance/Billing-Trends). The `Category`/`Sku`/
+> `SkuCategoryMapping` schema models stay (pre-existing, harmless empty tables; removing = a migration, not worth it).
+> **⚠️ FINDING (P4 — Targets): the sales/achievement upload model is target-parameter based.** The existing
+> `api/sales/upload/route.ts` (validates `skuCode` → writes `SalesInvoice` + would need `InvoiceLineItem`) is the
+> WRONG model and must be reconciled/replaced with parameter-based achievement upload in P4. Tracked here + RESUME.
+> **P2 DONE: 2.0, 2.1, 2.4 + RF1–RF7. Remaining: 2.2 (sales-user CRUD — mostly VERIFY), 2.3 (tiers/tier-history),
+> 2.5 (outlet mgmt UI — VERIFY). 2.6 catalog dropped (above).**
 
 > **P2 status (live).** **2.0 Reconcile ✅** — full audit in [`reconcile/P2-org-master-data.md`](reconcile/P2-org-master-data.md)
 > (Opus independently re-verified every load-bearing claim by direct file read). Headlines: much is

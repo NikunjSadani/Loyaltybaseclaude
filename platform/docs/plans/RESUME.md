@@ -102,11 +102,19 @@ DEFERRED / OPEN (none block P2):
 - **5 dev-DB migrations applied** (all human-gated, `current_database='gifsy_dev'` guarded, in `prisma/migrations/`).
 - **Seeded** 4 OutletTypes for both tenants (`scripts/seed-outlet-types.ts`) so the outlet upload validates.
 
-**P2 REMAINING:** 2.2 (sales-user CRUD — mostly VERIFY), 2.3 (tiers/tier-history), 2.5 (outlet mgmt UI — VERIFY),
-2.6 (Category CRUD + tiers/SKU/catalog admin UI — BUILD). Deferred: replace mock `sales-role.ts`/`partner-session.ts`
-with DB; per-field re-KYC consumption (P3). **Not pushed this session — user must say "push".**
+**⚠️ MODEL CORRECTION (owner, 2026-06-16) — front-and-center for P4:** the sales/achievement upload is
+**TARGET-PARAMETER based** (upload final amounts per outlet per parameter), NOT SKU-invoice based. The existing
+`api/sales/upload/route.ts` (validates `skuCode` → writes `SalesInvoice`) is the WRONG model — reconcile/replace
+it with parameter-based achievement upload in **P4 (Targets)**. Consequence: **2.6 Catalog (SKU/Category) was built
+then REVERTED** (`git revert 798aafe`) as YAGNI — nothing consumes a SKU/Category master under the parameter model;
+recoverable from git if a future tenant ever needs SKU-level reporting (P8). `Category`/`Sku` schema models left in
+place (harmless empty tables).
+
+**P2 REMAINING:** 2.2 (sales-user CRUD — mostly VERIFY), 2.3 (tiers/tier-history), 2.5 (outlet mgmt UI — VERIFY).
+Deferred: replace mock `sales-role.ts`/`partner-session.ts` with DB; per-field re-KYC consumption (P3).
+**Not pushed this session — user must say "push".**
 
 Local: dev-DB Auth Proxy on 127.0.0.1:5433 (drops intermittently — restart per DEV-DB.md); `.env.development.local`
-DEMO_MODE=true; preview on :3000. Confirm dev DB reachable + on `develop`; continue P2 (propose 2.6 or 2.2 next).
+DEMO_MODE=true; preview on :3000. Confirm dev DB reachable + on `develop`; continue P2 (propose 2.2 next).
 Before any migration/irreversible step show the SQL/plan + wait for the user's go.
 ```
