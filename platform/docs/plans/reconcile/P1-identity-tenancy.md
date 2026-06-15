@@ -107,7 +107,15 @@ First OTP for an unknown phone auto-creates a `PENDING_VERIFICATION` user with r
 - **OTP validity window** — route uses 6 h, helper uses 10 min. Executor + I recommend **10 min** (6 h is a security anti-pattern). Decide when 1.1's follow-up / messaging convergence lands.
 - **Auto-registration (F5)** — first OTP for an unknown phone silently creates a `PENDING_VERIFICATION/SSS` user. Confirm this is the intended self-enrollment funnel.
 - **OTP channel routing** — `msg91.sendOtp` picks channel from the MSG91 template, so the request's `SMS`/`WHATSAPP` field is now cosmetic. If explicit per-channel OTP is required, needs separate templateIds. → P7 messaging.
-- **1.5 taxonomy** (5 questions): sales data-scoping vs permission keys; single `kyc:approve` vs level-bound; per-feature-flag granularity; partner-app permissions; scheme rule-engine key. → resolve before 1.6 maps roles.
+- **1.5 taxonomy** (5 questions) — RESOLVED with defaults in 1.6a: sales/partner access stays portal+data-scoped (not permission keys); single `kyc:approve`; coarse `tenancy:manage_flags`; no partner-app permission group; scheme-calc key omitted.
+
+## 1.6 — RBAC engine (decisions, user-confirmed 2026-06-15)
+- **1.6a ✅** committed — `lib/rbac/can.ts`: default role→permission map + per-tenant overrides + `can()`. **Operating model:**
+  - **GIFSY_ADMIN = all** and is over-and-above every role (test-locked invariant: every role ⊆ Gifsy).
+  - **CLIENT_ADMIN = all EXCEPT `GIFSY_OPERATED_PERMISSIONS`** = tenancy config (`tenancy:write/manage_flags`), visibility self-billing invoices (all — hidden entirely), money settlement (`credits:download_bank_file/mark_paid/approve_reversal`, `payouts:manage_fund/process_batch/reconcile/view_tds`), activation create/delete (`schemes:write/delete`). KEEPS reward upload (`credits:upload`+read+confirm_payout+manage_fields), `payouts:read`, activation view+`schemes:manage_enrollments`+export, etc.
+  - **MIS_USER = read-only** (`:read` + `reports:export`). **Sales/Partner = []** (portal+data-scoped).
+- **1.6b ⏭** — wire `can()` enforcement across the ~65 admin routes via a `requirePermission` helper, behind a feature flag (OFF by default → no behavior change until enabled per tenant). The "admin sees only role-permitted sections" UI is part of the user's admin revamp (look/flow, not access-driven → enforcement won't be reshaped).
+- **Deferred:** Gifsy internal sub-roles (finer Gifsy access division) — engine supports adding later.
 
 ## Spec corrections emitted by this audit
 - §01 / gap-register: confirm #2 (fixed `UserRole` enum), #3 (no permission catalog), #20 (clientId not in token), #22 (registry in code), #23 (silent `deoleo` fallback **+** un-scoped `[id]` route) all still **open** and now have file:line evidence.

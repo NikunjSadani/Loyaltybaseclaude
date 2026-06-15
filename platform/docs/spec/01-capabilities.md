@@ -22,13 +22,26 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
 - **Purpose.** Authenticate users and authorize actions across four portals.
 - **Key entities.** `User`, `UserSession`, `OtpCode`, `AuditLog`, `LoginLog`, `UserRole` enum.
 - **Surface.** `api/auth/{send-otp,verify-otp,me}`, `admin/users`, `api/admin/users*`.
-- **Current.** OTP (MSG91) + JWT (`userId, role, partnerId`) or proxy-injected
-  `x-user-id`/`x-user-role`. Authorization = coarse inline role checks. `clientId` resolved
-  from `x-tenant-slug`, **not** in the token.
-- **Target/gaps.** Three access models: **Admin** = configurable roles with sections/features
-  tagged (catalog = permission set, Gap #2/#3); **Sales** = data scoped by hierarchy + team
-  rollup for seniors; **Partner** = own data only. (Dead `ROLES` constant removed, 0.4b.)
-  tenant–token binding to verify (register, "Also noted").
+- **Current (P1 done).** OTP via **MSG91** + JWT (`userId, role, partnerId, clientId, sid`).
+  **Persisted `UserSession`** is now the source of truth: `getAuthUser` validates it per request
+  (revocable; 365-day sliding idle) and **enforces subdomain == session-tenant for non-Gifsy**
+  (GIFSY_ADMIN exempt), binding token↔tenant in-app (gap #20 resolved, #23 header-swap closed).
+  Lifecycle: logout, logout-all-devices, Gifsy platform-wide force-logout, admin edit-phone→auto-logout.
+- **Target/gaps.** Three access models: **Admin** = tenant-configurable roles built on the
+  `lib/rbac` permission catalog (71 perms / 17 groups) + a pure `can()` engine with a default
+  role→permission map (Gap #2/#3, 1.5/1.6a). **Default map (operating model, user-confirmed):**
+  - **GIFSY_ADMIN = every permission** — Gifsy is *over and above* every role (invariant: every role ⊆ Gifsy).
+  - **CLIENT_ADMIN = all EXCEPT the Gifsy-operated set** (`GIFSY_OPERATED_PERMISSIONS`): tenancy config
+    (`tenancy:write/manage_flags`), **visibility self-billing invoices** (hidden entirely), **money
+    settlement** (bank file, UTR/mark-paid, reversals, fund, batch, reconcile, TDS), and **activation
+    create/delete** (`schemes:write/delete`). Client Admin DOES keep: reward/award upload + payout-status
+    view, activation *view* + enrollments + reports, KYC, users, partners, catalog, targets, wallet,
+    rewards, visibility capture/approval, support, engagement, and *viewing* tenant config.
+  - **MIS_USER = read-only** (all `:read` + `reports:export`). **Sales/Partner roles = []** by default
+    (access via portal routing + hierarchy/identity data-scoping, not admin permission keys).
+  Per-tenant overrides (full-replacement) supported. Enforcement wiring across admin routes = **1.6b**
+  (flag-gated, off by default). **Gifsy internal sub-roles** (finer Gifsy access division) = deferred.
+  **Sales** = data scoped by hierarchy + team rollup; **Partner** = own data only. (Dead `ROLES` removed, 0.4b.)
 
 ### 2 · Tenancy & Platform Configuration
 - **Purpose.** Onboard/configure tenants; per-tenant features, branding, structure.
