@@ -164,9 +164,19 @@ tenant config served from DB. **Depends on:** P0.
 > master table — distributor is **reference-only `distributorCode`/`distributorName` text columns on `Outlet`**,
 > populated from the outlet upload, used **only for report grouping/summary** (mirrors `SalesInvoice`'s existing
 > scalar pattern). Also fixed RF4: `SalesHierarchyLevel.level` now `@@unique([clientId, level])`. SQL saved at
-> `prisma/migrations/20260615_p2_distributor_hierarchy_level.sql`. **NEXT (no migration):** build waves — 2.4 wire
-> `outlets/upsert` to real clientId-scoped writes incl. the 2 distributor columns; 2.1 hierarchy relational write
-> + ZNM; 2.6 catalog (Category CRUD + admin UI).
+> `prisma/migrations/20260615_p2_distributor_hierarchy_level.sql`.
+> **Build order corrected (owner):** sales-hierarchy file is FIRST (the outlet file's XSR ID validates against it).
+> **2.1 ✅ DONE** (gated: tsc 0, 13/13 pure tests, real-DB smoke on gifsy_dev — chain persisted + reporting links
+> resolved + idempotent + rows cleaned, independently verified clean): hierarchy save now persists the relational
+> tree (`SalesHierarchyLevel` levels incl. **ZNM** + `User`+`SalesUser` per employee, two-pass reportingTo) **in
+> addition to** the JSON snapshot. New `lib/hierarchy-persistence.ts`. Coarse `UserRole` bucket via
+> `mapRoleCodeToUserRole` (ZNM→SALES_STATE_HEAD, no enum change); placeholders = synthetic INACTIVE user.
+> **Audit surfaced RF7** (`SalesUser.employeeCode` global-unique → cross-tenant overwrite risk; latent, single-tenant
+> safe). **Owner model decision:** partner≠outlet — keep separate linked records (schema already 1:many); 1:1 is
+> convention only; future 1:many is free; outlet created pre-owner (needs nullable `partnerId`).
+> **NEXT:** 2.4 outlet upload — wire `outlets/upsert` to real writes (validate XSR vs `SalesUser`, persist
+> distributor columns), **needs a migration** (nullable `Outlet.partnerId` + RF5 outletCode + RF7 employeeCode →
+> human gate). Then 2.6 catalog (no migration).
 
 ## P3 · Onboarding & KYC  (3–5 wk)
 **Objective:** the full enroll→KYC→approve→credential journey (spec §02 WF1) works end-to-end.
