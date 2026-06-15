@@ -18,7 +18,7 @@
  *
  * Safe-TOCTOU pattern (users/[id], channel-partners/[id], credits/*):
  *   Handler resolves `getClientIdFromRequest` → guarding `findFirst({ where: { id, clientId } })`
- *   → mutation by PK only.  These contain `clientId` in their source so they pass.
+ *   → mutation by PK only.  These contain `clientId` in their handler body so they pass.
  *
  * Safe-manual-guard pattern (sales/batches/[batchId]):
  *   Handler uses `findUnique({ where: { id } })` then checks `batch.clientId !== clientId`
@@ -27,17 +27,37 @@
  *   `where` clause.  It is listed in KNOWN_SAFE_MANUAL_GUARD below and excluded
  *   from the assertion so the suite stays green.
  *
- * Heuristic limits (false-positives avoided by design)
- * ─────────────────────────────────────────────────────
- * • We key on the string `clientId` appearing anywhere in the handler source.
- *   This is deliberately broad — it catches both the where-clause pattern and
- *   the guarding-findFirst pattern without needing an AST.
- * • The scan is per-file, not per-handler.  A file with one scoped handler and
- *   one un-scoped one would be flagged; that's an acceptable false-positive bias
- *   (safer to over-report).
- * • Operations on arrays (`{ id: { in: [...] } }`) are NOT filtered out by this
- *   heuristic, but in practice those routes resolve their arrays from a
- *   tenant-filtered findMany first, so they also contain `clientId` in source.
+ * Heuristic design: per-handler segmentation
+ * ───────────────────────────────────────────
+ * • The file source is split into individual handler segments at each
+ *   `export async function (GET|POST|PUT|PATCH|DELETE)` boundary.  Each segment
+ *   runs from the keyword to the next such boundary (or EOF).  The risky-op /
+ *   id-reference / clientId checks are then applied PER SEGMENT rather than
+ *   per-file.
+ *
+ * • This closes the false-NEGATIVE that the previous per-file approach had: a
+ *   file with one scoped handler (e.g. GET containing clientId) and one UN-scoped
+ *   handler (e.g. DELETE with a bare prisma.x.delete) would PASS the old check
+ *   because `clientId` appeared somewhere in the file — masking the real hole in
+ *   the DELETE segment.
+ *
+ * • The safe-TOCTOU pattern still passes correctly: because the guarding
+ *   findFirst({ where: { id, clientId } }) lives in the SAME handler segment as
+ *   the subsequent mutation, `clientId` is present within that segment.
+ *
+ * Residual limitations (string-based, not AST-based)
+ * ────────────────────────────────────────────────────
+ * • A handler that delegates its where-clause construction to a helper imported
+ *   from another file will contain no `clientId` reference in its own source; if
+ *   that helper provides the tenant scope it would still be flagged here as
+ *   suspicious.  Conversely, a handler that merely logs `clientId` (without using
+ *   it in the where clause) would be incorrectly considered safe.
+ * • Handler-segment boundaries are detected by the `export async function` regex;
+ *   a non-exported inner function within a handler body is attributed to the
+ *   current handler's segment — acceptable for our purposes.
+ * • Operations on arrays (`{ id: { in: [...] } }`) are NOT filtered out, but in
+ *   practice those routes resolve their arrays from a tenant-filtered findMany
+ *   first, so they also contain `clientId` in the same handler source.
  *
  * After all known holes are fixed this list should be EMPTY.
  * If new holes are found by this test add them to KNOWN_SAFE_MANUAL_GUARD
@@ -69,6 +89,14 @@ const RISKY_OPS_RE =
  * Routes that only operate on non-id fields won't match.
  */
 const USES_ID_RE = /\bid\b/;
+
+/**
+ * Regex used to split a route file into per-handler segments.
+ * Matches the start of each Next.js route handler export declaration.
+ * We use a capturing group so split() retains the delimiter text.
+ */
+const HANDLER_BOUNDARY_RE =
+  /(?=export\s+async\s+function\s+(?:GET|POST|PUT|PATCH|DELETE)\b)/;
 
 /**
  * Files that contain `findUnique` / `findFirst` / mutating calls scoped by a
@@ -110,29 +138,54 @@ function collectRouteFiles(dir: string): string[] {
 }
 
 /**
- * Returns true when the file contains at least one risky Prisma call where
- * `id` is referenced in the source but `clientId` is NOT present anywhere.
+ * Split a route file's source into per-handler segments.
  *
- * We check the full file source for `clientId` because:
- *  • A guarding `findFirst({ where: { id, clientId } })` before a mutation
- *    contains `clientId` in the same handler body.
- *  • A `where: { id, clientId }` inline also contains it.
- *  • If neither is present the file is potentially un-scoped.
+ * Each segment starts at `export async function GET|POST|PUT|PATCH|DELETE`
+ * and extends to the next such boundary (or EOF).  Module-level code before
+ * the first handler is returned as the first element if non-empty.
+ *
+ * Example — a file with GET then DELETE returns:
+ *   [
+ *     '<imports and constants...>',
+ *     'export async function GET(...) { ... }',
+ *     'export async function DELETE(...) { ... }',
+ *   ]
  */
-function isLikelyUnscoped(src: string): boolean {
-  // No risky ops → safe
-  if (!RISKY_OPS_RE.test(src)) return false;
-  // Reset lastIndex after global RE test
-  RISKY_OPS_RE.lastIndex = 0;
+export function splitIntoHandlerSegments(src: string): string[] {
+  return src.split(HANDLER_BOUNDARY_RE).filter((seg) => seg.trim().length > 0);
+}
+
+/**
+ * Returns true when a SINGLE handler segment contains at least one risky
+ * Prisma call where `id` is referenced but `clientId` is NOT present.
+ *
+ * Unlike the old per-file check, this operates on one handler's body so a
+ * scoped GET cannot mask an un-scoped DELETE in the same file.
+ */
+export function isHandlerSegmentUnscoped(segment: string): boolean {
+  // Clone RE to avoid shared lastIndex state between calls
+  const riskyRe = new RegExp(RISKY_OPS_RE.source, 'g');
+
+  // No risky ops in this segment → safe
+  if (!riskyRe.test(segment)) return false;
 
   // No id reference → ops are on non-id fields, not a by-id risk
-  if (!USES_ID_RE.test(src)) return false;
+  if (!USES_ID_RE.test(segment)) return false;
 
-  // If clientId is referenced anywhere in the file the handler is considered
-  // tenant-aware (either inline or via guarding findFirst).
-  if (src.includes('clientId')) return false;
+  // If clientId is referenced anywhere in this segment the handler is
+  // considered tenant-aware (either inline or via guarding findFirst).
+  if (segment.includes('clientId')) return false;
 
   return true;
+}
+
+/**
+ * Returns true when ANY handler segment in the file appears un-scoped.
+ * Replaces the old per-file `isLikelyUnscoped` which masked per-handler holes.
+ */
+export function isLikelyUnscoped(src: string): boolean {
+  const segments = splitIntoHandlerSegments(src);
+  return segments.some((seg) => isHandlerSegmentUnscoped(seg));
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -187,5 +240,83 @@ describe('Tenant-isolation audit — admin routes (gap #23)', () => {
     }
 
     expect(offenders).toEqual([]);
+  });
+
+  // ── Hardening: synthetic unit tests for per-handler segmentation ────────────
+  //
+  // These tests prove that the false-negative the old per-file check had is
+  // actually closed.  They use in-test source strings — no real files needed.
+
+  it('per-handler segmentation: flags a mixed file where GET is scoped but DELETE is not', () => {
+    // This is exactly the false-negative pattern the old per-file check missed:
+    // clientId appears in GET so the old whole-file check passed.
+    // Per-handler segmentation must flag the un-scoped DELETE segment.
+    //
+    // Note: the template literal below uses a function keyword (not arrow)
+    // to match the `export async function DELETE` pattern the splitter detects.
+    const mixedFileSrc = [
+      "import prisma from '@/lib/prisma';",
+      '',
+      'export async function GET(req: NextRequest) {',
+      '  const clientId = getClientIdFromRequest(req);',
+      "  const id = req.nextUrl.searchParams.get('id');",
+      '  const item = await prisma.widget.findFirst({ where: { id, clientId } });',
+      '  return NextResponse.json(item);',
+      '}',
+      '',
+      'export async function DELETE(req: NextRequest) {',
+      "  const id = req.nextUrl.searchParams.get('id');",
+      '  // BUG: no tenant scoping — bare delete by id only',
+      '  await prisma.widget.delete({ where: { id } });',
+      '  return NextResponse.json({ ok: true });',
+      '}',
+    ].join('\n');
+
+    // Old per-file check: passes incorrectly because clientId is in GET
+    // (we verify it would have been a false-negative)
+    expect(mixedFileSrc.includes('clientId')).toBe(true);
+
+    // New per-handler check: must flag this file
+    expect(isLikelyUnscoped(mixedFileSrc)).toBe(true);
+
+    // Verify it's specifically the DELETE segment that is flagged
+    const segments = splitIntoHandlerSegments(mixedFileSrc);
+    const deleteSegment = segments.find((s) => s.includes('export async function DELETE'));
+    expect(deleteSegment).toBeDefined();
+    expect(isHandlerSegmentUnscoped(deleteSegment!)).toBe(true);
+
+    // And the GET segment must NOT be flagged (it has clientId)
+    const getSegment = segments.find((s) => s.includes('export async function GET'));
+    expect(getSegment).toBeDefined();
+    expect(isHandlerSegmentUnscoped(getSegment!)).toBe(false);
+  });
+
+  it('per-handler segmentation: does NOT flag a file using the safe-TOCTOU pattern in DELETE', () => {
+    // The safe-TOCTOU pattern: guarding findFirst({ where: { id, clientId } })
+    // then updating by PK only.  clientId is present in the same handler segment.
+    const safeFileSrc = `
+import prisma from '@/lib/prisma';
+
+export async function DELETE(req: NextRequest) {
+  const clientId = getClientIdFromRequest(req);
+  const id = req.nextUrl.searchParams.get('id');
+
+  // Guard: ensure the record belongs to this tenant
+  const item = await prisma.widget.findFirst({ where: { id, clientId } });
+  if (!item) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+
+  // Safe: PK-only update after tenant guard above confirms ownership
+  await prisma.widget.update({ where: { id }, data: { deletedAt: new Date() } });
+  return NextResponse.json({ ok: true });
+}
+`.trim();
+
+    // Per-handler check: must NOT flag this file (clientId is in the DELETE segment)
+    expect(isLikelyUnscoped(safeFileSrc)).toBe(false);
+
+    const segments = splitIntoHandlerSegments(safeFileSrc);
+    const deleteSegment = segments.find((s) => s.includes('export async function DELETE'));
+    expect(deleteSegment).toBeDefined();
+    expect(isHandlerSegmentUnscoped(deleteSegment!)).toBe(false);
   });
 });
