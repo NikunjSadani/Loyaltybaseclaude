@@ -1135,6 +1135,32 @@ export interface PointsLedgerReportRow {
   closingBalance: number;
 }
 
+// ─── Ticket Aging Report ──────────────────────────────────────────────────────
+//
+// One row in the R2 Ticket Aging Excel / on-screen report.
+
+export interface TicketAgingRow {
+  ticketNumber:       string;
+  subject:            string;
+  category:           string;
+  priority:           string;
+  status:             string;
+  createdByName:      string;
+  assignedToName?:    string;
+  createdAt:          string;            // ISO
+  ageDays:            number;
+  agingBucket:        string;
+  firstResponseHours: number | null;     // null = no first response yet ("Pending")
+  slaBreached:        boolean;
+  lastUpdatedAt:      string;            // ISO
+}
+
+export interface TicketAgingSummary {
+  total:      number;
+  slaBreached: number;
+  byBucket:   Record<string, number>;
+}
+
 // ─── Reversal Request ─────────────────────────────────────────────────────────
 
 export type ReversalStatus = 'PENDING_GIFSY' | 'APPROVED' | 'REJECTED' | 'PARTIAL';

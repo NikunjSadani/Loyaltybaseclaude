@@ -62,6 +62,9 @@ DEFERRED / OPEN (none block P2):
   preview + xlsx; gated + independently audited; DEMO_MODE fully populated). Prod-wiring of its
   sales-hierarchy / distributor / program columns is **deferred to P2/P4** (those entities aren't built yet);
   points attribution decision = 1 partner = 1 outlet (rides on P2.4 #4).
+  **R2 Ticket Aging DONE** (operational; status/category/priority filters, aging buckets, SLA flag, summary
+  chips + preview + xlsx; gated + independently audited). Fully backed by `Ticket` model — **prod path
+  complete, no deferral.** User has MORE reports/workflow changes queued on this track before P2.
 
 NEXT: either **P2 (Organization & master data)** — sales org tree, partners/outlets, catalog (per
 00-MASTER-PLAN.md; note: an outlet/phone can belong to MULTIPLE tenants → separate per-tenant records)

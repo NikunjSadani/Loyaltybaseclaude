@@ -65,3 +65,40 @@ fully backed today).
 ### Open questions for client sign-off
 - Hierarchy label set (client uses **XSR** lowest, not ISR; **Zone** as a separate column) — confirm names/order.
 - Month label format (`Apr 2026`?) and whether a partner with no activity should still appear (zero row).
+
+---
+
+## R2 · Ticket Aging report
+
+**Category:** Operational · **Filter:** Status (default = open set), Category, Priority.
+**Fully backed today — NO P2/P4 dependency** (the `Ticket` model has every field), so this report is
+buildable *and* production-wireable now; demo + prod paths are both complete.
+
+### Columns (order)
+`Ticket #` · `Subject` · `Category` · `Priority` · `Status` · `Created By` · `Assigned To` ·
+`Created` · `Age (days)` · `Aging bucket` · `First response (hrs)` · `SLA breached` · `Last updated`.
+
+### Column → data mapping (all ✅ exist)
+| Column | Source |
+|---|---|
+| Ticket # / Subject / Category / Priority / Status | `Ticket.ticketNumber/subject/category/priority/status` |
+| Created By / Assigned To | `Ticket.createdBy.name` / `Ticket.assignedTo?.name` (User) |
+| Created / Last updated | `Ticket.createdAt` / `Ticket.updatedAt` |
+| Age (days) | `floor((asOf − createdAt)/1d)` (asOf = request time; injectable for deterministic tests) |
+| Aging bucket | `0-1` / `2-3` / `4-7` / `8-14` / `15-30` / `30+ days` |
+| First response (hrs) | `(firstResponseAt − createdAt)/1h`, else **Pending** (null) |
+| SLA breached | `Ticket.slaBreached` |
+
+### Decisions
+- **Default scope = open/unresolved** tickets: status ∈ {OPEN, IN_PROGRESS, PENDING_USER, ESCALATED}
+  (RESOLVED/CLOSED excluded unless explicitly filtered). `clientId`-scoped, `deletedAt: null`.
+- Pure functions take an **`asOf`** param so aging is deterministic in tests; route passes `new Date()`.
+- Preview shows a small **summary** (count per bucket + SLA-breached total) above the table.
+
+### Build scope (this track, fully complete — no deferral)
+- `lib/ticket-aging-export.ts`: `ageInDays`, `agingBucket`, `firstResponseHours`, `buildTicketAgingRow`,
+  `generateTicketAgingExcel`, `summarizeAging`, `demoTicketAgingRows(asOf)`.
+- `api/admin/reports/ticket-aging`: admin + `reports:export`; `?status&category&priority&format=json|xlsx`;
+  DEMO_MODE populated; production query is **fully wired** (no stub).
+- `admin/reports/ticket-aging` page: filter dropdowns + summary chips + preview table + Export Excel;
+  the existing Reports-list "Ticket Aging" card switches to `href` navigation + the `/api/admin/...` endpoint.
