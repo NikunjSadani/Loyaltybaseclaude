@@ -120,11 +120,16 @@ First OTP for an unknown phone auto-creates a `PENDING_VERIFICATION` user with r
   existing role check; flag-off ⇒ behavior unchanged; tsc validates every permission key).
 - **⚠️ Pre-activation checklist (do BEFORE setting `RBAC_ENFORCEMENT=true` for any tenant):**
   1. Wire per-tenant permission **overrides** storage + the admin UI to edit role→permission (deferred).
-  2. Refine the 4 ambiguous route→permission mappings: `outlets/rekyc-flag`(kyc:initiate?),
-     `credits/batches/[id]/reversals` POST initiate (mapped to `credits:approve_reversal` — likely should
-     be a client-initiate key, but none exists), `kpi-config` PUT (`reports:manage_scheduled`?),
-     `force-logout-all` (`users:manage_roles` — conceptually wrong but harmless: route is already
-     GIFSY-only-guarded; remove the requirePermission there or use a Gifsy-only key).
+  2. Refine the route→permission mappings flagged by the 1.6b-2 audit (PASS-WITH-NOTES; none are an
+     escalation while flag-off):
+     - `credits/batches/[id]/reversals` POST (initiate) → currently `credits:approve_reversal` (Gifsy-only,
+       so a client couldn't *initiate*). **Pre-activation blocker:** decide if clients may initiate reversals
+       → if yes, add a new non-Gifsy key (e.g. `credits:request_reversal`) or map to `credits:upload`.
+     - `force-logout-all` → `users:manage_roles` (conceptual mismatch; harmless — route already GIFSY-only
+       guarded). Remove the requirePermission there, or use a Gifsy-only key.
+     - `schemes/[id]/enrollments/export` (demo stub) → has NO inline role guard (relies on getAuthUser+perm);
+       add an explicit `['GIFSY_ADMIN','CLIENT_ADMIN']` role check before activation (also a P4 concern).
+     - `outlets/rekyc-flag`(`kyc:initiate`) and `kpi-config` PUT (`reports:manage_scheduled`) — minor/optional.
   3. Add caching to `requirePermission`'s per-tenant config read (React `cache()`/`unstable_cache`).
 - **Deferred:** Gifsy internal sub-roles (finer Gifsy access division) — engine supports adding later.
 
