@@ -74,11 +74,20 @@ export async function DELETE(req: NextRequest) {
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') return err('Forbidden', 403)
 
+    const clientId = getClientIdFromRequest(req)
     const sp = req.nextUrl.searchParams
     const id = sp.get('id')
     if (!id) return err('Banner ID is required')
 
-    await prisma.bannerManagement.delete({ where: { id } })
+    // Verify the banner belongs to this tenant before deleting (F6 fix).
+    const banner = await prisma.bannerManagement.findFirst({ where: { id, clientId } })
+    if (!banner) return err('Banner not found', 404)
+
+    // Soft delete — BannerManagement has a deletedAt column (schema line ~2002).
+    await prisma.bannerManagement.update({
+      where: { id },
+      data: { deletedAt: new Date() },
+    })
 
     return ok({ message: 'Banner deleted successfully' })
   } catch (e: any) {
