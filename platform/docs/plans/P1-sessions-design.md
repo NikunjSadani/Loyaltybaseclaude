@@ -92,8 +92,19 @@ for review given its blast radius.
   global `revokeAllSessions()` (no userId/clientId filter) + audit. Gate: tsc 0, no new reds. Combined
   S5 audit running.
 
-**1.2 + 1.8 core is functionally complete** (S1–S5). Remaining: **S4b** (point ~95 routes at the session
-`clientId` to finish the 1.8 binding / remove the silent-`deoleo` fallback) and **1.6** (RBAC `can()`).
+**1.2 + 1.8 core is functionally complete** (S1–S5). **S5 combined audit PASS-WITH-NOTES** — no priv-esc,
+no cross-user revoke, no escalation to the global logout; phone-change revokes the edited user. Note
+(deferred): `force-logout-all` writes its audit AFTER the revoke, so a transient DB error there leaves a
+mass-revoke unlogged (500 surfaces) — harden later (audit-before-respond / durable log).
+
+- **S4b ⏳** (building) — **REVISED to a single enforcement point** (better than the 95-route migration):
+  `getAuthUser` rejects when a non-GIFSY session's tenant ≠ the subdomain (`x-tenant-slug`) it's on —
+  closes the cross-tenant header-swap (gaps #20/#23) in one auditable place. **GIFSY_ADMIN is exempt**
+  (platform operator works cross-tenant via each tenant's subdomain — user-confirmed assumption). Routes
+  keep using `getClientIdFromRequest`, which is now trustworthy because getAuthUser guarantees
+  header==session for non-Gifsy. (Full route→authUser.clientId migration is now optional defense-in-depth,
+  not required.) Multi-tenant outlets unaffected (each subdomain = a separate single-tenant login).
+- **1.6 ⏭** — RBAC `can()` gate + tenant-configurable role→permission map on the 1.5 catalog.
 
 ### Phone-change → logout: attach points (user decision 2026-06-15)
 The revoke-on-phone-change rule attaches wherever a phone is actually mutated:
