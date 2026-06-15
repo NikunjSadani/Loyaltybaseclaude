@@ -24,6 +24,9 @@ const { mockPrismaClient, mockHeadersGet } = vi.hoisted(() => {
   return { mockPrismaClient, mockHeadersGet };
 });
 
+// Note: `server-only` is aliased to a no-op stub in vitest.config.ts — no
+// explicit mock needed here.
+
 // ─── Mock Prisma (both named + default export per the testing guide) ──────────
 vi.mock('@/lib/prisma', () => ({
   default: mockPrismaClient,
@@ -162,7 +165,7 @@ describe('getClientConfigFromDb', () => {
     vi.clearAllMocks();
     // Reset env vars before each test
     delete process.env.DEOLEO_MSG91_AUTH_KEY;
-    delete process.env.CLIENTB_MSG91_AUTH_KEY;
+    delete process.env.CLIENT_B_MSG91_AUTH_KEY;
   });
 
   it('returns a reconstructed ClientConfig when Prisma returns a row', async () => {
@@ -177,17 +180,17 @@ describe('getClientConfigFromDb', () => {
     };
     mockPrismaClient.client.findUnique.mockResolvedValueOnce(prismaRow);
 
-    // Set env secret as the registry does
-    process.env.DEOLEO_MSG91_AUTH_KEY = 'REAL_SECRET';
-
     const result = await getClientConfigFromDb('deoleo');
     expect(result).not.toBeNull();
     expect(result!.slug).toBe('deoleo');
-    expect(result!.notifications.msg91AuthKey).toBe('REAL_SECRET');
+    // The DB path sources the secret from the registry (evaluated at import time).
+    // In the test environment DEOLEO_MSG91_AUTH_KEY is unset, so both the
+    // registry and the DB path resolve to the registry's fallback 'DEMO_KEY'.
+    expect(result!.notifications.msg91AuthKey).toBe(DEOLEO_CONFIG.notifications.msg91AuthKey);
     expect(result!.branding.primaryColor).toBe('#16a34a');
   });
 
-  it('uses DEMO_KEY as the fallback when no env var is set', async () => {
+  it('uses DEMO_KEY as the fallback when no env var is set (deoleo)', async () => {
     const row = clientConfigToRow(DEOLEO_CONFIG);
     mockPrismaClient.client.findUnique.mockResolvedValueOnce({
       ...row,
@@ -195,12 +198,24 @@ describe('getClientConfigFromDb', () => {
       updatedAt: new Date(),
     });
 
-    // No env var set — fallback to 'DEMO_KEY'
+    // No env var set — registry resolves process.env.DEOLEO_MSG91_AUTH_KEY ?? 'DEMO_KEY'
     const result = await getClientConfigFromDb('deoleo');
     expect(result!.notifications.msg91AuthKey).toBe('DEMO_KEY');
+    // Must also match what the registry itself reports
+    expect(result!.notifications.msg91AuthKey).toBe(DEOLEO_CONFIG.notifications.msg91AuthKey);
   });
 
-  it('derives the env var name from the slug uppercased', async () => {
+  it('resolves clientb secret from the registry (which reads CLIENT_B_MSG91_AUTH_KEY, not CLIENTB_MSG91_AUTH_KEY)', async () => {
+    // The old buggy code derived CLIENTB_MSG91_AUTH_KEY from the slug, which
+    // cannot reproduce CLIENT_B_MSG91_AUTH_KEY — the real env var name the
+    // registry uses for slug 'clientb'. The fix sources the secret directly
+    // from CLIENT_REGISTRY[clientId].notifications.msg91AuthKey instead of
+    // re-deriving the var name from the slug.
+    //
+    // NOTE: env vars are evaluated at module import time, not per-call.
+    // Setting CLIENT_B_MSG91_AUTH_KEY in beforeEach does not affect the
+    // already-imported registry value. The invariant we can assert here is:
+    // getClientConfigFromDb returns EXACTLY the same secret as the registry.
     const row = clientConfigToRow(CLIENT_B_CONFIG);
     mockPrismaClient.client.findUnique.mockResolvedValueOnce({
       ...row,
@@ -208,10 +223,42 @@ describe('getClientConfigFromDb', () => {
       updatedAt: new Date(),
     });
 
-    process.env.CLIENTB_MSG91_AUTH_KEY = 'B_REAL_SECRET';
-
     const result = await getClientConfigFromDb('clientb');
-    expect(result!.notifications.msg91AuthKey).toBe('B_REAL_SECRET');
+    // The strongest assertion: DB path secret equals registry's resolved secret.
+    // In the test environment CLIENT_B_MSG91_AUTH_KEY is unset, so both resolve
+    // to the registry fallback 'DEMO_KEY_B'.
+    expect(result!.notifications.msg91AuthKey).toBe('DEMO_KEY_B');
+    expect(result!.notifications.msg91AuthKey).toBe(CLIENT_B_CONFIG.notifications.msg91AuthKey);
+  });
+
+  it('falls back to DEMO_KEY_B (registry fallback) for clientb when CLIENT_B_MSG91_AUTH_KEY is unset', async () => {
+    const row = clientConfigToRow(CLIENT_B_CONFIG);
+    mockPrismaClient.client.findUnique.mockResolvedValueOnce({
+      ...row,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // CLIENT_B_MSG91_AUTH_KEY is deliberately unset — registry falls back to 'DEMO_KEY_B'
+    const result = await getClientConfigFromDb('clientb');
+    expect(result!.notifications.msg91AuthKey).toBe('DEMO_KEY_B');
+    // The strongest assertion: DB path secret equals registry's resolved secret
+    expect(result!.notifications.msg91AuthKey).toBe(CLIENT_B_CONFIG.notifications.msg91AuthKey);
+  });
+
+  it('DB-path secret always matches registry secret for deoleo (invariant)', async () => {
+    // This is the key correctness invariant: whatever the registry resolves for
+    // msg91AuthKey (at import time, from the env or its fallback), the DB path
+    // must return the exact same value — no re-derivation from the slug.
+    const row = clientConfigToRow(DEOLEO_CONFIG);
+    mockPrismaClient.client.findUnique.mockResolvedValueOnce({
+      ...row,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const result = await getClientConfigFromDb('deoleo');
+    expect(result!.notifications.msg91AuthKey).toBe(DEOLEO_CONFIG.notifications.msg91AuthKey);
   });
 
   it('returns null when Prisma returns null (no row)', async () => {
@@ -256,11 +303,12 @@ describe('getTenantConfig — fallback chain', () => {
       createdAt: new Date(),
       updatedAt: new Date(),
     });
-    process.env.DEOLEO_MSG91_AUTH_KEY = 'FROM_DB_ENV';
 
     const config = await getTenantConfig();
     expect(config.slug).toBe('deoleo');
-    expect(config.notifications.msg91AuthKey).toBe('FROM_DB_ENV');
+    // Secret is sourced from the registry (evaluated at import time).
+    // Both the DB path and the direct registry value must agree.
+    expect(config.notifications.msg91AuthKey).toBe(DEOLEO_CONFIG.notifications.msg91AuthKey);
   });
 
   it('falls back to registry config when DB returns null', async () => {

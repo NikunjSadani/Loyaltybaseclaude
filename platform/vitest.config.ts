@@ -16,6 +16,10 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      // The `server-only` package throws at import time when evaluated outside
+      // the Next.js bundler (which is the case under vitest). Alias it to a
+      // no-op stub so server-only modules remain testable.
+      'server-only': path.resolve(__dirname, './src/test-utils/server-only-stub.ts'),
     },
   },
 });

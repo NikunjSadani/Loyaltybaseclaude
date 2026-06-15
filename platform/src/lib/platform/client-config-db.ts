@@ -11,30 +11,13 @@
  *  - On any DB error this function catches and returns null (never throws).
  */
 
+// Prevents this module from being bundled into client or Edge code.
+import 'server-only';
+
 import prisma from '@/lib/prisma';
 import { rowToClientConfig } from './client-row';
+import { CLIENT_REGISTRY } from './client-registry';
 import type { ClientConfig } from './client-config';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Secret key resolution
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Resolves the per-tenant MSG91 auth key from environment variables.
- *
- * Convention (mirrors the registry):
- *   slug "deoleo"  → env var  DEOLEO_MSG91_AUTH_KEY   fallback: 'DEMO_KEY'
- *   slug "clientb" → env var  CLIENTB_MSG91_AUTH_KEY  fallback: 'DEMO_KEY'
- *
- * The env var name is derived by:
- *   1. Uppercasing the slug
- *   2. Replacing hyphens with underscores (slugs may contain hyphens)
- *   3. Appending _MSG91_AUTH_KEY
- */
-function resolveMsg91AuthKey(slug: string): string {
-  const envVarName = `${slug.toUpperCase().replace(/-/g, '_')}_MSG91_AUTH_KEY`;
-  return process.env[envVarName] ?? 'DEMO_KEY';
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DB loader
@@ -49,6 +32,13 @@ function resolveMsg91AuthKey(slug: string): string {
  *  - The DB query throws for any reason (DB down, misconfigured connection, etc.)
  *
  * The caller is responsible for falling back to the in-code registry.
+ *
+ * Secret resolution: secrets are intentionally NOT stored in the DB. The
+ * registry entry's `notifications.msg91AuthKey` is already evaluated from
+ * `process.env.<correct-name> ?? '<correct-fallback>'`, so we re-use that as
+ * the authoritative secret source. A tenant present in the DB but NOT in the
+ * registry will receive the generic 'DEMO_KEY' fallback — a known limitation
+ * until a proper per-tenant secret store lands in P7.
  */
 export async function getClientConfigFromDb(
   clientId: string,
@@ -60,12 +50,16 @@ export async function getClientConfigFromDb(
 
     if (!row) return null;
 
-    const secretAuthKey = resolveMsg91AuthKey(clientId);
+    // Source the secret from the registry's own resolution — the registry uses
+    // the correctly-named env vars (e.g. CLIENT_B_MSG91_AUTH_KEY for 'clientb'),
+    // which cannot be reproduced by mechanical slug transformation.
+    const reg = CLIENT_REGISTRY[clientId];
+    const secretAuthKey = reg?.notifications.msg91AuthKey ?? 'DEMO_KEY';
+
     return rowToClientConfig(row, secretAuthKey);
-  } catch {
+  } catch (e) {
     // Log for observability but always fail safe — caller uses registry fallback.
-    // We intentionally swallow the error here; the caller's fallback is the
-    // safety net.
+    console.error('[getClientConfigFromDb]', e);
     return null;
   }
 }
