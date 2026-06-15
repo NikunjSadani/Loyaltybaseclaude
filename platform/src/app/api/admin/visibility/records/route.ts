@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getAuthUser } from '@/lib/auth';
 import { getClientIdFromRequest } from '@/lib/tenant';
+import { requirePermission } from '@/lib/rbac/require-permission';
 
 const ok  = (data: unknown, status = 200) =>
   NextResponse.json({ success: true,  data   }, { status });
@@ -31,6 +32,8 @@ export async function GET(req: NextRequest) {
     if (partnerRoles.includes(authUser.role)) return err('Forbidden', 403);
 
     const clientId = getClientIdFromRequest(req);
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'visibility:read');
+    if (denied) return denied;
     const { searchParams } = new URL(req.url);
 
     const month  = searchParams.get('month')  ?? '';

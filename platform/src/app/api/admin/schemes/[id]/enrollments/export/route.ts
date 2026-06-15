@@ -17,6 +17,8 @@ import {
   buildExcelExportRows,
   type FormField,
 } from '@/lib/campaign';
+import { getAuthUser } from '@/lib/auth';
+import { requirePermission } from '@/lib/rbac/require-permission';
 
 // Demo form fields — in production these come from the scheme's stored config
 const DEMO_FORM_FIELDS: FormField[] = [
@@ -45,8 +47,10 @@ export async function GET(
 ) {
   const { id: schemeId } = await params;
 
-  // TODO: In production, verify session role is GIFSY_ADMIN or CLIENT_ADMIN here.
-  // For demo we allow all requests.
+  const authUser = await getAuthUser(_req);
+  if (!authUser) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  const denied = await requirePermission(authUser as { role: string; clientId: string },'schemes:export');
+  if (denied) return denied;
 
   // Fetch enrollments for this scheme
   const enrollments = MOCK_ENROLLMENTS.filter(

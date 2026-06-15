@@ -3,6 +3,7 @@ import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
 import { getClientIdFromRequest } from '@/lib/tenant'
+import { requirePermission } from '@/lib/rbac/require-permission'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -25,6 +26,8 @@ export async function GET(req: NextRequest) {
     if (!authUser) return err('Unauthorized', 401)
 
     const clientId = getClientIdFromRequest(req)
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'engagement:read')
+    if (denied) return denied
     const where: any = { clientId }
     // Only show active banners for non-admins
     if (authUser.role !== 'GIFSY_ADMIN') {
@@ -51,6 +54,8 @@ export async function POST(req: NextRequest) {
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') return err('Forbidden', 403)
 
     const clientId = getClientIdFromRequest(req)
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'engagement:manage_banners')
+    if (denied) return denied
     const body = await req.json()
     const parsed = createSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
@@ -75,6 +80,8 @@ export async function DELETE(req: NextRequest) {
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') return err('Forbidden', 403)
 
     const clientId = getClientIdFromRequest(req)
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'engagement:manage_banners')
+    if (denied) return denied
     const sp = req.nextUrl.searchParams
     const id = sp.get('id')
     if (!id) return err('Banner ID is required')

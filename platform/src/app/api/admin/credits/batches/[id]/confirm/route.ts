@@ -3,6 +3,7 @@ import prisma from '@/lib/prisma';
 import { getAuthUser } from '@/lib/auth';
 import { getClientIdFromRequest } from '@/lib/tenant';
 import { notifyGifsyNewBatch } from '@/lib/credits-payouts-notify';
+import { requirePermission } from '@/lib/rbac/require-permission';
 
 const ok  = (data: unknown, status = 200) => NextResponse.json({ success: true,  data  }, { status });
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status });
@@ -19,6 +20,8 @@ export async function POST(
   if (!ALLOWED_ROLES.includes(user.role as typeof ALLOWED_ROLES[number])) return err('Forbidden', 403);
 
   const clientId = getClientIdFromRequest(req);
+  const denied = await requirePermission(user as { role: string; clientId: string },'credits:confirm_payout');
+  if (denied) return denied;
   const { id } = await params;
 
   const batch = await prisma.creditBatch.findFirst({

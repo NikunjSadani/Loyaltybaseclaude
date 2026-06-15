@@ -12,6 +12,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getAuthUser } from '@/lib/auth';
 import { getClientIdFromRequest } from '@/lib/tenant';
+import { requirePermission } from '@/lib/rbac/require-permission';
 
 const ALLOWED_ROLES = ['CLIENT_ADMIN', 'GIFSY_ADMIN'];
 
@@ -25,6 +26,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const clientId = getClientIdFromRequest(req);
   if (!clientId) return err('Missing tenant context', 400);
+
+  const denied = await requirePermission(user as { role: string; clientId: string },'sales_org:read');
+  if (denied) return denied;
 
   try {
     const batches = await prisma.salesUploadBatch.findMany({

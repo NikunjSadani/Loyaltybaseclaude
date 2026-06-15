@@ -32,6 +32,7 @@ import {
   parseExcelDate,
   VISIBILITY_UPLOAD_HEADERS,
 } from '@/lib/visibility-upload';
+import { requirePermission } from '@/lib/rbac/require-permission';
 
 const ok  = (data: unknown, status = 200) =>
   NextResponse.json({ success: true,  data   }, { status });
@@ -70,6 +71,8 @@ export async function POST(req: NextRequest) {
     }
 
     const clientId = getClientIdFromRequest(req);
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'visibility:write');
+    if (denied) return denied;
 
     // ── Parse form data ───────────────────────────────────────────────────────
     let formData: FormData;

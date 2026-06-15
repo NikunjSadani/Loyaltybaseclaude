@@ -3,6 +3,7 @@ import { z } from 'zod'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
 import { getClientIdFromRequest } from '@/lib/tenant'
+import { requirePermission } from '@/lib/rbac/require-permission'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -26,6 +27,8 @@ export async function GET(req: NextRequest) {
     if (!authUser) return err('Unauthorized', 401)
 
     const clientId = getClientIdFromRequest(req)
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'catalog:read')
+    if (denied) return denied
     const sp = req.nextUrl.searchParams
     const search = sp.get('search') ?? undefined
     const isActive = sp.get('isActive')
@@ -66,6 +69,8 @@ export async function POST(req: NextRequest) {
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') return err('Forbidden', 403)
 
     const clientId = getClientIdFromRequest(req)
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'catalog:write')
+    if (denied) return denied
     const body = await req.json()
     const parsed = createSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)

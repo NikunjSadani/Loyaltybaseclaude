@@ -4,6 +4,7 @@ import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
 import { getClientIdFromRequest } from '@/lib/tenant'
 import { revokeAllSessionsForUser } from '@/lib/session'
+import { requirePermission } from '@/lib/rbac/require-permission'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -27,6 +28,8 @@ export async function GET(
 
     const { id } = await params
     const clientId = getClientIdFromRequest(req)
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'users:read')
+    if (denied) return denied
 
     const user = await prisma.user.findFirst({
       where: { id, clientId },
@@ -56,6 +59,8 @@ export async function PATCH(
 
     const { id } = await params
     const clientId = getClientIdFromRequest(req)
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'users:write')
+    if (denied) return denied
     const body = await req.json()
     const parsed = patchSchema.safeParse(body)
     if (!parsed.success) return err(parsed.error.issues[0].message)
@@ -111,6 +116,8 @@ export async function DELETE(
 
     const { id } = await params
     const clientId = getClientIdFromRequest(req)
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'users:delete')
+    if (denied) return denied
 
     if (id === authUser.userId) return err('Cannot delete your own account')
 

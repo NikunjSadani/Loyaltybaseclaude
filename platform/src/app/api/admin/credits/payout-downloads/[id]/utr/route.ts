@@ -4,6 +4,7 @@ import { getAuthUser } from '@/lib/auth';
 import { getClientIdFromRequest } from '@/lib/tenant';
 import { parseUtrUpload } from '@/lib/credits-payouts-utr';
 import { notifyPayoutConfirmed } from '@/lib/credits-payouts-notify';
+import { requirePermission } from '@/lib/rbac/require-permission';
 
 const ok  = (data: unknown, status = 200) => NextResponse.json({ success: true,  data  }, { status });
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status });
@@ -19,6 +20,8 @@ export async function POST(
   if (user.role !== 'GIFSY_ADMIN') return err('Forbidden — GIFSY_ADMIN only', 403);
 
   const clientId = getClientIdFromRequest(req);
+  const denied = await requirePermission(user as { role: string; clientId: string },'credits:mark_paid');
+  if (denied) return denied;
   const { id } = await params;
 
   const download = await prisma.creditPayoutDownload.findFirst({

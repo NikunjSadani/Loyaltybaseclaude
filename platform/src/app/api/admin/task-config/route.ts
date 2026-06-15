@@ -4,6 +4,7 @@ import prisma                        from '@/lib/prisma';
 import { getAuthUser }               from '@/lib/auth';
 import { getClientIdFromRequest }    from '@/lib/tenant';
 import { DEFAULT_TASK_CONFIG }       from '@/lib/task-config';
+import { requirePermission }         from '@/lib/rbac/require-permission';
 
 const SETTING_KEY = 'task_config';
 
@@ -32,6 +33,8 @@ export async function GET(req: NextRequest) {
     if (partnerRoles.includes(authUser.role)) return err('Forbidden', 403);
 
     const clientId = getClientIdFromRequest(req);
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'sales_org:read');
+    if (denied) return denied;
     const row = await prisma.programSetting.findFirst({
       where: { clientId, settingKey: SETTING_KEY },
     });
@@ -53,6 +56,8 @@ export async function PUT(req: NextRequest) {
     }
 
     const clientId = getClientIdFromRequest(req);
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'sales_org:manage_tasks');
+    if (denied) return denied;
     const body     = await req.json();
     const parsed   = taskConfigSchema.safeParse(body);
     if (!parsed.success) return err(parsed.error.issues[0].message);

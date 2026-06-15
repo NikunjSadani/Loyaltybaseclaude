@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthUser } from '@/lib/auth';
 import { getTenantConfig } from '@/lib/platform/server';
+import { requirePermission } from '@/lib/rbac/require-permission';
 
 const ok = (data: unknown, status = 200) =>
   NextResponse.json({ success: true, data }, { status });
@@ -28,6 +29,9 @@ export async function GET(req: NextRequest) {
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') {
       return err('Forbidden', 403);
     }
+
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'tenancy:read');
+    if (denied) return denied;
 
     const config = await getTenantConfig();
 

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getAuthUser } from '@/lib/auth';
 import { getClientIdFromRequest } from '@/lib/tenant';
+import { requirePermission } from '@/lib/rbac/require-permission';
 
 const ok  = (data: unknown, status = 200) => NextResponse.json({ success: true, data }, { status });
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status });
@@ -15,6 +16,8 @@ export async function POST(req: NextRequest) {
     if (!ADMIN_ROLES.has(authUser.role)) return err('Forbidden', 403);
 
     getClientIdFromRequest(req);
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'partners:manage_outlets');
+    if (denied) return denied;
 
     let body: { rows?: unknown[] };
     try {

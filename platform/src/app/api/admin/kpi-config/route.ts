@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getAuthUser } from '@/lib/auth';
 import { getClientIdFromRequest } from '@/lib/tenant';
+import { requirePermission } from '@/lib/rbac/require-permission';
 
 const ok  = (data: unknown, status = 200) => NextResponse.json({ success: true,  data    }, { status });
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status });
@@ -17,6 +18,8 @@ export async function GET(req: NextRequest) {
     }
 
     const clientId = getClientIdFromRequest(req);
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'reports:read');
+    if (denied) return denied;
 
     const setting = await prisma.programSetting.findFirst({
       where: { clientId, settingKey: SETTING_KEY },
@@ -40,6 +43,8 @@ export async function PUT(req: NextRequest) {
     }
 
     const clientId = getClientIdFromRequest(req);
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'reports:manage_scheduled');
+    if (denied) return denied;
     const body = await req.json();
 
     if (!Array.isArray(body)) return err('Expected an array of KPI definitions');

@@ -28,6 +28,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
 import { getClientIdFromRequest } from '@/lib/tenant'
+import { requirePermission } from '@/lib/rbac/require-permission'
 
 const ADMIN_ROLES = new Set(['GIFSY_ADMIN', 'CLIENT_ADMIN'])
 const ok  = (data: any) => NextResponse.json({ success: true,  data  })
@@ -38,6 +39,8 @@ export async function POST(req: NextRequest) {
   if (!authUser)                       return err('Unauthorized', 401)
   if (!ADMIN_ROLES.has(authUser.role)) return err('Forbidden', 403)
   const clientId = getClientIdFromRequest(req)
+  const denied = await requirePermission(authUser as { role: string; clientId: string },'users:write')
+  if (denied) return denied
 
   let body: any
   try {

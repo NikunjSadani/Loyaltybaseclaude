@@ -16,6 +16,7 @@ import {
   generateOutletMasterExcel,
   DEMO_OUTLET_MASTER_ROWS,
 } from '@/lib/outlet-master-export'
+import { requirePermission } from '@/lib/rbac/require-permission'
 
 const ADMIN_ROLES = new Set(['GIFSY_ADMIN', 'CLIENT_ADMIN'])
 
@@ -23,6 +24,9 @@ export async function GET(req: NextRequest) {
   const authUser = await getAuthUser(req)
   if (!authUser)                       return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
   if (!ADMIN_ROLES.has(authUser.role)) return NextResponse.json({ success: false, error: 'Forbidden' }, { status: 403 })
+
+  const denied = await requirePermission(authUser as { role: string; clientId: string },'reports:export')
+  if (denied) return denied
 
   // ── DEMO_MODE ──────────────────────────────────────────────────────────────
   if (process.env.DEMO_MODE === 'true') {

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getAuthUser } from '@/lib/auth'
 import { getClientIdFromRequest } from '@/lib/tenant'
+import { requirePermission } from '@/lib/rbac/require-permission'
 
 const ok  = (data: any, status = 200) => NextResponse.json({ success: true,  data  }, { status })
 const err = (msg: string, status = 400) => NextResponse.json({ success: false, error: msg }, { status })
@@ -24,6 +25,8 @@ export async function GET(req: NextRequest) {
     if (!ALLOWED_ROLES.has(authUser.role)) return err('Forbidden', 403)
 
     const clientId = getClientIdFromRequest(req)
+    const denied = await requirePermission(authUser as { role: string; clientId: string },'reports:read')
+    if (denied) return denied
 
     const [
       activePartners,
