@@ -20,7 +20,7 @@ function mapStatus(s: string): 'PAID' | 'PENDING' | 'PROCESSING' | 'FAILED' {
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req)
+    const authUser = await getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
 
     const partner = await prisma.channelPartner.findFirst({

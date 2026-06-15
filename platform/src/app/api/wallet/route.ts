@@ -10,7 +10,7 @@ const CONVERSION_RATE = parseFloat(process.env.POINTS_CONVERSION_RATE ?? '1') //
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req)
+    const authUser = await getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     const clientId = getClientIdFromRequest(req)
 

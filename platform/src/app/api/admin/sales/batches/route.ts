@@ -19,7 +19,7 @@ const ok  = (data: unknown) => NextResponse.json({ success: true,  data  });
 const err = (msg: string, status: number) => NextResponse.json({ success: false, error: msg }, { status });
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const user = getAuthUser(req);
+  const user = await getAuthUser(req);
   if (!user) return err('Unauthorized', 401);
   if (!ALLOWED_ROLES.includes(user.role)) return err('Forbidden', 403);
 

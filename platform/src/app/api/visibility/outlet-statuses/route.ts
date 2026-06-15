@@ -29,7 +29,7 @@ const partnerRoles = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req);
+    const authUser = await getAuthUser(req);
     if (!authUser) return err('Unauthorized', 401);
     if (partnerRoles.includes(authUser.role)) return err('Forbidden', 403);
 

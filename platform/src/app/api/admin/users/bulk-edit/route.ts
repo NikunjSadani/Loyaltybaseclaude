@@ -34,7 +34,7 @@ const ok  = (data: any) => NextResponse.json({ success: true,  data  })
 const err = (msg: string, status = 400) => NextResponse.json({ success: false, error: msg }, { status })
 
 export async function POST(req: NextRequest) {
-  const authUser = getAuthUser(req)
+  const authUser = await getAuthUser(req)
   if (!authUser)                       return err('Unauthorized', 401)
   if (!ADMIN_ROLES.has(authUser.role)) return err('Forbidden', 403)
   const clientId = getClientIdFromRequest(req)

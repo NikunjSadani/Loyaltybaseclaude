@@ -24,7 +24,7 @@ const taskConfigSchema = z.object({
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req);
+    const authUser = await getAuthUser(req);
     if (!authUser) return err('Unauthorized', 401);
     // All authenticated users (admin + all sales roles) can read task config.
     // Partners (RETAILER / WHOLESALER / SUB_STOCKIST) are blocked.
@@ -46,7 +46,7 @@ export async function GET(req: NextRequest) {
 
 export async function PUT(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req);
+    const authUser = await getAuthUser(req);
     if (!authUser) return err('Unauthorized', 401);
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') {
       return err('Forbidden', 403);

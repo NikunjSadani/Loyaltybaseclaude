@@ -60,7 +60,7 @@ interface ErrorRow {
 export async function POST(req: NextRequest) {
   try {
     // ── Auth ──────────────────────────────────────────────────────────────────
-    const authUser = getAuthUser(req);
+    const authUser = await getAuthUser(req);
     if (!authUser) return err('Unauthorized', 401);
     if (!WRITE_ROLES.includes(authUser.role)) {
       return err(

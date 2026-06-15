@@ -10,7 +10,7 @@ const SLA_TARGET_HOURS = parseInt(process.env.SLA_TARGET_HOURS ?? '48', 10)
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req)
+    const authUser = await getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN') return err('Forbidden - Gifsy Admin only', 403)
     const clientId = getClientIdFromRequest(req)

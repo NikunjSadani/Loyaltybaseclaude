@@ -39,7 +39,7 @@ const schemeSchema = z.object({
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req)
+    const authUser = await getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
 
     const clientId = getClientIdFromRequest(req)
@@ -82,7 +82,7 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req)
+    const authUser = await getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') {
       return err('Forbidden - Admin only', 403)

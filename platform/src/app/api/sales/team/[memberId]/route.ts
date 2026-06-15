@@ -10,7 +10,7 @@ export async function GET(
   { params }: { params: Promise<{ memberId: string }> },
 ) {
   try {
-    const authUser = getAuthUser(req)
+    const authUser = await getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
 
     const { memberId } = await params

@@ -36,7 +36,7 @@ export async function PUT(
   req:     NextRequest,
   context: { params: Promise<{ slug: string; code: string }> },
 ) {
-  const user = getAuthUser(req);
+  const user = await getAuthUser(req);
   if (!user)                         return err('Unauthorized', 401);
   if (!ALLOWED_ROLES.has(user.role)) return err('Forbidden', 403);
 

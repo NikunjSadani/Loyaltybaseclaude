@@ -23,7 +23,7 @@ const err = (message: string, status = 400) =>
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req);
+    const authUser = await getAuthUser(req);
     if (!authUser) return err('Unauthorized', 401);
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') {
       return err('Forbidden', 403);

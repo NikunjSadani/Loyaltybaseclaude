@@ -61,7 +61,7 @@ const partnerRoles = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req);
+    const authUser = await getAuthUser(req);
     if (!authUser) return err('Unauthorized', 401);
     if (partnerRoles.includes(authUser.role)) return err('Forbidden', 403);
 
@@ -84,7 +84,7 @@ export async function GET(req: NextRequest) {
 
 export async function PUT(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req);
+    const authUser = await getAuthUser(req);
     if (!authUser) return err('Unauthorized', 401);
     if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') {
       return err('Forbidden', 403);

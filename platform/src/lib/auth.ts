@@ -1,6 +1,7 @@
 ﻿import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { prisma } from './prisma';
+import { validateSession } from './session';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -180,30 +181,82 @@ export async function compareHash(
 // ─── Request Helper ───────────────────────────────────────────────────────────
 
 /**
- * Extract the authenticated user from a request.
+ * Extract and validate the authenticated user from a request.
  *
- * Priority:
- *  1. Proxy-injected headers (x-user-id / x-user-role) — set by the Edge
- *     proxy after JWT verification, and also in DEMO_MODE. Trusting these is
- *     safe because they can only be set by the proxy, not by the client.
- *  2. Authorization: Bearer <token> — fallback for direct API calls that
- *     explicitly pass a JWT (e.g. server-side fetch calls).
+ * Logic (in order):
+ *  1. DEMO_MODE: if x-user-id and x-user-role headers are present (injected
+ *     by the proxy in DEMO_MODE=true), return a demo identity immediately.
+ *     Demo requests carry no real session, so validateSession is NOT called.
+ *  2. Real path:
+ *     a. Read the token from Authorization: Bearer <t> (case-insensitive) or
+ *        from the `token` cookie parsed out of the raw Cookie header. The raw
+ *        cookie approach is used so that callers passing a minimal
+ *        `{ headers: { get } }` object (without a .cookies property) work
+ *        correctly — which is the pattern used throughout the codebase.
+ *     b. verifyToken() — if null, or payload has no sid, reject (non-session
+ *        legacy tokens are not accepted on the authenticated path).
+ *     c. validateSession(payload.sid) — checks revoked/idle-expired and bumps
+ *        the sliding window. Returns null → reject.
+ *     d. Return { userId, role, clientId } from the session (clientId is the
+ *        tenant bound at login — 1.8 binding). Include partnerId if present.
  *
- * Returns null if neither source provides a valid identity.
+ * Returns null if no valid, live session is found.
  */
-export function getAuthUser(req: { headers: { get: (key: string) => string | null } }): TokenPayload | null {
-  // 1. Proxy-injected headers (DEMO_MODE + normal authenticated requests)
-  const userId = req.headers.get('x-user-id');
-  const role   = req.headers.get('x-user-role');
-  if (userId && role) {
-    return { userId, role } as TokenPayload;
+export async function getAuthUser(
+  req: { headers: { get: (key: string) => string | null } },
+): Promise<TokenPayload | null> {
+  // 1. DEMO_MODE — proxy injects x-user-id/x-user-role; no session exists.
+  if (process.env.DEMO_MODE === 'true') {
+    const userId = req.headers.get('x-user-id');
+    const role   = req.headers.get('x-user-role');
+    if (userId && role) {
+      const tenantSlug = req.headers.get('x-tenant-slug');
+      return { userId, role, clientId: tenantSlug ?? 'deoleo' } as TokenPayload;
+    }
+    // DEMO_MODE but no injected headers — fall through to null (should not happen in practice).
+    return null;
   }
 
-  // 2. Bearer token fallback
-  const authHeader = req.headers.get('Authorization') ?? req.headers.get('authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
-  const token = authHeader.slice(7);
-  return verifyToken(token);
+  // 2. Real path — read the raw token.
+  let token: string | null = null;
+
+  // 2a. Authorization: Bearer <token> (case-insensitive header name)
+  const authHeader =
+    req.headers.get('authorization') ?? req.headers.get('Authorization');
+  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
+    token = authHeader.slice(7).trim();
+  }
+
+  // 2a (alt). Cookie: token=<value> — parse the raw Cookie header so callers
+  //           that pass a minimal { headers: { get } } object still work.
+  if (!token) {
+    const cookieHeader = req.headers.get('cookie') ?? req.headers.get('Cookie');
+    if (cookieHeader) {
+      // Find `token=<value>` in a semicolon-separated list of name=value pairs.
+      const match = cookieHeader.match(/(?:^|;\s*)token=([^;]+)/);
+      if (match) token = decodeURIComponent(match[1].trim());
+    }
+  }
+
+  if (!token) return null;
+
+  // 2b. Verify JWT signature/expiry and extract claims.
+  const payload = verifyToken(token);
+  if (!payload || !payload.sid) return null; // non-session / legacy tokens rejected
+
+  // 2c. Validate the server-side session (revoked? idle-expired? bumps window).
+  const session = await validateSession(payload.sid);
+  if (!session) return null;
+
+  // 2d. Return the merged identity: userId+clientId from the session (authoritative),
+  //     role+partnerId from the JWT claims.
+  const result: TokenPayload = {
+    userId: session.userId,
+    role: payload.role,
+    clientId: session.clientId,
+  };
+  if (payload.partnerId) result.partnerId = payload.partnerId;
+  return result;
 }
 
 // ─── Legacy exports for backward compatibility ────────────────────────────────

@@ -19,7 +19,7 @@ const err = (msg: string, status = 400) => NextResponse.json({ success: false, e
  *   { success: true, data: { lastUploadedAt: string | null } }
  */
 export async function GET(req: NextRequest) {
-  const authUser = getAuthUser(req);
+  const authUser = await getAuthUser(req);
   if (!authUser) return err('Unauthorized', 401);
 
   const clientId = getClientIdFromRequest(req);

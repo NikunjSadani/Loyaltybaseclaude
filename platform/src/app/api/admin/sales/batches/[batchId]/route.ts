@@ -29,7 +29,7 @@ interface RouteContext {
 
 export async function DELETE(req: NextRequest, ctx: RouteContext): Promise<NextResponse> {
   // ── Auth ──────────────────────────────────────────────────────────────────
-  const user = getAuthUser(req);
+  const user = await getAuthUser(req);
   if (!user) return err('Unauthorized', 401);
   if (!ALLOWED_ROLES.includes(user.role)) return err('Forbidden', 403);
 

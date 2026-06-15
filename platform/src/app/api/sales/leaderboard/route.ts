@@ -9,7 +9,7 @@ type ScopeFilter = 'rm' | 'state' | 'national'
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req)
+    const authUser = await getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
 
     const scope = (req.nextUrl.searchParams.get('scope') ?? 'rm') as ScopeFilter

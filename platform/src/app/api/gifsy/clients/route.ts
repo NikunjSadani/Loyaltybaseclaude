@@ -7,7 +7,7 @@ const err = (msg: string, status = 400) => NextResponse.json({ success: false, e
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req)
+    const authUser = await getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (authUser.role !== 'GIFSY_ADMIN') return err('Forbidden', 403)
 

@@ -19,7 +19,7 @@ const ALLOWED_ROLES = new Set(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'])
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req)
+    const authUser = await getAuthUser(req)
     if (!authUser) return err('Unauthorized', 401)
     if (!ALLOWED_ROLES.has(authUser.role)) return err('Forbidden', 403)
 

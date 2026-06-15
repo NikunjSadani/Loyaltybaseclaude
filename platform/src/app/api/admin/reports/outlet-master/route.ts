@@ -20,7 +20,7 @@ import {
 const ADMIN_ROLES = new Set(['GIFSY_ADMIN', 'CLIENT_ADMIN'])
 
 export async function GET(req: NextRequest) {
-  const authUser = getAuthUser(req)
+  const authUser = await getAuthUser(req)
   if (!authUser)                       return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
   if (!ADMIN_ROLES.has(authUser.role)) return NextResponse.json({ success: false, error: 'Forbidden' }, { status: 403 })
 

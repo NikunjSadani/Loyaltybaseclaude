@@ -10,7 +10,7 @@ const ADMIN_ROLES = new Set(['GIFSY_ADMIN', 'CLIENT_ADMIN']);
 
 export async function GET(req: NextRequest) {
   try {
-    const authUser = getAuthUser(req);
+    const authUser = await getAuthUser(req);
     if (!authUser) return err('Unauthorized', 401);
     if (!ADMIN_ROLES.has(authUser.role)) return err('Forbidden', 403);
 
