@@ -24,7 +24,8 @@ export type FormFieldType =
   | 'CAMERA'         // live camera capture (distinct from file-picker IMAGE)
   | 'GPS_POINT'
   | 'UPI_QR_SCAN'    // camera → scan QR code → extract and populate UPI ID
-  | 'DATA_DISPLAY';  // read-only: shows an Excel-uploaded data point, no user input
+  | 'DATA_DISPLAY'   // read-only: shows an Excel-uploaded data point, no user input
+  | 'CALCULATED';    // read-only: auto-computed from other fields via a formula
 
 /**
  * Controls which outlet segment sees a field.
@@ -37,6 +38,16 @@ export type FieldAudience = 'ALL' | 'LOYALTY_MEMBERS' | 'NON_LOYALTY_MEMBERS';
 // ─────────────────────────────────────────────────────────────────────────────
 // Form config types
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Single-condition visibility rule: show a field only when a given condition
+ * on another field's current value is met.
+ */
+export interface VisibleWhen {
+  fieldId: string;
+  op: 'eq' | 'neq' | 'gt' | 'lt' | 'contains';
+  value: string;
+}
 
 export interface FormField {
   id: string;
@@ -58,6 +69,17 @@ export interface FormField {
    * Excel-uploaded data point (e.g. 'last_month_sales', 'outlet_score').
    */
   dataDisplayKey?: string;
+  /**
+   * For CALCULATED fields — arithmetic formula referencing other field ids as
+   * `{fieldId}` tokens, e.g. "{abc123} * {def456} * 0.05".
+   * Supports + - * / % and parentheses only (no eval/Function).
+   */
+  formula?: string;
+  /**
+   * Optional single-condition visibility rule. When set, this field is only
+   * rendered/validated when the condition evaluates to true.
+   */
+  visibleWhen?: VisibleWhen;
   order: number;
 }
 
@@ -312,6 +334,171 @@ export function reorderFields(
   return copy.map((f, i) => ({ ...f, order: i }));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Conditional visibility
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Evaluates a single VisibleWhen condition against the current field values.
+ * - eq / neq / contains: string comparison (coerces value to string)
+ * - gt / lt: numeric comparison via parseFloat; NaN on either side → false
+ */
+export function evaluateCondition(
+  cond: VisibleWhen,
+  values: Record<string, unknown>,
+): boolean {
+  const left = String(values[cond.fieldId] ?? '');
+  const { op, value } = cond;
+
+  if (op === 'eq')       return left === value;
+  if (op === 'neq')      return left !== value;
+  if (op === 'contains') return left.includes(value);
+
+  // Numeric operators
+  const lNum = parseFloat(left);
+  const rNum = parseFloat(value);
+  if (isNaN(lNum) || isNaN(rNum)) return false;
+  if (op === 'gt') return lNum > rNum;
+  if (op === 'lt') return lNum < rNum;
+
+  return false;
+}
+
+/**
+ * Returns true if the field should be shown (and validated) given current
+ * form values. A field without `visibleWhen` is always visible.
+ */
+export function isFieldVisible(
+  field: FormField,
+  values: Record<string, unknown>,
+): boolean {
+  if (!field.visibleWhen) return true;
+  return evaluateCondition(field.visibleWhen, values);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Formula evaluator (shunting-yard, NO eval/Function)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Evaluates a CALCULATED field formula safely — no eval or Function().
+ *
+ * Steps:
+ *  1. Replace each `{fieldId}` token with the numeric value from `values`
+ *     (blank / non-numeric → 0).
+ *  2. Tokenize: numbers (including decimals), operators + - * / %, parentheses.
+ *     Any other character → return null (invalid formula).
+ *  3. Shunting-yard algorithm → RPN.
+ *  4. RPN evaluation.  Division / modulo by zero → null.
+ *
+ * Empty or whitespace-only formula → null.
+ */
+export function computeFormula(
+  formula: string,
+  values: Record<string, unknown>,
+): number | null {
+  if (!formula.trim()) return null;
+
+  // Step 1: substitute {id} tokens
+  const substituted = formula.replace(/\{([^}]+)\}/g, (_match, id: string) => {
+    const raw = values[id];
+    if (raw === undefined || raw === null || String(raw).trim() === '') return '0';
+    const n = parseFloat(String(raw));
+    return isNaN(n) ? '0' : String(n);
+  });
+
+  // Step 2: tokenize
+  type Token = { kind: 'num'; val: number } | { kind: 'op'; val: string } | { kind: 'paren'; val: string };
+  const tokens: Token[] = [];
+  let i = 0;
+  while (i < substituted.length) {
+    const ch = substituted[i];
+    if (ch === ' ' || ch === '\t') { i++; continue; }
+
+    // Number (integer or decimal)
+    if (ch >= '0' && ch <= '9' || ch === '.') {
+      let numStr = '';
+      while (i < substituted.length && (substituted[i] >= '0' && substituted[i] <= '9' || substituted[i] === '.')) {
+        numStr += substituted[i++];
+      }
+      const n = parseFloat(numStr);
+      if (isNaN(n)) return null;
+      tokens.push({ kind: 'num', val: n });
+      continue;
+    }
+
+    if ('+-*/%'.includes(ch)) { tokens.push({ kind: 'op', val: ch }); i++; continue; }
+    if (ch === '(' || ch === ')') { tokens.push({ kind: 'paren', val: ch }); i++; continue; }
+
+    // Any unrecognised character → invalid
+    return null;
+  }
+
+  if (tokens.length === 0) return null;
+
+  // Step 3: shunting-yard → RPN
+  const precedence: Record<string, number> = { '+': 1, '-': 1, '*': 2, '/': 2, '%': 2 };
+  const output: Token[] = [];
+  const opStack: Token[] = [];
+
+  for (const tok of tokens) {
+    if (tok.kind === 'num') {
+      output.push(tok);
+    } else if (tok.kind === 'op') {
+      while (
+        opStack.length > 0 &&
+        opStack[opStack.length - 1].kind === 'op' &&
+        precedence[opStack[opStack.length - 1].val] >= precedence[tok.val]
+      ) {
+        output.push(opStack.pop()!);
+      }
+      opStack.push(tok);
+    } else if (tok.val === '(') {
+      opStack.push(tok);
+    } else if (tok.val === ')') {
+      while (opStack.length > 0 && !(opStack[opStack.length - 1].kind === 'paren' && opStack[opStack.length - 1].val === '(')) {
+        output.push(opStack.pop()!);
+      }
+      if (opStack.length === 0) return null; // mismatched paren
+      opStack.pop(); // discard '('
+    }
+  }
+
+  while (opStack.length > 0) {
+    const top = opStack.pop()!;
+    if (top.kind === 'paren') return null; // mismatched paren
+    output.push(top);
+  }
+
+  // Step 4: RPN evaluation
+  const stack: number[] = [];
+  for (const tok of output) {
+    if (tok.kind === 'num') {
+      stack.push(tok.val);
+    } else {
+      if (stack.length < 2) return null;
+      const b = stack.pop()!;
+      const a = stack.pop()!;
+      let result: number;
+      if (tok.val === '+') result = a + b;
+      else if (tok.val === '-') result = a - b;
+      else if (tok.val === '*') result = a * b;
+      else if (tok.val === '/') {
+        if (b === 0) return null;
+        result = a / b;
+      } else if (tok.val === '%') {
+        if (b === 0) return null;
+        result = a % b;
+      } else return null;
+      stack.push(result);
+    }
+  }
+
+  if (stack.length !== 1) return null;
+  const result = stack[0];
+  return isFinite(result) ? result : null;
+}
+
 /**
  * Validates an EnrollmentFormConfig.
  * Returns an array of human-readable error messages; empty = valid.
@@ -325,6 +512,8 @@ export function validateEnrollmentFormConfig(
     errors.push('The enrollment form must have at least one field.');
   }
 
+  const fieldIds = new Set(config.fields.map((f) => f.id));
+
   config.fields.forEach((field, i) => {
     const pos = `Field ${i + 1}`;
     if (!field.label.trim()) {
@@ -333,6 +522,31 @@ export function validateEnrollmentFormConfig(
     if (field.type === 'DROPDOWN') {
       if (!field.options || field.options.length === 0) {
         errors.push(`${pos} ("${field.label || 'Dropdown'}"): must have at least one option.`);
+      }
+    }
+
+    // CALCULATED: formula must not be empty; all {id} references must exist
+    if (field.type === 'CALCULATED') {
+      const formula = field.formula ?? '';
+      if (!formula.trim()) {
+        errors.push(`${pos} ("${field.label || 'Calculation'}"): formula cannot be empty.`);
+      } else {
+        const refs = Array.from(formula.matchAll(/\{([^}]+)\}/g)).map((m) => m[1]);
+        for (const ref of refs) {
+          if (!fieldIds.has(ref)) {
+            errors.push(`${pos} ("${field.label || 'Calculation'}"): formula references unknown field id "${ref}".`);
+          }
+        }
+      }
+    }
+
+    // visibleWhen: fieldId must exist and must not reference itself
+    if (field.visibleWhen) {
+      const vw = field.visibleWhen;
+      if (vw.fieldId === field.id) {
+        errors.push(`${pos} ("${field.label || field.type}"): visibleWhen cannot depend on itself.`);
+      } else if (!fieldIds.has(vw.fieldId)) {
+        errors.push(`${pos} ("${field.label || field.type}"): visibleWhen references unknown field id "${vw.fieldId}".`);
       }
     }
   });
@@ -382,6 +596,9 @@ export function validateFieldValues(
   for (const field of fields) {
     if (!field.required)               continue;
     if (field.type === 'DATA_DISPLAY') continue; // never user-filled
+    if (field.type === 'CALCULATED')   continue; // read-only, never blocking
+    // Hidden fields (conditional visibility) must not block submit
+    if (!isFieldVisible(field, values)) continue;
 
     const val = values[field.id];
 

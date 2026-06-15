@@ -19,9 +19,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Camera, MapPin, QrCode, StopCircle, Lock, Upload,
-  AlertCircle, CheckCircle, Eye,
+  AlertCircle, CheckCircle, Eye, Calculator,
 } from 'lucide-react';
-import { filterFieldsByAudience, validateFieldValues, type FormField } from '@/lib/campaign';
+import { filterFieldsByAudience, isFieldVisible, computeFormula, validateFieldValues, type FormField } from '@/lib/campaign';
 import { isValidUpiId, parseUpiFromQr } from '@/lib/upi-utils';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -461,10 +461,11 @@ export function EnrollmentFormRenderer({
   onSubmit,
   submitLabel = 'Submit',
 }: EnrollmentFormRendererProps) {
-  // Filter by audience first
-  const visibleFields = filterFieldsByAudience(fields, isLoyaltyMember);
+  // Filter by audience first, then by conditional visibility
+  const audienceFields = filterFieldsByAudience(fields, isLoyaltyMember);
+  const visibleFields  = audienceFields.filter((f) => isFieldVisible(f, values));
 
-  // Validate to determine if submit is enabled
+  // Validate to determine if submit is enabled (only visible fields count)
   const { valid } = validateFieldValues(visibleFields, values);
 
   const handleSubmit = () => {
@@ -485,6 +486,22 @@ export function EnrollmentFormRenderer({
   return (
     <div className="space-y-4">
       {visibleFields.map((field) => {
+        // CALCULATED — read-only computed chip
+        if (field.type === 'CALCULATED') {
+          const result = computeFormula(field.formula ?? '', values);
+          const display = result !== null ? result.toLocaleString() : '—';
+          return (
+            <div key={field.id}>
+              <p className={labelCls}>{field.label}</p>
+              <div className="flex items-center gap-2 px-3 py-2.5 bg-orange-50 border border-orange-200 rounded-xl">
+                <Calculator className="h-3.5 w-3.5 text-orange-400 shrink-0" />
+                <span className="text-sm font-medium text-orange-700">{display}</span>
+              </div>
+              {field.helpText && <p className={helpCls}>{field.helpText}</p>}
+            </div>
+          );
+        }
+
         // DATA_DISPLAY — always read-only from prefillData
         if (field.type === 'DATA_DISPLAY') {
           return <DataDisplayField key={field.id} field={field} prefillData={prefillData} />;

@@ -41,6 +41,7 @@ import {
   Users,
   UserCheck,
   UserX,
+  Calculator,
 } from 'lucide-react';
 import {
   reorderFields,
@@ -49,21 +50,23 @@ import {
   type FormFieldType,
   type FieldAudience,
   type EnrollmentFormConfig,
+  type VisibleWhen,
 } from '@/lib/campaign';
 
 // ── Field type metadata ───────────────────────────────────────────────────────
 
 const FIELD_TYPES: { type: FormFieldType; label: string; icon: React.ReactNode; desc: string }[] = [
-  { type: 'TEXT',         label: 'Text',          icon: <Type className="w-4 h-4" />,     desc: 'Single-line text input' },
-  { type: 'NUMBER',       label: 'Number',         icon: <Hash className="w-4 h-4" />,     desc: 'Numeric value' },
-  { type: 'DROPDOWN',     label: 'Dropdown',       icon: <List className="w-4 h-4" />,     desc: 'Select from a list' },
-  { type: 'DATE',         label: 'Date',           icon: <Calendar className="w-4 h-4" />, desc: 'Date picker' },
-  { type: 'DOCUMENT',     label: 'Document',       icon: <FileText className="w-4 h-4" />, desc: 'File / PDF upload' },
-  { type: 'IMAGE',        label: 'Photo Upload',   icon: <Camera className="w-4 h-4" />,   desc: 'Gallery image picker + GPS tag' },
-  { type: 'CAMERA',       label: 'Camera Capture', icon: <Camera className="w-4 h-4" />,   desc: 'Live camera → still + GPS tag' },
-  { type: 'GPS_POINT',    label: 'GPS Location',   icon: <MapPin className="w-4 h-4" />,   desc: 'Explicit lat/lng pin drop' },
-  { type: 'UPI_QR_SCAN',  label: 'UPI QR Scan',    icon: <QrCode className="w-4 h-4" />,   desc: 'Scan QR code → extract UPI ID' },
-  { type: 'DATA_DISPLAY', label: 'Data Display',   icon: <Eye className="w-4 h-4" />,      desc: 'Read-only: shows Excel data point' },
+  { type: 'TEXT',         label: 'Text',          icon: <Type className="w-4 h-4" />,           desc: 'Single-line text input' },
+  { type: 'NUMBER',       label: 'Number',         icon: <Hash className="w-4 h-4" />,           desc: 'Numeric value' },
+  { type: 'DROPDOWN',     label: 'Dropdown',       icon: <List className="w-4 h-4" />,           desc: 'Select from a list' },
+  { type: 'DATE',         label: 'Date',           icon: <Calendar className="w-4 h-4" />,       desc: 'Date picker' },
+  { type: 'DOCUMENT',     label: 'Document',       icon: <FileText className="w-4 h-4" />,       desc: 'File / PDF upload' },
+  { type: 'IMAGE',        label: 'Photo Upload',   icon: <Camera className="w-4 h-4" />,         desc: 'Gallery image picker + GPS tag' },
+  { type: 'CAMERA',       label: 'Camera Capture', icon: <Camera className="w-4 h-4" />,         desc: 'Live camera → still + GPS tag' },
+  { type: 'GPS_POINT',    label: 'GPS Location',   icon: <MapPin className="w-4 h-4" />,         desc: 'Explicit lat/lng pin drop' },
+  { type: 'UPI_QR_SCAN',  label: 'UPI QR Scan',    icon: <QrCode className="w-4 h-4" />,         desc: 'Scan QR code → extract UPI ID' },
+  { type: 'DATA_DISPLAY', label: 'Data Display',   icon: <Eye className="w-4 h-4" />,            desc: 'Read-only: shows Excel data point' },
+  { type: 'CALCULATED',   label: 'Calculation',    icon: <Calculator className="w-4 h-4" />,     desc: 'Auto-computed from other fields' },
 ];
 
 const TYPE_BG: Record<FormFieldType, string> = {
@@ -77,6 +80,7 @@ const TYPE_BG: Record<FormFieldType, string> = {
   GPS_POINT:    'bg-green-50 text-green-600',
   UPI_QR_SCAN:  'bg-indigo-50 text-indigo-600',
   DATA_DISPLAY: 'bg-slate-100 text-slate-600',
+  CALCULATED:   'bg-orange-50 text-orange-600',
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -92,6 +96,7 @@ function defaultField(type: FormFieldType, order: number): FormField {
     placeholder: '',
     helpText: '',
     options: type === 'DROPDOWN' ? [''] : undefined,
+    formula: type === 'CALCULATED' ? '' : undefined,
     autoFillFromExcel: false,
     autoFillEditable: false,
     order,
@@ -172,6 +177,12 @@ function MobilePreviewField({ field }: { field: FormField }) {
           <span className="text-[11px] text-slate-600 font-medium">
             {field.dataDisplayKey ? `[${field.dataDisplayKey}]` : '[ Excel value ]'}
           </span>
+        </div>
+      )}
+      {field.type === 'CALCULATED' && (
+        <div className="flex items-center gap-2 px-2.5 py-2 bg-orange-50 border border-orange-200 rounded-full">
+          <Calculator className="w-3 h-3 text-orange-400" />
+          <span className="text-[11px] text-orange-600 font-medium">= computed value</span>
         </div>
       )}
       {field.helpText && (
@@ -290,7 +301,7 @@ export function EnrollmentFormBuilder({ config, onChange, showAutoFill = false }
             </button>
             <div>
               <p className="text-xs font-medium text-gray-800">Require OTP verification</p>
-              <p className="text-[11px] text-gray-500">OTP sent to outlet's registered phone via MSG91 before submission</p>
+              <p className="text-[11px] text-gray-500">OTP sent to outlet&apos;s registered phone via MSG91 before submission</p>
             </div>
           </label>
         </div>
@@ -348,18 +359,27 @@ export function EnrollmentFormBuilder({ config, onChange, showAutoFill = false }
                   className="flex-1 text-xs border-0 focus:outline-none text-gray-800 placeholder-gray-300 bg-transparent"
                 />
 
-                {/* Required badge */}
-                <button
-                  type="button"
-                  onClick={() => setField(field.id, { required: !field.required })}
-                  className={`text-[10px] px-2 py-0.5 rounded-full font-medium transition-colors flex-shrink-0 ${
-                    field.required
-                      ? 'bg-red-50 text-red-600 border border-red-200'
-                      : 'bg-gray-100 text-gray-400 border border-transparent'
-                  }`}
-                >
-                  {field.required ? 'Required' : 'Optional'}
-                </button>
+                {/* Conditional badge — shown when visibleWhen is set */}
+                {field.visibleWhen && (
+                  <span className="text-[10px] px-2 py-0.5 rounded-full font-medium flex-shrink-0 bg-violet-50 text-violet-600 border border-violet-200">
+                    Conditional
+                  </span>
+                )}
+
+                {/* Required badge — hidden for CALCULATED (read-only) */}
+                {field.type !== 'CALCULATED' && (
+                  <button
+                    type="button"
+                    onClick={() => setField(field.id, { required: !field.required })}
+                    className={`text-[10px] px-2 py-0.5 rounded-full font-medium transition-colors flex-shrink-0 ${
+                      field.required
+                        ? 'bg-red-50 text-red-600 border border-red-200'
+                        : 'bg-gray-100 text-gray-400 border border-transparent'
+                    }`}
+                  >
+                    {field.required ? 'Required' : 'Optional'}
+                  </button>
+                )}
 
                 {/* Expand toggle */}
                 <button
@@ -408,8 +428,8 @@ export function EnrollmentFormBuilder({ config, onChange, showAutoFill = false }
                     </div>
                   </div>
 
-                  {/* Placeholder + help text (not shown for DATA_DISPLAY) */}
-                  {field.type !== 'DATA_DISPLAY' && (
+                  {/* Placeholder + help text (not shown for DATA_DISPLAY or CALCULATED) */}
+                  {field.type !== 'DATA_DISPLAY' && field.type !== 'CALCULATED' && (
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-[10px] text-gray-500 mb-1">Placeholder text</label>
@@ -511,6 +531,163 @@ export function EnrollmentFormBuilder({ config, onChange, showAutoFill = false }
                       </p>
                     </div>
                   )}
+
+                  {/* CALCULATED — formula editor */}
+                  {field.type === 'CALCULATED' && (() => {
+                    // Fields available to reference: NUMBER and CALCULATED fields that are not this field
+                    const numericFields = config.fields.filter(
+                      (f) => f.id !== field.id && (f.type === 'NUMBER' || f.type === 'CALCULATED'),
+                    );
+                    // Build a human-readable preview: replace {id} with field label
+                    const formulaPreview = (field.formula ?? '').replace(
+                      /\{([^}]+)\}/g,
+                      (_m, id: string) => {
+                        const ref = config.fields.find((f) => f.id === id);
+                        return ref ? `[${ref.label || 'Untitled'}]` : `{${id}}`;
+                      },
+                    );
+                    const appendToken = (token: string) =>
+                      setField(field.id, { formula: (field.formula ?? '') + token });
+
+                    return (
+                      <div className="space-y-2">
+                        <label className="block text-[10px] text-gray-500">Formula</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={field.formula ?? ''}
+                            onChange={(e) => setField(field.id, { formula: e.target.value })}
+                            placeholder='e.g. {fieldId} * 0.05'
+                            className="flex-1 text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] font-mono"
+                          />
+                          {numericFields.length > 0 && (
+                            <div className="relative">
+                              <select
+                                defaultValue=""
+                                onChange={(e) => {
+                                  if (e.target.value) { appendToken(`{${e.target.value}}`); e.target.value = ''; }
+                                }}
+                                className="text-[10px] border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] bg-white text-gray-600 cursor-pointer"
+                              >
+                                <option value="">Insert field ▾</option>
+                                {numericFields.map((f) => (
+                                  <option key={f.id} value={f.id}>{f.label || '(Untitled)'}</option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                        </div>
+                        {formulaPreview && (
+                          <p className="text-[10px] text-orange-600 bg-orange-50 rounded px-2 py-1 font-mono break-all">
+                            = {formulaPreview}
+                          </p>
+                        )}
+                        <p className="text-[10px] text-gray-400">Uses + − × ÷ % and ( ) · references other fields as &#123;fieldId&#125;</p>
+                        <div className="flex items-start gap-2 bg-orange-50 border border-orange-100 rounded-lg px-3 py-2">
+                          <Info className="w-3.5 h-3.5 text-orange-400 flex-shrink-0 mt-0.5" />
+                          <p className="text-[11px] text-orange-600">
+                            Read-only field — value is computed automatically from the formula above. The partner cannot edit this value.
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Conditional display — "Show only when…" — available for every field */}
+                  {(() => {
+                    const otherFields = config.fields.filter((f) => f.id !== field.id);
+                    const vw = field.visibleWhen;
+                    const condEnabled = !!vw;
+                    const depField = vw ? config.fields.find((f) => f.id === vw.fieldId) : undefined;
+                    const OP_LABELS: { value: VisibleWhen['op']; label: string }[] = [
+                      { value: 'eq',       label: 'is' },
+                      { value: 'neq',      label: 'is not' },
+                      { value: 'contains', label: 'contains' },
+                      { value: 'gt',       label: '>' },
+                      { value: 'lt',       label: '<' },
+                    ];
+                    return (
+                      <div className="pt-1 border-t border-gray-100 space-y-2">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={condEnabled}
+                            onChange={(e) => {
+                              if (!e.target.checked) {
+                                setField(field.id, { visibleWhen: undefined });
+                              } else if (otherFields.length > 0) {
+                                setField(field.id, {
+                                  visibleWhen: { fieldId: otherFields[0].id, op: 'eq', value: '' },
+                                });
+                              }
+                            }}
+                            className="w-3.5 h-3.5 accent-[var(--brand-primary)]"
+                          />
+                          <span className="text-[11px] text-gray-600 font-medium">Show only when…</span>
+                        </label>
+
+                        {condEnabled && vw && (
+                          <div className="flex flex-wrap items-center gap-2 pl-5">
+                            {/* Field selector */}
+                            <select
+                              value={vw.fieldId}
+                              onChange={(e) =>
+                                setField(field.id, { visibleWhen: { ...vw, fieldId: e.target.value } })
+                              }
+                              className="text-[10px] border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] bg-white text-gray-700"
+                            >
+                              {otherFields.map((f) => (
+                                <option key={f.id} value={f.id}>{f.label || '(Untitled)'}</option>
+                              ))}
+                            </select>
+
+                            {/* Operator selector */}
+                            <select
+                              value={vw.op}
+                              onChange={(e) =>
+                                setField(field.id, { visibleWhen: { ...vw, op: e.target.value as VisibleWhen['op'] } })
+                              }
+                              className="text-[10px] border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] bg-white text-gray-700"
+                            >
+                              {OP_LABELS.map(({ value, label }) => (
+                                <option key={value} value={value}>{label}</option>
+                              ))}
+                            </select>
+
+                            {/* Value: dropdown options if dep field is DROPDOWN, else text input */}
+                            {depField?.type === 'DROPDOWN' ? (
+                              <select
+                                value={vw.value}
+                                onChange={(e) =>
+                                  setField(field.id, { visibleWhen: { ...vw, value: e.target.value } })
+                                }
+                                className="text-[10px] border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] bg-white text-gray-700"
+                              >
+                                <option value="">Select…</option>
+                                {(depField.options ?? []).map((opt) => (
+                                  <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <input
+                                type="text"
+                                value={vw.value}
+                                onChange={(e) =>
+                                  setField(field.id, { visibleWhen: { ...vw, value: e.target.value } })
+                                }
+                                placeholder="value"
+                                className="text-[10px] border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)] w-24"
+                              />
+                            )}
+                          </div>
+                        )}
+
+                        {condEnabled && otherFields.length === 0 && (
+                          <p className="text-[10px] text-gray-400 pl-5">Add more fields to set up a condition.</p>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Auto-fill from Excel */}
                   {showAutoFill && (
@@ -614,7 +791,7 @@ export function EnrollmentFormBuilder({ config, onChange, showAutoFill = false }
                   {config.requireOtp && (
                     <div className="mt-2 border border-amber-200 rounded-lg px-2 py-2 bg-amber-50 text-center">
                       <p className="text-[10px] text-amber-600 font-medium">OTP Verification</p>
-                      <p className="text-[9px] text-amber-500">Sent to outlet's phone</p>
+                      <p className="text-[9px] text-amber-500">Sent to outlet&apos;s phone</p>
                     </div>
                   )}
                   <button className="w-full mt-3 py-2 bg-[var(--brand-primary)] text-white text-[11px] font-semibold rounded-lg">
