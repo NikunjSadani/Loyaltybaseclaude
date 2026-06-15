@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma'
-import { generateToken } from '@/lib/auth'
+import { generateToken, generateAccessToken } from '@/lib/auth'
 import { getClientIdFromRequest } from '@/lib/tenant'
+import { createSession } from '@/lib/session'
 
 const ok = (data: any, status = 200) => NextResponse.json({ success: true, data }, { status })
 const err = (message: string, status = 400) => NextResponse.json({ success: false, error: message }, { status })
@@ -126,9 +127,28 @@ export async function POST(req: NextRequest) {
       })
     })
 
-    // Generate JWT (F3 — use canonical generateToken; partnerId not set here
-    // because the auth flow does not have it at login time).
-    const token = generateToken(user.id, user.role)
+    // S3: Create a server-side session and mint a JWT that carries the session id.
+    //
+    // The sid is a cryptographically-random UUID (crypto.randomUUID — Node 14.17+
+    // global; no import needed). It becomes UserSession.token — the stable key the
+    // session row is looked up by. The JWT is a signed envelope around this sid so
+    // the JWT can be re-minted (S4 sliding) without altering the session row.
+    //
+    // Atomicity: createSession is a separate write from the $transaction above.
+    // If it throws the login 500s and the user retries; no partial state persists
+    // because the session row is only useful once the JWT carrying its sid is issued.
+    // Merging them into one transaction would require interactive-tx support and
+    // a larger refactor — deferred per task spec.
+    const sid = crypto.randomUUID()
+    await createSession({
+      userId: user.id,
+      clientId,
+      token: sid,
+      ipAddress,
+      deviceName: deviceInfo ?? null,
+      userAgent: deviceInfo ?? null,
+    })
+    const token = generateAccessToken({ userId: user.id, role: user.role, clientId, sid })
 
     return ok({
       token,

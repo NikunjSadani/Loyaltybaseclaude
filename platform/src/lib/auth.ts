@@ -8,6 +8,10 @@ export interface TokenPayload {
   userId: string;
   role: string;
   partnerId?: string;
+  /** Tenant identifier — present on tokens minted by generateAccessToken (S3+). */
+  clientId?: string;
+  /** Stable session id — the UserSession.token value the JWT is a signed envelope for. */
+  sid?: string;
   iat?: number;
   exp?: number;
 }
@@ -103,6 +107,42 @@ export function generateToken(
 
   return jwt.sign(payload, getJWTSecret(), {
     expiresIn: JWT_EXPIRES_IN,
+  } as jwt.SignOptions);
+}
+
+/**
+ * Create a signed JWT for a fully-authenticated session (S3+).
+ *
+ * Carries four claims beyond the legacy token:
+ *   - `clientId`  — the tenant this session belongs to (bound at login from the subdomain).
+ *   - `sid`       — a stable session identifier equal to `UserSession.token`.
+ *                   The JWT is a signed envelope around the sid; the sid is the stable key
+ *                   used to look up and validate the session server-side. This lets the JWT
+ *                   be re-minted (e.g. S4 sliding) without breaking the session row.
+ *
+ * Expiry: '365d' — matches the SESSION_IDLE_DAYS sliding window in lib/session.ts.
+ * Server-side idle enforcement (validateSession) is the real gate; the JWT expiry is
+ * set long so it never expires client-side before the server-side session does.
+ * (The legacy JWT_EXPIRES_IN default is '7d', which is shorter than the 365-day session
+ * window, so we pass an explicit '365d' here rather than reusing it.)
+ */
+export function generateAccessToken(input: {
+  userId: string;
+  role: string;
+  clientId: string;
+  sid: string;
+  partnerId?: string;
+}): string {
+  const payload: Omit<TokenPayload, 'iat' | 'exp'> = {
+    userId: input.userId,
+    role: input.role,
+    clientId: input.clientId,
+    sid: input.sid,
+  };
+  if (input.partnerId) payload.partnerId = input.partnerId;
+
+  return jwt.sign(payload, getJWTSecret(), {
+    expiresIn: '365d',
   } as jwt.SignOptions);
 }
 

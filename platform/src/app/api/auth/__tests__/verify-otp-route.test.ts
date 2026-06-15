@@ -43,10 +43,17 @@ vi.mock('@/lib/prisma', () => {
 
 vi.mock('@/lib/auth', () => ({
   generateToken: vi.fn().mockReturnValue('mock-jwt-token'),
+  // S3: generateAccessToken added — return the same stub so 1.9 assertions on token still pass.
+  generateAccessToken: vi.fn().mockReturnValue('mock-jwt-token'),
 }));
 
 vi.mock('@/lib/tenant', () => ({
   getClientIdFromRequest: vi.fn().mockReturnValue('deoleo'),
+}));
+
+// S3: route now calls createSession — stub it out so 1.9 tests are not affected.
+vi.mock('@/lib/session', () => ({
+  createSession: vi.fn().mockResolvedValue({ id: 'sess-stub' }),
 }));
 
 // ── Import handler and mocked modules ────────────────────────────────────────
