@@ -116,11 +116,18 @@ NOT piecemeal** — recommended before P4 (or P4.0). **Program-based scheme targ
 program selector + a matcher vs `Outlet.programName/Category`), not a rename. 2.2 + 2.5 are CLEAN (no legacy deps;
 2.5 already uses program) — safe to finish anytime.
 
-**P2 REMAINING:** 2.2 (sales-user CRUD — mostly VERIFY), 2.3 (tiers/tier-history), 2.5 (outlet mgmt UI — VERIFY).
-Deferred: replace mock `sales-role.ts`/`partner-session.ts` with DB; per-field re-KYC consumption (P3).
-**Not pushed this session — user must say "push".**
+**✅ P2 FUNCTIONALLY COMPLETE:** 2.0, 2.1, 2.2, 2.4, 2.5 + RF1–RF7 done & gated. 2.2/2.5 verify+harden fixed 4
+more tenant-isolation defects (bulk-edit cross-tenant XSR reassign; deactivate/reactivate/bulk-delete used the
+partner-join so ownerless outlets couldn't be lifecycle-managed → now scoped by `Outlet.clientId`). **2.3 (tiers)
+folded into the P4.0 de-scaffold** (above). Adjacent P3 note: outlet list GET hardcodes `kycStatus:'NOT_STARTED'`
+(KYC filter cosmetic until a real KYC-status join). Deferred: replace mock `sales-role.ts`/`partner-session.ts`
+with DB; per-field re-KYC consumption (P3).
+
+**NEXT = either (a) P4.0 loyalty-engine de-scaffold** (tiers + partner-class→program + retire `lib/incentive.ts`
+compute; one human-gated drop migration; then build program-based scheme targeting) **or (b) P3 (Onboarding &
+KYC)** — note P3's 3.0 Reconcile must build against the revamped KYC-approval UX + the program model. Owner picks.
 
 Local: dev-DB Auth Proxy on 127.0.0.1:5433 (drops intermittently — restart per DEV-DB.md); `.env.development.local`
-DEMO_MODE=true; preview on :3000. Confirm dev DB reachable + on `develop`; continue P2 (propose 2.2 next).
+DEMO_MODE=true; preview on :3000 (restart to pick up schema/client changes). Confirm dev DB reachable + on `develop`.
 Before any migration/irreversible step show the SQL/plan + wait for the user's go.
 ```
