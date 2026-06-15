@@ -114,7 +114,18 @@ First OTP for an unknown phone auto-creates a `PENDING_VERIFICATION` user with r
   - **GIFSY_ADMIN = all** and is over-and-above every role (test-locked invariant: every role ⊆ Gifsy).
   - **CLIENT_ADMIN = all EXCEPT `GIFSY_OPERATED_PERMISSIONS`** = tenancy config (`tenancy:write/manage_flags`), visibility self-billing invoices (all — hidden entirely), money settlement (`credits:download_bank_file/mark_paid/approve_reversal`, `payouts:manage_fund/process_batch/reconcile/view_tds`), activation create/delete (`schemes:write/delete`). KEEPS reward upload (`credits:upload`+read+confirm_payout+manage_fields), `payouts:read`, activation view+`schemes:manage_enrollments`+export, etc.
   - **MIS_USER = read-only** (`:read` + `reports:export`). **Sales/Partner = []** (portal+data-scoped).
-- **1.6b ⏭** — wire `can()` enforcement across the ~65 admin routes via a `requirePermission` helper, behind a feature flag (OFF by default → no behavior change until enabled per tenant). The "admin sees only role-permitted sections" UI is part of the user's admin revamp (look/flow, not access-driven → enforcement won't be reshaped).
+- **1.6b ✅** done — **1.6b-1** `requirePermission(authUser, perm)` helper + two-level flag: global master
+  `env RBAC_ENFORCEMENT` (off by default → no-op, no DB read) + per-tenant `features.rbacEnforcement`
+  opt-in; fail-open. **1.6b-2** wired into all 44 admin route files / 63 handlers (additive — after the
+  existing role check; flag-off ⇒ behavior unchanged; tsc validates every permission key).
+- **⚠️ Pre-activation checklist (do BEFORE setting `RBAC_ENFORCEMENT=true` for any tenant):**
+  1. Wire per-tenant permission **overrides** storage + the admin UI to edit role→permission (deferred).
+  2. Refine the 4 ambiguous route→permission mappings: `outlets/rekyc-flag`(kyc:initiate?),
+     `credits/batches/[id]/reversals` POST initiate (mapped to `credits:approve_reversal` — likely should
+     be a client-initiate key, but none exists), `kpi-config` PUT (`reports:manage_scheduled`?),
+     `force-logout-all` (`users:manage_roles` — conceptually wrong but harmless: route is already
+     GIFSY-only-guarded; remove the requirePermission there or use a Gifsy-only key).
+  3. Add caching to `requirePermission`'s per-tenant config read (React `cache()`/`unstable_cache`).
 - **Deferred:** Gifsy internal sub-roles (finer Gifsy access division) — engine supports adding later.
 
 ## Spec corrections emitted by this audit

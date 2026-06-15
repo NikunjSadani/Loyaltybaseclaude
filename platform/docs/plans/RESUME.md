@@ -47,8 +47,16 @@ the live per-task log (tags, gates, audits, findings F1-F7, deferred items).
   non-Gifsy (GIFSY_ADMIN exempt) — closes the cross-tenant header-swap (#20 resolved, #23 reduced).
   Stages S1–S5 + S4b all committed/gated/audited. Phone-change revoke for sales(bulk upload→P2) &
   outlets(re-KYC→P3) deferred to those phases (mechanism ready).
-  REMAINING IN P1: **1.6** (can() gate + tenant-configurable role→permission map on top of 1.5; the 5
-  taxonomy Qs resolved with defaults — see P1-identity-tenancy.md). Then P1 exit.
+  **1.6 ✅ DONE** — RBAC: 1.5 permission catalog · 1.6a `can()` engine + default role map (GIFSY=all
+  over-and-above every role; CLIENT_ADMIN minus the Gifsy-operated set — tenancy config, visibility
+  invoicing, money settlement/UTR, activation create/delete; MIS=read-only; sales/partner data-scoped) ·
+  1.6b `requirePermission` + two-level flag (master `env RBAC_ENFORCEMENT` off by default + per-tenant
+  `features.rbacEnforcement`) wired additively into all 44 admin routes. **Pre-activation checklist + 4
+  ambiguous mappings to refine BEFORE enabling the flag** — see P1-identity-tenancy.md §1.6.
+  **➡️ P1 COMPLETE (at exit criteria): login on real DB ✓ · tenant config from DB ✓ · isolation audit
+  green ✓ · admin RBAC engine + route enforcement built (flag-gated; section-visibility UI lands with
+  the admin revamp). NEXT PHASE: P2 (Organization & master data) — see 00-MASTER-PLAN.md.**
+  Reminder: phone-change→logout hooks for sales(P2 bulk upload)/outlets(P3 re-KYC) still to wire in those phases.
   Deferred follow-ups: OTP validity window (6h→10min decision), send-otp orphaned-rows on failure,
   auto-registration confirmation, isolation-audit AST hardening, 1.9 audit-txn-blocks-login tradeoff,
   vitest.integration server-only alias. Migration note: this dev DB has NO prisma migration history —
