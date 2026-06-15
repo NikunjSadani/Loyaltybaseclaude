@@ -190,6 +190,7 @@ const CREDITS = {
   CONFIRM_PAYOUT:   'credits:confirm_payout',
   DOWNLOAD_BANK_FILE: 'credits:download_bank_file',
   MARK_PAID:        'credits:mark_paid',
+  REQUEST_REVERSAL: 'credits:request_reversal',
   APPROVE_REVERSAL: 'credits:approve_reversal',
   MANAGE_FIELDS:    'credits:manage_fields',
 } as const;

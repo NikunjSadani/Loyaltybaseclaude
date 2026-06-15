@@ -95,6 +95,14 @@ describe('GIFSY_ADMIN', () => {
   it('can() returns true for credits:mark_paid', () => {
     expect(can('GIFSY_ADMIN', 'credits:mark_paid')).toBe(true);
   });
+
+  it('can() returns true for credits:request_reversal', () => {
+    expect(can('GIFSY_ADMIN', 'credits:request_reversal')).toBe(true);
+  });
+
+  it('can() returns true for credits:approve_reversal', () => {
+    expect(can('GIFSY_ADMIN', 'credits:approve_reversal')).toBe(true);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -128,6 +136,14 @@ describe('CLIENT_ADMIN', () => {
 
   it('has credits:confirm_payout', () => {
     expect(can('CLIENT_ADMIN', 'credits:confirm_payout')).toBe(true);
+  });
+
+  it('has credits:request_reversal (maker-checker: client can request)', () => {
+    expect(can('CLIENT_ADMIN', 'credits:request_reversal')).toBe(true);
+  });
+
+  it('does NOT have credits:approve_reversal (Gifsy approves — separation of duties)', () => {
+    expect(can('CLIENT_ADMIN', 'credits:approve_reversal')).toBe(false);
   });
 
   it('does NOT have any Gifsy-operated permission (operating split)', () => {

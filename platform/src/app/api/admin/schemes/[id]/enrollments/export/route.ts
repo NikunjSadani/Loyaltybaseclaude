@@ -49,6 +49,9 @@ export async function GET(
 
   const authUser = await getAuthUser(_req);
   if (!authUser) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 });
+  if (authUser.role !== 'GIFSY_ADMIN' && authUser.role !== 'CLIENT_ADMIN') {
+    return NextResponse.json({ success: false, error: 'Forbidden' }, { status: 403 });
+  }
   const denied = await requirePermission(authUser as { role: string; clientId: string },'schemes:export');
   if (denied) return denied;
 

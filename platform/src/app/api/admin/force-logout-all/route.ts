@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthUser } from '@/lib/auth';
 import { revokeAllSessions } from '@/lib/session';
 import prisma from '@/lib/prisma';
-import { requirePermission } from '@/lib/rbac/require-permission';
 
 const ok = (data: unknown, status = 200) =>
   NextResponse.json({ success: true, data }, { status });
@@ -32,9 +31,6 @@ export async function POST(req: NextRequest) {
     if (authUser.role !== 'GIFSY_ADMIN') {
       return err('Forbidden — Gifsy Admin only', 403);
     }
-
-    const denied = await requirePermission(authUser as { role: string; clientId: string },'users:manage_roles');
-    if (denied) return denied;
 
     const count = await revokeAllSessions();
 

@@ -37,7 +37,7 @@ export async function GET(
   return ok(reversals);
 }
 
-// POST /api/admin/credits/batches/[id]/reversals — initiate a reversal (credits:approve_reversal used for the initiation action)
+// POST /api/admin/credits/batches/[id]/reversals — initiate a reversal request (maker-checker: client requests, Gifsy approves)
 const createSchema = z.object({
   outletId:        z.string(),
   outletName:      z.string(),
@@ -57,7 +57,7 @@ export async function POST(
   if (!ALLOWED_ROLES.includes(user.role as typeof ALLOWED_ROLES[number])) return err('Forbidden', 403);
 
   const clientId = getClientIdFromRequest(req);
-  const denied = await requirePermission(user as { role: string; clientId: string },'credits:approve_reversal');
+  const denied = await requirePermission(user as { role: string; clientId: string },'credits:request_reversal');
   if (denied) return denied;
   const { id } = await params;
 
