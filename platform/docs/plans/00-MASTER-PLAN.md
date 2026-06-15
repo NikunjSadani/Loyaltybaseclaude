@@ -241,14 +241,26 @@ wallet are created. **Depends on:** P2.
 ## P4 · Programs, targets & enrollment  (4–6 wk)
 **Objective:** activations/schemes and targets are configurable and outlets can enroll (spec §02 WF5).
 
+> ⚠️ **START HERE — P4.0 = the loyalty-engine DE-SCAFFOLD (read [`MODEL-ALIGNMENT.md`](MODEL-ALIGNMENT.md) FIRST).**
+> The model-alignment pass (2026-06-16) found the inherited code is **3 disconnected layers** and contradicts the
+> owner-confirmed real model: **sales/achievement = TARGET-PARAMETER upload (platform does NOT compute points)**;
+> **segmentation = PROGRAM (`Outlet.programName/programCategory`, per-outlet at upload) — REPLACES partner class**;
+> **no point-tiers, no SKU**. Before building P4 features, do the de-scaffold as ONE coherent effort (with ONE
+> human-gated drop migration — show SQL first): **drop** `TierConfig`/`PartnerTierHistory`/`currentTierConfigId`/
+> `SchemeEligibility.tierConfigId`; **retire** partner class (`PartnerClassConfig`, `enum PartnerClassCode`/
+> `ChannelPartnerClass`, `ChannelPartner.partnerClassId`, `eligibleClasses[]`/`targetClasses[]` on reward/visibility/
+> leaderboard/banner — all stored-only, decorative); **retire the compute engine** (`lib/incentive.ts`,
+> `api/schemes/calculate`, `Scheme.pointsPerRupee/fixedPoints`). All low-risk (mostly unwired). MODEL-ALIGNMENT.md
+> has the exact per-file removal list + severities.
+
 | Task | What | Key files / area | Test |
 |---|---|---|---|
-| 4.0 | Reconcile Schemes + Targets; decide Scheme rule-engine keep/prune (#10). **Owner-flagged 2026-06-15:** the `SchemeBuilder` retains stale in-platform-compute fields that contradict the upload-final-amounts model — **prune §6 Incentive Calculation** (Flat/%/per-unit/**slab**/**overachievement**) + **§7 Target Configuration**, and **reconcile the legacy Incentive Type enum vs the new Campaign Type** (Loyalty/Open/Mixed). | `components/admin/scheme-builder.tsx`, `lib/schemes.ts`, `lib/targets.ts` | — |
-| 4.1 | Scheme/activation CRUD + status lifecycle + eligibility/geo targeting | `api/admin/schemes*`, `Scheme*` | unit |
+| **4.0** | **DE-SCAFFOLD (above) + Reconcile.** Execute the loyalty-engine teardown (drop migration, human-gated); confirm scheme-builder §6/§7 already pruned this session (they are); reconcile the legacy Incentive-Type enum vs Campaign-Type (Loyalty/Open/Mixed). Per `MODEL-ALIGNMENT.md`. | `MODEL-ALIGNMENT.md`, `scheme-builder.tsx`, `lib/schemes.ts`, `lib/incentive.ts`, schema | drop-migration + scoped |
+| 4.1 | Scheme/activation CRUD + lifecycle + **PROGRAM-based eligibility/geo targeting** (net-new: a program selector in `scheme-builder.tsx` replacing the decorative `applicableClasses` UI + a matcher vs `Outlet.programName/programCategory`; today eligibility wrongly keys off outlet TYPE) | `api/admin/schemes*`, `Scheme*`, `scheme-builder.tsx` | unit |
 | 4.2 | **Configurable enrollment form** (field defs + values model) (#6) — the rich `EnrollmentFormBuilder` + partner renderer ALREADY EXIST and were extended this session with **CALCULATED** + single-condition **`visibleWhen`** fields (`lib/campaign.ts`); 4.2 = persist the form-schema + submission values + Excel-dataset binding | `prisma`, `lib/campaign.ts`, `lib/enrollment-form*` | pure validation |
 | 4.3 | Enrollment: self vs sales mode + conditional pre-fill (#6) | `api/schemes/[id]/enrollments` | pure prefill + wiring |
 | 4.4 | Target config (wizard + Excel) | `admin/targets*`, `lib/target-excel-upload.ts` | pure parser |
-| 4.5 | Achievement upload + pace; partner target view (tracking only) | `admin/sales`, `partner/targets`, `lib/pace.ts` | pure pace |
+| 4.5 | **Achievement upload — TARGET-PARAMETER based** (upload final amounts per outlet per parameter; store verbatim, NO compute). ⚠️ The existing `api/sales/upload/route.ts` (validates `skuCode` → writes `SalesInvoice`) is the WRONG invoice/SKU model — reconcile/replace it here. The correct pattern already exists: `api/admin/credits/**` + `OutletSalesRecord.kpiValues` store uploaded numbers as-is. + pace; partner target view (tracking only) | `admin/sales`, `partner/targets`, `lib/pace.ts`, `api/sales/upload` | pure pace |
 
 **Exit:** admin publishes an activation, eligible outlets enroll via a configurable form, targets +
 achievement display. **Depends on:** P2 (audience/eligibility).

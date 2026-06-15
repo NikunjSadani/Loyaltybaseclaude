@@ -4,19 +4,20 @@ Paste the block below to restart the orchestrator on point. The on-disk docs are
 
 ```
 You're the orchestrator for the Loyaltybase build (multi-tenant trade-loyalty platform,
-C:\Users\nikun\Loyaltybaseclaude\platform). Reload context by reading:
-- docs/plans/00-MASTER-PLAN.md            (phases P0→P9; P1 status block; P9 = infra/deploy/go-live)
+C:\Users\nikun\Loyaltybaseclaude\platform). **NEXT = P4, and P4.0 is the loyalty-engine DE-SCAFFOLD.** Reload by reading:
+- docs/plans/MODEL-ALIGNMENT.md           (⚠️ READ FIRST — the platform's REAL model + the P4.0 de-scaffold scope)
+- docs/plans/00-MASTER-PLAN.md            (phases P0→P9; P2 = DONE; P4 section has the de-scaffold callout)
 - docs/plans/08-agent-execution-guide.md  (role, loop, review gate, context bundles)
 - docs/plans/01-how-we-test.md            (test conventions; deterministic; two styles)
 - docs/plans/GIT-WORKFLOW.md              (branches/deploy — WORK ON develop, main=releases)
-- docs/plans/DEV-DB.md                    (dev DB + Auth Proxy restart; migrate gotcha)
-- docs/plans/reconcile/baseline-red-snapshot.txt   (the gate: NO NEW reds vs this snapshot)
-- docs/plans/reconcile/P1-identity-tenancy.md + docs/plans/P1-sessions-design.md   (P1 detail, audits, deferred)
+- docs/plans/DEV-DB.md                    (dev DB + Auth Proxy restart; migrate gotcha; drop-migration via guarded SQL)
+- docs/plans/reconcile/baseline-red-snapshot.txt   (the gate: NO NEW reds vs this snapshot = 28 files/105 tests)
+- docs/plans/reconcile/P2-org-master-data.md  (P2 reconcile + RF1–RF7 + the catalog/sales-upload addendum)
 - docs/plans/RBAC-ENABLEMENT.md           (how to turn RBAC enforcement on — it's OFF by default)
 - docs/plans/REPORTING-REVAMP.md          (user-driven reporting track, built ahead of P8 for client sign-off)
 - docs/plans/KYC-APPROVAL-REVAMP.md        (P3 design: Gifsy bulk KYC verify/approve — DEMO workflow BUILT on develop; schema/persistence = P3)
 - docs/spec/gap-register.md               (open gaps + what P0/P1 resolved)
-- your memory note: loyaltybase-spec-effort.md
+- your memory notes: loyaltybase-spec-effort.md + platform-real-model.md + reconcile-fit-before-build.md
 
 ROLE & OPERATING MODEL (user-agreed for speed): you orchestrate, plan, GATE, and personally audit
 high-risk work; you do NOT just trust an executor's word — a task is done only when YOUR gate passes
@@ -41,9 +42,12 @@ SELECT 1 before migrating. NEVER point dev at prod (gifsy-db). This dev DB has N
 — use db push / surgical `migrate diff` → apply SQL in a txn guarded by current_database='gifsy_dev';
 NEVER `prisma migrate dev` (it would RESET it). Backfill scripts reuse the lib/prisma singleton.
 
-STATE: **P0 + P1 COMPLETE**, all built→gated→independently-audited, **pushed to GitHub** (origin/main,
-88 commits) + the latest on **origin/develop** (the working branch). Gate is DIFFERENTIAL ("no NEW reds
-vs the snapshot"; the suite is red throughout a TDD build). P1 delivered: OTP→msg91 auth; persisted
+STATE: **P0 + P1 + P2 COMPLETE**, all built→gated→independently-audited, on **origin/develop** (pushed; HEAD
+`5d834d2` as of 2026-06-16). Gate is DIFFERENTIAL ("no NEW reds vs the snapshot" = 28 files/105 tests; the suite
+is red throughout a TDD build). **P2 summary (full block below + `MODEL-ALIGNMENT.md`):** sales hierarchy →
+relational tree; outlet master upload + re-KYC flags persist for real (parameter+program model, World C); RF1–RF7
+tenant-isolation defects fixed; 5 dev-DB migrations applied; OutletTypes seeded. Catalog/SKU built-then-reverted
+(YAGNI); tiers/partner-class/compute-engine → P4.0 de-scaffold. P1 delivered: OTP→msg91 auth; persisted
 sessions (365d sliding idle, logout/logout-all/Gifsy-force-logout-all, admin edit-phone→revoke);
 getAuthUser validates the session + enforces subdomain==session-tenant for non-Gifsy (closed #20 + the
 #23 header-swap); DB-backed Client tenant config (migration applied to dev); RBAC engine (72 perms/17
