@@ -76,8 +76,12 @@ First OTP for an unknown phone auto-creates a `PENDING_VERIFICATION` user with r
 |---|---|---|---|
 | 1.0 | ✅ done | n/a (audit) | n/a |
 | 1.2a (F1 fix) | ✅ committed `341b9a3` | tsc 0 / lint clean / tests +11, no new reds | **PASS-WITH-NOTES** — confirmed all 3 handlers scoped & no-mutation; surfaced F6 (banners) + soft-deleted-target + findFirst-arg test-strengthening (folded into 1.7) |
-| 1.1 (F2/F3/F4) | ✅ committed `4dd30d5` | tsc 0 / lint clean / tests +9, no new reds | running |
-| 1.5 (catalog) | ✅ committed `a8b2e6e` | tsc 0 (fixed union-type test) / lint clean / tests +17 | running |
+| 1.1 (F2/F3/F4) | ✅ committed `4dd30d5` | tsc 0 / lint clean / tests +9, no new reds | **PASS-WITH-NOTES** — F3/F4 correct; surfaced **F7** (send-otp silent-failure) → fixed in **1.1a**; noted wiring tests are source-greps not behavioral |
+| 1.1a (F7 fix) | dispatched | — | — |
+| 1.5 (catalog) | ✅ committed `a8b2e6e` | tsc 0 (fixed union-type test) / lint clean / tests +17 | **PASS** — 17 §-refs verified 1:1 vs spec, union type exhaustive, unwired, helpers correct |
+
+### 🟠 F7 (Med, → 1.1a) — `send-otp` reports success even when delivery didn't happen
+`send-otp/route.ts:75` discards the `sendOtp` result, and `templateId` resolves to `''` for any tenant slug absent from `CLIENT_REGISTRY` — so an unregistered/mis-keyed tenant gets `200 {success:true,"OTP sent"}` while MSG91 sent nothing and the OTP row already exists (user can't log in, no error signal). Registered tenants (deoleo/clientb) unaffected. Fix in 1.1a: fail-fast when no templateId is configured (before writing rows) + check the `sendOtp` result; add a **behavioral** test (mock msg91+prisma) proving an unconfigured tenant gets no false success.
 
 **Differential gate evidence (whole wave):** full `npm test` = 28 failed files / 105 failed tests = **exact match to baseline-red-snapshot.txt** (zero new reds, zero regressions); +37 new green tests; `tsc --noEmit` = 0 errors; lint clean on all wave files (pre-existing project-wide `any` debt untouched, matching surrounding convention).
 
