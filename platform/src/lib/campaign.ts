@@ -402,9 +402,12 @@ export function computeFormula(
   // Step 1: substitute {id} tokens
   const substituted = formula.replace(/\{([^}]+)\}/g, (_match, id: string) => {
     const raw = values[id];
-    if (raw === undefined || raw === null || String(raw).trim() === '') return '0';
+    // Space-pad every substituted value so two adjacent {a}{b} tokens (no operator
+    // between them) tokenize as two separate numbers → invalid (null), not a silent
+    // concatenation like "45".
+    if (raw === undefined || raw === null || String(raw).trim() === '') return ' 0 ';
     const n = parseFloat(String(raw));
-    return isNaN(n) ? '0' : String(n);
+    return isNaN(n) ? ' 0 ' : ` ${n} `;
   });
 
   // Step 2: tokenize

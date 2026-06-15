@@ -105,6 +105,11 @@ describe('computeFormula', () => {
     expect(computeFormula('{a};{b}', { a: 1, b: 2 })).toBeNull();
   });
 
+  it('returns null for two adjacent field tokens with no operator (no silent concat)', () => {
+    // {a}{b} with a=4,b=5 must NOT produce 45 — it is malformed → null.
+    expect(computeFormula('{a}{b}', { a: 4, b: 5 })).toBeNull();
+  });
+
   it('returns null for a formula that looks like a function call', () => {
     // e.g. "sqrt(4)" — "sqrt" contains letters which are not valid tokens
     expect(computeFormula('sqrt(4)', {})).toBeNull();
