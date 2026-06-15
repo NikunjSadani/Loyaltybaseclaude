@@ -88,9 +88,9 @@ DEFERRED / OPEN (none block P2):
 NEXT = **P2 (Organization & master data)** — sales org tree, partners/outlets, catalog (per 00-MASTER-PLAN.md
 §P2; note: an outlet/phone can belong to MULTIPLE tenants → separate per-tenant records; P2.1/2.2 also unblock
 the Outlet Points Ledger hierarchy columns, P2.4 the distributor columns + 1:1 binding). The user chose P2 as
-the post-compaction starting point. **All session demo work (reporting R1/R2, KYC demo, scheme form-builder
-extension) is committed on `develop` but UNPUSHED** (owner holding push) — offer to batch-push before/while
-starting P2. Local: dev-DB Auth Proxy on 127.0.0.1:5433 (UP) + `.env.development.local` DEMO_MODE=true; a
+the post-compaction starting point. **All session demo work (reporting R1/R2, KYC design+demo+rebuild, scheme
+form-builder extend+prune) is committed AND pushed to `origin/develop`** (CI red-by-design → no deploy
+proceeds). Local: dev-DB Auth Proxy on 127.0.0.1:5433 (UP) + `.env.development.local` DEMO_MODE=true; a
 preview dev server runs on :3000. Confirm dev DB reachable + you're on `develop`, then propose the P2 task
 list (start with 2.0 Reconcile). Before
 assigning each task show the task + context bundle + what you'll verify; wait for the user's go on
