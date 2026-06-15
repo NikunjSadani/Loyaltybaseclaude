@@ -32,11 +32,21 @@ the dev DB is empty/auth-gated — and will fold in the user's admin revamp). Ba
 is "no NEW reds vs reconcile/baseline-red-snapshot.txt" (the suite is red throughout a TDD build —
 never gate on "zero reds").
 
-START P1 (Identity, tenancy & access) — run the FULL track in order (1.0→1.9). It's almost entirely
-backend and does not touch the user's revamp areas (admin dashboards, reports, Gifsy KYC-approval — those
-are P8/P3). The admin-UI bits 1.4 (admin config UI) and 1.6 (admin role-gating) ARE fine to do now (user
-confirmed); just avoid the specific pages under active revamp. When P3 (KYC) and P8 (dashboards/reports)
-arrive, their 3.0/8.0 Reconcile builds against the user's REVAMPED pages (code wins).
+P1 (Identity, tenancy & access) — IN PROGRESS. See docs/plans/reconcile/P1-identity-tenancy.md for
+the live per-task log (tags, gates, audits, findings F1-F7, deferred items).
+  DONE & committed (each gated + independently audited): 1.0 reconcile · 1.2a (cross-tenant users/[id]
+  fix, F1) · 1.1 + 1.1a (OTP→msg91, generateToken, tenant-scoped OTP, silent-failure fix) · 1.5
+  (permission catalog) · 1.7 + 1.7a (banners F6 fix + per-handler tenant-isolation audit test) · 1.3 +
+  1.3a (Client tenant model — MIGRATION APPLIED to dev gifsy_dev, 2 rows backfilled, secret stripped).
+  REMAINING: 1.2 (decide JWT-only vs persisted UserSession + verify user CRUD/auth-me; sessions table
+  exists but is UNWIRED) · 1.4 (read flags/branding from the new Client row + admin config UI) · 1.6
+  (can() gate + tenant-configurable role→permission map on top of 1.5; resolve the 5 taxonomy Qs first) ·
+  1.8 (token↔tenant binding #20 — HUMAN-GATE with proxy owner) · 1.9 (write LoginLog + lastLoginAt/
+  loginCount on login — both currently UNWIRED).
+  Deferred follow-ups: OTP validity window (6h→10min decision), send-otp orphaned-rows on failure,
+  auto-registration confirmation, isolation-audit AST hardening. Migration note: this dev DB has NO
+  prisma migration history — use db push / diff-SQL, NEVER `prisma migrate dev` (it would reset). See
+  DEV-DB.md. Admin-UI bits 1.4/1.6 are fine now; avoid the user's revamp pages (P8/P3).
 
 Before assigning each task show me the task, its context bundle, and what you'll verify; wait for my
 go on anything irreversible. Begin by confirming the dev DB is reachable and giving me the P1 backend
