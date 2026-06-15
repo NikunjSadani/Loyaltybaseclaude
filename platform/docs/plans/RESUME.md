@@ -102,13 +102,19 @@ DEFERRED / OPEN (none block P2):
 - **5 dev-DB migrations applied** (all human-gated, `current_database='gifsy_dev'` guarded, in `prisma/migrations/`).
 - **Seeded** 4 OutletTypes for both tenants (`scripts/seed-outlet-types.ts`) so the outlet upload validates.
 
-**⚠️ MODEL CORRECTION (owner, 2026-06-16) — front-and-center for P4:** the sales/achievement upload is
-**TARGET-PARAMETER based** (upload final amounts per outlet per parameter), NOT SKU-invoice based. The existing
-`api/sales/upload/route.ts` (validates `skuCode` → writes `SalesInvoice`) is the WRONG model — reconcile/replace
-it with parameter-based achievement upload in **P4 (Targets)**. Consequence: **2.6 Catalog (SKU/Category) was built
-then REVERTED** (`git revert 798aafe`) as YAGNI — nothing consumes a SKU/Category master under the parameter model;
-recoverable from git if a future tenant ever needs SKU-level reporting (P8). `Category`/`Sku` schema models left in
-place (harmless empty tables).
+**⚠️ MODEL ALIGNMENT — READ `docs/plans/MODEL-ALIGNMENT.md` (owner-confirmed, 2026-06-16).** A read-only sweep
+found the model mismatch is **systemic**: the codebase is **3 disconnected layers** — World A (inherited DB
+loyalty/compute engine, mostly unwired, contradicts the model), World B (decorative mock UI), World C (the REAL
+parameter+program model we've been building in P2). Confirmed model: **sales = TARGET-PARAMETER upload (no
+compute)**; **segmentation = PROGRAM (`Outlet.programName/Category`, per-outlet at upload), REPLACING partner
+class**. Key facts: partner class is **already decorative** (scheme eligibility actually keys off outlet TYPE;
+KYC's `partnerClass` holds outlet-type values) → low-risk to retire. **Point-tiers = pure deletion** (multiplier
+never applied). **`lib/incentive.ts` + `api/schemes/calculate` compute = contradicts the model**, retire.
+Consequences: **2.6 Catalog REVERTED** (`git revert 798aafe`, YAGNI; recoverable). **Tiers + partner-class +
+World-A-compute are ENTANGLED → one coherent "loyalty-engine de-scaffold" (with a human-gated drop migration),
+NOT piecemeal** — recommended before P4 (or P4.0). **Program-based scheme targeting is net-new P4 work** (a
+program selector + a matcher vs `Outlet.programName/Category`), not a rename. 2.2 + 2.5 are CLEAN (no legacy deps;
+2.5 already uses program) — safe to finish anytime.
 
 **P2 REMAINING:** 2.2 (sales-user CRUD — mostly VERIFY), 2.3 (tiers/tier-history), 2.5 (outlet mgmt UI — VERIFY).
 Deferred: replace mock `sales-role.ts`/`partner-session.ts` with DB; per-field re-KYC consumption (P3).
