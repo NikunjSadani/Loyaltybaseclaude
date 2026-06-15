@@ -35,19 +35,40 @@ flowchart TB
 
 ## 3 · Multi-tenancy & request lifecycle
 
-- Subdomain `<slug>.gifsy.in` → edge proxy sets **`x-tenant-slug`** → `getClientIdFromRequest`
-  → **`clientId`**; falls back to `DEFAULT_CLIENT_ID = 'deoleo'` if absent.
+- Subdomain `<slug>.gifsy.in` → edge proxy sets **`x-tenant-slug`** → used at login time to
+  bind the tenant to the session (see §4). For pre-auth paths (`send-otp`, `verify-otp`)
+  `getClientIdFromRequest` still reads `x-tenant-slug` directly.
+- **✅ P1:** a `Client` model (id=slug) now exists in the DB — `getTenantConfig` reads the
+  `Client` row first; the in-code `CLIENT_REGISTRY` is the edge-safe fallback (the edge proxy
+  still uses the registry; no DB access at the edge). Tenant onboarding no longer requires a
+  code change for config (gap #22 addressed).
 - **Isolation = shared DB, row-level scoping** by the denormalised `clientId` string on every
-  table. No `Client` model/FK; per-tenant config in the code `CLIENT_REGISTRY`.
+  table. The 1.7 isolation audit test guards every tenant-scoped route. No Postgres RLS yet
+  (future hardening — gap #23 residual).
 
 ## 4 · Authentication & authorization
 
-- **AuthN:** OTP (MSG91) → JWT (`userId, role, partnerId`). `getAuthUser` trusts
-  proxy-injected `x-user-id`/`x-user-role` **or** falls back to `Authorization: Bearer`.
-  **JWT verification is expected at the proxy**; `JWT_SECRET` refuses missing in prod.
-- **`clientId` is NOT in the token** — tenant comes from the host header. Token↔tenant binding
-  depends on the (external) proxy (→ Gap #20).
-- **AuthZ:** coarse inline role checks today; **target = configurable admin RBAC** (Gap #2).
+- **AuthN:** OTP (MSG91) → JWT (`userId, role, partnerId, clientId, sid`). Two-layer gate:
+  - **Edge proxy (coarse, fast):** JWT signature verify + role-route check + inject
+    `x-user-id`/`x-user-role`/`x-tenant-slug`. No DB access. `JWT_SECRET` refuses to start if
+    missing in prod.
+  - **App layer `getAuthUser` (fine, ✅ P1 upgraded):** validates the persisted `UserSession`
+    (revoked? idle-expired? wrong tenant?) on every authenticated request. Returns
+    `{ userId, role, partnerId, clientId, sid }` sourced from the session row. Also **enforces
+    subdomain==session-tenant for non-Gifsy** requests — a valid token used on the wrong
+    subdomain is rejected, closing the header-swap attack (gap #23) and the proxy-trust gap (#20).
+    GIFSY_ADMIN is exempt (platform operator works cross-tenant).
+  - `DEMO_MODE` bypasses session validation (trusts proxy headers) — **never enable in prod**.
+- **Session lifecycle (✅ P1):** `verify-otp` creates a `UserSession` with `clientId` set from
+  the login subdomain and `expiresAt = now + 365d`. Every validated request bumps `expiresAt`
+  (sliding idle). Sessions are revocable immediately (logout, logout-all, admin phone-change,
+  GIFSY kill-switch force-logout-all).
+- **AuthZ (✅ P1 engine done, wiring flag-gated):** `lib/rbac/can.ts` — 71-permission catalog /
+  17 groups; default role→permission map (GIFSY_ADMIN=all; CLIENT_ADMIN=all except
+  `GIFSY_OPERATED_PERMISSIONS`; MIS_USER=read-only; Sales/Partner=portal-scoped). Per-tenant
+  overrides supported. `requirePermission` wired into all 44 admin route files — **additive,
+  flag-gated off by default** (env `RBAC_ENFORCEMENT` + per-tenant `features.rbacEnforcement`).
+  Consult pre-activation checklist in `reconcile/P1-identity-tenancy.md` before enabling.
 
 ## 5 · Integrations
 
@@ -74,10 +95,15 @@ flowchart TB
 
 ## 8 · Architecture risks / gaps
 
-- **→ Gap #20 (High):** the security boundary (JWT verify + tenant binding) lives in an **edge
-  proxy not in this repo**. Without it, fallbacks apply (`DEFAULT_CLIENT_ID`, Bearer) — a valid
-  token on the wrong subdomain could mismatch tenant scope. Verify the proxy exists + binds them.
+- **→ Gap #20 — ✅ RESOLVED (P1 S3–S4b):** `clientId`+`sid` are now in the JWT, bound to a
+  server-side `UserSession`. `getAuthUser` validates the session and enforces
+  subdomain==session-tenant in-app, independent of the proxy.
 - **→ Gap #21 (Low, DECIDED 0.4c):** MSG91 is the sole provider (SMS/OTP/WhatsApp/email); retire
   `notifications.ts`'s axios senders + `nodemailer`, keep its DB template/queue model. Build in P7.
-- **Config-in-code** (`CLIENT_REGISTRY`) means tenant onboarding is a code deploy, not data
-  (ties to Gap #2 / tenancy).
+- **→ Gap #22 — ✅ ADDRESSED (P1 1.3/1.4):** `Client` model in DB; `getTenantConfig` reads it.
+  Registry remains as edge-safe fallback. Admin config UI deferred (coordinate with UX revamp).
+- **→ Gap #23 — ◐ REDUCED (P1):** header-swap closed (S4b); per-route `clientId` scoping fixed
+  (1.2a/1.7); isolation audit test guarding missed filters. Residual: still per-query discipline;
+  no Postgres RLS / Prisma auto-scoping (future — P8.6).
+- **Config-in-code** (`CLIENT_REGISTRY`) is now the edge-only fallback; DB-backed config is live
+  for app-layer requests.

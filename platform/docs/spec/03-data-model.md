@@ -36,6 +36,18 @@ erDiagram
 
 ### B1 · Identity, Partners, Sales, KYC
 
+> **✅ P1 additions:**
+> - `UserSession` gained `clientId String` (indexed, tenant bound at login from subdomain) and
+>   `lastSeenAt DateTime?` (last-active display). `expiresAt` doubles as the 365-day idle sliding
+>   marker (bumped on every validated request). Sessions are now actually written (previously the
+>   model existed but had zero writers).
+> - New `Client` model (`clients` table): `id = slug`, scalars `internalName`/`onboardedAt`, seven
+>   JSON config blocks (`branding`, `features`, `partnerClasses`, `approvalHierarchy`, `notifications`,
+>   `invoicing`, `wallet`), `status ClientStatus` enum (`ACTIVE`/`INACTIVE`/`ONBOARDING`). **No secret
+>   columns** — `notifications` JSON excludes `msg91AuthKey` (kept in env/Secret Manager).
+> - `FeatureFlags` gained `rbacEnforcement Boolean` (per-tenant opt-in for the RBAC engine;
+>   off by default).
+
 ```mermaid
 erDiagram
     USER ||--o| CHANNEL_PARTNER : "1:1"
@@ -111,9 +123,12 @@ erDiagram
 
 ## C · Cross-cutting data patterns & gaps
 
-- **`clientId: String` denormalised on ~every table** for tenant scoping, but **no `Client`/
-  `Tenant` model or FK** exists — tenant config lives in code (`CLIENT_REGISTRY`). Integrity of
-  `clientId` is unenforced (Gaps #2, tenancy).
+- **`clientId: String` denormalised on ~every table** for tenant scoping. **✅ P1 (gap #22
+  addressed):** a `Client` model (id=slug, JSON config blocks, no secret) + `ClientStatus` enum
+  now exist — the `clients` table is the DB home for tenant config. `getTenantConfig` reads the
+  `Client` row; the in-code `CLIENT_REGISTRY` is the edge-safe fallback and migration seed.
+  Note: `clientId` on other tables still has no FK to `Client` — DB-level FK enforcement is
+  future work.
 - **JSON-blob configs in `ProgramSetting`** (hierarchy, target-config, kpi-defs, banners, gifts)
   shadow relational models (`SalesUser`, `Target`, …). Two sources of truth per domain → drift
   (→ Gap #18). Decide blob vs relational per domain.

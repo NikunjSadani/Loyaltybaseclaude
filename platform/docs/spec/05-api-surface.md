@@ -5,14 +5,25 @@ handler exports (~113 handlers). Roles are best-known from handler checks; "scop
 filtered by ownership/hierarchy. All routes are tenant-scoped via `clientId`.
 
 ## 1 · Identity & Auth
+
+> **✅ P1:** `getAuthUser` is now session-validated — it looks up the `UserSession` row on every
+> request (revocable; 365-day sliding idle) and enforces subdomain==session-tenant for non-Gifsy
+> callers (GIFSY_ADMIN exempt). All 44 admin route files have `requirePermission` wired (additive,
+> **flag-gated off by default** via `RBAC_ENFORCEMENT` env + per-tenant `features.rbacEnforcement`).
+
 | Method | Endpoint | Purpose | Role |
 |---|---|---|---|
 | POST | `/auth/send-otp` | Send login OTP | public |
-| POST | `/auth/verify-otp` | Verify OTP → JWT | public |
+| POST | `/auth/verify-otp` | Verify OTP → JWT + create `UserSession` | public |
 | GET | `/auth/me` | Current user | any auth |
-| GET·POST | `/admin/users` | List / create users | admin |
-| GET·PATCH·DELETE | `/admin/users/[id]` | User detail / update / delete | admin |
+| POST | `/auth/logout` | Revoke current session + clear token cookie | any auth |
+| POST | `/auth/logout-all` | Revoke all sessions for the calling user | any auth |
+| GET | `/admin/users` | List users | admin |
+| POST | `/admin/users` | Create user | admin |
+| GET·PATCH·DELETE | `/admin/users/[id]` | User detail / update (edit-phone revokes sessions) / delete | admin |
 | POST | `/admin/users/bulk-edit` | Bulk user edits | admin |
+| POST | `/admin/force-logout-all` | Global kill switch — revoke every session (all tenants) | GIFSY_ADMIN only |
+| GET | `/admin/settings/config` | Read tenant config from DB (Client row) | admin |
 
 ## 2 · Tenancy & Platform Config
 | Method | Endpoint | Purpose | Role |

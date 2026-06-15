@@ -7,19 +7,35 @@
   prod Secret Manager.
 - **Secrets:** GCP Secret Manager; SA key files + `push_secrets` gitignored; no hardcoded creds.
 - **Input validation:** `zod` on many API routes (e.g. KYC). Coverage to audit.
-- **Boundary risk (Gap #20):** JWT verification + tenant injection are in an **external proxy**;
-  in-app fallbacks (`DEFAULT_CLIENT_ID`, Bearer) are weaker. Add in-app middleware as
-  defence-in-depth.
-- **AuthZ:** coarse role checks today → configurable admin RBAC (Gap #2).
+- **Server-side session revocation (✅ P1):** `UserSession` is the source of truth for every
+  authenticated request. Sessions are revocable instantly — logout, logout-all-devices, admin
+  phone-change, and a GIFSY-only global kill switch (`force-logout-all`). 365-day sliding idle
+  expiry (`expiresAt` bumped per request).
+- **Token↔tenant binding + header-swap defence (✅ P1, gap #20 resolved):** `clientId` is now
+  in the JWT and bound to the session at login. `getAuthUser` enforces subdomain==session-tenant
+  for non-Gifsy sessions in the app layer — a valid token used on the wrong subdomain is
+  rejected. Proxy continues to do coarse JWT verify.
+- **AuthZ (✅ P1 engine done, enforcement flag-gated):** `lib/rbac/can.ts` — 71-permission
+  catalog; default role→permission map; per-tenant overrides; `requirePermission` wired into all
+  44 admin route files (additive; off by default via `RBAC_ENFORCEMENT` env +
+  `features.rbacEnforcement`). Complete the pre-activation checklist in
+  `reconcile/P1-identity-tenancy.md` before enabling.
+- **⚠️ `DEMO_MODE` production risk:** `DEMO_MODE=true` trusts the `x-user-role` header —
+  **never enable in production** (add to prod hardening checklist before go-live).
 
 ## 2 · Multi-tenant isolation
 
-- **App-level row scoping** by `clientId` on every query; **no DB-level enforcement** (no RLS,
-  no `Client` FK). A missed `clientId` filter = cross-tenant leak.
-- **→ Gap #23 (High):** rely solely on developers remembering `getClientIdFromRequest` +
-  `where: { clientId }`. Add a guardrail — Prisma middleware/extension that auto-scopes by
-  tenant, or Postgres RLS — so isolation isn't per-query discipline.
-- Token↔tenant binding depends on the proxy (Gap #20).
+- **App-level row scoping** by `clientId` on every query; no DB-level enforcement (no Postgres
+  RLS yet — future P8.6).
+- **✅ P1 improvements (gap #23 reduced):**
+  - Cross-tenant header-swap closed: `getAuthUser` enforces subdomain==session-tenant in-app
+    (gap #23 header-swap + gap #20 proxy-trust both addressed).
+  - Per-route `clientId` scoping fixed: `admin/users/[id]` (F1) and `admin/banners` DELETE (F6)
+    were missing tenant filters — both corrected.
+  - Isolation audit test (1.7/1.7a): per-handler heuristic that fails on routes missing
+    `clientId` filters; runs as part of the test suite.
+- **Residual gap #23:** still relies on per-query developer discipline for new routes; no Prisma
+  auto-scoping middleware or Postgres RLS. Hardening tracked as P8.6.
 
 ## 3 · Privacy & data protection (India DPDP)
 

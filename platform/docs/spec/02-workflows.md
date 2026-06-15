@@ -4,8 +4,45 @@ Core end-to-end journeys. Each: **actors**, a **state machine**, the **happy-pat
 **side effects**, and **gaps**. State machines use Mermaid (renders on GitHub / with a Mermaid
 preview extension) plus a textual transition list.
 
-Workflows covered: 1) Outlet Onboarding & KYC · 2) Award → Wallet → Payout · 3) Visibility →
-Self-Bill Invoice · 4) Points Redemption · 5) Activation Enrollment · 6) Support Ticket.
+Workflows covered: 0) Authentication & Session · 1) Outlet Onboarding & KYC · 2) Award → Wallet →
+Payout · 3) Visibility → Self-Bill Invoice · 4) Points Redemption · 5) Activation Enrollment ·
+6) Support Ticket.
+
+---
+
+## Workflow 0 — Authentication & Session (✅ P1)
+
+**Actors.** User (any role) · Admin (phone-change) · Gifsy Ops (force-logout).
+
+**Login (OTP flow):**
+1. `POST /auth/send-otp` — MSG91 sends OTP to the phone registered under the tenant resolved from
+   the subdomain (`x-tenant-slug`). Fails fast if no MSG91 template is configured for that tenant.
+2. `POST /auth/verify-otp` — verifies OTP; on success: (a) writes a `UserSession` row with
+   `clientId` set from the login subdomain and `expiresAt = now + 365d`; (b) bumps
+   `lastLoginAt`/`loginCount` and writes a `LoginLog` entry; (c) issues a JWT carrying
+   `{ userId, role, partnerId, clientId, sid }` (sid = session ID).
+3. Every subsequent authenticated request: `getAuthUser` looks up the `UserSession` by token,
+   rejects if revoked or idle-expired (`now > expiresAt`), bumps `expiresAt` (sliding 365-day
+   idle), and — for non-Gifsy sessions — rejects if the subdomain doesn't match the session's
+   `clientId` (header-swap defence). Returns `{ userId, role, partnerId, clientId, sid }`.
+
+**Session lifecycle:**
+
+| Action | Endpoint | Effect |
+|---|---|---|
+| Logout (this device) | `POST /auth/logout` | Revokes current `UserSession`; clears token cookie |
+| Logout all devices | `POST /auth/logout-all` | Revokes all sessions for the calling user |
+| Admin phone-change | `PATCH /admin/users/[id]` | Revokes all sessions for the edited user on actual phone change |
+| Gifsy force-logout | `POST /admin/force-logout-all` | Global kill switch — revokes every active session across all tenants (GIFSY_ADMIN only; CLIENT_ADMIN gets 403) |
+
+**Notes.**
+- GIFSY_ADMIN sessions are exempt from the subdomain==tenant check (platform operator works
+  cross-tenant).
+- `DEMO_MODE` bypasses session validation (trusts proxy headers). **Never enable in production.**
+- Phone-change revoke is wired for admin edits (P1). Wiring for bulk sales upload (P2) and
+  re-KYC (P3) is deferred with TODO markers.
+
+---
 
 ---
 
