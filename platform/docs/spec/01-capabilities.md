@@ -28,7 +28,7 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
   (GIFSY_ADMIN exempt), binding token↔tenant in-app (gap #20 resolved, #23 header-swap closed).
   Lifecycle: logout, logout-all-devices, Gifsy platform-wide force-logout, admin edit-phone→auto-logout.
 - **Target/gaps.** Three access models: **Admin** = tenant-configurable roles built on the
-  `lib/rbac` permission catalog (71 perms / 17 groups) + a pure `can()` engine with a default
+  `lib/rbac` permission catalog (72 perms / 17 groups) + a pure `can()` engine with a default
   role→permission map (Gap #2/#3, 1.5/1.6a). **Default map (operating model, user-confirmed):**
   - **GIFSY_ADMIN = every permission** — Gifsy is *over and above* every role (invariant: every role ⊆ Gifsy).
   - **CLIENT_ADMIN = all EXCEPT the Gifsy-operated set** (`GIFSY_OPERATED_PERMISSIONS`): tenancy config
