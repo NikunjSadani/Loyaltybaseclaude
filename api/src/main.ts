@@ -1,5 +1,5 @@
 import { NestFactory }           from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
+import { ValidationPipe, Logger, VersioningType } from '@nestjs/common';
 import { ConfigService }          from '@nestjs/config';
 import helmet                     from 'helmet';
 import { AppModule }              from './app.module';
@@ -7,6 +7,10 @@ import { AppModule }              from './app.module';
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
   const app    = await NestFactory.create(AppModule);
+
+  // URI versioning — all feature controllers serve under /v1 (default version).
+  // AppController (/, /health) is VERSION_NEUTRAL so liveness probes stay unversioned.
+  app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
 
   const config = app.get(ConfigService);
 
