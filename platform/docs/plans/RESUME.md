@@ -46,6 +46,10 @@ check port 5433, restart per DEV-DB.md). .env DATABASE_URL → 127.0.0.1:5433/gi
 SELECT 1 before migrating. NEVER point dev at prod (gifsy-db). This dev DB has NO prisma migration history
 — use db push / surgical `migrate diff` → apply SQL in a txn guarded by current_database='gifsy_dev';
 NEVER `prisma migrate dev` (it would RESET it). Backfill scripts reuse the lib/prisma singleton.
+⚠️ **SCHEMA SOURCE OF TRUTH = `platform/prisma/schema.prisma`** (80 models; used by local dev via
+`prisma.config.ts`, the platform Dockerfile, CI, + `gifsy_dev`). The repo ALSO has a separate NestJS `api/`
+service with its OWN `api/prisma/schema.prisma` (74 models) — do NOT edit/generate the platform from api's
+schema (Gap #30; CI bug fixed 2026-06-16). The P4.0 drop-migration edits the PLATFORM schema.
 
 STATE: **P0 + P1 + P2 COMPLETE** (as of 2026-06-16), all built→gated→independently-audited and **pushed to
 origin/develop** (run `git log --oneline origin/develop -5` for the latest). Gate is DIFFERENTIAL ("no NEW reds

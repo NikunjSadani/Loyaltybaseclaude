@@ -9,7 +9,10 @@ A dedicated GCP Cloud SQL instance for development, **isolated from production**
 - **Password:** GCP **Secret Manager** secret `gifsy-dev-db-password` (never in git/transcript)
 - **Local access:** Cloud SQL **Auth Proxy** on `127.0.0.1:5433`
 - **`.env`:** `DATABASE_URL=postgresql://gifsy_user:<pw>@127.0.0.1:5433/gifsy_dev`, `DEMO_MODE=false`
-- **Schema:** created with `npx prisma db push` (79 tables), starts empty.
+- **Schema:** built from **`platform/prisma/schema.prisma`** (the platform's OWN schema = source of truth; 80
+  models as of P2) via `npx prisma db push`, starts empty. ⚠️ This is the **platform** schema — NOT the separate
+  `api/prisma/schema.prisma` (the NestJS `api/` service is a different app with its own schema, 74 models). Always
+  generate/migrate from the platform's own schema (`npx prisma generate` in `platform/` uses `prisma.config.ts`).
 - Cost: ~$8/mo (smallest tier, HDD, no backups).
 
 ## ⚠️ Never point dev at prod

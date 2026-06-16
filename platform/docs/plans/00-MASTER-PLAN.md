@@ -351,7 +351,7 @@ deploy-validated; the launch parts (9.7–9.9) gate the first real tenant.
 
 | Task | What | Key area | Gate |
 |---|---|---|---|
-| 9.0 | Reconcile EXISTING infra (`.github/workflows/*`, `terraform/*`, `Dockerfile`, Cloud SQL, Secret Manager) vs target; list real gaps | `terraform/`, `.github/` | — |
+| 9.0 | Reconcile EXISTING infra (`.github/workflows/*`, `terraform/*`, `Dockerfile`, Cloud SQL, Secret Manager) vs target; list real gaps. **Note (Gap #30):** repo deploys TWO services — `platform/` (Next.js) + `api/` (NestJS), each with its OWN prisma schema (80 vs 74 models). CI/deploy now generate each from its own schema (fixed 2026-06-16). **Resolve here: do `platform`+`api` share the PROD DB (`gifsy-db`)?** If yes → migration/table-ownership decision between the two schemas. | `terraform/`, `.github/`, `*/prisma/schema.prisma` | — |
 | 9.1 | **Fix the CI gate** (`ci.yml` EXISTS): its `npm test` all-pass requirement is incompatible with the red-by-design TDD baseline → switch CI to the **differential gate** (no NEW reds vs `baseline-red-snapshot.txt`) or quarantine the baseline reds, so CI can be green and deploys can proceed | `.github/workflows/ci.yml` | CI green-able |
 | 9.2 | **Environments** (`deploy-staging.yml` + terraform EXIST): verify staging is stood up & mirrors prod; confirm dev→staging→prod promotion | `terraform/`, Cloud Run | deploys |
 | 9.3 | **CD** (`deploy.yml`/`deploy-staging.yml` EXIST): verify the `main`→prod (approval-gated) + `develop`→staging flows end-to-end; **add the DB-migration step** (none in the pipeline today — see 9.5) | `.github/workflows/*` | deploy run |

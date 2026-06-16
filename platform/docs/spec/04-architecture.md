@@ -26,7 +26,16 @@ flowchart TB
 
 ## 2 · Building blocks (C4 L2)
 
-- **Next.js 15 App Router** — co-located UI (`src/app/<portal>/…`) and API (`src/app/api/…`).
+> **⚠️ Two deployed services in this repo (2026-06-16).** The git root holds **two** apps, both deployed to
+> Cloud Run by `deploy.yml`: **`platform/`** (Next.js — *this spec covers it*, the app we build on) and
+> **`api/`** (a separate NestJS service). **Each has its OWN Prisma schema.** `platform/prisma/schema.prisma`
+> (80 models) is the **source of truth for the platform** — used by local dev (`prisma.config.ts`), the
+> platform Dockerfile, CI, and the dev DB (`gifsy_dev`). `api/prisma/schema.prisma` (74 models) is the api
+> service's own, separate schema (missing the platform's `Client` model + Credits module — they're not the
+> same schema). Don't cross-wire them. (A stale "platform has no prisma/schema.prisma" note in the CI/deploy
+> workflows was fixed in the 2026-06-16 CI-schema reconcile; see §6 + Gap #30.)
+
+- **Next.js 16 App Router** — co-located UI (`src/app/<portal>/…`) and API (`src/app/api/…`).
   Four portal route-groups: `gifsy/`, `admin/`, `sales/`, `partner/`.
 - **`lib/`** — domain logic, mostly **pure + testable** (e.g. `kyc-approval`, `*-upload`,
   `credits-payouts-*`), separated from side-effectful callers (Prisma, GCS, MSG91).
@@ -81,8 +90,15 @@ flowchart TB
 
 ## 6 · Deployment
 
-- **Docker → Cloud Run**; **Cloud SQL** Postgres; **GCS** bucket; **Secret Manager**
-  (`JWT_SECRET`, MSG91 keys — never hardcoded; SA key files gitignored); `terraform/iam.tf`.
+- **Docker → Cloud Run** for **both** services (`platform` + `api`); **Cloud SQL** Postgres; **GCS** bucket;
+  **Secret Manager** (`JWT_SECRET`, MSG91 keys — never hardcoded; SA key files gitignored); `terraform/iam.tf`.
+- **Prisma client generation** (CI `ci.yml`, deploy `deploy.yml`/`deploy-staging.yml`, and `platform/Dockerfile`)
+  generates each app's client from **its own `prisma/schema.prisma`** (`npx prisma generate` per app dir).
+  ⚠️ Earlier the platform-test step hardcoded `--schema=../api/prisma/schema.prisma` (generated the platform
+  client from api's stale schema → platform `tsc` failed in CI; latent since P1). **Fixed 2026-06-16.**
+- **Open (P9):** confirm whether `platform` + `api` share one **prod** DB (`gifsy-db`). If they do, the two
+  diverged schemas (80 vs 74 models) need a migration-ownership decision. Dev is clean (`gifsy_dev` = platform's
+  own DB, built from the platform schema). See Gap #30.
 - `DEMO_MODE=true` short-circuits external deps (DB/MSG91/approvals) for end-to-end demo.
 
 ## 7 · Cross-cutting concerns
