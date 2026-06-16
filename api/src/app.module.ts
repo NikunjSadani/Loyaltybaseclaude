@@ -8,6 +8,7 @@ import { AppController }  from './app.controller';
 import { AppService }     from './app.service';
 import { JwtAuthGuard }   from './common/guards/jwt-auth.guard';
 import { RolesGuard }     from './common/guards/roles.guard';
+import { PermissionGuard } from './common/guards/permission.guard';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { AllExceptionsFilter }  from './common/filters/all-exceptions.filter';
 
@@ -48,6 +49,8 @@ import { TenantModule }   from './tenant/tenant.module';
     // Apply JWT auth globally — use @Public() to opt out
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    // RBAC permission enforcement — flag-gated, no-op unless @RequirePermission + flags on
+    { provide: APP_GUARD, useClass: PermissionGuard },
   ],
 })
 export class AppModule {}
