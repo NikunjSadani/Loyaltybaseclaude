@@ -13,6 +13,8 @@ import { TransformInterceptor } from './common/interceptors/transform.intercepto
 import { AllExceptionsFilter }  from './common/filters/all-exceptions.filter';
 
 import { PrismaModule }   from './prisma/prisma.module';
+import { StorageModule }  from './storage/storage.module';
+import { NotificationsModule } from './notifications/notifications.module';
 import { AuthModule }     from './auth/auth.module';
 import { TenantModule }   from './tenant/tenant.module';
 import { TicketsModule }  from './tickets/tickets.module';
@@ -40,6 +42,8 @@ import { PartnerModule }  from './partner/partner.module';
       limit: 60,
     }]),
     PrismaModule,
+    StorageModule,
+    NotificationsModule,
     AuthModule,
     TenantModule,
     TicketsModule,
