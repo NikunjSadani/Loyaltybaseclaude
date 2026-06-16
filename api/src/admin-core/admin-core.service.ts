@@ -1,0 +1,686 @@
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { Prisma, KycStatus } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { TenantService } from '../tenant/tenant.service';
+import { JwtPayload } from '../common/decorators/current-user.decorator';
+import {
+  BulkEditUsersDto,
+  CreateUserDto,
+  ListUsersQueryDto,
+  UpdateUserDto,
+} from './dto/users.dto';
+import { UpsertSettingDto } from './dto/settings.dto';
+import { HierarchyConfigDto, TaskConfigDto } from './dto/config.dto';
+import {
+  DEOLEO_HIERARCHY,
+  HierarchyEmployee,
+  persistHierarchy,
+} from './hierarchy-persistence';
+
+/**
+ * AdminCoreService — business logic for the ported admin sub-domains
+ * (users, settings, hierarchy-config, force-logout-all, dashboard, task-config,
+ * kpi-config, gift-config). Re-homed from platform/src/app/api/admin/* onto /v1.
+ *
+ * Every query is tenant-scoped by `user.clientId` (the old `userId` is `user.sub`).
+ * Role/permission gates live on the controllers (@Roles / @RequirePermission);
+ * tenant scope + business rules are re-checked here. Controllers stay thin.
+ *
+ * Single return shape: each method returns the `data` payload directly
+ * (the Next `ok(data)` body); the global TransformInterceptor envelopes it.
+ */
+@Injectable()
+export class AdminCoreService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenant: TenantService,
+  ) {}
+
+  // ─── ProgramSetting setting keys (mirror the Next routes) ───────────────────
+  private static readonly HIERARCHY_KEY = 'employee_hierarchy';
+  private static readonly TASK_CONFIG_KEY = 'task_config';
+  private static readonly KPI_DEFS_KEY = 'kpi_defs';
+  private static readonly GIFT_CATALOGUE_KEY = 'gift_catalogue';
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Session helpers — ported from platform/src/lib/session.ts
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** Revoke all non-revoked sessions for a single user. Returns the count. */
+  private async revokeAllSessionsForUser(userId: string): Promise<number> {
+    const result = await this.prisma.userSession.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    return result.count;
+  }
+
+  /**
+   * Platform-wide kill switch — revokes EVERY non-revoked session across ALL
+   * users and ALL tenants. Intentionally global (no userId / clientId filter).
+   * GIFSY_ADMIN only — enforced on the controller.
+   */
+  private async revokeAllSessions(): Promise<number> {
+    const result = await this.prisma.userSession.updateMany({
+      where: { revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    return result.count;
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // USERS — admin/users, admin/users/[id], admin/users/bulk-edit
+  // ════════════════════════════════════════════════════════════════════════
+
+  async listUsers(user: JwtPayload, q: ListUsersQueryDto) {
+    const page = q.page ?? 1;
+    const limit = q.limit ?? 20;
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.UserWhereInput = { clientId: user.clientId };
+    if (q.role) where.role = q.role;
+    if (q.status) where.status = q.status;
+    if (q.search) {
+      where.OR = [
+        { name: { contains: q.search, mode: 'insensitive' } },
+        { phone: { contains: q.search } },
+        { email: { contains: q.search, mode: 'insensitive' } },
+      ];
+    }
+
+    const [users, total] = await Promise.all([
+      this.prisma.user.findMany({
+        where,
+        select: {
+          id: true,
+          phone: true,
+          name: true,
+          email: true,
+          role: true,
+          status: true,
+          createdAt: true,
+          salesUser: { select: { id: true } },
+        },
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.user.count({ where }),
+    ]);
+
+    return { users, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+  }
+
+  async createUser(user: JwtPayload, dto: CreateUserDto) {
+    const clientId = user.clientId;
+
+    const existing = await this.prisma.user.findFirst({ where: { phone: dto.phone, clientId } });
+    if (existing) throw new BadRequestException('User with this phone already exists');
+
+    const created = await this.prisma.user.create({
+      data: {
+        phone: dto.phone,
+        name: dto.name,
+        role: dto.role,
+        email: dto.email ?? null,
+        status: 'ACTIVE',
+        clientId,
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'CREATE',
+        entityType: 'USER',
+        entityId: created.id,
+        actorId: user.sub,
+        metadata: { role: dto.role, phone: dto.phone },
+      },
+    });
+
+    return { user: created };
+  }
+
+  async getUser(user: JwtPayload, id: string) {
+    const found = await this.prisma.user.findFirst({
+      where: { id, clientId: user.clientId },
+      include: { channelPartner: true, salesUser: true },
+    });
+    if (!found) throw new NotFoundException('User not found');
+    return { user: found };
+  }
+
+  async updateUser(user: JwtPayload, id: string, dto: UpdateUserDto) {
+    const clientId = user.clientId;
+
+    const target = await this.prisma.user.findFirst({ where: { id, clientId } });
+    if (!target) throw new NotFoundException('User not found');
+
+    // Phone-uniqueness guard: check BEFORE update to avoid Prisma P2002
+    if (dto.phone && dto.phone !== target.phone) {
+      const clash = await this.prisma.user.findFirst({
+        where: { phone: dto.phone, clientId, id: { not: id } },
+      });
+      if (clash) throw new ConflictException('Phone number already in use');
+    }
+
+    const phoneChanged = Boolean(dto.phone && dto.phone !== target.phone);
+
+    const updated = await this.prisma.user.update({
+      where: { id },
+      data: { ...dto, updatedAt: new Date() },
+    });
+
+    // Force re-login on all devices when login identity (phone) changes
+    if (phoneChanged) {
+      await this.revokeAllSessionsForUser(id);
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'UPDATE',
+        entityType: 'USER',
+        entityId: id,
+        actorId: user.sub,
+        metadata: { ...dto },
+      },
+    });
+
+    return { user: updated };
+  }
+
+  async deleteUser(user: JwtPayload, id: string) {
+    const clientId = user.clientId;
+
+    if (id === user.sub) throw new BadRequestException('Cannot delete your own account');
+
+    const target = await this.prisma.user.findFirst({ where: { id, clientId } });
+    if (!target) throw new NotFoundException('User not found');
+
+    // Soft delete
+    await this.prisma.user.update({
+      where: { id },
+      data: { status: 'INACTIVE', deletedAt: new Date() },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'DELETE',
+        entityType: 'USER',
+        entityId: id,
+        actorId: user.sub,
+      },
+    });
+
+    return { message: 'User deleted successfully' };
+  }
+
+  // ── bulk-edit ──────────────────────────────────────────────────────────────
+
+  async bulkEditUsers(user: JwtPayload, dto: BulkEditUsersDto) {
+    const clientId = user.clientId;
+    const action = dto.action;
+
+    // ── DEMO_MODE ─────────────────────────────────────────────────────────────
+    if (process.env.DEMO_MODE === 'true') {
+      if (action === 'resign') {
+        return { resigned: (dto.employeeCodes ?? []).length, message: 'Resigned (demo mode)' };
+      }
+      if (action === 'reassign_outlet') {
+        return { reassigned: (dto.outletIds ?? []).length, message: 'Reassigned (demo mode)' };
+      }
+      throw new BadRequestException(`Unknown action: ${action}`);
+    }
+
+    // ── Resign ──────────────────────────────────────────────────────────────
+    if (action === 'resign') {
+      const employeeCodes = dto.employeeCodes;
+      if (!Array.isArray(employeeCodes) || employeeCodes.length === 0) {
+        throw new BadRequestException('employeeCodes must be a non-empty array');
+      }
+      if (employeeCodes.length > 200) {
+        throw new BadRequestException('Maximum 200 employees per bulk-resign request');
+      }
+
+      const salesUsers = await this.prisma.salesUser.findMany({
+        where: { employeeCode: { in: employeeCodes }, deletedAt: null, user: { clientId } },
+        select: { id: true, userId: true, employeeCode: true },
+      });
+
+      if (salesUsers.length === 0) {
+        throw new BadRequestException('No active employees found for the given codes');
+      }
+
+      const salesUserIds = salesUsers.map((s) => s.id);
+      const userIds = salesUsers.map((s) => s.userId);
+      const now = new Date();
+
+      await this.prisma.$transaction(async (tx) => {
+        await tx.salesUser.updateMany({
+          where: { id: { in: salesUserIds } },
+          data: { isActive: false, deletedAt: now },
+        });
+
+        await tx.user.updateMany({
+          where: { id: { in: userIds } },
+          data: { status: 'INACTIVE' },
+        });
+
+        await tx.salesUserAssignment.updateMany({
+          where: { salesUserId: { in: salesUserIds }, unassignedAt: null },
+          data: { unassignedAt: now },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            action: 'UPDATE',
+            entityType: 'SALES_USER',
+            entityId: 'BULK',
+            actorId: user.sub,
+            newValues: { status: 'RESIGNED', employeeCodes },
+            metadata: { action: 'bulk_resign', count: salesUsers.length },
+          },
+        });
+      });
+
+      return { resigned: salesUsers.length, notFound: employeeCodes.length - salesUsers.length };
+    }
+
+    // ── Reassign outlet XSR ─────────────────────────────────────────────────
+    if (action === 'reassign_outlet') {
+      const outletIds = dto.outletIds;
+      const newXsrEmployeeCode = dto.newXsrEmployeeCode;
+
+      if (!Array.isArray(outletIds) || outletIds.length === 0) {
+        throw new BadRequestException('outletIds must be a non-empty array');
+      }
+      if (!newXsrEmployeeCode || typeof newXsrEmployeeCode !== 'string') {
+        throw new BadRequestException('newXsrEmployeeCode is required');
+      }
+      if (outletIds.length > 200) {
+        throw new BadRequestException('Maximum 200 outlets per reassignment request');
+      }
+
+      // Validate new XSR — MUST be tenant-scoped (no cross-tenant assignment).
+      const newXsr = await this.prisma.salesUser.findFirst({
+        where: { employeeCode: newXsrEmployeeCode.trim(), deletedAt: null, isActive: true, clientId },
+        select: { id: true },
+      });
+      if (!newXsr) {
+        throw new BadRequestException(
+          `XSR with employee code ${newXsrEmployeeCode} not found or inactive`,
+        );
+      }
+
+      // Verify outlets exist; scope by the outlet's OWN clientId.
+      const outlets = await this.prisma.outlet.findMany({
+        where: { id: { in: outletIds }, deletedAt: null, clientId },
+        select: { id: true, partnerId: true },
+      });
+      if (outlets.length === 0) {
+        throw new BadRequestException('No active outlets found for the given IDs');
+      }
+
+      const now = new Date();
+
+      await this.prisma.$transaction(async (tx) => {
+        for (const outlet of outlets) {
+          await tx.salesUserAssignment.updateMany({
+            where: { outletId: outlet.id, unassignedAt: null },
+            data: { unassignedAt: now },
+          });
+
+          await tx.salesUserAssignment.create({
+            data: {
+              salesUserId: newXsr.id,
+              outletId: outlet.id,
+              partnerId: outlet.partnerId,
+              assignedAt: now,
+            },
+          });
+        }
+
+        await tx.auditLog.create({
+          data: {
+            action: 'UPDATE',
+            entityType: 'OUTLET',
+            entityId: 'BULK',
+            actorId: user.sub,
+            newValues: { newXsrEmployeeCode, outletIds },
+            metadata: { action: 'bulk_reassign_outlet', count: outlets.length },
+          },
+        });
+      });
+
+      return { reassigned: outlets.length, notFound: outletIds.length - outlets.length };
+    }
+
+    throw new BadRequestException(
+      `Unknown action: ${action}. Valid actions: resign, reassign_outlet`,
+    );
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // SETTINGS — admin/settings, admin/settings/config
+  // ════════════════════════════════════════════════════════════════════════
+
+  private static readonly SETTINGS_DEFAULTS: Record<string, unknown> = {
+    holdingPeriodDays: 30,
+    conversionRate: 1,
+    slaTargetHours: 48,
+    maxOtpAttempts: 3,
+    otpExpiryMinutes: 10,
+    minRedemptionPoints: 100,
+    maxDailyVisibilitySubmissions: 10,
+    tdsRate: 0.1,
+    tdsThresholdPaise: 2000000,
+    programName: 'Loyalty Program',
+    supportEmail: 'support@platform.com',
+    supportPhone: '1800-XXX-XXXX',
+  };
+
+  async getSettings(user: JwtPayload) {
+    const rows = await this.prisma.programSetting.findMany({ where: { clientId: user.clientId } });
+
+    const settings: Record<string, unknown> = { ...AdminCoreService.SETTINGS_DEFAULTS };
+    for (const row of rows) {
+      settings[row.settingKey] = row.settingValue;
+    }
+
+    return { settings };
+  }
+
+  async upsertSetting(user: JwtPayload, dto: UpsertSettingDto) {
+    const clientId = user.clientId;
+
+    const setting = await this.prisma.programSetting.upsert({
+      where: { clientId_settingKey: { clientId, settingKey: dto.key } },
+      update: { settingValue: dto.value, updatedById: user.sub },
+      create: {
+        settingKey: dto.key,
+        settingValue: dto.value,
+        category: dto.category,
+        description: dto.description,
+        updatedById: user.sub,
+        clientId,
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'UPDATE',
+        entityType: 'PROGRAM_SETTINGS',
+        entityId: setting.id,
+        actorId: user.sub,
+        metadata: { key: dto.key, value: dto.value },
+      },
+    });
+
+    return { setting };
+  }
+
+  /**
+   * admin/settings/config — branding + feature flags for the caller's tenant.
+   * Source used getTenantConfig() (DB-backed loader). Here we resolve via the
+   * @Global TenantService (AdminConfig-backed). NEVER expose secrets — only
+   * branding + features (+ non-secret metadata) are returned.
+   */
+  async getTenantConfig(user: JwtPayload) {
+    const config = await this.tenant.resolveClient(user.clientId);
+    return {
+      slug: config.slug,
+      internalName: config.name,
+      status: config.isActive ? 'ACTIVE' : 'INACTIVE',
+      branding: config.branding,
+      features: config.features,
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // HIERARCHY-CONFIG — admin/hierarchy-config
+  // ════════════════════════════════════════════════════════════════════════
+
+  async getHierarchyConfig(user: JwtPayload) {
+    const setting = await this.prisma.programSetting.findFirst({
+      where: { clientId: user.clientId, settingKey: AdminCoreService.HIERARCHY_KEY },
+    });
+    const employees = (setting?.settingValue as unknown[]) ?? [];
+    return { employees };
+  }
+
+  async saveHierarchyConfig(user: JwtPayload, dto: HierarchyConfigDto) {
+    const clientId = user.clientId;
+    const employees = dto.employees;
+
+    if (!Array.isArray(employees)) {
+      throw new BadRequestException('Expected { employees: [...] }');
+    }
+
+    // 1. Keep the denormalized JSON snapshot for the admin UI (GET) AND
+    // 2. Persist the authoritative relational tree — both in one transaction.
+    const result = await this.prisma.$transaction(async (tx) => {
+      await tx.programSetting.upsert({
+        where: { clientId_settingKey: { clientId, settingKey: AdminCoreService.HIERARCHY_KEY } },
+        update: { settingValue: employees as Prisma.InputJsonValue, updatedById: user.sub },
+        create: {
+          clientId,
+          settingKey: AdminCoreService.HIERARCHY_KEY,
+          settingValue: employees as Prisma.InputJsonValue,
+          updatedById: user.sub,
+        },
+      });
+
+      return persistHierarchy(
+        clientId,
+        employees as HierarchyEmployee[],
+        DEOLEO_HIERARCHY,
+        tx,
+      );
+    });
+
+    return { message: 'Employee hierarchy saved', persisted: result };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // FORCE-LOGOUT-ALL — admin/force-logout-all (GIFSY kill switch)
+  // ════════════════════════════════════════════════════════════════════════
+
+  async forceLogoutAll(user: JwtPayload) {
+    const count = await this.revokeAllSessions();
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'LOGOUT',
+        entityType: 'SESSION',
+        entityId: 'ALL',
+        actorId: user.sub,
+        metadata: { revoked: count, reason: 'force-logout-all' },
+      },
+    });
+
+    return { message: 'All users logged out', revoked: count };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // DASHBOARD — admin/dashboard/kpis
+  // ════════════════════════════════════════════════════════════════════════
+
+  private static readonly PENDING_KYC_STATUSES: KycStatus[] = [
+    'SUBMITTED',
+    'UNDER_REVIEW',
+    'PENDING_SO_APPROVAL',
+    'PENDING_ASM_APPROVAL',
+    'PENDING_RSM_APPROVAL',
+    'PENDING_GIFSY',
+  ];
+
+  async dashboardKpis(user: JwtPayload) {
+    const clientId = user.clientId;
+
+    const [activePartners, pendingKyc, pendingVisibility, walletAggregate, payoutGroups] =
+      await Promise.all([
+        this.prisma.channelPartner.count({
+          where: { clientId, isActive: true, deletedAt: null },
+        }),
+
+        this.prisma.kycSubmission.count({
+          where: {
+            user: { clientId },
+            status: { in: AdminCoreService.PENDING_KYC_STATUSES },
+          },
+        }),
+
+        this.prisma.visibilitySubmission.count({
+          where: {
+            partner: { clientId },
+            status: 'SUBMITTED',
+          },
+        }),
+
+        this.prisma.wallet.aggregate({
+          _sum: { redeemablePoints: true },
+          where: { partner: { clientId } },
+        }),
+
+        this.prisma.payoutTransaction.groupBy({
+          by: ['status'],
+          where: { partner: { clientId } },
+          _count: { id: true },
+          _sum: { netAmountPaise: true },
+        }),
+      ]);
+
+    const totalRedeemablePoints = walletAggregate._sum.redeemablePoints ?? 0;
+
+    const payoutSummary: Record<string, { count: number; amountPaise: number }> = {};
+    for (const g of payoutGroups) {
+      payoutSummary[g.status] = {
+        count: g._count.id,
+        amountPaise: g._sum.netAmountPaise ?? 0,
+      };
+    }
+
+    return {
+      activePartners,
+      pendingKyc,
+      pendingVisibility,
+      totalRedeemablePoints,
+      payoutSummary,
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // TASK-CONFIG — admin/task-config
+  // ════════════════════════════════════════════════════════════════════════
+
+  private static readonly DEFAULT_TASK_CONFIG = {
+    customTaskLabel: 'HO Notifications / Reminders',
+    customTaskItems: [] as unknown[],
+  };
+
+  async getTaskConfig(user: JwtPayload) {
+    const row = await this.prisma.programSetting.findFirst({
+      where: { clientId: user.clientId, settingKey: AdminCoreService.TASK_CONFIG_KEY },
+    });
+    const config = row ? (row.settingValue as object) : AdminCoreService.DEFAULT_TASK_CONFIG;
+    return { config };
+  }
+
+  async saveTaskConfig(user: JwtPayload, dto: TaskConfigDto) {
+    const clientId = user.clientId;
+
+    const setting = await this.prisma.programSetting.upsert({
+      where: { clientId_settingKey: { clientId, settingKey: AdminCoreService.TASK_CONFIG_KEY } },
+      update: { settingValue: dto as unknown as Prisma.InputJsonValue, updatedById: user.sub },
+      create: {
+        settingKey: AdminCoreService.TASK_CONFIG_KEY,
+        settingValue: dto as unknown as Prisma.InputJsonValue,
+        category: 'sales_tasks',
+        description: 'Sales dashboard task category configuration',
+        updatedById: user.sub,
+        clientId,
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'UPDATE',
+        entityType: 'PROGRAM_SETTINGS',
+        entityId: setting.id,
+        actorId: user.sub,
+        metadata: { key: AdminCoreService.TASK_CONFIG_KEY },
+      },
+    });
+
+    return { config: dto };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // KPI-CONFIG — admin/kpi-config
+  // ════════════════════════════════════════════════════════════════════════
+
+  async getKpiConfig(user: JwtPayload) {
+    const setting = await this.prisma.programSetting.findFirst({
+      where: { clientId: user.clientId, settingKey: AdminCoreService.KPI_DEFS_KEY },
+    });
+    const kpiDefs = (setting?.settingValue as unknown[]) ?? [];
+    return { kpiDefs };
+  }
+
+  async saveKpiConfig(user: JwtPayload, body: unknown) {
+    const clientId = user.clientId;
+    if (!Array.isArray(body)) {
+      throw new BadRequestException('Expected an array of KPI definitions');
+    }
+
+    await this.prisma.programSetting.upsert({
+      where: { clientId_settingKey: { clientId, settingKey: AdminCoreService.KPI_DEFS_KEY } },
+      update: { settingValue: body as Prisma.InputJsonValue, updatedById: user.sub },
+      create: {
+        clientId,
+        settingKey: AdminCoreService.KPI_DEFS_KEY,
+        settingValue: body as Prisma.InputJsonValue,
+        updatedById: user.sub,
+      },
+    });
+
+    return { message: 'KPI definitions saved' };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // GIFT-CONFIG — admin/gift-config
+  // ════════════════════════════════════════════════════════════════════════
+
+  async getGiftConfig(user: JwtPayload) {
+    const setting = await this.prisma.programSetting.findFirst({
+      where: { clientId: user.clientId, settingKey: AdminCoreService.GIFT_CATALOGUE_KEY },
+    });
+    const gifts = (setting?.settingValue as unknown[]) ?? [];
+    return { gifts };
+  }
+
+  async saveGiftConfig(user: JwtPayload, body: unknown) {
+    const clientId = user.clientId;
+    if (!Array.isArray(body)) {
+      throw new BadRequestException('Expected an array of gift items');
+    }
+
+    await this.prisma.programSetting.upsert({
+      where: { clientId_settingKey: { clientId, settingKey: AdminCoreService.GIFT_CATALOGUE_KEY } },
+      update: { settingValue: body as Prisma.InputJsonValue, updatedById: user.sub },
+      create: {
+        clientId,
+        settingKey: AdminCoreService.GIFT_CATALOGUE_KEY,
+        settingValue: body as Prisma.InputJsonValue,
+        updatedById: user.sub,
+      },
+    });
+
+    return { message: 'Gift catalogue saved' };
+  }
+}

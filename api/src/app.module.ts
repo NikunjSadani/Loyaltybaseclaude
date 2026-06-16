@@ -29,6 +29,10 @@ import { PayoutsModule }  from './payouts/payouts.module';
 import { ReportsModule }  from './reports/reports.module';
 import { SchemesModule }  from './schemes/schemes.module';
 import { LeaderboardModule } from './leaderboard/leaderboard.module';
+import { CreditsModule }  from './credits/credits.module';
+import { AdminOutletsModule } from './admin-outlets/admin-outlets.module';
+import { AdminCoreModule } from './admin-core/admin-core.module';
+import { AdminProgramsModule } from './admin-programs/admin-programs.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
 // leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
@@ -64,6 +68,10 @@ import { LeaderboardModule } from './leaderboard/leaderboard.module';
     ReportsModule,
     SchemesModule,
     LeaderboardModule,
+    CreditsModule,
+    AdminOutletsModule,
+    AdminCoreModule,
+    AdminProgramsModule,
   ],
   controllers: [AppController],
   providers: [
