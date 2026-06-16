@@ -7,7 +7,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, KycFieldKey } from '@prisma/client';
+import { Prisma, KycFieldKey, KycDocumentType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
@@ -69,6 +69,7 @@ export class KycService {
    */
   async uploadDocument(user: JwtPayload, file: Express.Multer.File, dto: UploadKycDocumentDto) {
     if (!file) throw new BadRequestException('No file uploaded');
+    if (!file.buffer?.length) throw new BadRequestException('Empty file');
 
     const MAX_BYTES = 5 * 1024 * 1024; // 5 MB — typical KYC photo/doc
     if (file.size > MAX_BYTES) {
@@ -206,15 +207,33 @@ export class KycService {
     if (dto.documents?.length) {
       for (const doc of dto.documents) {
         if (!doc.type) continue;
-        // Prefer a GCS-uploaded object (fileKey/fileUrl from POST /v1/kyc/documents);
-        // fall back to the legacy inline dataUrl, then a pending placeholder.
-        const fileUrl = doc.fileUrl ?? doc.dataUrl ?? `pending://kyc/${submission.id}/${doc.type}`;
-        const fileKey = doc.fileKey ?? `kyc/${submission.id}/${doc.type}/${Date.now()}`;
+
+        let fileUrl: string;
+        let fileKey: string;
+        if (doc.fileKey) {
+          // A GCS object reference — accept ONLY keys this tenant owns (the upload
+          // endpoint always tenant-folders as kyc/<clientId>/…). Reconstruct the URL
+          // from the validated key; never trust a client-supplied fileUrl (a foreign
+          // key would otherwise be signed into another tenant's doc at review time).
+          if (!doc.fileKey.startsWith(`kyc/${user.clientId}/`)) {
+            throw new BadRequestException('Invalid document reference');
+          }
+          fileKey = doc.fileKey;
+          fileUrl = this.storage.publicUrl(fileKey);
+        } else if (doc.dataUrl) {
+          // Legacy inline base64 fallback.
+          fileUrl = doc.dataUrl;
+          fileKey = `kyc/${submission.id}/${doc.type}/${Date.now()}`;
+        } else {
+          fileUrl = `pending://kyc/${submission.id}/${doc.type}`;
+          fileKey = `kyc/${submission.id}/${doc.type}/${Date.now()}`;
+        }
+
         docPromises.push(
           this.prisma.kycDocument.create({
             data: {
               kycSubmissionId: submission.id,
-              documentType: doc.type as never,
+              documentType: doc.type as KycDocumentType,
               fileUrl,
               fileKey,
               fileName: doc.fileName ?? null,
@@ -911,21 +930,26 @@ export class KycService {
         try {
           return await this.storage.getSignedUrl(d.fileKey);
         } catch {
-          return d.fileUrl;
+          // Fail CLOSED — never emit a raw private-object URL into the export.
+          return undefined;
         }
       }
       return d.fileUrl && !d.fileUrl.startsWith('pending://') ? d.fileUrl : undefined;
     };
     const byType = (t: string) => docs.find((d) => d.documentType === t);
 
+    // Board photo + self-declaration both arrive as OTHER (form overloads the type).
+    // Match each by filename, non-overlapping; do NOT guess when nothing matches —
+    // leave the column blank rather than risk linking the wrong evidence under the
+    // wrong label. Proper fix = distinct doc types (reconcile §8 follow-up).
     const others = docs.filter((d) => d.documentType === 'OTHER');
     const board = others.find((d) => /board|store/i.test(d.fileName ?? ''));
-    const decl = others.find((d) => /declar|self/i.test(d.fileName ?? ''));
+    const decl = others.find((d) => d !== board && /declar|self/i.test(d.fileName ?? ''));
 
     return {
       gstCertificateUrl: await sign(byType('GST_CERTIFICATE')),
       addressDocUrl: await sign(byType('SHOP_ESTABLISHMENT') ?? byType('TRADE_LICENSE')),
-      selfDeclarationUrl: await sign(decl ?? others.find((d) => d !== board)),
+      selfDeclarationUrl: await sign(decl),
       boardPhotoUrl: await sign(board),
       ownerPhotoUrl: await sign(byType('SELFIE')),
       chequeUrl: await sign(byType('CANCELLED_CHEQUE')),

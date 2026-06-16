@@ -52,6 +52,7 @@ const mockStorage = {
   generateKey: jest.fn((folder: string, name: string) => `${folder}/2026-06/uuid-${name}`),
   uploadFile: jest.fn().mockResolvedValue('https://storage.googleapis.com/bucket/key'),
   getSignedUrl: jest.fn(),
+  publicUrl: jest.fn((k: string) => `https://storage.googleapis.com/bucket/${k}`),
   deleteFile: jest.fn(),
 };
 
@@ -103,6 +104,54 @@ describe('KycService', () => {
         service.uploadDocument(so, file(6 * 1024 * 1024), { documentType: 'PAN_CARD' }),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('create() document references (tenant safety)', () => {
+    const baseDto = {
+      partnerName: 'Kumar Store',
+      mobile: '9820100001',
+      address: '12 SV Road',
+      city: 'Mumbai',
+      state: 'Maharashtra',
+      pincode: '400058',
+    };
+
+    const primeCreateMocks = () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(null); // no in-flight dup
+      mockPrisma.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-1' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockPrisma.kycDocument.create.mockResolvedValue({});
+    };
+
+    it('rejects a document fileKey belonging to another tenant', async () => {
+      primeCreateMocks();
+      await expect(
+        service.create(so, {
+          ...baseDto,
+          documents: [{ type: 'GST_CERTIFICATE', fileKey: 'kyc/OTHER-TENANT/2026-06/uuid.pdf' }],
+        } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.kycDocument.create).not.toHaveBeenCalled();
+    });
+
+    it('accepts an own-tenant fileKey and stores the server-reconstructed URL', async () => {
+      primeCreateMocks();
+      const res = await service.create(so, {
+        ...baseDto,
+        documents: [{ type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/uuid.pdf' }],
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
+      expect(mockStorage.publicUrl).toHaveBeenCalledWith('kyc/deoleo/2026-06/uuid.pdf');
+      expect(mockPrisma.kycDocument.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            fileKey: 'kyc/deoleo/2026-06/uuid.pdf',
+            fileUrl: 'https://storage.googleapis.com/bucket/kyc/deoleo/2026-06/uuid.pdf',
+          }),
+        }),
+      );
     });
   });
 

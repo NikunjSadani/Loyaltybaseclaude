@@ -13,7 +13,7 @@ import {
   ValidateNested,
   Length,
 } from 'class-validator';
-import { KycStatus } from '@prisma/client';
+import { KycStatus, KycDocumentType } from '@prisma/client';
 
 // ─── Geo capture sub-schema ───────────────────────────────────────────────────
 export class GeoDto {
@@ -36,8 +36,8 @@ export class GeoDto {
 //      (the production path; the bytes live in object storage, not the DB).
 //   2. dataUrl — a base64 data URL inlined in the JSON (legacy/demo fallback).
 export class KycDocumentDto {
-  @IsString()
-  type!: string; // KycDocumentType enum value
+  @IsEnum(KycDocumentType, { message: 'Invalid document type' })
+  type!: KycDocumentType; // validated against the Prisma enum
 
   @IsOptional()
   @IsString()
@@ -68,9 +68,8 @@ export class KycDocumentDto {
 // ─── POST /v1/kyc/documents — multipart single-file upload to GCS ──────────────
 // The file rides as multipart field `file`; this DTO is the accompanying text field.
 export class UploadKycDocumentDto {
-  @IsString()
-  @MinLength(1, { message: 'documentType is required' })
-  documentType!: string; // KycDocumentType enum value
+  @IsEnum(KycDocumentType, { message: 'Invalid documentType' })
+  documentType!: KycDocumentType;
 }
 
 // ─── Full KYC submission schema ───────────────────────────────────────────────

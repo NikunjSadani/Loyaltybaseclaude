@@ -98,4 +98,41 @@ describe('evaluateSubmission (Stage-2 bridge)', () => {
     expect(r.next).toBe('RE_UPLOAD_REQUIRED');
     expect(r.rejectedFields).toEqual(['PAYMENT']);
   });
+
+  it('all 7 REJECTED → RE_UPLOAD_REQUIRED, every field named in canonical order, 0 approved', () => {
+    const r = evaluateSubmission(allWith('REJECTED'));
+    expect(r.next).toBe('RE_UPLOAD_REQUIRED');
+    expect(r.approvedCount).toBe(0);
+    expect(r.rejectedFields).toEqual(KYC_FIELD_KEYS);
+  });
+
+  it('ignores unknown field keys and extra rows (cannot corrupt the verdict)', () => {
+    const items: VerificationDecisionLike[] = [
+      ...allWith('APPROVED'),
+      { fieldKey: 'NOT_A_REAL_FIELD' as KycFieldKey, decision: 'REJECTED' },
+    ];
+    const r = evaluateSubmission(items);
+    expect(r.next).toBe('APPROVED');
+    expect(r.approvedCount).toBe(7);
+    expect(r.rejectedFields).toEqual([]);
+  });
+
+  it('rejectedFields order is independent of input order', () => {
+    const forward = evaluateSubmission([
+      item('PAYMENT', 'REJECTED'),
+      item('ADDRESS', 'REJECTED'),
+      ...KYC_FIELD_KEYS.filter((k) => k !== 'PAYMENT' && k !== 'ADDRESS').map((k) =>
+        item(k, 'APPROVED'),
+      ),
+    ]);
+    const reversed = evaluateSubmission([
+      item('ADDRESS', 'REJECTED'),
+      item('PAYMENT', 'REJECTED'),
+      ...KYC_FIELD_KEYS.filter((k) => k !== 'PAYMENT' && k !== 'ADDRESS').map((k) =>
+        item(k, 'APPROVED'),
+      ),
+    ]);
+    expect(forward.rejectedFields).toEqual(['PAYMENT', 'ADDRESS']);
+    expect(reversed.rejectedFields).toEqual(['PAYMENT', 'ADDRESS']);
+  });
 });

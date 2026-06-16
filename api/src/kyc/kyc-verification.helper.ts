@@ -61,7 +61,11 @@ export function evaluateSubmission(items: VerificationDecisionLike[]): BridgeRes
   const anyPending = decisions.some((d) => d === 'PENDING');
 
   if (anyPending) {
-    // Grid still being worked — hold at PENDING_GIFSY regardless of any rejects so far.
+    // Grid still being worked — hold at PENDING_GIFSY regardless of any rejects so
+    // far. NOTE (owner-confirm): rejects are intentionally NOT surfaced until all 7
+    // fields are terminal — a partner learns of a re-upload only once the grid is
+    // complete. Faithful to reconcile §5; early per-field re-share, if ever wanted,
+    // is a return-shape change, not a one-liner. Flagged for owner sign-off.
     return { next: 'PENDING_GIFSY', rejectedFields: [], approvedCount };
   }
 

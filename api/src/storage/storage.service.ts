@@ -36,13 +36,18 @@ export class StorageService {
     return `${folder}/${yearMonth}/${randomUUID()}-${base}${ext}`;
   }
 
+  /** The canonical (private) object URL for a key — same form uploadFile returns. */
+  publicUrl(key: string): string {
+    return `https://storage.googleapis.com/${this.bucket}/${key}`;
+  }
+
   /** Upload a Buffer and return the (private) object URL. */
   async uploadFile(file: Buffer, key: string, contentType: string): Promise<string> {
     await this.storage.bucket(this.bucket).file(key).save(file, {
       contentType,
       resumable: false, // simple upload for typical KYC/report files (< 5MB)
     });
-    return `https://storage.googleapis.com/${this.bucket}/${key}`;
+    return this.publicUrl(key);
   }
 
   /** V4 signed GET URL for a private object. */

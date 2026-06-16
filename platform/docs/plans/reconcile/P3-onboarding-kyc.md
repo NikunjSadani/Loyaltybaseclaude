@@ -277,3 +277,30 @@ the idempotency assertion; the tenant-scoping pattern; all §1 line citations. F
 
 **Verdict:** sound to proceed to the 3.4a migration gate **once BLOCKER #1 is in the schema** (it now is, in §4).
 Findings 2 & 3 are 3.3/3.4c build items, not migration blockers.
+
+---
+
+## 10 · Retro-audit of built tasks (3.1 / bridge / 3.4b), 2026-06-16
+
+Three **independent parallel** auditors reviewed the already-built tasks (owner adopted the full plan→execute→audit
+model). All confirmed: 3.1 tenant-foldering + size guard correct; the bridge implements §5 exactly (pure,
+deterministic); **3.4b query is correctly tenant-scoped — no cross-tenant leak**. Findings remediated (gated, tsc 0,
+49/49):
+
+| Task | Sev | Finding | Resolution |
+|---|---|---|---|
+| 3.1 | **security** | `create()` trusted a client `fileKey` with no ownership check → a foreign key would be signed into another tenant's doc at review | reject any `fileKey` not under `kyc/<clientId>/`; reconstruct `fileUrl` server-side via `storage.publicUrl` (never trust client URL) + test |
+| 3.1 | SHOULD-FIX | `documentType` accepted any string (`as never`) → 500 on bad value | `@IsEnum(KycDocumentType)` on both DTOs; honest `as KycDocumentType` |
+| 3.1 | NIT | zero-byte file passed the guard | `!file.buffer?.length` check |
+| 3.4b | SHOULD-FIX | signed-URL **fail-open** returned a raw private GCS URL into the xlsx | fail **closed** — return `undefined` on signing error |
+| 3.4b | SHOULD-FIX | OTHER doc-split could mis-assign board ↔ self-declaration | deterministic non-overlapping match; blank (not a guess) when no filename matches |
+| 3.4b | SHOULD-FIX | remark-less REJECT broke the parser round-trip | dump emits a placeholder remark for remark-less REJECT |
+| bridge | tests | missing edge coverage | +all-rejected, +unknown-key, +order-independence |
+
+**Deferred (low-priority follow-ups, tracked):** 3.1 MIME/extension allow-list; orphaned-GCS-object cleanup (upload
+without a later `create()`); 3.4b no-primary-outlet reviewer signal.
+
+**Owner decision needed (bridge audit #1):** rejects are intentionally **not surfaced until all 7 fields are
+terminal** — a partner learns of a re-upload only when the grid is complete. This is faithful to §5 but trades against
+REVAMP locked-decision #1 ("fix only the failing piece, fast"). Confirm keep-as-is, or switch to early per-field
+re-share (a return-shape change). Flagged in `kyc-verification.helper.ts`.

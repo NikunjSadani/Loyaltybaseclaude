@@ -176,7 +176,9 @@ export function generateKycReviewDumpExcel(entries: KycReviewDumpEntry[]): Buffe
       const decision =
         fs.decision === 'PENDING' ? '' : fs.decision === 'APPROVED' ? 'APPROVE' : 'REJECT';
       row.push(decision);
-      row.push(fs.remark ?? '');
+      // A REJECT must carry a remark or the bulk-verify parser rejects the row on
+      // re-import; emit a placeholder if one is somehow missing (write paths enforce it).
+      row.push(decision === 'REJECT' ? fs.remark || 'Rejected (no remark on file)' : (fs.remark ?? ''));
     }
 
     return row;

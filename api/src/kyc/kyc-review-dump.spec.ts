@@ -89,6 +89,15 @@ describe('generateKycReviewDumpExcel', () => {
     expect(cell?.v ?? '').toBe('');
   });
 
+  it('a REJECTED field with no remark gets a placeholder (round-trip stays valid)', () => {
+    const fields = allPending();
+    fields.PAYMENT = { decision: 'REJECTED' }; // no remark
+    const { rows } = parse(generateKycReviewDumpExcel([entry({ fields })]));
+    const decIdx = rows[0].indexOf(kycFieldDecisionHeader('Payment (Bank/UPI)'));
+    expect(rows[1][decIdx]).toBe('REJECT');
+    expect(rows[1][decIdx + 1]).not.toBe(''); // remark column carries a non-empty placeholder
+  });
+
   it('is deterministic in content', () => {
     const a = parse(generateKycReviewDumpExcel([entry()])).rows;
     const b = parse(generateKycReviewDumpExcel([entry()])).rows;
