@@ -9,12 +9,15 @@ A dedicated GCP Cloud SQL instance for development, **isolated from production**
 - **Password:** GCP **Secret Manager** secret `gifsy-dev-db-password` (never in git/transcript)
 - **Local access:** Cloud SQL **Auth Proxy** on `127.0.0.1:5433`
 - **`.env`:** `DATABASE_URL=postgresql://gifsy_user:<pw>@127.0.0.1:5433/gifsy_dev`, `DEMO_MODE=false`
-- **Schema:** built from **`platform/prisma/schema.prisma`** (source of truth; 80 models as of P2) via
-  `npx prisma db push`, starts empty. ⚠️ **Phase S (`BACKEND-SPLIT-PLAN.md`) MOVES the canonical schema to the
-  backend** — which lives in the `api/` dir (S2 takes this platform schema, drops World-A, and it **becomes
-  `api/prisma/schema.prisma`, replacing api's World-A 74-model schema**). **Update this file's schema location when S2
-  lands.** Until then, the platform schema is
-  authoritative (`npx prisma generate` in `platform/` uses `prisma.config.ts`).
+- **Schema source of truth = `api/prisma/schema.prisma`** (canonical, **66 models**) — **moved to the backend in
+  Phase S S2 (2026-06-16)**. S2 took the platform's 80-model schema, dropped 14 World-A models + their fields/enums
+  (tiers, partner-class, SKU/catalog, invoice-line, compute, Target), and the result is the backend's canonical schema.
+  The de-scaffold migration `api/prisma/migrations-manual/S2_descaffold_worldA.sql` was applied to `gifsy_dev`
+  (80→66 tables; guarded by `current_database()='gifsy_dev'`). Regenerate the backend client with
+  `npx prisma generate` in `api/`.
+- **Transitional:** `platform/prisma/schema.prisma` still has the old 80 models — the platform's World-A routes are
+  removed in S4 and its schema/Prisma usage retired as it thins to the frontend. Until then it's stale vs the DB
+  (its World-A routes fail at runtime — no UI, harmless).
 - Cost: ~$8/mo (smallest tier, HDD, no backups).
 
 ## ⚠️ Never point dev at prod

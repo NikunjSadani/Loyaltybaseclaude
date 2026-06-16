@@ -242,9 +242,9 @@ owns DB + all logic) + a **thin Next.js web frontend**, so future mobile/PWA/par
 
 | Task | What | Gate |
 |---|---|---|
-| S0 | Safety checks (greenfield ✅, no `api/` consumer ✅, prod-DB ownership ✅) | **human gate** ✅ |
-| S1 | Backend scaffold **in place in `api/`**: keep shell + port auth/tenant, **delete World-A domain** | **human gate** (deletion) + health route |
-| S2 | Canonical schema → `api/prisma/` + **World-A de-scaffold** (folds in P4.0) | **human-gated migration** (dev only) |
+| S0 | Safety checks (greenfield ✅, no `api/` consumer ✅, prod-DB ownership ✅) | **✅ DONE** |
+| S1 | Backend scaffold **in place in `api/`**: keep shell + port auth/tenant, **delete World-A domain** | **✅ DONE** (builds/boots/health, 47 tests) |
+| S2 | Canonical schema → `api/prisma/` (66 models) + **World-A de-scaffold** (folds in P4.0) | **✅ DONE** (migration applied to `gifsy_dev`, 80→66) |
 | S3 | Port `lib/` domain logic → backend services (rewrite 3 `next/*` helpers) | unit |
 | S4 | Re-home 119 route handlers → controllers (`/v1`), parallel by domain | wiring + differential |
 | S5 | Global guards: auth/session, permission, **tenant-scoping**, throttle, audit, cron | unit + smoke |

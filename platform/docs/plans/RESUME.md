@@ -22,7 +22,7 @@ its World-A domain** (skus/schemes/targets/rewards/wallet/payouts/outlets/partne
 born clean. **Owner constraints:** no speed-vs-quality tradeoff (full split); NestJS confirmed; multi-tenancy =
 config/data not code-branches (no `if clientId===`); DEFER per-client customization machinery (YAGNI — clean module
 boundaries only); current client = parameter-upload, **no compute engine**. **The full plan = read
-`docs/plans/BACKEND-SPLIT-PLAN.md` (steps S0–S8, each gated; human gates at S0/S1-World-A-deletion/S2-migration). **S0 ✅ + S1 ✅ DONE** (backend scaffolded in place in `api/`: World-A domain deleted, shell + `auth`/`tenant` kept, health route boots + DB-connects, 47/47 kept-set tests green, lock synced). **NEXT = S2** (canonical schema → `api/prisma/` + World-A de-scaffold; human-gated migration). Reload:
+`docs/plans/BACKEND-SPLIT-PLAN.md` (steps S0–S8, each gated; human gates at S0/S1-World-A-deletion/S2-migration). **S0 ✅ + S1 ✅ + S2 ✅ DONE.** S1: backend scaffolded in place in `api/` (World-A domain deleted, shell + `auth`/`tenant` kept). S2: canonical schema authored at **`api/prisma/schema.prisma` (66 models)**; the guarded de-scaffold migration (`api/prisma/migrations-manual/S2_descaffold_worldA.sql`, 14 tables + fields/2 enums) applied to `gifsy_dev` (80→66); backend builds + boots + DB-connects + 47/47 tests green. **NEXT = S3** (port `platform/lib/` domain logic → backend services; reconcile to the canonical model — the auth `UserStatus`/`UserSession.clientId` reconcile already done as a preview). Reload:
 - docs/plans/BACKEND-SPLIT-PLAN.md        ⭐ **the Phase S plan — START HERE** (target arch, principles, reused-vs-reworked, S0–S8)
 - docs/spec/04-architecture.md            (TARGET architecture §1/§2/§6/§8 — API-first, decided)
 - docs/plans/MODEL-ALIGNMENT.md           (REAL model + the World-A de-scaffold list executed in S2)
@@ -66,9 +66,10 @@ check port 5433, restart per DEV-DB.md). .env DATABASE_URL → 127.0.0.1:5433/gi
 SELECT 1 before migrating. NEVER point dev at prod (gifsy-db). This dev DB has NO prisma migration history
 — use db push / surgical `migrate diff` → apply SQL in a txn guarded by current_database='gifsy_dev';
 NEVER `prisma migrate dev` (it would RESET it). Backfill scripts reuse the lib/prisma singleton.
-⚠️ **SCHEMA SOURCE OF TRUTH = `platform/prisma/schema.prisma`** (80 models) **until Phase S — then it MOVES to
-the backend's `api/prisma/schema.prisma`** as the single canonical schema (S2 takes the platform schema,
-de-scaffolds World-A; it REPLACES api's World-A 74-model schema — not deleted, replaced). During S2 update DEV-DB.md.
+⚠️ **SCHEMA SOURCE OF TRUTH = `api/prisma/schema.prisma`** (canonical, **66 models**) — **moved to the backend in
+S2 (DONE 2026-06-16)**; the de-scaffold migration was applied to `gifsy_dev` (80→66 tables; guarded SQL in
+`api/prisma/migrations-manual/`). `platform/prisma/schema.prisma` is now **transitional/stale** (still 80 models;
+its World-A routes are removed in S4 as the platform thins to the frontend). See DEV-DB.md.
 
 STATE: **P0 + P1 + P2 COMPLETE** (as of 2026-06-16), all built→gated→independently-audited and **pushed to
 origin/develop** (run `git log --oneline origin/develop -5` for the latest). Gate is DIFFERENTIAL ("no NEW reds

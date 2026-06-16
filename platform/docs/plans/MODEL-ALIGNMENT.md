@@ -55,6 +55,11 @@ Optionally a real `Program`/`ProgramCategory` master (per-tenant) if validation 
 Settings-JSON.
 
 ## Sequencing — the de-scaffold is now part of PHASE S (the backend split)
+> **✅ SCHEMA DE-SCAFFOLD DONE (S2, 2026-06-16):** the canonical `api/prisma/schema.prisma` (66 models) dropped
+> all the World-A schema below — tiers, partner-class (full), SKU/catalog, invoice-line, `Target`/`TargetAchievement`,
+> `SchemeRule`, compute fields — plus `SalesInvoice`/`SalesUpload` (owner call). Migration applied to `gifsy_dev`
+> (80→66). **Remaining = code** (not porting the World-A routes into the backend; happens across S3/S4) + the net-new
+> **program-based targeting (P4)**.
 > **Alias note:** other docs call this the **"P4.0 de-scaffold."** Same scope — it is now **executed in Phase S
 > step S2** (the backend is built clean rather than de-scaffolded-then-ported). "P4.0" = Phase S / S2.
 **Owner decision 2026-06-16 (Gap #31): this de-scaffold is executed inside [`BACKEND-SPLIT-PLAN.md`](BACKEND-SPLIT-PLAN.md)
