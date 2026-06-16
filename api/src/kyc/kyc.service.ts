@@ -7,13 +7,13 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, KycFieldKey, KycDocumentType } from '@prisma/client';
+import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource } from '@prisma/client';
 import * as XLSX from 'xlsx';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { KYC_FIELD_KEYS } from './kyc-verification.helper';
+import { KYC_FIELD_KEYS, BridgeResult } from './kyc-verification.helper';
 import { evaluateSubmission } from './kyc-verification.helper';
 import {
   generateKycReviewDumpExcel,
@@ -34,6 +34,7 @@ import {
   RejectKycDto,
   UpdateKycDto,
   UploadKycDocumentDto,
+  VerifyKycFieldDto,
 } from './dto/kyc.dto';
 import {
   canFirstApprove,
@@ -521,13 +522,37 @@ export class KycService {
   }
 
   // ─── POST /v1/kyc/:id/approve ────────────────────────────────────────────────
+  /**
+   * Convenience "approve all" — approves all still-PENDING verification items,
+   * then evaluates via the bridge (§5 locked decision).
+   *
+   * - If bridge → APPROVED: calls applyBridgeOutcome (activate + wallet + history + audit).
+   * - If bridge → RE_UPLOAD_REQUIRED: some field was already REJECTED by a prior portal
+   *   verify call → ConflictException (lists rejected fields). Entire tx rolls back; no mutation.
+   * - If bridge → PENDING_GIFSY: impossible when we just set all pending items to APPROVED
+   *   (the only way this stays PENDING is if < 7 items exist, which can't happen after
+   *   the approve-all upsert writes all 7) — guarded defensively.
+   *
+   * B1: notification enqueued AFTER the tx resolves.
+   * S1: RE_UPLOAD case is a ConflictException (never reaches applyBridgeOutcome's outlet check).
+   */
   async approve(user: JwtPayload, id: string) {
     // GIFSY-only is enforced by @Roles on the controller; re-checked logically here.
     if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
 
     const submission = await this.prisma.kycSubmission.findFirst({
       where: { id, user: { clientId: user.clientId } },
-      include: { user: true, partner: true },
+      include: {
+        user: true,
+        partner: {
+          include: {
+            outlets: {
+              where: { isPrimary: true, deletedAt: null },
+              take: 1,
+            },
+          },
+        },
+      },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
     if (submission.status === 'APPROVED') throw new BadRequestException('Already approved');
@@ -540,61 +565,211 @@ export class KycService {
       );
     }
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.kycSubmission.update({
-        where: { id },
-        data: { status: 'APPROVED', approvedAt: new Date() },
-      });
+    const now = new Date();
 
-      await tx.kycStatusHistory.create({
-        data: {
-          kycSubmissionId: id,
-          fromStatus: 'PENDING_GIFSY',
-          toStatus: 'APPROVED',
-          changedByUserId: user.sub,
-          notes: 'Final approval by Gifsy Admin',
-          metadata: { stage: 'GIFSY' },
+    const notifyIntent = await this.prisma.$transaction(async (tx) => {
+      // ── (a) Re-assert PENDING_GIFSY + tenant inside the tx ────────────────
+      const sub = await tx.kycSubmission.findFirst({
+        where: { id, status: 'PENDING_GIFSY', user: { clientId: user.clientId } },
+        include: {
+          user: true,
+          partner: {
+            include: {
+              outlets: {
+                where: { isPrimary: true, deletedAt: null },
+                take: 1,
+              },
+            },
+          },
         },
       });
-
-      // Activate the user's account.
-      await tx.user.update({
-        where: { id: submission.userId },
-        data: { status: 'ACTIVE' },
-      });
-
-      // Create wallet if not already present.
-      if (submission.partnerId) {
-        const existingWallet = await tx.wallet.findFirst({
-          where: { partnerId: submission.partnerId },
-        });
-        if (!existingWallet) {
-          await tx.wallet.create({ data: { partnerId: submission.partnerId } });
-        }
+      if (!sub) {
+        // Raced — already moved or tenant mismatch.
+        throw new ConflictException('Submission is no longer PENDING_GIFSY');
       }
 
-      await tx.auditLog.create({
+      // ── (b) Approve all still-PENDING verification items (do NOT touch REJECTED) ──
+      //
+      // We cannot use a single upsert because Prisma's upsert.update block runs
+      // unconditionally and would overwrite already-REJECTED items. Instead:
+      //   Step 1: updateMany(where decision=PENDING) → APPROVED for existing rows.
+      //   Step 2: For fields that have NO row yet, create them as APPROVED.
+      //           (Load existing field keys first so we know which are missing.)
+      const existingItems = await tx.kycVerificationItem.findMany({
+        where: { kycSubmissionId: id },
+        select: { fieldKey: true, decision: true },
+      });
+      const existingByKey = new Map(existingItems.map((it) => [it.fieldKey, it.decision]));
+
+      // Step 1: flip all existing PENDING rows to APPROVED (leave REJECTED alone).
+      await tx.kycVerificationItem.updateMany({
+        where: {
+          kycSubmissionId: id,
+          decision: 'PENDING',
+        },
         data: {
-          action: 'APPROVE',
-          entityType: 'KYC_SUBMISSION',
-          entityId: id,
-          actorId: user.sub,
-          oldValues: { status: 'PENDING_GIFSY' },
-          newValues: { status: 'APPROVED' },
-          metadata: { stage: 'GIFSY', submissionId: id, userId: submission.userId },
+          decision: 'APPROVED',
+          source: 'PORTAL',
+          verifiedById: user.sub,
+          verifiedAt: now,
         },
       });
+
+      // Step 2: create rows for any of the 7 fields that have no row yet.
+      const missingKeys = KYC_FIELD_KEYS.filter((k) => !existingByKey.has(k));
+      if (missingKeys.length > 0) {
+        await tx.kycVerificationItem.createMany({
+          data: missingKeys.map((fieldKey) => ({
+            kycSubmissionId: id,
+            fieldKey,
+            decision: 'APPROVED' as const,
+            source: 'PORTAL' as const,
+            verifiedById: user.sub,
+            verifiedAt: now,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      // ── (c) Load all 7 items → bridge ─────────────────────────────────────
+      const allItems = await tx.kycVerificationItem.findMany({
+        where: { kycSubmissionId: id },
+        select: { fieldKey: true, decision: true },
+      });
+      const bridgeResult = evaluateSubmission(allItems);
+
+      // ── (d) Conflict check: any already-REJECTED field blocks a blanket approve ─
+      if (bridgeResult.next === 'RE_UPLOAD_REQUIRED') {
+        throw new ConflictException(
+          `Cannot approve: fields [${bridgeResult.rejectedFields.join(', ')}] are rejected — resolve them first`,
+        );
+      }
+
+      // ── (e) Apply side-effects via shared helper ──────────────────────────
+      const applied = await this.applyBridgeOutcome(tx, sub, bridgeResult, 'PORTAL', user.sub, now);
+      return applied.notification ?? null;
     });
 
-    await this.notify(
-      submission.userId,
-      'KYC_APPROVED',
-      `Your KYC has been approved.`,
-      { name: submission.user.name ?? submission.user.phone },
-      submission.user.phone ?? undefined,
-    );
+    // B1: enqueue AFTER the tx commits (never inside the tx).
+    if (notifyIntent) {
+      await this.notify(
+        notifyIntent.userId,
+        notifyIntent.event,
+        notifyIntent.body,
+        notifyIntent.variables,
+        notifyIntent.phone,
+      );
+    }
 
     return { message: 'KYC approved successfully' };
+  }
+
+  // ─── POST /v1/kyc/:id/verify ─────────────────────────────────────────────────
+  /**
+   * Field-level portal verification (Lane B) — Gifsy-only, #14.
+   *
+   * Approves or rejects a single field of a PENDING_GIFSY submission. After each
+   * field action, runs the bridge and — if all 7 are now terminal — commits the
+   * appropriate side-effects (APPROVED: activate + wallet; RE_UPLOAD: reKycFlags).
+   *
+   * B1: notification enqueued AFTER the tx.
+   * S1: RE_UPLOAD outlet-before-flip throw inside applyBridgeOutcome.
+   */
+  async verifyField(user: JwtPayload, id: string, dto: VerifyKycFieldDto) {
+    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
+
+    const now = new Date();
+    const { fieldKey, decision, remark } = dto;
+
+    // Defense-in-depth (audit NIT): the DTO @ValidateIf already requires a remark on
+    // REJECT, but re-assert here so any future non-HTTP caller can't store a
+    // remark-less rejection (which would also break the dump round-trip).
+    if (decision === 'REJECTED' && !remark?.trim()) {
+      throw new BadRequestException('A remark is required when rejecting a field');
+    }
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      // ── (a) Re-assert PENDING_GIFSY + tenant ──────────────────────────────
+      const submission = await tx.kycSubmission.findFirst({
+        where: { id, status: 'PENDING_GIFSY', user: { clientId: user.clientId } },
+        include: {
+          user: true,
+          partner: {
+            include: {
+              outlets: {
+                where: { isPrimary: true, deletedAt: null },
+                take: 1,
+              },
+            },
+          },
+        },
+      });
+      if (!submission) {
+        throw new NotFoundException(
+          'KYC submission not found, not PENDING_GIFSY, or does not belong to this tenant',
+        );
+      }
+
+      // ── (b) Upsert the ONE field being verified ───────────────────────────
+      await tx.kycVerificationItem.upsert({
+        where: {
+          kycSubmissionId_fieldKey: { kycSubmissionId: id, fieldKey },
+        },
+        create: {
+          kycSubmissionId: id,
+          fieldKey,
+          decision,
+          source: 'PORTAL',
+          remark: remark ?? null,
+          verifiedById: user.sub,
+          verifiedAt: now,
+        },
+        update: {
+          decision,
+          source: 'PORTAL',
+          remark: remark ?? null,
+          verifiedById: user.sub,
+          verifiedAt: now,
+        },
+      });
+
+      // ── (c) Load all 7 items → bridge ─────────────────────────────────────
+      const allItems = await tx.kycVerificationItem.findMany({
+        where: { kycSubmissionId: id },
+        select: { fieldKey: true, decision: true },
+      });
+      const bridgeResult = evaluateSubmission(allItems);
+
+      // ── (d) Apply bridge outcome (only fires if all 7 are terminal) ───────
+      let applied: { outcome: 'approved' | 'reupload' | 'recorded' | 'skipped'; notification?: CommitNotifyIntent } = { outcome: 'recorded' };
+      if (bridgeResult.next !== 'PENDING_GIFSY') {
+        applied = await this.applyBridgeOutcome(tx, submission, bridgeResult, 'PORTAL', user.sub, now);
+      }
+
+      return {
+        submissionId: id,
+        fieldKey,
+        decision,
+        bridgeResult,
+        applied,
+      };
+    });
+
+    // B1: enqueue AFTER the tx commits.
+    if (result.applied.notification) {
+      const n = result.applied.notification;
+      await this.notify(n.userId, n.event, n.body, n.variables, n.phone);
+    }
+
+    return {
+      submissionId: result.submissionId,
+      fieldKey: result.fieldKey,
+      fieldDecision: result.decision,
+      derivedStatus: result.bridgeResult.next,
+      approvedCount: result.bridgeResult.approvedCount,
+      rejectedFields: result.bridgeResult.rejectedFields,
+      outcome: result.applied.outcome,
+    };
   }
 
   // ─── POST /v1/kyc/:id/reject ─────────────────────────────────────────────────
@@ -982,6 +1157,205 @@ export class KycService {
     };
   }
 
+  // ─── Shared bridge side-effect applier (Lane A + Lane B) ────────────────────
+  /**
+   * Apply the side-effects corresponding to a bridge outcome inside an already-open
+   * transaction. Called by BOTH Lane A (bulk commit) and Lane B (portal single-record
+   * verify + approve) so the two paths can never diverge (reconcile §5 DRY rule).
+   *
+   * Guarantees:
+   *   B1 — does NOT enqueue notifications; returns a CommitNotifyIntent that the
+   *        caller enqueues AFTER the tx commits. A rolled-back tx never notifies.
+   *   S1 — for RE_UPLOAD_REQUIRED, resolves the primary outlet BEFORE the status flip
+   *        and throws if none, rolling back the entire tx (no half-commit).
+   *
+   * @param tx         The open Prisma interactive-transaction client.
+   * @param submission The full submission row (with user + partner.outlets[0]).
+   * @param bridgeResult  Result from evaluateSubmission.
+   * @param source     'EXCEL' (bulk) or 'PORTAL' (single-record) — written to audit.
+   * @param actorId    The acting admin's user ID.
+   * @param now        Timestamp for approvedAt / verifiedAt fields.
+   * @returns { outcome, notification? } — the notification intent is absent for PENDING_GIFSY.
+   */
+  private async applyBridgeOutcome(
+    tx: Prisma.TransactionClient,
+    submission: {
+      id: string;
+      userId: string;
+      partnerId: string | null;
+      user: { name: string | null; phone: string | null };
+      partner: { outlets: Array<{ id: string; reKycFlags: Prisma.JsonValue | null }> } | null;
+    },
+    bridgeResult: BridgeResult,
+    source: KycFieldSource,
+    actorId: string,
+    now: Date,
+  ): Promise<{ outcome: 'approved' | 'reupload' | 'recorded' | 'skipped'; notification?: CommitNotifyIntent }> {
+    const submissionId = submission.id;
+    const sourceLabel = source === 'EXCEL' ? 'EXCEL_BULK' : 'PORTAL';
+
+    if (bridgeResult.next === 'APPROVED') {
+      // Conditional flip — race hardening (§6 NIT #5): only one concurrent writer
+      // can win; count===0 means we lost the race → skip side-effects.
+      const { count } = await tx.kycSubmission.updateMany({
+        where: { id: submissionId, status: 'PENDING_GIFSY' },
+        data: { status: 'APPROVED', approvedAt: now },
+      });
+      if (count === 0) {
+        return { outcome: 'skipped' };
+      }
+
+      // Activate the user.
+      await tx.user.update({
+        where: { id: submission.userId },
+        data: { status: 'ACTIVE' },
+      });
+
+      // Create wallet if not exists.
+      if (submission.partnerId) {
+        const existingWallet = await tx.wallet.findFirst({
+          where: { partnerId: submission.partnerId },
+        });
+        if (!existingWallet) {
+          await tx.wallet.create({ data: { partnerId: submission.partnerId } });
+        }
+      }
+
+      // Audit + history.
+      await tx.kycStatusHistory.create({
+        data: {
+          kycSubmissionId: submissionId,
+          fromStatus: 'PENDING_GIFSY',
+          toStatus: 'APPROVED',
+          changedByUserId: actorId,
+          notes:
+            source === 'EXCEL'
+              ? 'Bulk Excel approval — all 7 fields APPROVED'
+              : 'Portal single-record approval — all 7 fields APPROVED',
+          metadata: { stage: 'GIFSY', source: sourceLabel },
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          action: 'APPROVE',
+          entityType: 'KYC_SUBMISSION',
+          entityId: submissionId,
+          actorId,
+          oldValues: { status: 'PENDING_GIFSY' },
+          newValues: { status: 'APPROVED' },
+          metadata: { stage: 'GIFSY', source: sourceLabel, submissionId, userId: submission.userId },
+        },
+      });
+
+      // Return the notification intent — the caller enqueues it AFTER the tx commits
+      // (audit B1: enqueuing here would persist on a separate connection and could
+      // survive a rolled-back approval).
+      return {
+        outcome: 'approved',
+        notification: {
+          userId: submission.userId,
+          event: 'KYC_APPROVED',
+          body: 'Your KYC has been approved.',
+          variables: { name: submission.user.name ?? submission.user.phone },
+          phone: submission.user.phone ?? undefined,
+        },
+      };
+    }
+
+    if (bridgeResult.next === 'RE_UPLOAD_REQUIRED') {
+      // Resolve the primary outlet FIRST — we must set reKycFlags, so if there is no
+      // outlet we THROW (rolling back the whole tx) rather than flip status without the
+      // flags that tell the partner what to fix (audit S1: no half-commit). The caller
+      // counts the thrown row as 'error' and the status is never mutated.
+      const primaryOutlet = submission.partner?.outlets[0] ?? null;
+      if (!primaryOutlet) {
+        throw new Error(
+          `No primary outlet for submission ${submissionId} — cannot set reKycFlags ` +
+            `(rejected: ${bridgeResult.rejectedFields.join(', ')})`,
+        );
+      }
+
+      // Conditional flip — race hardening; count===0 means a concurrent writer won.
+      const { count } = await tx.kycSubmission.updateMany({
+        where: { id: submissionId, status: 'PENDING_GIFSY' },
+        data: { status: 'RE_UPLOAD_REQUIRED' },
+      });
+      if (count === 0) {
+        return { outcome: 'skipped' };
+      }
+
+      // Build the reKycFlags update: set all booleans for the rejected fields.
+      const flagsUpdate: Record<string, boolean> = {};
+      for (const rejectedField of bridgeResult.rejectedFields) {
+        for (const flag of KYC_FIELD_TO_REKYCFLAGS[rejectedField] ?? []) {
+          flagsUpdate[flag] = true;
+        }
+      }
+
+      // Merge into existing reKycFlags (if any) — last-write-wins per flag.
+      const existing = (primaryOutlet.reKycFlags ?? {}) as Record<string, boolean>;
+      const merged: Prisma.InputJsonValue = { ...existing, ...flagsUpdate };
+
+      await tx.outlet.update({
+        where: { id: primaryOutlet.id },
+        data: { reKycFlags: merged },
+      });
+
+      // Audit + history.
+      await tx.kycStatusHistory.create({
+        data: {
+          kycSubmissionId: submissionId,
+          fromStatus: 'PENDING_GIFSY',
+          toStatus: 'RE_UPLOAD_REQUIRED',
+          changedByUserId: actorId,
+          notes: `${source === 'EXCEL' ? 'Bulk Excel' : 'Portal'} — rejected fields: ${bridgeResult.rejectedFields.join(', ')}`,
+          metadata: {
+            stage: 'GIFSY',
+            source: sourceLabel,
+            rejectedFields: bridgeResult.rejectedFields,
+            outletId: primaryOutlet.id,
+          },
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          action: 'REJECT',
+          entityType: 'KYC_SUBMISSION',
+          entityId: submissionId,
+          actorId,
+          oldValues: { status: 'PENDING_GIFSY' },
+          newValues: { status: 'RE_UPLOAD_REQUIRED' },
+          metadata: {
+            stage: 'GIFSY',
+            source: sourceLabel,
+            rejectedFields: bridgeResult.rejectedFields,
+            outletId: primaryOutlet.id,
+          },
+        },
+      });
+
+      // Notification intent — enqueued post-commit by the caller (audit B1).
+      // TODO(P3.6): also notify the assigned sales owner (SalesUserAssignment lookup);
+      // for now the partner (submission.userId) is told what to re-upload.
+      return {
+        outcome: 'reupload',
+        notification: {
+          userId: submission.userId,
+          event: 'KYC_RE_UPLOAD_REQUIRED',
+          body: `Your KYC requires re-upload for: ${bridgeResult.rejectedFields.join(', ')}`,
+          variables: {
+            name: submission.user.name ?? submission.user.phone,
+            rejectedFields: bridgeResult.rejectedFields.join(', '),
+          },
+          phone: submission.user.phone ?? undefined,
+        },
+      };
+    }
+
+    // PENDING_GIFSY — partial progress recorded, no status change.
+    return { outcome: 'recorded' };
+  }
+
   /**
    * Commit one submission's field updates inside its own transaction.
    * Per §6: re-assert PENDING_GIFSY, upsert items, evaluate, branch.
@@ -1063,166 +1437,9 @@ export class KycService {
 
       const bridgeResult = evaluateSubmission(allItems);
 
-      // ── (d) Branch on bridge outcome ─────────────────────────────────────
-      if (bridgeResult.next === 'APPROVED') {
-        // Conditional flip — race hardening (§6 NIT #5): only one concurrent writer
-        // can win; count===0 means we lost the race → skip side-effects.
-        const { count } = await tx.kycSubmission.updateMany({
-          where: { id: submissionId, status: 'PENDING_GIFSY' },
-          data: { status: 'APPROVED', approvedAt: now },
-        });
-        if (count === 0) {
-          return { submissionId, outcome: 'skipped' as const, detail: 'Concurrent commit won the race' };
-        }
-
-        // Activate the user.
-        await tx.user.update({
-          where: { id: submission.userId },
-          data: { status: 'ACTIVE' },
-        });
-
-        // Create wallet if not exists.
-        if (submission.partnerId) {
-          const existingWallet = await tx.wallet.findFirst({
-            where: { partnerId: submission.partnerId },
-          });
-          if (!existingWallet) {
-            await tx.wallet.create({ data: { partnerId: submission.partnerId } });
-          }
-        }
-
-        // Audit + history.
-        await tx.kycStatusHistory.create({
-          data: {
-            kycSubmissionId: submissionId,
-            fromStatus: 'PENDING_GIFSY',
-            toStatus: 'APPROVED',
-            changedByUserId: user.sub,
-            notes: 'Bulk Excel approval — all 7 fields APPROVED',
-            metadata: { stage: 'GIFSY', source: 'EXCEL_BULK' },
-          },
-        });
-        await tx.auditLog.create({
-          data: {
-            action: 'APPROVE',
-            entityType: 'KYC_SUBMISSION',
-            entityId: submissionId,
-            actorId: user.sub,
-            oldValues: { status: 'PENDING_GIFSY' },
-            newValues: { status: 'APPROVED' },
-            metadata: { stage: 'GIFSY', source: 'EXCEL_BULK', submissionId, userId: submission.userId },
-          },
-        });
-
-        // Return the notification intent — the caller enqueues it AFTER the tx commits
-        // (audit B1: enqueuing here would persist on a separate connection and could
-        // survive a rolled-back approval).
-        return {
-          submissionId,
-          outcome: 'approved' as const,
-          notification: {
-            userId: submission.userId,
-            event: 'KYC_APPROVED',
-            body: 'Your KYC has been approved.',
-            variables: { name: submission.user.name ?? submission.user.phone },
-            phone: submission.user.phone ?? undefined,
-          },
-        };
-      }
-
-      if (bridgeResult.next === 'RE_UPLOAD_REQUIRED') {
-        // Resolve the primary outlet FIRST — we must set reKycFlags, so if there is no
-        // outlet we THROW (rolling back the whole tx) rather than flip status without the
-        // flags that tell the partner what to fix (audit S1: no half-commit). The caller
-        // counts the thrown row as 'error' and the status is never mutated.
-        const primaryOutlet = submission.partner?.outlets[0] ?? null;
-        if (!primaryOutlet) {
-          throw new Error(
-            `No primary outlet for submission ${submissionId} — cannot set reKycFlags ` +
-              `(rejected: ${bridgeResult.rejectedFields.join(', ')})`,
-          );
-        }
-
-        // Conditional flip — race hardening; count===0 means a concurrent writer won.
-        const { count } = await tx.kycSubmission.updateMany({
-          where: { id: submissionId, status: 'PENDING_GIFSY' },
-          data: { status: 'RE_UPLOAD_REQUIRED' },
-        });
-        if (count === 0) {
-          return { submissionId, outcome: 'skipped' as const, detail: 'Concurrent commit won the race' };
-        }
-
-        // Build the reKycFlags update: set all booleans for the rejected fields.
-        const flagsUpdate: Record<string, boolean> = {};
-        for (const rejectedField of bridgeResult.rejectedFields) {
-          for (const flag of KYC_FIELD_TO_REKYCFLAGS[rejectedField] ?? []) {
-            flagsUpdate[flag] = true;
-          }
-        }
-
-        // Merge into existing reKycFlags (if any) — last-write-wins per flag.
-        const existing = (primaryOutlet.reKycFlags ?? {}) as Record<string, boolean>;
-        const merged: Prisma.InputJsonValue = { ...existing, ...flagsUpdate };
-
-        await tx.outlet.update({
-          where: { id: primaryOutlet.id },
-          data: { reKycFlags: merged },
-        });
-
-        // Audit + history.
-        await tx.kycStatusHistory.create({
-          data: {
-            kycSubmissionId: submissionId,
-            fromStatus: 'PENDING_GIFSY',
-            toStatus: 'RE_UPLOAD_REQUIRED',
-            changedByUserId: user.sub,
-            notes: `Bulk Excel — rejected fields: ${bridgeResult.rejectedFields.join(', ')}`,
-            metadata: {
-              stage: 'GIFSY',
-              source: 'EXCEL_BULK',
-              rejectedFields: bridgeResult.rejectedFields,
-              outletId: primaryOutlet.id,
-            },
-          },
-        });
-        await tx.auditLog.create({
-          data: {
-            action: 'REJECT',
-            entityType: 'KYC_SUBMISSION',
-            entityId: submissionId,
-            actorId: user.sub,
-            oldValues: { status: 'PENDING_GIFSY' },
-            newValues: { status: 'RE_UPLOAD_REQUIRED' },
-            metadata: {
-              stage: 'GIFSY',
-              source: 'EXCEL_BULK',
-              rejectedFields: bridgeResult.rejectedFields,
-              outletId: primaryOutlet.id,
-            },
-          },
-        });
-
-        // Notification intent — enqueued post-commit by the caller (audit B1).
-        // TODO(P3.6): also notify the assigned sales owner (SalesUserAssignment lookup);
-        // for now the partner (submission.userId) is told what to re-upload.
-        return {
-          submissionId,
-          outcome: 'reupload' as const,
-          notification: {
-            userId: submission.userId,
-            event: 'KYC_RE_UPLOAD_REQUIRED',
-            body: `Your KYC requires re-upload for: ${bridgeResult.rejectedFields.join(', ')}`,
-            variables: {
-              name: submission.user.name ?? submission.user.phone,
-              rejectedFields: bridgeResult.rejectedFields.join(', '),
-            },
-            phone: submission.user.phone ?? undefined,
-          },
-        };
-      }
-
-      // PENDING_GIFSY — partial progress recorded, no status change.
-      return { submissionId, outcome: 'recorded' as const };
+      // ── (d) Branch on bridge outcome via shared applyBridgeOutcome ────────
+      const applied = await this.applyBridgeOutcome(tx, submission, bridgeResult, 'EXCEL', user.sub, now);
+      return { submissionId, ...applied };
     });
   }
 

@@ -321,3 +321,24 @@ and the field-map — and found two atomicity bugs the mocked-`$transaction` tes
 Deferred (tracked): S2 — RE_UPLOAD notifies the partner; add the assigned sales owner via `SalesUserAssignment` in
 P3.6 (TODO in code). N1 — blank-row no-op tx. Gated after remediation: tsc 0, **89/89** kyc tests, boot smoke
 (route maps, unauth 401).
+
+---
+
+## 12 · 3.3 — bridge wired into single-record approval (+ §5 DRY refactor), 2026-06-16
+
+Built by a Sonnet executor, independently audited (**verdict: sound to commit**). What shipped:
+- **`applyBridgeOutcome(tx, submission, bridgeResult, source, actorId, now)`** — the shared side-effect helper now
+  used by BOTH Lane A (`commitSubmissionVerification`, `source='EXCEL'`) and Lane B (`verifyField` + `approve`,
+  `source='PORTAL'`). Lane A & B can no longer diverge (§5). **B1 + S1 preserved structurally** inside it (returns a
+  notification intent — callers enqueue post-tx; resolves the primary outlet and throws *before* the RE_UPLOAD flip).
+- **`POST /v1/kyc/:id/verify`** (#14) — Gifsy-only per-field approve/reject (REJECT requires a remark: DTO
+  `@ValidateIf` **+** a service-level guard added per audit NIT). Upserts one `KycVerificationItem` (`PORTAL`), runs
+  the bridge, finalizes via the shared helper.
+- **`POST /v1/kyc/:id/approve` re-gated** (§5): approves only the still-PENDING items (`updateMany where
+  decision=PENDING` + `createMany skipDuplicates` for missing) — **an already-REJECTED field can never be flipped to
+  APPROVED** (audit-confirmed) — then the bridge; bridge→RE_UPLOAD ⟹ **ConflictException** (tx rolls back, no side
+  effects). The old broken "approve with 0 items" test was rewritten.
+
+Audit confirmed: B1/S1 preserved; REJECTED not overwritten; tenant-scoped + tx-atomic on both new paths; enqueue
+only post-commit. NITs (service remark guard + its test) folded in; redundant pre-tx load left as-is. Gated: tsc 0,
+**101/101** kyc tests.

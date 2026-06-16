@@ -25,6 +25,7 @@ import {
   RejectKycDto,
   UpdateKycDto,
   UploadKycDocumentDto,
+  VerifyKycFieldDto,
 } from './dto/kyc.dto';
 
 /**
@@ -137,6 +138,23 @@ export class KycController {
     @Body() dto: FirstApproveKycDto,
   ) {
     return this.kyc.firstApprove(user, id, dto);
+  }
+
+  /**
+   * POST /v1/kyc/:id/verify — per-field portal verification (Lane B, Gifsy-only).
+   * Body: { fieldKey, decision: 'APPROVED'|'REJECTED', remark? }
+   * REJECTED requires a non-empty remark (validated in VerifyKycFieldDto).
+   * Runs the bridge after the upsert; applies side-effects if all 7 are terminal.
+   */
+  @Post(':id/verify')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('kyc:gifsy_approve')
+  verifyField(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: VerifyKycFieldDto,
+  ) {
+    return this.kyc.verifyField(user, id, dto);
   }
 
   @Post(':id/approve')

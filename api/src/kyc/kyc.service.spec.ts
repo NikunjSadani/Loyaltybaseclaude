@@ -15,6 +15,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { KYC_FIELD_KEYS } from './kyc-verification.helper';
 import {
   canFirstApprove,
   nextStatusAfterFirstApprove,
@@ -22,12 +23,22 @@ import {
   detectEscalation,
 } from './kyc-approval.helper';
 
+// ─── Shared transaction mock ──────────────────────────────────────────────────
+// Includes all table operations needed by the new approve(), verifyField(),
+// and the shared applyBridgeOutcome() helper.
 const mockTx = {
-  kycSubmission: { update: jest.fn() },
+  kycSubmission: { update: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
+  kycVerificationItem: {
+    upsert: jest.fn(),
+    findMany: jest.fn(),
+    updateMany: jest.fn(),
+    createMany: jest.fn(),
+  },
   kycStatusHistory: { create: jest.fn() },
   auditLog: { create: jest.fn() },
   user: { update: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
+  outlet: { update: jest.fn() },
 };
 
 const mockPrisma = {
@@ -59,6 +70,9 @@ const mockStorage = {
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const so: JwtPayload = { sub: 'so1', role: 'SALES_SO', clientId: 'deoleo', phone: '', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' };
+
+/** All-7-APPROVED items for the bridge */
+const ALL_APPROVED = KYC_FIELD_KEYS.map((k) => ({ fieldKey: k, decision: 'APPROVED' as const }));
 
 describe('KycService', () => {
   let service: KycService;
@@ -344,7 +358,44 @@ describe('KycService', () => {
     });
   });
 
-  describe('approve', () => {
+  describe('approve (re-gated, §5 convenience path)', () => {
+    /** Seed the pre-tx findFirst (outer load) and the in-tx sub re-assert. */
+    const seedApproveHappyPath = () => {
+      // Outer pre-tx load
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        partnerId: 'p1',
+        user: { name: 'n', phone: 'p' },
+        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+      });
+      // In-tx re-assert
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        partnerId: 'p1',
+        user: { name: 'n', phone: 'p' },
+        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+      });
+      // Step 1: load existing items (none yet, so all 7 are missing)
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
+      // updateMany for PENDING→APPROVED (no-op since no rows)
+      mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
+      // createMany for the 7 missing fields
+      mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
+      // Step c: load all 7 after upsert → all APPROVED
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      // Conditional flip succeeds
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({ id: 'w1' });
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+    };
+
     it('blocks approval unless the submission is PENDING_GIFSY', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({
         id: 's1',
@@ -352,19 +403,13 @@ describe('KycService', () => {
         status: 'PENDING_SO_APPROVAL',
         partnerId: 'p1',
         user: {},
+        partner: null,
       });
       await expect(service.approve(gifsy, 's1')).rejects.toBeInstanceOf(ConflictException);
     });
 
-    it('approves, activates the user, creates a wallet, and notifies', async () => {
-      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
-        id: 's1',
-        userId: 'user1',
-        status: 'PENDING_GIFSY',
-        partnerId: 'p1',
-        user: { name: 'n', phone: 'p' },
-      });
-      mockTx.wallet.findFirst.mockResolvedValue(null);
+    it('approves, activates the user, creates a wallet, and enqueues notify post-tx', async () => {
+      seedApproveHappyPath();
       const res = await service.approve(gifsy, 's1');
       expect(res).toEqual({ message: 'KYC approved successfully' });
       expect(mockTx.user.update).toHaveBeenCalledWith({
@@ -372,7 +417,249 @@ describe('KycService', () => {
         data: { status: 'ACTIVE' },
       });
       expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'p1' } });
+      // B1: notification enqueued via service.notify, not inside the tx
       expect(mockNotifications.enqueue).toHaveBeenCalled();
+    });
+
+    it('does NOT create a wallet when one already exists', async () => {
+      seedApproveHappyPath();
+      // Override wallet.findFirst to return an existing wallet
+      mockTx.wallet.findFirst.mockReset();
+      mockTx.wallet.findFirst.mockResolvedValueOnce({ id: 'existing-wallet' });
+      await service.approve(gifsy, 's1');
+      expect(mockTx.wallet.create).not.toHaveBeenCalled();
+    });
+
+    it('throws ConflictException when any field is already REJECTED (no side effects)', async () => {
+      // Outer pre-tx load
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        partnerId: 'p1',
+        user: { name: 'n', phone: 'p' },
+        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+      });
+      // In-tx re-assert
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        partnerId: 'p1',
+        user: { name: 'n', phone: 'p' },
+        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+      });
+      // Existing items: 6 APPROVED + 1 REJECTED (OWNER_PHOTO)
+      const existingItems = KYC_FIELD_KEYS.map((k) => ({
+        fieldKey: k,
+        decision: k === 'OWNER_PHOTO' ? ('REJECTED' as const) : ('APPROVED' as const),
+      }));
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(existingItems);
+      mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 0 });
+      // Bridge after approve-all: OWNER_PHOTO is still REJECTED (updateMany only touched PENDING)
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(existingItems);
+
+      await expect(service.approve(gifsy, 's1')).rejects.toBeInstanceOf(ConflictException);
+      // No flip, no user activation, no wallet, no notification
+      expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.user.update).not.toHaveBeenCalled();
+      expect(mockTx.wallet.create).not.toHaveBeenCalled();
+      expect(mockNotifications.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('tenant-scopes the in-tx re-assert (wrong tenant → ConflictException)', async () => {
+      const otherTenant: JwtPayload = { sub: 'admin2', role: 'GIFSY_ADMIN', clientId: 'other', phone: '', name: '' };
+      // The outer findFirst finds nothing (wrong tenant)
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      await expect(service.approve(otherTenant, 's1')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('B1 regression: tx failure → notification NOT enqueued', async () => {
+      // Outer pre-tx load
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        partnerId: 'p1',
+        user: { name: 'n', phone: 'p' },
+        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+      });
+      // In-tx re-assert
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        partnerId: 'p1',
+        user: { name: 'n', phone: 'p' },
+        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+      });
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
+      mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({});
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      // auditLog throws → tx would roll back
+      mockTx.auditLog.create.mockRejectedValueOnce(new Error('DB write failed'));
+
+      await expect(service.approve(gifsy, 's1')).rejects.toThrow();
+      expect(mockNotifications.enqueue).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('verifyField (POST /v1/kyc/:id/verify)', () => {
+    /** Seed a in-tx PENDING_GIFSY re-assert. */
+    const seedVerifyTx = (overrides?: Partial<{ outlets: unknown[] }>) => {
+      const outlets = overrides?.outlets ?? [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }];
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        partnerId: 'p1',
+        user: { name: 'n', phone: 'p' },
+        partner: { outlets },
+      });
+    };
+
+    it('approving a single field when others are still PENDING → stays PENDING_GIFSY', async () => {
+      seedVerifyTx();
+      // Upsert succeeds
+      mockTx.kycVerificationItem.upsert.mockResolvedValueOnce({});
+      // Load all 7 → only 1 APPROVED, rest PENDING
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([
+        { fieldKey: 'PAYMENT', decision: 'APPROVED' },
+      ]);
+
+      const res = await service.verifyField(gifsy, 's1', {
+        fieldKey: 'PAYMENT',
+        decision: 'APPROVED',
+      });
+
+      expect(res.derivedStatus).toBe('PENDING_GIFSY');
+      expect(res.outcome).toBe('recorded');
+      // No status flip — bridge returned PENDING_GIFSY so applyBridgeOutcome was not called
+      expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+      expect(mockNotifications.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('rejecting a field with a remark records the decision', async () => {
+      seedVerifyTx();
+      mockTx.kycVerificationItem.upsert.mockResolvedValueOnce({});
+      // Rejected field + 6 still PENDING → bridge stays PENDING_GIFSY
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([
+        { fieldKey: 'PAYMENT', decision: 'REJECTED' },
+      ]);
+
+      const res = await service.verifyField(gifsy, 's1', {
+        fieldKey: 'PAYMENT',
+        decision: 'REJECTED',
+        remark: 'Bank details mismatch',
+      });
+
+      expect(res.derivedStatus).toBe('PENDING_GIFSY');
+      expect(mockTx.kycVerificationItem.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          create: expect.objectContaining({ decision: 'REJECTED', remark: 'Bank details mismatch', source: 'PORTAL' }),
+        }),
+      );
+    });
+
+    it('all 7 APPROVED after verifying the last field → APPROVED + activate + wallet + notify', async () => {
+      seedVerifyTx();
+      mockTx.kycVerificationItem.upsert.mockResolvedValueOnce({});
+      // All 7 APPROVED → bridge = APPROVED
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({ id: 'w1' });
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+
+      const res = await service.verifyField(gifsy, 's1', {
+        fieldKey: 'OWNER_PHOTO',
+        decision: 'APPROVED',
+      });
+
+      expect(res.derivedStatus).toBe('APPROVED');
+      expect(res.outcome).toBe('approved');
+      expect(mockTx.user.update).toHaveBeenCalledWith({ where: { id: 'user1' }, data: { status: 'ACTIVE' } });
+      expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'p1' } });
+      // B1: notification enqueued post-tx, not inside tx
+      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({ variables: expect.objectContaining({ event: 'KYC_APPROVED' }) }),
+      );
+    });
+
+    it('all 7 terminal with 1 REJECTED → RE_UPLOAD_REQUIRED + reKycFlags', async () => {
+      seedVerifyTx();
+      mockTx.kycVerificationItem.upsert.mockResolvedValueOnce({});
+      const items = KYC_FIELD_KEYS.map((k) => ({
+        fieldKey: k,
+        decision: k === 'OWNER_PHOTO' ? ('REJECTED' as const) : ('APPROVED' as const),
+      }));
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(items);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+
+      const res = await service.verifyField(gifsy, 's1', {
+        fieldKey: 'PAYMENT',
+        decision: 'APPROVED',
+      });
+
+      expect(res.derivedStatus).toBe('RE_UPLOAD_REQUIRED');
+      expect(res.outcome).toBe('reupload');
+      expect(mockTx.outlet.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ reKycFlags: expect.objectContaining({ ownerPhoto: true }) }) }),
+      );
+    });
+
+    it('throws NotFoundException when submission is not PENDING_GIFSY or not in tenant', async () => {
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      await expect(
+        service.verifyField(gifsy, 'no-such-sub', { fieldKey: 'PAYMENT', decision: 'APPROVED' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('tenant-scopes the in-tx re-assert', async () => {
+      // The in-tx findFirst must include user: { clientId } in the where clause
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      await expect(
+        service.verifyField(gifsy, 's1', { fieldKey: 'PAYMENT', decision: 'APPROVED' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      const whereArg = mockTx.kycSubmission.findFirst.mock.calls[0][0].where;
+      expect(whereArg.user).toEqual({ clientId: 'deoleo' });
+    });
+
+    it('B1 regression: tx failure → notification NOT enqueued', async () => {
+      seedVerifyTx();
+      mockTx.kycVerificationItem.upsert.mockResolvedValueOnce({});
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({});
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      // auditLog throws → tx would roll back
+      mockTx.auditLog.create.mockRejectedValueOnce(new Error('audit write failed'));
+
+      await expect(
+        service.verifyField(gifsy, 's1', { fieldKey: 'OWNER_PHOTO', decision: 'APPROVED' }),
+      ).rejects.toThrow();
+      expect(mockNotifications.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('rejects a REJECTED decision with no remark before opening a tx (service guard)', async () => {
+      await expect(
+        service.verifyField(gifsy, 's1', { fieldKey: 'OWNER_PHOTO', decision: 'REJECTED' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     });
   });
 

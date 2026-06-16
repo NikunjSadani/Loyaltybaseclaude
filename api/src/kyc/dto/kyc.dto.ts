@@ -12,8 +12,9 @@ import {
   Min,
   ValidateNested,
   Length,
+  ValidateIf,
 } from 'class-validator';
-import { KycStatus, KycDocumentType } from '@prisma/client';
+import { KycStatus, KycDocumentType, KycFieldKey } from '@prisma/client';
 
 // ─── Geo capture sub-schema ───────────────────────────────────────────────────
 export class GeoDto {
@@ -268,4 +269,19 @@ export class ListKycQueryDto {
   @IsInt()
   @Min(1)
   limit?: number = 20;
+}
+
+// POST /v1/kyc/:id/verify — per-field portal verification (Lane B, Gifsy-only)
+export class VerifyKycFieldDto {
+  @IsEnum(KycFieldKey, { message: 'Invalid fieldKey' })
+  fieldKey!: KycFieldKey;
+
+  @IsEnum(['APPROVED', 'REJECTED'], { message: 'decision must be APPROVED or REJECTED' })
+  decision!: 'APPROVED' | 'REJECTED';
+
+  // remark is required when decision === REJECTED
+  @ValidateIf((o: VerifyKycFieldDto) => o.decision === 'REJECTED')
+  @IsString()
+  @MinLength(1, { message: 'remark is required when rejecting a field' })
+  remark?: string;
 }
