@@ -46,7 +46,8 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
 ### 2 · Tenancy & Platform Configuration
 - **Purpose.** Onboard/configure tenants; per-tenant features, branding, structure.
 - **Key entities.** `ClientConfig` (code registry), `OutletType`, `OutletTypeClientConfig`,
-  `ProgramSetting`, `AdminConfig`, `PartnerClassConfig`.
+  `ProgramSetting` (holds the per-tenant **program / program-category valid-lists** — the segmentation config),
+  `AdminConfig`. *(`PartnerClassConfig` = legacy/decorative, retiring in P4.0 → program segmentation.)*
 - **Surface.** `gifsy/clients*`, `gifsy/outlet-types`, `gifsy/settings`,
   `api/gifsy/clients/[slug]/outlet-type-configs*`, `api/admin/settings`.
 - **Current.** Tenant config lives in code (`CLIENT_REGISTRY`); per-tenant blobs stored in
@@ -61,26 +62,32 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
   `SalesUserAssignment`, sales tasks (`task-config`).
 - **Surface.** `admin/hierarchy`, `sales/team/[memberId]*`, `sales/tasks`,
   `api/sales/team*`, `api/admin/hierarchy-config`, `api/admin/task-config`.
-- **Current.** Configurable levels per tenant; managers see subordinate + team performance;
-  ISR leaf is outlet-facing. Hierarchy persisted as JSON in `ProgramSetting`.
-- **Reference ladder** (tenant-driven names/count): ISR < SO < ASM < RSM < ZNM < NSM.
-- **Target/gaps.** Derive level/role from relational `SalesHierarchyLevel`, not the fixed
-  enum (Gap #11). Hierarchy stored as JSON blob vs relational `SalesUser` rows in some admin
-  flows — verify source of truth. `task-config` scope to confirm.
+- **Current (P2.1 ✅).** Configurable levels per tenant; managers see subordinate + team performance;
+  XSR leaf is outlet-facing. The hierarchy upload (18-col XSR→NSM chain — the **FIRST onboarding file**) now
+  **persists the relational `SalesHierarchyLevel` + `SalesUser` tree** (`lib/hierarchy-persistence.ts`), in
+  addition to the JSON snapshot. The outlet file's XSR ID validates against this tree.
+- **Reference ladder** (tenant-driven names/count): XSR < SO < ASM < RSM < ZNM < NSM.
+- **Target/gaps (Gap #11 ADDRESSED in P2.1).** Fine role lives on `SalesHierarchyLevel.code` (incl. ZNM);
+  coarse `UserRole` bucket via `mapRoleCodeToUserRole` (no enum change). `task-config` scope to confirm.
 
 ### 4 · Partners & Outlets
-- **Purpose.** The trade partners and their physical stores.
-- **Key entities.** `ChannelPartner`, `PartnerClassConfig`, `TierConfig`,
-  `PartnerTierHistory`, `Outlet`, `OutletGeoHistory`.
-- **Surface.** `admin/users/outlets`, `admin/outlets`, `partner/profile`,
-  `api/admin/outlets*`, `api/admin/channel-partners*`.
-- **Current.** Partner = login (1:1 `User`); has Partner Class + Tier; owns Outlets.
-  Outlet master upload/upsert, deactivate/reactivate, geo capture.
-- **Onboarding sequence.** **Admin adds the outlet** in the portal → it then goes for
-  enrollment/KYC performed by the client-defined **sales hierarchy** → approval chain →
-  credentials issued (see #5). Credentials exist only *after* approval.
-- **Target/gaps.** Partner/Outlet 1:many but operated 1:1; feature-to-level binding to
-  formalize (Gap #4).
+- **Purpose.** The physical stores (outlets) and their owners (partners).
+- **Key entities.** `Outlet` (owns `clientId`; segmented by `programName`/`programCategory`; nullable
+  `partnerId`; reference cols `distributorCode/Name`, `beat/metro/zone`; `reKycFlags`), `ChannelPartner`
+  (owner, attached at KYC), `OutletGeoHistory`. *(`PartnerClassConfig`/`TierConfig`/`PartnerTierHistory` =
+  legacy, DROP in P4.0 de-scaffold — see `docs/plans/MODEL-ALIGNMENT.md`.)*
+- **Surface.** `admin/users/outlets`, `admin/outlets*`, `partner/profile`, `api/admin/outlets*`
+  (list/upsert/deactivate/reactivate/bulk-delete/rekyc-flag), `api/admin/channel-partners*`.
+- **Current (P2.4/2.5 ✅).** Outlet carries its **own `clientId`** and can exist **before its owner**
+  (owner = `ChannelPartner`, attached at KYC). Segmented by **program** (not partner class). Outlet-master
+  upload **persists for real** (tenant-tagged, XSR-validated vs the hierarchy tree, distributor/program
+  reference cols); re-KYC flag upload persists `reKycFlags`. Lifecycle (deactivate/reactivate/bulk-delete)
+  scoped by the outlet's own `clientId`.
+- **Onboarding sequence.** **Sales-hierarchy file first** → **outlet-master file** (validates XSR vs the
+  tree) creates outlet shells (no owner yet) → enrollment/KYC by the **sales hierarchy** → approval chain →
+  credentials + owner attached (see #5). Credentials exist only *after* approval.
+- **Target/gaps (Gap #4 ADDRESSED in P2.4).** Partner↔Outlet kept **1:many + `isPrimary`**, operated 1:1 by
+  convention (future 1:many is free).
 
 ---
 
@@ -103,12 +110,11 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
   (resigned⇒blank phone), then Gifsy final (Gap #9). Retire flat `ROLE_PHONES`. Gifsy
   sub-steps + re-KYC trigger → §02 Workflows. Status alias `RESUBMISSION_REQUIRED`→`RE_UPLOAD_REQUIRED`.
 
-### 6 · Product Catalog
-- **Purpose.** SKUs and categories underpinning schemes/targets/achievements.
-- **Key entities.** `Category` (self-referential), `Sku`, `SkuCategoryMapping`.
-- **Surface.** `api/admin/skus`.
-- **Current.** Category tree + SKUs per tenant; mapping to categories.
-- **Target/gaps.** Light admin UI surface — verify management UX exists vs API-only.
+### 6 · Product Catalog — ⚠️ RETIRED (not part of the real model)
+- **Status.** The platform's sales/achievement upload is **target-parameter based, not SKU/invoice based**, so
+  **nothing consumes a SKU/Category master**. The catalog admin UI built in P2.6 was **reverted** (YAGNI,
+  `git revert 798aafe`). The `Category`/`Sku`/`SkuCategoryMapping` schema models remain as harmless empty tables
+  (recoverable from git if a future tenant ever needs SKU-level reporting — P8). See `docs/plans/MODEL-ALIGNMENT.md`.
 
 ---
 
@@ -120,16 +126,17 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
   `SchemeTarget`, `SchemeType`/`SchemeStatus`/`RuleType`/`RewardType` enums.
 - **Surface.** `admin/schemes/[id]{,/enrollments}`, `api/schemes*`,
   `api/admin/schemes/[id]/enrollments{,/export}`, `api/schemes/calculate`.
-- **Current.** Rich model — scheme types, generic rule engine (`SchemeRule`), segment/geo
-  eligibility (incl. exclusions), enrollment, per-user `SchemeTarget`, budget tracking,
-  `calculate` endpoint. **But the rule-engine/calculate path is not the operating award
-  model** (awards come via Credits upload — see Core value model).
-- **Operational scope.** Define activations (time-bound, audience, eligibility) + enroll
-  outlets. Awards flow through Awards & Credits, not the scheme engine.
-- **Target/gaps.** 🔍 Configurable **per-activation** enrollment forms (variable fields,
-  self-vs-sales mode, conditional pre-fill for loyalty outlets) — Gap #6; enrollment mode is
-  only tenant-level today. Loyalty (top/KYC, ongoing) vs Activation (all outlets, time-bound)
-  split. Rule-engine/`calculate`/auto-`SchemeTarget` = aspirational vs upload reality (Gap #10).
+- **Current.** Rich inherited model — scheme types, generic rule engine (`SchemeRule`), eligibility,
+  enrollment, per-user `SchemeTarget`, budget tracking, `calculate` endpoint. **The rule-engine/`calculate`
+  compute path is NOT the operating model** and is **slated for removal** (P4.0 de-scaffold) — awards come via
+  parameter/Credits upload (final amounts, no compute). Eligibility today wrongly keys off **outlet TYPE**; the
+  real audience dimension is **program** (`Outlet.programName/programCategory`).
+- **Operational scope.** Define activations (time-bound, audience = **program**-based, eligibility) + enroll
+  outlets. Awards flow through Awards & Credits (upload-final), not the scheme engine.
+- **Target/gaps (P4).** 🔍 Configurable **per-activation** enrollment forms (variable fields, self-vs-sales
+  mode, conditional pre-fill) — Gap #6 (`EnrollmentFormBuilder` exists; extended w/ CALCULATED + `visibleWhen`).
+  **Build program-based targeting** (net-new: a program selector + a matcher vs `Outlet.programName/Category`).
+  **Retire the rule-engine/`calculate`/auto-`SchemeTarget` compute** — decision MADE = PRUNE (Gap #10 → P4.0).
 
 ### 8 · Targets & Achievements
 - **Purpose.** Period goals per outlet and measured achievement.
@@ -153,10 +160,10 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
   expiry config; admin adjustments. ⚠️ **Credits do NOT write the wallet today** (Gap #16) and
   nothing writes `PointsLedger` (Gap #28) — only redemption *debits* points. Earn is *intended*
   to come from Credits upload.
-- **Target/gaps.** Points lifecycle is **tenant-configurable**: expiry (`PointExpiryConfig`),
-  holding/lock period (`TierConfig.holdingPeriodDays`), and whether points convert to INR
-  (→ payout engine via `redemptionOrderId`) vs gifts-only. → feeds Phase 3 Configurability
-  Matrix. `TierConfig.pointsMultiplier` likely **dead** (amounts computed externally). 🔍 resolved.
+- **Target/gaps.** Points lifecycle is **tenant-configurable**: expiry (`PointExpiryConfig`), a
+  holding/lock period (re-home off `TierConfig` — that model is being DROPPED in P4.0), and whether points
+  convert to INR (→ payout engine via `redemptionOrderId`) vs gifts-only. → feeds Phase 3 Configurability
+  Matrix. `TierConfig.pointsMultiplier` is **DEAD** (never applied — amounts uploaded final, no compute); the whole `TierConfig` model is DROPPED in the P4.0 de-scaffold. ✅ resolved.
 
 ### 10 · Rewards & Redemption
 - **Purpose.** Catalog of gifts and the redemption pipeline (points → gift or INR).

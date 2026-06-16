@@ -219,8 +219,8 @@ recorded; INR modes create a `PayoutTransaction` linked via `redemptionOrderId`.
 - **Points IN-path missing (Gap #16):** redemption *debits* `redeemablePoints`, but nothing in
   the Credits flow *credits* them — so where balances originate is unresolved (manual adjust?).
 - **Refund-on-cancel/return:** verify `CANCELLED`/`RETURNED`/`FAILED` re-credit points.
-- **Holding/lock period** (`TierConfig.holdingPeriodDays`, `redeemablePoints` vs total) —
-  document when points become redeemable (tenant-configurable, Phase 3).
+- **Holding/lock period** (`redeemablePoints` vs total; re-home the config off `TierConfig` — that model is
+  DROPPED in P4.0) — document when points become redeemable (tenant-configurable, Phase 3).
 
 ---
 
@@ -244,7 +244,8 @@ stateDiagram-v2
 ```
 
 **Narrative.** Admin/Gifsy defines a time-bound activation (`Scheme`: type, start/end,
-`SchemeEligibility` audience by class/tier/geo, enrollment-form config) → publish (`ACTIVE`).
+`SchemeEligibility` audience by **program** (`Outlet.programName/programCategory`) + geo — replaces the legacy
+class/tier targeting; enrollment-form config) → publish (`ACTIVE`).
 Eligible outlets enroll — **self-enroll** (if allowed) or **sales-enroll** — via a
 **configurable form** (variable fields); **loyalty/KYC'd outlets arrive with fields
 pre-filled**, others fill from scratch → `SchemeEnrollment`. Participation runs to `endDate`;

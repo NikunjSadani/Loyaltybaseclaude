@@ -36,7 +36,7 @@ N2 — cosmetic (`remark:undefined` on approved merges).
 PAN rides with GST (auto-derived at enrollment); signature/consent handled via OTP, not separately approved.
 
 **Hybrid Excel + portal (merge, never overwrite).** The Excel dump must contain **ALL enrollment fields**
-(see `sales/kyc/new`: outlet/owner, mobile, class, GST/PAN, address, bank/UPI, geo, name-mismatch) **+ a
+(see `sales/kyc/new`: outlet/owner, mobile, program/programCategory + outlet type *(NOT "partner class" — that's retired; the legacy `partnerClass` field actually held outlet-type values)*, GST/PAN, address, bank/UPI, geo, name-mismatch) **+ a
 clickable hyperlink to every document** (GST cert, address doc, self-declaration, board photo, owner photo,
 cheque) **+ a Decision + Remark column for each of the 7 fields**. The approver fills some fields in Excel and
 the rest on the portal; an upload **merges** parsed statuses in — a blank Excel cell never clears a status set

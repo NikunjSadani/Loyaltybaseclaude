@@ -48,9 +48,12 @@ feature-tagged** (see Gap #2). The current `UserRole` enum has 11 coarse roles:
 - Current `UserRole` enum encodes only a 5-level subset
   (`SALES_HO`/`SALES_STATE_HEAD`/`SALES_ASM`/`SALES_SO`/`SALES_ISR`) — no Zonal rung; see Gap #11.
 
-### Partner portal — `partner/` (3 classes)
-- **SSS, WHOLESALER, SUB_STOCKIST** — trade partners. See targets + achievement, wallet,
-  redeem gifts/INR, raise tickets, manage profile. Carry a loyalty Tier.
+### Partner portal — `partner/`
+- Trade partners (outlets) segmented by **program** (`programName` / `programCategory`, captured
+  per-outlet at outlet-master upload — this replaced the legacy "partner class"). See targets +
+  achievement, wallet, redeem gifts/INR, raise tickets, manage profile.
+  *(Outlet TYPE — SSS / WHOLESALER / SUB_STOCKIST / SSS_TOT — is a separate dimension, set at outlet
+  upload + used for scheme-by-type eligibility. No loyalty "tier"/point-multiplier — retired, see Glossary.)*
 
 ## §3 Glossary (Ubiquitous Language)
 
@@ -58,13 +61,16 @@ feature-tagged** (see Gap #2). The current `UserRole` enum has 11 coarse roles:
 - **Gifsy** — platform operator (company); super-admin tenant.
 - **Tenant / Client** — a brand running programs; keyed by `clientId` slug; served on
   `<slug>.gifsy.in`.
-- **Channel Partner ("Partner")** — trade business account holding a login (1:1 `User`);
-  carries a Partner Class and a Tier.
-- **Outlet** — a physical store under a Partner. **Operated 1:1 with Partner today**
-  (Gap #4); two-level model reserved for future multi-outlet partners. Login + wallet
-  bind at Partner level; KYC + visibility often at Outlet level.
-- **Partner Class** — segmentation (`CP_01/02/03`) → retailer / wholesaler / sub-stockist.
-- **Tier** — loyalty standing (Platinum→Standard) from points; drives multipliers/benefits.
+- **Channel Partner ("Partner")** — trade business account holding a login (1:1 `User`); the
+  outlet's owner. Created/attached at **KYC** (an outlet can exist before its owner).
+- **Outlet** — a physical store. Carries its **own `clientId`**; segmented by **program**
+  (`programName`/`programCategory`). **Operated 1:1 with Partner by convention** (schema is 1:many +
+  `isPrimary`; Gap #4 — ADDRESSED in P2.4); `partnerId` is nullable (owner attached at KYC). Login +
+  wallet bind at Partner level; KYC + visibility at Outlet level.
+- **Program** — the segmentation dimension: `programName` + `programCategory`, captured **per-outlet
+  at outlet-master upload** (per-tenant valid-lists). **Replaces the legacy "Partner Class."**
+- *(retired) **Partner Class** (`CP_01/02/03`) and **Tier** (point-multiplier) — inherited scaffolding;
+  decorative/never wired to compute. Being removed in the P4.0 de-scaffold. See `docs/plans/MODEL-ALIGNMENT.md`.*
 - **Sales User** — brand field employee in a configurable reporting tree (HO→ISR leaf),
   assigned to Partners/Outlets.
 
@@ -75,8 +81,9 @@ feature-tagged** (see Gap #2). The current `UserRole` enum has 11 coarse roles:
   form (variable fields), per-activation enrollment mode (self vs sales-only), and
   conditional pre-fill from the loyalty profile (Gap #6).
 - **KYC** — enrollment: collect documents → validate → multi-level approval → credentials.
-- **Target** — period-based goal for an outlet; own status lifecycle.
-- **Achievement** — actual performance uploaded and measured against a Target.
+- **Target** — period-based goal for an outlet, **per parameter**; own status lifecycle.
+- **Achievement** — actual performance, **uploaded as final amounts per outlet per parameter and
+  stored verbatim** (the platform does **not** compute points/incentives), measured against a Target.
 - **Wallet** — a Partner's store of value: **Points** and/or **INR**.
 - **Points** — loyalty currency; ledgered, expirable, redeemable.
 - **Redemption** — exchange points for **Gifts** (Gifsy **Reward Catalogue**) or INR.

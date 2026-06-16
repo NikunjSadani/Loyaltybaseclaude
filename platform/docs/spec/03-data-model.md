@@ -42,8 +42,9 @@ erDiagram
 >   marker (bumped on every validated request). Sessions are now actually written (previously the
 >   model existed but had zero writers).
 > - New `Client` model (`clients` table): `id = slug`, scalars `internalName`/`onboardedAt`, seven
->   JSON config blocks (`branding`, `features`, `partnerClasses`, `approvalHierarchy`, `notifications`,
->   `invoicing`, `wallet`), `status ClientStatus` enum (`ACTIVE`/`INACTIVE`/`ONBOARDING`). **No secret
+>   JSON config blocks (`branding`, `features`, `partnerClasses` *(legacy/decorative — segmentation is by
+>   program; retiring in P4.0)*, `approvalHierarchy`, `notifications`, `invoicing`, `wallet`),
+>   `status ClientStatus` enum (`ACTIVE`/`INACTIVE`/`ONBOARDING`). **No secret
 >   columns** — `notifications` JSON excludes `msg91AuthKey` (kept in env/Secret Manager).
 > - `FeatureFlags` gained `rbacEnforcement Boolean` (per-tenant opt-in for the RBAC engine;
 >   off by default).
@@ -54,11 +55,7 @@ erDiagram
     USER ||--o| SALES_USER : "1:1"
     USER ||--o{ USER_SESSION : ""
     USER ||--o{ OTP_CODE : ""
-    PARTNER_CLASS_CONFIG ||--o{ CHANNEL_PARTNER : classifies
-    PARTNER_CLASS_CONFIG ||--o{ TIER_CONFIG : defines
-    TIER_CONFIG ||--o{ CHANNEL_PARTNER : "current tier"
-    CHANNEL_PARTNER ||--o{ PARTNER_TIER_HISTORY : ""
-    CHANNEL_PARTNER ||--o{ OUTLET : owns
+    CHANNEL_PARTNER ||--o{ OUTLET : "owns (nullable; owner attached at KYC)"
     OUTLET_TYPE ||--o{ OUTLET : types
     OUTLET ||--o{ OUTLET_GEO_HISTORY : ""
     SALES_HIERARCHY_LEVEL ||--o{ SALES_USER : "level of"
@@ -69,6 +66,17 @@ erDiagram
     USER ||--o{ CONSENT_RECORD : ""
     USER ||--o{ DATA_REQUEST : ""
 ```
+
+> **Real-model notes (P2, 2026-06-16 — see `docs/plans/MODEL-ALIGNMENT.md`):**
+> - **Outlet is the segmentation anchor.** `Outlet` carries its **own `clientId`**, a **nullable `partnerId`**
+>   (owner attached at KYC), and **`programName` + `programCategory`** — the segmentation dimension that
+>   **REPLACES partner class**. Plus reference cols `distributorCode/Name`, `beat/metro/zone`, and `reKycFlags`.
+>   Uniqueness is per-tenant: `@@unique([clientId, outletCode])`.
+> - **`SALES_HIERARCHY_LEVEL` / `SALES_USER`** (already in the ERD) are now the **real, populated** reporting
+>   tree (P2.1); `SalesUser` carries `clientId` + `@@unique([clientId, employeeCode])`.
+> - **DROPPED in P4.0 de-scaffold (removed from the ERD above):** `PARTNER_CLASS_CONFIG`, `TIER_CONFIG`,
+>   `PARTNER_TIER_HISTORY` (+ `ChannelPartner.partnerClassId`/`currentTierConfigId`). Decorative/never wired.
+>   `Client.partnerClasses` JSON block is likewise legacy (pending program migration).
 
 ### B2 · Programs & Value (Schemes, Targets, Wallet, Rewards)
 
@@ -88,6 +96,11 @@ erDiagram
     REWARD_CATALOG ||--o{ REDEMPTION_ORDER : ""
     REDEMPTION_ORDER ||--o{ REDEMPTION_STATUS_HISTORY : ""
 ```
+
+> **Real-model note:** **achievement is uploaded as final amounts per outlet per parameter and stored verbatim**
+> (`OutletSalesRecord.kpiValues`); the platform does **not** compute. `TARGET_ACHIEVEMENT`/auto-`SCHEME_TARGET`
+> compute fields (`rewardPoints`, `projectedIncentive`, `pointsPerRupee`) belong to the inherited compute engine
+> being **retired in P4.0**. Scheme audience = **program** (`Outlet.programName/programCategory`), not class/tier.
 
 ### B3 · Finance (Credits, Payouts, Invoicing)
 

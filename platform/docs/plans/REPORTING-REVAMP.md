@@ -32,9 +32,9 @@ fully backed today).
 |---|---|---|
 | Outlet ID / Name / type | `Outlet`, `OutletType` | ✅ exists |
 | Opening / monthly Earn / monthly Burn / Total earn / Total burn / Total expired / Closing | `PointsLedger` (via `Outlet → partner(1:1) → Wallet → PointsLedger`), bucketed by `createdAt` month. **Earn = `EARN`** (+credit `ADJUST`/`REVERSE`), **Burn = `REDEEM`**, **Expired = `EXPIRE`**. `Opening = net points before period start`; `Closing = Opening + Earn − Burn − Expired`. | ✅ engine buildable now |
-| Zone, ZNM id, RSM id, ASM id, SO id, XSR id | `SalesHierarchyLevel` + `SalesUser.reportingTo` chain + `SalesUserAssignment` (outlet→salesUser→walk up) | ⏳ **P2** — schema exists, org tree **not seeded**; blank in prod until P2.1/2.2, demo-filled now |
-| Distributor code / Name | **No `Distributor` entity and no outlet→distributor relation exist** | ⏳ **P2.4** — must define entity + link first; demo-filled now |
-| Program name / category | Closest is `Scheme` (no "category" field); no "Program" entity; `PointsLedger.schemeId` exists but points span **many schemes** over 24 months | ⏳ **P4** — define Program(=Scheme?)+category and decide per-outlet vs per-outlet×program granularity; demo-filled now |
+| Zone, ZNM id, RSM id, ASM id, SO id, XSR id | `SalesHierarchyLevel` + `SalesUser.reportingTo` chain + `SalesUserAssignment` (outlet→salesUser→walk up) | ✅ **P2.1 BUILT** — the relational tree is now persisted by the hierarchy upload (`lib/hierarchy-persistence.ts`); walk `SalesUserAssignment` → `SalesUser.reportingTo` to fill the chain |
+| Distributor code / Name | **`Outlet.distributorCode` / `Outlet.distributorName`** (reference-only text columns, populated from the outlet-master upload — owner decision: NO separate Distributor entity) | ✅ **P2.4 BUILT** — read the columns directly |
+| Program name / category | **`Outlet.programName` / `Outlet.programCategory`** (the segmentation dimension; captured per-outlet at outlet-master upload) | ✅ **P2.4 BUILT** — read the columns directly (per-outlet; no Scheme/Program-entity needed) |
 
 ### Decisions (locked)
 - **Points attribution: 1 partner = 1 outlet.** `Wallet` is keyed by `partnerId`; we attribute a partner's

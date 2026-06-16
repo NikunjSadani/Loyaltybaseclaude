@@ -1,3 +1,7 @@
+> ⚠️ **SUPERSEDED (2026-06-16) by [`00-MASTER-PLAN.md`](00-MASTER-PLAN.md) P1.** Delivered: Gap #20 closed, #23
+> reduced (session-bound tenant + isolation-audit test); per-route `clientId` fixes continued through P2 (RF1–RF7).
+> Historical reference only — plan from `00-MASTER-PLAN.md`.
+
 # Milestone D · Tenant-isolation guardrail (Gaps #23, #20, High)
 
 **Context:** isolation today is "every developer remembers to add `where: { clientId }`." One

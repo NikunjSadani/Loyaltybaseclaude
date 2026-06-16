@@ -32,8 +32,8 @@ filtered by ownership/hierarchy. All routes are tenant-scoped via `clientId`.
 | GET | `/gifsy/clients/[slug]/outlet-type-configs` | Tenant outlet-type config | GIFSY_ADMIN |
 | PUT | `/gifsy/clients/[slug]/outlet-type-configs/[code]` | Upsert outlet-type config | GIFSY_ADMIN |
 | GET·PUT | `/admin/settings` | Tenant settings | admin |
-| GET·POST | `/admin/skus` | SKU catalog | admin |
-| GET·POST | `/admin/tiers` | Tier config | admin |
+| ~~GET·POST~~ | ~~`/admin/skus`~~ | **RETIRED — SKU catalog not in the real model (P2.6 reverted)** | — |
+| ~~GET·POST~~ | ~~`/admin/tiers`~~ | **RETIRING — point-tiers dropped in P4.0 de-scaffold** | — |
 | GET·PUT | `/admin/task-config` | Sales task config | admin |
 
 ## 3 · Sales Org & Team
@@ -75,7 +75,7 @@ filtered by ownership/hierarchy. All routes are tenant-scoped via `clientId`.
 | GET·POST | `/schemes` | List / create | admin · scoped read |
 | GET·PATCH·DELETE | `/schemes/[id]` | Detail / update / delete | admin |
 | GET | `/schemes/[id]/targets` · `/schemes/targets` | Scheme targets | scoped |
-| POST | `/schemes/calculate` | Reward calc (aspirational, Gap #10) | — |
+| ~~POST~~ | ~~`/schemes/calculate`~~ | **RETIRED in P4.0 — compute engine contradicts the upload-final model (Gap #10)** | — |
 | GET | `/admin/schemes/[id]/enrollments/export` | Enrollment export | admin |
 
 ## 7 · Targets & Achievements
@@ -87,7 +87,7 @@ filtered by ownership/hierarchy. All routes are tenant-scoped via `clientId`.
 | POST | `/admin/sales/bulk-upload` | Achievement upload | admin |
 | GET | `/admin/sales/batches` · `/admin/sales/records` | Upload batches / records | admin |
 | DELETE | `/admin/sales/batches/[batchId]` | Delete batch | admin |
-| POST | `/sales/upload` · GET `/sales/last-upload` | Field sales upload | sales |
+| POST | `/sales/upload` · GET `/sales/last-upload` | Field sales upload ⚠️ **WRONG MODEL** — current impl is invoice/`skuCode`→`SalesInvoice`; the real model is **parameter-based achievement upload** (final amounts, no compute). Reconcile/replace in P4.5. `/sales/returns` (`InvoiceReturn`) rides the same stale SKU/invoice scaffolding. | sales |
 | GET | `/partner/targets` | My targets vs achievement | partner |
 
 ## 8 · Wallet & Points

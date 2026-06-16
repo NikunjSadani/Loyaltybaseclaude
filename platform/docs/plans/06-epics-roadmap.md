@@ -1,3 +1,8 @@
+> ⚠️ **SUPERSEDED (2026-06-16) by [`00-MASTER-PLAN.md`](00-MASTER-PLAN.md).** Historical roadmap. E1 (config-as-data)
+> and E2 (RBAC engine) were **delivered in P1**; E3 (KYC tree) is partly in P1/P3. **Do not plan from this doc** —
+> the phase plan + status live in `00-MASTER-PLAN.md`. Also note the model correction in
+> [`MODEL-ALIGNMENT.md`](MODEL-ALIGNMENT.md) (parameter-based, program-segmented, no compute).
+
 # Milestone E · Epics roadmap (plan before you task)
 
 These four are **large features**, not bite-sized tasks. Each needs its own planning session to

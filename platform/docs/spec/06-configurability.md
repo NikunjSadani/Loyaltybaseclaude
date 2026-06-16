@@ -30,11 +30,11 @@ Every knob that varies by tenant. **Current home** legend: `CODE` = `CLIENT_REGI
 ## C · Organization
 | Setting | Controls | Home | Target |
 |---|---|---|---|
-| Sales hierarchy names + level count | ISR<SO<ASM<RSM<ZNM<NSM (tenant labels) | REL (`SalesHierarchyLevel`) / BLOB | REL single source (Gap #18) |
+| Sales hierarchy names + level count | XSR<SO<ASM<RSM<ZNM<NSM (tenant labels) | REL (`SalesHierarchyLevel`) ✅ now single source (P2.1) | done (Gap #18/#11) |
 | Approval hierarchy (L1/L2, `requireGifsyFinalApproval`) | KYC approver levels + Gifsy-final | CODE | DB; drive from tree (Gap #9) |
-| Partner classes (`CP_01/02/03` names) | Retailer/wholesaler/sub-stockist labels | REL/CODE | DB |
-| Tiers (Platinum→Standard, multipliers) | Loyalty tiers | REL (`TierConfig`) | DB; note multiplier likely dead (#10) |
-| Outlet types | Per-tenant outlet-type configs | REL (`OutletTypeClientConfig`) | keep |
+| **Program / Program category** (per-tenant valid-lists) | **The segmentation dimension** (`Outlet.programName/programCategory`, set at outlet upload) — **replaces partner class** | BLOB (`ProgramSetting`) | optionally DB-backed `Program` master (P4) |
+| Outlet types | Per-tenant outlet-type configs (SSS/WHOLESALER/SUB_STOCKIST/SSS_TOT) | REL (`OutletTypeClientConfig`) | keep |
+| ~~Partner classes / Tiers~~ | ~~`CP_01/02/03`, multipliers~~ | — | **RETIRED → program (P4.0 de-scaffold)** |
 
 ## D · Enrollment & KYC
 | Setting | Controls | Home | Target |
@@ -48,7 +48,7 @@ Every knob that varies by tenant. **Current home** legend: `CODE` = `CLIENT_REGI
 | Setting | Controls | Home | Target |
 |---|---|---|---|
 | Points expiry | Whether/when points expire | REL (`PointExpiryConfig`) | keep; wire to wallet |
-| Holding/lock period | When points become redeemable | REL (`TierConfig.holdingPeriodDays`) | keep |
+| Holding/lock period | When points become redeemable | re-home off `TierConfig` (DROPPED in P4.0) → outlet/program or wallet config | keep config, move home |
 | Points → INR conversion | Gifts-only vs gifts+INR | — | tenant flag |
 | Credit parameters (`CreditField`) | Headers; `isSeparatePayout`; per-outlet-type award | REL | keep; enforce clubbing (Gap #7) |
 
