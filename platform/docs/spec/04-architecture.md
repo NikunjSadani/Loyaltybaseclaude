@@ -31,9 +31,10 @@ flowchart TB
 ## 2 · Building blocks (C4 L2)
 
 > **In transition (Phase S, `../plans/BACKEND-SPLIT-PLAN.md`).** The current code is a full-stack Next.js app
-> (`platform/`, 119 Prisma routes) plus a separate, **superseded** NestJS `api/` (a frozen, World-A-model
-> service the platform never calls — being **deleted**, mined only for structural patterns). The target below is
-> what Phase S builds.
+> (`platform/`, 119 Prisma routes) plus a separate NestJS `api/` (a World-A-model service the platform never
+> calls). Phase S **reuses `api/`'s framework shell in place as the backend** (it's the proven `gifsy-api` deploy
+> target) while **deleting its World-A domain** and rebuilding the real domain from `platform/lib`. The target
+> below is what Phase S builds.
 
 **Target building blocks:**
 - **Backend API (NestJS)** — the single source of truth: controllers (versioned `/v1`) over the ported domain
@@ -105,8 +106,10 @@ flowchart TB
   `JWT_SECRET` only). This is exactly what `terraform/` already provisions — the split makes the **code** match it.
   **Cloud SQL** Postgres (one canonical schema); **GCS**; **Secret Manager** (`JWT_SECRET`, MSG91 keys — never
   hardcoded; SA key files gitignored); `terraform/iam.tf`. **Cloudflare worker** routes subdomains to origins.
-- **Schema ownership:** the **backend** owns the single canonical Prisma schema. The current split-brain (two
-  schemas, `platform` 80 vs `api` 74) is **resolved by Phase S** — `api/` is deleted; one schema remains (Gap #30).
+- **Schema ownership:** the **backend** (which lives in the `api/` dir post-split) owns the single canonical Prisma
+  schema. The split-brain (two schemas, `platform` 80 vs `api` 74) is **resolved by Phase S** — the platform schema
+  is de-scaffolded and becomes `api/prisma/schema.prisma` (replacing api's World-A 74-model schema); one schema
+  remains (Gap #30).
 - `DEMO_MODE=true` short-circuits external deps (DB/MSG91/approvals) for end-to-end demo — **never in prod**.
 
 ## 7 · Cross-cutting concerns
@@ -122,8 +125,9 @@ flowchart TB
 - **→ Gap #31 — ✅ DECIDED (2026-06-16), resolving via Phase S:** the code was built **full-stack** while
   `terraform/` deploys a **stateless frontend + NestJS `api/` as DB owner** (platform had NO prod `DATABASE_URL` →
   couldn't run in prod). **Owner decision:** adopt the **dedicated-backend (API-first)** architecture — build the
-  backend from the **platform's real-model `lib/`+schema** (not the World-A `api/`, which is deleted), frontend goes
-  thin. Done **now** (greenfield, P2 = cheapest). Gates P3+. Full plan: `../plans/BACKEND-SPLIT-PLAN.md`.
+  backend from the **platform's real-model `lib/`+schema** (not the World-A `api/` domain, which is deleted — though
+  `api/`'s framework **shell** is reused in place as the deploy target), frontend goes thin. Done **now** (greenfield,
+  P2 = cheapest). Gates P3+. Full plan: `../plans/BACKEND-SPLIT-PLAN.md`.
 
 - **→ Gap #20 — ✅ RESOLVED (P1 S3–S4b):** `clientId`+`sid` are now in the JWT, bound to a
   server-side `UserSession`. `getAuthUser` validates the session and enforces

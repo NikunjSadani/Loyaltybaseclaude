@@ -12,13 +12,17 @@ frontend**, so future mobile/PWA/partner consumers reuse one backend. **Why:** `
 split (stateless FE + `gifsy-api` DB owner; the FE has NO prod `DATABASE_URL` → the full-stack code can't run in
 prod); we realign the CODE to the infra **now** while greenfield/P2 = cheapest (later = re-home twice).
 **FOUNDATION = the platform's real-model `lib/`+schema** (framework-agnostic: only 3/63 lib files touch `next/*`),
-**NOT the NestJS `api/`** — `api/` is real code but a 100% **World-A** (wrong) model (Sku/SkusModule, partner-class,
-tiers, scheme-compute; `programName`=0); it is **DELETED**, mined only for structural patterns (guards/DI/cron).
+**NOT the NestJS `api/` domain** — it's real code but a 100% **World-A** (wrong) model (Sku/SkusModule, partner-class,
+tiers, scheme-compute; `programName`=0). The backend is built **IN PLACE in `api/`** (verified+independently-confirmed
+2026-06-16): the deploy build is hard-wired to `./api` (`docker build … ./api`), so we **reuse `api/`'s proven
+framework shell** (Dockerfile, Prisma-7 module, common guards, bootstrap) + **port `auth/`+`tenant/`**, and **delete
+its World-A domain** (skus/schemes/targets/rewards/wallet/payouts/outlets/partners/sales/kyc/admin/reports/…). The
+`api/` dir *becomes* the backend — it is NOT deleted; only its World-A domain is.
 **Absorbs P4.0:** the World-A de-scaffold (tiers/partner-class/compute/SKU) happens in step S2 so the backend is
 born clean. **Owner constraints:** no speed-vs-quality tradeoff (full split); NestJS confirmed; multi-tenancy =
 config/data not code-branches (no `if clientId===`); DEFER per-client customization machinery (YAGNI — clean module
 boundaries only); current client = parameter-upload, **no compute engine**. **The full plan = read
-`docs/plans/BACKEND-SPLIT-PLAN.md` (steps S0–S8, each gated; human gates at S0/S2-migration/S8-delete-api).** Reload:
+`docs/plans/BACKEND-SPLIT-PLAN.md` (steps S0–S8, each gated; human gates at S0/S1-World-A-deletion/S2-migration). **S0 ✅ + S1 ✅ DONE** (backend scaffolded in place in `api/`: World-A domain deleted, shell + `auth`/`tenant` kept, health route boots + DB-connects, 47/47 kept-set tests green, lock synced). **NEXT = S2** (canonical schema → `api/prisma/` + World-A de-scaffold; human-gated migration). Reload:
 - docs/plans/BACKEND-SPLIT-PLAN.md        ⭐ **the Phase S plan — START HERE** (target arch, principles, reused-vs-reworked, S0–S8)
 - docs/spec/04-architecture.md            (TARGET architecture §1/§2/§6/§8 — API-first, decided)
 - docs/plans/MODEL-ALIGNMENT.md           (REAL model + the World-A de-scaffold list executed in S2)
@@ -63,8 +67,8 @@ SELECT 1 before migrating. NEVER point dev at prod (gifsy-db). This dev DB has N
 — use db push / surgical `migrate diff` → apply SQL in a txn guarded by current_database='gifsy_dev';
 NEVER `prisma migrate dev` (it would RESET it). Backfill scripts reuse the lib/prisma singleton.
 ⚠️ **SCHEMA SOURCE OF TRUTH = `platform/prisma/schema.prisma`** (80 models) **until Phase S — then it MOVES to
-the backend** as the single canonical schema (S2 takes the platform schema, de-scaffolds World-A, and the backend
-owns it; `api/prisma/schema.prisma` is DELETED with `api/`). During S2 update DEV-DB.md to the new location.
+the backend's `api/prisma/schema.prisma`** as the single canonical schema (S2 takes the platform schema,
+de-scaffolds World-A; it REPLACES api's World-A 74-model schema — not deleted, replaced). During S2 update DEV-DB.md.
 
 STATE: **P0 + P1 + P2 COMPLETE** (as of 2026-06-16), all built→gated→independently-audited and **pushed to
 origin/develop** (run `git log --oneline origin/develop -5` for the latest). Gate is DIFFERENTIAL ("no NEW reds
@@ -83,9 +87,10 @@ FLAG-GATED OFF (env RBAC_ENFORCEMENT + per-tenant features.rbacEnforcement). Rev
 DEFERRED / OPEN (none block P4):
 - RBAC enforcement is OFF and safe to enable later via RBAC-ENABLEMENT.md (mappings already finalized).
 - Phone-change→logout hooks: wire into the sales/outlet bulk-uploads (built in P2, hook NOT yet added) + P3 re-KYC (revoke mechanism is ready).
-- **Two-schema / shared-prod-DB question (Gaps #30/#31) — ✅ RESOLVED BY PHASE S.** `api/` is deleted; the backend
-  owns one canonical schema (built from the platform's). No migration-ownership conflict remains; greenfield = no prod
-  data to reconcile. (Historical: a 2026-06-16 CI bug that generated the platform client from api's schema was fixed.)
+- **Two-schema / shared-prod-DB question (Gaps #30/#31) — ✅ RESOLVED BY PHASE S.** The backend (the `api/` dir,
+  World-A domain deleted) owns one canonical schema = the de-scaffolded platform schema at `api/prisma/`. No
+  migration-ownership conflict remains; greenfield = no prod data to reconcile. (Historical: a 2026-06-16 CI bug that
+  generated the platform client from api's schema was fixed.)
 - Small follow-ups: OTP validity window (6h→10min), send-otp orphaned-rows on failure, isolation-audit
   AST hardening, force-logout-all audit-durability ordering, vitest.integration server-only alias,
   requirePermission per-tenant-config caching, RBAC per-tenant override storage/UI.

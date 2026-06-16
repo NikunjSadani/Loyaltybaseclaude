@@ -36,7 +36,7 @@ commits · conventional-commit messages · **every DB query scoped by `clientId`
 | **P0** | Foundations & shared infra | cross-cutting | #1, #21 | 1–2 wk |
 | **P1** | Identity, tenancy & access | Identity & Access · Tenancy/Config | #2, #3, #20, #22, #23 | 4–6 wk |
 | **P2** | Organization & master data | Sales Org · Partners/Outlets · Catalog | #4, #11 | 3–5 wk |
-| **S** | **Backend split — API-first re-architecture** (NestJS backend from platform `lib/`+schema; thin FE; delete `api/`; absorbs P4.0 World-A de-scaffold) — **gates P3+** | cross-cutting | #30, #31, #10, #29 | ~1–2 wk |
+| **S** | **Backend split — API-first re-architecture** (NestJS backend built **in place in `api/`** from platform `lib/`+schema; World-A domain deleted; thin FE; absorbs P4.0 World-A de-scaffold) — **gates P3+** | cross-cutting | #30, #31, #10, #29 | ~1–2 wk |
 | **P3** | Onboarding & KYC | KYC & Enrollment | #9, #12, #13, #14, #15 | 3–5 wk |
 | **P4** | Programs, targets & enrollment | Schemes/Activations · Targets | #6, #10 | 4–6 wk |
 | **P5** | Wallet, points & rewards | Wallet & Points · Rewards | #28 | 3–4 wk |
@@ -168,7 +168,8 @@ tenant config served from DB. **Depends on:** P0.
 > `lib/incentive.ts` compute = ONE deliberate effort; see `docs/plans/MODEL-ALIGNMENT.md`).
 > **⚠️⚠️ NEXT = PHASE S (BACKEND SPLIT) — DECIDED 2026-06-16 (Gap #31), gates P3+.** Task 0's topology reconcile +
 > independent-agent confirm settled it: split into a **dedicated NestJS backend** (from the platform's real-model
-> `lib/`+schema) + **thin frontend**; **delete the World-A `api/`**. The de-scaffold (formerly "P4.0") is **absorbed
+> `lib/`+schema, built **in place in the `api/` dir** — reuse its shell, **delete its World-A domain**) + **thin
+> frontend**. The de-scaffold (formerly "P4.0") is **absorbed
 > into Phase S step S2** so the backend is born clean. Full plan: [`BACKEND-SPLIT-PLAN.md`](BACKEND-SPLIT-PLAN.md);
 > arch: `../spec/04-architecture.md`. **Do NOT build P3+/P4 until Phase S lands.**
 
@@ -232,25 +233,27 @@ owns DB + all logic) + a **thin Next.js web frontend**, so future mobile/PWA/par
 > **Why now:** the infra (`terraform/`) was always built for a split (stateless FE + `gifsy-api` DB owner); the
 > code drifted to full-stack. Owner decision (2026-06-16, Gap #31): realign the **code** to the infra **now** —
 > greenfield, no prod data, only at P2 = cheapest. Building P3+ full-stack first = re-home twice.
-> **Foundation = the platform's real-model `lib/`+schema** (framework-agnostic), **not** the NestJS `api/` (real
-> code but 100% the wrong World-A model) → `api/` is **deleted**, mined only for structural patterns.
+> **Foundation = the platform's real-model `lib/`+schema** (framework-agnostic), **not** the NestJS `api/` domain
+> (real code but 100% the wrong World-A model). The backend is built **in place in the `api/` dir** — its proven
+> framework shell (the `gifsy-api` deploy target) is reused, its **World-A domain deleted**, the real domain rebuilt
+> from `lib/`. (Build path is hard-wired to `./api`, so reuse keeps the deploy pipeline untouched.)
 > **Absorbs P4.0:** the World-A loyalty-engine de-scaffold (tiers/partner-class/compute/SKU, gaps #10/#29) happens
 > in **S2** — we build the backend clean rather than de-scaffolding the platform then porting.
 
 | Task | What | Gate |
 |---|---|---|
-| S0 | Safety checks (greenfield ✅, no `api/` consumer ✅, prod-DB ownership) | **human gate** |
-| S1 | NestJS backend scaffold (borrow `api/` guard/DI/cron patterns) | health route |
-| S2 | Canonical schema + **World-A de-scaffold** (folds in P4.0) | **human-gated migration** (dev only) |
+| S0 | Safety checks (greenfield ✅, no `api/` consumer ✅, prod-DB ownership ✅) | **human gate** ✅ |
+| S1 | Backend scaffold **in place in `api/`**: keep shell + port auth/tenant, **delete World-A domain** | **human gate** (deletion) + health route |
+| S2 | Canonical schema → `api/prisma/` + **World-A de-scaffold** (folds in P4.0) | **human-gated migration** (dev only) |
 | S3 | Port `lib/` domain logic → backend services (rewrite 3 `next/*` helpers) | unit |
 | S4 | Re-home 119 route handlers → controllers (`/v1`), parallel by domain | wiring + differential |
 | S5 | Global guards: auth/session, permission, **tenant-scoping**, throttle, audit, cron | unit + smoke |
 | S6 | Thin the frontend → call backend over HTTP (CORS, cross-origin auth) | e2e smoke |
-| S7 | Infra/CI: backend gets DB/secrets; FE stateless; drop `api/` build | deploy run |
-| S8 | Cutover smokes; **delete `api/`**; close #30/#31 | **human gate** |
+| S7 | Infra/CI: ~no change (backend = `api/` dir already deploys as `gifsy-api`); drop dead schema-fallback | deploy run |
+| S8 | Cutover smokes; confirm no World-A leftovers (`api/` dir *persists* as the backend); close #30/#31 | **human gate** |
 
-**Exit:** web → backend → DB works end-to-end; one canonical schema; `api/` deleted; frontend carries no business
-logic. **Depends on:** P2. **Blocks:** P3+ (all later phases build in the backend).
+**Exit:** web → backend → DB works end-to-end; one canonical schema (`api/prisma/`); World-A domain gone; frontend
+carries no business logic. **Depends on:** P2. **Blocks:** P3+ (all later phases build in the backend).
 
 ## P3 · Onboarding & KYC  (3–5 wk)
 **Objective:** the full enroll→KYC→approve→credential journey (spec §02 WF1) works end-to-end.
@@ -383,7 +386,7 @@ deploy-validated; the launch parts (9.7–9.9) gate the first real tenant.
 
 | Task | What | Key area | Gate |
 |---|---|---|---|
-| 9.0 | Reconcile EXISTING infra (`.github/workflows/*`, `terraform/*`, `Dockerfile`, Cloud SQL, Secret Manager) vs target; list real gaps. **Note:** after **Phase S**, deploy is **backend (`gifsy-api`, owns DB) + thin frontend (`gifsy-frontend`, stateless)** — one canonical schema, `api/` deleted (Gaps #30/#31 resolved). Most infra wiring moves into Phase S (S7); 9.x verifies/finishes it. | `terraform/`, `.github/`, backend `prisma/schema.prisma` | — |
+| 9.0 | Reconcile EXISTING infra (`.github/workflows/*`, `terraform/*`, `Dockerfile`, Cloud SQL, Secret Manager) vs target; list real gaps. **Note:** after **Phase S**, deploy is **backend (`gifsy-api`, owns DB) + thin frontend (`gifsy-frontend`, stateless)** — one canonical schema in `api/prisma/`; the backend *is* the `api/` dir (its World-A domain deleted, not the dir) (Gaps #30/#31 resolved). Most infra wiring moves into Phase S (S7); 9.x verifies/finishes it. | `terraform/`, `.github/`, backend `prisma/schema.prisma` | — |
 | 9.1 | **Fix the CI gate** (`ci.yml` EXISTS): its `npm test` all-pass requirement is incompatible with the red-by-design TDD baseline → switch CI to the **differential gate** (no NEW reds vs `baseline-red-snapshot.txt`) or quarantine the baseline reds, so CI can be green and deploys can proceed | `.github/workflows/ci.yml` | CI green-able |
 | 9.2 | **Environments** (`deploy-staging.yml` + terraform EXIST): verify staging is stood up & mirrors prod; confirm dev→staging→prod promotion | `terraform/`, Cloud Run | deploys |
 | 9.3 | **CD** (`deploy.yml`/`deploy-staging.yml` EXIST): verify the `main`→prod (approval-gated) + `develop`→staging flows end-to-end; **add the DB-migration step** (none in the pipeline today — see 9.5) | `.github/workflows/*` | deploy run |

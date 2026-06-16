@@ -10,9 +10,10 @@ A dedicated GCP Cloud SQL instance for development, **isolated from production**
 - **Local access:** Cloud SQL **Auth Proxy** on `127.0.0.1:5433`
 - **`.env`:** `DATABASE_URL=postgresql://gifsy_user:<pw>@127.0.0.1:5433/gifsy_dev`, `DEMO_MODE=false`
 - **Schema:** built from **`platform/prisma/schema.prisma`** (source of truth; 80 models as of P2) via
-  `npx prisma db push`, starts empty. ⚠️ **Phase S (`BACKEND-SPLIT-PLAN.md`) MOVES the canonical schema to the new
-  NestJS backend** (S2 takes this schema, drops World-A, and the backend owns it; the old `api/prisma/schema.prisma`
-  is deleted with `api/`). **Update this file's schema location when S2 lands.** Until then, the platform schema is
+  `npx prisma db push`, starts empty. ⚠️ **Phase S (`BACKEND-SPLIT-PLAN.md`) MOVES the canonical schema to the
+  backend** — which lives in the `api/` dir (S2 takes this platform schema, drops World-A, and it **becomes
+  `api/prisma/schema.prisma`, replacing api's World-A 74-model schema**). **Update this file's schema location when S2
+  lands.** Until then, the platform schema is
   authoritative (`npx prisma generate` in `platform/` uses `prisma.config.ts`).
 - Cost: ~$8/mo (smallest tier, HDD, no backups).
 

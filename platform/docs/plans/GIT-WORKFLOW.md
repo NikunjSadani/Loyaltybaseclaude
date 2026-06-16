@@ -10,9 +10,11 @@
 
 Feature branches off `develop` are optional; for a solo build, committing straight to `develop` is fine.
 
-> **Post-Phase S** (`BACKEND-SPLIT-PLAN.md`): the deploy targets stay `gifsy-api` + `gifsy-frontend`, but
-> `gifsy-api` becomes the **new NestJS backend** (built from the platform's logic) and the old `api/` is deleted;
-> the CI build/test matrix updates from `[api, platform]` to `[backend, frontend]` in step S7.
+> **Post-Phase S** (`BACKEND-SPLIT-PLAN.md`): the deploy targets stay `gifsy-api` + `gifsy-frontend`. The backend is
+> built **in place in the `api/` dir** (its World-A domain deleted, the real domain rebuilt from the platform's
+> `lib/`), so the **CI build/test matrix dir names stay `[api, platform]`** — `api/` *is* the backend now, `platform/`
+> thins to the frontend. No workflow build-path changes needed (the build is already hard-wired to `./api`); S7 only
+> drops the dead `prisma generate --schema=../api/prisma/...` fallback once the canonical schema lands there (S2).
 
 ## Day-to-day flow
 1. Work + commit on **`develop`** (executors/auditors/gate as usual). Push `develop`.
