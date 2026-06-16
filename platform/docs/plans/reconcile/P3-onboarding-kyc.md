@@ -300,7 +300,24 @@ deterministic); **3.4b query is correctly tenant-scoped — no cross-tenant leak
 **Deferred (low-priority follow-ups, tracked):** 3.1 MIME/extension allow-list; orphaned-GCS-object cleanup (upload
 without a later `create()`); 3.4b no-primary-outlet reviewer signal.
 
-**Owner decision needed (bridge audit #1):** rejects are intentionally **not surfaced until all 7 fields are
-terminal** — a partner learns of a re-upload only when the grid is complete. This is faithful to §5 but trades against
-REVAMP locked-decision #1 ("fix only the failing piece, fast"). Confirm keep-as-is, or switch to early per-field
-re-share (a return-shape change). Flagged in `kyc-verification.helper.ts`.
+**Owner decision (bridge audit #1) — RESOLVED 2026-06-16: keep as-is.** Rejects are surfaced only once all 7 fields
+are terminal (one consolidated re-upload). Early per-field re-share was considered and declined.
+
+---
+
+## 11 · 3.4c bulk auto-approve commit — built (Sonnet executor) + independently audited, 2026-06-16
+
+`POST /v1/kyc/bulk-verify?apply=true|false` (Gifsy-only, multipart): dry-run preview (no writes) / per-submission
+commit. Ported parser (`kyc-bulk-verify.ts`), per-submission `$transaction`, conditional `updateMany` idempotency,
+the bridge, auto-approve side effects (activate + wallet + audit), RE_UPLOAD → `reKycFlags` (the §6 field-map). The
+independent auditor **confirmed** per-submission isolation, the idempotency guard, tenant scoping, merge semantics,
+and the field-map — and found two atomicity bugs the mocked-`$transaction` tests structurally couldn't catch:
+
+| Sev | Finding | Resolution |
+|---|---|---|
+| **BLOCKER (B1)** | `notify()` ran *inside* the commit tx, but `NotificationsService.enqueue` writes on its own base client → a rolled-back approval could still deliver "KYC approved" | commit returns a **notification intent**; the caller enqueues **after** the tx resolves (mirrors single-record `approve()`). +regression test (tx fails → no notify) |
+| **SHOULD-FIX (S1)** | RE_UPLOAD with no primary outlet flipped status then returned `error` → half-commit (re-upload state, no flags) | resolve the outlet **before** the flip; **throw** if none → whole tx rolls back, clean `error`, no mutation. +test asserting no flip |
+
+Deferred (tracked): S2 — RE_UPLOAD notifies the partner; add the assigned sales owner via `SalesUserAssignment` in
+P3.6 (TODO in code). N1 — blank-row no-op tx. Gated after remediation: tsc 0, **89/89** kyc tests, boot smoke
+(route maps, unauth 401).

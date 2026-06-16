@@ -64,8 +64,9 @@ export function evaluateSubmission(items: VerificationDecisionLike[]): BridgeRes
     // Grid still being worked — hold at PENDING_GIFSY regardless of any rejects so
     // far. NOTE (owner-confirm): rejects are intentionally NOT surfaced until all 7
     // fields are terminal — a partner learns of a re-upload only once the grid is
-    // complete. Faithful to reconcile §5; early per-field re-share, if ever wanted,
-    // is a return-shape change, not a one-liner. Flagged for owner sign-off.
+    // complete. Faithful to reconcile §5. Owner-confirmed 2026-06-16: KEEP this —
+    // one consolidated re-upload after the grid is reviewed (early per-field re-share
+    // was considered and declined).
     return { next: 'PENDING_GIFSY', rejectedFields: [], approvedCount };
   }
 

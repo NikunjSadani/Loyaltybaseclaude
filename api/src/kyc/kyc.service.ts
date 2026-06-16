@@ -8,16 +8,23 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, KycFieldKey, KycDocumentType } from '@prisma/client';
+import * as XLSX from 'xlsx';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { KYC_FIELD_KEYS } from './kyc-verification.helper';
+import { evaluateSubmission } from './kyc-verification.helper';
 import {
   generateKycReviewDumpExcel,
   KycReviewDumpEntry,
   KycReviewDumpFieldState,
 } from './kyc-review-dump';
+import {
+  parseKycApprovalSheet,
+  KycVerifyUpdate,
+  KycVerifyParseResult,
+} from './kyc-bulk-verify';
 import {
   ConsentKycDto,
   CreateKycDto,
@@ -34,6 +41,65 @@ import {
   nextStatusAfterFirstApprove,
   detectEscalation,
 } from './kyc-approval.helper';
+
+// ─── KycFieldKey → ReKYCFlags map (reconcile §6 SHOULD-FIX #3) ──────────────
+// Proposed map from the spec; drives which boolean flags are set on the
+// primary outlet's reKycFlags when a field is REJECTED on bulk commit.
+const KYC_FIELD_TO_REKYCFLAGS: Record<KycFieldKey, string[]> = {
+  PAYMENT: ['bankName', 'accountHolderName', 'accountNumber', 'ifscCode', 'upiId', 'cancelledCheque'],
+  GST_VALIDATION: ['gstNumber', 'panNumber'],
+  GST_DOCUMENT: ['gstCertificate'],
+  ADDRESS: ['streetAddress', 'city', 'state', 'pincode'],
+  ADDRESS_DOCUMENT: ['addressProof', 'selfDeclaration'],
+  BOARD_PHOTO: ['storeBoardPhoto'],
+  OWNER_PHOTO: ['ownerPhoto'],
+};
+
+/** Outcome for a single submission in a bulk-verify commit. */
+export interface BulkVerifySubmissionResult {
+  submissionId: string;
+  outcome: 'approved' | 'reupload' | 'recorded' | 'skipped' | 'error';
+  detail?: string;
+}
+
+export interface BulkVerifyResult {
+  committed: boolean;
+  results: BulkVerifySubmissionResult[];
+  errors: KycVerifyParseResult['errors'];
+  summary: {
+    rowsParsed: number;
+    fieldsSet: number;
+    parseErrors: number;
+    approved: number;
+    reupload: number;
+    recorded: number;
+    skipped: number;
+    commitErrors: number;
+  };
+}
+
+export interface BulkVerifyDryRunResult {
+  committed: false;
+  updates: KycVerifyUpdate[];
+  errors: KycVerifyParseResult['errors'];
+  summary: KycVerifyParseResult['summary'];
+}
+
+/**
+ * A notification to enqueue AFTER a per-submission commit tx resolves (audit B1):
+ * NotificationsService.enqueue writes via its own (base) Prisma client, NOT the tx,
+ * so enqueuing inside the tx would persist independently and could outlive a
+ * rolled-back approval. We carry the intent out and enqueue post-commit.
+ */
+interface CommitNotifyIntent {
+  userId: string;
+  event: string;
+  body: string;
+  variables: Record<string, unknown>;
+  phone?: string;
+}
+
+type CommitOutcome = BulkVerifySubmissionResult & { notification?: CommitNotifyIntent };
 
 /**
  * KYC & Enrollment — ported from platform/src/app/api/kyc/* onto /v1.
@@ -807,6 +873,357 @@ export class KycService {
       rejectionByReason,
       reUploadRate: Math.round(reUploadRate * 10) / 10,
     };
+  }
+
+  // ─── POST /v1/kyc/bulk-verify ────────────────────────────────────────────────
+  /**
+   * Lane A bulk upload: parse an xlsx, dry-run preview OR commit field-level
+   * verification for all PENDING_GIFSY submissions in this tenant.
+   *
+   * apply=false (default) → parse only; return { updates, errors, summary }; 0 DB writes.
+   * apply=true            → per-submission $transaction (§6); return per-row outcomes.
+   *
+   * Gifsy-admin only.  Tenant-scoped: only PENDING_GIFSY submissions for this
+   * clientId are valid; the parser rejects any other submission ID.
+   *
+   * Failure-mode handling (reconcile §6):
+   *   - Idempotency: step (a) re-asserts PENDING_GIFSY; the flip is a conditional
+   *     updateMany (count===0 → skip) so a concurrent re-upload can't double-fire.
+   *   - Partial-batch: per-submission tx → one row erroring leaves others committed.
+   *   - No sync external side-effect: all DB writes happen inside the tx; notifications
+   *     are enqueued (a NotificationQueue row, delivery is P7); no external call.
+   */
+  async bulkVerify(
+    user: JwtPayload,
+    file: Express.Multer.File,
+    apply: boolean,
+  ): Promise<BulkVerifyResult | BulkVerifyDryRunResult> {
+    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
+
+    if (!file?.buffer?.length) throw new BadRequestException('No file uploaded or file is empty');
+
+    // ── Parse the xlsx ────────────────────────────────────────────────────────
+    const wb = XLSX.read(file.buffer, { type: 'buffer' });
+    const sheetName = wb.SheetNames[0];
+    if (!sheetName) throw new BadRequestException('Uploaded file has no sheets');
+    const ws = wb.Sheets[sheetName];
+    const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, {
+      defval: '',
+      raw: false, // all values as strings
+    });
+
+    // ── Load this tenant's valid PENDING_GIFSY submission IDs ─────────────────
+    const pendingSubmissions = await this.prisma.kycSubmission.findMany({
+      where: { status: 'PENDING_GIFSY', user: { clientId: user.clientId } },
+      select: { id: true },
+    });
+    const validIds = new Set(pendingSubmissions.map((s) => s.id));
+
+    const parseResult = parseKycApprovalSheet(rawRows, validIds);
+
+    // ── Dry-run: no DB writes ─────────────────────────────────────────────────
+    if (!apply) {
+      return {
+        committed: false,
+        updates: parseResult.updates,
+        errors: parseResult.errors,
+        summary: parseResult.summary,
+      };
+    }
+
+    // ── Commit: per-submission transactions ───────────────────────────────────
+    const results: BulkVerifySubmissionResult[] = [];
+    const now = new Date();
+    let approved = 0;
+    let reupload = 0;
+    let recorded = 0;
+    let skipped = 0;
+    let commitErrors = 0;
+
+    for (const update of parseResult.updates) {
+      const { submissionId, fields } = update;
+      try {
+        const outcome = await this.commitSubmissionVerification(user, submissionId, fields, now);
+        results.push({ submissionId, outcome: outcome.outcome, detail: outcome.detail });
+        // Enqueue notifications ONLY after the tx has committed (audit B1) — a row
+        // that threw never returns a notification, so a rolled-back approval can't notify.
+        if (outcome.notification) {
+          const n = outcome.notification;
+          await this.notify(n.userId, n.event, n.body, n.variables, n.phone);
+        }
+        if (outcome.outcome === 'approved') approved++;
+        else if (outcome.outcome === 'reupload') reupload++;
+        else if (outcome.outcome === 'recorded') recorded++;
+        else if (outcome.outcome === 'skipped') skipped++;
+      } catch (err: unknown) {
+        commitErrors++;
+        results.push({
+          submissionId,
+          outcome: 'error',
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    return {
+      committed: true,
+      results,
+      errors: parseResult.errors,
+      summary: {
+        rowsParsed: parseResult.summary.rowsParsed,
+        fieldsSet: parseResult.summary.fieldsSet,
+        parseErrors: parseResult.summary.errors,
+        approved,
+        reupload,
+        recorded,
+        skipped,
+        commitErrors,
+      },
+    };
+  }
+
+  /**
+   * Commit one submission's field updates inside its own transaction.
+   * Per §6: re-assert PENDING_GIFSY, upsert items, evaluate, branch.
+   *
+   * Returns the per-submission outcome.  Throws on unrecoverable DB error
+   * so the caller can count it as 'error' without halting the batch.
+   */
+  private async commitSubmissionVerification(
+    user: JwtPayload,
+    submissionId: string,
+    fields: KycVerifyUpdate['fields'],
+    now: Date,
+  ): Promise<CommitOutcome> {
+    return this.prisma.$transaction(async (tx) => {
+      // ── (a) Re-load + re-assert PENDING_GIFSY (idempotency guard) ─────────
+      const submission = await tx.kycSubmission.findFirst({
+        where: {
+          id: submissionId,
+          status: 'PENDING_GIFSY',
+          user: { clientId: user.clientId },
+        },
+        include: {
+          user: true,
+          partner: {
+            include: {
+              outlets: {
+                where: { isPrimary: true, deletedAt: null },
+                take: 1,
+              },
+            },
+          },
+        },
+      });
+
+      // Not PENDING_GIFSY or not in this tenant → skip (idempotent)
+      if (!submission) {
+        return {
+          submissionId,
+          outcome: 'skipped' as const,
+          detail: 'Submission is no longer PENDING_GIFSY or does not belong to this tenant',
+        };
+      }
+
+      // ── (b) Upsert KycVerificationItem rows for fields in this update ────
+      for (const [rawKey, fieldUpdate] of Object.entries(fields)) {
+        const fieldKey = rawKey as KycFieldKey;
+        if (!fieldUpdate) continue;
+        await tx.kycVerificationItem.upsert({
+          where: {
+            kycSubmissionId_fieldKey: {
+              kycSubmissionId: submissionId,
+              fieldKey,
+            },
+          },
+          create: {
+            kycSubmissionId: submissionId,
+            fieldKey,
+            decision: fieldUpdate.decision,
+            source: 'EXCEL',
+            remark: fieldUpdate.remark ?? null,
+            verifiedById: user.sub,
+            verifiedAt: now,
+          },
+          update: {
+            decision: fieldUpdate.decision,
+            source: 'EXCEL',
+            remark: fieldUpdate.remark ?? null,
+            verifiedById: user.sub,
+            verifiedAt: now,
+          },
+        });
+      }
+
+      // ── (c) Load all 7 items → bridge ─────────────────────────────────────
+      const allItems = await tx.kycVerificationItem.findMany({
+        where: { kycSubmissionId: submissionId },
+        select: { fieldKey: true, decision: true },
+      });
+
+      const bridgeResult = evaluateSubmission(allItems);
+
+      // ── (d) Branch on bridge outcome ─────────────────────────────────────
+      if (bridgeResult.next === 'APPROVED') {
+        // Conditional flip — race hardening (§6 NIT #5): only one concurrent writer
+        // can win; count===0 means we lost the race → skip side-effects.
+        const { count } = await tx.kycSubmission.updateMany({
+          where: { id: submissionId, status: 'PENDING_GIFSY' },
+          data: { status: 'APPROVED', approvedAt: now },
+        });
+        if (count === 0) {
+          return { submissionId, outcome: 'skipped' as const, detail: 'Concurrent commit won the race' };
+        }
+
+        // Activate the user.
+        await tx.user.update({
+          where: { id: submission.userId },
+          data: { status: 'ACTIVE' },
+        });
+
+        // Create wallet if not exists.
+        if (submission.partnerId) {
+          const existingWallet = await tx.wallet.findFirst({
+            where: { partnerId: submission.partnerId },
+          });
+          if (!existingWallet) {
+            await tx.wallet.create({ data: { partnerId: submission.partnerId } });
+          }
+        }
+
+        // Audit + history.
+        await tx.kycStatusHistory.create({
+          data: {
+            kycSubmissionId: submissionId,
+            fromStatus: 'PENDING_GIFSY',
+            toStatus: 'APPROVED',
+            changedByUserId: user.sub,
+            notes: 'Bulk Excel approval — all 7 fields APPROVED',
+            metadata: { stage: 'GIFSY', source: 'EXCEL_BULK' },
+          },
+        });
+        await tx.auditLog.create({
+          data: {
+            action: 'APPROVE',
+            entityType: 'KYC_SUBMISSION',
+            entityId: submissionId,
+            actorId: user.sub,
+            oldValues: { status: 'PENDING_GIFSY' },
+            newValues: { status: 'APPROVED' },
+            metadata: { stage: 'GIFSY', source: 'EXCEL_BULK', submissionId, userId: submission.userId },
+          },
+        });
+
+        // Return the notification intent — the caller enqueues it AFTER the tx commits
+        // (audit B1: enqueuing here would persist on a separate connection and could
+        // survive a rolled-back approval).
+        return {
+          submissionId,
+          outcome: 'approved' as const,
+          notification: {
+            userId: submission.userId,
+            event: 'KYC_APPROVED',
+            body: 'Your KYC has been approved.',
+            variables: { name: submission.user.name ?? submission.user.phone },
+            phone: submission.user.phone ?? undefined,
+          },
+        };
+      }
+
+      if (bridgeResult.next === 'RE_UPLOAD_REQUIRED') {
+        // Resolve the primary outlet FIRST — we must set reKycFlags, so if there is no
+        // outlet we THROW (rolling back the whole tx) rather than flip status without the
+        // flags that tell the partner what to fix (audit S1: no half-commit). The caller
+        // counts the thrown row as 'error' and the status is never mutated.
+        const primaryOutlet = submission.partner?.outlets[0] ?? null;
+        if (!primaryOutlet) {
+          throw new Error(
+            `No primary outlet for submission ${submissionId} — cannot set reKycFlags ` +
+              `(rejected: ${bridgeResult.rejectedFields.join(', ')})`,
+          );
+        }
+
+        // Conditional flip — race hardening; count===0 means a concurrent writer won.
+        const { count } = await tx.kycSubmission.updateMany({
+          where: { id: submissionId, status: 'PENDING_GIFSY' },
+          data: { status: 'RE_UPLOAD_REQUIRED' },
+        });
+        if (count === 0) {
+          return { submissionId, outcome: 'skipped' as const, detail: 'Concurrent commit won the race' };
+        }
+
+        // Build the reKycFlags update: set all booleans for the rejected fields.
+        const flagsUpdate: Record<string, boolean> = {};
+        for (const rejectedField of bridgeResult.rejectedFields) {
+          for (const flag of KYC_FIELD_TO_REKYCFLAGS[rejectedField] ?? []) {
+            flagsUpdate[flag] = true;
+          }
+        }
+
+        // Merge into existing reKycFlags (if any) — last-write-wins per flag.
+        const existing = (primaryOutlet.reKycFlags ?? {}) as Record<string, boolean>;
+        const merged: Prisma.InputJsonValue = { ...existing, ...flagsUpdate };
+
+        await tx.outlet.update({
+          where: { id: primaryOutlet.id },
+          data: { reKycFlags: merged },
+        });
+
+        // Audit + history.
+        await tx.kycStatusHistory.create({
+          data: {
+            kycSubmissionId: submissionId,
+            fromStatus: 'PENDING_GIFSY',
+            toStatus: 'RE_UPLOAD_REQUIRED',
+            changedByUserId: user.sub,
+            notes: `Bulk Excel — rejected fields: ${bridgeResult.rejectedFields.join(', ')}`,
+            metadata: {
+              stage: 'GIFSY',
+              source: 'EXCEL_BULK',
+              rejectedFields: bridgeResult.rejectedFields,
+              outletId: primaryOutlet.id,
+            },
+          },
+        });
+        await tx.auditLog.create({
+          data: {
+            action: 'REJECT',
+            entityType: 'KYC_SUBMISSION',
+            entityId: submissionId,
+            actorId: user.sub,
+            oldValues: { status: 'PENDING_GIFSY' },
+            newValues: { status: 'RE_UPLOAD_REQUIRED' },
+            metadata: {
+              stage: 'GIFSY',
+              source: 'EXCEL_BULK',
+              rejectedFields: bridgeResult.rejectedFields,
+              outletId: primaryOutlet.id,
+            },
+          },
+        });
+
+        // Notification intent — enqueued post-commit by the caller (audit B1).
+        // TODO(P3.6): also notify the assigned sales owner (SalesUserAssignment lookup);
+        // for now the partner (submission.userId) is told what to re-upload.
+        return {
+          submissionId,
+          outcome: 'reupload' as const,
+          notification: {
+            userId: submission.userId,
+            event: 'KYC_RE_UPLOAD_REQUIRED',
+            body: `Your KYC requires re-upload for: ${bridgeResult.rejectedFields.join(', ')}`,
+            variables: {
+              name: submission.user.name ?? submission.user.phone,
+              rejectedFields: bridgeResult.rejectedFields.join(', '),
+            },
+            phone: submission.user.phone ?? undefined,
+          },
+        };
+      }
+
+      // PENDING_GIFSY — partial progress recorded, no status change.
+      return { submissionId, outcome: 'recorded' as const };
+    });
   }
 
   // ─── GET /v1/kyc/review-dump ─────────────────────────────────────────────────

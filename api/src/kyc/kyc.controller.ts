@@ -16,6 +16,7 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import {
+  BulkVerifyQueryDto,
   ConsentKycDto,
   CreateKycDto,
   FirstApproveKycDto,
@@ -90,6 +91,29 @@ export class KycController {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: 'attachment; filename="kyc-review-dump.xlsx"',
     });
+  }
+
+  /**
+   * POST /v1/kyc/bulk-verify?apply=true|false
+   *
+   * Lane A bulk upload: parse a filled KYC review-dump xlsx and either preview
+   * (apply=false, default) or commit (apply=true) field-level verification for
+   * all PENDING_GIFSY submissions in this tenant.
+   *
+   * Gifsy-admin only.  File rides as multipart field `file`.
+   * apply=false → dry-run, 0 DB writes, returns { updates, errors, summary }.
+   * apply=true  → per-submission $transaction commit, returns { committed, results, errors, summary }.
+   */
+  @Post('bulk-verify')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('kyc:gifsy_approve')
+  @UseInterceptors(FileInterceptor('file'))
+  bulkVerify(
+    @CurrentUser() user: JwtPayload,
+    @UploadedFile() file: Express.Multer.File,
+    @Query() query: BulkVerifyQueryDto,
+  ) {
+    return this.kyc.bulkVerify(user, file, query.apply === 'true');
   }
 
   @Get(':id')

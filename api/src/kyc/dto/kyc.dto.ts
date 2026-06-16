@@ -244,6 +244,13 @@ export class NotInterestedKycDto {
   outletId!: string;
 }
 
+// POST /v1/kyc/bulk-verify — ?apply=true|false (default false = dry-run)
+export class BulkVerifyQueryDto {
+  @IsOptional()
+  @IsString()
+  apply?: string; // string, not boolean — HTTP query params are always strings
+}
+
 // GET /v1/kyc — list query
 export class ListKycQueryDto {
   @IsOptional()
