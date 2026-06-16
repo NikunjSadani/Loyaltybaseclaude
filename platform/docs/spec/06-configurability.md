@@ -8,6 +8,36 @@ Every knob that varies by tenant. **Current home** legend: `CODE` = `CLIENT_REGI
 > tenant or changing a flag is a **code change + redeploy**, not an admin action. Target: a DB-
 > backed `Client` config managed by Gifsy/Client Admin. (Ties to Gaps #2, #18.)
 
+## 0 · Multi-tenancy & customization model (locked with owner, 2026-06-16)
+How the platform stays one codebase across many FMCG clients with per-client customization. Built into the
+**dedicated backend** (`../plans/BACKEND-SPLIT-PLAN.md`).
+
+1. **Multi-tenancy = config + data, NEVER code branches.** Every row carries `clientId`; behavior varies by
+   **reading per-tenant config** (the knobs in §A–H below — `Client`/`ClientConfig`/`ProgramSetting`), not by
+   `if (clientId === …)`. **A `clientId` literal in backend logic is a design failure.**
+2. **Tenant isolation = one backend-enforced point.** The backend adds a **tenant-scoping guard/interceptor**
+   (single chokepoint), replacing per-query `where:{clientId}` discipline; Postgres RLS is a later hardening
+   (Gap #23). This is a concrete win the split unlocks.
+3. **Customization spectrum — climb only as far as a real requirement forces:**
+   - **(a) Config** (default) — a tenant differs by flags/lists/values. Covers branding, module toggles, hierarchy
+     labels, programs, KYC fields, value mechanics. **No code.**
+   - **(b) Extension seam** — a tenant needs genuinely *different logic* in one domain → add a **strategy interface
+     in that one module** (NestJS DI binds a per-tenant implementation). **Deferred (YAGNI):** we do **not** build a
+     customization framework now; we add a seam **when a paying client requires it.** The only up-front cost is
+     **clean, well-bounded modules**, which is free.
+   - **(c) Forking domain code per client — never.**
+4. **Effort, now vs later (why this shape is cheap):** the platform is **already multi-tenant** (clientId
+   everywhere + `Client` model + isolation), so it ports with the split at **~0 extra cost**. Onboarding the next
+   client — expected ~2 months after go-live, **same loyalty model** — is a **config + data-load exercise (days),
+   not engineering.** Real per-client logic divergence costs **days, scoped, when it arrives** (option b), vs
+   **weeks of speculative framework** if built now. So: spend ~0 now on customization machinery; defer it.
+5. **Multi-consumer auth (web + mobile + partner).** One versioned API (`/v1`); **Bearer-JWT in header** (not
+   cookies) works identically for web/mobile/PWA. Partner/third-party integrations get **scoped API keys /
+   OAuth client-credentials** (added when the first integration is real — option b, deferred).
+6. **No compute for the current client.** The backend **ingests/tracks** uploaded target/achievement/wallet
+   amounts; it does not compute incentives. A future client needing computation is an option-(b) seam, not core.
+   See `../plans/MODEL-ALIGNMENT.md`.
+
 ## A · Module toggles (`ClientConfig.features`)
 | Setting | Controls | Home | Target |
 |---|---|---|---|

@@ -1,8 +1,13 @@
 # Phase 2 — §05 API Surface
 
-All API routes (`src/app/api/`), grouped by bounded context. **Methods are verified** from the
-handler exports (~113 handlers). Roles are best-known from handler checks; "scoped" = results
-filtered by ownership/hierarchy. All routes are tenant-scoped via `clientId`.
+All API routes, grouped by bounded context. **Methods are verified** from the handler exports (~113 handlers).
+Roles are best-known from handler checks; "scoped" = results filtered by ownership/hierarchy. All routes are
+tenant-scoped via `clientId`.
+
+> **Phase S (`../plans/BACKEND-SPLIT-PLAN.md`):** these endpoints currently live in the Next.js `src/app/api/`;
+> Phase S re-homes them into the **NestJS backend** as versioned (`/v1`) controllers — the **surface (paths,
+> methods, contracts) stays the same**, only the host/framework changes. Auth/permission/tenant checks become
+> global guards.
 
 ## 1 · Identity & Auth
 

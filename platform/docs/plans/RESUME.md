@@ -5,22 +5,24 @@ Paste the block below to restart the orchestrator on point. The on-disk docs are
 ```
 You're the orchestrator for the Loyaltybase build (multi-tenant trade-loyalty platform,
 C:\Users\nikun\Loyaltybaseclaude\platform).
-⚠️⚠️ **NEXT (BEFORE P4) = WHOLE-SYSTEM TOPOLOGY RECONCILE + ARCHITECTURE DECISION — do this FIRST.** A late
-discovery (2026-06-16): the git ROOT has TWO services — `platform/` (Next.js, full-stack: 119 prisma-using API
-routes, owns its schema) + `api/` (NestJS, 74-model schema, **the platform never calls it**) — and `terraform/`
-provisions the platform as a **stateless frontend** + the api as the **DB owner** (the platform has NO prod
-`DATABASE_URL`). So the deployed infra contradicts the built code. **OWNER DIRECTION:** the frontend/api were
-split deliberately for **future mobile-app / PWA scalability** (consultant-advised); owner leans toward the
-**SEPARATED architecture** (dedicated API backend + thin frontend) as the target — Opus over-weighted "avoid
-rework" first and walked it back. **TASK 0 (gates everything, incl. whether P3+ is built full-stack or separated
-— don't build P3+ until settled, or it's built twice):** (1) a whole-repo topology reconcile — inventory git
-root (both apps, terraform, CI/CD, all DBs, Redis?, what's LIVE vs LEGACY, real prod data-flow); (2) **assess the
-`api/` service's actual maturity** (viable backend foundation vs abandoned scaffolding — decides the effort); (3)
-produce a concrete **separate-now migration plan + real effort estimate** (NOW ≈ ~119 routes/80 models migrate
-once; LATER ≈ ~2× as P3–P8 add surface; lib/ is portable; terraform ALREADY fits separation so no infra rework).
-Then owner decides with numbers. See Gap #30/#31 + `04-architecture.md`. **P4.0 de-scaffold is AFTER this.** Reload by reading:
-- docs/plans/MODEL-ALIGNMENT.md           (the platform's REAL model + the P4.0 de-scaffold scope — after Task 0)
-- docs/plans/00-MASTER-PLAN.md            (phases P0→P9; P2 = DONE; P4 section has the de-scaffold callout)
+⚠️⚠️ **NEXT = PHASE S — BACKEND SPLIT (API-first re-architecture). DO THIS NOW; it gates P3+.** DECIDED by owner
+2026-06-16 (Gap #31, after Task 0 recon + an independent-agent confirm): split the full-stack Next.js code into a
+**dedicated NestJS backend API** (single source of truth — owns DB + ALL business logic) + a **thin Next.js web
+frontend**, so future mobile/PWA/partner consumers reuse one backend. **Why:** `terraform/` was always built for a
+split (stateless FE + `gifsy-api` DB owner; the FE has NO prod `DATABASE_URL` → the full-stack code can't run in
+prod); we realign the CODE to the infra **now** while greenfield/P2 = cheapest (later = re-home twice).
+**FOUNDATION = the platform's real-model `lib/`+schema** (framework-agnostic: only 3/63 lib files touch `next/*`),
+**NOT the NestJS `api/`** — `api/` is real code but a 100% **World-A** (wrong) model (Sku/SkusModule, partner-class,
+tiers, scheme-compute; `programName`=0); it is **DELETED**, mined only for structural patterns (guards/DI/cron).
+**Absorbs P4.0:** the World-A de-scaffold (tiers/partner-class/compute/SKU) happens in step S2 so the backend is
+born clean. **Owner constraints:** no speed-vs-quality tradeoff (full split); NestJS confirmed; multi-tenancy =
+config/data not code-branches (no `if clientId===`); DEFER per-client customization machinery (YAGNI — clean module
+boundaries only); current client = parameter-upload, **no compute engine**. **The full plan = read
+`docs/plans/BACKEND-SPLIT-PLAN.md` (steps S0–S8, each gated; human gates at S0/S2-migration/S8-delete-api).** Reload:
+- docs/plans/BACKEND-SPLIT-PLAN.md        ⭐ **the Phase S plan — START HERE** (target arch, principles, reused-vs-reworked, S0–S8)
+- docs/spec/04-architecture.md            (TARGET architecture §1/§2/§6/§8 — API-first, decided)
+- docs/plans/MODEL-ALIGNMENT.md           (REAL model + the World-A de-scaffold list executed in S2)
+- docs/plans/00-MASTER-PLAN.md            (phases; P2 DONE; **Phase S** inserted before P3; P4 = program targeting on the clean backend)
 - docs/plans/08-agent-execution-guide.md  (role, loop, review gate, context bundles)
 - docs/plans/01-how-we-test.md            (test conventions; deterministic; two styles)
 - docs/plans/GIT-WORKFLOW.md              (branches/deploy — WORK ON develop, main=releases)
@@ -60,10 +62,9 @@ check port 5433, restart per DEV-DB.md). .env DATABASE_URL → 127.0.0.1:5433/gi
 SELECT 1 before migrating. NEVER point dev at prod (gifsy-db). This dev DB has NO prisma migration history
 — use db push / surgical `migrate diff` → apply SQL in a txn guarded by current_database='gifsy_dev';
 NEVER `prisma migrate dev` (it would RESET it). Backfill scripts reuse the lib/prisma singleton.
-⚠️ **SCHEMA SOURCE OF TRUTH = `platform/prisma/schema.prisma`** (80 models; used by local dev via
-`prisma.config.ts`, the platform Dockerfile, CI, + `gifsy_dev`). The repo ALSO has a separate NestJS `api/`
-service with its OWN `api/prisma/schema.prisma` (74 models) — do NOT edit/generate the platform from api's
-schema (Gap #30; CI bug fixed 2026-06-16). The P4.0 drop-migration edits the PLATFORM schema.
+⚠️ **SCHEMA SOURCE OF TRUTH = `platform/prisma/schema.prisma`** (80 models) **until Phase S — then it MOVES to
+the backend** as the single canonical schema (S2 takes the platform schema, de-scaffolds World-A, and the backend
+owns it; `api/prisma/schema.prisma` is DELETED with `api/`). During S2 update DEV-DB.md to the new location.
 
 STATE: **P0 + P1 + P2 COMPLETE** (as of 2026-06-16), all built→gated→independently-audited and **pushed to
 origin/develop** (run `git log --oneline origin/develop -5` for the latest). Gate is DIFFERENTIAL ("no NEW reds
@@ -82,7 +83,9 @@ FLAG-GATED OFF (env RBAC_ENFORCEMENT + per-tenant features.rbacEnforcement). Rev
 DEFERRED / OPEN (none block P4):
 - RBAC enforcement is OFF and safe to enable later via RBAC-ENABLEMENT.md (mappings already finalized).
 - Phone-change→logout hooks: wire into the sales/outlet bulk-uploads (built in P2, hook NOT yet added) + P3 re-KYC (revoke mechanism is ready).
-- **CI prisma-schema discrepancy — ✅ FIXED (2026-06-16).** `ci.yml` was generating the platform's Prisma client from `../api/prisma/schema.prisma` (a SEPARATE, staler api-service schema missing the `Client` model, the Credits module, and the P2 columns) → platform `tsc` failed in CI. The platform's REAL source of truth is **`platform/prisma/schema.prisma`** (used by local dev via `prisma.config.ts` AND by `platform/Dockerfile`). Fixed ci.yml to `npx prisma generate` (own schema); deploy.yml + deploy-staging.yml were already conditional-correct (stale comments fixed). Audited: regenerate→tsc 0; dev DB = no-diff. The NestJS `api/` is a separate deployed service with its own schema — left as-is. **Open for P9:** confirm whether `api` + `platform` share a PROD DB (`gifsy-db`); if they do, the two diverged schemas (80 vs 74 models) need a migration-ownership decision (who owns which tables). Dev is clean: `gifsy_dev` is the platform's DB, built from the platform schema.
+- **Two-schema / shared-prod-DB question (Gaps #30/#31) — ✅ RESOLVED BY PHASE S.** `api/` is deleted; the backend
+  owns one canonical schema (built from the platform's). No migration-ownership conflict remains; greenfield = no prod
+  data to reconcile. (Historical: a 2026-06-16 CI bug that generated the platform client from api's schema was fixed.)
 - Small follow-ups: OTP validity window (6h→10min), send-otp orphaned-rows on failure, isolation-audit
   AST hardening, force-logout-all audit-durability ordering, vitest.integration server-only alias,
   requirePermission per-tenant-config caching, RBAC per-tenant override storage/UI.
@@ -142,9 +145,9 @@ KYC's `partnerClass` holds outlet-type values) → low-risk to retire. **Point-t
 never applied). **`lib/incentive.ts` + `api/schemes/calculate` compute = contradicts the model**, retire.
 Consequences: **2.6 Catalog REVERTED** (`git revert 798aafe`, YAGNI; recoverable). **Tiers + partner-class +
 World-A-compute are ENTANGLED → one coherent "loyalty-engine de-scaffold" (with a human-gated drop migration),
-NOT piecemeal** — recommended before P4 (or P4.0). **Program-based scheme targeting is net-new P4 work** (a
-program selector + a matcher vs `Outlet.programName/Category`), not a rename. 2.2 + 2.5 are CLEAN (no legacy deps;
-2.5 already uses program) — safe to finish anytime.
+NOT piecemeal** — **executed in Phase S step S2** (the backend is built clean; "P4.0" = S2). **Program-based scheme
+targeting is net-new P4 work** (a program selector + a matcher vs `Outlet.programName/Category`), built in the
+backend after Phase S. 2.2 + 2.5 are CLEAN (no legacy deps; 2.5 already uses program).
 
 **✅ P2 FUNCTIONALLY COMPLETE:** 2.0, 2.1, 2.2, 2.4, 2.5 + RF1–RF7 done & gated. 2.2/2.5 verify+harden fixed 4
 more tenant-isolation defects (bulk-edit cross-tenant XSR reassign; deactivate/reactivate/bulk-delete used the
@@ -153,9 +156,9 @@ folded into the P4.0 de-scaffold** (above). Adjacent P3 note: outlet list GET ha
 (KYC filter cosmetic until a real KYC-status join). Deferred: replace mock `sales-role.ts`/`partner-session.ts`
 with DB; per-field re-KYC consumption (P3).
 
-**NEXT = either (a) P4.0 loyalty-engine de-scaffold** (tiers + partner-class→program + retire `lib/incentive.ts`
-compute; one human-gated drop migration; then build program-based scheme targeting) **or (b) P3 (Onboarding &
-KYC)** — note P3's 3.0 Reconcile must build against the revamped KYC-approval UX + the program model. Owner picks.
+**NEXT = PHASE S (backend split) — see the top of this brief + `BACKEND-SPLIT-PLAN.md`.** It gates P3+ and absorbs
+the P4.0 World-A de-scaffold (in S2). Do NOT start P3/P4 feature work until Phase S lands. After S: P3 (KYC, built
+in the backend; 3.0 Reconcile against the revamped KYC-approval UX + program model), then P4 (program-based targeting).
 
 Local: dev-DB Auth Proxy on 127.0.0.1:5433 (drops intermittently — restart per DEV-DB.md); `.env.development.local`
 DEMO_MODE=true; preview on :3000 (restart to pick up schema/client changes). Confirm dev DB reachable + on `develop`.

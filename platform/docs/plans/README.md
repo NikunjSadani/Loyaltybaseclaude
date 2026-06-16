@@ -3,8 +3,11 @@
 This folder turns the [spec](../spec/README.md) into an **executable, sequenced plan of
 bite-sized tasks** for an engineer **new to this codebase and domain**.
 
+**⭐ CURRENT PRIORITY: [`BACKEND-SPLIT-PLAN.md`](BACKEND-SPLIT-PLAN.md)** — Phase S, the API-first re-architecture
+(dedicated NestJS backend + thin frontend), decided 2026-06-16 and **gating P3+**. Do this before any new feature phase.
+
 **▶ Start here: [`00-MASTER-PLAN.md`](00-MASTER-PLAN.md)** — the phased plan for the **entire
-platform** (all 17 bounded contexts + workflows, 9 phases, gaps absorbed). Everything else supports it:
+platform** (all 17 bounded contexts + workflows, 9 phases + Phase S, gaps absorbed). Everything else supports it:
 - [`00-onboarding.md`](00-onboarding.md) + [`01-how-we-test.md`](01-how-we-test.md) — **required reading**.
 - The **Milestone/Epic files** below — *deep, code-level* task breakdowns for the gap-remediation
   slice (the worked-example depth); the master plan's phases point to them.

@@ -36,6 +36,7 @@ commits · conventional-commit messages · **every DB query scoped by `clientId`
 | **P0** | Foundations & shared infra | cross-cutting | #1, #21 | 1–2 wk |
 | **P1** | Identity, tenancy & access | Identity & Access · Tenancy/Config | #2, #3, #20, #22, #23 | 4–6 wk |
 | **P2** | Organization & master data | Sales Org · Partners/Outlets · Catalog | #4, #11 | 3–5 wk |
+| **S** | **Backend split — API-first re-architecture** (NestJS backend from platform `lib/`+schema; thin FE; delete `api/`; absorbs P4.0 World-A de-scaffold) — **gates P3+** | cross-cutting | #30, #31, #10, #29 | ~1–2 wk |
 | **P3** | Onboarding & KYC | KYC & Enrollment | #9, #12, #13, #14, #15 | 3–5 wk |
 | **P4** | Programs, targets & enrollment | Schemes/Activations · Targets | #6, #10 | 4–6 wk |
 | **P5** | Wallet, points & rewards | Wallet & Points · Rewards | #28 | 3–4 wk |
@@ -58,7 +59,8 @@ gantt
     P1 Identity & Tenancy      :p1, after p0, 35d
     section Core domain
     P2 Org & Master Data       :p2, after p1, 25d
-    P3 Onboarding & KYC        :p3, after p2, 25d
+    S  Backend split (now)     :crit, ps, after p2, 10d
+    P3 Onboarding & KYC        :p3, after ps, 25d
     P4 Programs & Targets      :p4, after p3, 30d
     section Value & finance
     P5 Wallet & Rewards        :p5, after p4, 20d
@@ -162,16 +164,13 @@ tenant config served from DB. **Depends on:** P0.
 > note (P3): outlet list GET hardcodes `kycStatus:'NOT_STARTED'` — the UI's KYC filter/stats are cosmetic until a
 > real KYC-status join (P3).
 > **✅ P2 FUNCTIONALLY COMPLETE: 2.0, 2.1, 2.2, 2.4, 2.5 + RF1–RF7 all done.** 2.6 catalog dropped (above).
-> **2.3 (tiers) folded into the loyalty-engine de-scaffold → P4.0** (see `docs/plans/MODEL-ALIGNMENT.md`): tiers +
-> partner-class→program + retiring `lib/incentive.ts` compute are ONE deliberate effort, deferred to P4.0 (with a
-> human-gated drop migration), NOT piecemeal.
-> **⚠️⚠️ NEXT = TASK 0 (BEFORE P3/P4): WHOLE-SYSTEM TOPOLOGY RECONCILE + ARCHITECTURE DECISION (Gap #31).** Late
-> discovery: the repo has TWO services (`platform/` full-stack Next.js + `api/` NestJS), `terraform/` deploys the
-> platform as a **stateless frontend** (no prod DB) with `api` as DB owner — contradicting the built code. Owner
-> split FE/api deliberately for **mobile/PWA scalability** + leans **separated**. Task 0: whole-repo topology
-> reconcile → assess `api/` maturity → **separate-now migration plan + effort estimate** (NOW ≈ migrate ~119
-> routes once; LATER ≈ ~2×; terraform already fits separation). **Do NOT build P3+/P4 until decided** (else built
-> twice). See Gap #30/#31 + `04-architecture.md` §8. P4.0 de-scaffold + P3 come AFTER this.
+> **2.3 (tiers) folded into the loyalty-engine de-scaffold** (tiers + partner-class→program + retiring
+> `lib/incentive.ts` compute = ONE deliberate effort; see `docs/plans/MODEL-ALIGNMENT.md`).
+> **⚠️⚠️ NEXT = PHASE S (BACKEND SPLIT) — DECIDED 2026-06-16 (Gap #31), gates P3+.** Task 0's topology reconcile +
+> independent-agent confirm settled it: split into a **dedicated NestJS backend** (from the platform's real-model
+> `lib/`+schema) + **thin frontend**; **delete the World-A `api/`**. The de-scaffold (formerly "P4.0") is **absorbed
+> into Phase S step S2** so the backend is born clean. Full plan: [`BACKEND-SPLIT-PLAN.md`](BACKEND-SPLIT-PLAN.md);
+> arch: `../spec/04-architecture.md`. **Do NOT build P3+/P4 until Phase S lands.**
 
 > **P2 status (live).** **2.0 Reconcile ✅** — full audit in [`reconcile/P2-org-master-data.md`](reconcile/P2-org-master-data.md)
 > (Opus independently re-verified every load-bearing claim by direct file read). Headlines: much is
@@ -225,8 +224,37 @@ tenant config served from DB. **Depends on:** P0.
 > are seeded + enabled for the demo tenant, every outlet row errors "Unknown outlet type." **NEXT:** seed demo
 > OutletTypes so the pipeline runs end-to-end in the local preview, then 2.6 catalog (Category CRUD + admin UI).
 
+## S · Backend split — API-first re-architecture  (~1–2 wk) — **DO NOW, gates P3+**
+**Objective:** split the full-stack Next.js code into a **dedicated NestJS backend API** (single source of truth:
+owns DB + all logic) + a **thin Next.js web frontend**, so future mobile/PWA/partner consumers reuse one backend.
+**Full plan, principles, reused-vs-reworked, and gated steps S0–S8: [`BACKEND-SPLIT-PLAN.md`](BACKEND-SPLIT-PLAN.md).**
+
+> **Why now:** the infra (`terraform/`) was always built for a split (stateless FE + `gifsy-api` DB owner); the
+> code drifted to full-stack. Owner decision (2026-06-16, Gap #31): realign the **code** to the infra **now** —
+> greenfield, no prod data, only at P2 = cheapest. Building P3+ full-stack first = re-home twice.
+> **Foundation = the platform's real-model `lib/`+schema** (framework-agnostic), **not** the NestJS `api/` (real
+> code but 100% the wrong World-A model) → `api/` is **deleted**, mined only for structural patterns.
+> **Absorbs P4.0:** the World-A loyalty-engine de-scaffold (tiers/partner-class/compute/SKU, gaps #10/#29) happens
+> in **S2** — we build the backend clean rather than de-scaffolding the platform then porting.
+
+| Task | What | Gate |
+|---|---|---|
+| S0 | Safety checks (greenfield ✅, no `api/` consumer ✅, prod-DB ownership) | **human gate** |
+| S1 | NestJS backend scaffold (borrow `api/` guard/DI/cron patterns) | health route |
+| S2 | Canonical schema + **World-A de-scaffold** (folds in P4.0) | **human-gated migration** (dev only) |
+| S3 | Port `lib/` domain logic → backend services (rewrite 3 `next/*` helpers) | unit |
+| S4 | Re-home 119 route handlers → controllers (`/v1`), parallel by domain | wiring + differential |
+| S5 | Global guards: auth/session, permission, **tenant-scoping**, throttle, audit, cron | unit + smoke |
+| S6 | Thin the frontend → call backend over HTTP (CORS, cross-origin auth) | e2e smoke |
+| S7 | Infra/CI: backend gets DB/secrets; FE stateless; drop `api/` build | deploy run |
+| S8 | Cutover smokes; **delete `api/`**; close #30/#31 | **human gate** |
+
+**Exit:** web → backend → DB works end-to-end; one canonical schema; `api/` deleted; frontend carries no business
+logic. **Depends on:** P2. **Blocks:** P3+ (all later phases build in the backend).
+
 ## P3 · Onboarding & KYC  (3–5 wk)
 **Objective:** the full enroll→KYC→approve→credential journey (spec §02 WF1) works end-to-end.
+*(Built in the backend per Phase S; the web KYC pages stay thin.)*
 
 > ⚠️ **User UX revamp incoming — the Gifsy KYC-approval page is being redesigned by the user.** Task 3.0
 > Reconcile must build against the **revamped** approval UX (whatever is in the code when P3 starts), not
@@ -243,22 +271,19 @@ tenant config served from DB. **Depends on:** P0.
 | 3.6 | **Re-KYC trigger** (#13) + SLA metrics | `api/kyc/sla-metrics` | unit |
 
 **Exit:** an ISR can enroll an outlet, it routes up the real tree, Gifsy approves, credentials +
-wallet are created. **Depends on:** P2.
+wallet are created. **Depends on:** P2 + **Phase S** (built in the backend).
 
 ## P4 · Programs, targets & enrollment  (4–6 wk)
 **Objective:** activations/schemes and targets are configurable and outlets can enroll (spec §02 WF5).
 
-> ⚠️ **START HERE — P4.0 = the loyalty-engine DE-SCAFFOLD (read [`MODEL-ALIGNMENT.md`](MODEL-ALIGNMENT.md) FIRST).**
-> The model-alignment pass (2026-06-16) found the inherited code is **3 disconnected layers** and contradicts the
-> owner-confirmed real model: **sales/achievement = TARGET-PARAMETER upload (platform does NOT compute points)**;
-> **segmentation = PROGRAM (`Outlet.programName/programCategory`, per-outlet at upload) — REPLACES partner class**;
-> **no point-tiers, no SKU**. Before building P4 features, do the de-scaffold as ONE coherent effort (with ONE
-> human-gated drop migration — show SQL first): **drop** `TierConfig`/`PartnerTierHistory`/`currentTierConfigId`/
-> `SchemeEligibility.tierConfigId`; **retire** partner class (`PartnerClassConfig`, `enum PartnerClassCode`/
-> `ChannelPartnerClass`, `ChannelPartner.partnerClassId`, `eligibleClasses[]`/`targetClasses[]` on reward/visibility/
-> leaderboard/banner — all stored-only, decorative); **retire the compute engine** (`lib/incentive.ts`,
-> `api/schemes/calculate`, `Scheme.pointsPerRupee/fixedPoints`). All low-risk (mostly unwired). MODEL-ALIGNMENT.md
-> has the exact per-file removal list + severities.
+> ⚠️ **The P4.0 loyalty-engine DE-SCAFFOLD is now ABSORBED INTO PHASE S (step S2)** — read
+> [`MODEL-ALIGNMENT.md`](MODEL-ALIGNMENT.md) + [`BACKEND-SPLIT-PLAN.md`](BACKEND-SPLIT-PLAN.md). The backend is
+> **built clean on the real model** (no World-A carried in), so by the time P4 starts the de-scaffold is done:
+> **sales/achievement = TARGET-PARAMETER upload (no compute)**; **segmentation = PROGRAM
+> (`Outlet.programName/programCategory`) — REPLACES partner class**; **no point-tiers, no SKU**. The exact
+> removal list (TierConfig/PartnerClassConfig/`lib/incentive.ts`/scheme-compute/`eligibleClasses[]` …) lives in
+> MODEL-ALIGNMENT.md and is executed in S2's human-gated migration. **P4 itself = build program-based scheme
+> targeting** (net-new: program selector + matcher vs `Outlet.programName/Category`) on the clean backend.
 
 | Task | What | Key files / area | Test |
 |---|---|---|---|
@@ -358,7 +383,7 @@ deploy-validated; the launch parts (9.7–9.9) gate the first real tenant.
 
 | Task | What | Key area | Gate |
 |---|---|---|---|
-| 9.0 | Reconcile EXISTING infra (`.github/workflows/*`, `terraform/*`, `Dockerfile`, Cloud SQL, Secret Manager) vs target; list real gaps. **Note (Gap #30):** repo deploys TWO services — `platform/` (Next.js) + `api/` (NestJS), each with its OWN prisma schema (80 vs 74 models). CI/deploy now generate each from its own schema (fixed 2026-06-16). **Resolve here: do `platform`+`api` share the PROD DB (`gifsy-db`)?** If yes → migration/table-ownership decision between the two schemas. | `terraform/`, `.github/`, `*/prisma/schema.prisma` | — |
+| 9.0 | Reconcile EXISTING infra (`.github/workflows/*`, `terraform/*`, `Dockerfile`, Cloud SQL, Secret Manager) vs target; list real gaps. **Note:** after **Phase S**, deploy is **backend (`gifsy-api`, owns DB) + thin frontend (`gifsy-frontend`, stateless)** — one canonical schema, `api/` deleted (Gaps #30/#31 resolved). Most infra wiring moves into Phase S (S7); 9.x verifies/finishes it. | `terraform/`, `.github/`, backend `prisma/schema.prisma` | — |
 | 9.1 | **Fix the CI gate** (`ci.yml` EXISTS): its `npm test` all-pass requirement is incompatible with the red-by-design TDD baseline → switch CI to the **differential gate** (no NEW reds vs `baseline-red-snapshot.txt`) or quarantine the baseline reds, so CI can be green and deploys can proceed | `.github/workflows/ci.yml` | CI green-able |
 | 9.2 | **Environments** (`deploy-staging.yml` + terraform EXIST): verify staging is stood up & mirrors prod; confirm dev→staging→prod promotion | `terraform/`, Cloud Run | deploys |
 | 9.3 | **CD** (`deploy.yml`/`deploy-staging.yml` EXIST): verify the `main`→prod (approval-gated) + `develop`→staging flows end-to-end; **add the DB-migration step** (none in the pipeline today — see 9.5) | `.github/workflows/*` | deploy run |

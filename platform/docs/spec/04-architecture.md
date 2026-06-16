@@ -2,47 +2,57 @@
 
 ## 1 · System context (C4 L1)
 
+> **TARGET architecture (owner-decided 2026-06-16): API-first.** A dedicated **NestJS backend API** is the single
+> source of truth (owns the DB + all business logic); the **Next.js web app is a thin client**, and future
+> **mobile/PWA/partner** consumers are siblings calling the same API. The realignment from the current full-stack
+> code is **Phase S** — see `../plans/BACKEND-SPLIT-PLAN.md` (why = Gap #31). Diagram shows the target.
+
 ```mermaid
 flowchart TB
-    subgraph Actors
-      P[Partner app]
-      S[Sales app]
-      A[Client Admin]
-      G[Gifsy Ops]
+    subgraph Consumers
+      W["Web Portal<br/>(Next.js PWA — thin: UI only)"]
+      M["Mobile App<br/>(future)"]
+      I["Partner integrations<br/>(future)"]
     end
-    PX["Edge proxy / ingress<br/>(JWT verify + x-tenant-slug + x-user-* injection)<br/>⚠ NOT in this repo"]
-    APP["Loyaltybase — Next.js 15 App Router<br/>(UI + API routes) on Cloud Run"]
-    DB[("Postgres<br/>Cloud SQL")]
+    CF["Cloudflare worker (gifsy-proxy)<br/>subdomain → origin, x-forwarded-host (tenant)"]
+    API["Backend API<br/>NestJS on Cloud Run — owns ALL logic + data"]
+    DB[("Postgres<br/>Cloud SQL — one canonical schema")]
     GCS[("GCS bucket<br/>docs / images")]
     MSG[MSG91<br/>SMS · WhatsApp · OTP]
     SM[GCP Secret Manager]
 
-    P & S & A & G --> PX --> APP
-    APP --> DB
-    APP --> GCS
-    APP --> MSG
-    APP -. secrets .-> SM
+    W & M & I --> CF --> API
+    API --> DB
+    API --> GCS
+    API --> MSG
+    API -. secrets .-> SM
 ```
 
 ## 2 · Building blocks (C4 L2)
 
-> **⚠️ Two deployed services in this repo (2026-06-16).** The git root holds **two** apps, both deployed to
-> Cloud Run by `deploy.yml`: **`platform/`** (Next.js — *this spec covers it*, the app we build on) and
-> **`api/`** (a separate NestJS service). **Each has its OWN Prisma schema.** `platform/prisma/schema.prisma`
-> (80 models) is the **source of truth for the platform** — used by local dev (`prisma.config.ts`), the
-> platform Dockerfile, CI, and the dev DB (`gifsy_dev`). `api/prisma/schema.prisma` (74 models) is the api
-> service's own, separate schema (missing the platform's `Client` model + Credits module — they're not the
-> same schema). Don't cross-wire them. (A stale "platform has no prisma/schema.prisma" note in the CI/deploy
-> workflows was fixed in the 2026-06-16 CI-schema reconcile; see §6 + Gap #30.)
+> **In transition (Phase S, `../plans/BACKEND-SPLIT-PLAN.md`).** The current code is a full-stack Next.js app
+> (`platform/`, 119 Prisma routes) plus a separate, **superseded** NestJS `api/` (a frozen, World-A-model
+> service the platform never calls — being **deleted**, mined only for structural patterns). The target below is
+> what Phase S builds.
 
-- **Next.js 16 App Router** — co-located UI (`src/app/<portal>/…`) and API (`src/app/api/…`).
-  Four portal route-groups: `gifsy/`, `admin/`, `sales/`, `partner/`.
-- **`lib/`** — domain logic, mostly **pure + testable** (e.g. `kyc-approval`, `*-upload`,
-  `credits-payouts-*`), separated from side-effectful callers (Prisma, GCS, MSG91).
-- **Prisma** → Cloud SQL Postgres. **GCS** (`lib/s3.ts`, ADC service account) for documents/
-  images + signed URLs. **MSG91** (`lib/msg91.ts`) for messaging/OTP.
+**Target building blocks:**
+- **Backend API (NestJS)** — the single source of truth: controllers (versioned `/v1`) over the ported domain
+  services. Cross-cutting via global guards/interceptors: JWT+session auth, permission guard, **tenant-scoping
+  guard** (one isolation enforcement point), throttling, audit, cron jobs. Owns Prisma → Postgres.
+- **Domain logic (`lib/`)** — the platform's framework-agnostic logic (`kyc-approval`, `*-upload`,
+  `credits-payouts-*`, RBAC `can`, sessions, hierarchy/outlet persistence) **moves into the backend** as services
+  (only 3 `next/*`-coupled helpers are rewritten). This is the real-model foundation; the old `api/`'s domain is **not** reused.
+- **Web frontend (Next.js)** — thin: UI + input + API calls + display only. **No business logic** (it may mirror
+  validation for UX; the backend is authority). Portals: `gifsy/`, `admin/`, `sales/`, `partner/`.
+- **Prisma** → Cloud SQL Postgres (one canonical schema, World-A de-scaffolded). **GCS** (`lib/s3.ts`, ADC) for
+  docs/images + signed URLs. **MSG91** (`lib/msg91.ts`) for messaging/OTP. **Cloudflare worker** = edge proxy
+  (subdomain→origin, `x-forwarded-host` carries tenant).
 
 ## 3 · Multi-tenancy & request lifecycle
+
+> **The multi-tenant & per-client customization *model* (config-not-code-branches, customization spectrum,
+> isolation enforcement, multi-consumer auth, now-vs-later effort) is owned by `06-configurability.md` §0.** This
+> section covers the request mechanics.
 
 - Subdomain `<slug>.gifsy.in` → edge proxy sets **`x-tenant-slug`** → used at login time to
   bind the tenant to the session (see §4). For pre-auth paths (`send-otp`, `verify-otp`)
@@ -90,16 +100,14 @@ flowchart TB
 
 ## 6 · Deployment
 
-- **Docker → Cloud Run** for **both** services (`platform` + `api`); **Cloud SQL** Postgres; **GCS** bucket;
-  **Secret Manager** (`JWT_SECRET`, MSG91 keys — never hardcoded; SA key files gitignored); `terraform/iam.tf`.
-- **Prisma client generation** (CI `ci.yml`, deploy `deploy.yml`/`deploy-staging.yml`, and `platform/Dockerfile`)
-  generates each app's client from **its own `prisma/schema.prisma`** (`npx prisma generate` per app dir).
-  ⚠️ Earlier the platform-test step hardcoded `--schema=../api/prisma/schema.prisma` (generated the platform
-  client from api's stale schema → platform `tsc` failed in CI; latent since P1). **Fixed 2026-06-16.**
-- **Open (P9):** confirm whether `platform` + `api` share one **prod** DB (`gifsy-db`). If they do, the two
-  diverged schemas (80 vs 74 models) need a migration-ownership decision. Dev is clean (`gifsy_dev` = platform's
-  own DB, built from the platform schema). See Gap #30.
-- `DEMO_MODE=true` short-circuits external deps (DB/MSG91/approvals) for end-to-end demo.
+- **Target (Phase S):** **Docker → Cloud Run** for **two** services — the **backend API** (`gifsy-api`; owns the
+  DB, gets `DATABASE_URL`/Redis/Cloud SQL/secrets) + the **thin web frontend** (`gifsy-frontend`; stateless,
+  `JWT_SECRET` only). This is exactly what `terraform/` already provisions — the split makes the **code** match it.
+  **Cloud SQL** Postgres (one canonical schema); **GCS**; **Secret Manager** (`JWT_SECRET`, MSG91 keys — never
+  hardcoded; SA key files gitignored); `terraform/iam.tf`. **Cloudflare worker** routes subdomains to origins.
+- **Schema ownership:** the **backend** owns the single canonical Prisma schema. The current split-brain (two
+  schemas, `platform` 80 vs `api` 74) is **resolved by Phase S** — `api/` is deleted; one schema remains (Gap #30).
+- `DEMO_MODE=true` short-circuits external deps (DB/MSG91/approvals) for end-to-end demo — **never in prod**.
 
 ## 7 · Cross-cutting concerns
 
@@ -111,13 +119,11 @@ flowchart TB
 
 ## 8 · Architecture risks / gaps
 
-- **→ Gap #31 — ⚠️ FOUNDATIONAL, UNRESOLVED (surfaced 2026-06-16):** the code is built **full-stack** (the Next.js
-  `platform/` owns the DB via 119 prisma routes; never calls the api) but `terraform/` deploys it as a **stateless
-  frontend** with the NestJS `api/` as the DB owner (platform has NO prod `DATABASE_URL`). The FE/api split was
-  **deliberate — for future mobile-app / PWA scalability** (owner's consultant); owner leans toward the **separated**
-  architecture as the target. **DECISION + migration-effort estimate = TASK 0 before P4** (assess `api/` maturity
-  first; separating NOW ≈ ½ the cost of LATER since P3–P8 would otherwise be built full-stack then migrated). Until
-  decided, do NOT build P3+ (risk of building it twice). The `api` is currently uncalled by the platform.
+- **→ Gap #31 — ✅ DECIDED (2026-06-16), resolving via Phase S:** the code was built **full-stack** while
+  `terraform/` deploys a **stateless frontend + NestJS `api/` as DB owner** (platform had NO prod `DATABASE_URL` →
+  couldn't run in prod). **Owner decision:** adopt the **dedicated-backend (API-first)** architecture — build the
+  backend from the **platform's real-model `lib/`+schema** (not the World-A `api/`, which is deleted), frontend goes
+  thin. Done **now** (greenfield, P2 = cheapest). Gates P3+. Full plan: `../plans/BACKEND-SPLIT-PLAN.md`.
 
 - **→ Gap #20 — ✅ RESOLVED (P1 S3–S4b):** `clientId`+`sid` are now in the JWT, bound to a
   server-side `UserSession`. `getAuthUser` validates the session and enforces

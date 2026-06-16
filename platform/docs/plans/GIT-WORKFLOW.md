@@ -10,6 +10,10 @@
 
 Feature branches off `develop` are optional; for a solo build, committing straight to `develop` is fine.
 
+> **Post-Phase S** (`BACKEND-SPLIT-PLAN.md`): the deploy targets stay `gifsy-api` + `gifsy-frontend`, but
+> `gifsy-api` becomes the **new NestJS backend** (built from the platform's logic) and the old `api/` is deleted;
+> the CI build/test matrix updates from `[api, platform]` to `[backend, frontend]` in step S7.
+
 ## Day-to-day flow
 1. Work + commit on **`develop`** (executors/auditors/gate as usual). Push `develop`.
 2. CI (`ci.yml`) runs `tsc` + tests; `deploy-staging.yml` deploys to **staging** when the test gate passes.

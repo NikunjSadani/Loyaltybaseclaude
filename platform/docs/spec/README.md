@@ -19,7 +19,7 @@ PRD (product track), DDD ubiquitous language + bounded contexts (domain), arc42 
 | 1 | Capability / Module Catalog (bounded contexts) | [01-capabilities.md](01-capabilities.md) | ✅ done (17 contexts, 4 deep-dives resolved) |
 | 1 | Core Workflows & State Machines | [02-workflows.md](02-workflows.md) | ✅ done (6 workflows + state machines) |
 | 2 | Domain & Data Model | [03-data-model.md](03-data-model.md) | ✅ drafted (ERDs + patterns) |
-| 2 | Architecture & Cross-cutting (arc42/C4) | [04-architecture.md](04-architecture.md) | ✅ drafted (C4 + arc42 sections) |
+| 2 | Architecture & Cross-cutting (arc42/C4) | [04-architecture.md](04-architecture.md) | ✅ **TARGET = API-first** (dedicated NestJS backend + thin FE, decided 2026-06-16 — Gap #31; realigned via Phase S, see `../plans/BACKEND-SPLIT-PLAN.md`) |
 | 2 | API Surface | [05-api-surface.md](05-api-surface.md) | ✅ done (~113 handlers, verified methods) |
 | 3 | Per-tenant Configurability Matrix | [06-configurability.md](06-configurability.md) | ✅ drafted (8 categories) |
 | 3 | Non-functional & Compliance | [07-nfr-compliance.md](07-nfr-compliance.md) | ✅ drafted |

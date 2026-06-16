@@ -54,10 +54,15 @@ reconcile decides).
 Optionally a real `Program`/`ProgramCategory` master (per-tenant) if validation should be DB-backed rather than
 Settings-JSON.
 
-## Recommendation / sequencing
-- **2.2 + 2.5 are clean** → safe to finish P2 anytime.
-- **The loyalty-engine de-scaffold (tiers + partner-class + World-A compute) is one deliberate effort**, not a
-  P2 tail task. It reshapes **P4 (schemes/targets → program-based, no compute)**, **P5 (wallet/points)**, and
-  **P6 (credits/incentive)**. Recommend doing it as a dedicated wave (with a human-gated drop migration) **before
-  P4**, OR as P4.0's first task. Do NOT rip it out piecemeal.
-- **Program targeting is net-new P4 work**, not a rename.
+## Sequencing — the de-scaffold is now part of PHASE S (the backend split)
+> **Alias note:** other docs call this the **"P4.0 de-scaffold."** Same scope — it is now **executed in Phase S
+> step S2** (the backend is built clean rather than de-scaffolded-then-ported). "P4.0" = Phase S / S2.
+**Owner decision 2026-06-16 (Gap #31): this de-scaffold is executed inside [`BACKEND-SPLIT-PLAN.md`](BACKEND-SPLIT-PLAN.md)
+step S2.** We are NOT de-scaffolding the platform then porting — instead we build the new NestJS backend **clean on
+the real model**: take the platform schema, **drop the World-A concepts below in one human-gated migration**, and
+the backend never carries them. So "drop `lib/incentive.ts` / `api/schemes/calculate`" = those simply are **not
+ported** into the backend; the schema drops happen in S2.
+- The removal list (tiers + partner-class + compute + SKU, exact per-file) above is the **S2 checklist**.
+- **Program-based scheme targeting is net-new P4 work** (program selector + matcher vs `Outlet.programName/Category`),
+  built **in the backend** after Phase S — not a rename.
+- This still reshapes P4 (schemes/targets → program-based, no compute), P5 (wallet/points), P6 (credits/incentive).

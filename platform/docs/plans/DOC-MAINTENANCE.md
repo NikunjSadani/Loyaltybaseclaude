@@ -8,6 +8,14 @@ gate**, not a memory exercise.
 > **A model-level, scope-level, or owner-decision change is NOT "done" until the doc sweep passes.**
 > Treat it with the same weight as `tsc`/tests. The machine check is `scripts/check-doc-consistency.mjs`
 > (also wired to a Stop hook). Run it; if it exits non-zero, the work isn't finished.
+>
+> **Two checks, not one — the machine check is necessary but NOT sufficient:**
+> 1. **Coverage audit (own it; don't make the owner catch misses):** before declaring docs done, enumerate
+>    *every* decision/fact from the discussion and grep-verify each is written in its source-of-truth doc. The
+>    consistency script only catches *retired-term drift* — it does NOT catch a decision that was simply never
+>    written down (e.g. the multi-tenancy model, the NestJS rationale — both initially missed in the 2026-06-16
+>    Phase-S pass and only caught on owner prompting). Run the enumerate-and-grep sweep yourself.
+> 2. **Consistency gate:** `check-doc-consistency.mjs` exits 0.
 
 ## Trigger events (when to sweep ALL docs, not just the one in your path)
 - The owner corrects/changes the **model** (e.g. "sales is parameter-based", "segmentation is program").
@@ -48,6 +56,9 @@ Update the owner doc; everyone else **references** it (don't restate). This is w
 
 | Fact-domain | Source of truth | Others should… |
 |---|---|---|
+| **Target architecture** (API-first: NestJS backend + thin FE; the decision + C4/arc42) | **`spec/04-architecture.md`** | link to it |
+| **The backend split — Phase S** (execution: steps S0–S8, reused-vs-reworked, principles) | **`BACKEND-SPLIT-PLAN.md`** | link to it |
+| **Multi-tenancy & per-client customization model** (config-not-code-branches, customization spectrum, isolation, multi-consumer auth, now-vs-later effort) | **`spec/06-configurability.md` §0** | link to it |
 | The **real operating model** (parameter-based, program-segmented, no-compute, the 3 layers, de-scaffold scope) | **`MODEL-ALIGNMENT.md`** | link to it, not re-explain it |
 | **Phase plan + live build status** | **`00-MASTER-PLAN.md`** (per-phase status blocks) | the milestone/epic/phased docs are SUPERSEDED — banner only |
 | **Gaps + resolutions** | **`spec/gap-register.md`** | reference gap #s |
