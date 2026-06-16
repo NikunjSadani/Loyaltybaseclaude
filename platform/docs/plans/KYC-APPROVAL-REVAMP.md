@@ -35,6 +35,19 @@ N2 — cosmetic (`remark:undefined` on approved merges).
 7. **Owner photo** (selfie)
 PAN rides with GST (auto-derived at enrollment); signature/consent handled via OTP, not separately approved.
 
+**Two-stage architecture (owner-confirmed 2026-06-16).** The approval is two linked tables, not one:
+- **Stage 1 = submission lifecycle** (`KycSubmission.status`, the existing sales-chain state machine
+  `PENDING_SO → … → PENDING_GIFSY → APPROVED`). The field-sales chain does the *first* approval; everything
+  funnels to `PENDING_GIFSY`.
+- **Stage 2 = the 7-field grid** (`KycVerificationItem` rows). It **begins only when Stage 1 reaches
+  `PENDING_GIFSY`** (the submission surfaces in the Gifsy portal) and the verification rows are created then.
+- **`status` stays `PENDING_GIFSY` for the entire time Stage 2 is worked** — partial progress ("n of 7") is
+  **derived from the `KycVerificationItem` rows, never encoded in the status enum** (avoids enum explosion). The
+  status moves only at the boundaries.
+- **Bridge:** all 7 rows terminal-and-APPROVED ⟹ Stage 1 flips to `APPROVED` (→ activate user + wallet +
+  credentials + WhatsApp). Any row REJECTED ⟹ Stage 1 → `RE_UPLOAD_REQUIRED`, re-opening only the rejected
+  field(s) via the existing `reKycFlags` re-share.
+
 **Hybrid Excel + portal (merge, never overwrite).** The Excel dump must contain **ALL enrollment fields**
 (see `sales/kyc/new`: outlet/owner, mobile, program/programCategory + outlet type *(NOT "partner class" — that's retired; the legacy `partnerClass` field actually held outlet-type values)*, GST/PAN, address, bank/UPI, geo, name-mismatch) **+ a
 clickable hyperlink to every document** (GST cert, address doc, self-declaration, board photo, owner photo,
@@ -98,10 +111,15 @@ owner / a specific document with a reason → targeted `RE_UPLOAD_REQUIRED`, not
 - **ChannelPartner:** add `entityType` + `gstRegistrationType` (promote the `lib/invoice` string-unions to
   Prisma enums; reconcile `lib/invoice` to read the persisted values — feeds P6 invoicing/TDS). Captured at
   KYC approval.
-- **Field-level verification** (on `KycSubmission`, or a normalized `KycVerificationItem` table — decide at
-  reconcile): **bank** reuse `pennydrop*` + add `bankNameMatch` + `bankVerifiedById`; **GST** add
-  `gstLegalName`, `gstStatus`, `gstVerifiedById/At`; **address** `addressApproved/ById/At`; **owner**
-  `ownerApproved/ById/At`; per-check `notes`. Documents already have `KycDocument.status`.
+- **Field-level verification = a normalized `KycVerificationItem` table** (Option A, owner-decided 2026-06-16 —
+  one uniform store for the uniform 7-field engine; chosen over scattering decisions across `KycDocument.status` +
+  `pennydrop*` + new columns, which would force a 3-way join in the dump/parse/merge/commit logic). Shape:
+  `(kycSubmissionId, fieldKey, decision PENDING|APPROVED|REJECTED, source EXCEL|PORTAL, remark, verifiedById,
+  verifiedAt, evidence Json?)`, one row per (submission × 7 fields). Structured offline-check evidence rides in the
+  row / `evidence` JSON: **bank** → reuse `pennydrop*` + `bankNameMatch`; **GST** → `gstLegalName`, `gstStatus`;
+  **address/owner** → in-row decision. The 4 document fields may **reference** the relevant `KycDocument` as
+  evidence; `KycDocument` stays the uploaded-file record (the verification *decision* lives in `KycVerificationItem`,
+  not duplicated in `KycDocument.status`).
 - A **bulk-upload artifact** (parsed result + audit), mirroring the sales/target Excel-upload libs.
 
 ## Best practices baked in
@@ -128,8 +146,13 @@ triggers (`RE_KYC_REQUIRED`) + the phone-change→re-KYC hook.
 - **3.0 reconcile** builds against the owner's revamped approval page (code wins).
 - Routing (3.2) + re-KYC (3.6) + phone-change→re-KYC hook are adjacent P3 work.
 
-## Open questions for the owner (resolve at build time)
-- GST registration-type value set: `REGULAR / COMPOSITE / UNREGISTERED` — also add `CASUAL` / `SEZ`?
-- On bulk commit, does an all-fields-pass row **auto-approve**, or always require a final explicit Gifsy commit?
-- "Verified by" identity for bulk = the uploading Gifsy admin (single actor for the batch)?
-- KYC validity period before `RE_KYC_REQUIRED`.
+## Resolved (owner, 2026-06-16) — were open questions
+- **GST registration-type value set = `REGULAR / COMPOSITE / UNREGISTERED`** (3 values; CASUAL/SEZ NOT needed).
+- **Auto-approve on bulk commit:** a row with all 7 fields APPROVE **auto-flips the submission to `APPROVED`** on
+  commit (no separate per-row Gifsy click) — and so fires activation + wallet + credentials + WhatsApp. The
+  **dry-run preview before commit remains the safety gate** (a bad sheet is caught at preview, not after).
+- **Bulk "verified-by" = the uploading Gifsy admin**, single actor for the whole batch (recorded on every field
+  the upload touches). Per-field verifier identity is NOT carried in the sheet.
+- **KYC validity = event-driven, NOT time-based.** No automatic expiry / no validity-period countdown. Re-KYC is
+  triggered **manually** (someone flags it) → `RE_KYC_REQUIRED` + the existing `reKycFlags` re-share. (Task 3.6 is
+  therefore a *manual* re-KYC trigger + SLA metrics, not a time-expiry job.)

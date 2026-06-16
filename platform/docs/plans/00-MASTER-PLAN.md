@@ -271,7 +271,7 @@ carries no business logic. **Depends on:** P2. **Blocks:** P3+ (all later phases
 | 3.2 | **Tree-based approval routing**, retire `ROLE_PHONES` (#9) | `lib/kyc-approval.ts` (pure `resolveApprover`) | pure (escalation) |
 | 3.3 | First-approve / approve / reject routes; activate user + create wallet on approve | `api/kyc/[id]/*` | wiring + manual |
 | 3.4 | **Field-level rejection** (#14); Gifsy GST/bank validation + reg-type capture (#12, #15) — **bulk export→offline-validate→upload-with-preview→commit** flow + single-page exceptions, field-level verification w/ structured evidence. Full design + schema + 3.4a–e breakdown in [`KYC-APPROVAL-REVAMP.md`](KYC-APPROVAL-REVAMP.md). ⚠️ adds an additive dev-DB migration | `api/kyc/*`, `admin/kyc/*`, `lib/kyc-approval.ts`, schema | unit |
-| 3.5 | Consent capture + DPDP data requests | `api/kyc/consent`, `DataRequest` | unit |
+| 3.5 | Consent persistence only (~~DPDP `DataRequest`~~ **DESCOPED** owner 2026-06-16; OTP-verify already gives timestamped phone-bound proof) | `api/kyc/consent` | unit (or no-op) |
 | 3.6 | **Re-KYC trigger** (#13) + SLA metrics | `api/kyc/sla-metrics` | unit |
 
 **Exit:** an ISR can enroll an outlet, it routes up the real tree, Gifsy approves, credentials +
