@@ -249,7 +249,7 @@ owns DB + all logic) + a **thin Next.js web frontend**, so future mobile/PWA/par
 | S4 | Re-home all route handlers → `/v1` controllers, parallel by domain | **✅ DONE** (124 `/v1` routes, 17 modules; every wave gated + audited) |
 | S5 | Global guards: auth/session ✅, permission ✅, throttle ✅ already global → **`TenantGuard`** added (asserts a tenant is resolved per authed request → loud 403; stamps `req.tenantId`). DB-level isolation (RLS/Prisma auto-scope) measured-and-deferred to **P8.6** (Gap #23). | **✅ DONE** (10 unit + boot smoke; tsc 0 / 273 tests) |
 | S6 | Thin the frontend → **Next proxy** (`next.config.ts` `beforeFiles` rewrite `/api/*` → backend `/v1/*`; deferred routes excluded; zero page changes, Bearer auth preserved). *Premise corrected: api-client/`NEXT_PUBLIC_API_URL` were NOT pre-plumbed; 53 raw-`fetch` callers centralized later (P3).* | **✅ DONE** (e2e smoke: authed request browser→proxy→backend→DB = 200) |
-| S7 | Infra/CI: ~no change (backend = `api/` dir already deploys as `gifsy-api`); drop dead schema-fallback | deploy run |
+| S7 | Infra/CI: ~no change (backend = `api/` dir already deploys as `gifsy-api`); **removed dead cross-app prisma-schema fallback** from deploy workflows. `NEXT_PUBLIC_API_URL` already plumbed (Dockerfile `ARG`→`ENV` + deploy `--build-arg`) — only the GitHub secrets need real values. | **✅ DONE** (YAML valid; diff = fallback removal only) |
 | S8 | Cutover smokes; confirm no World-A leftovers (`api/` dir *persists* as the backend); close #30/#31 | **human gate** |
 
 **Exit:** web → backend → DB works end-to-end; one canonical schema (`api/prisma/`); World-A domain gone; frontend

@@ -5,17 +5,19 @@
 ever be), before building P3+. No speed-vs-quality tradeoff. Architecture source of truth = `../spec/04-architecture.md`;
 why = Gap #31. This doc = how we execute it.
 
-> **STATUS (2026-06-16): S0–S6 ✅ DONE** (S0–S5 pushed to `origin/develop`; S6 committed-pending). The backend is built
+> **STATUS (2026-06-16): S0–S7 ✅ DONE** (S0–S5 pushed to `origin/develop`; S6–S7 commit-pending). The backend is built
 > in `api/` — **124 `/v1` endpoints across 17 modules**, a 66-model canonical schema (World-A de-scaffolded, migration
 > applied to `gifsy_dev`), and foundation rails (response envelope · RBAC permission guard · `StorageService` GCS ·
 > `NotificationsService` enqueue seam · shared xlsx/`StreamableFile`). **S5** added the app-layer `TenantGuard`
 > (asserts a tenant is resolved per authed request + stamps `req.tenantId`; DB-level RLS/auto-scope measured-and-
 > deferred to **P8.6**, Gap #23). **S6** thinned the frontend via a `next.config.ts` proxy (`/api/*` → backend `/v1/*`,
-> `beforeFiles`; deferred routes excluded) — verified e2e (authed request browser→proxy→backend→DB returns 200). Every
-> wave gated (tsc + tests + boot/e2e smoke) and **independently audited**. **Remaining (light): S7** infra (near-no-op:
-> set `NEXT_PUBLIC_API_URL` in prod; drop dead schema-fallback) · **S8** cutover + delete World-A `api/` leftovers (incl.
-> the now-shadowed local `src/app/api/*` ported routes). Live per-step status in `00-MASTER-PLAN.md`; restart at S7 via
-> `RESUME.md`.
+> `beforeFiles`; deferred routes excluded) — verified e2e (authed request browser→proxy→backend→DB returns 200). **S7**
+> (infra, near-no-op) removed the dead cross-app `prisma generate --schema=../api/prisma` fallback from the deploy
+> workflows; `NEXT_PUBLIC_API_URL` was already plumbed (`platform/Dockerfile` `ARG`→`ENV` + deploy `--build-arg` from
+> secrets + `terraform/README`). Every wave gated (tsc + tests + boot/e2e smoke) and **independently audited**.
+> **Remaining: S8** cutover (human-gated) — e2e smokes + delete World-A `api/` leftovers **and** the now-shadowed local
+> `src/app/api/*` ported routes (then platform's Prisma schema). Live per-step status in `00-MASTER-PLAN.md`; restart at
+> S8 via `RESUME.md`.
 
 ## Why now (one paragraph)
 The code was built full-stack (the Next.js `platform/` owns the DB via 119 Prisma routes) but the **infra was
@@ -123,11 +125,16 @@ regardless; the framework choice only changes the handler-wrapper style. We stil
   cookie+Bearer both keep working) and a stepping stone to httpOnly-cookie auth, and it avoids a 53-file sweep that is
   partly throwaway (those pages churn again in P3).* **Deferred (follow-up):** centralize the 53 raw-`fetch` callers
   through `api-client.ts` — done incrementally when those pages are touched for P3, not as a big-bang now.
-- **S7 · Infra/CI (mostly already done).** Because the backend lives in `api/`, the existing `gifsy-api`
-  build/deploy path is unchanged (no workflow-path edits). Confirm the backend has the prod DB/secrets — it already
-  does (only `gifsy-api` gets `DATABASE_URL`); frontend stays stateless; cloudflare already routes; the CI build/test
-  matrix dir names stay `[api, platform]`. Remove the now-dead `prisma generate --schema=../api/prisma/schema.prisma`
-  fallback in the deploy workflows once the canonical schema lands in `api/prisma/` (S2).
+- **S7 · Infra/CI (mostly already done). ✅ DONE.** Because the backend lives in `api/`, the existing `gifsy-api`
+  build/deploy path is unchanged (no workflow-path edits). Confirmed: backend already has prod DB/secrets (only
+  `gifsy-api` gets `DATABASE_URL`); frontend stays stateless; cloudflare already routes; CI build/test matrix stays
+  `[api, platform]`. **Removed** the now-dead cross-app `prisma generate --schema=../api/prisma/schema.prisma` fallback
+  from `deploy.yml` + `deploy-staging.yml` (both apps have a local schema → the `else` never fired; `ci.yml` was already
+  fallback-free; kept the `-f` guard so the step no-ops once S8 deletes platform's schema). **`NEXT_PUBLIC_API_URL` was
+  already fully plumbed** for the proxy: `platform/Dockerfile` `ARG NEXT_PUBLIC_API_URL` → `ENV` (bakes the rewrite
+  destination at `next build` + present at runtime); both deploy workflows pass `--build-arg
+  NEXT_PUBLIC_API_URL=${{ secrets.* }}`; `terraform/README` documents the values. **Only operational step:** set the
+  GitHub secrets `NEXT_PUBLIC_API_URL`/`_STAGING` to the real backend origins (repo settings, not code).
 - **S8 · Cutover + retire.** End-to-end smokes (web → backend → DB); confirm no World-A leftovers remain in `api/`;
   close Gaps #30/#31. **The `api/` dir persists — it *is* the backend now**; only its World-A domain was deleted (S1).
 

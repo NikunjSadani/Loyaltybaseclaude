@@ -42,14 +42,14 @@ jobs:
         run: npm ci
 
       - name: Generate Prisma client
-        # Each app generates from its OWN prisma/schema.prisma (the platform has its
-        # own — source of truth for the platform; the api has its own separate schema).
-        # The fallback remains only for safety if an app ever lacks a local schema.
+        # Each app generates from its OWN prisma/schema.prisma (platform + api each
+        # have one post-split). The cross-app fallback (--schema=../api/prisma) was
+        # removed in Phase S S7 — it was dead (both apps have a local schema). The
+        # -f guard remains so the step no-ops cleanly if a schema is ever absent
+        # (e.g. after S8 deletes platform's schema when it becomes a pure proxy FE).
         run: |
           if [ -f prisma/schema.prisma ]; then
             npx prisma generate
-          else
-            npx prisma generate --schema=../api/prisma/schema.prisma
           fi
 
       - name: Run tests
