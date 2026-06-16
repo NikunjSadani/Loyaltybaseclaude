@@ -8,6 +8,7 @@ import { AppController }  from './app.controller';
 import { AppService }     from './app.service';
 import { JwtAuthGuard }   from './common/guards/jwt-auth.guard';
 import { RolesGuard }     from './common/guards/roles.guard';
+import { TenantGuard }    from './common/guards/tenant.guard';
 import { PermissionGuard } from './common/guards/permission.guard';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { AllExceptionsFilter }  from './common/filters/all-exceptions.filter';
@@ -85,6 +86,10 @@ import { AdminProgramsModule } from './admin-programs/admin-programs.module';
     // Apply JWT auth globally — use @Public() to opt out
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    // Tenant chokepoint (S5): after JWT (so req.user exists), asserts a tenant is
+    // resolved on every authenticated request + stamps req.tenantId. Defense-in-depth;
+    // DB-level isolation (RLS / Prisma auto-scope) is Gap #23 → P8.6.
+    { provide: APP_GUARD, useClass: TenantGuard },
     // RBAC permission enforcement — flag-gated, no-op unless @RequirePermission + flags on
     { provide: APP_GUARD, useClass: PermissionGuard },
   ],
