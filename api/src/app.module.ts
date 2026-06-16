@@ -12,26 +12,15 @@ import { RolesGuard }     from './common/guards/roles.guard';
 import { PrismaModule }   from './prisma/prisma.module';
 import { AuthModule }     from './auth/auth.module';
 import { TenantModule }   from './tenant/tenant.module';
-import { UsersModule }    from './users/users.module';
-import { PartnersModule } from './partners/partners.module';
-import { KycModule }      from './kyc/kyc.module';
-import { OutletsModule }  from './outlets/outlets.module';
-import { SkusModule }     from './skus/skus.module';
-import { SalesModule }    from './sales/sales.module';
-import { WalletModule }   from './wallet/wallet.module';
-import { PayoutsModule }  from './payouts/payouts.module';
-import { SchemesModule }  from './schemes/schemes.module';
-import { TargetsModule }  from './targets/targets.module';
-import { AdminModule }         from './admin/admin.module';
-import { RewardsModule }       from './rewards/rewards.module';
-import { VisibilityModule }    from './visibility/visibility.module';
-import { LeaderboardModule }   from './leaderboard/leaderboard.module';
-import { NotificationsModule } from './notifications/notifications.module';
+// Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
+// kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
+// leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-    // Background jobs: notifications worker (every minute) + points expiry (daily 00:05)
+    // Background-jobs scaffold — domain cron jobs (notifications worker, points
+    // expiry) are re-added as the real domain is ported from platform/lib (S3/S4).
     ScheduleModule.forRoot(),
     // Rate limiting — applied globally; OTP endpoints have tighter limits set
     // directly on the controller with @Throttle({ default: { limit, ttl } }).
@@ -44,21 +33,6 @@ import { NotificationsModule } from './notifications/notifications.module';
     PrismaModule,
     AuthModule,
     TenantModule,
-    UsersModule,
-    PartnersModule,
-    KycModule,
-    OutletsModule,
-    SkusModule,
-    SalesModule,
-    WalletModule,
-    PayoutsModule,
-    SchemesModule,
-    TargetsModule,
-    AdminModule,
-    RewardsModule,
-    VisibilityModule,
-    LeaderboardModule,
-    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [

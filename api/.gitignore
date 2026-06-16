@@ -38,3 +38,6 @@ Thumbs.db
 # Prisma
 # Keep schema and migrations; ignore generated client (re-generated on build)
 prisma/generated/
+
+# Incremental TS build cache (machine-specific)
+tsconfig.build.tsbuildinfo
