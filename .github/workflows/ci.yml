@@ -65,8 +65,10 @@ jobs:
         run: npm ci
 
       - name: Generate Prisma client
-        # platform has no prisma/schema.prisma — it shares the API schema
-        run: npx prisma generate --schema=../api/prisma/schema.prisma
+        # The platform has its OWN prisma/schema.prisma (source of truth for the
+        # platform: used by local dev via prisma.config.ts AND by platform/Dockerfile).
+        # The NestJS api has its own separate schema. Generate from the platform's own.
+        run: npx prisma generate
 
       - name: TypeScript check
         run: npx tsc --noEmit

@@ -36,7 +36,9 @@ jobs:
         run: npm ci
 
       - name: Generate Prisma client
-        # platform has no prisma/schema.prisma — it shares the API schema
+        # Each app generates from its OWN prisma/schema.prisma (platform has its own —
+        # source of truth for the platform; api has its own separate schema).
+        # The fallback remains only for safety if an app ever lacks a local schema.
         run: |
           if [ -f prisma/schema.prisma ]; then
             npx prisma generate
