@@ -245,9 +245,9 @@ owns DB + all logic) + a **thin Next.js web frontend**, so future mobile/PWA/par
 | S0 | Safety checks (greenfield ✅, no `api/` consumer ✅, prod-DB ownership ✅) | **✅ DONE** |
 | S1 | Backend scaffold **in place in `api/`**: keep shell + port auth/tenant, **delete World-A domain** | **✅ DONE** (builds/boots/health, 47 tests) |
 | S2 | Canonical schema → `api/prisma/` (66 models) + **World-A de-scaffold** (folds in P4.0) | **✅ DONE** (migration applied to `gifsy_dev`, 80→66) |
-| S3 | Port `lib/` domain logic → backend services (rewrite 3 `next/*` helpers) | unit |
-| S4 | Re-home 119 route handlers → controllers (`/v1`), parallel by domain | wiring + differential |
-| S5 | Global guards: auth/session, permission, **tenant-scoping**, throttle, audit, cron | unit + smoke |
+| S3 | Foundation: envelope interceptor · RBAC permission guard · **StorageService** (GCS) · **NotificationsService** (enqueue seam) · shared xlsx builder | **✅ DONE** |
+| S4 | Re-home all route handlers → `/v1` controllers, parallel by domain | **✅ DONE** (124 `/v1` routes, 17 modules; every wave gated + audited) |
+| S5 | Global guards: auth/session ✅, permission ✅, throttle ✅ already global → **add tenant-scoping guard/interceptor** (the one real cross-cutting add) | unit + smoke |
 | S6 | Thin the frontend → call backend over HTTP (CORS, cross-origin auth) | e2e smoke |
 | S7 | Infra/CI: ~no change (backend = `api/` dir already deploys as `gifsy-api`); drop dead schema-fallback | deploy run |
 | S8 | Cutover smokes; confirm no World-A leftovers (`api/` dir *persists* as the backend); close #30/#31 | **human gate** |

@@ -5,24 +5,26 @@ Paste the block below to restart the orchestrator on point. The on-disk docs are
 ```
 You're the orchestrator for the Loyaltybase build (multi-tenant trade-loyalty platform,
 C:\Users\nikun\Loyaltybaseclaude\platform).
-⚠️⚠️ **NEXT = PHASE S — BACKEND SPLIT (API-first re-architecture). DO THIS NOW; it gates P3+.** DECIDED by owner
-2026-06-16 (Gap #31, after Task 0 recon + an independent-agent confirm): split the full-stack Next.js code into a
-**dedicated NestJS backend API** (single source of truth — owns DB + ALL business logic) + a **thin Next.js web
-frontend**, so future mobile/PWA/partner consumers reuse one backend. **Why:** `terraform/` was always built for a
-split (stateless FE + `gifsy-api` DB owner; the FE has NO prod `DATABASE_URL` → the full-stack code can't run in
-prod); we realign the CODE to the infra **now** while greenfield/P2 = cheapest (later = re-home twice).
-**FOUNDATION = the platform's real-model `lib/`+schema** (framework-agnostic: only 3/63 lib files touch `next/*`),
-**NOT the NestJS `api/` domain** — it's real code but a 100% **World-A** (wrong) model (Sku/SkusModule, partner-class,
-tiers, scheme-compute; `programName`=0). The backend is built **IN PLACE in `api/`** (verified+independently-confirmed
-2026-06-16): the deploy build is hard-wired to `./api` (`docker build … ./api`), so we **reuse `api/`'s proven
-framework shell** (Dockerfile, Prisma-7 module, common guards, bootstrap) + **port `auth/`+`tenant/`**, and **delete
-its World-A domain** (skus/schemes/targets/rewards/wallet/payouts/outlets/partners/sales/kyc/admin/reports/…). The
-`api/` dir *becomes* the backend — it is NOT deleted; only its World-A domain is.
+⚠️⚠️ **PHASE S — BACKEND SPLIT (API-first) — IN PROGRESS. S0–S4 DONE; NEXT = S5 → S8 (light).** DECIDED by owner
+2026-06-16 (Gap #31): split the full-stack Next.js code into a **dedicated NestJS backend API** (single source of
+truth — owns DB + ALL business logic) + a **thin Next.js web frontend** (future mobile/PWA/partner reuse one backend).
+Built **IN PLACE in `api/`** (reuses api/'s proven framework shell — Dockerfile/Prisma-7/guards/bootstrap; the deploy
+build is hard-wired to `./api`); api/'s World-A domain was deleted and the real domain rebuilt from the platform's
+`lib/`. The **`api/` dir IS the backend now** (NOT deleted; only its World-A domain was). **Why:** `terraform/` was
+always built for the split (stateless FE + `gifsy-api` DB owner; FE has no prod `DATABASE_URL`) — realign code→infra
+while greenfield = cheapest. **Backend dev:** `cd api && npm run build` / `npm test`; boot needs `DATABASE_URL` (from
+`platform/.env` → gifsy_dev) + `JWT_SECRET`.
 **Absorbs P4.0:** the World-A de-scaffold (tiers/partner-class/compute/SKU) happens in step S2 so the backend is
 born clean. **Owner constraints:** no speed-vs-quality tradeoff (full split); NestJS confirmed; multi-tenancy =
 config/data not code-branches (no `if clientId===`); DEFER per-client customization machinery (YAGNI — clean module
 boundaries only); current client = parameter-upload, **no compute engine**. **The full plan = read
-`docs/plans/BACKEND-SPLIT-PLAN.md` (steps S0–S8, each gated; human gates at S0/S1-World-A-deletion/S2-migration). **S0 ✅ + S1 ✅ + S2 ✅ DONE.** S1: backend scaffolded in place in `api/` (World-A domain deleted, shell + `auth`/`tenant` kept). S2: canonical schema authored at **`api/prisma/schema.prisma` (66 models)**; the guarded de-scaffold migration (`api/prisma/migrations-manual/S2_descaffold_worldA.sql`, 14 tables + fields/2 enums) applied to `gifsy_dev` (80→66); backend builds + boots + DB-connects + 47/47 tests green. **NEXT = S3** (port `platform/lib/` domain logic → backend services; reconcile to the canonical model — the auth `UserStatus`/`UserSession.clientId` reconcile already done as a preview). Reload:
+`docs/plans/BACKEND-SPLIT-PLAN.md` (steps S0–S8). **S0–S4 ✅ DONE & committed on `develop` (run `git log --oneline -30`):**
+- **S1** scaffold in place in `api/` (World-A domain deleted, shell + `auth`/`tenant` kept).
+- **S2** canonical schema = **`api/prisma/schema.prisma` (66 models)**; guarded de-scaffold migration (`api/prisma/migrations-manual/S2_descaffold_worldA.sql`, 14 tables + cols + 2 enums) **applied to `gifsy_dev`** (80→66).
+- **S3 foundation:** response-envelope interceptor · RBAC permission guard · **StorageService** (GCS) · **NotificationsService** (enqueue seam → NotificationQueue; delivery is P7) · shared `src/common/xlsx.ts` (StreamableFile downloads).
+- **S4 ✅ ALL 124 `/v1` endpoints re-homed, 17 modules:** auth, tickets, wallet, gifsy, visibility, rewards, partner, kyc, sales, payouts, reports, schemes, leaderboard, credits, admin-outlets, admin-core, admin-programs (`@Controller('admin/<x>')` mirrors source paths). Every wave gated (tsc+tests+boot) + independently audited (credits money-flow audited by Opus = SOLID).
+**NEXT = S5–S8 (light):** **S5** add a **tenant-scoping guard/interceptor** (the one real cross-cutting add — auth/permission/throttle already global; tenant scope is currently correct but per-query) · **S6** thin the frontend → point web app's data layer at backend `/v1` (CORS, cross-origin auth) · **S7** infra/CI near-no-op (in-place `api/` reuse; drop the dead `prisma generate --schema=../api/prisma/...` fallback) · **S8** cutover smokes (web→backend→DB) + delete World-A `api/` leftovers (old seed etc.) + close #30/#31.
+**DEFERRED routes (need infra / P3 — re-home when ready):** rewards `redeem`(+confirm) = action-OTP (no `REDEMPTION_CONFIRM` OtpPurpose) + delivery · visibility `submit` = multipart on StorageService · partner `invoices` = mock · admin/kyc approvals = mock (P3). **Follow-ups (audit-found, all faithful source carry-overs or pre-existing):** payouts `processBatch` atomicity (P6); seed `kyc:*` for SALES_SO/ASM/STATE_HEAD before enabling RBAC (RBAC-ENABLEMENT); `admin/banners` list omits `deletedAt:null` (soft-deleted banners show — 1-line fix). Reload:
 - docs/plans/BACKEND-SPLIT-PLAN.md        ⭐ **the Phase S plan — START HERE** (target arch, principles, reused-vs-reworked, S0–S8)
 - docs/spec/04-architecture.md            (TARGET architecture §1/§2/§6/§8 — API-first, decided)
 - docs/plans/MODEL-ALIGNMENT.md           (REAL model + the World-A de-scaffold list executed in S2)
