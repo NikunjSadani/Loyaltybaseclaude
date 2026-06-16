@@ -1,4 +1,15 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { KycService } from './kyc.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -11,6 +22,7 @@ import {
   NotInterestedKycDto,
   RejectKycDto,
   UpdateKycDto,
+  UploadKycDocumentDto,
 } from './dto/kyc.dto';
 
 /**
@@ -36,6 +48,17 @@ export class KycController {
   @RequirePermission('kyc:initiate')
   create(@CurrentUser() user: JwtPayload, @Body() dto: CreateKycDto) {
     return this.kyc.create(user, dto);
+  }
+
+  @Post('documents')
+  @RequirePermission('kyc:initiate')
+  @UseInterceptors(FileInterceptor('file'))
+  uploadDocument(
+    @CurrentUser() user: JwtPayload,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: UploadKycDocumentDto,
+  ) {
+    return this.kyc.uploadDocument(user, file, dto);
   }
 
   @Post('consent')

@@ -10,6 +10,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   ConsentKycDto,
@@ -19,6 +20,7 @@ import {
   NotInterestedKycDto,
   RejectKycDto,
   UpdateKycDto,
+  UploadKycDocumentDto,
 } from './dto/kyc.dto';
 import {
   canFirstApprove,
@@ -48,7 +50,41 @@ export class KycService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly storage: StorageService,
   ) {}
+
+  // ─── POST /v1/kyc/documents ──────────────────────────────────────────────────
+  /**
+   * Upload a single KYC document to GCS and return its object reference. The form
+   * uploads each file here as the user picks it, then submits the KYC (POST /v1/kyc)
+   * with the returned { fileKey, fileUrl } instead of inlining base64 — keeping the
+   * bytes in object storage, not the DB. Files are private; reads go through a
+   * signed URL at review time.
+   */
+  async uploadDocument(user: JwtPayload, file: Express.Multer.File, dto: UploadKycDocumentDto) {
+    if (!file) throw new BadRequestException('No file uploaded');
+
+    const MAX_BYTES = 5 * 1024 * 1024; // 5 MB — typical KYC photo/doc
+    if (file.size > MAX_BYTES) {
+      throw new BadRequestException('File too large (max 5 MB)');
+    }
+
+    // Tenant-foldered key so objects are partitioned per client.
+    const key = this.storage.generateKey(
+      `kyc/${user.clientId}`,
+      file.originalname || `${dto.documentType}.bin`,
+    );
+    const fileUrl = await this.storage.uploadFile(file.buffer, key, file.mimetype);
+
+    return {
+      documentType: dto.documentType,
+      fileKey: key,
+      fileUrl,
+      fileName: file.originalname ?? null,
+      mimeType: file.mimetype ?? null,
+      fileSizeBytes: file.size,
+    };
+  }
 
   private isAdmin(role: string): boolean {
     return role === 'GIFSY_ADMIN' || role === 'CLIENT_ADMIN';
@@ -164,8 +200,10 @@ export class KycService {
     if (dto.documents?.length) {
       for (const doc of dto.documents) {
         if (!doc.type) continue;
-        const fileUrl = doc.dataUrl ?? `pending://kyc/${submission.id}/${doc.type}`;
-        const fileKey = `kyc/${submission.id}/${doc.type}/${Date.now()}`;
+        // Prefer a GCS-uploaded object (fileKey/fileUrl from POST /v1/kyc/documents);
+        // fall back to the legacy inline dataUrl, then a pending placeholder.
+        const fileUrl = doc.fileUrl ?? doc.dataUrl ?? `pending://kyc/${submission.id}/${doc.type}`;
+        const fileKey = doc.fileKey ?? `kyc/${submission.id}/${doc.type}/${Date.now()}`;
         docPromises.push(
           this.prisma.kycDocument.create({
             data: {
@@ -174,6 +212,8 @@ export class KycService {
               fileUrl,
               fileKey,
               fileName: doc.fileName ?? null,
+              mimeType: doc.mimeType ?? null,
+              fileSizeBytes: doc.fileSizeBytes ?? null,
               status: 'PENDING',
             },
           }),

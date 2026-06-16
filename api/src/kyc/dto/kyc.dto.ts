@@ -31,19 +31,46 @@ export class GeoDto {
 }
 
 // ─── Document sub-schema ─────────────────────────────────────────────────────
-// dataUrl is stored as-is in KycDocument.fileUrl (a base64 data URL in demo,
-// or a storage URL in production after the file is uploaded separately).
+// A document is referenced one of two ways, in preference order:
+//   1. fileKey + fileUrl — the object was uploaded to GCS via POST /v1/kyc/documents
+//      (the production path; the bytes live in object storage, not the DB).
+//   2. dataUrl — a base64 data URL inlined in the JSON (legacy/demo fallback).
 export class KycDocumentDto {
   @IsString()
   type!: string; // KycDocumentType enum value
 
   @IsOptional()
   @IsString()
-  dataUrl?: string;
+  fileKey?: string; // GCS object key returned by the upload endpoint (preferred)
+
+  @IsOptional()
+  @IsString()
+  fileUrl?: string; // GCS object URL returned by the upload endpoint
+
+  @IsOptional()
+  @IsString()
+  dataUrl?: string; // legacy inline base64 fallback
 
   @IsOptional()
   @IsString()
   fileName?: string;
+
+  @IsOptional()
+  @IsString()
+  mimeType?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  fileSizeBytes?: number;
+}
+
+// ─── POST /v1/kyc/documents — multipart single-file upload to GCS ──────────────
+// The file rides as multipart field `file`; this DTO is the accompanying text field.
+export class UploadKycDocumentDto {
+  @IsString()
+  @MinLength(1, { message: 'documentType is required' })
+  documentType!: string; // KycDocumentType enum value
 }
 
 // ─── Full KYC submission schema ───────────────────────────────────────────────

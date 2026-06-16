@@ -13,6 +13,7 @@ import {
 import { KycService } from './kyc.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   canFirstApprove,
@@ -47,6 +48,13 @@ const mockPrisma = {
 
 const mockNotifications = { enqueue: jest.fn().mockResolvedValue({ id: 'n1' }) };
 
+const mockStorage = {
+  generateKey: jest.fn((folder: string, name: string) => `${folder}/2026-06/uuid-${name}`),
+  uploadFile: jest.fn().mockResolvedValue('https://storage.googleapis.com/bucket/key'),
+  getSignedUrl: jest.fn(),
+  deleteFile: jest.fn(),
+};
+
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const so: JwtPayload = { sub: 'so1', role: 'SALES_SO', clientId: 'deoleo', phone: '', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' };
@@ -61,9 +69,41 @@ describe('KycService', () => {
         KycService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: NotificationsService, useValue: mockNotifications },
+        { provide: StorageService, useValue: mockStorage },
       ],
     }).compile();
     service = module.get(KycService);
+  });
+
+  describe('uploadDocument (GCS)', () => {
+    const file = (size: number): Express.Multer.File =>
+      ({ buffer: Buffer.from('x'), originalname: 'pan.jpg', mimetype: 'image/jpeg', size }) as Express.Multer.File;
+
+    it('uploads under a tenant folder and returns the object reference', async () => {
+      const res = await service.uploadDocument(so, file(1024), { documentType: 'PAN_CARD' });
+      expect(mockStorage.generateKey).toHaveBeenCalledWith('kyc/deoleo', 'pan.jpg');
+      expect(mockStorage.uploadFile).toHaveBeenCalledTimes(1);
+      expect(res).toMatchObject({
+        documentType: 'PAN_CARD',
+        fileKey: expect.any(String),
+        fileUrl: 'https://storage.googleapis.com/bucket/key',
+        fileSizeBytes: 1024,
+      });
+    });
+
+    it('rejects when no file is provided', async () => {
+      await expect(
+        service.uploadDocument(so, undefined as unknown as Express.Multer.File, { documentType: 'PAN_CARD' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
+
+    it('rejects a file over 5 MB without uploading', async () => {
+      await expect(
+        service.uploadDocument(so, file(6 * 1024 * 1024), { documentType: 'PAN_CARD' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
   });
 
   describe('approval routing helpers (pure)', () => {
