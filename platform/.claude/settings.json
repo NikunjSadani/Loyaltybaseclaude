@@ -9,5 +9,17 @@
       "Bash(npx tsc --noEmit)",
       "Bash(npx vitest run *)"
     ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/Users/nikun/Loyaltybaseclaude/platform/scripts/check-doc-consistency.mjs\" --hook"
+          }
+        ]
+      }
+    ]
   }
 }

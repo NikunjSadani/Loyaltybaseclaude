@@ -137,7 +137,7 @@ tenant config served from DB. **Depends on:** P0.
 | 2.0 | Reconcile Sales Org + Partners/Outlets + Catalog | `lib/employee-hierarchy.ts`, `lib/outlet-*` | — |
 | 2.1 | Sales hierarchy levels + reporting tree; derive role from `SalesHierarchyLevel` (#11) — **feeds the Outlet Points Ledger Zone/ZNM/RSM/ASM/SO/XSR columns** ([`REPORTING-REVAMP.md`](REPORTING-REVAMP.md)) | `api/admin/hierarchy-config`, `admin/hierarchy` | pure tree + wiring |
 | 2.2 | Sales user CRUD + outlet/partner assignment | `api/sales/team*`, `SalesUserAssignment` | unit |
-| 2.3 | Partner classes + tiers + tier history | `api/admin/tiers`, `TierConfig` | unit |
+| ~~2.3~~ | ~~Partner classes + tiers + tier history~~ → **RETIRED / folded into the P4.0 de-scaffold** (partner-class→program, drop `TierConfig`; see `MODEL-ALIGNMENT.md`) | ~~`api/admin/tiers`, `TierConfig`~~ | — |
 | 2.4 | Partner + Outlet model; outlet master upload/upsert; finalize 1:1 binding (#4); **define Distributor entity + outlet→distributor link** (the Outlet Points Ledger report's distributor columns + 1:1-points attribution depend on this — [`REPORTING-REVAMP.md`](REPORTING-REVAMP.md)) | `lib/outlet-upload.ts`, `api/admin/outlets*` | pure parser + wiring |
 | 2.5 | Outlet management UI (search/filter/deactivate/re-KYC flag) | `admin/users/outlets` | render + interaction |
 | 2.6 | Product catalog: categories + SKUs | `api/admin/skus`, `Category`/`Sku` | unit |

@@ -6,13 +6,13 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
 
 > **Deep-dive flag** 🔍 = high-ambiguity context flagged for a dedicated Q&A round.
 
-> **Core value model (canonical).** The platform does **not** compute incentives. Tenants
-> compute points/INR **externally** and **upload final amounts** per outlet per parameter
-> (**header** = parameter/field, plus a **narration**). Uploads are *intended* to reflect in the
-> **Wallet** (⚠️ not yet wired — Gap #16) and drive payouts (parameters **club into one UTR,
+> **Core value model (canonical).** Model context: see `docs/plans/MODEL-ALIGNMENT.md`
+> (parameter-based, program-segmented, no compute — tenants upload final amounts per outlet per
+> parameter; **header** = parameter/field, plus a **narration**). Uploads are *intended* to reflect
+> in the **Wallet** (⚠️ not yet wired — Gap #16) and drive payouts (parameters **club into one UTR,
 > except Visibility** which is always separate).
-> Therefore: **Awards & Credits (#12a) is the single award path**; **Targets & Achievements
-> (#8) is tracking/display only**; the **Scheme rule-engine (#7) is aspirational/unused**.
+> Therefore, for this catalog: **Awards & Credits (#12a) is the single award path**; **Targets &
+> Achievements (#8) is tracking/display only**; the **Scheme rule-engine (#7) is aspirational/unused**.
 
 ---
 
@@ -128,9 +128,9 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
   `api/admin/schemes/[id]/enrollments{,/export}`, `api/schemes/calculate`.
 - **Current.** Rich inherited model — scheme types, generic rule engine (`SchemeRule`), eligibility,
   enrollment, per-user `SchemeTarget`, budget tracking, `calculate` endpoint. **The rule-engine/`calculate`
-  compute path is NOT the operating model** and is **slated for removal** (P4.0 de-scaffold) — awards come via
-  parameter/Credits upload (final amounts, no compute). Eligibility today wrongly keys off **outlet TYPE**; the
-  real audience dimension is **program** (`Outlet.programName/programCategory`).
+  compute path is NOT the operating model** and is **slated for removal** (P4.0 de-scaffold). Eligibility today
+  wrongly keys off **outlet TYPE**; the real audience dimension is **program**
+  (`Outlet.programName/programCategory`). Model context: see `docs/plans/MODEL-ALIGNMENT.md`.
 - **Operational scope.** Define activations (time-bound, audience = **program**-based, eligibility) + enroll
   outlets. Awards flow through Awards & Credits (upload-final), not the scheme engine.
 - **Target/gaps (P4).** 🔍 Configurable **per-activation** enrollment forms (variable fields, self-vs-sales
