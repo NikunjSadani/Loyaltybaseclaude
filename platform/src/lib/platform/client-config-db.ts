@@ -46,6 +46,23 @@ export async function getClientConfigFromDb(
   try {
     const row = await prisma.client.findUnique({
       where: { id: clientId },
+      // Explicit select that OMITS `partnerClasses`: that column was dropped from the
+      // DB when partner classes were retired (World-A de-scaffold), but the platform
+      // schema still declares it (stale — the full platform-schema retirement is P4,
+      // alongside removing partnerClasses from the row mapper + write path). A
+      // select-all throws "column clients.partnerClasses does not exist" on every load.
+      select: {
+        id: true,
+        internalName: true,
+        status: true,
+        onboardedAt: true,
+        branding: true,
+        features: true,
+        approvalHierarchy: true,
+        notifications: true,
+        invoicing: true,
+        wallet: true,
+      },
     });
 
     if (!row) return null;
@@ -56,7 +73,12 @@ export async function getClientConfigFromDb(
     const reg = CLIENT_REGISTRY[clientId];
     const secretAuthKey = reg?.notifications.msg91AuthKey ?? 'DEMO_KEY';
 
-    return rowToClientConfig(row, secretAuthKey);
+    // partnerClasses is no longer persisted (retired) — source it from the CODE
+    // registry so config consumers/displays keep working until full retirement (P4).
+    return rowToClientConfig(
+      { ...row, partnerClasses: reg?.partnerClasses ?? [] },
+      secretAuthKey,
+    );
   } catch (e) {
     // Log for observability but always fail safe — caller uses registry fallback.
     console.error('[getClientConfigFromDb]', e);
