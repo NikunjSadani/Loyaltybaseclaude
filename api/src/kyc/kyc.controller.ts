@@ -6,6 +6,7 @@ import {
   Patch,
   Post,
   Query,
+  StreamableFile,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
@@ -78,6 +79,17 @@ export class KycController {
   @RequirePermission('kyc:read')
   slaMetrics(@CurrentUser() user: JwtPayload) {
     return this.kyc.slaMetrics(user);
+  }
+
+  @Get('review-dump')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('kyc:read')
+  async reviewDump(@CurrentUser() user: JwtPayload): Promise<StreamableFile> {
+    const buffer = await this.kyc.reviewDump(user);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: 'attachment; filename="kyc-review-dump.xlsx"',
+    });
   }
 
   @Get(':id')

@@ -106,6 +106,70 @@ describe('KycService', () => {
     });
   });
 
+  describe('reviewDump (Lane A export)', () => {
+    it('rejects a non-Gifsy caller', async () => {
+      await expect(service.reviewDump(so)).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('queries PENDING_GIFSY scoped to the tenant and returns an xlsx buffer', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
+        {
+          id: 'KYC-1',
+          boardPhotoLat: 19.1,
+          boardPhotoLng: 72.8,
+          user: { name: 'A', phone: '9820100001' },
+          partner: {
+            businessName: 'Kumar Store',
+            ownerName: 'Suresh',
+            phone: '9820100001',
+            gstNumber: 'G',
+            panNumber: 'P',
+            bankName: 'HDFC',
+            bankAccountNumber: '50100',
+            bankAccountHolder: 'Ramesh', // differs from owner → nameMismatch
+            ifscCode: 'HDFC0001',
+            upiId: null,
+            paymentMode: 'bank',
+            outlets: [
+              {
+                outletCode: 'OUT-1',
+                name: 'Kumar Store',
+                addressLine1: '12 SV Road',
+                addressLine2: null,
+                city: 'Mumbai',
+                state: 'Maharashtra',
+                pincode: '400058',
+                programName: 'Gold',
+                outletType: { name: 'SSS' },
+              },
+            ],
+          },
+          documents: [
+            {
+              documentType: 'GST_CERTIFICATE',
+              fileUrl: 'https://storage.googleapis.com/bucket/key',
+              fileKey: 'key',
+              fileName: 'gst.pdf',
+            },
+          ],
+          verificationItems: [
+            { fieldKey: 'PAYMENT', decision: 'APPROVED', remark: null, source: 'EXCEL' },
+          ],
+        },
+      ]);
+      mockStorage.getSignedUrl.mockResolvedValueOnce('https://signed/gst');
+
+      const buf = await service.reviewDump(gifsy);
+
+      expect(Buffer.isBuffer(buf)).toBe(true);
+      expect(buf.length).toBeGreaterThan(0);
+      const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
+      expect(where.status).toBe('PENDING_GIFSY');
+      expect(where.user).toEqual({ clientId: 'deoleo' });
+      expect(mockStorage.getSignedUrl).toHaveBeenCalledWith('key');
+    });
+  });
+
   describe('approval routing helpers (pure)', () => {
     it('canFirstApprove matches role to its pending status only', () => {
       expect(canFirstApprove('SALES_SO', 'PENDING_SO_APPROVAL')).toBe(true);

@@ -231,7 +231,7 @@ parser accepts literal `APPROVE` in all 7 cells with no cross-check that PAYMENT
 | **3.2** | Tree-based approval routing; retire `ROLE_PHONES` (#9) | helper fn signatures | swap data source → `SalesUser` tree |
 | **3.3** | first-approve / approve / reject + activate+wallet | `approve()` (real) | gate `/approve` on the bridge (§5) |
 | **3.4a** | schema (§4) + **human-gated migration** | existing `KycDocument`/`pennydrop*` as evidence | `KycVerificationItem` + 2 enums on partner |
-| **3.4b** | review-dump export | `lib/kyc-review-dump.ts` (port) | demo data → `prisma PENDING_GIFSY` query; relabel `partnerClass` |
+| **3.4b** ✅ | review-dump export (`GET /v1/kyc/review-dump`, Gifsy-only, StreamableFile) | `lib/kyc-review-dump.ts` ported pure | demo data → real `PENDING_GIFSY` query (clientId-scoped) + signed doc URLs; **columns kept verbatim** (owner) — "Partner Class" header retained, populated from outlet type |
 | **3.4c** | bulk upload: parser + dry-run preview + **commit** (§6) | `lib/kyc-bulk-verify.ts` (port) | per-submission commit tx; the bridge |
 | **3.4d** | bulk-approval UI + field-level rejection on detail page (#14) | `admin/kyc/approvals` (locked UX), `admin/kyc/[id]` | wire to real `/v1` |
 | **3.4e** | GST/bank evidence + reg-type → invoicing wiring (#12/#15) + DPDP masking | `lib/invoice` | read persisted enums |
@@ -250,6 +250,12 @@ Review targets, in priority order:
 
 Open build-time decisions (not blockers): submission→outlet resolution for re-share (§6, primary-outlet proposed);
 exact convenience-path test rewrite (§5/3.3).
+
+**Build follow-up (found in 3.4b):** the submission form overloads `KycDocumentType.OTHER` for **both** the store
+board photo and the self-declaration, so the dump can't cleanly distinguish them (currently split best-effort by file
+name). Proper fix = distinct doc types (`STORE_BOARD_PHOTO` / `SELF_DECLARATION` enum values — a small additive
+migration) wired into the submission form (3.1) and the dump mapping. Low priority; the 4 unambiguous docs
+(GST cert, address doc, owner photo, cheque) map cleanly today.
 
 ---
 

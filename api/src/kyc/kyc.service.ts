@@ -7,11 +7,17 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, KycFieldKey } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { KYC_FIELD_KEYS } from './kyc-verification.helper';
+import {
+  generateKycReviewDumpExcel,
+  KycReviewDumpEntry,
+  KycReviewDumpFieldState,
+} from './kyc-review-dump';
 import {
   ConsentKycDto,
   CreateKycDto,
@@ -781,6 +787,148 @@ export class KycService {
       pendingAging,
       rejectionByReason,
       reUploadRate: Math.round(reUploadRate * 10) / 10,
+    };
+  }
+
+  // ─── GET /v1/kyc/review-dump ─────────────────────────────────────────────────
+  /**
+   * Lane A export: one xlsx of all PENDING_GIFSY submissions for this tenant, with
+   * every filled field, signed document hyperlinks, and the per-field Decision/Remark
+   * columns reflecting current verification state (so re-export round-trips). Pure
+   * layout in kyc-review-dump.ts; this assembles entries from real data.
+   */
+  async reviewDump(user: JwtPayload): Promise<Buffer> {
+    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
+
+    const submissions = await this.prisma.kycSubmission.findMany({
+      where: { status: 'PENDING_GIFSY', user: { clientId: user.clientId } },
+      include: {
+        user: { select: { name: true, phone: true } },
+        partner: {
+          select: {
+            businessName: true,
+            ownerName: true,
+            phone: true,
+            gstNumber: true,
+            panNumber: true,
+            bankName: true,
+            bankAccountNumber: true,
+            bankAccountHolder: true,
+            ifscCode: true,
+            upiId: true,
+            paymentMode: true,
+            outlets: {
+              where: { isPrimary: true, deletedAt: null },
+              take: 1,
+              select: {
+                outletCode: true,
+                name: true,
+                addressLine1: true,
+                addressLine2: true,
+                city: true,
+                state: true,
+                pincode: true,
+                programName: true,
+                outletType: { select: { name: true } },
+              },
+            },
+          },
+        },
+        documents: { select: { documentType: true, fileUrl: true, fileKey: true, fileName: true } },
+        verificationItems: { select: { fieldKey: true, decision: true, remark: true, source: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const entries: KycReviewDumpEntry[] = [];
+    for (const s of submissions) {
+      const p = s.partner;
+      const o = p?.outlets[0];
+      const holder = p?.bankAccountHolder?.trim().toLowerCase();
+      const owner = p?.ownerName?.trim().toLowerCase();
+      entries.push({
+        submissionId: s.id,
+        outletCode: o?.outletCode ?? '',
+        outletName: o?.name ?? p?.businessName ?? '',
+        ownerName: p?.ownerName ?? '',
+        mobile: p?.phone ?? s.user.phone ?? '',
+        outletType: o?.outletType?.name ?? o?.programName ?? '',
+        gstNumber: p?.gstNumber ?? '',
+        panNumber: p?.panNumber ?? '',
+        address: [o?.addressLine1, o?.addressLine2].filter(Boolean).join(', '),
+        city: o?.city ?? '',
+        state: o?.state ?? '',
+        pincode: o?.pincode ?? '',
+        paymentMode: p?.paymentMode ?? '',
+        bankName: p?.bankName ?? undefined,
+        accountHolderName: p?.bankAccountHolder ?? undefined,
+        accountNumber: p?.bankAccountNumber ?? undefined,
+        ifscCode: p?.ifscCode ?? undefined,
+        upiId: p?.upiId ?? undefined,
+        boardGeo:
+          s.boardPhotoLat != null && s.boardPhotoLng != null
+            ? { lat: Number(s.boardPhotoLat), lng: Number(s.boardPhotoLng) }
+            : undefined,
+        nameMismatch: !!(holder && owner && holder !== owner),
+        documents: await this.resolveDumpDocuments(s.documents),
+        fields: this.dumpFieldStates(s.verificationItems),
+      });
+    }
+
+    return generateKycReviewDumpExcel(entries);
+  }
+
+  /** Build the 7-field state map, defaulting any field with no item to PENDING. */
+  private dumpFieldStates(
+    items: { fieldKey: KycFieldKey; decision: string; remark: string | null; source: string | null }[],
+  ): Record<KycFieldKey, KycReviewDumpFieldState> {
+    const out = {} as Record<KycFieldKey, KycReviewDumpFieldState>;
+    for (const k of KYC_FIELD_KEYS) out[k] = { decision: 'PENDING' };
+    for (const it of items) {
+      out[it.fieldKey] = {
+        decision: it.decision as KycReviewDumpFieldState['decision'],
+        remark: it.remark ?? undefined,
+        source: (it.source as KycReviewDumpFieldState['source']) ?? undefined,
+      };
+    }
+    return out;
+  }
+
+  /**
+   * Map KycDocument rows → the 6 dump doc columns, signing GCS objects for clickable
+   * links. NOTE: the submission form overloads documentType 'OTHER' for both the store
+   * board photo and the self-declaration, so those two are split best-effort by file
+   * name — the proper fix is distinct KycDocumentType values (tracked follow-up).
+   */
+  private async resolveDumpDocuments(
+    docs: { documentType: string; fileUrl: string; fileKey: string; fileName: string | null }[],
+  ): Promise<KycReviewDumpEntry['documents']> {
+    const sign = async (
+      d?: { fileUrl: string; fileKey: string },
+    ): Promise<string | undefined> => {
+      if (!d) return undefined;
+      if (d.fileKey && d.fileUrl?.startsWith('https://storage.googleapis.com/')) {
+        try {
+          return await this.storage.getSignedUrl(d.fileKey);
+        } catch {
+          return d.fileUrl;
+        }
+      }
+      return d.fileUrl && !d.fileUrl.startsWith('pending://') ? d.fileUrl : undefined;
+    };
+    const byType = (t: string) => docs.find((d) => d.documentType === t);
+
+    const others = docs.filter((d) => d.documentType === 'OTHER');
+    const board = others.find((d) => /board|store/i.test(d.fileName ?? ''));
+    const decl = others.find((d) => /declar|self/i.test(d.fileName ?? ''));
+
+    return {
+      gstCertificateUrl: await sign(byType('GST_CERTIFICATE')),
+      addressDocUrl: await sign(byType('SHOP_ESTABLISHMENT') ?? byType('TRADE_LICENSE')),
+      selfDeclarationUrl: await sign(decl ?? others.find((d) => d !== board)),
+      boardPhotoUrl: await sign(board),
+      ownerPhotoUrl: await sign(byType('SELFIE')),
+      chequeUrl: await sign(byType('CANCELLED_CHEQUE')),
     };
   }
 }
