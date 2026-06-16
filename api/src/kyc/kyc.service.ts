@@ -38,9 +38,8 @@ import {
 } from './dto/kyc.dto';
 import {
   canFirstApprove,
-  initialKycStatus,
   nextStatusAfterFirstApprove,
-  detectEscalation,
+  statusForApproverCode,
 } from './kyc-approval.helper';
 
 // ─── KycFieldKey → ReKYCFlags map (reconcile §6 SHOULD-FIX #3) ──────────────
@@ -164,6 +163,98 @@ export class KycService {
     return role === 'GIFSY_ADMIN' || role === 'CLIENT_ADMIN';
   }
 
+  /**
+   * Resolves the initial KYC status and escalation note by walking the real
+   * SalesUser reporting tree upward from the submitter's record.
+   *
+   * Algorithm:
+   *   1. Find the submitter's SalesUser (tenant-scoped, not soft-deleted).
+   *      If none (non-sales role: GIFSY_ADMIN, RETAILER, etc.) → SUBMITTED, null.
+   *   2. Walk reportingToId upward (max 10 hops, cycle-safe). Skip any manager
+   *      that is inactive (isActive=false) OR soft-deleted (deletedAt != null).
+   *   3. The first ACTIVE manager found → map their hierarchyLevel.code to a
+   *      KycStatus via statusForApproverCode (SO→PENDING_SO, ASM→PENDING_ASM,
+   *      RSM/ZNM/NSM→PENDING_RSM).
+   *   4. escalatedFrom: if one or more intermediate managers were skipped, set it
+   *      to the FIRST skipped level code (matches legacy detectEscalation intent).
+   *   5. Fallback when no active manager found up the entire chain:
+   *      PENDING_RSM_APPROVAL (routes to the top of the known bucket rather than
+   *      silently dropping the submission into SUBMITTED). escalatedFrom is set to
+   *      the first skipped level code if any skips occurred, else null.
+   *
+   * Every Prisma query is scoped to `user.clientId` to prevent cross-tenant reads.
+   * The walk is bounded to MAX_HOPS to avoid infinite loops on cyclic data.
+   */
+  private async resolveInitialRouting(
+    user: JwtPayload,
+  ): Promise<{ status: string; escalatedFrom: string | null }> {
+    const MAX_HOPS = 10;
+
+    // Step 1: find the submitter's own SalesUser.
+    const submitterSalesUser = await this.prisma.salesUser.findFirst({
+      where: {
+        userId: user.sub,
+        clientId: user.clientId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        reportingToId: true,
+      },
+    });
+
+    // Non-sales submitter (GIFSY_ADMIN, RETAILER, etc.) → plain SUBMITTED.
+    if (!submitterSalesUser) {
+      return { status: 'SUBMITTED', escalatedFrom: null };
+    }
+
+    // Step 2–4: walk the reporting chain upward.
+    let currentId: string | null = submitterSalesUser.reportingToId;
+    let firstSkippedCode: string | null = null;
+    let hops = 0;
+    const visitedIds = new Set<string>();
+
+    while (currentId && hops < MAX_HOPS) {
+      if (visitedIds.has(currentId)) break; // cycle guard
+      visitedIds.add(currentId);
+      hops++;
+
+      const manager = await this.prisma.salesUser.findFirst({
+        where: {
+          id: currentId,
+          clientId: user.clientId,
+        },
+        select: {
+          id: true,
+          isActive: true,
+          deletedAt: true,
+          reportingToId: true,
+          hierarchyLevel: { select: { code: true } },
+        },
+      });
+
+      if (!manager) break; // dangling reference — stop walking
+
+      const isInactive = !manager.isActive || manager.deletedAt != null;
+
+      if (isInactive) {
+        // Record the first skipped level for the escalation note.
+        if (firstSkippedCode === null) {
+          firstSkippedCode = manager.hierarchyLevel.code;
+        }
+        currentId = manager.reportingToId;
+        continue;
+      }
+
+      // Active manager found — resolve status.
+      const status = statusForApproverCode(manager.hierarchyLevel.code);
+      return { status, escalatedFrom: firstSkippedCode };
+    }
+
+    // Step 5: no active manager found up the chain → escalate to RSM bucket.
+    return { status: 'PENDING_RSM_APPROVAL', escalatedFrom: firstSkippedCode };
+  }
+
   /** Enqueue a KYC notification, mirroring the source's fire-and-forget semantics. */
   private async notify(
     userId: string,
@@ -230,9 +321,8 @@ export class KycService {
     });
     if (existing) throw new BadRequestException('You already have a pending KYC submission');
 
-    // 4. Escalation routing (preserved from original).
-    const status = initialKycStatus(user.role);
-    const escalatedFrom = detectEscalation(user.role, status);
+    // 4. Escalation routing — DB-backed via the real SalesUser reporting tree.
+    const { status, escalatedFrom } = await this.resolveInitialRouting(user);
 
     // 5. Create KycSubmission with all geo + notes.
     const submission = await this.prisma.kycSubmission.create({

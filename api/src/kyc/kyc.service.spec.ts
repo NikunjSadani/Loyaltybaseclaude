@@ -19,8 +19,6 @@ import { KYC_FIELD_KEYS } from './kyc-verification.helper';
 import {
   canFirstApprove,
   nextStatusAfterFirstApprove,
-  initialKycStatus,
-  detectEscalation,
 } from './kyc-approval.helper';
 
 // ─── Shared transaction mock ──────────────────────────────────────────────────
@@ -54,6 +52,7 @@ const mockPrisma = {
   kycDocument: { create: jest.fn() },
   otpCode: { findFirst: jest.fn(), update: jest.fn() },
   outlet: { findUnique: jest.fn(), update: jest.fn() },
+  salesUser: { findFirst: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
@@ -79,6 +78,9 @@ describe('KycService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    // clearAllMocks does not drain mockResolvedValueOnce queues; reset the
+    // salesUser mock explicitly so stale Once-values from prior tests don't bleed.
+    mockPrisma.salesUser.findFirst.mockReset();
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         KycService,
@@ -132,6 +134,8 @@ describe('KycService', () => {
     };
 
     const primeCreateMocks = () => {
+      // resolveInitialRouting: no SalesUser → SUBMITTED (simplest case for doc tests)
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
       mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
       mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(null); // no in-flight dup
       mockPrisma.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-1' });
@@ -247,23 +251,159 @@ describe('KycService', () => {
       expect(nextStatusAfterFirstApprove('PENDING_ASM_APPROVAL')).toBe('PENDING_GIFSY');
       expect(nextStatusAfterFirstApprove('PENDING_RSM_APPROVAL')).toBe('PENDING_GIFSY');
     });
+  });
 
-    it('initialKycStatus routes a SALES_SO submitter to the ASM approver', () => {
-      expect(initialKycStatus('SALES_SO')).toBe('PENDING_ASM_APPROVAL');
+  // ─── resolveInitialRouting (DB-backed) ────────────────────────────────────────
+  // These tests exercise the private method via create() with mocked SalesUser
+  // queries. The salesUser mock is called first (resolveInitialRouting), then the
+  // rest of the create() pipeline (channelPartner, kycSubmission, etc.).
+
+  describe('resolveInitialRouting (via create)', () => {
+    /** Build a minimal SO-role submitter */
+    const isr: JwtPayload = { sub: 'isr1', role: 'SALES_ISR', clientId: 'deoleo', phone: '', name: '' };
+
+    const baseDto = {
+      partnerName: 'Test Store',
+      mobile: '9000000001',
+      address: '1 Main St',
+      city: 'Mumbai',
+      state: 'Maharashtra',
+      pincode: '400001',
+    };
+
+    /** Prime create() mocks after resolveInitialRouting resolves. */
+    const primeCreate = () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-rt-1' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+    };
+
+    it('submitter with no SalesUser record → status SUBMITTED, escalatedFrom null', async () => {
+      // resolveInitialRouting: no SalesUser → SUBMITTED
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+      primeCreate();
+      const res = await service.create(
+        { sub: 'retail1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' },
+        baseDto as never,
+      );
+      expect(res).toMatchObject({ status: 'SUBMITTED', escalatedFrom: null });
+      // Confirm the salesUser query was tenant-scoped
+      const suWhere = mockPrisma.salesUser.findFirst.mock.calls[0][0].where;
+      expect(suWhere.clientId).toBe('deoleo');
+      expect(suWhere.deletedAt).toBe(null);
     });
 
-    it('initialKycStatus falls back to SUBMITTED for non-field roles', () => {
-      expect(initialKycStatus('GIFSY_ADMIN')).toBe('SUBMITTED');
+    it("direct manager active -- routes to that manager's level status", async () => {
+      // Submitter SalesUser → reportingToId = 'so-id'
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' }) // submitter
+        .mockResolvedValueOnce({                                           // manager (SO)
+          id: 'so-su',
+          isActive: true,
+          deletedAt: null,
+          reportingToId: 'asm-su',
+          hierarchyLevel: { code: 'SO' },
+        });
+      primeCreate();
+      const res = await service.create(isr, baseDto as never);
+      expect(res).toMatchObject({ status: 'PENDING_SO_APPROVAL', escalatedFrom: null });
+      // audit NIT-1: the per-hop manager lookup must ALSO be tenant-scoped, not just
+      // the submitter lookup — guard the highest-value invariant of this change.
+      expect(mockPrisma.salesUser.findFirst.mock.calls[1][0].where.clientId).toBe('deoleo');
     });
 
-    it('detectEscalation flags a skipped manager from the role:status key', () => {
-      expect(detectEscalation('SALES_SO', 'PENDING_RSM_APPROVAL')).toBe('ASM');
-      expect(detectEscalation('SALES_SO', 'PENDING_ASM_APPROVAL')).toBeNull();
+    it('direct manager resigned (inactive) → escalates to next active manager, escalatedFrom set', async () => {
+      // Submitter → SO (inactive) → ASM (active)
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' })   // submitter
+        .mockResolvedValueOnce({                                              // SO — inactive
+          id: 'so-su',
+          isActive: false,
+          deletedAt: null,
+          reportingToId: 'asm-su',
+          hierarchyLevel: { code: 'SO' },
+        })
+        .mockResolvedValueOnce({                                              // ASM — active
+          id: 'asm-su',
+          isActive: true,
+          deletedAt: null,
+          reportingToId: null,
+          hierarchyLevel: { code: 'ASM' },
+        });
+      primeCreate();
+      const res = await service.create(isr, baseDto as never);
+      expect(res).toMatchObject({ status: 'PENDING_ASM_APPROVAL', escalatedFrom: 'SO' });
     });
+
+    it('direct manager soft-deleted → treated as inactive and skipped', async () => {
+      // Submitter → SO (deletedAt set) → ASM (active)
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' })
+        .mockResolvedValueOnce({
+          id: 'so-su',
+          isActive: true,
+          deletedAt: new Date('2024-01-01'),  // soft-deleted counts as inactive
+          reportingToId: 'asm-su',
+          hierarchyLevel: { code: 'SO' },
+        })
+        .mockResolvedValueOnce({
+          id: 'asm-su',
+          isActive: true,
+          deletedAt: null,
+          reportingToId: null,
+          hierarchyLevel: { code: 'ASM' },
+        });
+      primeCreate();
+      const res = await service.create(isr, baseDto as never);
+      expect(res).toMatchObject({ status: 'PENDING_ASM_APPROVAL', escalatedFrom: 'SO' });
+    });
+
+    it('no active manager anywhere up the chain → fallback PENDING_RSM_APPROVAL', async () => {
+      // Submitter → SO (inactive) → no further manager
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' })
+        .mockResolvedValueOnce({
+          id: 'so-su',
+          isActive: false,
+          deletedAt: null,
+          reportingToId: null,
+          hierarchyLevel: { code: 'SO' },
+        });
+      primeCreate();
+      const res = await service.create(isr, baseDto as never);
+      expect(res).toMatchObject({ status: 'PENDING_RSM_APPROVAL', escalatedFrom: 'SO' });
+    });
+
+    it('lookup is tenant-scoped (clientId in salesUser where clause)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+      primeCreate();
+      await service.create(isr, baseDto as never);
+      const suWhere = mockPrisma.salesUser.findFirst.mock.calls[0][0].where;
+      expect(suWhere.clientId).toBe('deoleo');
+      expect(suWhere.userId).toBe('isr1');
+    });
+
+    it('cycle in reporting chain is bounded (no hang, fallback reached)', async () => {
+      // Submitter → a-su (inactive) → b-su (inactive) → a-su (cycle detected by visitedIds).
+      // The walk makes exactly 3 salesUser.findFirst calls:
+      //   1. submitter lookup  2. a-su  3. b-su  → then a-su is already in visitedIds → break.
+      // Fallback: no active manager found → PENDING_RSM_APPROVAL.
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'a-su' })
+        .mockResolvedValueOnce({ id: 'a-su', isActive: false, deletedAt: null, reportingToId: 'b-su', hierarchyLevel: { code: 'SO' } })
+        .mockResolvedValueOnce({ id: 'b-su', isActive: false, deletedAt: null, reportingToId: 'a-su', hierarchyLevel: { code: 'SO' } });
+      // After those 3, the visited-set guard fires (a-su already seen) → break.
+      primeCreate();
+      const res = await service.create(isr, baseDto as never);
+      expect(res.status).toBe('PENDING_RSM_APPROVAL');
+    }, 5000);
   });
 
   describe('create', () => {
     it('rejects a duplicate in-flight submission', async () => {
+      // resolveInitialRouting: SO has no SalesUser → SUBMITTED
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'existing' });
       await expect(service.create(so, { partnerName: 'Acme', mobile: '9000000000', address: 'addr1', city: 'X', state: 'Y', pincode: '110011' } as never)).rejects.toBeInstanceOf(
@@ -272,6 +412,16 @@ describe('KycService', () => {
     });
 
     it('creates a submission scoped to the caller and records history', async () => {
+      // resolveInitialRouting: SO → ASM (active)
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'so-su', reportingToId: 'asm-su' })  // submitter
+        .mockResolvedValueOnce({                                             // ASM manager
+          id: 'asm-su',
+          isActive: true,
+          deletedAt: null,
+          reportingToId: null,
+          hierarchyLevel: { code: 'ASM' },
+        });
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       mockPrisma.kycSubmission.findFirst.mockResolvedValue(null);
       mockPrisma.kycSubmission.create.mockResolvedValue({ id: 'sub1' });
@@ -324,7 +474,7 @@ describe('KycService', () => {
       await expect(service.getOne(partner, 's1')).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('forbids a non-admin from viewing someone else’s submission', async () => {
+    it("forbids a non-admin from viewing someone else’s submission", async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 's1', userId: 'other' });
       await expect(service.getOne(partner, 's1')).rejects.toBeInstanceOf(ForbiddenException);
     });

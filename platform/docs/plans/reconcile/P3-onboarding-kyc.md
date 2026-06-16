@@ -342,3 +342,18 @@ Built by a Sonnet executor, independently audited (**verdict: sound to commit**)
 Audit confirmed: B1/S1 preserved; REJECTED not overwritten; tenant-scoped + tx-atomic on both new paths; enqueue
 only post-commit. NITs (service remark guard + its test) folded in; redundant pre-tx load left as-is. Gated: tsc 0,
 **101/101** kyc tests.
+
+---
+
+## 13 · 3.2 — tree-based approval routing, `ROLE_PHONES` retired (gap #9 RESOLVED), 2026-06-16
+
+Built by a Sonnet executor, independently audited (**verdict: sound to commit**). `KycService.resolveInitialRouting`
+replaces the hardcoded `ROLE_PHONES` table: it finds the submitter's `SalesUser` (tenant-scoped), walks
+`reportingToId` upward to the first **ACTIVE** manager (skipping `isActive:false`/soft-deleted), and maps the
+manager's hierarchy level → `PENDING_SO/ASM/RSM_APPROVAL` (RSM/ZNM/NSM collapse to RSM). Escalation = the first
+skipped level. Fallbacks: no `SalesUser` → `SUBMITTED`; no active manager up-chain → `PENDING_RSM_APPROVAL`.
+`ROLE_PHONES` + `resolveApprover`/`initialKycStatus`/`detectEscalation` retired (grep-clean); `canFirstApprove`/
+`nextStatusAfterFirstApprove` kept. **Audit confirmed the key invariant: per-hop tenant scoping is airtight** (id +
+clientId on a global-unique PK ⟹ cross-tenant resolution impossible); walk doubly-bounded (10 hops + visited-set
+cycle guard). NIT folded in: a test now asserts `clientId` on the per-hop manager lookup. Gated: tsc 0, **105/105**
+kyc tests. Closes gap #9.
