@@ -85,6 +85,22 @@ export class KycController {
     return this.kyc.slaMetrics(user);
   }
 
+  /**
+   * GET /v1/kyc/review-queue
+   *
+   * Returns all PENDING_GIFSY submissions for this tenant with their 7-field
+   * verification state, so the approvals UI can show queue items with n/7 progress
+   * and per-field status without a separate detail fetch per row.
+   *
+   * Gifsy-admin only. Placed BEFORE the :id route to avoid param shadowing.
+   */
+  @Get('review-queue')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('kyc:read')
+  reviewQueue(@CurrentUser() user: JwtPayload) {
+    return this.kyc.reviewQueue(user);
+  }
+
   @Get('review-dump')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('kyc:read')

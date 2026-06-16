@@ -1,17 +1,17 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { use } from 'react';
 import {
   ArrowLeft,
   Building2,
   Phone,
   MapPin,
-  Calendar,
   CheckCircle,
   XCircle,
   Clock,
   RefreshCw,
+  AlertTriangle,
   CreditCard,
   FileText,
 } from 'lucide-react';
@@ -19,6 +19,55 @@ import Link from 'next/link';
 import { Spinner } from '@/components/ui/spinner';
 import { KYCReviewer } from '@/components/admin/kyc-reviewer';
 import type { EntityType, GSTRegistrationType } from '@/lib/invoice';
+
+// ─── 7-field verification types (shared with approvals page) ─────────────────
+
+type KycFieldKey =
+  | 'PAYMENT'
+  | 'GST_VALIDATION'
+  | 'GST_DOCUMENT'
+  | 'ADDRESS'
+  | 'ADDRESS_DOCUMENT'
+  | 'BOARD_PHOTO'
+  | 'OWNER_PHOTO';
+
+type KycFieldDecision = 'PENDING' | 'APPROVED' | 'REJECTED';
+
+interface KycFieldState {
+  decision: KycFieldDecision;
+  remark?: string;
+  source?: 'EXCEL' | 'PORTAL';
+}
+
+const KYC_FIELD_ORDER: KycFieldKey[] = [
+  'PAYMENT', 'GST_VALIDATION', 'GST_DOCUMENT',
+  'ADDRESS', 'ADDRESS_DOCUMENT', 'BOARD_PHOTO', 'OWNER_PHOTO',
+];
+
+const KYC_FIELD_LABELS: Record<KycFieldKey, string> = {
+  PAYMENT: 'Payment (Bank/UPI)',
+  GST_VALIDATION: 'GST Validation',
+  GST_DOCUMENT: 'GST Document',
+  ADDRESS: 'Address',
+  ADDRESS_DOCUMENT: 'Address Document',
+  BOARD_PHOTO: 'Store Board Photo',
+  OWNER_PHOTO: 'Owner Photo',
+};
+
+function authToken(): string {
+  return typeof localStorage !== 'undefined' ? (localStorage.getItem('token') ?? '') : '';
+}
+
+/** Unwrap the backend { success, data } envelope. Throws on success=false. */
+async function unwrapJson<T>(res: Response): Promise<T> {
+  const body = await res.json().catch(() => ({ success: false, error: `HTTP ${res.status}` })) as
+    | { success: true; data: T }
+    | { success: false; error?: string };
+  if (!res.ok || !body.success) {
+    throw new Error((body as { error?: string }).error ?? `Request failed (${res.status})`);
+  }
+  return (body as { success: true; data: T }).data;
+}
 
 const ENTITY_TYPE_LABELS: Record<EntityType, string> = {
   INDIVIDUAL: 'Individual / Proprietor',
@@ -52,6 +101,7 @@ interface ApiKycDetail {
     bankName?: string | null; bankAccountNumber?: string | null; ifscCode?: string | null;
   } | null;
   documents?: { id: string; documentType: string; fileUrl?: string; status: string }[];
+  verificationItems?: { fieldKey: string; decision: string; remark?: string | null; source?: string | null }[];
   statusHistory?: { id: string; toStatus: string; createdAt: string; notes?: string | null }[];
 }
 
@@ -67,6 +117,7 @@ type KycDetailShape = {
   statusHistory: Array<{ status: string; timestamp: string; user: string; remark?: string }>;
   auditLog: Array<{ action: string; user: string; timestamp: string; detail: string }>;
   documents: Array<{ id: string; type: string; label: string; url: string; status: 'pending' | 'verified' | 'rejected' }>;
+  verificationItems: Array<{ fieldKey: string; decision: string; remark?: string | null; source?: string | null }>;
 };
 
 function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
@@ -79,6 +130,7 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
   };
   return {
     id:               s.id,
+    verificationItems: s.verificationItems ?? [],
     outletName:       s.partner?.businessName ?? s.user.name,
     firmName:         s.partner?.businessName ?? s.user.name,
     mobile:           s.user.phone,
@@ -208,6 +260,190 @@ const PENNY_ICONS = {
   pending: <Clock className="w-4 h-4 text-amber-500" />,
 };
 
+// ─── Per-field verification panel (wired to POST /api/kyc/:id/verify) ─────────
+
+function KycFieldVerificationPanel({
+  submissionId,
+  initialItems,
+}: {
+  submissionId: string;
+  initialItems?: { fieldKey: string; decision: string; remark?: string | null; source?: string | null }[];
+}) {
+  const [fields, setFields] = useState<Record<KycFieldKey, KycFieldState>>(() => {
+    const out = {} as Record<KycFieldKey, KycFieldState>;
+    for (const k of KYC_FIELD_ORDER) out[k] = { decision: 'PENDING' };
+    // Seed from the submission's existing verification items (3.4d).
+    for (const it of initialItems ?? []) {
+      if ((KYC_FIELD_ORDER as string[]).includes(it.fieldKey)) {
+        out[it.fieldKey as KycFieldKey] = {
+          decision: it.decision as KycFieldDecision,
+          remark: it.remark ?? undefined,
+          source: (it.source as KycFieldState['source']) ?? undefined,
+        };
+      }
+    }
+    return out;
+  });
+  const [remarkInputs, setRemarkInputs] = useState<Record<KycFieldKey, string>>(
+    () => Object.fromEntries(KYC_FIELD_ORDER.map(k => [k, ''])) as Record<KycFieldKey, string>
+  );
+  const [fieldLoading, setFieldLoading] = useState<Record<KycFieldKey, boolean>>(
+    () => Object.fromEntries(KYC_FIELD_ORDER.map(k => [k, false])) as Record<KycFieldKey, boolean>
+  );
+  const [fieldError, setFieldError] = useState<Record<KycFieldKey, string>>(
+    () => Object.fromEntries(KYC_FIELD_ORDER.map(k => [k, ''])) as Record<KycFieldKey, string>
+  );
+  const [derivedStatus, setDerivedStatus] = useState<string | null>(null);
+
+  const applyField = useCallback(
+    async (key: KycFieldKey, decision: 'APPROVED' | 'REJECTED', remark?: string) => {
+      setFieldLoading(prev => ({ ...prev, [key]: true }));
+      setFieldError(prev => ({ ...prev, [key]: '' }));
+      try {
+        const res = await fetch(`/api/kyc/${submissionId}/verify`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken()}`,
+          },
+          body: JSON.stringify({ fieldKey: key, decision, remark: remark ?? undefined }),
+        });
+        const data = await unwrapJson<{
+          fieldKey: KycFieldKey;
+          fieldDecision: 'APPROVED' | 'REJECTED';
+          derivedStatus: string;
+        }>(res);
+        setFields(prev => ({
+          ...prev,
+          [key]: { decision: data.fieldDecision, remark, source: 'PORTAL' as const },
+        }));
+        setDerivedStatus(data.derivedStatus);
+        // Clear the remark input after a successful reject
+        if (decision === 'REJECTED') {
+          setRemarkInputs(prev => ({ ...prev, [key]: '' }));
+        }
+      } catch (err) {
+        setFieldError(prev => ({
+          ...prev,
+          [key]: err instanceof Error ? err.message : 'Field verify failed.',
+        }));
+      } finally {
+        setFieldLoading(prev => ({ ...prev, [key]: false }));
+      }
+    },
+    [submissionId]
+  );
+
+  const terminalCount = KYC_FIELD_ORDER.filter(k => fields[k].decision !== 'PENDING').length;
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-4">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-sm font-semibold text-gray-800">
+          Field Verification (Gifsy Admin)
+        </h2>
+        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+          terminalCount === 7 ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'
+        }`}>
+          {terminalCount}/7 done
+        </span>
+      </div>
+
+      {derivedStatus && derivedStatus !== 'PENDING_GIFSY' && (
+        <div className={`mb-3 text-xs px-3 py-2 rounded flex items-center gap-2 ${
+          derivedStatus === 'APPROVED'
+            ? 'bg-green-50 border border-green-200 text-green-800'
+            : 'bg-amber-50 border border-amber-200 text-amber-800'
+        }`}>
+          {derivedStatus === 'APPROVED'
+            ? <CheckCircle className="w-3.5 h-3.5 shrink-0" />
+            : <RefreshCw className="w-3.5 h-3.5 shrink-0" />}
+          Derived status: <strong>{derivedStatus}</strong>
+        </div>
+      )}
+
+      <p className="text-[10px] text-gray-400 mb-3">
+        These decisions call <code>POST /api/kyc/{submissionId}/verify</code> directly.
+        The backend runs the bridge after each field — if all 7 are terminal it auto-transitions
+        the submission (APPROVED or RE_UPLOAD_REQUIRED).
+      </p>
+
+      <div className="divide-y divide-gray-100">
+        {KYC_FIELD_ORDER.map(key => {
+          const state = fields[key];
+          const remark = remarkInputs[key];
+          const canReject = remark.trim().length > 0;
+          const isLoading = fieldLoading[key];
+          const err = fieldError[key];
+
+          return (
+            <div key={key} className="py-3 flex flex-col gap-1.5 sm:flex-row sm:items-start sm:gap-4">
+              {/* Label + chip */}
+              <div className="sm:w-44 shrink-0">
+                <p className="text-xs font-medium text-gray-700">{KYC_FIELD_LABELS[key]}</p>
+                <div className="mt-1">
+                  <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${
+                    state.decision === 'APPROVED' ? 'bg-green-100 text-green-800' :
+                    state.decision === 'REJECTED' ? 'bg-red-100 text-red-700' :
+                    'bg-gray-100 text-gray-500'
+                  }`}>
+                    {state.decision === 'APPROVED' && <CheckCircle className="h-3 w-3" />}
+                    {state.decision === 'REJECTED' && <XCircle className="h-3 w-3" />}
+                    {state.decision}
+                    {state.source && <span className="text-[10px] font-normal opacity-70">[{state.source}]</span>}
+                  </span>
+                </div>
+                {state.decision === 'REJECTED' && state.remark && (
+                  <p className="text-xs text-red-600 mt-0.5 italic">{state.remark}</p>
+                )}
+              </div>
+
+              {/* Controls */}
+              <div className="flex flex-col gap-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    disabled={isLoading}
+                    onClick={() => applyField(key, 'APPROVED')}
+                    className="flex items-center gap-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-xs h-6 px-2.5 rounded font-medium"
+                  >
+                    {isLoading ? <RefreshCw className="h-3 w-3 animate-spin" /> : <CheckCircle className="h-3 w-3" />}
+                    Approve
+                  </button>
+
+                  <input
+                    type="text"
+                    placeholder="Remark (required)"
+                    value={remark}
+                    disabled={isLoading}
+                    onChange={e => setRemarkInputs(prev => ({ ...prev, [key]: e.target.value }))}
+                    className="border border-gray-200 rounded px-2 py-0.5 text-xs h-6 w-44 focus:outline-none focus:ring-1 focus:ring-red-300 disabled:opacity-50"
+                  />
+
+                  <button
+                    disabled={!canReject || isLoading}
+                    onClick={() => applyField(key, 'REJECTED', remark.trim())}
+                    title={canReject ? undefined : 'Enter a remark to reject'}
+                    className="flex items-center gap-1 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white text-xs h-6 px-2.5 rounded font-medium"
+                  >
+                    <XCircle className="h-3 w-3" />Reject
+                  </button>
+                </div>
+                {err && (
+                  <span className="text-xs text-red-600 flex items-center gap-1">
+                    <AlertTriangle className="h-3 w-3" />{err}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Main detail page ─────────────────────────────────────────────────────────
+
 export default function KYCDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [kyc, setKyc] = useState<KycDetailShape | null>(null);
@@ -222,7 +458,9 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
 
   useEffect(() => {
     if (!id) return;
-    fetch(`/api/kyc/${id}`)
+    fetch(`/api/kyc/${id}`, {
+      headers: { Authorization: `Bearer ${authToken()}` },
+    })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { submission: ApiKycDetail }; error?: string }) => {
         if (json.success && json.data) {
@@ -475,6 +713,9 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
               onRequestReupload={handleReupload}
             />
           </div>
+
+          {/* Per-field KYC verification — wired to POST /api/kyc/:id/verify */}
+          <KycFieldVerificationPanel submissionId={kyc.id} initialItems={kyc.verificationItems} />
 
           {/* Status History Timeline */}
           <div className="bg-white rounded-xl border border-gray-200 p-4">

@@ -368,3 +368,14 @@ Audit **verdict: sound to commit** (no blocker; confirmed S1/B1 on re-kyc, gst-d
 - **3.4e reg-type capture + DPDP masking:** `POST /v1/kyc/:id/gst-details` (Gifsy-only) persists `entityType`/`gstRegistrationType` on the partner (tenant-scoped via the submission join, enum-validated) + GST evidence on the item; `lib/invoice` reads these in **P6** (seam noted). `getOne()` masks bank/PAN/GST to last-4.
 
 Audit remediations folded in: **masking now unmasks the submission OWNER** (the audit showed `getOne` already 403s non-admin non-owners, so the only caller ever masked was the owner viewing their own data — wrong; now owner + admin see full, masking is defensive cover for any future non-owner read) + a direct mask-helper test; consent lookup `clientId`-scoped for consistency. **Open decisions (documented, fail-safe):** masking keys on `isAdmin` not the `kyc:view_documents` permission (TODO in code, switch when the RBAC flag-gate is enforced; CLIENT_ADMIN sees full for its own tenant — intended). Deferred NIT: scope the consent OTP to the submission/owner phone (pre-existing). Gated: tsc 0, **124/124** kyc tests, boot smoke (both routes map, unauth 401).
+
+---
+
+## 15 · 3.4d — Gifsy bulk-approval UI wired to the real backend, 2026-06-16
+
+Built by a Sonnet executor; backend part independently audited (**sound to commit**). 
+- **Backend:** `GET /v1/kyc/review-queue` (Gifsy-only, tenant-scoped) returns each `PENDING_GIFSY` submission **with its 7-field state** (reuses `dumpFieldStates`) for the queue's n/7 progress. `getOne()` now also returns `verificationItems` so the detail panel seeds real state (audit-driven). +5 queue tests → **129 kyc tests**, tsc 0.
+- **FE:** `admin/kyc/approvals` repointed off the platform demo routes onto the backend via the proxy — queue → `/api/kyc/review-queue`, export → `/api/kyc/review-dump`, preview → `/api/kyc/bulk-verify?apply=false`, **commit → `?apply=true`**; envelope-unwrapped, Bearer auth preserved. `admin/kyc/[id]` detail page gained a per-field Approve/Reject panel → `POST /api/kyc/:id/verify` (remark required on reject), seeded from `verificationItems`.
+- **Live browser verification (Chrome extension, against the running dev servers):** the approvals page renders the workspace; it fires `GET /api/kyc/review-queue`; the Next proxy forwards `/api/kyc/*` → backend `/v1/kyc/*`; the backend route is live (curl `/v1/kyc/review-queue` unauth → **401**, `/health` → 200) and returns 401 to the unauthenticated browser, which the page handles gracefully. **Full FE→proxy→backend wiring confirmed**; queue DATA needs a Gifsy login (auth-gated, expected).
+- **Unrelated pre-existing bug surfaced:** platform RootLayout errors `clients.partnerClasses does not exist` (platform schema references a dev-DB-dropped column from the partner-class retirement). Tracked separately — not a 3.4d defect.
+- Platform typecheck clean. Demo routes (`admin/kyc/*`) left in place (retired separately).

@@ -1182,6 +1182,116 @@ describe('KycService', () => {
     });
   });
 
+  // ── Task 3.4d: review-queue ──────────────────────────────────────────────────
+  describe('reviewQueue (GET /v1/kyc/review-queue)', () => {
+    it('is Gifsy-only — non-Gifsy caller gets ForbiddenException', async () => {
+      await expect(service.reviewQueue(so)).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('queries PENDING_GIFSY scoped to the tenant', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
+      await service.reviewQueue(gifsy);
+      const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
+      expect(where.status).toBe('PENDING_GIFSY');
+      expect(where.user).toEqual({ clientId: 'deoleo' });
+    });
+
+    it('returns entries array with submissionId, identity, and 7-field state', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
+        {
+          id: 'SUB-Q-1',
+          boardPhotoLat: 19.1,
+          boardPhotoLng: 72.8,
+          user: { name: 'Owner A', phone: '9820100001' },
+          partner: {
+            businessName: 'Kumar Store',
+            ownerName: 'Kumar',
+            phone: '9820100001',
+            gstNumber: 'GSTXXX',
+            panNumber: 'PANXXX',
+            bankName: 'HDFC',
+            bankAccountNumber: '50100',
+            bankAccountHolder: 'Kumar', // same as owner → nameMismatch=false
+            ifscCode: 'HDFC0001',
+            upiId: null,
+            paymentMode: 'bank',
+            outlets: [
+              {
+                outletCode: 'OUT-Q-1',
+                name: 'Kumar Store',
+                addressLine1: '12 SV Road',
+                addressLine2: null,
+                city: 'Mumbai',
+                state: 'Maharashtra',
+                pincode: '400058',
+                programName: 'Gold',
+                outletType: { name: 'SSS' },
+              },
+            ],
+          },
+          verificationItems: [
+            { fieldKey: 'PAYMENT', decision: 'APPROVED', remark: null, source: 'PORTAL' },
+          ],
+        },
+      ]);
+
+      const result = await service.reviewQueue(gifsy);
+
+      expect(result.entries).toHaveLength(1);
+      const entry = result.entries[0];
+      expect(entry.submissionId).toBe('SUB-Q-1');
+      expect(entry.outletCode).toBe('OUT-Q-1');
+      expect(entry.outletName).toBe('Kumar Store');
+      expect(entry.mobile).toBe('9820100001');
+      // 7 fields present
+      expect(Object.keys(entry.fields)).toHaveLength(7);
+      // PAYMENT is APPROVED (from verificationItems)
+      expect(entry.fields['PAYMENT'].decision).toBe('APPROVED');
+      expect(entry.fields['PAYMENT'].source).toBe('PORTAL');
+    });
+
+    it('defaults missing verification fields to PENDING', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
+        {
+          id: 'SUB-Q-2',
+          boardPhotoLat: null,
+          boardPhotoLng: null,
+          user: { name: 'B', phone: '9000000002' },
+          partner: {
+            businessName: 'B Store',
+            ownerName: 'B',
+            phone: '9000000002',
+            gstNumber: null,
+            panNumber: null,
+            bankName: null,
+            bankAccountNumber: null,
+            bankAccountHolder: null,
+            ifscCode: null,
+            upiId: null,
+            paymentMode: null,
+            outlets: [],
+          },
+          verificationItems: [], // no items → all 7 should default to PENDING
+        },
+      ]);
+
+      const result = await service.reviewQueue(gifsy);
+
+      const entry = result.entries[0];
+      expect(Object.keys(entry.fields)).toHaveLength(7);
+      for (const decision of Object.values(entry.fields)) {
+        expect((decision as { decision: string }).decision).toBe('PENDING');
+      }
+      expect(entry.boardGeo).toBeNull();
+    });
+
+    it('returns an empty entries array when no PENDING_GIFSY submissions exist', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
+      const result = await service.reviewQueue(gifsy);
+      expect(result.entries).toEqual([]);
+    });
+  });
+
   describe('notInterested', () => {
     it('is idempotent when the outlet is already marked', async () => {
       mockPrisma.outlet.findUnique.mockResolvedValue({

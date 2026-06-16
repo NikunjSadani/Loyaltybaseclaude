@@ -512,6 +512,10 @@ export class KycService {
         statusHistory: { orderBy: { createdAt: 'desc' } },
         user: { select: { id: true, name: true, phone: true, role: true } },
         partner: true,
+        // 3.4d: the detail-page field panel seeds its current state from these.
+        verificationItems: {
+          select: { fieldKey: true, decision: true, remark: true, source: true, verifiedAt: true },
+        },
       },
     });
 
@@ -1782,6 +1786,97 @@ export class KycService {
       const applied = await this.applyBridgeOutcome(tx, submission, bridgeResult, 'EXCEL', user.sub, now);
       return { submissionId, ...applied };
     });
+  }
+
+  // ─── GET /v1/kyc/review-queue ────────────────────────────────────────────────
+  /**
+   * Returns all PENDING_GIFSY submissions for this tenant with their 7-field
+   * verification state (decision + remark + source per field, defaulting missing
+   * fields to PENDING). Used by the approvals UI to show queue items with n/7
+   * progress dots and per-field status without a detail fetch per row.
+   *
+   * Reuses the same query shape as reviewDump (primary outlet + partner identity)
+   * and the dumpFieldStates helper so the two paths stay in sync.
+   */
+  async reviewQueue(user: JwtPayload) {
+    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
+
+    const submissions = await this.prisma.kycSubmission.findMany({
+      where: { status: 'PENDING_GIFSY', user: { clientId: user.clientId } },
+      include: {
+        user: { select: { name: true, phone: true } },
+        partner: {
+          select: {
+            businessName: true,
+            ownerName: true,
+            phone: true,
+            gstNumber: true,
+            panNumber: true,
+            bankName: true,
+            bankAccountNumber: true,
+            bankAccountHolder: true,
+            ifscCode: true,
+            upiId: true,
+            paymentMode: true,
+            outlets: {
+              where: { isPrimary: true, deletedAt: null },
+              take: 1,
+              select: {
+                outletCode: true,
+                name: true,
+                addressLine1: true,
+                addressLine2: true,
+                city: true,
+                state: true,
+                pincode: true,
+                programName: true,
+                outletType: { select: { name: true } },
+              },
+            },
+          },
+        },
+        verificationItems: {
+          select: { fieldKey: true, decision: true, remark: true, source: true },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const entries = submissions.map((s) => {
+      const p = s.partner;
+      const o = p?.outlets[0];
+      const holder = p?.bankAccountHolder?.trim().toLowerCase();
+      const owner = p?.ownerName?.trim().toLowerCase();
+
+      return {
+        submissionId: s.id,
+        outletCode: o?.outletCode ?? '',
+        outletName: o?.name ?? p?.businessName ?? '',
+        ownerName: p?.ownerName ?? '',
+        mobile: p?.phone ?? s.user.phone ?? '',
+        partnerClass: o?.outletType?.name ?? o?.programName ?? '',
+        gstNumber: p?.gstNumber ?? '',
+        panNumber: p?.panNumber ?? '',
+        address: [o?.addressLine1, o?.addressLine2].filter(Boolean).join(', '),
+        city: o?.city ?? '',
+        state: o?.state ?? '',
+        pincode: o?.pincode ?? '',
+        paymentMode: p?.paymentMode ?? '',
+        bankName: p?.bankName ?? null,
+        accountHolderName: p?.bankAccountHolder ?? null,
+        accountNumber: p?.bankAccountNumber ?? null,
+        ifscCode: p?.ifscCode ?? null,
+        upiId: p?.upiId ?? null,
+        boardGeo:
+          s.boardPhotoLat != null && s.boardPhotoLng != null
+            ? { lat: Number(s.boardPhotoLat), lng: Number(s.boardPhotoLng) }
+            : null,
+        nameMismatch: !!(holder && owner && holder !== owner),
+        fields: this.dumpFieldStates(s.verificationItems),
+      };
+    });
+
+    return { entries };
   }
 
   // ─── GET /v1/kyc/review-dump ─────────────────────────────────────────────────

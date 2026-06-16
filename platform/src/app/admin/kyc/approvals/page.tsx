@@ -8,10 +8,21 @@
  * Unified hybrid Excel + portal workspace:
  *   1. Export the KYC review dump (Excel with all context + doc links + blank decision cols).
  *   2. Upload validated results → dry-run preview (merges Excel decisions into in-memory state).
- *   3. Per-entry portal panel — view details/documents, approve/reject each of the 7 fields.
+ *   3. Commit the validated file → apply=true.
+ *   4. Per-entry portal panel — view details/documents, approve/reject each of the 7 fields
+ *      via POST /api/kyc/:id/verify.
  *
  * Auth: GIFSY_ADMIN only.
- * Spec: docs/plans/KYC-APPROVAL-REVAMP.md § Expanded approval model
+ *
+ * Fetch wiring (all go through the S6 proxy → NestJS /v1/*):
+ *   queue:   GET  /api/kyc/review-queue          (new endpoint, Part A)
+ *   export:  GET  /api/kyc/review-dump            (StreamableFile xlsx)
+ *   preview: POST /api/kyc/bulk-verify?apply=false (dry-run)
+ *   commit:  POST /api/kyc/bulk-verify?apply=true  (commit)
+ *   field:   POST /api/kyc/:id/verify             (per-field approve/reject)
+ *
+ * Responses are globally enveloped as { success, data } by the backend
+ * TransformInterceptor — unwrapped here at each call site.
  */
 
 import { Fragment, useState, useCallback, useEffect } from 'react'
@@ -54,15 +65,15 @@ interface KycApprovalEntry {
   city: string
   state: string
   pincode: string
-  paymentMode: 'bank' | 'upi'
-  bankName?: string
-  accountHolderName?: string
-  accountNumber?: string
-  ifscCode?: string
-  upiId?: string
+  paymentMode: string | null
+  bankName?: string | null
+  accountHolderName?: string | null
+  accountNumber?: string | null
+  ifscCode?: string | null
+  upiId?: string | null
   nameMismatch?: boolean
-  boardGeo?: { lat: number; lng: number }
-  documents: {
+  boardGeo?: { lat: number; lng: number } | null
+  documents?: {
     gstCertificateUrl?: string
     addressDocUrl?: string
     selfDeclarationUrl?: string
@@ -73,15 +84,45 @@ interface KycApprovalEntry {
   fields: Record<KycFieldKey, KycFieldState>
 }
 
+/** Dry-run preview response (apply=false). */
 interface KycVerifyUpdate {
   submissionId: string
   fields: Partial<Record<KycFieldKey, { decision: 'APPROVED' | 'REJECTED'; remark?: string }>>
 }
 
-interface KycVerifyResult {
+interface KycVerifyPreviewResult {
+  committed: false
   updates: KycVerifyUpdate[]
   errors: { rowNumber: number; submissionId: string; message: string }[]
   summary: { rowsParsed: number; fieldsSet: number; errors: number }
+}
+
+/** Commit response (apply=true). */
+interface KycVerifyCommitResult {
+  committed: true
+  results: { submissionId: string; outcome: string; detail?: string }[]
+  errors: { rowNumber: number; submissionId: string; message: string }[]
+  summary: {
+    rowsParsed: number
+    fieldsSet: number
+    parseErrors: number
+    approved: number
+    reupload: number
+    recorded: number
+    skipped: number
+    commitErrors: number
+  }
+}
+
+/** Per-field verify response from POST /api/kyc/:id/verify */
+interface KycVerifyFieldResponse {
+  submissionId: string
+  fieldKey: KycFieldKey
+  fieldDecision: 'APPROVED' | 'REJECTED'
+  derivedStatus: string
+  approvedCount: number
+  rejectedFields: KycFieldKey[]
+  outcome: string
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -124,6 +165,17 @@ function defaultFields(): Record<KycFieldKey, KycFieldState> {
   const out = {} as Record<KycFieldKey, KycFieldState>
   for (const k of FIELD_ORDER) out[k] = { decision: 'PENDING' }
   return out
+}
+
+/** Unwrap the backend { success, data } envelope. Throws on success=false. */
+async function unwrapJson<T>(res: Response): Promise<T> {
+  const body = await res.json().catch(() => ({ success: false, error: `HTTP ${res.status}` })) as
+    | { success: true; data: T }
+    | { success: false; error?: string }
+  if (!res.ok || !body.success) {
+    throw new Error((body as { error?: string }).error ?? `Request failed (${res.status})`)
+  }
+  return (body as { success: true; data: T }).data
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -184,11 +236,16 @@ export default function KycApprovalsPage() {
   // ── Selection ──────────────────────────────────────────────────────────────
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
-  // ── Upload + validate ──────────────────────────────────────────────────────
+  // ── Upload + validate (preview) ────────────────────────────────────────────
   const [uploadFile, setUploadFile] = useState<File | null>(null)
-  const [uploadResult, setUploadResult] = useState<KycVerifyResult | null>(null)
+  const [previewResult, setPreviewResult] = useState<KycVerifyPreviewResult | null>(null)
   const [uploadLoading, setUploadLoading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
+
+  // ── Commit state ───────────────────────────────────────────────────────────
+  const [commitResult, setCommitResult] = useState<KycVerifyCommitResult | null>(null)
+  const [commitLoading, setCommitLoading] = useState(false)
+  const [commitError, setCommitError] = useState<string | null>(null)
 
   // ── Export ─────────────────────────────────────────────────────────────────
   const [exportLoading, setExportLoading] = useState(false)
@@ -196,6 +253,10 @@ export default function KycApprovalsPage() {
 
   // ── Portal-field remark inputs (keyed submissionId+fieldKey) ───────────────
   const [remarkInputs, setRemarkInputs] = useState<Record<string, string>>({})
+
+  // ── Per-field loading / error state ───────────────────────────────────────
+  const [fieldLoading, setFieldLoading] = useState<Record<string, boolean>>({})
+  const [fieldError, setFieldError] = useState<Record<string, string>>({})
 
   // ── Lightbox (enlarged photo) ──────────────────────────────────────────────
   const [lightbox, setLightbox] = useState<{ url: string; label: string } | null>(null)
@@ -206,16 +267,13 @@ export default function KycApprovalsPage() {
       setListLoading(true)
       setListError(null)
       try {
-        const res = await fetch('/api/admin/kyc/approvals', {
+        const res = await fetch('/api/kyc/review-queue', {
           headers: { Authorization: `Bearer ${authToken()}` },
         })
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}))
-          throw new Error((body as { error?: string }).error ?? `Request failed (${res.status})`)
-        }
-        const body = await res.json() as { success: boolean; data: { entries: KycApprovalEntry[] } }
+        // Unwrap { success, data: { entries } }
+        const data = await unwrapJson<{ entries: KycApprovalEntry[] }>(res)
         // Ensure every entry has all 7 fields initialised
-        const normalised = body.data.entries.map(e => ({
+        const normalised = data.entries.map(e => ({
           ...e,
           fields: { ...defaultFields(), ...e.fields },
         }))
@@ -235,7 +293,7 @@ export default function KycApprovalsPage() {
     setExportLoading(true)
     setExportError(null)
     try {
-      const res = await fetch('/api/admin/kyc/review-dump?format=xlsx', {
+      const res = await fetch('/api/kyc/review-dump', {
         headers: { Authorization: `Bearer ${authToken()}` },
       })
       if (!res.ok) throw new Error(`Export failed (${res.status})`)
@@ -253,28 +311,25 @@ export default function KycApprovalsPage() {
     }
   }, [])
 
-  // ── Upload + validate (bulk-verify preview) ────────────────────────────────
+  // ── Upload + validate (bulk-verify dry-run preview, apply=false) ───────────
   const handleValidate = useCallback(async () => {
     if (!uploadFile) return
     setUploadLoading(true)
     setUploadError(null)
-    setUploadResult(null)
+    setPreviewResult(null)
+    setCommitResult(null)
     try {
       const fd = new FormData()
       fd.append('file', uploadFile)
-      const res = await fetch('/api/admin/kyc/bulk-verify?mode=preview', {
+      const res = await fetch('/api/kyc/bulk-verify?apply=false', {
         method: 'POST',
         headers: { Authorization: `Bearer ${authToken()}` },
         body: fd,
       })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error((body as { error?: string }).error ?? `Validation failed (${res.status})`)
-      }
-      const body = await res.json() as { success: boolean; data: KycVerifyResult }
-      const result = body.data
-      setUploadResult(result)
-      // Merge updates into entries state — never clear existing portal/excel decisions
+      // Unwrap { success, data: { committed, updates, errors, summary } }
+      const result = await unwrapJson<KycVerifyPreviewResult>(res)
+      setPreviewResult(result)
+      // Merge preview updates into entries state (never clear portal decisions)
       setEntries(prev => {
         const map = new Map(prev.map(e => [e.submissionId, e]))
         for (const upd of result.updates) {
@@ -298,21 +353,69 @@ export default function KycApprovalsPage() {
     }
   }, [uploadFile])
 
-  // ── Portal field decision (Approve / Reject) ───────────────────────────────
+  // ── Commit bulk-verify (apply=true) ───────────────────────────────────────
+  const handleCommit = useCallback(async () => {
+    if (!uploadFile || !previewResult) return
+    setCommitLoading(true)
+    setCommitError(null)
+    setCommitResult(null)
+    try {
+      const fd = new FormData()
+      fd.append('file', uploadFile)
+      const res = await fetch('/api/kyc/bulk-verify?apply=true', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${authToken()}` },
+        body: fd,
+      })
+      // Unwrap { success, data: { committed, results, errors, summary } }
+      const result = await unwrapJson<KycVerifyCommitResult>(res)
+      setCommitResult(result)
+    } catch (err) {
+      setCommitError(err instanceof Error ? err.message : 'Commit failed.')
+    } finally {
+      setCommitLoading(false)
+    }
+  }, [uploadFile, previewResult])
+
+  // ── Portal field decision (POST /api/kyc/:id/verify) ──────────────────────
   const applyFieldDecision = useCallback(
-    (submissionId: string, key: KycFieldKey, decision: 'APPROVED' | 'REJECTED', remark?: string) => {
-      setEntries(prev =>
-        prev.map(e => {
-          if (e.submissionId !== submissionId) return e
-          return {
-            ...e,
-            fields: {
-              ...e.fields,
-              [key]: { decision, remark: remark ?? undefined, source: 'PORTAL' },
-            },
-          }
+    async (submissionId: string, key: KycFieldKey, decision: 'APPROVED' | 'REJECTED', remark?: string) => {
+      const fk = `${submissionId}:${key}`
+      setFieldLoading(prev => ({ ...prev, [fk]: true }))
+      setFieldError(prev => ({ ...prev, [fk]: '' }))
+      try {
+        const res = await fetch(`/api/kyc/${submissionId}/verify`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken()}`,
+          },
+          body: JSON.stringify({ fieldKey: key, decision, remark: remark ?? undefined }),
         })
-      )
+        // Unwrap { success, data: KycVerifyFieldResponse }
+        const result = await unwrapJson<KycVerifyFieldResponse>(res)
+
+        // Reflect the returned field decision (authoritative from backend)
+        setEntries(prev =>
+          prev.map(e => {
+            if (e.submissionId !== submissionId) return e
+            return {
+              ...e,
+              fields: {
+                ...e.fields,
+                [key]: { decision: result.fieldDecision, remark: remark ?? undefined, source: 'PORTAL' as const },
+              },
+            }
+          })
+        )
+      } catch (err) {
+        setFieldError(prev => ({
+          ...prev,
+          [fk]: err instanceof Error ? err.message : 'Field verify failed.',
+        }))
+      } finally {
+        setFieldLoading(prev => ({ ...prev, [fk]: false }))
+      }
     },
     []
   )
@@ -339,8 +442,9 @@ export default function KycApprovalsPage() {
         <p className="text-sm text-gray-500 mt-1 max-w-3xl">
           Hybrid Excel + portal verification: <strong>export</strong> the dump, fill the 7 decision
           columns offline (bank penny-drop, GST portal, address + photo review), then{' '}
-          <strong>upload</strong> to merge those decisions in. Any field can also be set here in the
-          portal — the last write per field wins, and blank Excel cells never clear a portal decision.
+          <strong>upload</strong> to preview, then <strong>commit</strong> to apply. Any field can
+          also be set here in the portal — the last write per field wins, and blank Excel cells
+          never clear a portal decision.
         </p>
       </div>
 
@@ -351,7 +455,7 @@ export default function KycApprovalsPage() {
         </CardHeader>
         <CardContent className="space-y-4">
 
-          {/* Step 1 */}
+          {/* Step 1 — Export */}
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-xs font-bold text-gray-500 w-20">Step 1</span>
             <Button
@@ -372,7 +476,7 @@ export default function KycApprovalsPage() {
             )}
           </div>
 
-          {/* Step 2 */}
+          {/* Step 2 — Upload + Preview */}
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-xs font-bold text-gray-500 w-20">Step 2</span>
             <label className="flex items-center gap-2 cursor-pointer">
@@ -381,8 +485,10 @@ export default function KycApprovalsPage() {
                 accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 onChange={e => {
                   setUploadFile(e.target.files?.[0] ?? null)
-                  setUploadResult(null)
+                  setPreviewResult(null)
+                  setCommitResult(null)
                   setUploadError(null)
+                  setCommitError(null)
                 }}
                 className="text-xs text-gray-600 file:mr-2 file:py-1 file:px-2 file:rounded file:border file:border-gray-300 file:text-xs file:bg-gray-50 hover:file:bg-gray-100"
               />
@@ -396,7 +502,7 @@ export default function KycApprovalsPage() {
             >
               {uploadLoading
                 ? <><RefreshCw className="h-3 w-3 animate-spin" />Validating…</>
-                : <><Upload className="h-3 w-3" />Validate &amp; Merge</>}
+                : <><Upload className="h-3 w-3" />Validate &amp; Preview</>}
             </Button>
             {uploadError && (
               <span className="text-xs text-red-600 font-medium flex items-center gap-1">
@@ -405,41 +511,68 @@ export default function KycApprovalsPage() {
             )}
           </div>
 
-          {/* Upload result summary + error report */}
-          {uploadResult && (
+          {/* Step 3 — Commit (only enabled after a clean preview) */}
+          {previewResult && (
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-xs font-bold text-gray-500 w-20">Step 3</span>
+              <Button
+                onClick={handleCommit}
+                disabled={commitLoading || !!commitResult}
+                size="sm"
+                className="flex items-center gap-1.5 bg-green-700 hover:bg-green-800 text-white disabled:opacity-40"
+              >
+                {commitLoading
+                  ? <><RefreshCw className="h-3 w-3 animate-spin" />Committing…</>
+                  : commitResult
+                  ? <><CheckCircle className="h-3 w-3" />Committed</>
+                  : <><CheckCircle className="h-3 w-3" />Commit (apply=true)</>}
+              </Button>
+              <span className="text-xs text-gray-400">
+                Writes decisions to DB — triggers APPROVED / RE_UPLOAD side-effects.
+              </span>
+              {commitError && (
+                <span className="text-xs text-red-600 font-medium flex items-center gap-1">
+                  <AlertTriangle className="h-3 w-3" />{commitError}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Preview summary */}
+          {previewResult && !commitResult && (
             <div className="space-y-3 pt-1 border-t border-gray-100">
               <p className="text-xs text-gray-600">
-                <strong>Upload result:</strong> {uploadResult.summary.rowsParsed} rows parsed ·{' '}
-                {uploadResult.summary.fieldsSet} fields merged ·{' '}
-                {uploadResult.summary.errors > 0 ? (
-                  <span className="text-red-600 font-semibold">{uploadResult.summary.errors} errors</span>
+                <strong>Preview:</strong> {previewResult.summary.rowsParsed} rows parsed ·{' '}
+                {previewResult.summary.fieldsSet} fields merged ·{' '}
+                {previewResult.summary.errors > 0 ? (
+                  <span className="text-red-600 font-semibold">{previewResult.summary.errors} errors</span>
                 ) : (
                   <span className="text-green-700 font-semibold">0 errors</span>
                 )}
               </p>
-              {uploadResult.errors.length > 0 && (
-                <div className="overflow-x-auto rounded border border-red-200">
-                  <table className="text-xs border-collapse w-full">
-                    <thead>
-                      <tr className="bg-red-50 border-b border-red-200 text-red-700">
-                        {['Row', 'Submission ID', 'Errors'].map(h => (
-                          <th key={h} className="px-3 py-1.5 font-medium text-left">{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {uploadResult.errors.map((err, ei) => (
-                        <Fragment key={`err-${err.rowNumber}-${ei}`}>
-                          <tr className={`border-b border-red-100 ${ei % 2 === 1 ? 'bg-red-50/30' : ''}`}>
-                            <td className="px-3 py-1.5 font-mono text-red-600 whitespace-nowrap">{err.rowNumber}</td>
-                            <td className="px-3 py-1.5 font-mono text-gray-700 whitespace-nowrap">{err.submissionId}</td>
-                            <td className="px-3 py-1.5 text-gray-700">{err.message}</td>
-                          </tr>
-                        </Fragment>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+              {previewResult.errors.length > 0 && (
+                <ErrorTable errors={previewResult.errors} />
+              )}
+            </div>
+          )}
+
+          {/* Commit result summary */}
+          {commitResult && (
+            <div className="space-y-3 pt-1 border-t border-gray-100">
+              <p className="text-xs text-gray-600">
+                <strong>Committed:</strong>{' '}
+                {commitResult.summary.approved} approved ·{' '}
+                {commitResult.summary.reupload} re-upload ·{' '}
+                {commitResult.summary.recorded} recorded ·{' '}
+                {commitResult.summary.skipped} skipped ·{' '}
+                {commitResult.summary.commitErrors > 0 ? (
+                  <span className="text-red-600 font-semibold">{commitResult.summary.commitErrors} commit errors</span>
+                ) : (
+                  <span className="text-green-700 font-semibold">0 commit errors</span>
+                )}
+              </p>
+              {commitResult.errors.length > 0 && (
+                <ErrorTable errors={commitResult.errors} />
               )}
             </div>
           )}
@@ -567,66 +700,69 @@ export default function KycApprovalsPage() {
                   ) : (
                     <Fragment key="payment-upi">
                       <dt className="text-gray-500">Payment</dt>
-                      <dd className="text-gray-700">UPI — {selected.upiId ?? '—'}</dd>
+                      <dd className="text-gray-700">
+                        {selected.paymentMode === 'upi' ? `UPI — ${selected.upiId ?? '—'}` : `Mode: ${selected.paymentMode ?? '—'}`}
+                      </dd>
                     </Fragment>
                   )}
                 </dl>
               </CardContent>
             </Card>
 
-            {/* Documents */}
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-semibold">Documents</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {/* All documents in one row — click a photo to enlarge */}
-                <div className="flex flex-wrap gap-3">
-                  {(
-                    [
-                      { url: selected.documents.boardPhotoUrl,      label: 'Board Photo' },
-                      { url: selected.documents.ownerPhotoUrl,      label: 'Owner Photo' },
-                      { url: selected.documents.gstCertificateUrl,  label: 'GST Certificate' },
-                      { url: selected.documents.addressDocUrl,      label: 'Address Document' },
-                      { url: selected.documents.selfDeclarationUrl, label: 'Self-Declaration' },
-                      { url: selected.documents.chequeUrl,          label: 'Cancelled Cheque' },
-                    ] as { url?: string; label: string }[]
-                  ).map(({ url, label }) =>
-                    !url ? null : isPdf(url) ? (
-                      <a
-                        key={label}
-                        href={url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="flex flex-col items-center justify-center gap-1 h-24 w-24 rounded border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors"
-                      >
-                        <FileText className="h-6 w-6" />
-                        <span className="text-[10px] text-center leading-tight px-1">{label} ↗</span>
-                      </a>
-                    ) : (
-                      <button
-                        key={label}
-                        type="button"
-                        onClick={() => setLightbox({ url, label })}
-                        title="Click to enlarge"
-                        className="flex flex-col items-center gap-1 group"
-                      >
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={url}
-                          alt={label}
-                          className="h-24 w-24 object-cover rounded border border-gray-200 transition group-hover:ring-2 group-hover:ring-[var(--brand-primary)]"
-                        />
-                        <span className="text-[10px] text-gray-500">{label}</span>
-                      </button>
-                    )
-                  )}
-                </div>
-                <p className="text-[10px] text-gray-400 mt-2">Click a photo to enlarge.</p>
-              </CardContent>
-            </Card>
+            {/* Documents (only shown if documents are present on the entry) */}
+            {selected.documents && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-semibold">Documents</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex flex-wrap gap-3">
+                    {(
+                      [
+                        { url: selected.documents.boardPhotoUrl,      label: 'Board Photo' },
+                        { url: selected.documents.ownerPhotoUrl,      label: 'Owner Photo' },
+                        { url: selected.documents.gstCertificateUrl,  label: 'GST Certificate' },
+                        { url: selected.documents.addressDocUrl,      label: 'Address Document' },
+                        { url: selected.documents.selfDeclarationUrl, label: 'Self-Declaration' },
+                        { url: selected.documents.chequeUrl,          label: 'Cancelled Cheque' },
+                      ] as { url?: string; label: string }[]
+                    ).map(({ url, label }) =>
+                      !url ? null : isPdf(url) ? (
+                        <a
+                          key={label}
+                          href={url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex flex-col items-center justify-center gap-1 h-24 w-24 rounded border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors"
+                        >
+                          <FileText className="h-6 w-6" />
+                          <span className="text-[10px] text-center leading-tight px-1">{label} ↗</span>
+                        </a>
+                      ) : (
+                        <button
+                          key={label}
+                          type="button"
+                          onClick={() => setLightbox({ url, label })}
+                          title="Click to enlarge"
+                          className="flex flex-col items-center gap-1 group"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={url}
+                            alt={label}
+                            className="h-24 w-24 object-cover rounded border border-gray-200 transition group-hover:ring-2 group-hover:ring-[var(--brand-primary)]"
+                          />
+                          <span className="text-[10px] text-gray-500">{label}</span>
+                        </button>
+                      )
+                    )}
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-2">Click a photo to enlarge.</p>
+                </CardContent>
+              </Card>
+            )}
 
-            {/* 7 approval fields */}
+            {/* 7 approval fields — wired to POST /api/kyc/:id/verify */}
             <Card>
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-semibold">Field Decisions</CardTitle>
@@ -636,9 +772,12 @@ export default function KycApprovalsPage() {
                   const fieldState = selected.fields[key]
                   const remark = getRemark(selected.submissionId, key)
                   const canReject = remark.trim().length > 0
+                  const fk = remarkKey(selected.submissionId, key)
+                  const isLoading = !!fieldLoading[fk]
+                  const fError = fieldError[fk] ?? ''
 
                   return (
-                    <div key={key} className="py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+                    <div key={key} className="py-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-4">
                       {/* Label + chip */}
                       <div className="sm:w-52 shrink-0">
                         <p className="text-sm font-medium text-gray-700">{FIELD_LABELS[key]}</p>
@@ -651,38 +790,51 @@ export default function KycApprovalsPage() {
                       </div>
 
                       {/* Controls */}
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Button
-                          size="sm"
-                          onClick={() => applyFieldDecision(selected.submissionId, key, 'APPROVED')}
-                          className="flex items-center gap-1 bg-green-600 hover:bg-green-700 text-white text-xs h-7 px-3"
-                        >
-                          <CheckCircle className="h-3 w-3" />Approve
-                        </Button>
-
-                        <div className="flex items-center gap-1">
-                          <input
-                            type="text"
-                            placeholder="Remark (required to reject)"
-                            value={remark}
-                            onChange={e => setRemark(selected.submissionId, key, e.target.value)}
-                            className="border border-gray-200 rounded px-2 py-1 text-xs h-7 w-52 focus:outline-none focus:ring-1 focus:ring-red-300"
-                          />
+                      <div className="flex flex-col gap-1.5">
+                        <div className="flex flex-wrap items-center gap-2">
                           <Button
                             size="sm"
-                            disabled={!canReject}
-                            onClick={() => {
-                              applyFieldDecision(selected.submissionId, key, 'REJECTED', remark.trim())
-                              setRemark(selected.submissionId, key, '')
-                            }}
-                            title={canReject ? undefined : 'Enter a remark before rejecting'}
-                            className="flex items-center gap-1 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white text-xs h-7 px-3"
+                            disabled={isLoading}
+                            onClick={() => applyFieldDecision(selected.submissionId, key, 'APPROVED')}
+                            className="flex items-center gap-1 bg-green-600 hover:bg-green-700 text-white text-xs h-7 px-3 disabled:opacity-50"
                           >
-                            <XCircle className="h-3 w-3" />Reject
+                            {isLoading
+                              ? <RefreshCw className="h-3 w-3 animate-spin" />
+                              : <CheckCircle className="h-3 w-3" />}
+                            Approve
                           </Button>
+
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="text"
+                              placeholder="Remark (required to reject)"
+                              value={remark}
+                              disabled={isLoading}
+                              onChange={e => setRemark(selected.submissionId, key, e.target.value)}
+                              className="border border-gray-200 rounded px-2 py-1 text-xs h-7 w-52 focus:outline-none focus:ring-1 focus:ring-red-300 disabled:opacity-50"
+                            />
+                            <Button
+                              size="sm"
+                              disabled={!canReject || isLoading}
+                              onClick={() => {
+                                const r = remark.trim()
+                                applyFieldDecision(selected.submissionId, key, 'REJECTED', r)
+                                setRemark(selected.submissionId, key, '')
+                              }}
+                              title={canReject ? undefined : 'Enter a remark before rejecting'}
+                              className="flex items-center gap-1 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white text-xs h-7 px-3"
+                            >
+                              <XCircle className="h-3 w-3" />Reject
+                            </Button>
+                          </div>
+                          {!canReject && !isLoading && (
+                            <span className="text-[10px] text-gray-400 italic">Enter remark to enable Reject</span>
+                          )}
                         </div>
-                        {!canReject && (
-                          <span className="text-[10px] text-gray-400 italic">Enter remark to enable Reject</span>
+                        {fError && (
+                          <span className="text-xs text-red-600 flex items-center gap-1">
+                            <AlertTriangle className="h-3 w-3" />{fError}
+                          </span>
                         )}
                       </div>
                     </div>
@@ -736,6 +888,33 @@ export default function KycApprovalsPage() {
   )
 }
 
+// ─── Error table (shared by preview + commit) ─────────────────────────────────
+
+function ErrorTable({ errors }: { errors: { rowNumber: number; submissionId: string; message: string }[] }) {
+  return (
+    <div className="overflow-x-auto rounded border border-red-200">
+      <table className="text-xs border-collapse w-full">
+        <thead>
+          <tr className="bg-red-50 border-b border-red-200 text-red-700">
+            {['Row', 'Submission ID', 'Error'].map(h => (
+              <th key={h} className="px-3 py-1.5 font-medium text-left">{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {errors.map((err, ei) => (
+            <tr key={`err-${err.rowNumber}-${ei}`} className={`border-b border-red-100 ${ei % 2 === 1 ? 'bg-red-50/30' : ''}`}>
+              <td className="px-3 py-1.5 font-mono text-red-600 whitespace-nowrap">{err.rowNumber}</td>
+              <td className="px-3 py-1.5 font-mono text-gray-700 whitespace-nowrap">{err.submissionId}</td>
+              <td className="px-3 py-1.5 text-gray-700">{err.message}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 // ─── Completion banner ────────────────────────────────────────────────────────
 
 function CompletionBanner({ fields }: { fields: Record<KycFieldKey, KycFieldState> }) {
@@ -756,7 +935,7 @@ function CompletionBanner({ fields }: { fields: Record<KycFieldKey, KycFieldStat
     return (
       <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-800 flex items-center gap-2">
         <CheckCircle className="h-4 w-4 shrink-0" />
-        All fields approved — outlet credentials created + WhatsApp sent (demo)
+        All fields approved — outlet credentials created + WhatsApp sent (committed via backend)
       </div>
     )
   }
@@ -768,7 +947,6 @@ function CompletionBanner({ fields }: { fields: Record<KycFieldKey, KycFieldStat
       <span className="font-semibold">
         {rejectedKeys.map(k => FIELD_LABELS[k]).join(', ')}
       </span>
-      {' '}(demo)
     </div>
   )
 }
