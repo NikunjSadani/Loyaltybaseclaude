@@ -16,6 +16,8 @@ import { PrismaModule }   from './prisma/prisma.module';
 import { AuthModule }     from './auth/auth.module';
 import { TenantModule }   from './tenant/tenant.module';
 import { TicketsModule }  from './tickets/tickets.module';
+import { WalletModule }   from './wallet/wallet.module';
+import { GifsyModule }    from './gifsy/gifsy.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
 // leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
@@ -38,6 +40,8 @@ import { TicketsModule }  from './tickets/tickets.module';
     AuthModule,
     TenantModule,
     TicketsModule,
+    WalletModule,
+    GifsyModule,
   ],
   controllers: [AppController],
   providers: [
