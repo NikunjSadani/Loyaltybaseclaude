@@ -47,8 +47,9 @@ SELECT 1 before migrating. NEVER point dev at prod (gifsy-db). This dev DB has N
 — use db push / surgical `migrate diff` → apply SQL in a txn guarded by current_database='gifsy_dev';
 NEVER `prisma migrate dev` (it would RESET it). Backfill scripts reuse the lib/prisma singleton.
 
-STATE: **P0 + P1 + P2 COMPLETE**, all built→gated→independently-audited, on **origin/develop** (pushed; HEAD
-`5d834d2` as of 2026-06-16). Gate is DIFFERENTIAL ("no NEW reds vs the snapshot" = 28 files/105 tests; the suite
+STATE: **P0 + P1 + P2 COMPLETE** (as of 2026-06-16), all built→gated→independently-audited and **pushed to
+origin/develop** (run `git log --oneline origin/develop -5` for the latest). Gate is DIFFERENTIAL ("no NEW reds
+vs the snapshot" = 28 files/105 tests; the suite
 is red throughout a TDD build). **P2 summary (full block below + `MODEL-ALIGNMENT.md`):** sales hierarchy →
 relational tree; outlet master upload + re-KYC flags persist for real (parameter+program model, World C); RF1–RF7
 tenant-isolation defects fixed; 5 dev-DB migrations applied; OutletTypes seeded. Catalog/SKU built-then-reverted
