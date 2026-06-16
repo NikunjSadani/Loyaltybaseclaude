@@ -36,13 +36,15 @@ export class PermissionGuard implements CanActivate {
     // No @RequirePermission on this route → nothing to enforce.
     if (!permission) return true;
 
+    // Level 1 — master switch OFF (default) → no-op, zero DB read. Checked BEFORE
+    // the user check so enforcement-off never 401s a route (e.g. a @Public route
+    // that also carries @RequirePermission); behaviour is exactly as today when off.
+    if (process.env.RBAC_ENFORCEMENT !== 'true') return true;
+
     const user = ctx.switchToHttp().getRequest().user as
       | { role?: string; clientId?: string }
       | undefined;
     if (!user) throw new UnauthorizedException('Authentication required.');
-
-    // Level 1 — master switch OFF (default) → no-op, zero DB read.
-    if (process.env.RBAC_ENFORCEMENT !== 'true') return true;
 
     // Level 2 — per-tenant opt-in (fail-open if not enabled / unknown tenant).
     const enabled = await this.tenant.isFeatureEnabled(user.clientId ?? '', 'rbacEnforcement');
