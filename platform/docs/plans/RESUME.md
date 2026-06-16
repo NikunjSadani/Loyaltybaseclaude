@@ -4,8 +4,22 @@ Paste the block below to restart the orchestrator on point. The on-disk docs are
 
 ```
 You're the orchestrator for the Loyaltybase build (multi-tenant trade-loyalty platform,
-C:\Users\nikun\Loyaltybaseclaude\platform). **NEXT = P4, and P4.0 is the loyalty-engine DE-SCAFFOLD.** Reload by reading:
-- docs/plans/MODEL-ALIGNMENT.md           (⚠️ READ FIRST — the platform's REAL model + the P4.0 de-scaffold scope)
+C:\Users\nikun\Loyaltybaseclaude\platform).
+⚠️⚠️ **NEXT (BEFORE P4) = WHOLE-SYSTEM TOPOLOGY RECONCILE + ARCHITECTURE DECISION — do this FIRST.** A late
+discovery (2026-06-16): the git ROOT has TWO services — `platform/` (Next.js, full-stack: 119 prisma-using API
+routes, owns its schema) + `api/` (NestJS, 74-model schema, **the platform never calls it**) — and `terraform/`
+provisions the platform as a **stateless frontend** + the api as the **DB owner** (the platform has NO prod
+`DATABASE_URL`). So the deployed infra contradicts the built code. **OWNER DIRECTION:** the frontend/api were
+split deliberately for **future mobile-app / PWA scalability** (consultant-advised); owner leans toward the
+**SEPARATED architecture** (dedicated API backend + thin frontend) as the target — Opus over-weighted "avoid
+rework" first and walked it back. **TASK 0 (gates everything, incl. whether P3+ is built full-stack or separated
+— don't build P3+ until settled, or it's built twice):** (1) a whole-repo topology reconcile — inventory git
+root (both apps, terraform, CI/CD, all DBs, Redis?, what's LIVE vs LEGACY, real prod data-flow); (2) **assess the
+`api/` service's actual maturity** (viable backend foundation vs abandoned scaffolding — decides the effort); (3)
+produce a concrete **separate-now migration plan + real effort estimate** (NOW ≈ ~119 routes/80 models migrate
+once; LATER ≈ ~2× as P3–P8 add surface; lib/ is portable; terraform ALREADY fits separation so no infra rework).
+Then owner decides with numbers. See Gap #30/#31 + `04-architecture.md`. **P4.0 de-scaffold is AFTER this.** Reload by reading:
+- docs/plans/MODEL-ALIGNMENT.md           (the platform's REAL model + the P4.0 de-scaffold scope — after Task 0)
 - docs/plans/00-MASTER-PLAN.md            (phases P0→P9; P2 = DONE; P4 section has the de-scaffold callout)
 - docs/plans/08-agent-execution-guide.md  (role, loop, review gate, context bundles)
 - docs/plans/01-how-we-test.md            (test conventions; deterministic; two styles)

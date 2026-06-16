@@ -164,7 +164,14 @@ tenant config served from DB. **Depends on:** P0.
 > **✅ P2 FUNCTIONALLY COMPLETE: 2.0, 2.1, 2.2, 2.4, 2.5 + RF1–RF7 all done.** 2.6 catalog dropped (above).
 > **2.3 (tiers) folded into the loyalty-engine de-scaffold → P4.0** (see `docs/plans/MODEL-ALIGNMENT.md`): tiers +
 > partner-class→program + retiring `lib/incentive.ts` compute are ONE deliberate effort, deferred to P4.0 (with a
-> human-gated drop migration), NOT piecemeal. **NEXT = P3 (Onboarding & KYC)** or the P4.0 de-scaffold.
+> human-gated drop migration), NOT piecemeal.
+> **⚠️⚠️ NEXT = TASK 0 (BEFORE P3/P4): WHOLE-SYSTEM TOPOLOGY RECONCILE + ARCHITECTURE DECISION (Gap #31).** Late
+> discovery: the repo has TWO services (`platform/` full-stack Next.js + `api/` NestJS), `terraform/` deploys the
+> platform as a **stateless frontend** (no prod DB) with `api` as DB owner — contradicting the built code. Owner
+> split FE/api deliberately for **mobile/PWA scalability** + leans **separated**. Task 0: whole-repo topology
+> reconcile → assess `api/` maturity → **separate-now migration plan + effort estimate** (NOW ≈ migrate ~119
+> routes once; LATER ≈ ~2×; terraform already fits separation). **Do NOT build P3+/P4 until decided** (else built
+> twice). See Gap #30/#31 + `04-architecture.md` §8. P4.0 de-scaffold + P3 come AFTER this.
 
 > **P2 status (live).** **2.0 Reconcile ✅** — full audit in [`reconcile/P2-org-master-data.md`](reconcile/P2-org-master-data.md)
 > (Opus independently re-verified every load-bearing claim by direct file read). Headlines: much is

@@ -111,6 +111,14 @@ flowchart TB
 
 ## 8 · Architecture risks / gaps
 
+- **→ Gap #31 — ⚠️ FOUNDATIONAL, UNRESOLVED (surfaced 2026-06-16):** the code is built **full-stack** (the Next.js
+  `platform/` owns the DB via 119 prisma routes; never calls the api) but `terraform/` deploys it as a **stateless
+  frontend** with the NestJS `api/` as the DB owner (platform has NO prod `DATABASE_URL`). The FE/api split was
+  **deliberate — for future mobile-app / PWA scalability** (owner's consultant); owner leans toward the **separated**
+  architecture as the target. **DECISION + migration-effort estimate = TASK 0 before P4** (assess `api/` maturity
+  first; separating NOW ≈ ½ the cost of LATER since P3–P8 would otherwise be built full-stack then migrated). Until
+  decided, do NOT build P3+ (risk of building it twice). The `api` is currently uncalled by the platform.
+
 - **→ Gap #20 — ✅ RESOLVED (P1 S3–S4b):** `clientId`+`sid` are now in the JWT, bound to a
   server-side `UserSession`. `getAuthUser` validates the session and enforces
   subdomain==session-tenant in-app, independent of the proxy.
