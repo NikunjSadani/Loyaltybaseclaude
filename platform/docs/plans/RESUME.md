@@ -29,10 +29,12 @@ boundaries only); current client = parameter-upload, **no compute engine**. **Th
 - **S8 ✅ cutover (human-gated) — DONE; retirement DEFERRED to P3/P4:** e2e cutover proven (S6's authed `/api/auth/me`→proxy→backend→DB→200). `api/` confirmed **clean** of World-A leftovers (only explanatory comments; `prisma/seed.ts` is the real-model seed). Closed **#31 (✅ RESOLVED)** + reduced **#30** (platform schema lingers). **A route-coverage cross-check (independently reviewed) found 16 platform routes with no backend equivalent** → the proxy 404s them (new **Gap #32**): 14 wrong-model/retired (skus/tiers/schemes-calculate/billing-trends/sales-invoices/upload/returns/last-upload/leaderboard — await P4.x; never prod-functional on the FE anyway), `admin/sales/*` (models survive → clean port candidate), `auth/logout(-all)` (no backend route **and** no UI caller → server-side revocation never invoked, latent auth gap). **Decision: leave as honest 404s + track (Gap #32), do NOT band-aid via proxy-exclusion.** **Retirement deferred:** the ~112 shadowed-but-inert local `src/app/api/*` handlers + platform schema stay as an in-cutover rollback safety-net; they retire as ONE unit in P3/P4 once the 16 unported + 4 deferred groups are ported/reworked.
 **NEXT = P3 (Phase S gated it; now unblocked):** see `00-MASTER-PLAN.md`. **Phase-S follow-ups carried into P3/P4:** Gap #32 (16 unported routes — rework wrong-model, decide `admin/sales/*` port, add real server-side logout revocation); when porting completes → delete the shadowed platform routes + platform schema (full retirement).
 **DEFERRED routes (need infra / P3 — re-home when ready):** rewards `redeem`(+confirm) = action-OTP (no `REDEMPTION_CONFIRM` OtpPurpose) + delivery · visibility `submit` = multipart on StorageService · partner `invoices` = mock · admin/kyc approvals = mock (P3). **Follow-ups (audit-found, all faithful source carry-overs or pre-existing):** payouts `processBatch` atomicity (P6); seed `kyc:*` for SALES_SO/ASM/STATE_HEAD before enabling RBAC (RBAC-ENABLEMENT); `admin/banners` list omits `deletedAt:null` (soft-deleted banners show — 1-line fix); **(S6) centralize the 53 raw `fetch('/api/...')` callers through `api-client.ts`** — do incrementally when each page is touched in P3, not a big-bang. Reload:
-- docs/plans/BACKEND-SPLIT-PLAN.md        ⭐ **the Phase S plan — START HERE** (target arch, principles, reused-vs-reworked, S0–S8)
-- docs/spec/04-architecture.md            (TARGET architecture §1/§2/§6/§8 — API-first, decided)
+- docs/plans/KYC-APPROVAL-REVAMP.md       ⭐ **P3 design — START HERE** (KYC approval revamp: bulk-validate→upload→commit, field-level verification, schema + 3.4a–e)
+- docs/plans/00-onboarding.md             (P3 onboarding/KYC spec §02 WF1)
+- docs/plans/00-MASTER-PLAN.md            (phases; P2 + **Phase S DONE**; **P3 = Onboarding & KYC §P3 tasks 3.0–3.6**; P4 = program targeting)
+- docs/plans/BACKEND-SPLIT-PLAN.md        (Phase S plan + status — ✅ DONE; reference for what the backend looks like + Gap #32)
+- docs/spec/04-architecture.md            (architecture §1/§2/§6/§8 — API-first, built)
 - docs/plans/MODEL-ALIGNMENT.md           (REAL model + the World-A de-scaffold list executed in S2)
-- docs/plans/00-MASTER-PLAN.md            (phases; P2 DONE; **Phase S** inserted before P3; P4 = program targeting on the clean backend)
 - docs/plans/08-agent-execution-guide.md  (role, loop, review gate, context bundles)
 - docs/plans/01-how-we-test.md            (test conventions; deterministic; two styles)
 - docs/plans/GIT-WORKFLOW.md              (branches/deploy — WORK ON develop, main=releases)
@@ -168,9 +170,22 @@ folded into the P4.0 de-scaffold** (above). Adjacent P3 note: outlet list GET ha
 (KYC filter cosmetic until a real KYC-status join). Deferred: replace mock `sales-role.ts`/`partner-session.ts`
 with DB; per-field re-KYC consumption (P3).
 
-**NEXT = PHASE S (backend split) — see the top of this brief + `BACKEND-SPLIT-PLAN.md`.** It gates P3+ and absorbs
-the P4.0 World-A de-scaffold (in S2). Do NOT start P3/P4 feature work until Phase S lands. After S: P3 (KYC, built
-in the backend; 3.0 Reconcile against the revamped KYC-approval UX + program model), then P4 (program-based targeting).
+**NEXT = P3 · ONBOARDING & KYC (3–5 wk) — Phase S is COMPLETE and unblocked it.** Objective: the full
+enroll→KYC→approve→credential journey (spec §02 WF1) works e2e, **built in the NestJS backend** (`api/src/kyc/*`
+already exists from S4 as a skeleton — controller/service/dto + `kyc-approval.helper.ts`; the `/admin/kyc/*` approval
+routes are still **mock**) with thin web KYC pages. Tasks (see `00-MASTER-PLAN.md` §P3 + design `docs/plans/KYC-APPROVAL-REVAMP.md`):
+**3.0** reconcile KYC vs spec §02 WF1 · **3.1** submission form + GCS doc upload · **3.2** tree-based approval routing,
+retire `ROLE_PHONES` (#9) · **3.3** first-approve/approve/reject + activate-user-&-create-wallet on approve · **3.4**
+field-level rejection (#14) + Gifsy GST/bank validation + reg-type (#12/#15) — bulk export→offline-validate→upload-
+preview→commit (additive dev-DB migration; human-gate the SQL) · **3.5** consent + DPDP `DataRequest` · **3.6** re-KYC
+trigger (#13) + SLA metrics.
+⚠️ **COORDINATE BEFORE TOUCHING KYC UI:** the user is **redesigning the Gifsy KYC-approval page** — Task 3.0 must build
+against whatever revamped approval UX is in the code when P3 starts, NOT the current `sales/kyc/[id]` page. Confirm with
+the user before editing approval routes/pages.
+**Carried from Phase S (don't lose):** Gap #32 (16 unported routes the proxy 404s — incl. `admin/sales/*` clean port
+candidate + `auth/logout` server-revocation gap); the ~112 shadowed platform routes + platform schema await full
+retirement once unported routes port; seed `kyc:*` for SALES_SO/ASM/STATE_HEAD before enabling RBAC (`RBAC-ENABLEMENT.md`);
+`admin/banners` list `deletedAt:null` 1-line fix; centralize the 53 raw `fetch('/api')` callers incrementally.
 
 Local: dev-DB Auth Proxy on 127.0.0.1:5433 (drops intermittently — restart per DEV-DB.md); `.env.development.local`
 DEMO_MODE=true; preview on :3000 (restart to pick up schema/client changes). Confirm dev DB reachable + on `develop`.
