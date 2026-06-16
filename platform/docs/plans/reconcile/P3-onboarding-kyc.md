@@ -357,3 +357,14 @@ skipped level. Fallbacks: no `SalesUser` → `SUBMITTED`; no active manager up-c
 clientId on a global-unique PK ⟹ cross-tenant resolution impossible); walk doubly-bounded (10 hops + visited-set
 cycle guard). NIT folded in: a test now asserts `clientId` on the per-hop manager lookup. Gated: tsc 0, **105/105**
 kyc tests. Closes gap #9.
+
+---
+
+## 14 · 3.5 / 3.6 / 3.4e (Lane D) — built (one Sonnet executor) + independently audited, 2026-06-16
+
+Audit **verdict: sound to commit** (no blocker; confirmed S1/B1 on re-kyc, gst-details tenant scoping, consent-after-verify).
+- **3.5 consent persistence:** `consent()` writes one durable `ConsentRecord` (`consentType:'KYC_TERMS'`, version, `consentedAt = otp.verifiedAt`) only after OTP verify on the caller's own submission. (DPDP `DataRequest` stays descoped.)
+- **3.6 manual re-KYC:** `POST /v1/kyc/:id/re-kyc` (Gifsy-only) — APPROVED-only guard (else Conflict), flips to `RE_KYC_REQUIRED`, sets `reKycFlags` on the primary outlet via the field-map (**S1**: outlet-before-flip throw), notify post-tx (**B1**). `slaMetrics()` unchanged (sufficient).
+- **3.4e reg-type capture + DPDP masking:** `POST /v1/kyc/:id/gst-details` (Gifsy-only) persists `entityType`/`gstRegistrationType` on the partner (tenant-scoped via the submission join, enum-validated) + GST evidence on the item; `lib/invoice` reads these in **P6** (seam noted). `getOne()` masks bank/PAN/GST to last-4.
+
+Audit remediations folded in: **masking now unmasks the submission OWNER** (the audit showed `getOne` already 403s non-admin non-owners, so the only caller ever masked was the owner viewing their own data — wrong; now owner + admin see full, masking is defensive cover for any future non-owner read) + a direct mask-helper test; consent lookup `clientId`-scoped for consistency. **Open decisions (documented, fail-safe):** masking keys on `isAdmin` not the `kyc:view_documents` permission (TODO in code, switch when the RBAC flag-gate is enforced; CLIENT_ADMIN sees full for its own tenant — intended). Deferred NIT: scope the consent OTP to the submission/owner phone (pre-existing). Gated: tsc 0, **124/124** kyc tests, boot smoke (both routes map, unauth 401).

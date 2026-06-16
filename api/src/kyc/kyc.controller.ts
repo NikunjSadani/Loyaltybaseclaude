@@ -20,9 +20,11 @@ import {
   ConsentKycDto,
   CreateKycDto,
   FirstApproveKycDto,
+  GstDetailsDto,
   ListKycQueryDto,
   NotInterestedKycDto,
   RejectKycDto,
+  ReKycDto,
   UpdateKycDto,
   UploadKycDocumentDto,
   VerifyKycFieldDto,
@@ -174,5 +176,41 @@ export class KycController {
   @RequirePermission('kyc:read')
   ledger(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.kyc.ledger(user, id);
+  }
+
+  /**
+   * POST /v1/kyc/:id/re-kyc — manual re-KYC trigger (Task 3.6, Gifsy-only).
+   * Body: { reason: string, fieldKeys?: KycFieldKey[] }
+   * Transitions APPROVED → RE_KYC_REQUIRED; optionally sets reKycFlags on the
+   * primary outlet. Notification enqueued post-tx (B1).
+   * Permission: kyc:gifsy_approve (closest existing Gifsy-side gate action).
+   */
+  @Post(':id/re-kyc')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('kyc:gifsy_approve')
+  reKyc(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: ReKycDto,
+  ) {
+    return this.kyc.reKyc(user, id, dto);
+  }
+
+  /**
+   * POST /v1/kyc/:id/gst-details — capture entity/registration type (Task 3.4e, Gifsy-only).
+   * Body: { entityType, gstRegistrationType, gstLegalName?, gstStatus? }
+   * Sets the two enums on the submission's ChannelPartner (tenant-scoped).
+   * Optional gstLegalName/gstStatus are stored in KycVerificationItem.evidence
+   * for GST_VALIDATION — the clean seam that P6 lib/invoice will read.
+   */
+  @Post(':id/gst-details')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('kyc:gifsy_approve')
+  gstDetails(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: GstDetailsDto,
+  ) {
+    return this.kyc.gstDetails(user, id, dto);
   }
 }

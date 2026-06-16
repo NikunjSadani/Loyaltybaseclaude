@@ -14,7 +14,7 @@ import {
   Length,
   ValidateIf,
 } from 'class-validator';
-import { KycStatus, KycDocumentType, KycFieldKey } from '@prisma/client';
+import { KycStatus, KycDocumentType, KycFieldKey, EntityType, GstRegistrationType } from '@prisma/client';
 
 // ─── Geo capture sub-schema ───────────────────────────────────────────────────
 export class GeoDto {
@@ -284,4 +284,34 @@ export class VerifyKycFieldDto {
   @IsString()
   @MinLength(1, { message: 'remark is required when rejecting a field' })
   remark?: string;
+}
+
+// POST /v1/kyc/:id/re-kyc — manual re-KYC trigger (Task 3.6, Gifsy-only)
+export class ReKycDto {
+  @IsString()
+  @MinLength(1, { message: 'reason is required' })
+  reason!: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsEnum(KycFieldKey, { each: true, message: 'Invalid fieldKey in fieldKeys' })
+  fieldKeys?: KycFieldKey[];
+}
+
+// POST /v1/kyc/:id/gst-details — capture entityType + gstRegistrationType (Task 3.4e, Gifsy-only)
+export class GstDetailsDto {
+  @IsEnum(EntityType, { message: 'Invalid entityType' })
+  entityType!: EntityType;
+
+  @IsEnum(GstRegistrationType, { message: 'Invalid gstRegistrationType' })
+  gstRegistrationType!: GstRegistrationType;
+
+  // Optional: stored in KycVerificationItem.evidence for GST_VALIDATION (read by P6 invoicing)
+  @IsOptional()
+  @IsString()
+  gstLegalName?: string;
+
+  @IsOptional()
+  @IsString()
+  gstStatus?: string;
 }

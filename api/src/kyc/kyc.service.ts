@@ -29,9 +29,11 @@ import {
   ConsentKycDto,
   CreateKycDto,
   FirstApproveKycDto,
+  GstDetailsDto,
   ListKycQueryDto,
   NotInterestedKycDto,
   RejectKycDto,
+  ReKycDto,
   UpdateKycDto,
   UploadKycDocumentDto,
   VerifyKycFieldDto,
@@ -161,6 +163,27 @@ export class KycService {
 
   private isAdmin(role: string): boolean {
     return role === 'GIFSY_ADMIN' || role === 'CLIENT_ADMIN';
+  }
+
+  /**
+   * Task 3.4e — DPDP read-masking.
+   * When `mask` is true, replaces bank account number, PAN, and GST number with
+   * "****<last4>" on the partner object. Full values are never stored differently —
+   * the mask is applied at the response layer only.
+   * Privileged callers (GIFSY_ADMIN / CLIENT_ADMIN) receive the unmasked values.
+   */
+  private maskPartnerSensitiveFields<T extends Record<string, unknown>>(partner: T, mask: boolean): T {
+    if (!mask) return partner;
+    const last4 = (v: unknown): string | null => {
+      if (typeof v !== 'string' || v.length === 0) return v as string | null;
+      return v.length <= 4 ? `****` : `****${v.slice(-4)}`;
+    };
+    return {
+      ...partner,
+      bankAccountNumber: last4(partner.bankAccountNumber),
+      panNumber: last4(partner.panNumber),
+      gstNumber: last4(partner.gstNumber),
+    };
   }
 
   /**
@@ -499,7 +522,19 @@ export class KycService {
       throw new ForbiddenException('Forbidden');
     }
 
-    return { submission };
+    // ── Task 3.4e: DPDP read-masking ─────────────────────────────────────────
+    // Mask sensitive fields (bank account, PAN, GST → last 4) for non-admin callers
+    // who are NOT the submission owner. Admins and the owner (who entered the data)
+    // see full values. NB: today a non-admin non-owner is already 403'd above, so this
+    // is defensive cover for any future read access (e.g. sales approvers viewing a
+    // submission). TODO: switch the privileged check to the `kyc:view_documents`
+    // permission once the RBAC flag-gate is enforced (currently role-based).
+    const masked = !this.isAdmin(user.role) && submission.userId !== user.sub;
+    const partner = submission.partner
+      ? this.maskPartnerSensitiveFields(submission.partner, masked)
+      : null;
+
+    return { submission: { ...submission, partner } };
   }
 
   // ─── PATCH /v1/kyc/:id ───────────────────────────────────────────────────────
@@ -1014,16 +1049,35 @@ export class KycService {
     }
 
     // Mark OTP as verified.
+    const verifiedAt = new Date();
     await this.prisma.otpCode.update({
       where: { id: otpRecord.id },
-      data: { verifiedAt: new Date() },
+      data: { verifiedAt },
     });
 
-    // Verify the submission belongs to this user.
+    // Verify the submission belongs to this user (tenant-scoped for consistency
+    // with the rest of the service — userId alone is already single-tenant).
     const submission = await this.prisma.kycSubmission.findFirst({
-      where: { id: submissionId, userId: user.sub },
+      where: { id: submissionId, userId: user.sub, user: { clientId: user.clientId } },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
+
+    // ── Task 3.5: Write a durable ConsentRecord on successful OTP verification ─
+    // Idempotency note: if consent() is called twice for the same submission we
+    // write a second ConsentRecord (each has its own OTP cycle so this is valid
+    // auditable proof). The schema allows multiple records per submission (no
+    // unique constraint on kycSubmissionId alone).
+    await this.prisma.consentRecord.create({
+      data: {
+        userId: user.sub,
+        kycSubmissionId: submissionId,
+        consentType: 'KYC_TERMS',
+        consentText: `KYC Terms & Conditions v${process.env.KYC_TERMS_VERSION ?? '1.0'}`,
+        version: process.env.KYC_TERMS_VERSION ?? '1.0',
+        consentedAt: verifiedAt,
+        // ipAddress / deviceInfo: not available on this path — left null (DPDP §3.2)
+      },
+    });
 
     return { verified: true, submissionId };
   }
@@ -1137,6 +1191,203 @@ export class KycService {
       pendingAging,
       rejectionByReason,
       reUploadRate: Math.round(reUploadRate * 10) / 10,
+    };
+  }
+
+  // ─── POST /v1/kyc/:id/re-kyc ─────────────────────────────────────────────────
+  /**
+   * Task 3.6 — Manual re-KYC trigger (Gifsy-only).
+   *
+   * Transitions an APPROVED submission to RE_KYC_REQUIRED and optionally sets
+   * the reKycFlags on the primary outlet for the specified fieldKeys.
+   *
+   * B1: notification enqueued AFTER the tx.
+   * S1: if fieldKeys are supplied but no primary outlet exists, throws inside the tx
+   *     → full rollback, no half-commit.
+   *
+   * Permission: @Roles('GIFSY_ADMIN') + @RequirePermission('kyc:gifsy_approve').
+   * Closest existing perm is kyc:gifsy_approve (the Gifsy-side approve action);
+   * re-KYC is likewise a Gifsy-only workflow gate so it reuses the same perm.
+   */
+  async reKyc(user: JwtPayload, id: string, dto: ReKycDto) {
+    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
+
+    const { reason, fieldKeys } = dto;
+    const now = new Date();
+
+    const notifyIntent = await this.prisma.$transaction(async (tx) => {
+      // Load and tenant-scope the submission.
+      const submission = await tx.kycSubmission.findFirst({
+        where: { id, user: { clientId: user.clientId } },
+        include: {
+          user: { select: { id: true, name: true, phone: true } },
+          partner: {
+            include: {
+              outlets: {
+                where: { isPrimary: true, deletedAt: null },
+                take: 1,
+                select: { id: true, reKycFlags: true },
+              },
+            },
+          },
+        },
+      });
+
+      if (!submission) throw new NotFoundException('KYC submission not found');
+
+      // Only an APPROVED KYC can be sent back for re-KYC.
+      if (submission.status !== 'APPROVED') {
+        throw new ConflictException(
+          `Re-KYC can only be triggered on an APPROVED submission (current status: "${submission.status}")`,
+        );
+      }
+
+      // S1: if fieldKeys given, we must have a primary outlet to write reKycFlags.
+      const primaryOutlet = submission.partner?.outlets[0] ?? null;
+      if (fieldKeys?.length && !primaryOutlet) {
+        throw new Error(
+          `No primary outlet found for submission ${id} — cannot set reKycFlags for fields: ${fieldKeys.join(', ')}`,
+        );
+      }
+
+      // Flip status → RE_KYC_REQUIRED.
+      await tx.kycSubmission.update({
+        where: { id },
+        data: { status: 'RE_KYC_REQUIRED' as never },
+      });
+
+      // Optionally set reKycFlags on the primary outlet.
+      if (fieldKeys?.length && primaryOutlet) {
+        const flagsUpdate: Record<string, boolean> = {};
+        for (const fk of fieldKeys) {
+          for (const flag of KYC_FIELD_TO_REKYCFLAGS[fk] ?? []) {
+            flagsUpdate[flag] = true;
+          }
+        }
+        const existing = (primaryOutlet.reKycFlags ?? {}) as Record<string, boolean>;
+        const merged = { ...existing, ...flagsUpdate };
+        await tx.outlet.update({
+          where: { id: primaryOutlet.id },
+          data: { reKycFlags: merged },
+        });
+      }
+
+      // KycStatusHistory
+      await tx.kycStatusHistory.create({
+        data: {
+          kycSubmissionId: id,
+          fromStatus: 'APPROVED' as never,
+          toStatus: 'RE_KYC_REQUIRED' as never,
+          changedByUserId: user.sub,
+          notes: reason,
+          metadata: { stage: 'GIFSY', fieldKeys: fieldKeys ?? null },
+        },
+      });
+
+      // AuditLog
+      await tx.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entityType: 'KYC_SUBMISSION',
+          entityId: id,
+          actorId: user.sub,
+          oldValues: { status: 'APPROVED' },
+          newValues: { status: 'RE_KYC_REQUIRED' },
+          metadata: { reason, fieldKeys: fieldKeys ?? null, triggeredAt: now.toISOString() },
+        },
+      });
+
+      // Return notification intent — enqueued post-tx (B1).
+      return {
+        userId: submission.userId,
+        event: 'KYC_RE_KYC_REQUIRED',
+        body: `Your KYC requires re-verification. Reason: ${reason}`,
+        variables: {
+          name: submission.user.name ?? submission.user.phone,
+          reason,
+          fieldKeys: fieldKeys?.join(', ') ?? '',
+        },
+        phone: submission.user.phone ?? undefined,
+      };
+    });
+
+    // B1: enqueue AFTER the tx commits.
+    await this.notify(
+      notifyIntent.userId,
+      notifyIntent.event,
+      notifyIntent.body,
+      notifyIntent.variables,
+      notifyIntent.phone,
+    );
+
+    return {
+      message: 'Re-KYC triggered successfully',
+      submissionId: id,
+      newStatus: 'RE_KYC_REQUIRED',
+    };
+  }
+
+  // ─── POST /v1/kyc/:id/gst-details ────────────────────────────────────────────
+  /**
+   * Task 3.4e — Capture entityType + gstRegistrationType on the ChannelPartner.
+   *
+   * Gifsy-only endpoint. Sets the two enum fields on the submission's partner
+   * (tenant-scoped). Optionally stores gstLegalName/gstStatus in the
+   * KycVerificationItem.evidence JSON for the GST_VALIDATION field.
+   *
+   * P6 seam: lib/invoice will read partner.entityType + partner.gstRegistrationType
+   * here to determine TDS applicability and invoice category. Do NOT build invoice
+   * computation in this task — leave this comment as the integration point.
+   */
+  async gstDetails(user: JwtPayload, id: string, dto: GstDetailsDto) {
+    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
+
+    const { entityType, gstRegistrationType, gstLegalName, gstStatus } = dto;
+
+    // Load submission — tenant-scoped.
+    const submission = await this.prisma.kycSubmission.findFirst({
+      where: { id, user: { clientId: user.clientId } },
+      include: { partner: { select: { id: true, clientId: true } } },
+    });
+
+    if (!submission) throw new NotFoundException('KYC submission not found');
+    if (!submission.partner) throw new NotFoundException('No ChannelPartner linked to this submission');
+
+    // Persist entityType + gstRegistrationType on the partner.
+    await this.prisma.channelPartner.update({
+      where: { id: submission.partner.id },
+      data: { entityType, gstRegistrationType },
+    });
+
+    // If gstLegalName or gstStatus supplied, store in KycVerificationItem.evidence
+    // for GST_VALIDATION (upsert so this is safe to call before or after field verify).
+    if (gstLegalName !== undefined || gstStatus !== undefined) {
+      const evidenceUpdate: Record<string, string | undefined> = {};
+      if (gstLegalName !== undefined) evidenceUpdate.legalName = gstLegalName;
+      if (gstStatus !== undefined) evidenceUpdate.status = gstStatus;
+
+      await this.prisma.kycVerificationItem.upsert({
+        where: {
+          kycSubmissionId_fieldKey: { kycSubmissionId: id, fieldKey: 'GST_VALIDATION' },
+        },
+        create: {
+          kycSubmissionId: id,
+          fieldKey: 'GST_VALIDATION',
+          decision: 'PENDING',
+          evidence: evidenceUpdate,
+        },
+        update: {
+          evidence: evidenceUpdate,
+        },
+      });
+    }
+
+    return {
+      message: 'GST details captured successfully',
+      submissionId: id,
+      partnerId: submission.partner.id,
+      entityType,
+      gstRegistrationType,
     };
   }
 

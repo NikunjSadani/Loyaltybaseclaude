@@ -53,6 +53,8 @@ const mockPrisma = {
   otpCode: { findFirst: jest.fn(), update: jest.fn() },
   outlet: { findUnique: jest.fn(), update: jest.fn() },
   salesUser: { findFirst: jest.fn() },
+  consentRecord: { create: jest.fn() },
+  kycVerificationItem: { upsert: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
@@ -859,6 +861,7 @@ describe('KycService', () => {
       });
       mockPrisma.otpCode.update.mockResolvedValue({});
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 's1' });
+      mockPrisma.consentRecord.create.mockResolvedValue({ id: 'cr1' });
       const res = await service.consent(partner, {
         submissionId: 's1',
         mobile: '9000000000',
@@ -866,6 +869,316 @@ describe('KycService', () => {
       });
       expect(res).toEqual({ verified: true, submissionId: 's1' });
       expect(mockPrisma.otpCode.findFirst.mock.calls[0][0].where.purpose).toBe('KYC_CONSENT');
+    });
+
+    // ── Task 3.5: ConsentRecord persistence ──────────────────────────────────
+    it('Task 3.5: writes a ConsentRecord with correct userId/kycSubmissionId/consentType/version on OTP success', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({
+        id: 'o1',
+        code: '111111',
+        attempts: 0,
+        maxAttempts: 3,
+      });
+      mockPrisma.otpCode.update.mockResolvedValueOnce({});
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({ id: 'sub-consent-1' });
+      mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr-1' });
+
+      await service.consent(partner, { submissionId: 'sub-consent-1', mobile: '9000000001', otp: '111111' });
+
+      expect(mockPrisma.consentRecord.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          userId: 'user1',
+          kycSubmissionId: 'sub-consent-1',
+          consentType: 'KYC_TERMS',
+          version: expect.any(String),
+          consentedAt: expect.any(Date),
+        }),
+      });
+    });
+
+    it('Task 3.5: does NOT write a ConsentRecord when OTP is wrong (still returns 401)', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({
+        id: 'o2',
+        code: '999999',
+        attempts: 0,
+        maxAttempts: 3,
+      });
+      mockPrisma.otpCode.update.mockResolvedValueOnce({});
+
+      const err = await service
+        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
+        .catch((e) => e);
+
+      expect(err).toBeInstanceOf(HttpException);
+      expect(err.getStatus()).toBe(401);
+      expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+    });
+
+    it('Task 3.5: does NOT write a ConsentRecord when OTP is expired (findFirst returns null)', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce(null);
+
+      const err = await service
+        .consent(partner, { submissionId: 's1', mobile: '9000000001', otp: '111111' })
+        .catch((e) => e);
+
+      expect(err).toBeInstanceOf(HttpException);
+      expect(err.getStatus()).toBe(401);
+      expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Task 3.6: Manual re-KYC trigger ──────────────────────────────────────────
+  describe('reKyc (POST /v1/kyc/:id/re-kyc)', () => {
+    /** A happy-path APPROVED submission with a primary outlet. */
+    const seedApprovedSubmission = (outletOverrides?: Partial<{ id: string; reKycFlags: unknown }>) => {
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's-approved',
+        userId: 'user1',
+        status: 'APPROVED',
+        user: { id: 'user1', name: 'Kumar', phone: '9000000001' },
+        partner: {
+          outlets: [{ id: outletOverrides?.id ?? 'outlet-1', reKycFlags: outletOverrides?.reKycFlags ?? null }],
+        },
+      });
+    };
+
+    it('sets status to RE_KYC_REQUIRED and writes history + auditLog', async () => {
+      seedApprovedSubmission();
+      mockTx.kycSubmission.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+
+      const res = await service.reKyc(gifsy, 's-approved', { reason: 'documents expired' });
+
+      expect(res.newStatus).toBe('RE_KYC_REQUIRED');
+      expect(mockTx.kycSubmission.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { status: 'RE_KYC_REQUIRED' } }),
+      );
+      expect(mockTx.kycStatusHistory.create).toHaveBeenCalled();
+      expect(mockTx.auditLog.create).toHaveBeenCalled();
+    });
+
+    it('sets reKycFlags on the primary outlet when fieldKeys are provided (tenant-scoped)', async () => {
+      seedApprovedSubmission({ id: 'outlet-2', reKycFlags: null });
+      mockTx.kycSubmission.update.mockResolvedValueOnce({});
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+
+      await service.reKyc(gifsy, 's-approved', {
+        reason: 'GST mismatch',
+        fieldKeys: ['GST_VALIDATION'],
+      });
+
+      expect(mockTx.outlet.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'outlet-2' },
+          data: expect.objectContaining({
+            reKycFlags: expect.objectContaining({ gstNumber: true, panNumber: true }),
+          }),
+        }),
+      );
+    });
+
+    it('throws ConflictException when submission is NOT APPROVED', async () => {
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's-pending',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        user: { id: 'user1', name: 'Kumar', phone: '9000000001' },
+        partner: { outlets: [] },
+      });
+
+      await expect(
+        service.reKyc(gifsy, 's-pending', { reason: 'test' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(mockTx.kycSubmission.update).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when submission is outside the tenant', async () => {
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+
+      await expect(
+        service.reKyc(gifsy, 'no-such', { reason: 'test' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('throws (rolls back) when fieldKeys given but no primary outlet', async () => {
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's-approved',
+        userId: 'user1',
+        status: 'APPROVED',
+        user: { id: 'user1', name: 'Kumar', phone: '9000000001' },
+        partner: { outlets: [] }, // no primary outlet
+      });
+
+      await expect(
+        service.reKyc(gifsy, 's-approved', { reason: 'test', fieldKeys: ['PAYMENT'] }),
+      ).rejects.toThrow('No primary outlet');
+      // status must NOT have been flipped
+      expect(mockTx.kycSubmission.update).not.toHaveBeenCalled();
+    });
+
+    it('requires reason (empty string should be caught at DTO level, service receives non-empty)', async () => {
+      // reason is validated as MinLength(1) in DTO; testing service does not crash with reason
+      seedApprovedSubmission();
+      mockTx.kycSubmission.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+      const res = await service.reKyc(gifsy, 's-approved', { reason: 'fraud detected' });
+      expect(res.message).toBe('Re-KYC triggered successfully');
+    });
+
+    it('B1 regression: notification enqueued post-tx (not inside the tx)', async () => {
+      seedApprovedSubmission();
+      mockTx.kycSubmission.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+
+      await service.reKyc(gifsy, 's-approved', { reason: 'doc expired' });
+
+      // notification must have been sent after the tx
+      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          variables: expect.objectContaining({ event: 'KYC_RE_KYC_REQUIRED' }),
+        }),
+      );
+    });
+
+    it('B1 regression: tx failure → notification NOT enqueued', async () => {
+      seedApprovedSubmission();
+      mockTx.kycSubmission.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      // auditLog throws → tx rolls back
+      mockTx.auditLog.create.mockRejectedValueOnce(new Error('DB write failed'));
+
+      await expect(service.reKyc(gifsy, 's-approved', { reason: 'test' })).rejects.toThrow();
+      expect(mockNotifications.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('is Gifsy-only (non-Gifsy caller gets ForbiddenException)', async () => {
+      await expect(service.reKyc(so, 's-approved', { reason: 'test' })).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+  });
+
+  // ── Task 3.4e: GST details + DPDP masking ─────────────────────────────────────
+  describe('gstDetails (POST /v1/kyc/:id/gst-details)', () => {
+    it('persists entityType + gstRegistrationType on the partner (tenant-scoped)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 'sub-gst-1',
+        userId: 'user1',
+        partner: { id: 'p1', clientId: 'deoleo' },
+      });
+      mockPrisma.channelPartner.update.mockResolvedValueOnce({ id: 'p1' });
+
+      const res = await service.gstDetails(gifsy, 'sub-gst-1', {
+        entityType: 'INDIVIDUAL',
+        gstRegistrationType: 'REGULAR',
+      });
+
+      expect(res.entityType).toBe('INDIVIDUAL');
+      expect(res.gstRegistrationType).toBe('REGULAR');
+      expect(mockPrisma.channelPartner.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'p1' },
+          data: { entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR' },
+        }),
+      );
+    });
+
+    it('is Gifsy-only (non-Gifsy caller gets ForbiddenException)', async () => {
+      await expect(
+        service.gstDetails(so, 'sub-gst-1', { entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('throws NotFoundException when submission does not belong to tenant', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      await expect(
+        service.gstDetails(gifsy, 'no-such', { entityType: 'COMPANY', gstRegistrationType: 'COMPOSITE' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('stores gstLegalName/gstStatus in KycVerificationItem.evidence for GST_VALIDATION', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 'sub-gst-2',
+        userId: 'user1',
+        partner: { id: 'p2', clientId: 'deoleo' },
+      });
+      mockPrisma.channelPartner.update.mockResolvedValueOnce({ id: 'p2' });
+      mockPrisma.kycVerificationItem.upsert.mockResolvedValueOnce({});
+
+      await service.gstDetails(gifsy, 'sub-gst-2', {
+        entityType: 'HUF',
+        gstRegistrationType: 'UNREGISTERED',
+        gstLegalName: 'Kumar HUF',
+        gstStatus: 'Active',
+      });
+
+      expect(mockPrisma.kycVerificationItem.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { kycSubmissionId_fieldKey: { kycSubmissionId: 'sub-gst-2', fieldKey: 'GST_VALIDATION' } },
+          create: expect.objectContaining({ evidence: { legalName: 'Kumar HUF', status: 'Active' } }),
+          update: expect.objectContaining({ evidence: { legalName: 'Kumar HUF', status: 'Active' } }),
+        }),
+      );
+    });
+  });
+
+  // ── Task 3.4e: DPDP masking in getOne() ──────────────────────────────────────
+  describe('DPDP masking in getOne()', () => {
+    const fullPartner = {
+      id: 'p1',
+      bankAccountNumber: '123456789012',
+      panNumber: 'ABCDE1234F',
+      gstNumber: '27AABCU9603R1ZM',
+    };
+
+    it('shows full sensitive fields to the submission OWNER (their own data is not masked)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'user1', // === partner.sub → the owner
+        partner: fullPartner,
+        documents: [],
+        statusHistory: [],
+        user: { id: 'user1', name: 'Kumar', phone: '9000000001', role: 'RETAILER' },
+      });
+
+      const res = await service.getOne(partner, 's1');
+
+      expect(res.submission.partner?.bankAccountNumber).toBe('123456789012');
+      expect(res.submission.partner?.panNumber).toBe('ABCDE1234F');
+      expect(res.submission.partner?.gstNumber).toBe('27AABCU9603R1ZM');
+    });
+
+    it('maskPartnerSensitiveFields masks to last-4 when masking is on (defensive cover for future non-owner reads)', () => {
+      const mask = (
+        service as unknown as {
+          maskPartnerSensitiveFields: (p: typeof fullPartner, m: boolean) => typeof fullPartner;
+        }
+      ).maskPartnerSensitiveFields(fullPartner, true);
+      expect(mask.bankAccountNumber).toBe('****9012');
+      expect(mask.panNumber).toBe('****234F');
+      expect(mask.gstNumber).toBe('****R1ZM');
+    });
+
+    it('shows full sensitive fields for Gifsy admin callers', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'admin1',
+        partner: fullPartner,
+        documents: [],
+        statusHistory: [],
+        user: { id: 'admin1', name: 'Admin', phone: '9000000002', role: 'GIFSY_ADMIN' },
+      });
+
+      const res = await service.getOne(gifsy, 's1');
+
+      expect(res.submission.partner?.bankAccountNumber).toBe('123456789012');
+      expect(res.submission.partner?.panNumber).toBe('ABCDE1234F');
+      expect(res.submission.partner?.gstNumber).toBe('27AABCU9603R1ZM');
     });
   });
 
