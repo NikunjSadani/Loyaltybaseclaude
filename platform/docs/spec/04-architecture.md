@@ -30,13 +30,15 @@ flowchart TB
 
 ## 2 · Building blocks (C4 L2)
 
-> **Phase S — S1–S4 DONE (`../plans/BACKEND-SPLIT-PLAN.md`).** The target below **is built**: the NestJS backend
+> **Phase S — S1–S6 DONE (`../plans/BACKEND-SPLIT-PLAN.md`).** The target below **is built**: the NestJS backend
 > lives in `api/` (api/'s World-A domain deleted; the real domain rebuilt from `platform/lib`), with **124 `/v1`
 > endpoints across 17 modules**, a **66-model canonical schema** (`api/prisma/schema.prisma`, World-A de-scaffolded),
-> and global envelope + JWT/permission guards. The storage/messaging integrations are now Nest services
-> (`StorageService` over GCS; `NotificationsService` enqueue seam — see §5). **Remaining:** S5 tenant-scoping guard ·
-> S6 thin the frontend (it still hosts the legacy routes until then) · S7 infra · S8 cutover + delete World-A
-> `api/` leftovers.
+> and global envelope + JWT/permission/**tenant** guards. The storage/messaging integrations are now Nest services
+> (`StorageService` over GCS; `NotificationsService` enqueue seam — see §5). **S5** added the app-layer `TenantGuard`
+> (asserts a tenant is resolved per authed request + stamps `req.tenantId`; DB-level RLS is Gap #23 → P8.6). **S6**
+> thinned the frontend: a `next.config.ts` proxy rewrites same-origin `/api/*` → backend `/v1/*` (the web client keeps
+> calling `/api/*`; mobile/partner consumers will hit `/v1` directly). **Remaining:** S7 infra (set `NEXT_PUBLIC_API_URL`
+> in prod) · S8 cutover + delete World-A `api/` leftovers **and** the now-shadowed local `src/app/api/*` ported routes.
 
 **Target building blocks:**
 - **Backend API (NestJS)** — the single source of truth: controllers (versioned `/v1`) over the ported domain
@@ -65,8 +67,12 @@ flowchart TB
   still uses the registry; no DB access at the edge). Tenant onboarding no longer requires a
   code change for config (gap #22 addressed).
 - **Isolation = shared DB, row-level scoping** by the denormalised `clientId` string on every
-  table. The 1.7 isolation audit test guards every tenant-scoped route. No Postgres RLS yet
-  (future hardening — gap #23 residual).
+  table. The 1.7 isolation audit test guards every tenant-scoped route. In the backend, the
+  **`TenantGuard` (Phase S S5)** is the app-layer chokepoint — it asserts a tenant is resolved on
+  every authenticated request (loud 403 vs a silent unscoped query) and stamps `req.tenantId` as the
+  single seam DB-level enforcement will hook. No Postgres RLS / Prisma auto-scoper yet — measured-and-
+  deferred to **P8.6** (gap #23 residual: ~28 relation-scoped + 41 id-only of 236 query sites carry no
+  direct `clientId`, so a strict assert must land *with* RLS + a cross-tenant escape-hatch taxonomy).
 
 ## 4 · Authentication & authorization
 
@@ -104,8 +110,9 @@ flowchart TB
 ## 6 · Deployment
 
 - **Target (Phase S):** **Docker → Cloud Run** for **two** services — the **backend API** (`gifsy-api`; owns the
-  DB, gets `DATABASE_URL`/Redis/Cloud SQL/secrets) + the **thin web frontend** (`gifsy-frontend`; stateless,
-  `JWT_SECRET` only). This is exactly what `terraform/` already provisions — the split makes the **code** match it.
+  DB, gets `DATABASE_URL`/Redis/Cloud SQL/secrets) + the **thin web frontend** (`gifsy-frontend`; stateless; needs
+  **`NEXT_PUBLIC_API_URL`** = backend origin so its `next.config.ts` proxy can forward `/api/*` → `/v1/*` — set in S7;
+  `JWT_SECRET` only while the shadowed local `src/app/api/*` routes still exist, removed at S8). This is exactly what `terraform/` already provisions — the split makes the **code** match it.
   **Cloud SQL** Postgres (one canonical schema); **GCS**; **Secret Manager** (`JWT_SECRET`, MSG91 keys — never
   hardcoded; SA key files gitignored); `terraform/iam.tf`. **Cloudflare worker** routes subdomains to origins.
 - **Schema ownership:** the **backend** (which lives in the `api/` dir post-split) owns the single canonical Prisma

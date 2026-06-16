@@ -1,9 +1,33 @@
 import type { NextConfig } from "next";
 import path from "path";
 
+// Phase S (S6) — thin frontend: the browser keeps calling same-origin `/api/*`,
+// and Next proxies those to the NestJS backend's versioned `/v1/*` surface. This
+// preserves the existing `Authorization: Bearer` (localStorage) auth with zero page
+// changes, keeps login same-origin, and avoids cross-origin CORS for the web client.
+// `beforeFiles` runs BEFORE the local `src/app/api/*` handlers, so the backend wins
+// over the still-present platform routes (those are deleted at S8).
+// EXCLUDED (kept on local handlers until the backend ports them — see RESUME.md
+// deferred list): rewards/redeem(+confirm), visibility/submit, partner/invoices,
+// admin/kyc approvals.
+const BACKEND_API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
+
 const nextConfig: NextConfig = {
   // Required for Docker standalone build (Cloud Run)
   output: 'standalone',
+  async rewrites() {
+    return {
+      beforeFiles: [
+        {
+          source:
+            '/api/:path((?!rewards/redeem|visibility/submit|partner/invoices|admin/kyc).*)',
+          destination: `${BACKEND_API_URL}/v1/:path`,
+        },
+      ],
+      afterFiles: [],
+      fallback: [],
+    };
+  },
   // Pin the Turbopack root to this package so Next.js ignores
   // any stray lockfiles higher up in the directory tree.
   turbopack: {

@@ -5,13 +5,17 @@
 ever be), before building P3+. No speed-vs-quality tradeoff. Architecture source of truth = `../spec/04-architecture.md`;
 why = Gap #31. This doc = how we execute it.
 
-> **STATUS (2026-06-16): S0–S4 ✅ DONE & pushed to `origin/develop`.** The backend is built in `api/` — **124 `/v1`
-> endpoints across 17 modules**, a 66-model canonical schema (World-A de-scaffolded, migration applied to
-> `gifsy_dev`), and foundation rails (response envelope · RBAC permission guard · `StorageService` GCS ·
-> `NotificationsService` enqueue seam · shared xlsx/`StreamableFile`). Every wave was gated (tsc + tests + boot) and
-> **independently audited**. **Remaining (light): S5** tenant-scoping guard · **S6** thin the frontend · **S7** infra
-> (near-no-op) · **S8** cutover + delete World-A `api/` leftovers. Live per-step status in `00-MASTER-PLAN.md`;
-> restart at S5 via `RESUME.md`.
+> **STATUS (2026-06-16): S0–S6 ✅ DONE** (S0–S5 pushed to `origin/develop`; S6 committed-pending). The backend is built
+> in `api/` — **124 `/v1` endpoints across 17 modules**, a 66-model canonical schema (World-A de-scaffolded, migration
+> applied to `gifsy_dev`), and foundation rails (response envelope · RBAC permission guard · `StorageService` GCS ·
+> `NotificationsService` enqueue seam · shared xlsx/`StreamableFile`). **S5** added the app-layer `TenantGuard`
+> (asserts a tenant is resolved per authed request + stamps `req.tenantId`; DB-level RLS/auto-scope measured-and-
+> deferred to **P8.6**, Gap #23). **S6** thinned the frontend via a `next.config.ts` proxy (`/api/*` → backend `/v1/*`,
+> `beforeFiles`; deferred routes excluded) — verified e2e (authed request browser→proxy→backend→DB returns 200). Every
+> wave gated (tsc + tests + boot/e2e smoke) and **independently audited**. **Remaining (light): S7** infra (near-no-op:
+> set `NEXT_PUBLIC_API_URL` in prod; drop dead schema-fallback) · **S8** cutover + delete World-A `api/` leftovers (incl.
+> the now-shadowed local `src/app/api/*` ported routes). Live per-step status in `00-MASTER-PLAN.md`; restart at S7 via
+> `RESUME.md`.
 
 ## Why now (one paragraph)
 The code was built full-stack (the Next.js `platform/` owns the DB via 119 Prisma routes) but the **infra was
@@ -106,8 +110,19 @@ regardless; the framework choice only changes the handler-wrapper style. We stil
   Parallelize by domain (disjoint waves of executors); batch the gate per wave. Add `/v1` versioning.
 - **S5 · Cross-cutting as guards.** Global JWT/session auth, `requirePermission` → a permission guard,
   **tenant-scoping guard/interceptor** (single isolation enforcement point), throttling, audit, cron jobs.
-- **S6 · Thin the frontend.** Point the web app's data layer at the backend base URL (`api-client.ts` +
-  `NEXT_PUBLIC_API_URL` already plumbed); handle CORS + cross-origin auth; confirm 0 business logic remains client-side.
+- **S6 · Thin the frontend. ✅ DONE — via a Next proxy, not a base-URL flip.** *(Plan premise corrected: the
+  audit found `api-client.ts` is used by only 5 files while **53** call raw `fetch('/api/...')`, and
+  `NEXT_PUBLIC_API_URL` was **unused** — so it was NOT "already plumbed".)* Chosen approach (owner-confirmed): a
+  **`next.config.ts` `beforeFiles` rewrite** proxies same-origin `/api/:path*` → backend `${NEXT_PUBLIC_API_URL}/v1/:path*`.
+  This keeps the existing `Authorization: Bearer` (localStorage) auth with **zero page changes**, keeps login
+  same-origin (no cross-origin CORS for the web client), and `beforeFiles` makes the backend win over the still-present
+  local `src/app/api/*` handlers (deleted at S8). The 4 **deferred** route groups (`rewards/redeem`,
+  `visibility/submit`, `partner/invoices`, `admin/kyc`) are excluded from the proxy (negative-lookahead) so they stay
+  on local handlers until ported. *Why proxy over direct cross-origin: the web client behind a same-origin proxy does
+  NOT compromise the multi-consumer goal (mobile/partner still hit `/v1` directly), it's lower auth-risk (same-origin
+  cookie+Bearer both keep working) and a stepping stone to httpOnly-cookie auth, and it avoids a 53-file sweep that is
+  partly throwaway (those pages churn again in P3).* **Deferred (follow-up):** centralize the 53 raw-`fetch` callers
+  through `api-client.ts` — done incrementally when those pages are touched for P3, not as a big-bang now.
 - **S7 · Infra/CI (mostly already done).** Because the backend lives in `api/`, the existing `gifsy-api`
   build/deploy path is unchanged (no workflow-path edits). Confirm the backend has the prod DB/secrets — it already
   does (only `gifsy-api` gets `DATABASE_URL`); frontend stays stateless; cloudflare already routes; the CI build/test

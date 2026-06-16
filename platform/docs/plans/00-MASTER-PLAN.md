@@ -247,8 +247,8 @@ owns DB + all logic) + a **thin Next.js web frontend**, so future mobile/PWA/par
 | S2 | Canonical schema → `api/prisma/` (66 models) + **World-A de-scaffold** (folds in P4.0) | **✅ DONE** (migration applied to `gifsy_dev`, 80→66) |
 | S3 | Foundation: envelope interceptor · RBAC permission guard · **StorageService** (GCS) · **NotificationsService** (enqueue seam) · shared xlsx builder | **✅ DONE** |
 | S4 | Re-home all route handlers → `/v1` controllers, parallel by domain | **✅ DONE** (124 `/v1` routes, 17 modules; every wave gated + audited) |
-| S5 | Global guards: auth/session ✅, permission ✅, throttle ✅ already global → **add tenant-scoping guard/interceptor** (the one real cross-cutting add) | unit + smoke |
-| S6 | Thin the frontend → call backend over HTTP (CORS, cross-origin auth) | e2e smoke |
+| S5 | Global guards: auth/session ✅, permission ✅, throttle ✅ already global → **`TenantGuard`** added (asserts a tenant is resolved per authed request → loud 403; stamps `req.tenantId`). DB-level isolation (RLS/Prisma auto-scope) measured-and-deferred to **P8.6** (Gap #23). | **✅ DONE** (10 unit + boot smoke; tsc 0 / 273 tests) |
+| S6 | Thin the frontend → **Next proxy** (`next.config.ts` `beforeFiles` rewrite `/api/*` → backend `/v1/*`; deferred routes excluded; zero page changes, Bearer auth preserved). *Premise corrected: api-client/`NEXT_PUBLIC_API_URL` were NOT pre-plumbed; 53 raw-`fetch` callers centralized later (P3).* | **✅ DONE** (e2e smoke: authed request browser→proxy→backend→DB = 200) |
 | S7 | Infra/CI: ~no change (backend = `api/` dir already deploys as `gifsy-api`); drop dead schema-fallback | deploy run |
 | S8 | Cutover smokes; confirm no World-A leftovers (`api/` dir *persists* as the backend); close #30/#31 | **human gate** |
 
