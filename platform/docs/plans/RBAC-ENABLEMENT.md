@@ -45,6 +45,12 @@ four-eyes control over money corrections.
       schemes-export got an explicit role guard; kpi-config left as `reports:manage_scheduled`).
 - [ ] Decide whether any tenant needs a permission **override** beyond the default split. If yes, that
       needs the override storage/UI (future) before enabling for that tenant.
+- [ ] **⚠️ Seed `kyc:*` for the field-sales approver roles (Phase S kyc-audit finding).** `SALES_SO`,
+      `SALES_ASM`, `SALES_STATE_HEAD` map to `EMPTY_PERMISSIONS` in the default role→permission map, but they are
+      the KYC **field approvers** (first-approve / reject / list their pending bucket). With RBAC OFF this is
+      harmless (the in-service role checks gate access); but enabling enforcement **without** granting these roles
+      `kyc:read`/`kyc:approve`/`kyc:reject` would 403 the entire field-approval chain. Add those grants (default map
+      or per-tenant override) before flipping the flag.
 - [ ] (Optional perf) add caching to `requirePermission`'s per-tenant config read.
 
 ## Enablement steps

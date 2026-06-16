@@ -30,11 +30,13 @@ flowchart TB
 
 ## 2 · Building blocks (C4 L2)
 
-> **In transition (Phase S, `../plans/BACKEND-SPLIT-PLAN.md`).** The current code is a full-stack Next.js app
-> (`platform/`, 119 Prisma routes) plus a separate NestJS `api/` (a World-A-model service the platform never
-> calls). Phase S **reuses `api/`'s framework shell in place as the backend** (it's the proven `gifsy-api` deploy
-> target) while **deleting its World-A domain** and rebuilding the real domain from `platform/lib`. The target
-> below is what Phase S builds.
+> **Phase S — S1–S4 DONE (`../plans/BACKEND-SPLIT-PLAN.md`).** The target below **is built**: the NestJS backend
+> lives in `api/` (api/'s World-A domain deleted; the real domain rebuilt from `platform/lib`), with **124 `/v1`
+> endpoints across 17 modules**, a **66-model canonical schema** (`api/prisma/schema.prisma`, World-A de-scaffolded),
+> and global envelope + JWT/permission guards. The storage/messaging integrations are now Nest services
+> (`StorageService` over GCS; `NotificationsService` enqueue seam — see §5). **Remaining:** S5 tenant-scoping guard ·
+> S6 thin the frontend (it still hosts the legacy routes until then) · S7 infra · S8 cutover + delete World-A
+> `api/` leftovers.
 
 **Target building blocks:**
 - **Backend API (NestJS)** — the single source of truth: controllers (versioned `/v1`) over the ported domain
@@ -94,9 +96,9 @@ flowchart TB
 
 | Integration | Lib | Notes |
 |---|---|---|
-| Object storage | `lib/s3.ts` (**GCS**, name is legacy) | ADC on Cloud Run; signed URLs need `serviceAccountTokenCreator` |
+| Object storage | `lib/s3.ts` (GCS) → backend **`StorageService`** (Phase S S3) | ADC on Cloud Run; signed URLs need `serviceAccountTokenCreator`; `generateKey`/`uploadFile`/`getSignedUrl` |
 | Messaging/OTP | `lib/msg91.ts` | WhatsApp/SMS/OTP; `DEMO_MODE` simulates |
-| Notifications | `lib/notifications.ts` | DB template/queue model **kept**; its generic axios senders + `nodemailer` to be **retired** — MSG91 is the sole provider (Gap #21 **DECIDED** 0.4c; build in P7) |
+| Notifications | `lib/notifications.ts` → backend **`NotificationsService`** (enqueue seam, S3) | DB template/queue model **kept**; Phase S S3 added `NotificationsService.enqueue` (writes QUEUED `NotificationQueue` rows). Delivery worker + retire axios/`nodemailer` (MSG91 sole provider) = **P7** (Gap #21) |
 | Payments | — | **No gateway integrated**; `PayoutTransaction.provider*` unused → payouts are **offline** (bank file + UTR) |
 
 ## 6 · Deployment

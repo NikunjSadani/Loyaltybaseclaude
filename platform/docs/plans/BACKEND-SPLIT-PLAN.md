@@ -5,6 +5,14 @@
 ever be), before building P3+. No speed-vs-quality tradeoff. Architecture source of truth = `../spec/04-architecture.md`;
 why = Gap #31. This doc = how we execute it.
 
+> **STATUS (2026-06-16): S0–S4 ✅ DONE & pushed to `origin/develop`.** The backend is built in `api/` — **124 `/v1`
+> endpoints across 17 modules**, a 66-model canonical schema (World-A de-scaffolded, migration applied to
+> `gifsy_dev`), and foundation rails (response envelope · RBAC permission guard · `StorageService` GCS ·
+> `NotificationsService` enqueue seam · shared xlsx/`StreamableFile`). Every wave was gated (tsc + tests + boot) and
+> **independently audited**. **Remaining (light): S5** tenant-scoping guard · **S6** thin the frontend · **S7** infra
+> (near-no-op) · **S8** cutover + delete World-A `api/` leftovers. Live per-step status in `00-MASTER-PLAN.md`;
+> restart at S5 via `RESUME.md`.
+
 ## Why now (one paragraph)
 The code was built full-stack (the Next.js `platform/` owns the DB via 119 Prisma routes) but the **infra was
 always built for a split** (`terraform/` runs `gifsy-frontend` stateless + `gifsy-api` as the DB owner; the
