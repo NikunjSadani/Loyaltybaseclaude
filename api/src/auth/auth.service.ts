@@ -116,7 +116,7 @@ export class AuthService {
       throw new ForbiddenException('Your account is inactive. Please contact your Deoleo representative.');
     }
 
-    if (user.status === 'PENDING') {
+    if (user.status === 'PENDING_VERIFICATION') {
       throw new ForbiddenException('Your account is pending activation. Please contact your Deoleo representative.');
     }
 
@@ -162,6 +162,7 @@ export class AuthService {
     await this.prisma.userSession.create({
       data: {
         userId:       user.id,
+        clientId:     user.clientId,   // canonical model binds the tenant to the session
         token:        accessToken,
         refreshToken,
         expiresAt,
