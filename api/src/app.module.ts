@@ -23,6 +23,7 @@ import { GifsyModule }    from './gifsy/gifsy.module';
 import { VisibilityModule } from './visibility/visibility.module';
 import { RewardsModule }  from './rewards/rewards.module';
 import { PartnerModule }  from './partner/partner.module';
+import { KycModule }      from './kyc/kyc.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
 // leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
@@ -52,6 +53,7 @@ import { PartnerModule }  from './partner/partner.module';
     VisibilityModule,
     RewardsModule,
     PartnerModule,
+    KycModule,
   ],
   controllers: [AppController],
   providers: [
