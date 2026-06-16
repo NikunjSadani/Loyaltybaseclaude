@@ -97,6 +97,44 @@ enum KycDocumentStatus {
   REJECTED
 }
 
+// ── Field-level KYC verification (P3.4a — the 7-field Gifsy grid, Option A) ──────
+enum KycFieldKey {
+  PAYMENT
+  GST_VALIDATION
+  GST_DOCUMENT
+  ADDRESS
+  ADDRESS_DOCUMENT
+  BOARD_PHOTO
+  OWNER_PHOTO
+}
+
+enum KycFieldDecision {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum KycFieldSource {
+  EXCEL
+  PORTAL
+}
+
+// ── Persisted at KYC approval; promote of the lib/invoice string-unions (P3.4a) ──
+enum EntityType {
+  INDIVIDUAL
+  HUF
+  COMPANY
+  FIRM
+  LLP
+  OTHERS
+}
+
+enum GstRegistrationType {
+  REGULAR
+  COMPOSITE
+  UNREGISTERED
+}
+
 enum DataRequestType {
   ACCESS
   CORRECTION
@@ -595,6 +633,9 @@ model ChannelPartner {
   email             String?
   gstNumber         String?
   panNumber         String?
+  // ── Entity / GST registration type (set at KYC approval; feeds P6 invoicing/TDS) ──
+  entityType          EntityType?
+  gstRegistrationType GstRegistrationType?
   // ── Bank / payout details (set on KYC approval) ──────────────────────────────
   bankName          String?
   bankAccountNumber String?
@@ -670,9 +711,10 @@ model KycSubmission {
 
   user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   partner        ChannelPartner?    @relation(fields: [partnerId], references: [id], onDelete: SetNull)
-  documents      KycDocument[]
-  statusHistory  KycStatusHistory[]
-  consentRecords ConsentRecord[]
+  documents          KycDocument[]
+  statusHistory      KycStatusHistory[]
+  consentRecords     ConsentRecord[]
+  verificationItems  KycVerificationItem[]
 
   @@index([userId])
   @@index([partnerId])
@@ -721,6 +763,33 @@ model KycStatusHistory {
   @@index([kycSubmissionId])
   @@index([createdAt])
   @@map("kyc_status_history")
+}
+
+/// Field-level KYC verification (Option A) — one row per (submission × 7 fields).
+/// The 7-field Gifsy grid (Stage 2) that begins when the submission reaches
+/// PENDING_GIFSY. The verification DECISION lives here; KycDocument stays the
+/// uploaded-file record (referenced via evidence.kycDocumentId, not duplicated).
+/// Tenant-scoped via kycSubmission → user → clientId (no direct clientId, matching
+/// the other KYC models). See docs/plans/reconcile/P3-onboarding-kyc.md §4.
+model KycVerificationItem {
+  id              String           @id @default(cuid())
+  kycSubmissionId String
+  fieldKey        KycFieldKey
+  decision        KycFieldDecision @default(PENDING)
+  source          KycFieldSource?
+  remark          String?
+  verifiedById    String? // the Gifsy admin (uploader for EXCEL; actor for PORTAL)
+  verifiedAt      DateTime?
+  evidence        Json? // PAYMENT:{pennydropRef,nameMatch} · GST:{legalName,status} · doc:{kycDocumentId}
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  kycSubmission KycSubmission @relation(fields: [kycSubmissionId], references: [id], onDelete: Cascade)
+
+  @@unique([kycSubmissionId, fieldKey]) // exactly one row per (submission × field)
+  @@index([kycSubmissionId])
+  @@index([decision])
+  @@map("kyc_verification_items")
 }
 
 model ConsentRecord {
