@@ -12,6 +12,7 @@ C:\Users\nikun\Loyaltybaseclaude\platform). **NEXT = P4, and P4.0 is the loyalty
 - docs/plans/GIT-WORKFLOW.md              (branches/deploy — WORK ON develop, main=releases)
 - docs/plans/DEV-DB.md                    (dev DB + Auth Proxy restart; migrate gotcha; drop-migration via guarded SQL)
 - docs/plans/reconcile/baseline-red-snapshot.txt   (the gate: NO NEW reds vs this snapshot = 28 files/105 tests)
+- docs/plans/DOC-MAINTENANCE.md            (⚠️ doc-consistency is a GATE STEP: run `node scripts/check-doc-consistency.mjs` — must be green — before any wave/model change is "done"; CI enforces it; ownership map = which doc owns which fact)
 - docs/plans/reconcile/P2-org-master-data.md  (P2 reconcile + RF1–RF7 + the catalog/sales-upload addendum)
 - docs/plans/RBAC-ENABLEMENT.md           (how to turn RBAC enforcement on — it's OFF by default)
 - docs/plans/REPORTING-REVAMP.md          (user-driven reporting track, built ahead of P8 for client sign-off)
@@ -59,18 +60,20 @@ groups) + can() + Gifsy/Client operating split + requirePermission wired into al
 FLAG-GATED OFF (env RBAC_ENFORCEMENT + per-tenant features.rbacEnforcement). Reversal = maker-checker
 (client requests, Gifsy approves). Gaps: #1/#3/#20/#22 closed, #2 engine done, #23 reduced.
 
-DEFERRED / OPEN (none block P2):
+DEFERRED / OPEN (none block P4):
 - RBAC enforcement is OFF and safe to enable later via RBAC-ENABLEMENT.md (mappings already finalized).
-- Phone-change→logout hooks: wire into P2 sales bulk-upload + P3 re-KYC (revoke mechanism is ready).
+- Phone-change→logout hooks: wire into the sales/outlet bulk-uploads (built in P2, hook NOT yet added) + P3 re-KYC (revoke mechanism is ready).
+- **CI prisma-schema discrepancy (P9):** `ci.yml` says "platform has no prisma/schema.prisma" + generates from `../api/prisma/schema.prisma`, but P2 edited `platform/prisma/schema.prisma` + ran migrations against it. Reconcile which schema is source of truth at the P9 CI reconcile.
 - Small follow-ups: OTP validity window (6h→10min), send-otp orphaned-rows on failure, isolation-audit
   AST hardening, force-logout-all audit-durability ordering, vitest.integration server-only alias,
   requirePermission per-tenant-config caching, RBAC per-tenant override storage/UI.
 - INFRA P9.1 (fix CI differential gate) is the gating item before the deploy pipeline can deploy.
 - **Reporting track** (user-driven, isolated on `develop`, built AHEAD of P8 for client look-and-feel
   sign-off) — see REPORTING-REVAMP.md. **R1 Outlet Points Ledger DONE** (engine + period picker + on-screen
-  preview + xlsx; gated + independently audited; DEMO_MODE fully populated). Prod-wiring of its
-  sales-hierarchy / distributor / program columns is **deferred to P2/P4** (those entities aren't built yet);
-  points attribution decision = 1 partner = 1 outlet (rides on P2.4 #4).
+  preview + xlsx; gated + independently audited; DEMO_MODE fully populated). Its sales-hierarchy / distributor /
+  program columns are now **BUILDABLE** (P2.1 relational `SalesUser` tree + P2.4 `Outlet.distributorCode/Name` +
+  `programName/programCategory` columns) — wire the real-data path when convenient (REPORTING-REVAMP.md updated);
+  points attribution decision = 1 partner = 1 outlet.
   **R2 Ticket Aging DONE** (operational; status/category/priority filters, aging buckets, SLA flag, summary
   chips + preview + xlsx; gated + independently audited). Fully backed by `Ticket` model — **prod path
   complete, no deferral.** User has MORE reports/workflow changes queued on this track.
