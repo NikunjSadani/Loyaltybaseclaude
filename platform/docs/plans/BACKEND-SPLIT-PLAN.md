@@ -5,7 +5,7 @@
 ever be), before building P3+. No speed-vs-quality tradeoff. Architecture source of truth = `../spec/04-architecture.md`;
 why = Gap #31. This doc = how we execute it.
 
-> **STATUS (2026-06-16): S0–S7 ✅ DONE** (S0–S5 pushed to `origin/develop`; S6–S7 commit-pending). The backend is built
+> **STATUS (2026-06-16): ✅ PHASE S COMPLETE (S0–S8)** (S0–S7 on `origin/develop`; S8 closure commit-pending). The backend is built
 > in `api/` — **124 `/v1` endpoints across 17 modules**, a 66-model canonical schema (World-A de-scaffolded, migration
 > applied to `gifsy_dev`), and foundation rails (response envelope · RBAC permission guard · `StorageService` GCS ·
 > `NotificationsService` enqueue seam · shared xlsx/`StreamableFile`). **S5** added the app-layer `TenantGuard`
@@ -14,10 +14,13 @@ why = Gap #31. This doc = how we execute it.
 > `beforeFiles`; deferred routes excluded) — verified e2e (authed request browser→proxy→backend→DB returns 200). **S7**
 > (infra, near-no-op) removed the dead cross-app `prisma generate --schema=../api/prisma` fallback from the deploy
 > workflows; `NEXT_PUBLIC_API_URL` was already plumbed (`platform/Dockerfile` `ARG`→`ENV` + deploy `--build-arg` from
-> secrets + `terraform/README`). Every wave gated (tsc + tests + boot/e2e smoke) and **independently audited**.
-> **Remaining: S8** cutover (human-gated) — e2e smokes + delete World-A `api/` leftovers **and** the now-shadowed local
-> `src/app/api/*` ported routes (then platform's Prisma schema). Live per-step status in `00-MASTER-PLAN.md`; restart at
-> S8 via `RESUME.md`.
+> secrets + `terraform/README`). Every wave gated (tsc + tests + boot/e2e smoke) and **independently audited**. **S8**
+> (cutover) confirmed `api/` clean of World-A leftovers, closed **#31 (RESOLVED)** / reduced #30, and a route-coverage
+> cross-check (independently reviewed) found **16 platform routes with no backend equivalent** (proxy 404s them →
+> **Gap #32**; decision: honest 404s + track, not a proxy band-aid). **Physical retirement** of the ~112 shadowed-but-
+> inert local `src/app/api/*` handlers + platform schema is **DEFERRED to P3/P4** (they're an in-cutover rollback net;
+> retire as one unit once the 16 unported + 4 deferred groups are ported/reworked). **→ Phase S architecture work is
+> COMPLETE; P3 is unblocked.** Live per-step status in `00-MASTER-PLAN.md`; P3 restart via `RESUME.md`.
 
 ## Why now (one paragraph)
 The code was built full-stack (the Next.js `platform/` owns the DB via 119 Prisma routes) but the **infra was
@@ -135,8 +138,16 @@ regardless; the framework choice only changes the handler-wrapper style. We stil
   destination at `next build` + present at runtime); both deploy workflows pass `--build-arg
   NEXT_PUBLIC_API_URL=${{ secrets.* }}`; `terraform/README` documents the values. **Only operational step:** set the
   GitHub secrets `NEXT_PUBLIC_API_URL`/`_STAGING` to the real backend origins (repo settings, not code).
-- **S8 · Cutover + retire.** End-to-end smokes (web → backend → DB); confirm no World-A leftovers remain in `api/`;
-  close Gaps #30/#31. **The `api/` dir persists — it *is* the backend now**; only its World-A domain was deleted (S1).
+- **S8 · Cutover + retire. ✅ DONE (cutover); retirement DEFERRED to P3/P4.** End-to-end smoke proven (authed
+  `/api/auth/me` → proxy → backend → DB → 200, S6). `api/` confirmed **clean** of World-A leftovers (the only mentions
+  are explanatory comments; `prisma/seed.ts` is the real-model seed). **#31 RESOLVED**, #30 reduced. A route-coverage
+  cross-check (independently reviewed) found **16 platform routes with no backend `/v1` equivalent** → the proxy 404s
+  them: 14 wrong-model/retired (await P4.x; not prod-functional on the FE anyway), `admin/sales/*` (models survive →
+  clean port candidate), `auth/logout(-all)` (no backend route + no UI caller → server-side revocation never invoked).
+  **Decision: honest 404s + track as Gap #32** — NOT a proxy-exclusion band-aid (those handlers need Prisma the prod FE
+  lacks). **The ~112 shadowed local `src/app/api/*` handlers + platform schema are NOT deleted now** — they're an
+  inert rollback safety-net and retire as one unit in P3/P4 once the unported routes are ported. **The `api/` dir
+  persists — it *is* the backend now**; only its World-A domain was deleted (S1).
 
 ## Effort shape (planning-grade — tighten at S0)
 A contained **re-home, not a rewrite** (TS→TS, Prisma→Prisma, logic already in `lib/`, frontend already

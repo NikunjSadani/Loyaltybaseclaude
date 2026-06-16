@@ -38,8 +38,11 @@ flowchart TB
 > (asserts a tenant is resolved per authed request + stamps `req.tenantId`; DB-level RLS is Gap #23 → P8.6). **S6**
 > thinned the frontend: a `next.config.ts` proxy rewrites same-origin `/api/*` → backend `/v1/*` (the web client keeps
 > calling `/api/*`; mobile/partner consumers will hit `/v1` directly). **S7** (infra) removed the dead cross-app
-> prisma-schema fallback from the deploy workflows (`NEXT_PUBLIC_API_URL` was already plumbed — see §6). **Remaining:**
-> S8 cutover + delete World-A `api/` leftovers **and** the now-shadowed local `src/app/api/*` ported routes.
+> prisma-schema fallback from the deploy workflows (`NEXT_PUBLIC_API_URL` was already plumbed — see §6). **S8** (cutover)
+> proved the e2e path + confirmed `api/` clean; **Phase S is complete** and the FE is prod-deployable against the
+> backend. Residual is *retirement only* (not architecture): ~112 shadowed-inert local `src/app/api/*` handlers + the
+> platform schema persist until the **16 unported routes** (Gap #32) + 4 deferred groups are ported in P3/P4, then
+> retire as one unit.
 
 **Target building blocks:**
 - **Backend API (NestJS)** — the single source of truth: controllers (versioned `/v1`) over the ported domain
