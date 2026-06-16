@@ -15,9 +15,12 @@ How the platform stays one codebase across many FMCG clients with per-client cus
 1. **Multi-tenancy = config + data, NEVER code branches.** Every row carries `clientId`; behavior varies by
    **reading per-tenant config** (the knobs in §A–H below — `Client`/`ClientConfig`/`ProgramSetting`), not by
    `if (clientId === …)`. **A `clientId` literal in backend logic is a design failure.**
-2. **Tenant isolation = one backend-enforced point.** The backend adds a **tenant-scoping guard/interceptor**
-   (single chokepoint), replacing per-query `where:{clientId}` discipline; Postgres RLS is a later hardening
-   (Gap #23). This is a concrete win the split unlocks.
+2. **Tenant isolation — layered, with a single app-layer chokepoint.** ✅ The backend's **`TenantGuard`** (Phase S
+   S5) asserts a tenant is resolved on every authenticated request (loud 403 instead of a silent unscoped query) and
+   stamps `req.tenantId` — the one named seam DB-level enforcement will hook. It is **defense-in-depth; it does NOT
+   replace the per-query `where:{clientId}` discipline** (that stays). The real *replacement* — Postgres RLS / a Prisma
+   auto-scoper — is **deferred to P8.6** (Gap #23): a strict assert was measured-and-deferred because ~28 relation-
+   scoped + 41 id-only of 236 query sites carry no direct `clientId`. The split *unlocks* that single enforcement point.
 3. **Customization spectrum — climb only as far as a real requirement forces:**
    - **(a) Config** (default) — a tenant differs by flags/lists/values. Covers branding, module toggles, hierarchy
      labels, programs, KYC fields, value mechanics. **No code.**

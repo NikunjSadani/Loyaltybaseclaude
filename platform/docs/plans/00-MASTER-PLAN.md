@@ -36,7 +36,7 @@ commits · conventional-commit messages · **every DB query scoped by `clientId`
 | **P0** | Foundations & shared infra | cross-cutting | #1, #21 | 1–2 wk |
 | **P1** | Identity, tenancy & access | Identity & Access · Tenancy/Config | #2, #3, #20, #22, #23 | 4–6 wk |
 | **P2** | Organization & master data | Sales Org · Partners/Outlets · Catalog | #4, #11 | 3–5 wk |
-| **S** | **Backend split — API-first re-architecture** (NestJS backend built **in place in `api/`** from platform `lib/`+schema; World-A domain deleted; thin FE; absorbs P4.0 World-A de-scaffold) — **gates P3+** | cross-cutting | #30, #31, #10, #29 | ~1–2 wk |
+| **S** ✅ | **Backend split — API-first re-architecture DONE (S0–S8)** (NestJS backend built **in place in `api/`** from platform `lib/`+schema; World-A domain deleted; thin FE via Next proxy; absorbed P4.0 World-A de-scaffold) — gated P3+, now unblocked | cross-cutting | #30, #31✅, #10, #29, #32 | ~1–2 wk |
 | **P3** | Onboarding & KYC | KYC & Enrollment | #9, #12, #13, #14, #15 | 3–5 wk |
 | **P4** | Programs, targets & enrollment | Schemes/Activations · Targets | #6, #10 | 4–6 wk |
 | **P5** | Wallet, points & rewards | Wallet & Points · Rewards | #28 | 3–4 wk |
@@ -166,12 +166,13 @@ tenant config served from DB. **Depends on:** P0.
 > **✅ P2 FUNCTIONALLY COMPLETE: 2.0, 2.1, 2.2, 2.4, 2.5 + RF1–RF7 all done.** 2.6 catalog dropped (above).
 > **2.3 (tiers) folded into the loyalty-engine de-scaffold** (tiers + partner-class→program + retiring
 > `lib/incentive.ts` compute = ONE deliberate effort; see `docs/plans/MODEL-ALIGNMENT.md`).
-> **⚠️⚠️ NEXT = PHASE S (BACKEND SPLIT) — DECIDED 2026-06-16 (Gap #31), gates P3+.** Task 0's topology reconcile +
-> independent-agent confirm settled it: split into a **dedicated NestJS backend** (from the platform's real-model
-> `lib/`+schema, built **in place in the `api/` dir** — reuse its shell, **delete its World-A domain**) + **thin
-> frontend**. The de-scaffold (formerly "P4.0") is **absorbed
-> into Phase S step S2** so the backend is born clean. Full plan: [`BACKEND-SPLIT-PLAN.md`](BACKEND-SPLIT-PLAN.md);
-> arch: `../spec/04-architecture.md`. **Do NOT build P3+/P4 until Phase S lands.**
+> **✅ PHASE S (BACKEND SPLIT) COMPLETE — S0–S8, 2026-06-16 (Gap #31 RESOLVED), now gates lifted → P3 unblocked.**
+> Task 0's topology reconcile + independent-agent confirm settled it: split into a **dedicated NestJS backend** (from
+> the platform's real-model `lib/`+schema, built **in place in the `api/` dir** — reused its shell, **deleted its
+> World-A domain**) + **thin frontend** (Next proxy `/api/*`→backend `/v1/*`). The de-scaffold (formerly "P4.0") was
+> **absorbed into step S2** so the backend was born clean. Plan: [`BACKEND-SPLIT-PLAN.md`](BACKEND-SPLIT-PLAN.md);
+> arch: `../spec/04-architecture.md`. **Residual (P3/P4):** Gap #32 (16 unported routes) + physical retirement of the
+> shadowed platform routes + schema.
 
 > **P2 status (live).** **2.0 Reconcile ✅** — full audit in [`reconcile/P2-org-master-data.md`](reconcile/P2-org-master-data.md)
 > (Opus independently re-verified every load-bearing claim by direct file read). Headlines: much is
@@ -225,7 +226,7 @@ tenant config served from DB. **Depends on:** P0.
 > are seeded + enabled for the demo tenant, every outlet row errors "Unknown outlet type." **NEXT:** seed demo
 > OutletTypes so the pipeline runs end-to-end in the local preview, then 2.6 catalog (Category CRUD + admin UI).
 
-## S · Backend split — API-first re-architecture  (~1–2 wk) — **DO NOW, gates P3+**
+## S · Backend split — API-first re-architecture  (~1–2 wk) — **✅ DONE (S0–S8); gated P3+, now unblocked**
 **Objective:** split the full-stack Next.js code into a **dedicated NestJS backend API** (single source of truth:
 owns DB + all logic) + a **thin Next.js web frontend**, so future mobile/PWA/partner consumers reuse one backend.
 **Full plan, principles, reused-vs-reworked, and gated steps S0–S8: [`BACKEND-SPLIT-PLAN.md`](BACKEND-SPLIT-PLAN.md).**

@@ -4,13 +4,17 @@ All API routes, grouped by bounded context. **Methods are verified** from the ha
 Roles are best-known from handler checks; "scoped" = results filtered by ownership/hierarchy. All routes are
 tenant-scoped via `clientId`.
 
-> **Phase S — S4 DONE (`../plans/BACKEND-SPLIT-PLAN.md`):** these endpoints are now **re-homed into the NestJS
-> backend** (`api/src/`) as versioned `/v1` controllers — **124 routes across 17 modules**; `/v1/admin/*` mirrors
-> the old `/api/admin/*`. The **surface (paths/methods/contracts) is preserved**, only the host/framework changed;
-> auth + permission are global guards (the tenant-scoping guard is S5). The platform's `src/app/api/*` routes are
-> now **legacy** (frontend repoints to the backend at S6; World-A leftovers deleted at S8). A few routes were
-> **deferred** (rewards `redeem` = action-OTP; visibility `submit` = multipart; partner `invoices` = mock; admin/kyc
-> approvals = mock/P3) — see `../plans/RESUME.md`.
+> **Phase S COMPLETE (S0–S8, `../plans/BACKEND-SPLIT-PLAN.md`):** these endpoints are **re-homed into the NestJS
+> backend** (`api/src/`) as versioned `/v1` controllers — **124 routes across 17 modules**; `/v1/admin/*` mirrors the
+> old `/api/admin/*`. The **surface (paths/methods/contracts) is preserved**, only the host/framework changed. Global
+> guards: auth + permission + the **S5 `TenantGuard`** (asserts a tenant is resolved per authed request). **The web
+> frontend reaches all of this via a `next.config.ts` proxy (S6): same-origin `/api/*` → backend `/v1/*`.** The
+> platform's own `src/app/api/*` handlers are now **shadowed/legacy** (kept as an inert rollback net; retired in P3/P4).
+> **Not all routes are ported:** a few are **deferred** (rewards `redeem` = action-OTP; visibility `submit` = multipart;
+> partner `invoices` = mock; admin/kyc approvals = mock/P3), and **Gap #32** tracks **16 routes with no backend
+> equivalent** that the proxy 404s — the ones marked **RETIRED/WRONG-MODEL below** (skus, tiers, `schemes/calculate`,
+> `billing-trends`, `sales/{invoices,upload,returns,last-upload,leaderboard}`) plus `admin/sales/*` (clean port
+> candidate) and `auth/logout(-all)` (no UI caller; server-side revocation never invoked). See `gap-register.md` #32.
 
 ## 1 · Identity & Auth
 
