@@ -30,7 +30,7 @@
  * No npm deps: uses only node:fs / node:path. ESM (.mjs).
  */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -145,6 +145,14 @@ const NEIGHBOR_WINDOW = 2;
 
 const allowSet = new Set(ALLOWLIST);
 const violations = []; // { path, lineNo, term, text }
+
+// Resilience: if the docs dir isn't here (e.g. this is wired as a GLOBAL Stop
+// hook and the current session is in some other project), no-op cleanly so the
+// hook never errors. The scan only applies to this repo's docs/.
+if (!existsSync(DOCS_DIR)) {
+  if (!process.argv.includes('--hook')) console.log('✓ no docs/ here — nothing to scan');
+  process.exit(0);
+}
 
 const mdFiles = collectMarkdown(DOCS_DIR);
 

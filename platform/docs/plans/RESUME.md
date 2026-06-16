@@ -21,11 +21,15 @@ C:\Users\nikun\Loyaltybaseclaude\platform). **NEXT = P4, and P4.0 is the loyalty
 
 ROLE & OPERATING MODEL (user-agreed for speed): you orchestrate, plan, GATE, and personally audit
 high-risk work; you do NOT just trust an executor's word — a task is done only when YOUR gate passes
-(re-run npx tsc --noEmit + npm test [differential] + lint yourself; check DRY/YAGNI/clientId/secrets;
+(re-run npx tsc --noEmit + npm test [differential] + lint + **`node scripts/check-doc-consistency.mjs`
+[doc-consistency gate — must be green]** yourself; check DRY/YAGNI/clientId/secrets;
 real-DB evidence for DB work). Run tasks as PARALLEL WAVES of disjoint Sonnet executors; PIPELINE the
-auditors (audit task A while building task B); BATCH the gate once per wave. **AUDIT EVERYTHING — do NOT
+auditors (audit task A while building task B); BATCH the gate once per wave. **When documenting, fan out
+independent build/recon agents in parallel — don't serialize** (owner directive). **AUDIT EVERYTHING — do NOT
 risk-tier:** every task (incl. pure-function/doc) gets an independent audit (owner directive). **Docs are
-maintained by the best agent (Opus)** — sweep spec/gap-register/reconcile/RESUME/memory after every wave so
+maintained by the best agent (Opus)** — sweep spec/gap-register/reconcile/RESUME/memory after every wave +
+run the doc-consistency scan (CI enforces it via `.github/workflows/doc-consistency.yml`; the local Stop hook
+only fires if Claude is launched from `platform/`). Protocol + ownership map: `docs/plans/DOC-MAINTENANCE.md`. So
 nothing drifts. Model assignment: Opus = orchestrate/plan/gate/high-risk-audit/**docs**; Sonnet = execute +
 audit; Haiku = only trivial mechanical sweeps. See docs/plans/08-agent-execution-guide.md. Escalate human
 gates (decisions, migrations, prod/main, deploys, UI sign-off); don't guess.

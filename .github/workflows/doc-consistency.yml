@@ -1,0 +1,31 @@
+name: Doc consistency
+
+# Machine-enforced doc-consistency gate: fails the check if any doc references a
+# RETIRED concept (partnerClass / TierConfig / SKU / pointsMultiplier / …) without
+# a historical annotation. Independent of the (red-by-design) test suite, so this
+# check can be GREEN on its own. Protocol + ownership map: platform/docs/plans/DOC-MAINTENANCE.md.
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [develop]
+
+concurrency:
+  group: doc-consistency-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  doc-consistency:
+    name: Docs — stale-reference scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Zero-dependency script — no `npm ci` needed.
+      - name: Scan docs for un-annotated retired terms
+        run: node platform/scripts/check-doc-consistency.mjs
