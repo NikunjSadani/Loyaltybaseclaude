@@ -18,6 +18,9 @@ import { TenantModule }   from './tenant/tenant.module';
 import { TicketsModule }  from './tickets/tickets.module';
 import { WalletModule }   from './wallet/wallet.module';
 import { GifsyModule }    from './gifsy/gifsy.module';
+import { VisibilityModule } from './visibility/visibility.module';
+import { RewardsModule }  from './rewards/rewards.module';
+import { PartnerModule }  from './partner/partner.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
 // leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
@@ -42,6 +45,9 @@ import { GifsyModule }    from './gifsy/gifsy.module';
     TicketsModule,
     WalletModule,
     GifsyModule,
+    VisibilityModule,
+    RewardsModule,
+    PartnerModule,
   ],
   controllers: [AppController],
   providers: [

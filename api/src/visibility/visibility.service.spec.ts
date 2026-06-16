@@ -1,0 +1,185 @@
+// Unit tests for VisibilityService — mirrors the S4 tickets/wallet template.
+// Covers tenant scoping, the GIFSY-only approve/reject transitions + audit trail,
+// the partner-role block on outlet-statuses, and fraud-log pagination ported
+// from the Next routes.
+// Run: npx jest src/visibility/visibility.service.spec.ts
+
+import { Test, TestingModule } from '@nestjs/testing';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { VisibilityService } from './visibility.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { JwtPayload } from '../common/decorators/current-user.decorator';
+
+const mockTx = {
+  visibilitySubmission: { update: jest.fn() },
+  visibilityApproval: { create: jest.fn() },
+  auditLog: { create: jest.fn() },
+};
+
+const mockPrisma = {
+  visibilitySubmission: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
+  visibilityApproval: { create: jest.fn() },
+  visibilityFraudLog: { findMany: jest.fn(), count: jest.fn() },
+  outletVisibilityRecord: { findMany: jest.fn() },
+  auditLog: { create: jest.fn() },
+  $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
+};
+
+const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
+const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' };
+
+describe('VisibilityService', () => {
+  let service: VisibilityService;
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [VisibilityService, { provide: PrismaService, useValue: mockPrisma }],
+    }).compile();
+    service = module.get(VisibilityService);
+  });
+
+  describe('listSubmissions', () => {
+    it('scopes to the tenant via partner.user.clientId and applies filters', async () => {
+      mockPrisma.visibilitySubmission.findMany.mockResolvedValue([]);
+      mockPrisma.visibilitySubmission.count.mockResolvedValue(0);
+      await service.listSubmissions(partner, { outletId: 'o1', programId: 'p1', status: 'DRAFT' as never });
+      const where = mockPrisma.visibilitySubmission.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({
+        partner: { user: { clientId: 'deoleo' } },
+        outletId: 'o1',
+        programId: 'p1',
+        status: 'DRAFT',
+      });
+    });
+
+    it('paginates with defaults', async () => {
+      mockPrisma.visibilitySubmission.findMany.mockResolvedValue([]);
+      mockPrisma.visibilitySubmission.count.mockResolvedValue(3);
+      const res = await service.listSubmissions(partner, {});
+      expect(res.pagination).toEqual({ page: 1, limit: 20, total: 3, pages: 1 });
+    });
+  });
+
+  describe('approve', () => {
+    it('throws NotFound when the submission is outside the tenant', async () => {
+      mockPrisma.visibilitySubmission.findFirst.mockResolvedValue(null);
+      await expect(service.approve(gifsy, 's1')).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockPrisma.visibilitySubmission.findFirst).toHaveBeenCalledWith({
+        where: { id: 's1', partner: { user: { clientId: 'deoleo' } } },
+      });
+    });
+
+    it('rejects an already-approved submission', async () => {
+      mockPrisma.visibilitySubmission.findFirst.mockResolvedValue({ id: 's1', status: 'APPROVED' });
+      await expect(service.approve(gifsy, 's1')).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('approves, records the approval, and writes an audit log', async () => {
+      mockPrisma.visibilitySubmission.findFirst.mockResolvedValue({ id: 's1', status: 'SUBMITTED' });
+      const res = await service.approve(gifsy, 's1');
+      expect(res).toEqual({ message: 'Submission approved successfully' });
+      expect(mockTx.visibilitySubmission.update).toHaveBeenCalledWith({
+        where: { id: 's1' },
+        data: { status: 'APPROVED', reviewedByUserId: 'admin1', reviewedAt: expect.any(Date) },
+      });
+      expect(mockTx.visibilityApproval.create).toHaveBeenCalledWith({
+        data: { submissionId: 's1', reviewerUserId: 'admin1', fromStatus: 'SUBMITTED', toStatus: 'APPROVED' },
+      });
+      expect(mockTx.auditLog.create).toHaveBeenCalled();
+    });
+  });
+
+  describe('reject', () => {
+    it('rejects an already-rejected submission', async () => {
+      mockPrisma.visibilitySubmission.findFirst.mockResolvedValue({ id: 's1', status: 'REJECTED' });
+      await expect(service.reject(gifsy, 's1', { reason: 'blurry' })).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects with a reason, records the approval row + audit log', async () => {
+      mockPrisma.visibilitySubmission.findFirst.mockResolvedValue({ id: 's1', status: 'SUBMITTED' });
+      const res = await service.reject(gifsy, 's1', { reason: 'blurry' });
+      expect(res).toEqual({ message: 'Submission rejected successfully' });
+      expect(mockTx.visibilitySubmission.update).toHaveBeenCalledWith({
+        where: { id: 's1' },
+        data: {
+          status: 'REJECTED',
+          rejectionReason: 'blurry',
+          reviewedByUserId: 'admin1',
+          reviewedAt: expect.any(Date),
+        },
+      });
+      expect(mockTx.visibilityApproval.create).toHaveBeenCalledWith({
+        data: {
+          submissionId: 's1',
+          reviewerUserId: 'admin1',
+          fromStatus: 'SUBMITTED',
+          toStatus: 'REJECTED',
+          notes: 'blurry',
+        },
+      });
+      expect(mockTx.auditLog.create).toHaveBeenCalled();
+    });
+  });
+
+  describe('outletStatuses', () => {
+    it('blocks partner roles', async () => {
+      const sss: JwtPayload = { ...partner, role: 'SSS' };
+      await expect(service.outletStatuses(sss, { outletCodes: 'A1' })).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('returns an empty map when no outletCodes are provided', async () => {
+      const res = await service.outletStatuses(partner, {});
+      expect(res).toEqual({});
+      expect(mockPrisma.outletVisibilityRecord.findMany).not.toHaveBeenCalled();
+    });
+
+    it('builds an outletCode→status map scoped to the tenant + month', async () => {
+      mockPrisma.outletVisibilityRecord.findMany.mockResolvedValue([
+        {
+          outletCode: 'A1',
+          status: 'APPROVED',
+          dateOfCapture: new Date('2026-06-10T00:00:00.000Z'),
+          approvedBy: 'admin1',
+          capturedByEmployeeName: 'Rep',
+        },
+      ]);
+      const res = await service.outletStatuses(partner, { outletCodes: 'A1, B2', month: '2026-06' });
+      expect(mockPrisma.outletVisibilityRecord.findMany).toHaveBeenCalledWith({
+        where: { clientId: 'deoleo', month: '2026-06', outletCode: { in: ['A1', 'B2'] } },
+        select: {
+          outletCode: true,
+          status: true,
+          dateOfCapture: true,
+          approvedBy: true,
+          capturedByEmployeeName: true,
+        },
+      });
+      expect(res).toEqual({
+        A1: { status: 'APPROVED', dateOfCapture: '2026-06-10', approvedBy: 'admin1', capturedByEmployeeName: 'Rep' },
+      });
+    });
+  });
+
+  describe('listFraudLog', () => {
+    it('scopes via submission.partner.user.clientId and applies a date range', async () => {
+      mockPrisma.visibilityFraudLog.findMany.mockResolvedValue([]);
+      mockPrisma.visibilityFraudLog.count.mockResolvedValue(0);
+      await service.listFraudLog(gifsy, { dateFrom: '2026-01-01', dateTo: '2026-02-01' });
+      const where = mockPrisma.visibilityFraudLog.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({
+        submission: { partner: { user: { clientId: 'deoleo' } } },
+        createdAt: { gte: new Date('2026-01-01'), lte: new Date('2026-02-01') },
+      });
+    });
+
+    it('paginates with defaults and no date filter', async () => {
+      mockPrisma.visibilityFraudLog.findMany.mockResolvedValue([]);
+      mockPrisma.visibilityFraudLog.count.mockResolvedValue(5);
+      const res = await service.listFraudLog(gifsy, {});
+      const where = mockPrisma.visibilityFraudLog.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ submission: { partner: { user: { clientId: 'deoleo' } } } });
+      expect(res.pagination).toEqual({ page: 1, limit: 20, total: 5, pages: 1 });
+    });
+  });
+});
