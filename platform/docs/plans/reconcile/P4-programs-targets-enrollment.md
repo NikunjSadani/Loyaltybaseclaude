@@ -1,8 +1,8 @@
 # P4 · Programs, Targets & Enrollment — Reconcile + Build Record
 
-> Status (2026-06-17): **4.0 reconcile ✅ · 4.1 ✅ · 4.2 ✅ · 4.4 ✅ · 4.5 ✅ (all BACKEND, gated tsc 0 /
-> jest green) · `SchemeTarget` dropped ✅. REMAINING: 4.3 (enrollment submission) + the thin admin/partner
-> FE repoints.** Owner-confirmed model below. Source of truth = the `api/` NestJS backend; FE is thin.
+> Status (2026-06-17): **P4 BACKEND COMPLETE — 4.0 ✅ · 4.1 ✅ · 4.2 ✅ · 4.3 ✅ · 4.4 ✅ · 4.5 ✅ (gated
+> tsc 0 / jest 182) · `SchemeTarget` dropped ✅. REMAINING: the thin admin/partner FE repoints only.**
+> Owner-confirmed model below. Source of truth = the `api/` NestJS backend; FE is thin.
 
 ## 0. Why a reconcile first
 
@@ -135,10 +135,12 @@ Schemes ⟂ targets share **no models**, so the two streams run **fully in paral
   - **4.1 ✅** Scheme CRUD lifecycle + dropped `SchemeTarget` reads + removed decorative class UI.
   - **4.2 ✅** Enrollment-form persistence (`SchemeEnrollmentForm` upsert/get + pure schema validator).
     `CampaignType` audience confirmed at form level; **submission FE/wiring = 4.3**.
-  - **4.3** Enrollment submission (self vs sales + conditional pre-fill) — **NEXT**.
+  - **4.3 ✅** Enrollment submission — `POST /v1/schemes/:id/enroll` (SELF vs SALES-on-behalf w/ assignment
+    check) + `GET :id/my-enrollment`; audience enforced on the enrolled partner's KYC; `CALCULATED` recomputed
+    server-side (client value discarded); upsert on `@@unique([schemeId,userId])`.
 
-**Remaining P4:** 4.3 (enrollment submission) · the admin FE repoint for targets/achievements + the
-enrollment-form builder wiring · partner-facing target/achievement view.
+**Remaining P4 (FE only):** admin FE repoint for KPIs/targets/achievements · the scheme-builder +
+enrollment-form builder/renderer wiring · partner-facing target/achievement + enrollment views.
 
 **Exit:** tenant KPIs defined; admin uploads per-outlet-per-month targets (blank = not configured) +
 achievement; target + achievement + pace display; **separately**, admin publishes activations and outlets

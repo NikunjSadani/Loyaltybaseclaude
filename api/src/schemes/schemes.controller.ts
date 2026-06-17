@@ -6,6 +6,7 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 import {
   CreateSchemeDto,
   ListSchemesQueryDto,
+  SubmitEnrollmentDto,
   UpdateSchemeDto,
   UpsertEnrollmentFormDto,
 } from './dto/schemes.dto';
@@ -88,5 +89,44 @@ export class SchemesController {
   @RequirePermission('schemes:read')
   getEnrollmentForm(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.schemes.getEnrollmentForm(user, id);
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // P4.3 — Enrollment submission routes
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * POST /v1/schemes/:id/enroll
+   *
+   * Submit an enrollment for a scheme.
+   *   Mode SELF  (default) — the JWT caller enrolls themselves. Requires the caller
+   *                          to be a ChannelPartner in this tenant.
+   *   Mode SALES            — a sales user enrolls on behalf of a partner. Requires
+   *                          an active SalesUserAssignment to the target partner.
+   *
+   * Validates: tenant scope, scheme state (ACTIVE + within dates), campaignType
+   * audience (LOYALTY_ONLY / OPEN_CAMPAIGN / MIXED), and form-values (required
+   * fields, types, visibleWhen, CALCULATED server-recompute).
+   */
+  @Post(':id/enroll')
+  @RequirePermission('schemes:read')
+  submitEnrollment(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: SubmitEnrollmentDto,
+  ) {
+    return this.schemes.submitEnrollment(user, id, dto);
+  }
+
+  /**
+   * GET /v1/schemes/:id/my-enrollment
+   *
+   * Returns the calling user's own enrollment for a scheme. 404 if not enrolled.
+   * Tenant-scoped via the scheme ownership check.
+   */
+  @Get(':id/my-enrollment')
+  @RequirePermission('schemes:read')
+  getMyEnrollment(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.schemes.getMyEnrollment(user, id);
   }
 }

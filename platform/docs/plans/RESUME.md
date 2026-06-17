@@ -8,8 +8,8 @@ Repo root: C:\Users\nikun\Loyaltybaseclaude  (git root; branch **develop**). Fro
 Backend: `api/` (NestJS + Prisma 7, the source of truth — owns the DB + ALL business logic).
 
 ⚠️⚠️ **STATE: P0 + P1 + P2 + Phase S + P3 ✅ COMPLETE. P4 (Programs, targets & enrollment) ◐ IN PROGRESS —
-4.0/4.1/4.2/4.4/4.5 BACKEND ✅ (gated tsc 0 / jest green; `SchemeTarget` dropped). REMAINING = 4.3
-(enrollment submission) + thin admin/partner FE repoints.** All pushed to origin/develop.
+BACKEND COMPLETE (4.0–4.5 ✅, gated tsc 0 / jest 182; `SchemeTarget` dropped). REMAINING = thin admin/partner
+FE repoints only.** Backend pushed to origin/develop (4.3 commit pending owner go).
 
 **Architecture (Phase S, done):** API-first — a dedicated NestJS backend built IN PLACE in `api/` (reused its
 shell, deleted its World-A domain, rebuilt the real domain from the platform's `lib/`+schema) consumed over
@@ -50,10 +50,11 @@ audience). Additive schema **applied to gifsy_dev** (`KpiDef`, `OutletTarget` mi
 OutletTarget template/upload (blank=omit, 0 verbatim, non-template file→400) · **4.5** achievement upload
 (`admin/sales/bulk-upload`→OutletSalesRecord) + pace (÷0→null) + `partner.service` rewired off SchemeTarget. Stream E
 — **4.1** scheme CRUD cleanup + removed decorative class UI · **4.2** enrollment-form persistence
-(`SchemeEnrollmentForm` + pure validator). **World-A `SchemeTarget` DROPPED** (0 rows verified; guarded migration
-applied). **REMAINING: 4.3** (enrollment submission self/sales + prefill) + thin **admin/partner FE repoints** for
-targets/achievements/enrollment-form. ⚠️ **`api/.env` was found pointing at PROD (`gifsy_prod`) and repointed to the
-dev proxy** — verify `current_database=gifsy_dev` before any migration.
+(`SchemeEnrollmentForm` + pure validator) · **4.3** enrollment submission (`POST /v1/schemes/:id/enroll` SELF/SALES +
+audience-by-KYC + server-side `CALCULATED` recompute). **World-A `SchemeTarget` DROPPED** (0 rows verified; guarded
+migration applied). **REMAINING (FE only): thin admin/partner repoints** — KPIs/targets/achievements pages,
+scheme-builder + enrollment-form builder/renderer, partner target/achievement + enrollment views. ⚠️ **`api/.env` was
+found pointing at PROD (`gifsy_prod`) and repointed to the dev proxy** — verify `current_database=gifsy_dev` before any migration.
 
 ROLE & OPERATING MODEL (owner-agreed): you ORCHESTRATE, plan, GATE, and own docs. **Per task: plan (Opus) → execute
 (a Sonnet executor) → ONE independent adversarial audit (Sonnet) → Opus gates → commit.** AUDIT EVERYTHING — do not

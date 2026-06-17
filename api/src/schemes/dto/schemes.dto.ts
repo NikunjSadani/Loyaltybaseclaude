@@ -166,3 +166,49 @@ export class UpsertEnrollmentFormDto {
   formSchema!: Record<string, unknown>;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// P4.3 — Enrollment submission DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ENROLLMENT_MODES = ['SELF', 'SALES'] as const;
+export type EnrollmentMode = (typeof ENROLLMENT_MODES)[number];
+
+/**
+ * DTO for POST /v1/schemes/:id/enroll
+ *
+ * enrollmentMode — SELF (default) or SALES.
+ *   SELF:  the JWT caller enrolls themselves. No targetPartnerId required.
+ *   SALES: a sales user enrolls on behalf of a partner. targetPartnerId must
+ *          be the ChannelPartner.id of the outlet/partner being enrolled.
+ *
+ * formValues — the submitted form field values (keyed by formField.id).
+ *   May be omitted / empty if the scheme has no enrollment form configured.
+ *   CALCULATED fields may be present but are ignored — the server recomputes.
+ *   autoFillFromExcel fields may arrive pre-filled and are accepted.
+ */
+export class SubmitEnrollmentDto {
+  @IsOptional()
+  @IsIn(ENROLLMENT_MODES as unknown as string[], {
+    message: `enrollmentMode must be SELF or SALES`,
+  })
+  enrollmentMode?: EnrollmentMode = 'SELF';
+
+  /**
+   * Required when enrollmentMode === 'SALES'.
+   * The ChannelPartner.id of the partner being enrolled on behalf of a sales user.
+   * NEVER trusted without an assignment access check server-side.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  targetPartnerId?: string;
+
+  /**
+   * The submitted form field values (Record<fieldId, value>).
+   * Optional — omit or pass {} if the scheme has no enrollment form.
+   */
+  @IsOptional()
+  @IsObject()
+  formValues?: Record<string, unknown>;
+}
+

@@ -1,10 +1,12 @@
 /**
- * enrollment-form.helper.ts — P4.2
+ * enrollment-form.helper.ts — P4.2 / P4.3
  *
- * Pure, unit-testable form-schema structural validator.
- * Ported from platform/src/lib/campaign.ts::validateEnrollmentFormConfig +
- * the type definitions (FormFieldType, FieldAudience, VisibleWhen, FormField,
- * EnrollmentFormConfig).
+ * Pure, unit-testable helpers for enrollment-form validation and submission.
+ *
+ * P4.2: validateFormSchema — structural validator for the stored form schema.
+ * P4.3: evaluateVisibleWhen, recomputeCalculated, validateSubmittedValues —
+ *   submission-time value validation (required-field presence, type checks,
+ *   visibleWhen-hidden field skipping, CALCULATED server-side recompute).
  *
  * No DB calls, no imports from NestJS internals — safe to import in spec files
  * without standing up the full module graph.
@@ -283,4 +285,200 @@ export function validateFormSchema(rawSchema: unknown): string[] {
   }
 
   return errors;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P4.3 — Submission-time helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Determines whether a field is visible given the current submitted values.
+ *
+ * If the field has no `visibleWhen` clause it is always visible.
+ * The predicate is evaluated against the *raw* submitted string values so that
+ * the same logic can run before type-coercion (matching the FE behaviour).
+ *
+ * Supported ops:
+ *   eq       — exact string match
+ *   neq      — not equal
+ *   gt / lt  — numeric comparison (non-numeric operands → false)
+ *   contains — substring match
+ */
+export function evaluateVisibleWhen(
+  field: FormField,
+  submittedValues: Record<string, unknown>,
+): boolean {
+  if (!field.visibleWhen) return true;
+
+  const { fieldId, op, value: condValue } = field.visibleWhen;
+  const raw = submittedValues[fieldId];
+  const rawStr = raw !== null && raw !== undefined ? String(raw) : '';
+
+  switch (op) {
+    case 'eq':
+      return rawStr === condValue;
+    case 'neq':
+      return rawStr !== condValue;
+    case 'gt': {
+      const n = Number(rawStr);
+      const cv = Number(condValue);
+      return !isNaN(n) && !isNaN(cv) && n > cv;
+    }
+    case 'lt': {
+      const n = Number(rawStr);
+      const cv = Number(condValue);
+      return !isNaN(n) && !isNaN(cv) && n < cv;
+    }
+    case 'contains':
+      return rawStr.includes(condValue);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Evaluates a simple arithmetic formula of the form `{fieldId} op {fieldId}`.
+ *
+ * Formula grammar (subset — matches the FE renderer):
+ *   - `{id}` tokens are replaced with the numeric value of that submitted field.
+ *   - Only + - * / operators between exactly two operands are supported.
+ *   - If any referenced value is non-numeric or the formula is malformed the
+ *     result is null (server writes null; client-sent value is discarded).
+ *
+ * This intentionally supports only the formula shapes used by the platform FE
+ * (e.g. `{f1} * 2`, `{f1} + {f2}`). Extend if richer expressions are required.
+ */
+export function evaluateFormula(
+  formula: string,
+  submittedValues: Record<string, unknown>,
+): number | null {
+  // Replace {fieldId} with the submitted numeric value.
+  const resolved = formula.replace(/\{([^}]+)\}/g, (_match, id: string) => {
+    const val = submittedValues[id];
+    if (val === null || val === undefined || val === '') return 'NaN';
+    const n = Number(val);
+    return isNaN(n) ? 'NaN' : String(n);
+  });
+
+  // If any replacement produced NaN the formula is not evaluable.
+  if (resolved.includes('NaN')) return null;
+
+  // Evaluate a simple two-operand arithmetic expression.
+  // We deliberately avoid eval(); instead parse manually.
+  const match = resolved.match(/^\s*(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*$/);
+  if (!match) {
+    // Also accept a bare number (formula with no operator, just a ref).
+    const bare = resolved.trim();
+    const n = Number(bare);
+    return isNaN(n) ? null : n;
+  }
+
+  const [, leftStr, op, rightStr] = match;
+  const left = Number(leftStr);
+  const right = Number(rightStr);
+
+  switch (op) {
+    case '+': return left + right;
+    case '-': return left - right;
+    case '*': return left * right;
+    case '/': return right === 0 ? null : left / right;
+    default:  return null;
+  }
+}
+
+/**
+ * Submission-time validation result.
+ *
+ * `errors`        — human-readable per-field validation messages; empty = valid.
+ * `recomputedValues` — CALCULATED field values as computed server-side, keyed
+ *                      by fieldId. Callers must merge these into formValues
+ *                      before persisting (overwrite whatever the client sent).
+ */
+export interface SubmissionValidationResult {
+  errors: string[];
+  recomputedValues: Record<string, number | null>;
+}
+
+/**
+ * Validates submitted form values against the stored `formSchema`.
+ *
+ * Rules (P4.3):
+ *   1. Visible fields that are `required` must have a non-empty value.
+ *   2. Fields hidden by `visibleWhen` are not required (even if required=true).
+ *   3. `autoFillFromExcel` fields are always accepted as-is (pre-filled allowed).
+ *   4. CALCULATED fields are server-recomputed; the client-sent value is ignored.
+ *      The recomputed value is returned in `recomputedValues`.
+ *   5. Type coercion checks:
+ *      - NUMBER fields must be parseable as a finite number.
+ *      - DATE fields must be a valid ISO date string (YYYY-MM-DD or ISO 8601).
+ *      - All other field types accept any non-empty string.
+ *   6. DATA_DISPLAY fields are read-only display labels — never required,
+ *      never validated.
+ *
+ * @param schema         The parsed EnrollmentFormSchema from the DB record.
+ * @param submitted      The raw submitted formValues from the request body
+ *                       (may be undefined/null if no form is configured).
+ */
+export function validateSubmittedValues(
+  schema: EnrollmentFormSchema,
+  submitted: Record<string, unknown> | null | undefined,
+): SubmissionValidationResult {
+  const errors: string[] = [];
+  const recomputedValues: Record<string, number | null> = {};
+  const values: Record<string, unknown> = submitted ?? {};
+
+  for (const field of schema.fields) {
+    // DATA_DISPLAY: read-only, skip entirely.
+    if (field.type === 'DATA_DISPLAY') continue;
+
+    // CALCULATED: server-side recompute; ignore client value.
+    if (field.type === 'CALCULATED') {
+      const computed = field.formula
+        ? evaluateFormula(field.formula, values)
+        : null;
+      recomputedValues[field.id] = computed;
+      continue;
+    }
+
+    // Determine visibility.
+    const visible = evaluateVisibleWhen(field, values);
+
+    // Hidden fields are never validated.
+    if (!visible) continue;
+
+    const rawValue = values[field.id];
+    const isEmpty =
+      rawValue === null ||
+      rawValue === undefined ||
+      (typeof rawValue === 'string' && rawValue.trim() === '');
+
+    // autoFillFromExcel: value may arrive pre-filled; accepted if present,
+    // but still required if required=true and the field is visible.
+    if (field.required && isEmpty) {
+      errors.push(`Field "${field.label}" (${field.id}) is required.`);
+      continue;
+    }
+
+    // Type validation — only when a value is present.
+    if (!isEmpty) {
+      const strVal = String(rawValue);
+
+      if (field.type === 'NUMBER') {
+        const n = Number(strVal);
+        if (!isFinite(n) || isNaN(n)) {
+          errors.push(`Field "${field.label}" (${field.id}) must be a valid number.`);
+        }
+      } else if (field.type === 'DATE') {
+        // Accept YYYY-MM-DD or full ISO 8601. Reject invalid strings.
+        const d = new Date(strVal);
+        if (isNaN(d.getTime())) {
+          errors.push(`Field "${field.label}" (${field.id}) must be a valid date.`);
+        }
+      }
+      // DROPDOWN, TEXT, GPS_POINT, IMAGE, CAMERA, DOCUMENT, UPI_QR_SCAN:
+      // any non-empty string is accepted (content validation is out-of-scope).
+    }
+  }
+
+  return { errors, recomputedValues };
 }
