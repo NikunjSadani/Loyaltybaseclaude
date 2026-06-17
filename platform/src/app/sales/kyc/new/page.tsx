@@ -132,9 +132,9 @@ const DOC_TYPE_MAP: Record<DocKey, string> = {
   businessDoc:     'GST_CERTIFICATE',
   ownerPhoto:      'SELFIE',
   shopAddressDoc:  'SHOP_ESTABLISHMENT',
-  storeBoardPhoto: 'OTHER',
+  storeBoardPhoto: 'STORE_BOARD_PHOTO',
   cheque:          'CANCELLED_CHEQUE',
-  selfDeclaration: 'OTHER',
+  selfDeclaration: 'SELF_DECLARATION',
 };
 
 /* ─── GCS upload helper ───────────────────────────────────────────────────────── */

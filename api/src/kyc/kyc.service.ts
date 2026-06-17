@@ -2008,19 +2008,18 @@ export class KycService {
     };
     const byType = (t: string) => docs.find((d) => d.documentType === t);
 
-    // Board photo + self-declaration both arrive as OTHER (form overloads the type).
-    // Match each by filename, non-overlapping; do NOT guess when nothing matches —
-    // leave the column blank rather than risk linking the wrong evidence under the
-    // wrong label. Proper fix = distinct doc types (reconcile §8 follow-up).
+    // Prefer the distinct doc types (P3 doctype split); fall back to the legacy OTHER
+    // filename heuristic for documents uploaded before the split (non-overlapping,
+    // no guess when nothing matches).
     const others = docs.filter((d) => d.documentType === 'OTHER');
-    const board = others.find((d) => /board|store/i.test(d.fileName ?? ''));
-    const decl = others.find((d) => d !== board && /declar|self/i.test(d.fileName ?? ''));
+    const legacyBoard = others.find((d) => /board|store/i.test(d.fileName ?? ''));
+    const legacyDecl = others.find((d) => d !== legacyBoard && /declar|self/i.test(d.fileName ?? ''));
 
     return {
       gstCertificateUrl: await sign(byType('GST_CERTIFICATE')),
       addressDocUrl: await sign(byType('SHOP_ESTABLISHMENT') ?? byType('TRADE_LICENSE')),
-      selfDeclarationUrl: await sign(decl),
-      boardPhotoUrl: await sign(board),
+      selfDeclarationUrl: await sign(byType('SELF_DECLARATION') ?? legacyDecl),
+      boardPhotoUrl: await sign(byType('STORE_BOARD_PHOTO') ?? legacyBoard),
       ownerPhotoUrl: await sign(byType('SELFIE')),
       chequeUrl: await sign(byType('CANCELLED_CHEQUE')),
     };
