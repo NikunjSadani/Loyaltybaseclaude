@@ -379,3 +379,19 @@ Built by a Sonnet executor; backend part independently audited (**sound to commi
 - **Live browser verification (Chrome extension, against the running dev servers):** the approvals page renders the workspace; it fires `GET /api/kyc/review-queue`; the Next proxy forwards `/api/kyc/*` → backend `/v1/kyc/*`; the backend route is live (curl `/v1/kyc/review-queue` unauth → **401**, `/health` → 200) and returns 401 to the unauthenticated browser, which the page handles gracefully. **Full FE→proxy→backend wiring confirmed**; queue DATA needs a Gifsy login (auth-gated, expected).
 - **Unrelated pre-existing bug surfaced:** platform RootLayout errors `clients.partnerClasses does not exist` (platform schema references a dev-DB-dropped column from the partner-class retirement). Tracked separately — not a 3.4d defect.
 - Platform typecheck clean. Demo routes (`admin/kyc/*`) left in place (retired separately).
+
+---
+
+## 16 · 3.1 (FE) — submission form → GCS upload, 2026-06-17
+
+Built by a Sonnet executor (FE-only; the backend `POST /v1/kyc/documents` was already audited in the 3.1 backend
+slice). The form (`sales/kyc/new`) now **uploads each document to `/api/kyc/documents` on pick** (multipart `file` +
+`documentType`, Bearer auth, envelope-unwrapped), stores the returned `{ fileKey, fileUrl, … }` on the doc slot, and
+**submits references** (`{ type, fileKey, fileUrl, fileName, mimeType, fileSizeBytes }`) instead of base64 — with the
+legacy `dataUrl` kept as a graceful fallback if an upload fails. Per-doc uploading/uploaded/error UX; submit gated
+while a required doc is uploading. Verified: platform tsc clean; **form renders + mounts with no console errors** (live
+GCS round-trip is staging — needs server-side GCS creds + a sales session with assigned outlets). Doc-type mapping kept
+as-is (the `OTHER` split is the pending migration decision).
+
+**✅ P3 original task list (3.0–3.6) COMPLETE.** Finish-items remaining: the `KycDocumentType.OTHER` migration
+(owner decision pending — SQL surfaced), retire the superseded platform KYC demo routes/libs, and the P3 docs sweep.

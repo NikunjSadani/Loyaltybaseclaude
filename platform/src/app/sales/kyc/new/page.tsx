@@ -38,11 +38,24 @@ interface AssignedOutlet {
   reKycRemarks?: string;
 }
 
+/** Upload state for a single KYC document slot */
+type DocUploadState = 'idle' | 'uploading' | 'uploaded' | 'error';
+
 interface UploadedFile {
   name: string;
   size: number;
   type: string;
+  /** Local preview only — dataUrl from canvas/compression; NOT sent on submit */
   dataUrl: string;
+  /** GCS-backed fields — set after POST /api/kyc/documents succeeds */
+  fileKey?: string;
+  fileUrl?: string;
+  /** Server-returned canonical filename (may differ from local name after compression) */
+  fileName?: string;
+  mimeType?: string;
+  fileSizeBytes?: number;
+  uploadState: DocUploadState;
+  uploadError?: string;
 }
 
 /* ─── Constants ──────────────────────────────────────────────────────────────── */
@@ -111,6 +124,52 @@ async function compressFile(file: File): Promise<{ dataUrl: string; size: number
   });
 }
 
+/* ─── KYC document type mapping ──────────────────────────────────────────────── */
+
+type DocKey = 'businessDoc' | 'ownerPhoto' | 'shopAddressDoc' | 'storeBoardPhoto' | 'cheque' | 'selfDeclaration';
+
+const DOC_TYPE_MAP: Record<DocKey, string> = {
+  businessDoc:     'GST_CERTIFICATE',
+  ownerPhoto:      'SELFIE',
+  shopAddressDoc:  'SHOP_ESTABLISHMENT',
+  storeBoardPhoto: 'OTHER',
+  cheque:          'CANCELLED_CHEQUE',
+  selfDeclaration: 'OTHER',
+};
+
+/* ─── GCS upload helper ───────────────────────────────────────────────────────── */
+
+interface GcsUploadResult {
+  fileKey: string;
+  fileUrl: string;
+  fileName: string;
+  mimeType: string;
+  fileSizeBytes: number;
+}
+
+async function uploadDocToGCS(
+  blob: Blob,
+  fileName: string,
+  docKey: DocKey,
+  token: string,
+): Promise<GcsUploadResult> {
+  const formData = new FormData();
+  formData.append('file', blob, fileName);
+  formData.append('documentType', DOC_TYPE_MAP[docKey]);
+
+  const res = await fetch('/api/kyc/documents', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: formData,
+  });
+
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.success) {
+    throw new Error(body.message ?? body.error ?? `Upload failed (${res.status})`);
+  }
+  return body.data as GcsUploadResult;
+}
+
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function NewKYCPage() {
@@ -162,14 +221,15 @@ export default function NewKYCPage() {
   const [paymentMode, setPaymentMode] = useState<PaymentMode>('bank');
 
   /* Docs */
-  const [docs, setDocs] = useState<{
+  type DocsState = {
     businessDoc:      UploadedFile | null;
     ownerPhoto:       UploadedFile | null;
     shopAddressDoc:   UploadedFile | null;
     storeBoardPhoto:  UploadedFile | null;
     cheque:           UploadedFile | null;
     selfDeclaration:  UploadedFile | null;
-  }>({ businessDoc: null, ownerPhoto: null, shopAddressDoc: null, storeBoardPhoto: null, cheque: null, selfDeclaration: null });
+  };
+  const [docs, setDocs] = useState<DocsState>({ businessDoc: null, ownerPhoto: null, shopAddressDoc: null, storeBoardPhoto: null, cheque: null, selfDeclaration: null });
 
   /* File refs */
   const businessDocRef       = useRef<HTMLInputElement>(null);
@@ -399,17 +459,52 @@ export default function NewKYCPage() {
     const dataUrl = canvas.toDataURL('image/jpeg', COMPRESS_QUALITY);
     const size    = Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75);
     const key     = cameraDocKey;
-    setDocs((d) => ({ ...d, [key]: { name: `${key}_${Date.now()}.jpg`, size, type: 'image/jpeg', dataUrl } }));
+    const fileName = `${key}_${Date.now()}.jpg`;
+    // Set preview immediately with uploading state
+    setDocs((d) => ({ ...d, [key]: { name: fileName, size, type: 'image/jpeg', dataUrl, uploadState: 'uploading' } }));
     setCapturing(false);
     closeCamera();
     // Trigger geo capture #1 immediately after the board photo is taken
     if (key === 'storeBoardPhoto') {
       captureBoardPhotoGeo();
     }
+    // Upload to GCS
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    // Convert dataUrl to Blob for upload
+    fetch(dataUrl)
+      .then((r) => r.blob())
+      .then((blob) => uploadDocToGCS(blob, fileName, key, token))
+      .then((result) => {
+        setDocs((d) => {
+          const existing = d[key];
+          if (!existing) return d;
+          return {
+            ...d,
+            [key]: {
+              ...existing,
+              fileKey:       result.fileKey,
+              fileUrl:       result.fileUrl,
+              fileName:      result.fileName,
+              mimeType:      result.mimeType,
+              fileSizeBytes: result.fileSizeBytes,
+              uploadState:   'uploaded' as DocUploadState,
+              uploadError:   undefined,
+            },
+          };
+        });
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Upload failed';
+        setDocs((d) => {
+          const existing = d[key];
+          if (!existing) return d;
+          return { ...d, [key]: { ...existing, uploadState: 'error' as DocUploadState, uploadError: msg } };
+        });
+      });
   };
 
   /* ── File select ── */
-  const handleFileSelect = useCallback(async (docKey: keyof typeof docs, e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = useCallback(async (docKey: keyof DocsState, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = '';
@@ -417,11 +512,54 @@ export default function NewKYCPage() {
     if (file.size > MAX_FILE_BYTES) { setFileError(`"${file.name}" is ${formatBytes(file.size)} — max 5 MB.`); return; }
     const result = await compressFile(file);
     if (!result) return;
-    setDocs((d) => ({ ...d, [docKey]: { name: file.name, size: result.size, type: result.type, dataUrl: result.dataUrl } }));
+    // Set preview immediately with uploading state
+    setDocs((d) => ({ ...d, [docKey]: { name: file.name, size: result.size, type: result.type, dataUrl: result.dataUrl, uploadState: 'uploading' } }));
     // Trigger geo capture #2 when the cancelled cheque is uploaded
     if (docKey === 'cheque') {
       capturePaymentGeo();
     }
+    // Upload to GCS
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    // Build a Blob from the compressed result to send (use original file for non-images, compressed jpeg for images)
+    let uploadBlob: Blob;
+    let uploadName: string;
+    if (result.type === 'image/jpeg' && result.dataUrl.startsWith('data:')) {
+      // Compressed image — convert dataUrl back to Blob
+      uploadBlob = await fetch(result.dataUrl).then((r) => r.blob());
+      uploadName = file.name.replace(/\.[^.]+$/, '.jpg');
+    } else {
+      // PDF or other non-image — upload original file
+      uploadBlob = file;
+      uploadName = file.name;
+    }
+    uploadDocToGCS(uploadBlob, uploadName, docKey as DocKey, token)
+      .then((gcsResult) => {
+        setDocs((d) => {
+          const existing = d[docKey];
+          if (!existing) return d;
+          return {
+            ...d,
+            [docKey]: {
+              ...existing,
+              fileKey:       gcsResult.fileKey,
+              fileUrl:       gcsResult.fileUrl,
+              fileName:      gcsResult.fileName,
+              mimeType:      gcsResult.mimeType,
+              fileSizeBytes: gcsResult.fileSizeBytes,
+              uploadState:   'uploaded' as DocUploadState,
+              uploadError:   undefined,
+            },
+          };
+        });
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Upload failed';
+        setDocs((d) => {
+          const existing = d[docKey];
+          if (!existing) return d;
+          return { ...d, [docKey]: { ...existing, uploadState: 'error' as DocUploadState, uploadError: msg } };
+        });
+      });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capturePaymentGeo]);
 
@@ -604,14 +742,39 @@ export default function NewKYCPage() {
   const handleSubmit = async () => {
     setSubmitting(true);
     try {
-      // Build documents payload
-      const documents: { type: string; dataUrl?: string; fileName?: string }[] = [];
-      if (docs.businessDoc)    documents.push({ type: 'GST_CERTIFICATE',   dataUrl: docs.businessDoc.dataUrl,    fileName: docs.businessDoc.name });
-      if (docs.ownerPhoto)     documents.push({ type: 'SELFIE',            dataUrl: docs.ownerPhoto.dataUrl,     fileName: docs.ownerPhoto.name });
-      if (docs.shopAddressDoc) documents.push({ type: 'SHOP_ESTABLISHMENT',dataUrl: docs.shopAddressDoc.dataUrl, fileName: docs.shopAddressDoc.name });
-      if (docs.storeBoardPhoto)documents.push({ type: 'OTHER',             dataUrl: docs.storeBoardPhoto.dataUrl,fileName: docs.storeBoardPhoto.name });
-      if (docs.cheque)         documents.push({ type: 'CANCELLED_CHEQUE',  dataUrl: docs.cheque.dataUrl,         fileName: docs.cheque.name });
-      if (docs.selfDeclaration)documents.push({ type: 'OTHER',             dataUrl: docs.selfDeclaration.dataUrl,fileName: docs.selfDeclaration.name });
+      // Build documents payload using GCS references (fileKey/fileUrl) — never send base64
+      interface DocPayload {
+        type: string;
+        fileKey?: string;
+        fileUrl?: string;
+        fileName?: string;
+        mimeType?: string;
+        fileSizeBytes?: number;
+        // Legacy fallback only if GCS upload did not complete
+        dataUrl?: string;
+      }
+      const buildDocPayload = (docKey: DocKey, doc: UploadedFile): DocPayload => {
+        if (doc.fileKey && doc.fileUrl) {
+          return {
+            type:          DOC_TYPE_MAP[docKey],
+            fileKey:       doc.fileKey,
+            fileUrl:       doc.fileUrl,
+            fileName:      doc.fileName ?? doc.name,
+            mimeType:      doc.mimeType,
+            fileSizeBytes: doc.fileSizeBytes,
+          };
+        }
+        // Fallback to legacy dataUrl if upload failed/incomplete (backend still accepts it)
+        return { type: DOC_TYPE_MAP[docKey], dataUrl: doc.dataUrl, fileName: doc.name };
+      };
+
+      const documents: DocPayload[] = [];
+      if (docs.businessDoc)    documents.push(buildDocPayload('businessDoc',    docs.businessDoc));
+      if (docs.ownerPhoto)     documents.push(buildDocPayload('ownerPhoto',     docs.ownerPhoto));
+      if (docs.shopAddressDoc) documents.push(buildDocPayload('shopAddressDoc', docs.shopAddressDoc));
+      if (docs.storeBoardPhoto)documents.push(buildDocPayload('storeBoardPhoto',docs.storeBoardPhoto));
+      if (docs.cheque)         documents.push(buildDocPayload('cheque',         docs.cheque));
+      if (docs.selfDeclaration)documents.push(buildDocPayload('selfDeclaration',docs.selfDeclaration));
 
       // Capture signature from canvas
       const signatureDataUrl = hasSigned
@@ -741,6 +904,9 @@ export default function NewKYCPage() {
     }
   }, [confirmNotInterestedId, selectedOutlet]);
 
+  /** Returns true when a doc slot is present but still uploading to GCS */
+  const isDocUploading = (doc: UploadedFile | null) => doc?.uploadState === 'uploading';
+
   /* ── Shared styles ── */
   const inputCls = 'w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)] bg-white';
   const labelCls = 'text-xs font-medium text-gray-600 block mb-1';
@@ -821,28 +987,63 @@ export default function NewKYCPage() {
   }: {
     file: UploadedFile; onRemove: () => void; onReplace: () => void; replaceLabel?: string;
   }) => (
-    <div className="border border-gray-200 rounded-xl overflow-hidden">
+    <div className={`border rounded-xl overflow-hidden ${
+      file.uploadState === 'error' ? 'border-red-300' : 'border-gray-200'
+    }`}>
       {isImage(file) && (
-        <div className="h-32 bg-gray-50">
+        <div className="h-32 bg-gray-50 relative">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={file.dataUrl} alt={file.name} className="w-full h-full object-contain" />
+          {/* Uploading overlay */}
+          {file.uploadState === 'uploading' && (
+            <div className="absolute inset-0 bg-white/70 flex items-center justify-center">
+              <Loader2 className="h-6 w-6 text-[var(--brand-primary)] animate-spin" />
+            </div>
+          )}
         </div>
       )}
       {!isImage(file) && (
-        <div className="h-16 bg-green-50 flex items-center justify-center gap-2">
-          <FileText className="h-6 w-6 text-[var(--brand-primary)]" />
-          <span className="text-xs font-medium text-[var(--brand-primary)]">PDF Document</span>
+        <div className={`h-16 flex items-center justify-center gap-2 ${
+          file.uploadState === 'error' ? 'bg-red-50' : 'bg-green-50'
+        }`}>
+          {file.uploadState === 'uploading' ? (
+            <Loader2 className="h-6 w-6 text-[var(--brand-primary)] animate-spin" />
+          ) : (
+            <FileText className={`h-6 w-6 ${file.uploadState === 'error' ? 'text-red-500' : 'text-[var(--brand-primary)]'}`} />
+          )}
+          <span className={`text-xs font-medium ${file.uploadState === 'error' ? 'text-red-600' : 'text-[var(--brand-primary)]'}`}>
+            {file.uploadState === 'uploading' ? 'Uploading…' : 'PDF Document'}
+          </span>
         </div>
       )}
       <div className="flex items-center gap-2 px-3 py-2 bg-white">
         {isImage(file) ? <ImageIcon className="h-4 w-4 text-gray-400 shrink-0" /> : <FileText className="h-4 w-4 text-gray-400 shrink-0" />}
         <div className="flex-1 min-w-0">
           <p className="text-xs font-medium text-gray-800 truncate">{file.name}</p>
-          <p className="text-[11px] text-gray-400">{formatBytes(file.size)} · compressed</p>
+          {file.uploadState === 'uploading' && (
+            <p className="text-[11px] text-blue-600 flex items-center gap-1">
+              <Loader2 className="h-2.5 w-2.5 animate-spin" /> Uploading to server…
+            </p>
+          )}
+          {file.uploadState === 'uploaded' && (
+            <p className="text-[11px] text-emerald-600 flex items-center gap-1">
+              <Check className="h-2.5 w-2.5" /> Uploaded · {formatBytes(file.size)}
+            </p>
+          )}
+          {file.uploadState === 'error' && (
+            <p className="text-[11px] text-red-600 flex items-center gap-1">
+              <AlertCircle className="h-2.5 w-2.5 shrink-0" /> {file.uploadError ?? 'Upload failed — will use local fallback'}
+            </p>
+          )}
+          {file.uploadState === 'idle' && (
+            <p className="text-[11px] text-gray-400">{formatBytes(file.size)}</p>
+          )}
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
-          <button type="button" onClick={onReplace} className="text-[11px] text-[var(--brand-primary)] font-medium hover:underline">{replaceLabel}</button>
-          <button type="button" onClick={onRemove} className="p-0.5 rounded-full hover:bg-gray-100 text-gray-400"><X className="h-3.5 w-3.5" /></button>
+          <button type="button" onClick={onReplace} disabled={file.uploadState === 'uploading'}
+            className="text-[11px] text-[var(--brand-primary)] font-medium hover:underline disabled:opacity-40 disabled:cursor-not-allowed">{replaceLabel}</button>
+          <button type="button" onClick={onRemove} disabled={file.uploadState === 'uploading'}
+            className="p-0.5 rounded-full hover:bg-gray-100 text-gray-400 disabled:opacity-40 disabled:cursor-not-allowed"><X className="h-3.5 w-3.5" /></button>
         </div>
       </div>
     </div>
@@ -1378,7 +1579,9 @@ export default function NewKYCPage() {
                   mobileCheck === 'idle' ||
                   mobileCheck === 'checking' ||
                   !docs.businessDoc ||
-                  !docs.ownerPhoto
+                  !docs.ownerPhoto ||
+                  isDocUploading(docs.businessDoc) ||
+                  isDocUploading(docs.ownerPhoto)
                 }>
                 Continue →
               </Button>
@@ -1527,7 +1730,10 @@ export default function NewKYCPage() {
                   !docs.shopAddressDoc || !docs.storeBoardPhoto ||
                   (nameMismatch && !docs.selfDeclaration) ||
                   boardPhotoGeoLoading ||
-                  !boardPhotoGeo
+                  !boardPhotoGeo ||
+                  isDocUploading(docs.shopAddressDoc) ||
+                  isDocUploading(docs.storeBoardPhoto) ||
+                  isDocUploading(docs.selfDeclaration)
                 }>
                 Continue →
               </Button>
@@ -1747,7 +1953,8 @@ export default function NewKYCPage() {
                     : (!form.upiId || !isValidUpiId(form.upiId))
                   ) || !agreedToTerms || !agreedToComms || !hasSigned ||
                   paymentGeoLoading ||
-                  !paymentGeo
+                  !paymentGeo ||
+                  isDocUploading(docs.cheque)
                 }>
                 Submit KYC
               </Button>
