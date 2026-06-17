@@ -85,3 +85,45 @@ export class ListTargetsQueryDto {
   @IsOptional()
   outletCode?: string;
 }
+
+// ─── Achievement upload ────────────────────────────────────────────────────────
+
+export class UploadAchievementsQueryDto {
+  /** When 'true', the response includes per-row details (for the preview). */
+  @IsString()
+  @IsOptional()
+  verbose?: string;
+}
+
+// ─── List achievement batches ──────────────────────────────────────────────────
+
+export class ListAchievementBatchesQueryDto {
+  @IsString()
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}$/, { message: 'month must be YYYY-MM' })
+  month?: string;
+}
+
+// ─── List achievement rows ─────────────────────────────────────────────────────
+
+export class ListAchievementsQueryDto {
+  @IsString()
+  @Matches(/^\d{4}-\d{2}$/, { message: 'month must be YYYY-MM' })
+  month!: string;
+
+  @IsString()
+  @IsOptional()
+  outletCode?: string;
+}
+
+// ─── Pace query ───────────────────────────────────────────────────────────────
+
+export class PaceQueryDto {
+  @IsString()
+  @Matches(/^\d{4}-\d{2}$/, { message: 'month must be YYYY-MM' })
+  month!: string;
+
+  @IsString()
+  @IsOptional()
+  outletCode?: string;
+}

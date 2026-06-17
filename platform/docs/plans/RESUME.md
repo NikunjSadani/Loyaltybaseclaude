@@ -8,8 +8,8 @@ Repo root: C:\Users\nikun\Loyaltybaseclaude  (git root; branch **develop**). Fro
 Backend: `api/` (NestJS + Prisma 7, the source of truth — owns the DB + ALL business logic).
 
 ⚠️⚠️ **STATE: P0 + P1 + P2 + Phase S + P3 ✅ COMPLETE. P4 (Programs, targets & enrollment) ◐ IN PROGRESS —
-4.0 reconcile DONE + additive schema applied to gifsy_dev (audited); building streams T (targets) + E
-(enrollment).** Everything through `02ab110` pushed to origin/develop.
+4.0/4.1/4.2/4.4/4.5 BACKEND ✅ (gated tsc 0 / jest green; `SchemeTarget` dropped). REMAINING = 4.3
+(enrollment submission) + thin admin/partner FE repoints.** All pushed to origin/develop.
 
 **Architecture (Phase S, done):** API-first — a dedicated NestJS backend built IN PLACE in `api/` (reused its
 shell, deleted its World-A domain, rebuilt the real domain from the platform's `lib/`+schema) consumed over
@@ -46,12 +46,14 @@ upload** (blank = not configured). **Schemes ⟂ targets — zero linkage** (two
 `KpiDef` table. #10 resolved (`SchemeType` canonical; FE `IncentiveType` retired; `CampaignType`=enrollment
 audience). Additive schema **applied to gifsy_dev** (`KpiDef`, `OutletTarget` mirrors `OutletSalesRecord`,
 `TargetUploadBatch`, `SchemeEnrollmentForm` + `scheme_enrollments.{enrollmentMode,formValues}`; audited PASS).
-**BUILDING (each task plan→execute→audit→gate):** **Stream T (targets, heart):** 4.4 `KpiDef` CRUD + `OutletTarget`
-template/upload → 4.5 achievement (port `admin/sales/bulk-upload`→`OutletSalesRecord`) + pace + partner view.
-**Stream E (enrollment):** 4.1 scheme CRUD cleanup + **drop World-A `SchemeTarget`** (model+reads; destructive
-migration, gated) + remove decorative class UI → 4.2 enrollment-form persistence → 4.3 submission (self/sales +
-prefill). ⚠️ **`api/.env` was found pointing at PROD (`gifsy_prod`) and repointed to the dev proxy** — verify
-`current_database=gifsy_dev` before any migration.
+**BACKEND BUILT + GATED (tsc 0 / jest green; plan→execute→audit→gate per task):** Stream T — **4.4** KpiDef CRUD +
+OutletTarget template/upload (blank=omit, 0 verbatim, non-template file→400) · **4.5** achievement upload
+(`admin/sales/bulk-upload`→OutletSalesRecord) + pace (÷0→null) + `partner.service` rewired off SchemeTarget. Stream E
+— **4.1** scheme CRUD cleanup + removed decorative class UI · **4.2** enrollment-form persistence
+(`SchemeEnrollmentForm` + pure validator). **World-A `SchemeTarget` DROPPED** (0 rows verified; guarded migration
+applied). **REMAINING: 4.3** (enrollment submission self/sales + prefill) + thin **admin/partner FE repoints** for
+targets/achievements/enrollment-form. ⚠️ **`api/.env` was found pointing at PROD (`gifsy_prod`) and repointed to the
+dev proxy** — verify `current_database=gifsy_dev` before any migration.
 
 ROLE & OPERATING MODEL (owner-agreed): you ORCHESTRATE, plan, GATE, and own docs. **Per task: plan (Opus) → execute
 (a Sonnet executor) → ONE independent adversarial audit (Sonnet) → Opus gates → commit.** AUDIT EVERYTHING — do not

@@ -217,18 +217,23 @@ export function parseTargetUploadBuffer(
   }
 
   const wb = XLSX.read(buffer, { type: 'buffer' });
+  if (wb.SheetNames.length === 0) {
+    throw new Error('Unrecognized file: no worksheet found');
+  }
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rawAoa = XLSX.utils.sheet_to_json<(string | number | null | undefined)[]>(ws, {
     header: 1,
     defval: null,
   });
 
+  // A valid template always has the two header rows (month-group row + column
+  // labels). Fewer rows means the file is not a recognizable template (e.g. a
+  // non-xlsx / corrupt file XLSX salvaged into a 1-cell sheet) → reject rather
+  // than silently accept an empty upload.
   if (rawAoa.length < 2) {
-    return {
-      rows: [],
-      acceptedTargets: {},
-      summary: { total: 0, accepted: 0, rejected: 0 },
-    };
+    throw new Error(
+      'Unrecognized file: expected the target/achievement template (missing header rows)',
+    );
   }
 
   const headerRow1 = (rawAoa[0] as (string | number | null)[]).map((c) =>
@@ -243,6 +248,12 @@ export function parseTargetUploadBuffer(
   const outletIdCol   = idxOf('Outlet ID');
   const outletNameCol = idxOf('Outlet Name');
   const outletTypeCol = idxOf('Outlet Type');
+
+  // "Outlet ID" is a mandatory template column; its absence means the uploaded
+  // file is not the expected template → reject.
+  if (outletIdCol === -1) {
+    throw new Error('Unrecognized template: missing the required "Outlet ID" column');
+  }
 
   // ── Detect month blocks from row 1 ─────────────────────────────────────────
   interface MonthBlock {

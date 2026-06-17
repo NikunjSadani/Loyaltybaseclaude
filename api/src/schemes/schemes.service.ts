@@ -6,6 +6,7 @@ import {
   CreateSchemeDto,
   ListSchemesQueryDto,
   UpdateSchemeDto,
+  UpsertEnrollmentFormDto,
 } from './dto/schemes.dto';
 
 /**
@@ -129,6 +130,75 @@ export class SchemesService {
     });
 
     return { message: 'Scheme deleted successfully' };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // P4.2 — Enrollment-form persistence
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Validates that a scheme exists and belongs to the caller's tenant.
+   * Throws NotFoundException if the scheme is missing or cross-tenant.
+   * Throws NotFoundException if the scheme is soft-deleted.
+   */
+  private async assertSchemeOwnership(user: JwtPayload, schemeId: string) {
+    const scheme = await this.prisma.scheme.findFirst({
+      where: { id: schemeId, clientId: user.clientId },
+    });
+    if (!scheme) throw new NotFoundException('Scheme not found');
+    if (scheme.deletedAt !== null) throw new NotFoundException('Scheme not found');
+    return scheme;
+  }
+
+  /**
+   * PUT /v1/schemes/:id/enrollment-form — admin-only.
+   *
+   * Upserts the SchemeEnrollmentForm record (1:1 on schemeId).
+   * The caller's tenant is validated before any write; formSchema structural
+   * validation is done at the DTO layer (class-validator) before this is called.
+   */
+  async upsertEnrollmentForm(
+    user: JwtPayload,
+    schemeId: string,
+    dto: UpsertEnrollmentFormDto,
+  ) {
+    if (!this.isAdmin(user)) throw new ForbiddenException('Forbidden - Admin only');
+
+    await this.assertSchemeOwnership(user, schemeId);
+
+    const form = await this.prisma.schemeEnrollmentForm.upsert({
+      where: { schemeId },
+      update: {
+        campaignType: dto.campaignType,
+        formSchema: dto.formSchema as Prisma.InputJsonValue,
+        updatedAt: new Date(),
+      },
+      create: {
+        schemeId,
+        campaignType: dto.campaignType,
+        formSchema: dto.formSchema as Prisma.InputJsonValue,
+      },
+    });
+
+    return { enrollmentForm: form };
+  }
+
+  /**
+   * GET /v1/schemes/:id/enrollment-form — schemes:read.
+   *
+   * Returns the enrollment form for a scheme, or 404 if none exists.
+   * Validates tenant ownership before reading.
+   */
+  async getEnrollmentForm(user: JwtPayload, schemeId: string) {
+    await this.assertSchemeOwnership(user, schemeId);
+
+    const form = await this.prisma.schemeEnrollmentForm.findUnique({
+      where: { schemeId },
+    });
+
+    if (!form) throw new NotFoundException('Enrollment form not found');
+
+    return { enrollmentForm: form };
   }
 
 }

@@ -458,7 +458,6 @@ model User {
   scheduledReports   ScheduledReport[]
   reportDeliveryLogs ReportDeliveryLog[]
   schemeEnrollments  SchemeEnrollment[]
-  schemeTargets      SchemeTarget[]
   loginLogs          LoginLog[]
 
   @@unique([clientId, phone]) // same phone can exist across different clients
@@ -997,7 +996,6 @@ model Scheme {
   eligibility    SchemeEligibility[]
   pointsLedger   PointsLedger[]
   enrollments    SchemeEnrollment[]
-  schemeTargets  SchemeTarget[]
   enrollmentForm SchemeEnrollmentForm?
 
   @@index([clientId])
@@ -1893,25 +1891,6 @@ model SchemeEnrollmentForm {
   scheme Scheme @relation(fields: [schemeId], references: [id], onDelete: Cascade)
 
   @@map("scheme_enrollment_forms")
-}
-
-model SchemeTarget {
-  id                 String   @id @default(cuid())
-  schemeId           String
-  userId             String
-  targetValue        Float    @default(0)
-  achievedValue      Float    @default(0)
-  projectedIncentive Float?
-  status             String   @default("ACTIVE")
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-
-  scheme Scheme @relation(fields: [schemeId], references: [id], onDelete: Cascade)
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([schemeId])
-  @@map("scheme_targets")
 }
 
 model LoginLog {

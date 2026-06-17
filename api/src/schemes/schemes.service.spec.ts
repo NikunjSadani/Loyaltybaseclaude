@@ -12,6 +12,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 const mockPrisma = {
   scheme: { findMany: jest.fn(), count: jest.fn(), create: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
   schemeEligibility: { findMany: jest.fn() },
+  schemeEnrollmentForm: { upsert: jest.fn(), findUnique: jest.fn() },
 };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
@@ -119,6 +120,124 @@ describe('SchemesService', () => {
       expect(data.deletedAt).toBeInstanceOf(Date);
       expect(data.status).toBe('CANCELLED');
       expect(res).toEqual({ message: 'Scheme deleted successfully' });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // P4.2 — upsertEnrollmentForm
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const validFormDto = {
+    campaignType: 'LOYALTY_ONLY' as const,
+    formSchema: {
+      captureGpsOnSubmit: false,
+      requireOtp: false,
+      fields: [
+        {
+          id: 'f1',
+          type: 'TEXT',
+          label: 'Name',
+          required: true,
+          autoFillFromExcel: false,
+          autoFillEditable: false,
+          order: 0,
+        },
+      ],
+    },
+  };
+
+  describe('upsertEnrollmentForm', () => {
+    it('throws Forbidden for non-admin callers', async () => {
+      await expect(
+        service.upsertEnrollmentForm(partner, 's1', validFormDto),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('throws NotFound when the schemeId does not belong to the tenant', async () => {
+      // findFirst returns null → scheme is missing/cross-tenant
+      mockPrisma.scheme.findFirst.mockResolvedValue(null);
+      await expect(
+        service.upsertEnrollmentForm(clientAdmin, 'unknown-scheme', validFormDto),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('throws NotFound for a soft-deleted scheme', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', clientId: 'deoleo', deletedAt: new Date() });
+      await expect(
+        service.upsertEnrollmentForm(clientAdmin, 's1', validFormDto),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('upserts the enrollment form with the correct fields', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', clientId: 'deoleo', deletedAt: null });
+      const fakeForm = { id: 'ef1', schemeId: 's1', campaignType: 'LOYALTY_ONLY', formSchema: validFormDto.formSchema };
+      mockPrisma.schemeEnrollmentForm.upsert.mockResolvedValue(fakeForm);
+
+      const result = await service.upsertEnrollmentForm(clientAdmin, 's1', validFormDto);
+
+      expect(result).toEqual({ enrollmentForm: fakeForm });
+
+      const upsertCall = mockPrisma.schemeEnrollmentForm.upsert.mock.calls[0][0];
+      expect(upsertCall.where).toEqual({ schemeId: 's1' });
+      expect(upsertCall.create.schemeId).toBe('s1');
+      expect(upsertCall.create.campaignType).toBe('LOYALTY_ONLY');
+      expect(upsertCall.update.campaignType).toBe('LOYALTY_ONLY');
+    });
+
+    it('verifies tenant scope: findFirst is called with both id and clientId', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', clientId: 'deoleo', deletedAt: null });
+      mockPrisma.schemeEnrollmentForm.upsert.mockResolvedValue({ id: 'ef1' });
+
+      await service.upsertEnrollmentForm(gifsy, 's1', validFormDto);
+
+      expect(mockPrisma.scheme.findFirst).toHaveBeenCalledWith({
+        where: { id: 's1', clientId: 'deoleo' },
+      });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // P4.2 — getEnrollmentForm
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe('getEnrollmentForm', () => {
+    it('throws NotFound when the schemeId is outside the tenant', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(null);
+      await expect(
+        service.getEnrollmentForm(partner, 's1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('throws NotFound when no enrollment form is configured', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', clientId: 'deoleo', deletedAt: null });
+      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue(null);
+      await expect(
+        service.getEnrollmentForm(partner, 's1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('returns the enrollment form when it exists', async () => {
+      const fakeForm = { id: 'ef1', schemeId: 's1', campaignType: 'OPEN_CAMPAIGN', formSchema: {} };
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', clientId: 'deoleo', deletedAt: null });
+      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue(fakeForm);
+
+      const result = await service.getEnrollmentForm(partner, 's1');
+      expect(result).toEqual({ enrollmentForm: fakeForm });
+      expect(mockPrisma.schemeEnrollmentForm.findUnique).toHaveBeenCalledWith({
+        where: { schemeId: 's1' },
+      });
+    });
+
+    it('always checks tenant scope before reading the form', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', clientId: 'deoleo', deletedAt: null });
+      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue({ id: 'ef1', schemeId: 's1' });
+
+      await service.getEnrollmentForm(partner, 's1');
+
+      // The tenant-scope query always includes clientId from the JWT
+      expect(mockPrisma.scheme.findFirst).toHaveBeenCalledWith({
+        where: { id: 's1', clientId: 'deoleo' },
+      });
     });
   });
 

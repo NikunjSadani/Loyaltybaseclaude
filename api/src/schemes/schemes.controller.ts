@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query } from '@nestjs/common';
 import { SchemesService } from './schemes.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -7,6 +7,7 @@ import {
   CreateSchemeDto,
   ListSchemesQueryDto,
   UpdateSchemeDto,
+  UpsertEnrollmentFormDto,
 } from './dto/schemes.dto';
 
 /**
@@ -51,5 +52,41 @@ export class SchemesController {
   @RequirePermission('schemes:delete')
   remove(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.schemes.remove(user, id);
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // P4.2 — Enrollment-form routes
+  // Note: `:id/enrollment-form` is a deeper path than `:id` and does NOT
+  // conflict with the existing `:id` param routes — NestJS resolves these
+  // routes in declaration order and a sub-path always wins over a bare param.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * PUT /v1/schemes/:id/enrollment-form
+   *
+   * Admin-only upsert of the configurable enrollment form for a scheme.
+   * Validates tenant ownership + formSchema structure before writing.
+   */
+  @Put(':id/enrollment-form')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('schemes:write')
+  upsertEnrollmentForm(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: UpsertEnrollmentFormDto,
+  ) {
+    return this.schemes.upsertEnrollmentForm(user, id, dto);
+  }
+
+  /**
+   * GET /v1/schemes/:id/enrollment-form
+   *
+   * Returns the enrollment form for a scheme. Returns 404 if none configured.
+   * Validates tenant ownership before reading.
+   */
+  @Get(':id/enrollment-form')
+  @RequirePermission('schemes:read')
+  getEnrollmentForm(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.schemes.getEnrollmentForm(user, id);
   }
 }

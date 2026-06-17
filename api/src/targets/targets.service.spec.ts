@@ -9,6 +9,11 @@
  *   • uploadTargets — verbatim write, blank-cell omission, batch tracking
  *   • listBatches — tenant scoped
  *   • listTargets — requires month param
+ *   • uploadAchievements — mirrors uploadTargets; blank→omit, 0 verbatim,
+ *       unknown outlet rejected, tenant scope, SalesUploadBatch + OutletSalesRecord
+ *   • listAchievementBatches — tenant scoped
+ *   • listAchievements — requires month param
+ *   • getPace — joins target + achievement; divide-by-zero → null
  *
  * All Prisma calls are mocked; the xlsx parse/generate logic is covered
  * separately in targets.helpers.spec.ts.
@@ -20,13 +25,24 @@ import * as XLSX from 'xlsx';
 import { TargetsService } from './targets.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { UpsertKpiDefDto, ListKpisQueryDto, ListBatchesQueryDto, ListTargetsQueryDto, TemplateQueryDto } from './dto/targets.dto';
+import {
+  UpsertKpiDefDto,
+  ListKpisQueryDto,
+  ListBatchesQueryDto,
+  ListTargetsQueryDto,
+  TemplateQueryDto,
+  ListAchievementBatchesQueryDto,
+  ListAchievementsQueryDto,
+  PaceQueryDto,
+} from './dto/targets.dto';
 
 // ─── Mock Prisma ──────────────────────────────────────────────────────────────
 
 const mockTx = {
-  targetUploadBatch: { create: jest.fn() },
-  outletTarget: { upsert: jest.fn() },
+  targetUploadBatch:  { create: jest.fn() },
+  outletTarget:       { upsert: jest.fn() },
+  salesUploadBatch:   { create: jest.fn() },
+  outletSalesRecord:  { upsert: jest.fn() },
 };
 
 const mockPrisma = {
@@ -44,7 +60,13 @@ const mockPrisma = {
   outletTarget: {
     findMany: jest.fn(),
   },
+  outletSalesRecord: {
+    findMany: jest.fn(),
+  },
   targetUploadBatch: {
+    findMany: jest.fn(),
+  },
+  salesUploadBatch: {
     findMany: jest.fn(),
   },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
@@ -381,6 +403,350 @@ describe('TargetsService', () => {
       await expect(
         service.listTargets(admin, {} as ListTargetsQueryDto),
       ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  // ─── uploadAchievements ────────────────────────────────────────────────────
+
+  describe('uploadAchievements', () => {
+    const mockOutlets = [
+      { outletCode: 'O001', name: 'Outlet One', outletType: { code: 'RETAIL' } },
+      { outletCode: 'O002', name: 'Outlet Two', outletType: { code: 'HORECA' } },
+    ];
+
+    beforeEach(() => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2]);
+      mockPrisma.outlet.findMany.mockResolvedValue(mockOutlets);
+      mockTx.salesUploadBatch.create.mockResolvedValue({
+        id: 'sales-batch-1',
+        clientId: 'deoleo',
+        month: '2026-07',
+        totalRows: 1,
+        acceptedCount: 1,
+        rejectedCount: 0,
+        status: 'COMPLETED',
+      });
+      mockTx.outletSalesRecord.upsert.mockResolvedValue({});
+    });
+
+    it('throws BadRequestException when no file is provided', async () => {
+      await expect(
+        service.uploadAchievements(admin, undefined as unknown as Express.Multer.File),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when no enabled KPIs exist', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+      const file = {
+        buffer: buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 100, 50]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+      await expect(service.uploadAchievements(admin, file)).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException for a corrupted (non-xlsx) buffer', async () => {
+      const file = {
+        buffer: Buffer.from('NOT AN XLSX FILE'),
+        originalname: 'bad.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+      await expect(service.uploadAchievements(admin, file)).rejects.toThrow(BadRequestException);
+    });
+
+    it('writes verbatim kpiValues into OutletSalesRecord and returns batch summary', async () => {
+      const file = {
+        buffer: buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 55.5, 30]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+
+      const result = await service.uploadAchievements(admin, file);
+
+      expect(result.batchId).toBe('sales-batch-1');
+      expect(result.acceptedCount).toBeGreaterThanOrEqual(1);
+
+      const upsertCall = mockTx.outletSalesRecord.upsert.mock.calls[0][0];
+      const stored = upsertCall.create.kpiValues as Record<string, number>;
+      expect(stored['MONTH_TGT']).toBe(55.5);
+      expect(stored['FOCUS_PACK_1']).toBe(30);
+    });
+
+    it('CRITICAL: blank cell → key OMITTED from kpiValues (not 0)', async () => {
+      // O001: MONTH_TGT=100, FOCUS_PACK_1=blank
+      const file = {
+        buffer: buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 100, null]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+
+      await service.uploadAchievements(admin, file);
+
+      const upsertCall = mockTx.outletSalesRecord.upsert.mock.calls[0][0];
+      const stored = upsertCall.create.kpiValues as Record<string, number>;
+      expect(stored['MONTH_TGT']).toBe(100);
+      expect('FOCUS_PACK_1' in stored).toBe(false);
+    });
+
+    it('CRITICAL: 0 is stored verbatim in kpiValues (0 ≠ blank)', async () => {
+      const file = {
+        buffer: buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 0, 75]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+
+      await service.uploadAchievements(admin, file);
+
+      const upsertCall = mockTx.outletSalesRecord.upsert.mock.calls[0][0];
+      const stored = upsertCall.create.kpiValues as Record<string, number>;
+      expect(stored['MONTH_TGT']).toBe(0);
+      expect(stored['FOCUS_PACK_1']).toBe(75);
+    });
+
+    it('unknown outlet code → rejected, no OutletSalesRecord upsert', async () => {
+      const file = {
+        buffer: buildTestXlsx([['GHOST', 'Ghost Outlet', 'RETAIL', 100, 50]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+
+      await service.uploadAchievements(admin, file);
+
+      expect(mockTx.outletSalesRecord.upsert).not.toHaveBeenCalled();
+    });
+
+    it('tenant-scopes SalesUploadBatch.create with clientId', async () => {
+      const file = {
+        buffer: buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 20]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+
+      await service.uploadAchievements(admin, file);
+
+      const batchCreate = mockTx.salesUploadBatch.create.mock.calls[0][0];
+      expect(batchCreate.data.clientId).toBe('deoleo');
+      expect(batchCreate.data.uploadedById).toBe('admin1');
+    });
+
+    it('tenant-scopes OutletSalesRecord.upsert with clientId', async () => {
+      const file = {
+        buffer: buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 20]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+
+      await service.uploadAchievements(admin, file);
+
+      const upsertCall = mockTx.outletSalesRecord.upsert.mock.calls[0][0];
+      expect(upsertCall.create.clientId).toBe('deoleo');
+      expect(upsertCall.where.clientId_outletCode_month.clientId).toBe('deoleo');
+    });
+  });
+
+  // ─── listAchievementBatches ────────────────────────────────────────────────
+
+  describe('listAchievementBatches', () => {
+    it('scopes query to caller tenant, newest first', async () => {
+      mockPrisma.salesUploadBatch.findMany.mockResolvedValue([]);
+      await service.listAchievementBatches(admin, {} as ListAchievementBatchesQueryDto);
+
+      const arg = mockPrisma.salesUploadBatch.findMany.mock.calls[0][0];
+      expect(arg.where.clientId).toBe('deoleo');
+      expect(arg.orderBy).toEqual({ createdAt: 'desc' });
+    });
+
+    it('filters by month when provided', async () => {
+      mockPrisma.salesUploadBatch.findMany.mockResolvedValue([]);
+      await service.listAchievementBatches(admin, { month: '2026-07' });
+
+      const arg = mockPrisma.salesUploadBatch.findMany.mock.calls[0][0];
+      expect(arg.where.month).toBe('2026-07');
+    });
+  });
+
+  // ─── listAchievements ──────────────────────────────────────────────────────
+
+  describe('listAchievements', () => {
+    it('scopes query to tenant and filters by month', async () => {
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+      await service.listAchievements(admin, { month: '2026-07' } as ListAchievementsQueryDto);
+
+      const arg = mockPrisma.outletSalesRecord.findMany.mock.calls[0][0];
+      expect(arg.where.clientId).toBe('deoleo');
+      expect(arg.where.month).toBe('2026-07');
+    });
+
+    it('optionally filters by outletCode', async () => {
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+      await service.listAchievements(admin, { month: '2026-07', outletCode: 'O001' });
+
+      const arg = mockPrisma.outletSalesRecord.findMany.mock.calls[0][0];
+      expect(arg.where.outletCode).toBe('O001');
+    });
+
+    it('throws BadRequestException when month is not provided', async () => {
+      await expect(
+        service.listAchievements(admin, {} as ListAchievementsQueryDto),
+      ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  // ─── getPace ───────────────────────────────────────────────────────────────
+
+  describe('getPace', () => {
+    beforeEach(() => {
+      mockPrisma.outletTarget.findMany.mockResolvedValue([]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+    });
+
+    it('throws BadRequestException when month is not provided', async () => {
+      await expect(service.getPace(admin, {} as PaceQueryDto)).rejects.toThrow(BadRequestException);
+    });
+
+    it('tenant-scopes both outletTarget and outletSalesRecord queries', async () => {
+      await service.getPace(admin, { month: '2026-07' });
+
+      const tArg = mockPrisma.outletTarget.findMany.mock.calls[0][0];
+      const aArg = mockPrisma.outletSalesRecord.findMany.mock.calls[0][0];
+      expect(tArg.where.clientId).toBe('deoleo');
+      expect(tArg.where.month).toBe('2026-07');
+      expect(aArg.where.clientId).toBe('deoleo');
+      expect(aArg.where.month).toBe('2026-07');
+    });
+
+    it('optionally scopes to a single outletCode', async () => {
+      await service.getPace(admin, { month: '2026-07', outletCode: 'O001' });
+
+      const tArg = mockPrisma.outletTarget.findMany.mock.calls[0][0];
+      expect(tArg.where.outletCode).toBe('O001');
+    });
+
+    it('returns empty outlets array when no target or achievement data', async () => {
+      const res = await service.getPace(admin, { month: '2026-07' });
+      expect(res).toEqual({ month: '2026-07', outlets: [] });
+    });
+
+    it('computes pace = achieved / target correctly', async () => {
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        {
+          outletCode: 'O001',
+          outletName: 'Outlet One',
+          outletType: 'RETAIL',
+          targetValues: { MONTH_TGT: 200 },
+        },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O001', kpiValues: { MONTH_TGT: 150 } },
+      ]);
+
+      const res = await service.getPace(admin, { month: '2026-07' });
+      const kpi = res.outlets[0].kpis.find((k: { code: string }) => k.code === 'MONTH_TGT')!;
+      expect(kpi.target).toBe(200);
+      expect(kpi.achieved).toBe(150);
+      expect(kpi.pace).toBeCloseTo(0.75);
+    });
+
+    it('CRITICAL: pace is null when target is 0 (divide-by-zero guard)', async () => {
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        {
+          outletCode: 'O001',
+          outletName: 'Outlet One',
+          outletType: 'RETAIL',
+          targetValues: { MONTH_TGT: 0 },
+        },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O001', kpiValues: { MONTH_TGT: 50 } },
+      ]);
+
+      const res = await service.getPace(admin, { month: '2026-07' });
+      const kpi = res.outlets[0].kpis.find((k: { code: string }) => k.code === 'MONTH_TGT')!;
+      expect(kpi.pace).toBeNull();
+    });
+
+    it('CRITICAL: pace is null when target key is absent', async () => {
+      // Target row has no MONTH_TGT key; achievement side has it
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        {
+          outletCode: 'O001',
+          outletName: 'Outlet One',
+          outletType: 'RETAIL',
+          targetValues: {},
+        },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O001', kpiValues: { MONTH_TGT: 80 } },
+      ]);
+
+      const res = await service.getPace(admin, { month: '2026-07' });
+      const kpi = res.outlets[0].kpis.find((k: { code: string }) => k.code === 'MONTH_TGT')!;
+      expect(kpi.target).toBeNull();
+      expect(kpi.pace).toBeNull();
+    });
+
+    it('includes outlets with only achievement data (target null)', async () => {
+      mockPrisma.outletTarget.findMany.mockResolvedValue([]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O001', kpiValues: { MONTH_TGT: 40 } },
+      ]);
+
+      const res = await service.getPace(admin, { month: '2026-07' });
+      expect(res.outlets).toHaveLength(1);
+      const kpi = res.outlets[0].kpis[0]!;
+      expect(kpi.achieved).toBe(40);
+      expect(kpi.target).toBeNull();
+      expect(kpi.pace).toBeNull();
+    });
+
+    it('includes outlets with only target data (achieved null, pace null)', async () => {
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        {
+          outletCode: 'O001',
+          outletName: 'Outlet One',
+          outletType: 'RETAIL',
+          targetValues: { MONTH_TGT: 100 },
+        },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+
+      const res = await service.getPace(admin, { month: '2026-07' });
+      expect(res.outlets).toHaveLength(1);
+      const kpi = res.outlets[0].kpis[0]!;
+      expect(kpi.target).toBe(100);
+      expect(kpi.achieved).toBeNull();
+      expect(kpi.pace).toBeNull();
+    });
+
+    it('handles outlet with achieved=0 and non-zero target — pace=0 (not null)', async () => {
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        {
+          outletCode: 'O001',
+          outletName: 'Outlet One',
+          outletType: 'RETAIL',
+          targetValues: { MONTH_TGT: 100 },
+        },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O001', kpiValues: { MONTH_TGT: 0 } },
+      ]);
+
+      const res = await service.getPace(admin, { month: '2026-07' });
+      const kpi = res.outlets[0].kpis[0]!;
+      expect(kpi.achieved).toBe(0);
+      expect(kpi.pace).toBe(0);  // 0 / 100 = 0, NOT null
+    });
+
+    it('results are sorted by outletCode', async () => {
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'Z999', outletName: 'Z', outletType: 'RETAIL', targetValues: { MONTH_TGT: 1 } },
+        { outletCode: 'A001', outletName: 'A', outletType: 'RETAIL', targetValues: { MONTH_TGT: 2 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+
+      const res = await service.getPace(admin, { month: '2026-07' });
+      expect(res.outlets[0].outletCode).toBe('A001');
+      expect(res.outlets[1].outletCode).toBe('Z999');
     });
   });
 });

@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
@@ -82,68 +81,123 @@ export class PartnerService {
   }
 
   /**
-   * GET /v1/partner/targets — the caller's active scheme targets for the tenant.
-   * Optional `period` ("YYYY-MM") filters to schemes overlapping that month.
+   * GET /v1/partner/targets — the caller's own outlets' target + achievement +
+   * pace per KPI for the requested month (or the most-recent month with data).
+   *
+   * Rewired from SchemeTarget (P4.1 dropped scheme-scoped targets) to the real
+   * per-outlet × KPI × month model:
+   *   - OutletTarget.targetValues   — target side
+   *   - OutletSalesRecord.kpiValues — achievement side
+   *
+   * Joins on (clientId, outletCode, month).  Pace = achieved ÷ target;
+   * target absent or 0 → pace null (divide-by-zero guard).
+   *
+   * Caller scoping: the partner's outlets are looked up via ChannelPartner
+   * (userId → id → Outlet[]) so only the caller's own outlets are returned.
+   * Tenant scope: every query is filtered by clientId from the JWT.
    */
   async getTargets(user: JwtPayload, q: ListPartnerTargetsQueryDto) {
-    const period = q.period ?? null; // e.g. "2026-05"; null = all active
-
-    // Build period date bounds once — used in the Prisma scheme where filter.
-    let periodStart: Date | null = null;
-    let periodEnd: Date | null = null;
-    if (period) {
-      const [y, m] = period.split('-').map(Number);
-      if (!isNaN(y) && !isNaN(m)) {
-        periodStart = new Date(y, m - 1, 1);
-        periodEnd = new Date(y, m, 0);
-      }
-    }
-
-    // Period filter pushed into the scheme where so take:20 applies after filtering.
-    const schemeWhere: Prisma.SchemeWhereInput = { clientId: user.clientId };
-    if (periodStart && periodEnd) {
-      schemeWhere.AND = [
-        { OR: [{ startDate: { lte: periodEnd } }] },
-        { OR: [{ endDate: { gte: periodStart } }] },
-      ];
-    }
-
-    const schemeTargets = await this.prisma.schemeTarget.findMany({
-      where: {
-        userId: user.sub,
-        status: 'ACTIVE',
-        scheme: schemeWhere,
-      },
-      include: {
-        scheme: {
-          select: {
-            id: true,
-            name: true,
-            endDate: true,
-            startDate: true,
-          },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 20,
+    // ── Resolve the caller's ChannelPartner + their outlet codes ─────────────
+    const partner = await this.prisma.channelPartner.findFirst({
+      where: { userId: user.sub, clientId: user.clientId },
+      select: { id: true },
     });
 
-    const targets = schemeTargets.map((t) => ({
-      id: t.id,
-      schemeId: t.schemeId,
-      schemeName: t.scheme?.name ?? '',
-      period: period ?? '',
-      targetValue: t.targetValue,
-      achievedValue: t.achievedValue,
-      percentage:
-        t.targetValue > 0
-          ? Math.min(100, Math.round((t.achievedValue / t.targetValue) * 100))
-          : 0,
-      status: t.status,
-      incentiveEarnable: t.projectedIncentive ?? 0,
-    }));
+    if (!partner) return { period: q.period ?? null, outlets: [] };
 
-    return { targets };
+    const outlets = await this.prisma.outlet.findMany({
+      where: {
+        clientId: user.clientId,
+        partnerId: partner.id,
+        isActive: true,
+        deletedAt: null,
+      },
+      select: { outletCode: true },
+    });
+
+    if (outlets.length === 0) return { period: q.period ?? null, outlets: [] };
+
+    const outletCodes = outlets.map((o) => o.outletCode);
+
+    // ── Determine the month to query ──────────────────────────────────────────
+    // If the caller passes a period, use it.  Otherwise, find the most-recent
+    // month for which this partner has any target data.
+    let month: string | null = q.period ?? null;
+
+    if (!month) {
+      const latest = await this.prisma.outletTarget.findFirst({
+        where: { clientId: user.clientId, outletCode: { in: outletCodes } },
+        orderBy: { month: 'desc' },
+        select: { month: true },
+      });
+      month = latest?.month ?? null;
+    }
+
+    if (!month) return { period: null, outlets: [] };
+
+    const whereBase = {
+      clientId: user.clientId,
+      month,
+      outletCode: { in: outletCodes },
+    };
+
+    // ── Fetch both sides in parallel ──────────────────────────────────────────
+    const [targetRows, achievementRows] = await Promise.all([
+      this.prisma.outletTarget.findMany({
+        where: whereBase,
+        select: { outletCode: true, outletName: true, outletType: true, targetValues: true },
+      }),
+      this.prisma.outletSalesRecord.findMany({
+        where: whereBase,
+        select: { outletCode: true, kpiValues: true },
+      }),
+    ]);
+
+    const targetIndex      = new Map(targetRows.map((r) => [r.outletCode, r]));
+    const achievementIndex = new Map(achievementRows.map((r) => [r.outletCode, r]));
+
+    const allOutletCodes = new Set([...targetIndex.keys(), ...achievementIndex.keys()]);
+
+    const result = [...allOutletCodes]
+      .sort()
+      .map((outletCode) => {
+        const tRow = targetIndex.get(outletCode);
+        const aRow = achievementIndex.get(outletCode);
+
+        const targetValues  = (tRow?.targetValues  ?? {}) as Record<string, number>;
+        const kpiValues     = (aRow?.kpiValues     ?? {}) as Record<string, number>;
+
+        const allKpiCodes = new Set([
+          ...Object.keys(targetValues),
+          ...Object.keys(kpiValues),
+        ]);
+
+        const kpis = [...allKpiCodes].map((code) => {
+          const target  = Object.prototype.hasOwnProperty.call(targetValues, code)
+            ? targetValues[code]
+            : null;
+          const achieved = Object.prototype.hasOwnProperty.call(kpiValues, code)
+            ? kpiValues[code]
+            : null;
+
+          // Divide-by-zero guard: target absent OR target===0 → pace null
+          let pace: number | null = null;
+          if (target !== null && target !== 0 && achieved !== null) {
+            pace = achieved / target;
+          }
+
+          return { code, target, achieved, pace };
+        });
+
+        return {
+          outletCode,
+          outletName: tRow?.outletName ?? outletCode,
+          outletType: tRow?.outletType ?? '',
+          kpis,
+        };
+      });
+
+    return { period: month, outlets: result };
   }
 
   private toPeriod(d: Date): string {

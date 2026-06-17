@@ -1,8 +1,8 @@
 # P4 · Programs, Targets & Enrollment — Reconcile + Build Record
 
-> Status: **4.0 RECONCILE — in progress (2026-06-17).** Owner-confirmed model below. Build waves
-> 4.1–4.5 recorded here as they land (plan→execute→audit per task). Source of truth for the build =
-> the `api/` NestJS backend; FE is thin.
+> Status (2026-06-17): **4.0 reconcile ✅ · 4.1 ✅ · 4.2 ✅ · 4.4 ✅ · 4.5 ✅ (all BACKEND, gated tsc 0 /
+> jest green) · `SchemeTarget` dropped ✅. REMAINING: 4.3 (enrollment submission) + the thin admin/partner
+> FE repoints.** Owner-confirmed model below. Source of truth = the `api/` NestJS backend; FE is thin.
 
 ## 0. Why a reconcile first
 
@@ -82,11 +82,10 @@ are updated as part of 4.0.
 - **`SchemeEnrollmentForm`** (4.2): `(id, schemeId @unique, campaignType, formSchema Json, …)` +
   **ALTER `scheme_enrollments`** add `formValues Json?` + `enrollmentMode` default `'SELF'`.
 
-**Separate destructive step — DEFERRED until AFTER 4.5 (not 4.1):**
-- **DROP `SchemeTarget`** — read by **TWO** modules: the `schemes` service (`getSchemeTarget`/`listTargets`,
-  removed in **4.1 ✅**) **AND** `partner.service.ts` (the partner "my targets" view, line ~111 —
-  rewired to `OutletTarget`/`OutletSalesRecord` in **4.5**). The model+table drop must land only once the
-  **last** reader is gone (else `tsc` breaks), i.e. **after 4.5**. Shown + audited + owner-gated when due.
+**Separate destructive step — ✅ DONE 2026-06-17 (after 4.5):**
+- **DROP `SchemeTarget`** ✅ — both readers removed (`schemes` service `getSchemeTarget`/`listTargets` in
+  **4.1**; `partner.service.ts` rewired to `OutletTarget`/`OutletSalesRecord` in **4.5**). grep-confirmed
+  zero readers; verified **0 rows** on `gifsy_dev`; guarded `P4_drop_scheme_target.sql` applied (table gone).
 
 Pace (4.5) joins `OutletTarget` ↔ `OutletSalesRecord` on `(clientId, outletCode, month)` per `kpiId` key —
 no cross-scheme keying needed (targets aren't scheme-scoped).
@@ -128,15 +127,18 @@ Schemes ⟂ targets share **no models**, so the two streams run **fully in paral
 
 - **4.0** ✅ Reconcile (this doc) + lock schema design. (`lib/incentive.ts` retirement re-homed to ~P6 — §2.)
 - **Stream T — Targets (heart of P4):**
-  - **4.4** `KpiDef` table + CRUD · `OutletTarget` + `TargetUploadBatch` · template download (KpiDef × months)
-    · verbatim upload parser (port `lib/target-excel-upload.ts`).
-  - **4.5** Achievement upload (port platform `admin/sales/bulk-upload` → `OutletSalesRecord`) · pace
-    (`OutletTarget`↔`OutletSalesRecord`) · partner target+achievement view.
+  - **4.4 ✅** `KpiDef` table + CRUD · `OutletTarget` + `TargetUploadBatch` · template download · verbatim
+    upload (blank = omitted, 0 verbatim; non-template files rejected 400). Backend done; **admin FE repoint pending**.
+  - **4.5 ✅** Achievement upload (`admin/sales/bulk-upload` → `OutletSalesRecord`) · pace
+    (`OutletTarget`↔`OutletSalesRecord`, ÷0→null) · `partner.service` rewired off `SchemeTarget`. Backend done; **FE pending**.
 - **Stream E — Enrollment/Schemes:**
-  - **4.1** Scheme CRUD lifecycle + **drop `SchemeTarget` reads** + remove decorative class UI.
-  - **4.2** Enrollment-form persistence (`SchemeEnrollmentForm` + `scheme_enrollments` values/mode);
-    confirm `CampaignType` audience scope.
-  - **4.3** Enrollment submission (self vs sales + conditional pre-fill).
+  - **4.1 ✅** Scheme CRUD lifecycle + dropped `SchemeTarget` reads + removed decorative class UI.
+  - **4.2 ✅** Enrollment-form persistence (`SchemeEnrollmentForm` upsert/get + pure schema validator).
+    `CampaignType` audience confirmed at form level; **submission FE/wiring = 4.3**.
+  - **4.3** Enrollment submission (self vs sales + conditional pre-fill) — **NEXT**.
+
+**Remaining P4:** 4.3 (enrollment submission) · the admin FE repoint for targets/achievements + the
+enrollment-form builder wiring · partner-facing target/achievement view.
 
 **Exit:** tenant KPIs defined; admin uploads per-outlet-per-month targets (blank = not configured) +
 achievement; target + achievement + pace display; **separately**, admin publishes activations and outlets

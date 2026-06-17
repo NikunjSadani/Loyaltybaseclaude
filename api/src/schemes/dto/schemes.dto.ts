@@ -3,14 +3,19 @@ import {
   IsBoolean,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsObject,
   IsOptional,
   IsString,
   Min,
   MinLength,
+  registerDecorator,
+  ValidationArguments,
+  ValidationOptions,
 } from 'class-validator';
 import { RewardType, SchemeStatus, SchemeType } from '@prisma/client';
+import { CAMPAIGN_TYPES, CampaignType, validateFormSchema } from '../enrollment-form.helper';
 
 /**
  * Schemes DTOs — ported from platform/src/app/api/schemes/* zod schemas.
@@ -111,5 +116,53 @@ export class ListSchemesQueryDto {
   @IsInt()
   @Min(1)
   limit?: number = 20;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P4.2 — Enrollment-form DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Custom decorator: validates formSchema structure using the pure helper.
+ * Reports each structural error individually (they are concatenated into a
+ * single validation message via class-validator's message function).
+ */
+function IsValidFormSchema(validationOptions?: ValidationOptions) {
+  // eslint-disable-next-line @typescript-eslint/ban-types
+  return function (object: Object, propertyName: string) {
+    registerDecorator({
+      name: 'isValidFormSchema',
+      target: object.constructor,
+      propertyName,
+      options: validationOptions,
+      validator: {
+        validate(value: unknown): boolean {
+          const errors = validateFormSchema(value);
+          return errors.length === 0;
+        },
+        defaultMessage(args: ValidationArguments): string {
+          const errors = validateFormSchema(args.value);
+          return errors.join(' | ');
+        },
+      },
+    });
+  };
+}
+
+/**
+ * DTO for PUT /v1/schemes/:id/enrollment-form
+ *
+ * campaignType — enrollment audience model (LOYALTY_ONLY | OPEN_CAMPAIGN | MIXED).
+ * formSchema   — EnrollmentFormSchema object validated by the pure helper.
+ */
+export class UpsertEnrollmentFormDto {
+  @IsIn(CAMPAIGN_TYPES as unknown as string[], {
+    message: `campaignType must be one of: ${CAMPAIGN_TYPES.join(', ')}`,
+  })
+  campaignType!: CampaignType;
+
+  @IsObject()
+  @IsValidFormSchema()
+  formSchema!: Record<string, unknown>;
 }
 
