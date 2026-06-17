@@ -1,27 +1,21 @@
 # KYC Approval Revamp — Gifsy bulk verification & approval
 
-> Design agreed 2026-06-15 (owner). Lives in **P3 · Onboarding & KYC** (task 3.4 area; gaps #12 GST/bank
-> validation, #14 field-level rejection, #15 reg-type capture). This is the canonical design for the Gifsy
-> KYC-approval revamp the owner is doing. Captures decisions; the exact schema is finalized at P3.0/3.4
-> reconcile (the approval page is being redesigned — code wins at reconcile).
+> Design agreed 2026-06-15 (owner). The canonical design for the Gifsy KYC-approval revamp; captures the locked
+> decisions (resolved at the bottom). **✅ BUILT IN P3 (3.4a–e + 3.3, 2026-06-17)** — see the build record in
+> `reconcile/P3-onboarding-kyc.md`. This doc is now a design/decisions reference, not a status tracker.
 
-## Demo status (built 2026-06-15; rebuilt to the 7-field hybrid model)
-The **full field-level hybrid workspace is built in DEMO mode on `develop`** (gated + independently audited):
-`lib/kyc-review-dump.ts` (40-col dump: all enrollment fields + clickable document hyperlinks + a Decision+Remark
-column per field), `lib/kyc-bulk-verify.ts` (`parseKycApprovalSheet` → per-field updates + concise-English error
-report), `api/admin/kyc/{approvals,review-dump,bulk-verify}` (GIFSY-only), and `admin/kyc/approvals` — a unified
-workspace: queue with *n/7* progress → export → upload-**merge** (blank cells never clear a status) → per-entry
-detail (photos w/ **click-to-enlarge lightbox**, per-field Approve/Reject + remark) → completion banner (all
-approved → credentials+WhatsApp; any reject → re-share to sales). Sidebar **KYC Management → KYC Approvals**
-points here. **No schema, no DB writes** (demo). Verified end-to-end in DEMO (queue, export, upload→merge,
-error report, lightbox, completion).
+## ✅ Status — BUILT (P3), 2026-06-17
+The field-level hybrid workspace shipped **for real in the NestJS backend** (no longer the demo):
+`KycVerificationItem` schema (Option A) + `entityType`/`gstRegistrationType` on `ChannelPartner`; `GET
+/v1/kyc/review-queue` + `GET /v1/kyc/review-dump` + `POST /v1/kyc/bulk-verify?apply=` (preview→commit,
+**auto-approve**) + `POST /v1/kyc/:id/verify` (per-field portal); the shared `applyBridgeOutcome`; the `admin/kyc/
+approvals` UI + the `admin/kyc/[id]` detail panel **repointed to the backend and browser-verified**.
+**The original DEMO (`lib/kyc-review-dump.ts`, `lib/kyc-bulk-verify.ts`, `api/admin/kyc/*`) was PORTED to the backend
+and then DELETED** (commit `e548aa7`). Closes gaps #12/#14/#15.
 
-**Remaining for P3:** **3.4a** schema + dev-DB migration (entityType/gstRegistrationType + persisted per-field
-verification), **3.4e** real persistence (commit writes + status transitions + audit) + credential creation
-(3.3) + **WhatsApp (P7/MSG91)** + the rejection→Re-KYC re-share wiring (reuse `reKycFlags`), and the
-single-record detail-page field-level rejection. **Audit notes folded forward:** N1 — mark the nav link
-`gifsyOnly:true` once real roles are wired (left visible now because gifsyOnly links are hidden in demo mode);
-N2 — cosmetic (`remark:undefined` on approved merges).
+**Carried to later phases (not done):** credential issuance = the activate-user-on-approve (built); **WhatsApp delivery
+= P7/MSG91**; assigned-sales-owner re-KYC notification (only the partner is notified today) = P4; nav link
+`gifsyOnly:true` once real roles wired (RBAC enable).
 
 ## Expanded approval model (owner, 2026-06-15)
 **7 approval fields**, each independently `PENDING → APPROVED / REJECTED(+remark)`, with **source (Excel|Portal)

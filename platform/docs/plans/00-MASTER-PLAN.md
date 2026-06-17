@@ -166,7 +166,7 @@ tenant config served from DB. **Depends on:** P0.
 > **✅ P2 FUNCTIONALLY COMPLETE: 2.0, 2.1, 2.2, 2.4, 2.5 + RF1–RF7 all done.** 2.6 catalog dropped (above).
 > **2.3 (tiers) folded into the loyalty-engine de-scaffold** (tiers + partner-class→program + retiring
 > `lib/incentive.ts` compute = ONE deliberate effort; see `docs/plans/MODEL-ALIGNMENT.md`).
-> **✅ PHASE S (BACKEND SPLIT) COMPLETE — S0–S8, 2026-06-16 (Gap #31 RESOLVED), now gates lifted → P3 unblocked.**
+> **✅ PHASE S (BACKEND SPLIT) COMPLETE — S0–S8, 2026-06-16 (Gap #31 RESOLVED). P3 (Onboarding & KYC) then built on it and is now ✅ DONE (3.0–3.6, 2026-06-17) — see §P3. NEXT = P4.**
 > Task 0's topology reconcile + independent-agent confirm settled it: split into a **dedicated NestJS backend** (from
 > the platform's real-model `lib/`+schema, built **in place in the `api/` dir** — reused its shell, **deleted its
 > World-A domain**) + **thin frontend** (Next proxy `/api/*`→backend `/v1/*`). The de-scaffold (formerly "P4.0") was
