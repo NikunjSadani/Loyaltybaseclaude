@@ -27,7 +27,6 @@ describe('validateCampaignSchemeForm', () => {
     startDate: '2025-07-01',
     endDate: '2025-09-30',
     campaignType: 'LOYALTY_ONLY',
-    applicableClasses: ['GOLD'],
     holdingPeriodDays: '30',
     outletTargeting: 'ALL',
     targetedOutlets: [],
@@ -61,46 +60,21 @@ describe('validateCampaignSchemeForm', () => {
     expect(errs.some((e) => e.field === 'endDate')).toBe(true);
   });
 
-  it('requires at least one applicable class for LOYALTY_ONLY', () => {
-    const errs = validateCampaignSchemeForm({ ...base, applicableClasses: [] });
-    expect(errs.some((e) => e.field === 'applicableClasses')).toBe(true);
-  });
-
-  it('OPEN_CAMPAIGN does not require applicableClasses', () => {
-    const errs = validateCampaignSchemeForm({
-      ...base,
-      campaignType: 'OPEN_CAMPAIGN',
-      applicableClasses: [],
-      enrollmentFormFields: [{ id: 'f1', label: 'Name', type: 'TEXT' }],
-      requiresSelfRegistration: false,
-    });
-    expect(errs.some((e) => e.field === 'applicableClasses')).toBe(false);
-  });
-
   it('OPEN_CAMPAIGN requires at least one enrollment form field', () => {
     const errs = validateCampaignSchemeForm({
       ...base,
       campaignType: 'OPEN_CAMPAIGN',
-      applicableClasses: [],
       enrollmentFormFields: [],
     });
     expect(errs.some((e) => e.field === 'enrollmentFormFields')).toBe(true);
   });
 
-  it('MIXED requires both applicableClasses AND enrollment form fields', () => {
-    const noClass = validateCampaignSchemeForm({
-      ...base,
-      campaignType: 'MIXED',
-      applicableClasses: [],
-      enrollmentFormFields: [{ id: 'f1', label: 'Name', type: 'TEXT' }],
-    });
+  it('MIXED requires enrollment form fields', () => {
     const noFields = validateCampaignSchemeForm({
       ...base,
       campaignType: 'MIXED',
-      applicableClasses: ['GOLD'],
       enrollmentFormFields: [],
     });
-    expect(noClass.some((e) => e.field === 'applicableClasses')).toBe(true);
     expect(noFields.some((e) => e.field === 'enrollmentFormFields')).toBe(true);
   });
 

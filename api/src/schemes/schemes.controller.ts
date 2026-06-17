@@ -6,7 +6,6 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 import {
   CreateSchemeDto,
   ListSchemesQueryDto,
-  ListTargetsQueryDto,
   UpdateSchemeDto,
 } from './dto/schemes.dto';
 
@@ -34,23 +33,10 @@ export class SchemesController {
     return this.schemes.create(user, dto);
   }
 
-  // Static route declared before ':id' so it is not shadowed by the param route.
-  @Get('targets')
-  @RequirePermission('schemes:read')
-  listTargets(@CurrentUser() user: JwtPayload, @Query() query: ListTargetsQueryDto) {
-    return this.schemes.listTargets(user, query);
-  }
-
   @Get(':id')
   @RequirePermission('schemes:read')
   getOne(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.schemes.getOne(user, id);
-  }
-
-  @Get(':id/targets')
-  @RequirePermission('schemes:read')
-  getSchemeTarget(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.schemes.getSchemeTarget(user, id);
   }
 
   @Patch(':id')

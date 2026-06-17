@@ -82,9 +82,11 @@ are updated as part of 4.0.
 - **`SchemeEnrollmentForm`** (4.2): `(id, schemeId @unique, campaignType, formSchema Json, …)` +
   **ALTER `scheme_enrollments`** add `formValues Json?` + `enrollmentMode` default `'SELF'`.
 
-**Separate destructive step, sequenced WITH the 4.1 code change (not in the additive bundle):**
-- **DROP `SchemeTarget`** — the schemes service (`getSchemeTarget`/`listTargets`) reads it, so the Prisma
-  model + table drop must land together with removing those reads (else `tsc` breaks). Shown + gated.
+**Separate destructive step — DEFERRED until AFTER 4.5 (not 4.1):**
+- **DROP `SchemeTarget`** — read by **TWO** modules: the `schemes` service (`getSchemeTarget`/`listTargets`,
+  removed in **4.1 ✅**) **AND** `partner.service.ts` (the partner "my targets" view, line ~111 —
+  rewired to `OutletTarget`/`OutletSalesRecord` in **4.5**). The model+table drop must land only once the
+  **last** reader is gone (else `tsc` breaks), i.e. **after 4.5**. Shown + audited + owner-gated when due.
 
 Pace (4.5) joins `OutletTarget` ↔ `OutletSalesRecord` on `(clientId, outletCode, month)` per `kpiId` key —
 no cross-scheme keying needed (targets aren't scheme-scoped).

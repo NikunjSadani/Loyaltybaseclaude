@@ -8,7 +8,7 @@ import {
   MessageSquare, Smartphone,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { IncentiveType, ChannelPartnerClass } from '@/types';
+import { IncentiveType } from '@/types';
 import { saveAdminScheme as persistAdminScheme } from '@/lib/schemes';
 import { EnrollmentFormBuilder } from '@/components/admin/EnrollmentFormBuilder';
 import type { EnrollmentFormConfig, FormField } from '@/lib/campaign';
@@ -34,7 +34,6 @@ interface SchemeFormData {
   endDate: string;
   incentiveType: IncentiveType;
   holdingPeriodDays: string;
-  applicableClasses: ChannelPartnerClass[];
   // Campaign type
   campaignType: CampaignType;
   // Outlet targeting
@@ -75,14 +74,6 @@ const defaultEnrollmentForm = (): EnrollmentFormConfig => ({
 // Static lists
 // ─────────────────────────────────────────────────────────────────────────────
 
-const PARTNER_CLASSES = [
-  ChannelPartnerClass.PLATINUM,
-  ChannelPartnerClass.GOLD,
-  ChannelPartnerClass.SILVER,
-  ChannelPartnerClass.BRONZE,
-  ChannelPartnerClass.STANDARD,
-];
-
 const INCENTIVE_TYPES = [
   { value: IncentiveType.SALES,           label: 'Sales Incentive'      },
   { value: IncentiveType.VISIBILITY,      label: 'Visibility Incentive' },
@@ -91,14 +82,6 @@ const INCENTIVE_TYPES = [
   { value: IncentiveType.REFERRAL,        label: 'Referral Bonus'       },
   { value: IncentiveType.MILESTONE,       label: 'Milestone Achievement'},
 ];
-
-const CLASS_COLORS: Record<ChannelPartnerClass, string> = {
-  [ChannelPartnerClass.PLATINUM]: 'border-purple-300 bg-purple-50 text-purple-700',
-  [ChannelPartnerClass.GOLD]:     'border-amber-300 bg-amber-50 text-amber-700',
-  [ChannelPartnerClass.SILVER]:   'border-gray-300 bg-gray-50 text-gray-700',
-  [ChannelPartnerClass.BRONZE]:   'border-orange-300 bg-orange-50 text-orange-700',
-  [ChannelPartnerClass.STANDARD]: 'border-blue-300 bg-blue-50 text-blue-700',
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Props
@@ -129,7 +112,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
     endDate:              initialData?.endDate ?? '',
     incentiveType:        initialData?.incentiveType ?? IncentiveType.SALES,
     holdingPeriodDays:    initialData?.holdingPeriodDays ?? '30',
-    applicableClasses:    initialData?.applicableClasses ?? [ChannelPartnerClass.GOLD, ChannelPartnerClass.SILVER],
     campaignType:         initialData?.campaignType ?? 'LOYALTY_ONLY',
     outletTargeting:      'ALL',
     targetedOutlets:      [],
@@ -151,7 +133,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
   const [sectionsOpen, setSectionsOpen] = useState({
     campaignType:     true,
     basic:            true,
-    eligibility:      true,
     outletTargeting:  true,
     enrollmentForm:   true,
     notifications:    false,
@@ -163,13 +144,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
 
   const set = useCallback(<K extends keyof SchemeFormData>(key: K, value: SchemeFormData[K]) =>
     setForm((f) => ({ ...f, [key]: value })), []);
-
-  const toggleClass = (cls: ChannelPartnerClass) => {
-    const classes = form.applicableClasses.includes(cls)
-      ? form.applicableClasses.filter((c) => c !== cls)
-      : [...form.applicableClasses, cls];
-    set('applicableClasses', classes);
-  };
 
   // ── Excel upload ──────────────────────────────────────────────────────────
 
@@ -256,7 +230,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
       startDate:             form.startDate,
       endDate:               form.endDate,
       campaignType:          form.campaignType,
-      applicableClasses:     form.applicableClasses,
       holdingPeriodDays:     form.holdingPeriodDays,
       outletTargeting:       form.outletTargeting,
       targetedOutlets:       form.targetedOutlets,
@@ -327,7 +300,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
       // Enriched display fields
       status:                   derivedStatus,
       incentiveType:            form.incentiveType,
-      applicableClasses:        form.applicableClasses,
       partnersEnrolled:         0,
       totalPayout:              '—',
     });
@@ -376,7 +348,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
   // Render
   // ─────────────────────────────────────────────────────────────────────────
 
-  const showEligibility    = form.campaignType === 'LOYALTY_ONLY' || form.campaignType === 'MIXED';
   const showEnrollmentForm = form.campaignType === 'OPEN_CAMPAIGN' || form.campaignType === 'MIXED';
 
   return (
@@ -527,45 +498,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
           </div>
         )}
       </div>
-
-      {/* ── 3. Partner Eligibility (LOYALTY_ONLY / MIXED) ────────────────── */}
-      {showEligibility && (
-        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-          <SectionHeader title="Partner Eligibility" section="eligibility" />
-          {sectionsOpen.eligibility && (
-            <div className="p-4">
-              <p className="text-xs text-gray-500 mb-3">Select which partner classes are eligible:</p>
-              <div className="flex flex-wrap gap-3">
-                {PARTNER_CLASSES.map((cls) => {
-                  const checked = form.applicableClasses.includes(cls);
-                  return (
-                    <label key={cls}
-                      className={`flex items-center gap-2 px-3 py-2 rounded-lg border-2 cursor-pointer transition-all text-sm font-medium ${
-                        checked ? CLASS_COLORS[cls] : 'border-gray-200 bg-white text-gray-500'
-                      }`}>
-                      <input type="checkbox" checked={checked}
-                        onChange={() => toggleClass(cls)} className="sr-only" />
-                      <div className={`w-4 h-4 rounded border-2 flex items-center justify-center ${checked ? 'border-current bg-current' : 'border-gray-300'}`}>
-                        {checked && (
-                          <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 10 10" fill="none">
-                            <path d="M1.5 5L4 7.5L8.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        )}
-                      </div>
-                      {cls}
-                    </label>
-                  );
-                })}
-              </div>
-              {errors.applicableClasses && (
-                <p className="text-xs text-red-500 mt-2 flex items-center gap-1">
-                  <AlertCircle className="w-3 h-3" />{errors.applicableClasses}
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* ── 4. Outlet Targeting & Self-Registration ───────────────────────── */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">

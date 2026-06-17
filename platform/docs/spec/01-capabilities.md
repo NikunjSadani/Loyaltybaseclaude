@@ -129,27 +129,30 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
 - **Current.** Rich inherited model — scheme types, generic rule engine (`SchemeRule`), eligibility,
   enrollment, per-user `SchemeTarget`, budget tracking, `calculate` endpoint. **The rule-engine/`calculate`
   compute path is NOT the operating model** and is **slated for removal** (P4.0 de-scaffold). Eligibility today
-  wrongly keys off **outlet TYPE**; the real audience dimension is **program**
-  (`Outlet.programName/programCategory`). Model context: see `docs/plans/MODEL-ALIGNMENT.md`.
-- **Operational scope.** Define activations (time-bound, audience = **program**-based, eligibility) + enroll
-  outlets. Awards flow through Awards & Credits (upload-final), not the scheme engine.
+  wrongly keys off **outlet TYPE**. ⚠️ **RECONCILED (2026-06-17):** there is **no audience/eligibility
+  engine** — program (`programName/programCategory`) is a **reporting/filter facet, NOT a targeting
+  dimension**. See `docs/plans/MODEL-ALIGNMENT.md` + `docs/plans/reconcile/P4-programs-targets-enrollment.md`.
+- **Operational scope.** Define activations (time-bound) + enroll outlets via a configurable form. Targets/
+  achievement are a **separate, parallel** per-outlet × KPI × month upload with **no linkage to schemes**.
+  Awards flow through Awards & Credits (upload-final), not the scheme engine.
 - **Target/gaps (P4).** 🔍 Configurable **per-activation** enrollment forms (variable fields, self-vs-sales
   mode, conditional pre-fill) — Gap #6 (`EnrollmentFormBuilder` exists; extended w/ CALCULATED + `visibleWhen`).
-  **Build program-based targeting** (net-new: a program selector + a matcher vs `Outlet.programName/Category`).
-  **Retire the rule-engine/`calculate`/auto-`SchemeTarget` compute** — decision MADE = PRUNE (Gap #10 → P4.0).
+  ~~Build program-based targeting~~ → **SUPERSEDED:** no targeting engine; scheme participation = the non-blank
+  cells of the per-outlet target upload (`KpiDef`/`OutletTarget`). **Rule-engine/`calculate`/auto-`SchemeTarget`
+  compute retired** — decision MADE = PRUNE (Gap #10, reconciled P4.0).
 
 ### 8 · Targets & Achievements
 - **Purpose.** Period goals per outlet and measured achievement.
-- **Key entities.** `Target`, `TargetAchievement`, `SalesUpload`, `SalesUploadBatch`,
-  `OutletSalesRecord`, `TargetPeriod`/`TargetStatus`/`SalesUploadStatus` enums.
+- **Key entities (P4 real model).** `KpiDef` (per-tenant parameters), `OutletTarget` (per outlet × month,
+  `targetValues` JSON) + `TargetUploadBatch`, `OutletSalesRecord` (achievement, per outlet × month). ⚠️ World-A
+  `Target`/`TargetAchievement`/`SalesUpload` were **dropped (Phase S S2)**; `SchemeTarget` dropped in P4.1.
 - **Surface.** `admin/targets{,/upload}`, `admin/sales`, `partner/targets`,
   `api/admin/target-config*`, `api/admin/sales/*`, `api/partner/targets`, `lib/pace`.
-- **Current.** Admin configures targets (wizard + Excel), uploads achievements (bulk batches),
-  partner views target vs achievement with pace. Target configs + KPI defs in `ProgramSetting`.
-  **Tracking/display only — not a money path** (see Core value model).
-- **Target/gaps.** KPI def storage moved to `kpi-config`/`target-config` APIs (recent). Pace
-  calc rules to document. Two separate uploads to disambiguate: *achievement* (tracking, here)
-  vs *award amount* (money, #12a).
+- **Current.** Admin configures KPIs + uploads per-outlet targets (Excel; **blank cell = not configured**) and
+  achievements (bulk batches); partner views target vs achievement with pace. **KPI defs normalized →
+  `KpiDef` table** (P4.4; was `ProgramSetting` JSON). **Tracking/display only — not a money path.**
+- **Target/gaps.** Pace = `OutletTarget` ↔ `OutletSalesRecord` on (outletCode, month) per KPI key. Two separate
+  uploads stay disambiguated: *achievement* (tracking, here) vs *award amount* (money, #12a).
 
 ### 9 · Wallet & Points 🔍
 - **Purpose.** Partner store of value (points + INR) and its ledger.

@@ -34,8 +34,6 @@ export interface SchemeBuilderCampaignForm {
   endDate: string;
   // Campaign type
   campaignType: CampaignType;
-  // Eligibility (used for LOYALTY_ONLY and MIXED)
-  applicableClasses: string[];
   // Advanced
   holdingPeriodDays: string;
   // Outlet targeting
@@ -82,17 +80,6 @@ export function validateCampaignSchemeForm(
     errors.push({ field: 'endDate', message: 'End date is required.' });
   } else if (form.startDate && form.endDate <= form.startDate) {
     errors.push({ field: 'endDate', message: 'End date must be after start date.' });
-  }
-
-  // LOYALTY_ONLY and MIXED need at least one partner class
-  if (
-    (form.campaignType === 'LOYALTY_ONLY' || form.campaignType === 'MIXED') &&
-    form.applicableClasses.length === 0
-  ) {
-    errors.push({
-      field: 'applicableClasses',
-      message: 'Select at least one partner class.',
-    });
   }
 
   // OPEN_CAMPAIGN and MIXED need at least one enrollment form field

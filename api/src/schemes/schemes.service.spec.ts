@@ -12,7 +12,6 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 const mockPrisma = {
   scheme: { findMany: jest.fn(), count: jest.fn(), create: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
   schemeEligibility: { findMany: jest.fn() },
-  schemeTarget: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
 };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
@@ -123,52 +122,4 @@ describe('SchemesService', () => {
     });
   });
 
-  describe('getSchemeTarget', () => {
-    it('throws NotFound when the scheme is outside the tenant', async () => {
-      mockPrisma.scheme.findFirst.mockResolvedValue(null);
-      await expect(service.getSchemeTarget(partner, 's1')).rejects.toBeInstanceOf(NotFoundException);
-    });
-
-    it('returns a null target with a message when none is assigned', async () => {
-      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', name: 'S', endDate: new Date() });
-      mockPrisma.schemeTarget.findFirst.mockResolvedValue(null);
-      await expect(service.getSchemeTarget(partner, 's1')).resolves.toEqual({
-        target: null,
-        message: 'No target assigned for this scheme',
-      });
-    });
-
-    it('computes a capped percentage and enriches with scheme name/deadline', async () => {
-      const deadline = new Date('2026-12-31');
-      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', name: 'S', endDate: deadline });
-      mockPrisma.schemeTarget.findFirst.mockResolvedValue({ id: 't1', targetValue: 100, achievedValue: 250 });
-      const res = await service.getSchemeTarget(partner, 's1');
-      expect(res.target?.percentage).toBe(100);
-      expect(res.target?.schemeName).toBe('S');
-      expect(res.target?.deadline).toBe(deadline);
-    });
-  });
-
-  describe('listTargets', () => {
-    it('scopes non-admins to their own targets even if userId is supplied', async () => {
-      mockPrisma.schemeTarget.findMany.mockResolvedValue([]);
-      mockPrisma.schemeTarget.count.mockResolvedValue(0);
-      await service.listTargets(partner, { userId: 'other' });
-      const where = mockPrisma.schemeTarget.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ userId: 'user1', scheme: { clientId: 'deoleo' } });
-    });
-
-    it('lets GIFSY admins inspect another user and enriches with projectedIncentive', async () => {
-      mockPrisma.schemeTarget.findMany.mockResolvedValue([
-        { id: 't1', targetValue: 200, achievedValue: 50, projectedIncentive: 99, scheme: { name: 'S', endDate: 'd' } },
-      ]);
-      mockPrisma.schemeTarget.count.mockResolvedValue(1);
-      const res = await service.listTargets(gifsy, { userId: 'other' });
-      const where = mockPrisma.schemeTarget.findMany.mock.calls[0][0].where;
-      expect(where.userId).toBe('other');
-      expect(res.targets[0].percentage).toBe(25);
-      expect(res.targets[0].incentiveEarnable).toBe(99);
-      expect(res.targets[0].schemeName).toBe('S');
-    });
-  });
 });

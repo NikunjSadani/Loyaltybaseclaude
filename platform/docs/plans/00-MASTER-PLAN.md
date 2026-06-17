@@ -166,7 +166,7 @@ tenant config served from DB. **Depends on:** P0.
 > **✅ P2 FUNCTIONALLY COMPLETE: 2.0, 2.1, 2.2, 2.4, 2.5 + RF1–RF7 all done.** 2.6 catalog dropped (above).
 > **2.3 (tiers) folded into the loyalty-engine de-scaffold** (tiers + partner-class→program + retiring
 > `lib/incentive.ts` compute = ONE deliberate effort; see `docs/plans/MODEL-ALIGNMENT.md`).
-> **✅ PHASE S (BACKEND SPLIT) COMPLETE — S0–S8, 2026-06-16 (Gap #31 RESOLVED). P3 (Onboarding & KYC) then built on it and is now ✅ DONE (3.0–3.6, 2026-06-17) — see §P3. NEXT = P4.**
+> **✅ PHASE S (BACKEND SPLIT) COMPLETE — S0–S8, 2026-06-16 (Gap #31 RESOLVED). P3 (Onboarding & KYC) ✅ DONE (3.0–3.6, 2026-06-17). P4 (Programs, targets & enrollment) ◐ IN PROGRESS — 4.0 reconcile DONE + schema applied to gifsy_dev; building streams T (targets) + E (enrollment) — see §P4.**
 > Task 0's topology reconcile + independent-agent confirm settled it: split into a **dedicated NestJS backend** (from
 > the platform's real-model `lib/`+schema, built **in place in the `api/` dir** — reused its shell, **deleted its
 > World-A domain**) + **thin frontend** (Next proxy `/api/*`→backend `/v1/*`). The de-scaffold (formerly "P4.0") was
@@ -268,7 +268,7 @@ carries no business logic. **Depends on:** P2. **Blocks:** P3+ (all later phases
 > verified end-to-end. Closes #9/#12/#13/#14/#15. Detail in [`reconcile/P3-onboarding-kyc.md`](reconcile/P3-onboarding-kyc.md).
 > **Residual (P4):** retire the shadowed `api/kyc/*` routes + platform schema (rollback-net) with the full platform
 > retirement; `lib/invoice` reads the persisted reg-type (P6); assigned-sales-owner re-KYC notification; RBAC enable.
-> **NEXT = P4 (Programs, targets & enrollment).**
+> **P4 (Programs, targets & enrollment) ◐ IN PROGRESS — 4.0 reconcile done + schema applied; building streams T + E.**
 
 | Task | What | Key files / area | Test |
 |---|---|---|---|

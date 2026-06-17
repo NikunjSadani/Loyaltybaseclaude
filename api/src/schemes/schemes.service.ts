@@ -5,7 +5,6 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   CreateSchemeDto,
   ListSchemesQueryDto,
-  ListTargetsQueryDto,
   UpdateSchemeDto,
 } from './dto/schemes.dto';
 
@@ -132,67 +131,4 @@ export class SchemesService {
     return { message: 'Scheme deleted successfully' };
   }
 
-  /** GET /schemes/:id/targets — the caller's own target for one scheme. */
-  async getSchemeTarget(user: JwtPayload, schemeId: string) {
-    const scheme = await this.prisma.scheme.findFirst({ where: { id: schemeId, clientId: user.clientId } });
-    if (!scheme) throw new NotFoundException('Scheme not found');
-
-    const target = await this.prisma.schemeTarget.findFirst({
-      where: { schemeId, userId: user.sub },
-    });
-
-    if (!target) {
-      return { target: null, message: 'No target assigned for this scheme' };
-    }
-
-    const percentage =
-      target.targetValue > 0
-        ? Math.min(100, Math.round((target.achievedValue / target.targetValue) * 100))
-        : 0;
-
-    return {
-      target: {
-        ...target,
-        percentage,
-        schemeName: scheme.name,
-        deadline: scheme.endDate,
-      },
-    };
-  }
-
-  /** GET /schemes/targets — list targets; admins may inspect another user's. */
-  async listTargets(user: JwtPayload, q: ListTargetsQueryDto) {
-    const page = q.page ?? 1;
-    const limit = q.limit ?? 20;
-    const skip = (page - 1) * limit;
-
-    const targetUserId = q.userId && user.role === 'GIFSY_ADMIN' ? q.userId : user.sub;
-
-    const where: Prisma.SchemeTargetWhereInput = {
-      userId: targetUserId,
-      scheme: { clientId: user.clientId },
-    };
-
-    const [targets, total] = await Promise.all([
-      this.prisma.schemeTarget.findMany({
-        where,
-        include: { scheme: { select: { id: true, name: true, endDate: true } } },
-        skip,
-        take: limit,
-        orderBy: { createdAt: 'desc' },
-      }),
-      this.prisma.schemeTarget.count({ where }),
-    ]);
-
-    const enriched = targets.map((t) => ({
-      ...t,
-      schemeName: t.scheme?.name,
-      deadline: t.scheme?.endDate,
-      percentage:
-        t.targetValue > 0 ? Math.min(100, Math.round((t.achievedValue / t.targetValue) * 100)) : 0,
-      incentiveEarnable: t.projectedIncentive ?? 0,
-    }));
-
-    return { targets: enriched, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
-  }
 }
