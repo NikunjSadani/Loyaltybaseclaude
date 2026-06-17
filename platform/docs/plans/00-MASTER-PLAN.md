@@ -37,7 +37,7 @@ commits · conventional-commit messages · **every DB query scoped by `clientId`
 | **P1** | Identity, tenancy & access | Identity & Access · Tenancy/Config | #2, #3, #20, #22, #23 | 4–6 wk |
 | **P2** | Organization & master data | Sales Org · Partners/Outlets · Catalog | #4, #11 | 3–5 wk |
 | **S** ✅ | **Backend split — API-first re-architecture DONE (S0–S8)** (NestJS backend built **in place in `api/`** from platform `lib/`+schema; World-A domain deleted; thin FE via Next proxy; absorbed P4.0 World-A de-scaffold) — gated P3+, now unblocked | cross-cutting | #30, #31✅, #10, #29, #32 | ~1–2 wk |
-| **P3** | Onboarding & KYC | KYC & Enrollment | #9, #12, #13, #14, #15 | 3–5 wk |
+| **P3** ✅ | **Onboarding & KYC — DONE (3.0–3.6)** (enroll→route→verify→approve→activate→re-KYC, backend-owned + thin FE; two-lane field-level KYC; built plan→execute→audit, 129 tests, browser-verified) | KYC & Enrollment | #9✅, #12✅, #13✅, #14✅, #15✅ | 3–5 wk |
 | **P4** | Programs, targets & enrollment | Schemes/Activations · Targets | #6, #10 | 4–6 wk |
 | **P5** | Wallet, points & rewards | Wallet & Points · Rewards | #28 | 3–4 wk |
 | **P6** | Finance: credits, payouts, visibility, invoicing | Awards&Credits · Payouts&Fund · Visibility · Invoicing | #5, #7, #8, #16, #17, #19, #25 | 5–7 wk |
@@ -256,13 +256,19 @@ owns DB + all logic) + a **thin Next.js web frontend**, so future mobile/PWA/par
 **Exit:** web → backend → DB works end-to-end; one canonical schema (`api/prisma/`); World-A domain gone; frontend
 carries no business logic. **Depends on:** P2. **Blocks:** P3+ (all later phases build in the backend).
 
-## P3 · Onboarding & KYC  (3–5 wk)
+## P3 · Onboarding & KYC  (3–5 wk) — **✅ DONE (3.0–3.6), 2026-06-17**
 **Objective:** the full enroll→KYC→approve→credential journey (spec §02 WF1) works end-to-end.
 *(Built in the backend per Phase S; the web KYC pages stay thin.)*
 
-> ⚠️ **User UX revamp incoming — the Gifsy KYC-approval page is being redesigned by the user.** Task 3.0
-> Reconcile must build against the **revamped** approval UX (whatever is in the code when P3 starts), not
-> the current page. Coordinate before touching `sales/kyc/[id]` / approval routes.
+> **✅ COMPLETE.** Full backend KYC engine (124+ routes' KYC module; **129 unit tests**) + thin FE, built
+> plan→execute→audit (independent audit per task — 4 caught real bugs: cross-tenant `fileKey`, an enqueue escaping a
+> tx, a half-commit, an inverted masking rule; all fixed). Two-lane field-level verification (bulk Excel auto-approve
+> + single-record portal) sharing one bridge; tree-based routing (retired `ROLE_PHONES`, #9); consent persistence;
+> manual re-KYC; GST reg-type capture + DPDP masking; `KycDocumentType.OTHER` split. Gifsy approvals UI browser-
+> verified end-to-end. Closes #9/#12/#13/#14/#15. Detail in [`reconcile/P3-onboarding-kyc.md`](reconcile/P3-onboarding-kyc.md).
+> **Residual (P4):** retire the shadowed `api/kyc/*` routes + platform schema (rollback-net) with the full platform
+> retirement; `lib/invoice` reads the persisted reg-type (P6); assigned-sales-owner re-KYC notification; RBAC enable.
+> **NEXT = P4 (Programs, targets & enrollment).**
 
 | Task | What | Key files / area | Test |
 |---|---|---|---|

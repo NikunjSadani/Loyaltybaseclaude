@@ -5,7 +5,18 @@ Paste the block below to restart the orchestrator on point. The on-disk docs are
 ```
 You're the orchestrator for the Loyaltybase build (multi-tenant trade-loyalty platform,
 C:\Users\nikun\Loyaltybaseclaude\platform).
-⚠️⚠️ **PHASE S — BACKEND SPLIT (API-first) — ✅ COMPLETE (S0–S8). Architecture realigned; FE prod-deployable against the backend. NEXT = P3.** (Physical *retirement* of the shadowed platform routes + schema deferred to P3/P4 — see below.) DECIDED by owner
+⚠️⚠️ **P3 — ONBOARDING & KYC — ✅ COMPLETE (3.0–3.6, 2026-06-17). NEXT = P4 (Programs, targets & enrollment).**
+Built in the NestJS backend (`api/src/kyc/*`, **129 unit tests**) + thin FE, plan→execute→audit (independent audit per
+task — 4 caught real bugs, all fixed). Two-lane field-level KYC (bulk Excel auto-approve + portal per-field) sharing one
+`evaluateSubmission` bridge; tree-based routing (retired `ROLE_PHONES`); consent persistence; manual re-KYC; GST
+reg-type capture + DPDP masking; `KycDocumentType.OTHER` split. Closes gaps #9/#12/#13/#14/#15. Approvals UI
+browser-verified e2e. Full detail: `docs/plans/reconcile/P3-onboarding-kyc.md`. **P3 residual → P4:** retire the
+shadowed `api/kyc/*` routes + platform schema (rollback-net) with the full platform-schema retirement; `lib/invoice`
+reads the persisted reg-type (P6); assigned-sales-owner re-KYC notification; seed `kyc:*` + enable RBAC. **The P4 brief
+below this banner is from the P3 start and needs refreshing at P4 kickoff (read 00-MASTER-PLAN §P4 + MODEL-ALIGNMENT
+for the program-targeting model).**
+
+⚠️ **(Historical — Phase S, for context)** **PHASE S — BACKEND SPLIT (API-first) — ✅ COMPLETE (S0–S8).** DECIDED by owner
 2026-06-16 (Gap #31): split the full-stack Next.js code into a **dedicated NestJS backend API** (single source of
 truth — owns DB + ALL business logic) + a **thin Next.js web frontend** (future mobile/PWA/partner reuse one backend).
 Built **IN PLACE in `api/`** (reuses api/'s proven framework shell — Dockerfile/Prisma-7/guards/bootstrap; the deploy
