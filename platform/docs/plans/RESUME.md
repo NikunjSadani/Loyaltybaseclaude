@@ -7,94 +7,87 @@ You're the orchestrator for the Loyaltybase build — a multi-tenant FMCG trade-
 Repo root: C:\Users\nikun\Loyaltybaseclaude  (git root; branch **develop**). Frontend: `platform/` (thin Next.js).
 Backend: `api/` (NestJS + Prisma 7, the source of truth — owns the DB + ALL business logic).
 
-⚠️⚠️ **STATE: P0 + P1 + P2 + Phase S + P3 + P4 ALL ✅ COMPLETE. NEXT = P5 (Wallet, points & rewards).**
-P4 = backend 4.0–4.5 (jest 182) + FE wiring (vitest 133) + `SchemeTarget` dropped; browser-verified against the
-live backend; gaps #6/#10/#29 closed. Everything pushed to origin/develop (≤ `ebf5ae5`).
+⚠️⚠️ **STATE: P0 · P1 · P2 · Phase S · P3 · P4 ALL ✅ COMPLETE. NEXT = P5 (Wallet, points & rewards).**
+Everything pushed to origin/develop (≤ `a5c9beb`). 18 gaps resolved (latest #6/#10/#29 via P4).
 
-**Architecture (Phase S, done):** API-first — a dedicated NestJS backend built IN PLACE in `api/` (reused its
-shell, deleted its World-A domain, rebuilt the real domain from the platform's `lib/`+schema) consumed over
-HTTP/JSON by a thin Next.js FE via a `next.config.ts` proxy (`/api/*` → backend `/v1/*`). The World-A de-scaffold
-(tiers/partner-class/compute/SKU — formerly "P4.0") was absorbed into Phase S step S2, so the backend is born clean.
-See [[architecture-backend-split]] + `docs/spec/04-architecture.md` + `docs/plans/BACKEND-SPLIT-PLAN.md`.
+**Architecture (Phase S, done):** API-first — a dedicated NestJS backend built IN PLACE in `api/` (reused its shell,
+deleted its World-A domain, rebuilt the real domain from the platform's `lib/`+schema), consumed by a thin Next.js FE
+over a `next.config.ts` proxy (`/api/*` → backend `/v1/*`, wrapped `{success,data}`). FE calls `/api/*` directly —
+**never add local `app/api/*` proxy routes** (the proxy already forwards; such routes are shadowed/dead). The World-A
+de-scaffold (tiers/partner-class/compute/SKU) was absorbed into Phase S S2 — the backend is born clean. See
+[[architecture-backend-split]] + `docs/spec/04-architecture.md`.
 
-**P3 (Onboarding & KYC, done 2026-06-17):** full enroll→route→verify→approve→activate→re-KYC in `api/src/kyc/*`
-(**129 unit tests**) + thin FE, built plan→execute→audit (one independent audit per task; 4 caught real bugs all
-fixed). Two-stage, two-lane field-level KYC: Stage 1 = `KycSubmission.status` sales-chain machine; Stage 2 = the
-7-field `KycVerificationItem` grid (begins at PENDING_GIFSY; status stays PENDING_GIFSY through it; progress derived).
-One pure `evaluateSubmission` bridge + `applyBridgeOutcome` shared by Lane A (bulk Excel `bulk-verify` preview→commit,
-auto-approve) and Lane B (portal `:id/verify`). Tree-based routing (retired `ROLE_PHONES`, #9); GCS doc upload;
-consent persistence; manual re-KYC; GST reg-type capture + DPDP masking; `KycDocumentType.OTHER` split. Closes
-#9/#12/#13/#14/#15. Full record: `docs/plans/reconcile/P3-onboarding-kyc.md`. See [[p3-kyc-complete]].
-Two invariants enforced across the KYC code (preserve if you touch it): **enqueue notifications only AFTER the tx
-commits**; **resolve the primary outlet BEFORE any status flip** (no half-commit).
+**THE REAL MODEL (owner-confirmed — do not relitigate; [[platform-real-model]]):** sales/achievement = **upload
+FINAL amounts per outlet × parameter, NO compute**; segmentation **program = a reporting/filter facet, NOT a
+targeting dimension**; no point-tiers, no SKU. Validate any inherited concept against this BEFORE building
+([[reconcile-fit-before-build]]) — the codebase still has speculative World-A scaffolding.
 
-**P3 residual carried to later phases (NOT done — don't assume):**
-- The **stale platform `schema.prisma` + still-live platform Prisma code** (auth/session/client-config + the
-  proxy-excluded `rewards/redeem`[P5] / `visibility/submit`+`partner/invoices`[P6] / `admin/kyc`) + the ~96
-  shadowed rollback-net route files + `lib/kyc-approval` retire as **ONE unit ~P6** (RE-HOMED from P4 — 120
-  platform files still use Prisma; deleting the schema before they port breaks the running platform). Also Gap
-  #32 (16 unported routes; `admin/sales/*` ports in P4.5; `auth/logout` server revocation ~P6).
-- `lib/invoice` reading the persisted `entityType`/`gstRegistrationType` = **P6** (invoicing).
-- Assigned-sales-owner re-KYC notification (only the partner is notified today); WhatsApp delivery = P7/MSG91.
-- Seed `kyc:*` perms for SALES roles + enable RBAC (it's OFF by default — see `RBAC-ENABLEMENT.md`).
+**DONE so far (brief — full records in the reconcile docs):**
+- **P3 Onboarding & KYC** (`api/src/kyc/*`): two-stage, two-lane field-level KYC (status machine + 7-field
+  `KycVerificationItem` grid; one `evaluateSubmission` bridge). Closes #9/#12/#13/#14/#15.
+  `reconcile/P3-onboarding-kyc.md` · [[p3-kyc-complete]]. Two invariants if you touch KYC: **enqueue notifications
+  only AFTER the tx commits**; **resolve the primary outlet BEFORE any status flip**.
+- **P4 Programs/Targets/Enrollment** (no compute): `KpiDef` (per-tenant params) · `OutletTarget` (mirrors
+  `OutletSalesRecord`) + verbatim per-outlet×KPI×month upload (blank=omit, 0 stored, non-template→400) ·
+  achievement (`/v1/admin/achievements/*`) + pace (÷0→null) · enrollment (`SchemeEnrollmentForm` + validator +
+  `POST /v1/schemes/:id/enroll` SELF/SALES + audience-by-KYC + server-side `CALCULATED` recompute). **Schemes ⟂
+  targets — zero linkage.** World-A `SchemeTarget` + `lib/incentive` compute DROPPED. FE wired (vitest 133).
+  Closes #6/#10/#29. `reconcile/P4-programs-targets-enrollment.md` · [[p4-complete]].
 
-**P4 · Programs, targets & enrollment (gaps #6, #10, #29) — ✅ COMPLETE (2026-06-17). Full record:
-`docs/plans/reconcile/P4-programs-targets-enrollment.md`.** ⚠️ **4.0 reconcile (owner-confirmed):**
-program (`programName/programCategory`) is a **reporting/filter facet, NOT a targeting dimension**; there is **no
-eligibility engine** — scheme participation = the **non-blank cells of the per-outlet × KPI × month target Excel
-upload** (blank = not configured). **Schemes ⟂ targets — zero linkage** (two parallel streams). KPIs normalized →
-`KpiDef` table. #10 resolved (`SchemeType` canonical; FE `IncentiveType` retired; `CampaignType`=enrollment
-audience). Additive schema **applied to gifsy_dev** (`KpiDef`, `OutletTarget` mirrors `OutletSalesRecord`,
-`TargetUploadBatch`, `SchemeEnrollmentForm` + `scheme_enrollments.{enrollmentMode,formValues}`; audited PASS).
-**BACKEND BUILT + GATED (tsc 0 / jest green; plan→execute→audit→gate per task):** Stream T — **4.4** KpiDef CRUD +
-OutletTarget template/upload (blank=omit, 0 verbatim, non-template file→400) · **4.5** achievement upload
-(`admin/sales/bulk-upload`→OutletSalesRecord) + pace (÷0→null) + `partner.service` rewired off SchemeTarget. Stream E
-— **4.1** scheme CRUD cleanup + removed decorative class UI · **4.2** enrollment-form persistence
-(`SchemeEnrollmentForm` + pure validator) · **4.3** enrollment submission (`POST /v1/schemes/:id/enroll` SELF/SALES +
-audience-by-KYC + server-side `CALCULATED` recompute). **World-A `SchemeTarget` DROPPED** (0 rows verified; guarded
-migration applied). **FE WIRED ✅ (platform tsc 0 / vitest 133):** admin/targets→KPI mgmt, targets/achievement
-upload→backend (template + server parse), admin/schemes + scheme-builder→`/api/schemes` (+ enrollment-form),
-enrollment submit, partner/targets→new shape. (Reconcile: removed FE-B's dead local proxy routes — `next.config`
-forwards `/api/*`→backend; mapped `KpiDef.code`→FE `id`.) ⚠️ **`api/.env` was
-found pointing at PROD (`gifsy_prod`) and repointed to the dev proxy** — verify `current_database=gifsy_dev` before any migration.
+**NEXT = P5 · Wallet, points & rewards (spec §02 WF4).** ⚠️ Magnet gaps: **#16** (POINTS awards never credit the
+wallet — credits confirm writes `CreditPayoutEntry` only, no `Wallet`/`PointsLedger` write) + **#28** (`lib/wallet`
+credit/debit update aggregate counters + `WalletTransaction` but **never write `PointsLedger`** → expiry/holding
+config is dead). Tasks (00-MASTER-PLAN §P5): 5.0 reconcile Wallet+Rewards (validate inherited `lib/wallet.ts`/
+`lib/gifts.ts` vs the real model FIRST) · 5.1 wallet read/transactions/admin-adjust · 5.2 **PointsLedger writes on
+credit/debit + expiry/holding (#16/#28)** · 5.3 rewards catalog/inventory (Gifsy-managed) · 5.4 redemption order +
+OTP + lifecycle/fulfilment · 5.5 partner wallet+rewards UI. **START P5:** confirm on `develop` + dev DB reachable,
+read `00-MASTER-PLAN.md §P5` + `MODEL-ALIGNMENT.md`, propose the P5 reconcile before building. Depends on P1.
 
-ROLE & OPERATING MODEL (owner-agreed): you ORCHESTRATE, plan, GATE, and own docs. **Per task: plan (Opus) → execute
-(a Sonnet executor) → ONE independent adversarial audit (Sonnet) → Opus gates → commit.** AUDIT EVERYTHING — do not
-risk-tier (the P3 audits caught a cross-tenant key, a tx-escaping notification, a half-commit, an inverted mask that
-tsc + unit tests all missed). For high-risk/destructive work Opus also personally audits. The gate (run it YOURSELF,
-every change): `cd api && npx tsc -p tsconfig.build.json --noEmit` (0) + `npx jest <area>` (or differential for the
-red-by-design suite) + a boot smoke for new endpoints + **`cd platform && node scripts/check-doc-consistency.mjs`
-GREEN**. Opus sweeps the docs (reconcile / gap-register / RESUME / 00-MASTER-PLAN / memory) after every task so
-nothing drifts. Protocol: `docs/plans/DOC-MAINTENANCE.md`.
+**Residuals carried forward (NOT done — don't assume):**
+- **Platform retirement (~P6, ONE unit):** stale `platform/prisma/schema.prisma` + still-live platform Prisma code
+  (auth/session/client-config + the proxy-excluded `rewards/redeem`[P5] / `visibility/submit`+`partner/invoices`[P6]
+  / `admin/kyc`) + the ~96 shadowed rollback-net route files + `lib/incentive`/`lib/kyc-approval`. 120 platform files
+  still use Prisma; deleting before they port breaks the running platform. Also Gap #32 `auth/logout` revocation.
+- `lib/invoice` reads persisted `entityType`/`gstRegistrationType` = **P6**. WhatsApp delivery + notification worker
+  (#21) = **P7/MSG91**. Seed `kyc:*` perms + enable RBAC (OFF by default — `RBAC-ENABLEMENT.md`). target-config/
+  banner/gift JSON-blob normalization (#18 residual).
+
+ROLE & OPERATING MODEL (owner-agreed): you ORCHESTRATE, plan, GATE, own docs. **Per task: plan (Opus) → execute
+(Sonnet executor, run in background; they have NO shell — you run the gate) → ONE independent adversarial audit
+(Sonnet, Read/Grep — also no shell) → Opus gates → commit.** AUDIT EVERYTHING — don't risk-tier (audits have caught
+a cross-tenant key, a tx-escaping notification, a half-commit, an inverted mask, a dead-proxy-route mistake that
+tsc+tests missed). Parallelize streams that touch disjoint files; Opus owns `schema.prisma` + migrations so executors
+never collide. The gate (run it YOURSELF): `cd api && npx tsc -p tsconfig.build.json --noEmit` (0) + `npx jest <area>`
++ a boot smoke for new endpoints; for FE, `cd platform && npx tsc --noEmit -p tsconfig.json` + `npx vitest run <area>`
+(platform = **vitest**, not jest) + `node scripts/check-doc-consistency.mjs` GREEN. Sweep docs (reconcile/gap-register/
+RESUME/00-MASTER-PLAN/memory) after every task. Protocol: `docs/plans/DOC-MAINTENANCE.md`.
 
 CONSTRAINTS (must hold):
-- WORK ON **develop** (auto CI + staging). **main = prod releases only — never push main** except a deliberate release.
-- **Commit/push ONLY when the owner asks.** Never expose secrets (extract DB password from `platform/.env` via
-  grep/cut without echoing).
-- DEV DB = Cloud SQL `gifsy-db-dev` via Auth Proxy on **127.0.0.1:5433** / `gifsy_dev` (DROPS after reboot — restart
-  per `DEV-DB.md`; `SELECT 1` before migrating). NEVER point dev at prod (`gifsy-db`). **NEVER `prisma migrate dev`**
-  (it RESETS gifsy_dev) — use `prisma db push` / guarded SQL applied via `prisma db execute` (txn guarded by
-  `current_database='gifsy_dev'`, in `api/prisma/migrations-manual/`). **SHOW migration SQL + WAIT for the owner's go
-  before applying.** Never `DEMO_MODE=true` in staging/prod.
-- ⚠️ **SCHEMA SOURCE OF TRUTH = `api/prisma/schema.prisma`** (canonical, de-scaffolded; +`KycVerificationItem` etc.
-  from P3; +`KpiDef`/`OutletTarget`/`TargetUploadBatch`/`SchemeEnrollmentForm` from P4). `platform/prisma/schema.prisma`
-  is **stale/transitional** — retires **~P6** (re-homed from P4; gated by still-live platform Prisma usage).
-- CI is red-by-design (~105 TDD-baseline fails until P8) — the gate is DIFFERENTIAL ("no NEW reds vs the snapshot").
+- WORK ON **develop**. **main = prod releases only — never push main.** **Commit/push ONLY when the owner asks.**
+  Never expose secrets (grep/cut DB creds without echoing).
+- DEV DB = Cloud SQL `gifsy-db-dev` via Auth Proxy on **127.0.0.1:5433** / `gifsy_dev` (drops after reboot — restart
+  per `DEV-DB.md`). **`SELECT 1` + confirm `current_database='gifsy_dev'` before migrating.** NEVER point dev at prod.
+  **NEVER `prisma migrate dev`** (RESETS gifsy_dev) — use guarded SQL via `prisma db execute` (txn guarded by
+  `current_database='gifsy_dev'`, in `api/prisma/migrations-manual/`). **SHOW migration SQL (independently audited) +
+  WAIT for the owner's go before applying.** Never `DEMO_MODE` in staging/prod.
+- ⚠️ **SCHEMA SOURCE OF TRUTH = `api/prisma/schema.prisma`** (+`KpiDef`/`OutletTarget`/`TargetUploadBatch`/
+  `SchemeEnrollmentForm` from P4). `platform/prisma/schema.prisma` is stale — retires ~P6.
+- CI is red-by-design (~105 TDD-baseline fails until P8) — the gate is DIFFERENTIAL ("no NEW reds").
+- ⚠️ **Backend dev gotchas (recur on restart):** (1) `api/.env` was found pointing at **PROD (`gifsy_prod`)** —
+  it's now on the dev proxy; re-verify before any DB op. (2) The dev backend runs a compiled `dist/`; new code needs
+  a rebuild, and repeated `tsc --noEmit` gate runs **poison the incremental `tsconfig.tsbuildinfo`** so `nest build`
+  emits nothing (exit 0, empty `dist/`) → rebuild with `tsc -p tsconfig.build.json --incremental false` (or delete
+  `*.tsbuildinfo`), then `node dist/main.js`.
 
 Reload (read before building):
 - docs/plans/00-MASTER-PLAN.md            (phases; **P0–P4 + S DONE**; **§P5 = NEXT**)
-- docs/plans/reconcile/P4-programs-targets-enrollment.md (**P4 reconcile + build record — pattern/reference**)
-- docs/plans/MODEL-ALIGNMENT.md           (the REAL parameter model; ⚠️ its program-targeting framing is SUPERSEDED — see the P4 reconcile)
-- docs/plans/reconcile/P3-onboarding-kyc.md (P3 build record + every audit outcome — reference/pattern)
-- docs/plans/08-agent-execution-guide.md  (role, loop, review gate, context bundles)
-- docs/plans/GIT-WORKFLOW.md              (branches/deploy — WORK ON develop, main=releases)
-- docs/plans/DEV-DB.md                    (dev DB + Auth Proxy restart; migrate gotcha)
-- docs/plans/DOC-MAINTENANCE.md           (doc-consistency is a GATE STEP; ownership map)
-- docs/plans/RBAC-ENABLEMENT.md           (how to turn RBAC on — it's OFF)
-- docs/spec/gap-register.md               (open gaps; 13 resolved incl. #9/#12/#13/#14/#15 via P3)
-- your memory: [[p3-kyc-complete]] · [[architecture-backend-split]] · [[platform-real-model]] · [[reconcile-fit-before-build]] · [[own-consistency-no-micromanage]]
+- docs/plans/MODEL-ALIGNMENT.md           (the REAL parameter model — spine of P5 wallet/points reconcile)
+- docs/plans/reconcile/{P4-programs-targets-enrollment,P3-onboarding-kyc}.md  (build records — pattern/reference)
+- docs/plans/08-agent-execution-guide.md · GIT-WORKFLOW.md · DEV-DB.md · DOC-MAINTENANCE.md · RBAC-ENABLEMENT.md
+- docs/spec/gap-register.md               (open gaps; 18 resolved; P5 magnets = #16/#28)
+- memory: [[p4-complete]] · [[p3-kyc-complete]] · [[architecture-backend-split]] · [[platform-real-model]] · [[reconcile-fit-before-build]] · [[own-consistency-no-micromanage]]
 
 Local: dev-DB Auth Proxy on 127.0.0.1:5433 (restart per DEV-DB.md); the owner runs platform on :3000 + backend on
 :4000 (drive the live app via the Chrome extension, not preview_start). Confirm on `develop` + dev DB reachable.
-Before any migration/irreversible step show the SQL/plan + wait for the owner's go.
+Before any migration/irreversible step, show the SQL/plan (independently audited) + wait for the owner's go.
 ```
