@@ -7,9 +7,9 @@ You're the orchestrator for the Loyaltybase build — a multi-tenant FMCG trade-
 Repo root: C:\Users\nikun\Loyaltybaseclaude  (git root; branch **develop**). Frontend: `platform/` (thin Next.js).
 Backend: `api/` (NestJS + Prisma 7, the source of truth — owns the DB + ALL business logic).
 
-⚠️⚠️ **STATE: P0 + P1 + P2 + Phase S + P3 ✅ COMPLETE. P4 (Programs, targets & enrollment) ◐ IN PROGRESS —
-BACKEND COMPLETE (4.0–4.5 ✅, gated tsc 0 / jest 182; `SchemeTarget` dropped). REMAINING = thin admin/partner
-FE repoints only.** Backend pushed to origin/develop (4.3 commit pending owner go).
+⚠️⚠️ **STATE: P0 + P1 + P2 + Phase S + P3 + P4 ALL ✅ COMPLETE. NEXT = P5 (Wallet, points & rewards).**
+P4 = backend 4.0–4.5 (jest 182) + FE wiring (vitest 133) + `SchemeTarget` dropped; browser-verified against the
+live backend; gaps #6/#10/#29 closed. Everything pushed to origin/develop (≤ `ebf5ae5`).
 
 **Architecture (Phase S, done):** API-first — a dedicated NestJS backend built IN PLACE in `api/` (reused its
 shell, deleted its World-A domain, rebuilt the real domain from the platform's `lib/`+schema) consumed over
@@ -38,8 +38,8 @@ commits**; **resolve the primary outlet BEFORE any status flip** (no half-commit
 - Assigned-sales-owner re-KYC notification (only the partner is notified today); WhatsApp delivery = P7/MSG91.
 - Seed `kyc:*` perms for SALES roles + enable RBAC (it's OFF by default — see `RBAC-ENABLEMENT.md`).
 
-**P4 · Programs, targets & enrollment (gaps #6, #10) — ◐ IN PROGRESS. Full record:
-`docs/plans/reconcile/P4-programs-targets-enrollment.md`.** ⚠️ **4.0 reconcile DONE (2026-06-17, owner-confirmed):**
+**P4 · Programs, targets & enrollment (gaps #6, #10, #29) — ✅ COMPLETE (2026-06-17). Full record:
+`docs/plans/reconcile/P4-programs-targets-enrollment.md`.** ⚠️ **4.0 reconcile (owner-confirmed):**
 program (`programName/programCategory`) is a **reporting/filter facet, NOT a targeting dimension**; there is **no
 eligibility engine** — scheme participation = the **non-blank cells of the per-outlet × KPI × month target Excel
 upload** (blank = not configured). **Schemes ⟂ targets — zero linkage** (two parallel streams). KPIs normalized →
@@ -52,8 +52,10 @@ OutletTarget template/upload (blank=omit, 0 verbatim, non-template file→400) �
 — **4.1** scheme CRUD cleanup + removed decorative class UI · **4.2** enrollment-form persistence
 (`SchemeEnrollmentForm` + pure validator) · **4.3** enrollment submission (`POST /v1/schemes/:id/enroll` SELF/SALES +
 audience-by-KYC + server-side `CALCULATED` recompute). **World-A `SchemeTarget` DROPPED** (0 rows verified; guarded
-migration applied). **REMAINING (FE only): thin admin/partner repoints** — KPIs/targets/achievements pages,
-scheme-builder + enrollment-form builder/renderer, partner target/achievement + enrollment views. ⚠️ **`api/.env` was
+migration applied). **FE WIRED ✅ (platform tsc 0 / vitest 133):** admin/targets→KPI mgmt, targets/achievement
+upload→backend (template + server parse), admin/schemes + scheme-builder→`/api/schemes` (+ enrollment-form),
+enrollment submit, partner/targets→new shape. (Reconcile: removed FE-B's dead local proxy routes — `next.config`
+forwards `/api/*`→backend; mapped `KpiDef.code`→FE `id`.) ⚠️ **`api/.env` was
 found pointing at PROD (`gifsy_prod`) and repointed to the dev proxy** — verify `current_database=gifsy_dev` before any migration.
 
 ROLE & OPERATING MODEL (owner-agreed): you ORCHESTRATE, plan, GATE, and own docs. **Per task: plan (Opus) → execute
@@ -80,8 +82,8 @@ CONSTRAINTS (must hold):
 - CI is red-by-design (~105 TDD-baseline fails until P8) — the gate is DIFFERENTIAL ("no NEW reds vs the snapshot").
 
 Reload (read before building):
-- docs/plans/00-MASTER-PLAN.md            (phases; **P0–P3 + S DONE**; **§P4 ◐ IN PROGRESS**)
-- docs/plans/reconcile/P4-programs-targets-enrollment.md (**P4 reconcile + build record — READ FIRST for P4**)
+- docs/plans/00-MASTER-PLAN.md            (phases; **P0–P4 + S DONE**; **§P5 = NEXT**)
+- docs/plans/reconcile/P4-programs-targets-enrollment.md (**P4 reconcile + build record — pattern/reference**)
 - docs/plans/MODEL-ALIGNMENT.md           (the REAL parameter model; ⚠️ its program-targeting framing is SUPERSEDED — see the P4 reconcile)
 - docs/plans/reconcile/P3-onboarding-kyc.md (P3 build record + every audit outcome — reference/pattern)
 - docs/plans/08-agent-execution-guide.md  (role, loop, review gate, context bundles)

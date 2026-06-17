@@ -38,7 +38,7 @@ commits · conventional-commit messages · **every DB query scoped by `clientId`
 | **P2** | Organization & master data | Sales Org · Partners/Outlets · Catalog | #4, #11 | 3–5 wk |
 | **S** ✅ | **Backend split — API-first re-architecture DONE (S0–S8)** (NestJS backend built **in place in `api/`** from platform `lib/`+schema; World-A domain deleted; thin FE via Next proxy; absorbed P4.0 World-A de-scaffold) — gated P3+, now unblocked | cross-cutting | #30, #31✅, #10, #29, #32 | ~1–2 wk |
 | **P3** ✅ | **Onboarding & KYC — DONE (3.0–3.6)** (enroll→route→verify→approve→activate→re-KYC, backend-owned + thin FE; two-lane field-level KYC; built plan→execute→audit, 129 tests, browser-verified) | KYC & Enrollment | #9✅, #12✅, #13✅, #14✅, #15✅ | 3–5 wk |
-| **P4** | Programs, targets & enrollment | Schemes/Activations · Targets | #6, #10 | 4–6 wk |
+| **P4** ✅ | Programs, targets & enrollment (DONE 2026-06-17) | Schemes/Activations · Targets | #6, #10, #29 | 4–6 wk |
 | **P5** | Wallet, points & rewards | Wallet & Points · Rewards | #28 | 3–4 wk |
 | **P6** | Finance: credits, payouts, visibility, invoicing | Awards&Credits · Payouts&Fund · Visibility · Invoicing | #5, #7, #8, #16, #17, #19, #25 | 5–7 wk |
 | **P7** | Engagement & support | Engagement · Support | (—) | 2–4 wk |
@@ -166,7 +166,7 @@ tenant config served from DB. **Depends on:** P0.
 > **✅ P2 FUNCTIONALLY COMPLETE: 2.0, 2.1, 2.2, 2.4, 2.5 + RF1–RF7 all done.** 2.6 catalog dropped (above).
 > **2.3 (tiers) folded into the loyalty-engine de-scaffold** (tiers + partner-class→program + retiring
 > `lib/incentive.ts` compute = ONE deliberate effort; see `docs/plans/MODEL-ALIGNMENT.md`).
-> **✅ PHASE S (BACKEND SPLIT) COMPLETE — S0–S8, 2026-06-16 (Gap #31 RESOLVED). P3 (Onboarding & KYC) ✅ DONE (3.0–3.6, 2026-06-17). P4 (Programs, targets & enrollment) ◐ IN PROGRESS — 4.0 reconcile DONE + schema applied to gifsy_dev; building streams T (targets) + E (enrollment) — see §P4.**
+> **✅ PHASE S (BACKEND SPLIT) COMPLETE — S0–S8, 2026-06-16 (Gap #31 RESOLVED). P3 (Onboarding & KYC) ✅ DONE (3.0–3.6, 2026-06-17). P4 (Programs, targets & enrollment) ✅ DONE (4.0–4.5 backend + FE, 2026-06-17; gaps #6/#10/#29 closed). NEXT = P5 (Wallet, points & rewards).**
 > Task 0's topology reconcile + independent-agent confirm settled it: split into a **dedicated NestJS backend** (from
 > the platform's real-model `lib/`+schema, built **in place in the `api/` dir** — reused its shell, **deleted its
 > World-A domain**) + **thin frontend** (Next proxy `/api/*`→backend `/v1/*`). The de-scaffold (formerly "P4.0") was
@@ -268,7 +268,7 @@ carries no business logic. **Depends on:** P2. **Blocks:** P3+ (all later phases
 > verified end-to-end. Closes #9/#12/#13/#14/#15. Detail in [`reconcile/P3-onboarding-kyc.md`](reconcile/P3-onboarding-kyc.md).
 > **Residual (P4):** retire the shadowed `api/kyc/*` routes + platform schema (rollback-net) with the full platform
 > retirement; `lib/invoice` reads the persisted reg-type (P6); assigned-sales-owner re-KYC notification; RBAC enable.
-> **P4 (Programs, targets & enrollment) ◐ IN PROGRESS — 4.0 reconcile done + schema applied; building streams T + E.**
+> **P4 (Programs, targets & enrollment) ✅ COMPLETE (backend 4.0–4.5 + FE wiring, 2026-06-17; gaps #6/#10/#29 closed). NEXT = P5 (Wallet, points & rewards).**
 
 | Task | What | Key files / area | Test |
 |---|---|---|---|

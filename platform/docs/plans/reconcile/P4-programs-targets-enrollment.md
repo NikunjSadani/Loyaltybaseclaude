@@ -1,8 +1,9 @@
 # P4 · Programs, Targets & Enrollment — Reconcile + Build Record
 
-> Status (2026-06-17): **P4 BACKEND COMPLETE — 4.0 ✅ · 4.1 ✅ · 4.2 ✅ · 4.3 ✅ · 4.4 ✅ · 4.5 ✅ (gated
-> tsc 0 / jest 182) · `SchemeTarget` dropped ✅. REMAINING: the thin admin/partner FE repoints only.**
-> Owner-confirmed model below. Source of truth = the `api/` NestJS backend; FE is thin.
+> Status (2026-06-17): **P4 COMPLETE ✅ — backend 4.0–4.5 (gated tsc 0 / jest 182) + FE wiring (platform
+> tsc 0 / vitest 133) + `SchemeTarget` dropped. Backend rebuilt + restarted + browser-verified (KPI screen
+> fetches live; `[PrismaService] Database connected`). All pushed (origin/develop ≤ `ebf5ae5`).** Gaps closed:
+> #6, #10, #29 (+ #18-KPI, #32-`admin/sales`). Owner-confirmed model below. Source of truth = `api/`; FE thin.
 
 ## 0. Why a reconcile first
 
@@ -139,8 +140,15 @@ Schemes ⟂ targets share **no models**, so the two streams run **fully in paral
     check) + `GET :id/my-enrollment`; audience enforced on the enrolled partner's KYC; `CALCULATED` recomputed
     server-side (client value discarded); upsert on `@@unique([schemeId,userId])`.
 
-**Remaining P4 (FE only):** admin FE repoint for KPIs/targets/achievements · the scheme-builder +
-enrollment-form builder/renderer wiring · partner-facing target/achievement + enrollment views.
+- **FE wiring ✅ (2026-06-17):** admin/targets → KPI management (`/api/admin/kpis`) · admin/targets/upload →
+  backend template + server-side upload · admin/sales → `/api/admin/achievements/*` + pace · admin/schemes +
+  scheme-builder → `/api/schemes` (+ enrollment-form PUT/GET) · enrollments export · partner enrollment submit ·
+  partner/targets → new per-outlet×KPI shape. (Orchestrator reconcile: removed FE-B's dead local proxy routes
+  — `next.config` already forwards `/api/*` → backend; mapped backend `KpiDef.code`→FE `id`.) Gated platform
+  tsc 0 / vitest 133; KPI screen browser-verified against the live backend.
+
+**P4 done.** Optional polish (non-blocking): dedupe the second `scheme-builder-campaign` test FE-C added; have
+the achievement-upload screen download the backend template (it still builds one client-side).
 
 **Exit:** tenant KPIs defined; admin uploads per-outlet-per-month targets (blank = not configured) +
 achievement; target + achievement + pace display; **separately**, admin publishes activations and outlets
