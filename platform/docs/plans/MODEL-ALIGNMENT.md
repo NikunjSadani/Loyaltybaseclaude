@@ -1,5 +1,14 @@
 # Model-Alignment Findings (2026-06-16)
 
+> ⚠️ **CORRECTION (2026-06-17, P4 kickoff reconcile):** the "**program-based scheme targeting**" framing
+> below (the per-concept Program row + "Net-new to BUILD" + the P4 sequencing note) was **invalidated by
+> the owner.** `programName`/`programCategory` are **reporting/filter facets only — they do NOT drive
+> target setting or scheme participation.** There is **no eligibility/targeting engine** in P4:
+> participation = the **non-blank cells of the per-outlet-per-parameter target Excel upload** (blank =
+> not configured). The decorative class UI is simply removed, not replaced by a program selector. See
+> [`reconcile/P4-programs-targets-enrollment.md`](reconcile/P4-programs-targets-enrollment.md) §1 for the
+> authoritative model. The de-scaffold findings (tiers/partner-class/SKU/compute) below remain valid.
+
 A read-only sweep triggered after two inherited concepts (Catalog/SKU, point-tiers) were found not to
 fit the platform's real model. It found the mismatch is **systemic, not incidental**.
 
@@ -26,7 +35,7 @@ fit the platform's real model. It found the mismatch is **systemic, not incident
 |---|---|---|
 | **Point tiers** (`TierConfig` minPoints/maxPoints/**pointsMultiplier**, `PartnerTierHistory`, `ChannelPartner.currentTierConfigId`) | `pointsMultiplier`/`minPoints` **never applied in any computation** — stored/CRUD'd only. Settings "Tier Management" card is local-state mock (no save). | **DROP** (pure deletion; no logic rewrites). |
 | **Partner class** (`PartnerClassConfig`, `enum PartnerClassCode`, `enum ChannelPartnerClass`, `applicableClasses`, `eligibleClasses[]` on reward/visibility/leaderboard/banner) | **Already decorative.** Scheme eligibility (`lib/schemes.ts:336`) actually keys off **outlet TYPE**, not class; the builder's GOLD/SILVER selector only renders badges. KYC's `partnerClass` field holds **outlet-type values** (SSS/WHOLESALER), mislabeled. Nothing functional depends on class. | **RETIRE → replace with program.** Low functional risk, wide DEFINE-layer footprint. |
-| **Program** (`Outlet.programName/Category`) | **No `Program` entity** — two text columns + per-tenant valid-lists in Settings. **Nothing targets/segments by program yet.** | **Make it the real segmentation dimension** (net-new targeting, not a rename). |
+| **Program** (`Outlet.programName/Category`) | **No `Program` entity** — two text columns + per-tenant valid-lists in Settings. **Nothing targets/segments by program yet.** | ~~Make it the real segmentation dimension~~ → **SUPERSEDED (2026-06-17):** program is a **reporting/filter facet only**, NOT a targeting dimension (owner-confirmed). No program targeting is built. |
 | **Incentive/points compute** (`lib/incentive.ts` slab/overachievement/`pointsPerRupee`, `api/schemes/calculate`, `Scheme.pointsPerRupee/fixedPoints`) | Live in World A, **disconnected from UI**; assume SKU/invoice accrual. The correct path (`api/admin/credits/**`, `OutletSalesRecord.kpiValues`) stores uploaded numbers verbatim. | **REMOVE/retire** the compute engine; standardize on upload-final. |
 | **Catalog/SKU** | (already reverted) | DONE. |
 | **2.2 sales-user CRUD / 2.5 outlet UI** | Zero references to class/tier/SKU; 2.5 already consumes program. | **Clean — safe to finish.** |
@@ -49,10 +58,14 @@ already beside it). **Compute:** retire `lib/incentive.ts` + `api/schemes/calcul
 reconcile decides).
 
 ## Net-new to BUILD (the replacement, not a rename)
-**Program-based scheme targeting:** a program selector in `scheme-builder.tsx` (replacing the decorative
-`applicableClasses` UI) + an eligibility matcher against `Outlet.programName/programCategory`. Belongs in **P4**.
-Optionally a real `Program`/`ProgramCategory` master (per-tenant) if validation should be DB-backed rather than
-Settings-JSON.
+> ⚠️ **SUPERSEDED (2026-06-17).** The "program-based scheme targeting" described here is **NOT built** —
+> program does not drive targeting (owner-confirmed). What replaces the decorative `applicableClasses` UI
+> is **nothing**: it is removed. Scheme participation = the **non-blank cells of the per-outlet-per-parameter
+> target Excel upload**. See [`reconcile/P4-programs-targets-enrollment.md`](reconcile/P4-programs-targets-enrollment.md).
+
+~~**Program-based scheme targeting:** a program selector in `scheme-builder.tsx` (replacing the decorative
+`applicableClasses` UI) + an eligibility matcher against `Outlet.programName/programCategory`.~~ Program
+stays a **reporting/filter facet** (outlet list filters + reports). No `Program`/`ProgramCategory` master.
 
 ## Sequencing — the de-scaffold is now part of PHASE S (the backend split)
 > **✅ SCHEMA DE-SCAFFOLD DONE (S2, 2026-06-16):** the canonical `api/prisma/schema.prisma` (66 models) dropped
@@ -68,6 +81,7 @@ the real model**: take the platform schema, **drop the World-A concepts below in
 the backend never carries them. So "drop `lib/incentive.ts` / `api/schemes/calculate`" = those simply are **not
 ported** into the backend; the schema drops happen in S2.
 - The removal list (tiers + partner-class + compute + SKU, exact per-file) above is the **S2 checklist**.
-- **Program-based scheme targeting is net-new P4 work** (program selector + matcher vs `Outlet.programName/Category`),
-  built **in the backend** after Phase S — not a rename.
+- ~~**Program-based scheme targeting is net-new P4 work**~~ → **SUPERSEDED (2026-06-17):** program is a
+  reporting/filter facet, not a targeting dimension. P4 builds **per-outlet-per-parameter target/achievement
+  upload** (participation = non-blank cells), not program targeting. See `reconcile/P4-...md`.
 - This still reshapes P4 (schemes/targets → program-based, no compute), P5 (wallet/points), P6 (credits/incentive).

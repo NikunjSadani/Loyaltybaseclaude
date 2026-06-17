@@ -286,23 +286,26 @@ wallet are created. **Depends on:** P2 + **Phase S** (built in the backend).
 ## P4 · Programs, targets & enrollment  (4–6 wk)
 **Objective:** activations/schemes and targets are configurable and outlets can enroll (spec §02 WF5).
 
-> ⚠️ **The P4.0 loyalty-engine DE-SCAFFOLD is now ABSORBED INTO PHASE S (step S2)** — read
-> [`MODEL-ALIGNMENT.md`](MODEL-ALIGNMENT.md) + [`BACKEND-SPLIT-PLAN.md`](BACKEND-SPLIT-PLAN.md). The backend is
-> **built clean on the real model** (no World-A carried in), so by the time P4 starts the de-scaffold is done:
-> **sales/achievement = TARGET-PARAMETER upload (no compute)**; **segmentation = PROGRAM
-> (`Outlet.programName/programCategory`) — REPLACES partner class**; **no point-tiers, no SKU**. The exact
-> removal list (TierConfig/PartnerClassConfig/`lib/incentive.ts`/scheme-compute/`eligibleClasses[]` …) lives in
-> MODEL-ALIGNMENT.md and is executed in S2's human-gated migration. **P4 itself = build program-based scheme
-> targeting** (net-new: program selector + matcher vs `Outlet.programName/Category`) on the clean backend.
+> ⚠️ **RECONCILED 2026-06-17 (owner) — read [`reconcile/P4-programs-targets-enrollment.md`](reconcile/P4-programs-targets-enrollment.md) §1 first.**
+> The de-scaffold (tiers/partner-class/SKU/compute) is done (Phase S S2). **The corrected P4 model:**
+> **program (`programName`/`programCategory`) is a REPORTING/FILTER facet — it does NOT drive targeting or
+> participation.** There is **no eligibility/targeting engine**: a scheme = metadata + **parameters**, and the
+> admin **uploads a per-outlet-per-parameter target Excel** — **blank cell = not configured, filled = configured;
+> participation = the non-blank cells.** Targets/achievement are **uploaded verbatim, no compute** (`SchemeTarget`
+> reshaped to mirror `OutletSalesRecord.kpiValues`). The decorative `applicableClasses` class UI is **removed**,
+> not replaced. **Program-based targeting is NOT built** (the prior framing here is superseded). The platform-schema
+> retirement is **re-homed out of P4 → ~P6** (gated by still-live platform Prisma usage; see #30/#31/#32).
 
 | Task | What | Key files / area | Test |
 |---|---|---|---|
-| **4.0** | **DE-SCAFFOLD (above) + Reconcile.** Execute the loyalty-engine teardown (drop migration, human-gated); confirm scheme-builder §6/§7 already pruned this session (they are); reconcile the legacy Incentive-Type enum vs Campaign-Type (Loyalty/Open/Mixed). Per `MODEL-ALIGNMENT.md`. | `MODEL-ALIGNMENT.md`, `scheme-builder.tsx`, `lib/schemes.ts`, `lib/incentive.ts`, schema | drop-migration + scoped |
-| 4.1 | Scheme/activation CRUD + lifecycle + **PROGRAM-based eligibility/geo targeting** (net-new: a program selector in `scheme-builder.tsx` replacing the decorative `applicableClasses` UI + a matcher vs `Outlet.programName/programCategory`; today eligibility wrongly keys off outlet TYPE) | `api/admin/schemes*`, `Scheme*`, `scheme-builder.tsx` | unit |
-| 4.2 | **Configurable enrollment form** (field defs + values model) (#6) — the rich `EnrollmentFormBuilder` + partner renderer ALREADY EXIST and were extended this session with **CALCULATED** + single-condition **`visibleWhen`** fields (`lib/campaign.ts`); 4.2 = persist the form-schema + submission values + Excel-dataset binding | `prisma`, `lib/campaign.ts`, `lib/enrollment-form*` | pure validation |
-| 4.3 | Enrollment: self vs sales mode + conditional pre-fill (#6) | `api/schemes/[id]/enrollments` | pure prefill + wiring |
-| 4.4 | Target config (wizard + Excel) | `admin/targets*`, `lib/target-excel-upload.ts` | pure parser |
-| 4.5 | **Achievement upload — TARGET-PARAMETER based** (upload final amounts per outlet per parameter; store verbatim, NO compute). ⚠️ The existing `api/sales/upload/route.ts` (validates `skuCode` → writes `SalesInvoice`) is the WRONG invoice/SKU model — reconcile/replace it here. The correct pattern already exists: `api/admin/credits/**` + `OutletSalesRecord.kpiValues` store uploaded numbers as-is. + pace; partner target view (tracking only) | `admin/sales`, `partner/targets`, `lib/pace.ts`, `api/sales/upload` | pure pace |
+| **4.0** ◐ | **Reconcile (DONE 2026-06-17) — see [`reconcile/P4-programs-targets-enrollment.md`](reconcile/P4-programs-targets-enrollment.md).** De-scaffold already done (S2); program reframed (facet, not targeting); eligibility = the target upload (blank/filled cells); #10 resolved (`SchemeType` canonical, retire FE `IncentiveType`, `CampaignType`=enrollment audience); platform-retirement re-homed →~P6 (incl. `lib/incentive.ts`, entangled w/ live platform pages); schema design locked (`SchemeTarget` reshape + enrollment-form models, applied per-wave gated). | reconcile doc, `lib/incentive.ts`, schema design | reconcile |
+> **Two parallel streams (schemes ⟂ targets, no shared models): T = Targets (4.4, 4.5), E = Enrollment (4.1, 4.2, 4.3).**
+
+| 4.1 (E) | Scheme/activation CRUD + lifecycle. **Remove** the decorative `applicableClasses` class UI from `scheme-builder.tsx`; **drop World-A `SchemeTarget` reads** (`getSchemeTarget`/`listTargets`) — schemes ⟂ targets, no eligibility matcher. | `api/src/schemes/*`, `Scheme*`, `scheme-builder.tsx` | unit |
+| 4.2 (E) | **Configurable enrollment form** (field defs + values model) (#6) — the rich `EnrollmentFormBuilder` + partner renderer ALREADY EXIST (CALCULATED + `visibleWhen`, `lib/campaign.ts`); 4.2 = **backend persistence** (`SchemeEnrollmentForm` + `scheme_enrollments` values/mode). `CampaignType` (LOYALTY/OPEN/MIXED) audience confirmed here. | `api/src` (new models), `lib/campaign.ts`, `lib/enrollment-form*` | pure validation |
+| 4.3 (E) | Enrollment: self vs sales mode + conditional pre-fill (#6) — integrates 4.1+4.2 | `api/src/schemes` enroll endpoints | pure prefill + wiring |
+| 4.4 (T) | **Targets (heart of P4).** Normalize KPIs → **`KpiDef`** table (per-tenant, from `kpi_defs`); **`OutletTarget`** (mirrors `OutletSalesRecord`) + `TargetUploadBatch`; template download (KpiDef × months); verbatim upload → per outlet × KPI × month (**blank = not configured**). Port `lib/target-excel-upload.ts`. | `api/src` targets, `lib/target-excel-upload.ts`, schema (`KpiDef`/`OutletTarget`) | pure parser |
+| 4.5 (T) | **Achievement upload — per outlet × KPI × month, verbatim, NO compute.** Port platform `admin/sales/bulk-upload` → backend (writes `OutletSalesRecord.kpiValues`). ⚠️ The WRONG `api/sales/upload` (SKU→`SalesInvoice`) was correctly **not** ported (#32). + pace (`OutletTarget`↔`OutletSalesRecord`, `lib/pace.ts`); partner target+achievement view (tracking only). | `api/src` sales-upload, `partner/targets`, `lib/pace.ts` | pure pace |
 
 **Exit:** admin publishes an activation, eligible outlets enroll via a configurable form, targets +
 achievement display. **Depends on:** P2 (audience/eligibility).
