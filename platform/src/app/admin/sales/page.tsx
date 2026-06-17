@@ -1,9 +1,9 @@
 'use client';
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Download, Upload, FileSpreadsheet,
-  CheckCircle2, Info, Trash2, History, AlertTriangle,
+  CheckCircle2, Info, Trash2, History, AlertTriangle, BarChart3,
 } from 'lucide-react';
 import {
   generateSalesTemplate,
@@ -12,8 +12,8 @@ import {
   type SalesParseResult,
 } from '@/lib/sales-excel-upload';
 import { DEOLEO_DEFAULT_KPIS } from '@/lib/platform/tenant-kpi-config';
-import { MOCK_OUTLETS, formatMonth } from '@/lib/targets';
-import type { NewOutletType } from '@/lib/targets';
+import type { TenantKpiDef } from '@/lib/platform/tenant-kpi-config';
+import { formatMonth } from '@/lib/targets';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -27,16 +27,46 @@ interface UploadBatch {
   createdAt:     string;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function getAllOutletIds(): Set<string> {
-  const ids = new Set<string>();
-  const outlets = MOCK_OUTLETS as Record<NewOutletType, Array<{ id: string }>>;
-  for (const list of Object.values(outlets)) {
-    for (const o of list) ids.add(o.id);
-  }
-  return ids;
+interface PaceKpi {
+  code:     string;
+  target:   number | null;
+  achieved: number | null;
+  pace:     number | null;
 }
+
+interface PaceOutlet {
+  outletCode: string;
+  outletName: string;
+  outletType: string;
+  month:      string;
+  kpis:       PaceKpi[];
+}
+
+interface PaceData {
+  month:   string;
+  outlets: PaceOutlet[];
+}
+
+// ── Upload result row type (from backend) ─────────────────────────────────────
+
+interface UploadResultRow {
+  rowIndex:   number;
+  outletCode: string;
+  status:     string;
+  remarks:    string;
+}
+
+interface UploadResult {
+  batchId:       string;
+  month:         string;
+  monthsInBatch: string[];
+  totalRows:     number;
+  acceptedCount: number;
+  rejectedCount: number;
+  rows:          UploadResultRow[];
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function downloadBuffer(buf: ArrayBuffer, filename: string) {
   const blob = new Blob([buf], {
@@ -69,11 +99,17 @@ function formatDate(iso: string) {
   });
 }
 
+function authHeader(): Record<string, string> {
+  if (typeof window === 'undefined') return {};
+  const token = localStorage.getItem('token');
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 // ── Upload History Component ──────────────────────────────────────────────────
 
 function UploadHistory({ refreshKey }: { refreshKey: number }) {
-  const [batches,   setBatches]   = useState<UploadBatch[]>([]);
-  const [loading,   setLoading]   = useState(true);
+  const [batches,    setBatches]    = useState<UploadBatch[]>([]);
+  const [loading,    setLoading]    = useState(true);
   const [fetchError, setFetchError] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirmId,  setConfirmId]  = useState<string | null>(null);
@@ -81,7 +117,8 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
   useEffect(() => {
     setLoading(true);
     setFetchError(false);
-    fetch('/api/admin/sales/batches')
+    // ↳ Repointed: /api/admin/sales/batches → /api/admin/achievements/batches
+    fetch('/api/admin/achievements/batches', { headers: authHeader() })
       .then(r => r.json())
       .then(body => {
         if (body.success) setBatches(body.data);
@@ -95,7 +132,12 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
     setDeletingId(batchId);
     setConfirmId(null);
     try {
-      const res  = await fetch(`/api/admin/sales/batches/${batchId}`, { method: 'DELETE' });
+      // The existing DELETE route /api/admin/sales/batches/[batchId] still works
+      // (it targets the SalesUploadBatch table directly via Prisma). Keep as-is.
+      const res  = await fetch(`/api/admin/sales/batches/${batchId}`, {
+        method: 'DELETE',
+        headers: authHeader(),
+      });
       const body = await res.json();
       if (body.success) {
         setBatches(prev => prev.filter(b => b.id !== batchId));
@@ -184,26 +226,163 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
   );
 }
 
+// ── Pace View Component ───────────────────────────────────────────────────────
+
+function PaceView({ month }: { month: string }) {
+  const [paceData,   setPaceData]   = useState<PaceData | null>(null);
+  const [loading,    setLoading]    = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!month) return;
+    setLoading(true);
+    setFetchError(null);
+    setPaceData(null);
+    // ↳ New endpoint: /api/admin/achievements/pace?month=YYYY-MM
+    fetch(`/api/admin/achievements/pace?month=${encodeURIComponent(month)}`, {
+      headers: authHeader(),
+    })
+      .then(r => r.json())
+      .then(body => {
+        if (body.success) setPaceData(body.data as PaceData);
+        else setFetchError(body.error ?? 'Failed to load pace data');
+      })
+      .catch(() => setFetchError('Network error loading pace data'))
+      .finally(() => setLoading(false));
+  }, [month]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-gray-400 py-4">
+        <div className="w-4 h-4 border-2 border-gray-200 border-t-gray-400 rounded-full animate-spin" />
+        Loading pace data…
+      </div>
+    );
+  }
+
+  if (fetchError) {
+    return <p className="text-sm text-amber-600 py-2">{fetchError}</p>;
+  }
+
+  if (!paceData || paceData.outlets.length === 0) {
+    return (
+      <p className="text-sm text-gray-400 py-2">
+        No pace data for {formatMonth(month)}. Upload targets and achievements first.
+      </p>
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs border-collapse">
+        <thead>
+          <tr className="bg-gray-50 border-b border-gray-200">
+            <th className="text-left px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Outlet</th>
+            <th className="text-left px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Type</th>
+            {paceData.outlets[0]?.kpis.map(k => (
+              <th
+                key={k.code}
+                colSpan={3}
+                className="text-center px-3 py-2 font-semibold text-gray-600 border-l border-gray-200 whitespace-nowrap"
+              >
+                {k.code}
+              </th>
+            ))}
+          </tr>
+          <tr className="bg-gray-50 border-b border-gray-200">
+            <th className="px-3 py-1" />
+            <th className="px-3 py-1" />
+            {paceData.outlets[0]?.kpis.map(k => (
+              <React.Fragment key={k.code}>
+                <th className="text-center px-2 py-1 font-medium text-gray-500 border-l border-gray-200">Target</th>
+                <th className="text-center px-2 py-1 font-medium text-gray-500">Achieved</th>
+                <th className="text-center px-2 py-1 font-medium text-gray-500">Pace</th>
+              </React.Fragment>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {paceData.outlets.map(outlet => (
+            <tr key={outlet.outletCode} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+              <td className="px-3 py-2 font-medium text-gray-800 whitespace-nowrap">
+                <span className="block text-xs font-semibold text-gray-900">{outlet.outletName}</span>
+                <span className="block text-[10px] text-gray-400 font-mono">{outlet.outletCode}</span>
+              </td>
+              <td className="px-3 py-2 text-gray-500 whitespace-nowrap">{outlet.outletType}</td>
+              {outlet.kpis.map(k => {
+                const pctVal = k.pace !== null ? Math.round(k.pace * 100) : null;
+                const pctColor =
+                  pctVal === null  ? 'text-gray-400' :
+                  pctVal >= 100    ? 'text-emerald-600 font-semibold' :
+                  pctVal >= 80     ? 'text-amber-600' :
+                  pctVal >= 60     ? 'text-orange-500' :
+                                     'text-red-500';
+                return (
+                  <React.Fragment key={`${outlet.outletCode}-${k.code}`}>
+                    <td className="text-center px-2 py-2 border-l border-gray-100 text-gray-700">
+                      {k.target ?? '—'}
+                    </td>
+                    <td className="text-center px-2 py-2 text-gray-700">
+                      {k.achieved ?? '—'}
+                    </td>
+                    <td className={`text-center px-2 py-2 ${pctColor}`}>
+                      {pctVal !== null ? `${pctVal}%` : '—'}
+                    </td>
+                  </React.Fragment>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function SalesUploadPage() {
-  const monthOptions               = getSalesMonthOptions();
+  const monthOptions                = getSalesMonthOptions();
   const [salesMonth, setSalesMonth] = useState(monthOptions[0].value);
-  const [kpiDefs, setKpiDefs]       = useState(DEOLEO_DEFAULT_KPIS);
+  const [kpiDefs, setKpiDefs]       = useState<TenantKpiDef[]>(DEOLEO_DEFAULT_KPIS);
   const [fileName,    setFileName]  = useState('');
-  const [parsing,     setParsing]   = useState(false);
-  const [saving,      setSaving]    = useState(false);
-  const [parseResult, setParseResult] = useState<SalesParseResult | null>(null);
+  const [uploading,   setUploading] = useState(false);
+  const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
   const [saved,       setSaved]     = useState(false);
-  const [savedBatchId, setSavedBatchId] = useState<string | null>(null);
-  const [historyKey,  setHistoryKey] = useState(0);   // bump to refresh history
+  const [historyKey,  setHistoryKey] = useState(0);  // bump to refresh history
+  const [showPace,    setShowPace]  = useState(false);
+
+  // For the local client-side parse (report download only — actual save is server-side now)
+  const [parseResult, setParseResult] = useState<SalesParseResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Fetch the tenant's KPI definitions from the backend.
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch('/api/admin/kpi-config', { headers: { Authorization: `Bearer ${token}` } })
+    fetch('/api/admin/kpis', { headers: authHeader() })
       .then(r => r.json())
-      .then(j => { if (j.success && Array.isArray(j.data.kpiDefs) && j.data.kpiDefs.length > 0) setKpiDefs(j.data.kpiDefs); })
+      .then(j => {
+        if (j.success && Array.isArray(j.data) && j.data.length > 0) {
+          // Backend KpiDef → FE TenantKpiDef: the FE keys template columns by
+          // `id`, which must be the KPI *code* (e.g. MONTH_TGT), not the cuid.
+          type BackendKpi = {
+            code: string; label: string; unit: string; isPrimary: boolean;
+            hasNameOverride: boolean; nameOverrideLabel: string | null;
+            order: number; enabled: boolean;
+          };
+          setKpiDefs(
+            (j.data as BackendKpi[]).map((k) => ({
+              id: k.code,
+              label: k.label,
+              unit: k.unit,
+              isPrimary: k.isPrimary,
+              hasNameOverride: k.hasNameOverride,
+              nameOverrideLabel: k.nameOverrideLabel ?? '',
+              order: k.order,
+              enabled: k.enabled,
+            })),
+          );
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -214,22 +393,48 @@ export default function SalesUploadPage() {
     downloadBuffer(buf, `sales_template_${salesMonth}.xlsx`);
   }
 
-  // ── Upload & parse ─────────────────────────────────────────────────────
+  // ── Upload file → send directly to backend via multipart ──────────────
 
   const handleFile = useCallback(async (file: File) => {
     setFileName(file.name);
-    setParsing(true);
-    setParseResult(null);
+    setUploadResult(null);
     setSaved(false);
-    setSavedBatchId(null);
+
+    // Also run client-side parse for the report download feature.
     try {
       const arrayBuf = await file.arrayBuffer();
-      const result   = parseSalesUpload(arrayBuf, kpiDefs, getAllOutletIds());
-      setParseResult(result);
+      // We pass an empty Set for outlet validation here — the backend does real validation.
+      // The local parse is used only to enable the "Download Report" button with row details
+      // populated from the backend response later.
+      setParseResult(parseSalesUpload(arrayBuf, kpiDefs, new Set<string>()));
+    } catch {
+      setParseResult(null);
+    }
+
+    // Upload the raw xlsx to the backend (multipart); the backend parses + stores.
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file, file.name);
+
+      const res  = await fetch('/api/admin/achievements/upload', {
+        method:  'POST',
+        headers: authHeader(),   // NO Content-Type — browser sets multipart boundary
+        body:    formData,
+      });
+      const body = await res.json();
+
+      if (res.ok && body.success) {
+        setUploadResult(body.data as UploadResult);
+        setSaved(true);
+        setHistoryKey(k => k + 1);
+      } else {
+        console.error('[SALES] Upload failed:', body);
+      }
     } catch (e) {
-      console.error('Sales upload parse error:', e);
+      console.error('[SALES] Upload error:', e);
     } finally {
-      setParsing(false);
+      setUploading(false);
     }
   }, [kpiDefs]);
 
@@ -244,35 +449,6 @@ export default function SalesUploadPage() {
     if (file) handleFile(file);
   }
 
-  // ── Save — wired to real API ───────────────────────────────────────────
-
-  async function handleSave() {
-    if (!parseResult || parseResult.summary.saved === 0) return;
-    setSaving(true);
-    try {
-      const res = await fetch('/api/admin/sales/bulk-upload', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          month:        salesMonth,
-          acceptedRows: parseResult.salesData,
-        }),
-      });
-      const body = await res.json();
-      if (res.ok && body.batchId) {
-        setSaved(true);
-        setSavedBatchId(body.batchId);
-        setHistoryKey(k => k + 1);   // refresh history list
-      } else {
-        console.error('[SALES] Save failed:', body);
-      }
-    } catch (e) {
-      console.error('[SALES] Save error:', e);
-    } finally {
-      setSaving(false);
-    }
-  }
-
   // ── Download report ────────────────────────────────────────────────────
 
   function handleDownloadReport() {
@@ -284,6 +460,16 @@ export default function SalesUploadPage() {
   }
 
   const currentMonthLabel = monthOptions.find(m => m.value === salesMonth)?.label ?? salesMonth;
+
+  // Summary derived from upload result (authoritative server counts).
+  const summary = uploadResult
+    ? {
+        total:   uploadResult.totalRows,
+        saved:   uploadResult.acceptedCount,
+        skipped: uploadResult.rejectedCount,
+        errors:  0,  // backend conflates skipped+error into rejectedCount
+      }
+    : null;
 
   // ── Render ─────────────────────────────────────────────────────────────
 
@@ -311,7 +497,13 @@ export default function SalesUploadPage() {
             {monthOptions.map((m, i) => (
               <button
                 key={m.value}
-                onClick={() => { setSalesMonth(m.value); setParseResult(null); setSaved(false); setSavedBatchId(null); }}
+                onClick={() => {
+                  setSalesMonth(m.value);
+                  setUploadResult(null);
+                  setSaved(false);
+                  setParseResult(null);
+                  setShowPace(false);
+                }}
                 className={`px-4 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
                   salesMonth === m.value
                     ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)]'
@@ -351,7 +543,7 @@ export default function SalesUploadPage() {
           <div>
             <p className="text-sm font-semibold text-gray-900">Step 2 — Upload Filled Template</p>
             <p className="text-xs text-gray-500 mt-0.5">
-              Drop your completed file here. Unknown outlet IDs are automatically skipped.
+              Drop your completed file here. The file is validated and saved automatically.
             </p>
           </div>
         </div>
@@ -378,16 +570,16 @@ export default function SalesUploadPage() {
           />
         </div>
 
-        {parsing && (
+        {uploading && (
           <div className="flex items-center gap-2 text-sm text-gray-500">
             <div className="w-4 h-4 border-2 border-gray-200 border-t-[var(--brand-primary)] rounded-full animate-spin" />
-            Parsing file…
+            Uploading and saving…
           </div>
         )}
       </div>
 
       {/* ── Step 3: Results ───────────────────────────────────────────────── */}
-      {parseResult && (
+      {uploadResult && summary && (
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-6 py-5 space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-sm font-semibold text-gray-900">Upload Result</p>
@@ -395,18 +587,17 @@ export default function SalesUploadPage() {
               <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 Saved for {currentMonthLabel}
-                {savedBatchId && <span className="opacity-60 font-normal ml-1">· {savedBatchId.slice(-8)}</span>}
+                <span className="opacity-60 font-normal ml-1">· {uploadResult.batchId.slice(-8)}</span>
               </span>
             )}
           </div>
 
           {/* Summary stats */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {([
-              { label: 'Total rows', value: parseResult.summary.total,   cls: 'bg-gray-50   border-gray-200  text-gray-800'  },
-              { label: 'Saved',      value: parseResult.summary.saved,   cls: 'bg-green-50  border-green-200 text-green-700' },
-              { label: 'Skipped',    value: parseResult.summary.skipped, cls: 'bg-amber-50  border-amber-200 text-amber-700' },
-              { label: 'Errors',     value: parseResult.summary.errors,  cls: 'bg-red-50    border-red-200   text-red-700'   },
+              { label: 'Total rows', value: summary.total,   cls: 'bg-gray-50   border-gray-200  text-gray-800'  },
+              { label: 'Saved',      value: summary.saved,   cls: 'bg-green-50  border-green-200 text-green-700' },
+              { label: 'Rejected',   value: summary.skipped, cls: 'bg-amber-50  border-amber-200 text-amber-700' },
             ] as const).map(({ label, value, cls }) => (
               <div key={label} className={`rounded-xl border px-4 py-3 text-center ${cls}`}>
                 <p className="text-2xl font-bold">{value}</p>
@@ -415,20 +606,20 @@ export default function SalesUploadPage() {
             ))}
           </div>
 
-          {/* Skipped / error rows */}
-          {parseResult.rows.filter(r => r.status !== 'saved').length > 0 && (
+          {/* Skipped / rejected rows from backend */}
+          {uploadResult.rows.filter(r => r.status !== 'accepted').length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
-              <p className="text-xs font-semibold text-amber-700 mb-2">Skipped / Error rows</p>
-              {parseResult.rows
-                .filter(r => r.status !== 'saved')
+              <p className="text-xs font-semibold text-amber-700 mb-2">Rejected rows</p>
+              {uploadResult.rows
+                .filter(r => r.status !== 'accepted')
                 .slice(0, 20)
                 .map(r => (
                   <p key={r.rowIndex} className="text-xs text-amber-700">
-                    <span className="font-mono font-semibold">Row {r.rowIndex} — {r.outletId}:</span>{' '}
+                    <span className="font-mono font-semibold">Row {r.rowIndex} — {r.outletCode}:</span>{' '}
                     {r.remarks}
                   </p>
                 ))}
-              {parseResult.rows.filter(r => r.status !== 'saved').length > 20 && (
+              {uploadResult.rows.filter(r => r.status !== 'accepted').length > 20 && (
                 <p className="text-xs text-amber-500">…download the report for full details</p>
               )}
             </div>
@@ -436,28 +627,43 @@ export default function SalesUploadPage() {
 
           {/* Actions */}
           <div className="flex items-center gap-3 flex-wrap">
-            {parseResult.summary.saved > 0 && !saved && (
+            {parseResult && (
               <button
-                onClick={handleSave}
-                disabled={saving}
-                className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-xl hover:opacity-90 transition-opacity disabled:opacity-60"
+                onClick={handleDownloadReport}
+                className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-600 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors"
               >
-                {saving
-                  ? <><div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" /> Saving…</>
-                  : <><CheckCircle2 className="w-4 h-4" /> Save {parseResult.summary.saved} row{parseResult.summary.saved !== 1 ? 's' : ''} for {currentMonthLabel}</>
-                }
+                <Download className="w-4 h-4" />
+                Download Report
               </button>
             )}
-            <button
-              onClick={handleDownloadReport}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-600 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors"
-            >
-              <Download className="w-4 h-4" />
-              Download Report
-            </button>
           </div>
         </div>
       )}
+
+      {/* ── Pace View ─────────────────────────────────────────────────────── */}
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-6 py-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-indigo-50">
+              <BarChart3 className="w-4 h-4 text-indigo-600" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-gray-900">Pace View — {currentMonthLabel}</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Target vs achievement vs pace per outlet × KPI. Pace = achieved ÷ target.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setShowPace(v => !v)}
+            className="text-xs font-medium text-[var(--brand-primary)] hover:underline"
+          >
+            {showPace ? 'Hide' : 'Show'}
+          </button>
+        </div>
+
+        {showPace && <PaceView month={salesMonth} />}
+      </div>
 
       {/* ── Upload History ────────────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-6 py-5 space-y-3">
@@ -468,7 +674,7 @@ export default function SalesUploadPage() {
           <div>
             <p className="text-sm font-semibold text-gray-900">Upload History</p>
             <p className="text-xs text-gray-500 mt-0.5">
-              Delete test uploads before going live. Deleting removes all saved records for that month.
+              Delete test uploads before going live. Deleting removes all saved records for that batch.
             </p>
           </div>
         </div>

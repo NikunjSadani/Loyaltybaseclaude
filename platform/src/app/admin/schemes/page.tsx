@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Plus,
   Search,
@@ -14,66 +14,88 @@ import {
   ClipboardList,
 } from 'lucide-react';
 import Link from 'next/link';
-import { getAdminSchemes, seedAdminSchemes, type AdminPublishedScheme } from '@/lib/schemes';
+import { api } from '@/lib/api-client';
+
+// ─── Backend scheme shape ──────────────────────────────────────────────────────
+
+export interface BackendScheme {
+  id: string;
+  code: string;
+  name: string;
+  description?: string | null;
+  schemeType: string;
+  rewardType: string;
+  startDate: string;
+  endDate: string;
+  status: string;
+  createdAt: string;
+  holdingPeriodDays?: number | null;
+  budgetPaise?: number | null;
+}
+
+interface ListSchemesResponse {
+  schemes: BackendScheme[];
+  pagination: { page: number; limit: number; total: number; pages: number };
+}
+
+// ─── Display helpers ───────────────────────────────────────────────────────────
 
 const STATUS_STYLES: Record<string, string> = {
-  ACTIVE:   'bg-green-100 text-green-700',
-  DRAFT:    'bg-gray-100 text-gray-600',
-  UPCOMING: 'bg-blue-100 text-blue-700',
-  ARCHIVED: 'bg-gray-100 text-gray-500',
-  EXPIRED:  'bg-red-50 text-red-500',
+  ACTIVE:    'bg-green-100 text-green-700',
+  DRAFT:     'bg-gray-100 text-gray-600',
+  UPCOMING:  'bg-blue-100 text-blue-700',
+  ARCHIVED:  'bg-gray-100 text-gray-500',
+  EXPIRED:   'bg-red-50 text-red-500',
+  CANCELLED: 'bg-red-100 text-red-600',
 };
 
 const STATUS_ICONS: Record<string, React.ReactNode> = {
-  ACTIVE:   <CheckCircle className="w-3.5 h-3.5" />,
-  DRAFT:    <Clock className="w-3.5 h-3.5" />,
-  UPCOMING: <Calendar className="w-3.5 h-3.5" />,
-  ARCHIVED: <Archive className="w-3.5 h-3.5" />,
-  EXPIRED:  <Archive className="w-3.5 h-3.5" />,
+  ACTIVE:    <CheckCircle className="w-3.5 h-3.5" />,
+  DRAFT:     <Clock className="w-3.5 h-3.5" />,
+  UPCOMING:  <Calendar className="w-3.5 h-3.5" />,
+  ARCHIVED:  <Archive className="w-3.5 h-3.5" />,
+  EXPIRED:   <Archive className="w-3.5 h-3.5" />,
+  CANCELLED: <Archive className="w-3.5 h-3.5" />,
 };
 
-const INCENTIVE_LABELS: Record<string, string> = {
-  SALES:           'Sales Incentive',
-  VISIBILITY:      'Visibility',
-  SECONDARY_SALES: 'Secondary Sales',
-  LOYALTY:         'Loyalty Points',
-  REFERRAL:        'Referral Bonus',
-  MILESTONE:       'Milestone',
-};
-
-const CALC_LABELS: Record<string, string> = {
-  FLAT:       'Flat Amount',
-  PERCENTAGE: 'Percentage',
-  SLAB:       'Slab-based',
-  PER_UNIT:   'Per Unit',
-  HYBRID:     'Hybrid',
-};
-
-const CLASS_COLORS: Record<string, string> = {
-  PLATINUM: 'text-purple-700 bg-purple-50',
-  GOLD:     'text-amber-700 bg-amber-50',
-  SILVER:   'text-gray-600 bg-gray-100',
-  BRONZE:   'text-orange-700 bg-orange-50',
-  STANDARD: 'text-blue-700 bg-blue-50',
-};
-
-const ALL_STATUSES = ['ALL', 'ACTIVE', 'DRAFT', 'UPCOMING', 'EXPIRED', 'ARCHIVED'] as const;
+const ALL_STATUSES = ['ALL', 'ACTIVE', 'DRAFT', 'UPCOMING', 'EXPIRED', 'ARCHIVED', 'CANCELLED'] as const;
 
 export default function SchemesPage() {
-  const [schemes,      setSchemes]      = useState<AdminPublishedScheme[]>([]);
+  const [schemes,      setSchemes]      = useState<BackendScheme[]>([]);
+  const [loading,      setLoading]      = useState(true);
+  const [error,        setError]        = useState<string | null>(null);
   const [search,       setSearch]       = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [typeFilter,   setTypeFilter]   = useState('ALL');
 
-  useEffect(() => {
-    seedAdminSchemes();          // no-op if data already exists
-    setSchemes(getAdminSchemes());
+  const loadSchemes = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    const result = await api.get<ListSchemesResponse>('/api/schemes');
+    if (result.success) {
+      setSchemes(result.data.schemes);
+    } else {
+      setError(result.error);
+    }
+    setLoading(false);
   }, []);
+
+  useEffect(() => { loadSchemes(); }, [loadSchemes]);
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this scheme? This cannot be undone.')) return;
+    const result = await api.del<{ message: string }>(`/api/schemes/${id}`);
+    if (result.success) {
+      setSchemes((prev) => prev.filter((s) => s.id !== id));
+    } else {
+      alert(`Delete failed: ${result.error}`);
+    }
+  };
 
   const filtered = schemes.filter((s) => {
     const matchSearch = !search || s.name.toLowerCase().includes(search.toLowerCase());
     const matchStatus = statusFilter === 'ALL' || s.status === statusFilter;
-    const matchType   = typeFilter === 'ALL' || s.incentiveType === typeFilter;
+    const matchType   = typeFilter === 'ALL' || s.schemeType === typeFilter;
     return matchSearch && matchStatus && matchType;
   });
 
@@ -81,6 +103,25 @@ export default function SchemesPage() {
     acc[s.status] = (acc[s.status] ?? 0) + 1;
     return acc;
   }, {} as Record<string, number>);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <p className="text-sm text-gray-400">Loading schemes…</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="py-20 text-center">
+        <p className="text-sm text-red-500">{error}</p>
+        <button onClick={loadSchemes} className="mt-3 text-xs text-[var(--brand-primary)] hover:underline">
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5 fade-in">
@@ -136,7 +177,7 @@ export default function SchemesPage() {
             className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
           >
             <option value="ALL">All Types</option>
-            <option value="SALES">Sales Incentive</option>
+            <option value="SALES_INCENTIVE">Sales Incentive</option>
             <option value="VISIBILITY">Visibility</option>
             <option value="SECONDARY_SALES">Secondary Sales</option>
             <option value="LOYALTY">Loyalty</option>
@@ -162,7 +203,7 @@ export default function SchemesPage() {
                   {STATUS_ICONS[scheme.status]}
                   {scheme.status}
                 </span>
-                <span className="text-xs text-gray-400">{scheme.id}</span>
+                <span className="text-xs text-gray-400 font-mono">{scheme.code}</span>
               </div>
             </div>
 
@@ -175,37 +216,19 @@ export default function SchemesPage() {
                 <div>
                   <h3 className="text-sm font-semibold text-gray-900 leading-tight">{scheme.name}</h3>
                   <p className="text-xs text-gray-500 mt-0.5">
-                    {INCENTIVE_LABELS[scheme.incentiveType ?? ''] ?? scheme.incentiveType ?? '—'}
-                    {scheme.calculationMethod ? ` · ${CALC_LABELS[scheme.calculationMethod] ?? scheme.calculationMethod}` : ''}
+                    {scheme.schemeType}{scheme.rewardType ? ` · ${scheme.rewardType}` : ''}
                   </p>
                 </div>
               </div>
 
               <div className="flex items-center gap-1 mb-3 text-xs text-gray-500">
                 <Calendar className="w-3.5 h-3.5" />
-                {scheme.startDate} → {scheme.endDate}
+                {scheme.startDate.slice(0, 10)} → {scheme.endDate.slice(0, 10)}
               </div>
 
-              {(scheme.applicableClasses ?? []).length > 0 && (
-                <div className="flex flex-wrap gap-1 mb-4">
-                  {(scheme.applicableClasses ?? []).map((cls) => (
-                    <span key={cls} className={`text-xs px-1.5 py-0.5 rounded font-medium ${CLASS_COLORS[cls] ?? 'text-gray-600 bg-gray-100'}`}>
-                      {cls}
-                    </span>
-                  ))}
-                </div>
+              {scheme.description && (
+                <p className="text-xs text-gray-500 mb-3 line-clamp-2">{scheme.description}</p>
               )}
-
-              <div className="grid grid-cols-2 gap-2 mb-4 text-xs">
-                <div className="bg-gray-50 rounded-lg p-2">
-                  <p className="text-gray-500">Partners Enrolled</p>
-                  <p className="font-bold text-gray-900 mt-0.5">{(scheme.partnersEnrolled ?? 0).toLocaleString()}</p>
-                </div>
-                <div className="bg-gray-50 rounded-lg p-2">
-                  <p className="text-gray-500">Total Payout</p>
-                  <p className="font-bold text-gray-900 mt-0.5">{scheme.totalPayout ?? '—'}</p>
-                </div>
-              </div>
 
               <div className="flex gap-2">
                 <Link
@@ -224,6 +247,13 @@ export default function SchemesPage() {
                     <ClipboardList className="w-3.5 h-3.5" />
                   </Link>
                 )}
+                <button
+                  onClick={() => handleDelete(scheme.id)}
+                  className="flex items-center gap-1 py-2 px-3 border border-red-100 text-red-500 rounded-lg text-xs font-medium hover:bg-red-50 transition-colors"
+                  title="Delete Scheme"
+                >
+                  <Archive className="w-3.5 h-3.5" />
+                </button>
               </div>
             </div>
           </div>

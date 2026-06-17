@@ -14,6 +14,11 @@
  *   UPI_QR_SCAN    — text input + jsQR-powered camera scan (reuses BankOrUpiSection logic)
  *   DATA_DISPLAY   — read-only chip showing outlet's Excel data point
  *   AUTO_POPULATED — prefilled input, locked or editable per admin config
+ *
+ * When `schemeId` is provided, onSubmit is wired to POST /api/schemes/:id/enroll
+ * with enrollmentMode SELF.  Success/validation errors from the backend are
+ * surfaced inline below the submit button.  If `schemeId` is omitted the
+ * component falls back to calling the `onSubmit` prop directly (legacy path).
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
@@ -23,6 +28,7 @@ import {
 } from 'lucide-react';
 import { filterFieldsByAudience, isFieldVisible, computeFormula, validateFieldValues, type FormField } from '@/lib/campaign';
 import { isValidUpiId, parseUpiFromQr } from '@/lib/upi-utils';
+import { api } from '@/lib/api-client';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Props
@@ -36,9 +42,26 @@ export interface EnrollmentFormRendererProps {
   /** Controlled values map: fieldId → value */
   values:          Record<string, unknown>;
   onChange:        (fieldId: string, value: unknown) => void;
+  /**
+   * Called after a successful submit.
+   * When `schemeId` is provided this is called with the server-confirmed values.
+   * When `schemeId` is omitted this is called directly on button click (legacy).
+   */
   onSubmit:        (values: Record<string, unknown>) => void;
   /** Optional submit button label. Defaults to "Submit". */
   submitLabel?:    string;
+  /**
+   * When provided, the submit button calls POST /api/schemes/:schemeId/enroll
+   * with { enrollmentMode: 'SELF', formValues: values }.
+   * On success, `onSubmit` is called with the server-confirmed values.
+   * On error, the error message is shown inline.
+   */
+  schemeId?:       string;
+  /**
+   * For SALES mode enrollment: the ChannelPartner.id of the target partner.
+   * When set, enrollmentMode is sent as 'SALES'.
+   */
+  targetPartnerId?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -460,7 +483,13 @@ export function EnrollmentFormRenderer({
   onChange,
   onSubmit,
   submitLabel = 'Submit',
+  schemeId,
+  targetPartnerId,
 }: EnrollmentFormRendererProps) {
+  const [submitting,   setSubmitting]   = useState(false);
+  const [submitError,  setSubmitError]  = useState<string | null>(null);
+  const [submitSuccess, setSubmitSuccess] = useState(false);
+
   // Filter by audience first, then by conditional visibility
   const audienceFields = filterFieldsByAudience(fields, isLoyaltyMember);
   const visibleFields  = audienceFields.filter((f) => isFieldVisible(f, values));
@@ -468,8 +497,40 @@ export function EnrollmentFormRenderer({
   // Validate to determine if submit is enabled (only visible fields count)
   const { valid } = validateFieldValues(visibleFields, values);
 
-  const handleSubmit = () => {
-    if (valid) onSubmit(values);
+  const handleSubmit = async () => {
+    if (!valid) return;
+
+    if (!schemeId) {
+      // Legacy path — no backend call, call onSubmit directly
+      onSubmit(values);
+      return;
+    }
+
+    // Backend-wired path
+    setSubmitting(true);
+    setSubmitError(null);
+
+    const payload: Record<string, unknown> = {
+      enrollmentMode: targetPartnerId ? 'SALES' : 'SELF',
+      formValues: values,
+    };
+    if (targetPartnerId) {
+      payload.targetPartnerId = targetPartnerId;
+    }
+
+    const result = await api.post<{ enrollment: unknown }>(
+      `/api/schemes/${schemeId}/enroll`,
+      payload,
+    );
+
+    setSubmitting(false);
+
+    if (result.success) {
+      setSubmitSuccess(true);
+      onSubmit(values);
+    } else {
+      setSubmitError(result.error);
+    }
   };
 
   const str = (id: string) => String(values[id] ?? '');
@@ -642,7 +703,6 @@ export function EnrollmentFormRenderer({
               value={str(field.id)}
               onChange={(e) => onChange(field.id, e.target.value)}
               placeholder={field.placeholder}
-              maxLength={field.type === 'TEXT' ? undefined : undefined}
             />
             {field.helpText && <p className={helpCls}>{field.helpText}</p>}
           </div>
@@ -653,14 +713,29 @@ export function EnrollmentFormRenderer({
       <button
         type="button"
         onClick={handleSubmit}
-        disabled={!valid}
+        disabled={!valid || submitting || submitSuccess}
         className="w-full py-3 rounded-xl text-sm font-bold transition-all
           disabled:opacity-40 disabled:cursor-not-allowed
           bg-[var(--brand-primary)] text-white hover:bg-[var(--brand-primary-dark)]
           active:scale-[0.98] flex items-center justify-center gap-2"
       >
-        {submitLabel}
+        {submitting
+          ? <><span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" /> Submitting…</>
+          : submitSuccess
+          ? <><CheckCircle className="h-4 w-4" /> Submitted!</>
+          : submitLabel}
       </button>
+
+      {/* Backend validation / network errors */}
+      {submitError && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5"
+        >
+          <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
+          <p className="text-xs text-red-700">{submitError}</p>
+        </div>
+      )}
     </div>
   );
 }

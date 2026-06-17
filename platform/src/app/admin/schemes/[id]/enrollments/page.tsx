@@ -20,19 +20,18 @@ import {
   ChevronUp,
   AlertCircle,
 } from 'lucide-react';
-import * as XLSX from 'xlsx';
 import {
   computeEnrollmentStats,
   buildExcelExportRows,
   MOCK_CAMPAIGN_OUTLETS,
   MOCK_ENROLLMENTS,
   type EnrollmentRecord,
-  type OutletRecord,
   type FormField,
 } from '@/lib/campaign';
+import { authHeader } from '@/lib/api-client';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mock form fields for demo
+// Mock form fields for demo (inline display in expanded rows)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DEMO_FORM_FIELDS: FormField[] = [
@@ -58,20 +57,27 @@ const fmtPct = (n: number) => `${n}%`;
 export default function EnrollmentDashboardPage({ params }: { params: Promise<{ id: string }> }) {
   const { id: schemeId } = use(params);
 
-  // Demo data scoped to this schemeId
-  const allTargeted = MOCK_CAMPAIGN_OUTLETS;
-  const allEnrollments = MOCK_ENROLLMENTS.filter((e) => e.schemeId === schemeId || schemeId === 'SCH001');
+  // ── In-page list uses mock data for the detail table (display only) ───────
+  // The authoritative export is driven by the backend xlsx endpoint below.
+  const allTargeted   = MOCK_CAMPAIGN_OUTLETS;
+  const allEnrollments: EnrollmentRecord[] = MOCK_ENROLLMENTS.filter(
+    (e) => e.schemeId === schemeId || schemeId === 'SCH001',
+  );
+
+  // ── Export state ──────────────────────────────────────────────────────────
+  const [exporting,    setExporting]    = useState(false);
+  const [exportError,  setExportError]  = useState<string | null>(null);
 
   // ── Filters ──────────────────────────────────────────────────────────────
-  const [search, setSearch] = useState('');
-  const [filterState, setFilterState] = useState('ALL');
-  const [filterEmployee, setFilterEmployee] = useState('ALL');
-  const [filterKyc, setFilterKyc] = useState('ALL');
+  const [search,          setSearch]          = useState('');
+  const [filterState,     setFilterState]     = useState('ALL');
+  const [filterEmployee,  setFilterEmployee]  = useState('ALL');
+  const [filterKyc,       setFilterKyc]       = useState('ALL');
   const [filterEnrolledBy, setFilterEnrolledBy] = useState('ALL');
-  const [filterOtp, setFilterOtp] = useState('ALL');
-  const [sortField, setSortField] = useState<'submittedAt' | 'outletName'>('submittedAt');
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [filterOtp,       setFilterOtp]       = useState('ALL');
+  const [sortField,       setSortField]       = useState<'submittedAt' | 'outletName'>('submittedAt');
+  const [sortDir,         setSortDir]         = useState<'asc' | 'desc'>('desc');
+  const [expandedId,      setExpandedId]      = useState<string | null>(null);
 
   const uniqueStates    = useMemo(() => [...new Set(allEnrollments.map((e) => e.state))].sort(), [allEnrollments]);
   const uniqueEmployees = useMemo(() => [...new Set(allEnrollments.map((e) => e.assignedEmployeeId))].sort(), [allEnrollments]);
@@ -103,19 +109,44 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
     return rows;
   }, [allEnrollments, search, filterState, filterEmployee, filterKyc, filterEnrolledBy, filterOtp, sortField, sortDir]);
 
-  // ── Stats ─────────────────────────────────────────────────────────────────
   const stats = useMemo(
     () => computeEnrollmentStats(allTargeted, allEnrollments),
     [allTargeted, allEnrollments],
   );
 
-  // ── Excel Export ──────────────────────────────────────────────────────────
-  const handleExport = () => {
-    const rows = buildExcelExportRows(allEnrollments, DEMO_FORM_FIELDS);
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Enrollments');
-    XLSX.writeFile(wb, `enrollments_${schemeId}_${new Date().toISOString().split('T')[0]}.xlsx`);
+  // ── Excel Export — backend xlsx download (RAW blob, no JSON parse) ────────
+  const handleExport = async () => {
+    setExporting(true);
+    setExportError(null);
+    try {
+      const res = await fetch(`/api/admin/schemes/${schemeId}/enrollments/export`, {
+        headers: { ...authHeader() },
+      });
+
+      if (!res.ok) {
+        // Attempt to parse error from JSON body; if the body is binary just use statusText
+        let errMsg = res.statusText;
+        try {
+          const body = await res.json();
+          errMsg = body?.error ?? body?.message ?? errMsg;
+        } catch { /* binary body or parse failure — use statusText */ }
+        setExportError(`Export failed: ${errMsg}`);
+        return;
+      }
+
+      // Backend returns RAW xlsx — stream into blob → trigger anchor download
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `enrollments_${schemeId}_${new Date().toISOString().split('T')[0]}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : 'Network error during export');
+    } finally {
+      setExporting(false);
+    }
   };
 
   // ── Sort toggle ───────────────────────────────────────────────────────────
@@ -144,22 +175,32 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
             <p className="text-xs text-gray-500">Scheme {schemeId} · All enrollment activity</p>
           </div>
         </div>
-        <button onClick={handleExport}
-          className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-medium rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors">
-          <Download className="w-4 h-4" />
-          Export Excel
-        </button>
+        <div className="flex flex-col items-end gap-1">
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-medium rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60"
+          >
+            <Download className="w-4 h-4" />
+            {exporting ? 'Exporting…' : 'Export Excel'}
+          </button>
+          {exportError && (
+            <p className="text-xs text-red-500 flex items-center gap-1 mt-1">
+              <AlertCircle className="w-3 h-3" />{exportError}
+            </p>
+          )}
+        </div>
       </div>
 
       {/* ── Summary strip ──────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
         {[
-          { label: 'Targeted',       value: stats.totalTargeted,   icon: <Users className="w-4 h-4 text-gray-500" />,       bg: 'bg-gray-50' },
-          { label: 'Enrolled',       value: stats.totalEnrolled,   icon: <UserCheck className="w-4 h-4 text-green-600" />,  bg: 'bg-green-50' },
-          { label: 'Enrolment %',    value: fmtPct(stats.enrollmentPct), icon: <TrendingUp className="w-4 h-4 text-blue-600" />, bg: 'bg-blue-50' },
-          { label: 'Self-enrolled',  value: stats.selfEnrolled,    icon: <UserCog className="w-4 h-4 text-purple-600" />,   bg: 'bg-purple-50' },
-          { label: 'By Employee',    value: stats.employeeEnrolled,icon: <Building2 className="w-4 h-4 text-amber-600" />,  bg: 'bg-amber-50' },
-          { label: 'OTP Verified',   value: stats.otpVerifiedCount,icon: <Phone className="w-4 h-4 text-teal-600" />,       bg: 'bg-teal-50' },
+          { label: 'Targeted',       value: stats.totalTargeted,        icon: <Users className="w-4 h-4 text-gray-500" />,        bg: 'bg-gray-50' },
+          { label: 'Enrolled',       value: stats.totalEnrolled,        icon: <UserCheck className="w-4 h-4 text-green-600" />,   bg: 'bg-green-50' },
+          { label: 'Enrolment %',    value: fmtPct(stats.enrollmentPct), icon: <TrendingUp className="w-4 h-4 text-blue-600" />,  bg: 'bg-blue-50' },
+          { label: 'Self-enrolled',  value: stats.selfEnrolled,         icon: <UserCog className="w-4 h-4 text-purple-600" />,    bg: 'bg-purple-50' },
+          { label: 'By Employee',    value: stats.employeeEnrolled,     icon: <Building2 className="w-4 h-4 text-amber-600" />,   bg: 'bg-amber-50' },
+          { label: 'OTP Verified',   value: stats.otpVerifiedCount,     icon: <Phone className="w-4 h-4 text-teal-600" />,        bg: 'bg-teal-50' },
         ].map(({ label, value, icon, bg }) => (
           <div key={label} className={`${bg} rounded-xl border border-gray-100 p-3 flex items-center gap-2`}>
             {icon}
@@ -173,8 +214,6 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
 
       {/* ── Geography + Employee breakdown ─────────────────────────────── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-
-        {/* State breakdown */}
         <div className="bg-white rounded-xl border border-gray-200 p-4">
           <h3 className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
             <MapPin className="w-4 h-4 text-gray-500" /> State-wise Enrollment
@@ -200,7 +239,6 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
             )}
         </div>
 
-        {/* Employee leaderboard */}
         <div className="bg-white rounded-xl border border-gray-200 p-4">
           <h3 className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
             <Building2 className="w-4 h-4 text-gray-500" /> Employee Leaderboard
@@ -233,7 +271,6 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
       {/* ── Filters ──────────────────────────────────────────────────────── */}
       <div className="bg-white rounded-xl border border-gray-200 p-4">
         <div className="flex flex-wrap gap-3">
-          {/* Search */}
           <div className="relative flex-1 min-w-48">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
             <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
@@ -242,21 +279,18 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
             />
           </div>
 
-          {/* State filter */}
           <select value={filterState} onChange={(e) => setFilterState(e.target.value)}
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]">
             <option value="ALL">All States</option>
             {uniqueStates.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
 
-          {/* Employee filter */}
           <select value={filterEmployee} onChange={(e) => setFilterEmployee(e.target.value)}
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]">
             <option value="ALL">All Employees</option>
             {uniqueEmployees.map((e) => <option key={e} value={e}>{e}</option>)}
           </select>
 
-          {/* KYC filter */}
           <select value={filterKyc} onChange={(e) => setFilterKyc(e.target.value)}
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]">
             <option value="ALL">KYC + Non-KYC</option>
@@ -264,7 +298,6 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
             <option value="NON_KYC">Non-KYC Only</option>
           </select>
 
-          {/* Enrolled-by filter */}
           <select value={filterEnrolledBy} onChange={(e) => setFilterEnrolledBy(e.target.value)}
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]">
             <option value="ALL">Self + Employee</option>
@@ -272,7 +305,6 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
             <option value="EMPLOYEE">By Employee</option>
           </select>
 
-          {/* OTP filter */}
           <select value={filterOtp} onChange={(e) => setFilterOtp(e.target.value)}
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]">
             <option value="ALL">Any OTP status</option>
@@ -372,13 +404,10 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
                     </td>
                   </tr>
 
-                  {/* Expanded row — audit log + field values */}
                   {expandedId === enr.enrollmentId && (
                     <tr key={`${enr.enrollmentId}-expanded`} className="bg-gray-50">
                       <td colSpan={9} className="px-4 py-4">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-
-                          {/* Field values */}
                           <div>
                             <h4 className="text-xs font-semibold text-gray-700 mb-2">Form Field Values</h4>
                             {Object.keys(enr.fieldValues).length === 0
@@ -394,7 +423,6 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
                                 </div>
                               )}
 
-                            {/* Photo geo-tags */}
                             {enr.photoGeoTags.length > 0 && (
                               <div className="mt-2">
                                 <h5 className="text-xs font-semibold text-gray-600 mb-1">Photo GPS Tags</h5>
@@ -407,7 +435,6 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
                             )}
                           </div>
 
-                          {/* Audit log */}
                           <div>
                             <h4 className="text-xs font-semibold text-gray-700 mb-2">Audit Log</h4>
                             <div className="space-y-1.5">
@@ -426,7 +453,6 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
                           </div>
                         </div>
 
-                        {/* OTP details */}
                         {enr.otpVerified && (
                           <div className="mt-3 flex items-center gap-2 text-xs text-green-700 bg-green-50 rounded-lg px-3 py-2 border border-green-100">
                             <Phone className="w-3.5 h-3.5 shrink-0" />

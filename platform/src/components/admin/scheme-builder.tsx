@@ -9,7 +9,6 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { IncentiveType } from '@/types';
-import { saveAdminScheme as persistAdminScheme } from '@/lib/schemes';
 import { EnrollmentFormBuilder } from '@/components/admin/EnrollmentFormBuilder';
 import type { EnrollmentFormConfig, FormField } from '@/lib/campaign';
 import {
@@ -22,6 +21,7 @@ import {
   type SchemeBuilderCampaignForm,
 } from './scheme-builder-helpers';
 import type { OutletRecord } from '@/lib/campaign';
+import { api } from '@/lib/api-client';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -55,10 +55,30 @@ interface SchemeFormData {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// localStorage persistence
+// Helpers — map IncentiveType → backend SchemeType / RewardType
 // ─────────────────────────────────────────────────────────────────────────────
 
-// saveAdminScheme is imported from @/lib/schemes (see import above)
+/**
+ * Backend expects schemeType (SALES_INCENTIVE | VISIBILITY | REFERRAL_BONUS |
+ * MILESTONE | GENERAL) and rewardType (POINTS | CASHBACK | VOUCHER | GIFT).
+ * Map from the FE IncentiveType enum to reasonable defaults.
+ */
+function toSchemeType(incentiveType: IncentiveType): string {
+  const map: Record<string, string> = {
+    SALES:           'SALES_INCENTIVE',
+    VISIBILITY:      'VISIBILITY',
+    SECONDARY_SALES: 'SALES_INCENTIVE',
+    LOYALTY:         'GENERAL',
+    REFERRAL:        'REFERRAL_BONUS',
+    MILESTONE:       'MILESTONE',
+  };
+  return map[incentiveType] ?? 'GENERAL';
+}
+
+function toRewardType(_incentiveType: IncentiveType): string {
+  // All schemes currently reward POINTS — refine later if needed
+  return 'POINTS';
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Defaults
@@ -91,7 +111,7 @@ interface SchemeBuilderProps {
   initialData?: Partial<SchemeFormData>;
   schemeId?: string;
   onSave?: (data: SchemeFormData) => void;
-  onPublish?: (data: SchemeFormData) => void;
+  onPublish?: (data: SchemeFormData, newSchemeId: string) => void;
   onArchive?: () => void;
 }
 
@@ -129,6 +149,7 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
 
   const [sectionsOpen, setSectionsOpen] = useState({
     campaignType:     true,
@@ -224,7 +245,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
   // ── Validation ────────────────────────────────────────────────────────────
 
   const validate = (): boolean => {
-    // Build a SchemeBuilderCampaignForm for the helper
     const helperForm: SchemeBuilderCampaignForm = {
       name:                  form.name,
       startDate:             form.startDate,
@@ -264,48 +284,93 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
   const handleSave = async () => {
     if (!validate()) return;
     setSaving(true);
-    await new Promise((r) => setTimeout(r, 800));
+    // Save draft — no backend persist for draft yet; notify parent
+    await new Promise((r) => setTimeout(r, 400));
     onSave?.(form);
     setSaving(false);
   };
 
+  // ── Publish → POST /api/schemes (+ optional enrollment-form PUT) ──────────
+
   const handlePublish = async () => {
     if (!validate()) return;
     setPublishing(true);
-    await new Promise((r) => setTimeout(r, 1000));
+    setPublishError(null);
 
-    const startFmt = form.startDate ? new Date(form.startDate).toLocaleDateString('en-IN', { month: 'short', year: '2-digit' }) : '';
-    const endFmt   = form.endDate   ? new Date(form.endDate).toLocaleDateString('en-IN',   { month: 'short', year: '2-digit' }) : '';
-    const now = new Date();
-    const start = form.startDate ? new Date(form.startDate) : null;
-    const end   = form.endDate   ? new Date(form.endDate)   : null;
-    const derivedStatus = !start ? 'DRAFT'
-      : now < start ? 'UPCOMING'
-      : end && now > end ? 'EXPIRED'
-      : 'ACTIVE';
+    try {
+      // Build a short unique code from name + timestamp
+      const codeBase = form.name.trim().toUpperCase().replace(/\s+/g, '_').slice(0, 20);
+      const code = `${codeBase}_${Date.now().toString(36).toUpperCase()}`;
 
-    // Always persist to the shared scheme store regardless of self-registration flag
-    persistAdminScheme({
-      id:                       schemeId ?? `sch_${Date.now()}`,
-      name:                     form.name,
-      description:              form.description,
-      period:                   startFmt && endFmt ? `${startFmt} – ${endFmt}` : '',
-      startDate:                form.startDate,
-      endDate:                  form.endDate,
-      acceptDeadline:           form.acceptDeadline,
-      outletTargeting:          form.outletTargeting,
-      targetedOutletIds:        form.targetedOutlets.map((o) => o.outletId),
-      requiresSelfRegistration: form.requiresSelfRegistration,
-      publishedAt:              new Date().toISOString(),
-      // Enriched display fields
-      status:                   derivedStatus,
-      incentiveType:            form.incentiveType,
-      partnersEnrolled:         0,
-      totalPayout:              '—',
-    });
+      const createPayload = {
+        code,
+        name:               form.name,
+        description:        form.description || undefined,
+        schemeType:         toSchemeType(form.incentiveType),
+        rewardType:         toRewardType(form.incentiveType),
+        startDate:          form.startDate,
+        endDate:            form.endDate,
+        holdingPeriodDays:  form.holdingPeriodDays ? Number(form.holdingPeriodDays) : 30,
+        budgetPaise:        form.budgetCap ? Math.round(Number(form.budgetCap) * 100) : undefined,
+        isStackable:        false,
+        priority:           0,
+        metadata: {
+          campaignType:           form.campaignType,
+          outletTargeting:        form.outletTargeting,
+          requiresSelfRegistration: form.requiresSelfRegistration,
+          acceptDeadline:         form.acceptDeadline || undefined,
+          tags:                   form.tags,
+          requireApprovalGate:    form.requireApprovalGate,
+          enableNotifications:    form.enableNotifications,
+        },
+      };
 
-    onPublish?.(form);
-    setPublishing(false);
+      const createResult = await api.post<{ scheme: { id: string } }>(
+        '/api/schemes',
+        createPayload,
+      );
+
+      if (!createResult.success) {
+        setPublishError(`Failed to create scheme: ${createResult.error}`);
+        setPublishing(false);
+        return;
+      }
+
+      const newSchemeId = createResult.data.scheme.id;
+
+      // If an enrollment form is configured (OPEN_CAMPAIGN / MIXED), persist it
+      const hasEnrollmentForm =
+        (form.campaignType === 'OPEN_CAMPAIGN' || form.campaignType === 'MIXED') &&
+        form.enrollmentFormConfig.fields.length > 0;
+
+      if (hasEnrollmentForm) {
+        // Build formSchema from EnrollmentFormConfig fields
+        const formSchema: Record<string, unknown> = {
+          captureGpsOnSubmit: form.enrollmentFormConfig.captureGpsOnSubmit,
+          requireOtp:         form.enrollmentFormConfig.requireOtp,
+          fields:             form.enrollmentFormConfig.fields,
+        };
+
+        const efResult = await api.put<{ enrollmentForm: unknown }>(
+          `/api/schemes/${newSchemeId}/enrollment-form`,
+          {
+            campaignType: form.campaignType,
+            formSchema,
+          },
+        );
+
+        if (!efResult.success) {
+          // Scheme created but form failed — surface as a warning, not a hard error
+          console.warn('[SchemeBuilder] Enrollment form save failed:', efResult.error);
+        }
+      }
+
+      onPublish?.(form, newSchemeId);
+    } catch (err) {
+      setPublishError(err instanceof Error ? err.message : 'Unexpected error');
+    } finally {
+      setPublishing(false);
+    }
   };
 
   // ── Sub-components ────────────────────────────────────────────────────────
@@ -539,7 +604,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
             {/* Excel upload */}
             {form.outletTargeting === 'SPECIFIC' && (
               <div className="space-y-3">
-                {/* Info about the new multi-column format */}
                 <div className="bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 text-xs text-blue-700">
                   <strong>Enhanced format:</strong> The template now supports multi-column outlet data —
                   outlet_id, outlet_name, outlet_type, state, city, pincode, assigned_employee_id, plus any
@@ -547,7 +611,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
                   Non-KYC outlets require all standard fields.
                 </div>
 
-                {/* Drop zone */}
                 <div
                   onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                   onDragLeave={() => setDragOver(false)}
@@ -564,7 +627,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
                     className="hidden" onChange={handleFileChange} />
                 </div>
 
-                {/* Template download */}
                 <button type="button" onClick={handleTemplateDownload}
                   className="flex items-center gap-2 text-xs font-medium text-[var(--brand-primary)] hover:text-[var(--brand-primary-dark)] transition-colors">
                   <Download className="w-3.5 h-3.5" />
@@ -574,7 +636,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
                   )}
                 </button>
 
-                {/* Status messages */}
                 {uploadSuccess && (
                   <p className="text-xs text-green-600 flex items-center gap-1.5">
                     <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/></svg>
@@ -587,7 +648,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
                   </p>
                 )}
 
-                {/* Preview table */}
                 {form.targetedOutlets.length > 0 && (
                   <div className="border border-green-200 rounded-xl overflow-hidden">
                     <div className="flex items-center justify-between px-3 py-2 bg-green-50 border-b border-green-200">
@@ -683,7 +743,7 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
                   </div>
                   <div className="bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
                     <p className="text-xs text-amber-700">
-                      Outlets that don't accept by the deadline will not be enrolled.
+                      Outlets that don&apos;t accept by the deadline will not be enrolled.
                     </p>
                   </div>
                 </div>
@@ -756,7 +816,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
 
             {form.enableNotifications && form.notificationConfig && (
               <div className="space-y-4 pt-2">
-                {/* WhatsApp */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1 flex items-center gap-1.5">
@@ -792,7 +851,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
                   </p>
                 )}
 
-                {/* OTP */}
                 <div className="border-t border-gray-100 pt-3">
                   <Toggle
                     value={form.notificationConfig.otpRequired}
@@ -802,7 +860,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
                   />
                 </div>
 
-                {/* Variable mapping hint */}
                 <div className="bg-blue-50 border border-blue-100 rounded-lg px-3 py-2.5">
                   <p className="text-xs text-blue-700 font-medium mb-1">Template variable mapping</p>
                   <p className="text-xs text-blue-600">
@@ -824,7 +881,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
         {sectionsOpen.advanced && (
           <div className="p-4 space-y-5">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Holding period */}
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">
                   Holding Period (Days) <span className="text-red-500">*</span>
@@ -838,7 +894,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
                 {errors.holdingPeriodDays && <p className="text-xs text-red-500 mt-1">{errors.holdingPeriodDays}</p>}
               </div>
 
-              {/* Budget cap */}
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">Budget Cap (₹)</label>
                 <input type="number" value={form.budgetCap}
@@ -852,7 +907,6 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
               </div>
             </div>
 
-            {/* Approval gate */}
             <div className="border-t border-gray-100 pt-4">
               <Toggle
                 value={form.requireApprovalGate}
@@ -876,6 +930,14 @@ export function SchemeBuilder({ initialData, schemeId, onSave, onPublish, onArch
           </div>
         )}
       </div>
+
+      {/* Publish error */}
+      {publishError && (
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+          <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+          <p className="text-sm text-red-700">{publishError}</p>
+        </div>
+      )}
 
       {/* ── Action Buttons ────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between pt-2">

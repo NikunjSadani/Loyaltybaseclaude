@@ -1,45 +1,57 @@
 'use client';
 
+/**
+ * Admin Target Upload page — FE-A (Targets / Stream T).
+ *
+ * Data source rewire:
+ *   OLD: client-side xlsx parsing (lib/target-excel-upload) + /api/admin/kpi-config
+ *   NEW:
+ *     Template download: GET /api/admin/targets/template?months=YYYY-MM,YYYY-MM
+ *                        → RAW xlsx binary (NOT JSON-wrapped) → browser download
+ *     Upload:            POST /api/admin/targets/upload (FormData, field "file")
+ *                        → { success: true, data: { batchId, month, monthsInBatch,
+ *                             totalRows, acceptedCount, rejectedCount, rows } }
+ *
+ * The client-side xlsx parsing path is REMOVED. The backend parses now.
+ * UI shell / styling is preserved; only the data layer changes.
+ */
+
 import { useState, useRef, useCallback, useEffect } from 'react';
 import {
-  Upload, Download, Plus, Trash2, ChevronDown, ChevronUp,
-  CheckCircle2, XCircle, AlertTriangle, FileSpreadsheet,
-  ArrowUp, ArrowDown, Settings2, Info,
+  Upload, Download, ChevronDown, ChevronUp,
+  CheckCircle2, XCircle, FileSpreadsheet,
+  AlertTriangle, Info,
 } from 'lucide-react';
-import {
-  makeKpiId,
-  DEOLEO_DEFAULT_KPIS,
-  type TenantKpiDef,
-} from '@/lib/platform/tenant-kpi-config';
-import {
-  generateTargetTemplate,
-  parseTargetUpload,
-  buildErrorReportBuffer,
-  type ParseResult,
-} from '@/lib/target-excel-upload';
-import {
-  buildMonthRange, MOCK_OUTLETS,
-  type NewOutletType, type TargetConfig,
-} from '@/lib/targets';
+import { authHeader } from '@/lib/api-client';
+import { buildMonthRange, formatMonth } from '@/lib/targets';
 
-// ── Roles permitted to access this page ──────────────────────────────────────
-// Both CLIENT_ADMIN and GIFSY_ADMIN are allowed.
-const ALLOWED_ROLES = ['CLIENT_ADMIN', 'GIFSY_ADMIN'] as const;
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/** A single parsed row as returned by the backend */
+interface UploadRow {
+  rowIndex:  number;
+  outletCode?: string;
+  outletId?:   string;
+  month?:      string;
+  status:      'accepted' | 'rejected' | 'skipped' | 'updated' | 'error';
+  remarks?:    string;
+  [key: string]: unknown;
+}
+
+interface UploadResult {
+  batchId:       string;
+  month:         string;
+  monthsInBatch: string[];
+  totalRows:     number;
+  acceptedCount: number;
+  rejectedCount: number;
+  rows:          UploadRow[];
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function getAllOutletIds(): Set<string> {
-  const ids = new Set<string>();
-  for (const outlets of Object.values(MOCK_OUTLETS)) {
-    for (const o of outlets) ids.add(o.id);
-  }
-  return ids;
-}
-
-function downloadBuffer(buf: ArrayBuffer, filename: string) {
-  const blob = new Blob([buf], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  });
+/** Trigger a browser download from a Blob */
+function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a   = Object.assign(document.createElement('a'), { href: url, download: filename });
   document.body.appendChild(a);
@@ -51,89 +63,35 @@ function downloadBuffer(buf: ArrayBuffer, filename: string) {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function TargetUploadPage() {
-  // KPI config
-  const [kpiDefs,             setKpiDefs]            = useState<TenantKpiDef[]>(DEOLEO_DEFAULT_KPIS);
-  const [kpiOpen,             setKpiOpen]            = useState(false);
-  const [addingKpi,           setAddingKpi]          = useState(false);
-  const [newKpiLabel,         setNewKpiLabel]        = useState('');
-  const [newKpiUnit,          setNewKpiUnit]         = useState('cases');
-  const [newKpiOverride,      setNewKpiOverride]     = useState(false);
-  const [newKpiOverrideLabel, setNewKpiOverrideLabel] = useState('');
-
-  // Template options — 12-month forward window (current month through next 11)
+  // Month range for template
   const monthOptions = buildMonthRange(12);
   const [fromMonth, setFromMonth] = useState(monthOptions[0]?.value ?? '');
   const [toMonth,   setToMonth]   = useState(monthOptions[2]?.value ?? monthOptions[0]?.value ?? '');
 
-  // Upload
+  // Upload state
   const fileInputRef  = useRef<HTMLInputElement>(null);
   const [fileName,    setFileName]    = useState('');
-  const [parsing,     setParsing]     = useState(false);
-  const [parseResult, setParseResult] = useState<ParseResult | null>(null);
-  const [savedConfig, setSavedConfig] = useState(false);
+  const [uploading,   setUploading]   = useState(false);
+  const [uploadError, setUploadError] = useState('');
+  const [result,      setResult]      = useState<UploadResult | null>(null);
 
-  // ── Load KPI defs from API on mount ───────────────────────────────────
+  // Template download state
+  const [downloading,   setDownloading]   = useState(false);
+  const [downloadError, setDownloadError] = useState('');
+
+  // KPI count hint (fetched once on mount)
+  const [kpiCount, setKpiCount] = useState<number | null>(null);
+
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch('/api/admin/kpi-config', { headers: { Authorization: `Bearer ${token}` } })
+    fetch('/api/admin/kpis', { headers: authHeader() })
       .then(r => r.json())
-      .then(j => { if (j.success && Array.isArray(j.data.kpiDefs) && j.data.kpiDefs.length > 0) setKpiDefs(j.data.kpiDefs); })
+      .then((j: { success: boolean; data?: unknown[] }) => {
+        if (j.success && Array.isArray(j.data)) setKpiCount(j.data.filter((k: unknown) => (k as { enabled?: boolean }).enabled).length);
+      })
       .catch(() => {});
   }, []);
 
-  // ── KPI helpers ────────────────────────────────────────────────────────
-
-  function saveKpis(defs: TenantKpiDef[]) {
-    setKpiDefs(defs);
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch('/api/admin/kpi-config', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(defs),
-    }).catch(() => {});
-  }
-
-  function toggleKpi(id: string) {
-    saveKpis(kpiDefs.map(d => d.id === id ? { ...d, enabled: !d.enabled } : d));
-  }
-
-  function removeKpi(id: string) {
-    saveKpis(kpiDefs.filter(d => d.id !== id));
-  }
-
-  function moveKpi(id: string, dir: -1 | 1) {
-    const sorted = [...kpiDefs].sort((a, b) => a.order - b.order);
-    const idx    = sorted.findIndex(d => d.id === id);
-    const newIdx = idx + dir;
-    if (newIdx < 0 || newIdx >= sorted.length) return;
-    [sorted[idx].order, sorted[newIdx].order] = [sorted[newIdx].order, sorted[idx].order];
-    saveKpis(sorted);
-  }
-
-  function commitAddKpi() {
-    const label = newKpiLabel.trim();
-    if (!label) return;
-    const id    = makeKpiId(label);
-    const order = Math.max(...kpiDefs.map(d => d.order), 0) + 1;
-    const def: TenantKpiDef = {
-      id,
-      label,
-      unit:              newKpiUnit,
-      isPrimary:         false,
-      hasNameOverride:   newKpiOverride,
-      nameOverrideLabel: newKpiOverride ? (newKpiOverrideLabel.trim() || `${label} Name`) : '',
-      order,
-      enabled:           true,
-    };
-    saveKpis([...kpiDefs, def]);
-    setAddingKpi(false);
-    setNewKpiLabel('');
-    setNewKpiUnit('cases');
-    setNewKpiOverride(false);
-    setNewKpiOverrideLabel('');
-  }
-
-  // ── Template download ──────────────────────────────────────────────────
+  // ── Month helpers ──────────────────────────────────────────────────────────
 
   function selectedMonths(): string[] {
     const from = monthOptions.findIndex(m => m.value === fromMonth);
@@ -142,14 +100,6 @@ export default function TargetUploadPage() {
     return monthOptions.slice(from, to + 1).map(m => m.value);
   }
 
-  function handleDownloadTemplate() {
-    const months = selectedMonths();
-    if (months.length === 0) return;
-    const buf = generateTargetTemplate(kpiDefs, months);
-    downloadBuffer(buf, `targets_template_${months[0]}_to_${months[months.length - 1]}.xlsx`);
-  }
-
-  // When "From" changes to something after "To", push "To" forward to match
   function handleFromChange(val: string) {
     setFromMonth(val);
     const fromIdx = monthOptions.findIndex(m => m.value === val);
@@ -157,27 +107,22 @@ export default function TargetUploadPage() {
     if (toIdx < fromIdx) setToMonth(val);
   }
 
-  // ── Quarter-aware presets ──────────────────────────────────────────────
-  // Computed once from the current date so "This Quarter" always reflects
-  // the actual calendar quarter, not a fixed month count.
+  // Quarter-aware presets
   const PRESETS = (() => {
     const now  = new Date();
-    const cm   = now.getMonth() + 1;           // 1-12
+    const cm   = now.getMonth() + 1;
     const cy   = now.getFullYear();
-    const cq   = Math.ceil(cm / 3);            // current quarter 1-4
-    const curr = monthOptions[0]?.value ?? ''; // current month (start of window)
+    const cq   = Math.ceil(cm / 3);
+    const curr = monthOptions[0]?.value ?? '';
 
-    // This quarter: from today's month → last month of current quarter
     const tqEndM  = cq * 3;
     const tqEnd   = `${cy}-${String(tqEndM).padStart(2, '0')}`;
 
-    // Next quarter: first → last month of the following quarter
     const nq      = cq === 4 ? 1 : cq + 1;
     const ny      = cq === 4 ? cy + 1 : cy;
     const nqStart = `${ny}-${String((nq - 1) * 3 + 1).padStart(2, '0')}`;
     const nqEnd   = `${ny}-${String(nq * 3).padStart(2, '0')}`;
 
-    // Numeric presets anchored to current month
     const mo = (i: number) => monthOptions[i]?.value ?? curr;
 
     return [
@@ -188,37 +133,90 @@ export default function TargetUploadPage() {
     ];
   })();
 
-  function applyPreset(from: string, to: string) {
-    setFromMonth(from);
-    setToMonth(to);
+  const activePreset = PRESETS.find(p => p.from === fromMonth && p.to === toMonth)?.key ?? null;
+
+  const chosenMonths   = selectedMonths();
+  const toOptions      = monthOptions.filter(m => m.value >= fromMonth);
+  const monthSpanLabel = chosenMonths.length > 0
+    ? `${monthOptions.find(m => m.value === chosenMonths[0])?.label} → ${monthOptions.find(m => m.value === chosenMonths[chosenMonths.length - 1])?.label}`
+    : '—';
+
+  // ── Template download ──────────────────────────────────────────────────────
+
+  async function handleDownloadTemplate() {
+    const months = selectedMonths();
+    if (months.length === 0) return;
+
+    setDownloading(true);
+    setDownloadError('');
+
+    try {
+      const qs       = months.join(',');
+      const filename = `targets_template_${months[0]}_to_${months[months.length - 1]}.xlsx`;
+
+      const res = await fetch(`/api/admin/targets/template?months=${encodeURIComponent(qs)}`, {
+        headers: authHeader(),
+      });
+
+      if (!res.ok) {
+        // Try to parse an error message from JSON (backend sends { success: false, error })
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = await res.json() as { error?: string; message?: string };
+          msg = j.error ?? j.message ?? msg;
+        } catch { /* ignore */ }
+        setDownloadError(msg);
+        return;
+      }
+
+      // SUCCESS — the response body is raw xlsx binary
+      const blob = await res.blob();
+      downloadBlob(blob, filename);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : 'Download failed');
+    } finally {
+      setDownloading(false);
+    }
   }
 
-  /** Which preset key is currently active, if any */
-  const activePreset = PRESETS.find(
-    p => p.from === fromMonth && p.to === toMonth,
-  )?.key ?? null;
-
-  // ── Upload & parse ─────────────────────────────────────────────────────
+  // ── Upload ─────────────────────────────────────────────────────────────────
 
   const handleFile = useCallback(async (file: File) => {
     setFileName(file.name);
-    setParsing(true);
-    setParseResult(null);
-    setSavedConfig(false);
+    setUploading(true);
+    setUploadError('');
+    setResult(null);
+
     try {
-      const arrayBuf = await file.arrayBuffer();
-      const result   = parseTargetUpload(arrayBuf, kpiDefs, getAllOutletIds());
-      setParseResult(result);
-    } catch (e) {
-      console.error('Upload parse error:', e);
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch('/api/admin/targets/upload', {
+        method:  'POST',
+        headers: authHeader(), // Do NOT add Content-Type — let the browser set multipart boundary
+        body:    formData,
+      });
+
+      const json = await res.json() as { success: boolean; data?: UploadResult; error?: string };
+
+      if (!res.ok || !json.success) {
+        setUploadError(json.error ?? `Upload failed (HTTP ${res.status})`);
+        return;
+      }
+
+      setResult(json.data!);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
-      setParsing(false);
+      setUploading(false);
     }
-  }, [kpiDefs]);
+  }, []);
 
   function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (file) handleFile(file);
+    // Reset so the same file can be re-picked
+    e.target.value = '';
   }
 
   function handleDrop(e: React.DragEvent<HTMLDivElement>) {
@@ -227,237 +225,54 @@ export default function TargetUploadPage() {
     if (file) handleFile(file);
   }
 
-  // ── Save ───────────────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────────────
 
-  async function handleSaveTargets() {
-    if (!parseResult || parseResult.summary.updated === 0) return;
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    const now   = new Date().toISOString();
-    const months = Object.keys(parseResult.targetValues);
-
-    let existing: TargetConfig | undefined;
-    try {
-      const r = await fetch('/api/admin/target-config', { headers: { Authorization: `Bearer ${token}` } });
-      const j = await r.json();
-      if (j.success) existing = (j.data.configs as TargetConfig[]).find(c => c.id === 'excel_upload_config');
-    } catch { /* use undefined */ }
-
-    const base: TargetConfig = existing ?? {
-      id: 'excel_upload_config',
-      outletType:  'SSS' as NewOutletType,
-      geoLevel:    'INDIA' as const,
-      geoName:     'Pan India',
-      months:      [],
-      kpis:        kpiDefs.filter(d => d.enabled).sort((a, b) => a.order - b.order).map(d => ({
-        id: d.id, displayName: d.label, type: 'custom' as const, unit: d.unit, isPrimary: d.isPrimary,
-      })),
-      status:           'ACTIVE' as const,
-      targetValues:     {},
-      kpiNameOverrides: {},
-      createdAt: now, updatedAt: now,
-    };
-    const merged: TargetConfig = {
-      ...base,
-      months:           Array.from(new Set([...(base.months ?? []), ...months])).sort(),
-      targetValues:     { ...(base.targetValues ?? {}),     ...parseResult.targetValues     },
-      kpiNameOverrides: { ...(base.kpiNameOverrides ?? {}), ...parseResult.kpiNameOverrides },
-      updatedAt: now,
-    };
-    try {
-      await fetch('/api/admin/target-config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(merged),
-      });
-      setSavedConfig(true);
-    } catch { /* ignore */ }
-  }
-
-  // ── Download report ────────────────────────────────────────────────────
-
-  function handleDownloadReport() {
-    if (!parseResult) return;
-    downloadBuffer(
-      buildErrorReportBuffer(parseResult.rows),
-      `upload_report_${new Date().toISOString().slice(0, 10)}.xlsx`,
-    );
-  }
-
-  const sortedKpis       = [...kpiDefs].sort((a, b) => a.order - b.order);
-  const enabledKpiCount  = kpiDefs.filter(d => d.enabled).length;
-  const overrideColCount = kpiDefs.filter(d => d.enabled && d.hasNameOverride).length;
-  const chosenMonths     = selectedMonths();
-  const monthSpanLabel   = chosenMonths.length > 0
-    ? `${monthOptions.find(m => m.value === chosenMonths[0])?.label} → ${monthOptions.find(m => m.value === chosenMonths[chosenMonths.length - 1])?.label}`
-    : '—';
-  // "To" options: only months ≥ fromMonth
-  const toOptions = monthOptions.filter(
-    m => m.value >= fromMonth,
-  );
-
-  // ── Render ─────────────────────────────────────────────────────────────
+  const [kpiHintOpen, setKpiHintOpen] = useState(false);
 
   return (
     <div className="space-y-5 pb-10">
 
-      {/* ── Section 1: KPI Configuration ───────────────────────────────── */}
+      {/* ── Section 1: KPI hint ─────────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
         <button
-          onClick={() => setKpiOpen(o => !o)}
+          onClick={() => setKpiHintOpen(o => !o)}
           className="w-full flex items-center justify-between px-6 py-4 text-left hover:bg-gray-50 transition-colors"
         >
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-xl bg-gray-100">
-              <Settings2 className="w-4 h-4 text-gray-600" />
+              <Info className="w-4 h-4 text-gray-600" />
             </div>
             <div>
-              <p className="text-sm font-semibold text-gray-900">KPI Configuration</p>
-              <p className="text-xs text-gray-500 mt-0.5">{enabledKpiCount} active KPIs · {overrideColCount} with name-override columns</p>
+              <p className="text-sm font-semibold text-gray-900">About this page</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {kpiCount !== null
+                  ? `${kpiCount} enabled KPI${kpiCount !== 1 ? 's' : ''} will appear as columns in the template`
+                  : 'KPI columns are driven by the KPI catalogue'}
+              </p>
             </div>
           </div>
-          {kpiOpen
+          {kpiHintOpen
             ? <ChevronUp   className="w-4 h-4 text-gray-400" />
             : <ChevronDown className="w-4 h-4 text-gray-400" />}
         </button>
 
-        {kpiOpen && (
-          <div className="border-t border-gray-100 px-6 py-5 space-y-4">
-
-            {/* Info note */}
+        {kpiHintOpen && (
+          <div className="border-t border-gray-100 px-6 py-4">
             <div className="flex items-start gap-2 bg-blue-50 border border-blue-100 rounded-xl px-4 py-3 text-xs text-blue-700">
               <Info className="w-3.5 h-3.5 mt-0.5 shrink-0 text-blue-500" />
               <span>
-                Changes here affect the template you generate. Adding a KPI automatically adds a new column — no code changes needed.
-                Accessible to both <strong>CLIENT_ADMIN</strong> and <strong>GIFSY_ADMIN</strong>.{' '}
-                <button
-                  onClick={() => saveKpis(DEOLEO_DEFAULT_KPIS)}
-                  className="underline text-blue-600 hover:text-blue-800"
-                >
-                  Reset to Deoleo defaults
-                </button>
+                The Excel template is built from the tenant&apos;s enabled KPIs and active outlet roster.
+                To add or change KPIs, visit{' '}
+                <a href="/admin/targets" className="underline font-semibold">KPI Management</a>.
+                Upload is parsed server-side — the backend validates outlet codes and KPI columns.
+                Blank cells are skipped (not stored as 0).
               </span>
             </div>
-
-            {/* KPI list */}
-            <div className="space-y-2">
-              {sortedKpis.map((kpi, idx) => (
-                <div
-                  key={kpi.id}
-                  className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors ${
-                    kpi.enabled ? 'border-gray-200 bg-gray-50' : 'border-gray-100 bg-gray-50 opacity-50'
-                  }`}
-                >
-                  {/* Order */}
-                  <div className="flex flex-col gap-0.5 shrink-0">
-                    <button onClick={() => moveKpi(kpi.id, -1)} disabled={idx === 0}
-                      className="p-0.5 rounded hover:bg-gray-200 disabled:opacity-20" aria-label="Move up">
-                      <ArrowUp className="w-3 h-3 text-gray-400" />
-                    </button>
-                    <button onClick={() => moveKpi(kpi.id, 1)} disabled={idx === sortedKpis.length - 1}
-                      className="p-0.5 rounded hover:bg-gray-200 disabled:opacity-20" aria-label="Move down">
-                      <ArrowDown className="w-3 h-3 text-gray-400" />
-                    </button>
-                  </div>
-
-                  {/* Info */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-medium text-gray-800">{kpi.label}</span>
-                      {kpi.isPrimary && (
-                        <span className="text-[10px] font-semibold bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">
-                          Primary
-                        </span>
-                      )}
-                      {kpi.hasNameOverride && (
-                        <span className="text-[10px] font-semibold bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded">
-                          Name col: {kpi.nameOverrideLabel}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-gray-400 mt-0.5">{kpi.unit} · ID: {kpi.id}</p>
-                  </div>
-
-                  {/* Toggle + remove */}
-                  <button onClick={() => toggleKpi(kpi.id)}
-                    className={`shrink-0 text-xs px-2.5 py-1 rounded-lg border font-medium transition-colors ${
-                      kpi.enabled
-                        ? 'border-red-200 text-red-600 hover:bg-red-50'
-                        : 'border-green-200 text-green-700 hover:bg-green-50'
-                    }`}>
-                    {kpi.enabled ? 'Disable' : 'Enable'}
-                  </button>
-                  <button onClick={() => removeKpi(kpi.id)}
-                    className="shrink-0 p-1.5 rounded-lg hover:bg-red-50 text-gray-300 hover:text-red-500 transition-colors"
-                    aria-label="Remove KPI">
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
-            </div>
-
-            {/* Add KPI */}
-            {addingKpi ? (
-              <div className="border border-gray-200 rounded-xl p-4 bg-white space-y-3">
-                <p className="text-xs font-semibold text-gray-700">New KPI</p>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Column Label *</label>
-                    <input
-                      value={newKpiLabel}
-                      onChange={e => setNewKpiLabel(e.target.value)}
-                      placeholder="e.g. New SKU"
-                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder:text-gray-300 focus:outline-none focus:border-gray-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Unit</label>
-                    <input
-                      value={newKpiUnit}
-                      onChange={e => setNewKpiUnit(e.target.value)}
-                      placeholder="cases"
-                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder:text-gray-300 focus:outline-none focus:border-gray-400"
-                    />
-                  </div>
-                </div>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" checked={newKpiOverride}
-                    onChange={e => setNewKpiOverride(e.target.checked)} className="rounded" />
-                  <span className="text-xs text-gray-600">Has per-outlet name override column</span>
-                </label>
-                {newKpiOverride && (
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Override column label</label>
-                    <input
-                      value={newKpiOverrideLabel}
-                      onChange={e => setNewKpiOverrideLabel(e.target.value)}
-                      placeholder={`${newKpiLabel || 'KPI'} Name`}
-                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 placeholder:text-gray-300 focus:outline-none focus:border-gray-400"
-                    />
-                  </div>
-                )}
-                <div className="flex gap-2">
-                  <button onClick={commitAddKpi} disabled={!newKpiLabel.trim()}
-                    className="flex items-center gap-1.5 px-3 py-2 bg-[var(--brand-primary)] text-white text-xs font-semibold rounded-lg hover:opacity-90 disabled:opacity-40">
-                    Add KPI
-                  </button>
-                  <button onClick={() => setAddingKpi(false)}
-                    className="px-3 py-2 border border-gray-200 text-gray-500 text-xs rounded-lg hover:bg-gray-50">
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <button onClick={() => setAddingKpi(true)}
-                className="flex items-center gap-1.5 px-3 py-2 border border-dashed border-gray-300 text-gray-500 text-xs font-medium rounded-xl hover:border-gray-400 hover:text-gray-700 hover:bg-gray-50 transition-colors">
-                <Plus className="w-3.5 h-3.5" />
-                Add KPI
-              </button>
-            )}
           </div>
         )}
       </div>
 
-      {/* ── Section 2: Download Template ───────────────────────────────── */}
+      {/* ── Section 2: Download Template ───────────────────────────────────── */}
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-6 py-5 space-y-4">
         <div className="flex items-center gap-3">
           <div className="p-2 rounded-xl bg-green-50">
@@ -466,7 +281,7 @@ export default function TargetUploadPage() {
           <div>
             <p className="text-sm font-semibold text-gray-900">Step 1 — Download Template</p>
             <p className="text-xs text-gray-500 mt-0.5">
-              Generate a blank Excel. Fill in Outlet ID, target values, and KPI names, then upload below.
+              Generate a blank Excel pre-filled with the outlet roster and KPI columns, then upload it below.
             </p>
           </div>
         </div>
@@ -477,7 +292,7 @@ export default function TargetUploadPage() {
           {PRESETS.map(p => (
             <button
               key={p.key}
-              onClick={() => applyPreset(p.from, p.to)}
+              onClick={() => { setFromMonth(p.from); setToMonth(p.to); }}
               className={`px-3 py-1 rounded-full text-xs font-semibold border transition-colors ${
                 activePreset === p.key
                   ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)]'
@@ -493,8 +308,11 @@ export default function TargetUploadPage() {
         <div className="flex items-end gap-4 flex-wrap">
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1.5">From</label>
-            <select value={fromMonth} onChange={e => handleFromChange(e.target.value)}
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-700 bg-white focus:outline-none focus:border-gray-400">
+            <select
+              value={fromMonth}
+              onChange={e => handleFromChange(e.target.value)}
+              className="border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-700 bg-white focus:outline-none focus:border-gray-400"
+            >
               {monthOptions.map(m => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
@@ -502,8 +320,11 @@ export default function TargetUploadPage() {
           </div>
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1.5">To</label>
-            <select value={toMonth} onChange={e => setToMonth(e.target.value)}
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-700 bg-white focus:outline-none focus:border-gray-400">
+            <select
+              value={toMonth}
+              onChange={e => setToMonth(e.target.value)}
+              className="border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-700 bg-white focus:outline-none focus:border-gray-400"
+            >
               {toOptions.map(m => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
@@ -511,10 +332,12 @@ export default function TargetUploadPage() {
           </div>
           <button
             onClick={handleDownloadTemplate}
-            disabled={chosenMonths.length === 0}
+            disabled={chosenMonths.length === 0 || downloading}
             className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-xl hover:opacity-90 disabled:opacity-40 transition-opacity"
           >
-            <Download className="w-4 h-4" />
+            {downloading
+              ? <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+              : <Download className="w-4 h-4" />}
             Download Template
           </button>
         </div>
@@ -524,12 +347,18 @@ export default function TargetUploadPage() {
           <p className="text-xs text-gray-500">
             <span className="font-semibold text-gray-700">{monthSpanLabel}</span>
             {' '}· {chosenMonths.length} month{chosenMonths.length !== 1 ? 's' : ''}
-            {' '}· {12 + overrideColCount + enabledKpiCount * chosenMonths.length} total columns
+            {kpiCount !== null && ` · ${kpiCount} KPI column${kpiCount !== 1 ? 's' : ''} per month`}
           </p>
+        )}
+
+        {downloadError && (
+          <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700">
+            <XCircle className="w-4 h-4 shrink-0" /> {downloadError}
+          </div>
         )}
       </div>
 
-      {/* ── Section 3: Upload ───────────────────────────────────────────── */}
+      {/* ── Section 3: Upload ───────────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-6 py-5 space-y-4">
         <div className="flex items-center gap-3">
           <div className="p-2 rounded-xl bg-blue-50">
@@ -538,7 +367,7 @@ export default function TargetUploadPage() {
           <div>
             <p className="text-sm font-semibold text-gray-900">Step 2 — Upload Filled Template</p>
             <p className="text-xs text-gray-500 mt-0.5">
-              Upload your completed Excel. Past months are never overwritten. Unknown outlet IDs are skipped.
+              Upload your completed Excel. The backend validates outlet codes and KPI columns. Re-upload is idempotent.
             </p>
           </div>
         </div>
@@ -553,76 +382,92 @@ export default function TargetUploadPage() {
           <FileSpreadsheet className="w-8 h-8 text-gray-300 mx-auto mb-2" />
           {fileName
             ? <p className="text-sm font-medium text-gray-700">{fileName}</p>
-            : <p className="text-sm text-gray-400">Drop your Excel here or <span className="text-[var(--brand-primary)] font-medium underline">browse</span></p>
-          }
-          <p className="text-xs text-gray-300 mt-1">Accepts .xlsx and .xls</p>
-          <input ref={fileInputRef} type="file" accept=".xlsx,.xls"
-            onChange={handleFileInputChange} className="hidden" />
+            : (
+              <>
+                <p className="text-sm text-gray-400">Drop your Excel here or <span className="text-[var(--brand-primary)] font-medium underline">browse</span></p>
+                <p className="text-xs text-gray-300 mt-1">Accepts .xlsx and .xls</p>
+              </>
+            )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            onChange={handleFileInputChange}
+            className="hidden"
+          />
         </div>
 
-        {parsing && (
+        {uploading && (
           <div className="flex items-center gap-2 text-sm text-gray-500">
             <div className="w-4 h-4 border-2 border-gray-200 border-t-[var(--brand-primary)] rounded-full animate-spin" />
-            Parsing file…
+            Uploading and parsing file…
+          </div>
+        )}
+
+        {uploadError && (
+          <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5 text-sm text-red-700">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{uploadError}</span>
           </div>
         )}
       </div>
 
-      {/* ── Section 4: Results ─────────────────────────────────────────── */}
-      {parseResult && (
+      {/* ── Section 4: Results ─────────────────────────────────────────────── */}
+      {result && (
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm px-6 py-5 space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-sm font-semibold text-gray-900">Upload Result</p>
-            {savedConfig && (
-              <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                Saved to active configs
+            <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              Batch {result.batchId.slice(-8)}
+            </span>
+          </div>
+
+          {/* Month chips */}
+          <div className="flex flex-wrap gap-1.5">
+            {result.monthsInBatch.map(m => (
+              <span key={m} className="text-[10px] font-semibold px-2 py-0.5 bg-[var(--brand-primary)]/10 text-[var(--brand-primary)] rounded-full">
+                {formatMonth(m)}
               </span>
-            )}
+            ))}
           </div>
 
-          {/* Summary row */}
+          {/* Summary stat cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <StatCard label="Total rows"  value={parseResult.summary.total}   color="gray"    />
-            <StatCard label="Updated"     value={parseResult.summary.updated}  color="green"   />
-            <StatCard label="Skipped"     value={parseResult.summary.skipped}  color="amber"   />
-            <StatCard label="Errors"      value={parseResult.summary.errors}   color="red"     />
+            <StatCard label="Total rows"  value={result.totalRows}     color="gray"  />
+            <StatCard label="Accepted"    value={result.acceptedCount} color="green" />
+            <StatCard label="Rejected"    value={result.rejectedCount} color={result.rejectedCount > 0 ? 'red' : 'gray'} />
+            <StatCard label="Months"      value={result.monthsInBatch.length} color="gray" />
           </div>
 
-          {/* Skipped / error rows preview */}
-          {parseResult.rows.filter(r => r.status !== 'updated').length > 0 && (
+          {/* Rejected rows preview */}
+          {result.rows.filter(r => r.status === 'rejected' || r.status === 'error' || r.status === 'skipped').length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-1 max-h-44 overflow-y-auto">
-              <p className="text-xs font-semibold text-amber-700 mb-2">Skipped / Error rows</p>
-              {parseResult.rows
-                .filter(r => r.status !== 'updated')
+              <p className="text-xs font-semibold text-amber-700 mb-2">Skipped / Rejected rows</p>
+              {result.rows
+                .filter(r => r.status !== 'accepted' && r.status !== 'updated')
                 .slice(0, 20)
-                .map(r => (
-                  <p key={r.rowIndex} className="text-xs text-amber-700">
-                    <span className="font-mono font-semibold">Row {r.rowIndex} — {r.outletId}:</span>{' '}
-                    {r.remarks}
+                .map((r, i) => (
+                  <p key={i} className="text-xs text-amber-700">
+                    <span className="font-mono font-semibold">
+                      Row {r.rowIndex ?? i + 1}
+                      {r.outletCode ? ` — ${r.outletCode}` : r.outletId ? ` — ${r.outletId}` : ''}:{' '}
+                    </span>
+                    {r.remarks ?? String(r.status)}
                   </p>
                 ))}
-              {parseResult.rows.filter(r => r.status !== 'updated').length > 20 && (
-                <p className="text-xs text-amber-500">…download the report for full details</p>
+              {result.rows.filter(r => r.status !== 'accepted' && r.status !== 'updated').length > 20 && (
+                <p className="text-xs text-amber-500">…{result.rows.filter(r => r.status !== 'accepted' && r.status !== 'updated').length - 20} more rows not shown</p>
               )}
             </div>
           )}
 
-          {/* Actions */}
-          <div className="flex items-center gap-3 flex-wrap">
-            {parseResult.summary.updated > 0 && !savedConfig && (
-              <button onClick={handleSaveTargets}
-                className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-xl hover:opacity-90 transition-opacity">
-                <CheckCircle2 className="w-4 h-4" />
-                Save {parseResult.summary.updated} updated target{parseResult.summary.updated !== 1 ? 's' : ''}
-              </button>
-            )}
-            <button onClick={handleDownloadReport}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-600 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors">
-              <Download className="w-4 h-4" />
-              Download Report
-            </button>
-          </div>
+          {result.acceptedCount === 0 && (
+            <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 text-sm text-amber-700">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              No rows were accepted. Check that the file uses the correct template and outlet codes match the roster.
+            </div>
+          )}
         </div>
       )}
     </div>
