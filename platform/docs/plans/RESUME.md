@@ -54,20 +54,27 @@ P6 = reconcile + wire-up, not build-from-zero.
   Migration `P6_credits_paise_standardisation.sql` applied to gifsy_dev (guarded/idempotent, tables were empty).
   Conversion happens ONCE (FE ingest edge), ÷100 for display only. Gate green; dead platform credit routes +
   `credits-payouts-notify` lib left on old `*Inr` contract (retire later). **Not committed** (owner commits on ask).
-- **#16 (HIGH)** — POINTS award → **partner** wallet (aggregate; `Wallet.partnerId @unique`; resolve
-  `outletCode→partnerId`; `walletService.creditEarn`), reversal → `reverse`. P5 primitive ready.
+- **#16 (HIGH) — ✅ DONE (Stream 1, 2026-06-18):** `confirmBatch` credits POINTS → the **partner** wallet
+  (`creditEarn`, race-safe guarded claim, no-wallet outlets skipped+reported); reversal approval → new
+  `walletService.clawbackAward` (`DEBIT_ADJUSTMENT`, reduces **only `redeemablePoints`** — `earnedPoints`/lifetime*
+  stay monotonic per the locked invariant). Money-path audited (no double-credit/-debit). ⚠️ **Owner decision
+  pending:** the already-redeemed "shortfall" settlement policy (today: clamped + surfaced in the response; a
+  structured/query-able record + policy is the proper fix — small schema add — deferred to owner).
 - **#8 invoicing — included, built LAST.** Logic already pure in `lib/invoice.ts` (GST-from-reg-type, number-gen);
   port + persist; needs `AutoInvoice` delta (status/finalize-lock/`invoiceNumberEdited`/snapshot). #15 GST reads reg-type.
+- **#17 (Visibility capture-mode) — ✅ DONE (Stream 2, 2026-06-18):** per-tenant `features.visibilityCaptureMode`
+  (`PHOTO_APPROVAL` default | `AMOUNT_UPLOAD`) in `Client.features` JSON (no migration); mutating entry points gated
+  by mode. Follow-up: a dedicated `PUT` admin setter; photo `submit` still unported (GCS).
 - ⚠️ **#25 TDS = ON HOLD — owner reviews structure FIRST.** Do NOT write TDS code. Owner wants a plain-English
   TDS explainer (the two sections: incentive **194R** vs visibility-service **194C/194J**; thresholds; who bears
   the deduction; where each computes) reviewed + confirmed before any TDS build. (Invoice-side 194C/J rates already
   exist in `lib/invoice.ts computeTDS`; payout-side 194R in `payouts.processBatch`.)
 
-**Sequencing:** **6.0 ✅ DONE.** Next: **Stream 1 (Credits: 6.2 #16 + 6.1 + 6.3 verify #7 separate-UTR + 6.4
-reversal)** ∥ **Stream 2 (Visibility: 6.6 capture-mode #17)** run in parallel (disjoint files). **Invoicing 6.7 LAST**
-(after 6.6). **Payouts/TDS (6.5: build the P5 `RedemptionOrder`→`PayoutTransaction` settlement bridge + #25) HELD**
-until the TDS review. **NEXT ACTION:** write the TDS explainer for owner review, and/or start Stream-1/Stream-2.
-Depends on P5 (wallet) + P3 (GST reg-type) + P2 (outlets).
+**Sequencing:** **6.0 ✅ · Stream 1 (Credits #16) ✅ · Stream 2 (Visibility #17) ✅** (all on `develop`; 6.0
+committed `13c5d4e`; Streams 1+2 commit pending). **Remaining: Invoicing (6.7) LAST; Payouts/TDS (6.5: P5
+`RedemptionOrder`→`PayoutTransaction` settlement bridge + #25) HELD** until the TDS review. **NEXT ACTION:** write
+the TDS explainer for owner review and/or start Invoicing (6.7). Also pending: owner decision on the reversal
+shortfall settlement policy; a `PUT` admin setter for `visibilityCaptureMode`. Depends on P5 + P3 + P2.
 
 **Residuals carried forward (NOT done — don't assume):**
 - **Platform retirement (~P6, ONE unit):** stale `platform/prisma/schema.prisma` + still-live platform Prisma code

@@ -456,6 +456,78 @@ export class WalletService {
     };
   }
 
+  /**
+   * Clawback previously-earned points on a credit-batch POINTS reversal (#16).
+   * Writes DEBIT_ADJUSTMENT (WalletTransaction) + ADJUST (PointsLedger), inside the
+   * supplied transaction so it is atomic with the reversal status update.
+   *
+   * Invariant-aware decrement rules:
+   *  - earnedPoints: decremented by `points` (the full approved amount).
+   *  - redeemablePoints: decremented by min(points, redeemablePoints) — CLAMPED at 0.
+   *    If the partner has already redeemed some of the awarded points, redeemablePoints
+   *    may be < points. We clamp rather than throw so the reversal still lands; the
+   *    shortfall is recorded in the ledger description for owner review.
+   *  - lifetimeEarned / lifetimeRedeemed / lifetimeExpired: UNTOUCHED (monotonic).
+   *
+   * ⚠️  OWNER REVIEW FLAG — partial-redemption shortfall:
+   *   When redeemablePoints < points the full earnedPoints decrement still fires but
+   *   only partial redeemable is removed. The delta (`shortfall`) is appended to the
+   *   description so it is visible in the passbook. A future enhancement could write
+   *   a compensating debit against future credits or flag the partner account.
+   *   Do NOT silently ignore this — it means the client credited points that the
+   *   partner already spent, and a cash settlement may be needed out-of-band.
+   *
+   * NOTE: applyMovement does NOT decrement earnedPoints (by design — it only touches
+   * redeemable + ledger/expiry counters). We therefore do the earnedPoints decrement
+   * here as a separate wallet.update BEFORE calling applyMovement, so both writes
+   * happen inside the same tx and can never desync.
+   */
+  async clawbackAward(
+    partnerId: string,
+    points: number,
+    opts: {
+      referenceType?: string | null;
+      referenceId?: string | null;
+      sourceType?: string | null;
+      sourceId?: string | null;
+      description?: string | null;
+    } = {},
+    tx: Prisma.TransactionClient,
+  ): Promise<{ transactionId: string; newRedeemable: number; ledgerId: string; shortfall: number }> {
+    if (points <= 0) throw new BadRequestException('Clawback amount must be positive');
+
+    const wallet = await tx.wallet.findFirst({ where: { partnerId } });
+    if (!wallet) throw new NotFoundException('Wallet not found for this partner');
+
+    // A clawback reduces ONLY the spendable balance (redeemablePoints) — exactly like
+    // a DEBIT_ADJUSTMENT. earnedPoints and every lifetime* counter are MONOTONIC and
+    // are NEVER decremented (the locked wallet invariant): the wallet still records
+    // that the points were earned; the reversal shows up as redeemablePoints dropping
+    // plus a DEBIT_ADJUSTMENT ledger entry. applyMovement floors redeemable at 0.
+    const redeemableDecrement = Math.min(points, wallet.redeemablePoints);
+    const shortfall = points - redeemableDecrement;
+
+    let desc = opts.description ?? `Clawback: credit batch POINTS reversal`;
+    if (shortfall > 0) {
+      desc += ` [SHORTFALL: ${shortfall} pts already redeemed — owner review required]`;
+    }
+
+    const movement = await this.applyMovement(tx, {
+      wallet,
+      walletTxType: 'DEBIT_ADJUSTMENT',
+      ledgerType: PointsLedgerType.ADJUST,
+      // passing -points is correct: applyMovement's internal decrement = min(magnitude, redeemableBefore)
+      points: -points,
+      referenceType: opts.referenceType ?? null,
+      referenceId: opts.referenceId ?? null,
+      sourceType: opts.sourceType ?? null,
+      sourceId: opts.sourceId ?? null,
+      description: desc,
+    });
+
+    return { ...movement, shortfall };
+  }
+
   // ─── Expiry sweep ────────────────────────────────────────────────────────────
 
   /**

@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   ListFraudLogQueryDto,
@@ -22,7 +23,10 @@ import {
  */
 @Injectable()
 export class VisibilityService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenant: TenantService,
+  ) {}
 
   /**
    * GET /v1/visibility/submissions — paginated submissions for the tenant,
@@ -63,8 +67,19 @@ export class VisibilityService {
   /**
    * POST /v1/visibility/submissions/:id/approve — GIFSY-only.
    * Transitions DRAFT/SUBMITTED/etc → APPROVED, records the approval and an audit log.
+   *
+   * Mode gate: only allowed when the tenant's visibilityCaptureMode is PHOTO_APPROVAL
+   * (the default). AMOUNT_UPLOAD tenants do not use photo submissions.
    */
   async approve(user: JwtPayload, id: string) {
+    const captureMode = await this.tenant.resolveVisibilityCaptureMode(user.clientId);
+    if (captureMode !== 'PHOTO_APPROVAL') {
+      throw new BadRequestException(
+        'Tenant is not configured for photo-approval visibility. ' +
+          'Approval actions are only available when features.visibilityCaptureMode = "PHOTO_APPROVAL".',
+      );
+    }
+
     // GIFSY-only is enforced by @Roles on the controller; tenant scope checked here.
     const submission = await this.prisma.visibilitySubmission.findFirst({
       where: { id, partner: { user: { clientId: user.clientId } } },
@@ -109,8 +124,19 @@ export class VisibilityService {
   /**
    * POST /v1/visibility/submissions/:id/reject — GIFSY-only.
    * Transitions → REJECTED with a reason, records the approval row and an audit log.
+   *
+   * Mode gate: only allowed when the tenant's visibilityCaptureMode is PHOTO_APPROVAL
+   * (the default). AMOUNT_UPLOAD tenants do not use photo submissions.
    */
   async reject(user: JwtPayload, id: string, dto: RejectSubmissionDto) {
+    const captureMode = await this.tenant.resolveVisibilityCaptureMode(user.clientId);
+    if (captureMode !== 'PHOTO_APPROVAL') {
+      throw new BadRequestException(
+        'Tenant is not configured for photo-approval visibility. ' +
+          'Reject actions are only available when features.visibilityCaptureMode = "PHOTO_APPROVAL".',
+      );
+    }
+
     // GIFSY-only is enforced by @Roles on the controller; tenant scope checked here.
     const submission = await this.prisma.visibilitySubmission.findFirst({
       where: { id, partner: { user: { clientId: user.clientId } } },

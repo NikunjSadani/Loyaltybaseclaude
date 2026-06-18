@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/com
 import { OutletVisibilityStatus, Prisma } from '@prisma/client';
 import * as XLSX from 'xlsx';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ListVisibilityRecordsQueryDto } from './dto/visibility.dto';
 import {
@@ -33,7 +34,10 @@ interface ErrorRow {
  */
 @Injectable()
 export class VisibilityService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenant: TenantService,
+  ) {}
 
   /** Partner roles are external traders — they cannot see admin visibility data. */
   private static readonly PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
@@ -71,6 +75,17 @@ export class VisibilityService {
 
   /** POST /v1/admin/visibility/bulk-upload (multipart "file"). */
   async bulkUpload(user: JwtPayload, file: Express.Multer.File | undefined) {
+    // Mode gate — AMOUNT_UPLOAD tenants only.
+    // Default mode is PHOTO_APPROVAL, so tenants that have not configured a mode
+    // explicitly will be blocked here (they must opt-in to amount-upload).
+    const captureMode = await this.tenant.resolveVisibilityCaptureMode(user.clientId);
+    if (captureMode !== 'AMOUNT_UPLOAD') {
+      throw new BadRequestException(
+        'Tenant is not configured for amount-upload visibility. ' +
+          'Set features.visibilityCaptureMode = "AMOUNT_UPLOAD" in the client config to enable this path.',
+      );
+    }
+
     if (!file) {
       throw new BadRequestException(
         'No file provided. Attach an .xlsx or .xls file with the field name "file".',

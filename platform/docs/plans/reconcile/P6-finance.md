@@ -1,9 +1,9 @@
 # P6 — Finance: credits, payouts, visibility, invoicing — Reconcile + Build Record
 
-> **Status: P6 reconcile locked; TASK 6.0 ✅ DONE (2026-06-18).** Decisions below are owner-locked.
-> **6.0 money-unit standardisation shipped** (see §4 build record). Remaining: Stream 1 (Credits #16),
-> Stream 2 (Visibility #17), Invoicing (6.7) last. ⚠️ **TDS (#25) is explicitly ON HOLD** — the owner
-> will review the TDS structure before any TDS work begins. **Not committed yet** (owner commits on ask).
+> **Status: 6.0 ✅ (committed `13c5d4e`) · Stream 1 (Credits #16) ✅ · Stream 2 (Visibility #17) ✅ (2026-06-18).**
+> Decisions below are owner-locked. Build records: §4 (6.0 money unit), §5 (Streams 1+2). **Remaining: Invoicing
+> (6.7) last; ⚠️ Payouts/TDS (6.5 + #25) ON HOLD** — owner reviews the TDS structure before any TDS work.
+> **⚠️ One owner decision pending (§5): the reversal "shortfall" settlement policy.** Stream 1+2 not yet committed.
 > Read [[platform-real-model]] + [[reconcile-fit-before-build]] + [[architecture-backend-split]] + [[p5-complete]].
 
 P6 = spec §02 Workflow 2/3 (Credits & Payouts) + the money spine. **This is mostly
@@ -91,8 +91,8 @@ streams that touch **disjoint files** run in parallel; invoicing is last; Payout
 | Wave | Task | Files / area | Schema delta | Status |
 |---|---|---|---|---|
 | **6.0 — Reconcile + money unit** (FIRST) | **convert Awards → integer paise** (#19) + kill JS float-sum + lock #5 naming | `credits/*`, `credits-payouts-*` lib, schema | **DONE** — see §4 | **✅ DONE** |
-| **Stream 1 — Credits** (∥) | **6.2 #16 POINTS→wallet on confirm + debit on reversal** (HIGH) · 6.1 credit-field polish · 6.3 verify #7 separate-UTR | `credits/*`, `wallet/` (reuses `creditEarn`/`reverse`) | none | planned |
-| **Stream 2 — Visibility** (∥, disjoint files) | 6.6 per-tenant **capture-mode flag** (#17); approve/reject already built; `submit` deferred (GCS) | `visibility/*`, tenant config | small (`visibilityCaptureMode`) | planned |
+| **Stream 1 — Credits** (∥) | **6.2 #16 POINTS→wallet on confirm + reversal clawback** (HIGH) · 6.1 · 6.3 verify #7 | `credits/*`, `wallet/` | none | **✅ DONE — §5** |
+| **Stream 2 — Visibility** (∥, disjoint files) | 6.6 per-tenant **capture-mode flag** (#17) | `visibility/*`, `tenant/*` (`Client.features` JSON) | none (JSON config) | **✅ DONE — §5** |
 | **Wave D — Invoicing** (LAST, after 6.6) | 6.7 self-bill invoicing port (#8 number-lock + #15 GST-from-reg-type) | new `api/src/invoices`, `AutoInvoice` | **YES** — `AutoInvoice` +status/+lock/+edited/+snapshot | planned |
 | **HELD — Payouts / TDS** | 6.5 redemption→`PayoutTransaction` settlement bridge + **#25 TDS sections** | `payouts/*`, `TdsRecord` | maybe (`TdsRecord.section`/`formType`) | ⚠️ **ON HOLD — owner TDS review first** |
 
@@ -144,4 +144,38 @@ platform schema; retire with the platform backend — NOT touched here).
 
 **Gate (all green):** backend `tsc` 0 · jest **596 passed** · platform `tsc` 0 · vitest **no new reds**
 (22 failing files = the exact baseline set) · credit/payout vitest **133 passed** · doc-consistency green.
-**#19 RESOLVED.** Not committed (owner commits on ask). **Next: Stream 1 (6.2 #16) ∥ Stream 2 (6.6 #17).**
+**#19 RESOLVED.** Committed `13c5d4e`.
+
+---
+
+## §5 · Build record — Stream 1 (Credits #16) + Stream 2 (Visibility #17) ✅ (2026-06-18)
+
+Built in parallel (disjoint files); each independently audited; backend gate green (**tsc 0 · jest 618**).
+
+**Stream 1 — Credits (#16 HIGH, #7, #6.1):**
+- **`confirmBatch` now credits POINTS** rows → the **partner** wallet (`walletService.creditEarn`, inside the
+  confirm tx): resolve `outletCode→partnerId`, outlets roll up to the partner; **race-safe guarded
+  `updateMany` claim** on PENDING_CONFIRM→CONFIRMED prevents concurrent double-credit; outlets with no wallet
+  are **skipped + reported** (`skippedNoWallet`), never abort the batch; 0/negative POINTS rows filtered out
+  pre-tx. PAYOUT rows still → `CreditPayoutEntry` (no row double-counted).
+- **Reversal clawback:** approving a POINTS reversal → new `walletService.clawbackAward` — a `DEBIT_ADJUSTMENT`
+  reducing **only `redeemablePoints`** (floored at 0). ⚠️ **`earnedPoints` + all `lifetime*` stay MONOTONIC**
+  (the locked invariant — the audit caught an earlier version wrongly decrementing `earnedPoints`; fixed).
+  Guarded `updateMany` claim prevents double-debit. **Already-redeemed shortfall** (approved > spendable) is
+  clamped (no negative), recorded in the ledger description, and **surfaced in the API response** (`clawbackShortfall`).
+- #7 verified (separate-UTR exclusion) + locked with tests.
+- **⚠️ Owner decision pending — the shortfall:** when a POINTS reversal is approved for more points than the
+  partner still holds (already redeemed some), the gap can't be reclaimed from the wallet. Today it's clamped +
+  surfaced (visible, non-blocking). **Proper fix = a structured/query-able record (a `CreditReversal` shortfall
+  column or a settlement entry) + a settlement policy (write-off / cash recovery / carry-forward)** — deferred to
+  owner; would need a small schema add.
+
+**Stream 2 — Visibility (#17):** per-tenant `features.visibilityCaptureMode` (`PHOTO_APPROVAL` default |
+`AMOUNT_UPLOAD`) in `Client.features` JSON (no migration); `TenantService.resolveVisibilityCaptureMode`; mutating
+entry points gated (photo approve/reject vs amount bulk-upload); read-only paths ungated. **Follow-ups:** a
+dedicated `PUT` admin setter for the flag (settable today via `upsertClientConfig`); the photo `submit` endpoint
+stays unported (GCS multipart infra).
+
+**Audit (money-path, independent):** no double-credit/double-debit escape; guarded claims + tx boundaries correct;
+DI correct. Must-fixes applied (earnedPoints invariant; 0-amount row skip; shortfall surfaced). Lower-sev pre-existing
+notes logged (visibility approve/reject TOCTOU; admin-programs upload-loop not in a tx) — not regressions, future polish.

@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { WalletService } from '../wallet/wallet.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { paiseToRupees, formatINR, toPaiseBigInt } from '../common/money';
 import {
@@ -43,6 +44,7 @@ export class CreditsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly walletService: WalletService,
   ) {}
 
   // ─── Code generators ───────────────────────────────────────────────────────
@@ -127,6 +129,9 @@ export class CreditsService {
 
   // ─── POST /v1/admin/credits/batches/:id/confirm ────────────────────────────
   async confirmBatch(user: JwtPayload, id: string) {
+    // Read the batch first for its data (rows, period, etc.). The status-flip below
+    // uses a guarded updateMany claim so a concurrent double-confirm cannot
+    // double-credit points.
     const batch = await this.prisma.creditBatch.findFirst({
       where: { id, clientId: user.clientId },
     });
@@ -135,7 +140,7 @@ export class CreditsService {
       throw new BadRequestException(`Batch is already ${batch.status}`);
     }
 
-    // Parse rows from JSON and create CreditPayoutEntry for each PAYOUT-type OK row.
+    // Parse rows from JSON.
     const rows = batch.rows as unknown as {
       outletId: string;
       outletName: string;
@@ -148,17 +153,37 @@ export class CreditsService {
     }[];
 
     const payoutRows = rows.filter((r) => r.awardType === 'PAYOUT' && r.status === 'OK');
+    // amount > 0: creditEarn rejects non-positive amounts; a 0/negative POINTS row
+    // would throw inside the tx and roll back the whole confirm (incl. PAYOUT entries).
+    const pointsRows = rows.filter(
+      (r) => r.awardType === 'POINTS' && r.status === 'OK' && r.amount > 0,
+    );
+
+    const skippedNoWallet: string[] = [];
+    let pointsCredited = 0;
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      const confirmed = await tx.creditBatch.update({
-        where: { id },
+      // ── Concurrency guard ──────────────────────────────────────────────────
+      // Replace the plain update with a conditional updateMany. Only the first
+      // concurrent caller flips status PENDING_CONFIRM→CONFIRMED (count===1);
+      // subsequent racing callers see count===0 and throw, preventing
+      // double-crediting of wallet points.
+      const claimed = await tx.creditBatch.updateMany({
+        where: { id, status: 'PENDING_CONFIRM' },
         data: {
           status: 'CONFIRMED',
           confirmedBy: user.sub,
           confirmedAt: new Date(),
         },
       });
+      if (claimed.count === 0) {
+        throw new BadRequestException('Batch already confirmed');
+      }
 
+      // Re-read to get the full record back (updateMany does not return the row).
+      const confirmed = await tx.creditBatch.findFirst({ where: { id } });
+
+      // ── PAYOUT rows → CreditPayoutEntry ───────────────────────────────────
       if (payoutRows.length > 0) {
         await tx.creditPayoutEntry.createMany({
           data: payoutRows.map((r) => ({
@@ -175,6 +200,50 @@ export class CreditsService {
             narration: r.narration ?? '',
           })),
         });
+      }
+
+      // ── POINTS rows → wallet creditEarn (gap #16) ────────────────────────
+      // Each row is one ledger entry. Multiple rows for the same partner roll up
+      // naturally in the wallet aggregate via successive creditEarn calls.
+      // We skip rather than throw if no outlet/partner/wallet exists, so a bad row
+      // cannot abort the whole confirm.
+      for (const r of pointsRows) {
+        // Resolve outletCode → partnerId (tenant-scoped).
+        const outlet = await tx.outlet.findFirst({
+          where: { outletCode: r.outletId, clientId: user.clientId },
+          select: { partnerId: true },
+        });
+        if (!outlet?.partnerId) {
+          skippedNoWallet.push(r.outletId);
+          continue;
+        }
+
+        // Guard: check wallet existence without letting requireWallet throw (a throw
+        // would abort the whole tx and roll back the PAYOUT entries too).
+        const wallet = await tx.wallet.findFirst({
+          where: { partnerId: outlet.partnerId },
+          select: { id: true },
+        });
+        if (!wallet) {
+          skippedNoWallet.push(r.outletId);
+          continue;
+        }
+
+        // r.amount is whole points for POINTS rows.
+        await this.walletService.creditEarn(
+          outlet.partnerId,
+          user.clientId,
+          r.amount,
+          {
+            referenceType: 'CREDIT_BATCH',
+            referenceId: id,
+            sourceType: 'CREDIT_FIELD',
+            sourceId: r.fieldId,
+            description: r.narration ?? null,
+          },
+          tx,
+        );
+        pointsCredited += 1;
       }
 
       return confirmed;
@@ -202,7 +271,12 @@ export class CreditsService {
       },
     });
 
-    return { batch: updated, payoutEntriesCreated: payoutRows.length };
+    return {
+      batch: updated,
+      payoutEntriesCreated: payoutRows.length,
+      pointsCredited,
+      skippedNoWallet,
+    };
   }
 
   // ─── GET /v1/admin/credits/batches/:id/reversals ───────────────────────────
@@ -669,6 +743,8 @@ export class CreditsService {
 
   // ─── PATCH /v1/admin/credits/reversals/:id ─────────────────────────────────
   async patchReversal(user: JwtPayload, id: string, dto: PatchReversalDto) {
+    // Read the reversal first to validate state + derive amounts. The actual status
+    // flip uses a guarded updateMany to prevent a double-execute from double-debiting.
     const reversal = await this.prisma.creditReversal.findFirst({
       where: { id, clientId: user.clientId },
     });
@@ -695,18 +771,75 @@ export class CreditsService {
           ? 'PARTIAL'
           : 'APPROVED';
 
-    return this.prisma.creditReversal.update({
-      where: { id },
-      data: {
-        status: newStatus,
-        approvedPaise:
-          action === ReversalAction.approve
-            ? toPaiseBigInt(approvedPaise ?? requestedPaiseNum)
-            : null,
-        approvedBy: user.sub,
-        approvedAt: new Date(),
-        remarks: remarks ?? null,
-      },
+    const finalApprovedPaise =
+      action === ReversalAction.approve
+        ? toPaiseBigInt(approvedPaise ?? requestedPaiseNum)
+        : null;
+
+    return this.prisma.$transaction(async (tx) => {
+      // ── Concurrency guard ─────────────────────────────────────────────────
+      // Only the first concurrent caller flips PENDING_GIFSY → newStatus (count===1).
+      // A racing second call sees count===0 and throws, preventing double-debit.
+      const claimed = await tx.creditReversal.updateMany({
+        where: { id, status: 'PENDING_GIFSY' },
+        data: {
+          status: newStatus,
+          approvedPaise: finalApprovedPaise,
+          approvedBy: user.sub,
+          approvedAt: new Date(),
+          remarks: remarks ?? null,
+        },
+      });
+      if (claimed.count === 0) {
+        throw new BadRequestException('Reversal already processed');
+      }
+
+      // ── POINTS reversal → wallet clawback (#16 reversal) ─────────────────
+      // PAYOUT reversals are handled via the cash-payout rail (out of scope here).
+      let clawbackShortfall = 0;
+      if (action === ReversalAction.approve && reversal.awardType === 'POINTS') {
+        // approvedPaise field holds approved whole points for POINTS-type reversals.
+        const approvedPoints = Number(finalApprovedPaise ?? 0n);
+        if (approvedPoints > 0) {
+          // Resolve outletCode → partnerId (tenant-scoped).
+          const outlet = await tx.outlet.findFirst({
+            where: { outletCode: reversal.outletId, clientId: user.clientId },
+            select: { partnerId: true },
+          });
+
+          if (outlet?.partnerId) {
+            // Guard: check wallet existence without throwing (a throw aborts the tx).
+            const wallet = await tx.wallet.findFirst({
+              where: { partnerId: outlet.partnerId },
+              select: { id: true },
+            });
+
+            if (wallet) {
+              const cb = await this.walletService.clawbackAward(
+                outlet.partnerId,
+                approvedPoints,
+                {
+                  referenceType: 'CREDIT_REVERSAL',
+                  referenceId: id,
+                  sourceType: 'CREDIT_FIELD',
+                  sourceId: reversal.fieldId,
+                  description: `Clawback for reversal ${id} — batch POINTS reversal`,
+                },
+                tx,
+              );
+              clawbackShortfall = cb.shortfall;
+            }
+            // If no wallet: reversal still lands; points were never credited to
+            // a wallet so there is nothing to claw back. This is a consistent no-op.
+          }
+        }
+      }
+
+      // Return the updated reversal for the HTTP response. clawbackShortfall > 0 means
+      // some approved points were already redeemed and could not be reclaimed from the
+      // spendable balance — surfaced so ops can settle out-of-band (owner review).
+      const finalReversal = await tx.creditReversal.findFirst({ where: { id } });
+      return { ...finalReversal, clawbackShortfall };
     });
   }
 }

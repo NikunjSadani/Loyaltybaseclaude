@@ -9,6 +9,7 @@ import * as XLSX from 'xlsx';
 import { CreditsService } from './credits.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { WalletService } from '../wallet/wallet.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   CreateBatchDto,
@@ -20,10 +21,29 @@ import {
 import { CreditAwardType } from '@prisma/client';
 import { PAYOUT_FILE_HEADERS } from './credits.helpers';
 
+// ─── Mock wallet service ──────────────────────────────────────────────────────
+
+const mockWalletService = {
+  creditEarn: jest.fn().mockResolvedValue({ transactionId: 'wt1', newRedeemable: 50, ledgerId: 'l1' }),
+  clawbackAward: jest.fn().mockResolvedValue({ transactionId: 'wt2', newRedeemable: 0, ledgerId: 'l2', shortfall: 0 }),
+};
+
+// ─── Mock Prisma TX ───────────────────────────────────────────────────────────
+
 const mockTx = {
-  creditBatch: { update: jest.fn() },
+  creditBatch: {
+    update: jest.fn(),
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    findFirst: jest.fn(),
+  },
   creditPayoutEntry: { createMany: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   creditPayoutDownload: { create: jest.fn(), update: jest.fn() },
+  creditReversal: {
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    findFirst: jest.fn(),
+  },
+  outlet: { findFirst: jest.fn() },
+  wallet: { findFirst: jest.fn() },
 };
 
 const mockPrisma = {
@@ -58,11 +78,20 @@ describe('CreditsService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    // Restore default resolved values that tests may override.
+    mockTx.creditBatch.updateMany.mockResolvedValue({ count: 1 });
+    mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED' });
+    mockTx.creditReversal.updateMany.mockResolvedValue({ count: 1 });
+    mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
+    mockTx.outlet.findFirst.mockResolvedValue(null);
+    mockTx.wallet.findFirst.mockResolvedValue(null);
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         CreditsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: NotificationsService, useValue: mockNotifications },
+        { provide: WalletService, useValue: mockWalletService },
       ],
     }).compile();
     service = module.get(CreditsService);
@@ -112,7 +141,7 @@ describe('CreditsService', () => {
       await expect(service.confirmBatch(admin, 'b1')).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('confirms and creates payout entries only for PAYOUT+OK rows', async () => {
+    it('confirms and creates payout entries only for PAYOUT+OK rows (legacy path)', async () => {
       mockPrisma.creditBatch.findFirst.mockResolvedValue({
         id: 'b1',
         status: 'PENDING_CONFIRM',
@@ -123,13 +152,12 @@ describe('CreditsService', () => {
         // totalPayoutPaise stored as BigInt in Prisma
         totalPayoutPaise: BigInt(30000),  // ₹300 in paise
         rows: [
-          // amounts are paise: 10000 = ₹100, 20000 = ₹200, 50 = 50 points
+          // amounts are paise: 10000 = ₹100, 20000 = ₹200
           { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F', amount: 10000, narration: '', awardType: 'PAYOUT', status: 'OK' },
           { outletId: 'O2', outletName: 'B', fieldId: 'f1', fieldName: 'F', amount: 20000, narration: '', awardType: 'PAYOUT', status: 'ERROR' },
-          { outletId: 'O3', outletName: 'C', fieldId: 'f1', fieldName: 'F', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
         ],
       });
-      mockTx.creditBatch.update.mockResolvedValue({ id: 'b1', status: 'CONFIRMED' });
+      // tx.outlet.findFirst returns null → no POINTS rows anyway; wallet not queried.
       const res = await service.confirmBatch(admin, 'b1');
       expect(res.payoutEntriesCreated).toBe(1);
       const createManyArg = mockTx.creditPayoutEntry.createMany.mock.calls[0][0].data;
@@ -139,6 +167,157 @@ describe('CreditsService', () => {
       // amountPaise written as BigInt
       expect(createManyArg[0].amountPaise).toBe(BigInt(10000));
       expect(mockNotifications.enqueue).toHaveBeenCalled();
+    });
+
+    it('calls creditEarn for each POINTS+OK row when outlet+wallet exist', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'PENDING_CONFIRM',
+        period: '2026-05',
+        uploadedBy: 'admin1',
+        totalOutlets: 2,
+        totalPoints: 100,
+        totalPayoutPaise: BigInt(0),
+        rows: [
+          // 50 points for O1 (POINTS/OK)
+          { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: 'May bonus', awardType: 'POINTS', status: 'OK' },
+          // ERROR row — must be skipped
+          { outletId: 'O2', outletName: 'B', fieldId: 'f1', fieldName: 'Sales', amount: 30, narration: '', awardType: 'POINTS', status: 'ERROR' },
+        ],
+      });
+      // O1 resolves to partner p1 which has a wallet.
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      mockTx.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+
+      const res = await service.confirmBatch(admin, 'b1');
+
+      expect(res.pointsCredited).toBe(1);
+      expect(res.skippedNoWallet).toEqual([]);
+      expect(mockWalletService.creditEarn).toHaveBeenCalledTimes(1);
+      expect(mockWalletService.creditEarn).toHaveBeenCalledWith(
+        'p1',
+        'deoleo',
+        50,
+        {
+          referenceType: 'CREDIT_BATCH',
+          referenceId: 'b1',
+          sourceType: 'CREDIT_FIELD',
+          sourceId: 'f1',
+          description: 'May bonus',
+        },
+        mockTx,   // same tx — atomicity guaranteed
+      );
+    });
+
+    it('skips POINTS rows whose outlet has no wallet and records them in skippedNoWallet', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'PENDING_CONFIRM',
+        period: '2026-05',
+        uploadedBy: 'admin1',
+        totalOutlets: 1,
+        totalPoints: 50,
+        totalPayoutPaise: BigInt(0),
+        rows: [
+          { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
+        ],
+      });
+      // Outlet resolves but has no partnerId.
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: null });
+
+      const res = await service.confirmBatch(admin, 'b1');
+
+      expect(res.pointsCredited).toBe(0);
+      expect(res.skippedNoWallet).toEqual(['O1']);
+      expect(mockWalletService.creditEarn).not.toHaveBeenCalled();
+    });
+
+    it('skips POINTS rows whose outlet is not found and records them in skippedNoWallet', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'PENDING_CONFIRM',
+        period: '2026-05',
+        uploadedBy: 'admin1',
+        totalOutlets: 1,
+        totalPoints: 50,
+        totalPayoutPaise: BigInt(0),
+        rows: [
+          { outletId: 'O_UNKNOWN', outletName: 'X', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
+        ],
+      });
+      // Outlet not found → null.
+      mockTx.outlet.findFirst.mockResolvedValue(null);
+
+      const res = await service.confirmBatch(admin, 'b1');
+
+      expect(res.skippedNoWallet).toEqual(['O_UNKNOWN']);
+      expect(mockWalletService.creditEarn).not.toHaveBeenCalled();
+    });
+
+    it('skips POINTS rows where the partner has no wallet (wallet check returns null)', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'PENDING_CONFIRM',
+        period: '2026-05',
+        uploadedBy: 'admin1',
+        totalOutlets: 1,
+        totalPoints: 50,
+        totalPayoutPaise: BigInt(0),
+        rows: [
+          { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
+        ],
+      });
+      // Outlet found with partnerId but wallet missing.
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      mockTx.wallet.findFirst.mockResolvedValue(null);
+
+      const res = await service.confirmBatch(admin, 'b1');
+
+      expect(res.skippedNoWallet).toEqual(['O1']);
+      expect(mockWalletService.creditEarn).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException on a double-confirm (guarded claim returns count=0)', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'PENDING_CONFIRM',
+        period: '2026-05',
+        uploadedBy: 'admin1',
+        totalOutlets: 0,
+        totalPoints: 0,
+        totalPayoutPaise: BigInt(0),
+        rows: [],
+      });
+      // Simulate a race: the guarded updateMany sees the row already flipped.
+      mockTx.creditBatch.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(service.confirmBatch(admin, 'b1')).rejects.toBeInstanceOf(BadRequestException);
+      // creditEarn must never have been called.
+      expect(mockWalletService.creditEarn).not.toHaveBeenCalled();
+    });
+
+    it('uses guarded updateMany (not a plain update) for the status flip', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'PENDING_CONFIRM',
+        period: '2026-05',
+        uploadedBy: 'admin1',
+        totalOutlets: 0,
+        totalPoints: 0,
+        totalPayoutPaise: BigInt(0),
+        rows: [],
+      });
+
+      await service.confirmBatch(admin, 'b1');
+
+      // The guarded claim must use updateMany with the PENDING_CONFIRM where clause.
+      expect(mockTx.creditBatch.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ id: 'b1', status: 'PENDING_CONFIRM' }),
+        }),
+      );
+      // The old un-guarded tx.creditBatch.update must NOT be called.
+      expect(mockTx.creditBatch.update).not.toHaveBeenCalled();
     });
   });
 
@@ -197,7 +376,7 @@ describe('CreditsService', () => {
 
   describe('patchReversal (checker approve/reject)', () => {
     it('rejects a reversal that is not PENDING_GIFSY', async () => {
-      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED', requestedPaise: BigInt(10000), awardType: 'POINTS', outletId: 'O1', fieldId: 'f1' });
       await expect(
         service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve }),
       ).rejects.toBeInstanceOf(BadRequestException);
@@ -205,19 +384,119 @@ describe('CreditsService', () => {
 
     it('marks PARTIAL when approved amount is below requested', async () => {
       // requestedPaise stored as BigInt in Prisma
-      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(10000) });
-      mockPrisma.creditReversal.update.mockResolvedValue({ id: 'r1' });
-      await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 4000 });
-      expect(mockPrisma.creditReversal.update.mock.calls[0][0].data.status).toBe('PARTIAL');
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(10000), awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1' });
+      // tx.creditReversal.findFirst returns the updated row
+      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PARTIAL' });
+
+      const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 4000 });
+      expect(res).toMatchObject({ id: 'r1', status: 'PARTIAL' });
+
+      const updateManyCall = mockTx.creditReversal.updateMany.mock.calls[0][0];
+      expect(updateManyCall.data.status).toBe('PARTIAL');
       // approvedPaise written as BigInt
-      expect(mockPrisma.creditReversal.update.mock.calls[0][0].data.approvedPaise).toBe(BigInt(4000));
+      expect(updateManyCall.data.approvedPaise).toBe(BigInt(4000));
     });
 
     it('rejects when approved amount exceeds requested', async () => {
-      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(10000) });
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(10000), awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1' });
       await expect(
         service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 20000 }),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('throws BadRequestException on a double-execute (guarded claim returns count=0)', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(5000), awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1' });
+      mockTx.creditReversal.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 5000 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
+    });
+
+    it('calls clawbackAward for POINTS reversal approval', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({
+        id: 'r1',
+        status: 'PENDING_GIFSY',
+        requestedPaise: BigInt(50),
+        awardType: 'POINTS',
+        outletId: 'O1',
+        fieldId: 'f1',
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
+      // Outlet + wallet exist.
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      mockTx.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+
+      await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 50 });
+
+      expect(mockWalletService.clawbackAward).toHaveBeenCalledTimes(1);
+      expect(mockWalletService.clawbackAward).toHaveBeenCalledWith(
+        'p1',
+        50,
+        expect.objectContaining({
+          referenceType: 'CREDIT_REVERSAL',
+          referenceId: 'r1',
+          sourceType: 'CREDIT_FIELD',
+          sourceId: 'f1',
+        }),
+        mockTx,   // same tx — atomic with status flip
+      );
+    });
+
+    it('does NOT call clawbackAward for PAYOUT reversal approval', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({
+        id: 'r1',
+        status: 'PENDING_GIFSY',
+        requestedPaise: BigInt(10000),
+        awardType: 'PAYOUT',
+        outletId: 'O1',
+        fieldId: 'f1',
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      mockTx.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+
+      await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 10000 });
+
+      expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
+    });
+
+    it('does NOT call clawbackAward when action is reject (POINTS type)', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({
+        id: 'r1',
+        status: 'PENDING_GIFSY',
+        requestedPaise: BigInt(50),
+        awardType: 'POINTS',
+        outletId: 'O1',
+        fieldId: 'f1',
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'REJECTED' });
+
+      await service.patchReversal(gifsy, 'r1', { action: ReversalAction.reject });
+
+      expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
+    });
+
+    it('skips clawback silently when partner has no wallet on POINTS reversal', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({
+        id: 'r1',
+        status: 'PENDING_GIFSY',
+        requestedPaise: BigInt(50),
+        awardType: 'POINTS',
+        outletId: 'O1',
+        fieldId: 'f1',
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
+      // Outlet found but no wallet.
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      mockTx.wallet.findFirst.mockResolvedValue(null);
+
+      // Should not throw — reversal lands cleanly.
+      await expect(
+        service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 50 }),
+      ).resolves.not.toThrow();
+      expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
     });
   });
 
@@ -309,6 +588,49 @@ describe('CreditsService', () => {
       // The Excel file shows rupees for human readability.
       expect(aoa[2][1]).toBe('O1');
       expect(aoa[2][10]).toBe(150);
+    });
+
+    // ── Task 6.3 — #7 separate-UTR verification ────────────────────────────────
+
+    it('STANDARD download excludes entries whose field has isSeparatePayout=true', async () => {
+      // f-sep is a separate-payout field; e1 (f-std) should appear, e2 (f-sep) should not.
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-sep' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'e1', outletId: 'O1', outletName: 'A', amountPaise: BigInt(10000), fieldId: 'f-std', batch: { batchCode: 'CB-1' } },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O1', name: 'A', phone: '', isActive: true, partner: { bankName: '', bankAccountNumber: '', ifscCode: '', upiId: '' } },
+      ]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd2', downloadCode: 'PD-2026-05-002' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.STANDARD });
+
+      // The query passed to creditPayoutEntry.findMany must exclude f-sep.
+      const where = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where;
+      // NOT clause must reference the separate field id.
+      expect(where.NOT).toBeDefined();
+      expect(where.NOT.fieldId.in).toContain('f-sep');
+    });
+
+    it('SEPARATE download for a given fieldId includes ONLY that field', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-sep' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'e2', outletId: 'O2', outletName: 'B', amountPaise: BigInt(5000), fieldId: 'f-sep', batch: { batchCode: 'CB-1' } },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O2', name: 'B', phone: '', isActive: true, partner: { bankName: '', bankAccountNumber: '', ifscCode: '', upiId: '' } },
+      ]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd3', downloadCode: 'PD-2026-05-003' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-sep', fieldName: 'Volume' });
+
+      // The query must scope to exactly that fieldId.
+      const where = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where;
+      expect(where.fieldId).toBe('f-sep');
+      // No NOT exclusion for SEPARATE downloads.
+      expect(where.NOT).toBeUndefined();
     });
   });
 

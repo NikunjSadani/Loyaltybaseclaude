@@ -3,6 +3,15 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
+/**
+ * The two supported visibility capture modes for a tenant.
+ *   PHOTO_APPROVAL  — field agents submit photos; Gifsy-admin approves/rejects.
+ *   AMOUNT_UPLOAD   — Gifsy-admin/Client-admin bulk-uploads visibility amounts via Excel.
+ *
+ * Default (when the field is absent): PHOTO_APPROVAL.
+ */
+export type VisibilityCaptureMode = 'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD';
+
 export interface ClientFeatures {
   loyalty:        boolean;
   visibility:     boolean;
@@ -12,6 +21,12 @@ export interface ClientFeatures {
   targets:        boolean;
   rewards:        boolean;
   tds:            boolean;
+  /**
+   * Controls which visibility data-capture path is active for the tenant.
+   * 'PHOTO_APPROVAL' (default when unset) — app photo-capture + approval workflow.
+   * 'AMOUNT_UPLOAD'                        — admin Excel bulk-upload workflow.
+   */
+  visibilityCaptureMode?: VisibilityCaptureMode;
 }
 
 export interface ClientConfig {
@@ -60,6 +75,23 @@ export class TenantService {
 
     this.cache.set(slug, { config, cachedAt: Date.now() });
     return config;
+  }
+
+  /**
+   * Resolve the visibility capture mode for a tenant.
+   * Returns 'PHOTO_APPROVAL' when the field is absent (the default).
+   *
+   * Usage: inject TenantService and call resolveVisibilityCaptureMode(user.clientId).
+   */
+  async resolveVisibilityCaptureMode(clientId: string): Promise<VisibilityCaptureMode> {
+    try {
+      const config = await this.resolveClient(clientId);
+      return config.features.visibilityCaptureMode ?? 'PHOTO_APPROVAL';
+    } catch {
+      // If the client config cannot be resolved (e.g. during tests without a full
+      // config row), fall back to the safe default rather than hard-crashing.
+      return 'PHOTO_APPROVAL';
+    }
   }
 
   /** Check if a specific feature is enabled for a client */

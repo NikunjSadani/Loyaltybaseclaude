@@ -8,6 +8,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { VisibilityService } from './visibility.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockTx = {
@@ -25,6 +26,12 @@ const mockPrisma = {
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
+// Default tenant mock — resolves to PHOTO_APPROVAL so the existing approve/reject
+// tests are not blocked by the capture-mode gate.
+const mockTenant = {
+  resolveVisibilityCaptureMode: jest.fn().mockResolvedValue('PHOTO_APPROVAL'),
+};
+
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' };
 
@@ -33,8 +40,14 @@ describe('VisibilityService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    // Re-apply the default mock implementation after clearAllMocks resets it.
+    mockTenant.resolveVisibilityCaptureMode.mockResolvedValue('PHOTO_APPROVAL');
     const module: TestingModule = await Test.createTestingModule({
-      providers: [VisibilityService, { provide: PrismaService, useValue: mockPrisma }],
+      providers: [
+        VisibilityService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: TenantService, useValue: mockTenant },
+      ],
     }).compile();
     service = module.get(VisibilityService);
   });

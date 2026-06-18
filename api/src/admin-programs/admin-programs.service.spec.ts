@@ -5,6 +5,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 import { ChannelPartnersService } from './channel-partners.service';
@@ -31,14 +32,29 @@ const mockPrisma = {
   auditLog: { create: jest.fn() },
 };
 
+// TenantService mock — used by VisibilityService (bulkUpload mode gate).
+// Default: resolves to 'AMOUNT_UPLOAD' so the existing bulkUpload tests that probe
+// file-validation errors are not short-circuited by the mode gate.
+const mockTenant = {
+  resolveVisibilityCaptureMode: jest.fn().mockResolvedValue('AMOUNT_UPLOAD'),
+};
+
 async function build<T>(token: new (...args: never[]) => T): Promise<T> {
   const module: TestingModule = await Test.createTestingModule({
-    providers: [token as never, { provide: PrismaService, useValue: mockPrisma }],
+    providers: [
+      token as never,
+      { provide: PrismaService, useValue: mockPrisma },
+      { provide: TenantService, useValue: mockTenant },
+    ],
   }).compile();
   return module.get(token);
 }
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.clearAllMocks();
+  // Re-apply the default mock after clearAllMocks resets implementations.
+  mockTenant.resolveVisibilityCaptureMode.mockResolvedValue('AMOUNT_UPLOAD');
+});
 
 describe('ChannelPartnersService', () => {
   it('scopes list by clientId and isActive (drops World-A class/tier filters)', async () => {

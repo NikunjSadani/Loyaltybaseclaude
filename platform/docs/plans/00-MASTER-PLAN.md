@@ -353,11 +353,11 @@ visibility self-bills. **This phase contains the most High-severity gaps.**
 | Task | What | Key files / area | Stream / status |
 |---|---|---|---|
 | 6.0 ✅ | **DONE (2026-06-18)** — money unit → **integer `BigInt` paise everywhere** (#19): Awards `Decimal`-INR → `BigInt` paise (renamed `*Paise`), existing rail `Int`→`BigInt` (overflow fix while empty), shared `money.ts`, killed JS float-sum. Gate green (backend 596 / no new platform reds). See `reconcile/P6-finance.md §4`. | `credits/*`, `payouts/*`, `money.ts`, schema | **✅ DONE · #19 resolved** |
-| 6.2 | **Credit POINTS → wallet on confirm** (#16, HIGH) + debit on reversal; grain = partner wallet | `credits/*`, `wallet/` (reuse `creditEarn`/`reverse`) | **Stream 1 (Credits)** |
-| 6.1 | Credit fields/params polish + batch upload + confirm | `credits/*` | Stream 1 |
-| 6.3 | Verify **separate-UTR for Visibility** (#7) — `isSeparatePayout` grouping looks already enforced → lock with a test | `credits/*` (bank download) | Stream 1 (likely test-only) |
+| 6.2 ✅ | **DONE** — Credit POINTS → **partner** wallet on confirm (#16, HIGH) + reversal clawback (`clawbackAward`, redeemable-only per invariant); race-safe guarded claims; money-path audited | `credits/*`, `wallet/` | **✅ Stream 1 · #16 resolved** |
+| 6.1 ✅ | Credit fields/batch/confirm sound | `credits/*` | ✅ Stream 1 |
+| 6.3 ✅ | **DONE** — verified separate-UTR (#7) `isSeparatePayout` exclusion + locked with tests | `credits/*` | **✅ Stream 1 · #7 verified** |
 | 6.4 | UTR upload + dup detection; **reversal maker-checker in the portal** — Client Admin *requests* (`credits:request_reversal`) → Gifsy *approves/executes* (`credits:approve_reversal`, Gifsy-only) → wallet debit. Surface request→approve states + reason. (RBAC perms exist, 1.6.) | `credits/*`, reversal UI | Stream 1 |
-| 6.6 | Visibility: per-tenant **capture-mode flag** (#17); approve/reject built; `submit` (photo upload) deferred (GCS) | `visibility/*`, tenant config | **Stream 2 (Visibility, ∥)** |
+| 6.6 ✅ | **DONE** — per-tenant **capture-mode flag** (#17) in `Client.features` (`PHOTO_APPROVAL`/`AMOUNT_UPLOAD`); mutating entry points gated by mode. Follow-up: admin `PUT` setter; `submit` still deferred (GCS) | `visibility/*`, `tenant/*` | **✅ Stream 2 · #17 resolved** |
 | 6.7 | Self-bill invoicing port + **number validation/lock** (#8); GST from reg-type (#15). Logic already pure in `lib/invoice.ts` → port + persist; needs `AutoInvoice` delta (status/lock/edited/snapshot) | new `api/src/invoices`, `AutoInvoice` | **Wave D — LAST (after 6.6)** |
 | 6.5 | Redemption payouts: **build the P5 `RedemptionOrder`→`PayoutTransaction` settlement bridge** + Fund ledger/receipts; **TDS sections** (#25) | `payouts/*`, `TdsRecord` | ⚠️ **HELD — owner TDS review first** |
 
