@@ -35,6 +35,8 @@ import {
   generateTargetTemplateBuffer,
   buildResolvedTargetsBuffer,
   parseTargetUploadBuffer,
+  currentMonthKey,
+  isMonthLocked,
   KpiDefLike,
   OutletLike,
 } from './targets.helpers';
@@ -331,10 +333,18 @@ export class TargetsService {
       monthsInUpload.add(month);
     }
 
-    // We create one batch per upload (regardless of how many months).
-    // If multiple months are present, we use the earliest month as the batch.month.
+    // ── Past-month lock ───────────────────────────────────────────────────────
+    // Targets for a month already in the PAST cannot be edited (prevents
+    // retroactively rewriting historical targets to game pace). The current +
+    // future months stay editable. Locked months in the upload are NOT written;
+    // they are reported back so the admin sees what was skipped and why.
+    const currentMonth = currentMonthKey();
     const sortedMonths = [...monthsInUpload].sort();
-    const batchMonth = sortedMonths[0] ?? 'unknown';
+    const lockedMonths = sortedMonths.filter((m) => isMonthLocked(m, currentMonth));
+    const writableMonths = sortedMonths.filter((m) => !isMonthLocked(m, currentMonth));
+
+    // Batch is labelled by the earliest WRITABLE month (else the earliest present).
+    const batchMonth = writableMonths[0] ?? sortedMonths[0] ?? 'unknown';
 
     const totalRows      = parseResult.summary.total;
     const acceptedCount  = parseResult.summary.accepted;
@@ -356,6 +366,7 @@ export class TargetsService {
 
       // Write one OutletTarget per (outletCode, month) with non-blank values
       for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
+        if (isMonthLocked(month, currentMonth)) continue; // past month — not editable
         for (const [outletCode, kpiMap] of Object.entries(outletMap)) {
           if (Object.keys(kpiMap).length === 0) continue; // safety: skip fully-blank
 
@@ -392,6 +403,9 @@ export class TargetsService {
       batchId:       batch.id,
       month:         batchMonth,
       monthsInBatch: sortedMonths,
+      writableMonths,
+      // Past months present in the file that were skipped (locked, not editable).
+      skippedLockedMonths: lockedMonths,
       totalRows,
       acceptedCount,
       rejectedCount,

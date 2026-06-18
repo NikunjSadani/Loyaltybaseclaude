@@ -42,6 +42,8 @@ interface UploadResult {
   batchId:       string;
   month:         string;
   monthsInBatch: string[];
+  writableMonths?:       string[];
+  skippedLockedMonths?:  string[];
   totalRows:     number;
   acceptedCount: number;
   rejectedCount: number;
@@ -477,6 +479,18 @@ export default function TargetUploadPage() {
             <StatCard label="Rejected"    value={result.rejectedCount} color={result.rejectedCount > 0 ? 'red' : 'gray'} />
             <StatCard label="Months"      value={result.monthsInBatch.length} color="gray" />
           </div>
+
+          {/* Past-month lock notice */}
+          {result.skippedLockedMonths && result.skippedLockedMonths.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+              <p className="text-xs font-semibold text-amber-700">
+                {result.skippedLockedMonths.length} past month{result.skippedLockedMonths.length !== 1 ? 's' : ''} skipped (locked) — targets for a month already in the past can&apos;t be edited.
+              </p>
+              <p className="text-[11px] text-amber-600 mt-0.5">
+                Not saved: {result.skippedLockedMonths.join(', ')}
+              </p>
+            </div>
+          )}
 
           {/* Rejected rows preview */}
           {result.rows.filter(r => r.status === 'rejected' || r.status === 'error' || r.status === 'skipped').length > 0 && (

@@ -356,6 +356,29 @@ describe('TargetsService', () => {
       expect(batchCreate.data.rejectedCount).toBe(1);
       expect(batchCreate.data.acceptedCount).toBe(1);
     });
+
+    it('LOCK: a PAST month is skipped (no upsert) and reported in skippedLockedMonths', async () => {
+      // "Jan '20 Target" = 2020-01, strictly in the past → locked, not editable.
+      const ws = XLSX.utils.aoa_to_sheet([
+        ['', '', '', "Jan '20 Target", ''],
+        ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1'],
+        ['O001', 'Outlet One', 'RETAIL', 100, 50],
+      ]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Targets');
+      const file = {
+        buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer,
+        originalname: 'past.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+
+      const result = await service.uploadTargets(admin, file);
+
+      // Locked month → nothing written, but the row still parses (no error).
+      expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+      expect(result.skippedLockedMonths).toContain('2020-01');
+      expect(result.writableMonths).not.toContain('2020-01');
+    });
   });
 
   // ─── listBatches ───────────────────────────────────────────────────────────

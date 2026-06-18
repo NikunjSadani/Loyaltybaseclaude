@@ -92,6 +92,23 @@ export function getEnabledKpis(kpis: KpiDefLike[]): KpiDefLike[] {
   return [...kpis].filter((k) => k.enabled).sort((a, b) => a.order - b.order);
 }
 
+// ── Month-lock helpers ────────────────────────────────────────────────────────
+
+/** Current month as `YYYY-MM` (server clock). */
+export function currentMonthKey(now: Date = new Date()): string {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+/**
+ * A target month is LOCKED (not editable) once it is strictly in the PAST. The
+ * CURRENT month stays editable (admins adjust the in-flight month); future
+ * months are always editable. Strict less-than, so `YYYY-MM` string ordering
+ * (which sorts chronologically) is the comparison.
+ */
+export function isMonthLocked(month: string, current: string = currentMonthKey()): boolean {
+  return month < current;
+}
+
 // ── Fixed columns (same as the platform template) ────────────────────────────
 
 export const FIXED_COLS = ['Outlet ID', 'Outlet Name', 'Outlet Type'] as const;
