@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Coins, Calendar, X, Download, Banknote } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { Spinner } from '@/components/ui/spinner';
@@ -10,7 +10,6 @@ import { formatPoints } from '@/lib/utils';
 import { TransactionType, WalletBucket, type WalletBalance, type WalletTransaction } from '@/types';
 import type { PayoutLedgerEntry } from '@/types';
 import { usePartnerSession } from '@/lib/partner-session';
-import { loadRedemptions } from '@/lib/redemption-store';
 
 
 /* ─── API types & mappers (wallet wiring) ────────────────────────────────────── */
@@ -57,15 +56,14 @@ function mapBucket(balanceType: string): WalletBucket {
   return WalletBucket.EARNED;
 }
 
-function mapApiBalance(api: ApiWalletBalance, storedRedemptionTotal: number): WalletBalance {
-  const redeemable = Math.max(0, api.redeemablePoints - storedRedemptionTotal);
+function mapApiBalance(api: ApiWalletBalance): WalletBalance {
   return {
     earned:     api.earnedPoints,
     locked:     api.lockedPoints,
-    redeemable,
-    redeemed:   api.redeemedPoints + storedRedemptionTotal,
+    redeemable: api.redeemablePoints,
+    redeemed:   api.redeemedPoints,
     expired:    api.expiredPoints,
-    available:  redeemable,
+    available:  api.redeemablePoints,
   };
 }
 
@@ -394,50 +392,23 @@ export default function WalletPage() {
   const [pendingTo,   setPendingTo]   = useState(DEFAULT_TO);
   const [calOpen,     setCalOpen]     = useState(false);
 
-  // storedTxsRef: capture locally-computed redemption transactions so the async
-  // API callbacks can re-merge them after replacing state — prevents them from
-  // disappearing when the API transaction list overwrites setTransactions.
-  const storedTxsRef = useRef<WalletTransaction[]>([]);
-
   useEffect(() => {
-    const stored = loadRedemptions();
-    const storedTotal = stored.reduce((s, r) => s + r.points, 0);
-    const sortedStored = [...stored].sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-    );
-
+    // Live data only — wallet summary + passbook from the backend (via the
+    // Next proxy). No localStorage merge: the ledger is the single source of truth.
     Promise.all([
       fetch('/api/wallet').then(r => r.json()).catch(() => null),
       fetch('/api/wallet/transactions').then(r => r.json()).catch(() => null),
     ]).then(([walletJson, txJson]) => {
-      // Balance — API returns flat earnedPoints, NOT nested under .balance
+      // Balance — API returns the flat {success,data} envelope; data is the
+      // balance summary itself (earnedPoints, not nested under .balance).
       if (walletJson?.success && walletJson.data?.earnedPoints !== undefined) {
-        setBalance(mapApiBalance(walletJson.data as ApiWalletBalance, storedTotal));
+        setBalance(mapApiBalance(walletJson.data as ApiWalletBalance));
       }
 
-      // Build stored-redemption txs using API redeemable as the running baseline
-      const baseline: number = walletJson?.data?.redeemablePoints ?? 0;
-      let runningBal = baseline;
-      const storedTxs: WalletTransaction[] = sortedStored.map((r) => {
-        runningBal = Math.max(0, runningBal - r.points);
-        return {
-          id: r.id, walletId: 'w1', userId: 'u1',
-          type: TransactionType.DEBIT, bucket: WalletBucket.REDEEMED,
-          amount: r.points, balanceAfter: runningBal, description: r.description,
-          schemeId: null, invoiceId: null, reversedById: null, reversalReason: null,
-          createdAt: new Date(r.createdAt),
-        };
-      });
-      storedTxsRef.current = storedTxs;
-
-      // Transactions — merge API list with any unsynced stored redemptions
+      // Transactions — straight from the passbook endpoint.
       if (txJson?.success && txJson.data?.transactions) {
         const apiTxs = (txJson.data.transactions as ApiWalletTransaction[]).map(mapApiTransaction);
-        const apiIds = new Set(apiTxs.map(t => t.id));
-        const unsynced = storedTxs.filter(t => !apiIds.has(t.id));
-        setTransactions([...unsynced, ...apiTxs]);
-      } else {
-        setTransactions(storedTxs);
+        setTransactions(apiTxs);
       }
     }).finally(() => setLoading(false));
   }, []);

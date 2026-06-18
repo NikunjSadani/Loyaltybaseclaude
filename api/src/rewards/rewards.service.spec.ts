@@ -17,6 +17,7 @@ import { WalletService } from '../wallet/wallet.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { UpdatableOrderStatus } from './dto/rewards.dto';
+import { parseFulfilmentUploadBuffer } from './rewards-fulfilment.helpers';
 
 const mockPrisma = {
   channelPartner: { findFirst: jest.fn() },
@@ -635,6 +636,229 @@ describe('RewardsService', () => {
       const call = mockPrisma.rewardCatalog.update.mock.calls?.[0]?.[0];
       expect(call.where).toEqual({ id: 'r1' });
       expect(call.data.deletedAt).toBeInstanceOf(Date);
+    });
+  });
+
+  // ─── P5.4b Bulk fulfilment (download → fill → upload) ─────────────────────────
+
+  describe('getFulfilmentTemplate', () => {
+    it('scopes rows to the tenant and the default awaiting-fulfilment status set', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([
+        {
+          orderNumber: 'RDM-1', redemptionMode: 'GIFT_CARD', status: 'CONFIRMED',
+          reward: { name: 'Amazon ₹500' },
+        },
+      ]);
+
+      const buf = await service.getFulfilmentTemplate(gifsy, {});
+
+      // Tenant scope + default actionable status set (no explicit status/mode filter).
+      const call = mockPrisma.redemptionOrder.findMany.mock.calls?.[0]?.[0];
+      expect(call.where.partner).toEqual({ user: { clientId: 'deoleo' } });
+      expect(call.where.status).toEqual({
+        in: expect.arrayContaining(['CONFIRMED', 'PROCESSING', 'DISPATCHED']),
+      });
+      // Round-trips through the shared helper into a real, parseable xlsx.
+      expect(Buffer.isBuffer(buf)).toBe(true);
+      const parsed = parseFulfilmentUploadBuffer(buf);
+      expect(parsed.rows[0].orderNumber).toBe('RDM-1');
+    });
+
+    it('honours an explicit ?status= and ?mode= filter', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      await service.getFulfilmentTemplate(gifsy, {
+        status: 'DISPATCHED' as never, mode: 'PHYSICAL_GIFT' as never,
+      });
+      const call = mockPrisma.redemptionOrder.findMany.mock.calls?.[0]?.[0];
+      expect(call.where.status).toBe('DISPATCHED');
+      expect(call.where.redemptionMode).toBe('PHYSICAL_GIFT');
+    });
+  });
+
+  describe('uploadFulfilment', () => {
+    /** Build an in-memory upload file from order-fill rows via the real builder. */
+    const fileFromRows = (
+      rows: { orderNumber: string; mode?: string; status?: string }[],
+      fill: Record<number, Partial<Record<string, string>>> = {},
+    ): Express.Multer.File => {
+      // Write a sheet with the template headers + the fill values under test
+      // (same shape the service's parser expects).
+      const XLSX = require('xlsx');
+      const header = [
+        'Order Number', 'Reward', 'Mode', 'Current Status',
+        'Voucher Code', 'Voucher Provider', 'Tracking Number', 'Tracking URL', 'New Status',
+      ];
+      const data = rows.map((r, i) => {
+        const f = fill[i] ?? {};
+        return [
+          r.orderNumber, 'X', r.mode ?? 'GIFT_CARD', r.status ?? 'CONFIRMED',
+          f['Voucher Code'] ?? '', f['Voucher Provider'] ?? '',
+          f['Tracking Number'] ?? '', f['Tracking URL'] ?? '', f['New Status'] ?? '',
+        ];
+      });
+      const ws = XLSX.utils.aoa_to_sheet([header, ...data]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Fulfilment');
+      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+      return { buffer, originalname: 'fill.xlsx' } as Express.Multer.File;
+    };
+
+    it('rejects a non-template file (missing Order Number header) with 400', async () => {
+      const XLSX = require('xlsx');
+      const ws = XLSX.utils.aoa_to_sheet([['Some', 'Other', 'Sheet'], ['a', 'b', 'c']]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Nope');
+      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+      await expect(
+        service.uploadFulfilment(gifsy, { buffer, originalname: 'x.xlsx' } as Express.Multer.File),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('matches orderNumber and calls transitionOrder per row with the row voucher + New Status', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'oid-1' });
+      const spy = jest
+        .spyOn(service, 'transitionOrder')
+        .mockResolvedValue({ order: { id: 'oid-1' } } as never);
+
+      const file = fileFromRows(
+        [{ orderNumber: 'RDM-1' }],
+        { 0: { 'Voucher Code': 'GC-XYZ', 'New Status': 'PROCESSING' } },
+      );
+      const res = await service.uploadFulfilment(gifsy, file);
+
+      // Resolved the order in-tenant by orderNumber.
+      expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { orderNumber: 'RDM-1', partner: { user: { clientId: 'deoleo' } } },
+        }),
+      );
+      // Applied via the guarded transition with the row's voucher + target status.
+      expect(spy).toHaveBeenCalledWith(gifsy, 'oid-1', expect.objectContaining({
+        toStatus: 'PROCESSING',
+        voucherCode: 'GC-XYZ',
+      }));
+      expect(res).toEqual({ processed: 1, succeeded: 1, skipped: 0, failed: 0, errors: [] });
+      spy.mockRestore();
+    });
+
+    it('rejects a row whose orderNumber belongs to another tenant (T1)', async () => {
+      // The order exists in another tenant → the tenant-scoped findFirst returns
+      // null, so the row is collected as an error and never transitioned.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(null);
+      const tSpy = jest.spyOn(service, 'transitionOrder').mockResolvedValue({} as never);
+      const uSpy = jest.spyOn(service, 'updateOrder').mockResolvedValue({} as never);
+
+      const file = fileFromRows(
+        [{ orderNumber: 'RDM-OTHER-TENANT' }],
+        { 0: { 'New Status': 'PROCESSING', 'Voucher Code': 'GC-X' } },
+      );
+      const res = await service.uploadFulfilment(gifsy, file);
+
+      expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { orderNumber: 'RDM-OTHER-TENANT', partner: { user: { clientId: 'deoleo' } } },
+        }),
+      );
+      expect(tSpy).not.toHaveBeenCalled();
+      expect(uSpy).not.toHaveBeenCalled();
+      expect(res.succeeded).toBe(0);
+      expect(res.errors).toEqual([
+        { row: expect.any(Number), orderNumber: 'RDM-OTHER-TENANT', message: 'Order not found in this tenant' },
+      ]);
+      tSpy.mockRestore();
+      uSpy.mockRestore();
+    });
+
+    it('skips an all-blank row (no status, no fill) instead of counting it as a change', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'oid-1' });
+      const uSpy = jest.spyOn(service, 'updateOrder').mockResolvedValue({} as never);
+
+      const file = fileFromRows([{ orderNumber: 'RDM-1' }], { 0: {} });
+      const res = await service.uploadFulfilment(gifsy, file);
+
+      expect(uSpy).not.toHaveBeenCalled();
+      expect(res).toEqual({ processed: 1, succeeded: 0, skipped: 1, failed: 0, errors: [] });
+      uSpy.mockRestore();
+    });
+
+    it('a blank New Status routes through the non-status updateOrder path', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'oid-1' });
+      const tSpy = jest.spyOn(service, 'transitionOrder').mockResolvedValue({} as never);
+      const uSpy = jest
+        .spyOn(service, 'updateOrder')
+        .mockResolvedValue({ order: { id: 'oid-1' } } as never);
+
+      const file = fileFromRows([{ orderNumber: 'RDM-1' }], { 0: { 'Voucher Code': 'GC-ONLY' } });
+      const res = await service.uploadFulfilment(gifsy, file);
+
+      expect(tSpy).not.toHaveBeenCalled();
+      expect(uSpy).toHaveBeenCalledWith(gifsy, 'oid-1', expect.objectContaining({
+        voucherCode: 'GC-ONLY',
+      }));
+      expect(res.succeeded).toBe(1);
+      tSpy.mockRestore();
+      uSpy.mockRestore();
+    });
+
+    it('collects an unknown orderNumber as an error and continues the batch', async () => {
+      // Row 1 unknown (null), row 2 found.
+      mockPrisma.redemptionOrder.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: 'oid-2' });
+      const spy = jest.spyOn(service, 'transitionOrder').mockResolvedValue({} as never);
+
+      const file = fileFromRows(
+        [{ orderNumber: 'GHOST' }, { orderNumber: 'RDM-2' }],
+        { 1: { 'New Status': 'PROCESSING' } },
+      );
+      const res = await service.uploadFulfilment(gifsy, file);
+
+      expect(res.processed).toBe(2);
+      expect(res.succeeded).toBe(1);
+      expect(res.failed).toBe(1);
+      expect(res.errors[0]).toMatchObject({ orderNumber: 'GHOST', message: expect.stringContaining('not found') });
+      // The good row still went through.
+      expect(spy).toHaveBeenCalledWith(gifsy, 'oid-2', expect.objectContaining({ toStatus: 'PROCESSING' }));
+      spy.mockRestore();
+    });
+
+    it('reports an illegal-edge row in errors without aborting the batch', async () => {
+      mockPrisma.redemptionOrder.findFirst
+        .mockResolvedValueOnce({ id: 'oid-1' })
+        .mockResolvedValueOnce({ id: 'oid-2' });
+      const spy = jest
+        .spyOn(service, 'transitionOrder')
+        .mockRejectedValueOnce(new BadRequestException('Illegal status transition: PENDING → DISPATCHED'))
+        .mockResolvedValueOnce({} as never);
+
+      const file = fileFromRows(
+        [{ orderNumber: 'RDM-1' }, { orderNumber: 'RDM-2' }],
+        { 0: { 'New Status': 'DISPATCHED' }, 1: { 'New Status': 'PROCESSING' } },
+      );
+      const res = await service.uploadFulfilment(gifsy, file);
+
+      expect(res.processed).toBe(2);
+      expect(res.succeeded).toBe(1);
+      expect(res.failed).toBe(1);
+      expect(res.errors[0]).toMatchObject({
+        orderNumber: 'RDM-1',
+        message: expect.stringContaining('Illegal status transition'),
+      });
+      expect(spy).toHaveBeenCalledTimes(2); // batch continued to row 2
+      spy.mockRestore();
+    });
+
+    it('collects an unknown New Status value without calling transitionOrder', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'oid-1' });
+      const spy = jest.spyOn(service, 'transitionOrder').mockResolvedValue({} as never);
+
+      const file = fileFromRows([{ orderNumber: 'RDM-1' }], { 0: { 'New Status': 'WAT' } });
+      const res = await service.uploadFulfilment(gifsy, file);
+
+      expect(spy).not.toHaveBeenCalled();
+      expect(res.failed).toBe(1);
+      expect(res.errors[0].message).toContain('Unknown New Status');
+      spy.mockRestore();
     });
   });
 });

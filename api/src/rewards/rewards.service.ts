@@ -7,7 +7,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Prisma, RedemptionStatus } from '@prisma/client';
+import { PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -15,15 +15,21 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   CreateRewardCatalogDto,
   CreateRewardCategoryDto,
+  FulfilmentTemplateQueryDto,
   ListCatalogQueryDto,
   ListOrdersQueryDto,
   RedeemConfirmDto,
   RedeemDto,
   TransitionOrderDto,
+  UpdatableOrderStatus,
   UpdateOrderDto,
   UpdateRewardCatalogDto,
   UpdateRewardCategoryDto,
 } from './dto/rewards.dto';
+import {
+  buildFulfilmentTemplateBuffer,
+  parseFulfilmentUploadBuffer,
+} from './rewards-fulfilment.helpers';
 
 /**
  * Rewards & Redemption — ported from platform/src/app/api/rewards/* onto /v1.
@@ -554,6 +560,181 @@ export class RewardsService {
     }
 
     return { order: updated };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // P5.4b — BULK fulfilment (Gifsy-ops download → fill → upload), mirroring the
+  // payout/target download→fill→upload flow and reusing the shared xlsx helper
+  // (src/common/xlsx.ts is the multi-sheet builder; this single-sheet template +
+  // its parser live in rewards-fulfilment.helpers.ts, matching the P4
+  // targets.helpers.ts split: a pure, DI-free build/parse pair).
+  //
+  // The upload APPLIES each row through the EXISTING guarded transitionOrder /
+  // updateOrder — no status logic is reimplemented here, so every row inherits
+  // the edge-map validation, RedemptionStatusHistory, timestamp stamping,
+  // refund-on-cancel and partner notification. One bad row never aborts the batch.
+  //
+  // The fulfilment-actionable set (orders that NEED a voucher or tracking):
+  //   GIFT_CARD     → CONFIRMED / PROCESSING       (need a voucherCode)
+  //   PHYSICAL_GIFT → CONFIRMED / PROCESSING / DISPATCHED (need tracking)
+  // A `?status=` or `?mode=` query narrows it further.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** PayoutMode → the statuses that are actionable for fulfilment. */
+  private fulfilmentStatusesFor(mode: PayoutMode): RedemptionStatus[] {
+    if (mode === PayoutMode.PHYSICAL_GIFT) {
+      return [RedemptionStatus.CONFIRMED, RedemptionStatus.PROCESSING, RedemptionStatus.DISPATCHED];
+    }
+    // GIFT_CARD / VOUCHER (and any cash mode that still surfaces here) → voucher entry.
+    return [RedemptionStatus.CONFIRMED, RedemptionStatus.PROCESSING];
+  }
+
+  /**
+   * GET /v1/admin/rewards/fulfilment/template — download an .xlsx of the tenant's
+   * orders awaiting fulfilment. Tenant-scoped; default rows = the per-mode
+   * actionable set, narrowable by `?status=` and `?mode=`.
+   */
+  async getFulfilmentTemplate(user: JwtPayload, q: FulfilmentTemplateQueryDto): Promise<Buffer> {
+    const where: Prisma.RedemptionOrderWhereInput = {
+      partner: { user: { clientId: user.clientId } },
+    };
+    if (q.mode) where.redemptionMode = q.mode;
+
+    if (q.status) {
+      where.status = q.status;
+    } else {
+      // Union of the actionable statuses across the relevant mode(s).
+      const modes: PayoutMode[] = q.mode
+        ? [q.mode]
+        : [PayoutMode.GIFT_CARD, PayoutMode.PHYSICAL_GIFT];
+      const statuses = new Set<RedemptionStatus>();
+      for (const m of modes) for (const s of this.fulfilmentStatusesFor(m)) statuses.add(s);
+      where.status = { in: [...statuses] };
+    }
+
+    const orders = await this.prisma.redemptionOrder.findMany({
+      where,
+      include: { reward: { select: { name: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return buildFulfilmentTemplateBuffer(
+      orders.map((o) => ({
+        orderNumber: o.orderNumber,
+        reward: o.reward?.name ?? '',
+        mode: o.redemptionMode,
+        currentStatus: o.status,
+      })),
+    );
+  }
+
+  /**
+   * POST /v1/admin/rewards/fulfilment/upload — parse a filled fulfilment sheet
+   * and apply each row.
+   *
+   * Per row:
+   *   • Match `Order Number` → the tenant's RedemptionOrder (cross-tenant / unknown
+   *     → collected as an error, batch continues).
+   *   • `New Status` PRESENT → apply via the guarded `transitionOrder` (carries the
+   *     voucher/tracking from the row). NEW-STATUS-BLANK DECISION: a blank New
+   *     Status means "no status change" → we route through the non-status
+   *     `updateOrder` path to set voucherCode/voucherProvider/tracking only (so an
+   *     ops user can stamp a voucher code without forcing a transition).
+   *   • An unknown / illegal New Status value, an illegal edge, or any per-row
+   *     throw is caught and collected; the batch is NOT aborted.
+   *
+   * Returns { processed, succeeded, failed, errors:[{ row, orderNumber, message }] }
+   * (mirrors the P4 achievement-upload result shape).
+   */
+  async uploadFulfilment(user: JwtPayload, file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('No file uploaded');
+
+    // A malformed/corrupt/non-template workbook → clean 400 (like the P4 parser).
+    let parsed: ReturnType<typeof parseFulfilmentUploadBuffer>;
+    try {
+      parsed = parseFulfilmentUploadBuffer(file.buffer);
+    } catch {
+      throw new BadRequestException(
+        'Invalid or unrecognized fulfilment file — download the template, fill it, and re-upload',
+      );
+    }
+
+    const validStatuses = new Set<string>(Object.values(UpdatableOrderStatus));
+    const errors: { row: number; orderNumber: string; message: string }[] = [];
+    let succeeded = 0;
+    let skipped = 0;
+
+    for (const r of parsed.rows) {
+      try {
+        // Resolve the order in-tenant; collect (don't throw) on a miss/cross-tenant.
+        const order = await this.prisma.redemptionOrder.findFirst({
+          where: { orderNumber: r.orderNumber, partner: { user: { clientId: user.clientId } } },
+          select: { id: true },
+        });
+        if (!order) {
+          errors.push({
+            row: r.rowIndex,
+            orderNumber: r.orderNumber,
+            message: 'Order not found in this tenant',
+          });
+          continue;
+        }
+
+        if (r.newStatus) {
+          if (!validStatuses.has(r.newStatus)) {
+            errors.push({
+              row: r.rowIndex,
+              orderNumber: r.orderNumber,
+              message: `Unknown New Status "${r.newStatus}"`,
+            });
+            continue;
+          }
+          // Guarded transition — reuses the edge-map, history, timestamps,
+          // refund-on-cancel and partner notification.
+          await this.transitionOrder(user, order.id, {
+            toStatus: r.newStatus as UpdatableOrderStatus,
+            voucherCode: r.voucherCode,
+            voucherProvider: r.voucherProvider,
+            trackingNumber: r.trackingNumber,
+            trackingUrl: r.trackingUrl,
+          });
+        } else {
+          // No status change → non-status write (voucher/tracking only). If every
+          // fill column is blank too, the row changes nothing (e.g. an unmodified
+          // template re-uploaded) — skip it so the success count isn't inflated.
+          if (
+            !r.voucherCode &&
+            !r.voucherProvider &&
+            !r.trackingNumber &&
+            !r.trackingUrl
+          ) {
+            skipped++;
+            continue;
+          }
+          await this.updateOrder(user, order.id, {
+            voucherCode: r.voucherCode,
+            voucherProvider: r.voucherProvider,
+            trackingNumber: r.trackingNumber,
+            trackingUrl: r.trackingUrl,
+          });
+        }
+        succeeded++;
+      } catch (e) {
+        errors.push({
+          row: r.rowIndex,
+          orderNumber: r.orderNumber,
+          message: e instanceof Error ? e.message : 'Unknown error',
+        });
+      }
+    }
+
+    return {
+      processed: parsed.rows.length,
+      succeeded,
+      skipped,
+      failed: errors.length,
+      errors,
+    };
   }
 
   /**

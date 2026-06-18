@@ -226,6 +226,27 @@ export class TransitionOrderDto {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// P5.4b — Bulk fulfilment (Gifsy-ops download → fill → upload).
+// GET .../fulfilment/template filters; the upload itself is multipart (no body DTO).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /v1/admin/rewards/fulfilment/template query filters.
+ *   - status: restrict the template to a single RedemptionStatus (default = the
+ *     fulfilment-actionable set per mode: see RewardsService.getFulfilmentTemplate).
+ *   - mode:   restrict to a single PayoutMode (e.g. GIFT_CARD vouchers only).
+ */
+export class FulfilmentTemplateQueryDto {
+  @IsOptional()
+  @IsEnum(RedemptionStatus)
+  status?: RedemptionStatus;
+
+  @IsOptional()
+  @IsEnum(PayoutMode)
+  mode?: PayoutMode;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // P5.3 — Admin Reward Catalog CRUD (real RewardCategory / RewardCatalog tables).
 // These supersede the World-B `admin/gift-config` JSON blob + `lib/gifts.ts`
 // demo (retired with the FE in 5.5). Tenant scope (clientId) is stamped by the
