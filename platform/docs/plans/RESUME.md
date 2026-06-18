@@ -44,53 +44,35 @@ targeting dimension**; no point-tiers, no SKU. Validate any inherited concept ag
 **NEXT = P7 (Engagement & support: banners/notifications/leaderboard/tickets — §02 WF6; 00-MASTER-PLAN §P7).**
 The P6 decisions below are the historical record (kept for reference); all are shipped.
 
-**Owner-locked decisions (do not relitigate):**
-- **Two distinct money rails (#5)** — **Awards & Credits** (admin *pushes* awards, `credits/*`, was Decimal-INR) vs
-  **Redemption Payouts** (partner *pulls* cash, `payouts/*`, paise + Fund + TDS). Keep separate; rename for clarity;
-  NOT a consolidation.
-- **#19 money unit — ✅ DONE (6.0, 2026-06-18): integer `BigInt` paise EVERYWHERE.** Awards rail `Decimal`-INR →
-  `BigInt` paise (renamed `*Inr`→`*Paise`; `totalPoints`→whole `Int`); existing paise rail widened `Int`→`BigInt`
-  (int4 overflow fix, done while tables empty — audit finding); shared `money.ts` (`rupeesToPaise`/`paiseToRupees`/
-  `toPaiseBigInt`) in api+platform; global `BigInt.prototype.toJSON`→Number in `main.ts`; killed JS float-sum.
-  Migration `P6_credits_paise_standardisation.sql` applied to gifsy_dev (guarded/idempotent, tables were empty).
-  Conversion happens ONCE (FE ingest edge), ÷100 for display only. Gate green; dead platform credit routes +
-  `credits-payouts-notify` lib left on old `*Inr` contract (retire later). **Not committed** (owner commits on ask).
-- **#16 (HIGH) — ✅ DONE (Stream 1, 2026-06-18):** `confirmBatch` credits POINTS → the **partner** wallet
-  (`creditEarn`, race-safe guarded claim, no-wallet outlets skipped+reported); reversal approval → new
-  `walletService.clawbackAward` (`DEBIT_ADJUSTMENT`, reduces **only `redeemablePoints`** — `earnedPoints`/lifetime*
-  stay monotonic per the locked invariant). Money-path audited (no double-credit/-debit). The
-  already-redeemed **shortfall** is **owner-decided = report-only**: persisted on `CreditReversal.shortfallPaise`
-  (migration `P6_reversal_shortfall.sql`); report = supposed(`approvedPaise`)/reversed(`approved−shortfall`)/
-  pending(`shortfall`); client settles `pending` **off-platform** (no platform write-off/recovery). Remaining: FE
-  reversal report columns.
-- **#8 + #15 invoicing — ✅ DONE (6.7, 2026-06-18):** real `api/src/invoices` (was all-mock); automatic idempotent
-  per-outlet-per-month generation (`@@unique`, re-run can't mutate a PAID invoice); GST-from-GSTIN (REGULAR only;
-  intra/inter from retailer GSTIN first-2 vs **19** Tech Gifsy/WB; CGST+SGST / IGST; pre-GST base; integer paise);
-  number editable-while-GENERATED + locked-once-PAID; KYC guard; Tech Gifsy recipient (`19AAACT9811F1Z9`) baked in;
-  partner + admin FE. Audited (PAID-immutability + paise rounding fixed). PDF/email + internal TDS line deferred (TDS→6.5).
-- **#17 (Visibility capture-mode) — ✅ DONE (Stream 2 + toggle, 2026-06-18):** per-tenant `features.visibilityCaptureMode`
-  (`PHOTO_APPROVAL` default | `AMOUNT_UPLOAD`) in `Client.features` JSON (no migration); mutating entry points gated
-  by mode; **Gifsy-admin toggle** (`PUT /v1/admin/settings/visibility-capture-mode`, `tenancy:manage_flags`, features-merge
-  no-clobber) + segmented control on the admin settings screen. Residual: photo `submit` still unported (GCS).
-- ◐ **#25 TDS — SPEC DRAFTED (`reconcile/P6.5-TDS-SPEC.md`), awaiting owner sign-off; NO code yet.** Owner-confirmed:
-  **194R** (incentive; deductor=client; per-tenant/FY; 10%/20%-no-PAN; ₹20k) vs **194C** (visibility; deductor=Gifsy;
-  platform-level per-PAN; 1%/2%/20%; >₹30k single|>₹1L agg; **GST-exclusive base**; two columns w/ & w/o threshold).
-  **Grossed-up (payer-borne)** only (no config flag — current tenant); **PAN-keyed** incl. off-platform unknown PANs;
-  FY-scoped; **compute+track+export only** (filing/Form-16A off-platform via TRACES / future third-party TDS API;
-  §206AB removed). 194R taxable event = cash payout at PAID + redemption at fulfilment + off-platform upload.
-  **Recommend 6.7 (invoicing) BEFORE 6.5** (194C base = invoice pre-GST base). Build only after sign-off.
+**P6 key facts (DO NOT relitigate; full record: `reconcile/P6-finance.md` + `P6.5-TDS-SPEC.md` + [[p6-finance-decisions]]):**
+- **Money = integer `BigInt` paise EVERYWHERE** (#19). Shared `money.ts` (api `src/common` + platform `src/lib`);
+  global `BigInt.prototype.toJSON`→Number in `main.ts`; FE converts ↔₹ ONLY at the upload-ingest + display edges.
+- **Two distinct money rails (#5)** — Awards/Credits `api/src/credits` (admin *push*) vs Redemption Payouts
+  `api/src/payouts` (partner *pull*). Separate, never consolidated.
+- **#16** — awarded POINTS credit the **partner** wallet on confirm (`walletService.creditEarn`, race-safe claim);
+  reversal → `clawbackAward` (reduces redeemablePoints ONLY; lifetime counters monotonic). Already-redeemed
+  **shortfall = report-only** (`CreditReversal.shortfallPaise`; supposed/reversed/pending; client settles off-platform).
+- **#8/#15 invoicing** (`api/src/invoices`) — auto idempotent per-outlet/month self-bill; re-run never mutates a PAID
+  invoice; GST from the **retailer GSTIN state vs 19** (Tech Gifsy/WB, `19AAACT9811F1Z9`); number editable-while-GENERATED,
+  locked-once-PAID; KYC-complete guard. Deferred: invoice PDF/email.
+- **#17** — per-tenant `features.visibilityCaptureMode` (`PHOTO_APPROVAL`/`AMOUNT_UPLOAD`) + Gifsy `PUT` toggle.
+- **#25 TDS** (`api/src/tds`) — **194R** (client; per-tenant/FY; 10/20% no-PAN; ₹20k threshold, retroactive) +
+  **194C** (Gifsy; platform per-PAN; 1/2/20%; >₹30k single|>₹1L agg; **two columns** w/ & w/o threshold);
+  **grossed-up (payer-borne)**; **PAN-keyed** (null/off-platform PAN → `__NO_PAN__` 20%); **compute+track+export ONLY**
+  (Form-16A/26Q filing OFF-platform — TRACES / future 3rd-party TDS API; §206AB removed). Redemption 194R value =
+  **points ÷ conversionRate**, frozen at confirm on `RedemptionOrder.valuePaise`. Off-platform + deposit Excel uploads
+  (PAN-required, `uploadBatchId` dedup); liability − deposited = outstanding. **Cash redemptions (UPI/BANK_TRANSFER)
+  now create a `PayoutTransaction`** (the settlement bridge) → existing payouts engine. **Audit money paths hard.**
 
-**Sequencing:** **6.0 ✅ · Credits #16 ✅ · Visibility #17 (+toggle) ✅ · Invoicing 6.7 (#8/#15) ✅ · TDS 6.5a ✅**
-(all on `develop`). **6.5 in progress.** TDS spec SIGNED OFF (`reconcile/P6.5-TDS-SPEC.md`). **6.5a DONE:** foundation
-migration (`P6_tds_foundation.sql` — `TdsOffPlatformEntry`/`TdsDeposit`, `RedemptionOrder.valuePaise`,
-`tds_records.section`, enums) + `src/tds` calc+aggregation engine (194R/194C per-PAN/FY, grossed-up, thresholds,
-two columns, deposits→outstanding, null-PAN 20%) + **redemption value frozen at confirm = points÷conversionRate**;
-read endpoints `/v1/admin/tds/194r|194c`. Audited (2 HIGH fixed). **6.5b DONE:** off-platform 194R upload + TDS
-deposit upload (194R=client / 194C=GIFSY-only) — template/preview/apply, rupees→paise, PAN-required, `uploadBatchId`
-dedup; `GET /v1/admin/tds/liability` (liability−deposited=outstanding). **6.5c DONE:** `GET /v1/admin/tds/194r|194c/export`
-— the **194R reference Excel** (26Q-mirrored cols + summary, deductee-name resolution) + the **194C two-column report**
-(with/without threshold). **REMAINING: 6.5d** admin **FE** (report download + the two upload screens) · the P5
-**`RedemptionOrder`→`PayoutTransaction` settlement bridge**. Then P6 is complete. Depends on P5 + P3 + P2.
+**NEXT = P7 · Engagement & support (spec §02 WF6; 00-MASTER-PLAN §P7).** Banners, notifications, leaderboard,
+tickets. Much read-side already exists (Phase S re-homed `api/src/{leaderboard,tickets,notifications}`). Tasks:
+**7.0** reconcile Engagement + Support · **7.1** banner config (admin) + partner-app banners · **7.2 notification
+engine** — templates/queue/delivery on the canonical **MSG91** path (**closes #21**; MSG91 = sole SMS/OTP/WhatsApp/email
+provider; retire `lib/notifications.ts` axios senders + `nodemailer`; the S3 `NotificationsService.enqueue` seam +
+DB template/queue exist — build the delivery worker) · **7.3** leaderboard config + snapshot + entries (ranking) ·
+**7.4** ticket lifecycle + threaded messages + escalation/SLA/routing. **START P7:** confirm on `develop` + dev DB
+reachable, read `00-MASTER-PLAN §P7` + the existing `api/src/{notifications,leaderboard,tickets}`, propose the P7
+reconcile before building. (No P6 finance gaps remain open.)
 
 **Residuals carried forward (NOT done — don't assume):**
 - **Platform retirement (~P6, ONE unit):** stale `platform/prisma/schema.prisma` + still-live platform Prisma code
@@ -140,10 +122,10 @@ Reload (read before building):
 - docs/plans/00-MASTER-PLAN.md            (phases; **P0–P5 + S DONE**; **§P6 = NEXT**)
 - docs/plans/MODEL-ALIGNMENT.md           (the REAL parameter model)
 - docs/plans/P6-TDS-EXPLAINER.md          (TDS structure for owner review — 6.5 is HELD on its 4 questions)
-- docs/plans/reconcile/{P5-wallet-points-rewards,P4-programs-targets-enrollment,P3-onboarding-kyc}.md  (build records)
+- docs/plans/reconcile/{P6-finance,P6.5-TDS-SPEC,P5-wallet-points-rewards,P4-programs-targets-enrollment}.md  (build records)
 - docs/plans/08-agent-execution-guide.md · GIT-WORKFLOW.md · DEV-DB.md · DOC-MAINTENANCE.md · RBAC-ENABLEMENT.md
 - docs/spec/gap-register.md               (open gaps; 19 resolved; P6 magnets = #16 + #7/#8/#19/#25)
-- memory: [[p5-complete]] · [[p4-complete]] · [[p3-kyc-complete]] · [[architecture-backend-split]] · [[platform-real-model]] · [[reconcile-fit-before-build]] · [[own-consistency-no-micromanage]]
+- memory: [[p6-finance-decisions]] · [[p5-complete]] · [[p4-complete]] · [[p3-kyc-complete]] · [[architecture-backend-split]] · [[platform-real-model]] · [[reconcile-fit-before-build]] · [[own-consistency-no-micromanage]]
 
 Local: dev-DB Auth Proxy on 127.0.0.1:5433 (restart per DEV-DB.md); platform on :3000 (Next dev) + backend on :4000
 (rebuild `dist` + `node dist/main.js`). Drive the live app via the Chrome extension (not preview_start). Confirm on
