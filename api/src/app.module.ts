@@ -35,6 +35,7 @@ import { AdminOutletsModule } from './admin-outlets/admin-outlets.module';
 import { AdminCoreModule } from './admin-core/admin-core.module';
 import { AdminProgramsModule } from './admin-programs/admin-programs.module';
 import { TargetsModule }      from './targets/targets.module';
+import { InvoicesModule }     from './invoices/invoices.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
 // leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
@@ -75,6 +76,7 @@ import { TargetsModule }      from './targets/targets.module';
     AdminCoreModule,
     AdminProgramsModule,
     TargetsModule,
+    InvoicesModule,
   ],
   controllers: [AppController],
   providers: [

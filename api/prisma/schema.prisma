@@ -1490,26 +1490,40 @@ model TdsRecord {
 }
 
 model AutoInvoice {
-  id              String    @id @default(cuid())
-  clientId        String
-  invoiceNumber   String    @unique
-  partnerId       String
-  invoiceDate     DateTime
-  periodStartDate DateTime?
-  periodEndDate   DateTime?
-  lineItems       Json
-  subtotalPaise   BigInt
-  gstPaise        BigInt    @default(0)
-  totalPaise      BigInt
-  pdfUrl          String?
-  emailSentAt     DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  id                  String            @id @default(cuid())
+  clientId            String
+  invoiceNumber       String            @unique
+  partnerId           String
+  outletCode          String
+  period              String // "YYYY-MM"
+  invoiceDate         DateTime
+  periodStartDate     DateTime?
+  periodEndDate       DateTime?
+  status              AutoInvoiceStatus @default(GENERATED)
+  invoiceNumberEdited Boolean           @default(false)
+  lineItems           Json
+  subtotalPaise       BigInt
+  gstPaise            BigInt            @default(0)
+  gstType             String? // CGST_SGST | IGST | null (unregistered)
+  totalPaise          BigInt
+  // Frozen retailer/KYC/GST/bank details at generation time (required — an invoice
+  // without its snapshot is unrecoverable if source data later changes).
+  snapshot            Json              @default("{}")
+  pdfUrl              String?
+  emailSentAt         DateTime?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
 
+  @@unique([clientId, outletCode, period]) // automatic generation: one invoice per outlet per month
   @@index([clientId])
   @@index([partnerId])
   @@index([invoiceDate])
   @@map("auto_invoices")
+}
+
+enum AutoInvoiceStatus {
+  GENERATED // editable (incl. invoice number); not yet paid
+  PAID // locked — invoice number can no longer change
 }
 
 // ============================================================
