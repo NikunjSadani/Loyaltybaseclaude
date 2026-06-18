@@ -3,7 +3,7 @@
 > **Status: 6.0 ✅ (committed `13c5d4e`) · Stream 1 (Credits #16) ✅ · Stream 2 (Visibility #17) ✅ (2026-06-18).**
 > Decisions below are owner-locked. Build records: §4 (6.0 money unit), §5 (Streams 1+2). **Remaining: Invoicing
 > (6.7) last; ⚠️ Payouts/TDS (6.5 + #25) ON HOLD** — owner reviews the TDS structure before any TDS work.
-> Reversal "shortfall" is **owner-decided** (report-only — see §5). Remaining visible piece: FE reversal report columns.
+> Reversal "shortfall" is **owner-decided** (report-only — see §5); FE Reversal Report (Supposed/Reversed/Pending) DONE.
 > Read [[platform-real-model]] + [[reconcile-fit-before-build]] + [[architecture-backend-split]] + [[p5-complete]].
 
 P6 = spec §02 Workflow 2/3 (Credits & Payouts) + the money spine. **This is mostly
@@ -169,7 +169,8 @@ Built in parallel (disjoint files); each independently audited; backend gate gre
   `P6_reversal_shortfall.sql`, applied; table was empty). The reversal report reads three figures per reversal:
   **supposed = `approvedPaise` · reversed = `approvedPaise − shortfallPaise` · pending = `shortfallPaise`**. The
   client settles `pending` **off-platform** — no write-off / recovery / carry-forward logic on the platform.
-  (Remaining: the FE reversal screen surfacing the three columns = a small visible-report follow-up.)
+  **FE "Reversal Report" DONE** — the admin payout page shows a Supposed / Reversed / Pending table for
+  approved reversals (PAYOUT ÷100 ₹ · POINTS as-is; non-zero Pending highlighted amber).
 
 **Stream 2 — Visibility (#17):** per-tenant `features.visibilityCaptureMode` (`PHOTO_APPROVAL` default |
 `AMOUNT_UPLOAD`) in `Client.features` JSON (no migration); `TenantService.resolveVisibilityCaptureMode`; mutating

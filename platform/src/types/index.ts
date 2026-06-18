@@ -1264,6 +1264,12 @@ export interface ReversalRequest {
   requestedPaise:  number;
   /** Approved reversal amount in integer paise (PAYOUT) or whole points (POINTS). */
   approvedPaise?:  number;
+  /**
+   * The portion of approvedPaise that could NOT be clawed back because the partner
+   * had already redeemed those points. Always 0 for PAYOUT reversals (no wallet).
+   * In integer paise (PAYOUT) or whole points (POINTS).
+   */
+  shortfallPaise?: number;
   requestedBy:     string;
   requestedAt:     string;
   status:          ReversalStatus;

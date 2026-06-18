@@ -92,7 +92,14 @@ interface Reversal {
   requestedPaise: string | number;
   /** Approved reversal in integer paise (PAYOUT) or whole points (POINTS). */
   approvedPaise?: string | number;
+  /**
+   * The portion of approvedPaise that could NOT be clawed back because the partner
+   * had already redeemed those points. Always 0 for PAYOUT reversals (no wallet).
+   * In integer paise (PAYOUT) or whole points (POINTS).
+   */
+  shortfallPaise?: string | number;
   requestedAt:    string;
+  approvedAt?:    string;
   status:         string;
   remarks?:       string;
 }
@@ -142,25 +149,28 @@ function PayoutPageInner() {
   const [expandedUtr,    setExpandedUtr]    = useState(false);
 
   // Reversal state
-  const [revAction,  setRevAction]  = useState<{ id: string; action: 'approve' | 'reject' } | null>(null);
-  const [revAmount,  setRevAmount]  = useState('');
-  const [revRemarks, setRevRemarks] = useState('');
-  const [revMsg,     setRevMsg]     = useState('');
-  const [revLoading, setRevLoading] = useState(false);
+  const [revAction,          setRevAction]          = useState<{ id: string; action: 'approve' | 'reject' } | null>(null);
+  const [revAmount,          setRevAmount]          = useState('');
+  const [revRemarks,         setRevRemarks]         = useState('');
+  const [revMsg,             setRevMsg]             = useState('');
+  const [revLoading,         setRevLoading]         = useState(false);
+  const [processedReversals, setProcessedReversals] = useState<Reversal[]>([]);
 
   const utrFileRef = useRef<HTMLInputElement>(null);
 
   // ─── Load data ───────────────────────────────────────────────────────────────
 
   const loadAll = useCallback(async () => {
-    const [fieldsRes, downloadsRes, reversalsRes] = await Promise.all([
+    const [fieldsRes, downloadsRes, reversalsRes, processedRes] = await Promise.all([
       fetch('/api/admin/credits/fields?active=true', { headers: authHeaders }).then((r) => r.json()),
       fetch(`/api/admin/credits/payout-downloads?period=${period}`, { headers: authHeaders }).then((r) => r.json()),
       fetch('/api/admin/credits/reversals?status=PENDING_GIFSY', { headers: authHeaders }).then((r) => r.json()),
+      fetch('/api/admin/credits/reversals?status=APPROVED', { headers: authHeaders }).then((r) => r.json()),
     ]);
     if (fieldsRes.success)    setFields(fieldsRes.data);
     if (downloadsRes.success) setDownloads(downloadsRes.data);
     if (reversalsRes.success) setReversals(reversalsRes.data);
+    if (processedRes.success) setProcessedReversals(processedRes.data);
   }, [period, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { loadAll(); }, [loadAll]);
@@ -688,6 +698,78 @@ function PayoutPageInner() {
                 )}
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Section 4: Reversal Report — processed (supposed / reversed / pending) ── */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
+        <h3 className="font-semibold text-gray-900 text-sm flex items-center gap-2">
+          <RotateCcw className="w-4 h-4 text-gray-400" />
+          Reversal Report
+          {processedReversals.length > 0 && (
+            <span className="ml-auto bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded-full font-medium">
+              {processedReversals.length}
+            </span>
+          )}
+        </h3>
+        <p className="text-xs text-gray-400">
+          Approved reversals. <strong>Pending</strong> = the portion that could not be reclaimed
+          (the partner had already redeemed those points) — the client settles this off-platform;
+          the platform takes no further action.
+        </p>
+
+        {processedReversals.length === 0 ? (
+          <p className="text-xs text-gray-400 text-center py-4">No processed reversals.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-500 text-left border-b border-gray-200">
+                  <th className="py-2 pr-3 font-medium">Outlet</th>
+                  <th className="py-2 pr-3 font-medium">Field</th>
+                  <th className="py-2 pr-3 font-medium">Period</th>
+                  <th className="py-2 pr-3 font-medium text-right">Supposed</th>
+                  <th className="py-2 pr-3 font-medium text-right">Reversed</th>
+                  <th className="py-2 pr-3 font-medium text-right">Pending</th>
+                  <th className="py-2 font-medium">Approved</th>
+                </tr>
+              </thead>
+              <tbody>
+                {processedReversals.map((rev) => {
+                  const isPayout = rev.awardType === 'PAYOUT';
+                  // approvedPaise = "supposed"; shortfallPaise = "pending"; reversed = supposed - pending.
+                  // PAYOUT values are integer paise (÷100 for ₹); POINTS are whole points (as-is).
+                  const supposed = Number(rev.approvedPaise ?? 0);
+                  const pending  = Number(rev.shortfallPaise ?? 0);
+                  const reversed = supposed - pending;
+                  const fmt = (v: number) =>
+                    isPayout ? `₹${(v / 100).toLocaleString('en-IN')}` : `${v.toLocaleString('en-IN')} pts`;
+                  return (
+                    <tr key={rev.id} className="border-b border-gray-100">
+                      <td className="py-2 pr-3">
+                        <span className="font-medium text-gray-800">{rev.outletName}</span>
+                        <span className="block text-gray-400 font-mono">{rev.outletId}</span>
+                      </td>
+                      <td className="py-2 pr-3 text-gray-700">{rev.fieldName}</td>
+                      <td className="py-2 pr-3 text-gray-700">{monthLabel(rev.period)}</td>
+                      <td className="py-2 pr-3 text-right font-medium text-gray-800">{fmt(supposed)}</td>
+                      <td className="py-2 pr-3 text-right font-medium text-emerald-700">{fmt(reversed)}</td>
+                      <td className="py-2 pr-3 text-right font-medium">
+                        {pending > 0 ? (
+                          <span className="inline-block bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">{fmt(pending)}</span>
+                        ) : (
+                          <span className="text-gray-400">{fmt(0)}</span>
+                        )}
+                      </td>
+                      <td className="py-2 text-gray-500">
+                        {rev.approvedAt ? new Date(rev.approvedAt).toLocaleDateString('en-IN') : '—'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>

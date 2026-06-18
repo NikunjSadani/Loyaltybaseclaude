@@ -69,11 +69,26 @@ This means the platform has to **track running yearly totals per shopkeeper per 
 when to start deducting — not just look at one payout in isolation. *(Today's code checks a single
 payment against a flat threshold; proper threshold tracking is part of the build.)*
 
-**d) The paper trail.**
-Compliance needs: a **TDS certificate (Form 16A)** to the shopkeeper each quarter, and the data for
-the **quarterly TDS return (Form 26Q)** to the government. The `TdsRecord` table already has slots for
-`assessmentYear`, `quarterPeriod`, `formType`, `certificateNumber`, `certificateUrl` — so the schema
-anticipates this; it's just not populated/sectioned yet.
+**d) The paper trail — and who actually produces it (important clarification).**
+Two documents matter, and **neither official one is "generated" by this platform**:
+- **Form 26Q** = the **quarterly TDS return** the *deductor* files with the Income-Tax Department.
+  The platform can **prepare the data** (deductee PAN, section, amount, TDS, challan refs); the actual
+  **filing** goes through the government e-filing/TIN system (a return-prep utility → FVU file, or a
+  TDS-filing service).
+- **Form 16A** = the TDS **certificate** for the shopkeeper. It **must be downloaded from the
+  government TRACES portal** (traces.gov.in) by the deductor **after** the 26Q is filed + processed —
+  it has a unique TRACES number and is verifiable. **A private portal cannot mint a valid 16A.**
+- **API?** The government doesn't expose a broad public "generate certificate" API. **Third-party
+  TDS-compliance providers** (Clear/ClearTDS, KDK, TDSMAN, etc.) offer APIs to file 26Q + pull
+  certificates — so automation is possible **via a third party**, later, if wanted.
+
+So the platform's realistic job = **compute + track + EXPORT** the 26Q dataset and show the shopkeeper
+an **internal** gross/TDS/net statement (informational, *not* the official certificate). The official
+16A + the filing stay **off-platform** (TRACES + e-filing, or your accounting / a TDS service) — the
+same "off-platform" call you already made for Gifsy→Client billing. The `TdsRecord` table already has
+slots for `assessmentYear`, `quarterPeriod`, `formType`, `certificateNumber`, `certificateUrl` — those
+hold the **section/period + a reference to the TRACES certificate once it's downloaded externally**, not
+a platform-minted certificate.
 
 ---
 
@@ -85,8 +100,11 @@ When you unblock 6.5, the TDS work would be:
 2. **Apply the right rate** per section + entity type + PAN-present (reuse the rates already in
    `lib/invoice.ts` / `payouts.service.ts`, confirmed by your CA).
 3. **Track annual per-recipient-per-section aggregates** so thresholds trigger correctly.
-4. **Record + report**: populate `TdsRecord` with section/year/quarter; produce Form-16A certificate
-   data + 26Q return data; show gross to the shopkeeper, net to the bank.
+4. **Record + EXPORT** (not generate certificates): populate `TdsRecord` with section/year/quarter;
+   **export the 26Q dataset** + an **internal** gross/TDS/net statement for the shopkeeper. The official
+   **Form 16A is downloaded from TRACES** and the **26Q is filed** off-platform (or via a future
+   third-party TDS-filing API) — the platform stores a *reference* to the TRACES certificate, it does
+   not mint one.
 5. **No tax *advice* in the product** — the platform computes/withholds/reports per the rules you
    confirm; it doesn't advise shopkeepers.
 
@@ -99,8 +117,10 @@ When you unblock 6.5, the TDS work would be:
    code's current assumption.
 2. **Who is the legal deductor — Gifsy or the brand?** (TAN / whose books / who issues certificates.)
 3. **Threshold period + reset** — financial year (Apr–Mar), per recipient, per section: confirm.
-4. **Certificate + return issuance** — does the platform generate Form 16A / 26Q data, or does that
-   happen in your external accounting? (Mirrors the "Gifsy→Client billing is off-platform" call.)
+4. **Filing model (reframed — see §3d):** confirm the platform's role = **compute + track + export**
+   the 26Q dataset + an internal statement only — the **official Form 16A (from TRACES) and the 26Q
+   filing stay off-platform** (your accounting / a TDS service). Then decide **whether/when** you want a
+   **third-party TDS-filing API integration** for automation, or keep it manual/external for now.
 
 Once you confirm these, 6.5 (redemption-payout settlement bridge + sectioned TDS) can start. Until
 then it stays on hold.
