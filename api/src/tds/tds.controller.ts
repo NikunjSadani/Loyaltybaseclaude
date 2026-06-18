@@ -1,5 +1,5 @@
 /**
- * TDS admin endpoints — P6.5a + P6.5b.
+ * TDS admin endpoints — P6.5a + P6.5b + P6.5c.
  *
  * P6.5a (aggregation reads):
  *   GET /v1/admin/tds/194r?fy=2025-26  — CLIENT_ADMIN or GIFSY_ADMIN (tenant-scoped)
@@ -11,6 +11,10 @@
  *   GET  /v1/admin/tds/deposits/template              → blank xlsx
  *   POST /v1/admin/tds/deposits/upload?section=194R|194C&apply=true → deposit upload
  *   GET  /v1/admin/tds/liability?section=194R|194C&fy=2025-26       → liability tracker
+ *
+ * P6.5c (CA-ready reference Excel exports):
+ *   GET /v1/admin/tds/194r/export?fy=2025-26  — CLIENT_ADMIN or GIFSY_ADMIN (tenant-scoped)
+ *   GET /v1/admin/tds/194c/export?fy=2025-26  — GIFSY_ADMIN only (platform-wide)
  */
 import {
   BadRequestException,
@@ -89,6 +93,62 @@ export class TdsController {
       summary: serializeSummary194C(summary),
       rows: rows.map(serializeRow194C),
     };
+  }
+
+  // ─── P6.5c: Excel reference exports ──────────────────────────────────────
+
+  /**
+   * GET /v1/admin/tds/194r/export?fy=2025-26
+   *
+   * CA-ready 194R reference Excel (mirroring the 26Q deductee sheet).
+   * Tenant-scoped: CLIENT_ADMIN is always their own tenant; GIFSY_ADMIN may
+   * pass ?clientId= to view another tenant's data.
+   *
+   * Columns: S.No · Deductee Name · PAN · Section (194R) · Amount Paid (₹)
+   *          · TDS Rate % · TDS Amount (₹) · Already Deposited (₹) · Outstanding (₹) · FY
+   * Plus a Summary sheet (totals).
+   * Filename: tds-194r-<fy>.xlsx
+   */
+  @Get('194r/export')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  async export194R(
+    @CurrentUser() user: JwtPayload,
+    @Query('fy') fy?: string,
+    @Query('clientId') queryClientId?: string,
+  ): Promise<StreamableFile> {
+    const clientId =
+      user.role === 'GIFSY_ADMIN' && queryClientId ? queryClientId : user.clientId;
+    const fyLabel = fy ?? fyOfToday().fyLabel;
+    const { buffer, filename } = await this.tds.export194R(clientId, fyLabel);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${filename}"`,
+    });
+  }
+
+  /**
+   * GET /v1/admin/tds/194c/export?fy=2025-26
+   *
+   * 194C two-column report Excel (platform-wide, Gifsy deductor).
+   * GIFSY_ADMIN only.
+   *
+   * Columns: S.No · Deductee Name · PAN · Entity Type · Section (194C) · Amount Paid (₹)
+   *          · TDS Rate % · TDS — With Threshold (₹) · TDS — No Threshold (₹)
+   *          · Threshold Met (Y/N) · Already Deposited (₹) · Outstanding (₹) · FY
+   * Filename: tds-194c-<fy>.xlsx
+   */
+  @Get('194c/export')
+  @Roles('GIFSY_ADMIN')
+  async export194C(
+    @CurrentUser() _user: JwtPayload,
+    @Query('fy') fy?: string,
+  ): Promise<StreamableFile> {
+    const fyLabel = fy ?? fyOfToday().fyLabel;
+    const { buffer, filename } = await this.tds.export194C(fyLabel);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${filename}"`,
+    });
   }
 
   // ─── P6.5b: Off-platform 194R upload ──────────────────────────────────────

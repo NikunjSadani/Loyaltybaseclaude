@@ -43,6 +43,8 @@ import {
   buildDepositTemplate,
 } from './tds.helpers';
 import type { UploadResult } from './dto/tds.dto';
+import { buildXlsx } from '../common/xlsx';
+import { paiseToRupees } from '../common/money';
 
 // ─── Result types ─────────────────────────────────────────────────────────────
 
@@ -575,6 +577,192 @@ export class TdsService {
     });
 
     return result;
+  }
+
+  // ─── 6.5c: Excel reference exports ──────────────────────────────────────────
+
+  /**
+   * Build the 194R reference Excel for a given clientId + FY.
+   *
+   * One row per PAN. Name resolution (CA-ready, mirroring 26Q deductee sheet):
+   *   - On-platform PAN → ChannelPartner (clientId-scoped) → ownerName or businessName
+   *   - __NO_PAN__ bucket → "NO PAN ON FILE"
+   *   - Unknown / off-platform PAN → blank name
+   *
+   * Columns: S.No · Deductee Name · PAN · Section · Amount Paid (₹) · TDS Rate %
+   *          · TDS Amount (₹) · Already Deposited (₹) · Outstanding (₹) · FY
+   *
+   * A second "Summary" sheet provides totals.
+   *
+   * @returns { buffer: Buffer, filename: string }
+   */
+  async export194R(
+    clientId: string,
+    fyLabel: string,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    const rows = await this.compute194R(clientId, fyLabel);
+
+    // Resolve PAN → name from ChannelPartner (tenant-scoped)
+    const onPlatformPans = rows
+      .map((r) => r.panNumber)
+      .filter((p) => p !== '__NO_PAN__');
+
+    const partners = onPlatformPans.length
+      ? await this.prisma.channelPartner.findMany({
+          where: {
+            clientId,
+            panNumber: { in: onPlatformPans },
+          },
+          select: { panNumber: true, ownerName: true, businessName: true },
+        })
+      : [];
+
+    // Use first match per PAN (panNumber is not unique-constrained across tenants,
+    // but within a single clientId scope duplicates should not arise in practice).
+    const panToName = new Map<string, string>();
+    for (const p of partners) {
+      if (p.panNumber && !panToName.has(p.panNumber)) {
+        panToName.set(p.panNumber, p.ownerName || p.businessName || '');
+      }
+    }
+
+    const detailRows = rows.map((r, i) => {
+      const hasPan = r.panNumber !== '__NO_PAN__';
+      const tdsRatePct = hasPan ? 10 : 20;
+      const deducteeName = hasPan
+        ? (panToName.get(r.panNumber) ?? '')
+        : 'NO PAN ON FILE';
+
+      return {
+        'S.No': i + 1,
+        'Deductee Name': deducteeName,
+        PAN: hasPan ? r.panNumber : '',
+        Section: '194R',
+        'Amount Paid (₹)': paiseToRupees(r.baseFyTotalPaise).toFixed(2),
+        'TDS Rate %': tdsRatePct,
+        'TDS Amount (₹)': paiseToRupees(r.liabilityPaise).toFixed(2),
+        'Already Deposited (₹)': paiseToRupees(r.depositedPaise).toFixed(2),
+        'Outstanding (₹)': paiseToRupees(r.outstandingPaise).toFixed(2),
+        FY: fyLabel,
+      };
+    });
+
+    // Summary sheet
+    const totalBase = rows.reduce((s, r) => s + r.baseFyTotalPaise, 0n);
+    const totalLiability = rows.reduce((s, r) => s + r.liabilityPaise, 0n);
+    const totalDeposited = rows.reduce((s, r) => s + r.depositedPaise, 0n);
+    const totalOutstanding = rows.reduce((s, r) => s + r.outstandingPaise, 0n);
+
+    const summaryRows = [
+      {
+        'Field': 'Total Deductees',
+        'Value': rows.length,
+      },
+      {
+        'Field': 'Total Amount Paid (₹)',
+        'Value': paiseToRupees(totalBase).toFixed(2),
+      },
+      {
+        'Field': 'Total TDS Amount (₹)',
+        'Value': paiseToRupees(totalLiability).toFixed(2),
+      },
+      {
+        'Field': 'Total Already Deposited (₹)',
+        'Value': paiseToRupees(totalDeposited).toFixed(2),
+      },
+      {
+        'Field': 'Total Outstanding (₹)',
+        'Value': paiseToRupees(totalOutstanding).toFixed(2),
+      },
+      {
+        'Field': 'FY',
+        'Value': fyLabel,
+      },
+    ];
+
+    const buffer = buildXlsx([
+      { name: 'TDS 194R Details', rows: detailRows },
+      { name: 'Summary', rows: summaryRows },
+    ]);
+
+    return { buffer, filename: `tds-194r-${fyLabel}.xlsx` };
+  }
+
+  /**
+   * Build the 194C two-column report Excel (platform-wide, Gifsy deductor).
+   *
+   * One row per PAN. Name resolution: look up ChannelPartner by PAN across
+   * all tenants (first match wins).
+   *
+   * Columns: S.No · Deductee Name · PAN · Entity Type · Section · Amount Paid (₹)
+   *          · TDS Rate % · TDS — With Threshold (₹) · TDS — No Threshold (₹)
+   *          · Threshold Met (Y/N) · Already Deposited (₹) · Outstanding (₹) · FY
+   *
+   * @returns { buffer: Buffer, filename: string }
+   */
+  async export194C(
+    fyLabel: string,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    const rows = await this.compute194C(fyLabel);
+
+    // Resolve PAN → name platform-wide (first match across any tenant)
+    const onPlatformPans = rows
+      .map((r) => r.panNumber)
+      .filter((p) => p !== '__NO_PAN__');
+
+    const partners = onPlatformPans.length
+      ? await this.prisma.channelPartner.findMany({
+          where: { panNumber: { in: onPlatformPans } },
+          select: { panNumber: true, ownerName: true, businessName: true },
+        })
+      : [];
+
+    const panToName = new Map<string, string>();
+    for (const p of partners) {
+      if (p.panNumber && !panToName.has(p.panNumber)) {
+        panToName.set(p.panNumber, p.ownerName || p.businessName || '');
+      }
+    }
+
+    const detailRows = rows.map((r, i) => {
+      const hasPan = r.panNumber !== '__NO_PAN__';
+
+      // Rate display: 1 for INDIVIDUAL/HUF, 2 for others, 20 for no-PAN
+      let tdsRatePct: number;
+      if (!hasPan) {
+        tdsRatePct = 20;
+      } else if (r.entityType === 'INDIVIDUAL' || r.entityType === 'HUF') {
+        tdsRatePct = 1;
+      } else {
+        tdsRatePct = 2;
+      }
+
+      const deducteeName = hasPan
+        ? (panToName.get(r.panNumber) ?? '')
+        : 'NO PAN ON FILE';
+
+      return {
+        'S.No': i + 1,
+        'Deductee Name': deducteeName,
+        PAN: hasPan ? r.panNumber : '',
+        'Entity Type': r.entityType,
+        Section: '194C',
+        'Amount Paid (₹)': paiseToRupees(r.baseFyTotalPaise).toFixed(2),
+        'TDS Rate %': tdsRatePct,
+        'TDS — With Threshold (₹)': paiseToRupees(r.liabilityPaise).toFixed(2),
+        'TDS — No Threshold (₹)': paiseToRupees(r.liabilityNoThresholdPaise).toFixed(2),
+        'Threshold Met (Y/N)': r.thresholdMet ? 'Y' : 'N',
+        'Already Deposited (₹)': paiseToRupees(r.depositedPaise).toFixed(2),
+        'Outstanding (₹)': paiseToRupees(r.outstandingPaise).toFixed(2),
+        FY: fyLabel,
+      };
+    });
+
+    const buffer = buildXlsx([
+      { name: 'TDS 194C Details', rows: detailRows },
+    ]);
+
+    return { buffer, filename: `tds-194c-${fyLabel}.xlsx` };
   }
 
   // ─── 6.5b: Liability tracker ─────────────────────────────────────────────────
