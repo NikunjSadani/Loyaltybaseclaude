@@ -888,9 +888,13 @@ export default function NewKYCPage() {
     const outletName = assignedOutlets.find((o) => o.outletId === confirmNotInterestedId)?.name ?? confirmNotInterestedId;
     setNotInterestedLoading(true);
     try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
       await fetch('/api/kyc/not-interested', {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body:    JSON.stringify({ outletId: confirmNotInterestedId }),
       });
       setDismissedOutlets((prev) => new Set([...prev, confirmNotInterestedId]));

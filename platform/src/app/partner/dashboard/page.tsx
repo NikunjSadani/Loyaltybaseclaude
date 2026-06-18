@@ -37,6 +37,7 @@ import { applyPrefillValues } from '@/lib/campaign';
 import { seedOutletData, getOutletPrefillData } from '@/lib/outlet-data';
 import { EnrollmentFormRenderer } from '@/components/partner/enrollment-form-renderer';
 import { formatLastUpdated, getLastSalesUploadDate } from '@/lib/sales-upload-utils';
+import { authHeader } from '@/lib/api-client';
 
 /* ─── Real-data context ──────────────────────────────────────────────────── */
 
@@ -814,7 +815,7 @@ export default function PartnerDashboard() {
   // API hydration — leaderboard pattern: mock shown first, API updates silently
   useEffect(() => {
     const period = currentPeriod();
-    fetch(`/api/partner/targets?period=${period}`)
+    fetch(`/api/partner/targets?period=${period}`, { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { targets: ApiSchemeTarget[] } }) => {
         if (json.success && json.data?.targets && json.data.targets.length > 0) {

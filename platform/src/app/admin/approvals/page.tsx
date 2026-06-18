@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus, type ApprovalEvent, type KYCSubmitterRole } from '@/types';
+import { authHeader } from '@/lib/api-client';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -239,7 +240,7 @@ export default function AdminApprovalsPage() {
   const [allFetched,    setAllFetched]    = useState<PendingKYC[]>(MOCK_PENDING);
 
   useEffect(() => {
-    fetch('/api/kyc?status=PENDING_GIFSY')
+    fetch('/api/kyc?status=PENDING_GIFSY', { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { submissions: ApiKycSubmission[] }; error?: string }) => {
         if (json.success && json.data) {

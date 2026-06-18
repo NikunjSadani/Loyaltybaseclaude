@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { Spinner } from '@/components/ui/spinner';
+import { authHeader } from '@/lib/api-client';
 
 type PayoutBatchStatus =
   | 'CALCULATED'
@@ -158,8 +159,8 @@ export default function PayoutsPage() {
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/payouts/batches').then(r => r.json()),
-      fetch('/api/payouts/transactions').then(r => r.json()),
+      fetch('/api/payouts/batches', { headers: { ...authHeader() } }).then(r => r.json()),
+      fetch('/api/payouts/transactions', { headers: { ...authHeader() } }).then(r => r.json()),
     ])
       .then(([batchJson, txnJson]) => {
         if (batchJson.success && batchJson.data) {

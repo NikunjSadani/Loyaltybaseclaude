@@ -9,6 +9,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
 import { formatDate } from '@/lib/utils';
 import { cn } from '@/lib/utils';
+import { authHeader } from '@/lib/api-client';
 
 type VisibilityStatus = 'SUBMITTED' | 'APPROVED' | 'REJECTED' | 'UNDER_REVIEW';
 
@@ -80,7 +81,7 @@ export default function SalesVisibilityPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/visibility/submissions')
+    fetch('/api/visibility/submissions', { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { submissions: ApiSubmission[] }; error?: string }) => {
         if (json.success && json.data) {

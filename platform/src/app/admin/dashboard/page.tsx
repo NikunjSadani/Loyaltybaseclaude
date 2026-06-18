@@ -19,6 +19,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { BillingTrendChart } from '@/components/charts/billing-trend';
+import { authHeader } from '@/lib/api-client';
 import {
   getAllConfigs,
   OUTLET_ACHIEVEMENTS,
@@ -310,7 +311,7 @@ export default function DashboardPage() {
   const [liveKpis, setLiveKpis] = useState<ApiKpiData | null>(null);
 
   useEffect(() => {
-    fetch('/api/admin/dashboard/kpis')
+    fetch('/api/admin/dashboard/kpis', { headers: { ...authHeader() } })
       .then(r => r.json())
       .then(json => { if (json.success && json.data) setLiveKpis(json.data); })
       .catch(() => {});

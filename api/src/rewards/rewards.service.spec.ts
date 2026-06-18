@@ -11,12 +11,13 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
 import { RewardsService } from './rewards.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { UpdatableOrderStatus } from './dto/rewards.dto';
+import { AdminListCatalogQueryDto, UpdatableOrderStatus } from './dto/rewards.dto';
 import { parseFulfilmentUploadBuffer } from './rewards-fulfilment.helpers';
 
 const mockPrisma = {
@@ -634,6 +635,35 @@ describe('RewardsService', () => {
       // Crucially NOT forced to ACTIVE (that's the partner read) — admin sees inactive items.
       expect(where.status).not.toBe('ACTIVE');
       expect(res.items[0].status).toBe('OUT_OF_STOCK');
+    });
+
+    // gap #35 regression: query params arrive as STRINGS over HTTP. The global
+    // ValidationPipe (transform:true) must coerce page/limit to Int via the DTO's
+    // @Type(() => Number) BEFORE they reach Prisma `take`/`skip` — otherwise
+    // Prisma throws PrismaClientValidationError (Int expected, got string) → 500.
+    // This used to slip through because the admin route typed @Query() as an
+    // inline intersection (erases to `Object` → pipe skips transform).
+    it('coerces string page/limit to Int so Prisma take/skip never sees a string', async () => {
+      mockPrisma.rewardCatalog.findMany.mockResolvedValue([]);
+      mockPrisma.rewardCatalog.count.mockResolvedValue(0);
+
+      // Reproduce the post-ValidationPipe shape: transform raw string query params
+      // through the concrete DTO exactly as Nest does with transform:true.
+      const dto = plainToInstance(
+        AdminListCatalogQueryDto,
+        { page: '1', limit: '200' },
+        { enableImplicitConversion: true },
+      );
+      expect(typeof dto.page).toBe('number');
+      expect(typeof dto.limit).toBe('number');
+
+      await service.adminListCatalog(gifsy, dto);
+
+      const args = mockPrisma.rewardCatalog.findMany.mock.calls?.[0]?.[0];
+      expect(args.take).toBe(200);
+      expect(args.skip).toBe(0);
+      expect(typeof args.take).toBe('number');
+      expect(typeof args.skip).toBe('number');
     });
   });
 

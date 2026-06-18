@@ -185,7 +185,7 @@ export default function VisibilityPage() {
   const [queueError, setQueueError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/visibility/submissions?status=SUBMITTED')
+    fetch('/api/visibility/submissions?status=SUBMITTED', { headers: adminAuthHeader() })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { submissions: ApiVisibilityItem[] }; error?: string }) => {
         if (json.success && json.data) {

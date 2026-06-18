@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Users, Search, ShieldCheck, UserCog, Building2, Activity } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
+import { authHeader } from '@/lib/api-client';
 
 interface GifsyUser {
   id: string;
@@ -27,7 +28,7 @@ export default function GifsyUsersPage() {
   const [search, setSearch] = useState('');
 
   useEffect(() => {
-    fetch('/api/admin/users')
+    fetch('/api/admin/users', { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { users: GifsyUser[] }; error?: string }) => {
         if (json.success && json.data) {

@@ -78,8 +78,10 @@ describe('GOTAPI — Gifsy Outlet Types API wiring', () => {
     });
     vi.stubGlobal('fetch', mockFetch);
     render(<OutletTypesPage />);
+    // P0.5 W1A: the call now carries Authorization headers via authHeader().
     expect(mockFetch).toHaveBeenCalledWith(
-      expect.stringContaining('/outlet-type-configs')
+      expect.stringContaining('/outlet-type-configs'),
+      expect.objectContaining({ headers: expect.anything() }),
     );
   });
 });

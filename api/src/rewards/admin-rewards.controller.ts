@@ -20,10 +20,10 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import {
+  AdminListCatalogQueryDto,
   CreateRewardCatalogDto,
   CreateRewardCategoryDto,
   FulfilmentTemplateQueryDto,
-  ListCatalogQueryDto,
   UpdateRewardCatalogDto,
   UpdateRewardCategoryDto,
 } from './dto/rewards.dto';
@@ -78,7 +78,7 @@ export class AdminRewardsController {
 
   @Get('catalog')
   @RequirePermission('rewards:read')
-  listCatalog(@CurrentUser() user: JwtPayload, @Query() query: ListCatalogQueryDto & { status?: string; categoryId?: string }) {
+  listCatalog(@CurrentUser() user: JwtPayload, @Query() query: AdminListCatalogQueryDto) {
     return this.rewards.adminListCatalog(user, query);
   }
 

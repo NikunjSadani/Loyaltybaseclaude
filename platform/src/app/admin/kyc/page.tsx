@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { Spinner } from '@/components/ui/spinner';
+import { authHeader } from '@/lib/api-client';
 
 type KYCStatusType = 'PENDING' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
 
@@ -106,7 +107,7 @@ export default function KYCPage() {
   const [bulkApproving, setBulkApproving] = useState(false);
 
   useEffect(() => {
-    fetch('/api/kyc')
+    fetch('/api/kyc', { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { submissions: ApiKycSub[] }; error?: string }) => {
         if (json.success && json.data) {

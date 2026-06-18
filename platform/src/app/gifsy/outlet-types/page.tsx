@@ -9,6 +9,7 @@ import {
   type OutletType,
 } from '@/lib/platform/outlet-types';
 import { Spinner } from '@/components/ui/spinner';
+import { authHeader } from '@/lib/api-client';
 
 /* ─── API types & mapping ──────────────────────────────────────────────────── */
 interface ApiOutletTypeConfig {
@@ -37,7 +38,7 @@ export default function OutletTypesPage() {
   const [types, setTypes] = useState<OutletType[]>(MASTER_OUTLET_TYPES);
 
   useEffect(() => {
-    fetch(`/api/gifsy/clients/${OUTLET_TYPE_CLIENT_SLUG}/outlet-type-configs`)
+    fetch(`/api/gifsy/clients/${OUTLET_TYPE_CLIENT_SLUG}/outlet-type-configs`, { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success: boolean; data?: ApiOutletTypeConfig[]; error?: string }) => {
         if (json.success && Array.isArray(json.data)) {

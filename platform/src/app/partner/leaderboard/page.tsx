@@ -5,6 +5,7 @@ import { Trophy, Medal, ArrowLeft, TrendingUp, MapPin, Globe, Map } from 'lucide
 import Link from 'next/link';
 import { formatPoints } from '@/lib/utils';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { authHeader } from '@/lib/api-client';
 
 type Scope = 'india' | 'state' | 'district';
 
@@ -75,7 +76,7 @@ export default function LeaderboardPage() {
 
   useEffect(() => {
     if (!features.partnerApp.showLeaderboard) { setLoading(false); return; }
-    fetch('/api/leaderboard')
+    fetch('/api/leaderboard', { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { leaderboard: ApiLeaderboardEntry[]; currentPartnerId?: string | null } }) => {
         if (json.success && json.data?.leaderboard && json.data.leaderboard.length > 0) {

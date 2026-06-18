@@ -14,6 +14,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { roundToRupeePaise } from '../tds/tds.helpers';
 import {
+  AdminListCatalogQueryDto,
   CreateRewardCatalogDto,
   CreateRewardCategoryDto,
   FulfilmentTemplateQueryDto,
@@ -929,7 +930,7 @@ export class RewardsService {
    * tenant-scoped, with the category name. Unlike the partner `listCatalog`, this is
    * NOT filtered to ACTIVE — admins manage inactive/out-of-stock/discontinued items.
    */
-  async adminListCatalog(user: JwtPayload, q: ListCatalogQueryDto & { status?: string; categoryId?: string }) {
+  async adminListCatalog(user: JwtPayload, q: AdminListCatalogQueryDto) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 50;
     const skip = (page - 1) * limit;
@@ -938,7 +939,7 @@ export class RewardsService {
       clientId: user.clientId,
       deletedAt: null,
     };
-    if (q.status) where.status = q.status as Prisma.RewardCatalogWhereInput['status'];
+    if (q.status) where.status = q.status;
     if (q.categoryId) where.categoryId = q.categoryId;
 
     const [items, total] = await Promise.all([

@@ -12,6 +12,7 @@ import {
   IsUrl,
   Length,
   Matches,
+  Max,
   Min,
   MinLength,
   ValidateNested,
@@ -53,7 +54,29 @@ export class ListCatalogQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(200)
   limit?: number = 20;
+}
+
+/**
+ * Admin catalogue listing filters. Extends the partner catalogue query so that
+ * `page`/`limit` keep their `@Type(() => Number)` coercion, and adds the
+ * admin-only `status`/`categoryId` filters.
+ *
+ * IMPORTANT: this MUST be a concrete class (not an inline intersection type on
+ * the controller). NestJS's ValidationPipe only transforms when the parameter's
+ * runtime metatype is a user class; an intersection type erases to `Object`, so
+ * the pipe skips coercion and `page`/`limit` reach Prisma as raw query STRINGS
+ * → `PrismaClientValidationError` on `take`/`skip`. (gap #35)
+ */
+export class AdminListCatalogQueryDto extends ListCatalogQueryDto {
+  @IsOptional()
+  @IsEnum(RewardCatalogStatus)
+  status?: RewardCatalogStatus;
+
+  @IsOptional()
+  @IsString()
+  categoryId?: string;
 }
 
 /** Orders listing filters — mirror the source GET /api/rewards/orders params. */

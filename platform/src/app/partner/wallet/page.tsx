@@ -10,6 +10,7 @@ import { formatPoints } from '@/lib/utils';
 import { TransactionType, WalletBucket, type WalletBalance, type WalletTransaction } from '@/types';
 import type { PayoutLedgerEntry } from '@/types';
 import { usePartnerSession } from '@/lib/partner-session';
+import { authHeader } from '@/lib/api-client';
 import {
   isDemoSession,
   DEMO_WALLET_BALANCE,
@@ -155,7 +156,7 @@ function InrWalletView() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch('/api/partner/payouts', { signal: controller.signal })
+    fetch('/api/partner/payouts', { signal: controller.signal, headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json) => {
         if (json.success && json.data?.payouts?.length > 0) {
@@ -418,8 +419,8 @@ export default function WalletPage() {
     // Live data only — wallet summary + passbook from the backend (via the
     // Next proxy). No localStorage merge: the ledger is the single source of truth.
     Promise.all([
-      fetch('/api/wallet').then(r => r.json()).catch(() => null),
-      fetch('/api/wallet/transactions').then(r => r.json()).catch(() => null),
+      fetch('/api/wallet', { headers: { ...authHeader() } }).then(r => r.json()).catch(() => null),
+      fetch('/api/wallet/transactions', { headers: { ...authHeader() } }).then(r => r.json()).catch(() => null),
     ]).then(([walletJson, txJson]) => {
       // Balance — API returns the flat {success,data} envelope; data is the
       // balance summary itself (earnedPoints, not nested under .balance).

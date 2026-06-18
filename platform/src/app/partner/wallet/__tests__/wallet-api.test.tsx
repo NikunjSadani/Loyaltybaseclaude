@@ -86,16 +86,23 @@ describe('PW — Partner wallet API wiring (live data)', () => {
 
   // ── Endpoint wiring ──────────────────────────────────────────────────────────
 
-  it('PW1: fetch is called with /api/wallet endpoint', async () => {
+  it('PW1: fetch is called with /api/wallet endpoint (authenticated)', async () => {
     stubFetch();
     await renderWallet();
-    expect(vi.mocked(global.fetch)).toHaveBeenCalledWith('/api/wallet');
+    // P0.5 W1A: the call now carries Authorization headers via authHeader().
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledWith(
+      '/api/wallet',
+      expect.objectContaining({ headers: expect.anything() }),
+    );
   });
 
-  it('PW2: fetch is called with /api/wallet/transactions endpoint', async () => {
+  it('PW2: fetch is called with /api/wallet/transactions endpoint (authenticated)', async () => {
     stubFetch();
     await renderWallet();
-    expect(vi.mocked(global.fetch)).toHaveBeenCalledWith('/api/wallet/transactions');
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledWith(
+      '/api/wallet/transactions',
+      expect.objectContaining({ headers: expect.anything() }),
+    );
   });
 
   // ── Real API shape mapping ───────────────────────────────────────────────────

@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { ROLE_LABELS, type SalesRole } from '@/lib/sales-role';
+import { authHeader } from '@/lib/api-client';
 
 interface SalesProfile {
   name: string;
@@ -98,7 +99,7 @@ export default function SalesProfilePage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/auth/me')
+    fetch('/api/auth/me', { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { user: Parameters<typeof mapUserToProfile>[0] }; error?: string }) => {
         if (json.success && json.data) {

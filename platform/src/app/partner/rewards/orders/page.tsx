@@ -7,6 +7,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
 import { formatDate, formatPoints } from '@/lib/utils';
+import { authHeader } from '@/lib/api-client';
 
 /* ─── Live order shape (GET /api/rewards/orders) ──────────────────────────────
    The {success,data} envelope is unwrapped in the effect; `data.orders` is the
@@ -157,7 +158,7 @@ export default function OrdersPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/rewards/orders')
+    fetch('/api/rewards/orders', { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { orders: ApiOrder[] }; error?: string }) => {
         if (json.success && json.data) {

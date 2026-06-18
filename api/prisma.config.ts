@@ -7,6 +7,9 @@ export default defineConfig({
   schema: "prisma/schema.prisma",
   migrations: {
     path: "prisma/migrations",
+    // Prisma 7 `db seed` runner. Uses ts-node (a devDependency) with an
+    // explicit CommonJS module override so the TS seed runs in this CJS repo.
+    seed: 'ts-node --compiler-options {"module":"CommonJS"} prisma/seed.ts',
   },
   datasource: {
     url: process.env["DATABASE_URL"],
