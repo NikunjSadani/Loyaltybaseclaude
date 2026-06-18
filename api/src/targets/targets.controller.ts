@@ -128,6 +128,27 @@ export class TargetsController {
   }
 
   /**
+   * GET /v1/admin/targets/export?month=YYYY-MM
+   * Streams a "final targets" xlsx: the stored OutletTarget values per outlet for
+   * the month, verbatim (no compute). Blank cell = KPI not configured.
+   */
+  @Get('export')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  async exportTargets(
+    @CurrentUser() user: JwtPayload,
+    @Query('month') month: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const buffer = await this.targets.exportTargetsBuffer(user, month);
+    const filename = `final-targets-${month}.xlsx`;
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${filename}"`,
+    });
+  }
+
+  /**
    * POST /v1/admin/targets/upload  (multipart/form-data, field: "file")
    * Parses the xlsx, validates against KpiDefs + outlet roster, and writes
    * OutletTarget rows inside a TargetUploadBatch. Blank cell = omitted key.

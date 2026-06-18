@@ -37,24 +37,20 @@ describe('A — lib/targets.ts data model', () => {
   });
 });
 
-// ─── B: admin/targets/page.tsx — Step 3 KPI wizard ──────────────────────────
-describe('B — admin/targets/page.tsx KPI wizard', () => {
+// ─── B: admin/targets/page.tsx — primary-KPI concept ────────────────────────
+// NOTE (P5 cleanup, 2026-06-18): P4 rewired admin/targets from the geo-hierarchy
+// TargetConfig WIZARD to KpiDef management against /api/admin/kpis. The old
+// wizard's `makeBlankConfig`/`setPrimary` handlers are gone (B3/B4 retired). The
+// `isPrimary` concept survives on the new KPI table, so B1/B2 still apply.
+describe('B — admin/targets/page.tsx primary-KPI concept', () => {
   const code = src('app/admin/targets/page.tsx');
 
   it('B1: KPI row state uses isPrimary field', () => {
     expect(code).toMatch(/isPrimary/);
   });
 
-  it('B2: wizard has "Primary" column header in Step 3', () => {
+  it('B2: page surfaces a "Primary" concept for KPIs', () => {
     expect(code).toMatch(/Primary/);
-  });
-
-  it('B3: a setPrimary handler (or equivalent) sets isPrimary: true', () => {
-    expect(code).toMatch(/isPrimary\s*:\s*true/);
-  });
-
-  it('B4: makeBlankConfig sets isPrimary: true on first KPI', () => {
-    expect(code).toMatch(/makeBlankConfig[\s\S]{0,400}isPrimary\s*:\s*true/);
   });
 });
 

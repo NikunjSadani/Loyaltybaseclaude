@@ -179,6 +179,35 @@ export default function TargetUploadPage() {
     }
   }
 
+  // ── Download Final Targets (export stored targets for the From month) ───────
+
+  async function handleDownloadFinal() {
+    if (!fromMonth) return;
+    setDownloading(true);
+    setDownloadError('');
+    try {
+      const res = await fetch(
+        `/api/admin/targets/export?month=${encodeURIComponent(fromMonth)}`,
+        { headers: authHeader() },
+      );
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = (await res.json()) as { error?: string; message?: string };
+          msg = j.error ?? j.message ?? msg;
+        } catch { /* ignore */ }
+        setDownloadError(msg);
+        return;
+      }
+      const blob = await res.blob();
+      downloadBlob(blob, `final_targets_${fromMonth}.xlsx`);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : 'Download failed');
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   // ── Upload ─────────────────────────────────────────────────────────────────
 
   const handleFile = useCallback(async (file: File) => {
@@ -339,6 +368,15 @@ export default function TargetUploadPage() {
               ? <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
               : <Download className="w-4 h-4" />}
             Download Template
+          </button>
+          <button
+            onClick={handleDownloadFinal}
+            disabled={!fromMonth || downloading}
+            title="Export the stored (final) targets for the From month"
+            className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-700 text-sm font-semibold rounded-xl hover:border-gray-400 disabled:opacity-40 transition-colors"
+          >
+            <Download className="w-4 h-4" />
+            Download Final Targets
           </button>
         </div>
 

@@ -406,6 +406,49 @@ describe('TargetsService', () => {
     });
   });
 
+  // ─── exportTargetsBuffer (Download Final Targets) ───────────────────────────
+
+  describe('exportTargetsBuffer', () => {
+    const XLSX = require('xlsx');
+
+    it('rejects a non-YYYY-MM month', async () => {
+      await expect(service.exportTargetsBuffer(admin, 'July')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('rejects when the tenant has no enabled KPIs', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+      await expect(service.exportTargetsBuffer(admin, '2026-07')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('dumps stored targetValues verbatim, blank for an omitted KPI key', async () => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        // RT-1 has both KPIs; RT-2 only the primary (FOCUS_PACK_1 omitted → blank).
+        { outletCode: 'RT-1', outletName: 'Shop One', outletType: 'SSS', targetValues: { MONTH_TGT: 100, FOCUS_PACK_1: 20 } },
+        { outletCode: 'RT-2', outletName: 'Shop Two', outletType: 'SSS', targetValues: { MONTH_TGT: 50 } },
+      ]);
+
+      const buf = await service.exportTargetsBuffer(admin, '2026-07');
+
+      // Tenant + month scoped read.
+      const where = mockPrisma.outletTarget.findMany.mock.calls.at(-1)[0].where;
+      expect(where).toEqual({ clientId: 'deoleo', month: '2026-07' });
+
+      const wb = XLSX.read(buf, { type: 'buffer' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+      expect(rows[0]).toEqual(['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1']);
+      expect(rows[1]).toEqual(['RT-1', 'Shop One', 'SSS', 100, 20]);
+      // RT-2's omitted FOCUS_PACK_1 cell is blank (empty), not 0.
+      expect(rows[2][3]).toBe(50);
+      expect(rows[2][4]).toBe('');
+    });
+  });
+
   // ─── uploadAchievements ────────────────────────────────────────────────────
 
   describe('uploadAchievements', () => {

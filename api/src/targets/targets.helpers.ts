@@ -177,6 +177,54 @@ export function generateTargetTemplateBuffer(
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
 
+// ── buildResolvedTargetsBuffer ────────────────────────────────────────────────
+
+/**
+ * Build a "final targets" export for ONE month — a verbatim dump of the stored
+ * `OutletTarget.targetValues` per outlet (NO geo-resolution / compute; the
+ * no-compute model just surfaces what was uploaded). Blank cell = the KPI was
+ * never configured for that outlet-month (key omitted from targetValues).
+ *
+ * @param month  YYYY-MM being exported.
+ * @param kpis   The tenant's KpiDef rows (only enabled ones become columns).
+ * @param rows   Stored OutletTarget rows for that month.
+ */
+export function buildResolvedTargetsBuffer(
+  month: string,
+  kpis: KpiDefLike[],
+  rows: {
+    outletCode: string;
+    outletName: string | null;
+    outletType: string | null;
+    targetValues: unknown;
+  }[],
+): Buffer {
+  const enabled = getEnabledKpis(kpis);
+  const header: string[] = [...FIXED_COLS, ...enabled.map((k) => k.label)];
+
+  const dataRows = rows.map((r) => {
+    const vals = (r.targetValues ?? {}) as Record<string, unknown>;
+    const out: (string | number)[] = [r.outletCode, r.outletName ?? '', r.outletType ?? ''];
+    for (const k of enabled) {
+      const v = vals[k.code];
+      out.push(typeof v === 'number' ? v : ''); // blank = not configured
+    }
+    return out;
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet([header, ...dataRows]);
+  ws['!cols'] = [
+    { wch: 16 },
+    { wch: 24 },
+    { wch: 16 },
+    ...enabled.map(() => ({ wch: 16 })),
+  ];
+  const wb = XLSX.utils.book_new();
+  // Sheet names cap at 31 chars and disallow some punctuation — month is safe.
+  XLSX.utils.book_append_sheet(wb, ws, `Final Targets ${month}`);
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+}
+
 // ── parseTargetUploadBuffer ───────────────────────────────────────────────────
 
 /**

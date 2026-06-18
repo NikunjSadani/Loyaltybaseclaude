@@ -458,12 +458,13 @@ describe('E — app/admin/sales/page.tsx: structure', () => {
     expect(page).toMatch(/type="file"|type='file'/);
   });
 
-  it('E8: uses getTenantKpiDefs for KPI config', () => {
-    expect(page).toMatch(/getTenantKpiDefs/);
+  it('E8: sources KPI defs from the backend (P4: /api/admin/kpis)', () => {
+    // P4 repointed admin/sales KPI config from getTenantKpiDefs → the KpiDef API.
+    expect(page).toMatch(/\/api\/admin\/kpis/);
   });
 
-  it('E9: has save / confirm action', () => {
-    expect(page).toMatch(/handleSave|handleConfirm|saveSales/);
+  it('E9: has a save / upload action (P4: /api/admin/achievements)', () => {
+    expect(page).toMatch(/\/api\/admin\/achievements|handleSave|handleConfirm|handleUpload/);
   });
 
   it('E10: has download report action', () => {

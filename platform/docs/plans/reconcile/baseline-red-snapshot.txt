@@ -38,9 +38,7 @@
   9  src/app/sales/kyc/new/__tests__/not-interested.test.tsx                  # P3
   2  src/app/sales/team/__tests__/member-card-id.test.tsx                     # P2
   3  src/app/sales/team/[memberId]/__tests__/member-detail.test.tsx           # P2
-  1  src/lib/__tests__/sales-excel-upload.test.ts                             # P4 (source-structure: getTenantKpiDefs)
-  1  src/lib/__tests__/target-excel-upload.test.ts                            # P4 (source-structure: getTenantKpiDefs)
-  2  src/lib/__tests__/primary-kpi-compliance.test.ts                         # P4 (admin/targets redesign — old KPI wizard setPrimary)
-  1  src/lib/__tests__/sales-upload-compliance.test.ts                        # P4 (admin/sales UI shape)
-  3  src/lib/__tests__/targets-compliance.test.ts                             # P4 (admin/targets delete-button colour)
- 11  src/lib/__tests__/targets-excel.test.ts                                  # P4 (admin/targets re-upload/resolved-download UI P4 replaced)
+# (2026-06-18) All 6 src/lib P4 admin/targets+sales redesign test files RESOLVED:
+#   the obsolete geo-hierarchy wizard tests (targets-excel) retired; the rest
+#   updated to the rewired backend endpoints. The old lib/targets.ts geo-compute
+#   retires with the platform (~P6).

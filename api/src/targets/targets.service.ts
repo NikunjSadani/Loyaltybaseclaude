@@ -33,6 +33,7 @@ import {
 } from './dto/targets.dto';
 import {
   generateTargetTemplateBuffer,
+  buildResolvedTargetsBuffer,
   parseTargetUploadBuffer,
   KpiDefLike,
   OutletLike,
@@ -225,6 +226,48 @@ export class TargetsService {
     }));
 
     return generateTargetTemplateBuffer(kpis, months, outletList);
+  }
+
+  /**
+   * GET /v1/admin/targets/export?month=YYYY-MM — "final targets" export.
+   * Dumps the stored OutletTarget.targetValues per outlet for the month, verbatim
+   * (no compute/resolution). Tenant-scoped. Blank cell = KPI not configured.
+   */
+  async exportTargetsBuffer(user: JwtPayload, month: string): Promise<Buffer> {
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      throw new BadRequestException('A valid YYYY-MM "month" query param is required');
+    }
+
+    const kpiRows = await this.prisma.kpiDef.findMany({
+      where: { clientId: user.clientId, enabled: true },
+      orderBy: { order: 'asc' },
+    });
+    if (kpiRows.length === 0) {
+      throw new BadRequestException('No enabled KPIs found for this tenant.');
+    }
+
+    const targetRows = await this.prisma.outletTarget.findMany({
+      where: { clientId: user.clientId, month },
+      orderBy: { outletCode: 'asc' },
+      select: {
+        outletCode: true,
+        outletName: true,
+        outletType: true,
+        targetValues: true,
+      },
+    });
+
+    const kpis: KpiDefLike[] = kpiRows.map((k) => ({
+      code: k.code,
+      label: k.label,
+      isPrimary: k.isPrimary,
+      hasNameOverride: k.hasNameOverride,
+      nameOverrideLabel: k.nameOverrideLabel ?? null,
+      order: k.order,
+      enabled: k.enabled,
+    }));
+
+    return buildResolvedTargetsBuffer(month, kpis, targetRows);
   }
 
   // ─── Target upload ──────────────────────────────────────────────────────────

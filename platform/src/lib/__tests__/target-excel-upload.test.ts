@@ -422,21 +422,22 @@ describe('G — admin/targets/upload/page.tsx: structure', () => {
     expect(code.length).toBeGreaterThan(0);
   });
 
-  it('G2: imports generateTargetTemplate', () => {
-    expect(code).toMatch(/generateTargetTemplate/);
+  // NOTE (P5 cleanup, 2026-06-18): P4 rewired admin/targets/upload OFF the local
+  // libs to backend endpoints (GET /api/admin/targets/template, POST
+  // /api/admin/targets/upload, GET /api/admin/kpis). G2/G3/G5 now assert those
+  // routes instead of the retired local-lib imports. G4 (buildErrorReportBuffer)
+  // and G11 (Add KPI — moved to admin/targets KPI mgmt) are retired; the rewired
+  // page is covered by P4's admin-pages-wiring + page-wiring tests.
+  it('G2: downloads the template from the backend (/api/admin/targets/template)', () => {
+    expect(code).toMatch(/\/api\/admin\/targets\/template/);
   });
 
-  it('G3: imports parseTargetUpload', () => {
-    expect(code).toMatch(/parseTargetUpload/);
+  it('G3: uploads to the backend (/api/admin/targets/upload)', () => {
+    expect(code).toMatch(/\/api\/admin\/targets\/upload/);
   });
 
-  it('G4: imports buildErrorReportBuffer', () => {
-    expect(code).toMatch(/buildErrorReportBuffer/);
-  });
-
-  it('G5: imports getTenantKpiDefs and saveTenantKpiDefs', () => {
-    expect(code).toMatch(/getTenantKpiDefs/);
-    expect(code).toMatch(/saveTenantKpiDefs/);
+  it('G5: sources KPI defs from the backend (/api/admin/kpis)', () => {
+    expect(code).toMatch(/\/api\/admin\/kpis/);
   });
 
   it('G6: file input accepts .xlsx and .xls', () => {
@@ -458,16 +459,8 @@ describe('G — admin/targets/upload/page.tsx: structure', () => {
     expect(code).toMatch(/skipped/i);
   });
 
-  it('G10: has a "Download Report" button after upload', () => {
-    expect(code).toMatch(/[Dd]ownload.*[Rr]eport|[Rr]eport.*[Dd]ownload/);
-  });
-
-  it('G11: KPI config section has Add KPI functionality', () => {
-    expect(code).toMatch(/[Aa]dd\s+KPI|addKpi|newKpi/i);
-  });
-
-  it('G12: accessible to both CLIENT_ADMIN and GIFSY_ADMIN', () => {
-    expect(code).toMatch(/CLIENT_ADMIN/);
-    expect(code).toMatch(/GIFSY_ADMIN/);
-  });
+  // G10 (Download Report), G11 (Add KPI) retired: P4 moved KPI config to
+  // admin/targets (KpiDef mgmt) and the backend upload returns errors inline;
+  // G12 (roles) retired: gating is enforced by the backend @Roles on
+  // /v1/admin/targets/* + the admin layout, not inline page strings.
 });

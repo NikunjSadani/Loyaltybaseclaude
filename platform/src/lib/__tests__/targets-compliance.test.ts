@@ -72,24 +72,24 @@ describe('B — admin/targets/page.tsx KPI delete button colour', () => {
   it('B1: delete button does NOT use text-gray-300 (too faint)', () => {
     // text-gray-300 is barely visible on a white/light background.
     // The delete button specifically should not use it.
-    // We look for the Trash2 button near "removeKpi" to be precise.
-    // Approach: check that the removeKpi button line doesn't have text-gray-300.
-    const trashBtnMatch = code.match(/removeKpi[\s\S]{0,300}Trash2|Trash2[\s\S]{0,300}removeKpi/);
+    // We look for the Trash2 button near "onDelete" to be precise.
+    // Approach: check that the onDelete button line doesn't have text-gray-300.
+    const trashBtnMatch = code.match(/onDelete[\s\S]{0,300}Trash2|Trash2[\s\S]{0,300}onDelete/);
     expect(trashBtnMatch).not.toBeNull();
     // The matched region must not contain text-gray-300
     expect(trashBtnMatch![0]).not.toMatch(/text-gray-300/);
   });
 
   it('B2: delete button uses a visible grey (text-gray-400 or darker)', () => {
-    // Extract the button that calls removeKpi and check it has a darker default colour.
+    // Extract the button that calls onDelete and check it has a darker default colour.
     // Accept text-gray-400, text-gray-500, text-gray-600.
-    const trashBtnMatch = code.match(/removeKpi[\s\S]{0,300}Trash2|Trash2[\s\S]{0,300}removeKpi/);
+    const trashBtnMatch = code.match(/onDelete[\s\S]{0,300}Trash2|Trash2[\s\S]{0,300}onDelete/);
     expect(trashBtnMatch).not.toBeNull();
     expect(trashBtnMatch![0]).toMatch(/text-gray-[456]/);
   });
 
   it('B3: delete button still has a red hover state (UX confirmation)', () => {
-    const trashBtnMatch = code.match(/removeKpi[\s\S]{0,300}Trash2|Trash2[\s\S]{0,300}removeKpi/);
+    const trashBtnMatch = code.match(/onDelete[\s\S]{0,300}Trash2|Trash2[\s\S]{0,300}onDelete/);
     expect(trashBtnMatch).not.toBeNull();
     expect(trashBtnMatch![0]).toMatch(/hover:text-red-/);
   });

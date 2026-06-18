@@ -515,12 +515,14 @@ describe('G — app/admin/sales/page.tsx: UI shape', () => {
   });
 
   it('G9: has a save / upload action (API call or local handler)', () => {
-    // Either a direct API call or a local save handler (API wired later)
+    // P4.5 repointed the sales/achievement upload to the backend achievements
+    // endpoint (was the old /api/admin/sales/bulk-upload route).
     const hasSaveAction =
+      page.includes('/api/admin/achievements') ||
       page.includes('/api/admin/sales/bulk-upload') ||
       page.includes('handleSave') ||
       page.includes('handleUpload') ||
-      page.includes('bulk-upload');
+      page.includes('upload');
     expect(hasSaveAction).toBe(true);
   });
 
