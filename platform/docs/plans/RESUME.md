@@ -68,11 +68,13 @@ P6 = reconcile + wire-up, not build-from-zero.
   (`PHOTO_APPROVAL` default | `AMOUNT_UPLOAD`) in `Client.features` JSON (no migration); mutating entry points gated
   by mode; **Gifsy-admin toggle** (`PUT /v1/admin/settings/visibility-capture-mode`, `tenancy:manage_flags`, features-merge
   no-clobber) + segmented control on the admin settings screen. Residual: photo `submit` still unported (GCS).
-- ⚠️ **#25 TDS = ON HOLD — owner reviews structure FIRST.** Do NOT write TDS code. **Explainer WRITTEN +
-  presented: `P6-TDS-EXPLAINER.md`** (the two sections incentive **194R** vs visibility-service **194C/194J**;
-  thresholds; who bears the deduction; where each computes) — **awaiting owner answers to its 4 questions**
-  (confirm sections/rates w/ CA · legal deductor Gifsy-vs-brand · threshold period · who issues certificates/returns)
-  before 6.5 starts. (Invoice-side 194C/J rates already in `lib/invoice.ts computeTDS`; payout-side 194R in `payouts.processBatch`.)
+- ◐ **#25 TDS — SPEC DRAFTED (`reconcile/P6.5-TDS-SPEC.md`), awaiting owner sign-off; NO code yet.** Owner-confirmed:
+  **194R** (incentive; deductor=client; per-tenant/FY; 10%/20%-no-PAN; ₹20k) vs **194C** (visibility; deductor=Gifsy;
+  platform-level per-PAN; 1%/2%/20%; >₹30k single|>₹1L agg; **GST-exclusive base**; two columns w/ & w/o threshold).
+  **Grossed-up (payer-borne)** only (no config flag — current tenant); **PAN-keyed** incl. off-platform unknown PANs;
+  FY-scoped; **compute+track+export only** (filing/Form-16A off-platform via TRACES / future third-party TDS API;
+  §206AB removed). 194R taxable event = cash payout at PAID + redemption at fulfilment + off-platform upload.
+  **Recommend 6.7 (invoicing) BEFORE 6.5** (194C base = invoice pre-GST base). Build only after sign-off.
 
 **Sequencing:** **6.0 ✅ · Stream 1 (Credits #16) ✅ · Stream 2 (Visibility #17) ✅** (all on `develop`; 6.0
 committed `13c5d4e`; Streams 1+2 commit pending). **Remaining: Invoicing (6.7) LAST; Payouts/TDS (6.5: P5
