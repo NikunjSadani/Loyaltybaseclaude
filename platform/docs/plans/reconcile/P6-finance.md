@@ -173,9 +173,14 @@ Built in parallel (disjoint files); each independently audited; backend gate gre
 
 **Stream 2 — Visibility (#17):** per-tenant `features.visibilityCaptureMode` (`PHOTO_APPROVAL` default |
 `AMOUNT_UPLOAD`) in `Client.features` JSON (no migration); `TenantService.resolveVisibilityCaptureMode`; mutating
-entry points gated (photo approve/reject vs amount bulk-upload); read-only paths ungated. **Follow-ups:** a
-dedicated `PUT` admin setter for the flag (settable today via `upsertClientConfig`); the photo `submit` endpoint
-stays unported (GCS multipart infra).
+entry points gated (photo approve/reject vs amount bulk-upload); read-only paths ungated. **Gifsy-admin toggle
+DONE** (2026-06-18): `PUT /v1/admin/settings/visibility-capture-mode` (GIFSY_ADMIN + `tenancy:manage_flags`,
+merges `features` without clobbering other keys, audit-logged) + a segmented control on the admin settings page
+(GIFSY_ADMIN-gated, optimistic with revert). Residual: the photo `submit` endpoint stays unported (GCS multipart infra).
+
+**TDS (6.5 / #25) — still ON HOLD.** Plain-English structure explainer written for owner review:
+[`../P6-TDS-EXPLAINER.md`](../P6-TDS-EXPLAINER.md) (the two sections 194R vs 194C/194J, thresholds, who bears the
+deduction, the 4 owner questions). No TDS code until the owner confirms.
 
 **Audit (money-path, independent):** no double-credit/double-debit escape; guarded claims + tx boundaries correct;
 DI correct. Must-fixes applied (earnedPoints invariant; 0-amount row skip; shortfall surfaced). Lower-sev pre-existing

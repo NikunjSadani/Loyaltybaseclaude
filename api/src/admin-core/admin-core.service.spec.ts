@@ -40,7 +40,7 @@ const mockPrisma = {
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
-const mockTenant = { resolveClient: jest.fn() };
+const mockTenant = { resolveClient: jest.fn(), upsertClientConfig: jest.fn() };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
@@ -268,6 +268,90 @@ describe('AdminCoreService', () => {
       await service.saveKpiConfig(clientAdmin, [{ id: 'k1' }]);
       const args = mockPrisma.programSetting.upsert.mock.calls[0][0];
       expect(args.where.clientId_settingKey).toEqual({ clientId: 'deoleo', settingKey: 'kpi_defs' });
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // setVisibilityCaptureMode
+  // ────────────────────────────────────────────────────────────────────────────
+  describe('setVisibilityCaptureMode', () => {
+    const baseConfig = {
+      slug: 'deoleo',
+      name: 'Deoleo',
+      isActive: true,
+      branding: { primaryColor: '#c00', displayName: 'Deoleo' },
+      features: {
+        loyalty: true,
+        visibility: true,
+        leaderboard: false,
+        schemes: false,
+        selfEnrollment: false,
+        targets: true,
+        rewards: true,
+        tds: false,
+        visibilityCaptureMode: 'PHOTO_APPROVAL' as const,
+      },
+    };
+
+    beforeEach(() => {
+      mockTenant.resolveClient.mockResolvedValue(structuredClone(baseConfig));
+      mockTenant.upsertClientConfig.mockResolvedValue(undefined);
+      mockPrisma.auditLog.create.mockResolvedValue({ id: 'al1' });
+    });
+
+    it('VCM1: sets mode to AMOUNT_UPLOAD and persists via upsertClientConfig', async () => {
+      const res = await service.setVisibilityCaptureMode(gifsy, { mode: 'AMOUNT_UPLOAD' });
+      expect(res).toEqual({ mode: 'AMOUNT_UPLOAD' });
+
+      const savedConfig = mockTenant.upsertClientConfig.mock.calls[0][1];
+      expect(savedConfig.features.visibilityCaptureMode).toBe('AMOUNT_UPLOAD');
+    });
+
+    it('VCM2: merges — does NOT clobber other feature flags when changing mode', async () => {
+      await service.setVisibilityCaptureMode(gifsy, { mode: 'AMOUNT_UPLOAD' });
+
+      const savedConfig = mockTenant.upsertClientConfig.mock.calls[0][1];
+      // All other feature flags must remain intact
+      expect(savedConfig.features.loyalty).toBe(true);
+      expect(savedConfig.features.visibility).toBe(true);
+      expect(savedConfig.features.rewards).toBe(true);
+      expect(savedConfig.features.targets).toBe(true);
+      // And branding is untouched
+      expect(savedConfig.branding.primaryColor).toBe('#c00');
+      expect(savedConfig.slug).toBe('deoleo');
+    });
+
+    it('VCM3: sets mode to PHOTO_APPROVAL (round-trip back)', async () => {
+      // Start from AMOUNT_UPLOAD
+      mockTenant.resolveClient.mockResolvedValueOnce({
+        ...baseConfig,
+        features: { ...baseConfig.features, visibilityCaptureMode: 'AMOUNT_UPLOAD' as const },
+      });
+      const res = await service.setVisibilityCaptureMode(gifsy, { mode: 'PHOTO_APPROVAL' });
+      expect(res).toEqual({ mode: 'PHOTO_APPROVAL' });
+      const savedConfig = mockTenant.upsertClientConfig.mock.calls[0][1];
+      expect(savedConfig.features.visibilityCaptureMode).toBe('PHOTO_APPROVAL');
+    });
+
+    it('VCM4: calls upsertClientConfig with caller clientId (tenant-scoped)', async () => {
+      await service.setVisibilityCaptureMode(gifsy, { mode: 'AMOUNT_UPLOAD' });
+      expect(mockTenant.upsertClientConfig.mock.calls[0][0]).toBe('deoleo');
+    });
+
+    it('VCM5: writes an audit log entry with the new mode', async () => {
+      await service.setVisibilityCaptureMode(gifsy, { mode: 'AMOUNT_UPLOAD' });
+      const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
+      expect(audit.action).toBe('UPDATE');
+      expect(audit.entityType).toBe('CLIENT_CONFIG');
+      expect(audit.actorId).toBe('admin1');
+      expect(audit.metadata).toMatchObject({ key: 'visibilityCaptureMode', value: 'AMOUNT_UPLOAD' });
+    });
+
+    it('VCM6: propagates NotFoundException when the client config does not exist', async () => {
+      mockTenant.resolveClient.mockRejectedValueOnce(new NotFoundException('Unknown client'));
+      await expect(
+        service.setVisibilityCaptureMode(gifsy, { mode: 'AMOUNT_UPLOAD' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

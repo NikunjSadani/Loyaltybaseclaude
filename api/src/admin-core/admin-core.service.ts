@@ -14,7 +14,7 @@ import {
   ListUsersQueryDto,
   UpdateUserDto,
 } from './dto/users.dto';
-import { UpsertSettingDto } from './dto/settings.dto';
+import { SetVisibilityCaptureModeDto, UpsertSettingDto } from './dto/settings.dto';
 import { HierarchyConfigDto, TaskConfigDto } from './dto/config.dto';
 import {
   DEOLEO_HIERARCHY,
@@ -439,6 +439,46 @@ export class AdminCoreService {
       branding: config.branding,
       features: config.features,
     };
+  }
+
+  /**
+   * admin/settings/visibility-capture-mode — GIFSY_ADMIN-only PUT.
+   *
+   * Reads the current ClientConfig, merges only the `visibilityCaptureMode`
+   * feature key (preserves every other feature flag and all top-level config
+   * fields), then persists via TenantService.upsertClientConfig which also
+   * busts the in-memory cache.
+   *
+   * The GET path is already covered by GET /v1/admin/settings/config which
+   * returns the full `features` object including `visibilityCaptureMode`.
+   */
+  async setVisibilityCaptureMode(user: JwtPayload, dto: SetVisibilityCaptureModeDto) {
+    const clientId = user.clientId;
+    // Load the full current config (throws NotFoundException if not found)
+    const config = await this.tenant.resolveClient(clientId);
+
+    // Merge — only update visibilityCaptureMode; all other feature flags are preserved.
+    const updatedConfig = {
+      ...config,
+      features: {
+        ...config.features,
+        visibilityCaptureMode: dto.mode,
+      },
+    };
+
+    await this.tenant.upsertClientConfig(clientId, updatedConfig);
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'UPDATE',
+        entityType: 'CLIENT_CONFIG',
+        entityId: clientId,
+        actorId: user.sub,
+        metadata: { key: 'visibilityCaptureMode', value: dto.mode },
+      },
+    });
+
+    return { mode: dto.mode };
   }
 
   // ════════════════════════════════════════════════════════════════════════

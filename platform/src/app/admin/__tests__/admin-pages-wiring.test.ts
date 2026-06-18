@@ -247,6 +247,66 @@ describe('F — admin/sales page', () => {
   });
 });
 
+// ─── H — admin/settings visibility-capture-mode toggle ───────────────────────
+
+describe('H — admin/settings page (visibility capture mode)', () => {
+  it('H1: imports fetchVisibilityCaptureMode and saveVisibilityCaptureMode from the lib', () => {
+    const code = src('app/admin/settings/page.tsx');
+    expect(code).toMatch(/fetchVisibilityCaptureMode/);
+    expect(code).toMatch(/saveVisibilityCaptureMode/);
+    expect(code).toMatch(/@\/lib\/visibility-capture-mode/);
+  });
+
+  it('H2: imports useAdminSession for role gating', () => {
+    const code = src('app/admin/settings/page.tsx');
+    expect(code).toMatch(/useAdminSession/);
+    expect(code).toMatch(/@\/lib\/admin-session/);
+  });
+
+  it('H3: guards the toggle with isGifsyAdmin (GIFSY_ADMIN-only)', () => {
+    const code = src('app/admin/settings/page.tsx');
+    // Must gate on GIFSY_ADMIN role check
+    expect(code).toMatch(/isGifsyAdmin/);
+    // And the role comparison is present
+    expect(code).toMatch(/GIFSY_ADMIN/);
+  });
+
+  it('H4: calls PUT /api/admin/settings/visibility-capture-mode in the lib', () => {
+    const code = src('lib/visibility-capture-mode.ts');
+    expect(code).toMatch(/\/api\/admin\/settings\/visibility-capture-mode/);
+    expect(code).toMatch(/method.*PUT|PUT.*method/s);
+  });
+
+  it('H5: reads mode from GET /api/admin/settings/config (features.visibilityCaptureMode)', () => {
+    const code = src('lib/visibility-capture-mode.ts');
+    expect(code).toMatch(/\/api\/admin\/settings\/config/);
+    expect(code).toMatch(/visibilityCaptureMode/);
+  });
+
+  it('H6: PHOTO_APPROVAL and AMOUNT_UPLOAD are both present as segmented control options', () => {
+    const code = src('app/admin/settings/page.tsx');
+    expect(code).toMatch(/PHOTO_APPROVAL/);
+    expect(code).toMatch(/AMOUNT_UPLOAD/);
+    // Friendly labels
+    expect(code).toMatch(/Photo Approval/);
+    expect(code).toMatch(/Amount Upload/);
+  });
+
+  it('H7: optimistic update — reverts captureMode on save failure', () => {
+    const code = src('app/admin/settings/page.tsx');
+    // The revert logic sets mode back to the previous value on error
+    expect(code).toMatch(/Revert optimistic/);
+  });
+
+  it('H8: lib falls back to PHOTO_APPROVAL when API response lacks the field', () => {
+    const code = src('lib/visibility-capture-mode.ts');
+    // Default fallback expressed in code
+    expect(code).toMatch(/'PHOTO_APPROVAL'/);
+    // catch block returns default
+    expect(code).toMatch(/catch[\s\S]*PHOTO_APPROVAL/);
+  });
+});
+
 // ─── G — admin/users/outlets ─────────────────────────────────────────────────
 
 describe('G — admin/users/outlets page', () => {

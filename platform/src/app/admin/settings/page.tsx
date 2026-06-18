@@ -1,11 +1,17 @@
 ﻿'use client'
 
 import { useState, useEffect } from 'react'
-import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp } from 'lucide-react'
+import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings'
+import {
+  fetchVisibilityCaptureMode,
+  saveVisibilityCaptureMode,
+  type VisibilityCaptureMode,
+} from '@/lib/visibility-capture-mode'
+import { useAdminSession } from '@/lib/admin-session'
 
 interface Settings {
   holdingPeriodDays: number
@@ -50,6 +56,10 @@ function SettingRow({ label, description, value, onChange, type = 'number', min,
 }
 
 export default function SettingsPage() {
+  // ── Role gate — visibility capture mode toggle is GIFSY_ADMIN-only ──
+  const adminSession = useAdminSession()
+  const isGifsyAdmin = adminSession.role === 'GIFSY_ADMIN'
+
   const [settings, setSettings] = useState<Settings>({
     holdingPeriodDays: 30, otpValidityHours: 6, kycSlaHours: 48,
     visibilityGeoRadiusMeters: 50, visibilityLookbackDays: 30, visibilityHashSimilarityThreshold: 90,
@@ -76,6 +86,36 @@ export default function SettingsPage() {
     saveGifsySettings({ paceAmberThreshold: paceThreshold })
     setPaceThresholdSaved(true)
     setTimeout(() => setPaceThresholdSaved(false), 3000)
+  }
+
+  // ── Visibility capture mode (GIFSY_ADMIN-only) ──
+  const [captureMode,      setCaptureMode]      = useState<VisibilityCaptureMode>('PHOTO_APPROVAL')
+  const [captureModeLoading, setCaptureModeLoading] = useState(false)
+  const [captureModeError,   setCaptureModeError]   = useState<string | null>(null)
+  const [captureModeSaved,   setCaptureModeSaved]   = useState(false)
+
+  useEffect(() => {
+    if (!isGifsyAdmin) return
+    fetchVisibilityCaptureMode().then(setCaptureMode)
+  }, [isGifsyAdmin])
+
+  async function handleCaptureModeChange(newMode: VisibilityCaptureMode) {
+    // Optimistic update
+    setCaptureMode(newMode)
+    setCaptureModeError(null)
+    setCaptureModeLoading(true)
+    try {
+      await saveVisibilityCaptureMode(newMode)
+      setCaptureModeSaved(true)
+      setTimeout(() => setCaptureModeSaved(false), 3000)
+    } catch (err) {
+      setCaptureModeError(err instanceof Error ? err.message : 'Failed to save')
+      // Revert optimistic update on failure
+      const previous = newMode === 'PHOTO_APPROVAL' ? 'AMOUNT_UPLOAD' : 'PHOTO_APPROVAL'
+      setCaptureMode(previous)
+    } finally {
+      setCaptureModeLoading(false)
+    }
   }
 
   // ── Task configuration ──
@@ -177,6 +217,75 @@ export default function SettingsPage() {
           <SettingRow label="EXIF Timestamp Window (hours)" description="Maximum acceptable difference between EXIF capture time and upload time." value={settings.visibilityExifWindowHours} onChange={set('visibilityExifWindowHours')} min={1} max={72} />
         </CardContent>
       </Card>
+
+      {/* ── Visibility Capture Mode (GIFSY_ADMIN only) ── */}
+      {isGifsyAdmin && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Eye className="h-4 w-4 text-[var(--brand-primary)]" /> Visibility Capture Mode
+                </CardTitle>
+                <CardDescription className="mt-1">
+                  Controls how visibility data is captured for this tenant.
+                  <strong> Photo Approval</strong> — field agents submit photos via the mobile app;
+                  Gifsy admin approves/rejects each submission.
+                  <strong> Amount Upload</strong> — Gifsy/Client admin bulk-uploads visibility amounts
+                  via Excel; no photo-capture workflow.
+                  This is a Gifsy-operated setting — only Gifsy Admin can change it.
+                </CardDescription>
+              </div>
+              {captureModeSaved && (
+                <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg shrink-0">
+                  ✓ Saved
+                </span>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center gap-3">
+              {/* Segmented control */}
+              <div className="flex bg-gray-100 rounded-lg p-1 gap-1" role="radiogroup" aria-label="Visibility capture mode">
+                {(['PHOTO_APPROVAL', 'AMOUNT_UPLOAD'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    role="radio"
+                    aria-checked={captureMode === mode}
+                    disabled={captureModeLoading}
+                    onClick={() => captureMode !== mode && handleCaptureModeChange(mode)}
+                    className={`px-4 py-2 rounded-md text-sm font-medium transition-all disabled:opacity-60 ${
+                      captureMode === mode
+                        ? 'bg-white text-gray-900 shadow-sm border border-gray-200'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    {mode === 'PHOTO_APPROVAL' ? 'Photo Approval' : 'Amount Upload'}
+                  </button>
+                ))}
+              </div>
+              {captureModeLoading && (
+                <RefreshCw className="h-4 w-4 animate-spin text-gray-400" aria-label="Saving" />
+              )}
+            </div>
+            {captureMode === 'PHOTO_APPROVAL' && (
+              <p className="text-xs text-gray-500 mt-2">
+                Active: field agents submit photos via the mobile app. Gifsy admin reviews and
+                approves/rejects each submission in the Visibility Approval queue.
+              </p>
+            )}
+            {captureMode === 'AMOUNT_UPLOAD' && (
+              <p className="text-xs text-gray-500 mt-2">
+                Active: no photo capture. Gifsy/Client admin uploads visibility amounts in bulk
+                via the Excel upload on the Visibility page.
+              </p>
+            )}
+            {captureModeError && (
+              <p className="text-xs text-red-600 mt-2">{captureModeError}</p>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* TDS Configuration */}
       <Card>

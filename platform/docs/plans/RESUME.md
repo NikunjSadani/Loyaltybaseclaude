@@ -64,13 +64,15 @@ P6 = reconcile + wire-up, not build-from-zero.
   reversal report columns.
 - **#8 invoicing — included, built LAST.** Logic already pure in `lib/invoice.ts` (GST-from-reg-type, number-gen);
   port + persist; needs `AutoInvoice` delta (status/finalize-lock/`invoiceNumberEdited`/snapshot). #15 GST reads reg-type.
-- **#17 (Visibility capture-mode) — ✅ DONE (Stream 2, 2026-06-18):** per-tenant `features.visibilityCaptureMode`
+- **#17 (Visibility capture-mode) — ✅ DONE (Stream 2 + toggle, 2026-06-18):** per-tenant `features.visibilityCaptureMode`
   (`PHOTO_APPROVAL` default | `AMOUNT_UPLOAD`) in `Client.features` JSON (no migration); mutating entry points gated
-  by mode. Follow-up: a dedicated `PUT` admin setter; photo `submit` still unported (GCS).
-- ⚠️ **#25 TDS = ON HOLD — owner reviews structure FIRST.** Do NOT write TDS code. Owner wants a plain-English
-  TDS explainer (the two sections: incentive **194R** vs visibility-service **194C/194J**; thresholds; who bears
-  the deduction; where each computes) reviewed + confirmed before any TDS build. (Invoice-side 194C/J rates already
-  exist in `lib/invoice.ts computeTDS`; payout-side 194R in `payouts.processBatch`.)
+  by mode; **Gifsy-admin toggle** (`PUT /v1/admin/settings/visibility-capture-mode`, `tenancy:manage_flags`, features-merge
+  no-clobber) + segmented control on the admin settings screen. Residual: photo `submit` still unported (GCS).
+- ⚠️ **#25 TDS = ON HOLD — owner reviews structure FIRST.** Do NOT write TDS code. **Explainer WRITTEN +
+  presented: `P6-TDS-EXPLAINER.md`** (the two sections incentive **194R** vs visibility-service **194C/194J**;
+  thresholds; who bears the deduction; where each computes) — **awaiting owner answers to its 4 questions**
+  (confirm sections/rates w/ CA · legal deductor Gifsy-vs-brand · threshold period · who issues certificates/returns)
+  before 6.5 starts. (Invoice-side 194C/J rates already in `lib/invoice.ts computeTDS`; payout-side 194R in `payouts.processBatch`.)
 
 **Sequencing:** **6.0 ✅ · Stream 1 (Credits #16) ✅ · Stream 2 (Visibility #17) ✅** (all on `develop`; 6.0
 committed `13c5d4e`; Streams 1+2 commit pending). **Remaining: Invoicing (6.7) LAST; Payouts/TDS (6.5: P5
@@ -125,6 +127,7 @@ CONSTRAINTS (must hold):
 Reload (read before building):
 - docs/plans/00-MASTER-PLAN.md            (phases; **P0–P5 + S DONE**; **§P6 = NEXT**)
 - docs/plans/MODEL-ALIGNMENT.md           (the REAL parameter model)
+- docs/plans/P6-TDS-EXPLAINER.md          (TDS structure for owner review — 6.5 is HELD on its 4 questions)
 - docs/plans/reconcile/{P5-wallet-points-rewards,P4-programs-targets-enrollment,P3-onboarding-kyc}.md  (build records)
 - docs/plans/08-agent-execution-guide.md · GIT-WORKFLOW.md · DEV-DB.md · DOC-MAINTENANCE.md · RBAC-ENABLEMENT.md
 - docs/spec/gap-register.md               (open gaps; 19 resolved; P6 magnets = #16 + #7/#8/#19/#25)
