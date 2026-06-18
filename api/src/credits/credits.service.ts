@@ -835,9 +835,16 @@ export class CreditsService {
         }
       }
 
-      // Return the updated reversal for the HTTP response. clawbackShortfall > 0 means
-      // some approved points were already redeemed and could not be reclaimed from the
-      // spendable balance — surfaced so ops can settle out-of-band (owner review).
+      // Persist the PENDING (un-reversible) portion for the reversal report:
+      //   supposed = approvedPaise · reversed = approvedPaise - shortfallPaise · pending = shortfallPaise.
+      // The client settles `pending` off-platform; the platform does nothing with it.
+      if (clawbackShortfall > 0) {
+        await tx.creditReversal.update({
+          where: { id },
+          data: { shortfallPaise: toPaiseBigInt(clawbackShortfall) },
+        });
+      }
+
       const finalReversal = await tx.creditReversal.findFirst({ where: { id } });
       return { ...finalReversal, clawbackShortfall };
     });

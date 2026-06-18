@@ -2233,6 +2233,10 @@ model CreditReversal {
   originalPaise   BigInt
   requestedPaise  BigInt
   approvedPaise   BigInt?
+  // Reporting only: PENDING points an approved POINTS reversal could NOT claw back
+  // (partner already redeemed them). reversed = approvedPaise - shortfallPaise.
+  // The client settles `pending` off-platform; the platform does nothing with it.
+  shortfallPaise  BigInt               @default(0)
   requestedBy     String
   requestedAt     DateTime             @default(now())
   approvedBy      String?

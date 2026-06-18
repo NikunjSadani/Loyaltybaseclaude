@@ -57,9 +57,11 @@ P6 = reconcile + wire-up, not build-from-zero.
 - **#16 (HIGH) — ✅ DONE (Stream 1, 2026-06-18):** `confirmBatch` credits POINTS → the **partner** wallet
   (`creditEarn`, race-safe guarded claim, no-wallet outlets skipped+reported); reversal approval → new
   `walletService.clawbackAward` (`DEBIT_ADJUSTMENT`, reduces **only `redeemablePoints`** — `earnedPoints`/lifetime*
-  stay monotonic per the locked invariant). Money-path audited (no double-credit/-debit). ⚠️ **Owner decision
-  pending:** the already-redeemed "shortfall" settlement policy (today: clamped + surfaced in the response; a
-  structured/query-able record + policy is the proper fix — small schema add — deferred to owner).
+  stay monotonic per the locked invariant). Money-path audited (no double-credit/-debit). The
+  already-redeemed **shortfall** is **owner-decided = report-only**: persisted on `CreditReversal.shortfallPaise`
+  (migration `P6_reversal_shortfall.sql`); report = supposed(`approvedPaise`)/reversed(`approved−shortfall`)/
+  pending(`shortfall`); client settles `pending` **off-platform** (no platform write-off/recovery). Remaining: FE
+  reversal report columns.
 - **#8 invoicing — included, built LAST.** Logic already pure in `lib/invoice.ts` (GST-from-reg-type, number-gen);
   port + persist; needs `AutoInvoice` delta (status/finalize-lock/`invoiceNumberEdited`/snapshot). #15 GST reads reg-type.
 - **#17 (Visibility capture-mode) — ✅ DONE (Stream 2, 2026-06-18):** per-tenant `features.visibilityCaptureMode`

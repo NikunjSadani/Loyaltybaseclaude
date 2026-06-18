@@ -3,7 +3,7 @@
 > **Status: 6.0 ✅ (committed `13c5d4e`) · Stream 1 (Credits #16) ✅ · Stream 2 (Visibility #17) ✅ (2026-06-18).**
 > Decisions below are owner-locked. Build records: §4 (6.0 money unit), §5 (Streams 1+2). **Remaining: Invoicing
 > (6.7) last; ⚠️ Payouts/TDS (6.5 + #25) ON HOLD** — owner reviews the TDS structure before any TDS work.
-> **⚠️ One owner decision pending (§5): the reversal "shortfall" settlement policy.** Stream 1+2 not yet committed.
+> Reversal "shortfall" is **owner-decided** (report-only — see §5). Remaining visible piece: FE reversal report columns.
 > Read [[platform-real-model]] + [[reconcile-fit-before-build]] + [[architecture-backend-split]] + [[p5-complete]].
 
 P6 = spec §02 Workflow 2/3 (Credits & Payouts) + the money spine. **This is mostly
@@ -161,14 +161,15 @@ Built in parallel (disjoint files); each independently audited; backend gate gre
 - **Reversal clawback:** approving a POINTS reversal → new `walletService.clawbackAward` — a `DEBIT_ADJUSTMENT`
   reducing **only `redeemablePoints`** (floored at 0). ⚠️ **`earnedPoints` + all `lifetime*` stay MONOTONIC**
   (the locked invariant — the audit caught an earlier version wrongly decrementing `earnedPoints`; fixed).
-  Guarded `updateMany` claim prevents double-debit. **Already-redeemed shortfall** (approved > spendable) is
-  clamped (no negative), recorded in the ledger description, and **surfaced in the API response** (`clawbackShortfall`).
+  Guarded `updateMany` claim prevents double-debit.
 - #7 verified (separate-UTR exclusion) + locked with tests.
-- **⚠️ Owner decision pending — the shortfall:** when a POINTS reversal is approved for more points than the
-  partner still holds (already redeemed some), the gap can't be reclaimed from the wallet. Today it's clamped +
-  surfaced (visible, non-blocking). **Proper fix = a structured/query-able record (a `CreditReversal` shortfall
-  column or a settlement entry) + a settlement policy (write-off / cash recovery / carry-forward)** — deferred to
-  owner; would need a small schema add.
+- **Shortfall — OWNER-DECIDED (report only; 2026-06-18):** when a POINTS reversal is approved for more than the
+  partner still holds (already redeemed some), the gap can't be reclaimed. The platform does **nothing** with it
+  beyond **reporting** — persisted on `CreditReversal.shortfallPaise` (additive migration
+  `P6_reversal_shortfall.sql`, applied; table was empty). The reversal report reads three figures per reversal:
+  **supposed = `approvedPaise` · reversed = `approvedPaise − shortfallPaise` · pending = `shortfallPaise`**. The
+  client settles `pending` **off-platform** — no write-off / recovery / carry-forward logic on the platform.
+  (Remaining: the FE reversal screen surfacing the three columns = a small visible-report follow-up.)
 
 **Stream 2 — Visibility (#17):** per-tenant `features.visibilityCaptureMode` (`PHOTO_APPROVAL` default |
 `AMOUNT_UPLOAD`) in `Client.features` JSON (no migration); `TenantService.resolveVisibilityCaptureMode`; mutating
