@@ -33,6 +33,8 @@ import {
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useAdminSession, setDemoAdminRole } from '@/lib/admin-session';
+import { RequireAuth } from '@/components/auth/require-auth';
+import { logout } from '@/lib/auth-client';
 
 // All possible nav items — feature flags control which are visible
 const ALL_NAV_ITEMS = [
@@ -123,11 +125,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const adminSession = useAdminSession();
 
   function handleLogout() {
-    // Clear session and navigate to root (L5 fix)
     if (typeof window !== 'undefined') {
       localStorage.removeItem('admin_role_demo');
     }
-    router.push('/');
+    logout(); // clears token + user, redirects to /auth/login
   }
   const [collapsed, setCollapsed] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
@@ -400,7 +401,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                   <a href="#" className="block px-4 py-2 text-xs text-gray-700 hover:bg-gray-50">Profile Settings</a>
                   <a href="#" className="block px-4 py-2 text-xs text-gray-700 hover:bg-gray-50">Change Password</a>
                   <hr className="my-1 border-gray-100" />
-                  <a href="#" className="block px-4 py-2 text-xs text-red-600 hover:bg-red-50">Sign Out</a>
+                  <button onClick={handleLogout} className="block w-full text-left px-4 py-2 text-xs text-red-600 hover:bg-red-50">Sign Out</button>
                 </div>
               )}
             </div>
@@ -409,7 +410,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
         {/* Page content */}
         <main className="flex-1 overflow-y-auto p-6">
-          {children}
+          <RequireAuth>{children}</RequireAuth>
         </main>
       </div>
     </div>

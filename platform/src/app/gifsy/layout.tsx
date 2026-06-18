@@ -6,6 +6,8 @@ import {
   LayoutGrid, Users, Settings, Building2,
   ChevronRight, LogOut, Globe, ShoppingBag,
 } from 'lucide-react';
+import { RequireAuth } from '@/components/auth/require-auth';
+import { logout } from '@/lib/auth-client';
 
 const NAV = [
   { href: '/gifsy',               label: 'Overview',       icon: LayoutGrid  },
@@ -59,7 +61,7 @@ export default function GifsyLayout({ children }: { children: React.ReactNode })
             <Globe className="w-4 h-4" />
             Platform Home
           </Link>
-          <button className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-white/40 hover:text-red-400 hover:bg-red-500/10 transition-colors">
+          <button onClick={logout} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-white/40 hover:text-red-400 hover:bg-red-500/10 transition-colors">
             <LogOut className="w-4 h-4" />
             Sign Out
           </button>
@@ -69,7 +71,7 @@ export default function GifsyLayout({ children }: { children: React.ReactNode })
       {/* Main content */}
       <main className="flex-1 overflow-auto bg-gray-950">
         <div className="max-w-6xl mx-auto px-6 py-6">
-          {children}
+          <RequireAuth>{children}</RequireAuth>
         </div>
       </main>
     </div>

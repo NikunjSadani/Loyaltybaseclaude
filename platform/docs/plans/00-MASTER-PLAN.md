@@ -40,8 +40,9 @@ commits · conventional-commit messages · **every DB query scoped by `clientId`
 | **P3** ✅ | **Onboarding & KYC — DONE (3.0–3.6)** (enroll→route→verify→approve→activate→re-KYC, backend-owned + thin FE; two-lane field-level KYC; built plan→execute→audit, 129 tests, browser-verified) | KYC & Enrollment | #9✅, #12✅, #13✅, #14✅, #15✅ | 3–5 wk |
 | **P4** ✅ | Programs, targets & enrollment (DONE 2026-06-17) | Schemes/Activations · Targets | #6, #10, #29 | 4–6 wk |
 | **P5** ✅ | **Wallet, points & rewards — DONE (5.0–5.5)** (ledger-aware wallet primitives + PointsLedger/expiry [#28]; real RewardCatalog CRUD [retired gift blob]; redeem→OTP→debit→lifecycle+refund+fulfilment; partner+admin FE; money-path audits caught real double-spend/oversell) | Wallet & Points · Rewards | #28 | 3–4 wk |
-| **P6** | Finance: credits, payouts, visibility, invoicing | Awards&Credits · Payouts&Fund · Visibility · Invoicing | #5, #7, #8, #16, #17, #19, #25 | 5–7 wk |
-| **P7** | Engagement & support | Engagement · Support | (—) | 2–4 wk |
+| **P6** ✅ | **Finance: credits, payouts, visibility, invoicing — DONE (6.0–6.7, backend)** | Awards&Credits · Payouts&Fund · Visibility · Invoicing | #5, #7, #8, #16, #17, #19, #25 | 5–7 wk |
+| **P0.5/0.6** ⚠️ | **"Make It Runnable" — FE/auth/integration remediation (NEXT, before P7).** A live runtime audit (2026-06-18) found "P0–P6 complete" was backend+static-green only: login is broken end-to-end, many FE pages 401→fabricate demo data, Gift Catalogue 500s, the seed is broken. `reconcile/P0.5-make-it-runnable.md` | cross-cutting (auth · FE wiring · seed · money hardening) | #33, #34, #35, #36, #37 (+H2 payouts.processBatch) | ~1–2 wk |
+| **P7** | Engagement & support (after P0.5/0.6; opens with platform-retirement #31) | Engagement · Support | (—) | 2–4 wk |
 | **P8** | Reporting, analytics, compliance & hardening | Reporting · cross-cutting | #24, #26, #27 | 3–5 wk |
 | **P9** | Infra, Deployment & Go-Live (CI/CD, staging/prod, migrations, RBAC enablement, launch) — **cross-cutting track**: CI/staging early, launch at the end | cross-cutting | #23 (RLS), #27 | 3–5 wk (spread) |
 
@@ -343,7 +344,9 @@ visibility self-bills. **This phase contained the most High-severity gaps.**
 > (194R/194C grossed-up PAN-keyed compute+track+export, #25) + the redemption→payout settlement bridge.
 > Every wave independently money-path audited. Resolves #5/#7/#8/#15/#16/#17/#19/#25. Full record:
 > [`reconcile/P6-finance.md`](reconcile/P6-finance.md) + [`reconcile/P6.5-TDS-SPEC.md`](reconcile/P6.5-TDS-SPEC.md).
-> Residual (deferred): invoice PDF/email; the actual 26Q FVU filing (off-platform). **NEXT = P7 (Engagement & support).**
+> Residual (deferred): invoice PDF/email; the actual 26Q FVU filing (off-platform). **NEXT = P0.5/0.6 "Make It
+> Runnable" (FE/auth/integration remediation), THEN P7.** ⚠️ P6 was DONE at the **backend** layer; a runtime
+> audit (2026-06-18) found the FE/auth/integration layer incomplete — see the P0.5 section below.
 
 > **◐ RECONCILE DRAFTED (2026-06-18) — decisions locked, build NOT started.** Audit found most P6
 > models + read-side routes already exist (Phase S). Full record: [`reconcile/P6-finance.md`](reconcile/P6-finance.md).
@@ -370,6 +373,47 @@ visibility self-bills. **This phase contained the most High-severity gaps.**
 
 **Exit:** a confirmed batch credits wallets and pays out (Visibility on its own UTR + invoice).
 **Depends on:** P5 (wallet), P3 (GST reg-type), P2 (outlets).
+
+## P0.5 / P0.6 · "Make It Runnable" — FE/auth/integration remediation  (~1–2 wk) — **NEXT, before P7**
+**Objective:** make the product actually usable. A live runtime audit (2026-06-18; backend :4000 + platform :3000
+driven via Chrome with seeded users) found the "P0–P6 complete" status was **backend + static-gate green only** —
+the app's front door does not open and a large share of FE is mock/auth-broken at runtime. Backend is real and
+correct. Full plan + evidence: [`reconcile/P0.5-make-it-runnable.md`](reconcile/P0.5-make-it-runnable.md) ·
+[[runtime-audit-p0.5]] · gap-register #33–#37.
+
+> **Why this exists:** the static gate (tsc + jest + vitest + doc-consistency) passed while login was broken
+> end-to-end (#33), most pages 401→fabricated demo data (#34), the admin Gift Catalogue 500s (#35), dashboards
+> show invented numbers (#36), and the seed/DB were unusable (#37). **The P0.5+ gate MUST add a live runtime
+> re-verify per wave** — the static gate cannot catch integration/auth rot.
+
+**P0.5 — NOW (blockers + reproducible env):**
+| Wave | What | Area | Parallel |
+|---|---|---|---|
+| **0** ✅ | **DONE (2026-06-18) — Auth/login fix (#33).** login contract (`phone`+`clientId`), token→`localStorage`(`accessToken`), `getRoleDashboard` fixed, `RequireAuth` guard in all 4 portal layouts, `logout()` wired. Runtime-verified per role; independent audit "sound to ship"; gate green (0 new vitest reds). | `platform` auth/login, auth-client, layouts | solo (Opus) |
+| **1A** | **Global auth-attachment (#34)** — route all data pages through `api-client` `authHeader`; revives Overview/KYC/Visibility/Payouts/partner-Wallet | `platform` pages/lib | ∥ after Wave 0 |
+| **1B** | **Seed rebuild (#37)** — pg-adapter seed + wire into `prisma.config` + realistic demo dataset (one command) | `api/prisma`, seed | ∥ |
+| **1C** | **Catalogue 500 + DTO coercion (#35, #26)** — fix `adminListCatalog` `take`; sweep all list DTOs for uncoerced numeric query params | `api/src/rewards` + DTOs | ∥ |
+
+**P0.6 — NEXT (wire dead surfaces + harden money), all parallel (disjoint modules), each independently audited:**
+| Agent | What | Gap |
+|---|---|---|
+| **D** | KYC write-paths (sales+admin approve/reject/submit → real endpoints; fix review-queue role) | #36, M3 |
+| **E** | Redemption + wallet write-paths (sales catalogue redeem + OTP + real balance) | #36 |
+| **F** | Visibility submit + invoice **generation** backend route + FE; Excel round-trip fixes | #36, M4 |
+| **G** | Tickets/support → `/api/tickets` (partner + admin) | #36 |
+| **H** | Dashboards → real aggregation endpoints (or hide) | #36 |
+| **I** | Backend: `payouts.processBatch` → `$transaction` + guarded claim; TDS `section` param | H2, M5 |
+
+**P0.7 — cleanup (overlaps P0.6 tail):** strip demo chrome/persona switchers (M2); delete dead `app/api/*` +
+duplicate `/admin/outlets` + dead links (L1); finish Excel round-trips.
+
+**Recommended adds:** CI smoke-login per role; E2E happy-path per portal through the real proxy; seeded demo
+dataset as a one-command artifact; global ValidationPipe transform audit; real `/auth/me` identity in headers.
+
+**Exit:** a real user logs in per role and every "complete" page shows real data or an honest empty state (no
+fabricated numbers, no fake-success writes). **Then → P7**, opening with the platform-retirement residual (#31).
+
+---
 
 ## P7 · Engagement & support  (2–4 wk)
 **Objective:** banners, notifications, leaderboard, and tickets (spec §02 WF6).

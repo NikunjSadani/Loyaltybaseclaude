@@ -16,6 +16,8 @@ import {
   type OutletType,
 } from '@/lib/partner-session';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { RequireAuth } from '@/components/auth/require-auth';
+import { logout } from '@/lib/auth-client';
 
 /* ── Demo switcher (dev only) ────────────────────────────────────────────────
    In production this is replaced by actual auth. */
@@ -73,7 +75,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
 
   const handleLogout = () => {
     document.cookie = 'token=; Max-Age=0; path=/';
-    router.push('/auth/login');
+    logout(); // clears localStorage token + user, redirects to /auth/login
   };
 
   /* ── Nav items — gated by feature flags ── */
@@ -169,7 +171,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
 
         {/* Main content */}
         <main className="flex-1 pb-24 px-4 py-5 max-w-4xl mx-auto w-full">
-          {children}
+          <RequireAuth>{children}</RequireAuth>
         </main>
       </div>
 

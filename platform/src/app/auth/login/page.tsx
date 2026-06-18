@@ -15,11 +15,12 @@ type Step = 'mobile' | 'otp';
 const RESEND_COUNTDOWN = 60;
 
 function getRoleDashboard(role?: string): string {
-  const partnerRoles = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
-  const salesRoles = ['SALES_EXECUTIVE', 'TERRITORY_SALES_OFFICER', 'AREA_SALES_MANAGER', 'SALES_MANAGER'];
-  if (partnerRoles.includes(role ?? '')) return '/dashboard';
-  if (salesRoles.includes(role ?? '')) return '/sales/dashboard';
-  return '/admin/dashboard';
+  const r = role ?? '';
+  // Role values match the backend UserRole enum.
+  if (r === 'GIFSY_ADMIN') return '/gifsy';
+  if (['SSS', 'WHOLESALER', 'SUB_STOCKIST'].includes(r)) return '/partner/dashboard';
+  if (['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'].includes(r)) return '/sales/dashboard';
+  return '/admin/dashboard'; // CLIENT_ADMIN, MIS_USER
 }
 
 export default function LoginPage() {
@@ -112,6 +113,12 @@ export default function LoginPage() {
       setOtp(['', '', '', '', '', '']);
       setTimeout(() => otpRefs.current[0]?.focus(), 100);
       return;
+    }
+
+    // Store the JWT where api-client.ts reads it (localStorage → Authorization: Bearer).
+    if (result.token) {
+      localStorage.setItem('token', result.token);
+      if (result.user) localStorage.setItem('user', JSON.stringify(result.user));
     }
 
     toast.success('Logged in successfully!');

@@ -1,7 +1,6 @@
-﻿'use server';
+'use server';
 
-import { redirect } from 'next/navigation';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 
 interface SendOTPResult {
   success: boolean;
@@ -11,7 +10,29 @@ interface SendOTPResult {
 interface VerifyOTPResult {
   success: boolean;
   role?: string;
+  /** JWT access token — the client stores this in localStorage (api-client reads it for Bearer auth). */
+  token?: string;
+  user?: { id: string; name: string; role: string; phone: string };
   error?: string;
+}
+
+const DEFAULT_CLIENT_ID = 'deoleo';
+
+/**
+ * Resolve the tenant slug from the request Host header (subdomain), e.g.
+ * `deoleo.gifsy.in` → `deoleo`. Bare domains, `www`/`platform`, and localhost
+ * fall back to DEFAULT_CLIENT_ID — matches `lib/tenant.ts`. The backend
+ * `verify-otp` requires `clientId` in the body to scope the user lookup.
+ */
+function resolveClientId(host: string | null): string {
+  if (!host) return DEFAULT_CLIENT_ID;
+  const hostname = host.split(':')[0].toLowerCase();
+  if (hostname === 'localhost' || hostname === '127.0.0.1') return DEFAULT_CLIENT_ID;
+  const parts = hostname.split('.');
+  if (parts.length < 3) return DEFAULT_CLIENT_ID; // bare domain, no subdomain
+  const sub = parts[0];
+  if (sub === 'www' || sub === 'platform') return DEFAULT_CLIENT_ID;
+  return sub;
 }
 
 export async function sendOTP(
@@ -23,7 +44,8 @@ export async function sendOTP(
     const res = await fetch(`${baseUrl}/api/auth/send-otp`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mobile, channel }),
+      // Backend SendOtpDto expects `phone` (not `mobile`).
+      body: JSON.stringify({ phone: mobile, channel }),
     });
 
     const data = await res.json();
@@ -44,10 +66,13 @@ export async function verifyOTP(
 ): Promise<VerifyOTPResult> {
   try {
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
+    const clientId = resolveClientId((await headers()).get('host'));
+
     const res = await fetch(`${baseUrl}/api/auth/verify-otp`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mobile, otp }),
+      // Backend VerifyOtpDto expects { phone, otp, clientId }.
+      body: JSON.stringify({ phone: mobile, otp, clientId }),
     });
 
     const data = await res.json();
@@ -56,9 +81,15 @@ export async function verifyOTP(
       return { success: false, error: data.error ?? 'Invalid OTP. Please try again.' };
     }
 
-    // Set session cookie
+    // Backend returns { success, data: { accessToken, refreshToken, user } }.
+    const token: string = data.data?.accessToken ?? '';
+    const user = data.data?.user;
+
+    // Also set an httpOnly cookie (defence-in-depth / future SSR guard); the
+    // client stores the token in localStorage because api-client.ts sends it as
+    // an Authorization: Bearer header and the backend extracts it from there.
     const cookieStore = await cookies();
-    cookieStore.set('token', data.data?.token ?? '', {
+    cookieStore.set('token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
@@ -66,29 +97,8 @@ export async function verifyOTP(
       path: '/',
     });
 
-    return { success: true, role: data.data?.user?.role };
+    return { success: true, role: user?.role, token, user };
   } catch {
     return { success: false, error: 'Network error. Please check your connection.' };
-  }
-}
-
-export async function redirectByRole(role: string) {
-  const partnerRoles = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
-  const salesRoles = [
-    'SALES_EXECUTIVE',
-    'TERRITORY_SALES_OFFICER',
-    'AREA_SALES_MANAGER',
-    'SALES_MANAGER',
-  ];
-  const adminRoles = ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'];
-
-  if (partnerRoles.includes(role)) {
-    redirect('/dashboard');
-  } else if (salesRoles.includes(role)) {
-    redirect('/sales/dashboard');
-  } else if (adminRoles.includes(role)) {
-    redirect('/admin/dashboard');
-  } else {
-    redirect('/dashboard');
   }
 }

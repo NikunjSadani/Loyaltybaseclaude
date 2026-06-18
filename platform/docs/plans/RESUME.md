@@ -7,10 +7,24 @@ You're the orchestrator for the Loyaltybase build — a multi-tenant FMCG trade-
 Repo root: C:\Users\nikun\Loyaltybaseclaude  (git root; branch **develop**). Frontend: `platform/` (thin Next.js).
 Backend: `api/` (NestJS + Prisma 7, the source of truth — owns the DB + ALL business logic).
 
-⚠️⚠️ **STATE: P0 · P1 · P2 · Phase S · P3 · P4 · P5 · P6 ALL ✅ COMPLETE. NEXT = P7 (Engagement & support:
-banners, notifications, leaderboard, tickets — spec §02 WF6; 00-MASTER-PLAN §P7).** On origin/develop. **P6
-(Finance) DONE 2026-06-18:** money-unit→BigInt paise (#19) · credits→wallet (#16) · visibility capture-mode (#17) ·
-self-bill invoicing (#8/#15) · TDS engine 194R/194C + redemption→payout bridge (#25). 27 gaps resolved.
+⚠️⚠️ **STATE (corrected 2026-06-18 after a live runtime audit): BACKEND P0–P6 ✅ COMPLETE, but the
+FE/AUTH/INTEGRATION layer is INCOMPLETE. "P0–P6 complete" was a backend+static-gate green; a runtime pass found
+the app's front door does not open.** Do NOT trust a green status — read `reconcile/P0.5-make-it-runnable.md` +
+[[runtime-audit-p0.5]] + gap-register #33–#37 first.
+**NEXT = P0.5 "Make It Runnable" (then P0.6/P0.7) BEFORE P7.** Critical runtime findings: **login broken
+end-to-end** (FE↔backend contract never reconciled post-Phase-S — #33), **pervasive FE auth-attachment bug**
+(pages 401 → fabricate demo data — #34), **Gift Catalogue 500** (uncoerced pagination — #35), **dashboards
+fabricate / unwired mock pages** (#36), **broken seed + empty dev DB** (#37). Backend is real & correct
+(verified: real wallet, credits, TDS+Excel export, targets, invoices, schemes).
+**P0.5 (NOW):** Wave 0 auth fix (login contract + token→localStorage + clientId + route guard) → Wave 1 parallel
+agents A=global auth-attachment, B=seed rebuild, C=catalogue-500/DTO-coercion. **P0.6 (NEXT):** parallel D=KYC
+writes, E=redemption/wallet writes, F=visibility/invoices, G=tickets/support, H=dashboards→real, I=payouts.
+processBatch+TDS. **P0.7:** cleanup (demo chrome, dead routes). **Gate MUST add a live runtime re-verify** — the
+static gate (tsc+jest+vitest) missed all of this.
+**P6 (Finance) DONE 2026-06-18 (backend):** money-unit→BigInt paise (#19) · credits→wallet (#16) · visibility
+capture-mode (#17) · self-bill invoicing (#8/#15) · TDS engine 194R/194C + redemption→payout bridge (#25).
+Dev login: `FIXED_OTP=123456`; seeded users in `gifsy_dev` (deoleo admin `9000000001`, partner `9000000002`,
+sales `9000000003`, gifsy admin `9830011252`).
 
 **Architecture (Phase S, done):** API-first — a dedicated NestJS backend built IN PLACE in `api/` (reused its shell,
 deleted its World-A domain, rebuilt the real domain from the platform's `lib/`+schema), consumed by a thin Next.js FE
@@ -40,9 +54,10 @@ targeting dimension**; no point-tiers, no SKU. Validate any inherited concept ag
   PENDING→CONFIRMED claim, one-pending-order OTP binding, guarded stock claim, FIXED_OTP prod-gate, in-tx OTP
   consume, atomic refund claim). `reconcile/P5-wallet-points-rewards.md` · [[p5-complete]].
 
-**P6 · Finance — ✅ DONE (2026-06-18).** Full record: `reconcile/P6-finance.md` + `reconcile/P6.5-TDS-SPEC.md`.
-**NEXT = P7 (Engagement & support: banners/notifications/leaderboard/tickets — §02 WF6; 00-MASTER-PLAN §P7).**
-The P6 decisions below are the historical record (kept for reference); all are shipped.
+**P6 · Finance — ✅ DONE (2026-06-18, backend).** Full record: `reconcile/P6-finance.md` + `reconcile/P6.5-TDS-SPEC.md`.
+**NEXT = P0.5/P0.6 "Make It Runnable" (FE/auth/integration remediation) BEFORE P7** — full plan:
+`reconcile/P0.5-make-it-runnable.md` + [[runtime-audit-p0.5]]. P7 (Engagement & support) resumes after, with the
+platform-retirement residual (#31) as its opening unit. The P6 decisions below are the historical record; all shipped.
 
 **P6 key facts (DO NOT relitigate; full record: `reconcile/P6-finance.md` + `P6.5-TDS-SPEC.md` + [[p6-finance-decisions]]):**
 - **Money = integer `BigInt` paise EVERYWHERE** (#19). Shared `money.ts` (api `src/common` + platform `src/lib`);
