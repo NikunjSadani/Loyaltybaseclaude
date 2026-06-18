@@ -39,7 +39,7 @@ commits · conventional-commit messages · **every DB query scoped by `clientId`
 | **S** ✅ | **Backend split — API-first re-architecture DONE (S0–S8)** (NestJS backend built **in place in `api/`** from platform `lib/`+schema; World-A domain deleted; thin FE via Next proxy; absorbed P4.0 World-A de-scaffold) — gated P3+, now unblocked | cross-cutting | #30, #31✅, #10, #29, #32 | ~1–2 wk |
 | **P3** ✅ | **Onboarding & KYC — DONE (3.0–3.6)** (enroll→route→verify→approve→activate→re-KYC, backend-owned + thin FE; two-lane field-level KYC; built plan→execute→audit, 129 tests, browser-verified) | KYC & Enrollment | #9✅, #12✅, #13✅, #14✅, #15✅ | 3–5 wk |
 | **P4** ✅ | Programs, targets & enrollment (DONE 2026-06-17) | Schemes/Activations · Targets | #6, #10, #29 | 4–6 wk |
-| **P5** | Wallet, points & rewards | Wallet & Points · Rewards | #28 | 3–4 wk |
+| **P5** ✅ | **Wallet, points & rewards — DONE (5.0–5.5)** (ledger-aware wallet primitives + PointsLedger/expiry [#28]; real RewardCatalog CRUD [retired gift blob]; redeem→OTP→debit→lifecycle+refund+fulfilment; partner+admin FE; money-path audits caught real double-spend/oversell) | Wallet & Points · Rewards | #28 | 3–4 wk |
 | **P6** | Finance: credits, payouts, visibility, invoicing | Awards&Credits · Payouts&Fund · Visibility · Invoicing | #5, #7, #8, #16, #17, #19, #25 | 5–7 wk |
 | **P7** | Engagement & support | Engagement · Support | (—) | 2–4 wk |
 | **P8** | Reporting, analytics, compliance & hardening | Reporting · cross-cutting | #24, #26, #27 | 3–5 wk |
@@ -310,8 +310,18 @@ wallet are created. **Depends on:** P2 + **Phase S** (built in the backend).
 **Exit:** admin publishes an activation, eligible outlets enroll via a configurable form, targets +
 achievement display. **Depends on:** P2 (audience/eligibility).
 
-## P5 · Wallet, points & rewards  (3–4 wk)
+## P5 · Wallet, points & rewards  (3–4 wk) — **✅ DONE (5.0–5.5), 2026-06-18**
 **Objective:** points balances + redemption work (spec §02 WF4).
+
+> **✅ COMPLETE.** Ledger-aware wallet primitives (`creditEarn`/`debitRedeem`/`reverse`/`adjust`/`expireDuePoints`)
+> writing `WalletTransaction`+`PointsLedger` atomically + expiry sweep (**#28 closed**); real
+> `RewardCategory`/`RewardCatalog` admin CRUD (retired the gift-config JSON blob, #18-gift); redeem→OTP
+> (`REDEMPTION_CONFIRM`)→debit→guarded status lifecycle + refund-on-cancel + voucher/tracking fulfilment (inline +
+> bulk Excel); partner wallet/rewards FE + admin catalogue/fulfilment FE. Money-path audits caught + fixed real
+> **double-spend/oversell** bugs. **#16 IN-path primitive ready** (P6 6.2 wires credit-confirm→`creditEarn`).
+> Holding/lock deferred (schema fields kept). Detail: [`reconcile/P5-wallet-points-rewards.md`](reconcile/P5-wallet-points-rewards.md) · [[p5-complete]].
+> **Also folded in (P5 close-out): P4 test-debt resolved** (stale geo-hierarchy wizard tests retired/updated) +
+> **Download Final Targets export** + **past-month upload lock**. **NEXT = P6.**
 
 | Task | What | Key files / area | Test |
 |---|---|---|---|

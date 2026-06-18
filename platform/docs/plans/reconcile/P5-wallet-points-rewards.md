@@ -1,8 +1,9 @@
 # P5 — Wallet, Points & Rewards — Reconcile + Build Record
 
-> **Status: 5.0 RECONCILE ✅ (2026-06-18). Build NOT started.** Owner-confirmed model + schema
-> delta locked; migration drafted (`api/prisma/migrations-manual/P5_wallet_rewards_additive.sql`),
-> shown for approval, **not yet applied**. Streams W (5.1→5.2) and R (5.3→5.4) then FE (5.5).
+> **Status: P5 COMPLETE ✅ (2026-06-18).** Backend (5.0–5.4b) + FE (5.5a/b), all independently audited,
+> committed + pushed to `develop` (≤ `51231fc`). Migration applied to gifsy_dev. Backend jest 596,
+> platform tsc 0, partner+admin vitest green; the 5 P5 wallet TDD reds resolved. **#28 closed**;
+> #16 IN-path primitive ready for P6; #18-gift resolved. Build record below + [[p5-complete]].
 > Read [[platform-real-model]] + [[reconcile-fit-before-build]] + [[architecture-backend-split]].
 
 P5 = spec §02 Workflow 4 (Points Redemption) + capabilities §9 (Wallet & Points) / §10 (Rewards &
