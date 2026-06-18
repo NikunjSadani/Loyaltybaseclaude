@@ -170,8 +170,10 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
 
 ### 10 · Rewards & Redemption
 - **Purpose.** Catalog of gifts and the redemption pipeline (points → gift or INR).
-- **Key entities.** `RewardCategory`, `RewardCatalog`, `RewardInventory`, `RedemptionOrder`,
-  `RedemptionStatusHistory`, `RedemptionStatus`/`RewardCatalogStatus` enums.
+- **Key entities.** `RewardCategory`, `RewardCatalog`, `RedemptionOrder`,
+  `RedemptionStatusHistory`, `RedemptionStatus`/`RewardCatalogStatus` enums. *(No `RewardInventory`
+  model — inventory is a nullable `RewardCatalog.stockQuantity` column, added P5; the earlier
+  `RewardInventory` reference was a phantom — see `reconcile/P5-wallet-points-rewards.md` §4.)*
 - **Surface.** `partner/rewards{,/orders}`, `admin/gifts`, `api/rewards/{catalog,orders,
   redeem,redeem/confirm}`, `api/admin/gift-config`.
 - **Current.** Gifsy-managed catalogue; inventory; OTP-confirmed redemption; order lifecycle.

@@ -12,6 +12,7 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
  * The PUT body is a raw JSON array of gift items (matches the source); the
  * service validates Array.isArray and stores it as a ProgramSetting blob.
  */
+// DEPRECATED: superseded by /v1/admin/rewards/* (P5.3) — retire with FE in 5.5
 @Controller('admin/gift-config')
 @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
 export class AdminGiftConfigController {

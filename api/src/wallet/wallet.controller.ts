@@ -33,4 +33,16 @@ export class WalletController {
   listTransactions(@CurrentUser() user: JwtPayload, @Query() query: ListTransactionsQueryDto) {
     return this.wallet.listTransactions(user, query);
   }
+
+  /**
+   * POST /v1/wallet/expire — GIFSY-only manual trigger for the expiry sweep.
+   * Idempotent + safe to re-run. Scheduling (cron) is deferred to P7/infra; this
+   * lets ops run it on demand until a job is wired up.
+   */
+  @Post('expire')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('wallet:adjust')
+  expireDuePoints() {
+    return this.wallet.expireDuePoints();
+  }
 }

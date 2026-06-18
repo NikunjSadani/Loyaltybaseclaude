@@ -38,6 +38,7 @@ enum OtpPurpose {
   KYC_CONSENT
   WITHDRAWAL
   PROFILE_UPDATE
+  REDEMPTION_CONFIRM
 }
 
 enum AuditAction {
@@ -1159,6 +1160,7 @@ model RewardCatalog {
   status              RewardCatalogStatus @default(ACTIVE)
   minRedemptionPoints Int?
   maxRedemptionPoints Int?
+  stockQuantity       Int?
   termsAndConditions  String?
   metadata            Json?
   sortOrder           Int                 @default(0)
@@ -1196,6 +1198,8 @@ model RedemptionOrder {
   deliveryPincode      String?
   trackingNumber       String?
   trackingUrl          String?
+  voucherCode          String?
+  voucherProvider      String?
   dispatchedAt         DateTime?
   deliveredAt          DateTime?
   cancelledAt          DateTime?
