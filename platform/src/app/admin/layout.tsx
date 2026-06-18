@@ -29,6 +29,7 @@ import {
   ShoppingBag,
   TrendingUp,
   Coins,
+  Landmark,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useAdminSession, setDemoAdminRole } from '@/lib/admin-session';
@@ -107,6 +108,7 @@ const ALL_NAV_ITEMS = [
       { href: '/admin/credits-payouts/fields',  label: 'Field Configuration' },
     ],
   },
+  { href: '/admin/tds',      label: 'TDS',               icon: Landmark,      featureFlag: null },
   { href: '/admin/tickets',  label: 'Tickets',          icon: TicketCheck,   featureFlag: null },
   { href: '/admin/banners',  label: 'Banners',          icon: Megaphone,     featureFlag: null },
   { href: '/admin/reports',  label: 'Reports',          icon: FileBarChart2, featureFlag: null },
