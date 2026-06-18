@@ -7,8 +7,10 @@ You're the orchestrator for the Loyaltybase build — a multi-tenant FMCG trade-
 Repo root: C:\Users\nikun\Loyaltybaseclaude  (git root; branch **develop**). Frontend: `platform/` (thin Next.js).
 Backend: `api/` (NestJS + Prisma 7, the source of truth — owns the DB + ALL business logic).
 
-⚠️⚠️ **STATE: P0 · P1 · P2 · Phase S · P3 · P4 · P5 ALL ✅ COMPLETE. NEXT = P6 (Finance: credits, payouts,
-visibility, invoicing).** Everything pushed to origin/develop (≤ `51231fc`). 19 gaps resolved (latest #28 via P5).
+⚠️⚠️ **STATE: P0 · P1 · P2 · Phase S · P3 · P4 · P5 · P6 ALL ✅ COMPLETE. NEXT = P7 (Engagement & support:
+banners, notifications, leaderboard, tickets — spec §02 WF6; 00-MASTER-PLAN §P7).** On origin/develop. **P6
+(Finance) DONE 2026-06-18:** money-unit→BigInt paise (#19) · credits→wallet (#16) · visibility capture-mode (#17) ·
+self-bill invoicing (#8/#15) · TDS engine 194R/194C + redemption→payout bridge (#25). 27 gaps resolved.
 
 **Architecture (Phase S, done):** API-first — a dedicated NestJS backend built IN PLACE in `api/` (reused its shell,
 deleted its World-A domain, rebuilt the real domain from the platform's `lib/`+schema), consumed by a thin Next.js FE
@@ -38,10 +40,9 @@ targeting dimension**; no point-tiers, no SKU. Validate any inherited concept ag
   PENDING→CONFIRMED claim, one-pending-order OTP binding, guarded stock claim, FIXED_OTP prod-gate, in-tx OTP
   consume, atomic refund claim). `reconcile/P5-wallet-points-rewards.md` · [[p5-complete]].
 
-**NEXT = P6 · Finance: credits, payouts, visibility, invoicing (spec §02 WF2/WF3; 00-MASTER-PLAN §P6).** The money
-spine — most High-severity gaps live here. **◐ RECONCILE DRAFTED (2026-06-18) — decisions locked, build NOT started.**
-Full record: `reconcile/P6-finance.md`. Audit found most P6 models + read-side routes already exist (Phase S);
-P6 = reconcile + wire-up, not build-from-zero.
+**P6 · Finance — ✅ DONE (2026-06-18).** Full record: `reconcile/P6-finance.md` + `reconcile/P6.5-TDS-SPEC.md`.
+**NEXT = P7 (Engagement & support: banners/notifications/leaderboard/tickets — §02 WF6; 00-MASTER-PLAN §P7).**
+The P6 decisions below are the historical record (kept for reference); all are shipped.
 
 **Owner-locked decisions (do not relitigate):**
 - **Two distinct money rails (#5)** — **Awards & Credits** (admin *pushes* awards, `credits/*`, was Decimal-INR) vs

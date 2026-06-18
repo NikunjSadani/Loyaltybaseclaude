@@ -334,9 +334,16 @@ achievement display. **Depends on:** P2 (audience/eligibility).
 
 **Exit:** a partner sees a balance, redeems with OTP, points debit, order tracks. **Depends on:** P1.
 
-## P6 · Finance: credits, payouts, visibility, invoicing  (5–7 wk)
+## P6 · Finance: credits, payouts, visibility, invoicing  (5–7 wk) — **✅ DONE (6.0–6.7, 2026-06-18)**
 **Objective:** the money spine (spec §02 WF2/WF3) — uploads credit wallets, payouts settle with UTR,
-visibility self-bills. **This phase contains the most High-severity gaps.**
+visibility self-bills. **This phase contained the most High-severity gaps.**
+
+> **✅ P6 COMPLETE.** 6.0 money-unit (BigInt paise, #19) · #16 credits→wallet (+reversal report) ·
+> #17 visibility capture-mode (+Gifsy toggle) · 6.7 self-bill invoicing (#8/#15) · 6.5 TDS engine
+> (194R/194C grossed-up PAN-keyed compute+track+export, #25) + the redemption→payout settlement bridge.
+> Every wave independently money-path audited. Resolves #5/#7/#8/#15/#16/#17/#19/#25. Full record:
+> [`reconcile/P6-finance.md`](reconcile/P6-finance.md) + [`reconcile/P6.5-TDS-SPEC.md`](reconcile/P6.5-TDS-SPEC.md).
+> Residual (deferred): invoice PDF/email; the actual 26Q FVU filing (off-platform). **NEXT = P7 (Engagement & support).**
 
 > **◐ RECONCILE DRAFTED (2026-06-18) — decisions locked, build NOT started.** Audit found most P6
 > models + read-side routes already exist (Phase S). Full record: [`reconcile/P6-finance.md`](reconcile/P6-finance.md).
@@ -359,7 +366,7 @@ visibility self-bills. **This phase contains the most High-severity gaps.**
 | 6.4 | UTR upload + dup detection; **reversal maker-checker in the portal** — Client Admin *requests* (`credits:request_reversal`) → Gifsy *approves/executes* (`credits:approve_reversal`, Gifsy-only) → wallet debit. Surface request→approve states + reason. (RBAC perms exist, 1.6.) | `credits/*`, reversal UI | Stream 1 |
 | 6.6 ✅ | **DONE** — per-tenant **capture-mode flag** (#17) in `Client.features` (`PHOTO_APPROVAL`/`AMOUNT_UPLOAD`); mutating entry points gated by mode. Follow-up: admin `PUT` setter; `submit` still deferred (GCS) | `visibility/*`, `tenant/*` | **✅ Stream 2 · #17 resolved** |
 | 6.7 ✅ | **DONE (2026-06-18)** — self-bill invoicing real backend + FE: automatic idempotent generation (`@@unique`), GST-from-GSTIN (#15), number validation + lock-once-PAID (#8), KYC-guard, Tech Gifsy recipient. TDS line deferred to 6.5. Audited (PAID-immutability + GST integer rounding fixed). | `api/src/invoices`, `AutoInvoice`, FE | **✅ DONE · #8 + #15 resolved** |
-| 6.5 | Redemption payouts: **build the P5 `RedemptionOrder`→`PayoutTransaction` settlement bridge** + Fund ledger/receipts; **TDS** (#25) — 194R (client/per-tenant) + 194C (Gifsy/platform), grossed-up, PAN-keyed, compute+track+export | `payouts/*`, `tds/*` | ◐ **SPEC DRAFTED — `reconcile/P6.5-TDS-SPEC.md`; awaiting sign-off; recommend 6.7 first** |
+| 6.5 ✅ | **DONE** — **TDS engine** (#25): 194R (client/per-tenant) + 194C (Gifsy/platform), grossed-up, PAN-keyed, FY-scoped; off-platform + deposit uploads + liability tracker; 194R reference Excel + 194C two-column report; admin FE. Plus the P5 **`RedemptionOrder`→`PayoutTransaction` settlement bridge**. Redemption value = points÷conversionRate. Audited (4 HIGH across waves fixed). | `tds/*`, `rewards/*`, FE | **✅ DONE · #25 resolved** |
 
 **Exit:** a confirmed batch credits wallets and pays out (Visibility on its own UTR + invoice).
 **Depends on:** P5 (wallet), P3 (GST reg-type), P2 (outlets).
