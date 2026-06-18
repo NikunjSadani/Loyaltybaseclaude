@@ -23,6 +23,7 @@ import {
   CreateRewardCatalogDto,
   CreateRewardCategoryDto,
   FulfilmentTemplateQueryDto,
+  ListCatalogQueryDto,
   UpdateRewardCatalogDto,
   UpdateRewardCategoryDto,
 } from './dto/rewards.dto';
@@ -74,6 +75,12 @@ export class AdminRewardsController {
   }
 
   // ─── Catalog items ───────────────────────────────────────────────────────────
+
+  @Get('catalog')
+  @RequirePermission('rewards:read')
+  listCatalog(@CurrentUser() user: JwtPayload, @Query() query: ListCatalogQueryDto & { status?: string; categoryId?: string }) {
+    return this.rewards.adminListCatalog(user, query);
+  }
 
   @Post('catalog')
   @RequirePermission('rewards:manage_inventory')

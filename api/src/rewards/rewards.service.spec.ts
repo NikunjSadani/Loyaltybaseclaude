@@ -621,6 +621,21 @@ describe('RewardsService', () => {
     });
   });
 
+  describe('adminListCatalog', () => {
+    it('lists ALL statuses (not just ACTIVE), tenant-scoped + non-deleted', async () => {
+      mockPrisma.rewardCatalog.findMany.mockResolvedValue([{ id: 'r1', status: 'OUT_OF_STOCK' }]);
+      mockPrisma.rewardCatalog.count.mockResolvedValue(1);
+
+      const res = await service.adminListCatalog(gifsy, { status: 'OUT_OF_STOCK' });
+
+      const where = mockPrisma.rewardCatalog.findMany.mock.calls?.[0]?.[0]?.where;
+      expect(where).toEqual({ clientId: 'deoleo', deletedAt: null, status: 'OUT_OF_STOCK' });
+      // Crucially NOT forced to ACTIVE (that's the partner read) — admin sees inactive items.
+      expect(where.status).not.toBe('ACTIVE');
+      expect(res.items[0].status).toBe('OUT_OF_STOCK');
+    });
+  });
+
   describe('deleteCatalogItem', () => {
     it('throws NotFound for an item outside the tenant / already deleted', async () => {
       mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);

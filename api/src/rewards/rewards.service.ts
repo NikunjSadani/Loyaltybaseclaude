@@ -836,6 +836,37 @@ export class RewardsService {
     return { categories };
   }
 
+  /**
+   * GET /v1/admin/rewards/catalog — admin catalogue list (ALL statuses, non-deleted),
+   * tenant-scoped, with the category name. Unlike the partner `listCatalog`, this is
+   * NOT filtered to ACTIVE — admins manage inactive/out-of-stock/discontinued items.
+   */
+  async adminListCatalog(user: JwtPayload, q: ListCatalogQueryDto & { status?: string; categoryId?: string }) {
+    const page = q.page ?? 1;
+    const limit = q.limit ?? 50;
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.RewardCatalogWhereInput = {
+      clientId: user.clientId,
+      deletedAt: null,
+    };
+    if (q.status) where.status = q.status as Prisma.RewardCatalogWhereInput['status'];
+    if (q.categoryId) where.categoryId = q.categoryId;
+
+    const [items, total] = await Promise.all([
+      this.prisma.rewardCatalog.findMany({
+        where,
+        include: { category: { select: { id: true, name: true, code: true } } },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+        skip,
+        take: limit,
+      }),
+      this.prisma.rewardCatalog.count({ where }),
+    ]);
+
+    return { items, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+  }
+
   /** PATCH /v1/admin/rewards/categories/:id — tenant-scoped update. */
   async updateCategory(user: JwtPayload, id: string, dto: UpdateRewardCategoryDto) {
     const existing = await this.prisma.rewardCategory.findFirst({
