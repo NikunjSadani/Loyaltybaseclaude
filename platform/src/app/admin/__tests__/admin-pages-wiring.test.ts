@@ -4,7 +4,7 @@
  *
  * Groups:
  *   A — admin/banners         : no localStorage popup fallback
- *   B — admin/gifts           : no loadGifts/saveGifts; API-backed gift-config route
+ *   B — admin/gifts           : no loadGifts/saveGifts/gift-config; real RewardCatalog CRUD + fulfilment
  *   C — admin/hierarchy       : no getEmployees/saveEmployees; API-backed hierarchy-config route
  *   D — admin/targets         : no localStorage target-config CRUD; API-backed target-config route
  *   E — admin/targets/upload  : no getTenantKpiDefs/saveTenantKpiDefs; API-backed kpi-config route
@@ -61,30 +61,35 @@ describe('B — admin/gifts page', () => {
     expect(code).not.toMatch(/saveGifts\s*\(/);
   });
 
-  it('B3: fetches from /api/admin/gift-config', () => {
+  it('B3: fetches the real reward catalogue from /api/admin/rewards/catalog', () => {
     const code = src('app/admin/gifts/page.tsx');
-    expect(code).toMatch(/\/api\/admin\/gift-config/);
+    expect(code).toMatch(/\/api\/admin\/rewards\/catalog/);
   });
 
-  it('B4: does NOT import loadGifts or saveGifts', () => {
+  it('B4: does NOT import loadGifts, saveGifts, GIFT_CATALOGUE, or @/lib/gifts', () => {
     const code = src('app/admin/gifts/page.tsx');
     expect(code).not.toMatch(/\bloadGifts\b/);
     expect(code).not.toMatch(/\bsaveGifts\b/);
+    expect(code).not.toMatch(/\bGIFT_CATALOGUE\b/);
+    expect(code).not.toMatch(/@\/lib\/gifts/);
   });
 
-  it('B5: gift-config GET route file exists', () => {
-    expect(() => src('app/api/admin/gift-config/route.ts')).not.toThrow();
+  it('B5: no longer talks to the gift-config blob route', () => {
+    const code = src('app/admin/gifts/page.tsx');
+    expect(code).not.toMatch(/\/api\/admin\/gift-config/);
   });
 
-  it('B6: gift-config route handles GET and PUT', () => {
-    const code = src('app/api/admin/gift-config/route.ts');
-    expect(code).toMatch(/export\s+async\s+function\s+GET/);
-    expect(code).toMatch(/export\s+async\s+function\s+PUT/);
+  it('B6: manages reward categories via /api/admin/rewards/categories', () => {
+    const code = src('app/admin/gifts/page.tsx');
+    expect(code).toMatch(/\/api\/admin\/rewards\/categories/);
   });
 
-  it('B7: gift-config route uses programSetting', () => {
-    const code = src('app/api/admin/gift-config/route.ts');
-    expect(code).toMatch(/programSetting/);
+  it('B7: wires the redemption-order fulfilment surface (orders + transition + bulk sheet)', () => {
+    const code = src('app/admin/gifts/page.tsx');
+    expect(code).toMatch(/\/api\/rewards\/orders/);
+    expect(code).toMatch(/\/transition/);
+    expect(code).toMatch(/\/api\/admin\/rewards\/fulfilment\/template/);
+    expect(code).toMatch(/\/api\/admin\/rewards\/fulfilment\/upload/);
   });
 });
 
@@ -151,10 +156,11 @@ describe('D — admin/targets page', () => {
     expect(code).toMatch(/\/api\/admin\/target-config/);
   });
 
-  it('D5: sends DELETE to /api/admin/target-config/id', () => {
+  it('D5: deletes a KPI def via /api/admin/kpis/:id', () => {
+    // P4 rewired admin/targets from the old target-config wizard to KPI mgmt.
     const code = src('app/admin/targets/page.tsx');
-    expect(code).toMatch(/DELETE/);
-    expect(code).toMatch(/\/api\/admin\/target-config\//);
+    expect(code).toMatch(/\.del[<(]/);
+    expect(code).toMatch(/\/api\/admin\/kpis\//);
   });
 
   it('D6: target-config route file exists', () => {
@@ -234,9 +240,10 @@ describe('F — admin/sales page', () => {
     expect(code).not.toMatch(/useState\s*\(\s*\(\s*\)\s*=>/);
   });
 
-  it('F3: fetches KPI defs from /api/admin/kpi-config', () => {
+  it('F3: fetches KPI defs from /api/admin/kpis', () => {
+    // P4 rewired admin/sales KPI defs to the relational KpiDef endpoint.
     const code = src('app/admin/sales/page.tsx');
-    expect(code).toMatch(/\/api\/admin\/kpi-config/);
+    expect(code).toMatch(/\/api\/admin\/kpis/);
   });
 });
 

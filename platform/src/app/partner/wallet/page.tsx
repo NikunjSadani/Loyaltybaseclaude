@@ -10,6 +10,12 @@ import { formatPoints } from '@/lib/utils';
 import { TransactionType, WalletBucket, type WalletBalance, type WalletTransaction } from '@/types';
 import type { PayoutLedgerEntry } from '@/types';
 import { usePartnerSession } from '@/lib/partner-session';
+import {
+  isDemoSession,
+  DEMO_WALLET_BALANCE,
+  DEMO_POINTS_TRANSACTIONS,
+  DEMO_INR_PAYOUTS,
+} from './demo-wallet-data';
 
 
 /* ─── API types & mappers (wallet wiring) ────────────────────────────────────── */
@@ -38,6 +44,10 @@ interface ApiWalletTransaction {
   balanceAfter:    number;
   referenceType:   string | null;
   referenceId:     string | null;
+  /** Optional KPI/parameter label (earn entries) — forward-compatible. */
+  kpiLabel?:       string | null;
+  /** Optional admin-supplied note — forward-compatible. */
+  narration?:      string | null;
 }
 
 function mapTransactionType(apiType: string): TransactionType {
@@ -79,6 +89,8 @@ function mapApiTransaction(t: ApiWalletTransaction): WalletTransaction {
     description:    t.description,
     schemeId:       t.referenceId,
     invoiceId:      null,
+    kpiLabel:       t.kpiLabel ?? undefined,
+    narration:      t.narration ?? undefined,
     reversedById:   null,
     reversalReason: null,
     createdAt:      new Date(t.date),
@@ -147,9 +159,16 @@ function InrWalletView() {
       .then((json) => {
         if (json.success && json.data?.payouts?.length > 0) {
           setAllPayouts(json.data.payouts);
+        } else if (isDemoSession()) {
+          // Demo fallback — only when the backend returned no payouts.
+          setAllPayouts(DEMO_INR_PAYOUTS);
         }
       })
-      .catch((e) => { if ((e as Error).name === 'AbortError') return; })
+      .catch((e) => {
+        if ((e as Error).name === 'AbortError') return;
+        // Network failure — fall back to demo sample under a demo session.
+        if (isDemoSession()) setAllPayouts(DEMO_INR_PAYOUTS);
+      })
       .finally(() => setLoading(false));
     return () => controller.abort();
   }, []);
@@ -232,18 +251,17 @@ function InrWalletView() {
             </p>
 
           <div className="flex items-center gap-2">
-            {/* Excel download */}
-            {ledgerEntries.length > 0 && (
-              <button
-                data-testid="excel-btn"
-                onClick={() => downloadInrStatement(ledgerEntries, `${fromPeriod}_${toPeriod}`)}
-                title="Download as Excel"
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border border-gray-200 bg-white text-gray-600 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-all"
-              >
-                <Download className="h-3.5 w-3.5" />
-                Excel
-              </button>
-            )}
+            {/* Excel download — always present; disabled when nothing to export */}
+            <button
+              data-testid="excel-btn"
+              onClick={() => { if (ledgerEntries.length > 0) downloadInrStatement(ledgerEntries, `${fromPeriod}_${toPeriod}`); }}
+              disabled={ledgerEntries.length === 0}
+              title="Download as Excel"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border border-gray-200 bg-white text-gray-600 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-gray-200 disabled:hover:text-gray-600"
+            >
+              <Download className="h-3.5 w-3.5" />
+              Excel
+            </button>
 
             {/* Period picker */}
             <div className="relative">
@@ -401,14 +419,25 @@ export default function WalletPage() {
     ]).then(([walletJson, txJson]) => {
       // Balance — API returns the flat {success,data} envelope; data is the
       // balance summary itself (earnedPoints, not nested under .balance).
-      if (walletJson?.success && walletJson.data?.earnedPoints !== undefined) {
+      const hasApiBalance = walletJson?.success && walletJson.data?.earnedPoints !== undefined;
+      if (hasApiBalance) {
         setBalance(mapApiBalance(walletJson.data as ApiWalletBalance));
       }
 
       // Transactions — straight from the passbook endpoint.
-      if (txJson?.success && txJson.data?.transactions) {
-        const apiTxs = (txJson.data.transactions as ApiWalletTransaction[]).map(mapApiTransaction);
+      const apiTxs =
+        txJson?.success && Array.isArray(txJson.data?.transactions)
+          ? (txJson.data.transactions as ApiWalletTransaction[]).map(mapApiTransaction)
+          : [];
+      if (apiTxs.length > 0) {
         setTransactions(apiTxs);
+      }
+
+      // Demo fallback — only when the backend returned NO data AND we are
+      // running under a demo session. Real fetched data always wins.
+      if (isDemoSession()) {
+        if (!hasApiBalance) setBalance(DEMO_WALLET_BALANCE);
+        if (apiTxs.length === 0) setTransactions(DEMO_POINTS_TRANSACTIONS);
       }
     }).finally(() => setLoading(false));
   }, []);
@@ -490,17 +519,17 @@ export default function WalletPage() {
                 </p>
 
               <div className="flex items-center gap-2">
-                {mainTxs.length > 0 && (
-                  <button
-                    data-testid="excel-btn"
-                    onClick={() => downloadStatement(mainTxs, `${fromMonth}_${toMonth}`)}
-                    title="Download as Excel"
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border border-gray-200 bg-white text-gray-600 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-all"
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                    Excel
-                  </button>
-                )}
+                {/* Excel download — always present; disabled when nothing to export */}
+                <button
+                  data-testid="excel-btn"
+                  onClick={() => { if (mainTxs.length > 0) downloadStatement(mainTxs, `${fromMonth}_${toMonth}`); }}
+                  disabled={mainTxs.length === 0}
+                  title="Download as Excel"
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border border-gray-200 bg-white text-gray-600 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-gray-200 disabled:hover:text-gray-600"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Excel
+                </button>
 
                 <div className="relative">
                   <button

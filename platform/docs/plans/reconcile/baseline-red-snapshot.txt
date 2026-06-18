@@ -1,5 +1,10 @@
 # Baseline red snapshot — known-failing tests (inherited, pre-existing).
-# DEFAULT LANE (`npm test`): 28 files / 105 tests failing. Updated 2026-06-14 after 0.1.
+# DEFAULT LANE (`npm test`): 28 files failing. Updated 2026-06-14 after 0.1.
+# Refreshed 2026-06-18 (P5): the 3 partner/wallet P5 reds (kpi-filter/narration/
+#   statement-layout) + partner/targets-api are now GREEN (removed). Added 4
+#   pre-existing admin/targets+sales redesign reds in src/lib/__tests__ that P4
+#   left uncaptured (they assert the OLD target-config wizard P4 replaced — a P4
+#   follow-up, NOT P5).
 # INTEGRATION LANE (`npm run test:integration`, *-live.test.ts): GREEN — credits-migration-live 10/10
 #   (was in the default lane as 10 reds; moved to its own lane in 0.1 and now passes vs the dev DB).
 #
@@ -16,10 +21,6 @@
   2  src/app/partner/leaderboard/__tests__/leaderboard-api.test.tsx           # P7
   1  src/app/partner/leaderboard/__tests__/leaderboard-feature-flag.test.tsx  # P7
   5  src/app/partner/leaderboard/__tests__/primary-kpi-ranking.test.tsx       # P7
-  1  src/app/partner/targets/__tests__/targets-api.test.tsx                   # P4
-  2  src/app/partner/wallet/__tests__/kpi-filter.test.tsx                     # P5
-  2  src/app/partner/wallet/__tests__/narration.test.tsx                      # P5
-  1  src/app/partner/wallet/__tests__/statement-layout.test.tsx               # P5
   3  src/app/sales/kyc/__tests__/filter-dropdown.test.tsx                     # P3
   5  src/app/sales/kyc/__tests__/filter-mutual-exclusive.test.tsx             # P3
  13  src/app/sales/kyc/__tests__/kyc-list.test.tsx                            # P3
@@ -39,3 +40,7 @@
   3  src/app/sales/team/[memberId]/__tests__/member-detail.test.tsx           # P2
   1  src/lib/__tests__/sales-excel-upload.test.ts                             # P4 (source-structure: getTenantKpiDefs)
   1  src/lib/__tests__/target-excel-upload.test.ts                            # P4 (source-structure: getTenantKpiDefs)
+  2  src/lib/__tests__/primary-kpi-compliance.test.ts                         # P4 (admin/targets redesign — old KPI wizard setPrimary)
+  1  src/lib/__tests__/sales-upload-compliance.test.ts                        # P4 (admin/sales UI shape)
+  3  src/lib/__tests__/targets-compliance.test.ts                             # P4 (admin/targets delete-button colour)
+ 11  src/lib/__tests__/targets-excel.test.ts                                  # P4 (admin/targets re-upload/resolved-download UI P4 replaced)
