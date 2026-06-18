@@ -1,16 +1,36 @@
 /**
- * TDS admin read-only endpoints — P6.5a.
+ * TDS admin endpoints — P6.5a + P6.5b.
  *
- * GET /v1/admin/tds/194r?fy=2025-26  — CLIENT_ADMIN or GIFSY_ADMIN (tenant-scoped)
- * GET /v1/admin/tds/194c?fy=2025-26  — GIFSY_ADMIN only (platform-wide)
+ * P6.5a (aggregation reads):
+ *   GET /v1/admin/tds/194r?fy=2025-26  — CLIENT_ADMIN or GIFSY_ADMIN (tenant-scoped)
+ *   GET /v1/admin/tds/194c?fy=2025-26  — GIFSY_ADMIN only (platform-wide)
  *
- * Excel exports and upload endpoints arrive in 6.5b/c.
+ * P6.5b (uploads + liability tracker):
+ *   GET  /v1/admin/tds/off-platform/template          → blank xlsx
+ *   POST /v1/admin/tds/off-platform/upload?apply=true → parse + commit off-platform 194R
+ *   GET  /v1/admin/tds/deposits/template              → blank xlsx
+ *   POST /v1/admin/tds/deposits/upload?section=194R|194C&apply=true → deposit upload
+ *   GET  /v1/admin/tds/liability?section=194R|194C&fy=2025-26       → liability tracker
  */
-import { Controller, Get, Query } from '@nestjs/common';
+import {
+  BadRequestException,
+  Controller,
+  ForbiddenException,
+  Get,
+  Post,
+  Query,
+  Res,
+  StreamableFile,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import { TdsService } from './tds.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { fyOfToday } from './tds.helpers';
+import { DepositUploadQueryDto, LiabilityQueryDto, UploadQueryDto } from './dto/tds.dto';
 
 @Controller('admin/tds')
 export class TdsController {
@@ -69,6 +89,115 @@ export class TdsController {
       summary: serializeSummary194C(summary),
       rows: rows.map(serializeRow194C),
     };
+  }
+
+  // ─── P6.5b: Off-platform 194R upload ──────────────────────────────────────
+
+  /**
+   * GET /v1/admin/tds/off-platform/template
+   * Returns a blank .xlsx with columns: Date · PAN · Outlet Code · Amount (₹)
+   * Roles: CLIENT_ADMIN or GIFSY_ADMIN.
+   */
+  @Get('off-platform/template')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  getOffPlatformTemplate(@Res({ passthrough: true }) res: Response): StreamableFile {
+    const buffer = this.tds.offPlatformTemplate();
+    res.setHeader('Content-Disposition', 'attachment; filename="tds-off-platform-template.xlsx"');
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+  }
+
+  /**
+   * POST /v1/admin/tds/off-platform/upload?apply=true|false
+   * Multipart xlsx. Preview unless apply=true. Commits to TdsOffPlatformEntry.
+   * PAN required; amount > 0; date required.
+   * Roles: CLIENT_ADMIN or GIFSY_ADMIN.
+   */
+  @Post('off-platform/upload')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadOffPlatform(
+    @CurrentUser() user: JwtPayload,
+    @UploadedFile() file: Express.Multer.File,
+    @Query() query: UploadQueryDto,
+  ) {
+    if (!file) throw new BadRequestException('No file uploaded');
+    const apply = query.apply === 'true';
+    return this.tds.uploadOffPlatform(user.clientId, user.sub, file, apply);
+  }
+
+  // ─── P6.5b: TDS deposit upload ────────────────────────────────────────────
+
+  /**
+   * GET /v1/admin/tds/deposits/template
+   * Returns a blank .xlsx with columns: Date · Outlet Code · PAN · Amount (₹)
+   * Roles: CLIENT_ADMIN or GIFSY_ADMIN.
+   */
+  @Get('deposits/template')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  getDepositTemplate(@Res({ passthrough: true }) res: Response): StreamableFile {
+    const buffer = this.tds.depositTemplate();
+    res.setHeader('Content-Disposition', 'attachment; filename="tds-deposit-template.xlsx"');
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+  }
+
+  /**
+   * POST /v1/admin/tds/deposits/upload?section=194R|194C&apply=true|false
+   * Multipart xlsx. Preview unless apply=true.
+   *   section=194R → depositorType=CLIENT, clientId from JWT. Roles: CLIENT_ADMIN or GIFSY_ADMIN.
+   *   section=194C → depositorType=GIFSY, clientId=null.   Roles: GIFSY_ADMIN only.
+   */
+  @Post('deposits/upload')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadDeposit(
+    @CurrentUser() user: JwtPayload,
+    @UploadedFile() file: Express.Multer.File,
+    @Query() query: DepositUploadQueryDto,
+  ) {
+    if (!file) throw new BadRequestException('No file uploaded');
+
+    const section = query.section; // '194R' | '194C' — validated by DTO @IsIn
+    if (!section) throw new BadRequestException('?section=194R|194C is required');
+
+    // 194C is GIFSY_ADMIN only
+    if (section === '194C' && user.role !== 'GIFSY_ADMIN') {
+      throw new ForbiddenException('194C deposits may only be uploaded by GIFSY_ADMIN');
+    }
+
+    const apply = query.apply === 'true';
+    const clientId = section === '194R' ? user.clientId : null;
+
+    return this.tds.uploadDeposit(section, clientId, user.sub, file, apply);
+  }
+
+  // ─── P6.5b: Liability tracker ─────────────────────────────────────────────
+
+  /**
+   * GET /v1/admin/tds/liability?section=194R|194C&fy=2025-26
+   * Returns per-PAN liability/deposited/outstanding for the section + FY.
+   *   194R: tenant-scoped (CLIENT_ADMIN or GIFSY_ADMIN with clientId from JWT).
+   *   194C: platform-wide (GIFSY_ADMIN only).
+   * Outstanding may be negative (over-deposit) — passed through as-is.
+   */
+  @Get('liability')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  async getLiability(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: LiabilityQueryDto,
+  ) {
+    const section = query.section;
+    if (!section) throw new BadRequestException('?section=194R|194C is required');
+
+    if (section === '194C' && user.role !== 'GIFSY_ADMIN') {
+      throw new ForbiddenException('194C liability is accessible to GIFSY_ADMIN only');
+    }
+
+    const fyLabel = query.fy ?? fyOfToday().fyLabel;
+    return this.tds.getLiability(section, fyLabel, user.clientId);
   }
 }
 

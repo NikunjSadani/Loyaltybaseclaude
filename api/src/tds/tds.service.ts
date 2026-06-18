@@ -28,6 +28,7 @@
  */
 
 import { Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   fyFromLabel,
@@ -35,7 +36,13 @@ import {
   rate194R,
   rate194C,
   roundToRupeePaise,
+  sectionParamToEnum,
+  parseOffPlatformUpload,
+  parseDepositUpload,
+  buildOffPlatformTemplate,
+  buildDepositTemplate,
 } from './tds.helpers';
+import type { UploadResult } from './dto/tds.dto';
 
 // ─── Result types ─────────────────────────────────────────────────────────────
 
@@ -454,6 +461,194 @@ export class TdsService {
       totalDepositedPaise: rows.reduce((s, r) => s + r.depositedPaise, 0n),
       totalOutstandingPaise: rows.reduce((s, r) => s + r.outstandingPaise, 0n),
       rowCount: rows.length,
+    };
+  }
+
+  // ─── 6.5b: Template builders ─────────────────────────────────────────────────
+
+  /** Return a blank xlsx Buffer for the off-platform 194R upload template. */
+  offPlatformTemplate(): Buffer {
+    return buildOffPlatformTemplate();
+  }
+
+  /** Return a blank xlsx Buffer for the TDS deposit upload template. */
+  depositTemplate(): Buffer {
+    return buildDepositTemplate();
+  }
+
+  // ─── 6.5b: Off-platform 194R upload ─────────────────────────────────────────
+
+  /**
+   * Parse (and optionally apply) an off-platform 194R upload.
+   *
+   * @param clientId  - tenant (from JWT)
+   * @param uploadedBy - user.sub from JWT
+   * @param file      - multipart xlsx file (Express.Multer.File)
+   * @param apply     - if false → preview only; if true → createMany to DB
+   *
+   * Validation: PAN non-empty, amount > 0, date parseable.
+   * On apply: generates one uploadBatchId (uuid) stamped on every row for
+   * re-upload dedup + traceability.
+   */
+  async uploadOffPlatform(
+    clientId: string,
+    uploadedBy: string,
+    file: Express.Multer.File,
+    apply: boolean,
+  ): Promise<UploadResult> {
+    const ab = file.buffer.buffer.slice(
+      file.buffer.byteOffset,
+      file.buffer.byteOffset + file.buffer.byteLength,
+    );
+
+    const { result, rows } = parseOffPlatformUpload(ab);
+
+    if (!apply || rows.length === 0) {
+      return result;
+    }
+
+    // One uploadBatchId per applied upload — uuid-based, unique per call.
+    const uploadBatchId = `OP-${randomUUID()}`;
+
+    await this.prisma.tdsOffPlatformEntry.createMany({
+      data: rows.map((r) => ({
+        clientId,
+        section: 'SEC_194R' as const,
+        entryDate: r.entryDate,
+        panNumber: r.panNumber,
+        outletCode: r.outletCode ?? undefined,
+        amountPaise: r.amountPaise,
+        uploadBatchId,
+        uploadedBy,
+      })),
+      skipDuplicates: true, // DB partial-unique catches true dups; this is a safety net
+    });
+
+    return result;
+  }
+
+  // ─── 6.5b: Deposit upload ────────────────────────────────────────────────────
+
+  /**
+   * Parse (and optionally apply) a TDS deposit upload.
+   *
+   * section=194R → depositorType=CLIENT, clientId set from JWT.
+   * section=194C → depositorType=GIFSY, clientId=null (platform).
+   *
+   * One uploadBatchId per applied upload stamped on every row.
+   */
+  async uploadDeposit(
+    section: '194R' | '194C',
+    clientId: string | null,
+    uploadedBy: string,
+    file: Express.Multer.File,
+    apply: boolean,
+  ): Promise<UploadResult> {
+    const ab = file.buffer.buffer.slice(
+      file.buffer.byteOffset,
+      file.buffer.byteOffset + file.buffer.byteLength,
+    );
+
+    const { result, rows } = parseDepositUpload(ab);
+
+    if (!apply || rows.length === 0) {
+      return result;
+    }
+
+    const prismaSection = sectionParamToEnum(section);
+    const depositorType = section === '194R' ? 'CLIENT' : 'GIFSY';
+    const uploadBatchId = `DEP-${randomUUID()}`;
+
+    await this.prisma.tdsDeposit.createMany({
+      data: rows.map((r) => ({
+        section: prismaSection,
+        depositorType: depositorType as 'CLIENT' | 'GIFSY',
+        clientId: clientId ?? undefined,
+        depositDate: r.depositDate,
+        panNumber: r.panNumber,
+        outletCode: r.outletCode ?? undefined,
+        amountPaise: r.amountPaise,
+        uploadBatchId,
+        uploadedBy,
+      })),
+      skipDuplicates: true,
+    });
+
+    return result;
+  }
+
+  // ─── 6.5b: Liability tracker ─────────────────────────────────────────────────
+
+  /**
+   * Return per-PAN liability/deposited/outstanding rows for a section + FY.
+   *
+   * 194R: tenant-scoped (requires clientId).
+   * 194C: platform-wide (GIFSY only; clientId ignored).
+   *
+   * Outstanding can be negative (over-deposit) — passed through as-is.
+   */
+  async getLiability(
+    section: '194R' | '194C',
+    fyLabel: string,
+    clientId: string,
+  ): Promise<{
+    section: string;
+    fyLabel: string;
+    rows: Array<{
+      panNumber: string;
+      liabilityPaise: string;
+      depositedPaise: string;
+      outstandingPaise: string;
+    }>;
+    totals: {
+      liabilityPaise: string;
+      depositedPaise: string;
+      outstandingPaise: string;
+    };
+  }> {
+    if (section === '194R') {
+      const rows = await this.compute194R(clientId, fyLabel);
+      const totalLiability = rows.reduce((s, r) => s + r.liabilityPaise, 0n);
+      const totalDeposited = rows.reduce((s, r) => s + r.depositedPaise, 0n);
+      const totalOutstanding = rows.reduce((s, r) => s + r.outstandingPaise, 0n);
+
+      return {
+        section: '194R',
+        fyLabel,
+        rows: rows.map((r) => ({
+          panNumber: r.panNumber,
+          liabilityPaise: r.liabilityPaise.toString(),
+          depositedPaise: r.depositedPaise.toString(),
+          outstandingPaise: r.outstandingPaise.toString(),
+        })),
+        totals: {
+          liabilityPaise: totalLiability.toString(),
+          depositedPaise: totalDeposited.toString(),
+          outstandingPaise: totalOutstanding.toString(),
+        },
+      };
+    }
+
+    // 194C — platform-wide
+    const rows = await this.compute194C(fyLabel);
+    const totalLiability = rows.reduce((s, r) => s + r.liabilityPaise, 0n);
+    const totalDeposited = rows.reduce((s, r) => s + r.depositedPaise, 0n);
+    const totalOutstanding = rows.reduce((s, r) => s + r.outstandingPaise, 0n);
+
+    return {
+      section: '194C',
+      fyLabel,
+      rows: rows.map((r) => ({
+        panNumber: r.panNumber,
+        liabilityPaise: r.liabilityPaise.toString(),
+        depositedPaise: r.depositedPaise.toString(),
+        outstandingPaise: r.outstandingPaise.toString(),
+      })),
+      totals: {
+        liabilityPaise: totalLiability.toString(),
+        depositedPaise: totalDeposited.toString(),
+        outstandingPaise: totalOutstanding.toString(),
+      },
     };
   }
 }

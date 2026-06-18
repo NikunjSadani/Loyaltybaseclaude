@@ -84,9 +84,11 @@ P6 = reconcile + wire-up, not build-from-zero.
 migration (`P6_tds_foundation.sql` — `TdsOffPlatformEntry`/`TdsDeposit`, `RedemptionOrder.valuePaise`,
 `tds_records.section`, enums) + `src/tds` calc+aggregation engine (194R/194C per-PAN/FY, grossed-up, thresholds,
 two columns, deposits→outstanding, null-PAN 20%) + **redemption value frozen at confirm = points÷conversionRate**;
-read endpoints `/v1/admin/tds/194r|194c`. Audited (2 HIGH fixed). **REMAINING: 6.5b** off-platform + deposit
-**uploads** + liability tracker · **6.5c** the **194R reference Excel** + **194C two-column report** · **6.5d** admin
-**FE** · the P5 **`RedemptionOrder`→`PayoutTransaction` settlement bridge**. Then P6 is complete. Depends on P5 + P3 + P2.
+read endpoints `/v1/admin/tds/194r|194c`. Audited (2 HIGH fixed). **6.5b DONE:** off-platform 194R upload + TDS
+deposit upload (194R=client / 194C=GIFSY-only) — template/preview/apply, rupees→paise, PAN-required, `uploadBatchId`
+dedup; `GET /v1/admin/tds/liability` (liability−deposited=outstanding). **REMAINING: 6.5c** the **194R reference Excel**
+(TDS-template columns) + **194C two-column report** · **6.5d** admin **FE** · the P5 **`RedemptionOrder`→
+`PayoutTransaction` settlement bridge**. Then P6 is complete. Depends on P5 + P3 + P2.
 
 **Residuals carried forward (NOT done — don't assume):**
 - **Platform retirement (~P6, ONE unit):** stale `platform/prisma/schema.prisma` + still-live platform Prisma code
