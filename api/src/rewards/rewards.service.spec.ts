@@ -39,6 +39,7 @@ const mockPrisma = {
   },
   redemptionOrder: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
+  payoutTransaction: { create: jest.fn() },
   // $transaction runs the callback against a tx client that proxies the same mocks.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   $transaction: jest.fn((fn: (tx: any) => unknown) => fn(mockPrisma)),
@@ -958,7 +959,183 @@ describe('RewardsService', () => {
       const claimData = (claimCall![0] as { data: { valuePaise?: bigint } }).data;
       expect(claimData.valuePaise).toBe(0n);
 
-      process.env.POINTS_CONVERSION_RATE = original;
+      if (original === undefined) delete process.env.POINTS_CONVERSION_RATE;
+      else process.env.POINTS_CONVERSION_RATE = original;
+    });
+  });
+
+  // ─── P6 Bridge — confirmRedeem creates PayoutTransaction for cash modes ──────
+
+  describe('confirmRedeem — P6 payout bridge', () => {
+    /**
+     * Partner bank snapshot returned by the channelPartner.findFirst inside the tx.
+     * The tx mock proxies to mockPrisma, so channelPartner.findFirst serves both
+     * the outer requirePartner call (not used in confirmRedeem) and the inner
+     * snapshot fetch; we use mockResolvedValueOnce sequencing to differentiate.
+     */
+    const partnerSnap = {
+      bankAccountHolder: 'Ravi Kumar',
+      ownerName: 'Ravi Kumar Proprietor',
+      upiId: 'ravi@upi',
+      bankAccountNumber: '0011223344',
+      ifscCode: 'HDFC0001234',
+      bankName: 'HDFC Bank',
+    };
+
+    /** A PENDING UPI-mode order (valuePaise will be computed as 100000n for 1000 pts). */
+    const upiOrder = {
+      id: 'o-upi',
+      status: 'PENDING',
+      partnerId: 'cp1',
+      orderNumber: 'RDM-UPI',
+      totalPointsCost: 1000,
+      quantity: 1,
+      redemptionMode: 'UPI',
+      partner: { id: 'cp1', userId: 'user1' },
+      reward: { name: 'Cash ₹1000', stockQuantity: null },
+    };
+
+    /** A PENDING BANK_TRANSFER-mode order. */
+    const bankOrder = {
+      ...upiOrder,
+      id: 'o-bank',
+      orderNumber: 'RDM-BANK',
+      redemptionMode: 'BANK_TRANSFER',
+    };
+
+    /** A PENDING GIFT_CARD order (no payout expected). */
+    const giftOrder = {
+      ...upiOrder,
+      id: 'o-gift',
+      orderNumber: 'RDM-GIFT',
+      redemptionMode: 'GIFT_CARD',
+    };
+
+    const goodOtp = {
+      id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+      expiresAt: new Date(Date.now() + 60_000), verifiedAt: null,
+    };
+
+    beforeEach(() => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockWallet.debitRedeem.mockResolvedValue({});
+      mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
+      mockPrisma.payoutTransaction.create.mockResolvedValue({ id: 'pt1' });
+      // channelPartner.findFirst returns the bank snapshot (used inside the tx for the snapshot)
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(partnerSnap);
+    });
+
+    it('UPI confirm: creates a PayoutTransaction with correct fields and PENDING status', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(upiOrder);
+
+      await service.confirmRedeem(partner, { orderId: 'o-upi', otp: '123456' });
+
+      expect(mockPrisma.payoutTransaction.create).toHaveBeenCalledTimes(1);
+      const call = mockPrisma.payoutTransaction.create.mock.calls[0][0];
+      expect(call.data).toMatchObject({
+        partnerId: 'cp1',
+        redemptionOrderId: 'o-upi',
+        payoutMode: 'UPI',
+        status: 'PENDING',
+        batchId: null,
+        // 1000 pts × 10000 / (1×100) = 100000 paise = ₹1000; roundToRupeePaise(100000n) = 100000n
+        amountPaise: 100000n,
+        netAmountPaise: 100000n,
+        tdsPaise: 0n,
+        tdsApplicable: false,
+        // beneficiary snapshot from partner KYC
+        beneficiaryName: 'Ravi Kumar',    // bankAccountHolder wins over ownerName
+        upiId: 'ravi@upi',
+        bankAccountNumber: '0011223344',
+        ifscCode: 'HDFC0001234',
+        bankName: 'HDFC Bank',
+      });
+    });
+
+    it('BANK_TRANSFER confirm: creates a PayoutTransaction linked to the order', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(bankOrder);
+
+      await service.confirmRedeem(partner, { orderId: 'o-bank', otp: '123456' });
+
+      expect(mockPrisma.payoutTransaction.create).toHaveBeenCalledTimes(1);
+      const call = mockPrisma.payoutTransaction.create.mock.calls[0][0];
+      expect(call.data.payoutMode).toBe('BANK_TRANSFER');
+      expect(call.data.redemptionOrderId).toBe('o-bank');
+      expect(call.data.amountPaise).toBe(100000n);
+      expect(call.data.status).toBe('PENDING');
+    });
+
+    it('GIFT_CARD confirm: does NOT create a PayoutTransaction', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(giftOrder);
+
+      await service.confirmRedeem(partner, { orderId: 'o-gift', otp: '123456' });
+
+      expect(mockPrisma.payoutTransaction.create).not.toHaveBeenCalled();
+    });
+
+    it('double-confirm is blocked by the PENDING claim (count=0 → ConflictException, no payout)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(upiOrder);
+      // Simulate another tx already flipped the order to CONFIRMED.
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        service.confirmRedeem(partner, { orderId: 'o-upi', otp: '123456' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+
+      // The payout create never runs — the ConflictException is thrown before it.
+      expect(mockPrisma.payoutTransaction.create).not.toHaveBeenCalled();
+    });
+
+    it('falls back to amountPaise=0n (with a logged warning) when valuePaise would be 0n', async () => {
+      // Force conversionRate=0 so valuePaise=0n
+      const original = process.env.POINTS_CONVERSION_RATE;
+      process.env.POINTS_CONVERSION_RATE = '0';
+
+      const module2 = await Test.createTestingModule({
+        providers: [
+          (await import('./rewards.service')).RewardsService,
+          { provide: PrismaService, useValue: mockPrisma },
+          { provide: (await import('../wallet/wallet.service')).WalletService, useValue: mockWallet },
+          { provide: (await import('../notifications/notifications.service')).NotificationsService, useValue: mockNotifications },
+        ],
+      }).compile();
+      const svc0 = module2.get((await import('./rewards.service')).RewardsService);
+
+      jest.clearAllMocks();
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(upiOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockWallet.debitRedeem.mockResolvedValue({});
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(partnerSnap);
+      mockPrisma.payoutTransaction.create.mockResolvedValue({ id: 'pt-warn' });
+
+      await svc0.confirmRedeem(partner, { orderId: 'o-upi', otp: '123456' });
+
+      // Even with zero conversionRate, a PayoutTransaction IS created (with 0n),
+      // so the admin can see and correct it.
+      expect(mockPrisma.payoutTransaction.create).toHaveBeenCalledTimes(1);
+      const call = mockPrisma.payoutTransaction.create.mock.calls[0][0];
+      expect(call.data.amountPaise).toBe(0n);
+      expect(call.data.netAmountPaise).toBe(0n);
+
+      if (original === undefined) delete process.env.POINTS_CONVERSION_RATE;
+      else process.env.POINTS_CONVERSION_RATE = original;
+    });
+
+    it('uses ownerName as beneficiaryName when bankAccountHolder is null', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(upiOrder);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        ...partnerSnap,
+        bankAccountHolder: null,
+      });
+
+      await service.confirmRedeem(partner, { orderId: 'o-upi', otp: '123456' });
+
+      const call = mockPrisma.payoutTransaction.create.mock.calls[0][0];
+      expect(call.data.beneficiaryName).toBe('Ravi Kumar Proprietor');
     });
   });
 });

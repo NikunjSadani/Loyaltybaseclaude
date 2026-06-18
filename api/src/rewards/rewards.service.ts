@@ -445,6 +445,80 @@ export class RewardsService {
           });
         }
       }
+
+      // P6 BRIDGE — create an unbatched PayoutTransaction for cash redemptions
+      // (UPI / BANK_TRANSFER) so the payout engine can settle the INR later.
+      //
+      // GATE: only UPI and BANK_TRANSFER modes carry real money; GIFT_CARD,
+      // PHYSICAL_GIFT, VOUCHER, and any future non-cash mode are fulfilled by
+      // the rewards engine itself and do NOT need a payout.
+      //
+      // DOUBLE-PAYOUT GUARD: this create runs ONLY inside the tx that won the
+      // PENDING→CONFIRMED claim (the `updateMany` above). A concurrent confirm
+      // matches 0 rows in that claim and throws ConflictException before it ever
+      // reaches here, so a single RedemptionOrder can produce at most one
+      // PayoutTransaction. No extra findFirst guard is needed; we rely on the
+      // exclusive claim. (If a future retry somehow reaches here after a partial
+      // write, the DB-level unique-ish on redemptionOrderId is not enforced by
+      // schema, but the claim gate prevents the scenario in practice.)
+      //
+      // AMOUNT: amountPaise = valuePaise frozen in the claim above. valuePaise
+      // may be null if the order was created before the freeze column existed; we
+      // fall back to 0n and log a warning so an admin can correct it.
+      //
+      // BENEFICIARY SNAPSHOT: we snapshot the partner's KYC-verified bank/UPI
+      // fields at confirm time so the payout record is self-contained and immune
+      // to later KYC edits.
+      if (
+        order.redemptionMode === 'UPI' ||
+        order.redemptionMode === 'BANK_TRANSFER'
+      ) {
+        // Fetch full partner for bank snapshot inside the tx.
+        const partnerSnap = await tx.channelPartner.findFirst({
+          where: { id: order.partnerId },
+          select: {
+            bankAccountHolder: true,
+            ownerName: true,
+            upiId: true,
+            bankAccountNumber: true,
+            ifscCode: true,
+            bankName: true,
+          },
+        });
+
+        // valuePaise is set by the claim update just above; the re-read is not
+        // needed — we computed it in `valuePaise` (BigInt) in this scope.
+        const amountPaise: bigint =
+          valuePaise != null && valuePaise > 0n ? valuePaise : (() => {
+            this.logger.warn(
+              `[confirmRedeem] valuePaise null/zero for order ${order.id} — PayoutTransaction created with amountPaise=0; manual correction required`,
+            );
+            return 0n;
+          })();
+
+        await tx.payoutTransaction.create({
+          data: {
+            partnerId: order.partnerId,
+            redemptionOrderId: order.id,
+            payoutMode: order.redemptionMode,
+            status: 'PENDING',
+            batchId: null,           // unbatched — GIFSY admin assigns to a batch later
+            amountPaise,
+            netAmountPaise: amountPaise,  // TDS computed later by payouts.processBatch
+            tdsPaise: 0n,
+            tdsApplicable: false,
+            beneficiaryName: partnerSnap?.bankAccountHolder ?? partnerSnap?.ownerName ?? null,
+            upiId: partnerSnap?.upiId ?? null,
+            bankAccountNumber: partnerSnap?.bankAccountNumber ?? null,
+            ifscCode: partnerSnap?.ifscCode ?? null,
+            bankName: partnerSnap?.bankName ?? null,
+          },
+        });
+
+        this.logger.log(
+          `[confirmRedeem] PayoutTransaction created for order ${order.id} (${order.redemptionMode}, ${amountPaise} paise)`,
+        );
+      }
     });
 
     await this.notifications
