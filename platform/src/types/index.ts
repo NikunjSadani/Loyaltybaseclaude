@@ -497,16 +497,17 @@ export interface GifsySettings {
 // ─── INR Payout Ledger Entry (Retailer / Sub-Stockist / MT) ──────────────────
 
 export interface PayoutLedgerEntry {
-  id:              string;
-  period:          string;      // '2026-05'
-  kpiLabel:        string;
-  achievedPct:     number;
-  payoutAmountInr: number;
-  uploadedAt:      string;      // ISO — when Deoleo uploaded the file
-  utr?:            string;      // set by Gifsy after bank transfer
-  paidAt?:         string;      // ISO date of payment
-  status:          'PENDING' | 'PROCESSING' | 'PAID' | 'FAILED';
-  narration?:      string;      // optional admin-supplied note shown under the row
+  id:                string;
+  period:            string;      // '2026-05'
+  kpiLabel:          string;
+  achievedPct:       number;
+  /** Payout amount in integer paise (e.g. 10000 = ₹100.00). */
+  payoutAmountPaise: number;
+  uploadedAt:        string;      // ISO — when Deoleo uploaded the file
+  utr?:              string;      // set by Gifsy after bank transfer
+  paidAt?:           string;      // ISO date of payment
+  status:            'PENDING' | 'PROCESSING' | 'PAID' | 'FAILED';
+  narration?:        string;      // optional admin-supplied note shown under the row
 }
 
 // ─── Wallet Balance Type ──────────────────────────────────────────────────────
@@ -848,6 +849,10 @@ export interface CreditUploadRow {
   outletName: string;
   fieldId:   string;
   fieldName: string;
+  /**
+   * PAYOUT rows: integer paise (e.g. 10000 = ₹100.00).
+   * POINTS rows: whole points (a count, NOT money — no ×100).
+   */
   amount:    number;
   narration: string;
   awardType: 'POINTS' | 'PAYOUT';
@@ -862,12 +867,13 @@ export interface CreditParseResult {
   hasErrors:     boolean;
   canProceed:    boolean;
   summary: {
-    total:          number;
-    ok:             number;
-    skipped:        number;
-    errors:         number;
-    totalPoints:    number;
-    totalPayoutInr: number;
+    total:             number;
+    ok:                number;
+    skipped:           number;
+    errors:            number;
+    totalPoints:       number;
+    /** Total payout in integer paise (e.g. 1000000 = ₹10,000.00). */
+    totalPayoutPaise:  number;
   };
 }
 
@@ -883,7 +889,8 @@ export interface CreditPayoutEntry {
   fieldId:         string;
   fieldName:       string;
   period:          string;   // 'YYYY-MM'
-  amount:          number;   // INR
+  /** Payout amount in integer paise (e.g. 10000 = ₹100.00). */
+  amountPaise:     number;
   narration:       string;
   status:          PayoutEntryStatus;
   utr?:            string;
@@ -914,9 +921,10 @@ export interface CreditBatch {
   uploadedAt:  string;
   confirmedAt?: string;
   confirmedBy?: string;
-  totalOutlets: number;
-  totalPoints:  number;
-  totalPayoutInr: number;
+  totalOutlets:    number;
+  totalPoints:     number;
+  /** Total payout in integer paise (e.g. 1000000 = ₹10,000.00). */
+  totalPayoutPaise: number;
   rows:         CreditUploadRow[];
 }
 
@@ -949,7 +957,11 @@ export interface PayoutBatchRow {
   ifscCode:           string;
   upiId:           string;
   kycStatus:       string;
-  amount:          number;        // sum of all PENDING payout entries for this outlet
+  /**
+   * Payout Amount column in the Excel file — **rupees** for human readability.
+   * The service converts from paise using paiseToRupees() before building this row.
+   */
+  amount:          number;
   isDeactivated:   boolean;       // flag if outlet was deactivated after upload
   utrStatus:       'PENDING' | 'PAID' | 'FAILED';
   utr?:            string;
@@ -1246,9 +1258,12 @@ export interface ReversalRequest {
   fieldName:       string;
   period:          string;
   awardType:       'POINTS' | 'PAYOUT';
-  originalAmount:  number;
-  requestedAmount: number;
-  approvedAmount?: number;
+  /** Original amount in integer paise (PAYOUT) or whole points (POINTS). */
+  originalPaise:   number;
+  /** Requested reversal amount in integer paise (PAYOUT) or whole points (POINTS). */
+  requestedPaise:  number;
+  /** Approved reversal amount in integer paise (PAYOUT) or whole points (POINTS). */
+  approvedPaise?:  number;
   requestedBy:     string;
   requestedAt:     string;
   status:          ReversalStatus;

@@ -49,7 +49,12 @@ export class UploadRowDto {
   @IsString()
   fieldName!: string;
 
-  @IsNumber()
+  /**
+   * Payout or points amount for this outlet+field row.
+   * PAYOUT rows: integer paise (e.g. 10000 = ₹100.00).
+   * POINTS rows: whole points (a count, NOT money — no ×100).
+   */
+  @IsInt()
   amount!: number;
 
   @IsOptional()
@@ -77,13 +82,15 @@ export class CreateBatchDto {
   @Min(0)
   totalOutlets!: number;
 
-  @IsNumber()
+  /** Whole points (a count, NOT money — no ×100 conversion). */
+  @IsInt()
   @Min(0)
   totalPoints!: number;
 
-  @IsNumber()
+  /** Total payout in integer paise (e.g. 1000000 = ₹10,000.00). */
+  @IsInt()
   @Min(0)
-  totalPayoutInr!: number;
+  totalPayoutPaise!: number;
 
   @IsArray()
   @ValidateNested({ each: true })
@@ -183,13 +190,15 @@ export class CreateReversalDto {
   @IsEnum(CreditAwardType)
   awardType!: CreditAwardType;
 
-  @IsNumber()
+  /** Original awarded amount in integer paise (PAYOUT rows) or whole points (POINTS rows). */
+  @IsInt()
   @IsPositive()
-  originalAmount!: number;
+  originalPaise!: number;
 
-  @IsNumber()
+  /** Requested reversal amount in integer paise (PAYOUT) or whole points (POINTS). */
+  @IsInt()
   @IsPositive()
-  requestedAmount!: number;
+  requestedPaise!: number;
 }
 
 /** Reversal approve/reject action. */
@@ -203,10 +212,11 @@ export class PatchReversalDto {
   @IsEnum(ReversalAction)
   action!: ReversalAction;
 
+  /** Approved reversal amount in integer paise (PAYOUT) or whole points (POINTS). */
   @IsOptional()
-  @IsNumber()
+  @IsInt()
   @IsPositive()
-  approvedAmount?: number;
+  approvedPaise?: number;
 
   @IsOptional()
   @IsString()

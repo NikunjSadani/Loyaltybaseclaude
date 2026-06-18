@@ -39,17 +39,35 @@ targeting dimension**; no point-tiers, no SKU. Validate any inherited concept ag
   consume, atomic refund claim). `reconcile/P5-wallet-points-rewards.md` · [[p5-complete]].
 
 **NEXT = P6 · Finance: credits, payouts, visibility, invoicing (spec §02 WF2/WF3; 00-MASTER-PLAN §P6).** The money
-spine — most High-severity gaps live here. ⚠️ Magnet: **#16** (POINTS awards never credit the wallet — credits
-confirm writes `CreditPayoutEntry` only). **P5 already built the IN-path primitive**: P6 6.2 wires credit-confirm →
-`walletService.creditEarn` (and reversal → `walletService.reverse`); the wallet/ledger is ready to be called. Tasks:
-6.0 reconcile all four finance contexts + lock money-unit (#19) · 6.1 credit fields/batch/confirm · **6.2 credit
-POINTS→wallet (#16)** · 6.3 bank-download grouping, separate-UTR for Visibility (#7) · 6.4 UTR upload + dup +
-reversal maker-checker · 6.5 redemption payouts + Fund ledger + TDS (#25) — **also settles P5 INR redemptions**
-(UPI/BANK_TRANSFER `RedemptionOrder`s link via `PayoutTransaction.redemptionOrderId`; snapshot bank detail from
-verified KYC at payout-creation) · 6.6 visibility submit/approve/fraud + two modes (#17) · 6.7 self-bill invoicing +
-number lock (#8) + GST from reg-type (#15). **START P6:** confirm on `develop` + dev DB reachable, read
-`00-MASTER-PLAN.md §P6` + `MODEL-ALIGNMENT.md`, propose the P6 reconcile before building. Depends on P5 (wallet) + P3
-(GST reg-type) + P2 (outlets).
+spine — most High-severity gaps live here. **◐ RECONCILE DRAFTED (2026-06-18) — decisions locked, build NOT started.**
+Full record: `reconcile/P6-finance.md`. Audit found most P6 models + read-side routes already exist (Phase S);
+P6 = reconcile + wire-up, not build-from-zero.
+
+**Owner-locked decisions (do not relitigate):**
+- **Two distinct money rails (#5)** — **Awards & Credits** (admin *pushes* awards, `credits/*`, was Decimal-INR) vs
+  **Redemption Payouts** (partner *pulls* cash, `payouts/*`, paise + Fund + TDS). Keep separate; rename for clarity;
+  NOT a consolidation.
+- **#19 money unit — ✅ DONE (6.0, 2026-06-18): integer `BigInt` paise EVERYWHERE.** Awards rail `Decimal`-INR →
+  `BigInt` paise (renamed `*Inr`→`*Paise`; `totalPoints`→whole `Int`); existing paise rail widened `Int`→`BigInt`
+  (int4 overflow fix, done while tables empty — audit finding); shared `money.ts` (`rupeesToPaise`/`paiseToRupees`/
+  `toPaiseBigInt`) in api+platform; global `BigInt.prototype.toJSON`→Number in `main.ts`; killed JS float-sum.
+  Migration `P6_credits_paise_standardisation.sql` applied to gifsy_dev (guarded/idempotent, tables were empty).
+  Conversion happens ONCE (FE ingest edge), ÷100 for display only. Gate green; dead platform credit routes +
+  `credits-payouts-notify` lib left on old `*Inr` contract (retire later). **Not committed** (owner commits on ask).
+- **#16 (HIGH)** — POINTS award → **partner** wallet (aggregate; `Wallet.partnerId @unique`; resolve
+  `outletCode→partnerId`; `walletService.creditEarn`), reversal → `reverse`. P5 primitive ready.
+- **#8 invoicing — included, built LAST.** Logic already pure in `lib/invoice.ts` (GST-from-reg-type, number-gen);
+  port + persist; needs `AutoInvoice` delta (status/finalize-lock/`invoiceNumberEdited`/snapshot). #15 GST reads reg-type.
+- ⚠️ **#25 TDS = ON HOLD — owner reviews structure FIRST.** Do NOT write TDS code. Owner wants a plain-English
+  TDS explainer (the two sections: incentive **194R** vs visibility-service **194C/194J**; thresholds; who bears
+  the deduction; where each computes) reviewed + confirmed before any TDS build. (Invoice-side 194C/J rates already
+  exist in `lib/invoice.ts computeTDS`; payout-side 194R in `payouts.processBatch`.)
+
+**Sequencing:** **6.0 ✅ DONE.** Next: **Stream 1 (Credits: 6.2 #16 + 6.1 + 6.3 verify #7 separate-UTR + 6.4
+reversal)** ∥ **Stream 2 (Visibility: 6.6 capture-mode #17)** run in parallel (disjoint files). **Invoicing 6.7 LAST**
+(after 6.6). **Payouts/TDS (6.5: build the P5 `RedemptionOrder`→`PayoutTransaction` settlement bridge + #25) HELD**
+until the TDS review. **NEXT ACTION:** write the TDS explainer for owner review, and/or start Stream-1/Stream-2.
+Depends on P5 (wallet) + P3 (GST reg-type) + P2 (outlets).
 
 **Residuals carried forward (NOT done — don't assume):**
 - **Platform retirement (~P6, ONE unit):** stale `platform/prisma/schema.prisma` + still-live platform Prisma code

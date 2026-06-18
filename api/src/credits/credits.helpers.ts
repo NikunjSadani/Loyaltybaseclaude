@@ -22,6 +22,11 @@ export interface PayoutBatchRow {
   ifscCode: string;
   upiId: string;
   kycStatus: string;
+  /**
+   * "Payout Amount" column value in the Excel file — **rupees** (not paise).
+   * The service converts from paise using paiseToRupees() before building this
+   * row; no conversion is performed inside the helper.
+   */
   amount: number;
   isDeactivated: boolean;
   utrStatus: 'PENDING' | 'PAID' | 'FAILED';

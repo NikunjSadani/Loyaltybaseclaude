@@ -160,7 +160,7 @@ export class ReportsService {
       if (!panSummary[pan]) {
         panSummary[pan] = { pan, tdsPaise: 0, count: 0 };
       }
-      panSummary[pan].tdsPaise += r.tdsPaise;
+      panSummary[pan].tdsPaise += Number(r.tdsPaise);
       panSummary[pan].count++;
     }
 
@@ -171,7 +171,7 @@ export class ReportsService {
       'Assessment Year': r.assessmentYear ?? '',
       'Quarter Period': r.quarterPeriod ?? '',
       'TDS Rate %': (Number(r.tdsRate) * 100).toFixed(1),
-      'TDS Amount (₹)': (r.tdsPaise / 100).toFixed(2),
+      'TDS Amount (₹)': (Number(r.tdsPaise) / 100).toFixed(2),
       Date: r.createdAt.toISOString().split('T')[0],
     }));
 
@@ -214,13 +214,13 @@ export class ReportsService {
       orderBy: { amountPaise: 'desc' },
     });
 
-    const totalLiabilityPaise = transactions.reduce((sum, t) => sum + t.amountPaise, 0);
+    const totalLiabilityPaise = transactions.reduce((sum, t) => sum + Number(t.amountPaise), 0);
 
     const data = transactions.map((t, i) => ({
       'S.No': i + 1,
       'Partner Name': t.partner?.businessName ?? '',
       'Batch Code': t.batch?.batchCode ?? '',
-      'Amount (₹)': (t.amountPaise / 100).toFixed(2),
+      'Amount (₹)': (Number(t.amountPaise) / 100).toFixed(2),
       Mode: t.payoutMode,
       Status: t.status,
       'Created On': t.createdAt.toISOString().split('T')[0],

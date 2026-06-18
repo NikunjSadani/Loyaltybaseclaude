@@ -45,7 +45,8 @@ export async function GET(req: NextRequest) {
       period:          toPeriod(t.completedAt ?? t.createdAt),
       kpiLabel:        t.batch?.notes ?? 'Incentive Payout',
       achievedPct:     100,
-      payoutAmountInr: Math.round(t.netAmountPaise / 100),
+      // netAmountPaise is BIGINT; store as integer paise in the response field
+      payoutAmountPaise: Number(t.netAmountPaise),
       uploadedAt:      (t.batch?.createdAt ?? t.createdAt).toISOString(),
       utr:             t.providerRefId ?? undefined,
       paidAt:          t.completedAt?.toISOString() ?? undefined,

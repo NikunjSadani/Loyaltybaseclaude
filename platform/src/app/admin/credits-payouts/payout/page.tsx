@@ -74,7 +74,8 @@ interface PayoutDownload {
   fieldName?:    string;
   status:        string;
   downloadedAt:  string;
-  totalAmountInr: string | number;
+  /** Total payout in integer paise (BigInt serialised to number by the API). */
+  totalAmountPaise: string | number;
   _count?: { entries: number };
 }
 
@@ -85,9 +86,12 @@ interface Reversal {
   fieldName:      string;
   period:         string;
   awardType:      string;
-  originalAmount: string | number;
-  requestedAmount: string | number;
-  approvedAmount?: string | number;
+  /** Original award in integer paise (PAYOUT) or whole points (POINTS). */
+  originalPaise:  string | number;
+  /** Requested reversal in integer paise (PAYOUT) or whole points (POINTS). */
+  requestedPaise: string | number;
+  /** Approved reversal in integer paise (PAYOUT) or whole points (POINTS). */
+  approvedPaise?: string | number;
   requestedAt:    string;
   status:         string;
   remarks?:       string;
@@ -275,7 +279,13 @@ function PayoutPageInner() {
     setRevMsg('');
 
     const body: Record<string, unknown> = { action: revAction.action };
-    if (revAction.action === 'approve' && revAmount) body.approvedAmount = Number(revAmount);
+    if (revAction.action === 'approve' && revAmount) {
+      const rev = reversals.find((r) => r.id === revAction.id);
+      // User enters rupees for PAYOUT reversals; convert to paise for the API DTO.
+      body.approvedPaise = rev?.awardType === 'PAYOUT'
+        ? Math.round(Number(revAmount) * 100)
+        : Number(revAmount);
+    }
     if (revRemarks) body.remarks = revRemarks;
 
     const res  = await fetch(`/api/admin/credits/reversals/${revAction.id}`, {
@@ -393,7 +403,8 @@ function PayoutPageInner() {
                     <p className="text-gray-500">{d.groupType}{d.fieldName ? ` · ${d.fieldName}` : ''}</p>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="text-gray-600">₹{Number(d.totalAmountInr).toLocaleString('en-IN')}</span>
+                    {/* totalAmountPaise is integer paise; divide by 100 for human display */}
+                    <span className="text-gray-600">₹{(Number(d.totalAmountPaise) / 100).toLocaleString('en-IN')}</span>
                     <span className={`px-2 py-0.5 rounded-full font-medium ${STATUS_COLOR[d.status] ?? 'bg-gray-100 text-gray-600'}`}>
                       {d.status}
                     </span>
@@ -597,8 +608,9 @@ function PayoutPageInner() {
                     <p className="text-gray-500">Requested Amount</p>
                     <p className="font-medium text-gray-800">
                       {rev.awardType === 'PAYOUT'
-                        ? `₹${Number(rev.requestedAmount).toLocaleString('en-IN')}`
-                        : `${Number(rev.requestedAmount).toLocaleString('en-IN')} pts`}
+                        // requestedPaise is integer paise; divide by 100 for human display
+                        ? `₹${(Number(rev.requestedPaise) / 100).toLocaleString('en-IN')}`
+                        : `${Number(rev.requestedPaise).toLocaleString('en-IN')} pts`}
                     </p>
                   </div>
                   <div>
@@ -612,14 +624,19 @@ function PayoutPageInner() {
                     <p className="text-xs font-semibold text-gray-800 capitalize">{revAction.action} Reversal</p>
                     {revAction.action === 'approve' && (
                       <div className="space-y-1">
-                        <label className="text-xs text-gray-600">Approved Amount (leave blank for full amount)</label>
+                        <label className="text-xs text-gray-600">
+                          Approved Amount {rev.awardType === 'PAYOUT' ? '(₹, leave blank for full amount)' : '(pts, leave blank for full amount)'}
+                        </label>
                         <input
                           type="number"
                           value={revAmount}
                           onChange={(e) => setRevAmount(e.target.value)}
-                          placeholder={String(Number(rev.requestedAmount))}
-                          max={Number(rev.requestedAmount)}
-                          min={1}
+                          placeholder={rev.awardType === 'PAYOUT'
+                            // requestedPaise is integer paise; show rupees in the placeholder
+                            ? String(Number(rev.requestedPaise) / 100)
+                            : String(Number(rev.requestedPaise))}
+                          max={rev.awardType === 'PAYOUT' ? Number(rev.requestedPaise) / 100 : Number(rev.requestedPaise)}
+                          min={rev.awardType === 'PAYOUT' ? 0.01 : 1}
                           className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none"
                         />
                       </div>

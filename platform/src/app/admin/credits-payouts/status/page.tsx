@@ -38,17 +38,18 @@ const STATUS_STYLES: Record<string, { bg: string; text: string; icon: React.Reac
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface BatchSummary {
-  id:             string;
-  batchCode:      string;
-  period:         string;
-  status:         string;
-  uploadedBy:     string;
-  uploadedAt:     string;
-  confirmedBy?:   string;
-  confirmedAt?:   string;
-  totalOutlets:   number;
-  totalPoints:    string | number;
-  totalPayoutInr: string | number;
+  id:               string;
+  batchCode:        string;
+  period:           string;
+  status:           string;
+  uploadedBy:       string;
+  uploadedAt:       string;
+  confirmedBy?:     string;
+  confirmedAt?:     string;
+  totalOutlets:     number;
+  totalPoints:      string | number;
+  /** totalPayoutPaise from the API — integer paise (BigInt serialised to number). */
+  totalPayoutPaise: string | number;
 }
 
 interface BatchRow {
@@ -69,14 +70,15 @@ interface BatchDetail extends BatchSummary {
 }
 
 interface ReversalTarget {
-  batchId:    string;
-  outletId:   string;
-  outletName: string;
-  fieldId:    string;
-  fieldName:  string;
-  period:     string;
-  awardType:  'POINTS' | 'PAYOUT';
-  originalAmount: number;
+  batchId:      string;
+  outletId:     string;
+  outletName:   string;
+  fieldId:      string;
+  fieldName:    string;
+  period:       string;
+  awardType:    'POINTS' | 'PAYOUT';
+  /** Original amount in integer paise (PAYOUT) or whole points (POINTS). */
+  originalPaise: number;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -163,16 +165,18 @@ export default function PayoutStatusPage() {
 
   function openReversal(batch: BatchSummary, row: BatchRow) {
     setRevTarget({
-      batchId:        batch.id,
-      outletId:       row.outletId,
-      outletName:     row.outletName,
-      fieldId:        row.fieldId,
-      fieldName:      row.fieldName,
-      period:         batch.period,
-      awardType:      row.awardType,
-      originalAmount: row.amount,
+      batchId:       batch.id,
+      outletId:      row.outletId,
+      outletName:    row.outletName,
+      fieldId:       row.fieldId,
+      fieldName:     row.fieldName,
+      period:        batch.period,
+      awardType:     row.awardType,
+      // row.amount is paise for PAYOUT rows; whole points for POINTS rows
+      originalPaise: row.amount,
     });
-    setRevAmount(String(row.amount));
+    // Pre-fill in human units: rupees for PAYOUT, points for POINTS
+    setRevAmount(row.awardType === 'PAYOUT' ? String(row.amount / 100) : String(row.amount));
     setRevRemarks('');
     setRevMsg(null);
   }
@@ -186,13 +190,20 @@ export default function PayoutStatusPage() {
 
   async function submitReversal() {
     if (!revTarget) return;
-    const amt = Number(revAmount);
-    if (!amt || amt <= 0) {
+    const inputAmt = Number(revAmount);
+    if (!inputAmt || inputAmt <= 0) {
       setRevMsg({ type: 'err', text: 'Please enter a valid amount.' });
       return;
     }
-    if (amt > revTarget.originalAmount) {
-      setRevMsg({ type: 'err', text: `Amount cannot exceed ₹${revTarget.originalAmount.toLocaleString('en-IN')}.` });
+    // Convert user input back to paise (for PAYOUT rows); POINTS rows already whole numbers.
+    const requestedPaise = revTarget.awardType === 'PAYOUT'
+      ? Math.round(inputAmt * 100)
+      : inputAmt;
+    if (requestedPaise > revTarget.originalPaise) {
+      const origDisplay = revTarget.awardType === 'PAYOUT'
+        ? `₹${(revTarget.originalPaise / 100).toLocaleString('en-IN')}`
+        : `${revTarget.originalPaise.toLocaleString('en-IN')} pts`;
+      setRevMsg({ type: 'err', text: `Amount cannot exceed ${origDisplay}.` });
       return;
     }
     setRevLoading(true);
@@ -201,13 +212,14 @@ export default function PayoutStatusPage() {
         method:  'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          outletId:        revTarget.outletId,
-          outletName:      revTarget.outletName,
-          fieldId:         revTarget.fieldId,
-          fieldName:       revTarget.fieldName,
-          awardType:       revTarget.awardType,
-          originalAmount:  revTarget.originalAmount,
-          requestedAmount: amt,
+          outletId:       revTarget.outletId,
+          outletName:     revTarget.outletName,
+          fieldId:        revTarget.fieldId,
+          fieldName:      revTarget.fieldName,
+          awardType:      revTarget.awardType,
+          // DTO now expects paise field names
+          originalPaise:  revTarget.originalPaise,
+          requestedPaise,
         }),
       });
       const json = await res.json();
@@ -301,8 +313,9 @@ export default function PayoutStatusPage() {
                     {Number(batch.totalPoints) > 0 && (
                       <span>{Number(batch.totalPoints).toLocaleString('en-IN')} pts</span>
                     )}
-                    {Number(batch.totalPayoutInr) > 0 && (
-                      <span>₹{Number(batch.totalPayoutInr).toLocaleString('en-IN')}</span>
+                    {Number(batch.totalPayoutPaise) > 0 && (
+                      // totalPayoutPaise is integer paise; divide by 100 for human display
+                      <span>₹{(Number(batch.totalPayoutPaise) / 100).toLocaleString('en-IN')}</span>
                     )}
                     <span>{batch.totalOutlets} outlets</span>
                   </div>
@@ -359,7 +372,10 @@ export default function PayoutStatusPage() {
                                     </span>
                                   </td>
                                   <td className="px-4 py-2 text-gray-700">
-                                    {r.awardType === 'PAYOUT' ? `₹${r.amount.toLocaleString('en-IN')}` : r.amount.toLocaleString('en-IN')}
+                                    {r.awardType === 'PAYOUT'
+                                      // amount is integer paise for PAYOUT rows; divide by 100 for display
+                                      ? `₹${(r.amount / 100).toLocaleString('en-IN')}`
+                                      : r.amount.toLocaleString('en-IN')}
                                   </td>
                                   <td className="px-4 py-2 text-gray-500">{r.narration || '—'}</td>
                                   {isConfirmed && (
@@ -418,8 +434,9 @@ export default function PayoutStatusPage() {
                 <span className="text-gray-500">Original Amount</span>
                 <span className="font-medium text-gray-800">
                   {revTarget.awardType === 'PAYOUT'
-                    ? `₹${revTarget.originalAmount.toLocaleString('en-IN')}`
-                    : `${revTarget.originalAmount.toLocaleString('en-IN')} pts`}
+                    // originalPaise is integer paise; divide by 100 for human display
+                    ? `₹${(revTarget.originalPaise / 100).toLocaleString('en-IN')}`
+                    : `${revTarget.originalPaise.toLocaleString('en-IN')} pts`}
                 </span>
               </div>
             </div>
@@ -440,8 +457,8 @@ export default function PayoutStatusPage() {
                     type="number"
                     value={revAmount}
                     onChange={(e) => setRevAmount(e.target.value)}
-                    max={revTarget.originalAmount}
-                    min={1}
+                    max={revTarget.awardType === 'PAYOUT' ? revTarget.originalPaise / 100 : revTarget.originalPaise}
+                    min={revTarget.awardType === 'PAYOUT' ? 0.01 : 1}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30"
                   />
                 </div>

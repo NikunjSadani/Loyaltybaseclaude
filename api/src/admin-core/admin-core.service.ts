@@ -561,7 +561,7 @@ export class AdminCoreService {
     for (const g of payoutGroups) {
       payoutSummary[g.status] = {
         count: g._count.id,
-        amountPaise: g._sum.netAmountPaise ?? 0,
+        amountPaise: Number(g._sum.netAmountPaise ?? 0),
       };
     }
 

@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { paiseToRupees, formatINR, toPaiseBigInt } from '../common/money';
 import {
   CreateBatchDto,
   CreateFieldDto,
@@ -87,7 +88,7 @@ export class CreditsService {
         confirmedAt: true,
         totalOutlets: true,
         totalPoints: true,
-        totalPayoutInr: true,
+        totalPayoutPaise: true,
       },
     });
   }
@@ -103,8 +104,11 @@ export class CreditsService {
         period: dto.period,
         uploadedBy: user.sub ?? '',
         totalOutlets: dto.totalOutlets,
+        // totalPoints is whole points (a count, NOT money — no ×100).
         totalPoints: dto.totalPoints,
-        totalPayoutInr: dto.totalPayoutInr,
+        // totalPayoutPaise: integer paise received from the client; stored as BigInt.
+        totalPayoutPaise: toPaiseBigInt(dto.totalPayoutPaise),
+        // rows JSON stores per-row `amount` in paise (PAYOUT) or whole points (POINTS).
         rows: dto.rows as unknown as Prisma.InputJsonValue,
       },
     });
@@ -165,7 +169,9 @@ export class CreditsService {
             fieldId: r.fieldId,
             fieldName: r.fieldName,
             period: batch.period,
-            amountInr: r.amount,
+            // r.amount is integer paise (invariant: upload parser converts rupees→paise
+            // before POSTing; the batch JSON therefore always stores paise for PAYOUT rows).
+            amountPaise: toPaiseBigInt(r.amount),
             narration: r.narration ?? '',
           })),
         });
@@ -175,6 +181,7 @@ export class CreditsService {
     });
 
     // Notify Gifsy team (fire-and-forget; don't block confirm on failure).
+    // totalPayoutPaise is a BigInt from Prisma — convert to rupees for the human-readable email.
     await this.notify({
       userId: batch.uploadedBy,
       channel: 'EMAIL',
@@ -188,7 +195,8 @@ export class CreditsService {
         period: batch.period,
         totalOutlets: Number(batch.totalOutlets),
         totalPoints: Number(batch.totalPoints),
-        totalPayoutInr: Number(batch.totalPayoutInr),
+        // Express as rupees for the Gifsy team email — humans read ₹, not paise.
+        totalPayoutRupees: paiseToRupees(batch.totalPayoutPaise ?? 0n),
         uploadedBy: batch.uploadedBy,
         recipientEmails: ['ops@gifsy.in'],
       },
@@ -221,7 +229,7 @@ export class CreditsService {
       throw new BadRequestException('Cannot reverse a batch that has not been confirmed');
     }
 
-    if (dto.requestedAmount > dto.originalAmount) {
+    if (dto.requestedPaise > dto.originalPaise) {
       throw new BadRequestException(
         'Requested reversal amount cannot exceed original amount',
       );
@@ -253,8 +261,9 @@ export class CreditsService {
         fieldName: dto.fieldName,
         period: batch.period,
         awardType: dto.awardType,
-        originalAmount: dto.originalAmount,
-        requestedAmount: dto.requestedAmount,
+        // Store as BigInt paise (or whole points for POINTS awardType).
+        originalPaise: toPaiseBigInt(dto.originalPaise),
+        requestedPaise: toPaiseBigInt(dto.requestedPaise),
         requestedBy: user.sub,
       },
     });
@@ -395,20 +404,21 @@ export class CreditsService {
       );
     }
 
-    // Group by outlet, sum amounts.
+    // Group by outlet, sum amounts (in integer paise — no float accumulation).
+    // amountPaise is a BigInt from Prisma; Number() is safe (paise « MAX_SAFE_INTEGER).
     const outletMap = new Map<
       string,
-      { outletName: string; amount: number; entryIds: string[] }
+      { outletName: string; amountPaise: number; entryIds: string[] }
     >();
     for (const e of entries) {
       const cur = outletMap.get(e.outletId);
       if (cur) {
-        cur.amount += Number(e.amountInr);
+        cur.amountPaise += Number(e.amountPaise);
         cur.entryIds.push(e.id);
       } else {
         outletMap.set(e.outletId, {
           outletName: e.outletName,
-          amount: Number(e.amountInr),
+          amountPaise: Number(e.amountPaise),
           entryIds: [e.id],
         });
       }
@@ -458,7 +468,8 @@ export class CreditsService {
         ifscCode: snapshot.ifscCode,
         upiId: snapshot.upiId,
         kycStatus: 'APPROVED',
-        amount: info.amount,
+        // amount in the Excel file is rupees for human readability; convert from paise.
+        amount: paiseToRupees(info.amountPaise),
         isDeactivated: !(o?.isActive ?? true),
         utrStatus: 'PENDING',
         entryIds: info.entryIds,
@@ -466,7 +477,11 @@ export class CreditsService {
     });
 
     const downloadCode = await this.generateDownloadCode(user.clientId, period);
-    const totalAmountInr = rows.reduce((s, r) => s + r.amount, 0);
+    // totalAmountPaise: integer sum in paise (exact, no float drift).
+    const totalAmountPaise = outletCodes.reduce(
+      (s, code) => s + outletMap.get(code)!.amountPaise,
+      0,
+    );
 
     const payoutBatch: PayoutBatch = {
       id: downloadCode,
@@ -478,7 +493,8 @@ export class CreditsService {
       status: 'OPEN',
       downloadedAt: new Date().toISOString(),
       downloadedBy: user.sub,
-      totalAmount: totalAmountInr,
+      // PayoutBatch.totalAmount is rupees (for the Excel file header); convert.
+      totalAmount: paiseToRupees(totalAmountPaise),
       bankSnapshots,
       rows,
     };
@@ -494,7 +510,7 @@ export class CreditsService {
           fieldId: fieldId ?? null,
           fieldName: fieldName ?? null,
           downloadedBy: user.sub,
-          totalAmountInr,
+          totalAmountPaise: toPaiseBigInt(totalAmountPaise),
           bankSnapshots: bankSnapshots as unknown as Prisma.InputJsonValue,
         },
       });
@@ -520,7 +536,7 @@ export class CreditsService {
       where: { id, clientId: user.clientId },
       include: {
         entries: {
-          select: { id: true, outletId: true, status: true, utr: true, amountInr: true },
+          select: { id: true, outletId: true, status: true, utr: true, amountPaise: true },
         },
       },
     });
@@ -612,17 +628,18 @@ export class CreditsService {
         const entry = download.entries.find((e) => e.outletId === row.outletId);
         const outlet = phoneMap.get(row.outletId);
         if (!entry || !outlet?.phone) continue;
+        // amountPaise is a BigInt from Prisma; convert for the human-readable WhatsApp body.
         await this.notify({
           userId: outlet.partnerId ?? download.downloadedBy,
           channel: 'WHATSAPP',
           recipientPhone: outlet.phone,
-          body: `Your payout of ₹${Number(entry.amountInr)} has been confirmed. UTR: ${
+          body: `Your payout of ${formatINR(entry.amountPaise)} has been confirmed. UTR: ${
             row.utr ?? ''
           }.`,
           variables: {
             event: 'CREDITS_PAYOUT_CONFIRMED',
             outletName: outlet.name,
-            amountInr: Number(entry.amountInr),
+            amountPaise: Number(entry.amountPaise),
             utr: row.utr ?? '',
             period: download.period,
           },
@@ -660,10 +677,13 @@ export class CreditsService {
       throw new BadRequestException(`Reversal is already ${reversal.status}`);
     }
 
-    const { action, approvedAmount, remarks } = dto;
+    const { action, approvedPaise, remarks } = dto;
 
-    if (action === ReversalAction.approve && approvedAmount !== undefined) {
-      if (approvedAmount > Number(reversal.requestedAmount)) {
+    // requestedPaise is a BigInt from Prisma; Number() is safe (paise « MAX_SAFE_INTEGER).
+    const requestedPaiseNum = Number(reversal.requestedPaise);
+
+    if (action === ReversalAction.approve && approvedPaise !== undefined) {
+      if (approvedPaise > requestedPaiseNum) {
         throw new BadRequestException('Approved amount cannot exceed requested amount');
       }
     }
@@ -671,7 +691,7 @@ export class CreditsService {
     const newStatus =
       action === ReversalAction.reject
         ? 'REJECTED'
-        : approvedAmount !== undefined && approvedAmount < Number(reversal.requestedAmount)
+        : approvedPaise !== undefined && approvedPaise < requestedPaiseNum
           ? 'PARTIAL'
           : 'APPROVED';
 
@@ -679,9 +699,9 @@ export class CreditsService {
       where: { id },
       data: {
         status: newStatus,
-        approvedAmount:
+        approvedPaise:
           action === ReversalAction.approve
-            ? (approvedAmount ?? Number(reversal.requestedAmount))
+            ? toPaiseBigInt(approvedPaise ?? requestedPaiseNum)
             : null,
         approvedBy: user.sub,
         approvedAt: new Date(),

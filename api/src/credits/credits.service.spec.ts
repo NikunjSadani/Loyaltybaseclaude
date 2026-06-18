@@ -86,7 +86,7 @@ describe('CreditsService', () => {
         period: '2026-05',
         totalOutlets: 1,
         totalPoints: 0,
-        totalPayoutInr: 100,
+        totalPayoutPaise: 10000,  // ₹100 in paise
         rows: [],
       };
       await service.createBatch(admin, dto);
@@ -94,6 +94,8 @@ describe('CreditsService', () => {
       expect(data.clientId).toBe('deoleo');
       expect(data.batchCode).toBe('CB-2026-05-003');
       expect(data.uploadedBy).toBe('admin1');
+      // totalPayoutPaise stored as BigInt
+      expect(data.totalPayoutPaise).toBe(BigInt(10000));
     });
   });
 
@@ -118,10 +120,12 @@ describe('CreditsService', () => {
         uploadedBy: 'admin1',
         totalOutlets: 2,
         totalPoints: 0,
-        totalPayoutInr: 300,
+        // totalPayoutPaise stored as BigInt in Prisma
+        totalPayoutPaise: BigInt(30000),  // ₹300 in paise
         rows: [
-          { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F', amount: 100, narration: '', awardType: 'PAYOUT', status: 'OK' },
-          { outletId: 'O2', outletName: 'B', fieldId: 'f1', fieldName: 'F', amount: 200, narration: '', awardType: 'PAYOUT', status: 'ERROR' },
+          // amounts are paise: 10000 = ₹100, 20000 = ₹200, 50 = 50 points
+          { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F', amount: 10000, narration: '', awardType: 'PAYOUT', status: 'OK' },
+          { outletId: 'O2', outletName: 'B', fieldId: 'f1', fieldName: 'F', amount: 20000, narration: '', awardType: 'PAYOUT', status: 'ERROR' },
           { outletId: 'O3', outletName: 'C', fieldId: 'f1', fieldName: 'F', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
         ],
       });
@@ -132,6 +136,8 @@ describe('CreditsService', () => {
       expect(createManyArg).toHaveLength(1);
       expect(createManyArg[0].outletId).toBe('O1');
       expect(createManyArg[0].clientId).toBe('deoleo');
+      // amountPaise written as BigInt
+      expect(createManyArg[0].amountPaise).toBe(BigInt(10000));
       expect(mockNotifications.enqueue).toHaveBeenCalled();
     });
   });
@@ -145,8 +151,8 @@ describe('CreditsService', () => {
         fieldId: 'f1',
         fieldName: 'F',
         awardType: CreditAwardType.PAYOUT,
-        originalAmount: 100,
-        requestedAmount: 200,
+        originalPaise: 10000,   // ₹100 in paise
+        requestedPaise: 20000,  // ₹200 in paise — exceeds original → BadRequest
       };
       await expect(service.createReversal(admin, 'b1', dto)).rejects.toBeInstanceOf(BadRequestException);
     });
@@ -155,7 +161,7 @@ describe('CreditsService', () => {
       mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'PENDING_CONFIRM', period: '2026-05' });
       const dto: CreateReversalDto = {
         outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
-        awardType: CreditAwardType.PAYOUT, originalAmount: 100, requestedAmount: 50,
+        awardType: CreditAwardType.PAYOUT, originalPaise: 10000, requestedPaise: 5000,
       };
       await expect(service.createReversal(admin, 'b1', dto)).rejects.toBeInstanceOf(BadRequestException);
     });
@@ -165,7 +171,7 @@ describe('CreditsService', () => {
       mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r-existing' });
       const dto: CreateReversalDto = {
         outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
-        awardType: CreditAwardType.PAYOUT, originalAmount: 100, requestedAmount: 50,
+        awardType: CreditAwardType.PAYOUT, originalPaise: 10000, requestedPaise: 5000,
       };
       await expect(service.createReversal(admin, 'b1', dto)).rejects.toBeInstanceOf(BadRequestException);
     });
@@ -176,13 +182,16 @@ describe('CreditsService', () => {
       mockPrisma.creditReversal.create.mockResolvedValue({ id: 'r1' });
       const dto: CreateReversalDto = {
         outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
-        awardType: CreditAwardType.PAYOUT, originalAmount: 100, requestedAmount: 50,
+        awardType: CreditAwardType.PAYOUT, originalPaise: 10000, requestedPaise: 5000,
       };
       await service.createReversal(admin, 'b1', dto);
       const data = mockPrisma.creditReversal.create.mock.calls[0][0].data;
       expect(data.clientId).toBe('deoleo');
       expect(data.requestedBy).toBe('admin1');
       expect(data.period).toBe('2026-05');
+      // BigInt writes
+      expect(data.originalPaise).toBe(BigInt(10000));
+      expect(data.requestedPaise).toBe(BigInt(5000));
     });
   });
 
@@ -195,16 +204,19 @@ describe('CreditsService', () => {
     });
 
     it('marks PARTIAL when approved amount is below requested', async () => {
-      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedAmount: 100 });
+      // requestedPaise stored as BigInt in Prisma
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(10000) });
       mockPrisma.creditReversal.update.mockResolvedValue({ id: 'r1' });
-      await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedAmount: 40 });
+      await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 4000 });
       expect(mockPrisma.creditReversal.update.mock.calls[0][0].data.status).toBe('PARTIAL');
+      // approvedPaise written as BigInt
+      expect(mockPrisma.creditReversal.update.mock.calls[0][0].data.approvedPaise).toBe(BigInt(4000));
     });
 
     it('rejects when approved amount exceeds requested', async () => {
-      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedAmount: 100 });
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(10000) });
       await expect(
-        service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedAmount: 200 }),
+        service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 20000 }),
       ).rejects.toBeInstanceOf(BadRequestException);
     });
   });
@@ -260,8 +272,9 @@ describe('CreditsService', () => {
     it('groups entries by outlet, marks them PROCESSING, and returns an xlsx buffer', async () => {
       mockPrisma.creditField.findMany.mockResolvedValue([]);
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
-        { id: 'e1', outletId: 'O1', outletName: 'A', amountInr: 100, batch: { batchCode: 'CB-1' } },
-        { id: 'e2', outletId: 'O1', outletName: 'A', amountInr: 50, batch: { batchCode: 'CB-1' } },
+        // amountPaise as BigInt: 10000 = ₹100, 5000 = ₹50
+        { id: 'e1', outletId: 'O1', outletName: 'A', amountPaise: BigInt(10000), batch: { batchCode: 'CB-1' } },
+        { id: 'e2', outletId: 'O1', outletName: 'A', amountPaise: BigInt(5000),  batch: { batchCode: 'CB-1' } },
       ]);
       mockPrisma.outlet.findMany.mockResolvedValue([
         { outletCode: 'O1', name: 'A', phone: '900', isActive: true, partner: { bankName: 'HDFC', bankAccountNumber: '123', ifscCode: 'IFSC', upiId: '' } },
@@ -281,6 +294,10 @@ describe('CreditsService', () => {
       expect(updateArg.data).toEqual({ downloadId: 'd1', status: 'PROCESSING' });
       expect(updateArg.where.id.in).toEqual(['e1', 'e2']);
 
+      // totalAmountPaise stored as BigInt: 10000 + 5000 = 15000 paise
+      const createArg = mockTx.creditPayoutDownload.create.mock.calls[0][0].data;
+      expect(createArg.totalAmountPaise).toBe(BigInt(15000));
+
       // The buffer is a real xlsx with the official headers and a single summed row.
       const wb = XLSX.read(res.buffer, { type: 'buffer' });
       const aoa = XLSX.utils.sheet_to_json<(string | number)[]>(wb.Sheets[wb.SheetNames[0]], {
@@ -288,7 +305,8 @@ describe('CreditsService', () => {
         defval: '',
       }) as (string | number)[][];
       expect(aoa[1]).toEqual(PAYOUT_FILE_HEADERS);
-      // Outlet O1 → 100 + 50 = 150 in the "Payout Amount" column (index 10).
+      // Outlet O1 → 10000 + 5000 = 15000 paise → ₹150 in the "Payout Amount" column (index 10).
+      // The Excel file shows rupees for human readability.
       expect(aoa[2][1]).toBe('O1');
       expect(aoa[2][10]).toBe(150);
     });
@@ -320,7 +338,8 @@ describe('CreditsService', () => {
         downloadCode,
         period: '2026-05',
         downloadedBy: 'g1',
-        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountInr: 100 }],
+        // amountPaise as BigInt: 10000 = ₹100
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) }],
       });
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
 
@@ -341,7 +360,8 @@ describe('CreditsService', () => {
         downloadCode,
         period: '2026-05',
         downloadedBy: 'g1',
-        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountInr: 100 }],
+        // amountPaise as BigInt
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) }],
       });
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
       mockPrisma.outlet.findMany.mockResolvedValue([
@@ -369,7 +389,7 @@ describe('CreditsService', () => {
         downloadCode,
         period: '2026-05',
         downloadedBy: 'g1',
-        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountInr: 100 }],
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) }],
       });
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
 

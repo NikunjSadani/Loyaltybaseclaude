@@ -89,7 +89,8 @@ export const DEMO_INR_PAYOUTS: PayoutLedgerEntry[] = [
     period:          '2026-05',
     kpiLabel:        'Visibility',
     achievedPct:     100,
-    payoutAmountInr: 4_500,
+    // ₹4500 = 450000 paise
+    payoutAmountPaise: 450_000,
     uploadedAt:      '2026-05-02T00:00:00.000Z',
     utr:             'UTR2605VIS001',
     paidAt:          '2026-05-12T00:00:00.000Z',
@@ -101,7 +102,8 @@ export const DEMO_INR_PAYOUTS: PayoutLedgerEntry[] = [
     period:          '2026-05',
     kpiLabel:        'Monthly Sales Target',
     achievedPct:     108,
-    payoutAmountInr: 8_000,
+    // ₹8000 = 800000 paise
+    payoutAmountPaise: 800_000,
     uploadedAt:      '2026-05-02T00:00:00.000Z',
     utr:             'UTR2605MST001',
     paidAt:          '2026-05-12T00:00:00.000Z',

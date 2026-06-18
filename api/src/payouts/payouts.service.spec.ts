@@ -117,7 +117,7 @@ describe('PayoutsService', () => {
 
       expect(mockTx.fundReceipt.create).toHaveBeenCalled();
       const ledgerData = mockTx.fundLedger.create.mock.calls[0][0].data;
-      expect(ledgerData.balancePaise).toBe(60000); // 50000 + 10000
+      expect(ledgerData.balancePaise).toBe(60000n); // 50000 + 10000 (BigInt paise)
       expect(mockTx.auditLog.create).toHaveBeenCalled();
       expect(res).toEqual({
         receiptId: 'r1',
@@ -195,7 +195,7 @@ describe('PayoutsService', () => {
 
       expect(mockPrisma.tdsRecord.create).toHaveBeenCalledTimes(1);
       const tdsData = mockPrisma.tdsRecord.create.mock.calls[0][0].data;
-      expect(tdsData.tdsPaise).toBe(300000); // 10% of 3,000,000
+      expect(tdsData.tdsPaise).toBe(300000n); // 10% of 3,000,000 (BigInt paise)
       expect(res.steps.fundCheck.status).toBe('PASSED');
       expect(res.steps.disbursement.flagged).toBe(1);
       expect(res.status).toBe('SUBMITTED');

@@ -4,6 +4,14 @@ import { ConfigService }          from '@nestjs/config';
 import helmet                     from 'helmet';
 import { AppModule }              from './app.module';
 
+// Money is stored as BigInt paise. JSON.stringify throws on BigInt by default;
+// serialise to Number (paise « Number.MAX_SAFE_INTEGER, so lossless) for all
+// API responses. This must be set before the app boots so that NestJS's
+// built-in JSON serialiser picks it up.
+(BigInt.prototype as unknown as { toJSON: () => number }).toJSON = function () {
+  return Number(this);
+};
+
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
   const app    = await NestFactory.create(AppModule);

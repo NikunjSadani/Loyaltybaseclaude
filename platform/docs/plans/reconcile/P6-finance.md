@@ -1,0 +1,147 @@
+# P6 — Finance: credits, payouts, visibility, invoicing — Reconcile + Build Record
+
+> **Status: P6 reconcile locked; TASK 6.0 ✅ DONE (2026-06-18).** Decisions below are owner-locked.
+> **6.0 money-unit standardisation shipped** (see §4 build record). Remaining: Stream 1 (Credits #16),
+> Stream 2 (Visibility #17), Invoicing (6.7) last. ⚠️ **TDS (#25) is explicitly ON HOLD** — the owner
+> will review the TDS structure before any TDS work begins. **Not committed yet** (owner commits on ask).
+> Read [[platform-real-model]] + [[reconcile-fit-before-build]] + [[architecture-backend-split]] + [[p5-complete]].
+
+P6 = spec §02 Workflow 2/3 (Credits & Payouts) + the money spine. **This is mostly
+reconcile + wire-up, not build-from-zero** — most P6 models + read-side routes already
+exist (ported in Phase S). The audit (2026-06-18) found four finance contexts already
+coded; P6 closes the gaps between them.
+
+---
+
+## §1 · The model (audit-confirmed; owner-locked)
+
+### Two distinct money rails — NOT consolidated (#5)
+The word "payout" is overloaded across **two legitimate, separate** flows. Keep them
+distinct; rename for clarity (Awards & Credits vs Redemption Payouts). **Not a merge.**
+
+| Rail | Direction | Models | Built today | Gap |
+|---|---|---|---|---|
+| **Awards & Credits** | admin **pushes** awards to outlets | `CreditBatch/Field/PayoutEntry/PayoutDownload/Reversal` (`credits/`) | batch→confirm→bank-download (SEPARATE/STANDARD grouping)→UTR upload+dup→reversal maker-checker — full CRUD | ⚠️ **#16** POINTS rows inert (no wallet write); reversal doesn't debit wallet |
+| **Redemption Payouts** | partner **pulls** cash out | `PayoutBatch/Transaction/FundLedger/FundReceipt/TdsRecord` (`payouts/`) | batch→process (validate→TDS→fund-check→flag)→reconciliation xlsx; fund receipts/ledger | **#25** TDS section not differentiated; **no code creates a `PayoutTransaction` from a P5 INR `RedemptionOrder`** (the P5→P6 settlement bridge is unbuilt) |
+| **Visibility** | outlet renders display service | `VisibilitySubmission/Approval/FraudLog/ImageHash`, `OutletVisibilityRecord/UploadBatch` (`visibility/` + `admin-programs/visibility*`) | approve/reject/fraud-log/outlet-statuses | **#17** no per-tenant capture-mode flag; `POST /submit` (photo upload) not ported (GCS infra) |
+| **Self-bill invoicing** | Gifsy invoices on the outlet's behalf | `AutoInvoice` | — (logic is pure functions in platform `lib/invoice.ts`) | **Greenfield in backend** — no `api/src/invoices` module; `AutoInvoice` too thin for #8 |
+
+### LOCKED DECISION — money unit (#19): **integer paise, everywhere**
+**Standardise the entire system on integer paise (and whole-integer points).** Drop the
+Awards rail's `Decimal(15,2)` rupees; everything money becomes `Int` paise, matching
+Payouts/Fund/TDS/Invoice/Wallet (which are already paise).
+
+- **Why paise, not whole rupees:** whole-rupees breaks on **tax** — 1% TDS of ₹2,550 =
+  ₹25.50, 18% GST of ₹1,055 = ₹189.90. In paise these are **exact integers** (2,550 paise;
+  18,990 paise) — no rounding fudge, no float. This is the industry-standard "integer
+  minor units" model.
+- **Why now:** the finance tables are **empty in `gifsy_dev`** → the unit conversion is a
+  ~1-hour schema migration (`×100` on conversion, nothing to backfill). Doing the same
+  change later, with live award/payout money in the tables, would be a risky data
+  migration. **This is the cheapest this change will ever be.**
+- **Also fixes a real bug:** the Awards service currently sums money via JS `Number()`
+  (`cur.amount += Number(e.amountInr)`, [credits.service.ts](../../../../api/src/credits/credits.service.ts)) —
+  IEEE-754 float math on money. Integer-paise arithmetic removes it.
+- **Scope** (4 Credit models, ~7 columns): `CreditBatch.totalPayoutInr/totalPoints`,
+  `CreditPayoutEntry.amountInr`, `CreditPayoutDownload.totalAmountInr`,
+  `CreditReversal.originalAmount/requestedAmount/approvedAmount` → `Int`. Money columns =
+  paise; `totalPoints` = whole points. Backend ~4 files / ~53 touchpoints + the
+  `credits-payouts-*` Excel lib (~6 files) + tests + screens. ⚠️ Every `×100`/`÷100`
+  (upload ingest / display / Excel) must be audited — a missed conversion is a 100× error.
+
+### LOCKED DECISION — wallet grain (#16): **aggregate to the partner wallet**
+`Wallet.partnerId @unique` — the wallet belongs to the **ChannelPartner**, not the outlet.
+Awards are per-outlet×field; on confirm, POINTS rows for all outlets under a partner
+credit **that partner's single wallet** (resolve `outletCode → partnerId`, call
+`walletService.creditEarn(partnerId, …)`). The outlet is the unit of measurement; the
+partner is the points-holder (matches the P5 model). Per-outlet balances were considered
+and rejected (would re-grain Wallet/Ledger — significant P5 rework, no business need).
+
+### LOCKED DECISION — invoicing (#8): **included in P6, built LAST**
+The self-bill invoicing module is the only fully-greenfield-in-backend piece, **but** the
+hard logic already exists as clean pure functions in `lib/invoice.ts`
+(`computeGST` CGST/SGST/IGST-from-reg-type, `computeTDS`, `generateInvoiceNumber`). So 6.7
+is a **port + persist**, not a build-from-scratch. It is the literal P6 exit criterion
+("Visibility on its own UTR + invoice") and it **depends on visibility settle (6.6)** —
+so it runs **last**. Needs an `AutoInvoice` schema delta (status, finalize-lock,
+`invoiceNumberEdited`, KYC/bank snapshot) to satisfy #8 (partner-editable number +
+uniqueness/lock-after-finalize).
+
+### ⚠️ ON HOLD — TDS (#25): owner reviews structure first
+**No TDS code until the owner has reviewed the TDS design.** The audit found TDS logic
+already exists on both sides but **not** differentiated by section:
+- **Redemption-payout side:** `payouts.processBatch` applies a flat **194R 10%** over a
+  ₹20,000 threshold → `TdsRecord`.
+- **Invoice / visibility-service side:** `lib/invoice.ts` `computeTDS` applies **194C/194J**
+  rates (1% individual/HUF, 2% others, 20% no-PAN) — this is already the
+  "differentiate from 194R" logic #25 asks for, just living in the invoice lib.
+
+The reconcile is to **encode the section by relationship type** (incentive 194R vs service
+194C/194J) and align with §00 direct-vs-indirect. **This is held pending an owner design
+review** — a plain-English TDS explainer (the two sections, thresholds, who bears the
+deduction, where each is computed) will be written and confirmed before build.
+
+---
+
+## §2 · Build streams & sequencing
+
+**6.0 must land first** (it changes the money unit everything else builds on). Then two
+streams that touch **disjoint files** run in parallel; invoicing is last; Payouts is held.
+
+| Wave | Task | Files / area | Schema delta | Status |
+|---|---|---|---|---|
+| **6.0 — Reconcile + money unit** (FIRST) | **convert Awards → integer paise** (#19) + kill JS float-sum + lock #5 naming | `credits/*`, `credits-payouts-*` lib, schema | **DONE** — see §4 | **✅ DONE** |
+| **Stream 1 — Credits** (∥) | **6.2 #16 POINTS→wallet on confirm + debit on reversal** (HIGH) · 6.1 credit-field polish · 6.3 verify #7 separate-UTR | `credits/*`, `wallet/` (reuses `creditEarn`/`reverse`) | none | planned |
+| **Stream 2 — Visibility** (∥, disjoint files) | 6.6 per-tenant **capture-mode flag** (#17); approve/reject already built; `submit` deferred (GCS) | `visibility/*`, tenant config | small (`visibilityCaptureMode`) | planned |
+| **Wave D — Invoicing** (LAST, after 6.6) | 6.7 self-bill invoicing port (#8 number-lock + #15 GST-from-reg-type) | new `api/src/invoices`, `AutoInvoice` | **YES** — `AutoInvoice` +status/+lock/+edited/+snapshot | planned |
+| **HELD — Payouts / TDS** | 6.5 redemption→`PayoutTransaction` settlement bridge + **#25 TDS sections** | `payouts/*`, `TdsRecord` | maybe (`TdsRecord.section`/`formType`) | ⚠️ **ON HOLD — owner TDS review first** |
+
+**#7 (separate-UTR / never-clubbed):** likely **already satisfied** — `createPayoutDownload`
+excludes `isSeparatePayout` fields from STANDARD and pays them on their own download.
+Treat 6.3 as **verify + lock with a test**, not a build, unless the test finds a hole.
+
+**Operating model:** plan (Opus) → execute (bg Sonnet, no shell) → ONE independent
+adversarial audit (Sonnet, Read/Grep) → Opus gates → commit. **Audit the money path
+hard** (P5's audits caught real double-spend/oversell). Opus owns `schema.prisma` +
+migrations; show migration SQL (independently audited) + WAIT for owner go before applying;
+confirm `current_database='gifsy_dev'`; `ALTER TYPE ADD VALUE` outside a txn.
+
+---
+
+## §3 · Dependencies & gaps touched
+
+- **Depends on:** P5 (wallet primitives `creditEarn`/`reverse`/`debitRedeem`), P3 (GST
+  reg-type `entityType`/`gstRegistrationType` on `ChannelPartner`), P2 (outlets/partners + bank fields).
+- **Gaps:** **#16** (HIGH) → 6.2 · **#19** → 6.0 · #5/#7/#8/#15/#17 → as above · **#25 HELD**.
+  Also folds the residual **`auth/logout` server-side revocation** (#32) + platform
+  retirement (the now-dead `lib/credits-payouts-*`/`lib/invoice.ts`/`lib/gifts.ts`/
+  `lib/targets.ts` + still-live platform Prisma) — retired as **one unit** at ~P6 close.
+
+---
+
+## §4 · Build record — 6.0 money-unit standardisation ✅ (2026-06-18)
+
+**Decision evolved during the owner review + an independent audit:** whole-rupees was rejected
+(tax produces sub-rupee amounts); **integer paise** chosen; the audit then upgraded `Int`→**`BigInt`**
+(int4 max = ₹21.47M would overflow on large batch totals/fund balances). Result: **all money is
+`BigInt` paise, system-wide.** Points stay `Int` (whole).
+
+**Migration** (`api/prisma/migrations-manual/P6_credits_paise_standardisation.sql`, applied to `gifsy_dev`,
+guarded + idempotent; all 10 finance tables verified empty first → zero data risk):
+- Awards rail: 6 `Decimal`-INR money cols → `BIGINT` paise (×100) + renamed `*Inr`/`*Amount`→`*Paise`;
+  `CreditBatch.totalPoints` `Decimal`→`INTEGER` (whole points, no ×100).
+- Existing rail widened `Int`→`BigInt` (overflow fix, while empty): `PayoutBatch`, `PayoutTransaction`
+  (amount/net/tds), `FundLedger` (amount/balance), `FundReceipt`, `TdsRecord`, `AutoInvoice` (subtotal/gst/total).
+
+**Code:** new shared `money.ts` (`rupeesToPaise`/`paiseToRupees`/`toPaiseBigInt`/`formatINR`) in **both**
+`api/src/common/` and `platform/src/lib/`; global `BigInt.prototype.toJSON`→Number in `api/src/main.ts`
+(safe: paise « `MAX_SAFE_INTEGER`); credits/payouts services + DTOs on paise; killed the JS-`Number()`
+float-sum; bigint→`Number()` fixes in the consumer reads (`reports`/`partner`/`admin-core`).
+**Conversion happens exactly once** — rupees→paise at the FE upload-parser ingest edge; `÷100` only for
+human display/email. The dead/shadowed platform `app/api/admin/credits/*` routes + the server-only
+`credits-payouts-notify` lib were **left on the old `*Inr`/Decimal contract** (they read the unmigrated
+platform schema; retire with the platform backend — NOT touched here).
+
+**Gate (all green):** backend `tsc` 0 · jest **596 passed** · platform `tsc` 0 · vitest **no new reds**
+(22 failing files = the exact baseline set) · credit/payout vitest **133 passed** · doc-consistency green.
+**#19 RESOLVED.** Not committed (owner commits on ask). **Next: Stream 1 (6.2 #16) ∥ Stream 2 (6.6 #17).**

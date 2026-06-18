@@ -23,12 +23,14 @@
 import * as XLSX from 'xlsx';
 import type { CreditField, CreditParseResult, CreditUploadRow } from '@/types';
 import type { TemplateOutlet } from './credits-payouts-template';
+import { rupeesToPaise } from './money';
 
 export interface ParseCreditUploadOpts {
   fields:      CreditField[];
   outlets:     TemplateOutlet[];
   month:       string;         // 'YYYY-MM'
   safetyCapPoints: number;
+  /** Safety cap in rupees (displayed to user). Internally compared after converting input to rupees. */
   safetyCapInr:    number;
 }
 
@@ -67,7 +69,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutInr: 0 },
+      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0 },
     };
   }
 
@@ -78,7 +80,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutInr: 0 },
+      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0 },
     };
   }
 
@@ -96,7 +98,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutInr: 0 },
+      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0 },
     };
   }
 
@@ -111,7 +113,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutInr: 0 },
+      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0 },
     };
   }
 
@@ -129,8 +131,8 @@ export function parseCreditUpload(
   const seen = new Set<string>();
 
   const rows: CreditUploadRow[] = [];
-  let totalPoints    = 0;
-  let totalPayoutInr = 0;
+  let totalPoints      = 0;
+  let totalPayoutPaise = 0;
 
   // Data rows start at index 2
   for (let rIdx = 2; rIdx < allRows.length; rIdx++) {
@@ -234,9 +236,18 @@ export function parseCreditUpload(
       const resolvedAwardType: 'POINTS' | 'PAYOUT' = awardType === 'PAYOUT' ? 'PAYOUT' : 'POINTS';
 
       if (status === 'OK') {
-        if (resolvedAwardType === 'POINTS') totalPoints    += amount;
-        else                               totalPayoutInr += amount;
+        if (resolvedAwardType === 'POINTS') {
+          totalPoints += amount;
+        } else {
+          // PAYOUT rows: the user entered rupees; convert to integer paise for the payload.
+          // Store paise in the row so the POST body is already in paise.
+          totalPayoutPaise += rupeesToPaise(amount);
+        }
       }
+
+      // For PAYOUT rows the amount stored in CreditUploadRow.amount is paise;
+      // for POINTS rows it remains whole points (no ×100 conversion).
+      const storedAmount = resolvedAwardType === 'PAYOUT' ? rupeesToPaise(amount) : amount;
 
       rows.push({
         rowNum:    rIdx + 1,
@@ -244,7 +255,7 @@ export function parseCreditUpload(
         outletName: outletName || (outlet?.name ?? outletId),
         fieldId:   field.id,
         fieldName: field.name,
-        amount,
+        amount:    storedAmount,
         narration: rawNarr,
         awardType: resolvedAwardType,
         status,
@@ -269,7 +280,7 @@ export function parseCreditUpload(
       skipped:        skippedCount,
       errors:         errorCount,
       totalPoints,
-      totalPayoutInr,
+      totalPayoutPaise,
     },
   };
 }

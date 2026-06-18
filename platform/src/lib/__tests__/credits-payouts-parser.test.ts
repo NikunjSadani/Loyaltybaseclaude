@@ -311,7 +311,7 @@ describe('E — Skip conditions (zero/blank/NA → SKIP, not error)', () => {
     );
     const result = parseCreditUpload(buf, DEFAULT_OPTS);
     expect(result.summary.totalPoints).toBe(0);
-    expect(result.summary.totalPayoutInr).toBe(0);
+    expect(result.summary.totalPayoutPaise).toBe(0);
   });
 
   it('E5: canProceed is false when all rows are skipped', async () => {
@@ -395,18 +395,19 @@ describe('G — Summary totals', () => {
     expect(result.summary.totalPoints).toBe(500);
   });
 
-  it('G2: summary.totalPayoutInr sums OK PAYOUT rows', async () => {
+  it('G2: summary.totalPayoutPaise sums OK PAYOUT rows (in integer paise)', async () => {
     const { parseCreditUpload } = await import('../credits-payouts-parser');
     const buf = buildXlsx(
       makeHeaders([FIELD_VOL]),
       [
-        ['WS-001', 'Anand Wholesale', 500, ''],
-        ['RT-001', 'Sharma Store',    300, ''],
-        ['SS-001', 'Mumbai Sub-Depot',200, ''],
+        ['WS-001', 'Anand Wholesale', 500, ''],   // WHOLESALER → POINTS, not counted in payout
+        ['RT-001', 'Sharma Store',    300, ''],   // SSS → PAYOUT: ₹300 = 30000 paise
+        ['SS-001', 'Mumbai Sub-Depot',200, ''],   // SUB_STOCKIST → PAYOUT: ₹200 = 20000 paise
       ],
     );
     const result = parseCreditUpload(buf, DEFAULT_OPTS);
-    expect(result.summary.totalPayoutInr).toBe(500);  // RT-001 + SS-001
+    // RT-001 (30000) + SS-001 (20000) = 50000 paise
+    expect(result.summary.totalPayoutPaise).toBe(50000);
   });
 
   it('G3: summary counts match row statuses', async () => {
@@ -430,6 +431,6 @@ describe('G — Summary totals', () => {
     const buf = buildXlsx(makeHeaders([FIELD_VOL]), []);
     const result = parseCreditUpload(buf, DEFAULT_OPTS);
     expect(result.summary.totalPoints).toBe(0);
-    expect(result.summary.totalPayoutInr).toBe(0);
+    expect(result.summary.totalPayoutPaise).toBe(0);
   });
 });

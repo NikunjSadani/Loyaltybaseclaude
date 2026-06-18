@@ -1365,7 +1365,7 @@ model PayoutBatch {
   batchCode        String
   status           PayoutBatchStatus @default(DRAFT)
   payoutMode       PayoutMode
-  totalAmountPaise Int               @default(0)
+  totalAmountPaise BigInt            @default(0)
   transactionCount Int               @default(0)
   successCount     Int               @default(0)
   failureCount     Int               @default(0)
@@ -1393,7 +1393,7 @@ model PayoutTransaction {
   redemptionOrderId String?
   payoutMode        PayoutMode
   status            PayoutStatus @default(PENDING)
-  amountPaise       Int
+  amountPaise       BigInt
   beneficiaryName   String?
   beneficiaryPhone  String?
   upiId             String?
@@ -1409,8 +1409,8 @@ model PayoutTransaction {
   completedAt       DateTime?
   reversedAt        DateTime?
   tdsApplicable     Boolean      @default(false)
-  tdsPaise          Int          @default(0)
-  netAmountPaise    Int
+  tdsPaise          BigInt       @default(0)
+  netAmountPaise    BigInt
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
@@ -1430,8 +1430,8 @@ model FundLedger {
   id            String         @id @default(cuid())
   clientId      String
   ledgerType    FundLedgerType
-  amountPaise   Int
-  balancePaise  Int
+  amountPaise   BigInt
+  balancePaise  BigInt
   referenceType String?
   referenceId   String?
   description   String?
@@ -1449,7 +1449,7 @@ model FundReceipt {
   id              String   @id @default(cuid())
   clientId        String
   receiptNumber   String
-  amountPaise     Int
+  amountPaise     BigInt
   receivedAt      DateTime
   paymentMode     String
   referenceNumber String?
@@ -1470,7 +1470,7 @@ model TdsRecord {
   payoutTransactionId String    @unique
   partnerId           String
   panNumber           String?
-  tdsPaise            Int
+  tdsPaise            BigInt
   tdsRate             Decimal   @db.Decimal(5, 2)
   assessmentYear      String?
   quarterPeriod       String?
@@ -1498,9 +1498,9 @@ model AutoInvoice {
   periodStartDate DateTime?
   periodEndDate   DateTime?
   lineItems       Json
-  subtotalPaise   Int
-  gstPaise        Int       @default(0)
-  totalPaise      Int
+  subtotalPaise   BigInt
+  gstPaise        BigInt    @default(0)
+  totalPaise      BigInt
   pdfUrl          String?
   emailSentAt     DateTime?
   createdAt       DateTime  @default(now())
@@ -2152,8 +2152,8 @@ model CreditBatch {
   confirmedAt    DateTime?
   confirmedBy    String?
   totalOutlets   Int               @default(0)
-  totalPoints    Decimal           @default(0) @db.Decimal(15, 2)
-  totalPayoutInr Decimal           @default(0) @db.Decimal(15, 2)
+  totalPoints      Int             @default(0)
+  totalPayoutPaise BigInt          @default(0)
   rows           Json              @default("[]")
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
@@ -2177,7 +2177,7 @@ model CreditPayoutEntry {
   fieldId    String
   fieldName  String
   period     String
-  amountInr  Decimal           @db.Decimal(15, 2)
+  amountPaise BigInt
   narration  String            @default("")
   status     CreditEntryStatus @default(PENDING)
   utr        String?
@@ -2207,7 +2207,7 @@ model CreditPayoutDownload {
   status         String   @default("OPEN")
   downloadedBy   String
   downloadedAt   DateTime @default(now())
-  totalAmountInr Decimal  @db.Decimal(15, 2)
+  totalAmountPaise BigInt
   bankSnapshots  Json     @default("[]")
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -2230,9 +2230,9 @@ model CreditReversal {
   fieldName       String
   period          String
   awardType       CreditAwardType
-  originalAmount  Decimal              @db.Decimal(15, 2)
-  requestedAmount Decimal              @db.Decimal(15, 2)
-  approvedAmount  Decimal?             @db.Decimal(15, 2)
+  originalPaise   BigInt
+  requestedPaise  BigInt
+  approvedPaise   BigInt?
   requestedBy     String
   requestedAt     DateTime             @default(now())
   approvedBy      String?

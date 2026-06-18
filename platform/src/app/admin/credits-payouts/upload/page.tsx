@@ -50,11 +50,12 @@ function isUploadWindowOpen(cutoffDay: number): boolean {
 type Step = 'template' | 'upload' | 'preview' | 'done';
 
 interface SavedBatch {
-  id:             string;
-  batchCode:      string;
-  totalOutlets:   number;
-  totalPoints:    number;
-  totalPayoutInr: number;
+  id:               string;
+  batchCode:        string;
+  totalOutlets:     number;
+  totalPoints:      number;
+  /** totalPayoutPaise from the API — integer paise. */
+  totalPayoutPaise: number;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -157,10 +158,11 @@ export default function CreditsPayoutsUploadPage() {
         method: 'POST', headers,
         body: JSON.stringify({
           period,
-          totalOutlets:   uniqueOutlets.size,
-          totalPoints:    parseResult.summary.totalPoints,
-          totalPayoutInr: parseResult.summary.totalPayoutInr,
-          rows:           parseResult.rows,
+          totalOutlets:    uniqueOutlets.size,
+          totalPoints:     parseResult.summary.totalPoints,
+          // totalPayoutPaise: already in paise from the parser
+          totalPayoutPaise: parseResult.summary.totalPayoutPaise,
+          rows:             parseResult.rows,
         }),
       });
       const saveJson = await saveRes.json();
@@ -184,11 +186,12 @@ export default function CreditsPayoutsUploadPage() {
       }
 
       setSavedBatch({
-        id:             saveJson.data.id,
-        batchCode:      saveJson.data.batchCode,
-        totalOutlets:   saveJson.data.totalOutlets,
-        totalPoints:    Number(saveJson.data.totalPoints),
-        totalPayoutInr: Number(saveJson.data.totalPayoutInr),
+        id:               saveJson.data.id,
+        batchCode:        saveJson.data.batchCode,
+        totalOutlets:     saveJson.data.totalOutlets,
+        totalPoints:      Number(saveJson.data.totalPoints),
+        // BigInt is serialised to number via toJSON patch in api/src/main.ts
+        totalPayoutPaise: Number(saveJson.data.totalPayoutPaise),
       });
       setSaved(true);
       setStep('done');
@@ -376,10 +379,11 @@ export default function CreditsPayoutsUploadPage() {
             ))}
           </div>
 
-          {parseResult.summary.totalPayoutInr > 0 && (
+          {parseResult.summary.totalPayoutPaise > 0 && (
             <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
               <p className="text-sm text-emerald-800">
-                Total Payout: <strong>₹{parseResult.summary.totalPayoutInr.toLocaleString('en-IN')}</strong>
+                {/* totalPayoutPaise is integer paise; divide by 100 for human display */}
+                Total Payout: <strong>₹{(parseResult.summary.totalPayoutPaise / 100).toLocaleString('en-IN')}</strong>
               </p>
             </div>
           )}
@@ -451,7 +455,8 @@ export default function CreditsPayoutsUploadPage() {
             <p className="text-xs text-gray-500">
               {savedBatch.totalOutlets} outlet{savedBatch.totalOutlets !== 1 ? 's' : ''}
               {savedBatch.totalPoints > 0 && ` · ${savedBatch.totalPoints.toLocaleString('en-IN')} pts`}
-              {savedBatch.totalPayoutInr > 0 && ` · ₹${savedBatch.totalPayoutInr.toLocaleString('en-IN')} payout`}
+              {/* totalPayoutPaise is integer paise; divide by 100 for human display */}
+              {savedBatch.totalPayoutPaise > 0 && ` · ₹${(savedBatch.totalPayoutPaise / 100).toLocaleString('en-IN')} payout`}
             </p>
           </div>
           <div className="flex gap-3 justify-center pt-2">

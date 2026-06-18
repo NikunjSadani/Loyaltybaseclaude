@@ -101,7 +101,7 @@ describe('PartnerService', () => {
         id: 't1',
         period: '2026-05',
         kpiLabel: 'Q1 Incentive',
-        payoutAmountInr: 123,
+        payoutAmountPaise: 12345,
         utr: 'UTR123',
         status: 'PAID',
         narration: 'Q1 Incentive',

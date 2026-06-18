@@ -338,16 +338,28 @@ achievement display. **Depends on:** P2 (audience/eligibility).
 **Objective:** the money spine (spec §02 WF2/WF3) — uploads credit wallets, payouts settle with UTR,
 visibility self-bills. **This phase contains the most High-severity gaps.**
 
-| Task | What | Key files / area | Test |
+> **◐ RECONCILE DRAFTED (2026-06-18) — decisions locked, build NOT started.** Audit found most P6
+> models + read-side routes already exist (Phase S). Full record: [`reconcile/P6-finance.md`](reconcile/P6-finance.md).
+> **Locked decisions:** **#5** two distinct rails (Awards push vs Redemption pull) — keep separate, not a
+> merge; **#19** = **integer paise EVERYWHERE** (6.0 converts the Awards rail `Decimal`-INR → `Int` paise:
+> tax math is exact in paise, and the finance tables are empty now so it's a ~1-hr migration vs a risky
+> live one later); **#16** = aggregate POINTS to the **partner** wallet; **#8** invoicing = included, built
+> **last**. ⚠️ **#25 TDS = ON HOLD** — owner reviews the TDS structure (the two sections: incentive 194R vs
+> visibility-service 194C/194J) before any TDS build.
+>
+> **Sequencing:** 6.0 first (changes the money unit). Then **Stream 1 (Credits)** ∥ **Stream 2 (Visibility)**
+> run in parallel (disjoint files). **Invoicing (6.7) last** (depends on 6.6). **Payouts/TDS held.**
+
+| Task | What | Key files / area | Stream / status |
 |---|---|---|---|
-| 6.0 | Reconcile all four finance contexts; lock money-unit standard (#19) | `lib/credits-payouts-*`, `lib/tds.ts` | — |
-| 6.1 | Credit fields/params + batch upload + confirm | `api/admin/credits/*` | pure selector |
-| 6.2 | **Credit POINTS → wallet on confirm** (#16) | Milestone B | pure + wiring |
-| 6.3 | Bank download grouping: **separate-UTR for Visibility** (#7) | Milestone C / `lib/credits-download.ts` | pure grouping |
-| 6.4 | UTR upload + dup detection; **reversal flow with maker-checker built into the portal** — Client Admin *requests* (`credits:request_reversal`) → Gifsy *approves/executes* (`credits:approve_reversal`, Gifsy-only) → wallet debit. Separation of duties; surface the request→approve states + reason in the reversal UI. (RBAC perms already exist, 1.6.) | `api/admin/credits/*`, reversal UI | pure + wiring |
-| 6.5 | Redemption payouts + Fund ledger/receipts; **TDS sections** (#25) | `api/payouts/*`, `TdsRecord` | unit |
-| 6.6 | Visibility: submit + approve + image-hash fraud; **two modes + flag** (#17) | `api/visibility/*` | pure + wiring |
-| 6.7 | Self-bill invoicing + **number validation/lock** (#8); GST logic from reg-type (#15) | `api/partner/invoices/[id]`, `lib/invoice.ts` | pure validator |
+| 6.0 ✅ | **DONE (2026-06-18)** — money unit → **integer `BigInt` paise everywhere** (#19): Awards `Decimal`-INR → `BigInt` paise (renamed `*Paise`), existing rail `Int`→`BigInt` (overflow fix while empty), shared `money.ts`, killed JS float-sum. Gate green (backend 596 / no new platform reds). See `reconcile/P6-finance.md §4`. | `credits/*`, `payouts/*`, `money.ts`, schema | **✅ DONE · #19 resolved** |
+| 6.2 | **Credit POINTS → wallet on confirm** (#16, HIGH) + debit on reversal; grain = partner wallet | `credits/*`, `wallet/` (reuse `creditEarn`/`reverse`) | **Stream 1 (Credits)** |
+| 6.1 | Credit fields/params polish + batch upload + confirm | `credits/*` | Stream 1 |
+| 6.3 | Verify **separate-UTR for Visibility** (#7) — `isSeparatePayout` grouping looks already enforced → lock with a test | `credits/*` (bank download) | Stream 1 (likely test-only) |
+| 6.4 | UTR upload + dup detection; **reversal maker-checker in the portal** — Client Admin *requests* (`credits:request_reversal`) → Gifsy *approves/executes* (`credits:approve_reversal`, Gifsy-only) → wallet debit. Surface request→approve states + reason. (RBAC perms exist, 1.6.) | `credits/*`, reversal UI | Stream 1 |
+| 6.6 | Visibility: per-tenant **capture-mode flag** (#17); approve/reject built; `submit` (photo upload) deferred (GCS) | `visibility/*`, tenant config | **Stream 2 (Visibility, ∥)** |
+| 6.7 | Self-bill invoicing port + **number validation/lock** (#8); GST from reg-type (#15). Logic already pure in `lib/invoice.ts` → port + persist; needs `AutoInvoice` delta (status/lock/edited/snapshot) | new `api/src/invoices`, `AutoInvoice` | **Wave D — LAST (after 6.6)** |
+| 6.5 | Redemption payouts: **build the P5 `RedemptionOrder`→`PayoutTransaction` settlement bridge** + Fund ledger/receipts; **TDS sections** (#25) | `payouts/*`, `TdsRecord` | ⚠️ **HELD — owner TDS review first** |
 
 **Exit:** a confirmed batch credits wallets and pays out (Visibility on its own UTR + invoice).
 **Depends on:** P5 (wallet), P3 (GST reg-type), P2 (outlets).

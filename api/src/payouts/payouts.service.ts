@@ -7,6 +7,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
+import { rupeesToPaise } from '../common/money';
 import {
   BatchDetailQueryDto,
   CreateBatchDto,
@@ -98,21 +99,23 @@ export class PayoutsService {
       _sum: { amountPaise: true },
     });
 
+    // _sum of a BigInt column returns bigint | null. Wrap with Number() for all
+    // arithmetic (paise values are well below Number.MAX_SAFE_INTEGER).
     const utilised = utilisedByMode.reduce(
-      (sum, m) => sum + (m._sum.amountPaise ?? 0),
+      (sum, m) => sum + Number(m._sum.amountPaise ?? 0n),
       0,
     );
-    const totalReceived = received._sum.amountPaise ?? 0;
-    const closingBalance = latestEntry?.balancePaise ?? totalReceived - utilised;
-    const pending = pendingLiability._sum.amountPaise ?? 0;
+    const totalReceived = Number(received._sum.amountPaise ?? 0n);
+    const closingBalance = Number(latestEntry?.balancePaise ?? 0n) || (totalReceived - utilised);
+    const pending = Number(pendingLiability._sum.amountPaise ?? 0n);
 
     return {
       totalReceivedPaise: totalReceived,
       totalReceived: totalReceived / 100,
       utilisedByMode: utilisedByMode.map((m) => ({
         mode: m.payoutMode,
-        amountPaise: m._sum.amountPaise ?? 0,
-        amount: (m._sum.amountPaise ?? 0) / 100,
+        amountPaise: Number(m._sum.amountPaise ?? 0n),
+        amount: Number(m._sum.amountPaise ?? 0n) / 100,
       })),
       totalUtilisedPaise: utilised,
       totalUtilised: utilised / 100,
@@ -128,14 +131,16 @@ export class PayoutsService {
   /** POST /v1/payouts/fund/receive — record an offline fund receipt + ledger entry (GIFSY-only). */
   async receiveFund(user: JwtPayload, dto: ReceiveFundDto) {
     const clientId = user.clientId;
-    const amountPaise = Math.round(dto.amount * 100);
+    // dto.amount is rupees from the request body; convert to integer paise.
+    const amountPaise = rupeesToPaise(dto.amount);
     const paymentMode = dto.paymentMode ?? 'BANK_TRANSFER';
 
     const latestEntry = await this.prisma.fundLedger.findFirst({
       where: { clientId },
       orderBy: { createdAt: 'desc' },
     });
-    const currentBalance = latestEntry?.balancePaise ?? 0;
+    // balancePaise is BigInt from Prisma; Number() is safe.
+    const currentBalance = Number(latestEntry?.balancePaise ?? 0n);
     const newBalance = currentBalance + amountPaise;
 
     const result = await this.prisma.$transaction(async (tx) => {
@@ -143,7 +148,7 @@ export class PayoutsService {
       const receipt = await tx.fundReceipt.create({
         data: {
           receiptNumber,
-          amountPaise,
+          amountPaise: BigInt(amountPaise),
           receivedAt: dto.paymentDate,
           paymentMode,
           referenceNumber: dto.referenceNumber ?? null,
@@ -157,8 +162,8 @@ export class PayoutsService {
       const ledgerEntry = await tx.fundLedger.create({
         data: {
           ledgerType: 'RECEIPT',
-          amountPaise,
-          balancePaise: newBalance,
+          amountPaise: BigInt(amountPaise),
+          balancePaise: BigInt(newBalance),
           referenceType: 'FUND_RECEIPT',
           referenceId: receipt.id,
           description:
@@ -315,7 +320,8 @@ export class PayoutsService {
       if (!tx.partner?.panNumber) {
         errors.push(`No PAN for partner ${tx.partnerId}`);
       }
-      if (!tx.amountPaise || tx.amountPaise <= 0) {
+      // amountPaise is BigInt from Prisma; compare as Number.
+      if (!tx.amountPaise || Number(tx.amountPaise) <= 0) {
         errors.push(`Invalid amount for tx ${tx.id}`);
       }
       if (errors.length === 0) {
@@ -332,12 +338,12 @@ export class PayoutsService {
     steps.invoiceGeneration.status = 'COMPLETED';
 
     // Step 3: TDS computation.
+    // amountPaise fields are BigInt from Prisma; convert with Number() for arithmetic.
     let totalTds = 0;
     for (const tx of validTransactions) {
-      if (tx.amountPaise >= PayoutsService.TDS_THRESHOLD_PAISE) {
-        const tdsAmount = Math.round(
-          tx.amountPaise * PayoutsService.TDS_RATE_DEFAULT,
-        );
+      const txAmountNum = Number(tx.amountPaise);
+      if (txAmountNum >= PayoutsService.TDS_THRESHOLD_PAISE) {
+        const tdsAmount = Math.round(txAmountNum * PayoutsService.TDS_RATE_DEFAULT);
         totalTds += tdsAmount;
         await this.prisma.tdsRecord.create({
           data: {
@@ -345,7 +351,7 @@ export class PayoutsService {
             partnerId: tx.partnerId,
             panNumber: tx.partner?.panNumber ?? null,
             tdsRate: PayoutsService.TDS_RATE_DEFAULT,
-            tdsPaise: tdsAmount,
+            tdsPaise: BigInt(tdsAmount),
           },
         });
       }
@@ -354,16 +360,17 @@ export class PayoutsService {
     steps.tdsComputation.status = 'COMPLETED';
 
     // Step 4: Fund check.
+    // balancePaise is BigInt from Prisma; Number() is safe.
     const fundLedger = await this.prisma.fundLedger.findFirst({
       where: { clientId },
       orderBy: { createdAt: 'desc' },
     });
     const totalRequired =
-      validTransactions.reduce((sum, tx) => sum + tx.amountPaise, 0) - totalTds;
-    steps.fundCheck.available = fundLedger?.balancePaise ?? 0;
+      validTransactions.reduce((sum, tx) => sum + Number(tx.amountPaise), 0) - totalTds;
+    const availableBalance = Number(fundLedger?.balancePaise ?? 0n);
+    steps.fundCheck.available = availableBalance;
     steps.fundCheck.required = totalRequired;
-    steps.fundCheck.status =
-      (fundLedger?.balancePaise ?? 0) >= totalRequired ? 'PASSED' : 'FAILED';
+    steps.fundCheck.status = availableBalance >= totalRequired ? 'PASSED' : 'FAILED';
 
     // Step 5: Flag for disbursement.
     let flagged = 0;
@@ -422,13 +429,15 @@ export class PayoutsService {
       orderBy: { createdAt: 'asc' },
     });
 
+    // amountPaise, netAmountPaise, tdsPaise are all BigInt from Prisma.
+    // Number() is safe (paise « Number.MAX_SAFE_INTEGER).
     const rows = transactions.map((t, i) => ({
       'S.No': i + 1,
       'Partner Name': t.partner?.businessName ?? '',
       PAN: t.partner?.panNumber ?? t.tdsRecord?.panNumber ?? 'N/A',
-      'Gross Amount (₹)': (t.amountPaise / 100).toFixed(2),
-      'TDS Amount (₹)': t.tdsRecord ? (t.tdsRecord.tdsPaise / 100).toFixed(2) : '0.00',
-      'Net Amount (₹)': (t.netAmountPaise / 100).toFixed(2),
+      'Gross Amount (₹)': (Number(t.amountPaise) / 100).toFixed(2),
+      'TDS Amount (₹)': t.tdsRecord ? (Number(t.tdsRecord.tdsPaise) / 100).toFixed(2) : '0.00',
+      'Net Amount (₹)': (Number(t.netAmountPaise) / 100).toFixed(2),
       Mode: t.payoutMode,
       Status: t.status,
       Date: t.createdAt.toISOString().split('T')[0],

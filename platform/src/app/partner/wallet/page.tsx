@@ -107,7 +107,8 @@ function downloadInrStatement(entries: PayoutLedgerEntry[], period: string) {
   const rows = entries.map(p => ({
     Date:          p.paidAt ? new Date(p.paidAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—',
     Description:   `${p.kpiLabel} · ${monthLabel(p.period)}`,
-    'Amount (₹)':  p.payoutAmountInr,
+    // payoutAmountPaise is integer paise; divide by 100 for the Excel sheet
+    'Amount (₹)':  p.payoutAmountPaise / 100,
     UTR:           p.utr ?? '—',
   }));
   const ws = XLSX.utils.json_to_sheet(rows);
@@ -190,13 +191,15 @@ function InrWalletView() {
   const [calOpen,     setCalOpen]     = useState(false);
 
   // Summary card figures — always unfiltered (lifetime = all time)
-  const lifetimePaid = useMemo(() => paidEntries.reduce((s, p) => s + p.payoutAmountInr, 0), [paidEntries]);
+  // payoutAmountPaise is integer paise; accumulate in paise then divide for display
+  const lifetimePaid = useMemo(() => paidEntries.reduce((s, p) => s + p.payoutAmountPaise, 0) / 100, [paidEntries]);
   const lastPaid     = useMemo(() =>
     paidEntries.length > 0
       ? [...paidEntries].sort((a, b) => b.period.localeCompare(a.period))[0]
       : null,
   [paidEntries]);
-  const lastMonthAmt   = lastPaid?.payoutAmountInr ?? 0;
+  // Divide by 100: payoutAmountPaise is integer paise; fmtInr expects rupees
+  const lastMonthAmt   = (lastPaid?.payoutAmountPaise ?? 0) / 100;
   const lastMonthLabel = lastPaid ? monthLabel(lastPaid.period) : '—';
 
   // KPI filter
@@ -377,7 +380,8 @@ function InrWalletView() {
                   </div>
 
                   {/* Amount */}
-                  <p className="text-sm font-bold text-emerald-700 shrink-0">{fmtInr(p.payoutAmountInr)}</p>
+                  {/* payoutAmountPaise is integer paise; fmtInr expects rupees */}
+                  <p className="text-sm font-bold text-emerald-700 shrink-0">{fmtInr(p.payoutAmountPaise / 100)}</p>
                 </div>
               );
             })}
