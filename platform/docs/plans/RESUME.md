@@ -62,8 +62,11 @@ P6 = reconcile + wire-up, not build-from-zero.
   (migration `P6_reversal_shortfall.sql`); report = supposed(`approvedPaise`)/reversed(`approved−shortfall`)/
   pending(`shortfall`); client settles `pending` **off-platform** (no platform write-off/recovery). Remaining: FE
   reversal report columns.
-- **#8 invoicing — included, built LAST.** Logic already pure in `lib/invoice.ts` (GST-from-reg-type, number-gen);
-  port + persist; needs `AutoInvoice` delta (status/finalize-lock/`invoiceNumberEdited`/snapshot). #15 GST reads reg-type.
+- **#8 + #15 invoicing — ✅ DONE (6.7, 2026-06-18):** real `api/src/invoices` (was all-mock); automatic idempotent
+  per-outlet-per-month generation (`@@unique`, re-run can't mutate a PAID invoice); GST-from-GSTIN (REGULAR only;
+  intra/inter from retailer GSTIN first-2 vs **19** Tech Gifsy/WB; CGST+SGST / IGST; pre-GST base; integer paise);
+  number editable-while-GENERATED + locked-once-PAID; KYC guard; Tech Gifsy recipient (`19AAACT9811F1Z9`) baked in;
+  partner + admin FE. Audited (PAID-immutability + paise rounding fixed). PDF/email + internal TDS line deferred (TDS→6.5).
 - **#17 (Visibility capture-mode) — ✅ DONE (Stream 2 + toggle, 2026-06-18):** per-tenant `features.visibilityCaptureMode`
   (`PHOTO_APPROVAL` default | `AMOUNT_UPLOAD`) in `Client.features` JSON (no migration); mutating entry points gated
   by mode; **Gifsy-admin toggle** (`PUT /v1/admin/settings/visibility-capture-mode`, `tenancy:manage_flags`, features-merge
@@ -76,11 +79,12 @@ P6 = reconcile + wire-up, not build-from-zero.
   §206AB removed). 194R taxable event = cash payout at PAID + redemption at fulfilment + off-platform upload.
   **Recommend 6.7 (invoicing) BEFORE 6.5** (194C base = invoice pre-GST base). Build only after sign-off.
 
-**Sequencing:** **6.0 ✅ · Stream 1 (Credits #16) ✅ · Stream 2 (Visibility #17) ✅** (all on `develop`; 6.0
-committed `13c5d4e`; Streams 1+2 commit pending). **Remaining: Invoicing (6.7) LAST; Payouts/TDS (6.5: P5
-`RedemptionOrder`→`PayoutTransaction` settlement bridge + #25) HELD** until the TDS review. **NEXT ACTION:** write
-the TDS explainer for owner review and/or start Invoicing (6.7). Also pending: owner decision on the reversal
-shortfall settlement policy; a `PUT` admin setter for `visibilityCaptureMode`. Depends on P5 + P3 + P2.
+**Sequencing:** **6.0 ✅ · Credits #16 ✅ · Visibility #17 (+toggle) ✅ · Invoicing 6.7 (#8/#15) ✅** (all on
+`develop`). **REMAINING in P6: 6.5 — Payouts/TDS.** TDS spec SIGNED OFF (`reconcile/P6.5-TDS-SPEC.md`); now
+**unblocked** (6.7 done → 194C base = invoice pre-GST base is defined). 6.5 also builds the P5
+`RedemptionOrder`→`PayoutTransaction` settlement bridge. **NEXT ACTION = build 6.5** (194R + 194C engines,
+grossed-up, PAN-keyed, compute+track+export per the spec) — start with the aggregation engine + `tds.ts`.
+Depends on P5 + P3 + P2. (Minor residual: invoice PDF/email deferred.)
 
 **Residuals carried forward (NOT done — don't assume):**
 - **Platform retirement (~P6, ONE unit):** stale `platform/prisma/schema.prisma` + still-live platform Prisma code

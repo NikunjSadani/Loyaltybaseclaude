@@ -2,10 +2,19 @@
 
 /**
  * /admin/invoices  — GIFSY_ADMIN only
- * Full invoice list with filter, status badge, and CSV export.
+ * Full invoice list with filters, "Generate invoices" action, Mark Paid, and CSV export.
+ *
+ * Backend:
+ *   GET  /api/admin/invoices?period=&status=&outletCode=
+ *   POST /api/admin/invoices/generate   body { period: "YYYY-MM" }
+ *   PATCH /api/admin/invoices/:id/mark-paid
+ *   PATCH /api/admin/invoices/:id/invoice-number  body { invoiceNumber }
+ *
+ * Money: all paise — divide by 100 for ₹ display.
+ * CGST_SGST split: CGST = SGST = gstPaise / 2.
  */
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import {
   Search,
@@ -16,98 +25,116 @@ import {
   Upload,
   CheckCircle,
   Clock,
+  Zap,
+  Loader2,
+  X,
+  AlertTriangle,
 } from 'lucide-react';
-import { type VisibilityInvoice } from '@/lib/invoice';
 import { Spinner } from '@/components/ui/spinner';
+import { api } from '@/lib/api-client';
+import { formatINR } from '@/lib/money';
+import { formatPeriodLabel } from '@/lib/invoice';
 
-/* ─── API types & mapping ──────────────────────────────────────────────────── */
-interface ApiAdminSalesInvoice {
+// ── Backend shape ─────────────────────────────────────────────────────────────
+interface BackendInvoice {
   id: string;
   invoiceNumber: string;
+  invoiceNumberEdited: boolean;
+  partnerId: string;
+  outletCode: string;
+  period: string;
   invoiceDate: string;
-  totalAmountPaise: number;
-  netAmountPaise: number;
-  processedAt?: string | null;
-  outletId?: string | null;
-  distributorName?: string | null;
-  lineItems?: { id: string; quantity: number; unitPricePaise: number }[];
+  status: 'GENERATED' | 'PAID';
+  subtotalPaise: number;
+  gstPaise: number;
+  gstType: 'CGST_SGST' | 'IGST' | null;
+  totalPaise: number;
+  createdAt: string;
+  snapshot: {
+    outletCode: string;
+    outletName: string;
+    firmName: string;
+    partnerName: string;
+    retailerState: string;
+    retailerGstin: string | null;
+    sacCode: string;
+    description: string;
+  };
 }
 
-function mapApiAdminInvoice(s: ApiAdminSalesInvoice): VisibilityInvoice {
-  const date = new Date(s.invoiceDate);
-  const period = s.invoiceDate.slice(0, 7);
-  const periodLabel = date.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
-  const baseAmount = s.totalAmountPaise / 100;
+// ── Generate API response ─────────────────────────────────────────────────────
+interface SkippedOutlet {
+  outletCode: string;
+  reason: string;
+}
+interface GenerateResult {
+  generated: number;
+  skipped: SkippedOutlet[];
+}
+
+// ── Display row ───────────────────────────────────────────────────────────────
+interface InvoiceRow {
+  id: string;
+  invoiceNumber: string;
+  outletCode: string;
+  outletName: string;
+  firmName: string;
+  retailerState: string;
+  period: string;
+  periodLabel: string;
+  status: 'GENERATED' | 'PAID';
+  subtotalPaise: number;
+  gstPaise: number;
+  gstType: 'CGST_SGST' | 'IGST' | null;
+  totalPaise: number;
+}
+
+function mapBackend(b: BackendInvoice): InvoiceRow {
   return {
-    id: s.id,
-    invoiceNumber: s.invoiceNumber,
-    invoiceNumberEdited: false,
-    status: s.processedAt ? 'PAID' : 'GENERATED',
-    period,
-    periodLabel,
-    outletId: s.outletId ?? '',
-    outletCode: '',
-    outletName: s.distributorName ?? s.outletId ?? '',
-    firmName: s.distributorName ?? '',
-    partnerName: '',
-    mobile: '',
-    retailerState: '',
-    panNumber: null,
-    gstNumber: null,
-    entityType: 'INDIVIDUAL',
-    gstRegistrationType: 'UNREGISTERED',
-    bankName: '',
-    accountNumber: '',
-    ifscCode: '',
-    baseAmount,
-    gstApplicable: false,
-    gstType: null,
-    cgst: 0,
-    sgst: 0,
-    igst: 0,
-    totalGST: 0,
-    totalInvoiceAmount: baseAmount,
-    tdsRate: 0,
-    tdsAmount: 0,
-    netDisbursed: s.netAmountPaise / 100,
-    generatedAt: s.invoiceDate,
-    paidAt: s.processedAt ?? null,
-    uploadBatchId: '',
-    sacCode: '998361',
-    description: `Sales invoice — ${periodLabel}`,
+    id:            b.id,
+    invoiceNumber: b.invoiceNumber,
+    outletCode:    b.snapshot.outletCode,
+    outletName:    b.snapshot.outletName,
+    firmName:      b.snapshot.firmName,
+    retailerState: b.snapshot.retailerState,
+    period:        b.period,
+    periodLabel:   formatPeriodLabel(b.period),
+    status:        b.status,
+    subtotalPaise: b.subtotalPaise,
+    gstPaise:      b.gstPaise,
+    gstType:       b.gstType,
+    totalPaise:    b.totalPaise,
   };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const STATUS_STYLES: Record<VisibilityInvoice['status'], string> = {
+const STATUS_STYLES: Record<InvoiceRow['status'], string> = {
   GENERATED: 'bg-amber-50 text-amber-700 border border-amber-200',
-  PAID: 'bg-green-50 text-green-700 border border-green-200',
+  PAID:      'bg-green-50 text-green-700 border border-green-200',
 };
-const STATUS_ICONS: Record<VisibilityInvoice['status'], React.ReactNode> = {
+const STATUS_ICONS: Record<InvoiceRow['status'], React.ReactNode> = {
   GENERATED: <Clock className="w-3 h-3" />,
-  PAID: <CheckCircle className="w-3 h-3" />,
+  PAID:      <CheckCircle className="w-3 h-3" />,
 };
 
-function exportCSV(invoices: VisibilityInvoice[]) {
+function exportCSV(invoices: InvoiceRow[]) {
   const headers = [
-    'Invoice Number', 'Outlet ID', 'Outlet Name', 'Firm Name', 'State',
-    'Period', 'Base Amount', 'GST Type', 'Total GST', 'Invoice Total',
-    'Status', 'Generated At', 'Paid At',
+    'Invoice Number', 'Outlet Code', 'Outlet Name', 'Firm Name', 'State',
+    'Period', 'Subtotal (₹)', 'GST Type', 'GST (₹)', 'Total (₹)',
+    'Status',
   ];
   const rows = invoices.map((inv) => [
     inv.invoiceNumber,
-    inv.outletId,
+    inv.outletCode,
     inv.outletName,
     inv.firmName,
     inv.retailerState,
-    inv.periodLabel,
-    inv.baseAmount,
+    inv.period,
+    (inv.subtotalPaise / 100).toFixed(2),
     inv.gstType ?? 'N/A',
-    inv.totalGST,
-    inv.totalInvoiceAmount,
+    (inv.gstPaise / 100).toFixed(2),
+    (inv.totalPaise / 100).toFixed(2),
     inv.status,
-    inv.generatedAt,
-    inv.paidAt ?? '',
   ]);
 
   const csv = [headers, ...rows]
@@ -115,9 +142,9 @@ function exportCSV(invoices: VisibilityInvoice[]) {
     .join('\n');
 
   const blob = new Blob([csv], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
   a.download = `visibility-invoices-${Date.now()}.csv`;
   a.click();
   URL.revokeObjectURL(url);
@@ -125,28 +152,89 @@ function exportCSV(invoices: VisibilityInvoice[]) {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function AdminInvoiceListPage() {
-  const [invoices, setInvoices] = useState<VisibilityInvoice[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState<string | null>(null);
 
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'ALL' | VisibilityInvoice['status']>('ALL');
+  const [search, setSearch]             = useState('');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'GENERATED' | 'PAID'>('ALL');
   const [periodFilter, setPeriodFilter] = useState('ALL');
 
-  useEffect(() => {
-    fetch('/api/sales/invoices')
-      .then((r) => r.json())
-      .then((json: { success: boolean; data?: { invoices: ApiAdminSalesInvoice[] }; error?: string }) => {
-        if (json.success && json.data) {
-          setInvoices(json.data.invoices.map(mapApiAdminInvoice));
-        } else {
-          setError(json.error ?? 'Failed to load invoices');
-        }
-      })
-      .catch(() => setError('Failed to load invoices'))
-      .finally(() => setLoading(false));
+  // ── Generate invoices state ──────────────────────────────────────────────
+  const [showGenerate, setShowGenerate]         = useState(false);
+  const [generatePeriod, setGeneratePeriod]     = useState('');
+  const [generating, setGenerating]             = useState(false);
+  const [generateResult, setGenerateResult]     = useState<GenerateResult | null>(null);
+  const [generateError, setGenerateError]       = useState<string | null>(null);
+
+  // ── Mark paid state ──────────────────────────────────────────────────────
+  const [markingPaid, setMarkingPaid]     = useState<string | null>(null); // invoice id
+  const [markPaidError, setMarkPaidError] = useState<string | null>(null);
+
+  // ── Fetch ────────────────────────────────────────────────────────────────
+  const fetchInvoices = useCallback(async (period?: string, status?: string) => {
+    setLoading(true);
+    setError(null);
+    const params = new URLSearchParams();
+    if (period && period !== 'ALL') params.set('period', period);
+    if (status && status !== 'ALL') params.set('status', status);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+
+    const res = await api.get<BackendInvoice[]>(`/api/admin/invoices${qs}`);
+    if (res.success) {
+      setInvoices(res.data.map(mapBackend));
+    } else {
+      setError('Failed to load invoices');
+    }
+    setLoading(false);
   }, []);
 
+  useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
+
+  // ── Generate invoices ────────────────────────────────────────────────────
+  const handleGenerate = async () => {
+    if (!generatePeriod.match(/^\d{4}-\d{2}$/)) {
+      setGenerateError('Enter a valid period in YYYY-MM format.');
+      return;
+    }
+    setGenerating(true);
+    setGenerateError(null);
+    setGenerateResult(null);
+
+    const res = await api.post<GenerateResult>('/api/admin/invoices/generate', {
+      period: generatePeriod,
+    });
+    setGenerating(false);
+
+    if (res.success) {
+      setGenerateResult(res.data);
+      // Refresh list
+      fetchInvoices(generatePeriod, undefined);
+    } else {
+      setGenerateError(res.error ?? 'Generation failed');
+    }
+  };
+
+  // ── Mark paid ────────────────────────────────────────────────────────────
+  const handleMarkPaid = async (id: string) => {
+    setMarkingPaid(id);
+    setMarkPaidError(null);
+
+    const res = await api.patch<BackendInvoice>(`/api/admin/invoices/${id}/mark-paid`, {});
+    setMarkingPaid(null);
+
+    if (res.success) {
+      setInvoices((prev) =>
+        prev.map((inv) =>
+          inv.id === id ? { ...inv, status: 'PAID' } : inv,
+        ),
+      );
+    } else {
+      setMarkPaidError(res.error ?? 'Failed to mark as paid');
+    }
+  };
+
+  // ── Computed ─────────────────────────────────────────────────────────────
   const allPeriods = useMemo(() => {
     const s = new Set(invoices.map((i) => i.period));
     return Array.from(s).sort().reverse();
@@ -162,16 +250,16 @@ export default function AdminInvoiceListPage() {
           inv.invoiceNumber.toLowerCase().includes(q) ||
           inv.outletName.toLowerCase().includes(q) ||
           inv.firmName.toLowerCase().includes(q) ||
-          inv.outletId.toLowerCase().includes(q)
+          inv.outletCode.toLowerCase().includes(q)
         );
       }
       return true;
     });
   }, [invoices, search, statusFilter, periodFilter]);
 
-  const totalBase = filtered.reduce((s, i) => s + i.baseAmount, 0);
-  const totalGST = filtered.reduce((s, i) => s + i.totalGST, 0);
-  const totalInvoice = filtered.reduce((s, i) => s + i.totalInvoiceAmount, 0);
+  const totalSubtotalPaise = filtered.reduce((s, i) => s + i.subtotalPaise, 0);
+  const totalGstPaise      = filtered.reduce((s, i) => s + i.gstPaise, 0);
+  const totalPaise         = filtered.reduce((s, i) => s + i.totalPaise, 0);
 
   if (loading) {
     return (
@@ -206,6 +294,12 @@ export default function AdminInvoiceListPage() {
           >
             <Download className="w-3.5 h-3.5" /> Export CSV
           </button>
+          <button
+            onClick={() => { setShowGenerate(true); setGenerateResult(null); setGenerateError(null); }}
+            className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 transition-colors"
+          >
+            <Zap className="w-3.5 h-3.5" /> Generate Invoices
+          </button>
           <Link
             href="/admin/invoices/upload"
             className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg bg-[var(--brand-primary)] text-white font-semibold hover:bg-green-700 transition-colors"
@@ -215,12 +309,85 @@ export default function AdminInvoiceListPage() {
         </div>
       </div>
 
+      {/* ── Generate invoices panel ─────────────────────────────────────────── */}
+      {showGenerate && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold text-blue-800">Generate invoices for a month</p>
+            <button onClick={() => setShowGenerate(false)} className="text-blue-400 hover:text-blue-600">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex items-center gap-3 flex-wrap">
+            <input
+              type="month"
+              value={generatePeriod}
+              onChange={(e) => {
+                // input[type=month] gives "YYYY-MM"
+                setGeneratePeriod(e.target.value);
+                setGenerateError(null);
+              }}
+              className="text-xs border border-blue-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300"
+              placeholder="YYYY-MM"
+            />
+            <button
+              onClick={handleGenerate}
+              disabled={generating || !generatePeriod}
+              className="flex items-center gap-1.5 text-xs px-4 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 transition-colors disabled:opacity-60"
+            >
+              {generating && <Loader2 className="w-3 h-3 animate-spin" />}
+              {generating ? 'Generating…' : 'Generate'}
+            </button>
+          </div>
+          {generateError && (
+            <p className="text-xs text-red-600 flex items-center gap-1">
+              <AlertTriangle className="w-3 h-3" /> {generateError}
+            </p>
+          )}
+          {generateResult && (
+            <div className="bg-white border border-blue-100 rounded-lg p-3 space-y-2">
+              <p className="text-xs font-semibold text-green-700">
+                <CheckCircle className="w-3.5 h-3.5 inline mr-1" />
+                {generateResult.generated} invoice{generateResult.generated !== 1 ? 's' : ''} generated
+              </p>
+              {generateResult.skipped.length > 0 && (
+                <div>
+                  <p className="text-[11px] font-semibold text-amber-700 mb-1">
+                    {generateResult.skipped.length} outlet{generateResult.skipped.length !== 1 ? 's' : ''} skipped:
+                  </p>
+                  <ul className="space-y-0.5">
+                    {generateResult.skipped.map((s, i) => (
+                      <li key={i} className="text-[11px] text-gray-600 flex items-start gap-1.5">
+                        <span className="font-mono text-gray-700">{s.outletCode}</span>
+                        <span className="text-gray-400">—</span>
+                        <span>{s.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Mark-paid error banner */}
+      {markPaidError && (
+        <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-xs text-red-700 flex items-center gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+          {markPaidError}
+          <button onClick={() => setMarkPaidError(null)} className="ml-auto text-red-400 hover:text-red-600">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Summary strip */}
       <div className="grid grid-cols-3 gap-3">
         {[
-          { label: 'Base Payout', value: `₹${totalBase.toLocaleString('en-IN')}`, sub: `${filtered.length} invoices` },
-          { label: 'Total GST', value: `₹${totalGST.toLocaleString('en-IN')}`, sub: 'GST applicable only' },
-          { label: 'Invoice Total', value: `₹${totalInvoice.toLocaleString('en-IN')}`, sub: 'Base + GST' },
+          { label: 'Base Payout',   value: formatINR(totalSubtotalPaise), sub: `${filtered.length} invoices` },
+          { label: 'Total GST',     value: formatINR(totalGstPaise),      sub: 'GST applicable only' },
+          { label: 'Invoice Total', value: formatINR(totalPaise),          sub: 'Base + GST' },
         ].map((s) => (
           <div key={s.label} className="bg-white border border-gray-200 rounded-xl px-4 py-3">
             <p className="text-[10px] text-gray-400 uppercase tracking-wide">{s.label}</p>
@@ -298,19 +465,19 @@ export default function AdminInvoiceListPage() {
                     </td>
                     <td className="px-4 py-3 text-gray-600">{inv.periodLabel}</td>
                     <td className="px-4 py-3 text-right font-medium text-gray-800">
-                      ₹{inv.baseAmount.toLocaleString('en-IN')}
+                      {formatINR(inv.subtotalPaise)}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      {inv.gstApplicable ? (
+                      {inv.gstPaise > 0 ? (
                         <span className="text-green-600">
-                          +₹{inv.totalGST.toLocaleString('en-IN')}
+                          +{formatINR(inv.gstPaise)}
                         </span>
                       ) : (
                         <span className="text-gray-400">—</span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-right font-semibold text-gray-900">
-                      ₹{inv.totalInvoiceAmount.toLocaleString('en-IN')}
+                      {formatINR(inv.totalPaise)}
                     </td>
                     <td className="px-4 py-3 text-center">
                       <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium ${STATUS_STYLES[inv.status]}`}>
@@ -319,12 +486,27 @@ export default function AdminInvoiceListPage() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      <Link
-                        href={`/admin/invoices/${inv.id}`}
-                        className="text-[var(--brand-primary)] hover:text-green-700 flex items-center"
-                      >
-                        <ChevronRight className="w-4 h-4" />
-                      </Link>
+                      <div className="flex items-center gap-2">
+                        {inv.status === 'GENERATED' && (
+                          <button
+                            onClick={() => handleMarkPaid(inv.id)}
+                            disabled={markingPaid === inv.id}
+                            className="text-[10px] px-2 py-1 rounded bg-green-600 text-white font-semibold hover:bg-green-700 transition-colors disabled:opacity-50 whitespace-nowrap flex items-center gap-1"
+                          >
+                            {markingPaid === inv.id
+                              ? <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                              : <CheckCircle className="w-2.5 h-2.5" />
+                            }
+                            Mark Paid
+                          </button>
+                        )}
+                        <Link
+                          href={`/admin/invoices/${inv.id}`}
+                          className="text-[var(--brand-primary)] hover:text-green-700 flex items-center"
+                        >
+                          <ChevronRight className="w-4 h-4" />
+                        </Link>
+                      </div>
                     </td>
                   </tr>
                 ))}

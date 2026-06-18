@@ -20,7 +20,7 @@ const nextConfig: NextConfig = {
       beforeFiles: [
         {
           source:
-            '/api/:path((?!rewards/redeem|visibility/submit|partner/invoices|admin/kyc).*)',
+            '/api/:path((?!rewards/redeem|visibility/submit|admin/kyc).*)',
           destination: `${BACKEND_API_URL}/v1/:path`,
         },
       ],

@@ -180,8 +180,29 @@ merges `features` without clobbering other keys, audit-logged) + a segmented con
 (GIFSY_ADMIN-gated, optimistic with revert). Residual: the photo `submit` endpoint stays unported (GCS multipart infra).
 
 **TDS (6.5 / #25) — still ON HOLD.** Plain-English structure explainer written for owner review:
-[`../P6-TDS-EXPLAINER.md`](../P6-TDS-EXPLAINER.md) (the two sections 194R vs 194C/194J, thresholds, who bears the
-deduction, the 4 owner questions). No TDS code until the owner confirms.
+[`../P6-TDS-EXPLAINER.md`](../P6-TDS-EXPLAINER.md). **Spec SIGNED OFF** ([`P6.5-TDS-SPEC.md`](P6.5-TDS-SPEC.md));
+build deferred until after 6.7 (194C base = the invoice pre-GST base). No TDS code yet.
+
+---
+
+## §6 · Build record — 6.7 Invoicing ✅ (2026-06-18)
+
+Self-bill visibility invoicing built for real (was 100% mock). Backend + FE; independently audited; gates green.
+- **Schema:** `AutoInvoice` + `status (GENERATED|PAID)`/`invoiceNumberEdited`/`outletCode`/`period`/`gstType`/
+  `snapshot` + **`@@unique([clientId, outletCode, period])`** (migration `P6_invoicing.sql`, applied; table empty).
+- **Generation = automatic + idempotent:** `generateForPeriod` creates one invoice per outlet per month; a re-run
+  refreshes a still-GENERATED row but **never mutates a PAID (locked) one** (create→catch P2002→`updateMany`
+  guarded on `status='GENERATED'` — the audit caught an earlier upsert that would have over-written PAID invoices).
+  Visibility base = `CreditPayoutEntry.amountPaise` for `isSeparatePayout` fields (pre-GST). **KYC-complete guard**
+  (no blank invoices); skipped outlets reported.
+- **GST (#15):** REGULAR retailers only; intra/inter from the retailer **GSTIN first-2-digits vs `19`** (Tech Gifsy/WB,
+  from the GST certificate `19AAACT9811F1Z9`) → CGST 9%+SGST 9% / IGST 18%; **GST-exclusive base**; **pure-BigInt
+  paise rounding** (`(base*9n+50n)/100n` — the audit replaced a float `Math.round` that could drift a paise).
+  **Tech Gifsy recipient** baked in as the self-bill buyer.
+- **#8 number lock:** partner-editable while GENERATED (regex/≤60/uniqueness), **locked once PAID**.
+- **FE:** partner list/detail (paise÷100, CGST/SGST split, recipient block, number-edit) + admin (list + **Generate
+  for month** + **Mark Paid**); proxy exclusion for `partner/invoices` removed. **Deferred:** PDF/email; the internal
+  **TDS line → 6.5**. Gate: backend tsc 0 / jest 663 · platform tsc 0 / no new vitest reds (22=baseline).
 
 **Audit (money-path, independent):** no double-credit/double-debit escape; guarded claims + tx boundaries correct;
 DI correct. Must-fixes applied (earnedPoints invariant; 0-amount row skip; shortfall surfaced). Lower-sev pre-existing

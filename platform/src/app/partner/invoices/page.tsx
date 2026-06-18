@@ -4,6 +4,9 @@
  * /partner/invoices — Retailer's invoice list
  * Shows gross amount only. No TDS, no 194C, no tax breakdown.
  * Dismissible info banner explaining self-billing.
+ *
+ * Backend: GET /api/partner/invoices → { success, data: Invoice[] }
+ * Money:   all amounts are integer paise — divide by 100 for ₹ display.
  */
 
 import { useState, useEffect } from 'react';
@@ -17,64 +20,68 @@ import {
   Clock,
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
+import { api } from '@/lib/api-client';
+import { formatINR } from '@/lib/money';
+import { formatPeriodLabel } from '@/lib/invoice';
 
-// ── Display-only shape (subset of VisibilityInvoice) ─────────────────────────
+// ── Backend shape (subset we care about for list) ─────────────────────────────
+interface BackendInvoice {
+  id: string;
+  invoiceNumber: string;
+  period: string;          // "YYYY-MM"
+  status: 'GENERATED' | 'PAID';
+  subtotalPaise: number;
+  gstPaise: number;
+  totalPaise: number;
+  snapshot: {
+    description?: string;
+  };
+}
+
+// ── Display-only shape ────────────────────────────────────────────────────────
 interface InvoiceListItem {
   id: string;
   invoiceNumber: string;
   periodLabel: string;
   description: string;
-  baseAmount: number;
+  totalPaise: number;
   status: 'GENERATED' | 'PAID';
 }
 
-// ── API types & mapping ───────────────────────────────────────────────────────
-interface ApiSalesInvoice {
-  id: string;
-  invoiceNumber: string;
-  invoiceDate: string;
-  totalAmountPaise: number;
-  netAmountPaise: number;
-  processedAt?: string | null;
-  lineItems?: { id: string; quantity: number; unitPricePaise: number }[];
-}
-
-function mapApiInvoice(s: ApiSalesInvoice): InvoiceListItem {
-  const date = new Date(s.invoiceDate);
+function mapBackendInvoice(b: BackendInvoice): InvoiceListItem {
   return {
-    id:            s.id,
-    invoiceNumber: s.invoiceNumber,
-    periodLabel:   date.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }),
-    description:   `${s.lineItems?.length ?? 0} line item(s)`,
-    baseAmount:    s.totalAmountPaise / 100,
-    status:        s.processedAt ? 'PAID' : 'GENERATED',
+    id:            b.id,
+    invoiceNumber: b.invoiceNumber,
+    periodLabel:   formatPeriodLabel(b.period),
+    description:   b.snapshot?.description ?? `Marketing visibility services — ${formatPeriodLabel(b.period)}`,
+    totalPaise:    b.totalPaise,
+    status:        b.status,
   };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const STATUS_STYLES = {
   GENERATED: 'bg-amber-50 text-amber-700',
-  PAID: 'bg-green-50 text-green-700',
+  PAID:      'bg-green-50 text-green-700',
 };
 const STATUS_LABEL = {
   GENERATED: 'Processing',
-  PAID: 'Paid',
+  PAID:      'Paid',
 };
 
 export default function PartnerInvoiceListPage() {
   const [bannerDismissed, setBannerDismissed] = useState(false);
-  const [invoices, setInvoices] = useState<InvoiceListItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [invoices, setInvoices]               = useState<InvoiceListItem[]>([]);
+  const [loading, setLoading]                 = useState(true);
+  const [error, setError]                     = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/sales/invoices')
-      .then(r => r.json())
-      .then((json: { success: boolean; data?: { invoices: ApiSalesInvoice[] }; error?: string }) => {
-        if (json.success && json.data) {
-          setInvoices(json.data.invoices.map(mapApiInvoice));
+    api.get<BackendInvoice[]>('/api/partner/invoices')
+      .then((res) => {
+        if (res.success) {
+          setInvoices(res.data.map(mapBackendInvoice));
         } else {
-          setError(json.error ?? 'Failed to load invoices');
+          setError('Failed to load invoices');
         }
       })
       .catch(() => setError('Failed to load invoices'))
@@ -152,9 +159,9 @@ export default function PartnerInvoiceListPage() {
                   <p className="text-xs text-gray-500 mt-0.5 truncate">{inv.description}</p>
                 </div>
                 <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
-                  {/* Gross amount — this is what the retailer sees */}
+                  {/* Gross invoice total — paise ÷ 100 */}
                   <p className="text-base font-bold text-gray-900">
-                    ₹{inv.baseAmount.toLocaleString('en-IN')}
+                    {formatINR(inv.totalPaise)}
                   </p>
                   <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 ${STATUS_STYLES[inv.status]}`}>
                     {inv.status === 'PAID'

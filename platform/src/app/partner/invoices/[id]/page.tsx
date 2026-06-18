@@ -7,6 +7,13 @@
  * - Shows gross amount only (no TDS, no 194C)
  * - Invoice number editable while status = GENERATED
  * - PDF download via jsPDF
+ *
+ * Backend:
+ *   GET   /api/partner/invoices/:id
+ *   PATCH /api/partner/invoices/:id/invoice-number  body { invoiceNumber }
+ *
+ * Money: all paise fields — divide by 100 for ₹ display.
+ * CGST_SGST split: CGST = SGST = gstPaise / 2.
  */
 
 import { useState, useEffect, use } from 'react';
@@ -23,64 +30,109 @@ import {
   FileText,
   Loader2,
 } from 'lucide-react';
-import { type VisibilityInvoice } from '@/lib/invoice';
 import { Spinner } from '@/components/ui/spinner';
+import { api, authHeader } from '@/lib/api-client';
+import { formatINR, paiseToRupees } from '@/lib/money';
+import { formatPeriodLabel } from '@/lib/invoice';
 
-/* ─── API types ──────────────────────────────────────────────────────────────── */
-interface ApiSalesInvoiceDetail {
+// ── Backend shape ─────────────────────────────────────────────────────────────
+interface BackendInvoice {
   id: string;
   invoiceNumber: string;
+  invoiceNumberEdited: boolean;
+  partnerId: string;
+  outletCode: string;
+  period: string;
   invoiceDate: string;
-  totalAmountPaise: number;
-  netAmountPaise: number;
-  processedAt?: string | null;
-  salesUploadId?: string | null;
-  outletId?: string | null;
-  lineItems?: { id: string; quantity: number; unitPricePaise: number }[];
+  status: 'GENERATED' | 'PAID';
+  subtotalPaise: number;
+  gstPaise: number;
+  gstType: 'CGST_SGST' | 'IGST' | null;
+  totalPaise: number;
+  createdAt: string;
+  snapshot: {
+    outletCode: string;
+    outletName: string;
+    firmName: string;
+    partnerName: string;
+    mobile: string;
+    retailerState: string;
+    retailerGstin: string | null;
+    panNumber: string | null;
+    entityType: string;
+    gstRegistrationType: string;
+    bankName: string;
+    accountNumber: string;
+    ifscCode: string;
+    sacCode: string;
+    description: string;
+    recipient: {
+      legalName: string;
+      gstin: string | null;
+      pan: string | null;
+      state: string;
+      address: string;
+      sacCode: string;
+    };
+  };
 }
 
-function mapApiToVisibilityInvoice(s: ApiSalesInvoiceDetail): VisibilityInvoice {
-  const date = new Date(s.invoiceDate);
-  const period = s.invoiceDate.slice(0, 7);
-  const periodLabel = date.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
-  const baseAmount = s.totalAmountPaise / 100;
+// ── Derived display shape ─────────────────────────────────────────────────────
+interface InvoiceDisplay {
+  id: string;
+  invoiceNumber: string;
+  invoiceNumberEdited: boolean;
+  status: 'GENERATED' | 'PAID';
+  period: string;
+  periodLabel: string;
+  invoiceDate: string;
+  // Retailer (service provider)
+  outletCode: string;
+  firmName: string;
+  partnerName: string;
+  retailerState: string;
+  panNumber: string | null;
+  retailerGstin: string | null;
+  // Recipient (Tech Gifsy)
+  recipientName: string;
+  recipientGstin: string | null;
+  recipientState: string;
+  recipientAddress: string;
+  // Amounts (paise)
+  subtotalPaise: number;
+  gstPaise: number;
+  gstType: 'CGST_SGST' | 'IGST' | null;
+  totalPaise: number;
+  // Meta
+  sacCode: string;
+  description: string;
+}
+
+function mapBackend(b: BackendInvoice): InvoiceDisplay {
   return {
-    id:                   s.id,
-    invoiceNumber:        s.invoiceNumber,
-    invoiceNumberEdited:  false,
-    status:               s.processedAt ? 'PAID' : 'GENERATED',
-    period,
-    periodLabel,
-    outletId:             s.outletId ?? '',
-    outletCode:           '',
-    outletName:           '',
-    firmName:             '',
-    partnerName:          '',
-    mobile:               '',
-    retailerState:        '',
-    panNumber:            null,
-    gstNumber:            null,
-    entityType:           'INDIVIDUAL',
-    gstRegistrationType:  'UNREGISTERED',
-    bankName:             '',
-    accountNumber:        '',
-    ifscCode:             '',
-    baseAmount,
-    gstApplicable:        false,
-    gstType:              null,
-    cgst:                 0,
-    sgst:                 0,
-    igst:                 0,
-    totalGST:             0,
-    totalInvoiceAmount:   baseAmount,
-    tdsRate:              0,
-    tdsAmount:            0,
-    netDisbursed:         s.netAmountPaise / 100,
-    generatedAt:          s.invoiceDate,
-    paidAt:               s.processedAt ?? null,
-    uploadBatchId:        s.salesUploadId ?? '',
-    sacCode:              '998361',
-    description:          `Marketing visibility services — ${periodLabel}`,
+    id:                   b.id,
+    invoiceNumber:        b.invoiceNumber,
+    invoiceNumberEdited:  b.invoiceNumberEdited,
+    status:               b.status,
+    period:               b.period,
+    periodLabel:          formatPeriodLabel(b.period),
+    invoiceDate:          b.invoiceDate,
+    outletCode:           b.snapshot.outletCode,
+    firmName:             b.snapshot.firmName,
+    partnerName:          b.snapshot.partnerName,
+    retailerState:        b.snapshot.retailerState,
+    panNumber:            b.snapshot.panNumber,
+    retailerGstin:        b.snapshot.retailerGstin,
+    recipientName:        b.snapshot.recipient.legalName,
+    recipientGstin:       b.snapshot.recipient.gstin,
+    recipientState:       b.snapshot.recipient.state,
+    recipientAddress:     b.snapshot.recipient.address,
+    subtotalPaise:        b.subtotalPaise,
+    gstPaise:             b.gstPaise,
+    gstType:              b.gstType,
+    totalPaise:           b.totalPaise,
+    sacCode:              b.snapshot.sacCode,
+    description:          b.snapshot.description,
   };
 }
 
@@ -92,27 +144,28 @@ export default function PartnerInvoiceDetailPage({
 }) {
   const { id } = use(params);
 
-  const [inv, setInv] = useState<VisibilityInvoice | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [inv, setInv]                   = useState<InvoiceDisplay | null>(null);
+  const [loading, setLoading]           = useState(true);
+  const [fetchError, setFetchError]     = useState<string | null>(null);
   const [editingNumber, setEditingNumber] = useState(false);
-  const [draftNumber, setDraftNumber] = useState('');
-  const [numberError, setNumberError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
-  const [downloading, setDownloading] = useState(false);
+  const [draftNumber, setDraftNumber]   = useState('');
+  const [numberError, setNumberError]   = useState<string | null>(null);
+  const [saving, setSaving]             = useState(false);
+  const [saveSuccess, setSaveSuccess]   = useState(false);
+  const [downloading, setDownloading]   = useState(false);
 
   useEffect(() => {
     if (!id) return;
-    fetch(`/api/sales/invoices/${id}`)
-      .then(r => r.json())
-      .then((json: { success: boolean; data?: { invoice: ApiSalesInvoiceDetail }; error?: string }) => {
-        if (json.success && json.data) {
-          const mapped = mapApiToVisibilityInvoice(json.data.invoice);
+    api.get<BackendInvoice>(`/api/partner/invoices/${id}`)
+      .then((res) => {
+        if (res.success) {
+          const mapped = mapBackend(res.data);
           setInv(mapped);
           setDraftNumber(mapped.invoiceNumber);
         } else {
-          setFetchError(json.error ?? 'Invoice not found');
+          // api-client returns 'Network error' for a fetch/network failure (its catch);
+          // a server failure carries the backend's message (e.g. 'Invoice not found').
+          setFetchError(res.error && res.error !== 'Network error' ? res.error : 'Failed to load invoice');
         }
       })
       .catch(() => setFetchError('Failed to load invoice'))
@@ -139,6 +192,13 @@ export default function PartnerInvoiceDetailPage({
   }
 
   const canEditNumber = inv.status === 'GENERATED';
+
+  // ── GST split helpers ─────────────────────────────────────────────────────
+  // For CGST_SGST: each leg = gstPaise / 2 (backend guarantees even split)
+  const cgstPaise = inv.gstType === 'CGST_SGST' ? Math.round(inv.gstPaise / 2) : 0;
+  const sgstPaise = cgstPaise;
+  const igstPaise = inv.gstType === 'IGST' ? inv.gstPaise : 0;
+  const gstApplicable = inv.gstPaise > 0 && inv.gstType !== null;
 
   // ── Invoice number editing ────────────────────────────────────────────────
   const startEdit = () => {
@@ -173,9 +233,12 @@ export default function PartnerInvoiceDetailPage({
     setNumberError(null);
 
     try {
-      const res = await fetch(`/api/partner/invoices/${id}`, {
+      const res = await fetch(`/api/partner/invoices/${id}/invoice-number`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader(),
+        },
         body: JSON.stringify({ invoiceNumber: trimmed }),
       });
 
@@ -187,9 +250,14 @@ export default function PartnerInvoiceDetailPage({
       }
 
       // Update local state from server response
+      const updated: BackendInvoice = data.success ? data.data : data;
       setInv((prev) =>
         prev
-          ? { ...prev, invoiceNumber: data.invoiceNumber, invoiceNumberEdited: true }
+          ? {
+              ...prev,
+              invoiceNumber:       updated.invoiceNumber ?? trimmed,
+              invoiceNumberEdited: true,
+            }
           : prev,
       );
       setEditingNumber(false);
@@ -209,7 +277,45 @@ export default function PartnerInvoiceDetailPage({
       const { generateVisibilityInvoicePDF } = await import(
         '@/components/invoice/VisibilityInvoicePDF'
       );
-      generateVisibilityInvoicePDF(inv);
+      // Build a VisibilityInvoice-compatible shape for the existing PDF generator
+      generateVisibilityInvoicePDF({
+        id:                   inv.id,
+        invoiceNumber:        inv.invoiceNumber,
+        invoiceNumberEdited:  inv.invoiceNumberEdited,
+        status:               inv.status,
+        period:               inv.period,
+        periodLabel:          inv.periodLabel,
+        outletId:             '',
+        outletCode:           inv.outletCode,
+        outletName:           inv.firmName,
+        firmName:             inv.firmName,
+        partnerName:          inv.partnerName,
+        mobile:               '',
+        retailerState:        inv.retailerState,
+        panNumber:            inv.panNumber,
+        gstNumber:            inv.retailerGstin,
+        entityType:           'INDIVIDUAL',
+        gstRegistrationType:  inv.gstType ? 'REGULAR' : 'UNREGISTERED',
+        bankName:             '',
+        accountNumber:        '',
+        ifscCode:             '',
+        baseAmount:           paiseToRupees(inv.subtotalPaise),
+        gstApplicable,
+        gstType:              inv.gstType,
+        cgst:                 paiseToRupees(cgstPaise),
+        sgst:                 paiseToRupees(sgstPaise),
+        igst:                 paiseToRupees(igstPaise),
+        totalGST:             paiseToRupees(inv.gstPaise),
+        totalInvoiceAmount:   paiseToRupees(inv.totalPaise),
+        tdsRate:              0,
+        tdsAmount:            0,
+        netDisbursed:         paiseToRupees(inv.subtotalPaise),
+        generatedAt:          inv.invoiceDate,
+        paidAt:               null,
+        uploadBatchId:        '',
+        sacCode:              '998361',
+        description:          inv.description,
+      } as Parameters<typeof generateVisibilityInvoicePDF>[0]);
     } catch (err) {
       console.error('PDF generation failed', err);
     } finally {
@@ -261,23 +367,17 @@ export default function PartnerInvoiceDetailPage({
           </span>
         </div>
         <div className="text-right">
-          <p className="text-xs text-gray-500">Generated on</p>
+          <p className="text-xs text-gray-500">Period</p>
+          <p className="text-xs font-medium text-gray-800 mt-0.5">{inv.periodLabel}</p>
+        </div>
+        <div className="text-right">
+          <p className="text-xs text-gray-500">Invoice Date</p>
           <p className="text-xs font-medium text-gray-800 mt-0.5">
-            {new Date(inv.generatedAt).toLocaleDateString('en-IN', {
+            {new Date(inv.invoiceDate).toLocaleDateString('en-IN', {
               day: 'numeric', month: 'short', year: 'numeric',
             })}
           </p>
         </div>
-        {inv.paidAt && (
-          <div className="text-right">
-            <p className="text-xs text-gray-500">Paid on</p>
-            <p className="text-xs font-medium text-gray-800 mt-0.5">
-              {new Date(inv.paidAt).toLocaleDateString('en-IN', {
-                day: 'numeric', month: 'short', year: 'numeric',
-              })}
-            </p>
-          </div>
-        )}
       </div>
 
       {/* Invoice number (editable) */}
@@ -366,18 +466,24 @@ export default function PartnerInvoiceDetailPage({
             {inv.panNumber && (
               <p className="text-[11px] font-mono text-gray-500 mt-1">PAN: {inv.panNumber}</p>
             )}
-            {inv.gstNumber && (
-              <p className="text-[11px] font-mono text-gray-500">GSTIN: {inv.gstNumber}</p>
+            {inv.retailerGstin && (
+              <p className="text-[11px] font-mono text-gray-500">GSTIN: {inv.retailerGstin}</p>
             )}
           </div>
           <div>
             <p className="text-[10px] text-gray-400 uppercase tracking-wide mb-2">Billed To</p>
-            <p className="text-xs font-semibold text-gray-800">Tech Gifsy Solutions Limited</p>
-            <p className="text-xs text-gray-500 mt-1">West Bengal, India</p>
+            <p className="text-xs font-semibold text-gray-800">{inv.recipientName}</p>
+            {inv.recipientGstin && (
+              <p className="text-[11px] font-mono text-gray-500 mt-1">GSTIN: {inv.recipientGstin}</p>
+            )}
+            <p className="text-xs text-gray-500 mt-1">{inv.recipientState}</p>
+            {inv.recipientAddress && (
+              <p className="text-xs text-gray-400 mt-0.5 leading-relaxed">{inv.recipientAddress}</p>
+            )}
           </div>
         </div>
 
-        {/* Description + Period */}
+        {/* Description + Period + SAC */}
         <div className="p-4 space-y-3">
           <div className="flex justify-between text-xs">
             <span className="text-gray-500">Period</span>
@@ -395,37 +501,45 @@ export default function PartnerInvoiceDetailPage({
 
         {/* Amount block */}
         <div className="p-4 space-y-2">
-          {/* Base amount — always shown */}
+          {/* Subtotal — always shown */}
           <div className="flex justify-between text-sm">
             <span className="text-gray-700 font-medium">Amount</span>
-            <span className="font-bold text-gray-900">₹{inv.baseAmount.toLocaleString('en-IN')}</span>
+            <span className="font-bold text-gray-900">{formatINR(inv.subtotalPaise)}</span>
           </div>
 
-          {/* GST — only for REGULAR retailers */}
-          {inv.gstApplicable && (
+          {/* GST — only when applicable */}
+          {gstApplicable && (
             <>
               {inv.gstType === 'CGST_SGST' ? (
                 <>
                   <div className="flex justify-between text-xs text-gray-500">
                     <span>CGST @ 9%</span>
-                    <span>₹{inv.cgst.toLocaleString('en-IN')}</span>
+                    <span>{formatINR(cgstPaise)}</span>
                   </div>
                   <div className="flex justify-between text-xs text-gray-500">
                     <span>SGST @ 9%</span>
-                    <span>₹{inv.sgst.toLocaleString('en-IN')}</span>
+                    <span>{formatINR(sgstPaise)}</span>
                   </div>
                 </>
               ) : (
                 <div className="flex justify-between text-xs text-gray-500">
                   <span>IGST @ 18%</span>
-                  <span>₹{inv.igst.toLocaleString('en-IN')}</span>
+                  <span>{formatINR(igstPaise)}</span>
                 </div>
               )}
               <div className="flex justify-between text-sm border-t border-gray-100 pt-2 mt-2">
                 <span className="font-semibold text-gray-800">Invoice Total</span>
-                <span className="font-bold text-gray-900">₹{inv.totalInvoiceAmount.toLocaleString('en-IN')}</span>
+                <span className="font-bold text-gray-900">{formatINR(inv.totalPaise)}</span>
               </div>
             </>
+          )}
+
+          {/* When no GST, still show a total line for clarity */}
+          {!gstApplicable && (
+            <div className="flex justify-between text-sm border-t border-gray-100 pt-2 mt-2">
+              <span className="font-semibold text-gray-800">Invoice Total</span>
+              <span className="font-bold text-gray-900">{formatINR(inv.totalPaise)}</span>
+            </div>
           )}
         </div>
       </div>
