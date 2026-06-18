@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { roundToRupeePaise } from '../tds/tds.helpers';
 import {
   CreateRewardCatalogDto,
   CreateRewardCategoryDto,
@@ -379,9 +380,22 @@ export class RewardsService {
       // flips PENDING→CONFIRMED proceeds. A concurrent confirm (double-submit)
       // matches 0 rows here and aborts BEFORE any debit, so a single order can
       // never be debited twice. This is the guard, not the pre-tx status read.
+      //
+      // valuePaise: freeze the ₹-equivalent of the points at confirm time (the
+      // 194R TDS base for redemptions). conversionRate can theoretically be 0
+      // (misconfigured env) — guard to prevent division-by-zero; in that case
+      // valuePaise = 0 (no TDS base, visible in reports for manual correction).
+      // value(₹) = points ÷ conversionRate. Work in centi-rate (rate×100) integer math so a
+      // fractional conversionRate (e.g. 0.5 pts/₹) isn't truncated: paise = points×10000 ÷ (rate×100).
+      const rateCenti = Math.round(this.conversionRate * 100);
+      const valuePaise =
+        rateCenti > 0
+          ? roundToRupeePaise((BigInt(requiredPoints) * 10000n) / BigInt(rateCenti))
+          : 0n;
+
       const claim = await tx.redemptionOrder.updateMany({
         where: { id: order.id, status: 'PENDING' },
-        data: { status: 'CONFIRMED', pointsDeducted: requiredPoints },
+        data: { status: 'CONFIRMED', pointsDeducted: requiredPoints, valuePaise },
       });
       if (claim.count === 0) {
         throw new ConflictException('Order is no longer awaiting confirmation');

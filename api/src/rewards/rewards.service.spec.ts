@@ -356,7 +356,7 @@ describe('RewardsService', () => {
       // bare update — only a PENDING row is claimed → CONFIRMED.
       expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
         where: { id: 'o1', status: 'PENDING' },
-        data: { status: 'CONFIRMED', pointsDeducted: 1000 },
+        data: { status: 'CONFIRMED', pointsDeducted: 1000, valuePaise: 100000n },
       });
       const hist = mockPrisma.redemptionStatusHistory.create.mock.calls?.[0]?.[0];
       expect(hist.data).toMatchObject({ orderId: 'o1', fromStatus: 'PENDING', toStatus: 'CONFIRMED', changedById: 'user1' });
@@ -874,6 +874,91 @@ describe('RewardsService', () => {
       expect(res.failed).toBe(1);
       expect(res.errors[0].message).toContain('Unknown New Status');
       spy.mockRestore();
+    });
+  });
+
+  // ─── P6.5a — valuePaise freeze on confirmRedeem ──────────────────────────
+
+  describe('confirmRedeem — valuePaise frozen as 194R base', () => {
+    /**
+     * The confirm transaction atomically sets:
+     *   status = CONFIRMED, pointsDeducted = requiredPoints, valuePaise = ...
+     *
+     * valuePaise = roundToRupeePaise(BigInt(points) * 100n / BigInt(conversionRate))
+     * Default conversionRate = 1 (env POINTS_CONVERSION_RATE not set in tests).
+     * So for 500 points: 500 * 100 / 1 = 50000 paise = ₹500. roundToRupeePaise(50000) = 50000.
+     */
+    const baseOrder = {
+      id: 'o1',
+      status: 'PENDING',
+      partnerId: 'cp1',
+      orderNumber: 'RDM-1',
+      totalPointsCost: 500,
+      pointsDeducted: 0,
+      reward: { id: 'r1', name: 'VCH', stockQuantity: null },
+      partner: { id: 'cp1', userId: 'user1' },
+    };
+
+    it('sets valuePaise = points * 100 / conversionRate, rounded to rupee, in the claim update', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(baseOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60_000), verifiedAt: null,
+      });
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockWallet.debitRedeem.mockResolvedValue({});
+
+      await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+
+      // The updateMany (atomic claim) must include valuePaise
+      const claimCall = mockPrisma.redemptionOrder.updateMany.mock.calls.find(
+        (c: unknown[]) => (c[0] as { where?: { status?: string } }).where?.status === 'PENDING',
+      );
+      expect(claimCall).toBeDefined();
+      const claimData = (claimCall![0] as { data: { status: string; pointsDeducted: number; valuePaise?: bigint } }).data;
+      expect(claimData.status).toBe('CONFIRMED');
+      expect(claimData.pointsDeducted).toBe(500);
+      // 500 points × 100 paise / 1 conversionRate = 50000 paise; round(50000) = 50000
+      expect(claimData.valuePaise).toBe(50000n);
+    });
+
+    it('valuePaise = 0 when conversionRate env is 0 (guard against division-by-zero)', async () => {
+      // Override POINTS_CONVERSION_RATE to 0
+      const original = process.env.POINTS_CONVERSION_RATE;
+      process.env.POINTS_CONVERSION_RATE = '0';
+
+      // Re-instantiate the service so it picks up the new env
+      const module2: TestingModule = await Test.createTestingModule({
+        providers: [
+          (await import('./rewards.service')).RewardsService,
+          { provide: PrismaService, useValue: mockPrisma },
+          { provide: (await import('../wallet/wallet.service')).WalletService, useValue: mockWallet },
+          { provide: (await import('../notifications/notifications.service')).NotificationsService, useValue: mockNotifications },
+        ],
+      }).compile();
+      const svc0 = module2.get((await import('./rewards.service')).RewardsService);
+
+      jest.clearAllMocks();
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(baseOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60_000), verifiedAt: null,
+      });
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockWallet.debitRedeem.mockResolvedValue({});
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({});
+      mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
+
+      await svc0.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+
+      const claimCall = mockPrisma.redemptionOrder.updateMany.mock.calls.find(
+        (c: unknown[]) => (c[0] as { where?: { status?: string } }).where?.status === 'PENDING',
+      );
+      const claimData = (claimCall![0] as { data: { valuePaise?: bigint } }).data;
+      expect(claimData.valuePaise).toBe(0n);
+
+      process.env.POINTS_CONVERSION_RATE = original;
     });
   });
 });

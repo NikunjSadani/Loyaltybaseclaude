@@ -79,12 +79,14 @@ P6 = reconcile + wire-up, not build-from-zero.
   §206AB removed). 194R taxable event = cash payout at PAID + redemption at fulfilment + off-platform upload.
   **Recommend 6.7 (invoicing) BEFORE 6.5** (194C base = invoice pre-GST base). Build only after sign-off.
 
-**Sequencing:** **6.0 ✅ · Credits #16 ✅ · Visibility #17 (+toggle) ✅ · Invoicing 6.7 (#8/#15) ✅** (all on
-`develop`). **REMAINING in P6: 6.5 — Payouts/TDS.** TDS spec SIGNED OFF (`reconcile/P6.5-TDS-SPEC.md`); now
-**unblocked** (6.7 done → 194C base = invoice pre-GST base is defined). 6.5 also builds the P5
-`RedemptionOrder`→`PayoutTransaction` settlement bridge. **NEXT ACTION = build 6.5** (194R + 194C engines,
-grossed-up, PAN-keyed, compute+track+export per the spec) — start with the aggregation engine + `tds.ts`.
-Depends on P5 + P3 + P2. (Minor residual: invoice PDF/email deferred.)
+**Sequencing:** **6.0 ✅ · Credits #16 ✅ · Visibility #17 (+toggle) ✅ · Invoicing 6.7 (#8/#15) ✅ · TDS 6.5a ✅**
+(all on `develop`). **6.5 in progress.** TDS spec SIGNED OFF (`reconcile/P6.5-TDS-SPEC.md`). **6.5a DONE:** foundation
+migration (`P6_tds_foundation.sql` — `TdsOffPlatformEntry`/`TdsDeposit`, `RedemptionOrder.valuePaise`,
+`tds_records.section`, enums) + `src/tds` calc+aggregation engine (194R/194C per-PAN/FY, grossed-up, thresholds,
+two columns, deposits→outstanding, null-PAN 20%) + **redemption value frozen at confirm = points÷conversionRate**;
+read endpoints `/v1/admin/tds/194r|194c`. Audited (2 HIGH fixed). **REMAINING: 6.5b** off-platform + deposit
+**uploads** + liability tracker · **6.5c** the **194R reference Excel** + **194C two-column report** · **6.5d** admin
+**FE** · the P5 **`RedemptionOrder`→`PayoutTransaction` settlement bridge**. Then P6 is complete. Depends on P5 + P3 + P2.
 
 **Residuals carried forward (NOT done — don't assume):**
 - **Platform retirement (~P6, ONE unit):** stale `platform/prisma/schema.prisma` + still-live platform Prisma code

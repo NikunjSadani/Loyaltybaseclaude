@@ -246,6 +246,16 @@ enum PayoutBatchStatus {
   CANCELLED
 }
 
+enum TdsSection {
+  SEC_194R // incentive / benefit (deductor = client)
+  SEC_194C // visibility service (deductor = Gifsy)
+}
+
+enum TdsDepositorType {
+  CLIENT
+  GIFSY
+}
+
 enum FundLedgerType {
   RECEIPT
   DISBURSEMENT
@@ -1188,6 +1198,9 @@ model RedemptionOrder {
   pointsDeducted       Int
   quantity             Int              @default(1)
   totalPointsCost      Int
+  // INR value of the benefit (paise), frozen at redemption from the points↔₹ converter
+  // (pointsDeducted ÷ conversionRate). Used as the 194R TDS base. See P6.5-TDS-SPEC.
+  valuePaise           BigInt?
   redemptionMode       PayoutMode
   deliveryName         String?
   deliveryPhone        String?
@@ -1471,6 +1484,7 @@ model TdsRecord {
   partnerId           String
   panNumber           String?
   tdsPaise            BigInt
+  section             TdsSection?
   tdsRate             Decimal   @db.Decimal(5, 2)
   assessmentYear      String?
   quarterPeriod       String?
@@ -1487,6 +1501,49 @@ model TdsRecord {
   @@index([panNumber])
   @@index([quarterPeriod])
   @@map("tds_records")
+}
+
+// 194R gifts/payouts given OUTSIDE the platform — uploaded + added to the PAN's FY total.
+model TdsOffPlatformEntry {
+  id            String     @id @default(cuid())
+  clientId      String
+  section       TdsSection @default(SEC_194R)
+  entryDate     DateTime
+  panNumber     String
+  outletCode    String?
+  amountPaise   BigInt
+  // re-upload dedup enforced by a DB-level PARTIAL unique index
+  // (clientId, uploadBatchId) WHERE uploadBatchId IS NOT NULL — Prisma can't model partial
+  // unique indexes, so it's in the migration only; the upload service catches P2002.
+  uploadBatchId String?
+  uploadedBy    String?
+  createdAt     DateTime   @default(now())
+
+  @@index([clientId, panNumber])
+  @@index([clientId, entryDate])
+  @@map("tds_off_platform_entries")
+}
+
+// TDS actually deposited to the government (reconciliation). 194R = CLIENT (clientId set,
+// per-tenant); 194C = GIFSY (clientId null, platform). liability(computed) − deposited = outstanding.
+model TdsDeposit {
+  id            String           @id @default(cuid())
+  section       TdsSection
+  depositorType TdsDepositorType
+  clientId      String?
+  depositDate   DateTime
+  panNumber     String
+  outletCode    String?
+  amountPaise   BigInt
+  // re-upload dedup via DB-level PARTIAL unique (clientId, section, uploadBatchId) WHERE NOT NULL.
+  uploadBatchId String?
+  uploadedBy    String?
+  createdAt     DateTime         @default(now())
+
+  @@index([section, panNumber])
+  @@index([clientId, section, panNumber])
+  @@index([depositDate])
+  @@map("tds_deposits")
 }
 
 model AutoInvoice {
