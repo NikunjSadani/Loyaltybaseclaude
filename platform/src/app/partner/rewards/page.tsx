@@ -2,9 +2,9 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  Gift, Search, CheckCircle, MapPin,
+  Gift, Search, CheckCircle,
   X, Shield, Package, Truck, Zap, Heart,
-  Banknote, CreditCard, Tag, ChevronRight,
+  Banknote, CreditCard, Tag,
   AlertCircle, Phone,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
@@ -15,11 +15,120 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { useToast } from '@/components/ui/toast';
 import { formatPoints } from '@/lib/utils';
 import { cn } from '@/lib/utils';
-import { type GiftCatalogueItem, loadGifts, GIFT_CATALOGUE } from '@/lib/gifts';
 import { api } from '@/lib/api-client';
 import { usePartnerSession } from '@/lib/partner-session';
 import { getGifsySettings } from '@/lib/gifsy-settings';
-import { saveRedemption } from '@/lib/redemption-store';
+
+/* ─── Catalogue item (live API shape, UI-augmented) ───────────────────────────
+   Live data only — fields come straight from GET /api/rewards/catalog. We keep a
+   small set of presentational fallbacks (emoji/gradient) so the grid renders even
+   when the backend has no image, but there is NO localStorage / GIFT_CATALOGUE
+   fallback path. */
+
+type VoucherDenominationType = 'FIXED' | 'FREE_AMOUNT';
+
+interface CatalogueItem {
+  id: string;
+  name: string;
+  brand: string;
+  category: string;
+  points: number;            // pointsCost — 0 for FREE_AMOUNT vouchers
+  description: string;
+  details: string;
+  features: string[];
+  emoji: string;
+  gradientFrom: string;
+  gradientTo: string;
+  imageDataUrl: string | null;
+  available: boolean;
+  popular: boolean;
+  isAffordable: boolean;
+  /** Backend redemption mode, e.g. 'GIFT_CARD' | 'PHYSICAL_GIFT' | 'BANK_TRANSFER' | 'UPI'. */
+  redemptionMode?: string | null;
+  /** Set only for category === 'Vouchers' */
+  voucherType?: VoucherDenominationType;
+  /** Face value for FIXED vouchers (₹). */
+  fixedAmount?: number;
+  /** Min/max redeemable points for FREE_AMOUNT vouchers (server-validated). */
+  minRedemptionPoints?: number | null;
+  maxRedemptionPoints?: number | null;
+}
+
+/** Raw item shape returned by GET /api/rewards/catalog. */
+interface ApiCatalogItem {
+  id: string;
+  name: string;
+  brand?: string | null;
+  category: string;
+  pointsCost: number;
+  description?: string | null;
+  details?: string | null;
+  features?: string[] | null;
+  imageUrl?: string | null;
+  imageUrls?: string[] | null;
+  available?: boolean;
+  popular?: boolean;
+  isAffordable?: boolean;
+  redemptionMode?: string | null;       // 'GIFT_CARD' | 'PHYSICAL_GIFT' | ...
+  voucherType?: VoucherDenominationType | null;
+  fixedAmount?: number | null;
+  minRedemptionPoints?: number | null;
+  maxRedemptionPoints?: number | null;
+}
+
+/* Presentational defaults for items the backend returns without imagery. */
+const GRADIENT_POOL: Array<{ emoji: string; from: string; to: string }> = [
+  { emoji: '🎁', from: 'var(--brand-primary)', to: '#22c55e' },
+  { emoji: '🛍️', from: '#FF9900',             to: '#FFB347' },
+  { emoji: '🎧', from: '#7c3aed',             to: '#a78bfa' },
+  { emoji: '⌚', from: '#1d4ed8',             to: '#60a5fa' },
+  { emoji: '🔋', from: '#0ea5e9',             to: '#38bdf8' },
+];
+
+function hashIndex(id: string, len: number): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return Math.abs(h) % len;
+}
+
+/** Infer a voucher type from the API item when not explicitly provided. */
+function inferVoucherType(item: ApiCatalogItem): VoucherDenominationType | undefined {
+  if (item.voucherType) return item.voucherType;
+  if (item.category !== 'Vouchers') return undefined;
+  // FREE_AMOUNT = pointsCost 0 with a min/max bound; otherwise FIXED.
+  if (item.pointsCost === 0 && (item.minRedemptionPoints != null || item.maxRedemptionPoints != null)) {
+    return 'FREE_AMOUNT';
+  }
+  return 'FIXED';
+}
+
+function mapCatalogItem(item: ApiCatalogItem): CatalogueItem {
+  const g = GRADIENT_POOL[hashIndex(item.id, GRADIENT_POOL.length)];
+  const voucherType = inferVoucherType(item);
+  const imageDataUrl = item.imageUrl ?? item.imageUrls?.[0] ?? null;
+  return {
+    id:           item.id,
+    name:         item.name,
+    brand:        item.brand ?? '',
+    category:     item.category,
+    points:       item.pointsCost,
+    description:  item.description ?? '',
+    details:      item.details ?? item.description ?? '',
+    features:     item.features ?? [],
+    emoji:        g.emoji,
+    gradientFrom: g.from,
+    gradientTo:   g.to,
+    imageDataUrl,
+    available:    item.available ?? true,
+    popular:      item.popular ?? false,
+    isAffordable: item.isAffordable ?? false,
+    redemptionMode: item.redemptionMode ?? null,
+    voucherType,
+    fixedAmount:  item.fixedAmount ?? (voucherType === 'FIXED' ? item.pointsCost : undefined),
+    minRedemptionPoints: item.minRedemptionPoints ?? null,
+    maxRedemptionPoints: item.maxRedemptionPoints ?? null,
+  };
+}
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -31,10 +140,33 @@ function deliveryLabel(category: string): string {
 
 function fmtInr(n: number) { return `₹${n.toLocaleString('en-IN')}`; }
 
+/* ─── Real redeem flow (POST /api/rewards/redeem → OTP → confirm) ──────────────
+   Shared by the gift + voucher sheets. Returns the message to surface, or null
+   on success. The {success,data}/{success,error} envelope is unwrapped by the
+   api-client, which lifts the backend's `error` string onto result.error for any
+   non-2xx response (400 insufficient/out-of-range, 401 bad OTP, etc.). */
+
+interface RedeemPayload {
+  rewardId: string;
+  quantity?: number;
+  amount?: number;
+  deliveryAddress?: {
+    name: string; mobile: string; address: string;
+    city: string; state: string; pincode: string;
+  };
+}
+
+interface RedeemInitResult {
+  orderId: string;
+  orderNumber: string;
+  requiredPoints: number;
+  message: string;
+}
+
 /* ─── Image / emoji display ──────────────────────────────────────────────── */
 
 interface GiftImageProps {
-  gift: Pick<GiftCatalogueItem, 'imageDataUrl' | 'emoji' | 'gradientFrom' | 'gradientTo'>;
+  gift: Pick<CatalogueItem, 'imageDataUrl' | 'emoji' | 'gradientFrom' | 'gradientTo'>;
   size: 'small' | 'large';
 }
 
@@ -63,41 +195,72 @@ function GiftImage({ gift, size }: GiftImageProps) {
 type RedemptionStep = 'detail' | 'form' | 'otp' | 'success';
 
 function GiftDetailSheet({
-  gift, onClose, myBalance, onWishlist, isWishlisted, onRedeemed,
+  gift, onClose, myBalance, mobile, onWishlist, isWishlisted, onRedeemed,
 }: {
-  gift: GiftCatalogueItem;
+  gift: CatalogueItem;
   onClose: () => void;
   myBalance: number;
+  mobile: string;
   onWishlist: (id: string) => void;
   isWishlisted: boolean;
-  onRedeemed: (pts: number, description: string) => void;
+  onRedeemed: (pts: number) => void;
 }) {
   const toast = useToast();
   const [step,       setStep]       = useState<RedemptionStep>('detail');
   const [address,    setAddress]    = useState({ line1: '', city: '', state: '', pincode: '' });
   const [otp,        setOtp]        = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [orderId,    setOrderId]    = useState<string | null>(null);
   const canAfford = myBalance >= gift.points;
   const delivery  = deliveryLabel(gift.category);
   const needMore  = !canAfford ? gift.points - myBalance : 0;
 
+  // Step 1: create the PENDING order + trigger OTP.
   const handleSendOtp = async () => {
     if (!address.line1 || !address.city || !address.pincode) {
       toast.error('Please fill in all required address fields'); return;
     }
+    if (!/^\d{6}$/.test(address.pincode)) {
+      toast.error('Enter a valid 6-digit pincode'); return;
+    }
     setSubmitting(true);
-    await new Promise(r => setTimeout(r, 800));
+    const payload: RedeemPayload = {
+      rewardId: gift.id,
+      quantity: 1,
+      deliveryAddress: {
+        name:    gift.brand || gift.name,
+        mobile,
+        address: address.line1,
+        city:    address.city,
+        state:   address.state || address.city,
+        pincode: address.pincode,
+      },
+    };
+    const result = await api.post<RedeemInitResult>('/api/rewards/redeem', payload);
     setSubmitting(false);
+    if (!result.success) {
+      // 400 (insufficient / out of range), 404 etc. — surface the backend message.
+      toast.error(result.error || 'Could not start redemption'); return;
+    }
+    setOrderId(result.data.orderId);
     setStep('otp');
   };
 
+  // Step 2: confirm with the OTP — debits points server-side.
   const handleConfirm = async () => {
     if (otp.length < 6) { toast.error('Enter the OTP'); return; }
+    if (!orderId) { toast.error('Redemption session expired, please retry'); return; }
     setSubmitting(true);
-    await new Promise(r => setTimeout(r, 1000));
+    const result = await api.post<{ orderId: string; status: string; message: string }>(
+      '/api/rewards/redeem/confirm', { orderId, otp },
+    );
     setSubmitting(false);
+    if (!result.success) {
+      // 401 bad/expired OTP, 400 not-confirmable, etc.
+      toast.error(result.error || 'Could not confirm redemption'); return;
+    }
+    onRedeemed(gift.points);
     setStep('success');
-    onRedeemed(gift.points, `Redemption – ${gift.name}`);
   };
 
   return (
@@ -141,7 +304,9 @@ function GiftDetailSheet({
                     <p className="text-xs text-gray-400 mt-0.5">Free delivery</p>
                   </div>
                 </div>
-                <div><h3 className="text-sm font-semibold text-gray-900 mb-1.5">About this reward</h3><p className="text-sm text-gray-600 leading-relaxed">{gift.details}</p></div>
+                {gift.details && (
+                  <div><h3 className="text-sm font-semibold text-gray-900 mb-1.5">About this reward</h3><p className="text-sm text-gray-600 leading-relaxed">{gift.details}</p></div>
+                )}
                 {gift.features.length > 0 && (
                   <div>
                     <h3 className="text-sm font-semibold text-gray-900 mb-2">Key features</h3>
@@ -198,7 +363,8 @@ function GiftDetailSheet({
               <p className="text-xs text-gray-500 flex items-center gap-1.5"><Phone className="h-3.5 w-3.5" /> OTP sent to your registered mobile</p>
               <input className="w-full border border-gray-200 rounded-xl px-3 py-3 text-center font-mono text-lg tracking-[0.4em] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
                 placeholder="· · · · · ·" maxLength={6} value={otp}
-                onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" />
+                onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric"
+                aria-label="OTP" />
             </div>
           )}
 
@@ -244,17 +410,17 @@ function GiftDetailSheet({
   );
 }
 
-/* ─── Voucher redeem sheet ────────────────────────────────────────────────── */
+/* ─── Voucher redeem sheet (FIXED + FREE_AMOUNT) ──────────────────────────── */
 
 function VoucherRedeemSheet({
   voucher, onClose, myBalance, minFreeAmount, conversionRate, onRedeemed,
 }: {
-  voucher: GiftCatalogueItem;
+  voucher: CatalogueItem;
   onClose: () => void;
   myBalance: number;
   minFreeAmount: number;
   conversionRate: number;
-  onRedeemed: (pts: number, description: string) => void;
+  onRedeemed: (pts: number) => void;
 }) {
   const toast = useToast();
   const [amount,     setAmount]     = useState('');
@@ -262,34 +428,51 @@ function VoucherRedeemSheet({
   const [otpSent,    setOtpSent]    = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [success,    setSuccess]    = useState(false);
+  const [orderId,    setOrderId]    = useState<string | null>(null);
 
-  const isFixed = voucher.voucherType === 'FIXED';
-  const fixedPts = voucher.fixedAmount ?? 0;
-  const freeAmt  = parseInt(amount, 10) || 0;
-  const ptsNeeded = isFixed ? fixedPts : Math.ceil(freeAmt / conversionRate);
+  const isFixed   = voucher.voucherType === 'FIXED';
+  const fixedPts  = isFixed ? voucher.points : 0;
+  const freeAmt   = parseInt(amount, 10) || 0;
+  // FREE_AMOUNT: points required = ₹amount × conversionRate (server re-validates vs min/max).
+  const ptsNeeded = isFixed ? fixedPts : Math.ceil(freeAmt * conversionRate);
   const canAfford = myBalance >= ptsNeeded && (isFixed || freeAmt >= minFreeAmount);
+
+  // Client-side UX validation for FREE_AMOUNT (server is authoritative).
+  const maxAffordableInr = Math.floor(myBalance / conversionRate);
   const amountError = !isFixed && freeAmt > 0 && freeAmt < minFreeAmount
     ? `Minimum redemption is ${fmtInr(minFreeAmount)}`
-    : freeAmt > myBalance * conversionRate
-    ? `Exceeds your balance (max ${fmtInr(myBalance * conversionRate)})`
+    : !isFixed && freeAmt > maxAffordableInr
+    ? `Exceeds your balance (max ${fmtInr(maxAffordableInr)})`
     : '';
 
+  // Step 1: create the order + trigger OTP. FREE_AMOUNT sends `amount`.
   const handleSendOtp = async () => {
     setSubmitting(true);
-    await new Promise(r => setTimeout(r, 800));
+    const payload: RedeemPayload = isFixed
+      ? { rewardId: voucher.id, quantity: 1 }
+      : { rewardId: voucher.id, amount: freeAmt };
+    const result = await api.post<RedeemInitResult>('/api/rewards/redeem', payload);
     setSubmitting(false);
+    if (!result.success) {
+      toast.error(result.error || 'Could not start redemption'); return;
+    }
+    setOrderId(result.data.orderId);
     setOtpSent(true);
   };
 
+  // Step 2: confirm with OTP.
   const handleConfirm = async () => {
     if (otp.length < 6) { toast.error('Enter the OTP'); return; }
+    if (!orderId) { toast.error('Redemption session expired, please retry'); return; }
     setSubmitting(true);
-    await new Promise(r => setTimeout(r, 1000));
+    const result = await api.post<{ orderId: string; status: string; message: string }>(
+      '/api/rewards/redeem/confirm', { orderId, otp },
+    );
     setSubmitting(false);
-    const desc = isFixed
-      ? `Redemption – ${voucher.brand} voucher`
-      : `Redemption – ${voucher.brand} voucher ₹${freeAmt}`;
-    onRedeemed(ptsNeeded, desc);
+    if (!result.success) {
+      toast.error(result.error || 'Could not confirm redemption'); return;
+    }
+    onRedeemed(ptsNeeded);
     setSuccess(true);
   };
 
@@ -302,9 +485,9 @@ function VoucherRedeemSheet({
             <CheckCircle className="h-8 w-8 text-emerald-600" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-gray-900">Voucher Sent!</h3>
+            <h3 className="text-lg font-bold text-gray-900">Voucher Confirmed!</h3>
             <p className="text-sm text-gray-500 mt-1">
-              {isFixed ? `${voucher.brand} voucher (${fmtInr(fixedPts)})` : `${voucher.brand} voucher (${fmtInr(freeAmt)})`} sent to your registered WhatsApp number.
+              {isFixed ? `${voucher.brand} voucher (${fmtInr(fixedPts)})` : `${voucher.brand} voucher (${fmtInr(freeAmt)})`} is being processed. Your voucher code will appear under Orders.
             </p>
             <p className="text-xs text-gray-400 mt-1">{ptsNeeded} pts deducted from your balance.</p>
           </div>
@@ -340,7 +523,7 @@ function VoucherRedeemSheet({
           {/* Balance display */}
           <div className="bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3 flex items-center justify-between">
             <p className="text-xs text-emerald-700 font-medium">Your balance</p>
-            <p className="text-base font-bold text-emerald-700">{formatPoints(myBalance)} pts = {fmtInr(myBalance * conversionRate)}</p>
+            <p className="text-base font-bold text-emerald-700">{formatPoints(myBalance)} pts = {fmtInr(maxAffordableInr)}</p>
           </div>
 
           {/* Fixed: show points cost */}
@@ -370,6 +553,7 @@ function VoucherRedeemSheet({
                   value={amount}
                   onChange={e => setAmount(e.target.value.replace(/\D/g, ''))}
                   inputMode="numeric"
+                  aria-label="Voucher amount"
                 />
               </div>
               {amountError && <p className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountError}</p>}
@@ -388,7 +572,8 @@ function VoucherRedeemSheet({
               <input
                 className="w-full border border-gray-200 rounded-xl px-3 py-3 text-center font-mono text-lg tracking-[0.4em] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
                 placeholder="· · · · · ·" maxLength={6} value={otp}
-                onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" />
+                onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric"
+                aria-label="OTP" />
             </div>
           )}
         </div>
@@ -416,10 +601,13 @@ function VoucherRedeemSheet({
   );
 }
 
-/* ─── Bank Transfer sheet ────────────────────────────────────────────────── */
+/* ─── Bank Transfer sheet (points → INR; cash settlement is P6) ────────────────
+   The points debit is created via the same redeem endpoint when the tenant has a
+   bank-transfer catalog reward; the INR cash rail (UTR/payout) is owned by P6.
+   No catalog reward => no rewardId => sheet stays informational. */
 
 function BankTransferSheet({
-  onClose, myBalance, minAmount, conversionRate, bankName, accountNumber, onRedeemed,
+  onClose, myBalance, minAmount, conversionRate, bankName, accountNumber, rewardId, onRedeemed,
 }: {
   onClose: () => void;
   myBalance: number;
@@ -427,7 +615,8 @@ function BankTransferSheet({
   conversionRate: number;
   bankName: string;
   accountNumber: string;
-  onRedeemed: (pts: number, description: string) => void;
+  rewardId: string | null;
+  onRedeemed: (pts: number) => void;
 }) {
   const toast = useToast();
   const [amount,     setAmount]     = useState('');
@@ -435,10 +624,11 @@ function BankTransferSheet({
   const [otpSent,    setOtpSent]    = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [success,    setSuccess]    = useState(false);
+  const [orderId,    setOrderId]    = useState<string | null>(null);
 
-  const inrAmt   = parseInt(amount, 10) || 0;
-  const ptsNeeded = Math.ceil(inrAmt / conversionRate);
-  const maxInr   = Math.floor(myBalance * conversionRate);
+  const inrAmt    = parseInt(amount, 10) || 0;
+  const ptsNeeded = Math.ceil(inrAmt * conversionRate);
+  const maxInr    = Math.floor(myBalance / conversionRate);
 
   const amountError = inrAmt > 0 && inrAmt < minAmount
     ? `Minimum transfer is ${fmtInr(minAmount)}`
@@ -449,18 +639,25 @@ function BankTransferSheet({
   const canProceed = inrAmt >= minAmount && !amountError && myBalance >= ptsNeeded;
 
   const handleSendOtp = async () => {
+    if (!rewardId) { toast.error('Bank transfer is not available right now'); return; }
     setSubmitting(true);
-    await new Promise(r => setTimeout(r, 800));
+    const result = await api.post<RedeemInitResult>('/api/rewards/redeem', { rewardId, amount: inrAmt });
     setSubmitting(false);
+    if (!result.success) { toast.error(result.error || 'Could not start transfer'); return; }
+    setOrderId(result.data.orderId);
     setOtpSent(true);
   };
 
   const handleConfirm = async () => {
     if (otp.length < 6) { toast.error('Enter the OTP'); return; }
+    if (!orderId) { toast.error('Transfer session expired, please retry'); return; }
     setSubmitting(true);
-    await new Promise(r => setTimeout(r, 1000));
+    const result = await api.post<{ orderId: string; status: string; message: string }>(
+      '/api/rewards/redeem/confirm', { orderId, otp },
+    );
     setSubmitting(false);
-    onRedeemed(ptsNeeded, `Redemption – bank transfer ₹${inrAmt}`);
+    if (!result.success) { toast.error(result.error || 'Could not confirm transfer'); return; }
+    onRedeemed(ptsNeeded);
     setSuccess(true);
   };
 
@@ -532,6 +729,7 @@ function BankTransferSheet({
                 value={amount}
                 onChange={e => setAmount(e.target.value.replace(/\D/g, ''))}
                 inputMode="numeric"
+                aria-label="Transfer amount"
               />
             </div>
             {amountError && <p className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountError}</p>}
@@ -548,7 +746,8 @@ function BankTransferSheet({
               <p className="text-xs text-gray-500 flex items-center gap-1"><Phone className="h-3.5 w-3.5" /> OTP sent to your registered mobile</p>
               <input className="w-full border border-gray-200 rounded-xl px-3 py-3 text-center font-mono text-lg tracking-[0.4em] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
                 placeholder="· · · · · ·" maxLength={6} value={otp}
-                onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" />
+                onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric"
+                aria-label="OTP" />
             </div>
           )}
         </div>
@@ -577,14 +776,14 @@ type MainTab = 'catalogue' | 'vouchers' | 'bank';
 export default function RewardsPage() {
   const router  = useRouter();
   const session = usePartnerSession();
-  const [gifts,     setGifts]     = useState<GiftCatalogueItem[]>([]);
+  const [gifts,     setGifts]     = useState<CatalogueItem[]>([]);
   const [loading,   setLoading]   = useState(true);
   const [tab,       setTab]       = useState<MainTab>('catalogue');
   const [category,  setCategory]  = useState('All');
   const [search,    setSearch]    = useState('');
   const [wishlist,  setWishlist]  = useState<Set<string>>(new Set());
-  const [detail,    setDetail]    = useState<GiftCatalogueItem | null>(null);
-  const [voucherDetail, setVoucherDetail] = useState<GiftCatalogueItem | null>(null);
+  const [detail,    setDetail]    = useState<CatalogueItem | null>(null);
+  const [voucherDetail, setVoucherDetail] = useState<CatalogueItem | null>(null);
   const [showBank,  setShowBank]  = useState(false);
   const [balance,   setBalance]   = useState(0);
   const settings = getGifsySettings();
@@ -592,49 +791,19 @@ export default function RewardsPage() {
   useEffect(() => {
     setBalance(session.pointsBalance);
 
-    // Try to load catalog from API; fall back to localStorage/mock on failure
+    // Live catalogue only — no localStorage / GIFT_CATALOGUE fallback.
     api.get<{
-      items: Array<{
-        id: string; name: string; brand?: string; category: string;
-        pointsCost: number; description?: string; imageUrl?: string | null;
-        available?: boolean; popular?: boolean; isAffordable?: boolean;
-      }>;
+      items: ApiCatalogItem[];
       userBalance?: number;
     }>('/api/rewards/catalog')
       .then((result) => {
-        if (result.success && result.data?.items?.length) {
+        if (result.success && result.data) {
           const { items, userBalance } = result.data;
           if (userBalance !== undefined) setBalance(userBalance);
-          // Map API items to GiftCatalogueItem, using GIFT_CATALOGUE for UI-only fields (emoji, gradient)
-          const catalogById = new Map(GIFT_CATALOGUE.map(g => [g.id, g]));
-          const mapped: GiftCatalogueItem[] = items.map((item) => {
-            const fallback = catalogById.get(item.id) ?? GIFT_CATALOGUE[0];
-            return {
-              id:           item.id,
-              name:         item.name,
-              brand:        item.brand ?? fallback.brand,
-              category:     item.category,
-              points:       item.pointsCost,
-              description:  item.description ?? fallback.description,
-              details:      fallback.details,
-              features:     fallback.features,
-              emoji:        fallback.emoji,
-              gradientFrom: fallback.gradientFrom,
-              gradientTo:   fallback.gradientTo,
-              imageDataUrl: item.imageUrl ?? null,
-              available:    item.available ?? true,
-              popular:      item.popular ?? false,
-              addedDate:    fallback.addedDate,
-              voucherType:  fallback.voucherType,
-              fixedAmount:  fallback.fixedAmount,
-            };
-          });
-          setGifts(mapped);
-        } else {
-          setGifts(loadGifts());
+          setGifts((items ?? []).map(mapCatalogItem));
         }
+        // On failure we simply show an empty catalogue (EmptyState) — no demo data.
       })
-      .catch(() => setGifts(loadGifts()))
       .finally(() => setLoading(false));
   }, [session.pointsBalance]);
 
@@ -685,10 +854,10 @@ export default function RewardsPage() {
     const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
 
-  const handleRedeemed = (pts: number, description: string) => {
-    setBalance(prev => prev - pts);
-    saveRedemption({ points: pts, description });
-    // Don't close the sheet here — each sheet's success screen "Done" button calls onClose
+  // Live debit succeeded — reflect it optimistically in the local balance.
+  // The wallet/catalog endpoints are the source of truth on next load.
+  const handleRedeemed = (pts: number) => {
+    setBalance(prev => Math.max(0, prev - pts));
   };
 
   if (loading) return <div className="flex items-center justify-center min-h-64"><Spinner size="lg" /></div>;
@@ -774,12 +943,12 @@ export default function RewardsPage() {
           <Button
             variant="primary"
             className="w-full"
-            disabled={balance < Math.ceil(settings.minBankTransferAmount / settings.pointsConversionRate)}
+            disabled={balance < Math.ceil(settings.minBankTransferAmount * settings.pointsConversionRate)}
             onClick={() => setShowBank(true)}
           >
             <Banknote className="h-4 w-4" />
-            {balance < Math.ceil(settings.minBankTransferAmount / settings.pointsConversionRate)
-              ? `Need ${formatPoints(Math.ceil(settings.minBankTransferAmount / settings.pointsConversionRate) - balance)} more pts`
+            {balance < Math.ceil(settings.minBankTransferAmount * settings.pointsConversionRate)
+              ? `Need ${formatPoints(Math.ceil(settings.minBankTransferAmount * settings.pointsConversionRate) - balance)} more pts`
               : `Transfer Funds`}
           </Button>
         </div>
@@ -823,7 +992,9 @@ export default function RewardsPage() {
           ) : (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               {filtered.map(gift => {
-                const canAfford   = gift.voucherType === 'FREE_AMOUNT' ? balance >= Math.ceil(settings.minVoucherFreeAmount / settings.pointsConversionRate) : balance >= gift.points;
+                const canAfford   = gift.voucherType === 'FREE_AMOUNT'
+                  ? balance >= Math.ceil(settings.minVoucherFreeAmount * settings.pointsConversionRate)
+                  : balance >= gift.points;
                 const isWishlisted = wishlist.has(gift.id);
                 return (
                   <div
@@ -858,7 +1029,7 @@ export default function RewardsPage() {
                       {!canAfford && (
                         <div className="absolute inset-0 flex items-end justify-center pb-2">
                           <span className="text-[9px] font-bold bg-gray-800/70 text-white px-2 py-0.5 rounded-full">
-                            {gift.voucherType === 'FREE_AMOUNT' ? `Need ${formatPoints(Math.ceil(settings.minVoucherFreeAmount / settings.pointsConversionRate) - balance)} more` : `Need ${formatPoints(gift.points - balance)} more pts`}
+                            {gift.voucherType === 'FREE_AMOUNT' ? `Need ${formatPoints(Math.ceil(settings.minVoucherFreeAmount * settings.pointsConversionRate) - balance)} more` : `Need ${formatPoints(gift.points - balance)} more pts`}
                           </span>
                         </div>
                       )}
@@ -890,7 +1061,8 @@ export default function RewardsPage() {
       {detail && (
         <GiftDetailSheet
           gift={detail} onClose={() => setDetail(null)}
-          myBalance={balance} onWishlist={toggleWishlist} isWishlisted={wishlist.has(detail.id)}
+          myBalance={balance} mobile={session.mobile}
+          onWishlist={toggleWishlist} isWishlisted={wishlist.has(detail.id)}
           onRedeemed={handleRedeemed}
         />
       )}
@@ -908,6 +1080,7 @@ export default function RewardsPage() {
           myBalance={balance} minAmount={settings.minBankTransferAmount}
           conversionRate={settings.pointsConversionRate}
           bankName="HDFC Bank" accountNumber="****3210"
+          rewardId={gifts.find(g => g.redemptionMode === 'BANK_TRANSFER' || g.redemptionMode === 'UPI')?.id ?? null}
           onRedeemed={handleRedeemed}
         />
       )}
