@@ -42,14 +42,16 @@ export async function expectScopedOut(
   path: string,
   opts: { forbiddenMarkers?: string[]; safeRedirects?: string[] } = {},
 ): Promise<void> {
-  // Live-session guard (FP-2): fail LOUDLY if we're not actually authenticated, rather than letting a
-  // login-redirect masquerade as "correctly scoped out".
-  const token = await page.evaluate(() => localStorage.getItem('token'));
-  expect(token, `cannot evaluate scoping for ${path}: no authenticated session (setup/storageState failed?)`).toBeTruthy();
-
   await page.goto(path);
   await expect(page.locator('body')).toBeVisible();
   const url = new URL(page.url());
+
+  // Live-session guard (FP-2), read AFTER navigating so we're on the http origin (reading
+  // localStorage on about:blank throws SecurityError). The FE redirects to /auth/login only when no
+  // token exists, so a dead/expired session lands here with no token → this fails LOUDLY rather than
+  // letting a login-redirect masquerade as "correctly scoped out".
+  const token = await page.evaluate(() => localStorage.getItem('token'));
+  expect(token, `no live session when testing scope-out of ${path} (dead/expired session, not an authz block?)`).toBeTruthy();
 
   if (!url.pathname.startsWith(path)) {
     // Redirected — only acceptable if it landed on a known-safe destination.

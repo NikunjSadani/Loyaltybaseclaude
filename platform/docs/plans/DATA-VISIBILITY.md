@@ -37,7 +37,7 @@ All six who-sees-what questions are answered. The harness asserts exactly these.
 | Page | Intended audience | Expected data | Status |
 |---|---|---|---|
 | `/auth/login` | all | OTP login, route by role to the right portal; GIFSY via subdomain/dev clientId override (Q3, real login only) | ◐ 3/4 roles ✅; GIFSY ❌ #39 |
-| `/admin/dashboard` | CLIENT_ADMIN/MIS | real tenant KPIs (partners/KYC/liability/fund) | ✅ (real seed data) |
+| `/admin/dashboard` | CLIENT_ADMIN/MIS | real tenant KPIs (partners/KYC/liability/fund) | ❌ E2E baseline: still renders demo **"4,821"** (#40) — was wrongly ✅ |
 | `/admin/dashboards/*` (kyc/payments/redemptions/engagement) | CLIENT_ADMIN/MIS | real tenant aggregates | ❌ fabricated #36/#40 |
 | `/admin/kyc` (Submissions) | CLIENT_ADMIN/MIS (tenant) | tenant KYC list | ✅ (2 real); minor stale class filter #45 |
 | `/admin/kyc/approvals` (bulk Gifsy) | **GIFSY only** (Q2; no client access) | PENDING_GIFSY queue, bulk verify | ❌ verify Gifsy-only + cross-tenant #38 |
@@ -60,3 +60,11 @@ All six who-sees-what questions are answered. The harness asserts exactly these.
 
 > This table is the harness's checklist: each row becomes an E2E assertion (right role → real expected data, no
 > fabricated values, correct scoping, honest error). A row is "done" only when its E2E test passes.
+
+> **Live status = the E2E harness, not this table.** `platform/e2e` (`npm run e2e`) is the source of truth;
+> hand-edited cells drift. **Baseline 2026-06-19 (4 roles, deterministic 12 pass / 14 fail):** #40 — demo
+> persona "Rajesh Kumar" on partner+sales pages, "4,821" on `/admin/dashboard`, sales real identity absent;
+> #41 — partner & sales see admin data, all roles reach `/gifsy/*`+cross-portal unblocked, clientAdmin sees
+> payout mgmt (Q1 violation). These reds are what #53 remediates. GIFSY login still ❌ #39 (not yet in the
+> session matrix). Not yet covered (need work first): write-persistence (S4), real cross-tenant data (S7 —
+> 2nd tenant has no data yet), sales-manager downline (Q4 — only an SO is seeded).

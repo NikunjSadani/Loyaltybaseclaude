@@ -11,7 +11,7 @@ import { login } from '../helpers/login';
  */
 mkdirSync(AUTH_DIR, { recursive: true });
 
-const SESSION_ROLES: RoleKey[] = ['partner'];
+const SESSION_ROLES: RoleKey[] = ['partner', 'clientAdmin', 'sales'];
 
 for (const key of SESSION_ROLES) {
   const role = ROLES[key];

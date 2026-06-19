@@ -41,12 +41,28 @@ export default defineConfig({
     // 1. Log in each role through the REAL login form, persist its storageState.
     { name: 'setup', testMatch: /setup\/auth\.setup\.ts/, use: { ...devices['Desktop Chrome'] } },
 
-    // 2. Role projects reuse the persisted session. Add more as the matrix fans out.
+    // 2. Login matrix — fresh context (NO storageState): exercises the real login per role and
+    //    asserts which roles work vs the known-broken one (#39 GIFSY). Independent of setup.
+    { name: 'login', testMatch: /login\/.*\.e2e\.ts/, use: { ...devices['Desktop Chrome'] } },
+
+    // 3. Role projects reuse the persisted session.
     {
       name: 'partner',
       testMatch: /partner\/.*\.e2e\.ts/,
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: ROLES.partner.storageStatePath },
+    },
+    {
+      name: 'clientAdmin',
+      testMatch: /clientAdmin\/.*\.e2e\.ts/,
+      dependencies: ['setup'],
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.clientAdmin.storageStatePath },
+    },
+    {
+      name: 'sales',
+      testMatch: /sales\/.*\.e2e\.ts/,
+      dependencies: ['setup'],
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.sales.storageStatePath },
     },
   ],
 });
