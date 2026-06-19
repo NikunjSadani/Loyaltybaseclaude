@@ -18,26 +18,21 @@ export async function login(page: Page, role: RoleDef): Promise<void> {
   const otpBoxes = page.locator('input[inputmode="numeric"][maxlength="1"]');
   await expect(phoneInput).toBeVisible();
 
-  // Step 1 — phone, then Send OTP exactly ONCE. send-otp is throttled to 5/min/IP, so we must NOT
-  // re-send on retry. The phone field is a controlled input: filling it before React hydrates makes
-  // React reset it to '' once it hydrates with the empty initial state (the "Mobile number is
-  // required" flake). So re-fill (no network) until the value SURVIVES a short settle — proving
-  // hydration is done and onChange captured it — then click Send OTP one time.
+  // Step 1 — fill phone (+ dev org override) and Send OTP, RETRIED until the OTP step renders. This
+  // beats the Next.js hydration race: if we fill/click before React hydrates, onChange never fires and
+  // the form rejects an "empty" mobile, so a single click can silently no-op. The guard short-circuits
+  // once we've advanced. Re-sending OTP on retry is safe — dev disables rate limiting when FIXED_OTP is
+  // set (app.module skipIf), so this no longer trips the 5/min throttle.
   await expect(async () => {
+    if (await otpBoxes.first().isVisible().catch(() => false)) return; // already on the OTP step
     await phoneInput.fill(role.phone);
-    await page.waitForTimeout(250); // let any pending hydration reset fire
-    expect(await phoneInput.inputValue()).toBe(role.phone);
-  }).toPass({ timeout: 10_000 });
-
-  // Dev-only org override (#39): set the tenant so non-deoleo roles (GIFSY, clientb) resolve correctly.
-  // On localhost resolveClientId() always yields 'deoleo', so this field is how those roles log in.
-  const orgField = page.getByPlaceholder(/gifsy, deoleo/i);
-  if (await orgField.count()) {
-    await orgField.fill(role.clientId);
-  }
-
-  await page.getByRole('button', { name: 'Send OTP' }).click();
-  await expect(otpBoxes.first()).toBeVisible({ timeout: 10_000 });
+    await expect(phoneInput).toHaveValue(role.phone);
+    // Dev-only org override (#39): non-deoleo roles (GIFSY, clientb) resolve their tenant here.
+    const orgField = page.getByPlaceholder(/gifsy, deoleo/i);
+    if (await orgField.count()) await orgField.fill(role.clientId);
+    await page.getByRole('button', { name: 'Send OTP' }).click();
+    await expect(otpBoxes.first()).toBeVisible({ timeout: 4_000 });
+  }).toPass({ timeout: 30_000 });
   const digits = role.otp.split('');
   expect(digits).toHaveLength(6);
   for (let i = 0; i < 6; i++) {
