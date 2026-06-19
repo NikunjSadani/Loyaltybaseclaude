@@ -62,9 +62,11 @@ All six who-sees-what questions are answered. The harness asserts exactly these.
 > fabricated values, correct scoping, honest error). A row is "done" only when its E2E test passes.
 
 > **Live status = the E2E harness, not this table.** `platform/e2e` (`npm run e2e`) is the source of truth;
-> hand-edited cells drift. **Baseline 2026-06-19 (4 roles, deterministic 12 pass / 14 fail):** #40 — demo
-> persona "Rajesh Kumar" on partner+sales pages, "4,821" on `/admin/dashboard`, sales real identity absent;
-> #41 — partner & sales see admin data, all roles reach `/gifsy/*`+cross-portal unblocked, clientAdmin sees
-> payout mgmt (Q1 violation). These reds are what #53 remediates. GIFSY login still ❌ #39 (not yet in the
-> session matrix). Not yet covered (need work first): write-persistence (S4), real cross-tenant data (S7 —
-> 2nd tenant has no data yet), sales-manager downline (Q4 — only an SO is seeded).
+> hand-edited cells drift. **Baseline 2026-06-19: 36/36 GREEN** (5 roles incl. GIFSY + clientb). The original
+> reds are all remediated: #40 fabricated data (partner/sales identity via `/partner/me`, admin KPIs real),
+> #41 role guards + Q1 payouts GIFSY-only, #39 GIFSY login (dev clientId override), cross-tenant isolation
+> BOTH directions (2nd tenant `clientb` seeded with data), and the **partner redemption money path** (#50 —
+> was 100% broken). Write-persistence covered for tickets + redemption. **Still NOT covered (open):** most
+> non-anchor pages, the OTHER write flows (visibility/submit + KYC — proxy-excluded/dead, #36/#38), the gifsy
+> console real data (mock, #49), sales-manager downline (Q4 — only an SO seeded), and **staging** (env-support
+> TODO). A green harness = "the asserted slices work", NOT "every page works".

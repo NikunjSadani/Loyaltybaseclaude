@@ -7,39 +7,49 @@ You're the orchestrator for the Loyaltybase build — a multi-tenant FMCG trade-
 Repo root: C:\Users\nikun\Loyaltybaseclaude  (git root; branch **develop**). Frontend: `platform/` (thin Next.js).
 Backend: `api/` (NestJS + Prisma 7, the source of truth — owns the DB + ALL business logic).
 
-⚠️⚠️ **STATE (corrected 2026-06-19): BACKEND P0–P6 complete, but FE/AUTH/INTEGRATION is INCOMPLETE — and "done"
-was repeatedly OVER-CLAIMED on tsc/unit-tests/one-happy-path.** Comprehensive role-matrix runtime testing keeps
-finding gaps behind "complete"/"done" features. **Do NOT trust any green status.** Read FIRST:
-`reconcile/P0.5-make-it-runnable.md` · `VERIFICATION-PROTOCOL.md` · `ENVIRONMENTS.md` · `DATA-VISIBILITY.md` ·
-`GO-LIVE-READINESS.md` · gap-register **#33–#46** · [[runtime-audit-p0.5]] · [[verify-flows-at-runtime]].
+⚠️ **STATE (2026-06-19): the ENFORCEMENT is built and the local matrix is GREEN — but green is BOUNDED, not
+"the whole app works".** The Playwright E2E harness (`platform/e2e`, `npm run e2e`, **36/36 green**) now covers
+real-login-per-role · real scoped data (no fabrication) · role/portal scoping · cross-tenant isolation (BOTH
+directions) · write-persistence (tickets + the partner redemption MONEY PATH). It is re-runnable (dev throttle
+disabled via `skipIf(FIXED_OTP)`). **It does NOT yet cover every page/flow** — most admin sub-pages, partner
+targets/leaderboard, sales team/outlets, the gifsy console (mock, #49), and most write flows are unverified. Read
+FIRST: [[e2e-harness]] · `e2e/README.md` · `GO-LIVE-READINESS.md` · `DATA-VISIBILITY.md` · `VERIFICATION-PROTOCOL.md`
+· gap-register **#33–#50** · [[runtime-audit-p0.5]] · [[verify-flows-at-runtime]].
 
 **THE DEFINITION OF DONE (`VERIFICATION-PROTOCOL.md`):** a real user, in the correct role, completes the flow
 end-to-end at RUNTIME against realistic multi-role data — canonical surface · role matrix · cross-tenant · DB
 persistence seen by a different session · honest unhappy path. `tsc`/unit tests are necessary, NEVER sufficient.
-"The backend is complete" is a hypothesis to test. **NEVER sample / "representative" / "should be fine".**
+**A green harness means "the asserted slices work" — NOT "everything works".** NEVER sample / "should be fine".
 
-**NEXT = the FOUNDATION that makes "done" real (before more wiring):** docs are passive and get shortcut, so build
-the **enforcement** — `DATA-VISIBILITY.md` (the expected per page×role; owner must answer §3) → a **Playwright E2E
-harness** (role × page × data; fails CI when a page fabricates / a scope leaks / a write doesn't persist; runnable
-local AND staging) → `GO-LIVE-READINESS.md` gate. Comprehensive verification runs THROUGH the harness, local first
-(green = confident push), staging as the pre-prod gate. (gap #46.)
+**RESOLVED this session (harness-verified):** #46 the harness itself · #39 GIFSY login (dev `clientId` override on
+the login form + prod subdomain; clientb login too) · #40 fabricated data (partner/sales identity via `/partner/me`;
+admin KPIs real) · #41 role/portal guards + Q1 payouts GIFSY-only · #47 admin dashboard KPIs · cross-tenant (2nd
+tenant `clientb` seeded) · **#50 the partner REDEMPTION MONEY PATH** (was 100% broken). Q1–Q6 owner decisions encoded
+in `DATA-VISIBILITY.md §3`.
 
-**P0.5/P0.6 status (corrected):** **W0 auth ◐ PARTIAL** — login works for CLIENT_ADMIN/partner/sales but **GIFSY_ADMIN
-login is BROKEN** (`resolveClientId` never yields `gifsy` → 401, #39); route guard + logout ✅. **W1A auth-attachment
-◐ PARTIAL** — fetches now authenticate, but many pages **still render fabricated demo data** (partner wallet
-statement, partner dashboard available/rank — #40) or are **role-gated out** (admin/payouts 403 for CLIENT_ADMIN —
-#41). **W1B seed ✅** (`npx prisma db seed`). **W1C catalogue-500 ✅**. **P0.6-G tickets ✅** (FE + backend
-`isSupportAdmin` fix, runtime-verified). **P0.6-D KYC re-scoped** — agent was mis-scoped onto the orphan
-`/admin/approvals`; canonical = bulk `/admin/kyc/approvals`; reverted; KYC approval cross-tenant gap = #38.
-**Remaining P0.6:** E redemption · F visibility/invoices · H dashboards→real · I payouts.processBatch (#42). **All
-findings + WHENs are in gap-register #33–#46** (don't re-discover; they're documented).
+**🔑 KEY PATTERN — the map of remaining DEAD WRITES is `platform/next.config.ts`:** its `beforeFiles` rewrite
+**EXCLUDES** some `/api/*` paths from the backend proxy (negative lookahead), routing them to stale local
+`src/app/api/*/route.ts` handlers that use the **RETIRED platform Prisma** → they throw. Redemption was one (FIXED:
+removed from the exclusion + deleted the dead local route → forwards to the P5 backend). **STILL excluded/broken:
+`visibility/submit` + `admin/kyc`** — their backends aren't ported yet. **NEXT = port `POST /v1/visibility/submit` +
+the `admin/kyc` write to the backend, then drop their exclusions** (same fix pattern). Also: sales `/catalogue`
+redemption is mock (hardcoded OTP `999999`, #50/P0.6-E); `payouts.processBatch` needs txn+guard (#42, money path).
+
+**Still OPEN (gap-register):** #36 visibility/KYC writes · #38 KYC approval cross-tenant · #42 payouts.processBatch ·
+#43 TDS · #44 Excel round-trips · #45 cleanup/dead-routes (P0.7) · #48 admin trend-analytics · #49 gifsy console
+real-data · #47 configurable RBAC. **Plus: STAGING harness env-support** (the harness only runs local; needs MSG91-OTP
+injection + staging tenant slugs before staging is a real gate). The Q1 payouts BACKEND `@Roles` change is
+code-correct but NOT runtime-verified (RBAC off in dev; the FE scope-out IS verified).
 
 **Architecture/env:** 3 environments — **local dev** (`gifsy_dev`, isolated instance, `FIXED_OTP=123456`) · **staging**
 (`gifsy_staging`, auto-deploys on **push to `develop`**) · **prod** (`gifsy_prod`, `main`, approval-gated). Full ref:
-`ENVIRONMENTS.md`. ⚠️ **6 commits are local-only (unpushed); DON'T push `develop` until the work is verified** (push
-auto-deploys to staging). `FIXED_OTP`/`localhost`-clientId are LOCAL-ONLY — the harness must not assume them.
-Seeded phones: gifsy `9830011252`/clientId `gifsy` (#39), deoleo admin `9000000001`, partner `9000000002`, sales
-`9000000003`.
+`ENVIRONMENTS.md` / [[environments-topology]]. All session changes are **dev-gated and staging-safe** (`FIXED_OTP`
+skipIf, `NODE_ENV!=='production'` clientId override, DB-guarded seed). **Pushed to `develop` on 2026-06-19**
+(auto-deploys to staging) — ⚠️ **staging is NOT harness-verified** (env-support TODO); exercise login + redemption +
+scoping there manually. Seeded phones (gifsy_dev): gifsy `9830011252`/clientId `gifsy`, deoleo admin `9000000001`,
+partner `9000000002` (wallet now <50k after redemption test runs), sales `9000000003`, clientb admin `9000000020`
+(clientId `clientb`). Servers: backend `:4000` (rebuilt+restarted for `/partner/me`+throttle+redeem) · FE `:3000`
+(restarted for the next.config change) · DB proxy `:5433`.
 
 **Architecture (Phase S, done):** API-first — a dedicated NestJS backend built IN PLACE in `api/` (reused its shell,
 deleted its World-A domain, rebuilt the real domain from the platform's `lib/`+schema), consumed by a thin Next.js FE
@@ -70,9 +80,12 @@ targeting dimension**; no point-tiers, no SKU. Validate any inherited concept ag
   consume, atomic refund claim). `reconcile/P5-wallet-points-rewards.md` · [[p5-complete]].
 
 **P6 · Finance — ✅ DONE (2026-06-18, backend).** Full record: `reconcile/P6-finance.md` + `reconcile/P6.5-TDS-SPEC.md`.
-**NEXT = P0.5/P0.6 "Make It Runnable" (FE/auth/integration remediation) BEFORE P7** — full plan:
-`reconcile/P0.5-make-it-runnable.md` + [[runtime-audit-p0.5]]. P7 (Engagement & support) resumes after, with the
-platform-retirement residual (#31) as its opening unit. The P6 decisions below are the historical record; all shipped.
+**P0.5/P0.6 "Make It Runnable" — MOSTLY DONE (2026-06-19), enforced by the E2E harness (top of this doc).** Auth +
+fabricated-data + scoping + dashboards + cross-tenant + the redemption money path are resolved & harness-green.
+**Remaining P0.6 = the dead-write ports** (visibility/submit + admin/kyc, via the next.config proxy-exclusion fix
+pattern) + `payouts.processBatch` (#42) + cleanup (#45/P0.7). Full plan: `reconcile/P0.5-make-it-runnable.md` +
+[[runtime-audit-p0.5]]. P7 (Engagement & support) resumes after; the platform-retirement (#31) overlaps the
+dead-write ports. The P6 decisions below are the historical record; all shipped.
 
 **P6 key facts (DO NOT relitigate; full record: `reconcile/P6-finance.md` + `P6.5-TDS-SPEC.md` + [[p6-finance-decisions]]):**
 - **Money = integer `BigInt` paise EVERYWHERE** (#19). Shared `money.ts` (api `src/common` + platform `src/lib`);
