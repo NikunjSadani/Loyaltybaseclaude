@@ -29,6 +29,35 @@ export class ListSubmissionsQueryDto {
   limit?: number = 20;
 }
 
+/**
+ * POST /v1/visibility/submit — partner photo submission (multipart/form-data).
+ * The image arrives via FileInterceptor('image'); these are the text fields.
+ * Multipart text fields are always strings — geoLat/geoLng are parsed in the
+ * service. outletId is optional: when omitted the service resolves the partner's
+ * single active outlet (the partner app does not send it today).
+ */
+export class SubmitVisibilityDto {
+  @IsString()
+  @MinLength(1, { message: 'programId is required' })
+  programId!: string;
+
+  @IsOptional()
+  @IsString()
+  outletId?: string;
+
+  @IsOptional()
+  @IsString()
+  geoLat?: string;
+
+  @IsOptional()
+  @IsString()
+  geoLng?: string;
+
+  @IsOptional()
+  @IsString()
+  notes?: string;
+}
+
 /** POST /v1/visibility/submissions/:id/reject — rejection reason is required. */
 export class RejectSubmissionDto {
   @IsString()

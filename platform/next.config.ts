@@ -7,10 +7,12 @@ import path from "path";
 // changes, keeps login same-origin, and avoids cross-origin CORS for the web client.
 // `beforeFiles` runs BEFORE the local `src/app/api/*` handlers, so the backend wins
 // over the still-present platform routes (those are deleted at S8).
-// EXCLUDED (kept on local handlers until the backend ports them — see RESUME.md
-// deferred list): visibility/submit, admin/kyc approvals.
-// NOTE: rewards/redeem(+confirm) WAS excluded but the backend ported it in P5; the stale exclusion
-// routed the money path to a dead local handler (broken — used retired platform Prisma). Now forwarded.
+// NO EXCLUSIONS REMAIN — every `/api/*` now forwards to the backend:
+//   - rewards/redeem(+confirm): ported in P5 (the stale exclusion routed the money
+//     path to a dead local handler — fixed).
+//   - visibility/submit: ported to POST /v1/visibility/submit (P0.6) — local route deleted.
+//   - admin/kyc: was a no-op exclusion (KYC writes already live at /v1/kyc/*; the FE
+//     calls /api/kyc/* which never matched this lookahead) — dropped.
 const BACKEND_API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 
 const nextConfig: NextConfig = {
@@ -20,9 +22,8 @@ const nextConfig: NextConfig = {
     return {
       beforeFiles: [
         {
-          source:
-            '/api/:path((?!visibility/submit|admin/kyc).*)',
-          destination: `${BACKEND_API_URL}/v1/:path`,
+          source: '/api/:path*',
+          destination: `${BACKEND_API_URL}/v1/:path*`,
         },
       ],
       afterFiles: [],

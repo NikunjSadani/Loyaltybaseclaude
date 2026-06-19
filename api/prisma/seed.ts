@@ -35,6 +35,7 @@ import {
   GstRegistrationType,
   PayoutMode,
   RewardCatalogStatus,
+  VisibilityProgramStatus,
 } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -470,6 +471,25 @@ async function seedDeoleoDemo() {
     });
     console.log(`   ✓ KycSubmission ${k.id} (${k.status})`);
   }
+
+  // 3.7 Visibility program — one ACTIVE program so the partner photo-submit flow
+  // (POST /v1/visibility/submit) has a valid target. Keyed on fixed id seed-vp-1.
+  const visibilityProgram = await prisma.visibilityProgram.upsert({
+    where: { id: 'seed-vp-1' },
+    update: {},
+    create: {
+      id: 'seed-vp-1',
+      clientId: DEOLEO_CLIENT_ID,
+      code: 'VP001',
+      name: 'Storefront Branding — Q1',
+      description: 'Demo visibility program — submit a storefront branding photo.',
+      status: VisibilityProgramStatus.ACTIVE,
+      startDate: new Date('2026-01-01'),
+      endDate: new Date('2026-12-31'),
+      pointsPerSubmission: 200,
+    },
+  });
+  console.log(`   ✓ VisibilityProgram [${visibilityProgram.code}] (${visibilityProgram.status})`);
 
   console.log('   ✅ deoleo demo dataset ready.');
 }

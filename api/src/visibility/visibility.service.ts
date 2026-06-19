@@ -8,7 +8,13 @@ import {
   ListSubmissionsQueryDto,
   OutletStatusesQueryDto,
   RejectSubmissionDto,
+  SubmitVisibilityDto,
 } from './dto/visibility.dto';
+import { StorageService } from '../storage/storage.service';
+
+/** Image MIME allowlist for visibility photo submissions. */
+const ALLOWED_IMAGE_MIME = ['image/jpeg', 'image/png', 'image/webp'];
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
 
 /**
  * Visibility — ported from platform/src/app/api/visibility/* onto /v1.
@@ -17,16 +23,115 @@ import {
  * (enforced by @Roles on the controller; tenant scope re-checked here). Business
  * logic lives here; the controller is a thin HTTP adapter.
  *
- * NOTE: the source POST /visibility/submit route is intentionally NOT ported — it
- * depends on multipart image upload + GCS storage infra (lib/s3.ts) that is owned
- * centrally and not present in this api. See the agent report.
+ * POST /visibility/submit (partner photo submission) is now ported here: it uses
+ * StorageService for the GCS upload (same pattern as kyc.uploadDocument). The
+ * partner is resolved from the JWT (never trusted from the request body), and the
+ * outlet from the partner — so a partner can only submit for their own outlet.
  */
 @Injectable()
 export class VisibilityService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenant: TenantService,
+    private readonly storage: StorageService,
   ) {}
+
+  /**
+   * POST /v1/visibility/submit — partner submits a branding photo for an outlet.
+   *
+   * Scoping/trust: the partner is resolved from the JWT (user.sub) — never from
+   * the request — so partnerId is always the caller's own ChannelPartner. The
+   * outlet is either the caller-supplied outletId (validated to belong to this
+   * partner) or, when omitted, the partner's single active outlet. The program is
+   * validated to belong to the caller's tenant.
+   *
+   * Mode gate: only PHOTO_APPROVAL tenants accept photo submissions (mirrors the
+   * approve/reject gate). Submissions land in SUBMITTED (queued for review).
+   */
+  async submit(user: JwtPayload, file: Express.Multer.File, dto: SubmitVisibilityDto) {
+    // 1. Validate the uploaded image.
+    if (!file) throw new BadRequestException('Image file is required');
+    if (!file.buffer?.length) throw new BadRequestException('Empty image file');
+    if (file.size > MAX_IMAGE_BYTES) {
+      throw new BadRequestException('Image too large (max 5 MB)');
+    }
+    if (!ALLOWED_IMAGE_MIME.includes(file.mimetype)) {
+      throw new BadRequestException('Invalid image format. Allowed: JPEG, PNG, WEBP');
+    }
+
+    // 2. Tenant must be in PHOTO_APPROVAL mode for photo submissions.
+    const captureMode = await this.tenant.resolveVisibilityCaptureMode(user.clientId);
+    if (captureMode !== 'PHOTO_APPROVAL') {
+      throw new BadRequestException(
+        'Tenant is not configured for photo-approval visibility. ' +
+          'Photo submissions are only available when features.visibilityCaptureMode = "PHOTO_APPROVAL".',
+      );
+    }
+
+    // 3. Resolve the calling partner from the JWT (never from the request body).
+    const partner = await this.prisma.channelPartner.findFirst({
+      where: { userId: user.sub, user: { clientId: user.clientId } },
+      select: { id: true },
+    });
+    if (!partner) throw new ForbiddenException('Only channel partners can submit visibility photos');
+
+    // 4. Validate the program belongs to this tenant.
+    const program = await this.prisma.visibilityProgram.findFirst({
+      where: { id: dto.programId, clientId: user.clientId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!program) throw new NotFoundException('Visibility program not found');
+
+    // 5. Resolve the outlet — caller-supplied (validated to this partner) or the
+    //    partner's single active outlet when omitted (the partner app sends none).
+    let outletId = dto.outletId;
+    if (outletId) {
+      const outlet = await this.prisma.outlet.findFirst({
+        where: { id: outletId, partnerId: partner.id, clientId: user.clientId },
+        select: { id: true },
+      });
+      if (!outlet) throw new NotFoundException('Outlet not found for this partner');
+    } else {
+      const outlets = await this.prisma.outlet.findMany({
+        where: { partnerId: partner.id, clientId: user.clientId, isActive: true },
+        select: { id: true },
+        take: 2,
+      });
+      if (outlets.length === 0) {
+        throw new BadRequestException('No active outlet found for this partner');
+      }
+      if (outlets.length > 1) {
+        throw new BadRequestException('Multiple outlets found — specify outletId');
+      }
+      outletId = outlets[0].id;
+    }
+
+    // 6. Upload the image to GCS (tenant-foldered key), then persist the submission.
+    const key = this.storage.generateKey(
+      `visibility/${user.clientId}`,
+      file.originalname || 'visibility.jpg',
+    );
+    const imageUrl = await this.storage.uploadFile(file.buffer, key, file.mimetype);
+
+    const geoLat = dto.geoLat != null && dto.geoLat !== '' ? Number(dto.geoLat) : null;
+    const geoLng = dto.geoLng != null && dto.geoLng !== '' ? Number(dto.geoLng) : null;
+
+    const submission = await this.prisma.visibilitySubmission.create({
+      data: {
+        programId: program.id,
+        partnerId: partner.id,
+        outletId,
+        imageUrls: [imageUrl],
+        latitude: Number.isFinite(geoLat as number) ? (geoLat as number) : null,
+        longitude: Number.isFinite(geoLng as number) ? (geoLng as number) : null,
+        status: 'SUBMITTED',
+        submittedAt: new Date(),
+      },
+      select: { id: true, status: true, submittedAt: true },
+    });
+
+    return { submissionId: submission.id, status: submission.status, submittedAt: submission.submittedAt };
+  }
 
   /**
    * GET /v1/visibility/submissions — paginated submissions for the tenant,

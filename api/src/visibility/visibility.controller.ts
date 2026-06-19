@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Query,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { VisibilityService } from './visibility.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -8,6 +18,7 @@ import {
   ListSubmissionsQueryDto,
   OutletStatusesQueryDto,
   RejectSubmissionDto,
+  SubmitVisibilityDto,
 } from './dto/visibility.dto';
 
 /**
@@ -27,6 +38,23 @@ export class VisibilityController {
   @RequirePermission('visibility:read')
   listSubmissions(@CurrentUser() user: JwtPayload, @Query() query: ListSubmissionsQueryDto) {
     return this.visibility.listSubmissions(user, query);
+  }
+
+  /**
+   * POST /v1/visibility/submit — partner photo submission (multipart/form-data,
+   * field `image`). Partner-only (the partner is re-resolved from the JWT in the
+   * service; a sales user has no ChannelPartner row and is rejected there too).
+   */
+  @Post('submit')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
+  @RequirePermission('visibility:write')
+  @UseInterceptors(FileInterceptor('image'))
+  submit(
+    @CurrentUser() user: JwtPayload,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: SubmitVisibilityDto,
+  ) {
+    return this.visibility.submit(user, file, dto);
   }
 
   @Post('submissions/:id/approve')
