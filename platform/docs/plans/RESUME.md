@@ -107,7 +107,8 @@ dead-write ports. The P6 decisions below are the historical record; all shipped.
   (PAN-required, `uploadBatchId` dedup); liability − deposited = outstanding. **Cash redemptions (UPI/BANK_TRANSFER)
   now create a `PayoutTransaction`** (the settlement bridge) → existing payouts engine. **Audit money paths hard.**
 
-**NEXT = P7 · Engagement & support (spec §02 WF6; 00-MASTER-PLAN §P7).** Banners, notifications, leaderboard,
+**AFTER the P0.6 dead-write ports (the actual NEXT — see the top of this prompt), then P7 · Engagement & support
+(spec §02 WF6; 00-MASTER-PLAN §P7).** Banners, notifications, leaderboard,
 tickets. Much read-side already exists (Phase S re-homed `api/src/{leaderboard,tickets,notifications}`). Tasks:
 **7.0** reconcile Engagement + Support · **7.1** banner config (admin) + partner-app banners · **7.2 notification
 engine** — templates/queue/delivery on the canonical **MSG91** path (**closes #21**; MSG91 = sole SMS/OTP/WhatsApp/email
@@ -162,7 +163,7 @@ CONSTRAINTS (must hold):
   dev (serves FE live from disk — no restart needed for FE changes).
 
 Reload (read before building):
-- docs/plans/00-MASTER-PLAN.md            (phases; **P0–P5 + S DONE**; **§P6 = NEXT**)
+- docs/plans/00-MASTER-PLAN.md            (phases; **P0–P6 + S DONE**; **P0.5/0.6 ◐ — remaining = dead-write ports; then P7**)
 - docs/plans/MODEL-ALIGNMENT.md           (the REAL parameter model)
 - docs/plans/P6-TDS-EXPLAINER.md          (TDS structure for owner review — 6.5 is HELD on its 4 questions)
 - docs/plans/reconcile/{P6-finance,P6.5-TDS-SPEC,P5-wallet-points-rewards,P4-programs-targets-enrollment}.md  (build records)
