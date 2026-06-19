@@ -7,27 +7,39 @@ You're the orchestrator for the Loyaltybase build — a multi-tenant FMCG trade-
 Repo root: C:\Users\nikun\Loyaltybaseclaude  (git root; branch **develop**). Frontend: `platform/` (thin Next.js).
 Backend: `api/` (NestJS + Prisma 7, the source of truth — owns the DB + ALL business logic).
 
-⚠️⚠️ **STATE (corrected 2026-06-18 after a live runtime audit): BACKEND P0–P6 ✅ COMPLETE, but the
-FE/AUTH/INTEGRATION layer is INCOMPLETE. "P0–P6 complete" was a backend+static-gate green; a runtime pass found
-the app's front door does not open.** Do NOT trust a green status — read `reconcile/P0.5-make-it-runnable.md` +
-[[runtime-audit-p0.5]] + gap-register #33–#37 first.
-**NEXT = P0.5 "Make It Runnable" (then P0.6/P0.7) BEFORE P7.** Critical runtime findings: **login broken
-end-to-end** (FE↔backend contract never reconciled post-Phase-S — #33), **pervasive FE auth-attachment bug**
-(pages 401 → fabricate demo data — #34), **Gift Catalogue 500** (uncoerced pagination — #35), **dashboards
-fabricate / unwired mock pages** (#36), **broken seed + empty dev DB** (#37). Backend is real & correct
-(verified: real wallet, credits, TDS+Excel export, targets, invoices, schemes).
-**P0.5 (NOW):** Wave 0 auth fix (login contract + token→localStorage + clientId + route guard) → Wave 1 parallel
-agents A=global auth-attachment, B=seed rebuild, C=catalogue-500/DTO-coercion. **P0.6 (NEXT):** parallel D=KYC
-writes, E=redemption/wallet writes, F=visibility/invoices, G=tickets/support, H=dashboards→real, I=payouts.
-processBatch+TDS. **P0.7:** cleanup (demo chrome, dead routes). **Gate MUST add a live runtime re-verify per
-`reconcile/../VERIFICATION-PROTOCOL.md`** (real login per role · role matrix · cross-tenant · DB persistence seen by
-a different session · honest unhappy path) — the static gate (tsc+jest+vitest) missed all of this; `tsc`/unit tests
-are never sufficient, and "the backend is complete" is a hypothesis to test (e.g. tickets list scopes CLIENT_ADMIN
-to own tickets; KYC approve 404s cross-tenant for Gifsy — both behind "complete" features).
-**P6 (Finance) DONE 2026-06-18 (backend):** money-unit→BigInt paise (#19) · credits→wallet (#16) · visibility
-capture-mode (#17) · self-bill invoicing (#8/#15) · TDS engine 194R/194C + redemption→payout bridge (#25).
-Dev login: `FIXED_OTP=123456`; seeded users in `gifsy_dev` (deoleo admin `9000000001`, partner `9000000002`,
-sales `9000000003`, gifsy admin `9830011252`).
+⚠️⚠️ **STATE (corrected 2026-06-19): BACKEND P0–P6 complete, but FE/AUTH/INTEGRATION is INCOMPLETE — and "done"
+was repeatedly OVER-CLAIMED on tsc/unit-tests/one-happy-path.** Comprehensive role-matrix runtime testing keeps
+finding gaps behind "complete"/"done" features. **Do NOT trust any green status.** Read FIRST:
+`reconcile/P0.5-make-it-runnable.md` · `VERIFICATION-PROTOCOL.md` · `ENVIRONMENTS.md` · `DATA-VISIBILITY.md` ·
+`GO-LIVE-READINESS.md` · gap-register **#33–#46** · [[runtime-audit-p0.5]] · [[verify-flows-at-runtime]].
+
+**THE DEFINITION OF DONE (`VERIFICATION-PROTOCOL.md`):** a real user, in the correct role, completes the flow
+end-to-end at RUNTIME against realistic multi-role data — canonical surface · role matrix · cross-tenant · DB
+persistence seen by a different session · honest unhappy path. `tsc`/unit tests are necessary, NEVER sufficient.
+"The backend is complete" is a hypothesis to test. **NEVER sample / "representative" / "should be fine".**
+
+**NEXT = the FOUNDATION that makes "done" real (before more wiring):** docs are passive and get shortcut, so build
+the **enforcement** — `DATA-VISIBILITY.md` (the expected per page×role; owner must answer §3) → a **Playwright E2E
+harness** (role × page × data; fails CI when a page fabricates / a scope leaks / a write doesn't persist; runnable
+local AND staging) → `GO-LIVE-READINESS.md` gate. Comprehensive verification runs THROUGH the harness, local first
+(green = confident push), staging as the pre-prod gate. (gap #46.)
+
+**P0.5/P0.6 status (corrected):** **W0 auth ◐ PARTIAL** — login works for CLIENT_ADMIN/partner/sales but **GIFSY_ADMIN
+login is BROKEN** (`resolveClientId` never yields `gifsy` → 401, #39); route guard + logout ✅. **W1A auth-attachment
+◐ PARTIAL** — fetches now authenticate, but many pages **still render fabricated demo data** (partner wallet
+statement, partner dashboard available/rank — #40) or are **role-gated out** (admin/payouts 403 for CLIENT_ADMIN —
+#41). **W1B seed ✅** (`npx prisma db seed`). **W1C catalogue-500 ✅**. **P0.6-G tickets ✅** (FE + backend
+`isSupportAdmin` fix, runtime-verified). **P0.6-D KYC re-scoped** — agent was mis-scoped onto the orphan
+`/admin/approvals`; canonical = bulk `/admin/kyc/approvals`; reverted; KYC approval cross-tenant gap = #38.
+**Remaining P0.6:** E redemption · F visibility/invoices · H dashboards→real · I payouts.processBatch (#42). **All
+findings + WHENs are in gap-register #33–#46** (don't re-discover; they're documented).
+
+**Architecture/env:** 3 environments — **local dev** (`gifsy_dev`, isolated instance, `FIXED_OTP=123456`) · **staging**
+(`gifsy_staging`, auto-deploys on **push to `develop`**) · **prod** (`gifsy_prod`, `main`, approval-gated). Full ref:
+`ENVIRONMENTS.md`. ⚠️ **6 commits are local-only (unpushed); DON'T push `develop` until the work is verified** (push
+auto-deploys to staging). `FIXED_OTP`/`localhost`-clientId are LOCAL-ONLY — the harness must not assume them.
+Seeded phones: gifsy `9830011252`/clientId `gifsy` (#39), deoleo admin `9000000001`, partner `9000000002`, sales
+`9000000003`.
 
 **Architecture (Phase S, done):** API-first — a dedicated NestJS backend built IN PLACE in `api/` (reused its shell,
 deleted its World-A domain, rebuilt the real domain from the platform's `lib/`+schema), consumed by a thin Next.js FE
