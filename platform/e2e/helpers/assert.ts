@@ -43,6 +43,10 @@ export async function expectScopedOut(
   opts: { forbiddenMarkers?: string[]; safeRedirects?: string[] } = {},
 ): Promise<void> {
   await page.goto(path);
+  // The FE route guard runs client-side (post-hydration), so a correct scope-out redirect fires a
+  // beat AFTER goto resolves. Give it up to 5s to settle before judging; if no redirect, fall through
+  // to the in-place forbidden/leak checks.
+  await page.waitForURL((u) => !u.pathname.startsWith(path), { timeout: 5_000 }).catch(() => {});
   await expect(page.locator('body')).toBeVisible();
   const url = new URL(page.url());
 

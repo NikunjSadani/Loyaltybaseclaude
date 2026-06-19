@@ -34,6 +34,28 @@ export function getStoredUser(): StoredUser | null {
   }
 }
 
+/**
+ * Which backend roles each portal admits (mirrors login/page.tsx getRoleDashboard). Used by the
+ * role-aware route guard so a role can't load another portal (gap #41). Keep in sync with the
+ * backend UserRole enum.
+ */
+export const PORTAL_ROLES: Record<'admin' | 'partner' | 'sales' | 'gifsy', string[]> = {
+  admin: ['CLIENT_ADMIN', 'MIS_USER'],
+  partner: ['SSS', 'WHOLESALER', 'SUB_STOCKIST'],
+  sales: ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'],
+  gifsy: ['GIFSY_ADMIN'],
+};
+
+/** The home dashboard for a role — where the guard sends a user who lands on a portal they can't use. */
+export function getRoleHome(role?: string | null): string {
+  if (!role) return '/auth/login';
+  if (PORTAL_ROLES.admin.includes(role)) return '/admin/dashboard';
+  if (PORTAL_ROLES.partner.includes(role)) return '/partner/dashboard';
+  if (PORTAL_ROLES.sales.includes(role)) return '/sales/dashboard';
+  if (PORTAL_ROLES.gifsy.includes(role)) return '/gifsy';
+  return '/auth/login';
+}
+
 /** Clear the local session and return to the login screen. */
 export function logout(): void {
   if (typeof window !== 'undefined') {

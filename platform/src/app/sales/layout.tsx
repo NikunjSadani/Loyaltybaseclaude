@@ -17,6 +17,7 @@ import {
   hasTeamView,
 } from '@/lib/sales-role';
 import { RequireAuth } from '@/components/auth/require-auth';
+import { PORTAL_ROLES } from '@/lib/auth-client';
 
 const BASE_NAV: NavItem[] = [
   { href: '/sales/dashboard',   label: 'Dashboard', icon: LayoutDashboard },
@@ -135,7 +136,7 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
       </header>
 
       {/* Main content */}
-      <main className="flex-1 pb-20 px-4 py-5"><RequireAuth>{children}</RequireAuth></main>
+      <main className="flex-1 pb-20 px-4 py-5"><RequireAuth allowedRoles={PORTAL_ROLES.sales}>{children}</RequireAuth></main>
 
       {/* Mobile bottom nav */}
       <NavBottom items={navItems} />

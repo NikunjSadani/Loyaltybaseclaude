@@ -17,7 +17,7 @@ import {
 } from '@/lib/partner-session';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { RequireAuth } from '@/components/auth/require-auth';
-import { logout } from '@/lib/auth-client';
+import { logout, PORTAL_ROLES } from '@/lib/auth-client';
 
 /* ── Demo switcher (dev only) ────────────────────────────────────────────────
    In production this is replaced by actual auth. */
@@ -171,7 +171,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
 
         {/* Main content */}
         <main className="flex-1 pb-24 px-4 py-5 max-w-4xl mx-auto w-full">
-          <RequireAuth>{children}</RequireAuth>
+          <RequireAuth allowedRoles={PORTAL_ROLES.partner}>{children}</RequireAuth>
         </main>
       </div>
 

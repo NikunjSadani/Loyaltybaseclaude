@@ -7,7 +7,7 @@ import {
   ChevronRight, LogOut, Globe, ShoppingBag,
 } from 'lucide-react';
 import { RequireAuth } from '@/components/auth/require-auth';
-import { logout } from '@/lib/auth-client';
+import { logout, PORTAL_ROLES } from '@/lib/auth-client';
 
 const NAV = [
   { href: '/gifsy',               label: 'Overview',       icon: LayoutGrid  },
@@ -71,7 +71,7 @@ export default function GifsyLayout({ children }: { children: React.ReactNode })
       {/* Main content */}
       <main className="flex-1 overflow-auto bg-gray-950">
         <div className="max-w-6xl mx-auto px-6 py-6">
-          <RequireAuth>{children}</RequireAuth>
+          <RequireAuth allowedRoles={PORTAL_ROLES.gifsy}>{children}</RequireAuth>
         </div>
       </main>
     </div>
