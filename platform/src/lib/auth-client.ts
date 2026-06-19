@@ -7,6 +7,14 @@
 const TOKEN_KEY = 'token';
 const USER_KEY = 'user';
 
+// ── Operator-context (A2/#51): a GIFSY operator "working in" a tenant ──────────
+// When the operator assumes a tenant, the active token becomes the tenant-scoped
+// assume-tenant token; the original gifsy (home) session is stashed so Exit can
+// restore it without a re-login. `assumedBrand` drives the global banner.
+const HOME_TOKEN_KEY = 'homeToken';
+const HOME_USER_KEY = 'homeUser';
+const ASSUMED_BRAND_KEY = 'assumedBrand';
+
 export function getToken(): string | null {
   if (typeof window === 'undefined') return null;
   return localStorage.getItem(TOKEN_KEY);
@@ -40,7 +48,11 @@ export function getStoredUser(): StoredUser | null {
  * backend UserRole enum.
  */
 export const PORTAL_ROLES: Record<'admin' | 'partner' | 'sales' | 'gifsy', string[]> = {
-  admin: ['CLIENT_ADMIN', 'MIS_USER'],
+  // GIFSY_ADMIN is admitted to the admin shell too: a GIFSY operator working IN a
+  // brand's context (A2/#51) operates per-brand surfaces that live in the admin
+  // shell (e.g. /admin/payouts, GIFSY-only per Q1). At platform level the operator
+  // uses /gifsy; in a tenant context they reach admin pages scoped to that tenant.
+  admin: ['CLIENT_ADMIN', 'MIS_USER', 'GIFSY_ADMIN'],
   partner: ['SSS', 'WHOLESALER', 'SUB_STOCKIST'],
   sales: ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'],
   gifsy: ['GIFSY_ADMIN'],
@@ -61,6 +73,56 @@ export function logout(): void {
   if (typeof window !== 'undefined') {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
+    localStorage.removeItem(HOME_TOKEN_KEY);
+    localStorage.removeItem(HOME_USER_KEY);
+    localStorage.removeItem(ASSUMED_BRAND_KEY);
     window.location.href = '/auth/login';
   }
+}
+
+// ── Operator-context switcher (A2/#51) ───────────────────────────────────────
+
+/** The brand the GIFSY operator is currently "working in", or null if at platform level. */
+export function getAssumedBrand(): string | null {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem(ASSUMED_BRAND_KEY);
+}
+
+/**
+ * GIFSY operator switches into a tenant's context: exchanges the gifsy session for
+ * a tenant-scoped GIFSY_ADMIN token (POST /api/auth/assume-tenant). The home (gifsy)
+ * session is stashed once so exitTenant() restores it without a re-login.
+ */
+export async function assumeTenant(clientId: string): Promise<{ brandName: string }> {
+  const res = await fetch('/api/auth/assume-tenant', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${getToken() ?? ''}` },
+    body: JSON.stringify({ clientId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.error || 'Could not switch brand context');
+  }
+  const { data } = await res.json();
+  // Stash the home session ONCE (a second assume keeps the original gifsy home).
+  if (!localStorage.getItem(HOME_TOKEN_KEY)) {
+    localStorage.setItem(HOME_TOKEN_KEY, getToken() ?? '');
+    const u = localStorage.getItem(USER_KEY);
+    if (u) localStorage.setItem(HOME_USER_KEY, u);
+  }
+  localStorage.setItem(TOKEN_KEY, data.accessToken);
+  localStorage.setItem(ASSUMED_BRAND_KEY, data.brandName);
+  return { brandName: data.brandName };
+}
+
+/** Exit the assumed tenant context and restore the gifsy (home) operator session. */
+export function exitTenant(): void {
+  if (typeof window === 'undefined') return;
+  const home = localStorage.getItem(HOME_TOKEN_KEY);
+  if (home) localStorage.setItem(TOKEN_KEY, home);
+  const homeUser = localStorage.getItem(HOME_USER_KEY);
+  if (homeUser) localStorage.setItem(USER_KEY, homeUser);
+  localStorage.removeItem(HOME_TOKEN_KEY);
+  localStorage.removeItem(HOME_USER_KEY);
+  localStorage.removeItem(ASSUMED_BRAND_KEY);
 }

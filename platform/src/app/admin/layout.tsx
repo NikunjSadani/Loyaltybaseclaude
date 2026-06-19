@@ -35,6 +35,7 @@ import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useAdminSession, setDemoAdminRole } from '@/lib/admin-session';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
+import { OperatorBanner } from '@/components/operator/operator-banner';
 
 // All possible nav items — feature flags control which are visible
 const ALL_NAV_ITEMS = [
@@ -171,7 +172,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   };
 
   return (
-    <div className="flex h-screen bg-gray-50 overflow-hidden">
+    <div className="flex flex-col h-screen bg-gray-50 overflow-hidden">
+      {/* Operator-context banner — shown when a GIFSY operator is working in a brand (A2/#51) */}
+      <OperatorBanner />
+      <div className="flex flex-1 min-h-0 overflow-hidden">
       {/* Sidebar */}
       <aside
         className={`flex flex-col bg-[#1A1A2E] text-slate-200 transition-all duration-300 ${
@@ -415,6 +419,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         <main className="flex-1 overflow-y-auto p-6">
           <RequireAuth allowedRoles={PORTAL_ROLES.admin}>{children}</RequireAuth>
         </main>
+      </div>
       </div>
     </div>
   );

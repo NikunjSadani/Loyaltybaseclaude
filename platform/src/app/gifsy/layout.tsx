@@ -8,6 +8,8 @@ import {
 } from 'lucide-react';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
+import { BrandSwitcher } from '@/components/operator/brand-switcher';
+import { OperatorBanner } from '@/components/operator/operator-banner';
 
 const NAV = [
   { href: '/gifsy',               label: 'Overview',       icon: LayoutGrid  },
@@ -21,7 +23,9 @@ export default function GifsyLayout({ children }: { children: React.ReactNode })
   const pathname = usePathname();
 
   return (
-    <div className="min-h-screen flex bg-gray-950 text-white">
+    <div className="min-h-screen flex flex-col bg-gray-950 text-white">
+      <OperatorBanner />
+      <div className="flex flex-1 min-h-0">
 
       {/* Sidebar */}
       <aside className="w-56 shrink-0 flex flex-col border-r border-white/10">
@@ -55,7 +59,9 @@ export default function GifsyLayout({ children }: { children: React.ReactNode })
         </nav>
 
         {/* Footer */}
-        <div className="px-3 py-4 border-t border-white/10 space-y-0.5">
+        <div className="px-3 py-4 border-t border-white/10 space-y-2">
+          {/* Operator-context switcher — "Work in brand ▾" (A2/#51) */}
+          <BrandSwitcher />
           <Link href="/" target="_blank"
             className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-white/40 hover:text-white hover:bg-white/5 transition-colors">
             <Globe className="w-4 h-4" />
@@ -74,6 +80,7 @@ export default function GifsyLayout({ children }: { children: React.ReactNode })
           <RequireAuth allowedRoles={PORTAL_ROLES.gifsy}>{children}</RequireAuth>
         </div>
       </main>
+      </div>
     </div>
   );
 }

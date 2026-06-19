@@ -1,40 +1,62 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
-  CheckCircle, Clock, AlertCircle, Search, ChevronRight, Plus,
+  CheckCircle, Clock, AlertCircle, Search, ChevronRight, Plus, Loader2,
 } from 'lucide-react';
-import { CLIENT_REGISTRY } from '@/lib/platform/client-registry';
-import { buildClientSummary } from '@/lib/platform/platform-admin';
-import type { ClientSummary } from '@/lib/platform/platform-admin';
+import { getToken } from '@/lib/auth-client';
 
-const ALL_SUMMARIES = Object.values(CLIENT_REGISTRY).map(buildClientSummary);
+// B3 (#49): the gifsy console now reads the REAL `clients` table via
+// GET /api/gifsy/clients (was the static lib/platform/client-registry mock).
+interface ClientRow {
+  slug: string;
+  internalName: string;
+  status: 'ACTIVE' | 'ONBOARDING' | 'INACTIVE';
+  onboardedAt: string | null;
+  displayName?: string;
+  primaryColor?: string;
+  features?: Record<string, boolean | undefined>;
+}
 
 type StatusFilter = 'ALL' | 'ACTIVE' | 'ONBOARDING' | 'INACTIVE';
 
+const display = (c: ClientRow) => c.displayName || c.internalName;
+const featureCount = (c: ClientRow) => Object.values(c.features ?? {}).filter(Boolean).length;
+
 export default function GifsyClientsPage() {
-  const [search, setSearch]           = useState('');
+  const [clients, setClients] = useState<ClientRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
 
-  const filtered = useMemo((): ClientSummary[] => {
+  useEffect(() => {
+    fetch('/api/gifsy/clients', { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
+      .then((r) => r.json())
+      .then((j) => setClients(j.data?.clients ?? []))
+      .catch(() => setError('Could not load clients'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const filtered = useMemo((): ClientRow[] => {
     const q = search.toLowerCase();
-    return ALL_SUMMARIES.filter((s) => {
+    return clients.filter((s) => {
       const matchSearch =
         !q ||
-        s.displayName.toLowerCase().includes(q) ||
+        display(s).toLowerCase().includes(q) ||
         s.slug.toLowerCase().includes(q) ||
         s.internalName.toLowerCase().includes(q);
       const matchStatus = statusFilter === 'ALL' || s.status === statusFilter;
       return matchSearch && matchStatus;
     });
-  }, [search, statusFilter]);
+  }, [clients, search, statusFilter]);
 
   const counts = useMemo(() => ({
-    ACTIVE:     ALL_SUMMARIES.filter((s) => s.status === 'ACTIVE').length,
-    ONBOARDING: ALL_SUMMARIES.filter((s) => s.status === 'ONBOARDING').length,
-    INACTIVE:   ALL_SUMMARIES.filter((s) => s.status === 'INACTIVE').length,
-  }), []);
+    ACTIVE:     clients.filter((s) => s.status === 'ACTIVE').length,
+    ONBOARDING: clients.filter((s) => s.status === 'ONBOARDING').length,
+    INACTIVE:   clients.filter((s) => s.status === 'INACTIVE').length,
+  }), [clients]);
 
   return (
     <div className="space-y-6">
@@ -43,7 +65,7 @@ export default function GifsyClientsPage() {
         <div>
           <h1 className="text-xl font-bold text-white">Clients</h1>
           <p className="text-sm text-white/50 mt-0.5">
-            {ALL_SUMMARIES.length} clients · {counts.ACTIVE} active · {counts.ONBOARDING} onboarding
+            {clients.length} clients · {counts.ACTIVE} active · {counts.ONBOARDING} onboarding
           </p>
         </div>
         <Link
@@ -57,7 +79,6 @@ export default function GifsyClientsPage() {
 
       {/* Filters row */}
       <div className="flex items-center gap-3 flex-wrap">
-        {/* Search */}
         <div className="relative flex-1 min-w-48 max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
           <input
@@ -68,17 +89,13 @@ export default function GifsyClientsPage() {
             className="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-4 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-white/30"
           />
         </div>
-
-        {/* Status tabs */}
         <div className="flex items-center gap-0.5 bg-white/5 border border-white/10 rounded-lg p-1">
           {(['ALL', 'ACTIVE', 'ONBOARDING', 'INACTIVE'] as StatusFilter[]).map((s) => (
             <button
               key={s}
               onClick={() => setStatusFilter(s)}
               className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                statusFilter === s
-                  ? 'bg-white/15 text-white'
-                  : 'text-white/40 hover:text-white/70'
+                statusFilter === s ? 'bg-white/15 text-white' : 'text-white/40 hover:text-white/70'
               }`}
             >
               {s === 'ALL' ? 'All' : s.charAt(0) + s.slice(1).toLowerCase()}
@@ -95,60 +112,61 @@ export default function GifsyClientsPage() {
               <th className="text-left px-4 py-3 text-xs font-medium text-white/40">Client</th>
               <th className="text-left px-4 py-3 text-xs font-medium text-white/40">Slug</th>
               <th className="text-center px-4 py-3 text-xs font-medium text-white/40">Status</th>
-              <th className="text-center px-4 py-3 text-xs font-medium text-white/40">Classes</th>
-              <th className="text-center px-4 py-3 text-xs font-medium text-white/40">Features</th>
+              <th className="text-center px-4 py-3 text-xs font-medium text-white/40">Modules</th>
               <th className="text-left px-4 py-3 text-xs font-medium text-white/40">Onboarded</th>
               <th className="px-4 py-3" />
             </tr>
           </thead>
           <tbody className="divide-y divide-white/5">
-            {filtered.map((s) => (
+            {!loading && !error && filtered.map((s) => (
               <tr key={s.slug} className="hover:bg-white/5 transition-colors group">
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-3">
                     <div
                       className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold text-white shrink-0"
-                      style={{ backgroundColor: s.primaryColor }}
+                      style={{ backgroundColor: s.primaryColor || '#6b7280' }}
                     >
-                      {s.displayName[0]}
+                      {display(s)[0]}
                     </div>
                     <div>
-                      <p className="font-semibold text-white">{s.displayName}</p>
+                      <p className="font-semibold text-white">{display(s)}</p>
                       <p className="text-xs text-white/40">{s.internalName}</p>
                     </div>
                   </div>
                 </td>
                 <td className="px-4 py-3">
-                  <span className="font-mono text-xs text-white/60 bg-white/5 px-2 py-0.5 rounded">
-                    {s.slug}
-                  </span>
+                  <span className="font-mono text-xs text-white/60 bg-white/5 px-2 py-0.5 rounded">{s.slug}</span>
                 </td>
+                <td className="px-4 py-3 text-center"><StatusBadge status={s.status} /></td>
                 <td className="px-4 py-3 text-center">
-                  <StatusBadge status={s.status} />
+                  <span className="text-xs text-white/60">{featureCount(s)}</span>
+                  <span className="text-xs text-white/25">/5</span>
                 </td>
-                <td className="px-4 py-3 text-center text-white/60 text-xs">{s.partnerClassCount}</td>
-                <td className="px-4 py-3 text-center">
-                  <span className="text-xs text-white/60">{s.enabledFeatureCount}</span>
-                  <span className="text-xs text-white/25">/9</span>
+                <td className="px-4 py-3 text-white/40 text-xs">
+                  {s.onboardedAt ? new Date(s.onboardedAt).toISOString().slice(0, 10) : '—'}
                 </td>
-                <td className="px-4 py-3 text-white/40 text-xs">{s.onboardedAt}</td>
                 <td className="px-4 py-3 text-right">
                   <Link
                     href={`/gifsy/clients/${s.slug}`}
                     className="inline-flex items-center gap-1 text-xs text-white/30 group-hover:text-white/70 transition-colors"
                   >
-                    Manage
-                    <ChevronRight className="w-3.5 h-3.5" />
+                    Manage<ChevronRight className="w-3.5 h-3.5" />
                   </Link>
                 </td>
               </tr>
             ))}
-            {filtered.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-4 py-12 text-center text-white/30 text-sm">
-                  No clients match your search.
-                </td>
-              </tr>
+            {loading && (
+              <tr><td colSpan={6} className="px-4 py-12 text-center text-white/40 text-sm">
+                <Loader2 className="w-4 h-4 animate-spin inline mr-2" />Loading clients…
+              </td></tr>
+            )}
+            {error && (
+              <tr><td colSpan={6} className="px-4 py-12 text-center text-red-400 text-sm">{error}</td></tr>
+            )}
+            {!loading && !error && filtered.length === 0 && (
+              <tr><td colSpan={6} className="px-4 py-12 text-center text-white/30 text-sm">
+                No clients match your search.
+              </td></tr>
             )}
           </tbody>
         </table>
