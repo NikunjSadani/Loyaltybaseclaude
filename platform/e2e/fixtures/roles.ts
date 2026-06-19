@@ -57,6 +57,16 @@ export const ROLES = {
     expectedDashboardPath: '/sales/dashboard',
     backendRole: 'SALES_SO',
   }),
+  // The SECOND tenant's admin — logs in via the dev clientId override (#39). Used to prove the
+  // REVERSE cross-tenant direction: clientb must not see deoleo's data (gap #52 bidirectional).
+  clientbAdmin: role({
+    key: 'clientbAdmin',
+    phone: '9000000020',
+    clientId: 'clientb',
+    otp: OTP,
+    expectedDashboardPath: '/admin/dashboard',
+    backendRole: 'CLIENT_ADMIN',
+  }),
   // ⚠️ GIFSY login is BROKEN today (#39): localhost resolveClientId never yields 'gifsy'.
   // Listed for completeness; the login-matrix spec asserts this is the ONE expected-broken role
   // until #39 is fixed (subdomain + dev clientId override, per DATA-VISIBILITY Q3).

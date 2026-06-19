@@ -63,10 +63,18 @@ export async function sendOTP(
 export async function verifyOTP(
   mobile: string,
   otp: string,
+  clientIdOverride?: string,
 ): Promise<VerifyOTPResult> {
   try {
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
-    const clientId = resolveClientId((await headers()).get('host'));
+    let clientId = resolveClientId((await headers()).get('host'));
+
+    // DEV-ONLY clientId override (#39 / Q3). On localhost there is no real subdomain, so the form
+    // offers an explicit org field to log in as GIFSY (or any non-default tenant). NEVER honored in
+    // production — there the Host subdomain is authoritative, so a tenant cannot impersonate another.
+    if (process.env.NODE_ENV !== 'production' && clientIdOverride) {
+      clientId = clientIdOverride.trim().toLowerCase();
+    }
 
     const res = await fetch(`${baseUrl}/api/auth/verify-otp`, {
       method: 'POST',

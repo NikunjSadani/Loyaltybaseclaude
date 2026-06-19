@@ -31,6 +31,9 @@ export default function LoginPage() {
   const [mobile, setMobile] = useState('');
   const [mobileError, setMobileError] = useState('');
   const [channel, setChannel] = useState<Channel>('SMS');
+  // DEV-ONLY org override (#39): localhost has no real subdomain, so a GIFSY admin (or any non-default
+  // tenant) supplies their clientId here. Hidden + ignored in production (Host subdomain is authoritative).
+  const [clientId, setClientId] = useState('');
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [otpError, setOtpError] = useState('');
   const [sending, setSending] = useState(false);
@@ -104,7 +107,7 @@ export default function LoginPage() {
     setOtpError('');
     setVerifying(true);
 
-    const result = await verifyOTP(mobile, code);
+    const result = await verifyOTP(mobile, code, clientId.trim() || undefined);
     setVerifying(false);
 
     if (!result.success) {
@@ -191,6 +194,22 @@ export default function LoginPage() {
               <p className="mt-1 text-xs text-red-600">{mobileError}</p>
             )}
           </div>
+
+          {/* DEV-ONLY org override (#39) — hidden in production (subdomain is authoritative there) */}
+          {process.env.NODE_ENV !== 'production' && (
+            <div>
+              <label className="text-sm font-medium text-gray-700 block mb-1.5">
+                Organization <span className="text-gray-400 font-normal">(dev — blank = deoleo)</span>
+              </label>
+              <input
+                type="text"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                placeholder="e.g. gifsy, deoleo, clientb"
+                className="w-full px-3 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 bg-white rounded-lg border border-gray-300 focus:outline-none focus:border-[var(--brand-primary)] focus:ring-2 focus:ring-[var(--brand-primary)]/20 transition-all"
+              />
+            </div>
+          )}
 
           {/* Channel selector */}
           <div>

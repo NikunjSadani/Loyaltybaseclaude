@@ -28,6 +28,14 @@ export async function login(page: Page, role: RoleDef): Promise<void> {
     await page.waitForTimeout(250); // let any pending hydration reset fire
     expect(await phoneInput.inputValue()).toBe(role.phone);
   }).toPass({ timeout: 10_000 });
+
+  // Dev-only org override (#39): set the tenant so non-deoleo roles (GIFSY, clientb) resolve correctly.
+  // On localhost resolveClientId() always yields 'deoleo', so this field is how those roles log in.
+  const orgField = page.getByPlaceholder(/gifsy, deoleo/i);
+  if (await orgField.count()) {
+    await orgField.fill(role.clientId);
+  }
+
   await page.getByRole('button', { name: 'Send OTP' }).click();
   await expect(otpBoxes.first()).toBeVisible({ timeout: 10_000 });
   const digits = role.otp.split('');

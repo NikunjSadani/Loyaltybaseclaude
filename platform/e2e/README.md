@@ -56,18 +56,22 @@ Add a role's session in `setup/auth.setup.ts` (`SESSION_ROLES`), add a project i
 `playwright.config.ts`, and add `e2e/<role>/*.e2e.ts` for each DATA-VISIBILITY row. A row is "done"
 only when its E2E test passes against real data.
 
-## Known expected-RED (until fixed — these are the bugs the harness exists to catch)
-- `partner/wallet` + `partner/dashboard` fabricated portal-shell identity → **gap #40**
-- partner not guarded out of `/admin/*` + `/gifsy/*` (no FE role guard) → **gap #41-class**
-- GIFSY login (not yet in `SESSION_ROLES`) → **gap #39** (subdomain + dev clientId override)
+## Status (2026-06-19): the matrix is GREEN (34/34) — the original reds are all remediated
+- #40 fabricated identity (partner/sales/admin), #41 FE role guards, Q1 payouts, #47 admin KPIs,
+  #52 cross-tenant (both directions), #39 GIFSY login — all fixed + verified through the harness.
 
-## Coverage limits & fan-out requirements (from the 2026-06-19 independent audit)
-Fix/add these as the matrix scales — they prevent rework and close known blind spots:
+## Coverage limits & still-OPEN (what GREEN does NOT yet cover)
 - **Write-persistence helper (S4):** none exists yet. Build the act→re-read-in-2nd-session pattern with
-  the first P0.6 write flow (KYC approve / redemption / visibility submit).
-- **Cross-tenant isolation test (S7):** the central multi-tenant risk is currently UNTESTED because only
-  one tenant (`deoleo`) is seeded. Seed a **second tenant with data**, then assert tenant A never sees
-  tenant B's rows (and that GIFSY sees both). Required before the go-live gate is meaningful.
+  the first write flow (KYC approve / redemption / visibility submit).
+- **GIFSY-sees-both real data (gap #49):** the `/gifsy/*` console reads a static `CLIENT_REGISTRY` mock,
+  not the real `clients` table — so the "operator sees both tenants" assertion is deferred until a real
+  `GET /v1/gifsy/clients` lands. (Login + a console smoke ARE covered.)
+- **Staging:** env-support is a TODO (MSG91-OTP injection + staging tenant slugs).
+- **DOM-only scan (S5):** `expectNoFabricatedData` reads `innerText` only — it misses values in input
+  `value`/`placeholder`, `aria`/`alt`/`title`, `<title>`/`<meta>`, SVG/canvas. Add attribute/value
+  assertions per-page when a flow renders data into form controls.
+- **Per-path fabricated tokens (S3):** `fixtures/fabricated.ts` supports `onlyOnPaths`; use it when a
+  real value on one page could collide with a demo token elsewhere.
 - **DOM-only scan (S5):** `expectNoFabricatedData` reads `innerText` only — it misses values in input
   `value`/`placeholder`, `aria`/`alt`/`title`, `<title>`/`<meta>`, SVG/canvas. Add attribute/value
   assertions per-page when a flow renders data into form controls.

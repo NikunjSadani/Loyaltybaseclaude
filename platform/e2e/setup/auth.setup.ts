@@ -5,13 +5,13 @@ import { login } from '../helpers/login';
 
 /**
  * Log each role in through the real form and persist its storageState for the role projects to
- * reuse. As the matrix fans out, add role keys here. GIFSY is intentionally NOT here yet (#39 —
- * login is broken until the subdomain/dev-clientId fix); a dedicated login-matrix spec asserts
- * that expected-broken state so it can't be silently forgotten.
+ * reuse. GIFSY logs in via the dev clientId override (#39) — the same real-login path as the rest.
+ * Each setup test runs login(), which asserts the right backendRole + dashboard route, so this IS
+ * the per-role login+routing assertion (no separate login-matrix needed).
  */
 mkdirSync(AUTH_DIR, { recursive: true });
 
-const SESSION_ROLES: RoleKey[] = ['partner', 'clientAdmin', 'sales'];
+const SESSION_ROLES: RoleKey[] = ['partner', 'clientAdmin', 'sales', 'gifsy', 'clientbAdmin'];
 
 for (const key of SESSION_ROLES) {
   const role = ROLES[key];
