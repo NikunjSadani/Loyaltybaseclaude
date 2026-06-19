@@ -50,11 +50,17 @@ import { TdsModule }          from './tds/tds.module';
     // Rate limiting — applied globally; OTP endpoints have tighter limits set
     // directly on the controller with @Throttle({ default: { limit, ttl } }).
     // Default here: 60 requests per minute per IP (generous for API consumers).
-    ThrottlerModule.forRoot([{
-      name:  'default',
-      ttl:   60_000,  // 1 minute window (ms)
-      limit: 60,
-    }]),
+    ThrottlerModule.forRoot({
+      throttlers: [{
+        name:  'default',
+        ttl:   60_000,  // 1 minute window (ms)
+        limit: 60,
+      }],
+      // DEV-ONLY: skip ALL rate limiting when FIXED_OTP is set (local dev + the E2E harness, whose
+      // real-login setup makes several OTP requests per run). FIXED_OTP is NEVER set in staging/prod,
+      // so throttling — incl. the tighter per-controller OTP limits — stays fully active there.
+      skipIf: () => !!process.env.FIXED_OTP,
+    }),
     PrismaModule,
     StorageModule,
     NotificationsModule,
