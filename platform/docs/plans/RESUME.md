@@ -36,10 +36,11 @@ local `src/app/api/*/route.ts` handlers on the **RETIRED platform Prisma** → t
 PHOTO_APPROVAL gate, partner-only `@Roles`; dead local route deleted; harness write-persistence test green) ·
 `admin/kyc` was a **no-op** exclusion (KYC writes already at `/v1/kyc/*`; FE calls `/api/kyc/*`, never matched).
 **NEXT = P0.6 Phases A–D (re-scoped 2026-06-19 from a code-grounded audit; full plan in `00-MASTER-PLAN §P0.6` +
-`reconcile/P0.5-make-it-runnable.md`; owner decisions in `DATA-VISIBILITY §3.1`).** **Start with A1 — Gifsy
-cross-tenant access (#38):** every KYC/visibility/payout lookup is `clientId: caller`-scoped → the GIFSY operator
-404s on tenant data (a real **bug**, the `VERIFICATION-PROTOCOL §72` class — NOT a "verify"). Fix = one shared
-"GIFSY exempt from caller-tenant filter; scope by record's tenant" rule. Then **A2** payouts money path
+`reconcile/P0.5-make-it-runnable.md`; owner decisions in `DATA-VISIBILITY §3.1`).** **✅ A1 — Gifsy cross-tenant
+access DONE (#38, 2026-06-19):** `kycTenantFilter`/`submissionTenantFilter` make GIFSY_ADMIN exempt from the
+caller-tenant filter (KYC + visibility); reviewQueue emits each record's clientId; FE got a brand column/filter;
+clientb seeded a PENDING_GIFSY KYC. Runtime-verified (6 checks) + api jest 783/783 + harness 39/39 + independent
+audit PASS (notes: slaMetrics/outletStatuses same-class → A3). **NEXT = A2** payouts money path
 (`processBatch` txn+guarded-claim + canonical TDS, #42/#43) ∥ **A3** enforcement coverage audit (#2); then **B1**
 sales-assisted redemption real (#50-E) ∥ **B2** invoices/Excel (#44) ∥ **B3** gifsy console real data (#49); then
 **C** harness+staging, **D** cleanup+platform-retirement. **Decisions:** Gifsy=sees-all console + brand-labeled

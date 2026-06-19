@@ -62,7 +62,7 @@ operator, and forced three more decisions. These define how Phase A/B (`00-MASTE
 | `/admin/dashboard` | CLIENT_ADMIN/MIS | real tenant KPIs (partners/KYC/liability/fund) | ❌ E2E baseline: still renders demo **"4,821"** (#40) — was wrongly ✅ |
 | `/admin/dashboards/*` (kyc/payments/redemptions/engagement) | CLIENT_ADMIN/MIS | real tenant aggregates | ❌ fabricated #36/#40 |
 | `/admin/kyc` (Submissions) | CLIENT_ADMIN/MIS (tenant) | tenant KYC list | ✅ (2 real); minor stale class filter #45 |
-| `/admin/kyc/approvals` (bulk Gifsy) | **GIFSY only** (Q2; no client access) | PENDING_GIFSY queue, bulk verify | ❌ verify Gifsy-only + cross-tenant #38 |
+| `/admin/kyc/approvals` (bulk Gifsy) | **GIFSY only** (Q2; no client access) | PENDING_GIFSY queue (all brands), bulk verify | ✅ A1 (#38): Gifsy cross-tenant (both brands + brand filter), CLIENT_ADMIN 403; harness-verified |
 | `/admin/payouts` | **GIFSY only** (Q1; remove from CLIENT_ADMIN nav, drop MIS) | all-tenant payout batches/txns | ❌ make Gifsy-only; CLIENT_ADMIN must 403/no-nav #41 |
 | `/admin/visibility` | CLIENT_ADMIN | tenant visibility submissions/upload | ✅ |
 | `/admin/credits-payouts/*` | CLIENT_ADMIN | tenant credit batches/status | ✅ (status verified) |
