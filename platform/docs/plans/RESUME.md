@@ -44,10 +44,14 @@ cross-tenant OVERSIGHT (see-all; A1) + per-brand OPERATION (the A2 switcher).
   `{sub:operator, role:GIFSY_ADMIN, clientId:tenant, assumed:true}` token (GIFSY-only, target-ACTIVE-only,
   sub-preserved, audited, 8h, refresh preserves scope, strategy matches session by userId+clientId). FE: a "Work in
   brand ▾" switcher (real `GET /api/gifsy/clients`) + a global "Working in &lt;Brand&gt;" banner in both shells +
-  `PORTAL_ROLES.admin` admits GIFSY_ADMIN. Operator-switch round-trip runtime-verified through the real UI; independent
-  audit PASS after 2 fixes. **A2 unblocks payouts (A3).**
-- **◐ B3 — gifsy console real data (#49) PARTIAL:** the Clients LIST + the switcher's brand list read the real
-  `clients` table now; the gifsy **dashboard** + **per-client detail** still read `CLIENT_REGISTRY` (remaining).
+  `PORTAL_ROLES.admin` admits GIFSY_ADMIN. Operator-switch round-trip runtime-verified through the real UI (harness)
+  **AND manually browser-verified** (login→switcher→assume Deoleo→banner+admin shell real KPIs→exit restores gifsy);
+  independent audit PASS after 2 fixes. **A2 unblocks payouts (A3).**
+- **◐ B3 — gifsy console real data (#49) PARTIAL:** the Clients LIST (browser-verified: "Modules X/5", retired
+  partner-class column gone) + the switcher's brand list read the real `clients` table now; the gifsy **Overview
+  dashboard** + **per-client detail** still read `CLIENT_REGISTRY` (remaining). ⚠️ **Live admin-dashboard demo chrome
+  confirmed → D1/#45:** hardcoded "NEEDS ATTENTION" numbers, the "Client/Gifsy" demo role-switcher, partner-class
+  filter chips, Growth-Trends MoM% (the KPI *cards* ARE real per #47).
 
 **NEXT = A3 — Payouts COMPLETION (#42/#43, money path; runs INSIDE the A2 assumed session — no cross-tenant rewrite):**
 (a) **batch-from-pending** sweep — the missing step: assign the orphaned redemption `PayoutTransaction`s (created
