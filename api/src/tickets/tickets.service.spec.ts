@@ -22,6 +22,7 @@ const mockPrisma = {
 };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
+const clientAdmin: JwtPayload = { sub: 'cadmin1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' };
 
 describe('TicketsService', () => {
@@ -51,6 +52,16 @@ describe('TicketsService', () => {
       const where = mockPrisma.ticket.findMany.mock.calls[0][0].where;
       expect(where).toEqual({ clientId: 'deoleo', status: 'OPEN' });
     });
+
+    // Regression (P0.6): a tenant admin must see ALL tenant tickets, not only their own.
+    // The admin/tickets page is "all support requests from outlets and sales team".
+    it('does NOT add a createdById filter for CLIENT_ADMIN (sees all tenant tickets)', async () => {
+      mockPrisma.ticket.findMany.mockResolvedValue([]);
+      mockPrisma.ticket.count.mockResolvedValue(0);
+      await service.list(clientAdmin, {});
+      const where = mockPrisma.ticket.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ clientId: 'deoleo' });
+    });
   });
 
   describe('getOne', () => {
@@ -67,6 +78,12 @@ describe('TicketsService', () => {
     it('returns the ticket for its owner', async () => {
       mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', createdById: 'user1' });
       await expect(service.getOne(partner, 't1')).resolves.toEqual({ ticket: { id: 't1', createdById: 'user1' } });
+    });
+
+    // Regression (P0.6): a tenant admin can open a ticket someone else created.
+    it('returns a ticket created by another user for a CLIENT_ADMIN', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', createdById: 'someoneElse' });
+      await expect(service.getOne(clientAdmin, 't1')).resolves.toEqual({ ticket: { id: 't1', createdById: 'someoneElse' } });
     });
   });
 

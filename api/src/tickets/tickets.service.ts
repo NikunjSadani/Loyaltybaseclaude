@@ -11,24 +11,32 @@ import { AddMessageDto, CreateTicketDto, EscalateTicketDto, ListTicketsQueryDto 
 
 /**
  * Support tickets — ported from platform/src/app/api/tickets/* (S4 pilot).
- * Tenant-scoped by clientId (from the session-bound JWT); non-GIFSY callers
- * see/act on only their own tickets. Business logic lives here; the controller
- * is a thin HTTP adapter.
+ * Tenant-scoped by clientId (from the session-bound JWT). Admin roles
+ * (GIFSY_ADMIN / CLIENT_ADMIN / MIS_USER) see + manage ALL tickets in their
+ * tenant (admin/tickets = "all support requests from outlets and sales team");
+ * field roles (sales chain, partners) see/act on only the tickets they created.
+ * Business logic lives here; the controller is a thin HTTP adapter.
  */
 @Injectable()
 export class TicketsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private isGifsy(user: JwtPayload): boolean {
-    return user.role === 'GIFSY_ADMIN';
+  /**
+   * Tenant-support admins: see + manage every ticket in their tenant. GIFSY is
+   * the platform operator; CLIENT_ADMIN/MIS_USER are the tenant's support desk.
+   * Field roles (SALES_*, SSS/WHOLESALER/SUB_STOCKIST) are NOT admins — they are
+   * scoped to their own tickets.
+   */
+  private isSupportAdmin(user: JwtPayload): boolean {
+    return user.role === 'GIFSY_ADMIN' || user.role === 'CLIENT_ADMIN' || user.role === 'MIS_USER';
   }
 
   async list(user: JwtPayload, q: ListTicketsQueryDto) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
     const where: Prisma.TicketWhereInput = { clientId: user.clientId };
-    // Non-admins are scoped to the tickets they created.
-    if (!this.isGifsy(user)) where.createdById = user.sub;
+    // Field roles see only their own tickets; support admins see all tenant tickets.
+    if (!this.isSupportAdmin(user)) where.createdById = user.sub;
     if (q.status) where.status = q.status;
     if (q.category) where.category = q.category;
 
@@ -75,7 +83,8 @@ export class TicketsService {
   private async loadAccessible(user: JwtPayload, id: string, include?: Prisma.TicketInclude) {
     const ticket = await this.prisma.ticket.findFirst({ where: { id, clientId: user.clientId }, include });
     if (!ticket) throw new NotFoundException('Ticket not found');
-    if (!this.isGifsy(user) && ticket.createdById !== user.sub) {
+    // Support admins can open any ticket in their tenant; field roles only their own.
+    if (!this.isSupportAdmin(user) && ticket.createdById !== user.sub) {
       throw new ForbiddenException('Forbidden');
     }
     return ticket;
@@ -125,7 +134,7 @@ export class TicketsService {
     const ticket = await this.loadAccessible(user, id);
     if (ticket.status === 'CLOSED') throw new BadRequestException('Cannot add message to a closed ticket');
     const isInternal = dto.isInternal ?? false;
-    if (isInternal && !this.isGifsy(user)) {
+    if (isInternal && !this.isSupportAdmin(user)) {
       throw new ForbiddenException('Forbidden - Internal notes are admin only');
     }
 
@@ -139,8 +148,8 @@ export class TicketsService {
           isInternal,
         },
       });
-      // Admin replying to an OPEN ticket moves it to IN_PROGRESS.
-      if (this.isGifsy(user) && ticket.status === 'OPEN') {
+      // A support admin replying to an OPEN ticket moves it to IN_PROGRESS.
+      if (this.isSupportAdmin(user) && ticket.status === 'OPEN') {
         await tx.ticket.update({ where: { id }, data: { status: 'IN_PROGRESS', updatedAt: new Date() } });
       }
       return msg;
