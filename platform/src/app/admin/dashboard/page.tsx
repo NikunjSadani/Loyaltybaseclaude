@@ -80,40 +80,23 @@ type OutletTypeFilter = 'ALL' | 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
 
 /* ─── KPI card data (varies by filter for realism) ──────────────────────────── */
 
-// growthGood = true means a positive % is a good thing (e.g. more partners).
-// growthGood = false means a negative % is good (e.g. fewer pending KYCs).
-interface KpiCard {
-  label:          string;
-  value:          string;
-  change:         string;
-  positive:       boolean;
-  icon:           React.ElementType;
-  color:          string;
-  border:         string;
-  mom:            number;   // MoM % (signed)
-  yoy:            number;   // YoY % (signed)
-  growthGood:     boolean;  // whether positive growth is desirable
+// KPI card chrome (label/icon/colors). Values come from the live /admin/dashboard/kpis endpoint;
+// no mock bases (the old 4821/214/… were fabricated, #40/#47). "Fund Available Balance" was dropped —
+// the payout fund is GIFSY-only (Q1), not a tenant KPI. MoM/YoY trend deltas need time-series we don't
+// aggregate yet, so they're omitted here rather than faked (tracked residual — see gap-register).
+interface KpiMeta {
+  label: string;
+  icon:  React.ElementType;
+  color: string;
+  border: string;
 }
 
-function getKpiCards(period: string, state: string, partnerClass: PartnerClass): KpiCard[] {
-  const stateM  = state === 'all' ? 1 : state === 'Maharashtra' ? 1.18 : state === 'Delhi' ? 0.92 : 0.78;
-  const classM  = partnerClass === 'All' ? 1 : partnerClass === 'Gold' ? 0.38 : partnerClass === 'Platinum' ? 0.08 : 0.54;
-  const periodM = period === 'ytd' ? 5.2 : period.includes('Q') ? 2.9 : 1;
-
-  const partners  = Math.round(4821 * stateM * (partnerClass === 'All' ? 1 : classM));
-  const kyc       = Math.round(214  * stateM);
-  const vis       = Math.round(1092 * stateM * periodM);
-  const liability = (2.14 * stateM * periodM).toFixed(2);
-  const fund      = (84.3 * stateM).toFixed(1);
-
-  return [
-    { label: 'Total Active Partners',        value: partners.toLocaleString('en-IN'), change: '+143 this month',      positive: true,  icon: Users,      color: 'bg-blue-50 text-blue-600',     border: 'border-blue-100',   mom:  +3.1, yoy: +18.4, growthGood: true  },
-    { label: 'Pending KYC',                  value: kyc.toLocaleString('en-IN'),      change: '38 breached SLA',      positive: false, icon: Clock,      color: 'bg-amber-50 text-amber-600',   border: 'border-amber-100',  mom:  -8.2, yoy: -12.4, growthGood: false },
-    { label: 'Pending Visibility Approvals', value: vis.toLocaleString('en-IN'),      change: '+312 since yesterday', positive: false, icon: Eye,        color: 'bg-purple-50 text-purple-600', border: 'border-purple-100', mom: +22.8, yoy: +34.1, growthGood: false },
-    { label: 'Total Points Liability',       value: `₹${liability} Cr`,              change: '+₹18.4L this month',   positive: false, icon: TrendingUp, color: 'bg-red-50 text-red-600',       border: 'border-red-100',    mom:  +9.4, yoy: +28.6, growthGood: false },
-    { label: 'Fund Available Balance',       value: `₹${fund}L`,                     change: '↓ Below threshold',    positive: false, icon: Wallet,     color: 'bg-green-50 text-green-600',   border: 'border-green-100',  mom:  -4.2, yoy: -18.9, growthGood: true  },
-  ];
-}
+const KPI_META: KpiMeta[] = [
+  { label: 'Total Active Partners',        icon: Users,      color: 'bg-blue-50 text-blue-600',     border: 'border-blue-100'   },
+  { label: 'Pending KYC',                  icon: Clock,      color: 'bg-amber-50 text-amber-600',   border: 'border-amber-100'  },
+  { label: 'Pending Visibility Approvals', icon: Eye,        color: 'bg-purple-50 text-purple-600', border: 'border-purple-100' },
+  { label: 'Total Points Liability',       icon: TrendingUp, color: 'bg-red-50 text-red-600',       border: 'border-red-100'    },
+];
 
 /* ─── Growth strip data ──────────────────────────────────────────────────────── */
 
@@ -305,9 +288,8 @@ export default function DashboardPage() {
   };
 
   const regionOptions = REGION_OPTIONS[state] ?? REGION_OPTIONS.all;
-  const kpiCards      = useMemo(() => getKpiCards(period, state, partnerClass), [period, state, partnerClass]);
 
-  // Live KPIs from API — silently overlaid on computed cards
+  // Live KPIs from the API — the only source for the cards. No mock fallback (was 4821/214/…).
   const [liveKpis, setLiveKpis] = useState<ApiKpiData | null>(null);
 
   useEffect(() => {
@@ -317,17 +299,20 @@ export default function DashboardPage() {
       .catch(() => {});
   }, []);
 
-  // Overlay real counts on the hardcoded KPI cards (keep growth % as-is — needs time-series)
+  // Build the cards from real data; '—' until the endpoint responds (never a fabricated number).
   const displayedKpiCards = useMemo(() => {
-    if (!liveKpis) return kpiCards;
-    return kpiCards.map((card, i) => {
-      if (i === 0) return { ...card, value: liveKpis.activePartners.toLocaleString('en-IN') };
-      if (i === 1) return { ...card, value: liveKpis.pendingKyc.toLocaleString('en-IN') };
-      if (i === 2) return { ...card, value: liveKpis.pendingVisibility.toLocaleString('en-IN') };
-      if (i === 3) return { ...card, value: `₹${(liveKpis.totalRedeemablePoints / 10_000_000).toFixed(2)} Cr` };
-      return card;
+    const fmt = (n: number) => n.toLocaleString('en-IN');
+    return KPI_META.map((meta, i) => {
+      let value = '—';
+      if (liveKpis) {
+        if (i === 0) value = fmt(liveKpis.activePartners);
+        else if (i === 1) value = fmt(liveKpis.pendingKyc);
+        else if (i === 2) value = fmt(liveKpis.pendingVisibility);
+        else if (i === 3) value = `₹${(liveKpis.totalRedeemablePoints / 10_000_000).toFixed(2)} Cr`;
+      }
+      return { ...meta, value };
     });
-  }, [kpiCards, liveKpis]);
+  }, [liveKpis]);
 
   // Overlay real payout counts/amounts (groups by raw DB status)
   const displayedPayoutSummary = useMemo(() => {
@@ -480,10 +465,6 @@ export default function DashboardPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
           {displayedKpiCards.map((card) => {
             const Icon = card.icon;
-            const growthPct  = growthView === 'mom' ? card.mom : card.yoy;
-            const growthIsGood = card.growthGood ? growthPct >= 0 : growthPct <= 0;
-            const growthLabel = `${growthPct >= 0 ? '+' : ''}${growthPct.toFixed(1)}%`;
-
             return (
               <div
                 key={card.label}
@@ -493,27 +474,12 @@ export default function DashboardPage() {
                   <div className={`p-2 rounded-lg ${card.color}`}>
                     <Icon className="w-4 h-4" />
                   </div>
-                  {/* Growth badge */}
-                  <span
-                    className={`inline-flex items-center gap-0.5 text-[11px] font-bold px-1.5 py-0.5 rounded-full ${
-                      growthIsGood
-                        ? 'bg-emerald-50 text-emerald-700'
-                        : 'bg-red-50 text-red-600'
-                    }`}
-                  >
-                    {growthPct >= 0
-                      ? <ArrowUpRight className="w-3 h-3" />
-                      : <ArrowDownRight className="w-3 h-3" />}
-                    {growthLabel}
-                  </span>
+                  {/* MoM/YoY trend badge omitted — needs real time-series (tracked residual). */}
                 </div>
                 <div>
                   <p className="text-2xl font-bold text-gray-900">{card.value}</p>
                   <p className="text-xs text-gray-500 mt-0.5">{card.label}</p>
                 </div>
-                <p className={`text-xs font-medium ${card.positive ? 'text-green-600' : 'text-amber-600'}`}>
-                  {card.change}
-                </p>
               </div>
             );
           })}

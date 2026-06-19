@@ -21,6 +21,16 @@ test.describe('@clientAdmin dashboard', () => {
     await expect(page.getByText(/deoleo/i).first()).toBeVisible();
   });
 
+  test('KPI cards show REAL live values, not the loading dash or a mock (#47)', async ({ page }) => {
+    await page.goto('/admin/dashboard');
+    // The "Total Active Partners" value (<p> before the label <p>) must resolve to a real integer
+    // from /admin/dashboard/kpis — not the '—' placeholder, not the old fabricated 4,821 base.
+    const value = page
+      .locator('p', { hasText: /^Total Active Partners$/ })
+      .locator('xpath=preceding-sibling::p[1]');
+    await expect(value).toHaveText(/^\d[\d,]*$/, { timeout: 10_000 });
+  });
+
   test('no fabricated values + no cross-tenant leak (#40 / Q6)', async ({ page }) => {
     await page.goto('/admin/dashboard');
     await expectNoFabricatedData(page);
