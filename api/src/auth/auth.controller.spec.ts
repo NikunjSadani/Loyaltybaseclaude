@@ -62,7 +62,7 @@ describe('AuthController', () => {
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9876543210', name: 'Test User' };
       const result  = controller.me(payload);
 
-      expect(result).toEqual({ id: 'user_1', role: 'RETAILER', clientId: 'deoleo' });
+      expect(result).toEqual({ id: 'user_1', role: 'RETAILER', clientId: 'deoleo', name: 'Test User', assumed: false });
     });
   });
 });

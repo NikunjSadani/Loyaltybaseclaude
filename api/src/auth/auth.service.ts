@@ -1,11 +1,12 @@
 import {
   Injectable, UnauthorizedException, BadRequestException,
-  Logger, ForbiddenException,
+  Logger, ForbiddenException, NotFoundException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { User } from '@prisma/client';
+import { JwtPayload } from '../common/decorators/current-user.decorator';
 import * as crypto from 'crypto';
 
 // ─── Business rule constants — single source of truth ─────────────────────────
@@ -142,27 +143,47 @@ export class AuthService {
 
   // ── Generate JWT + Refresh token ─────────────────────────────────────────────
 
-  async generateTokens(user: User): Promise<{ accessToken: string; refreshToken: string }> {
+  /**
+   * Mint an access + refresh token and persist a session row.
+   *
+   * `opts.clientIdOverride` / `opts.assumed` support the A2 operator-context
+   * (assume-tenant) flow: a GIFSY_ADMIN gets a token scoped to a TENANT's clientId
+   * (not their own `gifsy`) while `sub` stays the real operator. When overriding,
+   * the session row + JWT both carry the assumed clientId, and `opts.expiresIn`
+   * gives assumed tokens a shorter life (industry practice — scoped, short-lived).
+   */
+  async generateTokens(
+    user: User,
+    opts?: { clientIdOverride?: string; assumed?: boolean; expiresIn?: string },
+  ): Promise<{ accessToken: string; refreshToken: string }> {
+    const clientId = opts?.clientIdOverride ?? user.clientId;
     const payload = {
       sub:      user.id,
       role:     user.role,
-      clientId: user.clientId,
+      clientId,
       phone:    user.phone,
       name:     user.name,
+      ...(opts?.assumed ? { assumed: true } : {}),
     };
 
+    // expiresIn accepts the `ms` StringValue | number; the config value widens to
+    // string|number, so cast (the original used an untyped config.get for this).
+    const expiresIn = (opts?.expiresIn ?? this.config.get('JWT_EXPIRES_IN') ?? '7d') as string;
     const accessToken  = this.jwt.sign(payload, {
       secret:    this.config.get('JWT_SECRET'),
-      expiresIn: this.config.get('JWT_EXPIRES_IN') ?? '7d',
+      expiresIn: expiresIn as unknown as number,
     });
 
     const refreshToken = crypto.randomBytes(40).toString('hex');
-    const expiresAt    = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+    const ttlMs        = opts?.assumed
+      ? 8 * 60 * 60 * 1000              // assumed sessions: 8h
+      : 30 * 24 * 60 * 60 * 1000;       // normal: 30 days
+    const expiresAt    = new Date(Date.now() + ttlMs);
 
     await this.prisma.userSession.create({
       data: {
         userId:       user.id,
-        clientId:     user.clientId,   // canonical model binds the tenant to the session
+        clientId,                       // canonical model binds the tenant to the session
         token:        accessToken,
         refreshToken,
         expiresAt,
@@ -170,6 +191,69 @@ export class AuthService {
     });
 
     return { accessToken, refreshToken };
+  }
+
+  /**
+   * POST /v1/auth/assume-tenant — A2 operator-context switcher (#51).
+   *
+   * A GIFSY platform operator exchanges their `gifsy` session for a token scoped
+   * to ONE tenant's context, so per-brand operations (payouts) run under the
+   * normal `clientId: user.clientId` discipline with no cross-tenant query rewrite.
+   *
+   * Guardrails (industry pattern — AWS AssumeRole / Salesforce Login-As):
+   *   - GIFSY_ADMIN only (defense-in-depth beyond the controller @Roles);
+   *   - target must be a REAL, ACTIVE tenant (never `gifsy` itself);
+   *   - `sub` stays the real operator → audit logs attribute actions to them;
+   *   - every assume is audit-logged (action LOGIN + metadata.event=ASSUME_TENANT);
+   *   - the token is short-lived (8h) and flagged `assumed:true` (FE banner).
+   */
+  async assumeTenant(
+    operator: JwtPayload,
+    targetClientId: string,
+  ): Promise<{ accessToken: string; refreshToken: string; clientId: string; brandName: string }> {
+    if (operator.role !== 'GIFSY_ADMIN') {
+      throw new ForbiddenException('Only Gifsy operators may switch brand context');
+    }
+    if (targetClientId === operator.clientId) {
+      throw new BadRequestException('Already in this context');
+    }
+
+    const target = await this.prisma.client.findFirst({
+      where: { id: targetClientId, status: 'ACTIVE' },
+      select: { id: true, internalName: true },
+    });
+    if (!target) {
+      throw new NotFoundException('Tenant not found or not active');
+    }
+
+    // The real operator user (their identity rides the assumed token).
+    const opUser = await this.prisma.user.findFirst({
+      where: { id: operator.sub, deletedAt: null },
+    });
+    if (!opUser) throw new UnauthorizedException('Operator account not found');
+
+    // Audit the assume on the money-path trail — attributed to the real operator.
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'LOGIN',
+        entityType: 'CLIENT',
+        entityId: targetClientId,
+        actorId: operator.sub,
+        metadata: { event: 'ASSUME_TENANT', fromClientId: operator.clientId, toClientId: targetClientId },
+      },
+    });
+
+    const tokens = await this.generateTokens(opUser, {
+      clientIdOverride: targetClientId,
+      assumed: true,
+      expiresIn: '8h',
+    });
+
+    this.logger.log(
+      `GIFSY operator ${operator.sub} assumed tenant ${targetClientId} (from ${operator.clientId})`,
+    );
+
+    return { ...tokens, clientId: targetClientId, brandName: target.internalName };
   }
 
   // ── Refresh token ────────────────────────────────────────────────────────────
@@ -190,7 +274,17 @@ export class AuthService {
       data:  { revokedAt: new Date() },
     });
 
-    return this.generateTokens(session.user);
+    // Preserve the operator-context (A2): an assumed session's row carries the
+    // TENANT clientId while its user's home clientId is `gifsy`. Refresh must keep
+    // the assumed tenant scope (otherwise the operator is silently reverted to the
+    // platform context mid-flow). Only preserve while the operator is still a
+    // GIFSY_ADMIN — a demoted operator falls back to their home scope.
+    const isAssumed =
+      session.clientId !== session.user.clientId && session.user.role === 'GIFSY_ADMIN';
+    return this.generateTokens(
+      session.user,
+      isAssumed ? { clientIdOverride: session.clientId, assumed: true, expiresIn: '8h' } : undefined,
+    );
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────────

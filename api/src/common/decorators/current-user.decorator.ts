@@ -6,6 +6,13 @@ export interface JwtPayload {
   clientId: string;
   phone:    string;
   name:     string;
+  /**
+   * True when this is an OPERATOR-CONTEXT (assume-tenant) token: a GIFSY_ADMIN
+   * working inside a tenant's context (A2/#51). `sub` stays the real operator
+   * (audit attribution); `clientId` is the assumed tenant. The FE shows a
+   * "Working in <Brand>" banner when this is set. A normal session omits it.
+   */
+  assumed?: boolean;
   iat?:     number;
   exp?:     number;
 }

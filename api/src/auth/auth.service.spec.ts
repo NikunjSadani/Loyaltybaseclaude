@@ -3,6 +3,7 @@
 // Run: npx jest src/auth/auth.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
+import { ForbiddenException, NotFoundException, BadRequestException } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
@@ -14,7 +15,11 @@ const mockPrisma = {
   user:    { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
   otpCode: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
   userSession: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+  client:  { findFirst: jest.fn() },
+  auditLog: { create: jest.fn() },
 };
+
+const gifsyOp = { sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' } as any;
 
 const mockJwt = {
   sign:   jest.fn().mockReturnValue('mock.jwt.token'),
@@ -169,7 +174,85 @@ describe('AuthService', () => {
     });
   });
 
+  // ── refreshToken preserves the assumed operator-context (A2 audit fix) ───────
+  describe('refreshToken (operator-context)', () => {
+    it('a refreshed ASSUMED session keeps the tenant scope + assumed flag (not reverted to gifsy)', async () => {
+      // Session row carries the TENANT clientId; its user is the gifsy operator.
+      mockPrisma.userSession.findFirst.mockResolvedValue({
+        id: 'sess_a', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
+        expiresAt: new Date(Date.now() + 3600_000),
+        user: { id: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' },
+      });
+      mockPrisma.userSession.update.mockResolvedValue({});
+      mockPrisma.userSession.create.mockResolvedValue({});
+
+      await service.refreshToken('rt');
+
+      const payload = mockJwt.sign.mock.calls[0][0];
+      expect(payload).toMatchObject({ sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'deoleo', assumed: true });
+    });
+
+    it('a normal session refreshes to its own home clientId (no assumed flag)', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({
+        id: 'sess_n', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
+        expiresAt: new Date(Date.now() + 3600_000),
+        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
+      });
+      mockPrisma.userSession.update.mockResolvedValue({});
+      mockPrisma.userSession.create.mockResolvedValue({});
+
+      await service.refreshToken('rt');
+
+      const payload = mockJwt.sign.mock.calls[0][0];
+      expect(payload.clientId).toBe('deoleo');
+      expect(payload.assumed).toBeUndefined();
+    });
+  });
+
   // â”€â”€ Fixed OTP mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  // ── assumeTenant (A2 operator-context switcher, #51) ────────────────────────
+  describe('assumeTenant', () => {
+    beforeEach(() => {
+      mockPrisma.client.findFirst.mockResolvedValue({ id: 'deoleo', internalName: 'Deoleo' });
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' });
+      mockPrisma.userSession.create.mockResolvedValue({});
+      mockPrisma.auditLog.create.mockResolvedValue({});
+    });
+
+    it('mints a token scoped to the target tenant, keeping the GIFSY role + real operator sub', async () => {
+      const res = await service.assumeTenant(gifsyOp, 'deoleo');
+      expect(res.clientId).toBe('deoleo');
+      expect(res.brandName).toBe('Deoleo');
+      // the JWT payload carries the assumed tenant + assumed flag, sub stays the operator
+      const payload = mockJwt.sign.mock.calls[0][0];
+      expect(payload).toMatchObject({ sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'deoleo', assumed: true });
+      // the session row is bound to the assumed tenant
+      expect(mockPrisma.userSession.create.mock.calls[0][0].data.clientId).toBe('deoleo');
+    });
+
+    it('audit-logs the assume, attributed to the real operator', async () => {
+      await service.assumeTenant(gifsyOp, 'deoleo');
+      const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
+      expect(audit.actorId).toBe('op1');
+      expect(audit.metadata).toMatchObject({ event: 'ASSUME_TENANT', fromClientId: 'gifsy', toClientId: 'deoleo' });
+    });
+
+    it('refuses a non-GIFSY caller (403)', async () => {
+      const clientAdmin = { ...gifsyOp, role: 'CLIENT_ADMIN', clientId: 'deoleo' };
+      await expect(service.assumeTenant(clientAdmin, 'clientb')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('404s an unknown/inactive tenant', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(null);
+      await expect(service.assumeTenant(gifsyOp, 'no-such')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('400s assuming the operator’s own context', async () => {
+      await expect(service.assumeTenant(gifsyOp, 'gifsy')).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
 
   describe('FIXED_OTP mode', () => {
     it('should accept fixed OTP regardless of stored code when FIXED_OTP env is set', async () => {

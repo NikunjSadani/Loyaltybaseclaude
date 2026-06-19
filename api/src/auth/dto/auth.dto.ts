@@ -29,3 +29,11 @@ export class RefreshTokenDto {
   @IsNotEmpty()
   refreshToken: string;
 }
+
+/** POST /v1/auth/assume-tenant — the GIFSY operator-context switcher (A2/#51). */
+export class AssumeTenantDto {
+  /** The target tenant's clientId slug to work inside (e.g. "deoleo"). */
+  @IsString()
+  @IsNotEmpty()
+  clientId: string;
+}
