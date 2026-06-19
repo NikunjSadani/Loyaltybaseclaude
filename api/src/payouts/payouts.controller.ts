@@ -23,8 +23,8 @@ import {
 /**
  * Credits & Payouts API — re-homed from platform/src/app/api/payouts/* onto /v1.
  * Thin adapter: auth (JWT) + tenant scope come from @CurrentUser(); RBAC via
- * @RequirePermission (flag-gated). Read endpoints are GIFSY_ADMIN or MIS_USER;
- * mutating endpoints are GIFSY-only — both via @Roles. Responses are enveloped
+ * @RequirePermission (flag-gated). Q1 (2026-06-19): payout management is GIFSY-only —
+ * ALL endpoints (read + mutating) are @Roles('GIFSY_ADMIN'); MIS_USER dropped. Responses are enveloped
  * globally by TransformInterceptor (except the StreamableFile download, which
  * passes through unwrapped).
  */
@@ -33,7 +33,7 @@ export class PayoutsController {
   constructor(private readonly payouts: PayoutsService) {}
 
   @Get('transactions')
-  @Roles('GIFSY_ADMIN', 'MIS_USER')
+  @Roles('GIFSY_ADMIN')
   @RequirePermission('payouts:read')
   listTransactions(
     @CurrentUser() user: JwtPayload,
@@ -43,7 +43,7 @@ export class PayoutsController {
   }
 
   @Get('fund')
-  @Roles('GIFSY_ADMIN', 'MIS_USER')
+  @Roles('GIFSY_ADMIN')
   @RequirePermission('payouts:read')
   getFundSummary(@CurrentUser() user: JwtPayload) {
     return this.payouts.getFundSummary(user);
@@ -57,7 +57,7 @@ export class PayoutsController {
   }
 
   @Get('batches')
-  @Roles('GIFSY_ADMIN', 'MIS_USER')
+  @Roles('GIFSY_ADMIN')
   @RequirePermission('payouts:read')
   listBatches(
     @CurrentUser() user: JwtPayload,
@@ -74,7 +74,7 @@ export class PayoutsController {
   }
 
   @Get('batches/:id')
-  @Roles('GIFSY_ADMIN', 'MIS_USER')
+  @Roles('GIFSY_ADMIN')
   @RequirePermission('payouts:read')
   getBatch(
     @CurrentUser() user: JwtPayload,
@@ -92,7 +92,7 @@ export class PayoutsController {
   }
 
   @Get('reconciliation')
-  @Roles('GIFSY_ADMIN', 'MIS_USER')
+  @Roles('GIFSY_ADMIN')
   @RequirePermission('payouts:reconcile')
   async reconciliation(
     @CurrentUser() user: JwtPayload,

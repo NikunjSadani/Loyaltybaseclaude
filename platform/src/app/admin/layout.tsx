@@ -86,10 +86,13 @@ const ALL_NAV_ITEMS = [
     ],
   },
   {
+    // Q1: payout management is GIFSY-only — hidden from CLIENT_ADMIN nav (and the pages are
+    // guarded to GIFSY_ADMIN via admin/payouts/layout.tsx). MIS dropped from the backend too.
     href: '/admin/payouts',
     label: 'Payout Management',
     icon: CreditCard,
     featureFlag: 'walletModule' as const,
+    gifsyOnly: true,
     children: [
       { href: '/admin/payouts',      label: 'Payout Batches'  },
       { href: '/admin/payouts/fund', label: 'Fund Management' },

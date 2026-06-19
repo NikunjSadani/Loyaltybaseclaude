@@ -18,16 +18,18 @@ export async function login(page: Page, role: RoleDef): Promise<void> {
   const otpBoxes = page.locator('input[inputmode="numeric"][maxlength="1"]');
   await expect(phoneInput).toBeVisible();
 
-  // Step 1 — phone → Send OTP, RETRIED until the OTP step renders. Beats the Next.js hydration race:
-  // if we fill+click before the client hydrates, React's onChange never fires → the form rejects an
-  // "empty" mobile and stays put. The guard short-circuits once we've advanced (phone input is gone).
+  // Step 1 — phone, then Send OTP exactly ONCE. send-otp is throttled to 5/min/IP, so we must NOT
+  // re-send on retry. The phone field is a controlled input: filling it before React hydrates makes
+  // React reset it to '' once it hydrates with the empty initial state (the "Mobile number is
+  // required" flake). So re-fill (no network) until the value SURVIVES a short settle — proving
+  // hydration is done and onChange captured it — then click Send OTP one time.
   await expect(async () => {
-    if (await otpBoxes.first().isVisible().catch(() => false)) return;
     await phoneInput.fill(role.phone);
-    await expect(phoneInput).toHaveValue(role.phone);
-    await page.getByRole('button', { name: 'Send OTP' }).click();
-    await expect(otpBoxes.first()).toBeVisible({ timeout: 3000 });
-  }).toPass({ timeout: 20_000 });
+    await page.waitForTimeout(250); // let any pending hydration reset fire
+    expect(await phoneInput.inputValue()).toBe(role.phone);
+  }).toPass({ timeout: 10_000 });
+  await page.getByRole('button', { name: 'Send OTP' }).click();
+  await expect(otpBoxes.first()).toBeVisible({ timeout: 10_000 });
   const digits = role.otp.split('');
   expect(digits).toHaveLength(6);
   for (let i = 0; i < 6; i++) {
