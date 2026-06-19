@@ -8,9 +8,10 @@ Repo root: C:\Users\nikun\Loyaltybaseclaude  (git root; branch **develop**). Fro
 Backend: `api/` (NestJS + Prisma 7, the source of truth — owns the DB + ALL business logic).
 
 ⚠️ **STATE (2026-06-19): the ENFORCEMENT is built and the local matrix is GREEN — but green is BOUNDED, not
-"the whole app works".** The Playwright E2E harness (`platform/e2e`, `npm run e2e`, **36/36 green**) now covers
+"the whole app works".** The Playwright E2E harness (`platform/e2e`, `npm run e2e`, **37/37 green**) now covers
 real-login-per-role · real scoped data (no fabrication) · role/portal scoping · cross-tenant isolation (BOTH
-directions) · write-persistence (tickets + the partner redemption MONEY PATH). It is re-runnable (dev throttle
+directions) · write-persistence (tickets · the partner redemption MONEY PATH · the partner VISIBILITY submit).
+It is re-runnable (dev throttle
 disabled via `skipIf(FIXED_OTP)`). **It does NOT yet cover every page/flow** — most admin sub-pages, partner
 targets/leaderboard, sales team/outlets, the gifsy console (mock, #49), and most write flows are unverified. Read
 FIRST: [[e2e-harness]] · `e2e/README.md` · `GO-LIVE-READINESS.md` · `DATA-VISIBILITY.md` · `VERIFICATION-PROTOCOL.md`
@@ -27,15 +28,26 @@ admin KPIs real) · #41 role/portal guards + Q1 payouts GIFSY-only · #47 admin 
 tenant `clientb` seeded) · **#50 the partner REDEMPTION MONEY PATH** (was 100% broken). Q1–Q6 owner decisions encoded
 in `DATA-VISIBILITY.md §3`.
 
-**🔑 KEY PATTERN — the map of remaining DEAD WRITES is `platform/next.config.ts`:** its `beforeFiles` rewrite
-**EXCLUDES** some `/api/*` paths from the backend proxy (negative lookahead), routing them to stale local
-`src/app/api/*/route.ts` handlers that use the **RETIRED platform Prisma** → they throw. Redemption was one (FIXED:
-removed from the exclusion + deleted the dead local route → forwards to the P5 backend). **STILL excluded/broken:
-`visibility/submit` + `admin/kyc`** — their backends aren't ported yet. **NEXT = port `POST /v1/visibility/submit` +
-the `admin/kyc` write to the backend, then drop their exclusions** (same fix pattern). Also: sales `/catalogue`
-redemption is mock (hardcoded OTP `999999`, #50/P0.6-E); `payouts.processBatch` needs txn+guard (#42, money path).
+**🔑 KEY PATTERN (now CLEARED) — `platform/next.config.ts` proxy-exclusions WERE the map of DEAD WRITES.** Its
+`beforeFiles` rewrite excluded some `/api/*` paths from the backend proxy (negative lookahead), routing them to stale
+local `src/app/api/*/route.ts` handlers on the **RETIRED platform Prisma** → they threw. **ALL EXCLUSIONS NOW DROPPED
+(`/api/:path*` forwards everything):** redemption (P5 backend, fixed 2026-06-19) · **`visibility/submit` PORTED**
+(`POST /v1/visibility/submit` — multipart→GCS via `StorageService`, partner-from-JWT, outlet-from-partner,
+PHOTO_APPROVAL gate, partner-only `@Roles`; dead local route deleted; harness write-persistence test green) ·
+`admin/kyc` was a **no-op** exclusion (KYC writes already at `/v1/kyc/*`; FE calls `/api/kyc/*`, never matched).
+**NEXT = P0.6 Phases A–D (re-scoped 2026-06-19 from a code-grounded audit; full plan in `00-MASTER-PLAN §P0.6` +
+`reconcile/P0.5-make-it-runnable.md`; owner decisions in `DATA-VISIBILITY §3.1`).** **Start with A1 — Gifsy
+cross-tenant access (#38):** every KYC/visibility/payout lookup is `clientId: caller`-scoped → the GIFSY operator
+404s on tenant data (a real **bug**, the `VERIFICATION-PROTOCOL §72` class — NOT a "verify"). Fix = one shared
+"GIFSY exempt from caller-tenant filter; scope by record's tenant" rule. Then **A2** payouts money path
+(`processBatch` txn+guarded-claim + canonical TDS, #42/#43) ∥ **A3** enforcement coverage audit (#2); then **B1**
+sales-assisted redemption real (#50-E) ∥ **B2** invoices/Excel (#44) ∥ **B3** gifsy console real data (#49); then
+**C** harness+staging, **D** cleanup+platform-retirement. **Decisions:** Gifsy=sees-all console + brand-labeled
+queues · RBAC=@Roles-only+coverage-audit for launch · sales-redeem=real · tenant-creation=deferred but
+provision-ready. ⚠️ **Seeds note:** `seedDeoleoDemo` now seeds VisibilityProgram `VP001` (seed-vp-1). **Servers were
+restarted this session** with the new build (backend `dist` rebuilt; FE restarted for next.config) — owner may re-own.
 
-**Still OPEN (gap-register):** #36 visibility/KYC writes · #38 KYC approval cross-tenant · #42 payouts.processBatch ·
+**Still OPEN (gap-register):** #38 Gifsy cross-tenant access (real bug → A1) · #42 payouts.processBatch ·
 #43 TDS · #44 Excel round-trips · #45 cleanup/dead-routes (P0.7) · #48 admin trend-analytics · #49 gifsy console
 real-data · #47 configurable RBAC. **Plus: STAGING harness env-support** (the harness only runs local; needs MSG91-OTP
 injection + staging tenant slugs before staging is a real gate). The Q1 payouts BACKEND `@Roles` change is
@@ -81,11 +93,13 @@ targeting dimension**; no point-tiers, no SKU. Validate any inherited concept ag
 
 **P6 · Finance — ✅ DONE (2026-06-18, backend).** Full record: `reconcile/P6-finance.md` + `reconcile/P6.5-TDS-SPEC.md`.
 **P0.5/P0.6 "Make It Runnable" — MOSTLY DONE (2026-06-19), enforced by the E2E harness (top of this doc).** Auth +
-fabricated-data + scoping + dashboards + cross-tenant + the redemption money path are resolved & harness-green.
-**Remaining P0.6 = the dead-write ports** (visibility/submit + admin/kyc, via the next.config proxy-exclusion fix
-pattern) + `payouts.processBatch` (#42) + cleanup (#45/P0.7). Full plan: `reconcile/P0.5-make-it-runnable.md` +
-[[runtime-audit-p0.5]]. P7 (Engagement & support) resumes after; the platform-retirement (#31) overlaps the
-dead-write ports. The P6 decisions below are the historical record; all shipped.
+fabricated-data + scoping + dashboards + cross-tenant + the redemption money path + the **visibility/submit port**
+are resolved & harness-green (**the next.config proxy-exclusion list is now EMPTY — no remaining dead writes via that
+mechanism**). **Remaining P0.6 = Phases A–D** (code-grounded re-scope 2026-06-19): **A** Gifsy cross-tenant access
+(#38) + payouts money-path (#42/#43) + enforcement audit (#2) → **B** sales-assisted redemption (#50-E) + invoices
+(#44) + gifsy real data (#49) → **C** harness+staging → **D** cleanup (#45) + platform-retirement (#31/#32). Full
+plan: `00-MASTER-PLAN §P0.6` + `reconcile/P0.5-make-it-runnable.md` + [[runtime-audit-p0.5]]. P7 (Engagement &
+support) resumes after D. The P6 decisions below are the historical record; all shipped.
 
 **P6 key facts (DO NOT relitigate; full record: `reconcile/P6-finance.md` + `P6.5-TDS-SPEC.md` + [[p6-finance-decisions]]):**
 - **Money = integer `BigInt` paise EVERYWHERE** (#19). Shared `money.ts` (api `src/common` + platform `src/lib`);
@@ -107,7 +121,8 @@ dead-write ports. The P6 decisions below are the historical record; all shipped.
   (PAN-required, `uploadBatchId` dedup); liability − deposited = outstanding. **Cash redemptions (UPI/BANK_TRANSFER)
   now create a `PayoutTransaction`** (the settlement bridge) → existing payouts engine. **Audit money paths hard.**
 
-**AFTER the P0.6 dead-write ports (the actual NEXT — see the top of this prompt), then P7 · Engagement & support
+**AFTER the remaining P0.6 items (the actual NEXT — see the top of this prompt: `payouts.processBatch` #42, sales
+`/catalogue` redemption, KYC cross-tenant verify #38, cleanup), then P7 · Engagement & support
 (spec §02 WF6; 00-MASTER-PLAN §P7).** Banners, notifications, leaderboard,
 tickets. Much read-side already exists (Phase S re-homed `api/src/{leaderboard,tickets,notifications}`). Tasks:
 **7.0** reconcile Engagement + Support · **7.1** banner config (admin) + partner-app banners · **7.2 notification
@@ -120,7 +135,8 @@ reconcile before building. (No P6 finance gaps remain open.)
 
 **Residuals carried forward (NOT done — don't assume):**
 - **Platform retirement (~P6, ONE unit):** stale `platform/prisma/schema.prisma` + still-live platform Prisma code
-  (auth/session/client-config + the proxy-excluded `visibility/submit`+`partner/invoices`[P6] / `admin/kyc`) + the
+  (auth/session/client-config + `partner/invoices`[P6]; the proxy-exclusion list is now EMPTY — `visibility/submit`
+  ported + dead route deleted, `admin/kyc` was a no-op) + the
   ~96 shadowed rollback-net route files + `lib/incentive`/`lib/kyc-approval`. **P5 note: the platform `lib/targets.ts`
   geo-hierarchy + `lib/gifts.ts`/`redemption-store.ts` demos are now dead/legacy but still imported by ~9 FE pages —
   they retire as part of this unit, NOT piecemeal.** ~120 platform files still use Prisma. Also Gap #32 `auth/logout`.
@@ -163,7 +179,7 @@ CONSTRAINTS (must hold):
   dev (serves FE live from disk — no restart needed for FE changes).
 
 Reload (read before building):
-- docs/plans/00-MASTER-PLAN.md            (phases; **P0–P6 + S DONE**; **P0.5/0.6 ◐ — remaining = dead-write ports; then P7**)
+- docs/plans/00-MASTER-PLAN.md            (phases; **P0–P6 + S DONE**; **P0.5/0.6 ◐ — dead-write ports DONE; remaining = payouts.processBatch #42 / sales-redemption / KYC verify #38 / cleanup; then P7**)
 - docs/plans/MODEL-ALIGNMENT.md           (the REAL parameter model)
 - docs/plans/P6-TDS-EXPLAINER.md          (TDS structure for owner review — 6.5 is HELD on its 4 questions)
 - docs/plans/reconcile/{P6-finance,P6.5-TDS-SPEC,P5-wallet-points-rewards,P4-programs-targets-enrollment}.md  (build records)

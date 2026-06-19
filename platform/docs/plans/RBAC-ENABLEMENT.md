@@ -4,6 +4,13 @@
 > reversible operation with a short checklist. This is the process so it doesn't have to be memorized.
 > Owner: Gifsy platform admin. Last updated: 2026-06-15 (P1).
 
+> **LAUNCH DECISION (2026-06-19): ship `@Roles`-only — RBAC stays OFF for go-live.** With the **fixed built-in
+> roles** (the configurable sub-role portal is deferred, gap #47), the permission layer would only duplicate the
+> role enum, and it is fail-open today. Launch enforcement = `@Roles` + in-service role checks + tenant-scoped
+> queries, **plus a one-time route-coverage audit** (gap #2, P0.6 Phase A3) that guarantees *every* sensitive route
+> has a real guard (the audit found enforcement is a mix of `@Roles` / in-service / inert `@RequirePermission`).
+> Turning RBAC on (below) becomes worthwhile once custom sub-roles exist. Decision home: `DATA-VISIBILITY.md §3.1`.
+
 ## What "RBAC enforcement" is
 The admin backend has a permission engine (`src/lib/rbac/`): a catalog of permission keys, a default
 **role → permission** map, and `requirePermission(...)` checks wired into every admin route. Until it's

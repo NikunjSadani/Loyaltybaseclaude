@@ -394,24 +394,48 @@ correct. Full plan + evidence: [`reconcile/P0.5-make-it-runnable.md`](reconcile/
 | **1B** | **Seed rebuild (#37)** — pg-adapter seed + wire into `prisma.config` + realistic demo dataset (one command) | `api/prisma`, seed | ∥ |
 | **1C** | **Catalogue 500 + DTO coercion (#35, #26)** — fix `adminListCatalog` `take`; sweep all list DTOs for uncoerced numeric query params | `api/src/rewards` + DTOs | ∥ |
 
-**P0.6 — NEXT (wire dead surfaces + harden money), all parallel (disjoint modules), each independently audited:**
-| Agent | What | Gap |
-|---|---|---|
-| **D** | KYC write-paths (sales+admin approve/reject/submit → real endpoints; fix review-queue role) | #36, M3 |
-| **E** | Redemption + wallet write-paths (sales catalogue redeem + OTP + real balance) | #36 |
-| **F** | Visibility submit + invoice **generation** backend route + FE; Excel round-trip fixes | #36, M4 |
-| **G** | Tickets/support → `/api/tickets` (partner + admin) | #36 |
-| **H** | Dashboards → real aggregation endpoints (or hide) | #36 |
-| **I** | Backend: `payouts.processBatch` → `$transaction` + guarded claim; TDS `section` param | H2, M5 |
+**P0.6 — status (2026-06-19).** The original agents D/E/F/G/H largely landed: auth-attach (#34), seed (#37),
+dashboards real (#47), tickets (#46/G), and the dead-write **ports** — redemption (#50) + visibility/submit; KYC
+writes live at `/v1/kyc/*`; the `next.config` proxy-exclusion list is now EMPTY. **But a code-grounded re-audit
+(2026-06-19) found the remaining work is deeper than "wire dead surfaces":** the Gifsy cross-tenant operator is
+locked out of tenant data (every KYC/visibility/payout lookup is `clientId: caller.clientId` → GIFSY 404s — the
+exact gap class in `VERIFICATION-PROTOCOL.md §72`), `payouts.processBatch` is un-transactioned (#42), sales
+`/catalogue` redeem is a client-side fake (#50-E), and route enforcement is inconsistent (#2). Remaining P0.6 is
+re-scoped into **4 phases A–D** (full detail: [`reconcile/P0.5-make-it-runnable.md`](reconcile/P0.5-make-it-runnable.md)).
 
-**P0.7 — cleanup (overlaps P0.6 tail):** strip demo chrome/persona switchers (M2); delete dead `app/api/*` +
-duplicate `/admin/outlets` + dead links (L1); finish Excel round-trips.
+**Owner decisions (2026-06-19, source-of-truth `DATA-VISIBILITY.md §3` + `RBAC-ENABLEMENT.md`):** Gifsy = operator
+console + cross-tenant **brand-labeled** work queues (sees all tenants; no per-tenant dashboards) · RBAC at launch =
+**@Roles-only + a route-coverage audit** (RBAC stays off; configurable-RBAC #47 deferred) · sales-assisted
+redemption = **real** redeem→OTP→debit scoped to the sales user's assigned outlet · tenant-creation = **deferred,
+built provision-ready** (real `clients` read + clean tenant model so a future create-endpoint/UI is a small add).
 
-**Recommended adds:** CI smoke-login per role; E2E happy-path per portal through the real proxy; seeded demo
-dataset as a one-command artifact; global ValidationPipe transform audit; real `/auth/me` identity in headers.
+| Phase | Stream | What | Gaps | Parallel |
+|---|---|---|---|---|
+| **A** — correctness foundation (go-live blockers; first) | **A1** | Gifsy cross-tenant access: record-tenant scoping for GIFSY_ADMIN — KYC approve + visibility approve/reject + brand-labeled queues | #38 | ∥ A2/A3 |
+| | **A2** | Payouts money path: same Gifsy scoping + `processBatch` `$transaction`+guarded claim + canonical TDS engine + `section` param | #42, #43 | ∥ |
+| | **A3** | Enforcement coverage audit (every sensitive route has a real `@Roles`/in-service guard) + verify JWT↔`x-tenant-slug` binding | #2 | ∥ |
+| **B** — honesty wiring (no fake surfaces) | **B1** | Sales-assisted redemption → real redeem→OTP→debit, scoped to assigned outlet | #50-E | ∥ |
+| | **B2** | Invoice generation/upload backend + FE; Excel round-trips | #44 | ∥ |
+| | **B3** | Gifsy console real `clients` data; retire static registry; provision-ready tenant model | #49 | ∥ |
+| **C** — lock-in | **C1** | Harness coverage for each A/B fix (Gifsy KYC across brands, sales redeem debit, payouts, visibility-approve) | #46 | rides A/B |
+| | **C2** | Staging harness env-support (MSG91 OTP injection + staging tenant slugs) | — | standalone |
+| **D** — cleanup & retire (last) | **D1** | P0.7 cleanup: dead `app/api/*`, demo chrome/persona switchers, duplicate pages, display bugs | #45 | serial |
+| | **D2** | Platform-Prisma retirement (auth/session/client-config) + delete stale platform schema + `auth/logout` revocation | #31, #32 | serial |
+
+**Order & why:** **A first** — only cross-tenant/money/enforcement *corrupt or breach*, and KYC gates partner
+activation (everything depends on it). **B next** — wire real data onto a now-correct engine. **C** — lock each fix
+with a runtime test + make staging a real gate. **D last** — retiring ~120 platform-Prisma files is safest once the
+functional surface is stable. **Parallel:** A1∥A2∥A3 and B1∥B2∥B3 (disjoint modules); C1 rides each fix; D serial.
+
+**Deferred (kept in `gap-register` with a WHEN — none dropped):** #48 trend-analytics → P8 · #47 configurable-RBAC +
+tenant-creation UI · #18-resid JSON blobs · #21 notifications → P7 · #23/#24/#26/#27 → P8 · holding/lock period.
+
+**Recommended adds:** CI smoke-login per role; E2E happy-path per portal through the real proxy; global
+ValidationPipe transform audit; real `/auth/me` identity in headers.
 
 **Exit:** a real user logs in per role and every "complete" page shows real data or an honest empty state (no
-fabricated numbers, no fake-success writes). **Then → P7**, opening with the platform-retirement residual (#31).
+fabricated numbers, no fake-success writes); Gifsy completes KYC approval + payout processing across brands at
+runtime; the harness covers every fixed flow and runs on staging. **Then → P7.**
 
 ---
 

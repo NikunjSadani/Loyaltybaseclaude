@@ -29,6 +29,28 @@ All six who-sees-what questions are answered. The harness asserts exactly these.
 - **Q5 — MIS_USER → tenant-side, read-only.** Belongs to a tenant; read-only across that one tenant's modules. (⇒ removed from payouts per Q1.)
 - **Q6 — Cross-tenant → Gifsy sees all; tenants isolated.** GIFSY_ADMIN (and Gifsy-side roles) read across **all** tenants on platform surfaces; every tenant role is hard-scoped to its own `clientId` — cross-tenant access is a **test failure**. **194C** (Gifsy's TDS) is computed **platform-wide per-PAN across tenants** → it lives **only** on the Gifsy cross-tenant surface, never on a tenant screen (a tenant sees only its own **194R**).
 
+### 3.1 Further decisions (2026-06-19, code-grounded re-audit)
+A re-audit against the code (not docs) surfaced that several "Gifsy-only" surfaces are actually **broken** for the
+operator, and forced three more decisions. These define how Phase A/B (`00-MASTER-PLAN §P0.6`) is built.
+
+- **Gifsy operator = one console, sees ALL brands (not per-tenant dashboards).** The platform operator does NOT get
+  a copy of each brand's admin dashboard. They get **their own console** holding: platform settings (create/configure
+  tenants), cross-tenant reports that are inherently platform-wide (e.g. **194C** TDS), and **cross-tenant work
+  queues** (the KYC final-approval queue, payout processing) shown as **one list with a Brand column/filter**.
+  *Implementation:* every Gifsy-operated query must scope by the **record's** tenant, with `GIFSY_ADMIN` exempt from
+  the caller-tenant filter (today they're `clientId='gifsy'`-scoped → 404 on tenant data; gap #38 + visibility/payouts).
+- **RBAC at launch = `@Roles`-only + a route-coverage audit.** With **fixed built-in roles** (the configurable
+  sub-role portal is deferred, #47), the RBAC permission layer would just duplicate the role enum, and it is OFF +
+  fail-open today. Launch enforces via `@Roles` + in-service role checks + tenant-scoped queries; a coverage audit
+  (#2) guarantees every sensitive route has a real guard. Turning RBAC on is a later unit. Ref `RBAC-ENABLEMENT.md`.
+- **Sales-assisted redemption is REAL.** The sales team assists the outlets mapped to them — selecting rewards and
+  redeeming points **on the outlet's behalf** — then the normal redeem→OTP→debit→fulfilment flow proceeds. The
+  current `/sales/catalogue` client-side fake (`otp==='999999'`, no debit) is replaced with the real backend, scoped
+  to the sales user's assigned outlet (gap #50-E).
+- **Tenant creation: deferred for launch, but built provision-ready.** Launch seeds the known brands; Gifsy
+  self-serve tenant creation (UI + `POST /v1/gifsy/clients`) is deferred — BUT the gifsy-console real-data work (#49)
+  must shape the `clients` read + tenant model so adding the create path later is a small, clean addition.
+
 > **Deferred (separate unit, not blocking):** a *configurable* RBAC admin portal (heads define custom sub-roles/permissions) + the first-admin provisioning chain (seed bootstrap Gifsy super-admin → Gifsy creates tenant admins → tenant admin creates sub-users). For now the harness uses the **fixed built-in roles** above. Tracked in `gap-register` (#47).
 
 ## 4. Per-page expected visibility (skeleton — fill as each flow is verified)
@@ -55,18 +77,21 @@ All six who-sees-what questions are answered. The harness asserts exactly these.
 | `/sales/kyc` (+[id]) | sales (assigned) | assigned-outlet KYC; first-approve | ◐ list ✅; first-approve unverified #38 |
 | `/sales/outlets`, `/sales/team*`, `/sales/dashboard`, `/sales/leaderboard` | sales (hierarchy) | assigned/team data | 🟦 Q4 + ◐ |
 | `/sales/catalogue` (redemption) | sales | redeem for outlet (real balance) | ❌ hardcoded balance/OTP #36 |
-| `/sales/visibility` (+submit) | sales | submissions; submit | ❌ dead submit button #36 |
+| `/partner/visibility` (+submit) | partner | own submissions; submit photo | ✅ submit ported to `POST /v1/visibility/submit` (P0.6); harness write-persistence test green |
+| `/sales/visibility` (+submit) | sales | submissions; submit | ◐ list ✅; sales *submit* deferred — `VisibilitySubmission.partnerId` FKs `ChannelPartner` (a sales user has none); needs a model change (nullable submittedByUserId) before sales can submit |
 | `/gifsy/*` (clients/users/outlet-types/settings) | GIFSY (cross-tenant) | platform data | ◐ unverified (login blocked #39) |
 
 > This table is the harness's checklist: each row becomes an E2E assertion (right role → real expected data, no
 > fabricated values, correct scoping, honest error). A row is "done" only when its E2E test passes.
 
 > **Live status = the E2E harness, not this table.** `platform/e2e` (`npm run e2e`) is the source of truth;
-> hand-edited cells drift. **Baseline 2026-06-19: 36/36 GREEN** (5 roles incl. GIFSY + clientb). The original
+> hand-edited cells drift. **Baseline 2026-06-19: 37/37 GREEN** (5 roles incl. GIFSY + clientb; +1 = the partner
+> visibility write-persistence test added with the P0.6 dead-write port). The original
 > reds are all remediated: #40 fabricated data (partner/sales identity via `/partner/me`, admin KPIs real),
 > #41 role guards + Q1 payouts GIFSY-only, #39 GIFSY login (dev clientId override), cross-tenant isolation
 > BOTH directions (2nd tenant `clientb` seeded with data), and the **partner redemption money path** (#50 —
-> was 100% broken). Write-persistence covered for tickets + redemption. **Still NOT covered (open):** most
-> non-anchor pages, the OTHER write flows (visibility/submit + KYC — proxy-excluded/dead, #36/#38), the gifsy
-> console real data (mock, #49), sales-manager downline (Q4 — only an SO seeded), and **staging** (env-support
-> TODO). A green harness = "the asserted slices work", NOT "every page works".
+> was 100% broken). Write-persistence covered for tickets + redemption + **partner visibility submit** (P0.6 port).
+> **Still NOT covered (open):** most non-anchor pages, the KYC approval write at runtime (backend exists at
+> `/v1/kyc/*` — verify cross-tenant #38), the gifsy console real data (mock, #49), sales-manager downline (Q4 —
+> only an SO seeded), and **staging** (env-support TODO). A green harness = "the asserted slices work", NOT
+> "every page works".
