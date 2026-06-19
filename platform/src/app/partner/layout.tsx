@@ -15,6 +15,7 @@ import {
   usePartnerSession, OUTLET_TYPE_LABELS, OUTLET_TYPE_COLORS,
   type OutletType,
 } from '@/lib/partner-session';
+import { usePartnerIdentity } from '@/lib/partner-identity';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
@@ -65,6 +66,7 @@ function getNotifications(track: 'POINTS' | 'INR') {
 export default function PartnerLayout({ children }: { children: React.ReactNode }) {
   const router       = useRouter();
   const session      = usePartnerSession();
+  const identity     = usePartnerIdentity(); // REAL identity (replaces demo persona)
   const clientConfig = useClientConfig();
   const features     = clientConfig.features;
   const [notifOpen,      setNotifOpen]      = useState(false);
@@ -113,8 +115,8 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
       <Sidebar
         sections={sidebarSections}
         onLogout={handleLogout}
-        userName={session.firmName}
-        userRole={`${session.partnerName} · ${session.tier} Partner`}
+        userName={identity.businessName}
+        userRole={identity.ownerName}
         logoLabel={clientConfig.branding.displayName}
       />
 
@@ -132,13 +134,13 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
               </Link>
               <div className="min-w-0">
                 <div className="flex items-center gap-2 min-w-0">
-                  <p className="text-sm font-bold text-gray-900 leading-tight truncate">{session.firmName}</p>
+                  <p className="text-sm font-bold text-gray-900 leading-tight truncate">{identity.businessName}</p>
                   <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${typeColors.bg} ${typeColors.text}`}>
                     {OUTLET_TYPE_LABELS[session.outletType]}
                   </span>
                 </div>
                 <p className="text-xs text-gray-400 leading-tight truncate">
-                  {session.partnerName} · {session.tier} Partner
+                  {identity.ownerName}
                 </p>
               </div>
             </div>

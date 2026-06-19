@@ -15,6 +15,11 @@ import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
 export class PartnerController {
   constructor(private readonly partner: PartnerService) {}
 
+  @Get('me')
+  getMe(@CurrentUser() user: JwtPayload) {
+    return this.partner.getMe(user);
+  }
+
   @Get('banners')
   @RequirePermission('engagement:read')
   getBanners(@CurrentUser() user: JwtPayload) {

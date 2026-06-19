@@ -21,6 +21,33 @@ export class PartnerService {
   private readonly bannerSettingKey = 'banner_config';
 
   /**
+   * GET /v1/partner/me — the caller's own channel-partner identity (real, JWT-scoped). Replaces the
+   * FE demo persona (lib/partner-session DEMO_SESSIONS) for shell/header display. Returns nulls when
+   * the caller has no channel partner so the FE can fall back to the JWT user name.
+   */
+  async getMe(user: JwtPayload) {
+    const partner = await this.prisma.channelPartner.findFirst({
+      where: { userId: user.sub, clientId: user.clientId },
+      select: {
+        partnerCode: true,
+        businessName: true,
+        ownerName: true,
+        phone: true,
+        email: true,
+        entityType: true,
+      },
+    });
+    return {
+      businessName: partner?.businessName ?? null,
+      ownerName: partner?.ownerName ?? null,
+      partnerCode: partner?.partnerCode ?? null,
+      phone: partner?.phone ?? null,
+      email: partner?.email ?? null,
+      entityType: partner?.entityType ?? null,
+    };
+  }
+
+  /**
    * GET /v1/partner/banners — active banner + popup config for the caller's
    * tenant. All authenticated roles may read. Reads the real ProgramSetting
    * row (banner_config); the source route's dev-only mock fallback is dropped.

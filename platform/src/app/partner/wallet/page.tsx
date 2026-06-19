@@ -10,6 +10,7 @@ import { formatPoints } from '@/lib/utils';
 import { TransactionType, WalletBucket, type WalletBalance, type WalletTransaction } from '@/types';
 import type { PayoutLedgerEntry } from '@/types';
 import { usePartnerSession } from '@/lib/partner-session';
+import { usePartnerIdentity } from '@/lib/partner-identity';
 import { authHeader } from '@/lib/api-client';
 import {
   isDemoSession,
@@ -397,6 +398,7 @@ function InrWalletView() {
 
 export default function WalletPage() {
   const session = usePartnerSession();
+  const identity = usePartnerIdentity(); // REAL firm name (replaces demo persona)
 
   const [balance,      setBalance]      = useState<WalletBalance | null>(null);
   const [transactions, setTransactions] = useState<WalletTransaction[]>([]);
@@ -493,7 +495,7 @@ export default function WalletPage() {
       <div className="space-y-5 fade-in">
         <div>
           <h1 className="text-lg font-bold text-gray-900">My Wallet</h1>
-          <p className="text-xs text-gray-500 mt-0.5">Incentive payouts for {session.firmName}</p>
+          <p className="text-xs text-gray-500 mt-0.5">Incentive payouts for {identity.businessName}</p>
         </div>
         <InrWalletView />
       </div>

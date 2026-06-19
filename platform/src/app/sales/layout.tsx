@@ -9,15 +9,13 @@ import type { NavItem } from '@/components/layout/nav-bottom';
 import {
   type SalesRole,
   ROLE_LABELS,
-  ROLE_NAMES,
   ROLE_TERRITORY,
-  ROLE_EMP_IDS,
   getRole,
   setRole,
   hasTeamView,
 } from '@/lib/sales-role';
 import { RequireAuth } from '@/components/auth/require-auth';
-import { PORTAL_ROLES } from '@/lib/auth-client';
+import { PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
 
 const BASE_NAV: NavItem[] = [
   { href: '/sales/dashboard',   label: 'Dashboard', icon: LayoutDashboard },
@@ -44,9 +42,12 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
   const [rolePicker, setRolePicker] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifications, setNotifications] = useState(NOTIFICATIONS);
+  // REAL identity from the JWT (replaces the demo ROLE_NAMES/ROLE_EMP_IDS persona, #40).
+  const [userName, setUserName] = useState('');
 
   useEffect(() => {
     setRoleState(getRole());
+    setUserName(getStoredUser()?.name ?? '');
   }, []);
 
   const unreadCount = notifications.filter((n) => n.unread).length;
@@ -80,8 +81,8 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
               </svg>
             </div>
             <div>
-              <p className="text-white font-semibold text-sm leading-tight">{ROLE_NAMES[role]}</p>
-              <p className="text-white/50 text-xs">{ROLE_EMP_IDS[role]}</p>
+              <p className="text-white font-semibold text-sm leading-tight">{userName}</p>
+              <p className="text-white/50 text-xs">{ROLE_LABELS[role]}</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
