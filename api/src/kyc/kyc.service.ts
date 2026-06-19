@@ -166,6 +166,19 @@ export class KycService {
   }
 
   /**
+   * Tenant filter for KYC submission lookups (gap #38 / VERIFICATION-PROTOCOL §72).
+   * The GIFSY_ADMIN is the cross-tenant platform operator: final KYC approval + bulk
+   * validation act on ANY tenant's records, so they are EXEMPT from the caller-tenant
+   * filter (the record is scoped by its OWN tenant instead). Every other role —
+   * including CLIENT_ADMIN — stays hard-scoped to its own clientId. Returns a
+   * spreadable where-fragment so callers write `{ id, ...this.kycTenantFilter(user) }`.
+   * Owner decision: Gifsy sees all tenants (DATA-VISIBILITY §3.1).
+   */
+  private kycTenantFilter(user: JwtPayload): Prisma.KycSubmissionWhereInput {
+    return user.role === 'GIFSY_ADMIN' ? {} : { user: { clientId: user.clientId } };
+  }
+
+  /**
    * Task 3.4e — DPDP read-masking.
    * When `mask` is true, replaces bank account number, PAN, and GST number with
    * "****<last4>" on the partner object. Full values are never stored differently —
@@ -454,7 +467,7 @@ export class KycService {
     const limit = q.limit ?? 20;
     const skip = (page - 1) * limit;
 
-    const where: Prisma.KycSubmissionWhereInput = { user: { clientId: user.clientId } };
+    const where: Prisma.KycSubmissionWhereInput = { ...this.kycTenantFilter(user) };
 
     if (user.role === 'SALES_SO') {
       where.status = 'PENDING_SO_APPROVAL';
@@ -488,8 +501,8 @@ export class KycService {
     const statusCounts = await this.prisma.kycSubmission.groupBy({
       by: ['status'],
       where: this.isAdmin(user.role)
-        ? { user: { clientId: user.clientId } }
-        : { userId: user.sub, user: { clientId: user.clientId } },
+        ? { ...this.kycTenantFilter(user) }
+        : { userId: user.sub, ...this.kycTenantFilter(user) },
       _count: { status: true },
     });
 
@@ -506,7 +519,7 @@ export class KycService {
   // ─── GET /v1/kyc/:id ─────────────────────────────────────────────────────────
   async getOne(user: JwtPayload, id: string) {
     const submission = await this.prisma.kycSubmission.findFirst({
-      where: { id, user: { clientId: user.clientId } },
+      where: { id, ...this.kycTenantFilter(user) },
       include: {
         documents: true,
         statusHistory: { orderBy: { createdAt: 'desc' } },
@@ -556,7 +569,7 @@ export class KycService {
     }
 
     const submission = await this.prisma.kycSubmission.findFirst({
-      where: { id, user: { clientId: user.clientId } },
+      where: { id, ...this.kycTenantFilter(user) },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
 
@@ -593,7 +606,7 @@ export class KycService {
     const { remarks } = dto;
 
     const submission = await this.prisma.kycSubmission.findFirst({
-      where: { id, user: { clientId: user.clientId } },
+      where: { id, ...this.kycTenantFilter(user) },
       include: {
         user: { select: { id: true, name: true, phone: true } },
         partner: { select: { id: true, businessName: true } },
@@ -670,7 +683,7 @@ export class KycService {
     if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
 
     const submission = await this.prisma.kycSubmission.findFirst({
-      where: { id, user: { clientId: user.clientId } },
+      where: { id, ...this.kycTenantFilter(user) },
       include: {
         user: true,
         partner: {
@@ -699,7 +712,7 @@ export class KycService {
     const notifyIntent = await this.prisma.$transaction(async (tx) => {
       // ── (a) Re-assert PENDING_GIFSY + tenant inside the tx ────────────────
       const sub = await tx.kycSubmission.findFirst({
-        where: { id, status: 'PENDING_GIFSY', user: { clientId: user.clientId } },
+        where: { id, status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) },
         include: {
           user: true,
           partner: {
@@ -820,7 +833,7 @@ export class KycService {
     const result = await this.prisma.$transaction(async (tx) => {
       // ── (a) Re-assert PENDING_GIFSY + tenant ──────────────────────────────
       const submission = await tx.kycSubmission.findFirst({
-        where: { id, status: 'PENDING_GIFSY', user: { clientId: user.clientId } },
+        where: { id, status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) },
         include: {
           user: true,
           partner: {
@@ -907,7 +920,7 @@ export class KycService {
     const status = dto.status ?? 'REJECTED';
 
     const submission = await this.prisma.kycSubmission.findFirst({
-      where: { id, user: { clientId: user.clientId } },
+      where: { id, ...this.kycTenantFilter(user) },
       include: { user: true },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
@@ -975,7 +988,7 @@ export class KycService {
   // ─── GET /v1/kyc/:id/ledger ──────────────────────────────────────────────────
   async ledger(user: JwtPayload, id: string) {
     const submission = await this.prisma.kycSubmission.findFirst({
-      where: { id, user: { clientId: user.clientId } },
+      where: { id, ...this.kycTenantFilter(user) },
       include: {
         partner: {
           select: {
@@ -1222,7 +1235,7 @@ export class KycService {
     const notifyIntent = await this.prisma.$transaction(async (tx) => {
       // Load and tenant-scope the submission.
       const submission = await tx.kycSubmission.findFirst({
-        where: { id, user: { clientId: user.clientId } },
+        where: { id, ...this.kycTenantFilter(user) },
         include: {
           user: { select: { id: true, name: true, phone: true } },
           partner: {
@@ -1350,7 +1363,7 @@ export class KycService {
 
     // Load submission — tenant-scoped.
     const submission = await this.prisma.kycSubmission.findFirst({
-      where: { id, user: { clientId: user.clientId } },
+      where: { id, ...this.kycTenantFilter(user) },
       include: { partner: { select: { id: true, clientId: true } } },
     });
 
@@ -1434,7 +1447,7 @@ export class KycService {
 
     // ── Load this tenant's valid PENDING_GIFSY submission IDs ─────────────────
     const pendingSubmissions = await this.prisma.kycSubmission.findMany({
-      where: { status: 'PENDING_GIFSY', user: { clientId: user.clientId } },
+      where: { status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) },
       select: { id: true },
     });
     const validIds = new Set(pendingSubmissions.map((s) => s.id));
@@ -1720,7 +1733,7 @@ export class KycService {
         where: {
           id: submissionId,
           status: 'PENDING_GIFSY',
-          user: { clientId: user.clientId },
+          ...this.kycTenantFilter(user),
         },
         include: {
           user: true,
@@ -1802,9 +1815,11 @@ export class KycService {
     if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden — Gifsy Admin only');
 
     const submissions = await this.prisma.kycSubmission.findMany({
-      where: { status: 'PENDING_GIFSY', user: { clientId: user.clientId } },
+      where: { status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) },
       include: {
-        user: { select: { name: true, phone: true } },
+        // clientId = the record's own tenant — surfaced so the cross-tenant Gifsy
+        // queue can label/filter each row by brand (gap #38).
+        user: { select: { name: true, phone: true, clientId: true } },
         partner: {
           select: {
             businessName: true,
@@ -1850,6 +1865,7 @@ export class KycService {
 
       return {
         submissionId: s.id,
+        clientId: s.user.clientId,
         outletCode: o?.outletCode ?? '',
         outletName: o?.name ?? p?.businessName ?? '',
         ownerName: p?.ownerName ?? '',
@@ -1890,7 +1906,7 @@ export class KycService {
     if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
     const submissions = await this.prisma.kycSubmission.findMany({
-      where: { status: 'PENDING_GIFSY', user: { clientId: user.clientId } },
+      where: { status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) },
       include: {
         user: { select: { name: true, phone: true } },
         partner: {

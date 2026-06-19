@@ -37,6 +37,17 @@ export class VisibilityService {
   ) {}
 
   /**
+   * Tenant filter for visibility submissions (gap #38 / VERIFICATION-PROTOCOL §72).
+   * GIFSY_ADMIN is the cross-tenant operator (approve/reject visibility across all
+   * tenants) → EXEMPT from the caller-tenant filter; every other role is hard-scoped
+   * to its own clientId via the partner→user relation. Spreadable where-fragment.
+   * Owner decision: Gifsy sees all tenants (DATA-VISIBILITY §3.1).
+   */
+  private submissionTenantFilter(user: JwtPayload): Prisma.VisibilitySubmissionWhereInput {
+    return user.role === 'GIFSY_ADMIN' ? {} : { partner: { user: { clientId: user.clientId } } };
+  }
+
+  /**
    * POST /v1/visibility/submit — partner submits a branding photo for an outlet.
    *
    * Scoping/trust: the partner is resolved from the JWT (user.sub) — never from
@@ -143,7 +154,7 @@ export class VisibilityService {
     const skip = (page - 1) * limit;
 
     const where: Prisma.VisibilitySubmissionWhereInput = {
-      partner: { user: { clientId: user.clientId } },
+      ...this.submissionTenantFilter(user),
     };
     if (q.outletId) where.outletId = q.outletId;
     if (q.programId) where.programId = q.programId;
@@ -187,7 +198,7 @@ export class VisibilityService {
 
     // GIFSY-only is enforced by @Roles on the controller; tenant scope checked here.
     const submission = await this.prisma.visibilitySubmission.findFirst({
-      where: { id, partner: { user: { clientId: user.clientId } } },
+      where: { id, ...this.submissionTenantFilter(user) },
     });
     if (!submission) throw new NotFoundException('Submission not found');
     if (submission.status === 'APPROVED') throw new BadRequestException('Already approved');
@@ -244,7 +255,7 @@ export class VisibilityService {
 
     // GIFSY-only is enforced by @Roles on the controller; tenant scope checked here.
     const submission = await this.prisma.visibilitySubmission.findFirst({
-      where: { id, partner: { user: { clientId: user.clientId } } },
+      where: { id, ...this.submissionTenantFilter(user) },
     });
     if (!submission) throw new NotFoundException('Submission not found');
     if (submission.status === 'REJECTED') throw new BadRequestException('Already rejected');
@@ -362,9 +373,10 @@ export class VisibilityService {
     const dateFrom = q.dateFrom ? new Date(q.dateFrom) : undefined;
     const dateTo = q.dateTo ? new Date(q.dateTo) : undefined;
 
-    const where: Prisma.VisibilityFraudLogWhereInput = {
-      submission: { partner: { user: { clientId: user.clientId } } },
-    };
+    const where: Prisma.VisibilityFraudLogWhereInput =
+      user.role === 'GIFSY_ADMIN'
+        ? {}
+        : { submission: { partner: { user: { clientId: user.clientId } } } };
     if (dateFrom || dateTo) {
       where.createdAt = {};
       if (dateFrom) where.createdAt.gte = dateFrom;

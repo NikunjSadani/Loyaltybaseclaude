@@ -9,6 +9,7 @@ import { BadRequestException, ForbiddenException, NotFoundException } from '@nes
 import { VisibilityService } from './visibility.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
+import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockTx = {
@@ -32,7 +33,15 @@ const mockTenant = {
   resolveVisibilityCaptureMode: jest.fn().mockResolvedValue('PHOTO_APPROVAL'),
 };
 
-const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
+const mockStorage = {
+  generateKey: jest.fn().mockReturnValue('visibility/deoleo/key.png'),
+  uploadFile: jest.fn().mockResolvedValue('https://storage/visibility/deoleo/key.png'),
+};
+
+// gifsy = the cross-tenant operator. clientId 'gifsy' is intentionally NOT a real
+// tenant — A1 (#38) makes GIFSY_ADMIN exempt from the caller-tenant filter, so its
+// queries must NOT carry a clientId scope (it acts on the record's own tenant).
+const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' };
 
 describe('VisibilityService', () => {
@@ -47,6 +56,7 @@ describe('VisibilityService', () => {
         VisibilityService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TenantService, useValue: mockTenant },
+        { provide: StorageService, useValue: mockStorage },
       ],
     }).compile();
     service = module.get(VisibilityService);
@@ -75,9 +85,20 @@ describe('VisibilityService', () => {
   });
 
   describe('approve', () => {
-    it('throws NotFound when the submission is outside the tenant', async () => {
+    it('throws NotFound when the submission does not exist (Gifsy is cross-tenant, #38)', async () => {
       mockPrisma.visibilitySubmission.findFirst.mockResolvedValue(null);
       await expect(service.approve(gifsy, 's1')).rejects.toBeInstanceOf(NotFoundException);
+      // GIFSY_ADMIN is exempt from the caller-tenant filter — the lookup is by id only,
+      // scoped by the record's OWN tenant, so the operator can reach any brand's record.
+      expect(mockPrisma.visibilitySubmission.findFirst).toHaveBeenCalledWith({
+        where: { id: 's1' },
+      });
+    });
+
+    it('a tenant user (non-Gifsy) stays scoped to its own clientId', async () => {
+      const tenantAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
+      mockPrisma.visibilitySubmission.findFirst.mockResolvedValue(null);
+      await expect(service.approve(tenantAdmin, 's1')).rejects.toBeInstanceOf(NotFoundException);
       expect(mockPrisma.visibilitySubmission.findFirst).toHaveBeenCalledWith({
         where: { id: 's1', partner: { user: { clientId: 'deoleo' } } },
       });
@@ -175,23 +196,23 @@ describe('VisibilityService', () => {
   });
 
   describe('listFraudLog', () => {
-    it('scopes via submission.partner.user.clientId and applies a date range', async () => {
+    it('is cross-tenant for Gifsy (no clientId filter) and applies a date range (#38)', async () => {
       mockPrisma.visibilityFraudLog.findMany.mockResolvedValue([]);
       mockPrisma.visibilityFraudLog.count.mockResolvedValue(0);
       await service.listFraudLog(gifsy, { dateFrom: '2026-01-01', dateTo: '2026-02-01' });
       const where = mockPrisma.visibilityFraudLog.findMany.mock.calls[0][0].where;
+      // fraud-log is GIFSY-only — the operator sees every brand's fraud log.
       expect(where).toEqual({
-        submission: { partner: { user: { clientId: 'deoleo' } } },
         createdAt: { gte: new Date('2026-01-01'), lte: new Date('2026-02-01') },
       });
     });
 
-    it('paginates with defaults and no date filter', async () => {
+    it('paginates with defaults and no date filter (Gifsy cross-tenant)', async () => {
       mockPrisma.visibilityFraudLog.findMany.mockResolvedValue([]);
       mockPrisma.visibilityFraudLog.count.mockResolvedValue(5);
       const res = await service.listFraudLog(gifsy, {});
       const where = mockPrisma.visibilityFraudLog.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ submission: { partner: { user: { clientId: 'deoleo' } } } });
+      expect(where).toEqual({});
       expect(res.pagination).toEqual({ page: 1, limit: 20, total: 5, pages: 1 });
     });
   });

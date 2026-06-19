@@ -161,10 +161,11 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       expect(result.committed).toBe(false);
       // No $transaction should have been called
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
-      // Should have queried for valid PENDING_GIFSY ids (tenant-scoped)
+      // Should have queried for valid PENDING_GIFSY ids — cross-tenant for the Gifsy
+      // operator (#38): no caller-tenant filter, bulk-validates every brand.
       const findManyArgs = mockPrisma.kycSubmission.findMany.mock.calls[0][0];
       expect(findManyArgs.where.status).toBe('PENDING_GIFSY');
-      expect(findManyArgs.where.user.clientId).toBe('deoleo');
+      expect(findManyArgs.where.user).toBeUndefined();
     });
 
     it('returns updates and errors in dry-run mode', async () => {

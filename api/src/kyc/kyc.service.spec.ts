@@ -180,7 +180,7 @@ describe('KycService', () => {
       await expect(service.reviewDump(so)).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('queries PENDING_GIFSY scoped to the tenant and returns an xlsx buffer', async () => {
+    it('queries PENDING_GIFSY cross-tenant (Gifsy, #38) and returns an xlsx buffer', async () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
         {
           id: 'KYC-1',
@@ -234,7 +234,7 @@ describe('KycService', () => {
       expect(buf.length).toBeGreaterThan(0);
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
       expect(where.status).toBe('PENDING_GIFSY');
-      expect(where.user).toEqual({ clientId: 'deoleo' });
+      expect(where.user).toBeUndefined(); // GIFSY is cross-tenant (#38) — no caller-tenant filter
       expect(mockStorage.getSignedUrl).toHaveBeenCalledWith('key');
     });
   });
@@ -466,7 +466,8 @@ describe('KycService', () => {
       mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
       await service.list(gifsy, { status: 'APPROVED' as never });
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ user: { clientId: 'deoleo' }, status: 'APPROVED' });
+      // GIFSY is the cross-tenant operator (#38) — no caller-tenant filter, all brands.
+      expect(where).toEqual({ status: 'APPROVED' });
     });
   });
 
@@ -620,11 +621,14 @@ describe('KycService', () => {
       expect(mockNotifications.enqueue).not.toHaveBeenCalled();
     });
 
-    it('tenant-scopes the in-tx re-assert (wrong tenant → ConflictException)', async () => {
-      const otherTenant: JwtPayload = { sub: 'admin2', role: 'GIFSY_ADMIN', clientId: 'other', phone: '', name: '' };
-      // The outer findFirst finds nothing (wrong tenant)
+    it('approve of a missing submission → NotFound (Gifsy is cross-tenant, #38)', async () => {
+      // GIFSY_ADMIN reaches any brand's record (no caller-tenant filter); a NotFound
+      // now means the record genuinely does not exist, not a tenant mismatch.
+      const gifsyOther: JwtPayload = { sub: 'admin2', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: '' };
       mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(null);
-      await expect(service.approve(otherTenant, 's1')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.approve(gifsyOther, 's1')).rejects.toBeInstanceOf(NotFoundException);
+      const where = mockPrisma.kycSubmission.findFirst.mock.calls[0][0].where;
+      expect(where.user).toBeUndefined();
     });
 
     it('B1 regression: tx failure → notification NOT enqueued', async () => {
@@ -779,14 +783,16 @@ describe('KycService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('tenant-scopes the in-tx re-assert', async () => {
-      // The in-tx findFirst must include user: { clientId } in the where clause
+    it('Gifsy in-tx re-assert is cross-tenant (id+status only, #38)', async () => {
+      // GIFSY is cross-tenant (#38): the in-tx re-assert is by id+status only, with NO
+      // caller-tenant filter (scoped by the record's own tenant).
       mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
       await expect(
         service.verifyField(gifsy, 's1', { fieldKey: 'PAYMENT', decision: 'APPROVED' }),
       ).rejects.toBeInstanceOf(NotFoundException);
       const whereArg = mockTx.kycSubmission.findFirst.mock.calls[0][0].where;
-      expect(whereArg.user).toEqual({ clientId: 'deoleo' });
+      expect(whereArg.user).toBeUndefined();
+      expect(whereArg.status).toBe('PENDING_GIFSY');
     });
 
     it('B1 regression: tx failure → notification NOT enqueued', async () => {
@@ -1188,12 +1194,12 @@ describe('KycService', () => {
       await expect(service.reviewQueue(so)).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('queries PENDING_GIFSY scoped to the tenant', async () => {
+    it('queries PENDING_GIFSY cross-tenant (Gifsy, #38)', async () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
       await service.reviewQueue(gifsy);
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
       expect(where.status).toBe('PENDING_GIFSY');
-      expect(where.user).toEqual({ clientId: 'deoleo' });
+      expect(where.user).toBeUndefined(); // GIFSY is cross-tenant (#38) — no caller-tenant filter
     });
 
     it('returns entries array with submissionId, identity, and 7-field state', async () => {

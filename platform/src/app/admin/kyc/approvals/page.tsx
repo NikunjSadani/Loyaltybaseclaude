@@ -54,6 +54,7 @@ interface KycFieldState {
 
 interface KycApprovalEntry {
   submissionId: string
+  clientId: string
   outletCode: string
   outletName: string
   ownerName: string
@@ -232,6 +233,11 @@ export default function KycApprovalsPage() {
   const [entries, setEntries] = useState<KycApprovalEntry[]>([])
   const [listLoading, setListLoading] = useState(true)
   const [listError, setListError] = useState<string | null>(null)
+
+  // ── Brand filter (cross-tenant Gifsy queue, #38) — the review-queue now spans
+  //    every brand for the platform operator; this filters the list by tenant. Only
+  //    surfaced when >1 brand is present (i.e. the Gifsy cross-tenant view).
+  const [brandFilter, setBrandFilter] = useState<string>('ALL')
 
   // ── Selection ──────────────────────────────────────────────────────────────
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -430,6 +436,9 @@ export default function KycApprovalsPage() {
     remarkInputs[remarkKey(submissionId, key)] ?? ''
 
   // ── Derived ────────────────────────────────────────────────────────────────
+  const brands = Array.from(new Set(entries.map(e => e.clientId))).sort()
+  const visibleEntries =
+    brandFilter === 'ALL' ? entries : entries.filter(e => e.clientId === brandFilter)
   const selected = entries.find(e => e.submissionId === selectedId) ?? null
 
   // ─── Render ───────────────────────────────────────────────────────────────
@@ -588,10 +597,27 @@ export default function KycApprovalsPage() {
             Queue
             {!listLoading && (
               <span className="ml-1 font-normal normal-case text-gray-400">
-                ({entries.length})
+                ({visibleEntries.length}{brandFilter !== 'ALL' ? ` of ${entries.length}` : ''})
               </span>
             )}
           </p>
+
+          {/* Brand filter — only when the queue spans multiple brands (Gifsy view, #38) */}
+          {brands.length > 1 && (
+            <select
+              value={brandFilter}
+              onChange={e => setBrandFilter(e.target.value)}
+              className="w-full text-xs border border-gray-200 rounded-md px-2 py-1.5 bg-white text-gray-700"
+              aria-label="Filter queue by brand"
+            >
+              <option value="ALL">All brands ({entries.length})</option>
+              {brands.map(b => (
+                <option key={b} value={b}>
+                  {b} ({entries.filter(e => e.clientId === b).length})
+                </option>
+              ))}
+            </select>
+          )}
 
           {listLoading && (
             <div className="flex items-center gap-2 text-sm text-gray-400 px-1">
@@ -607,7 +633,7 @@ export default function KycApprovalsPage() {
             <p className="text-xs text-gray-400 px-1">No submissions pending review.</p>
           )}
 
-          {entries.map(e => {
+          {visibleEntries.map(e => {
             const isSelected = e.submissionId === selectedId
             return (
               <button
@@ -623,7 +649,14 @@ export default function KycApprovalsPage() {
                   <span className="text-sm font-semibold text-gray-800 truncate">{e.outletName}</span>
                   <ProgressPill fields={e.fields} />
                 </div>
-                <p className="text-xs text-gray-500 font-mono">{e.outletCode}</p>
+                <div className="flex items-center gap-1.5">
+                  <p className="text-xs text-gray-500 font-mono">{e.outletCode}</p>
+                  {brands.length > 1 && (
+                    <span className="text-[10px] bg-indigo-50 text-indigo-700 rounded px-1.5 py-0.5 font-medium">
+                      {e.clientId}
+                    </span>
+                  )}
+                </div>
                 <FieldDots fields={e.fields} />
               </button>
             )

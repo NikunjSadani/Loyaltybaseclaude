@@ -603,8 +603,22 @@ async function seedClientBDemo() {
     },
   });
 
+  // A PENDING_GIFSY KYC so the Gifsy cross-tenant review queue has >1 brand
+  // (proves #38: the operator sees deoleo's seed-kyc-1 AND clientb's seed-kyc-b1).
+  await prisma.kycSubmission.upsert({
+    where: { id: 'seed-kyc-b1' },
+    update: {},
+    create: {
+      id: 'seed-kyc-b1',
+      userId: user.id,
+      partnerId: partner.id,
+      status: KycStatus.PENDING_GIFSY,
+      submittedAt: new Date(),
+    },
+  });
+
   console.log(
-    `   ✓ clientb: admin ${clientAdmin.phone} + partner CPB001 (Zenith Trading Co) + wallet + outlet OB001`,
+    `   ✓ clientb: admin ${clientAdmin.phone} + partner CPB001 (Zenith Trading Co) + wallet + outlet OB001 + PENDING_GIFSY KYC`,
   );
   console.log('   ✅ clientb cross-tenant dataset ready.');
 }

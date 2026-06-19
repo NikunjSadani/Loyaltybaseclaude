@@ -22,7 +22,13 @@ import { VisibilityService as PhotoVisibilityService } from './visibility.servic
 import { VisibilityService as AmountVisibilityService } from '../admin-programs/visibility.service';
 import { TenantService } from '../tenant/tenant.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+
+const mockStorage = {
+  generateKey: jest.fn().mockReturnValue('visibility/acme/key.png'),
+  uploadFile: jest.fn().mockResolvedValue('https://storage/visibility/acme/key.png'),
+};
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -70,6 +76,7 @@ async function buildPhotoService(
       PhotoVisibilityService,
       { provide: PrismaService, useValue: mockPrisma },
       { provide: TenantService, useValue: tenant },
+      { provide: StorageService, useValue: mockStorage },
     ],
   }).compile();
   return module.get(PhotoVisibilityService);
