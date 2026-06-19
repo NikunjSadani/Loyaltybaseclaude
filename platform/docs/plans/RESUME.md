@@ -39,7 +39,7 @@ PHOTO_APPROVAL gate, partner-only `@Roles`; dead local route deleted; harness wr
 cross-tenant OVERSIGHT (see-all; A1) + per-brand OPERATION (the A2 switcher).
 - **✅ A1 — Gifsy cross-tenant OVERSIGHT DONE (#38):** `kycTenantFilter`/`submissionTenantFilter` exempt GIFSY_ADMIN
   from the caller-tenant filter (KYC + visibility); reviewQueue emits each record's clientId; FE brand column/filter.
-  Runtime-verified (6 checks) + independent audit PASS (residuals slaMetrics/outletStatuses → A4).
+  Runtime-verified (6 checks) + independent audit PASS (residual slaMetrics → ✅ cross-tenant in A4; outletStatuses already had a partner denylist).
 - **✅ A2 — Operator-context SWITCHER DONE (#51), backend+FE:** `POST /v1/auth/assume-tenant` mints a tenant-scoped
   `{sub:operator, role:GIFSY_ADMIN, clientId:tenant, assumed:true}` token (GIFSY-only, target-ACTIVE-only,
   sub-preserved, audited, 8h, refresh preserves scope, strategy matches session by userId+clientId). FE: a "Work in
@@ -53,14 +53,41 @@ cross-tenant OVERSIGHT (see-all; A1) + per-brand OPERATION (the A2 switcher).
   confirmed → D1/#45:** hardcoded "NEEDS ATTENTION" numbers, the "Client/Gifsy" demo role-switcher, partner-class
   filter chips, Growth-Trends MoM% (the KPI *cards* ARE real per #47).
 
-**NEXT = A3 — Payouts COMPLETION (#42/#43, money path; runs INSIDE the A2 assumed session — no cross-tenant rewrite):**
-(a) **batch-from-pending** sweep — the missing step: assign the orphaned redemption `PayoutTransaction`s (created
-unbatched, `rewards.service.ts:506`, never consumed) into a tenant batch; (b) `processBatch` (`payouts.service.ts:280`)
-→ `$transaction` + guarded atomic claim (#42); (c) replace inline flat-194R with the **canonical TDS engine** + add
-`/admin/tds/liability` `section` (#43). **Audit hard.** Then **A4** enforcement coverage (#2; role-gate
-`/partner/me`,`/sales/*`,`/leaderboard`,`/rewards/redeem` — also closes the A2 self-lookup edge; + slaMetrics/outletStatuses
-residuals) ∥ **B1** sales-assisted redemption real (#50-E) ∥ **B2** invoices/Excel (#44) ∥ finish **B3**; then **C**
-harness+staging, **D** cleanup+platform-retirement. **Decisions:** RBAC=@Roles-only+coverage-audit for launch ·
+**✅ A3 — Payouts COMPLETION DONE (#42/#43, money path, 2026-06-19):** ran INSIDE the A2 assumed session (no cross-tenant
+rewrite). (a) **batch-from-pending** sweep `POST /v1/payouts/batches/:id/assign-pending` — the missing consumer: a
+guarded `updateMany` assigns unbatched (`batchId:null`, PENDING, `redemptionOrderId` set) redemption `PayoutTransaction`s
+into a DRAFT batch, scoped by `partner: { clientId }` (cross-tenant-safe) + matching `payoutMode`; plus a `?unbatched=true`
+list filter. (b) `processBatch` → **guarded atomic claim** (`payoutBatch.updateMany status in [DRAFT,SUBMITTED,FAILED]`,
+0-count=BadRequest) + disbursement/finalise in `$transaction` + **reset-to-FAILED on any post-claim throw** (never stranded
+in PROCESSING). (c) **OWNER DECISION: payouts disburse the FULL amount — inline flat-194R TDS + the `TdsRecord` write were
+REMOVED** (TDS owned by the P6.5 engine, which reads `RedemptionOrder.valuePaise` directly; `/admin/tds/liability?section=`
+ALREADY existed). jest **795/795** + independent adversarial audit (**SHIP**, no money/cross-tenant defect; 2 findings
+fixed = stuck-batch + dead reconciliation tdsRecord read) + **runtime-verified end-to-end** (gifsy→assume deoleo→unbatched
+list shows ONLY deoleo not clientb→create batch→assign-pending=1→process SUBMITTED, required=full 500000, flagged 1; DB:
+deoleo INITIATED+batched, clientb still PENDING+unbatched, **0 TdsRecords**). ⚠️ **Found pre-existing bug #52:**
+`payouts/fund/receive` 400s — `ReceiveFundDto.paymentDate` lacks an `@IsX` decorator so `forbidNonWhitelisted` rejects it
+(**✅ fixed in A4**; was not A3).
+
+**✅ A4 — Enforcement coverage audit DONE (#2, 2026-06-19):** audited ALL 35 controllers. KEY FINDING (validated): tenant
+isolation is solid (service-layer `clientId` + TenantGuard) and MOST "ungated" endpoints already self-scope (tickets→own,
+wallet→own, rewards-orders→own, banners/banner-config/admin-visibility→service denylist, targets fully gated) — so it was
+NOT "40 open holes". Added `@Roles` to the partner/sales self-service surface (partner.* class-gated PARTNER; sales.* class
+SALES; wallet read; rewards redeem/confirm/catalog; schemes enroll/my-enrollment; kyc first-approve/reject) for
+defense-in-depth + honest 403. **Fixed a REAL intra-tenant PII read-leak:** `kyc.ledger` had no owner guard → a partner
+could read ANY tenant submission's wallet ledger; now partner-callers are own-only (`kyc.getOne` was already leak-safe via
+its post-fetch owner guard — left unchanged). **Fixed `visibility.listSubmissions`** (added the partner denylist its sibling
+`outletStatuses` already had). **Fixed #52** (`ReceiveFundDto.paymentDate` `@IsDate()`) + **slaMetrics cross-tenant** (A1
+residual). jest **803/803** + independent audit (**SHIP**; caught + fixed 1 self-inflicted regression — over-gating
+`/rewards/orders` broke the CLIENT_ADMIN Fulfilment tab → reverted those 2 to ungated self-scoping) + **runtime role-matrix
+12/12** (partner own-ledger 200 / other-ledger 404 / sales-team 403 / partner-me 200 / client-admin wallet 403 /
+rewards-orders 200 / fund-receive 201 / slaMetrics cross-tenant). **DEFERRED (documented):** JWT↔x-tenant-slug → Gap
+#23/P8.6 (RLS); the `getOne`(sales own-only) vs `ledger`(sales tenant-wide) asymmetry is PRE-EXISTING (A4 changed neither
+for sales) → revisit with the sales-KYC-review decision. ⚠️ Stale `'RETAILER'` test-fixture role (not in the enum) → D1.
+
+**NEXT = the B-wave (parallel, disjoint modules):** ∥ **B1** sales-assisted redemption real (#50-E,
+`api/src/rewards` sales-context + `sales/catalogue`; money path) ∥ **B2** invoices/Excel (#44, `api/src/invoices`) ∥ finish
+**B3** (gifsy Overview dashboard + per-client detail still `CLIENT_REGISTRY`); then **C** harness+staging, **D**
+cleanup+platform-retirement. **Decisions:** RBAC=@Roles-only+coverage-audit for launch ·
 sales-redeem=real · tenant-creation=deferred but provision-ready. **Payouts audit: P6 was sound** — the payout gaps
 are a documented P6 hold (6.5 ON HOLD) + a Q1 consequence, not P6 errors. ⚠️ **Seeds note:** `seedDeoleoDemo` seeds
 VisibilityProgram `VP001` (seed-vp-1); `seedClientBDemo` seeds a PENDING_GIFSY KYC (seed-kyc-b1). **All session work
@@ -68,8 +95,7 @@ pushed to `develop` (auto-deploys staging) on 2026-06-19** — ⚠️ staging NO
 exercise login + the operator switcher + redemption there manually. Servers restarted this session (backend `dist` +
 FE) — owner may re-own; DB proxy on :5433 restarted (`DEV-DB.md`).
 
-**Still OPEN (gap-register):** #42 payouts.processBatch (→ A3, money path) · #43 TDS (→ A3) · #2 enforcement audit
-(→ A4) · #50-E sales-assisted redemption (→ B1) · #44 Excel round-trips (→ B2) · #49 gifsy dashboard/detail (→ finish
+**Still OPEN (gap-register):** #50-E sales-assisted redemption (→ B1) · #44 Excel round-trips (→ B2) · #49 gifsy dashboard/detail (→ finish
 B3) · #45 cleanup/dead-routes (P0.7 → D1) · #31/#32 platform-retirement (→ D2) · #48 admin trend-analytics (→ P8) ·
 #47 configurable RBAC (deferred). **Plus: STAGING harness env-support** (the harness only runs local; needs MSG91-OTP
 injection + staging tenant slugs before staging is a real gate). The Q1 payouts BACKEND `@Roles` change is
@@ -118,8 +144,8 @@ targeting dimension**; no point-tiers, no SKU. Validate any inherited concept ag
 fabricated-data + scoping + dashboards + cross-tenant + the redemption money path + the **visibility/submit port**
 are resolved & harness-green (**the next.config proxy-exclusion list is now EMPTY — no remaining dead writes via that
 mechanism**). **P0.6 = Phases A–D** (code-grounded re-scope 2026-06-19): **A1** Gifsy oversight (#38) **✅** · **A2**
-operator-context switcher (#51) **✅** · **A3** payouts money-path (#42/#43) **← NEXT** · **A4** enforcement audit (#2)
-→ **B1** sales-assisted redemption (#50-E) · **B2** invoices (#44) · **B3** gifsy real data (#49, list ◐ done) →
+operator-context switcher (#51) **✅** · **A3** payouts money-path (#42/#43) **✅** · **A4** enforcement audit (#2) **✅**
+→ **B1** sales-assisted redemption (#50-E) **← NEXT** · **B2** invoices (#44) · **B3** gifsy real data (#49, list ◐ done) →
 **C** harness+staging → **D** cleanup (#45) + platform-retirement (#31/#32). Full plan: `00-MASTER-PLAN §P0.6` +
 `reconcile/P0.5-make-it-runnable.md` + [[runtime-audit-p0.5]]. P7 (Engagement & support) resumes after D. The P6
 decisions below are the historical record; all shipped.
@@ -144,8 +170,8 @@ decisions below are the historical record; all shipped.
   (PAN-required, `uploadBatchId` dedup); liability − deposited = outstanding. **Cash redemptions (UPI/BANK_TRANSFER)
   now create a `PayoutTransaction`** (the settlement bridge) → existing payouts engine. **Audit money paths hard.**
 
-**AFTER the remaining P0.6 items (the actual NEXT — see the top of this prompt: `payouts.processBatch` #42, sales
-`/catalogue` redemption, KYC cross-tenant verify #38, cleanup), then P7 · Engagement & support
+**AFTER the remaining P0.6 items (the actual NEXT — see the top of this prompt: the B-wave — sales
+`/catalogue` redemption B1, invoices B2, finish B3 — then C harness+staging, D cleanup), then P7 · Engagement & support
 (spec §02 WF6; 00-MASTER-PLAN §P7).** Banners, notifications, leaderboard,
 tickets. Much read-side already exists (Phase S re-homed `api/src/{leaderboard,tickets,notifications}`). Tasks:
 **7.0** reconcile Engagement + Support · **7.1** banner config (admin) + partner-app banners · **7.2 notification
@@ -202,7 +228,7 @@ CONSTRAINTS (must hold):
   dev (serves FE live from disk — no restart needed for FE changes).
 
 Reload (read before building):
-- docs/plans/00-MASTER-PLAN.md            (phases; **P0–P6 + S DONE**; **P0.5/0.6 ◐ — A1+A2 DONE; NEXT = A3 payouts (#42/#43); then A4/B/C/D; then P7**)
+- docs/plans/00-MASTER-PLAN.md            (phases; **P0–P6 + S DONE**; **P0.5/0.6 ◐ — A1+A2+A3+A4 DONE; NEXT = B-wave (B1/B2/B3); then C/D; then P7**)
 - docs/plans/MODEL-ALIGNMENT.md           (the REAL parameter model)
 - docs/plans/P6-TDS-EXPLAINER.md          (TDS structure for owner review — 6.5 is HELD on its 4 questions)
 - docs/plans/reconcile/{P6-finance,P6.5-TDS-SPEC,P5-wallet-points-rewards,P4-programs-targets-enrollment}.md  (build records)

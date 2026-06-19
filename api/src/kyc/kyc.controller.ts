@@ -49,6 +49,7 @@ export class KycController {
     return this.kyc.list(user, query);
   }
 
+  // Initiation is multi-actor (partner self / sales / admin); tenant-scoped + caller-scoped in the service.
   @Post()
   @RequirePermission('kyc:initiate')
   create(@CurrentUser() user: JwtPayload, @Body() dto: CreateKycDto) {
@@ -149,6 +150,7 @@ export class KycController {
   }
 
   @Post(':id/first-approve')
+  @Roles('SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR', 'CLIENT_ADMIN')
   @RequirePermission('kyc:approve')
   firstApprove(
     @CurrentUser() user: JwtPayload,
@@ -183,6 +185,7 @@ export class KycController {
   }
 
   @Post(':id/reject')
+  @Roles('SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR', 'CLIENT_ADMIN')
   @RequirePermission('kyc:reject')
   reject(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: RejectKycDto) {
     return this.kyc.reject(user, id, dto);

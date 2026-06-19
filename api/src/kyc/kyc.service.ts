@@ -518,6 +518,10 @@ export class KycService {
 
   // ─── GET /v1/kyc/:id ─────────────────────────────────────────────────────────
   async getOne(user: JwtPayload, id: string) {
+    // Tenant-scoped fetch. getOne is already leak-safe: the owner/admin guard
+    // below (`!isAdmin && submission.userId !== user.sub → Forbidden`) restricts
+    // every non-admin caller to their OWN submission, so A4 leaves getOne as-is.
+    // (ledger lacked that post-fetch guard — that is the one A4 fixes.)
     const submission = await this.prisma.kycSubmission.findFirst({
       where: { id, ...this.kycTenantFilter(user) },
       include: {
@@ -987,8 +991,15 @@ export class KycService {
 
   // ─── GET /v1/kyc/:id/ledger ──────────────────────────────────────────────────
   async ledger(user: JwtPayload, id: string) {
+    // Intra-tenant read leak fix: a partner could read ANY submission's wallet
+    // ledger in their tenant (PII). Restrict partner callers to their own
+    // submission; admins + sales stay tenant-wide (mirrors list()).
+    const PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
+    const where: Prisma.KycSubmissionWhereInput = { id, ...this.kycTenantFilter(user) };
+    if (PARTNER_ROLES.includes(user.role)) where.userId = user.sub; // a partner may only read their own KYC
+
     const submission = await this.prisma.kycSubmission.findFirst({
-      where: { id, ...this.kycTenantFilter(user) },
+      where,
       include: {
         partner: {
           select: {
@@ -1136,7 +1147,10 @@ export class KycService {
     const now = new Date();
 
     const approved = await this.prisma.kycSubmission.findMany({
-      where: { status: 'APPROVED', user: { clientId: user.clientId } },
+      // A1 cross-tenant filter: GIFSY → {} (aggregate over all tenants), else
+      // clientId-scoped — consistent with list()/getOne(). Filtering by the raw
+      // user.clientId made a GIFSY operator see only their empty `gifsy` tenant.
+      where: { status: 'APPROVED', ...this.kycTenantFilter(user) },
       include: {
         statusHistory: {
           where: { toStatus: 'APPROVED' },
@@ -1167,7 +1181,7 @@ export class KycService {
     const pending = await this.prisma.kycSubmission.findMany({
       where: {
         status: { in: ['SUBMITTED', 'UNDER_REVIEW', 'DRAFT'] },
-        user: { clientId: user.clientId },
+        ...this.kycTenantFilter(user),
       },
       select: { createdAt: true },
     });
@@ -1194,10 +1208,10 @@ export class KycService {
     }
 
     const reUploadCount = await this.prisma.kycSubmission.count({
-      where: { status: 'RE_UPLOAD_REQUIRED', user: { clientId: user.clientId } },
+      where: { status: 'RE_UPLOAD_REQUIRED', ...this.kycTenantFilter(user) },
     });
     const totalCount = await this.prisma.kycSubmission.count({
-      where: { user: { clientId: user.clientId } },
+      where: { ...this.kycTenantFilter(user) },
     });
     const reUploadRate = totalCount > 0 ? (reUploadCount / totalCount) * 100 : 0;
 

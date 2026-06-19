@@ -33,29 +33,38 @@ export class RewardsController {
   constructor(private readonly rewards: RewardsService) {}
 
   @Post('redeem')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
   @RequirePermission('rewards:read')
   redeem(@CurrentUser() user: JwtPayload, @Body() dto: RedeemDto) {
     return this.rewards.redeem(user, dto);
   }
 
   @Post('redeem/confirm')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
   @RequirePermission('rewards:read')
   confirmRedeem(@CurrentUser() user: JwtPayload, @Body() dto: RedeemConfirmDto) {
     return this.rewards.confirmRedeem(user, dto);
   }
 
   @Get('catalog')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
   @RequirePermission('rewards:read')
   listCatalog(@CurrentUser() user: JwtPayload, @Query() query: ListCatalogQueryDto) {
     return this.rewards.listCatalog(user, query);
   }
 
   @Get('catalog/:id')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
   @RequirePermission('rewards:read')
   getCatalogItem(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.rewards.getCatalogItem(user, id);
   }
 
+  // Orders reads are multi-audience + self-scoping in the service (partner → own,
+  // GIFSY → all-tenant, others → empty; getOrder additionally throws Forbidden for
+  // a non-owner non-GIFSY). Intentionally NOT @Roles-gated: the admin Gift-Catalogue
+  // Fulfilment tab (CLIENT_ADMIN) also reads this, and gating it to partners 403'd
+  // that page. Safety is the service-layer scoping, not a role allowlist here.
   @Get('orders')
   @RequirePermission('rewards:read')
   listOrders(@CurrentUser() user: JwtPayload, @Query() query: ListOrdersQueryDto) {

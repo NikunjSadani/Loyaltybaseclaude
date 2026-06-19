@@ -82,6 +82,31 @@ describe('VisibilityService', () => {
       const res = await service.listSubmissions(partner, {});
       expect(res.pagination).toEqual({ page: 1, limit: 20, total: 3, pages: 1 });
     });
+
+    // ── Partner denylist (mirrors outletStatuses) ───────────────────────────────
+    it('blocks channel-partner roles (they submit via POST /submit, not list)', async () => {
+      for (const role of ['SSS', 'WHOLESALER', 'SUB_STOCKIST'] as const) {
+        const p: JwtPayload = { ...partner, role };
+        await expect(service.listSubmissions(p, {})).rejects.toBeInstanceOf(ForbiddenException);
+      }
+      // No DB query is issued for a blocked partner.
+      expect(mockPrisma.visibilitySubmission.findMany).not.toHaveBeenCalled();
+    });
+
+    it('proceeds for a tenant admin (CLIENT_ADMIN)', async () => {
+      const tenantAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
+      mockPrisma.visibilitySubmission.findMany.mockResolvedValue([]);
+      mockPrisma.visibilitySubmission.count.mockResolvedValue(0);
+      await service.listSubmissions(tenantAdmin, {});
+      expect(mockPrisma.visibilitySubmission.findMany).toHaveBeenCalled();
+    });
+
+    it('proceeds for the GIFSY cross-tenant operator', async () => {
+      mockPrisma.visibilitySubmission.findMany.mockResolvedValue([]);
+      mockPrisma.visibilitySubmission.count.mockResolvedValue(0);
+      await service.listSubmissions(gifsy, {});
+      expect(mockPrisma.visibilitySubmission.findMany).toHaveBeenCalled();
+    });
   });
 
   describe('approve', () => {

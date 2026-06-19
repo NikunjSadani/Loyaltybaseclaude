@@ -1,6 +1,7 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { PartnerService } from './partner.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
 
@@ -12,6 +13,7 @@ import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
  * Responses are enveloped globally by TransformInterceptor.
  */
 @Controller('partner')
+@Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
 export class PartnerController {
   constructor(private readonly partner: PartnerService) {}
 

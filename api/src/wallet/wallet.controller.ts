@@ -16,6 +16,7 @@ export class WalletController {
   constructor(private readonly wallet: WalletService) {}
 
   @Get()
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
   @RequirePermission('wallet:read')
   getWallet(@CurrentUser() user: JwtPayload) {
     return this.wallet.getWallet(user);
@@ -29,6 +30,7 @@ export class WalletController {
   }
 
   @Get('transactions')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
   @RequirePermission('wallet:read')
   listTransactions(@CurrentUser() user: JwtPayload, @Query() query: ListTransactionsQueryDto) {
     return this.wallet.listTransactions(user, query);

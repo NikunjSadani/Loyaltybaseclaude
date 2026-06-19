@@ -149,6 +149,12 @@ export class VisibilityService {
    * scoped through partner.user.clientId (mirrors the source `where`).
    */
   async listSubmissions(user: JwtPayload, q: ListSubmissionsQueryDto) {
+    // Partners submit via POST /submit; they do not list the tenant's submissions.
+    // Mirror the denylist already enforced in outletStatuses (@Roles can't express
+    // "everyone except partners", so the block lives in the service).
+    const partnerRoles = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
+    if (partnerRoles.includes(user.role)) throw new ForbiddenException('Forbidden');
+
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
     const skip = (page - 1) * limit;

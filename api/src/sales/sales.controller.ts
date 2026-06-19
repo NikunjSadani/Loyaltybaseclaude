@@ -1,6 +1,7 @@
 import { Controller, Get, Param } from '@nestjs/common';
 import { SalesService } from './sales.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 
 /**
@@ -14,6 +15,7 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
  * they depend on dropped models.
  */
 @Controller('sales')
+@Roles('SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR')
 export class SalesController {
   constructor(private readonly sales: SalesService) {}
 

@@ -1,5 +1,7 @@
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
+  IsDate,
   IsEnum,
   IsInt,
   IsNumber,
@@ -24,6 +26,13 @@ export class ListTransactionsQueryDto {
   @IsOptional()
   @IsString()
   partnerId?: string;
+
+  // When true, return only unbatched waiting transactions (batchId null + PENDING)
+  // so an operator can see what's eligible for the batch-from-pending sweep.
+  @IsOptional()
+  @Type(() => Boolean)
+  @IsBoolean()
+  unbatched?: boolean;
 
   @IsOptional()
   @Type(() => Date)
@@ -105,6 +114,9 @@ export class ReceiveFundDto {
   referenceNumber?: string;
 
   // Source coerces the incoming string to a Date.
+  // @IsDate is required so the global forbidNonWhitelisted ValidationPipe keeps
+  // this property instead of rejecting it ("property paymentDate should not exist").
+  @IsDate()
   @Type(() => Date)
   paymentDate!: Date;
 

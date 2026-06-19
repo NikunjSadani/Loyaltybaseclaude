@@ -71,6 +71,9 @@ const mockStorage = {
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const so: JwtPayload = { sub: 'so1', role: 'SALES_SO', clientId: 'deoleo', phone: '', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' };
+// A real channel-partner role (one of SSS / WHOLESALER / SUB_STOCKIST) — used to
+// prove the intra-tenant read-leak fix (a partner may only read their own KYC).
+const sss: JwtPayload = { sub: 'sss1', role: 'SSS', clientId: 'deoleo', phone: '', name: '' };
 
 /** All-7-APPROVED items for the bridge */
 const ALL_APPROVED = KYC_FIELD_KEYS.map((k) => ({ fieldKey: k, decision: 'APPROVED' as const }));
@@ -480,6 +483,47 @@ describe('KycService', () => {
     it("forbids a non-admin from viewing someone else’s submission", async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 's1', userId: 'other' });
       await expect(service.getOne(partner, 's1')).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    // getOne is leak-safe via the post-fetch owner/admin guard above (a non-admin
+    // viewing a non-owned submission is 403'd). A4 left getOne unchanged; the
+    // ledger leak (no such guard) is the one A4 fixes — see below.
+  });
+
+  describe('ledger (intra-tenant read-leak fix)', () => {
+    const seedLedgerSubmission = (userId: string) =>
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1',
+        userId,
+        partner: { businessName: 'B', phone: 'p', outlets: [], wallets: [] },
+      });
+
+    it('restricts a partner caller to their own submission (where.userId = user.sub)', async () => {
+      seedLedgerSubmission('sss1');
+      await service.ledger(sss, 's1');
+      const where = mockPrisma.kycSubmission.findFirst.mock.calls[0][0].where;
+      expect(where).toEqual({ id: 's1', user: { clientId: 'deoleo' }, userId: 'sss1' });
+    });
+
+    it('does NOT restrict a sales reviewer by userId', async () => {
+      seedLedgerSubmission('someone-else');
+      await service.ledger(so, 's1');
+      const where = mockPrisma.kycSubmission.findFirst.mock.calls[0][0].where;
+      expect(where).toEqual({ id: 's1', user: { clientId: 'deoleo' } });
+      expect(where.userId).toBeUndefined();
+    });
+
+    it('does NOT restrict a GIFSY admin by userId (cross-tenant)', async () => {
+      seedLedgerSubmission('someone-else');
+      await service.ledger(gifsy, 's1');
+      const where = mockPrisma.kycSubmission.findFirst.mock.calls[0][0].where;
+      expect(where).toEqual({ id: 's1' });
+      expect(where.userId).toBeUndefined();
+    });
+
+    it('throws NotFound when the (scoped) submission is not found', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue(null);
+      await expect(service.ledger(sss, 's1')).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 
@@ -1322,6 +1366,18 @@ describe('KycService', () => {
   describe('slaMetrics', () => {
     it('forbids non-GIFSY callers', async () => {
       await expect(service.slaMetrics(so)).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('uses the cross-tenant (A1) filter for GIFSY — no caller-tenant user filter (#38)', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+      mockPrisma.kycSubmission.count.mockResolvedValue(0);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
+      await service.slaMetrics(gifsy);
+      // First findMany is the APPROVED query; GIFSY → kycTenantFilter() returns {}
+      // so there is NO `user.clientId` scope (would otherwise hide every brand's data).
+      const approvedWhere = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
+      expect(approvedWhere.status).toBe('APPROVED');
+      expect(approvedWhere.user).toBeUndefined();
     });
   });
 });

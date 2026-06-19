@@ -416,8 +416,8 @@ Q1 decision* (payouts→GIFSY-only, made AFTER P6 built them tenant-scoped) — 
 |---|---|---|---|---|
 | **A** — correctness foundation (go-live blockers) | **A1** ✅ | Gifsy cross-tenant **oversight**: GIFSY_ADMIN exempt from caller-tenant filter — KYC approve + visibility approve/reject + brand-labeled queue | #38 | — done |
 | | **A2** ✅ | **Operator-context switcher** (payouts prerequisite): `POST /v1/auth/assume-tenant` token `{sub:operator, role:GIFSY_ADMIN, clientId:tenant, assumed:true}` + 4 guardrails (real-actor `sub`, GIFSY-only, audited, "Working in <Brand>" banner) + FE "Work in brand ▾" switcher + operator-shell routing. Runtime-verified (UI round-trip) + 2 independent-audit fixes (refresh-scope, strategy match) | #51 | — done |
-| | **A3** ◀ NEXT | **Payouts completion** (tenant-context, money path): batch-from-pending sweep (wires the orphaned redemption `PayoutTransaction`s) + `processBatch` `$transaction`+guarded-claim (#42) + canonical TDS engine + `section` (#43). NO cross-tenant rewrite — runs in the A2 tenant-scoped session | #42,#43 | **A2** ✅ |
-| | **A4** | Enforcement coverage audit: role-gate the no-`@Roles` partner/sales endpoints (`/partner/me`,`/sales/*`,`/leaderboard`,`/rewards/redeem` — also closes the A2 #4 edge) + JWT↔`x-tenant-slug` binding + A1-audit residuals (slaMetrics, outletStatuses) | #2 | after B1 |
+| | **A3** ✅ | **Payouts completion** (tenant-context, money path): `assign-pending` batch-from-pending sweep (wires the orphaned redemption `PayoutTransaction`s; tenant+mode scoped) + `processBatch` `$transaction`+guarded-claim+reset-on-throw (#42) + **inline TDS REMOVED** — full-amount payout, TDS owned by the P6.5 engine; `/admin/tds/liability?section=` already existed (#43). jest 795/795 + audit SHIP + runtime-verified (sweep→process, cross-tenant, 0 TdsRecords). Found pre-existing #52 (fund/receive DTO). | #42,#43 | — done |
+| | **A4** ✅ | Enforcement coverage audit (all 35 controllers): tenant isolation solid + most "ungated" endpoints already self-scope; added `@Roles` to the partner/sales self-service surface (defense-in-depth + honest 403); **fixed a real `kyc.ledger` intra-tenant PII read-leak** + `visibility.listSubmissions` denylist; fixed #52 (`ReceiveFundDto.paymentDate`) + slaMetrics cross-tenant. jest 803/803 + audit SHIP (caught+fixed 1 over-gating regression on `/rewards/orders`) + runtime 12/12. JWT↔`x-tenant-slug` deferred to #23/P8.6 (RLS); getOne/ledger sales asymmetry pre-existing | #2,#52 | — done |
 | **B** — honesty wiring (no fake surfaces) | **B1** | Sales-assisted redemption → real redeem→OTP→debit, scoped to assigned outlet | #50-E | — |
 | | **B2** | Invoice generation/upload backend + FE; Excel round-trips | #44 | — |
 | | **B3** ◐ | Gifsy console real `clients` data: **Clients LIST + switcher brand-list = real** (`GET /api/gifsy/clients`, registry retired there); **remaining** = gifsy dashboard + per-client detail (still registry) + provision-ready tenant create | #49 | (A2 FE) |
@@ -430,11 +430,11 @@ Q1 decision* (payouts→GIFSY-only, made AFTER P6 built them tenant-scoped) — 
 prerequisite for A3 (payouts) — without a tenant-scoped operator session, payouts can't run. **B** wires real data;
 **C** locks each fix + makes staging a gate; **D** retires broad surfaces last.
 
-**Parallel waves (disjoint file sets, per `08-agent-execution-guide.md`). ✅ A1 + A2 DONE (built directly by the
-orchestrator — auth/money-critical, each independently audited).**
-- **Wave NOW:** **A3** payouts (`api/src/payouts/*` + payouts FE — runs in A2's assumed session; money path) ·
-  ∥ **B2** invoices (`api/src/invoices/*` + invoice FE + Excel) · ∥ **B1** sales-assisted redemption (`api/src/rewards`
-  sales-context + `platform/.../sales/catalogue` — money path). Disjoint modules (payouts / invoices / rewards+sales).
+**Parallel waves (disjoint file sets, per `08-agent-execution-guide.md`). ✅ A1 + A2 + A3 + A4 DONE (built directly by the
+orchestrator — auth/money/enforcement-critical, each independently audited + A3/A4 runtime-verified).**
+- **Wave NOW (the B-wave):** ∥ **B2** invoices (`api/src/invoices/*` + invoice FE + Excel) · ∥ **B1** sales-assisted
+  redemption (`api/src/rewards` sales-context + `platform/.../sales/catalogue` — money path) · finish **B3** (gifsy
+  Overview dashboard + per-client detail real). Disjoint modules (invoices / rewards+sales / gifsy-console).
 - **Then:** finish **B3** (gifsy dashboard/detail real) · **A4** enforcement coverage (cross-cutting `@Roles` — after
   B1 so it doesn't collide on `rewards`).
 - **Lock + cleanup:** **C1**+**C2**, then **D1**+**D2** (serial).

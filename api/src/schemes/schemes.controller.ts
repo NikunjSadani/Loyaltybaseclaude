@@ -22,6 +22,7 @@ import {
 export class SchemesController {
   constructor(private readonly schemes: SchemesService) {}
 
+  // Open to all in-tenant roles: tenant scheme browsing; service tenant-scopes.
   @Get()
   @RequirePermission('schemes:read')
   list(@CurrentUser() user: JwtPayload, @Query() query: ListSchemesQueryDto) {
@@ -35,6 +36,7 @@ export class SchemesController {
     return this.schemes.create(user, dto);
   }
 
+  // Open to all in-tenant roles: tenant scheme browsing; service tenant-scopes.
   @Get(':id')
   @RequirePermission('schemes:read')
   getOne(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
@@ -85,6 +87,7 @@ export class SchemesController {
    * Returns the enrollment form for a scheme. Returns 404 if none configured.
    * Validates tenant ownership before reading.
    */
+  // Open to all in-tenant roles: tenant scheme browsing; service tenant-scopes.
   @Get(':id/enrollment-form')
   @RequirePermission('schemes:read')
   getEnrollmentForm(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
@@ -109,6 +112,7 @@ export class SchemesController {
    * fields, types, visibleWhen, CALCULATED server-recompute).
    */
   @Post(':id/enroll')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST', 'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR')
   @RequirePermission('schemes:read')
   submitEnrollment(
     @CurrentUser() user: JwtPayload,
@@ -125,6 +129,7 @@ export class SchemesController {
    * Tenant-scoped via the scheme ownership check.
    */
   @Get(':id/my-enrollment')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST', 'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR')
   @RequirePermission('schemes:read')
   getMyEnrollment(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.schemes.getMyEnrollment(user, id);
