@@ -33,12 +33,20 @@ All six who-sees-what questions are answered. The harness asserts exactly these.
 A re-audit against the code (not docs) surfaced that several "Gifsy-only" surfaces are actually **broken** for the
 operator, and forced three more decisions. These define how Phase A/B (`00-MASTER-PLAN §P0.6`) is built.
 
-- **Gifsy operator = one console, sees ALL brands (not per-tenant dashboards).** The platform operator does NOT get
-  a copy of each brand's admin dashboard. They get **their own console** holding: platform settings (create/configure
-  tenants), cross-tenant reports that are inherently platform-wide (e.g. **194C** TDS), and **cross-tenant work
-  queues** (the KYC final-approval queue, payout processing) shown as **one list with a Brand column/filter**.
-  *Implementation:* every Gifsy-operated query must scope by the **record's** tenant, with `GIFSY_ADMIN` exempt from
-  the caller-tenant filter (today they're `clientId='gifsy'`-scoped → 404 on tenant data; gap #38 + visibility/payouts).
+- **Gifsy operates in TWO modes — oversight (see-all) and per-brand operation (tenant-context).** The platform
+  operator does NOT get a copy of each brand's admin dashboard. Instead:
+  - **Mode 1 — cross-tenant OVERSIGHT (see-all).** One `gifsy` session sees every brand's records *together*, in one
+    Brand-labelled list. For approval queues + platform-wide reports: the **KYC final-approval queue**, **194C** TDS.
+    *Mechanism:* the `GIFSY_ADMIN` role is **exempt from the caller-tenant filter** (queries scope by the record's own
+    tenant). **✅ built in A1** (gap #38) for KYC + visibility approve/reject.
+  - **Mode 2 — per-brand OPERATION (tenant-context).** For operations that are inherently per-brand and money-bearing
+    — **payouts** above all — Gifsy **switches into one brand** ("Work in brand ▾") and gets a **tenant-scoped
+    `GIFSY_ADMIN` session** (`clientId = that tenant`, role still GIFSY). Then the *existing* per-tenant code
+    (`clientId: user.clientId`) is already correct — **no cross-tenant exemption**, no mixing brands' money.
+    *Mechanism:* the **operator-context switcher** (assume-tenant token; gap #51) — see A2 in `00-MASTER-PLAN §P0.6`.
+  - Industry-standard pattern (AWS AssumeRole, Salesforce "Login As", Stripe account-switch). Guardrails: the token's
+    `sub` stays the **real operator** (audit attribution); only `GIFSY_ADMIN` may assume a tenant; every assume is
+    audit-logged; a **persistent "Working in <Brand>" banner** so the operator never acts on the wrong brand.
 - **RBAC at launch = `@Roles`-only + a route-coverage audit.** With **fixed built-in roles** (the configurable
   sub-role portal is deferred, #47), the RBAC permission layer would just duplicate the role enum, and it is OFF +
   fail-open today. Launch enforces via `@Roles` + in-service role checks + tenant-scoped queries; a coverage audit

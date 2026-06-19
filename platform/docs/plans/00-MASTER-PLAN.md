@@ -403,29 +403,43 @@ exact gap class in `VERIFICATION-PROTOCOL.md §72`), `payouts.processBatch` is u
 `/catalogue` redeem is a client-side fake (#50-E), and route enforcement is inconsistent (#2). Remaining P0.6 is
 re-scoped into **4 phases A–D** (full detail: [`reconcile/P0.5-make-it-runnable.md`](reconcile/P0.5-make-it-runnable.md)).
 
-**Owner decisions (2026-06-19, source-of-truth `DATA-VISIBILITY.md §3` + `RBAC-ENABLEMENT.md`):** Gifsy = operator
-console + cross-tenant **brand-labeled** work queues (sees all tenants; no per-tenant dashboards) · RBAC at launch =
-**@Roles-only + a route-coverage audit** (RBAC stays off; configurable-RBAC #47 deferred) · sales-assisted
-redemption = **real** redeem→OTP→debit scoped to the sales user's assigned outlet · tenant-creation = **deferred,
-built provision-ready** (real `clients` read + clean tenant model so a future create-endpoint/UI is a small add).
+**Owner decisions (2026-06-19, source-of-truth `DATA-VISIBILITY.md §3.1` + `RBAC-ENABLEMENT.md`):** Gifsy operates in
+**TWO modes** — (1) cross-tenant **oversight** (one session, sees all brands; KYC queue + 194C) via the A1 role
+exemption [DONE], and (2) per-brand **operation** (payouts etc.) by **switching into a brand** for a tenant-scoped
+`GIFSY_ADMIN` session [A2, the switcher] · RBAC at launch = **@Roles-only + a route-coverage audit** (RBAC off;
+configurable-RBAC #47 deferred) · sales-assisted redemption = **real** redeem→OTP→debit scoped to the sales user's
+assigned outlet · tenant-creation = **deferred, built provision-ready**. **Payouts audit (P6 was sound):** the
+payouts gaps are a *documented* P6 hold (6.5 Payouts/TDS was `ON HOLD` for owner TDS review) + a *consequence of the
+Q1 decision* (payouts→GIFSY-only, made AFTER P6 built them tenant-scoped) — not P6 build errors.
 
-| Phase | Stream | What | Gaps | Parallel |
+| Phase | Stream | What | Gaps | Dep |
 |---|---|---|---|---|
-| **A** — correctness foundation (go-live blockers; first) | **A1** | Gifsy cross-tenant access: record-tenant scoping for GIFSY_ADMIN — KYC approve + visibility approve/reject + brand-labeled queues | #38 | ∥ A2/A3 |
-| | **A2** | Payouts money path: same Gifsy scoping + `processBatch` `$transaction`+guarded claim + canonical TDS engine + `section` param | #42, #43 | ∥ |
-| | **A3** | Enforcement coverage audit (every sensitive route has a real `@Roles`/in-service guard) + verify JWT↔`x-tenant-slug` binding | #2 | ∥ |
-| **B** — honesty wiring (no fake surfaces) | **B1** | Sales-assisted redemption → real redeem→OTP→debit, scoped to assigned outlet | #50-E | ∥ |
-| | **B2** | Invoice generation/upload backend + FE; Excel round-trips | #44 | ∥ |
-| | **B3** | Gifsy console real `clients` data; retire static registry; provision-ready tenant model | #49 | ∥ |
-| **C** — lock-in | **C1** | Harness coverage for each A/B fix (Gifsy KYC across brands, sales redeem debit, payouts, visibility-approve) | #46 | rides A/B |
+| **A** — correctness foundation (go-live blockers) | **A1** ✅ | Gifsy cross-tenant **oversight**: GIFSY_ADMIN exempt from caller-tenant filter — KYC approve + visibility approve/reject + brand-labeled queue | #38 | — done |
+| | **A2** | **Operator-context switcher** (payouts prerequisite): in-console "Work in brand ▾" → assume-tenant token `{sub:operator, role:GIFSY_ADMIN, clientId:tenant}` + 4 guardrails (real-actor `sub`, GIFSY-only, audited, "Working in <Brand>" banner) + operator-shell routing | #51 | — |
+| | **A3** | **Payouts completion** (tenant-context, money path): batch-from-pending sweep (wires the orphaned redemption `PayoutTransaction`s) + `processBatch` `$transaction`+guarded-claim (#42) + canonical TDS engine + `section` (#43). NO cross-tenant rewrite — runs in the A2 tenant-scoped session | #42,#43 | **A2** |
+| | **A4** | Enforcement coverage audit: role-gate the no-`@Roles` partner/sales endpoints (`/partner/me`,`/sales/*`,`/leaderboard`,`/rewards/redeem` — also closes the A2 #4 edge) + JWT↔`x-tenant-slug` binding + A1-audit residuals (slaMetrics, outletStatuses) | #2 | after B1 |
+| **B** — honesty wiring (no fake surfaces) | **B1** | Sales-assisted redemption → real redeem→OTP→debit, scoped to assigned outlet | #50-E | — |
+| | **B2** | Invoice generation/upload backend + FE; Excel round-trips | #44 | — |
+| | **B3** | Gifsy console real `clients` data; retire static registry; provision-ready tenant model (the switcher's home) | #49 | (A2 FE) |
+| **C** — lock-in | **C1** | Harness coverage for each A/B fix (Gifsy KYC, operator-switch, payouts, sales redeem) | #46 | rides A/B |
 | | **C2** | Staging harness env-support (MSG91 OTP injection + staging tenant slugs) | — | standalone |
 | **D** — cleanup & retire (last) | **D1** | P0.7 cleanup: dead `app/api/*`, demo chrome/persona switchers, duplicate pages, display bugs | #45 | serial |
-| | **D2** | Platform-Prisma retirement (auth/session/client-config) + delete stale platform schema + `auth/logout` revocation | #31, #32 | serial |
+| | **D2** | Platform-Prisma retirement (auth/session/client-config) + delete stale platform schema + `auth/logout` revocation | #31,#32 | serial |
 
-**Order & why:** **A first** — only cross-tenant/money/enforcement *corrupt or breach*, and KYC gates partner
-activation (everything depends on it). **B next** — wire real data onto a now-correct engine. **C** — lock each fix
-with a runtime test + make staging a real gate. **D last** — retiring ~120 platform-Prisma files is safest once the
-functional surface is stable. **Parallel:** A1∥A2∥A3 and B1∥B2∥B3 (disjoint modules); C1 rides each fix; D serial.
+**Order & why:** **A first** — only cross-tenant/money/auth *corrupt or breach*. A2 (operator-context) is the
+prerequisite for A3 (payouts) — without a tenant-scoped operator session, payouts can't run. **B** wires real data;
+**C** locks each fix + makes staging a gate; **D** retires broad surfaces last.
+
+**Parallel waves (disjoint file sets, per `08-agent-execution-guide.md`):**
+- **Wave 1 (now, 3 agents ∥):** **A2** operator-context (`api/src/auth/*` + operator-shell FE) · **B2** invoices
+  (`api/src/invoices/*` + invoice FE + Excel) · **B1** sales-assisted redemption (`api/src/rewards` sales-context +
+  `platform/.../sales/catalogue`). Disjoint modules (auth / invoices / rewards+sales).
+- **Wave 2 (after A2 lands):** **A3** payouts (`api/src/payouts/*` + payouts FE — needs A2's tenant session) · **B3**
+  gifsy console real data (`api/src/gifsy` + gifsy FE — shares the operator console with A2, so it follows A2).
+- **Wave 3:** **A4** enforcement coverage (cross-cutting `@Roles` — runs after B1 so it doesn't collide on `rewards`).
+- **Wave 4 (lock + cleanup):** **C1**+**C2**, then **D1**+**D2** (serial).
+C1 rides each fix as it lands; the orchestrator runs the gate + the `VERIFICATION-PROTOCOL` runtime checks + the
+independent audit per wave before commit.
 
 **Deferred (kept in `gap-register` with a WHEN — none dropped):** #48 trend-analytics → P8 · #47 configurable-RBAC +
 tenant-creation UI · #18-resid JSON blobs · #21 notifications → P7 · #23/#24/#26/#27 → P8 · holding/lock period.

@@ -40,12 +40,18 @@ PHOTO_APPROVAL gate, partner-only `@Roles`; dead local route deleted; harness wr
 access DONE (#38, 2026-06-19):** `kycTenantFilter`/`submissionTenantFilter` make GIFSY_ADMIN exempt from the
 caller-tenant filter (KYC + visibility); reviewQueue emits each record's clientId; FE got a brand column/filter;
 clientb seeded a PENDING_GIFSY KYC. Runtime-verified (6 checks) + api jest 783/783 + harness 39/39 + independent
-audit PASS (notes: slaMetrics/outletStatuses same-class → A3). **NEXT = A2** payouts money path
-(`processBatch` txn+guarded-claim + canonical TDS, #42/#43) ∥ **A3** enforcement coverage audit (#2); then **B1**
-sales-assisted redemption real (#50-E) ∥ **B2** invoices/Excel (#44) ∥ **B3** gifsy console real data (#49); then
-**C** harness+staging, **D** cleanup+platform-retirement. **Decisions:** Gifsy=sees-all console + brand-labeled
-queues · RBAC=@Roles-only+coverage-audit for launch · sales-redeem=real · tenant-creation=deferred but
-provision-ready. ⚠️ **Seeds note:** `seedDeoleoDemo` now seeds VisibilityProgram `VP001` (seed-vp-1). **Servers were
+audit PASS (notes: slaMetrics/outletStatuses same-class → A4). **NEXT = A2 — Operator-context switcher** (#51, the
+payouts prerequisite): Gifsy can't get a tenant-scoped session today (`verifyOtp` binds JWT clientId to the user's
+home tenant; the gifsy operator is `clientId='gifsy'`). Build an in-console "Work in brand ▾" → assume-tenant token
+`{sub:operator, role:GIFSY_ADMIN, clientId:tenant}` (GIFSY-only, audited, banner). Then **A3** payouts completion
+(batch-from-pending sweep + `processBatch` txn+guarded-claim + canonical TDS, #42/#43; runs in the A2 tenant session —
+money path) → **A4** enforcement coverage audit (#2; role-gate partner/sales endpoints, closes the A2 #4 edge). ∥
+**B1** sales-assisted redemption real (#50-E) ∥ **B2** invoices/Excel (#44) ∥ **B3** gifsy console real data (#49);
+then **C** harness+staging, **D** cleanup+platform-retirement. **Parallel waves: W1 = A2 ∥ B2 ∥ B1; W2 = A3 ∥ B3
+(after A2); W3 = A4; W4 = C+D.** **Decisions:** Gifsy = TWO modes (oversight see-all [A1 done] + per-brand operation
+via the A2 switcher) · RBAC=@Roles-only+coverage-audit for launch · sales-redeem=real · tenant-creation=deferred but
+provision-ready. **Payouts audit: P6 was sound** — the payout gaps are a documented P6 hold (6.5 ON HOLD) + a Q1
+consequence, not P6 errors. ⚠️ **Seeds note:** `seedDeoleoDemo` now seeds VisibilityProgram `VP001` (seed-vp-1). **Servers were
 restarted this session** with the new build (backend `dist` rebuilt; FE restarted for next.config) — owner may re-own.
 
 **Still OPEN (gap-register):** #38 Gifsy cross-tenant access (real bug → A1) · #42 payouts.processBatch ·
