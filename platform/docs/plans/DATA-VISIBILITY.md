@@ -93,8 +93,8 @@ operator, and forced three more decisions. These define how Phase A/B (`00-MASTE
 > fabricated values, correct scoping, honest error). A row is "done" only when its E2E test passes.
 
 > **Live status = the E2E harness, not this table.** `platform/e2e` (`npm run e2e`) is the source of truth;
-> hand-edited cells drift. **Baseline 2026-06-19: 37/37 GREEN** (5 roles incl. GIFSY + clientb; +1 = the partner
-> visibility write-persistence test added with the P0.6 dead-write port). The original
+> hand-edited cells drift. **Baseline 2026-06-19: 40/40 GREEN** (5 roles incl. GIFSY + clientb; covers the partner
+> visibility write-persistence test, the A1 Gifsy cross-tenant KYC test, and the A2 operator-switch UI round-trip). The original
 > reds are all remediated: #40 fabricated data (partner/sales identity via `/partner/me`, admin KPIs real),
 > #41 role guards + Q1 payouts GIFSY-only, #39 GIFSY login (dev clientId override), cross-tenant isolation
 > BOTH directions (2nd tenant `clientb` seeded with data), and the **partner redemption money path** (#50 —

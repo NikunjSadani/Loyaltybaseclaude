@@ -8,25 +8,24 @@ Repo root: C:\Users\nikun\Loyaltybaseclaude  (git root; branch **develop**). Fro
 Backend: `api/` (NestJS + Prisma 7, the source of truth — owns the DB + ALL business logic).
 
 ⚠️ **STATE (2026-06-19): the ENFORCEMENT is built and the local matrix is GREEN — but green is BOUNDED, not
-"the whole app works".** The Playwright E2E harness (`platform/e2e`, `npm run e2e`, **37/37 green**) now covers
+"the whole app works".** The Playwright E2E harness (`platform/e2e`, `npm run e2e`, **40/40 green**) now covers
 real-login-per-role · real scoped data (no fabrication) · role/portal scoping · cross-tenant isolation (BOTH
-directions) · write-persistence (tickets · the partner redemption MONEY PATH · the partner VISIBILITY submit).
-It is re-runnable (dev throttle
-disabled via `skipIf(FIXED_OTP)`). **It does NOT yet cover every page/flow** — most admin sub-pages, partner
-targets/leaderboard, sales team/outlets, the gifsy console (mock, #49), and most write flows are unverified. Read
-FIRST: [[e2e-harness]] · `e2e/README.md` · `GO-LIVE-READINESS.md` · `DATA-VISIBILITY.md` · `VERIFICATION-PROTOCOL.md`
-· gap-register **#33–#50** · [[runtime-audit-p0.5]] · [[verify-flows-at-runtime]].
+directions) · write-persistence (tickets · the partner redemption MONEY PATH · the partner VISIBILITY submit) ·
+**Gifsy cross-tenant KYC (A1)** · **the Gifsy operator-context SWITCHER round-trip (A2-FE)**. Re-runnable (dev
+throttle disabled via `skipIf(FIXED_OTP)`). **It does NOT yet cover every page/flow** — most admin sub-pages, partner
+targets/leaderboard, sales team/outlets, the gifsy dashboard/detail (still registry-mock — B3 list IS real now), and
+most write flows are unverified. Read FIRST: [[e2e-harness]] · `e2e/README.md` · `GO-LIVE-READINESS.md` ·
+`DATA-VISIBILITY.md` · `VERIFICATION-PROTOCOL.md` · gap-register **#33–#51** · [[runtime-audit-p0.5]] · [[verify-flows-at-runtime]].
 
 **THE DEFINITION OF DONE (`VERIFICATION-PROTOCOL.md`):** a real user, in the correct role, completes the flow
 end-to-end at RUNTIME against realistic multi-role data — canonical surface · role matrix · cross-tenant · DB
 persistence seen by a different session · honest unhappy path. `tsc`/unit tests are necessary, NEVER sufficient.
 **A green harness means "the asserted slices work" — NOT "everything works".** NEVER sample / "should be fine".
 
-**RESOLVED this session (harness-verified):** #46 the harness itself · #39 GIFSY login (dev `clientId` override on
-the login form + prod subdomain; clientb login too) · #40 fabricated data (partner/sales identity via `/partner/me`;
-admin KPIs real) · #41 role/portal guards + Q1 payouts GIFSY-only · #47 admin dashboard KPIs · cross-tenant (2nd
-tenant `clientb` seeded) · **#50 the partner REDEMPTION MONEY PATH** (was 100% broken). Q1–Q6 owner decisions encoded
-in `DATA-VISIBILITY.md §3`.
+**RESOLVED (cumulative, harness-verified):** #46 the harness · #39 GIFSY login · #40 fabricated data · #41 role/portal
+guards + Q1 payouts GIFSY-only · #47 admin dashboard KPIs · cross-tenant (`clientb` seeded) · **#50 partner REDEMPTION
+MONEY PATH** · **#36 visibility/submit PORTED** · **#38 A1 Gifsy cross-tenant oversight** · **#51 A2 operator-context
+switcher (backend+FE)** · **#49 B3 ◐ gifsy clients-list real**. Owner decisions in `DATA-VISIBILITY.md §3 + §3.1`.
 
 **🔑 KEY PATTERN (now CLEARED) — `platform/next.config.ts` proxy-exclusions WERE the map of DEAD WRITES.** Its
 `beforeFiles` rewrite excluded some `/api/*` paths from the backend proxy (negative lookahead), routing them to stale
@@ -35,28 +34,40 @@ local `src/app/api/*/route.ts` handlers on the **RETIRED platform Prisma** → t
 (`POST /v1/visibility/submit` — multipart→GCS via `StorageService`, partner-from-JWT, outlet-from-partner,
 PHOTO_APPROVAL gate, partner-only `@Roles`; dead local route deleted; harness write-persistence test green) ·
 `admin/kyc` was a **no-op** exclusion (KYC writes already at `/v1/kyc/*`; FE calls `/api/kyc/*`, never matched).
-**NEXT = P0.6 Phases A–D (re-scoped 2026-06-19 from a code-grounded audit; full plan in `00-MASTER-PLAN §P0.6` +
-`reconcile/P0.5-make-it-runnable.md`; owner decisions in `DATA-VISIBILITY §3.1`).** **✅ A1 — Gifsy cross-tenant
-access DONE (#38, 2026-06-19):** `kycTenantFilter`/`submissionTenantFilter` make GIFSY_ADMIN exempt from the
-caller-tenant filter (KYC + visibility); reviewQueue emits each record's clientId; FE got a brand column/filter;
-clientb seeded a PENDING_GIFSY KYC. Runtime-verified (6 checks) + api jest 783/783 + harness 39/39 + independent
-audit PASS (notes: slaMetrics/outletStatuses same-class → A4). **NEXT = A2 — Operator-context switcher** (#51, the
-payouts prerequisite): Gifsy can't get a tenant-scoped session today (`verifyOtp` binds JWT clientId to the user's
-home tenant; the gifsy operator is `clientId='gifsy'`). Build an in-console "Work in brand ▾" → assume-tenant token
-`{sub:operator, role:GIFSY_ADMIN, clientId:tenant}` (GIFSY-only, audited, banner). Then **A3** payouts completion
-(batch-from-pending sweep + `processBatch` txn+guarded-claim + canonical TDS, #42/#43; runs in the A2 tenant session —
-money path) → **A4** enforcement coverage audit (#2; role-gate partner/sales endpoints, closes the A2 #4 edge). ∥
-**B1** sales-assisted redemption real (#50-E) ∥ **B2** invoices/Excel (#44) ∥ **B3** gifsy console real data (#49);
-then **C** harness+staging, **D** cleanup+platform-retirement. **Parallel waves: W1 = A2 ∥ B2 ∥ B1; W2 = A3 ∥ B3
-(after A2); W3 = A4; W4 = C+D.** **Decisions:** Gifsy = TWO modes (oversight see-all [A1 done] + per-brand operation
-via the A2 switcher) · RBAC=@Roles-only+coverage-audit for launch · sales-redeem=real · tenant-creation=deferred but
-provision-ready. **Payouts audit: P6 was sound** — the payout gaps are a documented P6 hold (6.5 ON HOLD) + a Q1
-consequence, not P6 errors. ⚠️ **Seeds note:** `seedDeoleoDemo` now seeds VisibilityProgram `VP001` (seed-vp-1). **Servers were
-restarted this session** with the new build (backend `dist` rebuilt; FE restarted for next.config) — owner may re-own.
+**P0.6 Phases A–D (re-scoped 2026-06-19 from a code-grounded audit; full plan in `00-MASTER-PLAN §P0.6` +
+`reconcile/P0.5-make-it-runnable.md`; owner decisions in `DATA-VISIBILITY §3.1`).** Gifsy operates in **TWO modes**:
+cross-tenant OVERSIGHT (see-all; A1) + per-brand OPERATION (the A2 switcher).
+- **✅ A1 — Gifsy cross-tenant OVERSIGHT DONE (#38):** `kycTenantFilter`/`submissionTenantFilter` exempt GIFSY_ADMIN
+  from the caller-tenant filter (KYC + visibility); reviewQueue emits each record's clientId; FE brand column/filter.
+  Runtime-verified (6 checks) + independent audit PASS (residuals slaMetrics/outletStatuses → A4).
+- **✅ A2 — Operator-context SWITCHER DONE (#51), backend+FE:** `POST /v1/auth/assume-tenant` mints a tenant-scoped
+  `{sub:operator, role:GIFSY_ADMIN, clientId:tenant, assumed:true}` token (GIFSY-only, target-ACTIVE-only,
+  sub-preserved, audited, 8h, refresh preserves scope, strategy matches session by userId+clientId). FE: a "Work in
+  brand ▾" switcher (real `GET /api/gifsy/clients`) + a global "Working in &lt;Brand&gt;" banner in both shells +
+  `PORTAL_ROLES.admin` admits GIFSY_ADMIN. Operator-switch round-trip runtime-verified through the real UI; independent
+  audit PASS after 2 fixes. **A2 unblocks payouts (A3).**
+- **◐ B3 — gifsy console real data (#49) PARTIAL:** the Clients LIST + the switcher's brand list read the real
+  `clients` table now; the gifsy **dashboard** + **per-client detail** still read `CLIENT_REGISTRY` (remaining).
 
-**Still OPEN (gap-register):** #38 Gifsy cross-tenant access (real bug → A1) · #42 payouts.processBatch ·
-#43 TDS · #44 Excel round-trips · #45 cleanup/dead-routes (P0.7) · #48 admin trend-analytics · #49 gifsy console
-real-data · #47 configurable RBAC. **Plus: STAGING harness env-support** (the harness only runs local; needs MSG91-OTP
+**NEXT = A3 — Payouts COMPLETION (#42/#43, money path; runs INSIDE the A2 assumed session — no cross-tenant rewrite):**
+(a) **batch-from-pending** sweep — the missing step: assign the orphaned redemption `PayoutTransaction`s (created
+unbatched, `rewards.service.ts:506`, never consumed) into a tenant batch; (b) `processBatch` (`payouts.service.ts:280`)
+→ `$transaction` + guarded atomic claim (#42); (c) replace inline flat-194R with the **canonical TDS engine** + add
+`/admin/tds/liability` `section` (#43). **Audit hard.** Then **A4** enforcement coverage (#2; role-gate
+`/partner/me`,`/sales/*`,`/leaderboard`,`/rewards/redeem` — also closes the A2 self-lookup edge; + slaMetrics/outletStatuses
+residuals) ∥ **B1** sales-assisted redemption real (#50-E) ∥ **B2** invoices/Excel (#44) ∥ finish **B3**; then **C**
+harness+staging, **D** cleanup+platform-retirement. **Decisions:** RBAC=@Roles-only+coverage-audit for launch ·
+sales-redeem=real · tenant-creation=deferred but provision-ready. **Payouts audit: P6 was sound** — the payout gaps
+are a documented P6 hold (6.5 ON HOLD) + a Q1 consequence, not P6 errors. ⚠️ **Seeds note:** `seedDeoleoDemo` seeds
+VisibilityProgram `VP001` (seed-vp-1); `seedClientBDemo` seeds a PENDING_GIFSY KYC (seed-kyc-b1). **All session work
+pushed to `develop` (auto-deploys staging) on 2026-06-19** — ⚠️ staging NOT harness-verified (C2 env-support TODO);
+exercise login + the operator switcher + redemption there manually. Servers restarted this session (backend `dist` +
+FE) — owner may re-own; DB proxy on :5433 restarted (`DEV-DB.md`).
+
+**Still OPEN (gap-register):** #42 payouts.processBatch (→ A3, money path) · #43 TDS (→ A3) · #2 enforcement audit
+(→ A4) · #50-E sales-assisted redemption (→ B1) · #44 Excel round-trips (→ B2) · #49 gifsy dashboard/detail (→ finish
+B3) · #45 cleanup/dead-routes (P0.7 → D1) · #31/#32 platform-retirement (→ D2) · #48 admin trend-analytics (→ P8) ·
+#47 configurable RBAC (deferred). **Plus: STAGING harness env-support** (the harness only runs local; needs MSG91-OTP
 injection + staging tenant slugs before staging is a real gate). The Q1 payouts BACKEND `@Roles` change is
 code-correct but NOT runtime-verified (RBAC off in dev; the FE scope-out IS verified).
 
@@ -102,11 +113,12 @@ targeting dimension**; no point-tiers, no SKU. Validate any inherited concept ag
 **P0.5/P0.6 "Make It Runnable" — MOSTLY DONE (2026-06-19), enforced by the E2E harness (top of this doc).** Auth +
 fabricated-data + scoping + dashboards + cross-tenant + the redemption money path + the **visibility/submit port**
 are resolved & harness-green (**the next.config proxy-exclusion list is now EMPTY — no remaining dead writes via that
-mechanism**). **Remaining P0.6 = Phases A–D** (code-grounded re-scope 2026-06-19): **A** Gifsy cross-tenant access
-(#38) + payouts money-path (#42/#43) + enforcement audit (#2) → **B** sales-assisted redemption (#50-E) + invoices
-(#44) + gifsy real data (#49) → **C** harness+staging → **D** cleanup (#45) + platform-retirement (#31/#32). Full
-plan: `00-MASTER-PLAN §P0.6` + `reconcile/P0.5-make-it-runnable.md` + [[runtime-audit-p0.5]]. P7 (Engagement &
-support) resumes after D. The P6 decisions below are the historical record; all shipped.
+mechanism**). **P0.6 = Phases A–D** (code-grounded re-scope 2026-06-19): **A1** Gifsy oversight (#38) **✅** · **A2**
+operator-context switcher (#51) **✅** · **A3** payouts money-path (#42/#43) **← NEXT** · **A4** enforcement audit (#2)
+→ **B1** sales-assisted redemption (#50-E) · **B2** invoices (#44) · **B3** gifsy real data (#49, list ◐ done) →
+**C** harness+staging → **D** cleanup (#45) + platform-retirement (#31/#32). Full plan: `00-MASTER-PLAN §P0.6` +
+`reconcile/P0.5-make-it-runnable.md` + [[runtime-audit-p0.5]]. P7 (Engagement & support) resumes after D. The P6
+decisions below are the historical record; all shipped.
 
 **P6 key facts (DO NOT relitigate; full record: `reconcile/P6-finance.md` + `P6.5-TDS-SPEC.md` + [[p6-finance-decisions]]):**
 - **Money = integer `BigInt` paise EVERYWHERE** (#19). Shared `money.ts` (api `src/common` + platform `src/lib`);
@@ -186,7 +198,7 @@ CONSTRAINTS (must hold):
   dev (serves FE live from disk — no restart needed for FE changes).
 
 Reload (read before building):
-- docs/plans/00-MASTER-PLAN.md            (phases; **P0–P6 + S DONE**; **P0.5/0.6 ◐ — dead-write ports DONE; remaining = payouts.processBatch #42 / sales-redemption / KYC verify #38 / cleanup; then P7**)
+- docs/plans/00-MASTER-PLAN.md            (phases; **P0–P6 + S DONE**; **P0.5/0.6 ◐ — A1+A2 DONE; NEXT = A3 payouts (#42/#43); then A4/B/C/D; then P7**)
 - docs/plans/MODEL-ALIGNMENT.md           (the REAL parameter model)
 - docs/plans/P6-TDS-EXPLAINER.md          (TDS structure for owner review — 6.5 is HELD on its 4 questions)
 - docs/plans/reconcile/{P6-finance,P6.5-TDS-SPEC,P5-wallet-points-rewards,P4-programs-targets-enrollment}.md  (build records)
