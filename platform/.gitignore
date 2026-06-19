@@ -41,3 +41,9 @@ yarn-error.log*
 next-env.d.ts
 
 /src/generated/prisma
+
+# playwright e2e harness (run artifacts + persisted sessions with real JWTs)
+/test-results/
+/e2e/.report/
+/e2e/.auth/
+/playwright-report/

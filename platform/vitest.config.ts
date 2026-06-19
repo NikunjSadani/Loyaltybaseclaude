@@ -11,7 +11,8 @@ export default defineConfig({
     // Default lane = deterministic unit/component tests only (per docs/plans/01-how-we-test.md:
     // "No real network/DB/clock"). Live DB-integration tests use the `*-live.test.ts` suffix and
     // run in a separate lane: `npm run test:integration` (vitest.integration.config.ts).
-    exclude: [...configDefaults.exclude, '**/*-live.test.ts'],
+    // `e2e/**` holds the Playwright go-live harness (runs via `npm run e2e`, NOT vitest).
+    exclude: [...configDefaults.exclude, '**/*-live.test.ts', 'e2e/**'],
   },
   resolve: {
     alias: {

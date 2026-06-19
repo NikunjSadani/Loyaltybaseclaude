@@ -1,0 +1,5 @@
+# Persisted login sessions (contain real JWTs) — never commit.
+.auth/
+# Playwright HTML report + traces.
+.report/
+test-results/

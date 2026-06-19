@@ -15,29 +15,33 @@
 |---|---|
 | **GIFSY_ADMIN** (platform operator) | **cross-tenant** — all tenants (KYC final approval, payouts, platform users, TDS-194C) |
 | **CLIENT_ADMIN** | their **whole tenant** (all outlets/partners/sales/tickets/credits/targets/visibility/invoices/KYC of that client) |
-| **MIS_USER** | their tenant — 🟦 read-only? (decision Q5) |
+| **MIS_USER** | their tenant — **read-only** (resolved Q5; tenant-side reporting role) |
 | **SALES_*** (HO/STATE_HEAD/ASM/SO/ISR) | their **assigned outlets / downline team** (hierarchy-scoped) |
 | **SSS / WHOLESALER / SUB_STOCKIST** (partner) | **only their own** — wallet, targets, tickets, rewards, visibility submissions, invoices |
 
-## 3. 🟦 OPEN owner decisions (answer these → cells below become testable)
-- **Q1 — Payouts:** who sees `/admin/payouts`? Today endpoints are `@Roles('GIFSY_ADMIN','MIS_USER')` but it's in the CLIENT_ADMIN nav → 403 (gap #41). Should CLIENT_ADMIN see their tenant's payout status (read), or is payout management Gifsy/MIS-only (then remove it from the CLIENT_ADMIN nav)?
-- **Q2 — KYC final approval:** confirmed model = sales first-approve → **Gifsy bulk validation** (`/admin/kyc/approvals`). So is `/admin/kyc/approvals` a **Gifsy-only** surface (and CLIENT_ADMIN gets read-only visibility of the pending-Gifsy queue, no approve)? (gap #38)
-- **Q3 — Gifsy operator login:** how does a GIFSY_ADMIN log in (which subdomain/path resolves `clientId='gifsy'`), and the localhost-dev path? (gap #39)
-- **Q4 — Sales hierarchy visibility:** does a sales *manager* (ASM/STATE_HEAD) see their **whole downline's** outlets/tickets/KYC, or only directly-assigned? (affects tickets list, KYC list, dashboards)
-- **Q5 — MIS_USER:** read-only across the tenant, or specific modules only?
-- **Q6 — Cross-tenant Gifsy reads:** GIFSY sees ALL tenants' data on platform pages (tickets, KYC, payouts) — confirm, and confirm tenant data is **never** visible to another tenant.
+## 3. ✅ RESOLVED owner decisions (2026-06-19) — these define the harness "expected"
+All six who-sees-what questions are answered. The harness asserts exactly these.
+
+- **Q1 — Payouts → GIFSY_ADMIN-only.** `/admin/payouts` is a platform-operator surface. **Remove it from the CLIENT_ADMIN nav** entirely, and **remove `MIS_USER` from the payout endpoints** (MIS is tenant-side, see Q5). Net: payout endpoints = `@Roles('GIFSY_ADMIN')`. (fixes gap #41)
+- **Q2 — KYC final approval → Gifsy-only, no client access.** Model = sales first-approve → **Gifsy bulk validation** (`/admin/kyc/approvals`). `/admin/kyc/approvals` is **GIFSY_ADMIN-only**; **no CLIENT_ADMIN access at all** (not even read-only). (relates gap #38)
+- **Q3 — Gifsy login → dedicated subdomain + dev override; real-login only.** Staging/prod: a Gifsy subdomain (`gifsy.<domain>` / `admin.<domain>`) resolves `clientId='gifsy'` from host. Localhost dev: an explicit `clientId` field/override on the login form (real login, real token — **NOT** the persona/view switcher, which never counts as "done"). (fixes gap #39)
+- **Q4 — Sales hierarchy → split.** A sales **manager** (ASM/STATE_HEAD/HO) sees the **whole downline's outlets + KYC** (recursive roll-up). **Support tickets are individual** — each user sees **only their own** raised tickets (tickets are a personal support channel, not team-rolled-up).
+- **Q5 — MIS_USER → tenant-side, read-only.** Belongs to a tenant; read-only across that one tenant's modules. (⇒ removed from payouts per Q1.)
+- **Q6 — Cross-tenant → Gifsy sees all; tenants isolated.** GIFSY_ADMIN (and Gifsy-side roles) read across **all** tenants on platform surfaces; every tenant role is hard-scoped to its own `clientId` — cross-tenant access is a **test failure**. **194C** (Gifsy's TDS) is computed **platform-wide per-PAN across tenants** → it lives **only** on the Gifsy cross-tenant surface, never on a tenant screen (a tenant sees only its own **194R**).
+
+> **Deferred (separate unit, not blocking):** a *configurable* RBAC admin portal (heads define custom sub-roles/permissions) + the first-admin provisioning chain (seed bootstrap Gifsy super-admin → Gifsy creates tenant admins → tenant admin creates sub-users). For now the harness uses the **fixed built-in roles** above. Tracked in `gap-register` (#47).
 
 ## 4. Per-page expected visibility (skeleton — fill as each flow is verified)
 `✅` = behavior confirmed at runtime · `◐` = partially confirmed · `🟦` = needs owner decision · `❌` = known broken (gap#)
 
 | Page | Intended audience | Expected data | Status |
 |---|---|---|---|
-| `/auth/login` | all | OTP login, route by role to the right portal | ◐ 3/4 roles ✅; GIFSY ❌ #39 |
+| `/auth/login` | all | OTP login, route by role to the right portal; GIFSY via subdomain/dev clientId override (Q3, real login only) | ◐ 3/4 roles ✅; GIFSY ❌ #39 |
 | `/admin/dashboard` | CLIENT_ADMIN/MIS | real tenant KPIs (partners/KYC/liability/fund) | ✅ (real seed data) |
 | `/admin/dashboards/*` (kyc/payments/redemptions/engagement) | CLIENT_ADMIN/MIS | real tenant aggregates | ❌ fabricated #36/#40 |
 | `/admin/kyc` (Submissions) | CLIENT_ADMIN/MIS (tenant) | tenant KYC list | ✅ (2 real); minor stale class filter #45 |
-| `/admin/kyc/approvals` (bulk Gifsy) | 🟦 GIFSY (Q2) | PENDING_GIFSY queue, bulk verify | 🟦 unverified #38 |
-| `/admin/payouts` | 🟦 (Q1) | tenant payout batches/txns | ❌ 403 for CLIENT_ADMIN #41 |
+| `/admin/kyc/approvals` (bulk Gifsy) | **GIFSY only** (Q2; no client access) | PENDING_GIFSY queue, bulk verify | ❌ verify Gifsy-only + cross-tenant #38 |
+| `/admin/payouts` | **GIFSY only** (Q1; remove from CLIENT_ADMIN nav, drop MIS) | all-tenant payout batches/txns | ❌ make Gifsy-only; CLIENT_ADMIN must 403/no-nav #41 |
 | `/admin/visibility` | CLIENT_ADMIN | tenant visibility submissions/upload | ✅ |
 | `/admin/credits-payouts/*` | CLIENT_ADMIN | tenant credit batches/status | ✅ (status verified) |
 | `/admin/targets`, `/admin/schemes`, `/admin/settings`, `/admin/users/outlets`, `/admin/hierarchy`, `/admin/sales`, `/admin/tds`, `/admin/invoices` | CLIENT_ADMIN | tenant data | ✅ (verified earlier) |
