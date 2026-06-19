@@ -12,8 +12,52 @@ import { Spinner } from '@/components/ui/spinner';
 import {
   type Ticket, type TicketStatus, type TicketPriority, type TicketCategory, type TicketSource,
   CATEGORY_LABELS, STATUS_LABELS, PRIORITY_LABELS,
-  getAllTickets, updateTicket,
 } from '@/lib/tickets';
+import { api } from '@/lib/api-client';
+import { useAdminSession } from '@/lib/admin-session';
+
+/* ─── DB ↔ local category / status / priority mappings ─────────────────────── */
+
+const CAT_FROM_DB: Record<string, TicketCategory> = {
+  KYC: 'kyc', POINTS: 'points', REDEMPTION: 'redemption',
+  PAYOUT: 'billing', SCHEME: 'other', TECHNICAL: 'technical',
+  ACCOUNT: 'other', OTHER: 'other',
+};
+const STATUS_FROM_DB: Record<string, TicketStatus> = {
+  OPEN: 'open', IN_PROGRESS: 'in_progress', PENDING_USER: 'waiting',
+  WAITING: 'waiting', ESCALATED: 'in_progress', RESOLVED: 'resolved', CLOSED: 'closed',
+};
+const PRIO_FROM_DB: Record<string, TicketPriority> = {
+  CRITICAL: 'high', HIGH: 'high', MEDIUM: 'medium', LOW: 'low',
+};
+
+/** Maps an enveloped backend ticket onto the local Ticket shape used by the UI. */
+function mapDbTicket(t: any): Ticket {
+  return {
+    id:              t.id,
+    ticketNumber:    t.ticketNumber,
+    title:           t.subject,
+    description:     t.description,
+    category:        CAT_FROM_DB[t.category]  ?? 'other',
+    priority:        PRIO_FROM_DB[t.priority] ?? 'medium',
+    status:          STATUS_FROM_DB[t.status] ?? 'open',
+    source:          'outlet',
+    outletId:        t.createdById ?? t.id,
+    outletName:      t.createdBy?.name ?? '',
+    raisedByName:    t.createdBy?.name ?? '',
+    assignedTo:      t.assignedTo?.name,
+    createdAt:       t.createdAt,
+    updatedAt:       t.updatedAt,
+    messages:        (t.messages ?? []).map((m: any) => ({
+      id:         m.id,
+      from:       m.sender?.role && m.sender.role !== 'OUTLET' ? ('admin' as const) : ('outlet' as const),
+      fromName:   m.sender?.name ?? 'Unknown',
+      text:       m.message,
+      createdAt:  m.createdAt,
+      isInternal: m.isInternal,
+    })),
+  };
+}
 
 /* ─── Styles ─────────────────────────────────────────────────────────────────── */
 
@@ -30,8 +74,6 @@ const PRIORITY_STYLE: Record<TicketPriority, string> = {
   medium: 'text-amber-600 bg-amber-50',
   low:    'text-gray-500 bg-gray-50',
 };
-
-const ALL_AGENTS = ['Priya (Admin)', 'Amit (Ops)', 'Tech Team', 'Rohan (Admin)', 'Unassigned'];
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' });
@@ -87,40 +129,53 @@ function TicketRow({ ticket, onClick }: { ticket: Ticket; onClick: () => void })
 
 /* ─── Ticket detail panel ────────────────────────────────────────────────────── */
 
-function TicketDetailPanel({ ticket: initial, onClose, onUpdate }: {
+function TicketDetailPanel({ ticket: initial, canEscalate, onClose, onUpdate }: {
   ticket: Ticket;
+  canEscalate: boolean;
   onClose: () => void;
   onUpdate: (t: Ticket) => void;
 }) {
-  const [ticket,  setTicket]  = useState(initial);
-  const [reply,   setReply]   = useState('');
-  const [isInt,   setIsInt]   = useState(false);
-  const [sending, setSending] = useState(false);
+  const [ticket,        setTicket]        = useState(initial);
+  const [assignedToId,  setAssignedToId]  = useState<string | null>(null);
+  const [reply,         setReply]         = useState('');
+  const [isInt,         setIsInt]         = useState(false);
+  const [sending,       setSending]       = useState(false);
+  const [escalating,    setEscalating]    = useState(false);
 
-  const handleStatusChange = (status: TicketStatus) => {
-    const upd = { ...ticket, status, updatedAt: new Date().toISOString() };
-    setTicket(upd); updateTicket(upd); onUpdate(upd);
+  // Keep the panel in sync when the parent loads the full thread via GET :id.
+  useEffect(() => { setTicket(initial); }, [initial]);
+
+  /** Refetches the full ticket thread and propagates it to the parent list. */
+  const refresh = async () => {
+    const res = await api.get<{ ticket: any }>(`/api/tickets/${ticket.id}`);
+    if (res.success) {
+      const upd = mapDbTicket(res.data.ticket);
+      setTicket(upd); setAssignedToId(res.data.ticket.assignedTo?.id ?? null); onUpdate(upd);
+    }
   };
 
-  const handleAssign = (agent: string) => {
-    const upd = { ...ticket, assignedTo: agent === 'Unassigned' ? undefined : agent, updatedAt: new Date().toISOString() };
-    setTicket(upd); updateTicket(upd); onUpdate(upd);
-  };
-
-  const handlePriorityChange = (priority: TicketPriority) => {
-    const upd = { ...ticket, priority, updatedAt: new Date().toISOString() };
-    setTicket(upd); updateTicket(upd); onUpdate(upd);
-  };
+  // Load the full thread (with raw assignee id) when the panel opens.
+  useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [ticket.id]);
 
   const handleSend = async () => {
     if (!reply.trim()) return;
     setSending(true);
-    await new Promise((r) => setTimeout(r, 600));
-    const now = new Date().toISOString();
-    const msg = { id: `m_${Date.now()}`, from: 'admin' as const, fromName: 'Admin', text: reply.trim(), createdAt: now, isInternal: isInt };
-    const upd = { ...ticket, updatedAt: now, messages: [...ticket.messages, msg] };
-    setTicket(upd); updateTicket(upd); onUpdate(upd);
-    setReply(''); setSending(false);
+    const res = await api.post<{ message: any }>(`/api/tickets/${ticket.id}/messages`, {
+      message: reply.trim(), isInternal: isInt,
+    });
+    if (res.success) { setReply(''); await refresh(); }
+    setSending(false);
+  };
+
+  const handleEscalate = async () => {
+    if (!assignedToId) return;
+    setEscalating(true);
+    const res = await api.post(`/api/tickets/${ticket.id}/escalate`, {
+      escalateTo: assignedToId,
+      reason: 'Escalated from admin console',
+    });
+    if (res.success) await refresh();
+    setEscalating(false);
   };
 
   const { variant } = STATUS_STYLE[ticket.status];
@@ -153,47 +208,30 @@ function TicketDetailPanel({ ticket: initial, onClose, onUpdate }: {
 
         {/* Controls */}
         <div className="px-5 py-3 border-b border-gray-100 shrink-0 space-y-2.5">
-          {/* Status */}
+          {/* Assigned-to (read-only — server-derived) */}
           <div className="flex items-center gap-3">
-            <span className="text-xs text-gray-400 w-16 shrink-0">Status</span>
-            <div className="flex gap-1.5 flex-wrap">
-              {(['open','in_progress','waiting','resolved','closed'] as TicketStatus[]).map((s) => (
-                <button key={s} onClick={() => handleStatusChange(s)}
-                  className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border transition-all ${ticket.status === s ? STATUS_STYLE[s].badge + ' border-current' : 'border-gray-200 text-gray-400 hover:border-gray-300'}`}>
-                  {STATUS_LABELS[s]}
-                </button>
-              ))}
-            </div>
+            <span className="text-xs text-gray-400 w-16 shrink-0">Assigned</span>
+            <span className="text-xs font-medium text-gray-700">{ticket.assignedTo ?? 'Unassigned'}</span>
           </div>
 
-          {/* Priority */}
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-gray-400 w-16 shrink-0">Priority</span>
-            <div className="flex gap-1.5">
-              {(['high','medium','low'] as TicketPriority[]).map((p) => (
-                <button key={p} onClick={() => handlePriorityChange(p)}
-                  className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border transition-all ${ticket.priority === p ? PRIORITY_STYLE[p] + ' border-current' : 'border-gray-200 text-gray-400 hover:border-gray-300'}`}>
-                  {PRIORITY_LABELS[p]}
-                </button>
-              ))}
+          {/* Escalate — GIFSY-only, requires an assignee */}
+          {canEscalate && (
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-400 w-16 shrink-0">Actions</span>
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={escalating}
+                disabled={!assignedToId || ticket.status === 'closed'}
+                onClick={handleEscalate}
+              >
+                <AlertCircle className="h-3.5 w-3.5" /> Escalate
+              </Button>
+              {!assignedToId && (
+                <span className="text-[10px] text-gray-400">Assign first to escalate</span>
+              )}
             </div>
-          </div>
-
-          {/* Assign */}
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-gray-400 w-16 shrink-0">Assign to</span>
-            <div className="flex gap-1.5 flex-wrap">
-              {ALL_AGENTS.map((a) => {
-                const active = (ticket.assignedTo ?? 'Unassigned') === a;
-                return (
-                  <button key={a} onClick={() => handleAssign(a)}
-                    className={`text-[10px] font-medium px-2 py-0.5 rounded-full border transition-all ${active ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)]' : 'border-gray-200 text-gray-400 hover:border-gray-300'}`}>
-                    {a}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+          )}
         </div>
 
         {/* Messages */}
@@ -265,16 +303,28 @@ type FilterState = {
 };
 
 export default function AdminTicketsPage() {
+  const session = useAdminSession();
   const [tickets,  setTickets]  = useState<Ticket[]>([]);
   const [loading,  setLoading]  = useState(true);
+  const [error,    setError]    = useState<string | null>(null);
   const [selected, setSelected] = useState<Ticket | null>(null);
   const [filters,  setFilters]  = useState<FilterState>({
     search: '', status: 'all', priority: 'all', category: 'all', source: 'all',
   });
 
   useEffect(() => {
-    const t = setTimeout(() => { setTickets(getAllTickets()); setLoading(false); }, 400);
-    return () => clearTimeout(t);
+    let cancelled = false;
+    setLoading(true);
+    api.get<{ tickets: any[] }>('/api/tickets').then((res) => {
+      if (cancelled) return;
+      if (res.success) {
+        setTickets((res.data.tickets ?? []).map(mapDbTicket));
+        setError(null);
+      } else {
+        setError(res.error);
+      }
+    }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, []);
 
   const filtered = useMemo(() => {
@@ -304,6 +354,12 @@ export default function AdminTicketsPage() {
     if (selected?.id === upd.id) setSelected(upd);
   };
 
+  const handleSelectTicket = async (ticket: Ticket) => {
+    setSelected(ticket);
+    const res = await api.get<{ ticket: any }>(`/api/tickets/${ticket.id}`);
+    if (res.success) setSelected(mapDbTicket(res.data.ticket));
+  };
+
   const setFilter = <K extends keyof FilterState>(key: K, val: FilterState[K]) =>
     setFilters((f) => ({ ...f, [key]: val }));
 
@@ -321,6 +377,12 @@ export default function AdminTicketsPage() {
 
       {loading ? (
         <div className="flex items-center justify-center min-h-64"><Spinner size="lg" /></div>
+      ) : error ? (
+        <div className="flex flex-col items-center gap-3 py-16 text-center">
+          <MessageSquare className="h-10 w-10 text-red-200" />
+          <p className="text-sm font-medium text-red-500">Could not load tickets</p>
+          <p className="text-xs text-gray-400">{error}</p>
+        </div>
       ) : (
         <>
           {/* Stats */}
@@ -416,7 +478,7 @@ export default function AdminTicketsPage() {
                   </thead>
                   <tbody>
                     {filtered.map((t) => (
-                      <TicketRow key={t.id} ticket={t} onClick={() => setSelected(t)} />
+                      <TicketRow key={t.id} ticket={t} onClick={() => handleSelectTicket(t)} />
                     ))}
                   </tbody>
                 </table>
@@ -428,7 +490,12 @@ export default function AdminTicketsPage() {
 
       {/* Detail panel */}
       {selected && (
-        <TicketDetailPanel ticket={selected} onClose={() => setSelected(null)} onUpdate={handleUpdate} />
+        <TicketDetailPanel
+          ticket={selected}
+          canEscalate={session.role === 'GIFSY_ADMIN'}
+          onClose={() => setSelected(null)}
+          onUpdate={handleUpdate}
+        />
       )}
     </div>
   );

@@ -10,15 +10,56 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import {
-  type Ticket, type TicketCategory, type TicketStatus,
+  type Ticket, type TicketCategory, type TicketStatus, type TicketPriority,
   CATEGORY_LABELS, STATUS_LABELS,
-  getAllTickets, addTicket, getNextTicketNumber,
 } from '@/lib/tickets';
+import { api } from '@/lib/api-client';
 
-/* ─── Config ────────────────────────────────────────────────────────────────── */
+/* ─── DB ↔ local category / status / priority mappings ─────────────────────── */
 
-const MY_OUTLET_ID = 'k1';
-const MY_NAME      = 'Rajesh Kumar';
+const CAT_TO_DB: Record<TicketCategory, string> = {
+  billing: 'PAYOUT', points: 'POINTS', kyc: 'KYC',
+  redemption: 'REDEMPTION', delivery: 'PAYOUT', technical: 'TECHNICAL', other: 'OTHER',
+};
+const CAT_FROM_DB: Record<string, TicketCategory> = {
+  KYC: 'kyc', POINTS: 'points', REDEMPTION: 'redemption',
+  PAYOUT: 'billing', SCHEME: 'other', TECHNICAL: 'technical',
+  ACCOUNT: 'other', OTHER: 'other',
+};
+const STATUS_FROM_DB: Record<string, TicketStatus> = {
+  OPEN: 'open', IN_PROGRESS: 'in_progress', PENDING_USER: 'waiting',
+  WAITING: 'waiting', ESCALATED: 'in_progress', RESOLVED: 'resolved', CLOSED: 'closed',
+};
+const PRIO_FROM_DB: Record<string, TicketPriority> = {
+  CRITICAL: 'high', HIGH: 'high', MEDIUM: 'medium', LOW: 'low',
+};
+
+/** Maps an enveloped backend ticket onto the local Ticket shape used by the UI. */
+function mapDbTicket(t: any): Ticket {
+  return {
+    id:           t.id,
+    ticketNumber: t.ticketNumber,
+    title:        t.subject,
+    description:  t.description,
+    category:     CAT_FROM_DB[t.category]  ?? 'other',
+    priority:     PRIO_FROM_DB[t.priority] ?? 'medium',
+    status:       STATUS_FROM_DB[t.status] ?? 'open',
+    source:       'outlet',
+    outletId:     t.createdById ?? t.id,
+    outletName:   t.createdBy?.name ?? '',
+    raisedByName: t.createdBy?.name ?? '',
+    createdAt:    t.createdAt,
+    updatedAt:    t.updatedAt,
+    messages:     (t.messages ?? []).map((m: any) => ({
+      id:        m.id,
+      from:      m.sender?.role && m.sender.role !== 'OUTLET' ? ('admin' as const) : ('outlet' as const),
+      fromName:  m.sender?.name ?? 'Unknown',
+      text:      m.message,
+      createdAt: m.createdAt,
+      isInternal: m.isInternal,
+    })),
+  };
+}
 
 /* ─── Sales team contacts (would come from outlet's assigned team in production) */
 
@@ -63,7 +104,7 @@ interface NewTicketForm {
 function TicketDetail({ ticket, onClose, onReply }: {
   ticket: Ticket;
   onClose: () => void;
-  onReply: (ticketId: string, text: string) => void;
+  onReply: (ticketId: string, text: string) => Promise<void>;
 }) {
   const [reply, setReply] = useState('');
   const [sending, setSending] = useState(false);
@@ -71,8 +112,7 @@ function TicketDetail({ ticket, onClose, onReply }: {
   const handleSend = async () => {
     if (!reply.trim()) return;
     setSending(true);
-    await new Promise((r) => setTimeout(r, 600));
-    onReply(ticket.id, reply.trim());
+    await onReply(ticket.id, reply.trim());
     setReply('');
     setSending(false);
   };
@@ -160,64 +200,60 @@ function TicketDetail({ ticket, onClose, onReply }: {
 export default function PartnerSupportPage() {
   const [tickets,    setTickets]    = useState<Ticket[]>([]);
   const [loading,    setLoading]    = useState(true);
+  const [error,      setError]      = useState<string | null>(null);
   const [newOpen,    setNewOpen]    = useState(false);
   const [selected,   setSelected]   = useState<Ticket | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState<NewTicketForm>({ category: '', title: '', description: '' });
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      setTickets(getAllTickets().filter((t) => t.outletId === MY_OUTLET_ID));
-      setLoading(false);
-    }, 350);
-    return () => clearTimeout(t);
+    let cancelled = false;
+    setLoading(true);
+    api.get<{ tickets: any[] }>('/api/tickets').then((res) => {
+      if (cancelled) return;
+      if (res.success) {
+        setTickets((res.data.tickets ?? []).map(mapDbTicket));
+        setError(null);
+      } else {
+        setError(res.error);
+      }
+    }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, []);
 
   const handleSubmit = async () => {
     if (!form.category || !form.title.trim() || !form.description.trim()) return;
     setSubmitting(true);
-    await new Promise((r) => setTimeout(r, 800));
-
-    const now = new Date().toISOString();
-    const ticket: Ticket = {
-      id:           `t_${Date.now()}`,
-      ticketNumber: getNextTicketNumber(),
-      title:        form.title.trim(),
-      description:  form.description.trim(),
-      category:     form.category as TicketCategory,
-      priority:     'medium',
-      status:       'open',
-      source:       'outlet',
-      outletId:     MY_OUTLET_ID,
-      outletName:   'Kumar General Store',
-      raisedByName: MY_NAME,
-      createdAt:    now,
-      updatedAt:    now,
-      messages: [{
-        id: 'm1', from: 'outlet', fromName: MY_NAME,
-        text: form.description.trim(), createdAt: now,
-      }],
-    };
-
-    addTicket(ticket);
-    setTickets((prev) => [ticket, ...prev]);
-    setForm({ category: '', title: '', description: '' });
-    setNewOpen(false);
+    const res = await api.post<{ ticket: any }>('/api/tickets', {
+      category:    CAT_TO_DB[form.category as TicketCategory],
+      subject:     form.title.trim(),
+      description: form.description.trim(),
+    });
+    if (res.success) {
+      setTickets((prev) => [mapDbTicket(res.data.ticket), ...prev]);
+      setForm({ category: '', title: '', description: '' });
+      setNewOpen(false);
+    } else {
+      setError(res.error);
+    }
     setSubmitting(false);
   };
 
-  const handleReply = (ticketId: string, text: string) => {
-    const now = new Date().toISOString();
-    const updated = tickets.map((t) => {
-      if (t.id !== ticketId) return t;
-      const upd: Ticket = {
-        ...t, updatedAt: now,
-        messages: [...t.messages, { id: `m_${Date.now()}`, from: 'outlet', fromName: MY_NAME, text, createdAt: now }],
-      };
-      return upd;
-    });
-    setTickets(updated);
-    if (selected?.id === ticketId) setSelected(updated.find((t) => t.id === ticketId) ?? null);
+  const handleSelectTicket = async (ticket: Ticket) => {
+    setSelected(ticket);
+    const res = await api.get<{ ticket: any }>(`/api/tickets/${ticket.id}`);
+    if (res.success) setSelected(mapDbTicket(res.data.ticket));
+  };
+
+  const handleReply = async (ticketId: string, text: string) => {
+    const res = await api.post<{ message: any }>(`/api/tickets/${ticketId}/messages`, { message: text });
+    if (!res.success) return;
+    const refreshed = await api.get<{ ticket: any }>(`/api/tickets/${ticketId}`);
+    if (refreshed.success) {
+      const updated = mapDbTicket(refreshed.data.ticket);
+      setTickets((prev) => prev.map((t) => (t.id === ticketId ? updated : t)));
+      if (selected?.id === ticketId) setSelected(updated);
+    }
   };
 
   const open  = tickets.filter((t) => t.status === 'open' || t.status === 'in_progress' || t.status === 'waiting');
@@ -280,6 +316,12 @@ export default function PartnerSupportPage() {
 
       {loading ? (
         <div className="flex items-center justify-center min-h-48"><Spinner size="lg" /></div>
+      ) : error ? (
+        <div className="flex flex-col items-center gap-3 py-16 text-center">
+          <MessageSquare className="h-10 w-10 text-red-200" />
+          <p className="text-sm font-medium text-red-500">Could not load your tickets</p>
+          <p className="text-xs text-gray-400">{error}</p>
+        </div>
       ) : (
         <>
           {/* Stats */}
@@ -307,7 +349,7 @@ export default function PartnerSupportPage() {
                   {open.map((t) => {
                     const { variant, dot } = STATUS_STYLE[t.status];
                     return (
-                      <button key={t.id} onClick={() => setSelected(t)} className="w-full text-left flex items-start gap-3 py-3.5 hover:bg-gray-50 rounded-xl transition-colors">
+                      <button key={t.id} onClick={() => handleSelectTicket(t)} className="w-full text-left flex items-start gap-3 py-3.5 hover:bg-gray-50 rounded-xl transition-colors">
                         <span className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${dot}`} />
                         <div className="flex-1 min-w-0 overflow-hidden">
                           <div className="flex items-center gap-2 min-w-0">
@@ -341,7 +383,7 @@ export default function PartnerSupportPage() {
                   {done.map((t) => {
                     const { variant } = STATUS_STYLE[t.status];
                     return (
-                      <button key={t.id} onClick={() => setSelected(t)} className="w-full text-left flex items-start gap-3 py-3 hover:bg-gray-50 rounded-xl transition-colors opacity-70">
+                      <button key={t.id} onClick={() => handleSelectTicket(t)} className="w-full text-left flex items-start gap-3 py-3 hover:bg-gray-50 rounded-xl transition-colors opacity-70">
                         <CheckCircle className="h-4 w-4 text-emerald-400 mt-0.5 shrink-0" />
                         <div className="flex-1 min-w-0 overflow-hidden">
                           <p className="text-sm text-gray-700 truncate">{t.title}</p>
