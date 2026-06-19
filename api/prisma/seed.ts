@@ -54,6 +54,9 @@ const GIFSY_ADMIN_PHONE  = process.env['GIFSY_ADMIN_PHONE'] ?? '9830011252';
 const GIFSY_ADMIN_NAME   = process.env['GIFSY_ADMIN_NAME']  ?? 'Gifsy Super Admin';
 
 const DEOLEO_CLIENT_ID = 'deoleo';
+// A SECOND tenant, so the E2E harness can prove tenant isolation: deoleo users must NEVER see any of
+// clientb's data (distinctive names below are the leak markers). See platform/e2e cross-tenant specs.
+const CLIENTB_CLIENT_ID = 'clientb';
 
 // OutletType master list. code is the stable key — name is the display label
 // and can be changed at any time without touching code or migrations.
@@ -137,6 +140,9 @@ async function main() {
 
   // 3. deoleo DEMO dataset ─────────────────────────────────────────────────────
   await seedDeoleoDemo();
+
+  // 4. clientb cross-tenant dataset (for the E2E tenant-isolation tests) ────────
+  await seedClientBDemo();
 
   console.log('\n✅  Seed complete.');
 }
@@ -466,6 +472,121 @@ async function seedDeoleoDemo() {
   }
 
   console.log('   ✅ deoleo demo dataset ready.');
+}
+
+// ── clientb cross-tenant data ────────────────────────────────────────────────
+// A minimal SECOND tenant with DISTINCTIVE names ("Zenith Trading Co" / "Bharat
+// Verma" / CPB001 / OB001). The E2E harness asserts a logged-in deoleo user
+// NEVER sees any of these — i.e. the backend's clientId scoping actually holds.
+async function seedClientBDemo() {
+  console.log('\n🏷️   Seeding clientb cross-tenant dataset…');
+  const demoPasswordHash = await bcrypt.hash('ChangeMeOnFirstLogin!', 12);
+  const emptyJson = {} as const;
+
+  await prisma.client.upsert({
+    where: { id: CLIENTB_CLIENT_ID },
+    update: {},
+    create: {
+      id: CLIENTB_CLIENT_ID,
+      internalName: 'Client B (Demo)',
+      status: 'ACTIVE',
+      onboardedAt: new Date(),
+      branding: emptyJson,
+      features: emptyJson,
+      approvalHierarchy: emptyJson,
+      notifications: emptyJson,
+      invoicing: emptyJson,
+      wallet: emptyJson,
+    },
+  });
+
+  const clientAdmin = await prisma.user.upsert({
+    where: { id: 'seed-clientb-admin' },
+    update: {},
+    create: {
+      id: 'seed-clientb-admin',
+      clientId: CLIENTB_CLIENT_ID,
+      phone: '9000000020',
+      email: 'admin@clientb.demo',
+      name: 'Client B Admin',
+      role: UserRole.CLIENT_ADMIN,
+      status: UserStatus.ACTIVE,
+      passwordHash: demoPasswordHash,
+    },
+  });
+
+  const wholesalerType = await prisma.outletType.findFirstOrThrow({ where: { code: 'WHOLESALER' } });
+
+  const user = await prisma.user.upsert({
+    where: { id: 'seed-clientb-partner' },
+    update: {},
+    create: {
+      id: 'seed-clientb-partner',
+      clientId: CLIENTB_CLIENT_ID,
+      phone: '9000000021',
+      name: 'Bharat Verma',
+      role: UserRole.WHOLESALER,
+      status: UserStatus.ACTIVE,
+      passwordHash: demoPasswordHash,
+    },
+  });
+
+  const partner = await prisma.channelPartner.upsert({
+    where: { id: 'seed-cpb-1' },
+    update: {},
+    create: {
+      id: 'seed-cpb-1',
+      clientId: CLIENTB_CLIENT_ID,
+      userId: user.id,
+      partnerCode: 'CPB001',
+      businessName: 'Zenith Trading Co',
+      ownerName: 'Bharat Verma',
+      phone: '9000000021',
+      gstNumber: '24ZENIT1234Z1Z9',
+      panNumber: 'ZENIT1234Z',
+      entityType: EntityType.FIRM,
+      gstRegistrationType: GstRegistrationType.REGULAR,
+      isActive: true,
+      onboardedAt: new Date(),
+    },
+  });
+
+  await prisma.wallet.upsert({
+    where: { id: 'seed-wb-1' },
+    update: {},
+    create: {
+      id: 'seed-wb-1',
+      partnerId: partner.id,
+      earnedPoints: 12345,
+      redeemablePoints: 12345,
+      lifetimeEarned: 12345,
+      lastTransactionAt: new Date(),
+    },
+  });
+
+  await prisma.outlet.upsert({
+    where: { id: 'seed-ob-1' },
+    update: {},
+    create: {
+      id: 'seed-ob-1',
+      clientId: CLIENTB_CLIENT_ID,
+      partnerId: partner.id,
+      outletTypeId: wholesalerType.id,
+      outletCode: 'OB001',
+      name: 'Zenith Trading Co',
+      ownerName: 'Bharat Verma',
+      phone: '9000000021',
+      city: 'Surat',
+      state: 'Gujarat',
+      isActive: true,
+      isPrimary: true,
+    },
+  });
+
+  console.log(
+    `   ✓ clientb: admin ${clientAdmin.phone} + partner CPB001 (Zenith Trading Co) + wallet + outlet OB001`,
+  );
+  console.log('   ✅ clientb cross-tenant dataset ready.');
 }
 
 main()
