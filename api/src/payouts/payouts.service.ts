@@ -27,10 +27,6 @@ import {
  */
 @Injectable()
 export class PayoutsService {
-  // Source constants — TDS under section 194R.
-  private static readonly TDS_RATE_DEFAULT = 0.1; // 10%
-  private static readonly TDS_THRESHOLD_PAISE = 2000000; // ₹20,000
-
   constructor(private readonly prisma: PrismaService) {}
 
   /** GET /v1/payouts/transactions — paginated, filterable payout transactions. */
@@ -39,10 +35,14 @@ export class PayoutsService {
     const limit = q.limit ?? 20;
     const skip = (page - 1) * limit;
 
-    const where: Prisma.PayoutTransactionWhereInput = {
-      batch: { clientId: user.clientId },
-    };
-    if (q.status) where.status = q.status;
+    // Default tenant scope rides the batch relation. BUT the unbatched filter asks
+    // for rows where batchId is null — a `batch: { clientId }` relation filter can
+    // never match a null relation, so it would wrongly exclude every waiting row.
+    // For unbatched, scope by the partner's clientId instead and pin batchId null.
+    const where: Prisma.PayoutTransactionWhereInput = q.unbatched
+      ? { batchId: null, status: 'PENDING', partner: { clientId: user.clientId } }
+      : { batch: { clientId: user.clientId } };
+    if (q.status && !q.unbatched) where.status = q.status;
     if (q.mode) where.payoutMode = q.mode;
     if (q.partnerId) where.partnerId = q.partnerId;
     if (q.dateFrom || q.dateTo) {
@@ -237,6 +237,56 @@ export class PayoutsService {
     return { batch };
   }
 
+  /**
+   * POST /v1/payouts/batches/:id/assign-pending — the batch-from-pending sweep.
+   * Cash redemptions create UNBATCHED transactions (batchId null, PENDING). This
+   * is the missing consumer: it pulls every eligible waiting transaction into a
+   * DRAFT batch in one guarded updateMany so they can be processed (GIFSY-only).
+   *
+   * Cross-tenant safety: the `partner: { clientId }` filter is mandatory — a batch
+   * must NEVER absorb another tenant's transaction. The `payoutMode` match is also
+   * mandatory so a UPI batch can't swallow BANK_TRANSFER rows.
+   */
+  async assignPendingTransactions(user: JwtPayload, batchId: string) {
+    const clientId = user.clientId;
+
+    const batch = await this.prisma.payoutBatch.findFirst({
+      where: { id: batchId, clientId },
+    });
+    if (!batch) throw new NotFoundException('Payout batch not found');
+    if (batch.status !== 'DRAFT') {
+      throw new BadRequestException(
+        'Can only assign transactions to a DRAFT batch',
+      );
+    }
+
+    // Single guarded statement: only unbatched, PENDING, redemption-backed
+    // transactions whose partner is in THIS tenant and whose mode matches the
+    // batch are pulled in. No read-then-write window.
+    const { count } = await this.prisma.payoutTransaction.updateMany({
+      where: {
+        batchId: null,
+        status: 'PENDING',
+        redemptionOrderId: { not: null },
+        payoutMode: batch.payoutMode,
+        partner: { clientId },
+      },
+      data: { batchId },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'UPDATE',
+        entityType: 'PAYOUT_BATCH',
+        entityId: batchId,
+        actorId: user.sub,
+        metadata: { event: 'ASSIGN_PENDING', assigned: count },
+      },
+    });
+
+    return { batchId, assigned: count };
+  }
+
   /** GET /v1/payouts/batches/:id — a batch + its paginated transactions. */
   async getBatch(user: JwtPayload, id: string, q: BatchDetailQueryDto) {
     const page = q.page ?? 1;
@@ -274,125 +324,129 @@ export class PayoutsService {
 
   /**
    * POST /v1/payouts/batches/:id/process — run the offline disbursement pipeline
-   * (validation → invoice log → TDS computation → fund check → flag for
-   * disbursement) and finalise the batch status (GIFSY-only).
+   * (validation → invoice log → fund check → flag for disbursement) and finalise
+   * the batch status (GIFSY-only).
+   *
+   * Payouts disburse the FULL amount: TDS is NOT withheld here. TDS liability is
+   * owned entirely by the P6.5 TDS engine (src/tds/), which computes 194R from the
+   * redemption order — this path does not touch tdsRecord or net out any TDS.
+   *
+   * Double-processing is prevented by a guarded atomic claim (updateMany with a
+   * status-in guard) rather than a read-then-write, so two concurrent callers can
+   * never both win the DRAFT → PROCESSING transition.
    */
   async processBatch(user: JwtPayload, id: string) {
     const clientId = user.clientId;
 
+    // Distinguish a genuine NotFound (no such batch in this tenant) from a
+    // bad-state claim (exists but already PROCESSING/COMPLETED/etc.) for a clean
+    // error, then perform the race-safe atomic claim.
     const batch = await this.prisma.payoutBatch.findFirst({
       where: { id, clientId },
-      include: { transactions: true },
     });
     if (!batch) throw new NotFoundException('Payout batch not found');
-    if (batch.status === 'COMPLETED') {
-      throw new BadRequestException('Batch already processed');
-    }
-    if (batch.status === 'PROCESSING') {
-      throw new BadRequestException('Batch is currently being processed');
-    }
 
-    // Mark as processing.
-    await this.prisma.payoutBatch.update({
-      where: { id },
+    // Guarded atomic claim: only a batch still in a processable state flips to
+    // PROCESSING. A 0-count claim means another caller already advanced it.
+    const claim = await this.prisma.payoutBatch.updateMany({
+      where: { id, clientId, status: { in: ['DRAFT', 'SUBMITTED', 'FAILED'] } },
       data: { status: 'PROCESSING' },
     });
+    if (claim.count === 0) {
+      throw new BadRequestException('Batch is not in a processable state');
+    }
 
     const steps = {
       validation: { status: 'PENDING', count: 0, errors: [] as string[] },
       invoiceGeneration: { status: 'PENDING', count: 0 },
-      tdsComputation: { status: 'PENDING', totalTds: 0 },
       fundCheck: { status: 'PENDING', available: 0, required: 0 },
       disbursement: { status: 'PENDING', flagged: 0 },
     };
+    let finalStatus: 'SUBMITTED' | 'FAILED' = 'FAILED';
 
-    // Step 1: Validation.
-    const transactions = await this.prisma.payoutTransaction.findMany({
-      where: { batchId: id, status: 'PENDING' },
-      include: { partner: true },
-    });
+    // The batch is now claimed (PROCESSING). If any step below throws, reset it to
+    // FAILED — a re-claimable state — so a transient error never strands the batch
+    // in PROCESSING (which the claim guard deliberately does not re-admit). The
+    // disbursement writes + finalisation are themselves transactional, so a throw
+    // there rolls back cleanly before the reset.
+    try {
+      // Step 1: Validation.
+      const transactions = await this.prisma.payoutTransaction.findMany({
+        where: { batchId: id, status: 'PENDING' },
+        include: { partner: true },
+      });
 
-    steps.validation.count = transactions.length;
-    const validTransactions: typeof transactions = [];
+      steps.validation.count = transactions.length;
+      const validTransactions: typeof transactions = [];
 
-    for (const tx of transactions) {
-      const errors: string[] = [];
-      if (!tx.partner?.panNumber) {
-        errors.push(`No PAN for partner ${tx.partnerId}`);
+      for (const tx of transactions) {
+        const errors: string[] = [];
+        if (!tx.partner?.panNumber) {
+          errors.push(`No PAN for partner ${tx.partnerId}`);
+        }
+        // amountPaise is BigInt from Prisma; compare as Number.
+        if (!tx.amountPaise || Number(tx.amountPaise) <= 0) {
+          errors.push(`Invalid amount for tx ${tx.id}`);
+        }
+        if (errors.length === 0) {
+          validTransactions.push(tx);
+        } else {
+          steps.validation.errors.push(...errors);
+        }
       }
-      // amountPaise is BigInt from Prisma; compare as Number.
-      if (!tx.amountPaise || Number(tx.amountPaise) <= 0) {
-        errors.push(`Invalid amount for tx ${tx.id}`);
-      }
-      if (errors.length === 0) {
-        validTransactions.push(tx);
-      } else {
-        steps.validation.errors.push(...errors);
-      }
-    }
-    steps.validation.status =
-      steps.validation.errors.length === 0 ? 'PASSED' : 'PASSED_WITH_WARNINGS';
+      steps.validation.status =
+        steps.validation.errors.length === 0 ? 'PASSED' : 'PASSED_WITH_WARNINGS';
 
-    // Step 2: Invoice generation (log only — no invoiceNumber field on PayoutTransaction).
-    steps.invoiceGeneration.count = validTransactions.length;
-    steps.invoiceGeneration.status = 'COMPLETED';
+      // Step 2: Invoice generation (log only — no invoiceNumber field on PayoutTransaction).
+      steps.invoiceGeneration.count = validTransactions.length;
+      steps.invoiceGeneration.status = 'COMPLETED';
 
-    // Step 3: TDS computation.
-    // amountPaise fields are BigInt from Prisma; convert with Number() for arithmetic.
-    let totalTds = 0;
-    for (const tx of validTransactions) {
-      const txAmountNum = Number(tx.amountPaise);
-      if (txAmountNum >= PayoutsService.TDS_THRESHOLD_PAISE) {
-        const tdsAmount = Math.round(txAmountNum * PayoutsService.TDS_RATE_DEFAULT);
-        totalTds += tdsAmount;
-        await this.prisma.tdsRecord.create({
-          data: {
-            payoutTransactionId: tx.id,
-            partnerId: tx.partnerId,
-            panNumber: tx.partner?.panNumber ?? null,
-            tdsRate: PayoutsService.TDS_RATE_DEFAULT,
-            tdsPaise: BigInt(tdsAmount),
-          },
+      // Step 3: Fund check — the full gross amount is required (no TDS deduction).
+      // balancePaise is BigInt from Prisma; Number() is safe.
+      const fundLedger = await this.prisma.fundLedger.findFirst({
+        where: { clientId },
+        orderBy: { createdAt: 'desc' },
+      });
+      const totalRequired = validTransactions.reduce(
+        (sum, tx) => sum + Number(tx.amountPaise),
+        0,
+      );
+      const availableBalance = Number(fundLedger?.balancePaise ?? 0n);
+      steps.fundCheck.available = availableBalance;
+      steps.fundCheck.required = totalRequired;
+      steps.fundCheck.status = availableBalance >= totalRequired ? 'PASSED' : 'FAILED';
+
+      // Step 4: Flag for disbursement + finalise — all per-transaction writes and the
+      // batch finalisation run in one transaction so a partial failure rolls back.
+      let flagged = 0;
+      finalStatus = steps.fundCheck.status === 'PASSED' ? 'SUBMITTED' : 'FAILED';
+
+      await this.prisma.$transaction(async (tx) => {
+        if (steps.fundCheck.status === 'PASSED') {
+          for (const vt of validTransactions) {
+            await tx.payoutTransaction.update({
+              where: { id: vt.id },
+              data: { status: 'INITIATED' },
+            });
+            flagged++;
+          }
+        }
+
+        await tx.payoutBatch.update({
+          where: { id },
+          data: { status: finalStatus, processedAt: new Date() },
         });
-      }
+      });
+      steps.disbursement.flagged = flagged;
+      steps.disbursement.status = flagged > 0 ? 'FLAGGED' : 'SKIPPED';
+    } catch (err) {
+      // Reset the claimed batch to FAILED so it can be retried; never leave it
+      // stranded in PROCESSING. Best-effort — swallow reset errors, rethrow cause.
+      await this.prisma.payoutBatch
+        .update({ where: { id }, data: { status: 'FAILED' } })
+        .catch(() => undefined);
+      throw err;
     }
-    steps.tdsComputation.totalTds = totalTds;
-    steps.tdsComputation.status = 'COMPLETED';
-
-    // Step 4: Fund check.
-    // balancePaise is BigInt from Prisma; Number() is safe.
-    const fundLedger = await this.prisma.fundLedger.findFirst({
-      where: { clientId },
-      orderBy: { createdAt: 'desc' },
-    });
-    const totalRequired =
-      validTransactions.reduce((sum, tx) => sum + Number(tx.amountPaise), 0) - totalTds;
-    const availableBalance = Number(fundLedger?.balancePaise ?? 0n);
-    steps.fundCheck.available = availableBalance;
-    steps.fundCheck.required = totalRequired;
-    steps.fundCheck.status = availableBalance >= totalRequired ? 'PASSED' : 'FAILED';
-
-    // Step 5: Flag for disbursement.
-    let flagged = 0;
-    if (steps.fundCheck.status === 'PASSED') {
-      for (const tx of validTransactions) {
-        await this.prisma.payoutTransaction.update({
-          where: { id: tx.id },
-          data: { status: 'INITIATED' },
-        });
-        flagged++;
-      }
-    }
-    steps.disbursement.flagged = flagged;
-    steps.disbursement.status = flagged > 0 ? 'FLAGGED' : 'SKIPPED';
-
-    // Update batch status.
-    const finalStatus =
-      steps.fundCheck.status === 'PASSED' ? 'SUBMITTED' : 'FAILED';
-    await this.prisma.payoutBatch.update({
-      where: { id },
-      data: { status: finalStatus, processedAt: new Date() },
-    });
 
     await this.prisma.auditLog.create({
       data: {
@@ -424,19 +478,20 @@ export class PayoutsService {
       where,
       include: {
         partner: { select: { businessName: true, panNumber: true } },
-        tdsRecord: true,
       },
       orderBy: { createdAt: 'asc' },
     });
 
-    // amountPaise, netAmountPaise, tdsPaise are all BigInt from Prisma.
-    // Number() is safe (paise « Number.MAX_SAFE_INTEGER).
+    // amountPaise / netAmountPaise are BigInt from Prisma; Number() is safe
+    // (paise « Number.MAX_SAFE_INTEGER). Payouts never withhold TDS (that is the
+    // P6.5 engine's job), so TDS here is always 0 and net always equals gross —
+    // the columns are kept for the reconciliation format's stability.
     const rows = transactions.map((t, i) => ({
       'S.No': i + 1,
       'Partner Name': t.partner?.businessName ?? '',
-      PAN: t.partner?.panNumber ?? t.tdsRecord?.panNumber ?? 'N/A',
+      PAN: t.partner?.panNumber ?? 'N/A',
       'Gross Amount (₹)': (Number(t.amountPaise) / 100).toFixed(2),
-      'TDS Amount (₹)': t.tdsRecord ? (Number(t.tdsRecord.tdsPaise) / 100).toFixed(2) : '0.00',
+      'TDS Amount (₹)': '0.00',
       'Net Amount (₹)': (Number(t.netAmountPaise) / 100).toFixed(2),
       Mode: t.payoutMode,
       Status: t.status,

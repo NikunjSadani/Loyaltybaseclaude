@@ -84,6 +84,13 @@ export class PayoutsController {
     return this.payouts.getBatch(user, id, query);
   }
 
+  @Post('batches/:id/assign-pending')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('payouts:process_batch')
+  assignPending(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.payouts.assignPendingTransactions(user, id);
+  }
+
   @Post('batches/:id/process')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('payouts:process_batch')

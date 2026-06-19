@@ -13,6 +13,8 @@ const mockTx = {
   fundReceipt: { create: jest.fn() },
   fundLedger: { create: jest.fn() },
   auditLog: { create: jest.fn() },
+  payoutTransaction: { update: jest.fn() },
+  payoutBatch: { update: jest.fn() },
 };
 
 const mockPrisma = {
@@ -22,6 +24,7 @@ const mockPrisma = {
     aggregate: jest.fn(),
     groupBy: jest.fn(),
     update: jest.fn(),
+    updateMany: jest.fn(),
   },
   payoutBatch: {
     findMany: jest.fn(),
@@ -29,6 +32,7 @@ const mockPrisma = {
     findFirst: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
+    updateMany: jest.fn(),
   },
   fundReceipt: { aggregate: jest.fn() },
   fundLedger: { findFirst: jest.fn() },
@@ -50,6 +54,9 @@ describe('PayoutsService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    // Default: the guarded atomic claim in processBatch succeeds (count 1).
+    // Individual tests override to exercise the 0-count bad-state path.
+    mockPrisma.payoutBatch.updateMany.mockResolvedValue({ count: 1 });
     const module: TestingModule = await Test.createTestingModule({
       providers: [PayoutsService, { provide: PrismaService, useValue: mockPrisma }],
     }).compile();
@@ -82,6 +89,21 @@ describe('PayoutsService', () => {
       await service.listTransactions(gifsy, { dateFrom: from, dateTo: to });
       const where = mockPrisma.payoutTransaction.findMany.mock.calls[0][0].where;
       expect(where.createdAt).toEqual({ gte: from, lte: to });
+    });
+
+    it('scopes unbatched by partner.clientId (not the null batch relation)', async () => {
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
+      mockPrisma.payoutTransaction.count.mockResolvedValue(0);
+      await service.listTransactions(gifsy, { unbatched: true });
+      const where = mockPrisma.payoutTransaction.findMany.mock.calls[0][0].where;
+      // A `batch: { clientId }` relation filter can't match a null batch, so the
+      // tenant scope must ride the partner relation instead.
+      expect(where).toEqual({
+        batchId: null,
+        status: 'PENDING',
+        partner: { clientId: 'deoleo' },
+      });
+      expect(where.batch).toBeUndefined();
     });
   });
 
@@ -170,16 +192,25 @@ describe('PayoutsService', () => {
       );
     });
 
-    it('rejects an already-completed batch', async () => {
+    it('rejects a non-processable batch via the 0-count guarded claim', async () => {
+      // Batch exists in-tenant, but the atomic claim matches nothing (already
+      // PROCESSING/COMPLETED) → BadRequest, not a read-then-write race.
       mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'COMPLETED' });
+      mockPrisma.payoutBatch.updateMany.mockResolvedValue({ count: 0 });
       await expect(service.processBatch(gifsy, 'b1')).rejects.toBeInstanceOf(
         BadRequestException,
       );
+      // The claim must carry the status-in guard.
+      const claimWhere = mockPrisma.payoutBatch.updateMany.mock.calls[0][0].where;
+      expect(claimWhere.status).toEqual({ in: ['DRAFT', 'SUBMITTED', 'FAILED'] });
+      expect(claimWhere).toMatchObject({ id: 'b1', clientId: 'deoleo' });
+      // No work should run on a failed claim.
+      expect(mockPrisma.payoutTransaction.findMany).not.toHaveBeenCalled();
     });
 
-    it('computes TDS, passes the fund check, flags transactions and SUBMITs', async () => {
+    it('passes the fund check (FULL amount, no TDS), flags transactions and SUBMITs', async () => {
       mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
-      // One eligible tx above the ₹20,000 TDS threshold (amountPaise 3,000,000 = ₹30,000).
+      // One eligible tx (amountPaise 3,000,000 = ₹30,000).
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([
         {
           id: 't1',
@@ -188,18 +219,20 @@ describe('PayoutsService', () => {
           partner: { panNumber: 'ABCDE1234F' },
         },
       ]);
-      // Fund ledger has more than required (required = 3,000,000 - 300,000 TDS = 2,700,000).
+      // Required is now the FULL 3,000,000 (no TDS deduction); ledger 5,000,000 passes.
       mockPrisma.fundLedger.findFirst.mockResolvedValue({ balancePaise: 5000000 });
 
       const res = await service.processBatch(gifsy, 'b1');
 
-      expect(mockPrisma.tdsRecord.create).toHaveBeenCalledTimes(1);
-      const tdsData = mockPrisma.tdsRecord.create.mock.calls[0][0].data;
-      expect(tdsData.tdsPaise).toBe(300000n); // 10% of 3,000,000 (BigInt paise)
+      // Payouts do NOT withhold TDS — the TDS engine owns that.
+      expect(mockPrisma.tdsRecord.create).not.toHaveBeenCalled();
+      expect(res.steps).not.toHaveProperty('tdsComputation');
+      expect(res.steps.fundCheck.required).toBe(3000000); // full gross, not netted
       expect(res.steps.fundCheck.status).toBe('PASSED');
       expect(res.steps.disbursement.flagged).toBe(1);
       expect(res.status).toBe('SUBMITTED');
-      expect(mockPrisma.payoutTransaction.update).toHaveBeenCalledWith({
+      // The disbursement + finalisation run inside the $transaction.
+      expect(mockTx.payoutTransaction.update).toHaveBeenCalledWith({
         where: { id: 't1' },
         data: { status: 'INITIATED' },
       });
@@ -211,9 +244,11 @@ describe('PayoutsService', () => {
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([
         { id: 't1', partnerId: 'p1', amountPaise: 500000, partner: { panNumber: 'ABCDE1234F' } },
       ]);
+      // Required = full 500,000; ledger 1,000 is short.
       mockPrisma.fundLedger.findFirst.mockResolvedValue({ balancePaise: 1000 });
 
       const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.fundCheck.required).toBe(500000);
       expect(res.steps.fundCheck.status).toBe('FAILED');
       expect(res.steps.disbursement.flagged).toBe(0);
       expect(res.status).toBe('FAILED');
@@ -229,6 +264,67 @@ describe('PayoutsService', () => {
       const res = await service.processBatch(gifsy, 'b1');
       expect(res.steps.validation.status).toBe('PASSED_WITH_WARNINGS');
       expect(res.steps.disbursement.flagged).toBe(0); // invalid tx excluded
+    });
+
+    it('resets a claimed batch to FAILED if a step throws (never strands it in PROCESSING)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutBatch.updateMany.mockResolvedValue({ count: 1 }); // claim wins
+      mockPrisma.payoutBatch.update.mockResolvedValue({});
+      const boom = new Error('db dropped mid-process');
+      mockPrisma.payoutTransaction.findMany.mockRejectedValue(boom);
+
+      await expect(service.processBatch(gifsy, 'b1')).rejects.toBe(boom);
+      // The claimed batch (PROCESSING) must be reset to FAILED — a re-claimable
+      // state — so the transient error doesn't leave it permanently stuck.
+      expect(mockPrisma.payoutBatch.update).toHaveBeenCalledWith({
+        where: { id: 'b1' },
+        data: { status: 'FAILED' },
+      });
+    });
+  });
+
+  describe('assignPendingTransactions', () => {
+    it('throws NotFound when the batch is outside the tenant', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue(null);
+      await expect(
+        service.assignPendingTransactions(gifsy, 'b1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockPrisma.payoutTransaction.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequest when the batch is not DRAFT', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'SUBMITTED',
+        payoutMode: 'UPI',
+      });
+      await expect(
+        service.assignPendingTransactions(gifsy, 'b1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.payoutTransaction.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('sweeps eligible unbatched PENDING txns into the DRAFT batch (tenant + mode scoped)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'DRAFT',
+        payoutMode: 'UPI',
+      });
+      mockPrisma.payoutTransaction.updateMany.mockResolvedValue({ count: 3 });
+
+      const res = await service.assignPendingTransactions(gifsy, 'b1');
+
+      const call = mockPrisma.payoutTransaction.updateMany.mock.calls[0][0];
+      expect(call.where).toEqual({
+        batchId: null,
+        status: 'PENDING',
+        redemptionOrderId: { not: null },
+        payoutMode: 'UPI',
+        partner: { clientId: 'deoleo' },
+      });
+      expect(call.data).toEqual({ batchId: 'b1' });
+      expect(res).toEqual({ batchId: 'b1', assigned: 3 });
+      expect(mockPrisma.auditLog.create).toHaveBeenCalled();
     });
   });
 
