@@ -68,16 +68,25 @@ lint, however, must be **0 new errors** (lint is red project-wide; check only th
 2. **Dispatch executors in parallel** (background), each with its context bundle (below). They build +
    run their own scoped test; they do not commit.
 3. **Consolidated gate (once):** `tsc` 0, full **differential** test (no new reds), lint (no new on the
-   wave's files). Review each diff (DRY/YAGNI/clientId/secrets).
-4. **Commit** each task (conventional message). **Commission the independent audit** of each (pipeline:
+   wave's files). Review each diff (DRY/YAGNI/clientId/secrets). **Then RUNTIME-VERIFY every user-facing flow
+   the wave touched per `VERIFICATION-PROTOCOL.md` (real login per role) — BEFORE commit.** A flow that only
+   `tsc`-passes is not done; do not commit it as "verified."
+4. **Commit** each task (conventional message) — only flows that passed the runtime protocol. **Commission the
+   independent audit** of each (pipeline:
    while auditing, start the next wave). Fold audit findings back in.
 5. **Doc sweep** (Opus): update every doc/spec/memory a changed fact touches. Then next wave.
 
 ## Context bundle — what each executor must receive
 
 **Always:** [`../../AGENTS.md`](../../AGENTS.md) (the "this is NOT the Next.js you know" warning) ·
-[`01-how-we-test.md`](01-how-we-test.md) (deterministic tests; two styles) · the **task row + phase exit
+[`01-how-we-test.md`](01-how-we-test.md) (deterministic tests; two styles) ·
+[`VERIFICATION-PROTOCOL.md`](VERIFICATION-PROTOCOL.md) (Definition of Done) · the **task row + phase exit
 criteria** · the **named code files** · the relevant source-of-truth reconcile/design doc.
+
+> **Executor framing (mandatory):** *"Do NOT assume the backend endpoint works. Your task includes proving the
+> flow works end-to-end for the real roles it serves. If the backend doesn't serve the needed role/tenant, STOP
+> and report it as a backend finding — do not fake it in the FE."* Agents have no runtime; the orchestrator runs
+> the `VERIFICATION-PROTOCOL.md` runtime checks before anything is called done.
 
 **Per phase — add the relevant spec sections + gap rows:**
 
@@ -98,6 +107,13 @@ criteria** · the **named code files** · the relevant source-of-truth reconcile
 
 ## Orchestrator gate checklist (before "done")
 
+- [ ] **Runtime flow-verification — MANDATORY for any user-facing flow** (`VERIFICATION-PROTOCOL.md`): drive the
+      flow at RUNTIME via a **real login per role** (not the demo persona switcher). All 6 checks pass — canonical
+      surface · role matrix (every role that should/shouldn't, succeeds/refuses honestly) · cross-tenant (Gifsy on a
+      tenant's data) · persistence observed in the DB **by a different session** · unhappy path renders honestly ·
+      tested with ≥2 roles + a record made by a different actor. **`tsc` + unit tests are necessary, never
+      sufficient — "the backend is complete" is a hypothesis to test.** A backend gap found here is a finding to
+      fix in the backend, not to route around in the FE.
 - [ ] A test **fails-without / passes-with** the change (not just "tests exist"); happy path + ≥1 edge.
 - [ ] `tsc` 0 · **differential** test (no new reds vs snapshot) · lint adds no new errors on the wave's files.
 - [ ] **DRY** (reused helpers) · **YAGNI** (only the task's scope; no unrelated files) · **every DB query

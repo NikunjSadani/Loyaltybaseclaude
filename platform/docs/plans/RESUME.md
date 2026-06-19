@@ -19,8 +19,11 @@ fabricate / unwired mock pages** (#36), **broken seed + empty dev DB** (#37). Ba
 **P0.5 (NOW):** Wave 0 auth fix (login contract + token→localStorage + clientId + route guard) → Wave 1 parallel
 agents A=global auth-attachment, B=seed rebuild, C=catalogue-500/DTO-coercion. **P0.6 (NEXT):** parallel D=KYC
 writes, E=redemption/wallet writes, F=visibility/invoices, G=tickets/support, H=dashboards→real, I=payouts.
-processBatch+TDS. **P0.7:** cleanup (demo chrome, dead routes). **Gate MUST add a live runtime re-verify** — the
-static gate (tsc+jest+vitest) missed all of this.
+processBatch+TDS. **P0.7:** cleanup (demo chrome, dead routes). **Gate MUST add a live runtime re-verify per
+`reconcile/../VERIFICATION-PROTOCOL.md`** (real login per role · role matrix · cross-tenant · DB persistence seen by
+a different session · honest unhappy path) — the static gate (tsc+jest+vitest) missed all of this; `tsc`/unit tests
+are never sufficient, and "the backend is complete" is a hypothesis to test (e.g. tickets list scopes CLIENT_ADMIN
+to own tickets; KYC approve 404s cross-tenant for Gifsy — both behind "complete" features).
 **P6 (Finance) DONE 2026-06-18 (backend):** money-unit→BigInt paise (#19) · credits→wallet (#16) · visibility
 capture-mode (#17) · self-bill invoicing (#8/#15) · TDS engine 194R/194C + redemption→payout bridge (#25).
 Dev login: `FIXED_OTP=123456`; seeded users in `gifsy_dev` (deoleo admin `9000000001`, partner `9000000002`,
