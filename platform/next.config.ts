@@ -8,8 +8,9 @@ import path from "path";
 // `beforeFiles` runs BEFORE the local `src/app/api/*` handlers, so the backend wins
 // over the still-present platform routes (those are deleted at S8).
 // EXCLUDED (kept on local handlers until the backend ports them — see RESUME.md
-// deferred list): rewards/redeem(+confirm), visibility/submit, partner/invoices,
-// admin/kyc approvals.
+// deferred list): visibility/submit, admin/kyc approvals.
+// NOTE: rewards/redeem(+confirm) WAS excluded but the backend ported it in P5; the stale exclusion
+// routed the money path to a dead local handler (broken — used retired platform Prisma). Now forwarded.
 const BACKEND_API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 
 const nextConfig: NextConfig = {
@@ -20,7 +21,7 @@ const nextConfig: NextConfig = {
       beforeFiles: [
         {
           source:
-            '/api/:path((?!rewards/redeem|visibility/submit|admin/kyc).*)',
+            '/api/:path((?!visibility/submit|admin/kyc).*)',
           destination: `${BACKEND_API_URL}/v1/:path`,
         },
       ],
