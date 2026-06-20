@@ -90,6 +90,22 @@ jobs:
           docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:staging-${{ github.sha }}
           docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:staging
 
+      # NOTE: prod migrations are NOT auto-wired here — the first prod deploy with the
+      # squashed Prisma baseline requires a one-time manual reconcile. See the gated
+      # cutover runbook before touching deploy.yml.
+      - name: Run DB migrations (staging)
+        run: |
+          gcloud run jobs deploy gifsy-migrate-staging \
+            --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:staging-${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --command=npx \
+            --args=prisma,migrate,deploy \
+            --set-secrets=DATABASE_URL=DATABASE_URL_STAGING:latest \
+            --vpc-connector=gifsy-connector \
+            --set-cloudsql-instances=${{ env.SQL_INSTANCE }} \
+            --service-account=gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com \
+            --execute-now --wait
+
       - name: Deploy API to Cloud Run staging
         run: |
           gcloud run deploy gifsy-api-staging \

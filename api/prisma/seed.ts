@@ -75,10 +75,11 @@ async function assertDevDatabase(): Promise<void> {
     SELECT current_database() AS current_database
   `;
   const dbName = rows[0]?.current_database;
-  if (dbName !== 'gifsy_dev') {
+  const allowed = ['gifsy_dev', 'gifsy_staging'];
+  if (!allowed.includes(dbName)) {
     throw new Error(
-      `🚫  Refusing to seed: connected database is "${dbName}", expected "gifsy_dev". ` +
-        `This seed only runs against the dev database. Check DATABASE_URL.`,
+      `🚫  Refusing to seed: connected database is "${dbName}", expected one of: ${allowed.map((d) => `"${d}"`).join(', ')}. ` +
+        `This seed only runs against the dev or staging database. Check DATABASE_URL.`,
     );
   }
   console.log(`   ✓ Safety check passed — connected to "${dbName}".`);
