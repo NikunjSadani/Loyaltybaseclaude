@@ -11,7 +11,7 @@
  *   2. npx wrangler deploy   (from this directory)
  *   3. In Cloudflare dashboard → Workers & Pages → gifsy-proxy →
  *      Settings → Triggers → Custom Domains: add each subdomain
- *      (api.gifsy.in, platform.gifsy.in, deoleo.gifsy.in, clientb.gifsy.in, gifsy.in)
+ *      (api.gifsy.in, platform.gifsy.in, deoleo.gifsy.in, deoleoloyalty.gifsy.in, clientb.gifsy.in, gifsy.in)
  */
 
 // Map each public hostname to its Cloud Run origin.
@@ -22,6 +22,7 @@ const ROUTES = {
   'platform.gifsy.in': 'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app',
   'deoleo.gifsy.in':   'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app',
   'clientb.gifsy.in':  'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app',
+  'deoleoloyalty.gifsy.in': 'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app', // Deoleo branded custom domain → resolves to tenant `deoleo`
   // gifsy.in root is a separate website — not routed through this Worker
 }
 

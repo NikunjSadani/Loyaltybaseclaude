@@ -65,7 +65,12 @@ export async function verifyOTP(
 ): Promise<VerifyOTPResult> {
   try {
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
-    let clientId = resolveClientId((await headers()).get('host'));
+    // Behind the Cloudflare Worker, `host` is the internal .run.app origin; the real
+    // public hostname (e.g. deoleoloyalty.gifsy.in) is carried in `x-forwarded-host`
+    // (set by cloudflare-worker/worker.js). Read that first so a branded custom domain
+    // resolves its tenant instead of falling back to DEFAULT_CLIENT_ID.
+    const hdrs = await headers();
+    let clientId = resolveClientId(hdrs.get('x-forwarded-host') ?? hdrs.get('host'));
 
     // DEV-ONLY clientId override (#39 / Q3). On localhost there is no real subdomain, so the form
     // offers an explicit org field to log in as GIFSY (or any non-default tenant). NEVER honored in

@@ -11,4 +11,5 @@ routes = [
   { pattern = "platform.gifsy.in/*", zone_name = "gifsy.in" },
   { pattern = "deoleo.gifsy.in/*",   zone_name = "gifsy.in" },
   { pattern = "clientb.gifsy.in/*",  zone_name = "gifsy.in" },
+  { pattern = "deoleoloyalty.gifsy.in/*", zone_name = "gifsy.in" },
 ]
