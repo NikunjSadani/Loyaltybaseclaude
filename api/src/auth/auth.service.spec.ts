@@ -8,6 +8,7 @@ import { AuthService } from './auth.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
+import { Msg91Service } from '../notifications/msg91.service';
 
 // â”€â”€â”€ Mocks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -52,6 +53,9 @@ describe('AuthService', () => {
         { provide: PrismaService,  useValue: mockPrisma },
         { provide: JwtService,     useValue: mockJwt    },
         { provide: ConfigService,  useValue: mockConfig },
+        // Real Msg91Service (A-2a): thin wrapper over the mocked ConfigService + global.fetch,
+        // so the existing MSG91/fetch behaviour tests run unchanged through the delegate.
+        Msg91Service,
       ],
     }).compile();
 

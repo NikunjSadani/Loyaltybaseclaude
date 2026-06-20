@@ -7,6 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { User } from '@prisma/client';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { Msg91Service } from '../notifications/msg91.service';
 import * as crypto from 'crypto';
 
 // ─── Business rule constants — single source of truth ─────────────────────────
@@ -24,6 +25,7 @@ export class AuthService {
     private readonly prisma:  PrismaService,
     private readonly jwt:     JwtService,
     private readonly config:  ConfigService,
+    private readonly msg91:   Msg91Service,
   ) {}
 
   // ── Send OTP ────────────────────────────────────────────────────────────────
@@ -295,41 +297,9 @@ export class AuthService {
   }
 
   private async sendViaMSG91(phone: string, otp: string, channel: 'SMS' | 'WHATSAPP'): Promise<void> {
-    const authKey    = this.config.get<string>('MSG91_AUTH_KEY');
-    const templateId = this.config.get<string>('MSG91_OTP_TEMPLATE_ID');
-    const fixedOtp   = this.config.get<string>('FIXED_OTP');
-
-    // FIXED_OTP mode — skip MSG91, log OTP to console (dev/staging only)
-    // Production Cloud Run will never have FIXED_OTP set
-    if (fixedOtp) {
-      this.logger.warn(`[FIXED_OTP MODE] OTP for ${phone} is always: ${fixedOtp} — MSG91 not called`);
-      return;
-    }
-
-    if (!authKey) {
-      this.logger.warn(`[DEV] MSG91 not configured — OTP for ${phone}: ${otp}`);
-      return;
-    }
-
-    // MSG91 OTP API v5 — authkey goes in the header, not the body.
-    // Sender ID is configured on the template inside the MSG91 dashboard,
-    // so it is NOT passed here. Both SMS and WhatsApp use the same endpoint;
-    // routing is determined by the template type registered in MSG91.
-    const url  = 'https://control.msg91.com/api/v5/otp';
-    const body = { template_id: templateId, mobile: `91${phone}`, otp };
-
-    const res = await fetch(url, {
-      method:  'POST',
-      headers: { authkey: authKey, 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body),
-    });
-
-    // MSG91 can return HTTP 200 with {"type":"error"} — check the body too
-    const json = await res.json() as { type?: string; message?: string };
-    if (!res.ok || json?.type === 'error') {
-      const reason = json?.message ?? `HTTP ${res.status}`;
-      this.logger.error(`MSG91 OTP failed for ${phone} (${channel}): ${reason}`);
-      throw new Error(`Failed to send OTP via ${channel}: ${reason}`);
-    }
+    // Delegates to the shared Msg91Service — behavior is byte-identical to the
+    // former inline implementation (FIXED_OTP/missing-authKey bypasses + the
+    // HTTP-200-with-{type:'error'} failure check live there now).
+    await this.msg91.sendOtp(phone, otp, channel);
   }
 }

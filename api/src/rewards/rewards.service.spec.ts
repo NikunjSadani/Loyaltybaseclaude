@@ -9,6 +9,7 @@ import {
   ConflictException,
   ForbiddenException,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
@@ -16,6 +17,7 @@ import { RewardsService } from './rewards.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { AdminListCatalogQueryDto, UpdatableOrderStatus } from './dto/rewards.dto';
 import { parseFulfilmentUploadBuffer } from './rewards-fulfilment.helpers';
@@ -59,6 +61,11 @@ const mockNotifications = {
   enqueue: jest.fn().mockResolvedValue({ id: 'n1' }),
 };
 
+// OTP is now sent synchronously via Msg91Service (A-2a) — default: succeeds.
+const mockMsg91 = {
+  sendOtp: jest.fn().mockResolvedValue(undefined),
+};
+
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '9990001111', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '9991112222', name: '' };
 const sales: JwtPayload = { sub: 'salesUser1', role: 'SALES_SO', clientId: 'deoleo', phone: '9993334444', name: '' };
@@ -74,6 +81,7 @@ describe('RewardsService', () => {
         { provide: PrismaService, useValue: mockPrisma },
         { provide: WalletService, useValue: mockWallet },
         { provide: NotificationsService, useValue: mockNotifications },
+        { provide: Msg91Service, useValue: mockMsg91 },
       ],
     }).compile();
     service = module.get(RewardsService);
@@ -295,6 +303,27 @@ describe('RewardsService', () => {
       expect(res.orderId).toBe('o1');
     });
 
+    it('A-2a: OTP send failure cancels the order, clears the OTP, and 503s', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o1', orderNumber: 'RDM-x' });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+      mockMsg91.sendOtp.mockRejectedValueOnce(new Error('MSG91 unreachable'));
+
+      await expect(service.redeem(partner, { rewardId: 'r1', quantity: 1 }))
+        .rejects.toBeInstanceOf(ServiceUnavailableException);
+
+      // No debit happens at redeem, so cleanup = cancel the just-created order + clear the unverified OTP.
+      expect(mockPrisma.redemptionOrder.update).toHaveBeenCalledWith({
+        where: { id: 'o1' },
+        data: { status: 'CANCELLED', cancelledAt: expect.any(Date) },
+      });
+      expect(mockPrisma.otpCode.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user1', purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
+      });
+    });
+
     it('requires a delivery address for PHYSICAL_GIFT', async () => {
       mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ ...fixedItem, redemptionMode: 'PHYSICAL_GIFT' });
       await expect(service.redeem(partner, { rewardId: 'r1' }))
@@ -499,10 +528,8 @@ describe('RewardsService', () => {
       // Affordability checked the OUTLET's wallet.
       expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'cp-out' } });
 
-      // OTP delivered to the OUTLET's phone.
-      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
-        expect.objectContaining({ userId: 'outletUser1', recipientPhone: '9000000000' }),
-      );
+      // OTP delivered synchronously to the OUTLET's phone (A-2a: Msg91Service.sendOtp).
+      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('9000000000', expect.stringMatching(/^\d{6}$/), 'SMS');
 
       // Audit trail records the operating sales user.
       const audit = mockPrisma.auditLog.create.mock.calls?.[0]?.[0];
@@ -1223,6 +1250,7 @@ describe('RewardsService', () => {
           { provide: PrismaService, useValue: mockPrisma },
           { provide: (await import('../wallet/wallet.service')).WalletService, useValue: mockWallet },
           { provide: (await import('../notifications/notifications.service')).NotificationsService, useValue: mockNotifications },
+          { provide: (await import('../notifications/msg91.service')).Msg91Service, useValue: mockMsg91 },
         ],
       }).compile();
       const svc0 = module2.get((await import('./rewards.service')).RewardsService);
@@ -1386,6 +1414,7 @@ describe('RewardsService', () => {
           { provide: PrismaService, useValue: mockPrisma },
           { provide: (await import('../wallet/wallet.service')).WalletService, useValue: mockWallet },
           { provide: (await import('../notifications/notifications.service')).NotificationsService, useValue: mockNotifications },
+          { provide: (await import('../notifications/msg91.service')).Msg91Service, useValue: mockMsg91 },
         ],
       }).compile();
       const svc0 = module2.get((await import('./rewards.service')).RewardsService);

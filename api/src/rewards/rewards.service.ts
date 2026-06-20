@@ -5,12 +5,14 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { roundToRupeePaise } from '../tds/tds.helpers';
 import {
@@ -58,6 +60,7 @@ export class RewardsService {
     private readonly prisma: PrismaService,
     private readonly wallet: WalletService,
     private readonly notifications: NotificationsService,
+    private readonly msg91: Msg91Service,
   ) {}
 
   private isGifsy(user: JwtPayload): boolean {
@@ -431,17 +434,19 @@ export class RewardsService {
       })
       .catch((e) => this.logger.error(`[redeemForOutlet] audit log failed: ${e}`));
 
-    // Enqueue OTP delivery to the OUTLET's phone (consent). Debug-log only in dev.
+    // Send OTP delivery to the OUTLET's phone synchronously (consent). Debug-log only in dev.
     this.logger.debug(`[redeemForOutlet] OTP for order ${order.id}: ${otp}`);
-    await this.notifications
-      .enqueue({
-        userId: otpUserId,
-        channel: 'SMS',
-        recipientPhone: otpPhone,
-        body: `Your redemption confirmation OTP is ${otp}. Valid for 10 minutes.`,
-        variables: { otp, orderNumber },
-      })
-      .catch((e) => this.logger.error(`[redeemForOutlet] OTP enqueue failed: ${e}`));
+    try {
+      await this.msg91.sendOtp(otpPhone, otp, 'SMS');
+    } catch (e) {
+      this.logger.error(`[redeemForOutlet] OTP send failed for order ${order.id}: ${e}`);
+      // No debit happened at redeem (pointsDeducted:0), so just undo the OTP + order so nothing is orphaned.
+      await this.prisma.$transaction(async (tx) => {
+        await tx.otpCode.deleteMany({ where: { userId: otpUserId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
+        await tx.redemptionOrder.update({ where: { id: order.id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
+      });
+      throw new ServiceUnavailableException('Could not send the confirmation OTP. Please try again in a moment.');
+    }
 
     return {
       orderId: order.id,
@@ -715,17 +720,19 @@ export class RewardsService {
       return created;
     });
 
-    // Enqueue OTP delivery (SMS). Never log the live OTP in prod; debug only.
+    // Send OTP delivery (SMS) synchronously. Never log the live OTP in prod; debug only.
     this.logger.debug(`[redeem] OTP for order ${order.id}: ${otp}`);
-    await this.notifications
-      .enqueue({
-        userId: user.sub,
-        channel: 'SMS',
-        recipientPhone: user.phone,
-        body: `Your redemption confirmation OTP is ${otp}. Valid for 10 minutes.`,
-        variables: { otp, orderNumber },
-      })
-      .catch((e) => this.logger.error(`[redeem] OTP enqueue failed: ${e}`));
+    try {
+      await this.msg91.sendOtp(user.phone, otp, 'SMS');
+    } catch (e) {
+      this.logger.error(`[redeem] OTP send failed for order ${order.id}: ${e}`);
+      // No debit happened at redeem (pointsDeducted:0), so just undo the OTP + order so nothing is orphaned.
+      await this.prisma.$transaction(async (tx) => {
+        await tx.otpCode.deleteMany({ where: { userId: user.sub, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
+        await tx.redemptionOrder.update({ where: { id: order.id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
+      });
+      throw new ServiceUnavailableException('Could not send the confirmation OTP. Please try again in a moment.');
+    }
 
     return {
       orderId: order.id,
