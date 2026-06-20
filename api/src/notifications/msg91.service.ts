@@ -14,8 +14,11 @@ export class Msg91Service {
   constructor(private readonly config: ConfigService) {}
 
   async sendOtp(phone: string, otp: string, channel: 'SMS' | 'WHATSAPP' = 'SMS'): Promise<void> {
-    const authKey    = this.config.get<string>('MSG91_AUTH_KEY');
-    const templateId = this.config.get<string>('MSG91_OTP_TEMPLATE_ID');
+    // `.trim()` defends against secrets saved with a leading UTF-8 BOM (U+FEFF) or
+    // stray whitespace/newline — a BOM on MSG91_AUTH_KEY made `fetch` throw a
+    // ByteString error ("character … value 65279") when set as the authkey header.
+    const authKey    = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
+    const templateId = this.config.get<string>('MSG91_OTP_TEMPLATE_ID')?.trim();
     const fixedOtp   = this.config.get<string>('FIXED_OTP');
 
     // FIXED_OTP mode — skip MSG91, log OTP to console (dev/staging only)

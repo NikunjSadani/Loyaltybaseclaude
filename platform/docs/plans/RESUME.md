@@ -43,6 +43,24 @@ A-2a F5, A-10 F1/F3, the dry-run 5s-tx-timeout, and the OTP→staging-infra casc
   ⚠️ **PROD is NOT migrated** — still on the stale June-6 schema (has `otp_codes`, missing P4–P6); deferred to the gated
   cutover, which now = run the `gifsy-migrate` job with the **Step-1.5 P3005 reconcile** (`runbooks/PROD-DB-MIGRATION.md`).
   Prod state is **inferred, not confirmed** — verify read-only (in-VPC) before cutover.
+- **🔑 STAGING LOGIN FIXED + REAL-OTP UAT LIVE (2026-06-20) — owner logged in end-to-end with a real SMS OTP.** Two more
+  issues surfaced when the owner tried the browser login: (1) the **"Send OTP" button hung** — the Cloudflare worker
+  rewrites `x-forwarded-host` for tenant resolution, so Next 16's Server-Action CSRF guard saw origin≠x-forwarded-host and
+  **ABORTED the action** (`auth/login/actions.ts` is the ONLY `'use server'` file → login was the only flow with this).
+  Fix: `experimental.serverActions.allowedOrigins` (next.config) with our tenant hosts incl. the **4-part** `uat.deoleoloyalty`/
+  `clientb.app` hosts (`*` doesn't cross dots); independent audit APPROVE-WITH-CHANGES. (2) **real MSG91 send 500'd** —
+  `MSG91_AUTH_KEY` (and `MSG91_SENDER_ID`) secrets had a leading **UTF-8 BOM** (U+FEFF) → `fetch` ByteString error; stripped
+  the auth-key BOM (secret **v5**) + added defensive `.trim()` in `msg91.service`. Removed the **SMS/WhatsApp selector**
+  (SMS-only). **Real-OTP UAT:** flipped `FIXED_OTP` **OFF** on staging (also removed from `deploy-staging.yml` → persistent;
+  restores ENVIRONMENTS.md's "staging = real MSG91" intent) + set deoleo admin (`seed-deoleo-admin`) phone → real
+  `9830011252`. ⚠️ **With real OTP on, only REAL numbers receive OTPs** — the seeded partner(`9000000002`)/sales/outlet are
+  FAKE, so partner-login + redemption-OTP UAT need real numbers set first. Commit `ea22776` (login fix) + a persistence
+  commit. **Local E2E harness unaffected** (local FIXED_OTP); the **staging** harness now needs the deferred real-OTP
+  read-back endpoint (→ P8).
+- **⚠️ PROD recommendation CORRECTED (2026-06-20):** do NOT migrate `gifsy_prod`'s DB in isolation — prod runs OLD code that
+  expects the OLD schema, so a DB-only migrate breaks it (code↔schema mismatch). The right fix is the **FULL cutover** as one
+  coordinated gated op (deploy current code `develop`→`main` + migrate the empty DB + remove the worker alias), **AFTER**
+  staging UAT. Owner wants prod **empty** (greenfield) — that's the cutover's data-lifecycle, not a standalone step.
 - **A-2a synchronous OTP** — shared `api/src/notifications/msg91.service.ts`; partner (`rewards:720`) + sales-assisted
   (`:437`) OTP send directly with send-failure cleanup (cancel order + clear OTP + 503); auth delegates to it; **+ a 10s
   MSG91 fetch timeout**. Audit SHIP; F5 (cleanup masking the 503) fixed. Confirmation SMS deferred.
