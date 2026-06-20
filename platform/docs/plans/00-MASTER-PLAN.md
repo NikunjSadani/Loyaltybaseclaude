@@ -537,7 +537,7 @@ deploy-validated; the launch parts (9.7–9.9) gate the first real tenant.
 | 9.7 | **Security hardening**: rate limiting, security headers, dependency/secret scanning, rotate prod creds | proxy/infra | review |
 | 9.8 | **RBAC enablement** per `RBAC-ENABLEMENT.md` (validate on staging → flip `RBAC_ENFORCEMENT` in prod) | env flag | staging validation |
 | 9.9 | **Launch/cutover runbook**: first-tenant onboarding + seed data, forced re-login comms, smoke tests, rollback plan, DR drill | runbook | go-live checklist |
-| 9.10 | **Deoleo custom domain `deoleoloyalty.gifsy.in`**: DNS → Cloud Run/LB (terraform `load-balancer.tf`/`cloud-run.tf`) + Google-managed SSL. ⚠️ **First fix the tenant-resolution mismatch** — `resolveClientId()` maps the subdomain's first label to the clientId, but `deoleoloyalty` ≠ the DB clientId `deoleo` → login breaks on that domain. Add a domain→clientId map (ideally a `clients.domain` column) OR use `deoleo.gifsy.in`. See `GO-LIVE-READINESS §3`. | `auth/login/actions.ts`, `terraform/`, DNS | login works on the domain |
+| 9.10 | **Deoleo custom domain `deoleoloyalty.gifsy.in`**: DNS → Cloud Run/LB (terraform `load-balancer.tf`/`cloud-run.tf`) + Google-managed SSL. ✅ **Tenant resolution DONE in code (`5de8aa9`)** — `CLIENT_REGISTRY.domains` maps the branded domain → `deoleo`. Remaining = infra: DNS+LB+SSL, **confirm the LB preserves the original `Host` header** to Cloud Run (resolver reads it server-side), smoke-test login on the domain. | `terraform/`, DNS, LB | login works on the domain |
 
 **Exit:** CI/CD green; staging mirrors prod; prod migrated + backed up; observability + alerting live;
 RBAC validated; a repeatable launch runbook. **Depends on:** runs alongside P1→P8; 9.7–9.9 before first tenant.

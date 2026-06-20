@@ -7,19 +7,29 @@ You're the orchestrator for the Loyaltybase build — a multi-tenant FMCG trade-
 Repo root: C:\Users\nikun\Loyaltybaseclaude  (git root; branch **develop**). Frontend: `platform/` (thin Next.js).
 Backend: `api/` (NestJS + Prisma 7, the source of truth — owns the DB + ALL business logic).
 
-⚠️ **STATE (2026-06-20): the P0.6 A-WAVE + B1 are DONE+PUSHED; the WAVE-NOW (B2 · B3-finish · #53 · C2) is DONE,
-audited, runtime-verified, and COMMITTED locally to `develop` but NOT YET PUSHED (awaiting owner go). Green is
-BOUNDED, not "the whole app works".** ✅ **A1** Gifsy cross-tenant oversight (#38) · **A2** operator-context switcher
-(#51) · **A3** payouts completion (#42/#43, money) · **A4** enforcement coverage audit (#2 — gated the partner/sales
-surface + fixed a real `kyc.ledger` PII read-leak + #52 + slaMetrics) · **the sales-KYC-review grant** · **B1**
-sales-assisted redemption (#50-E, money + full UI browser-verify). **WAVE-NOW (4 parallel agents, 2026-06-20, local
-commits):** **B2** invoices+Excel (#44 invoice slice — export/template/real-upload; `e07c06a`) · **B3-finish** gifsy
-Overview+detail real (#49; `745d573`) · **#53** schemes assignment-keying (`72a77f1`) · **C2** staging harness
-env-support (`4e08477`). Each: independent adversarial audit (caught real double-spend/leak/fail-closed bugs +
-B2's HIGH list-shape/MED P2002/LOW formula-injection that `tsc`+unit MISSED) → Opus gate → runtime-verify. Commits
-on `develop`: `980b501` A3 · `89cc013` A4 · `50ae797` sales-review · `39cf299` B1 (**pushed**) · then `72a77f1` #53 ·
-`4e08477` C2 · `745d573` B3 · `e07c06a` B2 (**local, NOT pushed**). The Playwright E2E harness
-(`platform/e2e`, `npm run e2e`, **40/40 green**) covers real-login-per-role · real scoped data · role/portal scoping ·
+⚠️ **STATE (2026-06-20): the ENTIRE P0.6 A–D wave is DONE — A1–A4 + sales-KYC-review · B1/B2/B3 · #53 · C1/C2 ·
+seed-enrichment · D1 · D2 — each independently audited + runtime-verified. NEXT = P7 (Engagement & support).** Green is
+BOUNDED, not "the whole app works". 🔻 **PUSH STATE: pushed to `develop` through D1 + the seed + the custom-domain
+docs. NOT pushed yet (held for owner): D2 (`60b5a76` + doc commits) + the custom-domain→clientId mapping (`5de8aa9`)** —
+held pending the owner running a local `docker build platform/` to verify the **deploy image** (no Docker on this build
+machine; the Dockerfile/ci `prisma generate` removal is verified by inspection + `next build`, but the image build is
+the ONE gate I couldn't run — first real build is otherwise the staging deploy). After "docker green" (or if owner
+accepts the inspection) → `git push origin develop`.
+Highlights (all audited + runtime-verified): **A1** Gifsy cross-tenant oversight (#38) · **A2** operator switcher (#51) ·
+**A3** payouts money path (#42/#43) · **A4** enforcement audit (#2 — fixed a real `kyc.ledger` PII leak + #52) ·
+**sales-KYC-review grant** · **B1** sales-assisted redemption (#50-E, browser-verified) · **B2** invoices+Excel (#44) ·
+**B3** gifsy console real (#49) · **#53** schemes assignment-keying · **C1** harness coverage (caught a flaky-OTP login
+bug + an A4-era visibility-write regression) · **C2** staging env (FIXED_OTP interim; real-OTP endpoint → P8.7) ·
+**seed-enrichment** (CP003 APPROVED-KYC + CreditField/payout + DEMO-VIS scheme → populated B2/#53 live-verified) · **D1**
+admin demo-chrome removal + Sidebar hydration fix (#45) · **D2 platform-Prisma retirement (#31/#32)** — deleted 113 dead
+`app/api` routes + dead-transitive `lib` + `lib/prisma.ts` + `platform/prisma/` (−26k lines), rewired `layout.tsx`
+tenant-config → in-code `CLIENT_REGISTRY` (behavior-identical), auth/logout = stateless (B1), fixed the `Dockerfile`/`ci.yml`
+`prisma generate` deploy breakers; **5 independent audits**; tsc 0 · next build green · harness 59 · vitest 0-new-reds ·
+**the custom-domain→clientId map** (`deoleoloyalty.gifsy.in`→`deoleo` via `CLIENT_REGISTRY.domains`). **Pending owner / infra:**
+push (after Docker), the Deoleo custom-domain DNS+LB+SSL (P9/9.10 — confirm the LB preserves the `Host` header), the
+multi-tenant SSR branding feature (`POST-GO-LIVE-BACKLOG §A`, before client #2), and the D1-residuals (admin header
+notifications, partner DemoSwitcher). **Reload: `POST-GO-LIVE-BACKLOG.md` (deferred work) · `reconcile/D2-platform-retirement.md` (the audited retirement plan).**
+The Playwright E2E harness (`platform/e2e`, `npm run e2e`, **59 green**) covers real-login-per-role · real scoped data · role/portal scoping ·
 cross-tenant (both dirs) · write-persistence (tickets · partner redemption MONEY PATH · visibility submit) · A1 Gifsy
 cross-tenant KYC · A2 operator-switcher. **✅ C1 DONE (`547fa03`, 2026-06-20): the harness now covers the wave (B2 invoice render+list-shape guard · B3 gifsy overview/detail+no-secret · A1 rendered cross-tenant · Q1 payouts redirect · sales catalogue/KYC-review) — `npm run e2e` = 59 passed.** C1 also caught + fixed a flaky OTP-fill in `login.ts` and re-aligned the visibility-write test to A4's partner-denylist (read-back as GIFSY). Re-runnable
 (`skipIf(FIXED_OTP)`). **It does NOT cover every page/flow** — most admin sub-pages, partner targets/leaderboard, sales
