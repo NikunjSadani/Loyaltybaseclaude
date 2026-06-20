@@ -430,16 +430,35 @@ Q1 decision* (payouts→GIFSY-only, made AFTER P6 built them tenant-scoped) — 
 prerequisite for A3 (payouts) — without a tenant-scoped operator session, payouts can't run. **B** wires real data;
 **C** locks each fix + makes staging a gate; **D** retires broad surfaces last.
 
-**Parallel waves (disjoint file sets, per `08-agent-execution-guide.md`). ✅ A1 + A2 + A3 + A4 DONE (built directly by the
-orchestrator — auth/money/enforcement-critical, each independently audited + A3/A4 runtime-verified).**
-- **Wave NOW (the B-wave):** ∥ **B2** invoices (`api/src/invoices/*` + invoice FE + Excel) · ∥ **B1** sales-assisted
-  redemption (`api/src/rewards` sales-context + `platform/.../sales/catalogue` — money path) · finish **B3** (gifsy
-  Overview dashboard + per-client detail real). Disjoint modules (invoices / rewards+sales / gifsy-console).
-- **Then:** finish **B3** (gifsy dashboard/detail real) · **A4** enforcement coverage (cross-cutting `@Roles` — after
-  B1 so it doesn't collide on `rewards`).
-- **Lock + cleanup:** **C1**+**C2**, then **D1**+**D2** (serial).
-C1 rides each fix as it lands; the orchestrator runs the gate + the `VERIFICATION-PROTOCOL` runtime checks + the
-independent audit per wave before commit.
+**Parallel-agent waves (disjoint file sets, per `08-agent-execution-guide.md`). ✅ A1+A2+A3+A4 + B1 DONE (built directly
+by the orchestrator — auth/money/enforcement-critical, each independently audited + runtime-verified; B1 also full-UI
+browser-verified; all pushed to `develop` 2026-06-20).**
+
+**▶ WAVE NOW — up to 4 agents IN PARALLEL (file-disjoint, safe to run simultaneously):**
+| Agent | Workstream | Files (disjoint) | Audit tier |
+|---|---|---|---|
+| 1 | **B2** invoices + Excel round-trips (#44) | `api/src/invoices/*` + admin/partner invoice FE + xlsx helpers | **FULL** (finance/money) |
+| 2 | **B3-finish** gifsy console real data (#49) | `api/src/gifsy/*` + `platform/src/app/gifsy/{page,clients/[slug]}` (retire `CLIENT_REGISTRY` there) | standard |
+| 3 | **#53** schemes assignment-keying fix (mirror B1: partnerId‖outletId) | `api/src/schemes/*` (+ spec) | **LIGHT** (auth-scope) + runtime |
+| 4 | **C2** staging harness env-support (MSG91-OTP inject + staging slugs) | `platform/e2e/*` config/env (no app code) | low |
+
+These four touch disjoint trees (`invoices` · `gifsy` · `schemes` · `e2e-config`) → no merge collisions.
+**C1** (harness specs for the A/B fixes — Gifsy cross-tenant KYC · operator-switch · payouts · sales-assisted redeem)
+is file-disjoint (new `platform/e2e/*` specs) but **logically depends on** B2/B3/#53, so run it just behind Wave NOW
+(or extend the harness as each feature lands).
+
+**▶ WAVE LAST — SERIAL, Opus-coordinated (broad FE, conflict-prone — do NOT parallelize with B or each other):**
+**D1** P0.7 cleanup (#45 — dead `app/api/*` routes, the "DEMO" role-switcher, hardcoded "Needs Attention" numbers,
+partner-class chips, GIFT_CATALOGUE cosmetic reliance, display bugs) **then D2** platform-Prisma retirement (#31/#32 —
+stale `platform/prisma/schema`, ~120 Prisma FE files, ~96 shadow routes, `lib/*` retirement, auth/logout). D2 deletes
+shared infra → LAST.
+
+**Orchestrator (Opus) owns throughout:** `api/prisma/schema.prisma` + any migration (none expected for B2/B3/#53/C;
+D2 deletes only the stale *platform* schema), and the per-task cycle: plan → Sonnet executor (background) → ONE
+independent adversarial audit → Opus gate (`tsc` + `jest`/`vitest` differential + `check-doc-consistency`) →
+`VERIFICATION-PROTOCOL` runtime-verify (real login per role; money/auth = hard) → commit → doc sweep. The money/auth
+streams (B2, #53) keep the FULL executor→audit→runtime cycle that caught real double-spend/leak/fail-closed bugs in
+A3/A4/B1.
 
 **Deferred (kept in `gap-register` with a WHEN — none dropped):** #48 trend-analytics → P8 · #47 configurable-RBAC +
 tenant-creation UI · #18-resid JSON blobs · #21 notifications → P7 · #23/#24/#26/#27 → P8 · holding/lock period.
