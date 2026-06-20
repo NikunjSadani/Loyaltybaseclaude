@@ -1,6 +1,7 @@
 'use server';
 
 import { cookies, headers } from 'next/headers';
+import { resolveSlugFromHostname } from '@/lib/platform/tenant-resolution';
 
 interface SendOTPResult {
   success: boolean;
@@ -19,20 +20,17 @@ interface VerifyOTPResult {
 const DEFAULT_CLIENT_ID = 'deoleo';
 
 /**
- * Resolve the tenant slug from the request Host header (subdomain), e.g.
- * `deoleo.gifsy.in` → `deoleo`. Bare domains, `www`/`platform`, and localhost
- * fall back to DEFAULT_CLIENT_ID — matches `lib/tenant.ts`. The backend
- * `verify-otp` requires `clientId` in the body to scope the user lookup.
+ * Resolve the tenant clientId from the request Host header. Delegates to the
+ * shared `resolveSlugFromHostname` so login uses the SAME resolution as the rest
+ * of the app — including the CLIENT_REGISTRY custom-domain map, so a branded
+ * domain whose label differs from the slug resolves correctly:
+ *   deoleoloyalty.gifsy.in → deoleo   (custom-domain map)
+ *   deoleo.gifsy.in        → deoleo   (subdomain label)
+ *   gifsy.in / www / localhost → DEFAULT_CLIENT_ID
+ * The backend `verify-otp` requires `clientId` in the body to scope the user lookup.
  */
 function resolveClientId(host: string | null): string {
-  if (!host) return DEFAULT_CLIENT_ID;
-  const hostname = host.split(':')[0].toLowerCase();
-  if (hostname === 'localhost' || hostname === '127.0.0.1') return DEFAULT_CLIENT_ID;
-  const parts = hostname.split('.');
-  if (parts.length < 3) return DEFAULT_CLIENT_ID; // bare domain, no subdomain
-  const sub = parts[0];
-  if (sub === 'www' || sub === 'platform') return DEFAULT_CLIENT_ID;
-  return sub;
+  return resolveSlugFromHostname(host ?? '') ?? DEFAULT_CLIENT_ID;
 }
 
 export async function sendOTP(

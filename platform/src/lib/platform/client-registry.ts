@@ -18,6 +18,8 @@ import type { ClientConfig } from './client-config';
 
 export const DEOLEO_CONFIG: ClientConfig = {
   slug: 'deoleo',
+  // Branded customer-facing domain (≠ the slug) → resolves to clientId `deoleo`.
+  domains: ['deoleoloyalty.gifsy.in'],
   internalName: 'Deoleo India Pvt. Ltd.',
   status: 'ACTIVE',
   onboardedAt: '2025-01-01',

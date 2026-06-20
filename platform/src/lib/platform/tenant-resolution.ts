@@ -25,9 +25,22 @@ export const DEFAULT_DEV_SLUG = 'deoleo';
 const PLATFORM_RESERVED = new Set(['www', 'app', 'api', 'admin', 'status', 'mail', 'platform']);
 
 /**
+ * Full custom-hostname → slug map, built from each tenant's `domains` (a branded
+ * domain that differs from the slug, e.g. `deoleoloyalty.gifsy.in` → `deoleo`).
+ * Checked BEFORE the subdomain-label heuristic so a branded domain resolves to the
+ * right tenant. (Long-term this map comes from a `clients.domains` column.)
+ */
+const DOMAIN_TO_SLUG: Record<string, string> = Object.fromEntries(
+  Object.values(CLIENT_REGISTRY).flatMap((cfg) =>
+    (cfg.domains ?? []).map((d) => [d.toLowerCase(), cfg.slug] as const),
+  ),
+);
+
+/**
  * Extracts the tenant slug from an incoming hostname.
  *
  * Examples:
+ *   deoleoloyalty.gifsy.in → "deoleo"   (custom domain map — branded ≠ slug)
  *   deoleo.gifsy.in        → "deoleo"
  *   clientb.app.gifsy.in   → "clientb"
  *   gifsy.in               → null   (bare domain — platform root)
@@ -44,6 +57,9 @@ export function resolveSlugFromHostname(hostname: string): string | null {
   if (!host || host === 'localhost' || host === '127.0.0.1') {
     return DEFAULT_DEV_SLUG;
   }
+
+  // Custom branded domain (full-hostname match) wins over the subdomain heuristic.
+  if (DOMAIN_TO_SLUG[host]) return DOMAIN_TO_SLUG[host];
 
   const parts = host.split('.');
 

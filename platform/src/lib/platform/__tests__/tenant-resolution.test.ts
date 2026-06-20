@@ -50,6 +50,26 @@ describe('resolveSlugFromHostname', () => {
   it('handles an empty string gracefully', () => {
     expect(resolveSlugFromHostname('')).toBe(DEFAULT_DEV_SLUG);
   });
+
+  // ── Custom branded-domain map (deoleoloyalty.gifsy.in → deoleo) ──────────────
+  it('maps a branded custom domain to its tenant slug (label ≠ slug)', () => {
+    expect(resolveSlugFromHostname('deoleoloyalty.gifsy.in')).toBe('deoleo');
+  });
+
+  it('custom-domain map is case-insensitive', () => {
+    expect(resolveSlugFromHostname('DeoleoLoyalty.Gifsy.In')).toBe('deoleo');
+  });
+
+  it('custom-domain map ignores the port', () => {
+    expect(resolveSlugFromHostname('deoleoloyalty.gifsy.in:3000')).toBe('deoleo');
+  });
+
+  it('a branded domain still round-trips to the right config', () => {
+    const slug = resolveSlugFromHostname('deoleoloyalty.gifsy.in');
+    const cfg  = resolveClientConfig(slug!);
+    expect(cfg!.slug).toBe('deoleo');
+    expect(cfg!.branding.displayName).toBe('Deoleo India');
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

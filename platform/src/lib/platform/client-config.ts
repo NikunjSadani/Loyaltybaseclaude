@@ -142,6 +142,14 @@ export interface WalletConfig {
 export interface ClientConfig {
   /** URL-safe lowercase identifier — drives subdomain routing */
   slug: string;
+  /**
+   * Custom/branded hostnames that resolve to this tenant, in addition to the
+   * default `<slug>.gifsy.in`. Use this when the customer-facing domain differs
+   * from the slug — e.g. Deoleo (slug `deoleo`) is served at `deoleoloyalty.gifsy.in`.
+   * Full lowercase hostnames (no port). Optional. (Long-term this becomes a
+   * `clients.domains` column — see POST-GO-LIVE-BACKLOG §A.)
+   */
+  domains?: string[];
   /** Internal display name used in GIFSY super-admin */
   internalName: string;
   status: 'ACTIVE' | 'INACTIVE' | 'ONBOARDING';
