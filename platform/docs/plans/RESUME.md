@@ -81,8 +81,10 @@ residual). jest **803/803** + independent audit (**SHIP**; caught + fixed 1 self
 `/rewards/orders` broke the CLIENT_ADMIN Fulfilment tab → reverted those 2 to ungated self-scoping) + **runtime role-matrix
 12/12** (partner own-ledger 200 / other-ledger 404 / sales-team 403 / partner-me 200 / client-admin wallet 403 /
 rewards-orders 200 / fund-receive 201 / slaMetrics cross-tenant). **DEFERRED (documented):** JWT↔x-tenant-slug → Gap
-#23/P8.6 (RLS); the `getOne`(sales own-only) vs `ledger`(sales tenant-wide) asymmetry is PRE-EXISTING (A4 changed neither
-for sales) → revisit with the sales-KYC-review decision. ⚠️ Stale `'RETAILER'` test-fixture role (not in the enum) → D1.
+#23/P8.6 (RLS). **✅ sales-KYC-review GRANTED (owner decision 2026-06-19):** `kyc.getOne` now blocks only PARTNER roles
+from non-owned (admins+MIS+SALES tenant-wide, consistent with list()'s stage-queue + ledger; partners own-only; PII masked
+for non-admin non-owner). Runtime-verified (sales reviews non-owned detail+ledger 200, cross-tenant 404; partner blocked
+from other partner 403). ⚠️ Stale `'RETAILER'` test-fixture role (not in the enum) → D1.
 
 **NEXT = the B-wave (parallel, disjoint modules):** ∥ **B1** sales-assisted redemption real (#50-E,
 `api/src/rewards` sales-context + `sales/catalogue`; money path) ∥ **B2** invoices/Excel (#44, `api/src/invoices`) ∥ finish

@@ -480,14 +480,20 @@ describe('KycService', () => {
       await expect(service.getOne(partner, 's1')).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it("forbids a non-admin from viewing someone else’s submission", async () => {
+    it('forbids a PARTNER from viewing someone else’s submission', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 's1', userId: 'other' });
-      await expect(service.getOne(partner, 's1')).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(service.getOne(sss, 's1')).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    // getOne is leak-safe via the post-fetch owner/admin guard above (a non-admin
-    // viewing a non-owned submission is 403'd). A4 left getOne unchanged; the
-    // ledger leak (no such guard) is the one A4 fixes — see below.
+    it('allows a SALES reviewer to view a non-owned submission (tenant approval queue)', async () => {
+      // Owner decision 2026-06-19: sales can review. Sales gets tenant-wide read
+      // (consistent with list()); sensitive PII is masked for the non-owner.
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, documents: [], statusHistory: [],
+      });
+      const res = await service.getOne(so, 's1');
+      expect(res.submission.id).toBe('s1');
+    });
   });
 
   describe('ledger (intra-tenant read-leak fix)', () => {

@@ -538,8 +538,14 @@ export class KycService {
 
     if (!submission) throw new NotFoundException('KYC submission not found');
 
-    // Non-admin users can only view their own submissions.
-    if (!this.isAdmin(user.role) && submission.userId !== user.sub) {
+    // Partners may only view their OWN submission. Admins, MIS, and SALES reviewers
+    // get tenant-wide read — sales work the tenant approval queue by stage (see
+    // list(); owner decision 2026-06-19: "sales team can review"). Cross-tenant is
+    // already prevented by kycTenantFilter on the fetch above; sensitive PII is
+    // still masked below for any non-admin non-owner (a sales reviewer sees PAN/
+    // bank as last-4).
+    const PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
+    if (PARTNER_ROLES.includes(user.role) && submission.userId !== user.sub) {
       throw new ForbiddenException('Forbidden');
     }
 
