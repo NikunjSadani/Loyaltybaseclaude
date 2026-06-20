@@ -1008,13 +1008,13 @@ async function main(): Promise<void> {
   const summary: { model: string; scope: string; count: number }[] = [];
 
   if (dryRun) {
-    // DRY-RUN: count each step inside a single read transaction. ZERO deletes.
-    await prisma.$transaction(async (tx) => {
-      for (const step of steps) {
-        const n = await step.count(tx);
-        summary.push({ model: step.model, scope: step.scope, count: n });
-      }
-    });
+    // DRY-RUN: count each step. Read-only → NO transaction needed (and wrapping all 69
+    // counts in one interactive tx hits Prisma's 5s default timeout — caught by the dev
+    // dry-run). ZERO deletes.
+    for (const step of steps) {
+      const n = await step.count(prisma);
+      summary.push({ model: step.model, scope: step.scope, count: n });
+    }
   } else {
     // REAL WIPE: count-then-delete each step, all inside ONE transaction so a
     // failure rolls the whole thing back (never half-wiped).
@@ -1025,7 +1025,10 @@ async function main(): Promise<void> {
           summary.push({ model: step.model, scope: step.scope, count: n });
         }
       },
-      { timeout: 120_000 },
+      // Generous timeout: 69 relation-scoped deletes on a large prod dataset can be slow
+      // (the dev dry-run showed even counts take ~5s). Run in a maintenance window; if it
+      // still times out, raise this / split. maxWait covers pool-acquire under load.
+      { timeout: 600_000, maxWait: 15_000 },
     );
   }
 
