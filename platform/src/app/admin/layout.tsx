@@ -36,6 +36,7 @@ import { useAdminSession } from '@/lib/admin-session';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
 import { OperatorBanner } from '@/components/operator/operator-banner';
+import { SiteFooter } from '@/components/layout/site-footer';
 
 // All possible nav items — feature flags control which are visible
 const ALL_NAV_ITEMS = [
@@ -399,6 +400,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         {/* Page content */}
         <main className="flex-1 overflow-y-auto p-6">
           <RequireAuth allowedRoles={PORTAL_ROLES.admin}>{children}</RequireAuth>
+          <SiteFooter />
         </main>
       </div>
       </div>

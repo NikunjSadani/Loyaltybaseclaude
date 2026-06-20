@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { SiteFooter } from '@/components/layout/site-footer';
 
 export const metadata: Metadata = {
   title: 'Sign In',
@@ -63,8 +64,9 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
       </div>
 
       {/* Form panel */}
-      <div className="flex-1 flex items-center justify-center p-6 lg:p-12 bg-gray-50">
+      <div className="flex-1 flex flex-col items-center justify-center p-6 lg:p-12 bg-gray-50">
         <div className="w-full max-w-sm">{children}</div>
+        <SiteFooter />
       </div>
     </div>
   );

@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { LayoutDashboard, ClipboardList, MapPin, User, Bell, X, FileCheck, AlertTriangle, CheckCircle, Coins, Users, ChevronDown, HeadphonesIcon, ListTodo, Trophy } from 'lucide-react';
 import { NavBottom } from '@/components/layout/nav-bottom';
 import type { NavItem } from '@/components/layout/nav-bottom';
+import { SiteFooter } from '@/components/layout/site-footer';
 import {
   type SalesRole,
   ROLE_LABELS,
@@ -137,7 +138,7 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
       </header>
 
       {/* Main content */}
-      <main className="flex-1 pb-20 px-4 py-5"><RequireAuth allowedRoles={PORTAL_ROLES.sales}>{children}</RequireAuth></main>
+      <main className="flex-1 pb-20 px-4 py-5"><RequireAuth allowedRoles={PORTAL_ROLES.sales}>{children}</RequireAuth><SiteFooter /></main>
 
       {/* Mobile bottom nav */}
       <NavBottom items={navItems} />

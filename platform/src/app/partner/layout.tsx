@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { NavBottom } from '@/components/layout/nav-bottom';
 import { Sidebar } from '@/components/layout/sidebar';
+import { SiteFooter } from '@/components/layout/site-footer';
 import type { NavItem } from '@/components/layout/nav-bottom';
 import type { SidebarSection } from '@/components/layout/sidebar';
 import {
@@ -174,6 +175,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
         {/* Main content */}
         <main className="flex-1 pb-24 px-4 py-5 max-w-4xl mx-auto w-full">
           <RequireAuth allowedRoles={PORTAL_ROLES.partner}>{children}</RequireAuth>
+          <SiteFooter />
         </main>
       </div>
 
