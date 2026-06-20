@@ -83,6 +83,12 @@ const MOCK_BACKEND_INVOICES = [
   },
 ];
 
+/** Real backend list() shape: { invoices, pagination } (NOT a bare array). */
+const wrap = (invoices: unknown[]) => ({
+  invoices,
+  pagination: { page: 1, limit: 20, total: invoices.length, pages: 1 },
+});
+
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('ADMI — Admin Invoice list API wiring', () => {
@@ -101,7 +107,7 @@ describe('ADMI — Admin Invoice list API wiring', () => {
       json: () =>
         Promise.resolve({
           success: true,
-          data: MOCK_BACKEND_INVOICES,
+          data: wrap(MOCK_BACKEND_INVOICES),
         }),
     }));
     render(<AdminInvoiceListPage />);
@@ -120,7 +126,7 @@ describe('ADMI — Admin Invoice list API wiring', () => {
       json: () =>
         Promise.resolve({
           success: true,
-          data: [],
+          data: wrap([]),
         }),
     }));
     render(<AdminInvoiceListPage />);
@@ -130,7 +136,7 @@ describe('ADMI — Admin Invoice list API wiring', () => {
   it('ADMI5: fetches from /api/admin/invoices', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({ success: true, data: [] }),
+      json: () => Promise.resolve({ success: true, data: wrap([]) }),
     });
     vi.stubGlobal('fetch', fetchMock);
     render(<AdminInvoiceListPage />);
@@ -143,7 +149,7 @@ describe('ADMI — Admin Invoice list API wiring', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: () =>
-        Promise.resolve({ success: true, data: MOCK_BACKEND_INVOICES }),
+        Promise.resolve({ success: true, data: wrap(MOCK_BACKEND_INVOICES) }),
     }));
     render(<AdminInvoiceListPage />);
     // totalPaise for inv1 = 590000 → ₹5,900.00
@@ -154,7 +160,7 @@ describe('ADMI — Admin Invoice list API wiring', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: () =>
-        Promise.resolve({ success: true, data: MOCK_BACKEND_INVOICES }),
+        Promise.resolve({ success: true, data: wrap(MOCK_BACKEND_INVOICES) }),
     }));
     render(<AdminInvoiceListPage />);
     const markPaidBtns = await screen.findAllByText(/mark paid/i);
@@ -168,7 +174,7 @@ describe('ADMI — Admin Invoice list API wiring', () => {
       json: () =>
         Promise.resolve({
           success: true,
-          data: [{ ...MOCK_BACKEND_INVOICES[1] }], // only the PAID one
+          data: wrap([{ ...MOCK_BACKEND_INVOICES[1] }]), // only the PAID one
         }),
     }));
     render(<AdminInvoiceListPage />);
@@ -179,7 +185,7 @@ describe('ADMI — Admin Invoice list API wiring', () => {
   it('ADMI9: "Generate Invoices" button is visible in the header', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({ success: true, data: [] }),
+      json: () => Promise.resolve({ success: true, data: wrap([]) }),
     }));
     render(<AdminInvoiceListPage />);
     await screen.findByText(/no invoices match your filters/i);
@@ -189,11 +195,43 @@ describe('ADMI — Admin Invoice list API wiring', () => {
   it('ADMI10: Generate panel is shown when "Generate Invoices" is clicked', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({ success: true, data: [] }),
+      json: () => Promise.resolve({ success: true, data: wrap([]) }),
     }));
     render(<AdminInvoiceListPage />);
     await screen.findByText(/no invoices match your filters/i);
     fireEvent.click(screen.getByText(/generate invoices/i));
     expect(screen.getByText(/generate invoices for a month/i)).toBeInTheDocument();
+  });
+
+  it('ADMI11: "Export Excel" button calls the backend export endpoint (#44)', async () => {
+    // createObjectURL/revokeObjectURL are not in jsdom — stub them.
+    const createObjectURL = vi.fn(() => 'blob:mock');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('/export')) {
+        return Promise.resolve({
+          ok: true,
+          headers: { get: () => 'attachment; filename="visibility-invoices.xlsx"' },
+          blob: () => Promise.resolve(new Blob(['x'])),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ success: true, data: wrap(MOCK_BACKEND_INVOICES) }),
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<AdminInvoiceListPage />);
+    await screen.findByText('TGSL-VIS-OUT001-202604-001');
+    fireEvent.click(screen.getByText(/export excel/i));
+
+    // The export endpoint must have been called.
+    const calledExport = fetchMock.mock.calls.some(
+      (c) => typeof c[0] === 'string' && (c[0] as string).includes('/api/admin/invoices/export'),
+    );
+    expect(calledExport).toBe(true);
   });
 });

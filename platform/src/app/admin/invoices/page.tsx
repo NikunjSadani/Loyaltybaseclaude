@@ -31,9 +31,38 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
-import { api } from '@/lib/api-client';
+import { api, authHeader } from '@/lib/api-client';
 import { formatINR } from '@/lib/money';
 import { formatPeriodLabel } from '@/lib/invoice';
+
+/** Trigger a browser download of an xlsx blob from a backend endpoint. */
+async function downloadXlsx(url: string, fallbackName: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { headers: authHeader() });
+    if (!res.ok) {
+      try {
+        const j = (await res.json()) as { error?: string; message?: string };
+        return j.error ?? j.message ?? `HTTP ${res.status}`;
+      } catch {
+        return `HTTP ${res.status}`;
+      }
+    }
+    // Prefer the server-provided filename (Content-Disposition) when present.
+    const cd = res.headers.get('Content-Disposition') ?? '';
+    const match = cd.match(/filename="?([^"]+)"?/);
+    const filename = match?.[1] ?? fallbackName;
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement('a'), { href: objectUrl, download: filename });
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(objectUrl);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : 'Download failed';
+  }
+}
 
 // ── Backend shape ─────────────────────────────────────────────────────────────
 interface BackendInvoice {
@@ -117,39 +146,6 @@ const STATUS_ICONS: Record<InvoiceRow['status'], React.ReactNode> = {
   PAID:      <CheckCircle className="w-3 h-3" />,
 };
 
-function exportCSV(invoices: InvoiceRow[]) {
-  const headers = [
-    'Invoice Number', 'Outlet Code', 'Outlet Name', 'Firm Name', 'State',
-    'Period', 'Subtotal (₹)', 'GST Type', 'GST (₹)', 'Total (₹)',
-    'Status',
-  ];
-  const rows = invoices.map((inv) => [
-    inv.invoiceNumber,
-    inv.outletCode,
-    inv.outletName,
-    inv.firmName,
-    inv.retailerState,
-    inv.period,
-    (inv.subtotalPaise / 100).toFixed(2),
-    inv.gstType ?? 'N/A',
-    (inv.gstPaise / 100).toFixed(2),
-    (inv.totalPaise / 100).toFixed(2),
-    inv.status,
-  ]);
-
-  const csv = [headers, ...rows]
-    .map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','))
-    .join('\n');
-
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = `visibility-invoices-${Date.now()}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function AdminInvoiceListPage() {
   const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
@@ -171,6 +167,10 @@ export default function AdminInvoiceListPage() {
   const [markingPaid, setMarkingPaid]     = useState<string | null>(null); // invoice id
   const [markPaidError, setMarkPaidError] = useState<string | null>(null);
 
+  // ── Export state ───────────────────────────────────────────────────────────
+  const [exporting, setExporting]     = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
   // ── Fetch ────────────────────────────────────────────────────────────────
   const fetchInvoices = useCallback(async (period?: string, status?: string) => {
     setLoading(true);
@@ -180,9 +180,10 @@ export default function AdminInvoiceListPage() {
     if (status && status !== 'ALL') params.set('status', status);
     const qs = params.toString() ? `?${params.toString()}` : '';
 
-    const res = await api.get<BackendInvoice[]>(`/api/admin/invoices${qs}`);
+    // Backend list() returns { invoices, pagination } — read the array off it.
+    const res = await api.get<{ invoices: BackendInvoice[] }>(`/api/admin/invoices${qs}`);
     if (res.success) {
-      setInvoices(res.data.map(mapBackend));
+      setInvoices((res.data.invoices ?? []).map(mapBackend));
     } else {
       setError('Failed to load invoices');
     }
@@ -232,6 +233,19 @@ export default function AdminInvoiceListPage() {
     } else {
       setMarkPaidError(res.error ?? 'Failed to mark as paid');
     }
+  };
+
+  // ── Export to Excel (server-side, tenant-scoped, honours active filters) ──
+  const handleExport = async () => {
+    setExporting(true);
+    setExportError(null);
+    const params = new URLSearchParams();
+    if (statusFilter !== 'ALL') params.set('status', statusFilter);
+    if (periodFilter !== 'ALL') params.set('period', periodFilter);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const err = await downloadXlsx(`/api/admin/invoices/export${qs}`, 'visibility-invoices.xlsx');
+    setExporting(false);
+    if (err) setExportError(err);
   };
 
   // ── Computed ─────────────────────────────────────────────────────────────
@@ -289,10 +303,14 @@ export default function AdminInvoiceListPage() {
         </div>
         <div className="flex gap-2">
           <button
-            onClick={() => exportCSV(filtered)}
-            className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+            onClick={handleExport}
+            disabled={exporting}
+            className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-60"
           >
-            <Download className="w-3.5 h-3.5" /> Export CSV
+            {exporting
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <Download className="w-3.5 h-3.5" />}
+            Export Excel
           </button>
           <button
             onClick={() => { setShowGenerate(true); setGenerateResult(null); setGenerateError(null); }}
@@ -368,6 +386,17 @@ export default function AdminInvoiceListPage() {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Export error banner */}
+      {exportError && (
+        <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-xs text-red-700 flex items-center gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+          {exportError}
+          <button onClick={() => setExportError(null)} className="ml-auto text-red-400 hover:text-red-600">
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 

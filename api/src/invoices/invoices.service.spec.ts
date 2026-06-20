@@ -27,8 +27,22 @@ import {
   generateInvoiceNumber,
   formatPeriodLabel,
   buildInvoiceDescription,
+  buildInvoiceExportXlsx,
+  buildInvoiceUploadTemplate,
+  type InvoiceExportRow,
 } from './invoice.helpers';
 import { GenerateInvoicesDto, UpdateInvoiceNumberDto } from './dto/invoices.dto';
+import * as XLSX from 'xlsx';
+
+/** Read a built workbook Buffer back into per-sheet array-of-objects (round-trip). */
+function readWorkbook(buffer: Buffer): Record<string, Record<string, unknown>[]> {
+  const wb = XLSX.read(buffer, { type: 'buffer' });
+  const out: Record<string, Record<string, unknown>[]> = {};
+  for (const name of wb.SheetNames) {
+    out[name] = XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' });
+  }
+  return out;
+}
 
 // ── Helper unit tests ─────────────────────────────────────────────────────────
 
@@ -124,6 +138,146 @@ describe('buildInvoiceDescription', () => {
     expect(buildInvoiceDescription('January 2025')).toBe(
       'Marketing visibility services — January 2025',
     );
+  });
+});
+
+// ── Excel round-trip (#44) ─────────────────────────────────────────────────────
+
+describe('buildInvoiceExportXlsx', () => {
+  const cgstSgstRow: InvoiceExportRow = {
+    invoiceNumber: 'TGSL-VIS-O1-202501-001',
+    outletCode: 'O1',
+    period: '2025-01',
+    invoiceDate: new Date('2025-01-15T00:00:00Z'),
+    status: 'GENERATED',
+    subtotalPaise: 500000n, // ₹5,000.00
+    gstPaise: 90000n, // ₹900.00
+    gstType: 'CGST_SGST',
+    totalPaise: 590000n, // ₹5,900.00
+    snapshot: {
+      outletName: 'Sharma Kirana',
+      firmName: 'Sharma Enterprises',
+      panNumber: 'ABCPS1234D',
+      retailerState: 'West Bengal',
+      retailerGstin: '19ABCPS1234D1Z5',
+    },
+  };
+
+  it('renders paise → ₹ with 2 decimals (no float drift)', () => {
+    const { buffer } = buildInvoiceExportXlsx([cgstSgstRow], 'January 2025');
+    const sheets = readWorkbook(buffer);
+    const row = sheets['Invoices'][0];
+    expect(row['Subtotal (₹)']).toBe('5000.00');
+    expect(row['Total GST (₹)']).toBe('900.00');
+    expect(row['Total (₹)']).toBe('5900.00');
+  });
+
+  it('splits CGST_SGST gst into equal CGST + SGST that sum back to gstPaise', () => {
+    const { buffer } = buildInvoiceExportXlsx([cgstSgstRow]);
+    const row = readWorkbook(buffer)['Invoices'][0];
+    expect(row['CGST (₹)']).toBe('450.00');
+    expect(row['SGST (₹)']).toBe('450.00');
+    expect(row['IGST (₹)']).toBe('0.00');
+    expect(row['GST Type']).toBe('CGST_SGST');
+  });
+
+  it('odd-paise gst split: remainder lands on CGST so CGST+SGST === gstPaise', () => {
+    const oddRow: InvoiceExportRow = {
+      ...cgstSgstRow,
+      gstPaise: 901n, // ₹9.01 — odd paise
+      subtotalPaise: 5006n,
+      totalPaise: 5907n,
+    };
+    const row = readWorkbook(buildInvoiceExportXlsx([oddRow]).buffer)['Invoices'][0];
+    // 901 → CGST 451 (4.51) + SGST 450 (4.50) = 901
+    expect(row['CGST (₹)']).toBe('4.51');
+    expect(row['SGST (₹)']).toBe('4.50');
+  });
+
+  it('puts IGST in the IGST column, leaves CGST/SGST at 0', () => {
+    const igstRow: InvoiceExportRow = {
+      ...cgstSgstRow,
+      gstType: 'IGST',
+    };
+    igstRow.snapshot = { ...cgstSgstRow.snapshot, retailerGstin: '27ABCPS1234D1Z5' };
+    const row = readWorkbook(buildInvoiceExportXlsx([igstRow]).buffer)['Invoices'][0];
+    expect(row['IGST (₹)']).toBe('900.00');
+    expect(row['CGST (₹)']).toBe('0.00');
+    expect(row['SGST (₹)']).toBe('0.00');
+  });
+
+  it('accepts number-typed paise (post-JSON round-trip) identically to bigint', () => {
+    const numberRow: InvoiceExportRow = {
+      ...cgstSgstRow,
+      subtotalPaise: 500000,
+      gstPaise: 90000,
+      totalPaise: 590000,
+    };
+    const row = readWorkbook(buildInvoiceExportXlsx([numberRow]).buffer)['Invoices'][0];
+    expect(row['Subtotal (₹)']).toBe('5000.00');
+    expect(row['Total (₹)']).toBe('5900.00');
+  });
+
+  it('neutralises spreadsheet formula injection in partner-supplied cells', () => {
+    const evilRow: InvoiceExportRow = {
+      ...cgstSgstRow,
+      snapshot: {
+        ...cgstSgstRow.snapshot,
+        firmName: '=WEBSERVICE("http://evil")',
+        outletName: '+1+1',
+      },
+    };
+    const row = readWorkbook(buildInvoiceExportXlsx([evilRow]).buffer)['Invoices'][0];
+    // Leading =/+ are defused with a leading apostrophe → Excel treats them as text.
+    expect(row['Firm Name']).toBe('\'=WEBSERVICE("http://evil")');
+    expect(row['Outlet Name']).toBe("'+1+1");
+  });
+
+  it('summary sheet totals are the paise sums rendered in ₹', () => {
+    const second: InvoiceExportRow = {
+      ...cgstSgstRow,
+      invoiceNumber: 'TGSL-VIS-O2-202501-002',
+      outletCode: 'O2',
+      subtotalPaise: 300000n,
+      gstPaise: 0n,
+      gstType: null,
+      totalPaise: 300000n,
+    };
+    const { buffer } = buildInvoiceExportXlsx([cgstSgstRow, second]);
+    const summary = readWorkbook(buffer)['Summary'];
+    const byField = Object.fromEntries(summary.map((r) => [r.Field, r.Value]));
+    expect(byField['Total Invoices']).toBe(2);
+    expect(byField['Total Subtotal (₹)']).toBe('8000.00'); // 5000 + 3000
+    expect(byField['Total GST (₹)']).toBe('900.00');
+    expect(byField['Total Invoice Value (₹)']).toBe('8900.00'); // 5900 + 3000
+  });
+
+  it('empty set still emits a labelled (header-only) Invoices sheet + summary', () => {
+    const { buffer } = buildInvoiceExportXlsx([]);
+    const sheets = readWorkbook(buffer);
+    // No data rows, but the header row keys exist on the worksheet.
+    const headerKeys = Object.keys(
+      XLSX.utils.sheet_to_json(
+        XLSX.read(buffer, { type: 'buffer' }).Sheets['Invoices'],
+        { header: 1 },
+      )[0] as Record<string, unknown>,
+    );
+    expect(headerKeys.length).toBeGreaterThan(0);
+    const summary = sheets['Summary'];
+    const byField = Object.fromEntries(summary.map((r) => [r.Field, r.Value]));
+    expect(byField['Total Invoices']).toBe(0);
+    expect(byField['Total Invoice Value (₹)']).toBe('0.00');
+  });
+});
+
+describe('buildInvoiceUploadTemplate', () => {
+  it('produces a parseable xlsx with the documented period columns', () => {
+    const buffer = buildInvoiceUploadTemplate();
+    const wb = XLSX.read(buffer, { type: 'buffer' });
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {
+      header: 1,
+    }) as unknown[][];
+    expect(aoa[0]).toEqual(['Period (YYYY-MM)', 'Outlet Code (optional)']);
   });
 });
 
@@ -641,6 +795,81 @@ describe('InvoicesService', () => {
       mockPrisma.autoInvoice.findFirst.mockResolvedValue({ id: 'inv1', clientId: 'deoleo', partnerId: 'p-OTHER' });
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'p1' });
       await expect(service.getById(partnerUser, 'inv1')).rejects.toBeInstanceOf(ForbiddenException);
+    });
+  });
+
+  // ── exportXlsx (#44) ───────────────────────────────────────────────────────────
+
+  describe('exportXlsx', () => {
+    const dbInvoice = {
+      id: 'inv1',
+      invoiceNumber: 'TGSL-VIS-O1-202501-001',
+      outletCode: 'O1',
+      period: '2025-01',
+      invoiceDate: new Date('2025-01-15T00:00:00Z'),
+      status: 'GENERATED',
+      subtotalPaise: 500000n,
+      gstPaise: 90000n,
+      gstType: 'CGST_SGST',
+      totalPaise: 590000n,
+      snapshot: {
+        outletName: 'Sharma Kirana',
+        firmName: 'Sharma Enterprises',
+        panNumber: 'ABCPS1234D',
+        retailerState: 'West Bengal',
+        retailerGstin: '19ABCPS1234D1Z5',
+      },
+    };
+
+    it('admin export is tenant-scoped (clientId pinned, no partnerId filter)', async () => {
+      mockPrisma.autoInvoice.findMany.mockResolvedValue([dbInvoice]);
+      const { buffer, filename } = await service.exportXlsx(admin, { period: '2025-01' });
+
+      const where = mockPrisma.autoInvoice.findMany.mock.calls[0][0].where;
+      expect(where.clientId).toBe('deoleo');
+      expect(where.partnerId).toBeUndefined();
+      expect(where.period).toBe('2025-01');
+      expect(filename).toMatch(/^visibility-invoices-.*\.xlsx$/);
+      // Buffer is a real xlsx (starts with the PK zip magic).
+      expect(buffer.slice(0, 2).toString('binary')).toBe('PK');
+    });
+
+    it('partner export is restricted to the caller partnerId', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'p1' });
+      mockPrisma.autoInvoice.findMany.mockResolvedValue([dbInvoice]);
+
+      await service.exportXlsx(partnerUser, {});
+      const where = mockPrisma.autoInvoice.findMany.mock.calls[0][0].where;
+      expect(where.partnerId).toBe('p1');
+      expect(where.clientId).toBe('deoleo');
+    });
+
+    it('partner with no partner record exports an empty workbook (no tenant leak)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+
+      const { buffer } = await service.exportXlsx(partnerUser, {});
+      // findMany must NOT have been called (no query that could leak).
+      expect(mockPrisma.autoInvoice.findMany).not.toHaveBeenCalled();
+      expect(buffer.slice(0, 2).toString('binary')).toBe('PK');
+    });
+
+    it('exported money matches the DB paise (paise → ₹ at the edge)', async () => {
+      mockPrisma.autoInvoice.findMany.mockResolvedValue([dbInvoice]);
+      const { buffer } = await service.exportXlsx(gifsy, {});
+      const wb = XLSX.read(buffer, { type: 'buffer' });
+      const row = XLSX.utils.sheet_to_json(wb.Sheets['Invoices'], { defval: '' })[0] as Record<string, unknown>;
+      expect(row['Total (₹)']).toBe('5900.00');
+      expect(row['Invoice Number']).toBe('TGSL-VIS-O1-202501-001');
+    });
+  });
+
+  // ── uploadTemplate (#44) ───────────────────────────────────────────────────────
+
+  describe('uploadTemplate', () => {
+    it('returns a non-empty xlsx Buffer', () => {
+      const buffer = service.uploadTemplate();
+      expect(buffer.length).toBeGreaterThan(0);
+      expect(buffer.slice(0, 2).toString('binary')).toBe('PK');
     });
   });
 });

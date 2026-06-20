@@ -6,7 +6,10 @@ import {
   Patch,
   Post,
   Query,
+  Res,
+  StreamableFile,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { InvoicesService } from './invoices.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -47,6 +50,37 @@ export class AdminInvoicesController {
     return this.invoices.list(user, q);
   }
 
+  /**
+   * GET /v1/admin/invoices/export?period=&status=&outletCode=
+   * Tenant-scoped .xlsx of the filtered invoice set (#44). Registered BEFORE
+   * `:id` so "export" is not swallowed by the param route.
+   */
+  @Get('export')
+  async export(
+    @CurrentUser() user: JwtPayload,
+    @Query() q: ListInvoicesQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { buffer, filename } = await this.invoices.exportXlsx(user, q);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+  }
+
+  /**
+   * GET /v1/admin/invoices/template → blank upload template .xlsx (#44).
+   * Registered BEFORE `:id`.
+   */
+  @Get('template')
+  template(@Res({ passthrough: true }) res: Response): StreamableFile {
+    const buffer = this.invoices.uploadTemplate();
+    res.setHeader('Content-Disposition', 'attachment; filename="invoice-upload-template.xlsx"');
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+  }
+
   @Get(':id')
   getById(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.invoices.getById(user, id);
@@ -83,6 +117,25 @@ export class PartnerInvoicesController {
   @Get()
   list(@CurrentUser() user: JwtPayload, @Query() q: ListInvoicesQueryDto) {
     return this.invoices.list(user, q);
+  }
+
+  /**
+   * GET /v1/partner/invoices/export — partner-scoped .xlsx of their own invoices
+   * (#44). The service restricts to the caller's partnerId; a caller with no
+   * partner record gets a header-only sheet (never a tenant-wide leak).
+   * Registered BEFORE `:id`.
+   */
+  @Get('export')
+  async export(
+    @CurrentUser() user: JwtPayload,
+    @Query() q: ListInvoicesQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { buffer, filename } = await this.invoices.exportXlsx(user, q);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
   }
 
   @Get(':id')

@@ -54,6 +54,12 @@ const MOCK_BACKEND_INVOICES = [
   },
 ];
 
+/** Real backend list() shape: { invoices, pagination } (NOT a bare array). */
+const wrap = (invoices: unknown[]) => ({
+  invoices,
+  pagination: { page: 1, limit: 20, total: invoices.length, pages: 1 },
+});
+
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('PINV — Partner Invoice list API wiring', () => {
@@ -72,7 +78,7 @@ describe('PINV — Partner Invoice list API wiring', () => {
       json: () =>
         Promise.resolve({
           success: true,
-          data: MOCK_BACKEND_INVOICES,
+          data: wrap(MOCK_BACKEND_INVOICES),
         }),
     }));
     render(<PartnerInvoiceListPage />);
@@ -91,7 +97,7 @@ describe('PINV — Partner Invoice list API wiring', () => {
       json: () =>
         Promise.resolve({
           success: true,
-          data: [],
+          data: wrap([]),
         }),
     }));
     render(<PartnerInvoiceListPage />);
@@ -104,7 +110,7 @@ describe('PINV — Partner Invoice list API wiring', () => {
       json: () =>
         Promise.resolve({
           success: true,
-          data: MOCK_BACKEND_INVOICES,
+          data: wrap(MOCK_BACKEND_INVOICES),
         }),
     }));
     render(<PartnerInvoiceListPage />);

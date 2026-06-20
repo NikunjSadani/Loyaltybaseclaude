@@ -18,11 +18,34 @@ import {
   X,
   CheckCircle,
   Clock,
+  Download,
+  Loader2,
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
-import { api } from '@/lib/api-client';
+import { api, authHeader } from '@/lib/api-client';
 import { formatINR } from '@/lib/money';
 import { formatPeriodLabel } from '@/lib/invoice';
+
+/** Trigger a browser download of the partner's own invoice export (.xlsx). */
+async function downloadInvoicesXlsx(): Promise<string | null> {
+  try {
+    const res = await fetch('/api/partner/invoices/export', { headers: authHeader() });
+    if (!res.ok) return `HTTP ${res.status}`;
+    const cd = res.headers.get('Content-Disposition') ?? '';
+    const match = cd.match(/filename="?([^"]+)"?/);
+    const filename = match?.[1] ?? 'my-invoices.xlsx';
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement('a'), { href: objectUrl, download: filename });
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(objectUrl);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : 'Download failed';
+  }
+}
 
 // ── Backend shape (subset we care about for list) ─────────────────────────────
 interface BackendInvoice {
@@ -74,12 +97,23 @@ export default function PartnerInvoiceListPage() {
   const [invoices, setInvoices]               = useState<InvoiceListItem[]>([]);
   const [loading, setLoading]                 = useState(true);
   const [error, setError]                     = useState<string | null>(null);
+  const [exporting, setExporting]             = useState(false);
+  const [exportError, setExportError]         = useState<string | null>(null);
+
+  const handleExport = async () => {
+    setExporting(true);
+    setExportError(null);
+    const err = await downloadInvoicesXlsx();
+    setExporting(false);
+    if (err) setExportError(err);
+  };
 
   useEffect(() => {
-    api.get<BackendInvoice[]>('/api/partner/invoices')
+    // Backend list() returns { invoices, pagination } — read the array off it.
+    api.get<{ invoices: BackendInvoice[] }>('/api/partner/invoices')
       .then((res) => {
         if (res.success) {
-          setInvoices(res.data.map(mapBackendInvoice));
+          setInvoices((res.data.invoices ?? []).map(mapBackendInvoice));
         } else {
           setError('Failed to load invoices');
         }
@@ -107,12 +141,32 @@ export default function PartnerInvoiceListPage() {
   return (
     <div className="space-y-4 fade-in">
       {/* Header */}
-      <div>
-        <h1 className="text-base font-bold text-gray-900">My Invoices</h1>
-        <p className="text-xs text-gray-500 mt-0.5">
-          Visibility service invoices raised on your behalf
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-base font-bold text-gray-900">My Invoices</h1>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Visibility service invoices raised on your behalf
+          </p>
+        </div>
+        {invoices.length > 0 && (
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors disabled:opacity-60 flex-shrink-0"
+          >
+            {exporting
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <Download className="w-3.5 h-3.5" />}
+            Export Excel
+          </button>
+        )}
       </div>
+
+      {exportError && (
+        <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-xs text-red-700">
+          {exportError}
+        </div>
+      )}
 
       {/* Info banner — dismissible */}
       {!bannerDismissed && (

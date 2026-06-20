@@ -10,9 +10,12 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   TECH_GIFSY,
   buildInvoiceDescription,
+  buildInvoiceExportXlsx,
+  buildInvoiceUploadTemplate,
   computeGST,
   formatPeriodLabel,
   generateInvoiceNumber,
+  type InvoiceExportRow,
 } from './invoice.helpers';
 import {
   GenerateInvoicesDto,
@@ -254,8 +257,22 @@ export class InvoicesService {
         const isP2002 =
           err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
         if (!isP2002) throw err;
-        // Already exists — refresh amounts/snapshot ONLY if still GENERATED.
-        // PAID invoices are immutable; the guarded updateMany skips them (count 0).
+        // Disambiguate WHICH unique constraint fired. AutoInvoice has TWO: the
+        // (clientId,outletCode,period) tuple AND a global `invoiceNumber` unique.
+        // Only the tuple means "this outlet's invoice for this period already
+        // exists" → safe to refresh its amounts. A collision on the global
+        // invoiceNumber (e.g. a previously EDITED number equals a freshly-computed
+        // sequence) must NOT trigger the blind updateMany below — that could mutate
+        // a different outlet's row. Report it as a skip instead.
+        const target = (err as Prisma.PrismaClientKnownRequestError).meta?.target;
+        const targetStr = Array.isArray(target) ? target.join(',') : String(target ?? '');
+        if (targetStr.includes('invoiceNumber')) {
+          skipped.push({ outletCode, reason: 'Invoice number collision — not regenerated' });
+          continue;
+        }
+        // Already exists (period tuple) — refresh amounts/snapshot ONLY if still
+        // GENERATED. PAID invoices are immutable; the guarded updateMany skips
+        // them (count 0).
         const refreshed = await this.prisma.autoInvoice.updateMany({
           where: { clientId, outletCode, period, status: 'GENERATED' },
           data: {
@@ -289,22 +306,13 @@ export class InvoicesService {
    * via the ChannelPartner linked to the caller's userId.
    */
   async list(user: JwtPayload, q: ListInvoicesQueryDto) {
-    const { clientId } = user;
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
     const skip = (page - 1) * limit;
 
-    const where: Prisma.AutoInvoiceWhereInput = { clientId };
-    if (q.period) where.period = q.period;
-    if (q.status) where.status = q.status as 'GENERATED' | 'PAID';
-    if (q.outletCode) where.outletCode = q.outletCode;
-
-    // Partner-scope: restrict to their own invoices.
-    if (this.isPartnerRole(user.role)) {
-      const partner = await this.resolveCallerPartner(user);
-      if (!partner) return { invoices: [], pagination: { page, limit, total: 0, pages: 0 } };
-      where.partnerId = partner.id;
-    }
+    const where = await this.buildScopedWhere(user, q);
+    // null where ⇒ partner role with no resolvable partner ⇒ empty page.
+    if (!where) return { invoices: [], pagination: { page, limit, total: 0, pages: 0 } };
 
     const [invoices, total] = await Promise.all([
       this.prisma.autoInvoice.findMany({
@@ -317,6 +325,68 @@ export class InvoicesService {
     ]);
 
     return { invoices, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+  }
+
+  /**
+   * Build the tenant-scoped + filtered `where` for list/export.
+   * Returns `null` when a partner caller has no resolvable ChannelPartner (so
+   * the caller short-circuits to an empty result rather than leaking tenant-wide
+   * rows). Every branch pins `clientId` from the JWT — never from client input.
+   */
+  private async buildScopedWhere(
+    user: JwtPayload,
+    q: ListInvoicesQueryDto,
+  ): Promise<Prisma.AutoInvoiceWhereInput | null> {
+    const where: Prisma.AutoInvoiceWhereInput = { clientId: user.clientId };
+    if (q.period) where.period = q.period;
+    if (q.status) where.status = q.status as 'GENERATED' | 'PAID';
+    if (q.outletCode) where.outletCode = q.outletCode;
+
+    if (this.isPartnerRole(user.role)) {
+      const partner = await this.resolveCallerPartner(user);
+      if (!partner) return null;
+      where.partnerId = partner.id;
+    }
+
+    return where;
+  }
+
+  // ── exportXlsx (#44) ─────────────────────────────────────────────────────────
+
+  /**
+   * Export the filtered, tenant-scoped invoice set as an .xlsx workbook (#44).
+   *
+   * Reuses the SAME scoped `where` as list() — so an admin export is tenant-wide,
+   * a partner export is restricted to their own invoices, and a partner with no
+   * partner record gets an empty (header-only) sheet (never a tenant-wide leak).
+   *
+   * Money stays integer paise from the DB; conversion to ₹ happens once at the
+   * Excel display edge inside buildInvoiceExportXlsx.
+   *
+   * @returns { buffer, filename }
+   */
+  async exportXlsx(
+    user: JwtPayload,
+    q: ListInvoicesQueryDto,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    const where = await this.buildScopedWhere(user, q);
+
+    const invoices = where
+      ? await this.prisma.autoInvoice.findMany({
+          where,
+          orderBy: { invoiceDate: 'desc' },
+        })
+      : [];
+
+    const periodLabel = q.period ? formatPeriodLabel(q.period) : undefined;
+    return buildInvoiceExportXlsx(invoices as unknown as InvoiceExportRow[], periodLabel);
+  }
+
+  // ── uploadTemplate (#44) ──────────────────────────────────────────────────────
+
+  /** Blank .xlsx template for the invoice-upload page (the dead-link fix, #44). */
+  uploadTemplate(): Buffer {
+    return buildInvoiceUploadTemplate();
   }
 
   // ── getById ────────────────────────────────────────────────────────────────
