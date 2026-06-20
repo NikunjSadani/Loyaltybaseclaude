@@ -77,6 +77,20 @@ the MSG91 template application (a 404 link won't get DLT-approved), the worker n
 - **Owner vs me:** me (worker edit + all verification); only step 2's prod deploy needs your approval.
 - **Commits so far (local, unpushed):** `37e54f9` (plan + route + login fix) · `98d9f8e` (custom domain) · `3fcfa57` (the alias).
 
+## A.2 Build progress (live — 2026-06-20)
+- **A-1 CD gate** ✅ done, pushed, **validated** — staging deployed rev `00002` (first success since the gate went red).
+- **A-3 login `x-forwarded-host`** ✅ done (pushed).
+- **A-2a synchronous OTP** ✅ done — shared `Msg91Service`; partner + sales-assisted OTP send directly with failure-cleanup
+  (cancel order + clear OTP + 503); auth delegates to it; confirmation SMS deferred. Gated: api jest **836/836**, tsc 0. (local)
+- **A-4 observability** ✅ **code already satisfied** (reconcile): global `AllExceptionsFilter` logs 5xx stacks → Cloud Run →
+  Cloud Logging (error visibility exists); `/health` present. **Residual = infra:** a Cloud Monitoring uptime check +
+  error-rate alert — needs the **owner's alert-notification email** (added to the owner list).
+- **A-6 security hardening** ✅ **code already satisfied** (reconcile): `helmet`, CORS-from-`CORS_ORIGINS`, strict
+  ValidationPipe (whitelist+forbidNonWhitelisted), global `ThrottlerGuard` + the Jwt/Roles/Tenant/Permission guard stack;
+  prod omits `FIXED_OTP`/`DEMO_MODE`. **Residual = owner:** rotate any dev-shared creds + set prod `CORS_ORIGINS` incl. the
+  branded domain (already in O-2).
+- **A-10 prod-wipe runbook** ⏳ in progress (guarded destructive script + doc).
+
 ## 0. The reframe
 Core platform is built (P0–P6 + P0.6 A–D). Launch needs a small specific set, several items inside P7/P8/P9, sequenced here.
 **Units:** "build-days" = orchestrated sessions (plan→executor→audit→gate→runtime-verify). Code is fast; **calendar is
