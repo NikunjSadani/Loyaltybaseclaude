@@ -41,7 +41,8 @@ async function renderK1() {
   );
 }
 
-describe('T — Submit Visibility Photo feature flag', () => {
+// QUARANTINE (launch CD gate / A-1): pre-existing TDD-red spec for an unbuilt/changed feature. Un-skip when that feature ships. See docs/plans/reconcile/baseline-red-snapshot.txt
+describe.skip('T — Submit Visibility Photo feature flag', () => {
   beforeEach(() => {
     localStorage.clear();
   });

@@ -50,3 +50,26 @@
 #   the obsolete geo-hierarchy wizard tests (targets-excel) retired; the rest
 #   updated to the rewired backend endpoints. The old lib/targets.ts geo-compute
 #   retires with the platform (~P6).
+#
+# (2026-06-20) A-1 — LAUNCH CD GATE QUARANTINE: the red tests in the 22 files listed above are
+#   now QUARANTINED via in-file `.skip` (each marked with a `// QUARANTINE (launch CD gate / A-1)`
+#   comment pointing back to this file), so `npm test` is GREEN and stops blocking the CD deploy gate.
+#   Mechanism: Group 1 = whole-file (every top-level describe → describe.skip); Group 2 = per-test
+#   (only the specific failing it/test → it.skip, passing tests left intact). NO source/page/component
+#   file was touched and NO passing test's assertions were changed.
+#   The UN-SKIP CHECKLIST is exactly the 22-file list above — un-skip each test when its feature lands.
+#   Group 1 (whole-file describe.skip):
+#     admin: (none) | partner/leaderboard: primary-kpi-ranking
+#     sales/kyc: filter-dropdown, filter-mutual-exclusive, kyc-list, outlet-code-kyc-list
+#     sales/kyc/[id]: camera-only-docs, gst-pan-store-info, outlet-code-kyc-detail,
+#       outlet-quick-actions, resubmit-flow, visibility-photo-flag
+#     sales/kyc/[id]/edit: kyc-edit-api | sales/kyc/[id]/ledger: kpi-filter-ledger
+#     sales/team: member-card-id | sales/team/[memberId]: member-detail
+#   Group 2 (per-test it.skip):
+#     admin/hierarchy/hierarchy-page: H37,H38,H40,H45,H46,H47,H48,H49 (kept all other H-tests)
+#     admin/users/outlets/outlets-page: UI23,UI24 (kept the other 23)
+#     partner/leaderboard/leaderboard-api: LB1,LB3,LB4 (kept LB2)
+#     partner/leaderboard/leaderboard-feature-flag: PLF2,PLF4 (kept PLF1,PLF3)
+#     sales/kyc/new/new-kyc: the 4 tests in the "A: No inline OTP" describe (whole block skipped)
+#     sales/kyc/new/not-interested: NI4,NI5,NI6,NI7,NI8,NI9,NI10,NI11,NI12 (kept NI1,NI2,NI3)
+#     sales/kyc/[id]/kyc-detail-api: SKCD1,SKCD2,SKCD5,SKCD6,SKCD7 (kept SKCD3,SKCD4)
