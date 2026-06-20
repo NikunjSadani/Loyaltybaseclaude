@@ -1,4 +1,6 @@
 import { test, expect } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { ROLES } from '../fixtures/roles';
 
 /**
  * Visibility write-persistence (P0.6 dead-write port) — proves POST /api/visibility/submit now
@@ -8,12 +10,29 @@ import { test, expect } from '@playwright/test';
  * Why an authenticated proxied request instead of driving the UI: the partner visibility page
  * requires navigator.geolocation + a camera/file capture, which is impractical to drive reliably
  * in CI. The write here still goes through the REAL same-origin /api/* proxy with a REAL partner
- * session (storageState), which is exactly the next.config forwarding under test. Persistence is
- * proven by a FRESH GET /api/visibility/submissions showing the new row — not optimistic UI.
+ * session (storageState), which is exactly the next.config forwarding under test.
+ *
+ * Persistence is proven by a FRESH read showing the new submissionId — NOT optimistic UI. The
+ * read is performed as GIFSY_ADMIN: A4 (#2) correctly denylists partner roles from the tenant-wide
+ * GET /visibility/submissions (a partner listing it would leak other partners' submissions), and
+ * the partner UI never lists — it only POSTs /submit. GIFSY is the cross-tenant operator that CAN
+ * list, so it's the right reader to confirm the row landed.
  *
  * Seeded target: VisibilityProgram VP001 (seed-vp-1), partner CP001 with one active outlet.
  */
 const PROGRAM_ID = 'seed-vp-1';
+
+/** Pull the real JWT a role's storageState carries (localStorage `token`), for a cross-role read. */
+function tokenFor(roleKey: 'gifsy'): string {
+  const ss = JSON.parse(readFileSync(ROLES[roleKey].storageStatePath, 'utf8')) as {
+    origins?: { localStorage?: { name: string; value: string }[] }[];
+  };
+  for (const o of ss.origins ?? []) {
+    const t = (o.localStorage ?? []).find((x) => x.name === 'token');
+    if (t?.value) return t.value;
+  }
+  throw new Error(`no token in ${roleKey} storageState`);
+}
 
 // 1x1 PNG (valid image/png) so the backend MIME + buffer checks pass.
 const PNG_BASE64 =
@@ -25,14 +44,16 @@ test.describe('@partner visibility write-persistence (P0.6)', () => {
     const token = await page.evaluate(() => localStorage.getItem('token'));
     expect(token, 'partner must be logged in (storageState)').toBeTruthy();
 
-    const auth = { Authorization: `Bearer ${token}` };
-    const countSubmissions = async (): Promise<number> => {
-      const r = await page.request.get('/api/visibility/submissions?limit=100', { headers: auth });
+    // Read the persisted list as GIFSY (cross-tenant operator) — partners are denylisted from this
+    // tenant-wide list by A4 (#2), and the partner UI never calls it.
+    const gifsyAuth = { Authorization: `Bearer ${tokenFor('gifsy')}` };
+    const submissionIds = async (): Promise<string[]> => {
+      const r = await page.request.get('/api/visibility/submissions?limit=200', { headers: gifsyAuth });
       const j = await r.json();
-      return (j.data?.submissions ?? []).length as number;
+      return ((j.data?.submissions ?? []) as { id: string }[]).map((s) => s.id);
     };
 
-    const before = await countSubmissions();
+    const before = await submissionIds();
 
     // Build the multipart body in the page context (Node Blob/FormData differs across versions).
     const submit = await page.evaluate(
@@ -56,10 +77,13 @@ test.describe('@partner visibility write-persistence (P0.6)', () => {
     // The proxy forwarded to the backend (NOT the deleted local 404), and it created a submission.
     expect(submit.status, JSON.stringify(submit.body)).toBe(201);
     expect(submit.body?.success).toBe(true);
-    expect(submit.body?.data?.submissionId, 'a real submissionId').toBeTruthy();
+    const newId = submit.body?.data?.submissionId as string | undefined;
+    expect(newId, 'a real submissionId').toBeTruthy();
     expect(submit.body?.data?.status).toBe('SUBMITTED');
 
-    // PERSISTENCE: a fresh list read shows exactly one more submission (scoped to this partner).
-    await expect.poll(countSubmissions, { timeout: 10_000 }).toBe(before + 1);
+    // PERSISTENCE: the new submissionId was NOT in the pre-submit list and IS in a fresh read —
+    // proof it actually landed in the DB (not optimistic UI), read back by a role that can list.
+    expect(before, 'the new id must not pre-exist').not.toContain(newId);
+    await expect.poll(submissionIds, { timeout: 10_000 }).toContain(newId);
   });
 });

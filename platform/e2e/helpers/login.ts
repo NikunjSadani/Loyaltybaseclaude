@@ -48,9 +48,20 @@ export async function login(page: Page, role: RoleDef): Promise<void> {
   const otp = await resolveOtp(role);
   const digits = otp.split('');
   expect(digits).toHaveLength(6);
-  for (let i = 0; i < 6; i++) {
-    await otpBoxes.nth(i).fill(digits[i]);
-  }
+  // The 6 OTP boxes auto-advance focus on input, which races with a per-box .fill():
+  // a single digit can silently land in the wrong box or get dropped (→ only 5 filled →
+  // auto-submit never fires → no redirect → timeout). Refill any box whose value drifted
+  // and assert all 6 hold their digit BEFORE waiting on the redirect.
+  await expect(async () => {
+    for (let i = 0; i < 6; i++) {
+      if ((await otpBoxes.nth(i).inputValue()) !== digits[i]) {
+        await otpBoxes.nth(i).fill(digits[i]);
+      }
+    }
+    for (let i = 0; i < 6; i++) {
+      await expect(otpBoxes.nth(i)).toHaveValue(digits[i]);
+    }
+  }).toPass({ timeout: 10_000 });
 
   // Auto-submit fires when all 6 are filled → redirect away from /auth/login on success.
   await page.waitForURL((url) => !url.pathname.startsWith('/auth/login'), { timeout: 15_000 });
