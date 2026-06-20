@@ -50,6 +50,33 @@
 
 ---
 
+## A.1 Live infra state + the TEMPORARY edge alias (MUST retire)
+**Domain (O-3): ✅ DONE (2026-06-20).** `deoleoloyalty.gifsy.in` is live — a Cloudflare **Worker Custom Domain**
+(managed DNS record + managed SSL; shows under Workers & Pages → gifsy-proxy → Domains & Routes, *not* the DNS-records
+tab). Routes through the `gifsy-proxy` worker → the prod frontend. Verified: root + `/auth/login` = **HTTP 200**, title
+"Sign In | Deoleo India Loyalty".
+
+**⚠️ TEMPORARY edge alias — tracked tech-debt to remove.** Prod still runs code that does **not** map the branded domain
+→ tenant `deoleo` (that map = commit `5de8aa9` + the login `x-forwarded-host` fix `37e54f9`, both on `develop`, **not yet
+in prod** — prod deploys from `main`, and the CD gate is red). So `deoleoloyalty.gifsy.in` originally **404'd**. To unblock
+the MSG91 template application (a 404 link won't get DLT-approved), the worker now carries a `TENANT_HOST_ALIAS` in
+`cloudflare-worker/worker.js` that presents the branded host to the app as `x-forwarded-host = deoleo.gifsy.in`, which the
+*current* prod code already resolves to the Deoleo tenant → the branded URL serves the real Deoleo login (200).
+- **What works:** the login page renders, branded + correct; redirects keep the public branded host (Location-rewrite).
+- **What it is not:** it doesn't fix prod's code; full end-to-end login still needs MSG91 OTP (being set up). It's a pure
+  host-translation bridge, isolated to the `deoleoloyalty.gifsy.in` route — no effect on the other domains.
+
+**Retirement steps (do once prod runs current code):**
+1. **A-1** (CD gate green) → current code becomes deployable.
+2. Merge `develop` → `main` → prod deploy (owner approval) so prod has `5de8aa9` (branded-domain→slug map) + `37e54f9`
+   (login reads `x-forwarded-host`).
+3. **Verify native resolution:** probe the prod frontend origin with header `x-forwarded-host: deoleoloyalty.gifsy.in` →
+   expect **200** (today it's 404). That confirms prod maps the branded domain without the alias.
+4. Remove the `TENANT_HOST_ALIAS` map + the `tenantHost` line from `cloudflare-worker/worker.js`; `wrangler deploy`.
+5. Re-verify `https://deoleoloyalty.gifsy.in/auth/login` still serves (now natively, no alias).
+- **Owner vs me:** me (worker edit + all verification); only step 2's prod deploy needs your approval.
+- **Commits so far (local, unpushed):** `37e54f9` (plan + route + login fix) · `98d9f8e` (custom domain) · `3fcfa57` (the alias).
+
 ## 0. The reframe
 Core platform is built (P0–P6 + P0.6 A–D). Launch needs a small specific set, several items inside P7/P8/P9, sequenced here.
 **Units:** "build-days" = orchestrated sessions (plan→executor→audit→gate→runtime-verify). Code is fast; **calendar is
@@ -140,7 +167,7 @@ prod access.** For each, I prepare the exact change/command first; the owner onl
 
 | When | Owner does (only this) | I do (everything around it) |
 |---|---|---|
-| **NOW** | Cloudflare: add the `deoleoloyalty.gifsy.in` **DNS record** + `wrangler deploy` (the worker edit is ready) + add the **Custom Domain** trigger in the Cloudflare dashboard | ✅ done the `worker.js`/`wrangler.toml` route edit + the `actions.ts` `x-forwarded-host` fix; I verify resolution after |
+| ~~NOW~~ ✅ | **Domain — DONE by me** (no owner action was needed). | ✅ deployed the worker + Custom Domain (DNS+SSL), added the temporary alias, verified `deoleoloyalty.gifsy.in` serves the Deoleo login (200). See §A.1. |
 | **NOW (after domain)** | MSG91: create the **OTP + transactional SMS templates** + DLT registration; put `MSG91_AUTH_KEY`/`SENDER_ID`/template IDs into Secret Manager | I draft the exact template message text + variable list for you to submit |
 | Before cutover | GCP **Secret Manager**: set/verify prod secret *values* (I give the exact `gcloud` commands + key list) | the command list, the key inventory, the verification checklist |
 | Before cutover | GCP **Cloud SQL**: enable backups + PITR on the prod instance | the exact steps |
@@ -169,6 +196,7 @@ actions; Cloudflare/MSG91/GCP = your accounts. I can't authenticate to those, an
 - **P8:** trend analytics (#48), scheduled reports, pagination (#26), DPDP (#24), systemic RLS (#23), staging real-OTP (8.7).
 - **P9 post-launch:** full RBAC enablement (9.8/#47 — the flip is **gated on seeding `kyc:*` for field-approver roles**),
   multi-tenant SSR branding (before client #2), per-user backend logout (#32).
+- **Retire the temporary worker host-alias** once prod runs current code — full steps in **§A.1** (after A-1 + the prod deploy).
 - **GO-LIVE §3 carried items:** Money-path integrity = *sign-off* (A3/A4/B1 audited + harness-pinned), not new build.
   **Excel round-trips (#44)** — final-targets re-ingest header + mock enrollments export = **small fast-follow** (confirm
   Deoleo doesn't need final-target re-upload at launch).
