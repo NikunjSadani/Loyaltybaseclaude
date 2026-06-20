@@ -16,8 +16,18 @@
   (`force-logout-all` IS a live ported revoke route), and an under-scoped test sweep (~20 `lib/__tests__` `readFileSync`
   compliance tests fail at RUNTIME, not `tsc`). Folded in (§2, §3-B, §4.7).
 
+**Round 2 (2 fresh auditors on the REVISED plan, owner-requested):**
+- **D — holistic red-team:** re-derived every claim (5th confirmation of the core thesis); no new blocker. Caught that
+  my §4.7 test-sweep would **over-delete** valid tests (named tests that read *surviving* files), missed the `*-live`
+  `tsc`-failing test lane, and named only 2 of the prisma deps. Folded in (§3, §4.7).
+- **E — manifest completeness:** built the exact delete manifest. **Route count is 113, not ~135.** Every dead-transitive
+  module is self-contained (zero live importers); `lib/visibility.ts`+`lib/tds.ts` are fully orphaned. Gave the precise
+  test DELETE vs KEEP lists, found 2 more deletes (`credits-migration` + `credits-migration-live`) and 2 unlisted scripts
+  (`platform/scripts/{seed-outlet-types,backfill-clients}.ts`), and confirmed NO missed live importer. Folded in (§2/§4).
+
 Net: **the core thesis (one live SSR Prisma chain; everything else dead-shadowed; `prisma.ts` deleted last) is sound and
-triple-verified.** The plan below incorporates every audit finding.
+verified by 5 independent audits.** The plan below incorporates every finding; the remaining items are precision/manifest,
+not soundness.
 
 ## 1. The one fact that de-risks everything
 
@@ -37,10 +47,11 @@ existing Prisma-free fallback.
 
 | Bucket | Contents | Action |
 |---|---|---|
-| **DEAD-SHADOWED** | ~135 `app/api/**/route.ts` files (all dirs) | DELETE |
-| **DEAD-TRANSITIVE** | `lib/auth.ts`, `lib/session.ts`, `lib/wallet.ts`, `lib/visibility.ts`, `lib/tds.ts`, `lib/notifications.ts`, `lib/incentive.ts` (orphan, 0 importers), `lib/outlet-persist.ts`, `lib/hierarchy-persistence.ts`, `lib/rbac/*`, `lib/kyc-approval.ts` — imported ONLY by dead routes/tests | DELETE (after confirming no live importer) |
+| **DEAD-SHADOWED** | **113** `app/api/**/route.ts` files (14 dirs: admin/auth/gifsy/kyc/leaderboard/partner/payouts/reports/rewards/sales/schemes/tickets/visibility/wallet) | DELETE |
+| **DEAD-TRANSITIVE** | `lib/auth.ts`, `lib/session.ts`, `lib/wallet.ts`, `lib/visibility.ts` (orphan), `lib/tds.ts` (orphan), `lib/notifications.ts`, `lib/incentive.ts` (orphan), `lib/outlet-persist.ts`, `lib/hierarchy-persistence.ts`, `lib/rbac/*`, `lib/kyc-approval.ts` — all verified imported ONLY by dead routes/tests (zero live importers, 5 audits) | DELETE |
+| **Standalone seed scripts** | `platform/scripts/seed-outlet-types.ts`, `platform/scripts/backfill-clients.ts` (import `@/lib/prisma`/`client-config-db`; their purpose was the now-retired clients-table seeding) | DELETE (round-2 E) |
 | **LIVE-server (PORT/REWIRE FIRST)** | `app/layout.tsx` tenant-config Prisma chain (the ONLY one) | Rewire to Prisma-free fallback BEFORE deleting `lib/prisma.ts` |
-| **Prisma infra** | `lib/prisma.ts`, `lib/platform/client-config-db.ts` + its orphan helper **`lib/platform/client-row.ts`** (audit C), `platform/prisma/schema.prisma`, **`platform/prisma.config.ts`** (audit B), `@prisma/client`+`@prisma/adapter-pg` in `platform/package.json`, AND the unguarded `prisma generate` in **`platform/Dockerfile:14`** + **`.github/workflows/ci.yml:71`** (audit B — deploy/CI breakers) | DELETE/REMOVE last |
+| **Prisma infra** | `lib/prisma.ts`, `lib/platform/client-config-db.ts` + its orphan helper **`lib/platform/client-row.ts`**, `platform/prisma/` (schema + `neon-setup.sql` + 8 migration `.sql`), **`platform/prisma.config.ts`**, the `platform/package.json` deps **`@prisma/client` + `@prisma/adapter-pg` + the `prisma` CLI devDep** (+ `pg`/`@types/pg` are adapter-only → removable), AND the unguarded `prisma generate` in **`Dockerfile:14`** + **`ci.yml:71`** (deploy/CI breakers; `ci.yml:35`=api job KEEP; deploy workflows already `-f`-guarded). No `postinstall` exists; Dockerfile uses `npm ci --ignore-scripts` → dep removal trips no hook. | DELETE/REMOVE last |
 | **CLIENT_REGISTRY** | `lib/platform/client-registry.ts` (in-code, Prisma-free) | **KEEP** as the FE SSR-branding fallback (see Decision A) |
 | **Legacy-lib demos** | `lib/targets.ts`, `lib/gifts.ts`, `lib/partner-session.ts`, `lib/redemption-store.ts`, `lib/platform/{outlet-types,platform-admin,tenant-kpi-config,...}` — **NOT Prisma-backed** | **OUT OF D2 SCOPE** (retire as pages get real wiring) |
 
@@ -94,13 +105,25 @@ deleted regardless.
 6. **Resolve #32** per Decision B (delete the dead `app/api/auth/logout*` + `admin/force-logout-all` *platform* routes in
    step 2 regardless — the backend `POST /v1/admin/force-logout-all` is the live one and is untouched; add a per-user
    backend logout only if B2).
-7. **Delete the orphaned tests — BOTH kinds (audit C):**
-   - (a) route-colocated `app/api/**/__tests__` (fail at `tsc`/compile), AND
-   - (b) the **~20 `lib/__tests__` source-reading "compliance" tests** that `readFileSync` a deleted route/lib's source
-     (e.g. `tenant-isolation-audit`, `*-compliance`, `*-export`, `kyc-wiring`, `points-ledger-export`, …) — these fail at
-     **RUNTIME (ENOENT), NOT `tsc`**, and are NOT under the route trees, so a route-folder sweep misses them.
-   Enumerate both into the manifest; delete; then **re-cut the vitest red-snapshot** deliberately so the differential gate
-   stays meaningful (no NEW reds beyond the intentional removals).
+7. **Delete the orphaned tests — by a PER-FILE RULE, never by name pattern (round-2 correction):**
+   > **RULE:** delete/update a test **iff** it `import`s OR `readFileSync`s a path that is IN this delete manifest.
+   > Re-derive per file. Failure mode is **mixed**: tests that `import` a deleted lib fail at **`tsc`**; tests that
+   > `readFileSync` deleted route/migration source fail at **runtime (vitest)**. Both gates below catch them.
+   - **(a) DELETE — route-colocated `app/api/**/__tests__`** (15 files; `tsc`-fail — import dead routes).
+   - **(b) DELETE — out-of-tree tests that import/read a DELETED path** (round-2 exact list): `visibility-upload-compliance`,
+     `task-config-api-compliance`, `banner-sales-compliance`, `otp-6digit-compliance`, `kyc-wiring`, `outlet-master-export`,
+     `sales-upload-compliance`, `credits-payouts-api`, `session`, `session-revoke-all`, `auth-getauthuser`,
+     `hierarchy-persistence`, `outlet-persist`, `outlet-upsert-smoke-live`, `lib/platform/__tests__/{client-config-db,
+     client-row}`, `lib/rbac/__tests__/{can,permissions,require-permission}`, **`credits-migration` (reads a deleted
+     `prisma/migrations/*.sql`)**, **`credits-migration-live` (imports `@/lib/prisma`)**, and `app/admin/__tests__/
+     admin-pages-wiring` (UPDATE — drops refs to deleted admin routes).
+   - **⚠️ (c) KEEP — DO NOT DELETE (read/import ONLY surviving sources):** `points-ledger-export`, `ticket-aging-export`,
+     `targets-compliance`, `primary-kpi-compliance`, `banner-visibility`, `target-excel-upload`, `sales-excel-upload`,
+     `credits-payouts-{notify,parser,template,utr}`, `admin-session`, and the `app/**/__tests__/*-pages-wiring` tests that
+     read only surviving `*.tsx`. **My original draft wrongly listed `points-ledger-export`/`*-export` as deletes — that
+     was a false-deletion; round-2 corrected it.**
+   Then **re-cut the vitest red-snapshot** so the differential gate stays meaningful (no NEW reds beyond the intentional
+   removals; the KEEP set must still pass).
 
 ## 5. Verification (every step + final) — *expanded per audit B (the TS graph is not enough)*
 
