@@ -434,15 +434,15 @@ prerequisite for A3 (payouts) — without a tenant-scoped operator session, payo
 by the orchestrator — auth/money/enforcement-critical, each independently audited + runtime-verified; B1 also full-UI
 browser-verified; all pushed to `develop` 2026-06-20).**
 
-**▶ WAVE NOW — up to 4 agents IN PARALLEL (file-disjoint, safe to run simultaneously):**
-| Agent | Workstream | Files (disjoint) | Audit tier |
-|---|---|---|---|
-| 1 | **B2** invoices + Excel round-trips (#44) | `api/src/invoices/*` + admin/partner invoice FE + xlsx helpers | **FULL** (finance/money) |
-| 2 | **B3-finish** gifsy console real data (#49) | `api/src/gifsy/*` + `platform/src/app/gifsy/{page,clients/[slug]}` (retire `CLIENT_REGISTRY` there) | standard |
-| 3 | **#53** schemes assignment-keying fix (mirror B1: partnerId‖outletId) | `api/src/schemes/*` (+ spec) | **LIGHT** (auth-scope) + runtime |
-| 4 | **C2** staging harness env-support (MSG91-OTP inject + staging slugs) | `platform/e2e/*` config/env (no app code) | low |
+**✅ WAVE NOW — DONE 2026-06-20 (4 agents ran in parallel; each independent adversarial audit → Opus gate → runtime-verify → local commit on `develop`, NOT yet pushed):**
+| Agent | Workstream | Result |
+|---|---|---|
+| 1 | **B2** invoices + Excel round-trips (#44) | **✅ `e07c06a`** — export/template/real-upload (no-compute period-gen). FULL money audit = SHIP-WITH-FIXES → fixed HIGH list-shape (FE `res.data.invoices`; tests assert real `{invoices,pagination}`) · MED P2002 mis-attribution · LOW Excel formula-injection. jest 52 + runtime-verified. Enrollments-export + final-targets header → D1. |
+| 2 | **B3-finish** gifsy console real data (#49) | **✅ `745d573`** — `GET /v1/gifsy/overview` + `/clients/:slug` real; both pages off `CLIENT_REGISTRY`; fake "N classes" → real modules-on count. Audit SHIP (no secret leak, GIFSY-only). |
+| 3 | **#53** schemes assignment-keying fix | **✅ `72a77f1`** — mirrors B1 (partnerId‖outletId + empty-list guard); +positive +negative over-auth tests; audit SHIP; runtime-proven (outletId-only authorizes, unassigned 403). |
+| 4 | **C2** staging harness env-support | **✅ `4e08477`** — `E2E_ENV=local|staging` switch; local default byte-identical; no prod code touched; audit SHIP. Staging OTP source = owner decision (FIXED_OTP vs a non-prod secret-guarded read-back endpoint). |
 
-These four touch disjoint trees (`invoices` · `gifsy` · `schemes` · `e2e-config`) → no merge collisions.
+These four touched disjoint trees (`invoices` · `gifsy` · `schemes` · `e2e-config`) → no merge collisions. **Still to do: push the wave (owner go), the C2 staging-OTP decision, then C1.**
 **C1** (harness specs for the A/B fixes — Gifsy cross-tenant KYC · operator-switch · payouts · sales-assisted redeem)
 is file-disjoint (new `platform/e2e/*` specs) but **logically depends on** B2/B3/#53, so run it just behind Wave NOW
 (or extend the harness as each feature lands).
