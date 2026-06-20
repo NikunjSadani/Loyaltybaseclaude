@@ -55,7 +55,13 @@ existing Prisma-free fallback.
 | **CLIENT_REGISTRY** | `lib/platform/client-registry.ts` (in-code, Prisma-free) | **KEEP** as the FE SSR-branding fallback (see Decision A) |
 | **Legacy-lib demos** | `lib/targets.ts`, `lib/gifts.ts`, `lib/partner-session.ts`, `lib/redemption-store.ts`, `lib/platform/{outlet-types,platform-admin,tenant-kpi-config,...}` — **NOT Prisma-backed** | **OUT OF D2 SCOPE** (retire as pages get real wiring) |
 
-## 3. Decisions for the owner (the plan branches on these)
+## 3. Decisions (RESOLVED by owner 2026-06-20)
+
+- **A = A1 (registry fallback).** The full multi-tenant SSR-branding feature is deferred + tracked in
+  [`POST-GO-LIVE-BACKLOG.md`](../POST-GO-LIVE-BACKLOG.md) §A (trigger: **before the 2nd real client onboards**; ~3–5 days;
+  additive, no migration, no harder later).
+- **B = B1 (stateless logout).** Delete the dead logout routes; track the per-user backend-logout residual in the backlog
+  (§B). `POST /v1/admin/force-logout-all` stays (untouched) for break-glass.
 
 **Decision A — tenant-config (SSR branding):**
 - **A1 (recommended for D2):** rewire `layout.tsx`/`server.ts` to resolve tenant config from the in-code

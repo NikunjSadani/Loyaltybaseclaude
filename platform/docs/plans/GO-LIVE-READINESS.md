@@ -3,6 +3,9 @@
 > Created 2026-06-19. Documentation alone is **passive** and gets shortcut (proven repeatedly this session).
 > "Done / ready to ship" must be **enforced by something executable**, not trusted to a checklist. This doc
 > defines (1) the intent, (2) the automated enforcement, (3) the readiness gate, (4) who does what.
+>
+> 📋 **Complement:** what we deliberately deferred to *after* launch lives in
+> [`POST-GO-LIVE-BACKLOG.md`](POST-GO-LIVE-BACKLOG.md). This doc = launch **blockers**; that doc = **fast-follows**.
 
 ## 1. Intent (the bar)
 A **green comprehensive run on local dev must mean we can push `develop` expecting it to pass staging → prod with

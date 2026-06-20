@@ -25,7 +25,7 @@ cross-tenant KYC · A2 operator-switcher. **✅ C1 DONE (`547fa03`, 2026-06-20):
 (`skipIf(FIXED_OTP)`). **It does NOT cover every page/flow** — most admin sub-pages, partner targets/leaderboard, sales
 team/outlets, and most write flows are unverified by the harness (B2 invoices + B3 gifsy overview/detail were
 runtime-verified by hand this wave but have no harness spec yet → C1). Read FIRST: [[e2e-harness]] · `e2e/README.md` ·
-`GO-LIVE-READINESS.md` · `DATA-VISIBILITY.md` · `VERIFICATION-PROTOCOL.md` · gap-register **#33–#53** · [[runtime-audit-p0.5]] · [[verify-flows-at-runtime]].
+`GO-LIVE-READINESS.md` (launch blockers) · `POST-GO-LIVE-BACKLOG.md` (deferred/fast-follow work, incl. multi-tenant SSR branding → before client #2) · `DATA-VISIBILITY.md` · `VERIFICATION-PROTOCOL.md` · gap-register **#33–#53** · [[runtime-audit-p0.5]] · [[verify-flows-at-runtime]].
 
 **THE DEFINITION OF DONE (`VERIFICATION-PROTOCOL.md`):** a real user, in the correct role, completes the flow
 end-to-end at RUNTIME against realistic multi-role data — canonical surface · role matrix · cross-tenant · DB
