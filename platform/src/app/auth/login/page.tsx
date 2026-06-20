@@ -2,14 +2,12 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { MessageSquare, Phone } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/components/ui/toast';
 import { sendOTP, verifyOTP } from './actions';
 import { cn } from '@/lib/utils';
 
-type Channel = 'SMS' | 'WHATSAPP';
 type Step = 'mobile' | 'otp';
 
 const RESEND_COUNTDOWN = 60;
@@ -30,7 +28,7 @@ export default function LoginPage() {
   const [step, setStep] = useState<Step>('mobile');
   const [mobile, setMobile] = useState('');
   const [mobileError, setMobileError] = useState('');
-  const [channel, setChannel] = useState<Channel>('SMS');
+  // OTP is delivered via SMS only (MSG91). No channel selection — we always send SMS.
   // DEV-ONLY org override (#39): localhost has no real subdomain, so a GIFSY admin (or any non-default
   // tenant) supplies their clientId here. Hidden + ignored in production (Host subdomain is authoritative).
   const [clientId, setClientId] = useState('');
@@ -61,7 +59,7 @@ export default function LoginPage() {
     setMobileError('');
     setSending(true);
 
-    const result = await sendOTP(mobile, channel);
+    const result = await sendOTP(mobile, 'SMS');
     setSending(false);
 
     if (!result.success) {
@@ -69,7 +67,7 @@ export default function LoginPage() {
       return;
     }
 
-    toast.success(`OTP sent via ${channel === 'SMS' ? 'SMS' : 'WhatsApp'}`);
+    toast.success('OTP sent via SMS');
     setStep('otp');
     setCountdown(RESEND_COUNTDOWN);
     setTimeout(() => otpRefs.current[0]?.focus(), 100);
@@ -138,7 +136,7 @@ export default function LoginPage() {
   const handleResend = async () => {
     if (countdown > 0) return;
     setSending(true);
-    const result = await sendOTP(mobile, channel);
+    const result = await sendOTP(mobile, 'SMS');
     setSending(false);
     if (result.success) {
       toast.info('OTP resent');
@@ -210,34 +208,6 @@ export default function LoginPage() {
               />
             </div>
           )}
-
-          {/* Channel selector */}
-          <div>
-            <label className="text-sm font-medium text-gray-700 block mb-2">
-              Receive OTP via
-            </label>
-            <div className="grid grid-cols-2 gap-3">
-              {([
-                { value: 'SMS', label: 'SMS', icon: Phone },
-                { value: 'WHATSAPP', label: 'WhatsApp', icon: MessageSquare },
-              ] as const).map(({ value, label, icon: Icon }) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => setChannel(value)}
-                  className={cn(
-                    'flex items-center gap-2 px-4 py-3 rounded-lg border-2 text-sm font-medium transition-all',
-                    channel === value
-                      ? 'border-[var(--brand-primary)] bg-[var(--brand-primary)]/5 text-[var(--brand-primary)]'
-                      : 'border-gray-200 text-gray-600 hover:border-gray-300',
-                  )}
-                >
-                  <Icon className="h-4 w-4" />
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
 
           <Button
             variant="primary"

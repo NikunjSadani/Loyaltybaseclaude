@@ -54,6 +54,22 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
     NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
   },
+  // Server Actions run behind the Cloudflare Worker, which rewrites `x-forwarded-host`
+  // (e.g. uat.deoleoloyalty.gifsy.in → deoleoloyalty.gifsy.in for tenant resolution).
+  // Next's Server-Action CSRF guard aborts when `origin` ≠ `x-forwarded-host`, which
+  // hung the login form. Allow our tenant origins to bypass that check. NOTE: Next's
+  // `*` does not cross dots, so multi-level hosts (uat.deoleoloyalty…) are listed
+  // explicitly in addition to the single-level wildcard.
+  experimental: {
+    serverActions: {
+      allowedOrigins: [
+        '*.gifsy.in',                 // all single-label tenant subdomains (deoleo, clientb, platform, deoleoloyalty)
+        'deoleoloyalty.gifsy.in',     // Deoleo prod (explicit for the launch domain; also covered above)
+        'uat.deoleoloyalty.gifsy.in', // Deoleo UAT — 4-part host; `*` does not cross dots
+        'clientb.app.gifsy.in',       // 4-part prod hostname (tenant-resolution tests) — not covered by `*.gifsy.in`
+      ],
+    },
+  },
   // Compress responses
   compress: true,
   // Strict mode for catching issues early
