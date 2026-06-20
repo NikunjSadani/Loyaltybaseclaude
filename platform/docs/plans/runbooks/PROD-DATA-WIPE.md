@@ -19,8 +19,8 @@ seed staging  →  UAT on staging (bulk bug-fixing)  →  minimal real-OTP smoke
               →  CLEAN-WIPE (this runbook)          →  load real Deoleo client data
 ```
 
-The wipe deletes **only** rows owned by the named tenant `clientId`s (default
-`deoleo,clientb`). It never touches:
+The wipe deletes **only** rows owned by the tenant `clientId`s you name in
+`WIPE_CLIENT_IDS` (**required — no default**, fail-closed per audit A-10 F3). It never touches:
 
 - the **GIFSY platform** admin user / the `gifsy` client row (the script hard-refuses
   if `gifsy` is listed as a target),
@@ -55,7 +55,7 @@ All four must pass before a single row is deleted:
 |------|-----------|----------------------|
 | **1. Positive DB-name assertion** | `WIPE_TARGET_DB` must EXACTLY equal `SELECT current_database()` | prints error, `exit 1` |
 | **2. Confirmation token** | `WIPE_CONFIRM` must EXACTLY equal `WIPE <db> <clientIds>` | prints the expected token, `exit 1` |
-| **3. Tenant scope** | `WIPE_CLIENT_IDS` (default `deoleo,clientb`); `gifsy` is rejected | prints error, `exit 1` |
+| **3. Tenant scope** | `WIPE_CLIENT_IDS` (**required — no default**); `gifsy` is rejected | prints error, `exit 1` |
 | **4. Dry-run by DEFAULT** | real wipe requires `WIPE_DRY_RUN=false` (or `--no-dry-run`) | does counts only, no deletes |
 
 The whole wipe runs inside a **single transaction**, so any failure rolls back the
@@ -69,7 +69,7 @@ entire operation — it can never leave the DB half-wiped.
 |-----|----------|---------|-------|
 | `DATABASE_URL` | yes | `postgresql://…/gifsy_staging` | the connection (same as the app). Determines which DB you actually connect to. |
 | `WIPE_TARGET_DB` | yes | `gifsy_staging` | must match `current_database()` of `DATABASE_URL` exactly. The deliberate "name the DB" guard. |
-| `WIPE_CLIENT_IDS` | no | `deoleo,clientb` | comma-separated tenant slugs. Defaults to `deoleo,clientb`. |
+| `WIPE_CLIENT_IDS` | **yes** | `deoleo` | comma-separated tenant slugs. **No default — required** (fail-closed, A-10 F3); the script exits if unset. |
 | `WIPE_DRY_RUN` | no | `false` | **omit / `true` = dry-run (default, safe).** Only `false` performs deletes. |
 | `WIPE_CONFIRM` | for real wipe | `WIPE gifsy_staging deoleo,clientb` | format = `WIPE ` + DB name + ` ` + the client ids joined by comma, in the same order as `WIPE_CLIENT_IDS`. |
 

@@ -58,11 +58,18 @@ const prisma = new PrismaClient({ adapter });
 // wipe target — even if a caller mistakenly lists it, we refuse.
 const PROTECTED_CLIENT_IDS = ['gifsy'];
 
-const DEFAULT_CLIENT_IDS = 'deoleo,clientb';
-
 function parseClientIds(): string[] {
+  // Fail-closed: the tenant list must be named EXPLICITLY (no default), so a forgotten
+  // env var on prod can never silently widen the wipe scope (audit A-10 F3).
   const raw = process.env['WIPE_CLIENT_IDS']?.trim();
-  return (raw && raw.length > 0 ? raw : DEFAULT_CLIENT_IDS)
+  if (!raw || raw.length === 0) {
+    console.error(
+      '🚫  WIPE_CLIENT_IDS is not set. You must explicitly list the tenant clientId(s) to ' +
+        'wipe (e.g. WIPE_CLIENT_IDS=deoleo). Refusing to run.',
+    );
+    process.exit(1);
+  }
+  return raw
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
@@ -799,6 +806,19 @@ function buildSteps(clientIds: string[]): Step[] {
       count: (tx) => tx.pointExpiryConfig.count({ where: { clientId: In } }),
       del: (tx) =>
         tx.pointExpiryConfig
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      // OutletTypeClientConfig → per-tenant outlet-type enable/feature config (direct clientId).
+      // Audit A-10 F1: previously missed. Leaving stale rows would collide on @@unique
+      // ([clientId, outletTypeId]) or silently reuse UAT toggles when real data is loaded.
+      // References only OutletType (global, never deleted) and nothing references it → order-free.
+      model: 'OutletTypeClientConfig',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.outletTypeClientConfig.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.outletTypeClientConfig
           .deleteMany({ where: { clientId: In } })
           .then((r) => r.count),
     },

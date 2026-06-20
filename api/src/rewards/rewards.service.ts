@@ -441,10 +441,16 @@ export class RewardsService {
     } catch (e) {
       this.logger.error(`[redeemForOutlet] OTP send failed for order ${order.id}: ${e}`);
       // No debit happened at redeem (pointsDeducted:0), so just undo the OTP + order so nothing is orphaned.
-      await this.prisma.$transaction(async (tx) => {
-        await tx.otpCode.deleteMany({ where: { userId: otpUserId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
-        await tx.redemptionOrder.update({ where: { id: order.id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
-      });
+      // Best-effort: a stranded PENDING order is superseded by the next redeem; a cleanup failure must
+      // NEVER mask the user-facing 503 (audit A-2a F5).
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          await tx.otpCode.deleteMany({ where: { userId: otpUserId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
+          await tx.redemptionOrder.update({ where: { id: order.id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
+        });
+      } catch (ce) {
+        this.logger.error(`[redeemForOutlet] cleanup after OTP-send failure failed for order ${order.id}: ${ce}`);
+      }
       throw new ServiceUnavailableException('Could not send the confirmation OTP. Please try again in a moment.');
     }
 
@@ -727,10 +733,16 @@ export class RewardsService {
     } catch (e) {
       this.logger.error(`[redeem] OTP send failed for order ${order.id}: ${e}`);
       // No debit happened at redeem (pointsDeducted:0), so just undo the OTP + order so nothing is orphaned.
-      await this.prisma.$transaction(async (tx) => {
-        await tx.otpCode.deleteMany({ where: { userId: user.sub, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
-        await tx.redemptionOrder.update({ where: { id: order.id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
-      });
+      // Best-effort: a stranded PENDING order is superseded by the next redeem; a cleanup failure must
+      // NEVER mask the user-facing 503 (audit A-2a F5).
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          await tx.otpCode.deleteMany({ where: { userId: user.sub, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null } });
+          await tx.redemptionOrder.update({ where: { id: order.id }, data: { status: 'CANCELLED', cancelledAt: new Date() } });
+        });
+      } catch (ce) {
+        this.logger.error(`[redeem] cleanup after OTP-send failure failed for order ${order.id}: ${ce}`);
+      }
       throw new ServiceUnavailableException('Could not send the confirmation OTP. Please try again in a moment.');
     }
 
