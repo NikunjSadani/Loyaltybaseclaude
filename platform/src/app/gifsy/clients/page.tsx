@@ -34,7 +34,10 @@ export default function GifsyClientsPage() {
   useEffect(() => {
     fetch('/api/gifsy/clients', { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
       .then((r) => r.json())
-      .then((j) => setClients(j.data?.clients ?? []))
+      .then((j) => {
+        if (j?.success) setClients(j.data?.clients ?? []);
+        else setError('Could not load clients');
+      })
       .catch(() => setError('Could not load clients'))
       .finally(() => setLoading(false));
   }, []);

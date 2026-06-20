@@ -11,7 +11,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
-  client: { findMany: jest.fn() },
+  client: { findMany: jest.fn(), findUnique: jest.fn() },
   outletType: { findMany: jest.fn(), findFirst: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn(), upsert: jest.fn() },
 };
@@ -59,6 +59,127 @@ describe('GifsyService', () => {
         salesTeamApp: true,
         referralModule: false,
       });
+    });
+  });
+
+  describe('getOverview', () => {
+    it('throws Forbidden for non-GIFSY callers', async () => {
+      await expect(service.getOverview(partner)).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('tallies status counts and projects module-on counts across all tenants', async () => {
+      mockPrisma.client.findMany.mockResolvedValue([
+        {
+          id: 'deoleo',
+          internalName: 'Deoleo India',
+          status: 'ACTIVE',
+          onboardedAt: new Date('2025-01-01'),
+          branding: { displayName: 'Deoleo', primaryColor: '#16a34a' },
+          features: { visibilityInvoiceModule: true, kycApprovalFlow: true, walletModule: true, salesTeamApp: false, referralModule: false },
+        },
+        {
+          id: 'clientb',
+          internalName: 'Client B',
+          status: 'ONBOARDING',
+          onboardedAt: new Date('2026-06-01'),
+          branding: {},
+          features: {},
+        },
+        {
+          id: 'old',
+          internalName: 'Old Co',
+          status: 'INACTIVE',
+          onboardedAt: new Date('2024-01-01'),
+          branding: {},
+          features: {},
+        },
+      ]);
+
+      const result = await service.getOverview(gifsy);
+
+      expect(result.totalClients).toBe(3);
+      expect(result.active).toBe(1);
+      expect(result.onboarding).toBe(1);
+      expect(result.inactive).toBe(1);
+      expect(result.clients).toHaveLength(3);
+
+      const deoleo = result.clients.find((c) => c.slug === 'deoleo')!;
+      expect(deoleo.displayName).toBe('Deoleo');
+      expect(deoleo.primaryColor).toBe('#16a34a');
+      expect(deoleo.enabledFeatureCount).toBe(3); // visibility + kyc + wallet
+      expect(deoleo.moduleCount).toBe(5);
+
+      // Empty-blob tenant falls back to internalName + grey + zero modules.
+      const clientb = result.clients.find((c) => c.slug === 'clientb')!;
+      expect(clientb.displayName).toBe('Client B');
+      expect(clientb.primaryColor).toBe('#6b7280');
+      expect(clientb.enabledFeatureCount).toBe(0);
+    });
+  });
+
+  describe('getClientDetail', () => {
+    it('throws Forbidden for non-GIFSY callers', async () => {
+      await expect(service.getClientDetail(partner, 'deoleo')).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('throws NotFound when the slug has no client row', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue(null);
+      await expect(service.getClientDetail(gifsy, 'nope')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('projects the JSON config blocks into a full ClientConfig-shaped detail', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({
+        id: 'deoleo',
+        internalName: 'Deoleo India Pvt. Ltd.',
+        status: 'ACTIVE',
+        onboardedAt: new Date('2025-01-01'),
+        branding: { displayName: 'Deoleo India', primaryColor: '#16a34a', supportEmail: 'help@deoleo.in', productBrands: ['Figaro'] },
+        features: { visibilityInvoiceModule: true, walletModule: true, partnerApp: { showWallet: true, showLeaderboard: false } },
+        approvalHierarchy: { levels: [{ roleKey: 'L1' }], requireGifsyFinalApproval: true },
+        notifications: { whatsappSenderId: '91X', smsSenderId: 'DEOLEO', templateIds: { otpVerification: 'deoleo_otp' } },
+        invoicing: { sellerGstin: '19AABCT1234A1ZX', invoicePrefix: 'TGSL-VIS' },
+        wallet: { defaultHoldingPeriodDays: 30, minRedemptionAmount: 500, redemptionModes: ['UPI', 'NEFT'] },
+      });
+
+      const detail = await service.getClientDetail(gifsy, 'deoleo');
+
+      expect(detail.slug).toBe('deoleo');
+      expect(detail.branding.displayName).toBe('Deoleo India');
+      expect(detail.branding.productBrands).toEqual(['Figaro']);
+      expect(detail.features.visibilityInvoiceModule).toBe(true);
+      expect(detail.features.referralModule).toBe(false); // missing flag → false
+      expect(detail.features.partnerApp.showWallet).toBe(true);
+      expect(detail.features.partnerApp.showSchemes).toBe(true); // default-on
+      expect(detail.approvalHierarchy.levels).toHaveLength(1);
+      expect(detail.notifications.templateIds.otpVerification).toBe('deoleo_otp');
+      expect(detail.notifications.templateIds.kycApproved).toBe(''); // missing → empty
+      // msg91AuthKey is never present on the detail payload.
+      expect((detail.notifications as Record<string, unknown>).msg91AuthKey).toBeUndefined();
+      expect(detail.invoicing.sellerLegalName).toBe('Tech Gifsy Solutions Limited');
+      expect(detail.wallet.redemptionModes).toEqual(['UPI', 'NEFT']);
+      expect(detail.wallet.pointsExpiryDays).toBeNull();
+    });
+
+    it('returns a complete shape even when every config blob is empty', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({
+        id: 'fresh',
+        internalName: 'Fresh Co',
+        status: 'ONBOARDING',
+        onboardedAt: new Date('2026-06-01'),
+        branding: {},
+        features: {},
+        approvalHierarchy: {},
+        notifications: {},
+        invoicing: {},
+        wallet: {},
+      });
+
+      const detail = await service.getClientDetail(gifsy, 'fresh');
+      expect(detail.branding.displayName).toBe('Fresh Co'); // falls back to internalName
+      expect(detail.branding.primaryColor).toBe('#6b7280');
+      expect(detail.partnerClasses).toEqual([]);
+      expect(detail.approvalHierarchy.levels).toEqual([]);
+      expect(detail.wallet.pointsToRupeeRatio).toBe(1);
     });
   });
 

@@ -16,11 +16,25 @@ import { UpdateOutletTypeConfigDto } from './dto/gifsy.dto';
 export class GifsyController {
   constructor(private readonly gifsy: GifsyService) {}
 
+  @Get('overview')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('tenancy:read')
+  getOverview(@CurrentUser() user: JwtPayload) {
+    return this.gifsy.getOverview(user);
+  }
+
   @Get('clients')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('tenancy:read')
   listClients(@CurrentUser() user: JwtPayload) {
     return this.gifsy.listClients(user);
+  }
+
+  @Get('clients/:slug')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('tenancy:read')
+  getClientDetail(@CurrentUser() user: JwtPayload, @Param('slug') slug: string) {
+    return this.gifsy.getClientDetail(user, slug);
   }
 
   @Get('clients/:slug/outlet-type-configs')

@@ -1,14 +1,50 @@
+'use client';
+
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Building2, CheckCircle, Clock, AlertCircle, TrendingUp, Users } from 'lucide-react';
-import { CLIENT_REGISTRY } from '@/lib/platform/client-registry';
-import { buildClientSummary } from '@/lib/platform/platform-admin';
+import {
+  Building2, CheckCircle, Clock, AlertCircle, TrendingUp, Loader2,
+} from 'lucide-react';
+import { getToken } from '@/lib/auth-client';
+
+// B3 (#49): the gifsy Overview now reads the REAL `clients` table via
+// GET /api/gifsy/overview (was the static lib/platform/client-registry mock).
+interface OverviewClient {
+  slug: string;
+  internalName: string;
+  status: 'ACTIVE' | 'ONBOARDING' | 'INACTIVE';
+  onboardedAt: string | null;
+  displayName: string;
+  primaryColor: string;
+  enabledFeatureCount: number;
+  moduleCount: number;
+}
+
+interface Overview {
+  totalClients: number;
+  active: number;
+  onboarding: number;
+  inactive: number;
+  clients: OverviewClient[];
+}
+
+const EMPTY: Overview = { totalClients: 0, active: 0, onboarding: 0, inactive: 0, clients: [] };
 
 export default function GifsyOverviewPage() {
-  const summaries = Object.values(CLIENT_REGISTRY).map(buildClientSummary);
+  const [overview, setOverview] = useState<Overview>(EMPTY);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const active     = summaries.filter((s) => s.status === 'ACTIVE').length;
-  const onboarding = summaries.filter((s) => s.status === 'ONBOARDING').length;
-  const inactive   = summaries.filter((s) => s.status === 'INACTIVE').length;
+  useEffect(() => {
+    fetch('/api/gifsy/overview', { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
+      .then((r) => r.json())
+      .then((j) => {
+        if (j?.success) setOverview(j.data ?? EMPTY);
+        else setError('Could not load platform overview');
+      })
+      .catch(() => setError('Could not load platform overview'))
+      .finally(() => setLoading(false));
+  }, []);
 
   return (
     <div className="space-y-6">
@@ -20,15 +56,15 @@ export default function GifsyOverviewPage() {
       {/* Stat strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
-          { label: 'Total Clients',   value: summaries.length, icon: Building2,    color: 'text-white/70' },
-          { label: 'Active',          value: active,            icon: CheckCircle,  color: 'text-green-400' },
-          { label: 'Onboarding',      value: onboarding,        icon: Clock,        color: 'text-amber-400' },
-          { label: 'Inactive',        value: inactive,          icon: AlertCircle,  color: 'text-red-400' },
+          { label: 'Total Clients', value: overview.totalClients, icon: Building2,   color: 'text-white/70' },
+          { label: 'Active',        value: overview.active,       icon: CheckCircle, color: 'text-green-400' },
+          { label: 'Onboarding',    value: overview.onboarding,   icon: Clock,       color: 'text-amber-400' },
+          { label: 'Inactive',      value: overview.inactive,     icon: AlertCircle, color: 'text-red-400' },
         ].map(({ label, value, icon: Icon, color }) => (
           <div key={label} className="bg-white/5 border border-white/10 rounded-xl p-4 flex items-center gap-3">
             <Icon className={`w-5 h-5 shrink-0 ${color}`} />
             <div>
-              <p className="text-xl font-bold text-white">{value}</p>
+              <p className="text-xl font-bold text-white">{loading ? '—' : value}</p>
               <p className="text-xs text-white/40">{label}</p>
             </div>
           </div>
@@ -45,8 +81,20 @@ export default function GifsyOverviewPage() {
           </Link>
         </div>
 
+        {loading && (
+          <div className="py-12 text-center text-white/40 text-sm">
+            <Loader2 className="w-4 h-4 animate-spin inline mr-2" />Loading clients…
+          </div>
+        )}
+        {error && !loading && (
+          <div className="py-12 text-center text-red-400 text-sm">{error}</div>
+        )}
+        {!loading && !error && overview.clients.length === 0 && (
+          <div className="py-12 text-center text-white/30 text-sm">No clients onboarded yet.</div>
+        )}
+
         <div className="space-y-2">
-          {summaries.map((s) => (
+          {!loading && !error && overview.clients.map((s) => (
             <Link key={s.slug} href={`/gifsy/clients/${s.slug}`}
               className="flex items-center gap-4 bg-white/5 border border-white/10 rounded-xl px-4 py-3 hover:bg-white/8 hover:border-white/20 transition-all group">
 
@@ -62,8 +110,7 @@ export default function GifsyOverviewPage() {
               </div>
 
               <div className="flex items-center gap-4 text-xs text-white/50 shrink-0">
-                <span>{s.partnerClassCount} classes</span>
-                <span>{s.enabledFeatureCount} features on</span>
+                <span>{s.enabledFeatureCount}/{s.moduleCount} modules on</span>
                 <span className={`px-2 py-0.5 rounded-full font-medium ${
                   s.status === 'ACTIVE'      ? 'bg-green-500/20 text-green-400' :
                   s.status === 'ONBOARDING'  ? 'bg-amber-500/20 text-amber-400' :

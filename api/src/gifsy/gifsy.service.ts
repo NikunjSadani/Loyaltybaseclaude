@@ -42,6 +42,20 @@ const CONFIG_FIELDS = [
   'kycRequired',
 ] as const;
 
+/**
+ * The module-level feature keys counted as "modules on" in the operator
+ * console (mirrors the FE clients-list `features` projection). partnerClasses
+ * is intentionally absent — that World-A concept's column was dropped in S2,
+ * so the console no longer surfaces a class count.
+ */
+const MODULE_FEATURE_KEYS = [
+  'visibilityInvoiceModule',
+  'kycApprovalFlow',
+  'walletModule',
+  'salesTeamApp',
+  'referralModule',
+] as const;
+
 @Injectable()
 export class GifsyService {
   constructor(private readonly prisma: PrismaService) {}
@@ -83,6 +97,173 @@ export class GifsyService {
     });
 
     return { clients };
+  }
+
+  /**
+   * GET /v1/gifsy/overview — operator dashboard aggregates over the canonical
+   * `Client` table. Cross-tenant by design (GIFSY oversight mode): every tenant
+   * is counted. Returns the status tallies for the stat strip plus a lightweight
+   * card row per client (status, brand colour, "modules on" count).
+   */
+  async getOverview(user: JwtPayload) {
+    this.assertGifsy(user);
+
+    const rows = await this.prisma.client.findMany({
+      orderBy: { onboardedAt: 'asc' },
+    });
+
+    const clients = rows.map((c) => {
+      const branding = (c.branding ?? {}) as Record<string, unknown>;
+      const features = (c.features ?? {}) as Record<string, unknown>;
+      const enabledFeatureCount = MODULE_FEATURE_KEYS.filter(
+        (k) => !!features[k],
+      ).length;
+      return {
+        slug: c.id, // id IS the tenant slug
+        internalName: c.internalName,
+        status: c.status,
+        onboardedAt: c.onboardedAt,
+        displayName: (branding.displayName as string) ?? c.internalName,
+        primaryColor: (branding.primaryColor as string) ?? '#6b7280',
+        enabledFeatureCount,
+        moduleCount: MODULE_FEATURE_KEYS.length,
+      };
+    });
+
+    const countBy = (status: string) =>
+      rows.filter((c) => c.status === status).length;
+
+    return {
+      totalClients: rows.length,
+      active: countBy('ACTIVE'),
+      onboarding: countBy('ONBOARDING'),
+      inactive: countBy('INACTIVE'),
+      clients,
+    };
+  }
+
+  /**
+   * GET /v1/gifsy/clients/:slug — full per-client detail for the operator
+   * config page. Cross-tenant (addressed by path slug, not the caller's own
+   * clientId). The nested config blocks are JSON columns; each is spread over a
+   * conservative default so the FE editor always receives a complete shape even
+   * for a freshly-onboarded tenant whose blobs are still empty. msg91AuthKey is
+   * deliberately never returned (it is not stored on the row).
+   */
+  async getClientDetail(user: JwtPayload, slug: string) {
+    this.assertGifsy(user);
+
+    const c = await this.prisma.client.findUnique({ where: { id: slug } });
+    if (!c) {
+      throw new NotFoundException(`Client "${slug}" not found.`);
+    }
+
+    const branding = (c.branding ?? {}) as Record<string, unknown>;
+    const features = (c.features ?? {}) as Record<string, unknown>;
+    const partnerApp = (features.partnerApp ?? {}) as Record<string, unknown>;
+    const approvalHierarchy = (c.approvalHierarchy ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const notifications = (c.notifications ?? {}) as Record<string, unknown>;
+    const templateIds = (notifications.templateIds ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const invoicing = (c.invoicing ?? {}) as Record<string, unknown>;
+    const wallet = (c.wallet ?? {}) as Record<string, unknown>;
+
+    return {
+      slug: c.id,
+      internalName: c.internalName,
+      status: c.status,
+      onboardedAt: c.onboardedAt,
+
+      branding: {
+        displayName: (branding.displayName as string) ?? c.internalName,
+        primaryColor: (branding.primaryColor as string) ?? '#6b7280',
+        logoUrl: (branding.logoUrl as string) ?? '',
+        faviconUrl: (branding.faviconUrl as string) ?? '',
+        supportEmail: (branding.supportEmail as string) ?? '',
+        supportPhone: (branding.supportPhone as string) ?? '',
+        productBrands: (branding.productBrands as string[]) ?? [],
+      },
+
+      features: {
+        visibilityInvoiceModule: !!features.visibilityInvoiceModule,
+        kycApprovalFlow: !!features.kycApprovalFlow,
+        campaignEnrollmentForm: !!features.campaignEnrollmentForm,
+        salesTeamApp: !!features.salesTeamApp,
+        walletModule: !!features.walletModule,
+        referralModule: !!features.referralModule,
+        selfEnrollmentAllowed: !!features.selfEnrollmentAllowed,
+        nonKycOutletCampaigns: !!features.nonKycOutletCampaigns,
+        multiLevelApproval: !!features.multiLevelApproval,
+        rbacEnforcement: !!features.rbacEnforcement,
+        partnerApp: {
+          showSchemes: partnerApp.showSchemes !== false,
+          showInvoices: !!partnerApp.showInvoices,
+          showWallet: !!partnerApp.showWallet,
+          showTeam: partnerApp.showTeam !== false,
+          showLeaderboard: !!partnerApp.showLeaderboard,
+        },
+      },
+
+      // partnerClasses is no longer a first-class persisted concept (the column
+      // was dropped in S2). If a tenant's features blob still carries a legacy
+      // list, pass it through; otherwise surface an empty list so the FE section
+      // renders its "none" state rather than crashing.
+      partnerClasses: (features.partnerClasses as unknown[]) ?? [],
+
+      approvalHierarchy: {
+        levels: (approvalHierarchy.levels as unknown[]) ?? [],
+        requireGifsyFinalApproval: !!approvalHierarchy.requireGifsyFinalApproval,
+        ...(approvalHierarchy.kycAutoApproveBelowCreditLimit !== undefined
+          ? {
+              kycAutoApproveBelowCreditLimit:
+                approvalHierarchy.kycAutoApproveBelowCreditLimit,
+            }
+          : {}),
+      },
+
+      notifications: {
+        whatsappSenderId: (notifications.whatsappSenderId as string) ?? '',
+        smsSenderId: (notifications.smsSenderId as string) ?? '',
+        templateIds: {
+          schemePublished: (templateIds.schemePublished as string) ?? '',
+          enrollmentConfirm: (templateIds.enrollmentConfirm as string) ?? '',
+          otpVerification: (templateIds.otpVerification as string) ?? '',
+          kycApproved: (templateIds.kycApproved as string) ?? '',
+          kycRejected: (templateIds.kycRejected as string) ?? '',
+          payoutGenerated: (templateIds.payoutGenerated as string) ?? '',
+        },
+      },
+
+      invoicing: {
+        sellerLegalName:
+          (invoicing.sellerLegalName as string) ??
+          'Tech Gifsy Solutions Limited',
+        sellerGstin: (invoicing.sellerGstin as string) ?? '',
+        sellerState: (invoicing.sellerState as string) ?? '',
+        sellerAddress: (invoicing.sellerAddress as string) ?? '',
+        sellerPan: (invoicing.sellerPan as string) ?? '',
+        bankName: (invoicing.bankName as string) ?? '',
+        bankAccountNumber: (invoicing.bankAccountNumber as string) ?? '',
+        bankIfsc: (invoicing.bankIfsc as string) ?? '',
+        bankBranch: (invoicing.bankBranch as string) ?? '',
+        invoicePrefix: (invoicing.invoicePrefix as string) ?? '',
+        sacCode: (invoicing.sacCode as string) ?? '',
+      },
+
+      wallet: {
+        defaultHoldingPeriodDays:
+          (wallet.defaultHoldingPeriodDays as number) ?? 0,
+        pointsExpiryDays: (wallet.pointsExpiryDays as number | null) ?? null,
+        minRedemptionAmount: (wallet.minRedemptionAmount as number) ?? 0,
+        redemptionModes: (wallet.redemptionModes as string[]) ?? [],
+        pointsToRupeeRatio: (wallet.pointsToRupeeRatio as number) ?? 1,
+      },
+    };
   }
 
   /**

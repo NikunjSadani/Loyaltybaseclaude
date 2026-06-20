@@ -1,16 +1,16 @@
 'use client';
 
-import { use, useState, useCallback } from 'react';
+import { use, useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import {
   ArrowLeft, CheckCircle, Clock, AlertCircle,
   Pencil, Save, X, ChevronDown, ChevronUp,
-  Palette, Shield, Users, Bell, FileText, Wallet, Building2, ShoppingBag,
+  Palette, Shield, Users, Bell, FileText, Wallet, Building2, ShoppingBag, Loader2,
 } from 'lucide-react';
-import { CLIENT_REGISTRY } from '@/lib/platform/client-registry';
 import { applyFeatureFlagUpdate } from '@/lib/platform/platform-admin';
 import type { ClientConfig, FeatureKey } from '@/lib/platform/client-config';
 import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-section';
+import { getToken } from '@/lib/auth-client';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Feature metadata — label + description for each toggle
@@ -35,15 +35,60 @@ const FEATURE_KEYS = Object.keys(FEATURE_META) as FeatureKey[];
 // Page
 // ─────────────────────────────────────────────────────────────────────────────
 
+// B3 (#49): the per-client detail now reads the REAL `clients` table via
+// GET /api/gifsy/clients/:slug (was the static lib/platform/client-registry mock).
+// The backend omits msg91AuthKey (never sent to the browser); the editor never
+// reads it, so we fill a server-side-only placeholder to satisfy the type.
+type ClientDetail = Omit<ClientConfig, 'notifications'> & {
+  notifications: Omit<ClientConfig['notifications'], 'msg91AuthKey'>;
+};
+
 export default function ClientConfigPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = use(params);
-  const seedConfig = CLIENT_REGISTRY[slug];
+  const [config, setConfig] = useState<ClientConfig | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  if (!seedConfig) {
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/gifsy/clients/${slug}`, { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
+      .then(async (r) => {
+        if (r.status === 404) { if (!cancelled) setNotFound(true); return null; }
+        const j = await r.json();
+        if (!j.success) throw new Error(j.error || 'Failed to load client');
+        return j.data as ClientDetail;
+      })
+      .then((detail) => {
+        if (cancelled || !detail) return;
+        setConfig({
+          ...detail,
+          notifications: { ...detail.notifications, msg91AuthKey: '••• (server-side only)' },
+        } as ClientConfig);
+      })
+      .catch(() => { if (!cancelled) setError('Could not load client'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [slug]);
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 gap-3 text-white/40 text-sm">
+        <Loader2 className="w-6 h-6 animate-spin" />
+        Loading client…
+      </div>
+    );
+  }
+
+  if (notFound || error || !config) {
     return (
       <div className="flex flex-col items-center justify-center py-24 gap-4">
         <Building2 className="w-10 h-10 text-white/20" />
-        <p className="text-white/50 text-sm">Client <code className="font-mono">{slug}</code> not found.</p>
+        <p className="text-white/50 text-sm">
+          {notFound
+            ? <>Client <code className="font-mono">{slug}</code> not found.</>
+            : (error ?? 'Could not load client.')}
+        </p>
         <Link href="/gifsy/clients" className="text-[var(--brand-primary)] text-sm hover:underline">
           ← Back to Clients
         </Link>
@@ -51,7 +96,7 @@ export default function ClientConfigPage({ params }: { params: Promise<{ slug: s
     );
   }
 
-  return <ClientConfigEditor initialConfig={seedConfig} />;
+  return <ClientConfigEditor initialConfig={config} />;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
