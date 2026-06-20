@@ -37,11 +37,23 @@ export class Msg91Service {
     const url  = 'https://control.msg91.com/api/v5/otp';
     const body = { template_id: templateId, mobile: `91${phone}`, otp };
 
-    const res = await fetch(url, {
-      method:  'POST',
-      headers: { authkey: authKey, 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body),
-    });
+    // Never hang the OTP request on an unresponsive MSG91 (e.g. egress/IP-whitelist issues):
+    // a 10s timeout makes the send fail fast with a clear error instead of an endless spinner.
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method:  'POST',
+        headers: { authkey: authKey, 'Content-Type': 'application/json' },
+        body:    JSON.stringify(body),
+        signal:  AbortSignal.timeout(10_000),
+      });
+    } catch (e) {
+      const reason = (e as Error)?.name === 'TimeoutError'
+        ? 'MSG91 did not respond within 10s (timeout — check MSG91 IP whitelisting / egress)'
+        : String(e);
+      this.logger.error(`MSG91 OTP request failed for ${phone} (${channel}): ${reason}`);
+      throw new Error(`Failed to send OTP via ${channel}: ${reason}`);
+    }
 
     // MSG91 can return HTTP 200 with {"type":"error"} — check the body too
     const json = await res.json() as { type?: string; message?: string };
