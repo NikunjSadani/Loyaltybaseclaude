@@ -1,23 +1,28 @@
 import { defineConfig, devices } from '@playwright/test';
 import { ROLES } from './e2e/fixtures/roles';
+import { resolveEnv } from './e2e/fixtures/env';
 
 /**
  * Go-live E2E harness — the executable form of `docs/plans/DATA-VISIBILITY.md`.
  * See `docs/plans/GO-LIVE-READINESS.md` for the intent: a green LOCAL run must mean
  * we can push `develop` expecting staging → prod to pass (no half-baked merges).
  *
- * Env-parameterised (so the SAME suite is the local merge gate AND the staging pre-prod gate):
- *   E2E_BASE_URL  — default http://localhost:3000 (local). Set to the staging FE URL for the pre-prod run.
- *   E2E_OTP       — default 123456 (local FIXED_OTP).
+ * Env-parameterised (so the SAME suite is the local merge gate AND the staging pre-prod gate). All
+ * env resolution lives in `e2e/fixtures/env.ts`; the knobs:
+ *   E2E_ENV            — local | staging (default local). Selects per-env defaults below.
+ *   E2E_BASE_URL       — FE URL. Local default http://localhost:3000; REQUIRED for staging (no default).
+ *   E2E_OTP            — the fixed OTP (default 123456 = local FIXED_OTP).
+ *   E2E_OTP_STRATEGY   — fixed | fetch. Default fixed (local). Staging defaults to fetch (real MSG91);
+ *                        set fixed if the staging backend itself runs with FIXED_OTP.
+ *   E2E_OTP_FETCH_URL  — (fetch only) test-only endpoint returning the just-sent OTP; see e2e/README.md.
+ *   E2E_OTP_FETCH_TOKEN— (fetch only) shared secret guarding that endpoint.
+ *   E2E_TENANT_STRATEGY— devClientIdField | subdomain. Local types the dev org field; staging uses host.
  *
- * ⚠️ STAGING SUPPORT IS NOT YET COMPLETE. The env knobs exist, but a staging run additionally needs
- *    (a) a real-MSG91 OTP-injection strategy (FIXED_OTP is local-only) and (b) staging tenant slugs
- *    in fixtures/roles.ts (the seeded `deoleo`/`gifsy` clientIds may differ on staging). Until both
- *    land, this harness is the LOCAL merge gate only; the staging pre-prod gate is a TODO.
+ * BACKWARD-COMPATIBLE: with no env vars set this is exactly the prior local behavior.
  *
  * Naming: tests are `*.e2e.ts` (vitest is configured to ignore `e2e/**`, so `npm test` won't touch them).
  */
-const BASE_URL = process.env.E2E_BASE_URL ?? 'http://localhost:3000';
+const BASE_URL = resolveEnv().baseURL;
 
 export default defineConfig({
   testDir: './e2e',

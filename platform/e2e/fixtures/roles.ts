@@ -1,11 +1,14 @@
 import path from 'node:path';
+import { resolveEnv } from './env';
 
 /**
  * Role registry — the real seeded users in `gifsy_dev` (verified 2026-06-19 against the DB).
  * Each role's `scope` + `expected` data is defined by `docs/plans/DATA-VISIBILITY.md` (§2/§3).
  *
- * ⚠️ Local-only assumptions live here, NOT in the specs: `otp` (FIXED_OTP) and the localhost
- * clientId resolution. The staging run overrides these via env (see playwright.config.ts).
+ * ⚠️ Env-specific assumptions live in `env.ts`, NOT in the specs: the OTP source (local FIXED_OTP vs
+ * staging real-MSG91) and the tenant strategy (local dev clientId override field vs staging
+ * subdomain). The `otp` field below is the LOCAL/fixed code; the actual code typed at login is
+ * resolved per-env by `helpers/otp.ts`. See playwright.config.ts + ENVIRONMENTS.md.
  */
 export interface RoleDef {
   /** file-safe key; storageState is e2e/.auth/<key>.json */
@@ -23,7 +26,10 @@ export interface RoleDef {
   storageStatePath: string;
 }
 
-const OTP = process.env.E2E_OTP ?? '123456';
+// The fixed/local OTP (E2E_OTP, default 123456). For staging-with-real-MSG91 the actual code is
+// fetched per-login by helpers/otp.ts; this value is then unused. Sourced via env.ts so there is one
+// resolution point. Backward-compatible: with no env vars set this is exactly '123456' as before.
+const OTP = resolveEnv().fixedOtp;
 /** Absolute auth dir so setup-write and config-read agree regardless of cwd (CI runs from repo root). */
 export const AUTH_DIR = path.resolve(__dirname, '..', '.auth');
 const stateFor = (key: string) => path.join(AUTH_DIR, `${key}.json`);

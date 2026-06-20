@@ -1,5 +1,7 @@
 import { expect, type Page } from '@playwright/test';
 import type { RoleDef } from '../fixtures/roles';
+import { resolveEnv } from '../fixtures/env';
+import { resolveOtp } from './otp';
 
 /**
  * Drive the REAL login form (FE → /api/auth/* → backend). This is the only path that counts as
@@ -10,6 +12,7 @@ import type { RoleDef } from '../fixtures/roles';
  * verifyOTP stores the JWT in localStorage and `window.location.href = roleDashboard`.
  */
 export async function login(page: Page, role: RoleDef): Promise<void> {
+  const env = resolveEnv();
   await page.goto('/auth/login');
 
   const phoneInput = page.locator('input[type="tel"]'); // only type=tel on the mobile step
@@ -27,13 +30,23 @@ export async function login(page: Page, role: RoleDef): Promise<void> {
     if (await otpBoxes.first().isVisible().catch(() => false)) return; // already on the OTP step
     await phoneInput.fill(role.phone);
     await expect(phoneInput).toHaveValue(role.phone);
-    // Dev-only org override (#39): non-deoleo roles (GIFSY, clientb) resolve their tenant here.
-    const orgField = page.getByPlaceholder(/gifsy, deoleo/i);
-    if (await orgField.count()) await orgField.fill(role.clientId);
+    // Tenant strategy (env.ts): on LOCAL the dev-only "Organization" override field carries the
+    // clientId (#39: non-deoleo roles GIFSY/clientb resolve their tenant here). On STAGING the FE is a
+    // production build, so that field is NOT rendered (NODE_ENV=production) and the tenant comes from
+    // the host/subdomain — we skip the fill entirely. The count() check also guards local gracefully.
+    if (env.tenantStrategy === 'devClientIdField') {
+      const orgField = page.getByPlaceholder(/gifsy, deoleo/i);
+      if (await orgField.count()) await orgField.fill(role.clientId);
+    }
     await page.getByRole('button', { name: 'Send OTP' }).click();
     await expect(otpBoxes.first()).toBeVisible({ timeout: 4_000 });
   }).toPass({ timeout: 30_000 });
-  const digits = role.otp.split('');
+
+  // Resolve the OTP per-env: 'fixed' returns the constant (local, or staging-with-FIXED_OTP); 'fetch'
+  // pulls the just-sent real code from the staging test-only hook (must run AFTER Send OTP). The local
+  // path is unchanged — same constant the harness always typed.
+  const otp = await resolveOtp(role);
+  const digits = otp.split('');
   expect(digits).toHaveLength(6);
   for (let i = 0; i < 6; i++) {
     await otpBoxes.nth(i).fill(digits[i]);

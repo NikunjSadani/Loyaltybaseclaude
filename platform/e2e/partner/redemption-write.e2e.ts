@@ -1,4 +1,6 @@
 import { test, expect } from '@playwright/test';
+import { ROLES } from '../fixtures/roles';
+import { resolveOtp } from '../helpers/otp';
 
 /**
  * Money-path write-persistence (S4 extension) — the highest-stakes write. A partner redeems a fixed
@@ -39,7 +41,9 @@ test.describe('@partner redemption money-path (S4)', () => {
     await page.getByRole('button', { name: /send otp/i }).click();
     const otpInput = page.locator('input[maxlength="6"][inputmode="numeric"]');
     await expect(otpInput).toBeVisible({ timeout: 10_000 });
-    await otpInput.fill('123456');
+    // Same OTP seam as login: 'fixed' locally (FIXED_OTP), fetched on staging-with-real-MSG91. The
+    // redeem-confirm OTP is the same backend mechanism, so it must NOT be hardcoded for the staging run.
+    await otpInput.fill(await resolveOtp(ROLES.partner));
     await page.getByRole('button', { name: /^confirm$/i }).click();
     await expect(page.getByText(/Redemption Confirmed/i)).toBeVisible({ timeout: 15_000 });
 
