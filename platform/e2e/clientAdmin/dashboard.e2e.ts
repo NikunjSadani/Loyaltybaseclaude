@@ -3,8 +3,8 @@ import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
  * CLIENT_ADMIN dashboard — DATA-VISIBILITY `/admin/dashboard`: real tenant KPIs.
- * Ground truth (gifsy_dev): tenant = "Deoleo India Pvt. Ltd." (user "Deoleo Admin"); 2 partners,
- * 2 outlets. The OTHER tenant "Client B (Demo)" / clientb must NEVER appear to a deoleo admin.
+ * Ground truth (gifsy_dev): tenant = "Deoleo India Pvt. Ltd." (user "Deoleo Admin"); 3 partners
+ * (CP001/CP002/CP003), 3 outlets. The OTHER tenant "Client B (Demo)" / clientb must NEVER appear to a deoleo admin.
  */
 const OTHER_TENANT = ['Client B', 'clientb']; // cross-tenant leak markers (S7-lite; full test = #52)
 

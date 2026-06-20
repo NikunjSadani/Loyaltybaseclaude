@@ -39,8 +39,8 @@ test.describe('@clientAdmin cross-tenant isolation (#52)', () => {
     const value = page
       .locator('p', { hasText: /^Total Active Partners$/ })
       .locator('xpath=preceding-sibling::p[1]');
-    // deoleo has exactly 2 partners; clientb adds 1 more (CPB001) under a different tenant. A leak in
-    // the count aggregation would render 3. Exact-2 proves the count is clientId-scoped.
-    await expect(value).toHaveText('2', { timeout: 10_000 });
+    // deoleo has exactly 3 active partners (CP001/CP002/CP003); clientb adds 1 more (CPB001) under a
+    // different tenant. A leak in the count aggregation would render 4. Exact-3 proves clientId scoping.
+    await expect(value).toHaveText('3', { timeout: 10_000 });
   });
 });

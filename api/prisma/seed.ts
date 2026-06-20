@@ -491,6 +491,157 @@ async function seedDeoleoDemo() {
   });
   console.log(`   ✓ VisibilityProgram [${visibilityProgram.code}] (${visibilityProgram.status})`);
 
+  // 3.8 Populated-path source data (B2 invoices · #53 enrollment). A THIRD partner with
+  // APPROVED KYC + PAN + bank (invoice generation requires an approved-KYC partner), a
+  // separate-payout CreditField, a CreditBatch + CreditPayoutEntry for 2026-05 (so
+  // POST /admin/invoices/generate produces a real invoice), and one ACTIVE scheme (a real
+  // sales-assisted enrollment target). All keyed on fixed ids → idempotent on re-run.
+  const distUser = await prisma.user.upsert({
+    where: { id: 'seed-deoleo-partner-3' },
+    update: {},
+    create: {
+      id: 'seed-deoleo-partner-3',
+      clientId: DEOLEO_CLIENT_ID,
+      phone: '9000000007',
+      name: 'Meena Iyer',
+      role: UserRole.WHOLESALER,
+      status: UserStatus.ACTIVE,
+      passwordHash: demoPasswordHash,
+    },
+  });
+  const distPartner = await prisma.channelPartner.upsert({
+    where: { id: 'seed-cp-3' },
+    update: {},
+    create: {
+      id: 'seed-cp-3',
+      clientId: DEOLEO_CLIENT_ID,
+      userId: distUser.id,
+      partnerCode: 'CP003',
+      businessName: 'Deoleo Demo Distributor',
+      ownerName: 'Meena Iyer',
+      phone: '9000000007',
+      gstNumber: '27KLMNO9012P1Z3', // Maharashtra (27) ≠ Tech Gifsy WB (19) → IGST invoice
+      panNumber: 'KLMNO9012P',
+      entityType: EntityType.FIRM,
+      gstRegistrationType: GstRegistrationType.REGULAR,
+      bankName: 'HDFC Bank',
+      bankAccountNumber: '50100123456789',
+      bankAccountHolder: 'Deoleo Demo Distributor',
+      ifscCode: 'HDFC0000123',
+      isActive: true,
+      onboardedAt: new Date(),
+    },
+  });
+  await prisma.wallet.upsert({
+    where: { id: 'seed-w-3' },
+    update: {},
+    create: { id: 'seed-w-3', partnerId: distPartner.id, earnedPoints: 0, redeemablePoints: 0, lifetimeEarned: 0 },
+  });
+  await prisma.outlet.upsert({
+    where: { id: 'seed-o-3' },
+    update: {},
+    create: {
+      id: 'seed-o-3',
+      clientId: DEOLEO_CLIENT_ID,
+      partnerId: distPartner.id,
+      outletTypeId: wholesalerType.id,
+      outletCode: 'O003',
+      name: 'Deoleo Demo Distributor',
+      ownerName: 'Meena Iyer',
+      phone: '9000000007',
+      city: 'Mumbai',
+      state: 'Maharashtra',
+      isActive: true,
+      isPrimary: true,
+    },
+  });
+  // APPROVED KYC — the only deoleo partner past KYC (so invoice generation has an eligible outlet).
+  await prisma.kycSubmission.upsert({
+    where: { id: 'seed-kyc-3' },
+    update: {},
+    create: {
+      id: 'seed-kyc-3',
+      userId: distUser.id,
+      partnerId: distPartner.id,
+      status: KycStatus.APPROVED,
+      submittedAt: new Date('2026-05-01'),
+    },
+  });
+  // Separate-payout credit field → the source generateForPeriod reads.
+  const visField = await prisma.creditField.upsert({
+    where: { id: 'seed-cf-vis' },
+    update: {},
+    create: {
+      id: 'seed-cf-vis',
+      clientId: DEOLEO_CLIENT_ID,
+      name: 'Visibility Spend',
+      isActive: true,
+      isSeparatePayout: true,
+      outletTypeAwards: {},
+      order: 1,
+    },
+  });
+  const creditBatch = await prisma.creditBatch.upsert({
+    where: { id: 'seed-cb-1' },
+    update: {},
+    create: {
+      id: 'seed-cb-1',
+      clientId: DEOLEO_CLIENT_ID,
+      batchCode: 'CB-2026-05',
+      period: '2026-05',
+      status: 'CONFIRMED',
+      uploadedBy: clientAdmin.id,
+      uploadedAt: new Date('2026-05-31'),
+      totalOutlets: 1,
+      totalPoints: 0,
+      totalPayoutPaise: 500000n,
+      rows: [],
+    },
+  });
+  // CreditPayoutEntry — outletId stores the OUTLET CODE (per generateForPeriod). ₹5,000 for O003.
+  await prisma.creditPayoutEntry.upsert({
+    where: { id: 'seed-cpe-1' },
+    update: {},
+    create: {
+      id: 'seed-cpe-1',
+      clientId: DEOLEO_CLIENT_ID,
+      batchId: creditBatch.id,
+      outletId: 'O003',
+      outletName: 'Deoleo Demo Distributor',
+      fieldId: visField.id,
+      fieldName: visField.name,
+      period: '2026-05',
+      amountPaise: 500000n,
+      narration: 'Visibility payout — May 2026',
+      status: 'PENDING',
+    },
+  });
+  console.log('   ✓ Invoice source: CP003 (APPROVED KYC) + Visibility Spend field + CB-2026-05 (₹5,000 / O003)');
+
+  // ACTIVE scheme (wide fixed window → enrollable regardless of server clock) — sales-assisted
+  // enrollment (#53) + B1 target.
+  await prisma.scheme.upsert({
+    where: { id: 'seed-scheme-1' },
+    update: {},
+    create: {
+      id: 'seed-scheme-1',
+      clientId: DEOLEO_CLIENT_ID,
+      code: 'DEMO-VIS',
+      name: 'Demo Visibility Scheme',
+      description: 'Demo ACTIVE scheme — sales-assisted enrollment target.',
+      schemeType: 'PURCHASE_INCENTIVE',
+      status: 'ACTIVE',
+      startDate: new Date('2020-01-01'),
+      endDate: new Date('2030-12-31'),
+      holdingPeriodDays: 0,
+      rewardType: 'POINTS',
+      spentPaise: 0,
+      isStackable: false,
+      priority: 1,
+    },
+  });
+  console.log('   ✓ Scheme [DEMO-VIS] (ACTIVE) — sales-assisted enrollment target');
+
   console.log('   ✅ deoleo demo dataset ready.');
 }
 
