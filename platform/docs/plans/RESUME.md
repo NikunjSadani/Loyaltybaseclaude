@@ -129,12 +129,17 @@ CreditField + CB-2026-05 payout + DEMO-VIS ACTIVE scheme → the **populated liv
 generate→IGST invoice ₹5,900 + idempotency + export-with-row; #53 full enrollment 201 ACTIVE). Ripple handled: deoleo
 now 3 active partners (count-isolation spec updated). The dev-generated invoice was deleted to keep the harness
 re-runnable (the seed SOURCE stays → generation is demonstrable on-demand). **✅ D1 DONE (`d947d55`):** admin
-demo-chrome removed + Sidebar hydration fixed (see #45). **REMAINING:** **D2, NEXT+LAST** = #31/#32 platform-Prisma
-retirement + the dead `app/api/*` routes + auth/logout (deletes shared infra → must be last) · D1-residuals (admin
-header notifications dropdown, partner DemoSwitcher/`lib/partner-session` demo personas, A1 KYC brand column → fold
-into D2 or a D1.1) · #48 admin trend-analytics (→ P8) · C2 staging real-OTP endpoint (→ P8.7; FIXED_OTP interim) · #47
-configurable RBAC (deferred). The Q1 payouts BACKEND `@Roles` change is code-correct but NOT runtime-verified (RBAC off
-in dev; the FE scope-out IS verified + harness-pinned via the redirect spec).
+demo-chrome removed + Sidebar hydration fixed (see #45). **✅ D2 DONE (`60b5a76`, 2026-06-20, COMMITTED LOCAL — NOT
+PUSHED):** platform-Prisma retirement — deleted 113 dead `app/api` routes + dead-transitive `lib` + `lib/prisma.ts` +
+`platform/prisma/` + deps; rewired `layout.tsx` tenant-config → in-code `CLIENT_REGISTRY` (behavior-identical; real
+multi-tenant SSR branding → `POST-GO-LIVE-BACKLOG §A`); auth/logout = stateless (B1); fixed the `Dockerfile`/`ci.yml`
+`prisma generate` deploy breakers. **5 independent audits**; tsc 0 · next build green · harness 59 · vitest 0-new-reds
+(−26k lines). ⚠️ **Docker image build NOT run locally (no Docker) → watch the staging deploy (first real image build).**
+**▶ NEXT = P7 (Engagement & support)** — the P0.6 A–D wave is COMPLETE. **REMAINING (non-blocking, in `POST-GO-LIVE-BACKLOG.md`):**
+D1-residuals (admin header notifications dropdown, partner DemoSwitcher/`lib/partner-session` demo personas, A1 KYC
+brand column) · #48 admin trend-analytics (→ P8) · C2 staging real-OTP endpoint (→ P8.7; FIXED_OTP interim) · #47
+configurable RBAC. The Q1 payouts BACKEND `@Roles` change is code-correct but NOT runtime-verified (RBAC off in dev;
+the FE scope-out IS verified + harness-pinned via the redirect spec).
 
 **Architecture/env:** 3 environments — **local dev** (`gifsy_dev`, isolated instance, `FIXED_OTP=123456`) · **staging**
 (`gifsy_staging`, auto-deploys on **push to `develop`**) · **prod** (`gifsy_prod`, `main`, approval-gated). Full ref:
