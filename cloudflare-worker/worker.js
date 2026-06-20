@@ -23,6 +23,7 @@ const ROUTES = {
   'deoleo.gifsy.in':   'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app',
   'clientb.gifsy.in':  'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app',
   'deoleoloyalty.gifsy.in': 'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app', // Deoleo branded custom domain → resolves to tenant `deoleo`
+  'uat.deoleoloyalty.gifsy.in': 'https://gifsy-frontend-staging-4d4n5mc6yq-el.a.run.app', // UAT view → STAGING frontend (current build, for owner UAT)
   // gifsy.in root is a separate website — not routed through this Worker
 }
 
@@ -33,6 +34,9 @@ const ROUTES = {
 // serves the real login page (200) instead of 404. REMOVE this once prod runs current code.
 const TENANT_HOST_ALIAS = {
   'deoleoloyalty.gifsy.in': 'deoleo.gifsy.in',
+  // UAT runs on the STAGING build (current code), which DOES know `deoleoloyalty.gifsy.in`
+  // → deoleo natively — so present it as that, resolving the UAT view to the Deoleo tenant.
+  'uat.deoleoloyalty.gifsy.in': 'deoleoloyalty.gifsy.in',
 }
 
 export default {

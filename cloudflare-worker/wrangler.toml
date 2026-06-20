@@ -14,4 +14,5 @@ routes = [
   # Custom Domain (not a plain route): wrangler creates the proxied DNS record + managed
   # SSL cert + binds the Worker — the branded tenant domains had no DNS records otherwise.
   { pattern = "deoleoloyalty.gifsy.in", custom_domain = true },
+  { pattern = "uat.deoleoloyalty.gifsy.in", custom_domain = true },
 ]
