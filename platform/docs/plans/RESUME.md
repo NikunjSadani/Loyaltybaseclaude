@@ -30,6 +30,19 @@ A-2a F5, A-10 F1/F3, the dry-run 5s-tx-timeout, and the OTP→staging-infra casc
 - **A-1 CD gate (THE foundational unblock)** — quarantined the ~92 red-by-design vitest specs (`it.skip`/`describe.skip`,
   tracked in `baseline-red-snapshot.txt`) → `npm test` green → **deploys actually work now** (the workflows' `test` job
   was failing on the red suite → every staging/prod deploy was silently blocked). Staging now deploys on each `develop` push.
+- **🗄️ MIGRATION MODEL FIXED + STAGING OTP/LOGIN WORKING (2026-06-20) — see `MIGRATIONS.md` + [[migration-model]].** The
+  "staging can't generate OTP" issue was `gifsy_staging` having **no tables** (the deploy pipeline never ran migrations;
+  every DB had been migrated by hand; staging was skipped) **+** a malformed `DATABASE_URL_STAGING` secret (empty host →
+  Prisma migrate `P1013`). Fixed: (1) **squashed** the divergent migration history into one clean baseline
+  (`api/prisma/migrations/00000000000000_baseline/` = current schema; old 6 → `migrations-archive/`; an audit caught + I
+  recovered two dropped TDS partial-unique indexes); (2) **wired `migrate deploy` as an in-VPC Cloud Run Job** into
+  `deploy-staging.yml` (`gifsy-migrate-staging`, SHA-pinned, `--wait`) — the instance is **private-IP** so migrations
+  can't run from a laptop or a GH runner; (3) **corrected the staging secret** to `@localhost/` (matching prod, secret
+  v2); (4) **compiled the seed into the image** (`prisma/seed.js`; prod omits ts-node) + ran `gifsy-seed-staging`. **Runtime-verified:** send-otp 200, full login `9000000001`/OTP `123456` → tokens, cross-tenant refused. **UAT-ready on
+  `uat.deoleoloyalty.gifsy.in`.** Commits `d9c847b` (baseline+CI+seed-guard) + `5623a35` (seed-compile+docs), pushed.
+  ⚠️ **PROD is NOT migrated** — still on the stale June-6 schema (has `otp_codes`, missing P4–P6); deferred to the gated
+  cutover, which now = run the `gifsy-migrate` job with the **Step-1.5 P3005 reconcile** (`runbooks/PROD-DB-MIGRATION.md`).
+  Prod state is **inferred, not confirmed** — verify read-only (in-VPC) before cutover.
 - **A-2a synchronous OTP** — shared `api/src/notifications/msg91.service.ts`; partner (`rewards:720`) + sales-assisted
   (`:437`) OTP send directly with send-failure cleanup (cancel order + clear OTP + 503); auth delegates to it; **+ a 10s
   MSG91 fetch timeout**. Audit SHIP; F5 (cleanup masking the 503) fixed. Confirmation SMS deferred.
