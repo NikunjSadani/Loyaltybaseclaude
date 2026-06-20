@@ -1,5 +1,11 @@
 # Master Implementation Plan — the entire platform
 
+> 🚀 **LAUNCH RE-SEQUENCE (2026-06-20):** P0–P6 + P0.6 are built. For the **first launch (Deoleo)** we do NOT finish
+> P7→P8→P9 first — we pull each phase's launch-critical slice forward and make the rest **post-launch fast-follows**.
+> The active launch plan + status is **[`DEOLEO-GO-LIVE-BUNDLE.md`](DEOLEO-GO-LIVE-BUNDLE.md)** (read it first for
+> launch work); the phase tables below remain the full backlog. ⚠️ The edge is a **Cloudflare Worker**, not a GCP LB
+> (see §9.10 + the bundle's §A.1).
+
 A phased, bite-sized plan to deliver the **whole Loyaltybase platform** to the
 [spec](../spec/README.md), for an engineer new to this codebase. This is the **top-level plan**:
 it covers all 17 bounded contexts and 6 core workflows, sequenced into 9 phases. The 28

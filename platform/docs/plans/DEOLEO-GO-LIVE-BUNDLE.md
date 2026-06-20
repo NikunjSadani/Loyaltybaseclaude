@@ -77,19 +77,32 @@ the MSG91 template application (a 404 link won't get DLT-approved), the worker n
 - **Owner vs me:** me (worker edit + all verification); only step 2's prod deploy needs your approval.
 - **Commits so far (local, unpushed):** `37e54f9` (plan + route + login fix) · `98d9f8e` (custom domain) · `3fcfa57` (the alias).
 
-## A.2 Build progress (live — 2026-06-20)
-- **A-1 CD gate** ✅ done, pushed, **validated** — staging deployed rev `00002` (first success since the gate went red).
-- **A-3 login `x-forwarded-host`** ✅ done (pushed).
-- **A-2a synchronous OTP** ✅ done — shared `Msg91Service`; partner + sales-assisted OTP send directly with failure-cleanup
-  (cancel order + clear OTP + 503); auth delegates to it; confirmation SMS deferred. Gated: api jest **836/836**, tsc 0. (local)
-- **A-4 observability** ✅ **code already satisfied** (reconcile): global `AllExceptionsFilter` logs 5xx stacks → Cloud Run →
-  Cloud Logging (error visibility exists); `/health` present. **Residual = infra:** a Cloud Monitoring uptime check +
-  error-rate alert — needs the **owner's alert-notification email** (added to the owner list).
-- **A-6 security hardening** ✅ **code already satisfied** (reconcile): `helmet`, CORS-from-`CORS_ORIGINS`, strict
-  ValidationPipe (whitelist+forbidNonWhitelisted), global `ThrottlerGuard` + the Jwt/Roles/Tenant/Permission guard stack;
-  prod omits `FIXED_OTP`/`DEMO_MODE`. **Residual = owner:** rotate any dev-shared creds + set prod `CORS_ORIGINS` incl. the
-  branded domain (already in O-2).
-- **A-10 prod-wipe runbook** ⏳ in progress (guarded destructive script + doc).
+## A.2 Build progress (live — updated end of 2026-06-20; all pushed, tip `60c700a`)
+- **A-1 CD gate** ✅ done, pushed, validated — staging deploys on `develop` push now (was blocked by the red `test` job).
+- **A-2a synchronous OTP** ✅ done + **audited SHIP** — shared `Msg91Service`; partner + sales-assisted OTP send directly
+  with failure-cleanup (cancel order + clear OTP + 503); auth delegates to it; **+ 10s MSG91 fetch timeout**; F5 fixed.
+  api jest **836/836**, tsc 0.
+- **A-3 login `x-forwarded-host`** ✅ done. **Footer** "Powered by Gifsy" ✅ on tenant-facing pages (login/admin/partner/sales).
+- **A-4 observability** ✅ **code already satisfied** (`AllExceptionsFilter`→Cloud Logging; `/health`). Residual = a Cloud
+  Monitoring alert (needs owner alert email). **A-6 hardening** ✅ **code already satisfied** (helmet/CORS/validation/
+  `ThrottlerGuard`/guard-stack; prod omits `FIXED_OTP`/`DEMO_MODE`). Residual = owner (cred rotation, prod `CORS_ORIGINS`).
+- **A-10 prod-wipe** ✅ done + **hard-audited** (F1 `OutletTypeClientConfig` + F3 fail-closed fixed) + **dry-run-VALIDATED
+  on `gifsy_dev`** (424 rows, sane; the 5s-tx-timeout bug it caught fixed). Real wipe is cutover-only.
+- **A-5 prod-migration runbook** ✅ drafted (`runbooks/PROD-DB-MIGRATION.md`) — `prisma migrate diff` (P7 syntax verified);
+  validated vs dev (4 cosmetic index renames). **A-9 cutover runbook** = next prep item (mine).
+- **MSG91 OTP template** ✅ set (`MSG91_OTP_TEMPLATE_ID`=`699d295ba29962881e09d062`; auth-key/sender already present).
+  MSG91 confirmed responding; **IP-whitelisting OFF** (not a factor). **B2 worker / B3 templates** = the long pole, cleared.
+- **UAT URL** ✅ `https://uat.deoleoloyalty.gifsy.in` → the staging build (owner UAT / pre-prod view).
+- **⚠️ 3 STAGING-INFRA BUGS found+fixed** (all surfaced by the real-OTP test — staging had never been exercised and was
+  broken): (1) staging FE missing `JWT_SECRET` → 500; (2) `api.staging.gifsy.in` (FE's baked API host) **unrouted** → the
+  login server-action self-proxy hung → routed it + 12s timeout on the login fetches (hardens prod); (3) staging API
+  **missing the `--vpc-connector`** prod has → couldn't reach the private-IP Cloud SQL → all DB ops 500'd → added
+  `gifsy-connector` to `deploy-staging.yml`. **Lesson: staging was DB-broken — the A-8 real-MSG91 staging rehearsal is now
+  unblocked and must run before prod.**
+
+**▶ NEXT (cutover, owner-gated):** O-4 backups/PITR → A-5 prod migration → prod code deploy (`develop`→`main`) → remove the
+worker host-alias → real-OTP smoke on the domain → A-9 cutover runbook → data lifecycle. **Resume the real-OTP test** once
+the latest staging redeploy lands (flip `FIXED_OTP` off → owner retries with a real phone).
 
 ## 0. The reframe
 Core platform is built (P0–P6 + P0.6 A–D). Launch needs a small specific set, several items inside P7/P8/P9, sequenced here.
