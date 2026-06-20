@@ -23,7 +23,6 @@ interface KYCEntry {
   id: string;
   outletName: string;
   mobile: string;
-  partnerClass: string;
   salesUser: string;
   territory: string;
   status: KYCStatusType;
@@ -61,7 +60,6 @@ function mapApiKyc(s: ApiKycSub): KYCEntry {
     id:            s.id,
     outletName:    s.partner?.businessName ?? s.user.name,
     mobile:        s.user.phone,
-    partnerClass:  '',
     salesUser:     s.user.name,
     territory:     '',
     status:        DB_STATUS_MAP[s.status] ?? 'PENDING',
@@ -88,21 +86,12 @@ const STATUS_LABELS: Record<KYCStatusType, string> = {
   RESUBMISSION_REQUIRED: 'Re-upload Required',
 };
 
-const CLASS_COLORS: Record<string, string> = {
-  PLATINUM: 'text-purple-700 bg-purple-50',
-  GOLD: 'text-amber-700 bg-amber-50',
-  SILVER: 'text-gray-600 bg-gray-100',
-  BRONZE: 'text-orange-700 bg-orange-50',
-  STANDARD: 'text-blue-700 bg-blue-50',
-};
-
 export default function KYCPage() {
   const [kycList, setKycList] = useState<KYCEntry[]>([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<KYCStatusType | 'ALL'>('ALL');
-  const [classFilter, setClassFilter] = useState('ALL');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkApproving, setBulkApproving] = useState(false);
 
@@ -136,10 +125,9 @@ export default function KYCPage() {
         k.mobile.includes(search) ||
         k.salesUser.toLowerCase().includes(search.toLowerCase());
       const matchStatus = statusFilter === 'ALL' || k.status === statusFilter;
-      const matchClass = classFilter === 'ALL' || k.partnerClass === classFilter;
-      return matchSearch && matchStatus && matchClass;
+      return matchSearch && matchStatus;
     });
-  }, [search, statusFilter, classFilter, kycList]);
+  }, [search, statusFilter, kycList]);
 
   const pendingIds = filtered.filter((k) => k.status === 'PENDING').map((k) => k.id);
   const allPendingSelected = pendingIds.length > 0 && pendingIds.every((id) => selected.has(id));
@@ -250,18 +238,6 @@ export default function KYCPage() {
               <option value="REJECTED">Rejected</option>
               <option value="RESUBMISSION_REQUIRED">Re-upload Required</option>
             </select>
-            <select
-              value={classFilter}
-              onChange={(e) => setClassFilter(e.target.value)}
-              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
-            >
-              <option value="ALL">All Classes</option>
-              <option value="PLATINUM">Platinum</option>
-              <option value="GOLD">Gold</option>
-              <option value="SILVER">Silver</option>
-              <option value="BRONZE">Bronze</option>
-              <option value="STANDARD">Standard</option>
-            </select>
           </div>
           <div className="flex gap-2">
             {selected.size > 0 && (
@@ -301,7 +277,6 @@ export default function KYCPage() {
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Outlet</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Mobile</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Class</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Sales User</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Status</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Submitted</th>
@@ -312,7 +287,7 @@ export default function KYCPage() {
             <tbody className="divide-y divide-gray-50">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-12 text-center text-sm text-gray-400">
+                  <td colSpan={8} className="px-4 py-12 text-center text-sm text-gray-400">
                     No KYC records match your filters
                   </td>
                 </tr>
@@ -340,11 +315,6 @@ export default function KYCPage() {
                       </div>
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-600">{k.mobile}</td>
-                    <td className="px-4 py-3">
-                      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${CLASS_COLORS[k.partnerClass]}`}>
-                        {k.partnerClass}
-                      </span>
-                    </td>
                     <td className="px-4 py-3 text-sm text-gray-600">{k.salesUser}</td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${STATUS_STYLES[k.status]}`}>

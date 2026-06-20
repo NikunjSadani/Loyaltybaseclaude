@@ -100,9 +100,16 @@ export function Sidebar({
 
       {/* User + collapse */}
       <div className="border-t border-white/10 p-3">
-        {!collapsed && userName && (
+        {/* Render this block purely on `collapsed` (a useState that is identical SSR/CSR).
+            `userName`/`userRole` derive from a localStorage-backed identity hook that is
+            empty during SSR and populated on the client, so gating the ELEMENT on them
+            caused a server/client DOM mismatch (hydration error). We always render the
+            container when expanded and only vary the inner text. */}
+        {!collapsed && (
           <div className="px-2 py-2 mb-1">
-            <p className="text-sm font-medium text-white truncate">{userName}</p>
+            {userName && (
+              <p className="text-sm font-medium text-white truncate">{userName}</p>
+            )}
             {userRole && (
               <p className="text-xs text-white/50 truncate">{userRole}</p>
             )}

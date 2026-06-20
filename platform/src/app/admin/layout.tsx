@@ -32,7 +32,7 @@ import {
   Landmark,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
-import { useAdminSession, setDemoAdminRole } from '@/lib/admin-session';
+import { useAdminSession } from '@/lib/admin-session';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
 import { OperatorBanner } from '@/components/operator/operator-banner';
@@ -297,25 +297,6 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
         {/* Footer */}
         <div className="border-t border-slate-700 p-3 space-y-1">
-          {/* Dev role switcher — demo only */}
-          {!collapsed && (
-            <div className="flex gap-1 mb-2">
-              {(['CLIENT_ADMIN', 'GIFSY_ADMIN'] as const).map((r) => (
-                <button
-                  key={r}
-                  onClick={() => setDemoAdminRole(r)}
-                  className={`flex-1 py-1 rounded text-[10px] font-semibold transition-all ${
-                    adminSession.role === r
-                      ? 'bg-[var(--brand-primary)] text-white'
-                      : 'bg-slate-700 text-slate-400 hover:bg-slate-600 hover:text-white'
-                  }`}
-                  title={`Switch to ${r}`}
-                >
-                  {r === 'CLIENT_ADMIN' ? 'Client' : 'Gifsy'}
-                </button>
-              ))}
-            </div>
-          )}
           <button
             onClick={handleLogout}
             className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-slate-400 hover:text-white hover:bg-[#16213E] transition-all"
