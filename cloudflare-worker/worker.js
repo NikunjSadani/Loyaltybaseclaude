@@ -26,6 +26,15 @@ const ROUTES = {
   // gifsy.in root is a separate website — not routed through this Worker
 }
 
+// TEMPORARY edge alias: production is still running code that doesn't yet map the
+// branded domain `deoleoloyalty.gifsy.in` → tenant `deoleo` (that ships with A-1 +
+// the next prod deploy). Until then, present the request to the app as `deoleo.gifsy.in`,
+// which the current prod code already resolves to the Deoleo tenant — so the branded URL
+// serves the real login page (200) instead of 404. REMOVE this once prod runs current code.
+const TENANT_HOST_ALIAS = {
+  'deoleoloyalty.gifsy.in': 'deoleo.gifsy.in',
+}
+
 export default {
   async fetch(request, _env, _ctx) {
     const url = new URL(request.url)
@@ -44,7 +53,9 @@ export default {
     // - X-Forwarded-Host carries the original public hostname so that
     //   Next.js proxy.ts can resolve the correct tenant slug.
     const headers = new Headers(request.headers)
-    headers.set('x-forwarded-host', hostname)
+    // Tenant-resolution host (aliased if the app doesn't yet know this public hostname).
+    const tenantHost = TENANT_HOST_ALIAS[hostname] || hostname
+    headers.set('x-forwarded-host', tenantHost)
     headers.set('x-forwarded-proto', url.protocol.replace(':', ''))
     // Remove Cf-* headers that Cloud Run doesn't need and that might confuse it.
     headers.delete('cf-connecting-ip')
