@@ -21,7 +21,7 @@ on `develop`: `980b501` A3 · `89cc013` A4 · `50ae797` sales-review · `39cf299
 `4e08477` C2 · `745d573` B3 · `e07c06a` B2 (**local, NOT pushed**). The Playwright E2E harness
 (`platform/e2e`, `npm run e2e`, **40/40 green**) covers real-login-per-role · real scoped data · role/portal scoping ·
 cross-tenant (both dirs) · write-persistence (tickets · partner redemption MONEY PATH · visibility submit) · A1 Gifsy
-cross-tenant KYC · A2 operator-switcher. **NOTE: A3/A4/B1/B2/B3/#53 have NO harness coverage yet → that is C1.** Re-runnable
+cross-tenant KYC · A2 operator-switcher. **✅ C1 DONE (`547fa03`, 2026-06-20): the harness now covers the wave (B2 invoice render+list-shape guard · B3 gifsy overview/detail+no-secret · A1 rendered cross-tenant · Q1 payouts redirect · sales catalogue/KYC-review) — `npm run e2e` = 59 passed.** C1 also caught + fixed a flaky OTP-fill in `login.ts` and re-aligned the visibility-write test to A4's partner-denylist (read-back as GIFSY). Re-runnable
 (`skipIf(FIXED_OTP)`). **It does NOT cover every page/flow** — most admin sub-pages, partner targets/leaderboard, sales
 team/outlets, and most write flows are unverified by the harness (B2 invoices + B3 gifsy overview/detail were
 runtime-verified by hand this wave but have no harness spec yet → C1). Read FIRST: [[e2e-harness]] · `e2e/README.md` ·
@@ -123,12 +123,14 @@ local commit; full plan = `00-MASTER-PLAN §P0.6 Parallel-agent waves`):**
 restarted this wave (backend `dist` rebuilt + restarted on :4000 for B2/B3/#53 runtime verify; owner may re-own); DB proxy on :5433
 (`DEV-DB.md`). ⚠️ **B1 runtime tests left the deoleo seed-cp-1 wallet at 45000** (3 test redemptions) — realistic, consistent.
 
-**Still OPEN (gap-register):** #44 Excel round-trips (→ B2) · #49 gifsy dashboard/detail (→ finish B3) · **#53
-schemes.submitEnrollment assignment-keying fails-closed for prod reps (→ Wave-NOW, mirror B1's fix)** · #46 harness
-coverage for A/B fixes (→ C1) · #45 cleanup/dead-routes + demo-chrome (P0.7 → D1) · #31/#32 platform-retirement (→ D2) ·
-#48 admin trend-analytics (→ P8) · #47 configurable RBAC (deferred). **Plus: STAGING harness env-support** (the harness only runs local; needs MSG91-OTP
-injection + staging tenant slugs before staging is a real gate). The Q1 payouts BACKEND `@Roles` change is
-code-correct but NOT runtime-verified (RBAC off in dev; the FE scope-out IS verified).
+**Still OPEN (gap-register):** ✅ #44 (B2) · ✅ #49 (B3) · ✅ #53 · ✅ #46 harness coverage (C1, 59 passed) — all DONE
+this wave. **REMAINING:** #45 cleanup/dead-routes + demo-chrome + the new partner-Sidebar hydration finding (P0.7 → **D1, NEXT**) ·
+#31/#32 platform-retirement (→ **D2, LAST**) · #48 admin trend-analytics (→ P8) · the **C2 staging real-OTP read-back
+endpoint** (→ P8.7; FIXED_OTP interim) · #47 configurable RBAC (deferred). **PENDING OWNER DECISION:** the
+**seed-enrichment** (approved-KYC partner + CreditField/CreditPayoutEntry + ACTIVE scheme) that would unlock the
+*populated* live paths (B2 generate→invoice rows, A3 populated payouts, #53 full enrollment) — today those are
+unit/divergence-proven only. The Q1 payouts BACKEND `@Roles` change is code-correct but NOT runtime-verified (RBAC off
+in dev; the FE scope-out IS verified + now harness-pinned via the redirect spec).
 
 **Architecture/env:** 3 environments — **local dev** (`gifsy_dev`, isolated instance, `FIXED_OTP=123456`) · **staging**
 (`gifsy_staging`, auto-deploys on **push to `develop`**) · **prod** (`gifsy_prod`, `main`, approval-gated). Full ref:
