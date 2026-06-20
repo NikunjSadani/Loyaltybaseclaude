@@ -31,7 +31,7 @@
 ## Local-vs-staging differences that break despite identical code
 
 Comprehensive testing is done on **local dev** (fast iteration); **staging is the final pre-prod confirmation** because these differ:
-- **`FIXED_OTP=123456` is LOCAL-ONLY.** Staging uses **real MSG91 OTP** — the login flow behaves differently.
+- **`FIXED_OTP` — reality (corrected 2026-06-20):** the staging Cloud Run service **currently has `FIXED_OTP=123456` set** (for UAT convenience — log in with OTP `123456`, no SMS). The original intent was staging = real MSG91; the **real-OTP dress rehearsal is a deliberate later flip** (`FIXED_OTP` removed on staging → owner retries with a real phone). Until then staging login uses `123456`, like local. Prod has **no** `FIXED_OTP` (real MSG91 only).
 - **`resolveClientId(host)`**: `localhost`→`deoleo` locally; real subdomains on staging → different tenant resolution. *(Exactly why the GIFSY-login bug #39 can't be fully exercised locally.)*
 - **Secrets/config** (JWT, GCS, `DATABASE_URL` via Cloud SQL socket) come from Secret Manager on staging vs `.env` locally.
 - **Build**: local `next dev` (HMR) vs the `output:standalone` production Docker build on staging.

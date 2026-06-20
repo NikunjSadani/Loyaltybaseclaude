@@ -9,6 +9,11 @@ COPY . .
 RUN npx prisma generate
 RUN ./node_modules/.bin/tsc -p tsconfig.build.json
 RUN ls dist/main.js
+# Compile the DB seed to JS so it runs in the prod image (which omits ts-node).
+# Emits prisma/seed.js; run via a Cloud Run Job: `node prisma/seed.js`.
+RUN ./node_modules/.bin/tsc prisma/seed.ts --module commonjs --target es2021 \
+      --esModuleInterop --skipLibCheck --moduleResolution node
+RUN ls prisma/seed.js
 
 # ── Stage 2: Production ───────────────────────────────────────────────────────
 FROM node:24-alpine AS runner
@@ -24,7 +29,8 @@ RUN npm ci --omit=dev --ignore-scripts
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-COPY prisma ./prisma
+# From the builder so the compiled prisma/seed.js is included (for the seed job).
+COPY --from=builder /app/prisma ./prisma
 COPY prisma.config.ts ./
 
 EXPOSE 4000

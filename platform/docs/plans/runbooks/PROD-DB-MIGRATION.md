@@ -8,12 +8,28 @@
 
 ## Context (why this is needed + how migrations work here)
 - The app's schema source of truth is **`api/prisma/schema.prisma`**.
-- Migration history here is **hybrid**: 6 formal Prisma migrations (`api/prisma/migrations/`) **plus** 10 manual
-  guarded-SQL files (`api/prisma/migrations-manual/`, P3–P6). **There is NO migration step in CI/CD** — schema is applied
-  out-of-band. So `gifsy_prod`'s current schema state is whatever was last applied to it manually (likely behind the
-  current schema, possibly still carrying old World-A tables).
-- The current prod API (`gifsy-api-00011`, old code) boots + connects, so prod has *a* working schema — but not
-  necessarily the current one. We must compute and apply the exact diff.
+
+> **🔄 UPDATED 2026-06-20 — the migration model changed.** History was **squashed to one clean baseline**
+> (`api/prisma/migrations/00000000000000_baseline/`; the 6 old migrations are in `migrations-archive/`). Migrations
+> now apply via **`prisma migrate deploy` run as an in-VPC Cloud Run Job** (the instance is private-IP). **Staging is
+> auto-migrated** on every `develop` push (`gifsy-migrate-staging` job in `deploy-staging.yml`). **Prod is still gated
+> and run via the existing `gifsy-migrate` job.** Full model: [`../MIGRATIONS.md`](../MIGRATIONS.md). The diff-based
+> Steps 1–4 below remain valid as the *reviewed, backed-up, guarded* cutover mechanic — but see **Step 1.5** first: with
+> the baseline, the prod first-apply needs a one-time `_prisma_migrations` reconcile or `migrate deploy` will P3005-fail.
+
+- `gifsy_prod` recorded the 6 now-archived migrations in its `_prisma_migrations` table (the `gifsy-migrate` job last ran
+  2026-06-12, applying the June-6 set). So prod is on the **June-6 schema** — it has `otp_codes` (login works) but is
+  **missing all P4–P6 tables** and still carries old World-A tables. It must be brought to the current baseline.
+
+## ⚠️ Step 1.5 — Prod baseline reconcile (one-time, because of the squash)
+After the 2026-06-20 squash, plain `prisma migrate deploy` against `gifsy_prod` **hard-fails with P3005** ("applied
+migrations not found locally") — it refuses, does not drop data. Because the project is **greenfield (no real prod
+data)**, the simplest correct reconcile is a **clean recreate** (prod is wiped at go-live anyway, see
+[`PROD-DATA-WIPE.md`](PROD-DATA-WIPE.md)):
+- **Path A (recreate, preferred at cutover):** after backup (Step 0), DROP+recreate an **empty** `gifsy_prod`, then run
+  the `gifsy-migrate` job → `migrate deploy` applies the baseline fresh → full current schema. Then seed real data.
+- **Path B (preserve, if ever needed):** clear the 6 stale rows from `_prisma_migrations`, ensure the tables match the
+  baseline, then `prisma migrate resolve --applied 00000000000000_baseline` so the job treats it as already-applied.
 
 ## The tool: `prisma migrate diff` (Prisma 7 syntax — verified 2026-06-20)
 Generates a **reviewable SQL script** to bring a live DB to a target schema. **Read-only** against the source DB.
