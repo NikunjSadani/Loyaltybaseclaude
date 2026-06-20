@@ -15,4 +15,5 @@ routes = [
   # SSL cert + binds the Worker — the branded tenant domains had no DNS records otherwise.
   { pattern = "deoleoloyalty.gifsy.in", custom_domain = true },
   { pattern = "uat.deoleoloyalty.gifsy.in", custom_domain = true },
+  { pattern = "api.staging.gifsy.in", custom_domain = true },
 ]

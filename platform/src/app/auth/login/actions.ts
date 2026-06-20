@@ -44,6 +44,9 @@ export async function sendOTP(
       headers: { 'Content-Type': 'application/json' },
       // Backend SendOtpDto expects `phone` (not `mobile`).
       body: JSON.stringify({ phone: mobile, channel }),
+      // Never let an unreachable API host hang the login form forever — fail fast to the
+      // catch below (which surfaces "Network error") instead of an endless spinner.
+      signal: AbortSignal.timeout(12_000),
     });
 
     const data = await res.json();
@@ -84,6 +87,7 @@ export async function verifyOTP(
       headers: { 'Content-Type': 'application/json' },
       // Backend VerifyOtpDto expects { phone, otp, clientId }.
       body: JSON.stringify({ phone: mobile, otp, clientId }),
+      signal: AbortSignal.timeout(12_000),
     });
 
     const data = await res.json();
