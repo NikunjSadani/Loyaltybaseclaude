@@ -506,6 +506,7 @@ runtime; the harness covers every fixed flow and runs on staging. **Then → P7.
 | 8.4 | **Observability baseline** (structured logs/metrics) (#27) | `lib/`, infra | smoke |
 | 8.5 | **DPDP retention/erasure policy** + implementation (#24) | `DataRequest`, `lib/` | unit |
 | 8.6 | Perf pass + systemic tenant isolation (RLS/extension) finalize (#23) | `lib/prisma`, infra | audit |
+| 8.7 | **Staging E2E real-OTP enablement** (deferred from C2, owner 2026-06-20) — interim = `FIXED_OTP` on staging (`E2E_OTP_STRATEGY=fixed`); this task builds the test-only, **non-prod-only, secret-guarded** OTP read-back endpoint (`GET /v1/_e2e/otp`) that the harness's `fetch` strategy consumes, so staging runs against real MSG91. Must NEVER deploy to prod; only READS an already-generated OTP. | `api/src/auth/*` (e2e-gated), `platform/e2e/helpers/otp.ts` | smoke |
 
 **Exit:** dashboards/reports live; lists paginated; observability + retention policy in place.
 
