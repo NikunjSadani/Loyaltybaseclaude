@@ -103,6 +103,7 @@ const mockPrisma = {
   channelPartner: { findFirst: jest.fn() },
   salesUser: { findFirst: jest.fn() },
   salesUserAssignment: { findFirst: jest.fn() },
+  outlet: { findMany: jest.fn() },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -201,6 +202,8 @@ describe('SchemesService — P4.3 enrollment submission', () => {
 
       mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
       mockPrisma.schemeEnrollment.upsert.mockResolvedValue({ id: 'enr1', status: 'ACTIVE' });
+      // Default: the target partner has no outlets unless a test overrides it.
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
     });
 
     it('succeeds when the sales user has an active assignment', async () => {
@@ -216,6 +219,47 @@ describe('SchemesService — P4.3 enrollment submission', () => {
       expect(upsertCall.create.enrollmentMode).toBe('SALES');
     });
 
+    // ── Gap #53 — assignment keyed by outletId only (partnerId null) ──────────
+    // The PRODUCTION master outlet-upload assigns a rep by outletId only; the
+    // partner attaches later at KYC and partnerId is NEVER backfilled on the
+    // assignment. The fix must authorize the rep when the active assignment
+    // matches ANY of the target partner's outlet ids — even though no assignment
+    // row carries partnerId = targetPartnerId. Mirrors the B1 redemption fix.
+    it('authorizes a rep whose active assignment is keyed by outletId only (partnerId null)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+
+      // The target partner owns outlet 'o1' (resolved via outlet.findMany).
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1' }]);
+
+      // The assignment is matched ONLY via the outletId branch of the OR. We
+      // assert this by checking the where-clause the service built: it must NOT
+      // restrict to partnerId alone but include the partner's outletIds.
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asgn-outlet' });
+
+      const result = await service.submitEnrollment(salesUser, 'scheme1', salesDto);
+      expect(result.enrollment).toBeDefined();
+
+      // Verify the partner's outlets were resolved for the OR branch.
+      expect(mockPrisma.outlet.findMany).toHaveBeenCalledWith({
+        where: { partnerId: 'cp1', deletedAt: null },
+        select: { id: true },
+      });
+
+      // Verify the assignment guard accepts EITHER partnerId OR an owned outletId
+      // (so an outletId-only production assignment authorizes).
+      const asgnWhere = mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where;
+      expect(asgnWhere.salesUserId).toBe('su1');
+      expect(asgnWhere.unassignedAt).toBeNull();
+      expect(asgnWhere.OR).toEqual([
+        { partnerId: 'cp1' },
+        { outletId: { in: ['o1'] } },
+      ]);
+
+      // And the enrollment still targets the partner's userId.
+      const upsertCall = mockPrisma.schemeEnrollment.upsert.mock.calls[0][0];
+      expect(upsertCall.create.userId).toBe('partner-user');
+    });
+
     it('throws Forbidden when the sales user has no assignment to the target partner', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
       mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null); // no assignment
@@ -223,6 +267,31 @@ describe('SchemesService — P4.3 enrollment submission', () => {
       await expect(
         service.submitEnrollment(salesUser, 'scheme1', salesDto),
       ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    // Gap #53 — over-authorization regression guard. A rep assigned to a DIFFERENT
+    // partner's outlet must NOT be authorized for the target: the outletId set in
+    // the OR is sourced ONLY from the target partner's outlets, so a foreign-outlet
+    // assignment can never satisfy the guard (findFirst returns null → Forbidden).
+    it('refuses a rep whose only assignment is to a different partner\'s outlet', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      // Target partner 'cp1' owns only 'o1'. The rep is (in reality) assigned to
+      // 'oX' belonging to another partner — so no row matches the built OR-clause.
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1' }]);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.submitEnrollment(salesUser, 'scheme1', salesDto),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      // The outletId set must be exactly the TARGET partner's outlets — never the
+      // rep's own/foreign outlets — so a foreign-outlet assignment is unreachable.
+      const asgnWhere =
+        mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where;
+      expect(asgnWhere.OR).toEqual([
+        { partnerId: 'cp1' },
+        { outletId: { in: ['o1'] } },
+      ]);
     });
 
     it('throws Forbidden when the caller is not a SalesUser', async () => {

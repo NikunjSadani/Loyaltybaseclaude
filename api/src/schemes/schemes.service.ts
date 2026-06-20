@@ -278,12 +278,26 @@ export class SchemesService {
         throw new NotFoundException('Target partner not found in this tenant.');
       }
 
-      // Caller must have an active assignment to this partner.
+      // Caller must have an ACTIVE assignment to this partner. Assignments may be
+      // keyed by partnerId (admin re-assign / seed) OR by outletId (the production
+      // master outlet-upload path, where partnerId is null at upload time — the
+      // partner attaches later at KYC and is never backfilled on the assignment).
+      // Accept EITHER so the guard matches real production assignments, not just
+      // the seeded shape. This mirrors rewards.requireAssignedPartner (gap #53 /
+      // the B1 fix for #50-E redemption).
+      const partnerOutlets = await this.prisma.outlet.findMany({
+        where: { partnerId: dto.targetPartnerId, deletedAt: null },
+        select: { id: true },
+      });
+      const outletIds = partnerOutlets.map((o) => o.id);
       const assignment = await this.prisma.salesUserAssignment.findFirst({
         where: {
           salesUserId: callerSalesUser.id,
-          partnerId: dto.targetPartnerId,
           unassignedAt: null,
+          OR: [
+            { partnerId: dto.targetPartnerId },
+            ...(outletIds.length ? [{ outletId: { in: outletIds } }] : []),
+          ],
         },
         select: { id: true },
       });
