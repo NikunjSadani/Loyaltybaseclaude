@@ -31,7 +31,6 @@ const rootSrc = (rel: string) =>
 
 describe('A — Prisma schemas: SalesUploadBatch + OutletSalesRecord', () => {
   const apiSchema      = rootSrc('api/prisma/schema.prisma');
-  const platformSchema = rootSrc('platform/prisma/schema.prisma');
 
   it('A1: api schema has SalesUploadBatch model', () => {
     expect(apiSchema).toMatch(/model\s+SalesUploadBatch/);
@@ -56,13 +55,7 @@ describe('A — Prisma schemas: SalesUploadBatch + OutletSalesRecord', () => {
     expect(block).toMatch(/month\s+String/);
   });
 
-  it('A6: platform schema has SalesUploadBatch model', () => {
-    expect(platformSchema).toMatch(/model\s+SalesUploadBatch/);
-  });
-
-  it('A7: platform schema has OutletSalesRecord model', () => {
-    expect(platformSchema).toMatch(/model\s+OutletSalesRecord/);
-  });
+  // A6/A7 (platform prisma schema) retired with D2 (#31) — platform Prisma is gone.
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -409,47 +402,8 @@ describe('E — generateSalesTemplate: multi-sheet Excel structure', () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// F: API routes — shape checks
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('F — API routes: shape checks', () => {
-  it('F1: bulk-upload POST route file exists', () => {
-    const code = src('app/api/admin/sales/bulk-upload/route.ts');
-    expect(code).toMatch(/export\s+(async\s+)?function\s+POST/);
-  });
-
-  it('F2: bulk-upload route checks auth (CLIENT_ADMIN / GIFSY_ADMIN)', () => {
-    const code = src('app/api/admin/sales/bulk-upload/route.ts');
-    expect(code).toMatch(/CLIENT_ADMIN|GIFSY_ADMIN/);
-  });
-
-  it('F3: bulk-upload route returns batchId in response', () => {
-    const code = src('app/api/admin/sales/bulk-upload/route.ts');
-    expect(code).toMatch(/batchId/);
-  });
-
-  it('F4: bulk-upload route returns savedCount (parsing is client-side now)', () => {
-    // Parsing moved to the client; server receives pre-validated acceptedRows and returns savedCount
-    const code = src('app/api/admin/sales/bulk-upload/route.ts');
-    expect(code).toMatch(/savedCount/);
-  });
-
-  it('F5: bulk-upload route accepts month in JSON body', () => {
-    const code = src('app/api/admin/sales/bulk-upload/route.ts');
-    expect(code).toMatch(/month/);
-  });
-
-  it('F6: records GET route file exists', () => {
-    const code = src('app/api/admin/sales/records/route.ts');
-    expect(code).toMatch(/export\s+(async\s+)?function\s+GET/);
-  });
-
-  it('F7: records GET route filters by month', () => {
-    const code = src('app/api/admin/sales/records/route.ts');
-    expect(code).toMatch(/month/);
-  });
-});
+// F (platform app/api/admin/sales/* route shape checks) retired with D2 (#31) —
+// those routes are gone; the sales-upload backend now lives in api/src.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // G: Admin page — /admin/sales/page.tsx

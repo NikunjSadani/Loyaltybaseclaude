@@ -8,6 +8,14 @@
 # INTEGRATION LANE (`npm run test:integration`, *-live.test.ts): GREEN — credits-migration-live 10/10
 #   (was in the default lane as 10 reds; moved to its own lane in 0.1 and now passes vs the dev DB).
 #
+# (2026-06-20) D2 platform-Prisma retirement: deleted ~113 dead app/api routes + their colocated
+#   __tests__, the dead-transitive lib + 14 import-orphan lib/__tests__, and the credits-migration*
+#   tests; trimmed 6 source-grep compliance tests (kyc-wiring/credits-payouts-api/outlet-master-export/
+#   sales-upload-compliance/admin-pages-wiring/primary-kpi-compliance) to drop the deleted-route blocks
+#   (kept the surviving page/lib assertions). The 22 red FILES below are UNCHANGED (none were in the
+#   delete set) → D2 introduced ZERO new reds. The 1 transient new red (primary-kpi-compliance H —
+#   dashboard Target-Achievement card removed by D1) was fixed in the same pass.
+#
 # PURPOSE: the suite is RED throughout a TDD build, so the gate is DIFFERENTIAL, not absolute.
 # After any task, re-run the suite and diff the failing set against this file:
 #   - a file/test here that is now GREEN  → progress (remove it from this snapshot).

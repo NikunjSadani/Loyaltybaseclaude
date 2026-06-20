@@ -7,35 +7,28 @@ import { headers } from 'next/headers';
 import { resolveClientConfig } from './tenant-resolution';
 import { buildCssVariables } from './client-config';
 import { DEOLEO_CONFIG } from './client-registry';
-import { getClientConfigFromDb } from './client-config-db';
 import type { ClientConfig } from './client-config';
 
 /**
- * Reads the resolved tenant slug from the x-tenant-slug header set by
- * middleware and returns the full ClientConfig.
+ * Reads the resolved tenant slug from the x-tenant-slug header and returns the
+ * full ClientConfig from the in-code registry (Prisma-free).
  *
  * Fallback chain (airtight — server rendering must never break):
- *   1. No slug header           → DEOLEO_CONFIG (dev / no-subdomain)
- *   2. Slug present, DB returns a row
- *                               → DB-backed ClientConfig (primary production path)
- *   3. DB returns null or throws → resolveClientConfig(slug) from in-code registry
- *   4. Slug unknown in registry → DEOLEO_CONFIG (last resort)
+ *   1. No slug header           → DEOLEO_CONFIG (dev / no-subdomain — the only runtime
+ *                                 path today, since no middleware sets x-tenant-slug)
+ *   2. Slug present in registry  → resolveClientConfig(slug)
+ *   3. Slug unknown in registry  → DEOLEO_CONFIG (last resort)
  *
- * The Edge runtime path (proxy.ts / tenant-resolution.ts) is NOT affected —
- * it still reads from CLIENT_REGISTRY only.
+ * D2 (#31): the DB-backed branch (`getClientConfigFromDb` → platform Prisma) was retired.
+ * It never executed at runtime (no middleware sets the slug → always Branch 1), so this is
+ * behavior-identical. Real per-tenant SSR branding (subdomain → backend tenant-config
+ * endpoint + a wired middleware) is a separate feature — see POST-GO-LIVE-BACKLOG.md §A.
  */
 export async function getTenantConfig(): Promise<ClientConfig> {
   const hdrs = await headers();
   const slug = hdrs.get('x-tenant-slug');
 
-  // ── Branch 1: no slug → dev/no-subdomain fallback ────────────────────────
   if (!slug) return DEOLEO_CONFIG;
-
-  // ── Branch 2: try DB ──────────────────────────────────────────────────────
-  const dbConfig = await getClientConfigFromDb(slug);
-  if (dbConfig) return dbConfig;
-
-  // ── Branches 3 + 4: registry fallback then DEOLEO_CONFIG ─────────────────
   return resolveClientConfig(slug) ?? DEOLEO_CONFIG;
 }
 

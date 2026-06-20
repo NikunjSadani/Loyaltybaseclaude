@@ -124,14 +124,8 @@ describe('G — sales/kyc/[id]/page.tsx', () => {
   });
 });
 
-// ─── H: admin/dashboard/page.tsx — Target Achievement card ───────────────────
-describe('H — admin/dashboard/page.tsx', () => {
-  const code = src('app/admin/dashboard/page.tsx');
-
-  it('H1: TargetAchievementCard references isPrimary or getPrimaryParam', () => {
-    expect(code).toMatch(/isPrimary|getPrimaryParam/);
-  });
-});
+// H (admin/dashboard Target-Achievement card) retired with D1 (#45) — the
+// fabricated demo card was removed from the dashboard; the assertion is obsolete.
 
 // ─── I: runtime — getPrimaryParam() ──────────────────────────────────────────
 import { getPrimaryParam } from '@/lib/targets';

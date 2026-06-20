@@ -167,12 +167,5 @@ describe('E — Signature column', () => {
     expect(code).toMatch(/Signature/);
   });
 
-  it('E2: API route file exists', () => {
-    expect(exists('src/app/api/admin/reports/outlet-master/route.ts')).toBe(true);
-  });
-
-  it('E3: API route uses generateOutletMasterExcel', () => {
-    const code = src('src/app/api/admin/reports/outlet-master/route.ts');
-    expect(code).toMatch(/generateOutletMasterExcel/);
-  });
+  // E2/E3 (platform app/api/admin/reports/outlet-master route) retired with D2 (#31).
 });

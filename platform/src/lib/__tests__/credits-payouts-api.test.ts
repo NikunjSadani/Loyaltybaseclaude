@@ -1,16 +1,16 @@
 /// <reference types="vitest/globals" />
 /**
- * TDD — Credits & Payouts DB Migration
+ * TDD — Credits & Payouts FE wiring
  *
- * Source-read tests that define what "done" looks like for the migration
- * from localStorage-backed libs to Prisma-backed API routes.
+ * Source-read tests for the credits-payouts FE migration off localStorage libs.
+ * The route-existence + role-gating groups (old A/E) were retired with D2 (#31) —
+ * those `app/api/admin/credits/*` routes are gone; the logic now lives in
+ * `api/src/credits`+`payouts`, role-gated there. The surviving groups assert the
+ * FE pages use the (proxied) fetch API and the client-side compute libs are intact.
  *
- * Groups:
- *   A — API route files exist at expected paths
  *   B — Pages use fetch / API, NOT localStorage lib imports
  *   C — localStorage libs are DELETED
  *   D — Pure compute libs still exist with correct signatures
- *   E — GIFSY_ADMIN vs CLIENT_ADMIN gating in API routes
  */
 
 import { describe, it, expect } from 'vitest';
@@ -26,46 +26,6 @@ function src(rel: string): string {
 function exists(rel: string): boolean {
   return existsSync(resolve(ROOT, rel));
 }
-
-// ─── A — API route files exist ────────────────────────────────────────────────
-
-describe('A — API routes exist', () => {
-  it('A1: fields list+create route exists', () => {
-    expect(exists('src/app/api/admin/credits/fields/route.ts')).toBe(true);
-  });
-
-  it('A2: fields toggle route exists', () => {
-    expect(exists('src/app/api/admin/credits/fields/[id]/route.ts')).toBe(true);
-  });
-
-  it('A3: eligible-outlets route exists', () => {
-    expect(exists('src/app/api/admin/credits/eligible-outlets/route.ts')).toBe(true);
-  });
-
-  it('A4: batches list+create route exists', () => {
-    expect(exists('src/app/api/admin/credits/batches/route.ts')).toBe(true);
-  });
-
-  it('A5: batch confirm route exists', () => {
-    expect(exists('src/app/api/admin/credits/batches/[id]/confirm/route.ts')).toBe(true);
-  });
-
-  it('A6: payout-downloads list+create route exists', () => {
-    expect(exists('src/app/api/admin/credits/payout-downloads/route.ts')).toBe(true);
-  });
-
-  it('A7: payout-downloads UTR upload route exists', () => {
-    expect(exists('src/app/api/admin/credits/payout-downloads/[id]/utr/route.ts')).toBe(true);
-  });
-
-  it('A8: batch reversals list+create route exists', () => {
-    expect(exists('src/app/api/admin/credits/batches/[id]/reversals/route.ts')).toBe(true);
-  });
-
-  it('A9: reversal approve/reject route exists', () => {
-    expect(exists('src/app/api/admin/credits/reversals/[id]/route.ts')).toBe(true);
-  });
-});
 
 // ─── B — Pages use fetch API, not localStorage libs ───────────────────────────
 
@@ -199,34 +159,5 @@ describe('D — Pure compute libs are intact', () => {
     const code = src('src/lib/credits-payouts-utr.ts');
     expect(code).toMatch(/batchRows/);
     expect(code).toMatch(/knownUtrs/);
-  });
-});
-
-// ─── E — Role gating in API routes ───────────────────────────────────────────
-
-describe('E — Role gating in API routes', () => {
-  it('E1: payout-downloads route requires GIFSY_ADMIN', () => {
-    const code = src('src/app/api/admin/credits/payout-downloads/route.ts');
-    expect(code).toMatch(/GIFSY_ADMIN/);
-  });
-
-  it('E2: payout-downloads UTR route requires GIFSY_ADMIN', () => {
-    const code = src('src/app/api/admin/credits/payout-downloads/[id]/utr/route.ts');
-    expect(code).toMatch(/GIFSY_ADMIN/);
-  });
-
-  it('E3: reversals approve/reject route requires GIFSY_ADMIN', () => {
-    const code = src('src/app/api/admin/credits/reversals/[id]/route.ts');
-    expect(code).toMatch(/GIFSY_ADMIN/);
-  });
-
-  it('E4: fields route accepts CLIENT_ADMIN', () => {
-    const code = src('src/app/api/admin/credits/fields/route.ts');
-    expect(code).toMatch(/CLIENT_ADMIN/);
-  });
-
-  it('E5: batches confirm route accepts CLIENT_ADMIN', () => {
-    const code = src('src/app/api/admin/credits/batches/[id]/confirm/route.ts');
-    expect(code).toMatch(/CLIENT_ADMIN/);
   });
 });

@@ -64,11 +64,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate Prisma client
-        # The platform has its OWN prisma/schema.prisma (source of truth for the
-        # platform: used by local dev via prisma.config.ts AND by platform/Dockerfile).
-        # The NestJS api has its own separate schema. Generate from the platform's own.
-        run: npx prisma generate
+      # D2 (#31): platform Prisma retired — the FE is a pure proxy to the backend.
+      # No `prisma generate` step (and no platform prisma/schema.prisma).
 
       - name: TypeScript check
         run: npx tsc --noEmit

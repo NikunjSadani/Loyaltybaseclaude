@@ -117,20 +117,7 @@ describe('C — admin/hierarchy page', () => {
     expect(code).not.toMatch(/\bsaveEmployees\b/);
   });
 
-  it('C5: hierarchy-config GET route file exists', () => {
-    expect(() => src('app/api/admin/hierarchy-config/route.ts')).not.toThrow();
-  });
-
-  it('C6: hierarchy-config route handles GET and PUT', () => {
-    const code = src('app/api/admin/hierarchy-config/route.ts');
-    expect(code).toMatch(/export\s+async\s+function\s+GET/);
-    expect(code).toMatch(/export\s+async\s+function\s+PUT/);
-  });
-
-  it('C7: hierarchy-config route uses programSetting', () => {
-    const code = src('app/api/admin/hierarchy-config/route.ts');
-    expect(code).toMatch(/programSetting/);
-  });
+  // C5–C7 (platform app/api/admin/hierarchy-config route) retired with D2 (#31).
 });
 
 // ─── D — admin/targets ────────────────────────────────────────────────────────
@@ -163,24 +150,7 @@ describe('D — admin/targets page', () => {
     expect(code).toMatch(/\/api\/admin\/kpis\//);
   });
 
-  it('D6: target-config route file exists', () => {
-    expect(() => src('app/api/admin/target-config/route.ts')).not.toThrow();
-  });
-
-  it('D7: target-config route handles GET and PUT', () => {
-    const code = src('app/api/admin/target-config/route.ts');
-    expect(code).toMatch(/export\s+async\s+function\s+GET/);
-    expect(code).toMatch(/export\s+async\s+function\s+PUT/);
-  });
-
-  it('D8: target-config route uses programSetting', () => {
-    const code = src('app/api/admin/target-config/route.ts');
-    expect(code).toMatch(/programSetting/);
-  });
-
-  it('D9: target-config [id] DELETE route file exists', () => {
-    expect(() => src('app/api/admin/target-config/[id]/route.ts')).not.toThrow();
-  });
+  // D6–D9 (platform app/api/admin/target-config route) retired with D2 (#31).
 });
 
 // ─── E — admin/targets/upload ─────────────────────────────────────────────────
@@ -211,20 +181,7 @@ describe('E — admin/targets/upload page', () => {
     expect(code).toMatch(/\/api\/admin\/kpi-config/);
   });
 
-  it('E6: kpi-config route file exists', () => {
-    expect(() => src('app/api/admin/kpi-config/route.ts')).not.toThrow();
-  });
-
-  it('E7: kpi-config route handles GET and PUT', () => {
-    const code = src('app/api/admin/kpi-config/route.ts');
-    expect(code).toMatch(/export\s+async\s+function\s+GET/);
-    expect(code).toMatch(/export\s+async\s+function\s+PUT/);
-  });
-
-  it('E8: kpi-config route uses programSetting', () => {
-    const code = src('app/api/admin/kpi-config/route.ts');
-    expect(code).toMatch(/programSetting/);
-  });
+  // E6–E8 (platform app/api/admin/kpi-config route) retired with D2 (#31).
 });
 
 // ─── F — admin/sales ─────────────────────────────────────────────────────────
@@ -325,9 +282,7 @@ describe('G — admin/users/outlets page', () => {
     expect(code).toMatch(/\/api\/admin\/outlets(?!\/)/);
   });
 
-  it('G4: /api/admin/outlets GET route file exists', () => {
-    expect(() => src('app/api/admin/outlets/route.ts')).not.toThrow();
-  });
+  // G4 (platform app/api/admin/outlets route) retired with D2 (#31).
 
   it('G5: does NOT import MOCK_EMPLOYEES from employee-hierarchy', () => {
     const code = src('app/admin/users/outlets/page.tsx');

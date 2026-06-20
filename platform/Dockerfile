@@ -11,7 +11,7 @@ COPY . .
 ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
-RUN npx prisma generate
+# D2 (#31): platform Prisma retired — the FE is a pure proxy to the backend. No `prisma generate`.
 RUN npm run build
 
 # ── Stage 2: Production ───────────────────────────────────────────────────────
