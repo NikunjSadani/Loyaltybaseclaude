@@ -8,9 +8,20 @@ import {
   ListOrdersQueryDto,
   RedeemConfirmDto,
   RedeemDto,
+  SalesRedeemConfirmDto,
+  SalesRedeemDto,
   TransitionOrderDto,
   UpdateOrderDto,
 } from './dto/rewards.dto';
+
+/** Sales hierarchy roles that may redeem on behalf of an assigned outlet. */
+const SALES_ROLES = [
+  'SALES_HO',
+  'SALES_STATE_HEAD',
+  'SALES_ASM',
+  'SALES_SO',
+  'SALES_ISR',
+] as const;
 
 /**
  * Rewards & Redemption API — re-homed from platform/src/app/api/rewards/* onto /v1.
@@ -46,15 +57,36 @@ export class RewardsController {
     return this.rewards.confirmRedeem(user, dto);
   }
 
+  /** SALES-ASSISTED redeem (B1, #50-E) — a sales user redeems for an assigned outlet. */
+  @Post('redeem-for-outlet')
+  @Roles(...SALES_ROLES)
+  @RequirePermission('rewards:read')
+  redeemForOutlet(@CurrentUser() user: JwtPayload, @Body() dto: SalesRedeemDto) {
+    return this.rewards.redeemForOutlet(user, dto);
+  }
+
+  /** SALES-ASSISTED redeem confirm — the OUTLET's OTP, submitted by the sales rep. */
+  @Post('redeem-for-outlet/confirm')
+  @Roles(...SALES_ROLES)
+  @RequirePermission('rewards:read')
+  confirmRedeemForOutlet(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: SalesRedeemConfirmDto,
+  ) {
+    return this.rewards.confirmRedeemForOutlet(user, dto);
+  }
+
+  // Catalog browsing is for partners (self-redeem) AND sales reps (sales-assisted
+  // redemption for an assigned outlet — B1). Tenant-scoped in the service.
   @Get('catalog')
-  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST', ...SALES_ROLES)
   @RequirePermission('rewards:read')
   listCatalog(@CurrentUser() user: JwtPayload, @Query() query: ListCatalogQueryDto) {
     return this.rewards.listCatalog(user, query);
   }
 
   @Get('catalog/:id')
-  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
+  @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST', ...SALES_ROLES)
   @RequirePermission('rewards:read')
   getCatalogItem(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.rewards.getCatalogItem(user, id);

@@ -22,6 +22,8 @@ import {
   ListOrdersQueryDto,
   RedeemConfirmDto,
   RedeemDto,
+  SalesRedeemConfirmDto,
+  SalesRedeemDto,
   TransitionOrderDto,
   UpdatableOrderStatus,
   UpdateOrderDto,
@@ -234,6 +236,384 @@ export class RewardsService {
     });
     if (!partner) throw new NotFoundException('Partner account not found');
     return partner;
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // B1 / #50-E — SALES-ASSISTED redemption (redeem ON BEHALF OF an outlet).
+  //
+  // A sales user redeems for an OUTLET they are actively assigned to. Points,
+  // the wallet debit, and the order all belong to the OUTLET — the sales user is
+  // only the operator (recorded for audit). The OTP is sent to the OUTLET's phone
+  // (owner decision: the outlet consents; the rep submits the code the outlet
+  // shares). Authorization is the active salesUserAssignment, re-verified on BOTH
+  // redeem AND confirm (the confirm never trusts the order alone).
+  //
+  // Scoping shape is the PROVEN sales-on-behalf guard from schemes.service.ts:
+  //   caller SalesUser in tenant → target ChannelPartner in tenant → active
+  //   salesUserAssignment(salesUserId + partnerId + unassignedAt null).
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Resolve the OUTLET (ChannelPartner) the caller (a SalesUser) may act for, or
+   * throw. Returns the partner plus the OTP recipient (the OUTLET's user + phone),
+   * which redeem/confirm bind the REDEMPTION_CONFIRM OTP to.
+   */
+  private async requireAssignedPartner(user: JwtPayload, targetPartnerId: string) {
+    // 1. Caller must be a SalesUser in this tenant.
+    const callerSalesUser = await this.prisma.salesUser.findFirst({
+      where: { userId: user.sub, clientId: user.clientId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!callerSalesUser) {
+      throw new ForbiddenException('Only sales users may redeem on behalf of an outlet');
+    }
+
+    // 2. Target outlet/partner must belong to this tenant (cross-tenant block).
+    const partner = await this.prisma.channelPartner.findFirst({
+      where: { id: targetPartnerId, clientId: user.clientId, deletedAt: null },
+      include: { user: { select: { id: true, phone: true } } },
+    });
+    if (!partner) throw new NotFoundException('Outlet not found in this tenant');
+
+    // 3. Caller must have an ACTIVE assignment to this outlet. Assignments may be
+    //    keyed by partnerId (admin re-assign / seed) OR by outletId (the master
+    //    outlet-upload path, where partnerId is null at upload time — the partner
+    //    is attached later at KYC and not backfilled). Accept EITHER so the guard
+    //    matches real production assignments, not just the seeded shape.
+    const partnerOutlets = await this.prisma.outlet.findMany({
+      where: { partnerId: targetPartnerId, deletedAt: null },
+      select: { id: true },
+    });
+    const outletIds = partnerOutlets.map((o) => o.id);
+    const assignment = await this.prisma.salesUserAssignment.findFirst({
+      where: {
+        salesUserId: callerSalesUser.id,
+        unassignedAt: null,
+        OR: [
+          { partnerId: targetPartnerId },
+          ...(outletIds.length ? [{ outletId: { in: outletIds } }] : []),
+        ],
+      },
+      select: { id: true },
+    });
+    if (!assignment) {
+      throw new ForbiddenException('You are not assigned to this outlet');
+    }
+
+    // ChannelPartner.userId is non-nullable in the schema, but guard defensively:
+    // an OTP with no recipient cannot be delivered, so fail loudly.
+    const otpUserId = partner.userId;
+    if (!otpUserId) {
+      throw new BadRequestException('Outlet has no linked user for OTP');
+    }
+
+    return { partner, otpUserId, otpPhone: partner.user?.phone ?? '' };
+  }
+
+  /**
+   * POST /v1/rewards/redeem-for-outlet — sales-assisted redeem initiation.
+   * Identical pipeline to `redeem()` EXCEPT the partner is the assigned OUTLET
+   * (not the caller), and the OTP is bound to + delivered to the OUTLET's phone.
+   * The wallet affordability check and the order both target the OUTLET. Writes a
+   * SALES_ASSISTED_REDEEM audit log recording the operating sales user.
+   */
+  async redeemForOutlet(user: JwtPayload, dto: SalesRedeemDto) {
+    const quantity = dto.quantity ?? 1;
+
+    // ACTIVE non-deleted catalog item, in-tenant.
+    const item = await this.prisma.rewardCatalog.findFirst({
+      where: { id: dto.rewardId, status: 'ACTIVE', deletedAt: null, clientId: user.clientId },
+    });
+    if (!item) throw new NotFoundException('Reward item not found or not available');
+
+    // PHYSICAL_GIFT requires a full delivery address; other modes do not.
+    if (item.redemptionMode === 'PHYSICAL_GIFT' && !dto.deliveryAddress) {
+      throw new BadRequestException('Delivery address is required for physical gifts');
+    }
+
+    // Points cost: FREE_AMOUNT = round(amount × rate) bounded by min/max; else pointsCost × qty.
+    let requiredPoints: number;
+    if (this.isFreeAmount(item)) {
+      if (dto.amount == null) {
+        throw new BadRequestException('amount (₹) is required for a variable-amount voucher');
+      }
+      requiredPoints = Math.round(dto.amount * this.conversionRate);
+      const min = item.minRedemptionPoints as number;
+      const max = item.maxRedemptionPoints as number;
+      if (requiredPoints < min || requiredPoints > max) {
+        throw new BadRequestException(
+          `Amount out of range. Allowed: ${min}–${max} points, requested: ${requiredPoints}`,
+        );
+      }
+    } else {
+      requiredPoints = item.pointsCost * quantity;
+    }
+    if (requiredPoints <= 0) {
+      throw new BadRequestException('Redemption must cost a positive number of points');
+    }
+
+    // Resolve the OUTLET the caller may act for + the OTP recipient (the outlet).
+    const { partner, otpUserId, otpPhone } = await this.requireAssignedPartner(
+      user,
+      dto.targetPartnerId,
+    );
+
+    // Affordability checks the OUTLET's wallet (no debit yet).
+    const wallet = await this.prisma.wallet.findFirst({ where: { partnerId: partner.id } });
+    if (!wallet) throw new NotFoundException('Wallet not found');
+    if (wallet.redeemablePoints < requiredPoints) {
+      throw new BadRequestException(
+        `Insufficient points. Required: ${requiredPoints}, Available: ${wallet.redeemablePoints}`,
+      );
+    }
+
+    const orderNumber = `RDM-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const addr = dto.deliveryAddress;
+    const otp = this.generateOtpCode();
+
+    // Single active OTP per OUTLET: supersede the OUTLET's abandoned PENDING orders
+    // (never debited) and clear the OUTLET's unverified REDEMPTION_CONFIRM OTPs so
+    // the new OTP can confirm only THIS order. Scope is the OUTLET, not the caller.
+    const order = await this.prisma.$transaction(async (tx) => {
+      await tx.redemptionOrder.updateMany({
+        where: { partnerId: partner.id, status: 'PENDING' },
+        data: { status: 'CANCELLED', cancelledAt: new Date() },
+      });
+      await tx.otpCode.deleteMany({
+        where: { userId: otpUserId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
+      });
+      const created = await tx.redemptionOrder.create({
+        data: {
+          partnerId: partner.id,
+          rewardId: item.id,
+          orderNumber,
+          quantity,
+          pointsDeducted: 0,
+          totalPointsCost: requiredPoints,
+          redemptionMode: item.redemptionMode,
+          status: 'PENDING',
+          deliveryName: addr?.name,
+          deliveryPhone: addr?.mobile,
+          deliveryAddressLine1: addr?.address,
+          deliveryCity: addr?.city,
+          deliveryState: addr?.state,
+          deliveryPincode: addr?.pincode,
+        },
+      });
+      await tx.otpCode.create({
+        data: {
+          userId: otpUserId,
+          phone: otpPhone,
+          code: otp,
+          purpose: 'REDEMPTION_CONFIRM',
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          maxAttempts: 3,
+        },
+      });
+      return created;
+    });
+
+    // Audit: record the operating sales user behind the OUTLET's order.
+    await this.prisma.auditLog
+      .create({
+        data: {
+          action: 'CREATE',
+          entityType: 'REDEMPTION_ORDER',
+          entityId: order.id,
+          actorId: user.sub,
+          metadata: {
+            event: 'SALES_ASSISTED_REDEEM',
+            salesUserId: user.sub,
+            partnerId: partner.id,
+            orderNumber,
+          },
+        },
+      })
+      .catch((e) => this.logger.error(`[redeemForOutlet] audit log failed: ${e}`));
+
+    // Enqueue OTP delivery to the OUTLET's phone (consent). Debug-log only in dev.
+    this.logger.debug(`[redeemForOutlet] OTP for order ${order.id}: ${otp}`);
+    await this.notifications
+      .enqueue({
+        userId: otpUserId,
+        channel: 'SMS',
+        recipientPhone: otpPhone,
+        body: `Your redemption confirmation OTP is ${otp}. Valid for 10 minutes.`,
+        variables: { otp, orderNumber },
+      })
+      .catch((e) => this.logger.error(`[redeemForOutlet] OTP enqueue failed: ${e}`));
+
+    return {
+      orderId: order.id,
+      orderNumber,
+      requiredPoints,
+      message:
+        "OTP sent to the outlet's registered mobile. Ask the outlet to share it to confirm.",
+    };
+  }
+
+  /**
+   * POST /v1/rewards/redeem-for-outlet/confirm — confirm a sales-assisted redeem.
+   * Re-verifies the assignment server-side (the assignment IS the authorization —
+   * the order alone is never trusted), verifies the OTP bound to the OUTLET's user,
+   * then runs the identical confirm transaction as `confirmRedeem` (atomic claim,
+   * in-tx OTP consume, OUTLET wallet debit, valuePaise freeze, stock claim, P6
+   * payout bridge). The operating sales user is the recorded status-history actor.
+   */
+  async confirmRedeemForOutlet(user: JwtPayload, dto: SalesRedeemConfirmDto) {
+    // Re-verify the assignment server-side — do NOT trust the order alone.
+    const { partner } = await this.requireAssignedPartner(user, dto.targetPartnerId);
+
+    // The order must belong to the resolved (assigned) outlet. Benign-by-design:
+    // a rep may confirm ANY PENDING order on that outlet — including one the
+    // partner created via self-redeem — because the wallet, the debit target and
+    // the OTP recipient are all the same outlet, so consent + the money path are
+    // unchanged. (The atomic claim below still guarantees a single debit if two
+    // assigned reps race.)
+    const order = await this.prisma.redemptionOrder.findFirst({
+      where: { id: dto.orderId, partnerId: partner.id },
+      include: { reward: true, partner: { select: { id: true, userId: true } } },
+    });
+    if (!order) throw new NotFoundException('Redemption order not found');
+    if (order.status !== 'PENDING') {
+      throw new BadRequestException('Order is not awaiting confirmation');
+    }
+
+    // OTP is bound to the OUTLET's user (it was delivered to the outlet's phone).
+    const otpId = await this.verifyRedemptionOtp(partner.userId, dto.otp);
+
+    const requiredPoints = order.totalPointsCost;
+
+    await this.prisma.$transaction(async (tx) => {
+      // valuePaise: freeze the ₹-equivalent at confirm time (194R TDS base).
+      // value(₹) = points ÷ conversionRate; centi-rate integer math avoids
+      // truncating a fractional rate. rate 0 (misconfig) → 0 (guard div-by-zero).
+      const rateCenti = Math.round(this.conversionRate * 100);
+      const valuePaise =
+        rateCenti > 0
+          ? roundToRupeePaise((BigInt(requiredPoints) * 10000n) / BigInt(rateCenti))
+          : 0n;
+
+      // Atomic claim: only the tx that flips PENDING→CONFIRMED proceeds → a single
+      // order can never be debited twice (double-submit matches 0 rows, aborts).
+      const claim = await tx.redemptionOrder.updateMany({
+        where: { id: order.id, status: 'PENDING' },
+        data: { status: 'CONFIRMED', pointsDeducted: requiredPoints, valuePaise },
+      });
+      if (claim.count === 0) {
+        throw new ConflictException('Order is no longer awaiting confirmation');
+      }
+
+      // Consume the OTP INSIDE the tx so a later failure rolls it back for retry.
+      await tx.otpCode.update({ where: { id: otpId }, data: { verifiedAt: new Date() } });
+
+      // Debit the OUTLET's wallet via the canonical write-path (passbook + ledger).
+      await this.wallet.debitRedeem(
+        order.partnerId,
+        requiredPoints,
+        { referenceId: order.id, description: `Redemption ${order.orderNumber}` },
+        tx,
+      );
+
+      // The operating sales user is the recorded actor.
+      await tx.redemptionStatusHistory.create({
+        data: {
+          orderId: order.id,
+          fromStatus: RedemptionStatus.PENDING,
+          toStatus: RedemptionStatus.CONFIRMED,
+          changedById: user.sub,
+        },
+      });
+
+      // Guarded stock claim — concurrent confirms of the last unit can't oversell.
+      if (order.reward?.stockQuantity != null) {
+        const stockClaim = await tx.rewardCatalog.updateMany({
+          where: { id: order.rewardId, stockQuantity: { gte: order.quantity } },
+          data: { stockQuantity: { decrement: order.quantity } },
+        });
+        if (stockClaim.count === 0) {
+          throw new BadRequestException('Reward is out of stock');
+        }
+        const fresh = await tx.rewardCatalog.findFirst({
+          where: { id: order.rewardId },
+          select: { stockQuantity: true },
+        });
+        if (fresh?.stockQuantity != null && fresh.stockQuantity <= 0) {
+          await tx.rewardCatalog.update({
+            where: { id: order.rewardId },
+            data: { status: 'OUT_OF_STOCK' },
+          });
+        }
+      }
+
+      // P6 BRIDGE — unbatched PayoutTransaction for cash modes (UPI/BANK_TRANSFER).
+      // The exclusive PENDING→CONFIRMED claim above guarantees at most one payout
+      // per order. Beneficiary fields are snapshotted from the OUTLET's KYC.
+      if (
+        order.redemptionMode === 'UPI' ||
+        order.redemptionMode === 'BANK_TRANSFER'
+      ) {
+        const partnerSnap = await tx.channelPartner.findFirst({
+          where: { id: order.partnerId },
+          select: {
+            bankAccountHolder: true,
+            ownerName: true,
+            upiId: true,
+            bankAccountNumber: true,
+            ifscCode: true,
+            bankName: true,
+          },
+        });
+
+        const amountPaise: bigint =
+          valuePaise != null && valuePaise > 0n ? valuePaise : (() => {
+            this.logger.warn(
+              `[confirmRedeemForOutlet] valuePaise null/zero for order ${order.id} — PayoutTransaction created with amountPaise=0; manual correction required`,
+            );
+            return 0n;
+          })();
+
+        await tx.payoutTransaction.create({
+          data: {
+            partnerId: order.partnerId,
+            redemptionOrderId: order.id,
+            payoutMode: order.redemptionMode,
+            status: 'PENDING',
+            batchId: null,
+            amountPaise,
+            netAmountPaise: amountPaise,
+            tdsPaise: 0n,
+            tdsApplicable: false,
+            beneficiaryName: partnerSnap?.bankAccountHolder ?? partnerSnap?.ownerName ?? null,
+            upiId: partnerSnap?.upiId ?? null,
+            bankAccountNumber: partnerSnap?.bankAccountNumber ?? null,
+            ifscCode: partnerSnap?.ifscCode ?? null,
+            bankName: partnerSnap?.bankName ?? null,
+          },
+        });
+
+        this.logger.log(
+          `[confirmRedeemForOutlet] PayoutTransaction created for order ${order.id} (${order.redemptionMode}, ${amountPaise} paise)`,
+        );
+      }
+    });
+
+    // Notify on commit — the confirmation goes to the OUTLET's phone.
+    await this.notifications
+      .enqueue({
+        userId: partner.userId,
+        channel: 'SMS',
+        recipientPhone: partner.user?.phone ?? undefined,
+        body: `Your redemption ${order.orderNumber} (${order.reward?.name ?? ''}) is confirmed for ${requiredPoints} points.`,
+        variables: { orderId: order.id, orderNumber: order.orderNumber, points: requiredPoints },
+      })
+      .catch((e) => this.logger.error(`[confirmRedeemForOutlet] notify failed: ${e}`));
+
+    return {
+      orderId: order.id,
+      status: 'CONFIRMED',
+      message: 'Redemption confirmed. Your order is being processed.',
+    };
   }
 
   /**

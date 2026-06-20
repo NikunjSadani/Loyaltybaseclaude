@@ -22,6 +22,10 @@ import { parseFulfilmentUploadBuffer } from './rewards-fulfilment.helpers';
 
 const mockPrisma = {
   channelPartner: { findFirst: jest.fn() },
+  salesUser: { findFirst: jest.fn() },
+  salesUserAssignment: { findFirst: jest.fn() },
+  outlet: { findMany: jest.fn() },
+  auditLog: { create: jest.fn() },
   wallet: { findFirst: jest.fn() },
   otpCode: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
   rewardCategory: {
@@ -57,6 +61,7 @@ const mockNotifications = {
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '9990001111', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '9991112222', name: '' };
+const sales: JwtPayload = { sub: 'salesUser1', role: 'SALES_SO', clientId: 'deoleo', phone: '9993334444', name: '' };
 
 describe('RewardsService', () => {
   let service: RewardsService;
@@ -77,6 +82,8 @@ describe('RewardsService', () => {
     mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.rewardCatalog.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+    mockPrisma.auditLog.create.mockResolvedValue({ id: 'audit1' });
+    mockPrisma.outlet.findMany.mockResolvedValue([]); // default: no extra outlet-keyed assignments
   });
 
   describe('listCatalog', () => {
@@ -376,6 +383,257 @@ describe('RewardsService', () => {
 
       await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
         .rejects.toBeInstanceOf(ConflictException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── B1 / #50-E — Sales-assisted redemption (redeem on behalf of an outlet) ───
+
+  describe('requireAssignedPartner (sales-on-behalf scoping)', () => {
+    // Reach the private resolver via the public redeemForOutlet path; the catalog
+    // item lookup succeeds first, so any throw here is the resolver's.
+    const fixedItem = {
+      id: 'r1', clientId: 'deoleo', status: 'ACTIVE', deletedAt: null,
+      pointsCost: 100, redemptionMode: 'GIFT_CARD',
+      minRedemptionPoints: null, maxRedemptionPoints: null, stockQuantity: null,
+    };
+
+    it('forbids when the caller is not a SalesUser', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.redeemForOutlet(sales, { rewardId: 'r1', targetPartnerId: 'cp-out' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFound when the target outlet is outside the tenant', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null); // cross-tenant
+
+      await expect(
+        service.redeemForOutlet(sales, { rewardId: 'r1', targetPartnerId: 'cp-other-tenant' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      // Lookup is tenant-scoped.
+      expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'cp-other-tenant', clientId: 'deoleo', deletedAt: null },
+        }),
+      );
+    });
+
+    it('forbids when the caller has no active assignment to the outlet', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        id: 'cp-out', userId: 'outletUser1', user: { id: 'outletUser1', phone: '9000000000' },
+      });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'out-1' }]);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null); // not assigned
+
+      await expect(
+        service.redeemForOutlet(sales, { rewardId: 'r1', targetPartnerId: 'cp-out' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      // Authorizes by partnerId OR the partner's outletIds (production assignments
+      // key on outletId; seed/admin-reassign key on partnerId).
+      const where = mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where;
+      expect(where).toMatchObject({ salesUserId: 'su1', unassignedAt: null });
+      expect(where.OR).toEqual([
+        { partnerId: 'cp-out' },
+        { outletId: { in: ['out-1'] } },
+      ]);
+    });
+  });
+
+  describe('redeemForOutlet', () => {
+    const fixedItem = {
+      id: 'r1', clientId: 'deoleo', status: 'ACTIVE', deletedAt: null,
+      pointsCost: 500, redemptionMode: 'GIFT_CARD',
+      minRedemptionPoints: null, maxRedemptionPoints: null, stockQuantity: null,
+    };
+    const outletPartner = {
+      id: 'cp-out', userId: 'outletUser1', user: { id: 'outletUser1', phone: '9000000000' },
+    };
+
+    /** Wire a fully-assigned, well-funded outlet. */
+    const wireAssigned = () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(outletPartner);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o-out', orderNumber: 'RDM-OUT' });
+      mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+    };
+
+    it('creates the order against the TARGET outlet, binds the OTP to the OUTLET, supersedes the OUTLET', async () => {
+      wireAssigned();
+
+      const res = await service.redeemForOutlet(sales, {
+        rewardId: 'r1', quantity: 2, targetPartnerId: 'cp-out',
+      });
+
+      // Order belongs to the OUTLET partner.
+      const created = mockPrisma.redemptionOrder.create.mock.calls?.[0]?.[0];
+      expect(created.data.partnerId).toBe('cp-out');
+      expect(created.data.totalPointsCost).toBe(1000); // 500 × 2
+      expect(created.data.pointsDeducted).toBe(0);
+
+      // Supersede prior PENDING is scoped to the OUTLET, not the sales user.
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { partnerId: 'cp-out', status: 'PENDING' },
+        data: { status: 'CANCELLED', cancelledAt: expect.any(Date) },
+      });
+      // OTP delete + create are bound to the OUTLET's user, NOT the sales rep.
+      expect(mockPrisma.otpCode.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'outletUser1', purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
+      });
+      const otpCreate = mockPrisma.otpCode.create.mock.calls?.[0]?.[0];
+      expect(otpCreate.data.userId).toBe('outletUser1');
+      expect(otpCreate.data.phone).toBe('9000000000');
+      expect(otpCreate.data.code).toMatch(/^\d{6}$/);
+
+      // Affordability checked the OUTLET's wallet.
+      expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'cp-out' } });
+
+      // OTP delivered to the OUTLET's phone.
+      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'outletUser1', recipientPhone: '9000000000' }),
+      );
+
+      // Audit trail records the operating sales user.
+      const audit = mockPrisma.auditLog.create.mock.calls?.[0]?.[0];
+      expect(audit.data).toMatchObject({
+        action: 'CREATE',
+        entityType: 'REDEMPTION_ORDER',
+        entityId: 'o-out',
+        actorId: 'salesUser1',
+        metadata: expect.objectContaining({
+          event: 'SALES_ASSISTED_REDEEM', salesUserId: 'salesUser1', partnerId: 'cp-out',
+        }),
+      });
+
+      expect(res.orderId).toBe('o-out');
+      expect(res.requiredPoints).toBe(1000);
+    });
+
+    it('rejects insufficient OUTLET balance with 400 and creates NO order', async () => {
+      wireAssigned();
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 100 }); // < 500
+
+      await expect(
+        service.redeemForOutlet(sales, { rewardId: 'r1', targetPartnerId: 'cp-out' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('confirmRedeemForOutlet', () => {
+    const outletPartner = {
+      id: 'cp-out', userId: 'outletUser1', user: { id: 'outletUser1', phone: '9000000000' },
+    };
+    const pendingOrder = {
+      id: 'o-out', status: 'PENDING', partnerId: 'cp-out', orderNumber: 'RDM-OUT',
+      totalPointsCost: 1000, quantity: 1, redemptionMode: 'GIFT_CARD',
+      partner: { id: 'cp-out', userId: 'outletUser1' },
+      reward: { name: 'Amazon ₹500', stockQuantity: null },
+    };
+    const goodOtp = {
+      id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+      expiresAt: new Date(Date.now() + 60_000), verifiedAt: null,
+    };
+
+    /** Wire an assigned outlet with a confirmable PENDING order + valid OTP. */
+    const wireConfirm = () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(outletPartner);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(pendingOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockWallet.debitRedeem.mockResolvedValue({});
+      mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
+    };
+
+    it('re-checks the assignment server-side — Forbidden without it (order alone not trusted)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(outletPartner);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null); // assignment revoked
+
+      await expect(
+        service.confirmRedeemForOutlet(sales, {
+          orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      // Never reached the order load / debit.
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('NotFound when the order does not belong to the resolved outlet', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(outletPartner);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.confirmRedeemForOutlet(sales, {
+          orderId: 'o-foreign', otp: '123456', targetPartnerId: 'cp-out',
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      // The order load is scoped to the resolved outlet partnerId.
+      expect(mockPrisma.redemptionOrder.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'o-foreign', partnerId: 'cp-out' } }),
+      );
+    });
+
+    it('happy path: verifies OTP against the OUTLET user, debits the OUTLET wallet, history actor = sales user', async () => {
+      wireConfirm();
+
+      const res = await service.confirmRedeemForOutlet(sales, {
+        orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+      });
+
+      // OTP looked up for the OUTLET's user (not the sales rep).
+      expect(mockPrisma.otpCode.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId: 'outletUser1', purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
+        }),
+      );
+      // Atomic PENDING→CONFIRMED claim with the valuePaise freeze.
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o-out', status: 'PENDING' },
+        data: { status: 'CONFIRMED', pointsDeducted: 1000, valuePaise: 100000n },
+      });
+      // Debit targets the OUTLET's wallet (order.partnerId).
+      expect(mockWallet.debitRedeem).toHaveBeenCalledWith(
+        'cp-out', 1000,
+        { referenceId: 'o-out', description: 'Redemption RDM-OUT' },
+        mockPrisma,
+      );
+      // The recorded actor is the operating sales user.
+      const hist = mockPrisma.redemptionStatusHistory.create.mock.calls?.[0]?.[0];
+      expect(hist.data).toMatchObject({
+        orderId: 'o-out', fromStatus: 'PENDING', toStatus: 'CONFIRMED', changedById: 'salesUser1',
+      });
+      // Confirmation notify goes to the OUTLET's phone.
+      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'outletUser1', recipientPhone: '9000000000' }),
+      );
+      expect(res.status).toBe('CONFIRMED');
+    });
+
+    it('a wrong OTP 401s and does NOT debit', async () => {
+      wireConfirm();
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ ...goodOtp, code: '999999' });
+
+      await expect(
+        service.confirmRedeemForOutlet(sales, {
+          orderId: 'o-out', otp: '000000', targetPartnerId: 'cp-out',
+        }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
   });

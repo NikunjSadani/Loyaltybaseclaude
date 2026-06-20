@@ -241,7 +241,12 @@ export class SalesService {
             outletType: { select: { code: true } },
             partner: {
               select: {
+                id: true,
                 phone: true,
+                // Sales-assisted redeem (B1) drives off the outlet's partnerId +
+                // its real redeemable balance, so the FE can offer "redeem for
+                // this outlet" with the points headroom shown.
+                wallets: { select: { redeemablePoints: true } },
                 kycSubmissions: {
                   orderBy: { createdAt: 'desc' },
                   take: 1,
@@ -266,6 +271,11 @@ export class SalesService {
 
           return {
             id: outlet.id,
+            // The outlet's owning partner + its real redeemable balance — drives
+            // sales-assisted redeem (B1, #50-E). Only outlets WITH a partner reach
+            // here (filtered above), so partnerId is always present.
+            partnerId: partner.id,
+            balance: partner.wallets[0]?.redeemablePoints ?? 0,
             kycId: latestKyc?.id ?? '',
             outletCode: outlet.outletCode,
             name: outlet.name,

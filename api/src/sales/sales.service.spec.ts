@@ -144,7 +144,9 @@ describe('SalesService', () => {
             state: 'DL',
             outletType: { code: 'RETAIL' },
             partner: {
+              id: 'cp1',
               phone: '888',
+              wallets: [{ redeemablePoints: 1500 }],
               kycSubmissions: [
                 { id: 'k1', status: 'APPROVED', createdAt: new Date('2024-05-01T00:00:00.000Z') },
               ],
@@ -160,6 +162,8 @@ describe('SalesService', () => {
       expect(res.outlets).toEqual([
         {
           id: 'o1',
+          partnerId: 'cp1',
+          balance: 1500,
           kycId: 'k1',
           outletCode: 'OC1',
           name: 'Outlet 1',

@@ -18,6 +18,7 @@ type GiftItem = GiftCatalogueItem;
 
 interface Outlet {
   id: string;
+  partnerId: string;
   kycId: string;
   name: string;
   mobile: string;
@@ -30,6 +31,7 @@ type SheetStep = 'detail' | 'select_outlet' | 'confirm' | 'otp' | 'success';
 
 interface RedeemState {
   outlet: Outlet | null;
+  orderId: string;
   otpSending: boolean;
   otpSent: boolean;
   otp: string;
@@ -39,7 +41,7 @@ interface RedeemState {
 }
 
 const INITIAL_REDEEM: RedeemState = {
-  outlet: null, otpSending: false, otpSent: false, otp: '',
+  outlet: null, orderId: '', otpSending: false, otpSent: false, otp: '',
   verifying: false, error: '', otpResendCountdown: 0,
 };
 
@@ -112,11 +114,12 @@ function CatalogueInner() {
       .then((body) => {
         if (body.success) {
           const mapped: Outlet[] = (body.data.outlets ?? []).map((o: any) => ({
-            id:      o.id,
-            kycId:   o.kycId ?? '',
-            name:    o.name,
-            mobile:  o.mobile ?? '',
-            balance: 0,
+            id:        o.id,
+            partnerId: o.partnerId ?? '',
+            kycId:     o.kycId ?? '',
+            name:      o.name,
+            mobile:    o.mobile ?? '',
+            balance:   o.balance ?? 0,
           }));
           setOutlets(mapped);
           if (preselectedId) {
@@ -129,27 +132,32 @@ function CatalogueInner() {
   }, [preselectedId]);
 
   useEffect(() => {
+    // The real /v1/rewards/catalog returns RewardCatalog rows (no brand/category/
+    // available/popular columns) — derive availability from status + stock, and
+    // borrow cosmetic-only fields (brand/category/emoji/gradient) from the static
+    // GIFT_CATALOGUE by id where present (else safe defaults). #50-E / D1.
     interface ApiCatalogItem {
-      id: string; name: string; brand: string; category: string;
-      pointsCost: number; description: string; imageUrl: string;
-      available: boolean; popular: boolean; isAffordable: boolean;
+      id: string; name: string; pointsCost: number;
+      description: string | null; imageUrls: string[] | null;
+      status: string; stockQuantity: number | null; redemptionMode?: string;
     }
-    interface ApiCatalogResponse { items: ApiCatalogItem[]; userBalance: number }
+    interface ApiCatalogResponse { items: ApiCatalogItem[] }
     api.get<ApiCatalogResponse>('/api/rewards/catalog')
       .then(result => {
         if (result.success && result.data.items.length > 0) {
           const mapped: GiftCatalogueItem[] = result.data.items.map(item => {
             const ref = GIFT_CATALOGUE.find(g => g.id === item.id);
+            const available = item.status === 'ACTIVE' && (item.stockQuantity == null || item.stockQuantity > 0);
             return {
               id:           item.id,
               name:         item.name,
-              brand:        item.brand,
-              category:     item.category,
+              brand:        ref?.brand ?? '',
+              category:     ref?.category ?? 'Gifts',
               points:       item.pointsCost,
-              description:  item.description,
-              imageDataUrl: item.imageUrl ?? null,
-              available:    item.available,
-              popular:      item.popular,
+              description:  item.description ?? ref?.description ?? '',
+              imageDataUrl: item.imageUrls?.[0] ?? ref?.imageDataUrl ?? null,
+              available,
+              popular:      ref?.popular ?? false,
               emoji:        ref?.emoji         ?? '🎁',
               gradientFrom: ref?.gradientFrom  ?? '#f3f4f6',
               gradientTo:   ref?.gradientTo    ?? '#e5e7eb',
@@ -217,11 +225,24 @@ function CatalogueInner() {
     setSheetStep('confirm');
   };
 
+  // Sales-assisted redeem (B1): create the PENDING order; the backend sends the
+  // OTP to the OUTLET's registered mobile. The rep enters the code the outlet shares.
   const sendOtp = async () => {
+    if (!redeem.outlet?.partnerId || !selectedGift) {
+      setRedeem((r) => ({ ...r, error: 'Missing outlet or gift. Please reselect.' }));
+      return;
+    }
     setRedeem((r) => ({ ...r, otpSending: true, error: '' }));
-    await new Promise((res) => setTimeout(res, 1_200));
-    setRedeem((r) => ({ ...r, otpSending: false, otpSent: true, otpResendCountdown: 30 }));
-    setSheetStep('otp');
+    const res = await api.post<{ orderId: string; orderNumber: string }>(
+      '/api/rewards/redeem-for-outlet',
+      { rewardId: selectedGift.id, targetPartnerId: redeem.outlet.partnerId },
+    );
+    if (res.success && res.data?.orderId) {
+      setRedeem((r) => ({ ...r, otpSending: false, otpSent: true, orderId: res.data.orderId, otp: '', otpResendCountdown: 30 }));
+      setSheetStep('otp');
+    } else {
+      setRedeem((r) => ({ ...r, otpSending: false, error: res.success ? 'Could not start redemption.' : res.error }));
+    }
   };
 
   const verifyOtp = async () => {
@@ -229,13 +250,20 @@ function CatalogueInner() {
       setRedeem((r) => ({ ...r, error: 'Please enter the 6-digit OTP.' }));
       return;
     }
+    if (!redeem.outlet?.partnerId || !redeem.orderId) {
+      setRedeem((r) => ({ ...r, error: 'Redemption session expired. Please restart.' }));
+      return;
+    }
     setRedeem((r) => ({ ...r, verifying: true, error: '' }));
-    await new Promise((res) => setTimeout(res, 1_200));
-    if (redeem.otp === '999999') {
-      setRedeem((r) => ({ ...r, verifying: false, error: 'Invalid OTP. Please try again.' }));
-    } else {
+    const res = await api.post(
+      '/api/rewards/redeem-for-outlet/confirm',
+      { orderId: redeem.orderId, otp: redeem.otp, targetPartnerId: redeem.outlet.partnerId },
+    );
+    if (res.success) {
       setRedeem((r) => ({ ...r, verifying: false }));
       setSheetStep('success');
+    } else {
+      setRedeem((r) => ({ ...r, verifying: false, error: res.error || 'Invalid or expired OTP. Please try again.' }));
     }
   };
 
@@ -613,7 +641,7 @@ function CatalogueInner() {
                   </div>
 
                   <p className="text-[10px] text-center text-gray-300">
-                    Demo: any 6 digits work (avoid 999999 to test invalid OTP)
+                    The OTP was sent to the outlet&apos;s registered mobile.
                   </p>
                 </div>
               )}

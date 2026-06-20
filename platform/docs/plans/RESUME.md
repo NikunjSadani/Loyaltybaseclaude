@@ -86,10 +86,22 @@ from non-owned (admins+MIS+SALES tenant-wide, consistent with list()'s stage-que
 for non-admin non-owner). Runtime-verified (sales reviews non-owned detail+ledger 200, cross-tenant 404; partner blocked
 from other partner 403). ⚠️ Stale `'RETAILER'` test-fixture role (not in the enum) → D1.
 
-**NEXT = the B-wave (parallel, disjoint modules):** ∥ **B1** sales-assisted redemption real (#50-E,
-`api/src/rewards` sales-context + `sales/catalogue`; money path) ∥ **B2** invoices/Excel (#44, `api/src/invoices`) ∥ finish
-**B3** (gifsy Overview dashboard + per-client detail still `CLIENT_REGISTRY`); then **C** harness+staging, **D**
-cleanup+platform-retirement. **Decisions:** RBAC=@Roles-only+coverage-audit for launch ·
+**✅ B1 — sales-assisted redemption DONE (#50-E, 2026-06-19):** `POST /v1/rewards/redeem-for-outlet` + `/confirm`
+(`@Roles(SALES)`) reuse the audited partner redeem/confirm core but target an ASSIGNED outlet — assignment-scoped (active
+`salesUserAssignment` by **partnerId OR the partner's outletIds**; the outletId path covers the production master-upload
+shape where partnerId is null), the OUTLET's wallet is debited, **OTP to+from the OUTLET** (owner consent decision),
+order against the outlet, sales user audit-logged. `/sales/outlets` now returns `partnerId`+`balance`. FE `sales/catalogue`
+wired (real calls + real balances; `otp==='999999'` fake removed; tsc 0). jest 813/813 + independent money-path audit
+(**SHIP** after fixing the assignment-keying MEDIUM the audit caught) + **runtime-verified API** (sales→assigned outlet
+wallet 46000→45500; non-assigned→403; outletId-only auth) **AND full UI click-through browser-verified 2026-06-20**
+(sales login→real catalog→select outlet real balance→confirm→OTP to outlet→confirm→DB wallet 45500→45000, order
+CONFIRMED, SALES_ASSISTED_REDEEM audit). **The UI pass caught + fixed 2 bugs unit/API missed:** A4 over-gated
+`/rewards/catalog` to partner-only (sales 403/empty → added SALES to the read `@Roles`) + the FE mapped non-existent
+`available`/`brand`/`category` fields (false "Out of stock" → derive from status+stock). GIFT_CATALOGUE cosmetic
+reliance → D1; **#53** logged: `schemes.submitEnrollment` has the SAME assignment-keying gap.
+
+**NEXT = ∥ B2 invoices/Excel (#44, `api/src/invoices`) ∥ finish B3** (gifsy Overview dashboard + per-client detail still
+`CLIENT_REGISTRY`); then **C** harness+staging, **D** cleanup+platform-retirement. **Decisions:** RBAC=@Roles-only+coverage-audit for launch ·
 sales-redeem=real · tenant-creation=deferred but provision-ready. **Payouts audit: P6 was sound** — the payout gaps
 are a documented P6 hold (6.5 ON HOLD) + a Q1 consequence, not P6 errors. ⚠️ **Seeds note:** `seedDeoleoDemo` seeds
 VisibilityProgram `VP001` (seed-vp-1); `seedClientBDemo` seeds a PENDING_GIFSY KYC (seed-kyc-b1). **All session work
@@ -147,7 +159,7 @@ fabricated-data + scoping + dashboards + cross-tenant + the redemption money pat
 are resolved & harness-green (**the next.config proxy-exclusion list is now EMPTY — no remaining dead writes via that
 mechanism**). **P0.6 = Phases A–D** (code-grounded re-scope 2026-06-19): **A1** Gifsy oversight (#38) **✅** · **A2**
 operator-context switcher (#51) **✅** · **A3** payouts money-path (#42/#43) **✅** · **A4** enforcement audit (#2) **✅**
-→ **B1** sales-assisted redemption (#50-E) **← NEXT** · **B2** invoices (#44) · **B3** gifsy real data (#49, list ◐ done) →
+→ **B1** sales-assisted redemption (#50-E) **✅** · **B2** invoices (#44) **← NEXT** · **B3** gifsy real data (#49, list ◐ done) →
 **C** harness+staging → **D** cleanup (#45) + platform-retirement (#31/#32). Full plan: `00-MASTER-PLAN §P0.6` +
 `reconcile/P0.5-make-it-runnable.md` + [[runtime-audit-p0.5]]. P7 (Engagement & support) resumes after D. The P6
 decisions below are the historical record; all shipped.

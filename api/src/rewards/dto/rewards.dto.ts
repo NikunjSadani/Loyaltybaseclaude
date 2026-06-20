@@ -218,6 +218,25 @@ export class RedeemConfirmDto {
 }
 
 /**
+ * POST /v1/rewards/redeem-for-outlet — SALES-ASSISTED redeem (B1, #50-E).
+ * A sales user redeems on behalf of an OUTLET they are assigned to. Points,
+ * wallet and the order all belong to the OUTLET; `targetPartnerId` names it.
+ * The OTP is sent to the OUTLET's phone (consent), the sales rep submits the code.
+ */
+export class SalesRedeemDto extends RedeemDto {
+  @IsString()
+  @MinLength(1)
+  targetPartnerId!: string;
+}
+
+/** POST /v1/rewards/redeem-for-outlet/confirm — confirm a sales-assisted redeem. */
+export class SalesRedeemConfirmDto extends RedeemConfirmDto {
+  @IsString()
+  @MinLength(1)
+  targetPartnerId!: string;
+}
+
+/**
  * POST /v1/rewards/orders/:id/transition — GIFSY-only guarded status change.
  * Allowed edges + refund-on-cancel/return/fail live in the service. Inline
  * voucher/tracking entry rides along on the same call (owner asked for per-order
