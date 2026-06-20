@@ -124,13 +124,17 @@ restarted this wave (backend `dist` rebuilt + restarted on :4000 for B2/B3/#53 r
 (`DEV-DB.md`). ⚠️ **B1 runtime tests left the deoleo seed-cp-1 wallet at 45000** (3 test redemptions) — realistic, consistent.
 
 **Still OPEN (gap-register):** ✅ #44 (B2) · ✅ #49 (B3) · ✅ #53 · ✅ #46 harness coverage (C1, 59 passed) — all DONE
-this wave. **REMAINING:** #45 cleanup/dead-routes + demo-chrome + the new partner-Sidebar hydration finding (P0.7 → **D1, NEXT**) ·
-#31/#32 platform-retirement (→ **D2, LAST**) · #48 admin trend-analytics (→ P8) · the **C2 staging real-OTP read-back
-endpoint** (→ P8.7; FIXED_OTP interim) · #47 configurable RBAC (deferred). **PENDING OWNER DECISION:** the
-**seed-enrichment** (approved-KYC partner + CreditField/CreditPayoutEntry + ACTIVE scheme) that would unlock the
-*populated* live paths (B2 generate→invoice rows, A3 populated payouts, #53 full enrollment) — today those are
-unit/divergence-proven only. The Q1 payouts BACKEND `@Roles` change is code-correct but NOT runtime-verified (RBAC off
-in dev; the FE scope-out IS verified + now harness-pinned via the redirect spec).
+this wave. **✅ SEED ENRICHMENT DONE (`52f6698`, 2026-06-20):** deoleo seed now has CP003 (APPROVED KYC) + Visibility-Spend
+CreditField + CB-2026-05 payout + DEMO-VIS ACTIVE scheme → the **populated live paths are runtime-verified** (B2
+generate→IGST invoice ₹5,900 + idempotency + export-with-row; #53 full enrollment 201 ACTIVE). Ripple handled: deoleo
+now 3 active partners (count-isolation spec updated). The dev-generated invoice was deleted to keep the harness
+re-runnable (the seed SOURCE stays → generation is demonstrable on-demand). **✅ D1 DONE (`d947d55`):** admin
+demo-chrome removed + Sidebar hydration fixed (see #45). **REMAINING:** **D2, NEXT+LAST** = #31/#32 platform-Prisma
+retirement + the dead `app/api/*` routes + auth/logout (deletes shared infra → must be last) · D1-residuals (admin
+header notifications dropdown, partner DemoSwitcher/`lib/partner-session` demo personas, A1 KYC brand column → fold
+into D2 or a D1.1) · #48 admin trend-analytics (→ P8) · C2 staging real-OTP endpoint (→ P8.7; FIXED_OTP interim) · #47
+configurable RBAC (deferred). The Q1 payouts BACKEND `@Roles` change is code-correct but NOT runtime-verified (RBAC off
+in dev; the FE scope-out IS verified + harness-pinned via the redirect spec).
 
 **Architecture/env:** 3 environments — **local dev** (`gifsy_dev`, isolated instance, `FIXED_OTP=123456`) · **staging**
 (`gifsy_staging`, auto-deploys on **push to `develop`**) · **prod** (`gifsy_prod`, `main`, approval-gated). Full ref:
