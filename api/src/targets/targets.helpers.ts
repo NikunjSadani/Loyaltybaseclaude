@@ -217,8 +217,27 @@ export function buildResolvedTargetsBuffer(
   }[],
 ): Buffer {
   const enabled = getEnabledKpis(kpis);
-  const header: string[] = [...FIXED_COLS, ...enabled.map((k) => k.label)];
 
+  // CRITICAL: emit the SAME two-row month-group layout that
+  // generateTargetTemplateBuffer produces, so a downloaded Final-Targets file
+  // can be re-uploaded straight back through parseTargetUploadBuffer (which
+  // requires row 1 = month-group headers and row 2 = fixed cols + KPI labels).
+  // A single-header layout parses to 0 rows.
+
+  // ── Row 1: month group header (one merged span for the single month) ────────
+  const [year, mm] = month.split('-');
+  const abbr = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][
+    Number(mm) - 1
+  ];
+  const monthLabel = `${abbr} '${year.slice(2)} Target`;
+  const row1: (string | number)[] = Array(FIXED_COLS.length).fill('');
+  row1.push(monthLabel);
+  for (let i = 1; i < enabled.length; i++) row1.push('');
+
+  // ── Row 2: column headers ───────────────────────────────────────────────────
+  const row2: string[] = [...FIXED_COLS, ...enabled.map((k) => k.label)];
+
+  // ── Data rows (verbatim stored values; blank = KPI not configured) ──────────
   const dataRows = rows.map((r) => {
     const vals = (r.targetValues ?? {}) as Record<string, unknown>;
     const out: (string | number)[] = [r.outletCode, r.outletName ?? '', r.outletType ?? ''];
@@ -229,13 +248,24 @@ export function buildResolvedTargetsBuffer(
     return out;
   });
 
-  const ws = XLSX.utils.aoa_to_sheet([header, ...dataRows]);
+  const ws = XLSX.utils.aoa_to_sheet([row1, row2, ...dataRows]);
   ws['!cols'] = [
     { wch: 16 },
     { wch: 24 },
     { wch: 16 },
     ...enabled.map(() => ({ wch: 16 })),
   ];
+
+  // Merge the month-group header cell across its KPI columns (row 1).
+  if (enabled.length > 0) {
+    ws['!merges'] = [
+      {
+        s: { r: 0, c: FIXED_COLS.length },
+        e: { r: 0, c: FIXED_COLS.length + enabled.length - 1 },
+      },
+    ];
+  }
+
   const wb = XLSX.utils.book_new();
   // Sheet names cap at 31 chars and disallow some punctuation — month is safe.
   XLSX.utils.book_append_sheet(wb, ws, `Final Targets ${month}`);
@@ -402,8 +432,14 @@ export function parseTargetUploadBuffer(
         // CRITICAL: blank / null / undefined / empty string → omit the key
         if (rawVal === null || rawVal === undefined || String(rawVal).trim() === '') continue;
 
+        // Locale-aware: India/en-IN uses commas as thousands separators
+        // ("1,23,456.78"). Strip grouping commas before parseFloat so "1,234"
+        // becomes 1234 — NOT 1 (parseFloat stops at the first comma). The "."
+        // decimal separator is preserved.
         const num =
-          typeof rawVal === 'number' ? rawVal : parseFloat(String(rawVal).trim());
+          typeof rawVal === 'number'
+            ? rawVal
+            : parseFloat(String(rawVal).trim().replace(/,/g, ''));
 
         // CRITICAL: only store valid finite numbers; non-numeric → omit the key
         if (!isFinite(num)) continue;

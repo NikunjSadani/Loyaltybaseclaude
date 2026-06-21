@@ -1512,9 +1512,13 @@ model TdsOffPlatformEntry {
   panNumber     String
   outletCode    String?
   amountPaise   BigInt
-  // re-upload dedup enforced by a DB-level PARTIAL unique index
-  // (clientId, uploadBatchId) WHERE uploadBatchId IS NOT NULL — Prisma can't model partial
-  // unique indexes, so it's in the migration only; the upload service catches P2002.
+  // FILE-LEVEL re-upload dedup. uploadBatchId is a DETERMINISTIC hash of the uploaded
+  // file's rows (set by the service, not a random uuid). A DB-level PARTIAL unique index
+  // on (clientId, section, panNumber, entryDate, amountPaise, COALESCE(outletCode,''),
+  // uploadBatchId) WHERE uploadBatchId IS NOT NULL makes re-uploading the SAME file a
+  // no-op while two DIFFERENT files each record their rows. Prisma can't model partial/
+  // expression unique indexes → migration-only; the upload service catches P2002 and
+  // reports the row as "skipped — duplicate entry". See 20260621000000_uat_hardening_constraints.
   uploadBatchId String?
   uploadedBy    String?
   createdAt     DateTime   @default(now())
@@ -1535,7 +1539,11 @@ model TdsDeposit {
   panNumber     String
   outletCode    String?
   amountPaise   BigInt
-  // re-upload dedup via DB-level PARTIAL unique (clientId, section, uploadBatchId) WHERE NOT NULL.
+  // FILE-LEVEL re-upload dedup (same model as TdsOffPlatformEntry): uploadBatchId is a
+  // deterministic hash of the file's rows; DB-level PARTIAL unique on
+  // (COALESCE(clientId,''), section, panNumber, depositDate, amountPaise,
+  // COALESCE(outletCode,''), uploadBatchId) WHERE uploadBatchId IS NOT NULL. clientId is
+  // nullable (194C = platform) so it is COALESCEd. Migration-only; service catches P2002.
   uploadBatchId String?
   uploadedBy    String?
   createdAt     DateTime         @default(now())

@@ -54,6 +54,7 @@ import {
   ListAchievementBatchesQueryDto,
   ListAchievementsQueryDto,
   PaceQueryDto,
+  AchievementTemplateQueryDto,
 } from './dto/targets.dto';
 
 // ─── KPI CRUD ─────────────────────────────────────────────────────────────────
@@ -207,6 +208,30 @@ export class AchievementsController {
   constructor(private readonly targets: TargetsService) {}
 
   /**
+   * GET /v1/admin/achievements/template?month=YYYY-MM
+   * Streams the achievement (sales) upload template — the SAME month-group
+   * 2-row layout as the target template, pre-filled with the REAL tenant
+   * outlet roster + enabled KpiDef columns. Filling this in and POSTing to
+   * /upload round-trips cleanly (the old FE generateSalesTemplate is retired).
+   * Must come BEFORE the generic @Get() to avoid routing ambiguity.
+   */
+  @Get('template')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  async getAchievementTemplate(
+    @CurrentUser() user: JwtPayload,
+    @Query() q: AchievementTemplateQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const buffer = await this.targets.buildAchievementTemplate(user, q.month);
+    const filename = `sales-template-${q.month}.xlsx`;
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${filename}"`,
+    });
+  }
+
+  /**
    * POST /v1/admin/achievements/upload  (multipart/form-data, field: "file")
    * Parses the xlsx (same template shape as target upload), validates against
    * KpiDefs + outlet roster, and writes OutletSalesRecord rows inside a
@@ -261,5 +286,18 @@ export class AchievementsController {
   @RequirePermission('targets:read')
   listAchievements(@CurrentUser() user: JwtPayload, @Query() q: ListAchievementsQueryDto) {
     return this.targets.listAchievements(user, q);
+  }
+
+  /**
+   * DELETE /v1/admin/achievements/batches/:id — delete an upload batch and its
+   * OutletSalesRecord rows (cascade via schema onDelete: Cascade). Lets an admin
+   * remove TEST uploads before go-live. Tenant-scoped; 404 if the batch isn't this
+   * tenant's. (Replaces the dead FE call to the non-existent /admin/sales/batches/:id.)
+   */
+  @Delete('batches/:id')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:upload')
+  deleteAchievementBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.targets.deleteAchievementBatch(user, id);
   }
 }

@@ -413,6 +413,68 @@ export class TargetsService {
     };
   }
 
+  // ─── Achievement template download ──────────────────────────────────────────
+
+  /**
+   * GET /v1/admin/achievements/template?month=YYYY-MM
+   *
+   * Build the achievement (sales) upload template. It is byte-for-byte the SAME
+   * month-group 2-row layout that the TARGET template uses (so the file the admin
+   * fills in parses cleanly back through parseTargetUploadBuffer on upload). This
+   * makes ONE source of truth for the upload format — the old FE generateSalesTemplate
+   * (12-col MOCK_OUTLETS, incompatible parser) is retired.
+   *
+   * Reuses the exact KPI + REAL tenant-scoped outlet-roster queries from
+   * getTemplateBuffer (NO mock outlets). Single month wrapped into the [months]
+   * array that generateTargetTemplateBuffer expects. Tenant-scoped by clientId.
+   */
+  async buildAchievementTemplate(user: JwtPayload, month: string): Promise<Buffer> {
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      throw new BadRequestException('A valid YYYY-MM "month" query param is required');
+    }
+
+    // Enabled KPIs for the tenant — same query as the target template path.
+    const kpiRows = await this.prisma.kpiDef.findMany({
+      where: { clientId: user.clientId, enabled: true },
+      orderBy: { order: 'asc' },
+    });
+
+    if (kpiRows.length === 0) {
+      throw new BadRequestException(
+        'No enabled KPIs found for this tenant. Seed KPIs first via POST /v1/admin/kpis/seed-defaults.',
+      );
+    }
+
+    // REAL active outlet roster — identical query to getTemplateBuffer (no mocks).
+    const outlets = await this.prisma.outlet.findMany({
+      where: {
+        clientId: user.clientId,
+        isActive: true,
+        deletedAt: null,
+      },
+      include: { outletType: { select: { code: true } } },
+      orderBy: { outletCode: 'asc' },
+    });
+
+    const kpis: KpiDefLike[] = kpiRows.map((k) => ({
+      code: k.code,
+      label: k.label,
+      isPrimary: k.isPrimary,
+      hasNameOverride: k.hasNameOverride,
+      nameOverrideLabel: k.nameOverrideLabel ?? null,
+      order: k.order,
+      enabled: k.enabled,
+    }));
+
+    const outletList: OutletLike[] = outlets.map((o) => ({
+      outletCode: o.outletCode,
+      name: o.name,
+      outletType: o.outletType.code,
+    }));
+
+    return generateTargetTemplateBuffer(kpis, [month], outletList);
+  }
+
   // ─── Achievement upload ─────────────────────────────────────────────────────
 
   /**
@@ -557,6 +619,23 @@ export class TargetsService {
       },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  // ─── Delete an achievement upload batch (+ cascade its OutletSalesRecord rows) ─
+
+  /**
+   * Delete a SalesUploadBatch and (by schema cascade) its OutletSalesRecord rows.
+   * Tenant-scoped: a batch outside the caller's client is a clean 404, never a
+   * cross-tenant delete. Used to clear TEST uploads before go-live.
+   */
+  async deleteAchievementBatch(user: JwtPayload, id: string) {
+    const batch = await this.prisma.salesUploadBatch.findFirst({
+      where: { id, clientId: user.clientId },
+    });
+    if (!batch) throw new NotFoundException('Upload batch not found');
+
+    await this.prisma.salesUploadBatch.delete({ where: { id } });
+    return { deleted: true, id, removedRecords: batch.acceptedCount };
   }
 
   // ─── List achievement rows ──────────────────────────────────────────────────

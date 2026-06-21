@@ -464,11 +464,15 @@ describe('TargetsService', () => {
       const wb = XLSX.read(buf, { type: 'buffer' });
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
-      expect(rows[0]).toEqual(['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1']);
-      expect(rows[1]).toEqual(['RT-1', 'Shop One', 'SSS', 100, 20]);
+      // 2-row month-group header (matches generateTargetTemplateBuffer) so the
+      // "Download Final Targets" export re-uploads cleanly through parseTargetUploadBuffer.
+      // Row 0 = month-group label over the KPI columns; row 1 = column labels.
+      expect(rows[0][3]).toBe("Jul '26 Target");
+      expect(rows[1]).toEqual(['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1']);
+      expect(rows[2]).toEqual(['RT-1', 'Shop One', 'SSS', 100, 20]);
       // RT-2's omitted FOCUS_PACK_1 cell is blank (empty), not 0.
-      expect(rows[2][3]).toBe(50);
-      expect(rows[2][4]).toBe('');
+      expect(rows[3][3]).toBe(50);
+      expect(rows[3][4]).toBe('');
     });
   });
 

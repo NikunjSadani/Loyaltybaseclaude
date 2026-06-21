@@ -85,9 +85,11 @@ describe('admin/sales/page.tsx — endpoint wiring', () => {
     expect(page).not.toContain('/api/admin/sales/bulk-upload');
   });
 
-  it('PW11: DELETE for batch history still targets /api/admin/sales/batches/[batchId]', () => {
-    // The delete path must still use the existing working DELETE route
-    expect(page).toContain('/api/admin/sales/batches/');
+  it('PW11: DELETE for batch history targets the real /api/admin/achievements/batches/[batchId]', () => {
+    // The old /api/admin/sales/batches/:id route never existed post platform-Prisma
+    // retirement; the delete must use the real achievements batch-delete endpoint.
+    expect(page).toContain('/api/admin/achievements/batches/');
+    expect(page).not.toContain('/api/admin/sales/batches/');
     expect(page).toMatch(/method.*DELETE|DELETE.*method/s);
   });
 

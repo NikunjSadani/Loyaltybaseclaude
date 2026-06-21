@@ -5,12 +5,7 @@ import {
   Download, Upload, FileSpreadsheet,
   CheckCircle2, Info, Trash2, History, AlertTriangle, BarChart3,
 } from 'lucide-react';
-import {
-  generateSalesTemplate,
-  parseSalesUpload,
-  buildSalesReportBuffer,
-  type SalesParseResult,
-} from '@/lib/sales-excel-upload';
+import { buildAchievementReportBuffer } from '@/lib/achievement-report';
 import { DEOLEO_DEFAULT_KPIS } from '@/lib/platform/tenant-kpi-config';
 import type { TenantKpiDef } from '@/lib/platform/tenant-kpi-config';
 import { formatMonth } from '@/lib/targets';
@@ -68,16 +63,22 @@ interface UploadResult {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function downloadBuffer(buf: ArrayBuffer, filename: string) {
-  const blob = new Blob([buf], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  });
+function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a   = Object.assign(document.createElement('a'), { href: url, download: filename });
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+function downloadBuffer(buf: ArrayBuffer, filename: string) {
+  downloadBlob(
+    new Blob([buf], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    }),
+    filename,
+  );
 }
 
 /** Current month and previous month — sales upload is always historical */
@@ -113,6 +114,7 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
   const [fetchError, setFetchError] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirmId,  setConfirmId]  = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -132,18 +134,23 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
     setDeletingId(batchId);
     setConfirmId(null);
     try {
-      // The existing DELETE route /api/admin/sales/batches/[batchId] still works
-      // (it targets the SalesUploadBatch table directly via Prisma). Keep as-is.
-      const res  = await fetch(`/api/admin/sales/batches/${batchId}`, {
+      // Backend DELETE on the achievements module — deletes the SalesUploadBatch and
+      // cascades its OutletSalesRecord rows. (The old /admin/sales/batches/:id route
+      // never existed post platform-Prisma-retirement; this is the real endpoint.)
+      const res  = await fetch(`/api/admin/achievements/batches/${batchId}`, {
         method: 'DELETE',
         headers: authHeader(),
       });
-      const body = await res.json();
-      if (body.success) {
+      const body = await res.json().catch(() => ({ success: false }));
+      if (res.ok && body.success) {
         setBatches(prev => prev.filter(b => b.id !== batchId));
+        setDeleteError(null);
+      } else {
+        setDeleteError('Could not delete this upload — please try again.');
       }
     } catch (e) {
       console.error('Delete batch failed:', e);
+      setDeleteError('Network error deleting this upload — please try again.');
     } finally {
       setDeletingId(null);
     }
@@ -172,6 +179,12 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
 
   return (
     <div className="divide-y divide-gray-100">
+      {deleteError && (
+        <p className="text-sm text-red-600 py-2 flex items-center gap-1.5">
+          <AlertTriangle className="w-3.5 h-3.5" />
+          {deleteError}
+        </p>
+      )}
       {batches.map(batch => (
         <div key={batch.id} className="flex items-center justify-between py-3 gap-4">
           <div className="flex-1 min-w-0">
@@ -351,9 +364,8 @@ export default function SalesUploadPage() {
   const [saved,       setSaved]     = useState(false);
   const [historyKey,  setHistoryKey] = useState(0);  // bump to refresh history
   const [showPace,    setShowPace]  = useState(false);
+  const [downloadError, setDownloadError] = useState('');
 
-  // For the local client-side parse (report download only — actual save is server-side now)
-  const [parseResult, setParseResult] = useState<SalesParseResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch the tenant's KPI definitions from the backend.
@@ -388,9 +400,30 @@ export default function SalesUploadPage() {
 
   // ── Template download ──────────────────────────────────────────────────
 
-  function handleDownloadTemplate() {
-    const buf = generateSalesTemplate(kpiDefs, salesMonth);
-    downloadBuffer(buf, `sales_template_${salesMonth}.xlsx`);
+  async function handleDownloadTemplate() {
+    setDownloadError('');
+    try {
+      // Single source of truth: the backend builds the template from the SAME
+      // month-group layout the achievement upload parser expects (real outlet
+      // roster + enabled KpiDef columns), so template → fill → upload round-trips.
+      const res = await fetch(
+        `/api/admin/achievements/template?month=${encodeURIComponent(salesMonth)}`,
+        { headers: authHeader() },
+      );
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = (await res.json()) as { error?: string; message?: string };
+          msg = j.error ?? j.message ?? msg;
+        } catch { /* body was not JSON */ }
+        setDownloadError(msg);
+        return;
+      }
+      const blob = await res.blob();
+      downloadBlob(blob, `sales_template_${salesMonth}.xlsx`);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : 'Template download failed');
+    }
   }
 
   // ── Upload file → send directly to backend via multipart ──────────────
@@ -400,18 +433,8 @@ export default function SalesUploadPage() {
     setUploadResult(null);
     setSaved(false);
 
-    // Also run client-side parse for the report download feature.
-    try {
-      const arrayBuf = await file.arrayBuffer();
-      // We pass an empty Set for outlet validation here — the backend does real validation.
-      // The local parse is used only to enable the "Download Report" button with row details
-      // populated from the backend response later.
-      setParseResult(parseSalesUpload(arrayBuf, kpiDefs, new Set<string>()));
-    } catch {
-      setParseResult(null);
-    }
-
-    // Upload the raw xlsx to the backend (multipart); the backend parses + stores.
+    // Upload the raw xlsx to the backend (multipart); the backend parses + stores
+    // and returns the authoritative per-row result used for the report download.
     setUploading(true);
     try {
       const formData = new FormData();
@@ -436,7 +459,7 @@ export default function SalesUploadPage() {
     } finally {
       setUploading(false);
     }
-  }, [kpiDefs]);
+  }, []);
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -452,22 +475,30 @@ export default function SalesUploadPage() {
   // ── Download report ────────────────────────────────────────────────────
 
   function handleDownloadReport() {
-    if (!parseResult) return;
+    if (!uploadResult) return;
+    // Built from the AUTHORITATIVE backend response (uploadResult.rows), not a
+    // local re-parse — the backend is the single source of truth for what stored.
     downloadBuffer(
-      buildSalesReportBuffer(parseResult.rows),
+      buildAchievementReportBuffer(uploadResult.rows),
       `sales_upload_report_${salesMonth}.xlsx`,
     );
   }
 
   const currentMonthLabel = monthOptions.find(m => m.value === salesMonth)?.label ?? salesMonth;
 
-  // Summary derived from upload result (authoritative server counts).
+  // Summary derived from upload result (authoritative server counts). The backend
+  // rejectedCount counts only rejected_outlet/rejected_kpi rows; blank-skipped rows
+  // are neither saved nor rejected, so derive them so the tiles reconcile to total
+  // (saved + skipped + rejected === total).
   const summary = uploadResult
     ? {
-        total:   uploadResult.totalRows,
-        saved:   uploadResult.acceptedCount,
-        skipped: uploadResult.rejectedCount,
-        errors:  0,  // backend conflates skipped+error into rejectedCount
+        total:    uploadResult.totalRows,
+        saved:    uploadResult.acceptedCount,
+        rejected: uploadResult.rejectedCount,
+        skipped:  Math.max(
+          0,
+          uploadResult.totalRows - uploadResult.acceptedCount - uploadResult.rejectedCount,
+        ),
       }
     : null;
 
@@ -501,7 +532,7 @@ export default function SalesUploadPage() {
                   setSalesMonth(m.value);
                   setUploadResult(null);
                   setSaved(false);
-                  setParseResult(null);
+                  setDownloadError('');
                   setShowPace(false);
                 }}
                 className={`px-4 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
@@ -532,6 +563,10 @@ export default function SalesUploadPage() {
           <Download className="w-4 h-4" />
           Download Template — {currentMonthLabel}
         </button>
+
+        {downloadError && (
+          <p className="text-xs text-red-600">{downloadError}</p>
+        )}
       </div>
 
       {/* ── Step 2: Upload ────────────────────────────────────────────────── */}
@@ -592,12 +627,13 @@ export default function SalesUploadPage() {
             )}
           </div>
 
-          {/* Summary stats */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          {/* Summary stats — saved + skipped + rejected === total */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {([
-              { label: 'Total rows', value: summary.total,   cls: 'bg-gray-50   border-gray-200  text-gray-800'  },
-              { label: 'Saved',      value: summary.saved,   cls: 'bg-green-50  border-green-200 text-green-700' },
-              { label: 'Rejected',   value: summary.skipped, cls: 'bg-amber-50  border-amber-200 text-amber-700' },
+              { label: 'Total rows',     value: summary.total,    cls: 'bg-gray-50   border-gray-200  text-gray-800'  },
+              { label: 'Saved',          value: summary.saved,    cls: 'bg-green-50  border-green-200 text-green-700' },
+              { label: 'Skipped (blank)',value: summary.skipped,  cls: 'bg-slate-50  border-slate-200 text-slate-600' },
+              { label: 'Rejected',       value: summary.rejected, cls: 'bg-amber-50  border-amber-200 text-amber-700' },
             ] as const).map(({ label, value, cls }) => (
               <div key={label} className={`rounded-xl border px-4 py-3 text-center ${cls}`}>
                 <p className="text-2xl font-bold">{value}</p>
@@ -627,15 +663,15 @@ export default function SalesUploadPage() {
 
           {/* Actions */}
           <div className="flex items-center gap-3 flex-wrap">
-            {parseResult && (
-              <button
-                onClick={handleDownloadReport}
-                className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-600 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors"
-              >
-                <Download className="w-4 h-4" />
-                Download Report
-              </button>
-            )}
+            {/* Report is built from the authoritative backend uploadResult.rows,
+                which is guaranteed present inside this block. */}
+            <button
+              onClick={handleDownloadReport}
+              className="flex items-center gap-2 px-4 py-2 border border-gray-200 text-gray-600 text-sm font-medium rounded-xl hover:bg-gray-50 transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              Download Report
+            </button>
           </div>
         </div>
       )}

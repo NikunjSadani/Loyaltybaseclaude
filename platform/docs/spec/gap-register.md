@@ -96,6 +96,19 @@ and where it surfaced. Severity is a first pass, to be refined.
   (gift-card/voucher) keeps its own fulfilment-refund lifecycle; no clawback on in-flight redeemed points.
 - ⛔ **Fund-check race / fund-shortfall = NOT APPLICABLE (owner 2026-06-21):** there is no in-portal fund balance to race on — the
   `payouts.service` fund-receive/fund-check is vestigial scaffolding vs the real offline-transfer + UTR-upload model.
+- 🔴 **BUG-1b ✅ THE REDEMPTION-PAYOUT UTR-INGEST WAS DESIGNED BUT NEVER BUILT (code+spec-verified 2026-06-21). OWNER DECISION: BUILD NOW.**
+  Key distinction the diagnosis surfaced: the UTR→PAID/FAILED→reversal pattern **IS built for the CREDITS/award+visibility payout side**
+  (`CreditPayoutEntry` → `CreditPayoutDownload` bank file → UTR-Excel upload w/ duplicate-UTR detection → PAID/FAILED; corrections via
+  `CreditReversal`) — spec'd in `02-workflows.md:118-136`, and the register lists it as HOLDING. But the **REDEMPTION side**
+  (`PayoutTransaction`, minted by the "P6 BRIDGE" at redeem-confirm, batched by the GIFSY-only `payouts` module) got the SCHEMA fields
+  (`completedAt`/`reversedAt`/`failureReason`/`providerRefId`) AND the partner read-side (`partner.service.ts:101-102` surfaces
+  `providerRefId`=UTR, `completedAt`=paidAt) but **no ingest WRITER** — `payouts.controller.ts` has only create/assign/process/
+  reconciliation-DOWNLOAD, and a `PayoutTransaction` never leaves `INITIATED` (nothing writes SUCCESS/FAILED/REVERSED). `processBatch`
+  gates on a vestigial `FundLedger` fund-check. So: designed + partially scaffolded, never completed. **S1 BUILDS the redemption-payout
+  UTR ingest, REUSING the proven credits UTR-upload pattern** (parser + duplicate-UTR detection): GIFSY uploads a UTR/status report →
+  each `PayoutTransaction` → SUCCESS(+completedAt,+providerRefId, order settled) or FAILED(+failureReason) → on FAILED, idempotent
+  points reversal + order→FAILED; REMOVE the manual `CONFIRMED→CANCELLED` INR path; DROP the vestigial fund-check. INR can't be
+  cancelled once OTP-confirmed; reversal ONLY on UTR=FAILED.
 - ◻ **Duplicate-reversal race** (`credits.service.ts:313`) — read-then-create, no unique key → 2 PENDING reversals → double clawback.
 - ◻ **Duplicate outletCode in a credit batch** → double payout entries at confirm.
 
@@ -115,14 +128,19 @@ KYC-revoked partner still receivable of payouts · ◻ formula-injection in TDS 
 (mock stats/table — only the xlsx export is real) · `/partner/visibility` (hardcoded demo submission history) · `/admin/visibility`
 (`DEMO_VISIBILITY_MAP`) · partner `DemoSwitcher` + `partner/wallet/demo-wallet-data.ts`. (Plus the deferred #57(a) admin sub-dashboards.)
 
-**🔴 EXCEL ROUND-TRIP audit (re-run 2026-06-21 — code-reasoned, VERIFY before fixing):** most flows HOLD (fulfilment,
+**🔴 EXCEL ROUND-TRIP audit (re-run 2026-06-21; ✅ TOP THREE NOW CODE-VERIFIED 2026-06-21 during S0 diagnose):** most flows HOLD (fulfilment,
 credits upload + UTR round-trip, invoice gen/export, the download-only report exports — all column-matched + BigInt-clean),
-BUT three real round-trip breaks: ◻ **ACHIEVEMENT upload may store ZERO rows** — the FE sales template (`sales-excel-upload.ts`,
-title row 0) feeds the backend *targets* parser (`parseTargetUploadBuffer`) which needs a `"<Mon> '<YY> Target"` month-group
-header → no months detected → all rows `skipped_blank` (the EARNING path — HIGH if confirmed; E2E missed it by posting rows
-directly, not via template→parse) · ◻ **"Download Final Targets" → re-upload BROKEN** — export emits a 1-row header, the parser
-expects 2 (month-group + cols) → 0 rows written (the "final-target re-upload" correction cycle) · ◻ **locale numbers** — `"1,234"`
-→ `parseFloat`=1 in target/achievement parsers (credits parser strips commas; these don't) → silent data corruption · ◻ TDS
+BUT three real round-trip breaks: ✅ **ACHIEVEMENT upload stores ZERO rows — CONFIRMED, complete break of the EARNING path.**
+`admin/sales/page.tsx:392` downloads `generateSalesTemplate` (the 12-col `sales-excel-upload.ts` — Zone/State/ASM…/Outlet ID, a
+single merged title row, MOCK_OUTLETS) and POSTs that same file (line 420) to `POST /v1/admin/achievements/upload`, which parses
+with `parseTargetUploadBuffer` requiring a `"<Mon> '<YY> Target"` month-group row 1 → 0 month blocks → every data row
+`skipped_blank` → 0 achievements stored. The two templates are statically incompatible (no backend achievement-template
+endpoint exists; the FE generates it). FIX (reuses tested code): add a backend `GET /v1/admin/achievements/template?month=` that
+serves `generateTargetTemplateBuffer(kpis,[month],realOutlets)`, repoint the FE download to it, delete the dead mock-based
+`sales-excel-upload.ts` path. · ✅ **"Download Final Targets" → re-upload BROKEN — CONFIRMED** — `buildResolvedTargetsBuffer`
+(`targets.helpers.ts:232`) emits a 1-row header; `parseTargetUploadBuffer` needs the month-group row 1 → 0 rows. Fix = export the
+2-row month-group layout (reuse `generateTargetTemplateBuffer`'s row-1 logic). · ✅ **locale numbers — CONFIRMED** — `"1,234"`
+→ `parseFloat`=1 at `targets.helpers.ts:406` + `sales-excel-upload.ts:220` (credits parser strips commas; these don't) → silent data corruption · ◻ TDS
 off-platform/deposit re-upload **double-inserts** (no `@@unique`; `skipDuplicates` is a no-op) → inflates 194R/194C base · minor:
 TDS export shows the statutory rate label next to the grossed-up amount (display). **Outlets/hierarchy/KYC flows (3rd agent):** ◻
 **"Download Outlet Master" → re-upload BROKEN** — export labels `Outlet Code`/`Distributor Code` ≠ parser's `Outlet ID`/`Distributor ID`,

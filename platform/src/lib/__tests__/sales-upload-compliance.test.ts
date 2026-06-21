@@ -456,16 +456,20 @@ describe('G — app/admin/sales/page.tsx: UI shape', () => {
     expect(hasReport).toBe(true);
   });
 
-  it('G7: calls generateSalesTemplate', () => {
-    expect(page).toMatch(/generateSalesTemplate/);
+  it('G7: downloads the template from the backend (single source of truth)', () => {
+    // P4.5: the client-side generateSalesTemplate (MOCK_OUTLETS, incompatible
+    // parser) is retired. The page now fetches the achievement template from the
+    // backend so template → fill → upload round-trips through the same parser.
+    expect(page).toMatch(/\/api\/admin\/achievements\/template/);
   });
 
-  it('G8: imports from lib/sales-upload (or lib/sales-excel-upload)', () => {
-    // Either the older multi-sheet lib or the newer single-sheet lib
-    const hasImport =
-      /from.*sales-upload/.test(page) ||
-      /from.*sales-excel-upload/.test(page);
-    expect(hasImport).toBe(true);
+  it('G8: builds the upload report from the backend response (achievement-report)', () => {
+    // The report is built from the authoritative backend uploadResult.rows via
+    // lib/achievement-report, not a dead local re-parse of the file.
+    const hasReportSource =
+      /from.*achievement-report/.test(page) ||
+      page.includes('buildAchievementReportBuffer');
+    expect(hasReportSource).toBe(true);
   });
 
   it('G9: has a save / upload action (API call or local handler)', () => {

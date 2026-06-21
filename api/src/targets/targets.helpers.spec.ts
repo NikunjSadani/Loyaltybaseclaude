@@ -19,6 +19,7 @@ import {
   parseMonthHeader,
   getEnabledKpis,
   generateTargetTemplateBuffer,
+  buildResolvedTargetsBuffer,
   parseTargetUploadBuffer,
   KpiDefLike,
   OutletLike,
@@ -253,6 +254,28 @@ describe('parseTargetUploadBuffer', () => {
     expect(kpiMap['FOCUS_PACK_1']).toBe(789);
   });
 
+  // ── Locale thousands separators (en-IN) ────────────────────────────────────
+
+  it('locale string "1,234" → 1234 (thousands comma stripped, NOT truncated to 1)', () => {
+    const buf = buildTestXlsx([['O001', 'Outlet One', 'RETAIL', '1,234', 50]]);
+    const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
+
+    const kpiMap = result.acceptedTargets['2026-07']?.['O001'];
+    expect(kpiMap).toBeDefined();
+    expect(kpiMap['MONTH_TGT']).toBe(1234);
+    expect(kpiMap['FOCUS_PACK_1']).toBe(50);
+  });
+
+  it('Indian-grouped string "1,23,456.78" → 123456.78 stored verbatim', () => {
+    const buf = buildTestXlsx([['O001', 'Outlet One', 'RETAIL', '1,23,456.78', 100]]);
+    const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
+
+    const kpiMap = result.acceptedTargets['2026-07']?.['O001'];
+    expect(kpiMap).toBeDefined();
+    expect(kpiMap['MONTH_TGT']).toBe(123456.78);
+    expect(kpiMap['FOCUS_PACK_1']).toBe(100);
+  });
+
   it('non-numeric cell (e.g. "N/A") → key OMITTED', () => {
     const buf = buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 'N/A', 200]]);
     const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
@@ -347,5 +370,72 @@ describe('parseTargetUploadBuffer', () => {
     expect(kpiMap).toBeDefined();
     expect(kpiMap['MONTH_TGT']).toBe(0);
     expect(kpiMap['FOCUS_PACK_1']).toBe(100);
+  });
+});
+
+// ─── buildResolvedTargetsBuffer round-trip ────────────────────────────────────
+//
+// The "Download Final Targets" export must produce a file that can be re-uploaded
+// straight back through parseTargetUploadBuffer (it shares the month-group 2-row
+// layout). A single-header export parses to 0 rows — this guards that regression.
+
+describe('buildResolvedTargetsBuffer ↔ parseTargetUploadBuffer round-trip', () => {
+  it('a Final-Targets export re-parses to the same accepted values', () => {
+    const month = '2026-07';
+    const storedRows = [
+      {
+        outletCode: 'O001',
+        outletName: 'Outlet One',
+        outletType: 'RETAIL',
+        // MONTH_TGT configured, FOCUS_PACK_1 omitted (not configured → blank cell)
+        targetValues: { MONTH_TGT: 1234 } as Record<string, unknown>,
+      },
+      {
+        outletCode: 'O002',
+        outletName: 'Outlet Two',
+        outletType: 'HORECA',
+        targetValues: { MONTH_TGT: 500, FOCUS_PACK_1: 78.5 } as Record<string, unknown>,
+      },
+    ];
+
+    const buf = buildResolvedTargetsBuffer(month, ENABLED_KPIS, storedRows);
+    const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
+
+    // Both rows accepted (non-empty), nothing skipped as blank.
+    expect(result.summary.accepted).toBe(2);
+
+    const o1 = result.acceptedTargets[month]?.['O001'];
+    expect(o1).toBeDefined();
+    expect(o1['MONTH_TGT']).toBe(1234);
+    // blank export cell → key omitted on re-parse (the no-compute contract)
+    expect('FOCUS_PACK_1' in o1).toBe(false);
+
+    const o2 = result.acceptedTargets[month]?.['O002'];
+    expect(o2).toBeDefined();
+    expect(o2['MONTH_TGT']).toBe(500);
+    expect(o2['FOCUS_PACK_1']).toBe(78.5);
+  });
+
+  it('the export emits the two-row month-group header (row1 month label, row2 fixed cols)', () => {
+    const buf = buildResolvedTargetsBuffer('2026-07', ENABLED_KPIS, [
+      {
+        outletCode: 'O001',
+        outletName: 'Outlet One',
+        outletType: 'RETAIL',
+        targetValues: { MONTH_TGT: 10 },
+      },
+    ]);
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json<(string | number)[]>(ws, { header: 1, defval: '' });
+
+    const row1 = aoa[0] as string[];
+    const row2 = aoa[1] as string[];
+    // Month-group label sits at the first KPI column (after 3 fixed cols).
+    expect(String(row1[3])).toMatch(/jul.*26.*target/i);
+    expect(row2[0]).toBe('Outlet ID');
+    expect(row2[1]).toBe('Outlet Name');
+    expect(row2[2]).toBe('Outlet Type');
+    expect(row2[3]).toBe('Month Target');
   });
 });

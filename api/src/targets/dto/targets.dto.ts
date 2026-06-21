@@ -86,6 +86,20 @@ export class ListTargetsQueryDto {
   outletCode?: string;
 }
 
+// ─── Achievement template download ──────────────────────────────────────────────
+
+export class AchievementTemplateQueryDto {
+  /**
+   * Single YYYY-MM month for the achievement template, e.g. "2026-06".
+   * The achievement (sales) upload is always for one historical month.
+   */
+  @IsString()
+  @Matches(/^\d{4}-(0[1-9]|1[0-2])$/, {
+    message: 'month must be a YYYY-MM value (month 01–12)',
+  })
+  month!: string;
+}
+
 // ─── Achievement upload ────────────────────────────────────────────────────────
 
 export class UploadAchievementsQueryDto {
