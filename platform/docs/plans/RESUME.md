@@ -57,10 +57,15 @@ A-2a F5, A-10 F1/F3, the dry-run 5s-tx-timeout, and the OTP→staging-infra casc
   FAKE, so partner-login + redemption-OTP UAT need real numbers set first. Commit `ea22776` (login fix) + a persistence
   commit. **Local E2E harness unaffected** (local FIXED_OTP); the **staging** harness now needs the deferred real-OTP
   read-back endpoint (→ P8).
-- **⚠️ PROD recommendation CORRECTED (2026-06-20):** do NOT migrate `gifsy_prod`'s DB in isolation — prod runs OLD code that
-  expects the OLD schema, so a DB-only migrate breaks it (code↔schema mismatch). The right fix is the **FULL cutover** as one
-  coordinated gated op (deploy current code `develop`→`main` + migrate the empty DB + remove the worker alias), **AFTER**
-  staging UAT. Owner wants prod **empty** (greenfield) — that's the cutover's data-lifecycle, not a standalone step.
+- **🚀 PROD CUTOVER DONE (2026-06-20) — prod is LIVE on current code, empty schema. Record: `runbooks/PROD-CUTOVER-RECORD.md`.**
+  Executed as one coordinated gated op (each step audited): backup → wire prod auto-migrate into `deploy.yml` → **recreate
+  `gifsy_prod` empty** (double-guarded DROP SCHEMA; reconciles P3005; 0 users so 0 data lost) → apply baseline (verified 72
+  tables, World-A gone) → add `deoleoloyalty.gifsy.in` to `CORS_ORIGINS` → merge `develop`→`main` (FF, 193 commits) → prod
+  deploy approved at the GitHub gate (`gifsy-api`+`gifsy-frontend` on `b3ab2e0`) → **remove the worker host-alias** (current
+  code resolves `deoleoloyalty.gifsy.in`→deoleo natively; `wrangler deploy`). Verified: login page 200, FE→backend routing
+  400 (proves `NEXT_PUBLIC_API_URL`=api.gifsy.in), `api.gifsy.in/health` 200. Pre-deploy Opus audit = SAFE-TO-APPROVE.
+  ⚠️ **Prod is intentionally EMPTY (0 users/clients)** — real users can't log in until the **real Deoleo master data** is
+  loaded (THE next go-live blocker). A-5/A-8/A-9 (cutover) + D1/D2 are DONE & live.
 - **A-2a synchronous OTP** — shared `api/src/notifications/msg91.service.ts`; partner (`rewards:720`) + sales-assisted
   (`:437`) OTP send directly with send-failure cleanup (cancel order + clear OTP + 503); auth delegates to it; **+ a 10s
   MSG91 fetch timeout**. Audit SHIP; F5 (cleanup masking the 503) fixed. Confirmation SMS deferred.
