@@ -12,10 +12,19 @@ Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic). Last v
 ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 The whole P0–P6 + P0.6 platform is built, audited, and **now serving in prod** (`gifsy-api`+`gifsy-frontend` on
 `b3ab2e0`, at `https://deoleoloyalty.gifsy.in`). The prod cutover is DONE; staging works end-to-end with REAL MSG91 OTP.
-**We are in the GO-LIVE phase now — NOT building new features.** Launch-readiness, in order:
-**(1) ✅ gap-#57 (b/c/e) WIRED + #78 tenant-provisioning DONE (2026-06-21, tasks #77+#78; 2 audits + E2E 290/0/9) — (a) sub-dashboards DEFERRED post-launch**, (2) load real Deoleo data into empty prod (**no longer gated by #78**), (3) owner UAT, (4) owner ops. **E2E coverage (Waves 0–4 + the #77/#78 slice, 290 green) is DONE** — and it
-CAUGHT gap #57. **Read FIRST:** `DEOLEO-GO-LIVE-BUNDLE.md` · `GO-LIVE-READINESS.md` · `docs/spec/gap-register.md` (#57) ·
-`runbooks/PROD-CUTOVER-RECORD.md` · `E2E-COVERAGE-PLAN.md` · `MIGRATIONS.md` · `ENVIRONMENTS.md`.
+**We are in the GO-LIVE phase now — preparing for owner UAT on STAGING.** Launch-readiness:
+**(1) ✅ gap-#57 (b/c/e) + #78 + GIFSY operator login (#59) DONE & DEPLOYED to staging (`fc5de23`, 2026-06-21).** ⚠️ A whole
+day's work had silently NOT deployed (staging-deploy-freeze #60 — CI `test` red on 2 stale specs skipped all `needs: test`
+deploys); FIXED → FE+API now serving the current build (verified image SHA + surfaces 200). **(2) 🔴 UAT IS PENDING A DEFECT
+TRIAGE:** the UAT-plan build (4 module + 3 hardening + 3 Excel agents) found a **defect register** (see `gap-register.md`
+"UAT Hardening Defect Register" + the Excel round-trip block) — incl. **real money-integrity + broken Excel round-trips**
+(achievement upload may store 0 rows; final-targets/outlet-master re-upload broken; double-payout on INR cancel). **NONE
+fixed yet.** Owner money rule: an **INR redemption can't be cancelled once OTP-confirmed — reversal ONLY on transfer
+FAILURE.** (3) load real Deoleo data into empty prod (no longer gated by #78), (4) owner UAT, (5) owner ops.
+**UAT creds (staging, real SMS OTP):** GIFSY operator `uat.app.gifsy.in` / **9830011252** · deoleo admin
+`uat.deoleoloyalty.gifsy.in` / **6289864191** · partner `7795096288` · sales `9875436349`. **E2E 290 green (local).
+Read FIRST:** `DEOLEO-GO-LIVE-BUNDLE.md` · `GO-LIVE-READINESS.md` · `docs/spec/gap-register.md` (#57/#59/#60 + Defect Register) ·
+`runbooks/PROD-CUTOVER-RECORD.md` · `MIGRATIONS.md` · `ENVIRONMENTS.md` · [[staging-deploy-gate]].
 
 ## ✅ What is LIVE / DONE
 - **The platform** — P0–P6 (onboarding/KYC, programs/targets/enrollment, wallet/points/rewards, finance/credits/
@@ -117,7 +126,12 @@ realistic data — `tsc`/unit-tests/audits are necessary, NEVER sufficient. ⚠�
 had NEVER been exercised end-to-end, so 4 stacked login bugs sat latent until the owner logged in. Run real flows
 EARLY — don't trust "it's deployed" = "it works".** The gate (run it YOURSELF): `cd api && npx tsc -p
 tsconfig.build.json --noEmit` (0) + `npx jest <area>`; FE: `cd platform && npx tsc --noEmit` + `npx vitest run <area>`
-(platform = **vitest**) + `node scripts/check-doc-consistency.mjs` GREEN. Sweep docs (RESUME/bundle/gap-register/
+(platform = **vitest**) + `node scripts/check-doc-consistency.mjs` GREEN. **🚦 BEFORE EVERY PUSH run the FULL suites — `cd
+api && npx jest --no-coverage` (N/N, 0 failed) + `cd platform && npx vitest run` — exactly what CI's `test` job gates the
+DEPLOYS on. A red full suite SILENTLY SKIPS all staging deploys (`needs: test`); it froze staging a whole day 2026-06-21 on
+2 stale specs while my targeted gate stayed green. And "pushed" ≠ "deployed" — verify the serving Cloud Run image SHA
+ends in `staging-<short-sha>` (`gcloud run services describe gifsy-frontend-staging|gifsy-api-staging`) + curl the surface
+before claiming UAT-ready. See [[staging-deploy-gate]].** Sweep docs (RESUME/bundle/gap-register/
 reconcile/memory) after every task (`DOC-MAINTENANCE.md`).
 
 ## Constraints (must hold)
