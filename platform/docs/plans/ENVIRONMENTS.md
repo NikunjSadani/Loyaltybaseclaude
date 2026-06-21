@@ -15,6 +15,7 @@
 - **Local dev is the only isolated DB instance.** Staging + prod share one Cloud SQL instance (different databases). `gifsy_dev` is on its own instance.
 - **Staging auto-deploys from every `develop` push.** As of 2026-06-19 our P0.5/P0.6 work is **6 commits AHEAD of `origin/develop` (unpushed)** → **staging does NOT have it yet**; staging is at the last-pushed state. Pushing `develop` deploys everything to staging.
 - **Prod is never pushed by us** (`main`, approval-gated). Never point dev at prod; never `prisma migrate dev` (resets `gifsy_dev`).
+- **DB migrations (2026-06-20):** schema applies from one squashed Prisma **baseline** via `prisma migrate deploy` run as an **in-VPC Cloud Run Job** (the shared instance is private-IP). **Staging auto-migrates** on every `develop` push (`gifsy-migrate-staging` in `deploy-staging.yml`, before the new revision serves); **prod is gated** (`gifsy-migrate` job + a one-time P3005 baseline reconcile). `gifsy_dev` is unchanged — db-push / surgical-SQL via the proxy. Full model: [`MIGRATIONS.md`](MIGRATIONS.md).
 
 ## What data shows where
 
@@ -23,15 +24,15 @@
 | Environment | Data in its DB |
 |---|---|
 | Local dev / `gifsy_dev` | the seeded test set (`npx prisma db seed`): gifsy admin + deoleo admin/partner/sales users, 2 partners+wallets+outlets, sales hierarchy, 2 KYC, rewards, tickets created during testing |
-| Staging / `gifsy_staging` | its own data — **state currently unknown / un-inspected**; treat as a separate dataset (likely sparse/old). Seed/verify before relying on it |
-| Prod / `gifsy_prod` | real customer data — untouched |
+| Staging / `gifsy_staging` | **seeded 2026-06-20** (full deoleo + clientb demo set via the seed job). Real-OTP UAT phones set: deoleo admin `9830011252`, partner+outlet `7795096288`, sales `9875436349` (the other seeded numbers are fake → no real SMS) |
+| Prod / `gifsy_prod` | **confirmed EMPTY — 0 users (2026-06-20)** — on the stale June-6 schema (has `otp_codes` + dead World-A `tier_configs`, MISSING P4–P6 tables + the `clients` table; 6 recorded migrations → P3005 on the baseline). Greenfield → recreated empty + migrated at the gated cutover |
 
 **Visibility by role (same in all envs):** GIFSY operator → cross-tenant (all tenants) · CLIENT_ADMIN / MIS_USER → their whole tenant · sales → their assigned outlets/team · partner → only their own.
 
 ## Local-vs-staging differences that break despite identical code
 
 Comprehensive testing is done on **local dev** (fast iteration); **staging is the final pre-prod confirmation** because these differ:
-- **`FIXED_OTP` — reality (corrected 2026-06-20):** the staging Cloud Run service **currently has `FIXED_OTP=123456` set** (for UAT convenience — log in with OTP `123456`, no SMS). The original intent was staging = real MSG91; the **real-OTP dress rehearsal is a deliberate later flip** (`FIXED_OTP` removed on staging → owner retries with a real phone). Until then staging login uses `123456`, like local. Prod has **no** `FIXED_OTP` (real MSG91 only).
+- **`FIXED_OTP` — REMOVED from staging (2026-06-20):** staging now uses **real MSG91 OTP** (the original design intent), so **only REAL phone numbers receive OTPs**; `FIXED_OTP` is also out of `deploy-staging.yml` (persistent across deploys). Local dev still uses `FIXED_OTP=123456`. Prod has **no** `FIXED_OTP` (real MSG91 only). ⚠️ MSG91 secrets must be saved **without a UTF-8 BOM** — a BOM on `MSG91_AUTH_KEY` 500'd OTP (fixed: secret re-saved + defensive `.trim()` in `msg91.service`).
 - **`resolveClientId(host)`**: `localhost`→`deoleo` locally; real subdomains on staging → different tenant resolution. *(Exactly why the GIFSY-login bug #39 can't be fully exercised locally.)*
 - **Secrets/config** (JWT, GCS, `DATABASE_URL` via Cloud SQL socket) come from Secret Manager on staging vs `.env` locally.
 - **Build**: local `next dev` (HMR) vs the `output:standalone` production Docker build on staging.

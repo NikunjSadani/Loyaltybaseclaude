@@ -39,6 +39,15 @@ Prod is `gifsy-db` (database `gifsy_prod`), **private-IP only**. Dev migrations/
 `npx prisma db push` (idempotent) — or a `SELECT 1` against `127.0.0.1:5433/gifsy_dev`.
 
 ## Applying schema changes — do NOT use `prisma migrate dev`
+
+> **🔄 Scope note (2026-06-20): this is the DEV-instance loop only.** `gifsy_dev` is a separate **public-IP**
+> instance you reach via the proxy, and the db-push / surgical-SQL guidance below still applies to it.
+> **Staging and prod now use a different mechanism** — one squashed Prisma **baseline**
+> (`api/prisma/migrations/00000000000000_baseline/`) applied via `prisma migrate deploy` run as an **in-VPC
+> Cloud Run Job** (staging auto-migrates on `develop`; prod is gated). See [`MIGRATIONS.md`](MIGRATIONS.md).
+> Note also: `api/prisma/migrations-manual/*.sql` is now **LEGACY** (the pre-baseline source record) — do not
+> add to it going forward.
+
 This DB is **db-push / manual-SQL managed**: there is **no `_prisma_migrations` table** and no
 Prisma migration-folder history (`prisma/migrations/` holds only loose `*.sql` records).
 `npx prisma migrate dev` would see the populated schema with no migration history, detect "drift",

@@ -121,6 +121,13 @@ confirm `current_database='gifsy_dev'`; `ALTER TYPE ADD VALUE` outside a txn.
 
 ## §4 · Build record — 6.0 money-unit standardisation ✅ (2026-06-18)
 
+> **🔄 Migration-mechanism note (2026-06-20):** every `migrations-manual/P6_*.sql` file referenced in §4–§6
+> (`P6_credits_paise_standardisation.sql`, `P6_reversal_shortfall.sql`, `P6_invoicing.sql`) is now **LEGACY** —
+> the source record of the P6 dev-DB deltas, now folded into the single squashed baseline
+> (`api/prisma/migrations/00000000000000_baseline/`). The schema/data in this build record is unchanged; only
+> the apply-mechanism moved (staging/prod = baseline + `migrate deploy` via the in-VPC job). Do not add to
+> `migrations-manual/`. See [`../MIGRATIONS.md`](../MIGRATIONS.md).
+
 **Decision evolved during the owner review + an independent audit:** whole-rupees was rejected
 (tax produces sub-rupee amounts); **integer paise** chosen; the audit then upgraded `Int`→**`BigInt`**
 (int4 max = ₹21.47M would overflow on large batch totals/fund balances). Result: **all money is

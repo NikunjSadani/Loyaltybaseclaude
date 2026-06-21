@@ -530,15 +530,21 @@ deploy-validated; the launch parts (9.7–9.9) gate the first real tenant.
 > (a) CI adopts the **differential gate** ("no NEW reds vs the snapshot") or (b) the baseline reds are
 > quarantined/skipped in CI. Reconcile in 9.1. (`main`→prod also means a push to main triggers the prod
 > pipeline — currently blocked only by the failing tests + the approval gate.)
+>
+> **🔄 DB-migration model (2026-06-20):** schema now applies via `prisma migrate deploy` run as an **in-VPC
+> Cloud Run Job** (Prisma history squashed to one baseline; the 6 old migrations archived). **Staging
+> auto-migrates** on every `develop` push (`gifsy-migrate-staging` in `deploy-staging.yml`); **prod is gated**
+> (`gifsy-migrate` job + a one-time P3005 baseline reconcile). The old "no migration step in the pipeline" /
+> diff-SQL framing in 9.3/9.5 below is superseded. Canonical model: [`MIGRATIONS.md`](MIGRATIONS.md).
 
 | Task | What | Key area | Gate |
 |---|---|---|---|
 | 9.0 | Reconcile EXISTING infra (`.github/workflows/*`, `terraform/*`, `Dockerfile`, Cloud SQL, Secret Manager) vs target; list real gaps. **Note:** after **Phase S**, deploy is **backend (`gifsy-api`, owns DB) + thin frontend (`gifsy-frontend`, stateless)** — one canonical schema in `api/prisma/`; the backend *is* the `api/` dir (its World-A domain deleted, not the dir) (Gaps #30/#31 resolved). Most infra wiring moves into Phase S (S7); 9.x verifies/finishes it. | `terraform/`, `.github/`, backend `prisma/schema.prisma` | — |
 | 9.1 | **Fix the CI gate** (`ci.yml` EXISTS): its `npm test` all-pass requirement is incompatible with the red-by-design TDD baseline → switch CI to the **differential gate** (no NEW reds vs `baseline-red-snapshot.txt`) or quarantine the baseline reds, so CI can be green and deploys can proceed | `.github/workflows/ci.yml` | CI green-able |
 | 9.2 | **Environments** (`deploy-staging.yml` + terraform EXIST): verify staging is stood up & mirrors prod; confirm dev→staging→prod promotion | `terraform/`, Cloud Run | deploys |
-| 9.3 | **CD** (`deploy.yml`/`deploy-staging.yml` EXIST): verify the `main`→prod (approval-gated) + `develop`→staging flows end-to-end; **add the DB-migration step** (none in the pipeline today — see 9.5) | `.github/workflows/*` | deploy run |
+| 9.3 | **CD** (`deploy.yml`/`deploy-staging.yml` EXIST): verify the `main`→prod (approval-gated) + `develop`→staging flows end-to-end. **DB-migration step (2026-06-20):** the migration model was overhauled — schema now applies via `prisma migrate deploy` run as an **in-VPC Cloud Run Job** (the instance is private-IP). **Staging is now auto-migrated** on every `develop` push (`gifsy-migrate-staging` job wired into `deploy-staging.yml`) — the earlier "no migration step in the pipeline" is now FALSE for staging. **Prod stays gated** (`gifsy-migrate` job, not auto-wired in `deploy.yml`; see 9.5). Canonical model: [`MIGRATIONS.md`](MIGRATIONS.md). | `.github/workflows/*` | deploy run |
 | 9.4 | **Secrets/env per environment**: `JWT_SECRET`, MSG91 keys, `DATABASE_URL`, `DEMO_MODE=false` in prod, RBAC flag — via Secret Manager; **never `DEMO_MODE=true` in prod** | Secret Manager | audit |
-| 9.5 | **Prod DB migration process** (prod is private-IP): the diff-SQL / `db push` runbook + a `_prisma_migrations` strategy if adopting Prisma migrate; apply P0–P8 schema to prod; backups + PITR enabled | `prisma/`, Cloud SQL | dry-run on staging |
+| 9.5 | **Prod DB migration process** (prod is private-IP): **UPDATED 2026-06-20 — the model is now baseline + `migrate deploy` via the in-VPC `gifsy-migrate` job**, not diff-SQL/`db push`. The Prisma history was squashed to one clean baseline (`api/prisma/migrations/00000000000000_baseline/`; the 6 old migrations → `migrations-archive/`). Prod first-apply needs a **one-time P3005 baseline reconcile** (clear the stale `_prisma_migrations` rows or `migrate resolve --applied`, greenfield → clean recreate acceptable). Backups + PITR enabled first. Canonical model: [`MIGRATIONS.md`](MIGRATIONS.md); procedure: [`runbooks/PROD-DB-MIGRATION.md`](runbooks/PROD-DB-MIGRATION.md) (Step 1.5). | `prisma/`, Cloud SQL | dry-run on staging |
 | 9.6 | **Observability/alerting** beyond logs (8.4): uptime checks, error-rate + latency alerts, DB metrics; **RLS/tenant-isolation hardening** finalize (8.6, #23) | Cloud Monitoring, `lib/prisma` | alerts fire |
 | 9.7 | **Security hardening**: rate limiting, security headers, dependency/secret scanning, rotate prod creds | proxy/infra | review |
 | 9.8 | **RBAC enablement** per `RBAC-ENABLEMENT.md` (validate on staging → flip `RBAC_ENFORCEMENT` in prod) | env flag | staging validation |

@@ -81,6 +81,12 @@ the 5.3 PR.
 
 ## §3 · Schema delta (one additive, human-gated migration)
 
+> **🔄 Migration-mechanism note (2026-06-20):** `migrations-manual/P5_*.sql` is now **LEGACY** — the source
+> record of the P5 dev-DB delta, now folded into the squashed baseline
+> (`api/prisma/migrations/00000000000000_baseline/`). Schema below is unchanged; only the apply-mechanism
+> moved (baseline + `migrate deploy` via the in-VPC job for staging/prod). Do not add to `migrations-manual/`.
+> See [`../MIGRATIONS.md`](../MIGRATIONS.md).
+
 `api/prisma/migrations-manual/P5_wallet_rewards_additive.sql` — guarded
 `current_database()='gifsy_dev'`, idempotent, **additive only**:
 - `OtpPurpose` **+`REDEMPTION_CONFIRM`** (matches spec WF4 + the unported platform routes).

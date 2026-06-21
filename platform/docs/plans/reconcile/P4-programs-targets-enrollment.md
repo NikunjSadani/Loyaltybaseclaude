@@ -64,6 +64,12 @@ are updated as part of 4.0.
 
 ## 3. Schema design locked in 4.0 (ONE additive migration, independently audited, then owner-gated)
 
+> **🔄 Migration-mechanism note (2026-06-20):** the `migrations-manual/P4_*.sql` files referenced in this
+> section are now **LEGACY** — they were the *source record* of the P4 dev-DB changes, which are now folded
+> into the single squashed baseline (`api/prisma/migrations/00000000000000_baseline/`). The schema described
+> here is correct and unchanged; only the apply-mechanism moved. Do not add to `migrations-manual/`. See
+> [`../MIGRATIONS.md`](../MIGRATIONS.md). (The build history below is left as-is for the record.)
+
 > ✅ **APPLIED to `gifsy_dev` 2026-06-17** — `api/prisma/migrations-manual/P4_targets_enrollment_additive.sql`
 > (independently audited PASS; nits reconciled). `current_database=gifsy_dev` confirmed pre-apply; client
 > regenerated; backend `tsc` green; all 4 tables + 2 columns verified present. (Pre-apply: a prod-pointing
