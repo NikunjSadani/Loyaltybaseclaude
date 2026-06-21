@@ -53,7 +53,18 @@ differences — the harness must not assume `FIXED_OTP`/`localhost` semantics.)
 - [x] **Custom domain (Deoleo = `deoleoloyalty.gifsy.in`): ✅ LIVE (2026-06-20).** ⚠️ **The edge is a Cloudflare Worker, NOT a GCP load balancer** — `terraform/load-balancer.tf` was **archived 2026-06-13** (LB destroyed; all traffic routes through `cloudflare-worker/`). Done: a Cloudflare **Worker Custom Domain** (managed DNS + SSL) + the branded-domain→slug map (`5de8aa9`, `CLIENT_REGISTRY.domains`) + the login `x-forwarded-host` fix (`37e54f9`). The Worker sets `x-forwarded-host` (it rewrites `Host` to the `.run.app` origin) and the proxy/login read that — so there is **no "preserve Host" requirement** (that earlier note was wrong). **As of the 2026-06-20 cutover the temporary host-alias was REMOVED — prod runs current code and resolves the branded domain natively** (login 200; see [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md)).
 - [ ] **Excel round-trips** work (download→fill→upload) where applicable (#44). *(Small fast-follow — confirm Deoleo doesn't need final-target re-upload at launch.)*
 - [~] **Observability** baseline (logs/metrics/alerts) (#27 → P8.4) — at least error visibility before prod. *(Structured logging → Cloud Logging + `/health` 200 done; **≥1 Cloud Monitoring alert still OPEN** — needs owner alert email.)*
-- [ ] **The E2E matrix is 100% green** (every `DATA-VISIBILITY.md` row covered, no OPEN cells). **⚠️ NOT yet 100% — partner slice proven; full role×page coverage is incomplete and remains OPEN.**
+- [ ] **The E2E matrix is 100% green** (every `DATA-VISIBILITY.md` row covered, no OPEN cells). **⚠️ NOT yet 100% — partner slice proven; full role×page coverage is incomplete and remains OPEN.** Plan to close it: [`E2E-COVERAGE-PLAN.md`](E2E-COVERAGE-PLAN.md) (owner directive: cover the app **before** UAT so bugs surface in CI, not UAT).
+
+### 3.1 Owner-ops before launch (owner-only — I prepare the exact steps; not blockers to UAT, needed before real customers)
+- [ ] **Cloud Monitoring alert email** — an automated alert on error-rate / uptime so a prod problem pages the owner (today: logs exist, but nothing actively notifies). Needs the owner's GCP account + email.
+- [ ] **Automated backups + PITR** on the shared `gifsy-db` instance — a one-off backup was taken at the cutover, but **ongoing** daily-backup + point-in-time-recovery is OFF. Turn it on before real data lands.
+- [ ] **Rotate prod-only secrets** — generate fresh production-only values (DB password, `JWT_SECRET`, MSG91 keys) so nothing dev-era is reused. (Involves real credential values → owner runs it; I give the exact `gcloud` commands.) Task #74.
+
+### 3.2 Other known gaps (track; mostly non-blocking)
+- **Staging E2E can't run there now** — `FIXED_OTP` was removed from staging (real MSG91), so a staging harness run needs the test-only OTP read-back endpoint (unbuilt, → P8) **or** temporarily re-adding `FIXED_OTP`. Local runs are unaffected.
+- **Staging shares the prod `gifsy-db` instance** (different DB names) — any DB op double-guards the DB name.
+- **Prod deploy health-check is advisory** (the deploy doesn't fail on a bad `/health`) — the migrate `--wait` step is the real gate; making `/health` a hard post-deploy gate is the A-4 residual.
+- **Redis** — `REDIS_URL` is bound but OTP is stored in the DB and the throttler is in-memory (per-instance, not global across Cloud Run instances). Verify whether Redis is actually used/needed; minor hardening, not a blocker.
 
 ## 4. Who does what
 - **Owner:** answer the 🟦 product decisions in `DATA-VISIBILITY.md §3` (who-sees-what); confirm when to run E2E against staging + staging access.
