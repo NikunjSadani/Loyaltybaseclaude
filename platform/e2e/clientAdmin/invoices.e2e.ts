@@ -33,7 +33,7 @@ function assertNoListShapeCrash(errors: string[]): void {
 }
 
 test.describe('@clientAdmin visibility invoices (B2)', () => {
-  test('renders the list header + the three summary cards at ₹0.00 (empty data)', async ({ page }) => {
+  test('renders the list header + the three summary cards', async ({ page }) => {
     const errors = collectPageErrors(page);
     await page.goto('/admin/invoices');
     await expect(page).toHaveURL(/\/admin\/invoices/);
@@ -42,24 +42,25 @@ test.describe('@clientAdmin visibility invoices (B2)', () => {
     await expect(page.getByRole('heading', { name: 'Visibility Invoices' })).toBeVisible();
 
     // The three summary cards. Labels are CSS-uppercased ("uppercase" class), so match case-insensitively.
+    // Data-agnostic: the cards render whether the list is empty OR populated (the W6 invoice-generate
+    // write spec may have created rows for a period), so we no longer assert a ₹0.00 empty total.
     await expect(page.getByText(/^Base Payout$/i)).toBeVisible();
     await expect(page.getByText(/^Total GST$/i)).toBeVisible();
     await expect(page.getByText(/^Invoice Total$/i)).toBeVisible();
 
-    // Empty data → every card total is ₹0.00 (formatINR(0)). At least one ₹0.00 value renders.
-    await expect(page.getByText('₹0.00').first()).toBeVisible();
-
     assertNoListShapeCrash(errors);
   });
 
-  test('shows the empty state (NOT a crash) — the list-shape regression guard', async ({ page }) => {
+  test('does not crash on the list shape — the #44 regression guard (data-agnostic)', async ({ page }) => {
     const errors = collectPageErrors(page);
     await page.goto('/admin/invoices');
 
-    // Positive render proof: the success branch ran and rendered the empty table state. If the page had
-    // thrown "map is not a function" it would either crash out or fall into the error early-return, and
-    // this text would be absent.
-    await expect(page.getByText('No invoices match your filters')).toBeVisible();
+    // The success branch ran (heading mounted, not the error early-return / infinite spinner) AND the
+    // summary total — which is reduced OVER the parsed invoice list — rendered. A "map is not a
+    // function" list-shape regression would crash that reduce before this point. This holds whether
+    // the list is empty or already populated, so it survives the W6 write spec creating invoices.
+    await expect(page.getByRole('heading', { name: 'Visibility Invoices' })).toBeVisible();
+    await expect(page.getByText(/^Invoice Total$/i)).toBeVisible();
 
     assertNoListShapeCrash(errors);
   });

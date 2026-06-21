@@ -285,6 +285,28 @@ Shared scaffolding + seed/role gaps. Do NOT parallelise within this wave (it edi
 - Effort: **M**. Output: all later waves can run without touching shared files.
 
 ### Wave 1 — Write-persistence, money/auth/irreversible first (parallel; one file per flow)
+> **✅ DONE + runtime-verified (2026-06-21) — full suite 83/83 green, 0 skipped.** Built by 4 parallel
+> executors (S1 admin-finance, S2 KYC two-stage, S3 assisted-redeem, S4n negative/scoping matrix), then
+> independently audited. The audit caught a real **money-path DEFECT** and several weak-spots, all closed:
+> - **W9 was built against the WRONG rail** (credits `confirmBatch`, zero-row batch). The #42 guard lives on
+>   `payouts.processBatch` (INR disbursement). FIX: added `gifsy/payout-process-write.e2e.ts` — a GIFSY
+>   **assume-tenant** spec that processes a seeded DRAFT `PayoutBatch` → SUBMITTED + INITIATED (persists),
+>   re-process → **flags 0 (no double-disbursement)**, and a COMPLETED batch → 400 (claim guard). Seeded the
+>   payout pipeline (FundLedger + DRAFT batch `seed-pb-1` + PENDING txn + COMPLETED `seed-pb-2`, seed §3.10).
+>   The original `credits-payout-write.e2e.ts` is KEPT — it covers the separate credits-confirm rail.
+> - **W5 stage-1 was always-skipped** (no `PENDING_SO_APPROVAL` seeded). FIX: seeded `seed-kyc-4`
+>   (PENDING_SO_APPROVAL for CP001, seed §3.9) → `sales/kyc-approve-write.e2e.ts` now RUNS (first-approve →
+>   PENDING_GIFSY, persists). Stage-2 = `gifsy/kyc-verify-write.e2e.ts` (single-field verify stays PENDING_GIFSY).
+> - **W6** strengthened from "list non-empty" to a by-outlet (O003) filtered read.
+> - **Gate fixes (test-side, no product bugs):** hardened `helpers/login.ts` OTP entry (keystroke, not per-box
+>   `.fill()` — was dropping a digit → salesManager couldn't log in); made `clientAdmin/invoices.e2e.ts`
+>   data-agnostic (W6 now populates invoices); rewrote `clientbAdmin/cross-tenant.e2e.ts` to the REAL
+>   endpoints (`/api/{kyc,tickets,schemes}`, `/api/visibility/submissions`; the `/api/admin/*` it used are 404)
+>   — isolation confirmed live, zero deoleo leakage.
+> - **Known residual weak-spot (tracked, minor):** the clientb `/api/visibility/submissions` leak check is only
+>   meaningful at suite level (the partner visibility-write spec creates a deoleo submission earlier in the run);
+>   on the seed alone there are no deoleo submissions to leak. Harden later by seeding a deoleo VisibilitySubmission.
+
 Highest bug-risk; each is an independent file.
 - `sales/assisted-redemption-write.e2e.ts` (W4) — assisted redeem for CP001's outlet → debit persists. **M**
 - `gifsy/kyc-approve-write.e2e.ts` + `sales/kyc-approve-write.e2e.ts` (W5, two-stage; two files, run in

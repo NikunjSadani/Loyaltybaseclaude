@@ -103,6 +103,14 @@ Add a role's session in `setup/auth.setup.ts` (`SESSION_ROLES`), add a project i
 `playwright.config.ts`, and add `e2e/<role>/*.e2e.ts` for each DATA-VISIBILITY row. A row is "done"
 only when its E2E test passes against real data.
 
+## Status (2026-06-21): GREEN (83) — Wave 0 + Wave 1 landed (write-flows + negative matrix)
+**Update:** the E2E-COVERAGE-PLAN Wave 0 (MIS/salesManager roles + seed) and Wave 1 (money/auth write-
+persistence + the negative/scoping matrix) are DONE + runtime-verified — 83/83 green. New write-flow specs:
+sales-assisted redemption (money), the REAL `payouts.processBatch` INR double-process guard (#42, via a GIFSY
+assume-tenant spec), credits-confirm, invoice-generate, scheme-enroll, KYC first-approve→gifsy-verify (two
+stage). Cross-tenant isolation asserted both directions on the real list endpoints. Waves 2–4 (read coverage +
+MIS column + remaining gifsy) still open — see `docs/plans/E2E-COVERAGE-PLAN.md`. Older status below ⤵
+
 ## Status (2026-06-20): GREEN (59) for the slices it covers — NOT the full matrix
 - Covered: #40 fabricated identity, #41 FE role guards, Q1 payouts, #47 admin KPIs, #52 cross-tenant
   (both dirs), #39 GIFSY login, A1/A2 gifsy oversight+switcher, the partner redemption MONEY path +

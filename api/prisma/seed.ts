@@ -34,6 +34,9 @@ import {
   EntityType,
   GstRegistrationType,
   PayoutMode,
+  PayoutStatus,
+  PayoutBatchStatus,
+  FundLedgerType,
   RewardCatalogStatus,
   VisibilityProgramStatus,
   TicketCategory,
@@ -751,6 +754,88 @@ async function seedDeoleoDemo() {
     },
   });
   console.log('   ✓ Scheme [DEMO-VIS] (ACTIVE) — sales-assisted enrollment target');
+
+  // 3.9 KYC awaiting SO first-approval (W5 stage-1 E2E target). The SO (seed-su-1) is assigned to
+  // CP001's outlet; first-approve gates on role+status, so a deoleo PENDING_SO_APPROVAL row lets the
+  // sales first-approve flow run (not just skip). The update path RESETS the status so a re-seed
+  // re-arms the test after a prior run advanced it to PENDING_GIFSY.
+  const cp1 = createdPartners[0];
+  if (cp1) {
+    await prisma.kycSubmission.upsert({
+      where: { id: 'seed-kyc-4' },
+      update: { status: KycStatus.PENDING_SO_APPROVAL },
+      create: {
+        id: 'seed-kyc-4',
+        userId: cp1.userId,
+        partnerId: cp1.partnerId,
+        status: KycStatus.PENDING_SO_APPROVAL,
+        submittedAt: new Date(),
+      },
+    });
+    console.log('   ✓ KycSubmission seed-kyc-4 (PENDING_SO_APPROVAL) — sales first-approve target');
+  }
+
+  // 3.10 Payout pipeline (W9 — the REAL INR-disbursement money path, #42). A FundLedger receipt
+  // (sufficient balance), a DRAFT PayoutBatch with one PENDING transaction for CP001 (which has a
+  // PAN, required by processBatch validation), and a COMPLETED batch to exercise the claim-guard
+  // rejection. The update paths RESET status (batch→DRAFT, txn→PENDING) so a re-seed re-arms the
+  // process test after a prior run flipped them to SUBMITTED/INITIATED.
+  await prisma.fundLedger.upsert({
+    where: { id: 'seed-fl-1' },
+    update: { balancePaise: 10_000_000n },
+    create: {
+      id: 'seed-fl-1',
+      clientId: DEOLEO_CLIENT_ID,
+      ledgerType: FundLedgerType.RECEIPT,
+      amountPaise: 10_000_000n,
+      balancePaise: 10_000_000n, // ₹1,00,000 — covers the seeded payout
+      description: 'Demo seed fund receipt (payout coverage)',
+    },
+  });
+  await prisma.payoutBatch.upsert({
+    where: { id: 'seed-pb-1' },
+    update: { status: PayoutBatchStatus.DRAFT, processedAt: null },
+    create: {
+      id: 'seed-pb-1',
+      clientId: DEOLEO_CLIENT_ID,
+      batchCode: 'PB-2026-05',
+      status: PayoutBatchStatus.DRAFT,
+      payoutMode: PayoutMode.BANK_TRANSFER,
+      totalAmountPaise: 500_000n,
+      transactionCount: 1,
+    },
+  });
+  await prisma.payoutTransaction.upsert({
+    where: { id: 'seed-pt-1' },
+    update: { status: PayoutStatus.PENDING, batchId: 'seed-pb-1', initiatedAt: null },
+    create: {
+      id: 'seed-pt-1',
+      batchId: 'seed-pb-1',
+      partnerId: cp1?.partnerId ?? 'seed-cp-1',
+      payoutMode: PayoutMode.BANK_TRANSFER,
+      status: PayoutStatus.PENDING,
+      amountPaise: 500_000n, // ₹5,000
+      netAmountPaise: 500_000n,
+      beneficiaryName: 'Ravi Kumar',
+      bankAccountNumber: '000111222333',
+      ifscCode: 'HDFC0000001',
+      bankName: 'HDFC Bank',
+    },
+  });
+  await prisma.payoutBatch.upsert({
+    where: { id: 'seed-pb-2' },
+    update: { status: PayoutBatchStatus.COMPLETED },
+    create: {
+      id: 'seed-pb-2',
+      clientId: DEOLEO_CLIENT_ID,
+      batchCode: 'PB-2026-04',
+      status: PayoutBatchStatus.COMPLETED, // non-processable → claim-guard rejection target
+      payoutMode: PayoutMode.BANK_TRANSFER,
+      totalAmountPaise: 0n,
+      transactionCount: 0,
+    },
+  });
+  console.log('   ✓ Payout pipeline: FundLedger + DRAFT PayoutBatch PB-2026-05 (1 PENDING txn) + COMPLETED PB-2026-04');
 
   console.log('   ✅ deoleo demo dataset ready.');
 }

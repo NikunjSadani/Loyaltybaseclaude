@@ -48,16 +48,15 @@ export async function login(page: Page, role: RoleDef): Promise<void> {
   const otp = await resolveOtp(role);
   const digits = otp.split('');
   expect(digits).toHaveLength(6);
-  // The 6 OTP boxes auto-advance focus on input, which races with a per-box .fill():
-  // a single digit can silently land in the wrong box or get dropped (→ only 5 filled →
-  // auto-submit never fires → no redirect → timeout). Refill any box whose value drifted
-  // and assert all 6 hold their digit BEFORE waiting on the redirect.
+  // The 6 OTP boxes auto-advance focus on input. A per-box .fill() sets the value directly and
+  // races with that focus shift — under load a digit can be dropped (observed: box 2 left empty
+  // while 1,3-6 fill), so auto-submit never fires → redirect timeout. Instead, clear all boxes and
+  // TYPE the code as real keystrokes from the first box: the component's auto-advance distributes
+  // one digit per box exactly as it does for a human. Retry the whole sequence if any box drifts.
   await expect(async () => {
-    for (let i = 0; i < 6; i++) {
-      if ((await otpBoxes.nth(i).inputValue()) !== digits[i]) {
-        await otpBoxes.nth(i).fill(digits[i]);
-      }
-    }
+    for (let i = 0; i < 6; i++) await otpBoxes.nth(i).fill('');
+    await otpBoxes.first().click();
+    await page.keyboard.type(otp, { delay: 40 });
     for (let i = 0; i < 6; i++) {
       await expect(otpBoxes.nth(i)).toHaveValue(digits[i]);
     }
