@@ -75,14 +75,30 @@ and where it surfaced. Severity is a first pass, to be refined.
 
 ---
 
-## UAT Hardening Defect Register (2026-06-21 — found by the cross-cutting hardening agents; ⚠️ NONE FIXED YET)
+## UAT Hardening Defect Register (2026-06-21 — ✅ FULLY RESOLVED in the parallel S0–S6 hardening wave)
 
-> Produced while building the UAT plan (4 module UAT-plan agents + 3 cross-cutting hardening agents: integration seams,
-> concurrency/races, boundary/data-integrity/security). The module agents covered per-module happy+edge cases; the
-> hardening pass found these CROSS-CUTTING candidate defects. **✅ = I verified it in code; ◻ = code-reasoned candidate
-> (verify before fixing).** Live-env checks PASSED: `FIXED_OTP`/`DEMO_MODE` UNSET on staging+prod; no cross-tenant scope
-> leak anywhere (all list/detail scope by JWT `clientId`; `x-forwarded-host`/`x-tenant-slug` never trusted for scope);
-> role denial enforced by `@Roles`. So these are LATENT code defects, not live holes.
+> **✅ STATUS (2026-06-21): the whole register is fixed + pushed across 6 parallel streams** (S0 migration `304045a`-era,
+> S5 Excel `c9bf80e`, S1 money `0aa6490`, S2/S3/S4/S6 `ad4fbe2`). Each stream ran: executor build → INDEPENDENT adversarial
+> audit (caught a real defect in S1, S2, S3, and S4) → Opus gate → runtime-verify (money + auth runtime-proven) → full suites
+> (api 880/880, platform 1464). Audit-caught BLOCKERS, all fixed: **S1** surviving BUG-1 via cash-mode RETURNED/FAILED edges;
+> **S2** access-token survived refresh-revoke for 7 days (now session-bound via `sid`); **S3** approval no-op for null-kycIntent
+> outlets (Prisma `{not}` excludes NULL); **S4** PAN column un-sanitised in the statutory export.
+>
+> Produced while building the UAT plan (4 module + 3 cross-cutting hardening agents). **✅ = verified in code; ◻ = was
+> code-reasoned.** Live-env checks PASSED: `FIXED_OTP`/`DEMO_MODE` UNSET on staging+prod; no cross-tenant scope leak; role
+> denial via `@Roles`.
+>
+> **Deferred follow-ups (raised during the wave, NOT blockers — tracked for post-this-wave):**
+> 1. **KYC-revoked partner still payable** (S3 item#4): `credits.service.ts:567` hardcodes `kycStatus:'APPROVED'`; `payouts.service`
+>    has no KYC guard → a revoked partner can still be emitted as a payout recipient. Cross-cutting (credits/payouts) — fix next.
+> 2. **S2 defense-in-depth:** `msg91.service` honors `FIXED_OTP` on the SEND side with no `NODE_ENV` guard (prod DoS/log-leak if ever
+>    set); `app.module` disables ALL rate-limiting when `FIXED_OTP` set. Prod has no FIXED_OTP so latent; gate both on non-prod.
+> 3. **Schemes enrollments list/stats endpoint** doesn't exist — `/admin/schemes/:id/enrollments` is honestly empty-stated (only the
+>    xlsx export is real); build the backend list/stats endpoint to populate it.
+> 4. **S6 dead code:** `admin/visibility` `VISIBILITY_QUEUE` dead const + wire the real fraud-log (`GET /v1/visibility/fraud-log`).
+> 5. **S3 NIT:** the RE_UPLOAD `ConflictException` logs nothing server-side (no record of which submission hit it) — add a `logger.warn`.
+> 6. **TDS hash note:** the S4 audit flagged the file-hash as collision-prone, but that was a MISREAD — the canonical string already
+>    uses a `\x01` field/row delimiter (od-verified), which with fixed 4-field arity is collision-safe for realistic inputs. No change.
 
 **🟢 MONEY-INTEGRITY — ✅ RESOLVED & RUNTIME-VERIFIED (S1, 2026-06-21, commit `0aa6490`).** The redemption-payout UTR ingest
 is built (`GET/POST /v1/payouts/batches/:id/utr[-template]`), reusing the credits UTR rail + the M2 refund-once claim: UTR=PAID →
