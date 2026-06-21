@@ -191,7 +191,7 @@ async function seedDeoleoDemo() {
   // 3.1 CLIENT_ADMIN user (keyed on fixed id seed-deoleo-admin).
   const clientAdmin = await prisma.user.upsert({
     where: { id: 'seed-deoleo-admin' },
-    update: {},
+    update: { name: 'Deoleo Client Admin' },
     create: {
       id: 'seed-deoleo-admin',
       clientId: DEOLEO_CLIENT_ID,
@@ -225,6 +225,19 @@ async function seedDeoleoDemo() {
   // 3.2 OutletType lookups (created above).
   const retailerType = await prisma.outletType.findFirstOrThrow({ where: { code: 'RETAILER' } });
   const wholesalerType = await prisma.outletType.findFirstOrThrow({ where: { code: 'WHOLESALER' } });
+
+  // 3.2b Per-tenant outlet-type configs. The admin outlet-upsert maps an outlet's type CODE → id via
+  // OutletTypeClientConfig; without a row per (tenant, type) every upsert fails "Unknown outlet type"
+  // and nothing persists. Enable all global types for deoleo (mirrors what tenant provisioning does).
+  const allOutletTypes = await prisma.outletType.findMany({ select: { id: true } });
+  for (const ot of allOutletTypes) {
+    await prisma.outletTypeClientConfig.upsert({
+      where: { clientId_outletTypeId: { clientId: DEOLEO_CLIENT_ID, outletTypeId: ot.id } },
+      update: { isEnabled: true },
+      create: { clientId: DEOLEO_CLIENT_ID, outletTypeId: ot.id, isEnabled: true },
+    });
+  }
+  console.log(`   ✓ OutletTypeClientConfig × ${allOutletTypes.length} (deoleo) — enables outlet upsert`);
 
   // 3.3 Two channel partners, each: User → ChannelPartner → Wallet → Outlet.
   // Ids + natural keys align with the manual-test rows already in gifsy_dev.
@@ -274,7 +287,9 @@ async function seedDeoleoDemo() {
     // 3.3a Partner user (keyed on fixed id).
     const user = await prisma.user.upsert({
       where: { id: p.userId },
-      update: {},
+      // Reset the display name on re-seed so dev DBs left over from older seeds become canonical
+      // (stale rows like "Test Wholesaler" otherwise survive an `update: {}` and break name asserts).
+      update: { name: p.ownerName },
       create: {
         id: p.userId,
         clientId: DEOLEO_CLIENT_ID,
@@ -289,7 +304,7 @@ async function seedDeoleoDemo() {
     // 3.3b ChannelPartner (keyed on fixed id).
     const partner = await prisma.channelPartner.upsert({
       where: { id: p.partnerId },
-      update: {},
+      update: { businessName: p.businessName, ownerName: p.ownerName, phone: p.phone, gstNumber: p.gstNumber, panNumber: p.panNumber },
       create: {
         id: p.partnerId,
         clientId: DEOLEO_CLIENT_ID,
@@ -325,7 +340,7 @@ async function seedDeoleoDemo() {
     // 3.3d Outlet (keyed on fixed id).
     const outlet = await prisma.outlet.upsert({
       where: { id: p.outletId },
-      update: {},
+      update: { name: p.businessName, ownerName: p.ownerName, city: p.city, state: p.state },
       create: {
         id: p.outletId,
         clientId: DEOLEO_CLIENT_ID,
@@ -416,7 +431,7 @@ async function seedDeoleoDemo() {
   // SO User account.
   const salesUserAccount = await prisma.user.upsert({
     where: { id: 'seed-deoleo-sales' },
-    update: {},
+    update: { name: 'Demo Sales Officer' },
     create: {
       id: 'seed-deoleo-sales',
       clientId: DEOLEO_CLIENT_ID,

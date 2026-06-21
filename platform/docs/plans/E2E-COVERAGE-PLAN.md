@@ -317,6 +317,21 @@ Highest bug-risk; each is an independent file.
 - `clientAdmin/scheme-enroll-write.e2e.ts` (W7) — enroll into DEMO-VIS → persists. **S**
 - Effort total: **L+**, but 5 disjoint files → ~1 day wall-clock with 5 executors.
 
+> **✅ WAVES 2–4 DONE + runtime-verified (2026-06-21) — full suite 291 passed / 0 failed / 11 skipped.**
+> ~42 new specs across admin CRUD-writes + reads, partner, sales + the **salesManager team roll-up**, the
+> **MIS read-only column** (+ write-denied), and the remaining gifsy surface. Built by 6 parallel executors,
+> then a fix-up + final-cleanup pass. **The expansion caught REAL product bugs (harness working as intended):**
+> - **`/api/auth/me` was thin** → partner/sales **profile pages showed demo MOCK data** ("Rajesh Kumar"/"KGS-001"/
+>   "4,250"). FIXED (enriched `me` with nested `channelPartner`+`wallet`+`salesUser`; rebuilt backend). Profile-page
+>   analog of #54/#55.
+> - **`OutletTypeClientConfig` unseeded for deoleo** → admin outlet-upsert silently failed ("Unknown outlet type").
+>   FIXED (seeded the configs).
+> - **Seed hygiene** — forced canonical display names (stale `"Test Wholesale Co"` etc. from old `update:{}` seeds).
+> - **Deferred real findings (owner decision, `test.fixme` + gap-register #57):** admin sub-dashboards + Outlet Master
+>   render hardcoded mock data; `/admin/hierarchy` empty (hierarchy-config returns no employees); GIFSY can't write a
+>   tenant's settings namespace; MIS denied KPI read; sales-shell demo notifications. All loud/obvious in UAT — not
+>   money/auth/scope (those are covered). The fixme'd tests re-enable trivially once the product is wired.
+
 ### Wave 2 — Admin CRUD writes + remaining admin reads (parallel; disjoint files)
 - `clientAdmin/targets.e2e.ts` (read) + `clientAdmin/target-upload-write.e2e.ts` (W8). **M**
 - `clientAdmin/gifts-crud-write.e2e.ts` (W10) + `clientAdmin/gifts-read.e2e.ts`. **M**

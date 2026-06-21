@@ -43,15 +43,10 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @Get('me')
   me(@CurrentUser() user: JwtPayload) {
-    // `assumed`/`clientId` let the operator shell render the "Working in <Brand>"
-    // banner (A2). For a normal session `assumed` is false.
-    return {
-      id: user.sub,
-      role: user.role,
-      clientId: user.clientId,
-      name: user.name,
-      assumed: user.assumed ?? false,
-    };
+    // Flat `assumed`/`clientId` drive the operator "Working in <Brand>" banner (A2); the nested
+    // `user` carries the real channelPartner/wallet/salesUser so /profile pages don't fall back to
+    // the demo MOCK_PROFILE (#40). See AuthService.getMe.
+    return this.authService.getMe(user);
   }
 
   /**

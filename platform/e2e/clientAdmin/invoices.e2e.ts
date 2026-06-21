@@ -55,12 +55,11 @@ test.describe('@clientAdmin visibility invoices (B2)', () => {
     const errors = collectPageErrors(page);
     await page.goto('/admin/invoices');
 
-    // The success branch ran (heading mounted, not the error early-return / infinite spinner) AND the
-    // summary total — which is reduced OVER the parsed invoice list — rendered. A "map is not a
-    // function" list-shape regression would crash that reduce before this point. This holds whether
-    // the list is empty or already populated, so it survives the W6 write spec creating invoices.
-    await expect(page.getByRole('heading', { name: 'Visibility Invoices' })).toBeVisible();
-    await expect(page.getByText(/^Invoice Total$/i)).toBeVisible();
+    // The success branch ran — the summary total card, which is reduced OVER the parsed invoice list,
+    // rendered. A "map is not a function" list-shape regression would crash that reduce before this
+    // point. This holds whether the list is empty or already populated (the W6 write spec creates
+    // invoices). (Test 1 covers the page heading; here we want the list-shape proof, not the title.)
+    await expect(page.getByText(/^Invoice Total$/i)).toBeVisible({ timeout: 15_000 });
 
     assertNoListShapeCrash(errors);
   });

@@ -28,6 +28,57 @@ export class AuthService {
     private readonly msg91:   Msg91Service,
   ) {}
 
+  // ── Current user (enriched) ───────────────────────────────────────────────────
+
+  /**
+   * GET /v1/auth/me — the base JWT identity PLUS the role-specific record under `user`
+   * (channelPartner + its wallet for partners, salesUser for sales) so the shell + /profile
+   * pages render REAL data instead of the demo MOCK_PROFILE fallback (#40-class, the profile-page
+   * analog of gap #54/#55). Tenant-safe — every lookup is keyed on the authenticated user's own id.
+   * The flat identity fields are kept for any consumer that reads them (and the A2 operator banner).
+   */
+  async getMe(user: JwtPayload) {
+    const [dbUser, channelPartner, salesUser] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: user.sub }, select: { name: true, phone: true } }),
+      this.prisma.channelPartner.findUnique({
+        where: { userId: user.sub },
+        select: {
+          id: true, partnerCode: true, businessName: true, ownerName: true,
+          phone: true, email: true, gstNumber: true, panNumber: true, entityType: true,
+        },
+      }),
+      this.prisma.salesUser.findUnique({
+        where: { userId: user.sub },
+        select: { id: true, employeeCode: true, region: true, zone: true },
+      }),
+    ]);
+
+    const wallet = channelPartner
+      ? await this.prisma.wallet.findUnique({
+          where: { partnerId: channelPartner.id },
+          select: { earnedPoints: true, redeemablePoints: true, lockedPoints: true, lifetimeEarned: true },
+        })
+      : null;
+
+    return {
+      id: user.sub,
+      role: user.role,
+      clientId: user.clientId,
+      name: user.name,
+      assumed: user.assumed ?? false,
+      user: {
+        id: user.sub,
+        name: dbUser?.name ?? user.name,
+        phone: dbUser?.phone ?? null,
+        role: user.role,
+        channelPartner: channelPartner
+          ? { ...channelPartner, wallets: wallet ? [wallet] : [] }
+          : null,
+        salesUser: salesUser ?? null,
+      },
+    };
+  }
+
   // ── Send OTP ────────────────────────────────────────────────────────────────
 
   async sendOtp(phone: string, channel: 'SMS' | 'WHATSAPP'): Promise<{ success: boolean; expiresIn: number }> {
