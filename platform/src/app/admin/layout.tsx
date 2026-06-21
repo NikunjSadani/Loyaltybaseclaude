@@ -32,7 +32,7 @@ import {
   Landmark,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
-import { useAdminSession } from '@/lib/admin-session';
+import { useAdminSession, adminRoleLabel } from '@/lib/admin-session';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
 import { OperatorBanner } from '@/components/operator/operator-banner';
@@ -217,7 +217,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
               <div>
                 <div className="text-xs font-semibold text-white">{clientConfig.branding.displayName}</div>
                 <div className="text-xs text-slate-400">
-                  {adminSession.role === 'GIFSY_ADMIN' ? 'Gifsy Admin' : 'Client Admin'}
+                  {adminRoleLabel(adminSession.role)}
                 </div>
               </div>
             </div>
@@ -375,12 +375,18 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                 className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors"
               >
                 <div className="w-7 h-7 rounded-full bg-[var(--brand-primary)] flex items-center justify-center text-white text-xs font-bold">
-                  RA
+                  {adminSession.name
+                    .split(' ')
+                    .map((w) => w[0])
+                    .filter(Boolean)
+                    .slice(0, 2)
+                    .join('')
+                    .toUpperCase() || 'A'}
                 </div>
                 <div className="text-left hidden sm:block">
                   <div className="text-xs font-semibold text-gray-800">{adminSession.name}</div>
                   <div className="text-xs text-gray-500">
-                    {adminSession.role === 'GIFSY_ADMIN' ? 'Gifsy Admin' : 'Client Admin'}
+                    {adminRoleLabel(adminSession.role)}
                   </div>
                 </div>
                 <ChevronDown className="w-3 h-3 text-gray-400" />

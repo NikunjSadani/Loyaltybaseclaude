@@ -29,6 +29,12 @@ export default defineConfig({
   testMatch: '**/*.e2e.ts',
   // Each spec drives the real running stack (FE → proxy → backend → gifsy_dev). No app is spawned here:
   // the owner already runs `next dev` (:3000) + `node dist/main.js` (:4000) + the DB proxy (:5433).
+  // ⚠️ Runtime is SERIAL by design (single worker). Specs share live DB state — the partner
+  // redemption + sales-assisted-redemption flows both DRAIN points from the same seeded outlet, so
+  // concurrent execution would make them flake/double-spend. The "parallel waves of disjoint files"
+  // in E2E-COVERAGE-PLAN.md §3 are about parallel AUTHORING (many agents writing different files at
+  // once), NOT parallel RUNTIME. Do not raise `workers` without first making the write specs
+  // state-independent (unique fixtures per run).
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
@@ -76,6 +82,18 @@ export default defineConfig({
       testMatch: /clientbAdmin\/.*\.e2e\.ts/,
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: ROLES.clientbAdmin.storageStatePath },
+    },
+    {
+      name: 'mis',
+      testMatch: /mis\/.*\.e2e\.ts/,
+      dependencies: ['setup'],
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.mis.storageStatePath },
+    },
+    {
+      name: 'salesManager',
+      testMatch: /salesManager\/.*\.e2e\.ts/,
+      dependencies: ['setup'],
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.salesManager.storageStatePath },
     },
   ],
 });

@@ -36,6 +36,7 @@ import {
   PayoutMode,
   RewardCatalogStatus,
   VisibilityProgramStatus,
+  TicketCategory,
 } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -201,6 +202,23 @@ async function seedDeoleoDemo() {
   });
   console.log(`   ✓ CLIENT_ADMIN — id: ${clientAdmin.id}, phone: ${clientAdmin.phone}`);
 
+  // 3.1b MIS_USER for deoleo — read-only tenant role (no write controls). Keyed on fixed id.
+  const misUser = await prisma.user.upsert({
+    where: { id: 'seed-deoleo-mis' },
+    update: {},
+    create: {
+      id: 'seed-deoleo-mis',
+      clientId: DEOLEO_CLIENT_ID,
+      phone: '9000000004',
+      email: 'mis@deoleo.demo',
+      name: 'Deoleo MIS User',
+      role: UserRole.MIS_USER,
+      status: UserStatus.ACTIVE,
+      passwordHash: demoPasswordHash,
+    },
+  });
+  console.log(`   ✓ MIS_USER — id: ${misUser.id}, phone: ${misUser.phone}`);
+
   // 3.2 OutletType lookups (created above).
   const retailerType = await prisma.outletType.findFirstOrThrow({ where: { code: 'RETAILER' } });
   const wholesalerType = await prisma.outletType.findFirstOrThrow({ where: { code: 'WHOLESALER' } });
@@ -325,7 +343,9 @@ async function seedDeoleoDemo() {
     console.log(`   ✓ Partner ${p.partnerCode} (${p.role}) + wallet + outlet ${p.outletCode}`);
   }
 
-  // 3.4 Sales hierarchy level + SalesUser assigned to the first outlet.
+  // 3.4 Sales hierarchy levels + SalesUsers with manager→SO downline.
+
+  // Level 1 — SO (front-line sales officer).
   const hierarchyLevel = await prisma.salesHierarchyLevel.upsert({
     where: { id: 'seed-hl-1' },
     update: {},
@@ -340,6 +360,57 @@ async function seedDeoleoDemo() {
   });
   console.log(`   ✓ SalesHierarchyLevel [${hierarchyLevel.code}]`);
 
+  // Level 2 — ASM (area sales manager). The SO reports to this level, giving
+  // /sales/team* a real roll-up hierarchy for the salesManager E2E role.
+  const hierarchyLevelAsm = await prisma.salesHierarchyLevel.upsert({
+    where: { id: 'seed-hl-2' },
+    update: {},
+    create: {
+      id: 'seed-hl-2',
+      clientId: DEOLEO_CLIENT_ID,
+      code: 'ASM',
+      name: 'Area Sales Manager',
+      level: 2,
+      description: 'Area sales manager',
+    },
+  });
+  console.log(`   ✓ SalesHierarchyLevel [${hierarchyLevelAsm.code}]`);
+
+  // Manager User account (SALES_ASM).
+  const salesMgrAccount = await prisma.user.upsert({
+    where: { id: 'seed-deoleo-sales-mgr' },
+    update: {},
+    create: {
+      id: 'seed-deoleo-sales-mgr',
+      clientId: DEOLEO_CLIENT_ID,
+      phone: '9000000006',
+      name: 'Demo Area Sales Manager',
+      role: UserRole.SALES_ASM,
+      status: UserStatus.ACTIVE,
+      passwordHash: demoPasswordHash,
+    },
+  });
+
+  // Manager SalesUser — no reportingToId (top of this demo hierarchy).
+  // MUST be created before the SO so the SO's FK reference resolves.
+  const salesMgr = await prisma.salesUser.upsert({
+    where: { id: 'seed-su-mgr' },
+    update: {},
+    create: {
+      id: 'seed-su-mgr',
+      clientId: DEOLEO_CLIENT_ID,
+      userId: salesMgrAccount.id,
+      hierarchyLevelId: hierarchyLevelAsm.id,
+      employeeCode: 'EMPASM1',
+      reportingToId: null,
+      region: 'West',
+      zone: 'Pune',
+      isActive: true,
+    },
+  });
+  console.log(`   ✓ SalesUser (ASM) ${salesMgr.employeeCode}`);
+
+  // SO User account.
   const salesUserAccount = await prisma.user.upsert({
     where: { id: 'seed-deoleo-sales' },
     update: {},
@@ -354,24 +425,26 @@ async function seedDeoleoDemo() {
     },
   });
 
+  // SO SalesUser — reports to the ASM manager. The update path backfills
+  // reportingToId on existing dev DBs so re-runs are idempotent.
   const salesUser = await prisma.salesUser.upsert({
     where: { id: 'seed-su-1' },
-    update: {},
+    update: { reportingToId: salesMgr.id },
     create: {
       id: 'seed-su-1',
       clientId: DEOLEO_CLIENT_ID,
       userId: salesUserAccount.id,
       hierarchyLevelId: hierarchyLevel.id,
       employeeCode: 'EMP001',
+      reportingToId: salesMgr.id,
       region: 'West',
       zone: 'Pune',
       isActive: true,
     },
   });
-  console.log(`   ✓ SalesUser ${salesUser.employeeCode}`);
+  console.log(`   ✓ SalesUser (SO) ${salesUser.employeeCode} → reports to ${salesMgr.employeeCode}`);
 
-  // 3.4a Assign the sales user to the first partner's outlet (keyed on fixed id
-  // seed-sa-1).
+  // 3.4a Assign the SO to the first partner's outlet (CP001 / O001).
   const firstOutletId = createdPartners[0]?.outletId;
   const firstPartnerId = createdPartners[0]?.partnerId;
   if (firstOutletId && firstPartnerId) {
@@ -388,6 +461,42 @@ async function seedDeoleoDemo() {
     });
     console.log(`   ✓ SalesUserAssignment → outlet ${firstOutletId}`);
   }
+
+  // 3.4b Assign the SO to a SECOND outlet (CP002 / O002) so the downline
+  // roll-up on /sales/team* has non-trivial data.
+  const secondOutletId = createdPartners[1]?.outletId;
+  const secondPartnerId = createdPartners[1]?.partnerId;
+  if (secondOutletId && secondPartnerId) {
+    await prisma.salesUserAssignment.upsert({
+      where: { id: 'seed-sa-2' },
+      update: {},
+      create: {
+        id: 'seed-sa-2',
+        salesUserId: salesUser.id,
+        partnerId: secondPartnerId,
+        outletId: secondOutletId,
+        notes: 'Demo seed assignment (2nd outlet)',
+      },
+    });
+    console.log(`   ✓ SalesUserAssignment (2nd) → outlet ${secondOutletId}`);
+  }
+
+  // 3.4c Partner-raised support ticket — gives /admin/tickets a real row and
+  // provides the target for the W13 admin-reply write-persistence spec.
+  await prisma.ticket.upsert({
+    where: { id: 'seed-ticket-1' },
+    update: {},
+    create: {
+      id: 'seed-ticket-1',
+      clientId: DEOLEO_CLIENT_ID,
+      ticketNumber: 'DEO-0001',
+      createdById: 'seed-deoleo-partner',
+      category: TicketCategory.PAYOUT,
+      subject: 'Payout not received for April',
+      description: 'Demo seed ticket: partner reports a pending payout for the April cycle.',
+    },
+  });
+  console.log('   ✓ Ticket [DEO-0001] (PAYOUT) — seed-deoleo-partner → admin tickets queue');
 
   // 3.5 Reward catalog: one category + two reward items.
   // RewardCategory has no natural unique → upsert on a fixed id.

@@ -219,7 +219,56 @@ file collisions**. Specs live under `e2e/<roleDir>/` where `<roleDir>` ∈ {`cli
 
 > Effort key: S ≈ ½ day, M ≈ 1 day, L ≈ 2 days (one executor).
 
+### 3.0 Parallel-stream map — what multiple agents can own concurrently
+
+**"Parallel" here = parallel AUTHORING** (N agents each writing a different file at once), **not parallel
+runtime** — the suite runs single-worker by design (shared live DB state; see the comment in
+`playwright.config.ts`). The unit of parallelism is **one spec file = one agent**; collisions only happen on
+SHARED files (seed, roles, config, helpers), which is why all shared edits are quarantined into Wave 0.
+
+**The hard serialisation point is Wave 0.** It edits `api/prisma/seed.ts` + `e2e/fixtures/roles.ts` +
+`playwright.config.ts` + new `helpers/write.ts` — every later wave imports these, so Wave 0 is **ONE agent,
+no fan-out**. ⚠️ **Pre-check before Wave 0 seeding (Opus-owned, may be a serial schema step):** confirm the
+`UserRole` enum already has `MIS_USER` and a sales-manager role (ASM/STATE_HEAD), and that the hierarchy
+model supports a manager→SO downline. If any is missing it's a `schema.prisma` change → Opus does that
+migration FIRST (executors never touch schema), then Wave 0 seeds against it.
+
+Once Wave 0 lands, the streams below are **mutually file-disjoint and can all run at once** (bounded only by
+how many executors you want to spend). Concurrency ceiling ≈ **12 streams**:
+
+| Stream | Owns (files) | Concurrent? | Depends on |
+|---|---|---|---|
+| **W0** Foundations | seed.ts · roles.ts · playwright.config.ts · helpers/write.ts · fixtures/files/ | ❌ solo (shared files) | Opus schema pre-check |
+| **S1** Admin finance writes | `clientAdmin/`: invoice-generate (W6) · credits-payout (W9) · scheme-enroll (W7) | ✅ (splittable into 3) | W0 helper |
+| **S2** KYC two-stage (W5) | `sales/kyc-approve` + `gifsy/kyc-approve` | ✅ — **one agent owns BOTH files** (single flow: sales-approve → gifsy-verify) | W0 helper; seed-kyc-1/2 |
+| **S3** Sales-assisted redeem (W4) | `sales/assisted-redemption-write` | ✅ | W0; ⚠️ runtime-shares CP001's point pool w/ partner-redeem |
+| **S2a–f** Admin CRUD + reads | `clientAdmin/`: targets · gifts · outlets · credit-fields · tickets+reply(W13) · banners+settings · dashboards · visibility/schemes/tds/reports/hierarchy/sales-admin/approvals | ✅ ~6 agents, all distinct files | W0; **ticket-reply needs W0 seeded partner ticket** |
+| **S3p** Partner remaining | `partner/`: rewards · orders · targets · leaderboard · payouts · profile-write · invoice-detail-scope | ✅ | W0 |
+| **S3s** Sales remaining | `sales/`: outlets · team(Q4) · leaderboard · tasks · support · kyc-detail · kyc-create-write · profile | ✅ | W0; **team needs W0 manager+downline seed** |
+| **S4m** MIS read-only column | `mis/*` (new dir) | ✅ | **W0 MIS seed + new project** (hard dep) |
+| **S4g** GIFSY remaining | `gifsy/`: users · outlet-types · settings · clients-new · tds-194c | ✅ | W0; gifsy-real-data upgrade waits on #49 |
+| **S4n** Negative/scoping matrix | extends EXISTING `partner/scoping` · `sales/scoping` · `clientAdmin/scoping` · `clientbAdmin/cross-tenant` | ✅ — splittable per-role (each file disjoint), but ⚠️ **these are the only EXISTING files anyone edits** — no other stream may touch them | W0 |
+
+**Read it as:** after the W0 gate, hand S1/S2/S3 to 3 agents for the UAT-gating slice; the rest (S2a–f, S3p,
+S3s, S4g) can run in the same parallel batch on spare executors; S4m and S3s-`team` only unblock once W0's
+new seed/roles are merged. **S4n is the one stream that mutates existing files** — keep it on a single
+owner (or strictly per-role) so it never races another stream.
+
+> **Out-of-scope / flag-don't-build:** W18 sales-visibility submit (blocked on a `VisibilitySubmission`
+> nullable-`submittedByUserId` model change) and the gifsy console real-data assertion (blocked on #49
+> `GET /v1/gifsy/clients`). Track as dependencies, not streams.
+
 ### Wave 0 — Foundations (BLOCKS all later waves; single executor, then fan out)
+> **✅ DONE + runtime-verified (2026-06-21).** Seed (`MIS_USER` 9000000004, ASM manager 9000000006 with the SO
+> reporting to it + a 2nd outlet assignment, partner ticket `DEO-0001`), the `mis`/`salesManager` harness roles
+> (roles.ts + auth.setup `SESSION_ROLES` + playwright projects), and `e2e/helpers/write.ts` (`tokenFor`/`authHeader`)
+> all landed; schema needed **no** change (`MIS_USER`/`SALES_ASM` already exist; downline = `SalesUser.reportingToId`).
+> Independent audit = SAFE-TO-PROCEED; harness `setup` ran **7/7 green** (real-form login for all roles incl. the 2 new).
+> **The audit also caught + we FIXED gap #55** (the admin shell showed the demo persona "Rahul Agarwal" for every real
+> admin/MIS login — the admin analog of the partner #54 fix; now reads the real JWT user + `'Rahul Agarwal'` is on the
+> #40 fail-list). **Deferred to Wave 3 (audit Finding #8):** the sales shell's demo role-picker defaults to `SO`, so a
+> `salesManager` spec must set/assert the role-picker state before relying on the "Team" nav (don't assume it on first render).
+
 Shared scaffolding + seed/role gaps. Do NOT parallelise within this wave (it edits shared files).
 - **Seed gaps to close** (`api/prisma/seed.ts`):
   1. **MIS_USER** for deoleo (e.g. phone `9000000004`, role `MIS_USER`, status ACTIVE) — required for the

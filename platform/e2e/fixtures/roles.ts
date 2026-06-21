@@ -73,9 +73,9 @@ export const ROLES = {
     expectedDashboardPath: '/admin/dashboard',
     backendRole: 'CLIENT_ADMIN',
   }),
-  // ⚠️ GIFSY login is BROKEN today (#39): localhost resolveClientId never yields 'gifsy'.
-  // Listed for completeness; the login-matrix spec asserts this is the ONE expected-broken role
-  // until #39 is fixed (subdomain + dev clientId override, per DATA-VISIBILITY Q3).
+  // GIFSY logs in via the dev clientId override field on LOCAL (#39 fixed, task #53) and via the
+  // host/subdomain on STAGING — the same real-login path as every other role. It is a live
+  // SESSION_ROLE (setup/auth.setup.ts) and its specs (gifsy/*.e2e.ts) are green.
   gifsy: role({
     key: 'gifsy',
     phone: '9830011252',
@@ -83,6 +83,28 @@ export const ROLES = {
     otp: OTP,
     expectedDashboardPath: '/gifsy',
     backendRole: 'GIFSY_ADMIN',
+  }),
+  // MIS_USER — read-only tenant role (no write controls); sees the same admin
+  // surface as CLIENT_ADMIN but all mutating actions are hidden/403.
+  // Seeded as id=seed-deoleo-mis (phone 9000000004) in api/prisma/seed.ts §3.1b.
+  mis: role({
+    key: 'mis',
+    phone: '9000000004',
+    clientId: 'deoleo',
+    otp: OTP,
+    expectedDashboardPath: '/admin/dashboard',
+    backendRole: 'MIS_USER',
+  }),
+  // SALES_ASM — area sales manager with the SO (seed-su-1) as a direct report,
+  // so /sales/team* returns real roll-up data. Use for Wave-3 team-downline specs.
+  // Seeded as id=seed-deoleo-sales-mgr (phone 9000000006) in api/prisma/seed.ts §3.4.
+  salesManager: role({
+    key: 'salesManager',
+    phone: '9000000006',
+    clientId: 'deoleo',
+    otp: OTP,
+    expectedDashboardPath: '/sales/dashboard',
+    backendRole: 'SALES_ASM',
   }),
 } satisfies Record<string, RoleDef>;
 

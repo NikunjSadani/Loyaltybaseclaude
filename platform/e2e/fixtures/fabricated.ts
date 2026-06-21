@@ -33,4 +33,8 @@ export const FABRICATED_TOKENS: FabricatedToken[] = [
   { text: 'Rajesh Kumar', note: 'partner-shell demo persona name (real user = the logged-in partner)' },
   { text: 'Kumar General Store', note: 'partner-shell demo outlet name' },
   { text: 'Gold Partner', note: 'partner-shell demo tier (retired partner-class concept, #45)' },
+  // CONFIRMED LIVE (2026-06-21): the admin-shell header rendered this demo persona for EVERY real
+  // admin/MIS login (admin-session getAdminSession fell back to DEMO_SESSIONS.CLIENT_ADMIN). Fixed to
+  // read the real JWT user; this token pins it so the admin analog of #54 can never regress.
+  { text: 'Rahul Agarwal', note: 'admin-shell demo persona name (real user = the logged-in admin)' },
 ];

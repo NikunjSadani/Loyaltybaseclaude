@@ -43,7 +43,7 @@ vi.mock('@/lib/admin-session', async (importOriginal) => {
     useAdminSession: vi.fn(() => ({
       role:             'CLIENT_ADMIN',
       clientId:         'deoleo',
-      name:             'Rahul Agarwal',
+      name:             'Test Admin',
       canManageSchemes: false,
     })),
   };
@@ -150,7 +150,7 @@ afterEach(() => {
   mockUseAdminSession.mockReturnValue({
     role:             'CLIENT_ADMIN',
     clientId:         'deoleo',
-    name:             'Rahul Agarwal',
+    name:             'Test Admin',
     canManageSchemes: false,
   });
 });
@@ -222,7 +222,7 @@ describe('TDS — Admin TDS page API wiring', () => {
     mockUseAdminSession.mockReturnValue({
       role:             'CLIENT_ADMIN',
       clientId:         'deoleo',
-      name:             'Rahul Agarwal',
+      name:             'Test Admin',
       canManageSchemes: false,
     });
     vi.stubGlobal('fetch', make194RFetch());
