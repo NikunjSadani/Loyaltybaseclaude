@@ -28,15 +28,11 @@ const ROUTES = {
   // gifsy.in root is a separate website — not routed through this Worker
 }
 
-// TEMPORARY edge alias: production is still running code that doesn't yet map the
-// branded domain `deoleoloyalty.gifsy.in` → tenant `deoleo` (that ships with A-1 +
-// the next prod deploy). Until then, present the request to the app as `deoleo.gifsy.in`,
-// which the current prod code already resolves to the Deoleo tenant — so the branded URL
-// serves the real login page (200) instead of 404. REMOVE this once prod runs current code.
+// Prod now runs current code that maps `deoleoloyalty.gifsy.in` → tenant `deoleo`
+// natively, so the temporary prod host-alias was REMOVED at the 2026-06-20 cutover.
+// The one remaining alias is UAT-only: `uat.deoleoloyalty.gifsy.in` runs the STAGING
+// build, which resolves `deoleoloyalty.gifsy.in` → deoleo natively — so present UAT as that.
 const TENANT_HOST_ALIAS = {
-  'deoleoloyalty.gifsy.in': 'deoleo.gifsy.in',
-  // UAT runs on the STAGING build (current code), which DOES know `deoleoloyalty.gifsy.in`
-  // → deoleo natively — so present it as that, resolving the UAT view to the Deoleo tenant.
   'uat.deoleoloyalty.gifsy.in': 'deoleoloyalty.gifsy.in',
 }
 
