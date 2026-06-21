@@ -39,8 +39,23 @@ describe('resolveSlugFromHostname', () => {
     expect(resolveSlugFromHostname('www.gifsy.in')).toBeNull();
   });
 
-  it('returns null for app root (admin platform domain)', () => {
-    expect(resolveSlugFromHostname('app.gifsy.in')).toBeNull();
+  // ── GIFSY operator console (app.gifsy.in → 'gifsy') ─────────────────────────
+  it('maps the operator console app.gifsy.in to the gifsy slug', () => {
+    expect(resolveSlugFromHostname('app.gifsy.in')).toBe('gifsy');
+  });
+
+  it('maps the staging operator console uat.app.gifsy.in to the gifsy slug', () => {
+    expect(resolveSlugFromHostname('uat.app.gifsy.in')).toBe('gifsy');
+  });
+
+  it('operator-console match is case-insensitive and ignores the port', () => {
+    expect(resolveSlugFromHostname('APP.Gifsy.In:443')).toBe('gifsy');
+    expect(resolveSlugFromHostname('UAT.App.Gifsy.In')).toBe('gifsy');
+  });
+
+  it('still treats other reserved platform subdomains as null', () => {
+    expect(resolveSlugFromHostname('platform.gifsy.in')).toBeNull();
+    expect(resolveSlugFromHostname('admin.gifsy.in')).toBeNull();
   });
 
   it('is case-insensitive — normalises to lowercase', () => {

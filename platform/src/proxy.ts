@@ -56,19 +56,28 @@ export async function proxy(request: NextRequest) {
     const clientConfig = resolveClientConfig(slug)
 
     if (!clientConfig) {
-      // Unknown slug — rewrite to 404
-      const url = request.nextUrl.clone()
-      url.pathname = '/not-found'
-      const res = NextResponse.rewrite(url, { request: { headers } })
-      res.headers.set('x-tenant-slug',  slug)
-      res.headers.set('x-tenant-valid', 'false')
-      return res
+      // The GIFSY operator console resolves to slug 'gifsy' — the platform operator,
+      // NOT a tenant in CLIENT_REGISTRY. Let it through as a no-tenant platform context
+      // (like the bare-domain branch above) rather than 404'ing the login page. Data
+      // scope still comes from the JWT clientId, never this header. Any OTHER unknown
+      // slug is a genuine 404.
+      if (slug === 'gifsy') {
+        headers.set('x-tenant-slug',  'gifsy')
+        headers.set('x-tenant-valid', 'false')
+      } else {
+        const url = request.nextUrl.clone()
+        url.pathname = '/not-found'
+        const res = NextResponse.rewrite(url, { request: { headers } })
+        res.headers.set('x-tenant-slug',  slug)
+        res.headers.set('x-tenant-valid', 'false')
+        return res
+      }
+    } else {
+      headers.set('x-tenant-slug',  clientConfig.slug)
+      headers.set('x-tenant-valid', 'true')
+      headers.set('x-tenant-color', clientConfig.branding.primaryColor)
+      headers.set('x-tenant-name',  clientConfig.branding.displayName)
     }
-
-    headers.set('x-tenant-slug',  clientConfig.slug)
-    headers.set('x-tenant-valid', 'true')
-    headers.set('x-tenant-color', clientConfig.branding.primaryColor)
-    headers.set('x-tenant-name',  clientConfig.branding.displayName)
   }
 
   // ── Step 2: Auth ───────────────────────────────────────────────────────────

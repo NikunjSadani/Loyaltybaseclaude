@@ -25,6 +25,8 @@ const ROUTES = {
   'deoleoloyalty.gifsy.in': 'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app', // Deoleo branded custom domain → resolves to tenant `deoleo`
   'uat.deoleoloyalty.gifsy.in': 'https://gifsy-frontend-staging-4d4n5mc6yq-el.a.run.app', // UAT view → STAGING frontend (current build, for owner UAT)
   'api.staging.gifsy.in':      'https://gifsy-api-staging-4d4n5mc6yq-el.a.run.app', // STAGING API — the FE's baked NEXT_PUBLIC_API_URL_STAGING targets this host; was unrouted (→ staging /api/* hung)
+  'app.gifsy.in':              'https://gifsy-frontend-4d4n5mc6yq-el.a.run.app', // GIFSY operator console (PROD) → resolves to clientId `gifsy`
+  'uat.app.gifsy.in':          'https://gifsy-frontend-staging-4d4n5mc6yq-el.a.run.app', // GIFSY operator console (STAGING/UAT) → STAGING frontend, resolves to clientId `gifsy`
   // gifsy.in root is a separate website — not routed through this Worker
 }
 

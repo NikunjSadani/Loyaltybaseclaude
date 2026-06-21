@@ -25,6 +25,18 @@ export const DEFAULT_DEV_SLUG = 'deoleo';
 const PLATFORM_RESERVED = new Set(['www', 'app', 'api', 'admin', 'status', 'mail', 'platform']);
 
 /**
+ * The GIFSY platform-operator console. The operator user lives under clientId
+ * `gifsy` (NOT a tenant in CLIENT_REGISTRY), so these exact hostnames must resolve
+ * to the `gifsy` slug — otherwise `app.gifsy.in` falls into PLATFORM_RESERVED → null
+ * (→ default tenant) and `uat.app.gifsy.in` would yield the `uat` label. Matched as
+ * full hosts ahead of every other rule. The staging build runs the same code, so
+ * the staging host resolves natively (no Worker host-alias needed).
+ *   app.gifsy.in      → gifsy   (prod operator console)
+ *   uat.app.gifsy.in  → gifsy   (staging operator console)
+ */
+const OPERATOR_HOSTS = new Set(['app.gifsy.in', 'uat.app.gifsy.in']);
+
+/**
  * Full custom-hostname → slug map, built from each tenant's `domains` (a branded
  * domain that differs from the slug, e.g. `deoleoloyalty.gifsy.in` → `deoleo`).
  * Checked BEFORE the subdomain-label heuristic so a branded domain resolves to the
@@ -52,6 +64,11 @@ const DOMAIN_TO_SLUG: Record<string, string> = Object.fromEntries(
 export function resolveSlugFromHostname(hostname: string): string | null {
   // Strip port
   const host = hostname.toLowerCase().split(':')[0].trim();
+
+  // GIFSY operator console — explicit full-host match → `gifsy` (overrides the
+  // reserved/subdomain heuristics below). Checked first so neither the `app`
+  // reserved-label nor the `uat` first-label intercepts it.
+  if (OPERATOR_HOSTS.has(host)) return 'gifsy';
 
   // Localhost / empty → dev default
   if (!host || host === 'localhost' || host === '127.0.0.1') {

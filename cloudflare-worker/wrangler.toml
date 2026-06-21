@@ -16,4 +16,7 @@ routes = [
   { pattern = "deoleoloyalty.gifsy.in", custom_domain = true },
   { pattern = "uat.deoleoloyalty.gifsy.in", custom_domain = true },
   { pattern = "api.staging.gifsy.in", custom_domain = true },
+  # GIFSY operator console — app.gifsy.in (prod) + uat.app.gifsy.in (staging) → clientId `gifsy`.
+  { pattern = "app.gifsy.in", custom_domain = true },
+  { pattern = "uat.app.gifsy.in", custom_domain = true },
 ]
