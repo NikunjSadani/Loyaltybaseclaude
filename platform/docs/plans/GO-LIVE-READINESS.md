@@ -37,16 +37,23 @@ differences — the harness must not assume `FIXED_OTP`/`localhost` semantics.)
 - Deploy to prod (`main`) stays behind the existing required-reviewer gate **and** a green staging E2E.
 
 ## 3. Readiness gate (broader than pages — all must be ✅ before go-live)
-- [ ] **Auth:** login works for **all roles** (real flow), route-by-role correct, logout clears session. *(GIFSY broken #39)*
+> **Status (2026-06-20):** **Prod cutover is DONE** — prod serves current code (`b3ab2e0`) on `deoleoloyalty.gifsy.in`,
+> `gifsy_prod` recreated empty + migrated to the squashed baseline (intentional greenfield, 0 users/0 clients), host-alias
+> removed, verified (login/health/routing). See [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md).
+> **Still OPEN before a real user can log in:** (a) the **E2E matrix is NOT 100% green** — partner slice proven, full
+> role×page coverage incomplete; (b) **real Deoleo master-data load** into the empty prod; (c) **observability alerts**
+> (Cloud Monitoring alert email = owner). Sales-team leaderboard = explicitly DEFERRED (fast-follow).
+
+- [ ] **Auth:** login works for **all roles** (real flow), route-by-role correct, logout clears session. *(GIFSY broken #39 → fixed; staging real-OTP login DONE; full role matrix on prod pending real-data load.)*
 - [ ] **RBAC + tenant isolation:** every endpoint role+tenant scoped to the `DATA-VISIBILITY.md` audience; cross-tenant never leaks; the Gifsy operator can reach the cross-tenant data it must (#38/#41). RBAC enablement decided (`RBAC-ENABLEMENT.md`).
-- [ ] **No fabricated data anywhere** — the E2E fail-list passes on every page (#40).
-- [ ] **Money-path integrity:** wallet/credits/redemption/payouts/TDS verified end-to-end per role; `payouts.processBatch` transactional+guarded (#42); BigInt-paise throughout; double-spend/oversell audited.
-- [ ] **Every write flow persists** (no fake success) — KYC approve, redemption, visibility submit, invoice generate, tickets (#36/#38).
-- [ ] **Environments configured + seeded:** staging has a known seeded dataset + the current schema; secrets set; `staging` E2E green.
-- [x] **Custom domain (Deoleo = `deoleoloyalty.gifsy.in`): ✅ LIVE (2026-06-20).** ⚠️ **The edge is a Cloudflare Worker, NOT a GCP load balancer** — `terraform/load-balancer.tf` was **archived 2026-06-13** (LB destroyed; all traffic routes through `cloudflare-worker/`). Done: a Cloudflare **Worker Custom Domain** (managed DNS + SSL) + the branded-domain→slug map (`5de8aa9`, `CLIENT_REGISTRY.domains`) + the login `x-forwarded-host` fix (`37e54f9`). The Worker sets `x-forwarded-host` (it rewrites `Host` to the `.run.app` origin) and the proxy/login read that — so there is **no "preserve Host" requirement** (that earlier note was wrong). Verified serving a `200` Deoleo login via a **temporary host-alias** (prod still runs old code; native resolution + alias removal ship with the prod deploy — see [`DEOLEO-GO-LIVE-BUNDLE.md`](DEOLEO-GO-LIVE-BUNDLE.md) §A.1).
-- [ ] **Excel round-trips** work (download→fill→upload) where applicable (#44).
-- [ ] **Observability** baseline (logs/metrics/alerts) (#27 → P8.4) — at least error visibility before prod.
-- [ ] **The E2E matrix is 100% green** (every `DATA-VISIBILITY.md` row covered, no OPEN cells).
+- [x] **No fabricated data anywhere** — the E2E fail-list passes on every page (#40). *(Enforced by the harness fail-list; partner slice proven.)*
+- [x] **Money-path integrity:** wallet/credits/redemption/payouts/TDS verified end-to-end per role; `payouts.processBatch` transactional+guarded (#42); BigInt-paise throughout; double-spend/oversell audited. *(P5/P6 audited + harness-pinned; sign-off, not new build.)*
+- [x] **Every write flow persists** (no fake success) — KYC approve, redemption, visibility submit, invoice generate, tickets (#36/#38). *(#50 redemption money path enforced by the E2E harness; residual proxy-excluded dead writes tracked separately.)*
+- [x] **Environments configured + seeded:** staging has a known seeded dataset + the current schema; secrets set; `staging` E2E green. *(Staging auto-migrates on `develop`; 3 staging-infra bugs fixed; real-MSG91 staging login works. **Prod is intentionally NOT seeded yet** — real-data load is the remaining step.)*
+- [x] **Custom domain (Deoleo = `deoleoloyalty.gifsy.in`): ✅ LIVE (2026-06-20).** ⚠️ **The edge is a Cloudflare Worker, NOT a GCP load balancer** — `terraform/load-balancer.tf` was **archived 2026-06-13** (LB destroyed; all traffic routes through `cloudflare-worker/`). Done: a Cloudflare **Worker Custom Domain** (managed DNS + SSL) + the branded-domain→slug map (`5de8aa9`, `CLIENT_REGISTRY.domains`) + the login `x-forwarded-host` fix (`37e54f9`). The Worker sets `x-forwarded-host` (it rewrites `Host` to the `.run.app` origin) and the proxy/login read that — so there is **no "preserve Host" requirement** (that earlier note was wrong). **As of the 2026-06-20 cutover the temporary host-alias was REMOVED — prod runs current code and resolves the branded domain natively** (login 200; see [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md)).
+- [ ] **Excel round-trips** work (download→fill→upload) where applicable (#44). *(Small fast-follow — confirm Deoleo doesn't need final-target re-upload at launch.)*
+- [~] **Observability** baseline (logs/metrics/alerts) (#27 → P8.4) — at least error visibility before prod. *(Structured logging → Cloud Logging + `/health` 200 done; **≥1 Cloud Monitoring alert still OPEN** — needs owner alert email.)*
+- [ ] **The E2E matrix is 100% green** (every `DATA-VISIBILITY.md` row covered, no OPEN cells). **⚠️ NOT yet 100% — partner slice proven; full role×page coverage is incomplete and remains OPEN.**
 
 ## 4. Who does what
 - **Owner:** answer the 🟦 product decisions in `DATA-VISIBILITY.md §3` (who-sees-what); confirm when to run E2E against staging + staging access.

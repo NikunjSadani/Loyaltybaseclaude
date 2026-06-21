@@ -103,9 +103,18 @@ Add a role's session in `setup/auth.setup.ts` (`SESSION_ROLES`), add a project i
 `playwright.config.ts`, and add `e2e/<role>/*.e2e.ts` for each DATA-VISIBILITY row. A row is "done"
 only when its E2E test passes against real data.
 
-## Status (2026-06-19): the matrix is GREEN (34/34) — the original reds are all remediated
-- #40 fabricated identity (partner/sales/admin), #41 FE role guards, Q1 payouts, #47 admin KPIs,
-  #52 cross-tenant (both directions), #39 GIFSY login — all fixed + verified through the harness.
+## Status (2026-06-20): GREEN (59) for the slices it covers — NOT the full matrix
+- Covered: #40 fabricated identity, #41 FE role guards, Q1 payouts, #47 admin KPIs, #52 cross-tenant
+  (both dirs), #39 GIFSY login, A1/A2 gifsy oversight+switcher, the partner redemption MONEY path +
+  visibility/support writes, B2 invoices, B3 gifsy console, sales catalogue/KYC.
+- ⚠️ **NOT the full role×page matrix.** Uncovered: most admin sub-pages (schemes/targets/achievements/
+  outlets/catalog/credits/TDS/payouts/settings/tickets/banners), partner targets/leaderboard/schemes/
+  orders/KYC, sales team/outlets/targets/tasks, and several write flows (KYC-approve, invoice-generate,
+  scheme-enrollment, credits/payouts). The GO-LIVE-READINESS "matrix 100% green" bar is **not met**.
+- ⚠️ **Never run end-to-end against live staging.** And since `FIXED_OTP` was **removed from staging
+  (2026-06-20, real MSG91 now)**, option (a) below no longer works as-is — a staging harness run now
+  needs the test-only OTP read-back endpoint (option (b), still unbuilt → P8) **or** temporarily
+  re-adding `FIXED_OTP` to the staging backend for the run.
 
 ## Coverage limits & still-OPEN (what GREEN does NOT yet cover)
 - **Write-persistence helper (S4):** none exists yet. Build the act→re-read-in-2nd-session pattern with

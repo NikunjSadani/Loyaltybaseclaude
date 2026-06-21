@@ -5,6 +5,13 @@
 > The active launch plan + status is **[`DEOLEO-GO-LIVE-BUNDLE.md`](DEOLEO-GO-LIVE-BUNDLE.md)** (read it first for
 > launch work); the phase tables below remain the full backlog. ⚠️ The edge is a **Cloudflare Worker**, not a GCP LB
 > (see §9.10 + the bundle's §A.1).
+>
+> ✅ **PROD CUTOVER DONE (2026-06-20):** prod (`gifsy-api` + `gifsy-frontend`) serves current code (`b3ab2e0`) on
+> `deoleoloyalty.gifsy.in`; `gifsy_prod` recreated empty + migrated to the squashed baseline (intentional greenfield,
+> 0 users/0 clients); prod auto-migrate wired into `deploy.yml`; temporary worker host-alias removed; verified
+> (login/health/routing). As-run record: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md).
+> **Remaining go-live work = real Deoleo master-data load into the empty prod + owner core-loop UAT (real OTP) + owner
+> ops (Cloud Monitoring alert, ongoing backups/PITR, cred rotation). Sales-team leaderboard = post-launch fast-follow.**
 
 A phased, bite-sized plan to deliver the **whole Loyaltybase platform** to the
 [spec](../spec/README.md), for an engineer new to this codebase. This is the **top-level plan**:
@@ -548,8 +555,8 @@ deploy-validated; the launch parts (9.7–9.9) gate the first real tenant.
 | 9.6 | **Observability/alerting** beyond logs (8.4): uptime checks, error-rate + latency alerts, DB metrics; **RLS/tenant-isolation hardening** finalize (8.6, #23) | Cloud Monitoring, `lib/prisma` | alerts fire |
 | 9.7 | **Security hardening**: rate limiting, security headers, dependency/secret scanning, rotate prod creds | proxy/infra | review |
 | 9.8 | **RBAC enablement** per `RBAC-ENABLEMENT.md` (validate on staging → flip `RBAC_ENFORCEMENT` in prod) | env flag | staging validation |
-| 9.9 | **Launch/cutover runbook**: first-tenant onboarding + seed data, forced re-login comms, smoke tests, rollback plan, DR drill | runbook | go-live checklist |
-| 9.10 | **Deoleo custom domain `deoleoloyalty.gifsy.in`**: ✅ **LIVE 2026-06-20.** ⚠️ Edge = **Cloudflare Worker, NOT a GCP LB** (`load-balancer.tf` archived 2026-06-13; traffic via `cloudflare-worker/`). Done: Worker **Custom Domain** (managed DNS+SSL) + branded-domain→slug map (`5de8aa9`) + login `x-forwarded-host` fix (`37e54f9`). Worker sets `x-forwarded-host` → no "preserve Host" need. Serving `200` Deoleo login via a **temporary host-alias**; native resolution + alias removal ship with the prod deploy (see `DEOLEO-GO-LIVE-BUNDLE.md §A.1`). | `cloudflare-worker/` | ✅ login serves on the domain |
+| 9.9 | **Launch/cutover runbook**: first-tenant onboarding + seed data, forced re-login comms, smoke tests, rollback plan, DR drill. ✅ **CUTOVER DONE 2026-06-20** — prod migrated (baseline) + deployed (`b3ab2e0`) + verified; as-run log [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md). **Remaining:** real Deoleo data load into the empty prod + owner core-loop UAT (real OTP) + a tested rollback drill. | runbook | ✅ cutover done; data-load + UAT pending |
+| 9.10 | **Deoleo custom domain `deoleoloyalty.gifsy.in`**: ✅ **LIVE 2026-06-20.** ⚠️ Edge = **Cloudflare Worker, NOT a GCP LB** (`load-balancer.tf` archived 2026-06-13; traffic via `cloudflare-worker/`). Done: Worker **Custom Domain** (managed DNS+SSL) + branded-domain→slug map (`5de8aa9`) + login `x-forwarded-host` fix (`37e54f9`). Worker sets `x-forwarded-host` → no "preserve Host" need. **As of the 2026-06-20 cutover prod runs current code and resolves the branded domain natively — the temporary host-alias was REMOVED** (login 200; see `runbooks/PROD-CUTOVER-RECORD.md`). | `cloudflare-worker/` | ✅ login serves on the domain (native) |
 
 **Exit:** CI/CD green; staging mirrors prod; prod migrated + backed up; observability + alerting live;
 RBAC validated; a repeatable launch runbook. **Depends on:** runs alongside P1→P8; 9.7–9.9 before first tenant.

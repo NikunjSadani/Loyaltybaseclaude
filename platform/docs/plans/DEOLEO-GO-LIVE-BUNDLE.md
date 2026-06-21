@@ -86,10 +86,21 @@ the MSG91 template application (a 404 link won't get DLT-approved), the worker n
 - **A-4 observability** ✅ **code already satisfied** (`AllExceptionsFilter`→Cloud Logging; `/health`). Residual = a Cloud
   Monitoring alert (needs owner alert email). **A-6 hardening** ✅ **code already satisfied** (helmet/CORS/validation/
   `ThrottlerGuard`/guard-stack; prod omits `FIXED_OTP`/`DEMO_MODE`). Residual = owner (cred rotation, prod `CORS_ORIGINS`).
+  Prod `CORS_ORIGINS` now includes `https://deoleoloyalty.gifsy.in` (secret v3, set at cutover).
+- **A-5 prod migration** ✅ **DONE (cutover, 2026-06-20).** `gifsy_prod` recreated empty + migrated to the squashed
+  baseline via the in-VPC `gifsy-migrate` job; prod auto-migrate wired into `deploy.yml`. Post-state verified: 72 tables
+  (+ledger), `kpi_defs`/`tds_deposits`=true, **World-A gone**, `_prisma_migrations: 1`, **0 users / 0 clients** (intentional
+  greenfield). Runbooks: `runbooks/PROD-DB-MIGRATION.md` (mechanics) + `runbooks/PROD-CUTOVER-RECORD.md` (as-run log).
+- **A-8 staging real-MSG91 rehearsal** ✅ **login DONE** — owner logged into staging with a **REAL MSG91 OTP** (the 3
+  staging-infra bugs below were the blockers, now fixed). Redemption/KYC UAT pending (phones set: partner+outlet
+  `7795096288`, sales `9875436349`).
+- **A-9 cutover** ✅ **DONE (2026-06-20).** Prod (`gifsy-api` + `gifsy-frontend`) now serves current code (`b3ab2e0`) on
+  `deoleoloyalty.gifsy.in`; the temporary worker host-alias was **REMOVED** (native resolution); pre-cutover backup taken.
+  Verified: login 200, FE→backend routing 400 (proves `NEXT_PUBLIC_API_URL`=api.gifsy.in), `/health` 200. Pre-deploy
+  independent Opus audit = **SAFE-TO-APPROVE**. As-run record: `runbooks/PROD-CUTOVER-RECORD.md`.
 - **A-10 prod-wipe** ✅ done + **hard-audited** (F1 `OutletTypeClientConfig` + F3 fail-closed fixed) + **dry-run-VALIDATED
-  on `gifsy_dev`** (424 rows, sane; the 5s-tx-timeout bug it caught fixed). Real wipe is cutover-only.
-- **A-5 prod-migration runbook** ✅ drafted (`runbooks/PROD-DB-MIGRATION.md`) — `prisma migrate diff` (P7 syntax verified);
-  validated vs dev (4 cosmetic index renames). **A-9 cutover runbook** = next prep item (mine).
+  on `gifsy_dev`** (424 rows, sane; the 5s-tx-timeout bug it caught fixed). (Cutover recreated `gifsy_prod` empty rather
+  than running the scoped wipe — prod was already greenfield/0-users; the wipe runbook stands for the post-UAT clean.)
 - **MSG91 OTP template** ✅ set (`MSG91_OTP_TEMPLATE_ID`=`699d295ba29962881e09d062`; auth-key/sender already present).
   MSG91 confirmed responding; **IP-whitelisting OFF** (not a factor). **B2 worker / B3 templates** = the long pole, cleared.
 - **UAT URL** ✅ `https://uat.deoleoloyalty.gifsy.in` → the staging build (owner UAT / pre-prod view).
@@ -100,9 +111,15 @@ the MSG91 template application (a 404 link won't get DLT-approved), the worker n
   `gifsy-connector` to `deploy-staging.yml`. **Lesson: staging was DB-broken — the A-8 real-MSG91 staging rehearsal is now
   unblocked and must run before prod.**
 
-**▶ NEXT (cutover, owner-gated):** O-4 backups/PITR → A-5 prod migration → prod code deploy (`develop`→`main`) → remove the
-worker host-alias → real-OTP smoke on the domain → A-9 cutover runbook → data lifecycle. **Resume the real-OTP test** once
-the latest staging redeploy lands (flip `FIXED_OTP` off → owner retries with a real phone).
+**✅ CUTOVER DONE (2026-06-20).** Prod migrated + deployed (`b3ab2e0`) on `deoleoloyalty.gifsy.in`, host-alias removed,
+`CORS_ORIGINS` set, verified (login/health/routing). See `runbooks/PROD-CUTOVER-RECORD.md`. **A-5/A-8/A-9/D1/D2 = DONE.**
+
+**▶ REMAINING GO-LIVE BLOCKERS** (these are the known final steps, not missed work):
+1. **Load real Deoleo master data into the empty prod** — client config, admins, sales team, partners/outlets, reward
+   catalog, schemes. **THE big one — no real user can log in until this lands** (prod is intentionally 0-users/0-clients).
+2. **Owner UAT of the core loop on staging** with real OTP — login DONE; redemption + KYC pending (phones above).
+3. **Owner ops:** Cloud Monitoring alert email; ongoing backups/PITR; prod credential rotation.
+4. Sales-team leaderboard = **explicitly DEFERRED** (fast-follow, nav hidden) — NOT a blocker.
 
 ## 0. The reframe
 Core platform is built (P0–P6 + P0.6 A–D). Launch needs a small specific set, several items inside P7/P8/P9, sequenced here.
@@ -238,17 +255,18 @@ actions; Cloudflare/MSG91/GCP = your accounts. I can't authenticate to those, an
 ---
 
 ## 7. Definition of "go-live done"
-- [ ] CD `test` gate green; `develop` push deploys staging; `main` deploys prod via the approval gate.
-- [ ] Staging harness green **AND a real-MSG91 staging dress rehearsal passes** (A-8).
-- [ ] **OTP works in prod (synchronous)**: login + **partner & sales-assisted** redemption OTP delivered via MSG91; send-failure cleans up (no orphan OTP/order).
-- [ ] `gifsy_prod` migrated (target-DB asserted); **backups + PITR enabled first**; staging dry-run passed.
-- [ ] **Login on `https://deoleoloyalty.gifsy.in`**: Worker routes the host; login reads `x-forwarded-host` → resolves `deoleo`.
-- [ ] Prod: no `FIXED_OTP`, no `DEMO_MODE`; `RBAC_ENFORCEMENT` unset/false.
-- [ ] **Sales-team leaderboard renders** (achievement÷target on the primary KPI across tagged outlets).
-- [ ] Error visibility: ≥1 error-rate + uptime alert; a real post-deploy `/health` gate.
-- [ ] Cutover runbook + a tested rollback exist.
+- [x] CD `test` gate green; `develop` push deploys staging; `main` deploys prod via the approval gate. **(A-1; prod deploy approved at cutover.)**
+- [~] Staging harness green **AND a real-MSG91 staging dress rehearsal passes** (A-8). **Real-OTP LOGIN done; redemption/KYC UAT pending.**
+- [ ] **OTP works in prod (synchronous)**: login + **partner & sales-assisted** redemption OTP delivered via MSG91; send-failure cleans up (no orphan OTP/order). *(code done A-2a; prod end-to-end pending real-data load + UAT.)*
+- [x] `gifsy_prod` migrated (target-DB asserted); **backups + PITR enabled first**; staging dry-run passed. **(A-5; pre-cutover backup taken; recreated empty → baseline. PITR = owner ongoing.)**
+- [x] **Login on `https://deoleoloyalty.gifsy.in`**: Worker routes the host; login reads `x-forwarded-host` → resolves `deoleo`. **(A-9; native resolution, alias removed; login 200.)**
+- [x] Prod: no `FIXED_OTP`, no `DEMO_MODE`; `RBAC_ENFORCEMENT` unset/false. **(A-6.)**
+- [—] **Sales-team leaderboard renders** — **DEFERRED** (fast-follow, nav hidden; D-c). Not a launch blocker.
+- [ ] Error visibility: ≥1 error-rate + uptime alert; a real post-deploy `/health` gate. *(`/health` 200; Cloud Monitoring alert = owner, needs alert email — OPEN.)*
+- [x] Cutover runbook + a tested rollback exist. **(`runbooks/PROD-CUTOVER-RECORD.md` as-run; rollback = pre-cutover backup. A tested rollback drill is still recommended.)**
 - [ ] Data lifecycle done: UAT on staging → prod cleaned **via the guarded A-10 runbook** (DB-asserted, FK-ordered, scoped,
-      backups-first) → real Deoleo data loaded → a real prod smoke (login → earn/view → redeem → OTP → confirm + leaderboard) passes.
+      backups-first) → real Deoleo data loaded → a real prod smoke (login → earn/view → redeem → OTP → confirm) passes.
+      **(Prod is greenfield-empty; real Deoleo data load + real-OTP UAT are the remaining open work.)**
 
 ---
 
