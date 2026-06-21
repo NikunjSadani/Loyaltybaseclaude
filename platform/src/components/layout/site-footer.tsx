@@ -10,7 +10,7 @@
  */
 export function SiteFooter({ className = '' }: { className?: string }) {
   return (
-    <footer className={`mt-8 text-center text-xs text-gray-400 ${className}`}>
+    <footer className={`mt-8 text-center text-sm text-gray-400 ${className}`}>
       Powered by <span className="font-semibold text-gray-500">Gifsy</span>
     </footer>
   );
