@@ -28,7 +28,8 @@ platform is NOT go-live ready — 6 BLOCKERS + 4 majors** (full detail + file:li
 **Next phases:** (1) THE FIX WAVE below (close GLB-1..6 + majors) → (2) re-audit money/auth/data → (3) load real Deoleo data into
 empty prod (#76) → (4) owner UAT on staging → (5) owner ops (#74).
 **UAT creds (staging, real SMS OTP):** GIFSY `uat.app.gifsy.in`/**9830011252** · deoleo admin `uat.deoleoloyalty.gifsy.in`/**6289864191** · partner `7795096288` · sales `9875436349`.
-**Read FIRST:** `gap-register.md` (GO-LIVE AUDIT block) · `GO-LIVE-READINESS.md` (status) · `DEOLEO-GO-LIVE-BUNDLE.md` · `MIGRATIONS.md` · `ENVIRONMENTS.md` · [[staging-deploy-gate]] · [[audit-every-build-item]] · [[verify-flows-at-runtime]].
+**Read FIRST:** `GO-LIVE-ISSUE-LIST.md` (⭐ the authoritative master tracker — every issue + file:line + E2E status) · `gap-register.md` (GO-LIVE AUDIT block) · `GO-LIVE-READINESS.md` (status) · `DEOLEO-GO-LIVE-BUNDLE.md` · `MIGRATIONS.md` · `ENVIRONMENTS.md` · [[staging-deploy-gate]] · [[audit-every-build-item]] · [[verify-flows-at-runtime]].
+**E2E runtime audit of S0–S6 (2026-06-21):** harness 292/0/7 + targeted drives → S1/S2/S3/S5 runtime-CONFIRMED good; **S4/S0 TDS runtime-CONFIRMED BROKEN (GLB-3: 2-row upload stored 1, reported succeeded:2)**; S6 harness-green. Details in `GO-LIVE-ISSUE-LIST.md`.
 
 ## ✅ What is LIVE / DONE
 - **The platform** — P0–P6 (onboarding/KYC, programs/targets/enrollment, wallet/points/rewards, finance/credits/

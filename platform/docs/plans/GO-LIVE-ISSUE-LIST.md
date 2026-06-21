@@ -1,0 +1,73 @@
+# Go-Live Issue List — authoritative master tracker (2026-06-21)
+
+> **VERDICT: NOT GO-LIVE READY.** Single consolidated list of every issue found this session, from (1) the S0–S6 per-stream
+> independent audits, (2) the 4-angle comprehensive *static* go-live audit (money · auth/isolation · core-loop · data/config),
+> and (3) the S0–S6 **E2E runtime audit** (Playwright harness 292 passed / 0 failed / 7 skipped + targeted runtime drives).
+> Each item has an ID, severity, file:line, the fix, and its **runtime/E2E verification status**. This is the master tracker for
+> the GO-LIVE FIX WAVE (tasks #84–#88; streams GLM · GL-Money · GL-RBAC · GL-FE-enroll · GL-FE-settle in `RESUME.md`).
+
+## S0–S6 E2E runtime audit results (2026-06-21)
+| Stream | What | Runtime verdict |
+|---|---|---|
+| **S0/S4** | TDS file-hash dedup | ❌ **BROKEN — GLB-3 confirmed live**: a 2-row off-platform upload **reported `succeeded:2` but stored only 1** (194R shows 1 PAN / ₹10k; PAN B's ₹20k silently dropped). Stale coarse baseline index. |
+| **S1** | redemption UTR ingest + BUG-1 | ✅ verified: redeem→confirm debits exactly; UTR=FAILED reverses + idempotent re-upload; UTR=PAID→DELIVERED no wallet change; manual cash cancel/return/fail → 400. |
+| **S2** | auth (atomic refresh + JWT-binding + FIXED_OTP) | ✅ verified: old access token → 401 after refresh; reused refresh token → 401; harness logs in every role. |
+| **S3** | KYC approval → outlet activation | ✅ verified (DB ground-truth): approving `seed-kyc-1` flipped null-intent outlet O001 `isActive=false→true`. |
+| **S5** | achievement Excel round-trip | ✅ verified: backend template → fill → upload → stored (was 0 rows before). |
+| **S6** | FE mock-data removal + guards | ✅ harness no-fabricated-data assertions green + FE tsc/vitest gate. |
+| **harness** | full role×page×data matrix | ✅ **292 passed / 0 failed / 7 skipped** against current code (auth, KYC reads, scoping, RBAC write-denials). |
+
+**Takeaway:** 6 of 7 S0–S6 streams runtime-CONFIRMED good; **S4/S0 (TDS) is runtime-CONFIRMED broken (GLB-3)** — it slipped because S4 was jest-only (Prisma mocked). Lesson reinforced: runtime-verify money/DB changes against the REAL dev DB.
+
+---
+
+## 🔴 BLOCKERS — must fix before any real money / UAT (FIX WAVE)
+| ID | Sev | Area | Issue | Fix | Status |
+|---|---|---|---|---|---|
+| **GLB-1** | BLOCKER | money | Eligibility (KYC-APPROVED + isActive) gate MISSING on BOTH rails. `credits.createPayoutDownload` hardcodes `kycStatus:'APPROVED'` (`credits.service.ts:567`), no join to real `KycSubmission.status` → RE_KYC'd/deactivated partners land in the payable bank file with a false APPROVED cert. Redemption rail (`confirmRedeem`/`assignPending`/`processBatch`) has ZERO KYC/active check. A partner moved APPROVED→RE_KYC_REQUIRED still gets paid. | Exclude non-APPROVED + inactive/deleted at the bank-file build (write the REAL kycStatus); mirror at `confirmRedeem`/`confirmRedeemForOutlet` (UPI/BANK) + `payouts.processBatch`. | CONFIRMED (static); needs fix + runtime-verify vs a partner moved APPROVED→RE_KYC mid-flow |
+| **GLB-2** | BLOCKER | money | Zero-value redemption: `conversionRate=0` → `valuePaise=0` → points debited, ₹0 payout, order unsettleable (`rewards.service.ts:891/579`). | Hard-fail zero-value cash redemption inside the confirm tx (rollback the debit); validate `POINTS_CONVERSION_RATE>0` at boot. | CONFIRMED (static) |
+| **GLB-3** | BLOCKER | data/tds | Stale coarse baseline indexes `tds_off_platform_entries_client_batch_key` + `tds_deposits_client_section_batch_key` (`(clientId,uploadBatchId)`) drop all-but-first row of every multi-row TDS upload (S4 file-hash batchId shared by all rows) → understated 194R/194C base, **reports false success**. | New migration DROPping both stale indexes; runtime-verify a multi-row upload persists ALL rows. | ❌ **CONFIRMED LIVE (E2E)** |
+| **GLB-4** | BLOCKER | auth | Privilege escalation: `admin-core.createUser`/`updateUser` write `dto.role` with no allow-list; `/admin/users` open to CLIENT_ADMIN → a tenant admin creates/promotes a user to GIFSY_ADMIN (global super-admin, bypasses @Roles + flips every tenant filter to all-tenants) → full cross-tenant breach. | Per-caller assignable-role allow-list (non-GIFSY callers can't assign GIFSY_ADMIN/CLIENT_ADMIN); stop spreading `...dto` into role. | CONFIRMED (static); needs fix + runtime-verify |
+| **GLB-5** | BLOCKER | core-loop | Scheme enrollment writes `localStorage` only — partner (`lib/schemes.ts:253`) + sales (`schemes.ts:283`) never call the real `POST /v1/schemes/:id/enroll` (which EXISTS + is E2E-proven). Enrollments never persist. | Wire both to the real route; runtime-verify persistence + admin export shows it. | CONFIRMED (static) |
+| **GLB-6** | BLOCKER | core-loop | Payout settlement has NO working operator UI. `admin/payouts` "Process Batch" is `setTimeout+alert` (`page.tsx:204`); no FE creates/assigns/processes/UTR-uploads a batch. The S1 settle endpoints (real, runtime-proven) have no FE driver → operators cannot settle redemptions. | Build the GIFSY settlement UI on the existing endpoints (create→assign→process→UTR-template→UTR upload). | CONFIRMED (static) |
+
+## 🟠 MAJORS
+| ID | Area | Issue | Fix |
+|---|---|---|---|
+| GLM-1 | money | Credit `CreditReversal` `awardType:'PAYOUT'` is a silent no-op even after the cash was already PAID (`credits.service.ts:821`) — no clawback/receivable. | On PAYOUT reversal: if entry still PENDING/PROCESSING pull it from payability; if already PAID record a recoverable receivable + surface it. |
+| GLM-2 | money | A FAILED credit `CreditPayoutEntry` never returns to PENDING (`credits.helpers.ts:695`) → a legitimately-owed award is un-bankable (re-download selects PENDING only). | Reset FAILED→PENDING (or include FAILED in re-download); document corrected re-upload flips FAILED→PAID intentionally. |
+| GLM-3 | money | Beneficiary bank fields (UPI id / acct+IFSC) never validated → blank-beneficiary rows in the bank file (`payouts.processBatch` checks only PAN+amount). | In `processBatch` reject txns missing mode-required beneficiary fields. |
+| GLM-4 | data | No DB unique on `PayoutTransaction.redemptionOrderId` — one-payout-per-order rests only on an app-layer claim. | Add partial unique `(redemptionOrderId) WHERE NOT NULL` (in the GLM migration). |
+| GLM-5 | core-loop | `/admin/kyc` list page fake bulk-approve + export (`setTimeout`+alert; real path exists at `/admin/kyc/[id]` + `/approvals`). | Remove or wire to `POST /v1/kyc/bulk-verify`. |
+
+## 🟡 MINORS
+| ID | Status | Issue |
+|---|---|---|
+| GLm-1 | ✅ FIXED (`c40a420`) | FIXED_OTP send-side (`msg91`) + rate-limit `skipIf` (`app.module`) + DEMO_MODE (`admin-core.bulkEditUsers`) now all require `NODE_ENV!=='production'`. |
+| GLm-2 | OPEN | `tickets.escalate` assigns `dto.escalateTo` without validating the assignee is in-tenant (`tickets.service.ts:114`). |
+| GLm-3 | OPEN | `kyc.slaMetrics` has one un-tenant-scoped histogram (`:1205`) — GIFSY-only, defense-in-depth tighten to `kycTenantFilter`. |
+| GLm-4 | OPEN (post-launch) | Legacy `sid`-less JWTs match on `(userId,clientId)` until they expire — do a hard cutover (reject `sid`-less) post-launch once old tokens age out. |
+| GLm-5 | TRACK | In-memory per-instance throttler (limits scale with Cloud Run instances); dead `REDIS_URL` bound but unused. |
+| GLm-6 | VERIFY | Confirm prod env has `DEMO_MODE` unset (proxy injects a GIFSY_ADMIN header when set); the proxy `DEMO_MODE` path must be off in prod. |
+| GLm-7 | NOTE | TDS file-hash audit flagged a "collision" — MISREAD: it already uses a `\x01` delimiter (od-verified) + fixed 4-field arity = collision-safe. No change. |
+
+## ⏭️ Deferred follow-ups / feature gaps (NOT launch blockers)
+- **Schemes enrollments list/stats endpoint** doesn't exist → `/admin/schemes/:id/enrollments` is honestly empty-stated (only the xlsx export is real). Build the backend list/stats endpoint (separate from GLB-5 which wires the *write*).
+- **S6 dead code:** `admin/visibility` `VISIBILITY_QUEUE` dead const; wire the real fraud-log (`GET /v1/visibility/fraud-log`).
+- **S3 NIT:** RE_UPLOAD `ConflictException` logs nothing server-side — add a `logger.warn` with the submission id before throwing.
+- **scheme-builder** `KYC_OUTLET_IDS = new Set() // TODO` (`scheme-builder.tsx:171`) — targeting-preview only.
+- **lib sample data** (`lib/invoice.ts MOCK_VISIBILITY_INVOICES`, `lib/points-ledger-export.ts DEMO_OUTLETS`, `lib/campaign.ts MOCK_*`) — confirm not imported by a live page (the core-loop audit traced them as not on live surfaces).
+- **#76 prod data load** must create the first GIFSY_ADMIN + the OutletType master rows via API/load-script (the seed is prod-firewalled).
+- **#74 owner ops:** Cloud Monitoring alert, automated backups + PITR on `gifsy-db`, prod secret rotation.
+
+## ✅ What the audits CONFIRMED SOUND (do not re-audit)
+Money atomic-claims + reversal idempotency (S0/S1 — "could not break it"); tenant data-isolation (no unscoped query across 33
+services); RBAC enforcement (one exception = GLB-4); schema↔migration parity (73 tables / 50 enums); BigInt/JSON serialization;
+secrets fail-closed (`JWT_SECRET`); money FKs `onDelete: Restrict`; the S0–S6 hardening (S1/S2/S3/S5 runtime-proven; S4 broken per GLB-3).
+
+## Sequence to go-live
+1. **FIX WAVE** — close GLB-1..6 + GLM-1..5 (parallel disjoint streams; runtime-verify each against the REAL dev DB).
+2. **Re-audit** the changed money/auth/data/core-loop paths + re-run the E2E harness.
+3. **#76** load real Deoleo data into empty prod (via API, not seed).
+4. **Owner UAT** on staging (real OTP) of the full loop incl. enrollment + settlement.
+5. **#74** owner ops (monitoring/backups/cred rotation).
