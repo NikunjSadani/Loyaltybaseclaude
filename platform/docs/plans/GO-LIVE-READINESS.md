@@ -40,9 +40,13 @@ differences — the harness must not assume `FIXED_OTP`/`localhost` semantics.)
 > **Status (2026-06-20):** **Prod cutover is DONE** — prod serves current code (`b3ab2e0`) on `deoleoloyalty.gifsy.in`,
 > `gifsy_prod` recreated empty + migrated to the squashed baseline (intentional greenfield, 0 users/0 clients), host-alias
 > removed, verified (login/health/routing). See [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md).
-> **Still OPEN before a real user can log in:** (a) the **E2E matrix is NOT 100% green** — partner slice proven, full
-> role×page coverage incomplete; (b) **real Deoleo master-data load** into the empty prod; (c) **observability alerts**
-> (Cloud Monitoring alert email = owner). Sales-team leaderboard = explicitly DEFERRED (fast-follow).
+> **Update (2026-06-21): the E2E role×page matrix is now COVERED + GREEN (291 passed, Waves 0–4; commits `961d5fa`/
+> `7b3828a`/`5119c1d`, pushed).** The expansion caught + fixed real prod bugs (money-path #42, the `/api/auth/me`
+> profile-mock bug, outlet-config, admin demo-identity #55) and surfaced **gap #57**.
+> **🔴 PRE-UAT BLOCKERS still OPEN before UAT:** (a) **gap #57** — admin-visible pages render mock/empty data
+> (sub-dashboards "4,821", Outlet Master, empty `/admin/hierarchy`, sales-shell demo notifications); these MUST be wired
+> to real data first or UAT testers hit them as visible "fake/unfinished" defects (owner re-prioritised — NOT a
+> fast-follow). (b) **real Deoleo master-data load** into empty prod (#76). (c) **observability alerts** (#74, owner).
 
 - [ ] **Auth:** login works for **all roles** (real flow), route-by-role correct, logout clears session. *(GIFSY broken #39 → fixed; staging real-OTP login DONE; full role matrix on prod pending real-data load.)*
 - [ ] **RBAC + tenant isolation:** every endpoint role+tenant scoped to the `DATA-VISIBILITY.md` audience; cross-tenant never leaks; the Gifsy operator can reach the cross-tenant data it must (#38/#41). RBAC enablement decided (`RBAC-ENABLEMENT.md`).
@@ -53,7 +57,7 @@ differences — the harness must not assume `FIXED_OTP`/`localhost` semantics.)
 - [x] **Custom domain (Deoleo = `deoleoloyalty.gifsy.in`): ✅ LIVE (2026-06-20).** ⚠️ **The edge is a Cloudflare Worker, NOT a GCP load balancer** — `terraform/load-balancer.tf` was **archived 2026-06-13** (LB destroyed; all traffic routes through `cloudflare-worker/`). Done: a Cloudflare **Worker Custom Domain** (managed DNS + SSL) + the branded-domain→slug map (`5de8aa9`, `CLIENT_REGISTRY.domains`) + the login `x-forwarded-host` fix (`37e54f9`). The Worker sets `x-forwarded-host` (it rewrites `Host` to the `.run.app` origin) and the proxy/login read that — so there is **no "preserve Host" requirement** (that earlier note was wrong). **As of the 2026-06-20 cutover the temporary host-alias was REMOVED — prod runs current code and resolves the branded domain natively** (login 200; see [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md)).
 - [ ] **Excel round-trips** work (download→fill→upload) where applicable (#44). *(Small fast-follow — confirm Deoleo doesn't need final-target re-upload at launch.)*
 - [~] **Observability** baseline (logs/metrics/alerts) (#27 → P8.4) — at least error visibility before prod. *(Structured logging → Cloud Logging + `/health` 200 done; **≥1 Cloud Monitoring alert still OPEN** — needs owner alert email.)*
-- [ ] **The E2E matrix is 100% green** (every `DATA-VISIBILITY.md` row covered, no OPEN cells). **⚠️ NOT yet 100% — partner slice proven; full role×page coverage is incomplete and remains OPEN.** Plan to close it: [`E2E-COVERAGE-PLAN.md`](E2E-COVERAGE-PLAN.md) (owner directive: cover the app **before** UAT so bugs surface in CI, not UAT).
+- [~] **The E2E matrix is covered + GREEN** (every `DATA-VISIBILITY.md` row, Waves 0–4 — 291 passed / 0 failed / 11 skipped). ✅ Built + runtime-verified ([`E2E-COVERAGE-PLAN.md`](E2E-COVERAGE-PLAN.md)). The 11 skips are the **gap #57** pages (`test.fixme`'d — admin sub-dashboards / Outlet Master / hierarchy / sales notifications render mock/empty data) + a few precondition skips. **The #57 cells re-assert real data the moment those pages are wired — that wiring is the PRE-UAT blocker above.** Staging E2E still needs the OTP read-back endpoint or temp `FIXED_OTP`.
 
 ### 3.1 Owner-ops before launch (owner-only — I prepare the exact steps; not blockers to UAT, needed before real customers)
 - [ ] **Cloud Monitoring alert email** — an automated alert on error-rate / uptime so a prod problem pages the owner (today: logs exist, but nothing actively notifies). Needs the owner's GCP account + email.

@@ -12,9 +12,10 @@ Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic). Last v
 ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 The whole P0–P6 + P0.6 platform is built, audited, and **now serving in prod** (`gifsy-api`+`gifsy-frontend` on
 `b3ab2e0`, at `https://deoleoloyalty.gifsy.in`). The prod cutover is DONE; staging works end-to-end with REAL MSG91 OTP.
-**We are in the GO-LIVE phase now — NOT building new features.** The remaining work is launch-readiness:
-(1) close the E2E coverage gap (owner directive: before UAT), (2) load real Deoleo data into empty prod,
-(3) owner UAT, (4) owner ops. **Read FIRST:** `DEOLEO-GO-LIVE-BUNDLE.md` · `GO-LIVE-READINESS.md` ·
+**We are in the GO-LIVE phase now — NOT building new features.** Launch-readiness, in order:
+**(1) 🔴 WIRE the gap-#57 admin pages to real data (PRE-UAT BLOCKER — the NEXT thing to do)**, (2) load real Deoleo
+data into empty prod, (3) owner UAT, (4) owner ops. **E2E coverage (Waves 0–4, 291 green) is DONE + pushed** — and it
+CAUGHT gap #57. **Read FIRST:** `DEOLEO-GO-LIVE-BUNDLE.md` · `GO-LIVE-READINESS.md` · `docs/spec/gap-register.md` (#57) ·
 `runbooks/PROD-CUTOVER-RECORD.md` · `E2E-COVERAGE-PLAN.md` · `MIGRATIONS.md` · `ENVIRONMENTS.md`.
 
 ## ✅ What is LIVE / DONE
@@ -35,18 +36,31 @@ The whole P0–P6 + P0.6 platform is built, audited, and **now serving in prod**
   empty-host secret, Next-16 Server-Action CSRF abort behind the worker, BOM'd MSG91 key) are all fixed. Redemption-UAT
   phones set on staging: deoleo admin `9830011252`, partner+outlet `7795096288`, sales `9875436349`.
 
+## ✅ E2E ROLE×PAGE MATRIX — DONE (Waves 0–4, 291 passed / 0 failed / 11 skipped; committed `961d5fa`/`7b3828a`/`5119c1d`, PUSHED)
+The full matrix (admin writes+reads, partner, sales + salesManager team roll-up, MIS read-only incl. write-denied, gifsy)
+is machine-enforced. It caught + we FIXED real prod bugs: the **money-path #42** (`payouts.processBatch` had no test → added
+a GIFSY assume-tenant spec + payout-pipeline seed), **`/api/auth/me` thin → profile pages showed MOCK data** (enriched `me`
+with nested channelPartner+wallet+salesUser; backend rebuilt), **`OutletTypeClientConfig` unseeded → outlet-upsert broken**
+(seeded), seed-hygiene (canonical names), the `login.ts` OTP-fill race, and admin demo-identity (#55). **To run E2E:** DB
+proxy `:5433`→gifsy_dev + backend `:4000` (`node dist/main.js`; ⚠️ **rebuild `dist` after the /api/auth/me change**) + FE
+`:3000`; re-seed `gifsy_dev` to re-arm money/KYC write specs; `cd platform && npm run e2e`. Staging-run still needs the OTP
+read-back endpoint OR temp `FIXED_OTP`.
+
 ## 🔴 The GO-LIVE critical path — what's LEFT
-1. **CLOSE THE E2E COVERAGE GAP (owner directive — do BEFORE UAT so bugs surface in CI, not UAT).** The Playwright
-   harness (`platform/e2e`, `npm run e2e`) is green for SLICES (~59) but **NOT the full role×page matrix**: uncovered =
-   most admin sub-pages (schemes/targets/achievements/outlets/catalog/credits/TDS/payouts/settings/tickets/banners),
-   partner targets/leaderboard/schemes/orders/KYC, sales team/outlets/targets/tasks, and many WRITE flows. Plan +
-   phased build: **`E2E-COVERAGE-PLAN.md`**. ⚠️ Staging-run dependency: `FIXED_OTP` was REMOVED from staging (real
-   MSG91), so a staging harness run now needs the test-only OTP read-back endpoint (unbuilt) OR temporarily re-adding
-   `FIXED_OTP`. Local runs use `FIXED_OTP=123456`. Tasks #75.
+1. **🔴 WIRE THE GAP-#57 ADMIN PAGES TO REAL DATA — PRE-UAT BLOCKER (owner re-prioritised 2026-06-21; the NEXT thing to do).**
+   The E2E expansion proved several **admin/sales-facing** pages render **mock/empty data** — a UAT tester hits them as
+   visible "fake/empty/unfinished" defects: **(a)** `/admin/dashboards/{payments,engagement,redemptions,kyc}` render
+   hardcoded demo values ("4,821", "Kumar General Store") — only the main `/admin/dashboard` was wired (P0.6-H/#47);
+   **(b)** `/admin/outlets` Outlet Master is a mock constant; **(c)** `/admin/hierarchy` is empty (`GET /api/admin/hierarchy-config`
+   returns `employees:[]` despite seeded sales users); **(d)** the sales shell shows hardcoded demo notifications. Wire these to
+   real aggregations/lists/endpoints. **Lower priority** (roles not in Deoleo's first UAT): GIFSY tenant-settings write path, MIS
+   KPI-read RBAC. The blocking E2E tests are `test.fixme(...)` citing **gap-register #57** — remove the fixme to re-assert real
+   data once wired. NOT money/auth/scope (those ARE covered). Full detail: `gap-register.md` #57 + `E2E-COVERAGE-PLAN.md`.
 2. **LOAD REAL DEOLEO MASTER DATA into the empty prod** — prod is migrated but has 0 users/0 clients; no real user can
    log in until the real client + admins + sales team + partners/outlets + reward catalog + schemes are loaded (owner
-   provides the file; I author+audit the load). THE blocker. Task #76.
-3. **Owner UAT** of the core loop on staging with real OTP (login done; KYC/earn/redeem pending).
+   provides the file; I author+audit the load). ⚠️ **Must also create `OutletTypeClientConfig` per tenant** (or outlet
+   management breaks — found in #57). THE data blocker. Task #76.
+3. **Owner UAT** of the core loop on staging with real OTP (login done; KYC/earn/redeem pending) — gate on #1 first.
 4. **Owner ops** (owner-only; I prepare exact steps): Cloud Monitoring alert email · automated backups + PITR on
    `gifsy-db` (a one-off backup was taken at cutover; ongoing is OFF) · rotate prod-only secrets. Task #74.
 - **Deferred fast-follows (NOT blockers):** sales-team leaderboard (nav hidden), rest of P7 (notification worker,

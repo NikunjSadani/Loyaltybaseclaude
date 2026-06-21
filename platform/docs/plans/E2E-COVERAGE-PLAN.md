@@ -327,10 +327,12 @@ Highest bug-risk; each is an independent file.
 > - **`OutletTypeClientConfig` unseeded for deoleo** → admin outlet-upsert silently failed ("Unknown outlet type").
 >   FIXED (seeded the configs).
 > - **Seed hygiene** — forced canonical display names (stale `"Test Wholesale Co"` etc. from old `update:{}` seeds).
-> - **Deferred real findings (owner decision, `test.fixme` + gap-register #57):** admin sub-dashboards + Outlet Master
->   render hardcoded mock data; `/admin/hierarchy` empty (hierarchy-config returns no employees); GIFSY can't write a
->   tenant's settings namespace; MIS denied KPI read; sales-shell demo notifications. All loud/obvious in UAT — not
->   money/auth/scope (those are covered). The fixme'd tests re-enable trivially once the product is wired.
+> - **🔴 Real findings → gap-register #57, `test.fixme`'d — RE-PRIORITISED to a PRE-UAT BLOCKER (owner, 2026-06-21,
+>   NOT a post-launch fast-follow):** admin sub-dashboards + Outlet Master render hardcoded mock data; `/admin/hierarchy`
+>   empty (hierarchy-config returns no employees); sales-shell demo notifications — admin/sales-facing, so a UAT tester
+>   hits them as visible "fake/empty/unfinished" defects → **wire to real data BEFORE UAT.** Lower priority (roles not in
+>   Deoleo's first UAT): GIFSY tenant-settings write, MIS KPI read. Core money/auth/scope/write paths ARE covered; the
+>   `test.fixme` cells re-assert real data once wired.
 
 ### Wave 2 — Admin CRUD writes + remaining admin reads (parallel; disjoint files)
 - `clientAdmin/targets.e2e.ts` (read) + `clientAdmin/target-upload-write.e2e.ts` (W8). **M**
