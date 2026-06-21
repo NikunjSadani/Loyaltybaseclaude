@@ -55,6 +55,23 @@ proxy `:5433`→gifsy_dev + backend `:4000` (`node dist/main.js`; ⚠️ **rebui
 read-back endpoint OR temp `FIXED_OTP`.
 
 ## 🔴 The GO-LIVE critical path — what's LEFT
+
+**⭐ THE POST-COMPACT WORK (do FIRST, owner directive 2026-06-21): CREATE A FIX PLAN — don't start coding yet.** Produce a
+written plan to fix **(a)** the **UAT Hardening Defect Register** (~26 candidates: money-integrity + auth + data-integrity —
+`gap-register.md` "UAT Hardening Defect Register"), **(b)** the **broken Excel round-trips** (achievement upload may store 0
+rows; final-targets & outlet-master re-upload; locale `"1,234"`→1; TDS re-upload double-insert; reactivate-via-upload no-op;
+missing error-reports — `gap-register.md` Excel block), **(c)** the **#57-class UI mock-data** items (enrollments page, partner/admin
+visibility demo data, partner DemoSwitcher/demo-wallet, the deferred #57a sub-dashboards), and **(d) anything else brought up.**
+**The plan MUST be structured so MULTIPLE AGENTS work SIMULTANEOUSLY (parallel disjoint-file streams) to cut lead time — with
+NO quality compromise:** every defect first VERIFIED at runtime (many are code-reasoned candidates — esp. "achievement upload
+stores 0 rows" + the money races), then per-stream build→independent-adversarial-audit→Opus-gate→runtime-verify→FULL-suite→commit
+(Opus owns `schema.prisma`/migrations so executors never collide; the TDS-dup + any `@@unique` need a migration). **MONEY RULE
+(owner, do not relitigate):** there is **NO in-portal fund balance / gateway** — INR transfer is OFFLINE, a UTR/status report is
+uploaded; an INR redemption **cannot be cancelled once OTP-confirmed**; reversal is driven **ONLY by an uploaded UTR=FAILED**
+(→ reverse points + mark order/payout FAILED, idempotent). So **remove the manual `CONFIRMED→CANCELLED` INR cancel path** (BUG-1)
+and **drop the fund-shortfall/fund-check-race items** (not in the real model — `payouts.service` fund-check is vestigial). Live
+env is clean (FIXED_OTP/DEMO_MODE unset, no tenant leak). Present the plan for owner approval BEFORE executing.
+
 1. **✅ DONE (2026-06-21, task #77) — gap-#57 (b/c/e) wired; (a) sub-dashboards DEFERRED.** (b) orphan `/admin/outlets` mock
    removed → redirect to the already-real `/admin/users/outlets`, + real per-outlet KYC-status join (derived from the owning
    **partner's** `KycSubmission` — KYC is partner-keyed, not outlet-keyed); (c) hierarchy read stays snapshot-fed **by P2.1

@@ -89,11 +89,13 @@ and where it surfaced. Severity is a first pass, to be refined.
   `PayoutTransaction` PENDING+payable → partner gets refund AND cash. **OWNER RULE (2026-06-21): an INR redemption CANNOT
   be cancelled/blocked once OTP-confirmed; the ONLY reversal is on transfer FAILURE (UTR=FAILED → reverse points).** Fix =
   remove the manual INR-cancel path; drive reversal solely from UTR-FAILED, atomic + idempotent, marking order+payout
-  FAILED. Edge cases (owner-confirmed): pre-confirm abandon OK; partial-batch reverses per-txn; mis-marked-UTR needs a
-  reconciliation/correction path; fund-shortfall ≠ failure (no reverse); stuck/limbo = no auto-reverse; INR success needs a
-  terminal (PAID/SETTLED); non-INR (gift-card/voucher) keeps its own fulfilment-refund lifecycle; no clawback on in-flight
-  redeemed points.
-- ◻ **Fund-check race** (`payouts.service.ts:406`) — concurrent batch process reads the unlocked fund balance → overspend.
+  FAILED. **MONEY MODEL (owner 2026-06-21): NO in-portal fund balance / gateway — the INR transfer happens OFFLINE at the bank;
+  the portal only ingests an uploaded UTR/status report.** So reversal is driven SOLELY by the uploaded UTR=FAILED (not a manual
+  cancel, not a balance check). Edge cases (owner-confirmed): pre-confirm abandon OK; partial-batch reverses per-txn; mis-marked-UTR
+  needs a reconciliation/correction path; stuck/limbo = no auto-reverse; INR success terminal = PAID/SETTLED on UTR=PAID; non-INR
+  (gift-card/voucher) keeps its own fulfilment-refund lifecycle; no clawback on in-flight redeemed points.
+- ⛔ **Fund-check race / fund-shortfall = NOT APPLICABLE (owner 2026-06-21):** there is no in-portal fund balance to race on — the
+  `payouts.service` fund-receive/fund-check is vestigial scaffolding vs the real offline-transfer + UTR-upload model.
 - ◻ **Duplicate-reversal race** (`credits.service.ts:313`) — read-then-create, no unique key → 2 PENDING reversals → double clawback.
 - ◻ **Duplicate outletCode in a credit batch** → double payout entries at confirm.
 
