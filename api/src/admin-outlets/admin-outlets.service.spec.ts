@@ -22,6 +22,7 @@ const mockPrisma = {
   outletTypeClientConfig: { findMany: jest.fn() },
   salesUser: { findUnique: jest.fn() },
   salesUserAssignment: { updateMany: jest.fn() },
+  kycSubmission: { findMany: jest.fn() },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
@@ -77,6 +78,9 @@ describe('AdminOutletsService', () => {
           metro: 'Yes',
           programName: 'Trade Loyalty',
           programCategory: 'Standard',
+          partnerId: null,
+          reKycFlags: null,
+          kycIntent: null,
           salesAssignments: [{ salesUser: { employeeCode: 'ISR-1', user: { name: 'Anil' } } }],
         },
       ]);

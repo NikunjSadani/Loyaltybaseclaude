@@ -10,6 +10,7 @@ const mockAuthService = {
   sendOtp:     jest.fn(),
   verifyOtp:   jest.fn(),
   refreshToken: jest.fn(),
+  getMe:       jest.fn(),
 };
 
 describe('AuthController', () => {
@@ -58,11 +59,18 @@ describe('AuthController', () => {
   });
 
   describe('me', () => {
-    it('should return user info from JWT payload', () => {
+    it('delegates to authService.getMe with the JWT payload (enriched profile)', async () => {
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9876543210', name: 'Test User' };
-      const result  = controller.me(payload);
+      const enriched = {
+        id: 'user_1', role: 'RETAILER', clientId: 'deoleo', name: 'Test User', assumed: false,
+        user: { id: 'user_1', name: 'Test User', phone: '9876543210', role: 'RETAILER', channelPartner: null, salesUser: null },
+      };
+      mockAuthService.getMe.mockResolvedValue(enriched);
 
-      expect(result).toEqual({ id: 'user_1', role: 'RETAILER', clientId: 'deoleo', name: 'Test User', assumed: false });
+      const result = await controller.me(payload);
+
+      expect(mockAuthService.getMe).toHaveBeenCalledWith(payload);
+      expect(result).toEqual(enriched);
     });
   });
 });
