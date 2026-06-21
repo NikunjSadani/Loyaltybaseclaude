@@ -47,7 +47,7 @@ proxy `:5433`→gifsy_dev + backend `:4000` (`node dist/main.js`; ⚠️ **rebui
 read-back endpoint OR temp `FIXED_OTP`.
 
 ## 🔴 The GO-LIVE critical path — what's LEFT
-1. **🔴 WIRE THE GAP-#57 ADMIN PAGES TO REAL DATA — PRE-UAT BLOCKER (owner re-prioritised 2026-06-21; the NEXT thing to do).**
+1. **🔴 WIRE THE GAP-#57 ADMIN PAGES TO REAL DATA — PRE-UAT BLOCKER (task #77). ⭐ THE POST-COMPACT WORK = #77 + #78 (do both).**
    The E2E expansion proved several **admin/sales-facing** pages render **mock/empty data** — a UAT tester hits them as
    visible "fake/empty/unfinished" defects: **(a)** `/admin/dashboards/{payments,engagement,redemptions,kyc}` render
    hardcoded demo values ("4,821", "Kumar General Store") — only the main `/admin/dashboard` was wired (P0.6-H/#47);
@@ -56,12 +56,17 @@ read-back endpoint OR temp `FIXED_OTP`.
    real aggregations/lists/endpoints. **Lower priority** (roles not in Deoleo's first UAT): GIFSY tenant-settings write path, MIS
    KPI-read RBAC. The blocking E2E tests are `test.fixme(...)` citing **gap-register #57** — remove the fixme to re-assert real
    data once wired. NOT money/auth/scope (those ARE covered). Full detail: `gap-register.md` #57 + `E2E-COVERAGE-PLAN.md`.
-2. **LOAD REAL DEOLEO MASTER DATA into the empty prod** — prod is migrated but has 0 users/0 clients; no real user can
+2. **🔴 AUTO-PROVISION `OutletTypeClientConfig` ON TENANT CREATION — pre-prod prerequisite (task #78; the OTHER post-compact item).**
+   A new tenant has ZERO outlet types enabled, so admin outlet create/upload fails "Unknown outlet type" until manually
+   configured (only path today = the manual GIFSY `updateOutletTypeConfig` endpoint, one type at a time; band-aided in
+   `seed.ts §3.2b` for the demo tenant only). Fix: tenant provisioning (`gifsy.service` create-client + the `/gifsy/clients/new`
+   flow) auto-creates the default outlet-type configs. Required before the prod data load (#76). NOT a staging-UAT blocker (seed
+   covers the demo tenant). Detail: `gap-register.md` #58.
+3. **LOAD REAL DEOLEO MASTER DATA into the empty prod** — prod is migrated but has 0 users/0 clients; no real user can
    log in until the real client + admins + sales team + partners/outlets + reward catalog + schemes are loaded (owner
-   provides the file; I author+audit the load). ⚠️ **Must also create `OutletTypeClientConfig` per tenant** (or outlet
-   management breaks — found in #57). THE data blocker. Task #76.
-3. **Owner UAT** of the core loop on staging with real OTP (login done; KYC/earn/redeem pending) — gate on #1 first.
-4. **Owner ops** (owner-only; I prepare exact steps): Cloud Monitoring alert email · automated backups + PITR on
+   provides the file; I author+audit the load). ⚠️ **Gated by #78** (outlet-type configs must exist first). THE data blocker. Task #76.
+4. **Owner UAT** of the core loop on staging with real OTP (login done; KYC/earn/redeem pending) — gate on #1 (+ #78) first.
+5. **Owner ops** (owner-only; I prepare exact steps): Cloud Monitoring alert email · automated backups + PITR on
    `gifsy-db` (a one-off backup was taken at cutover; ongoing is OFF) · rotate prod-only secrets. Task #74.
 - **Deferred fast-follows (NOT blockers):** sales-team leaderboard (nav hidden), rest of P7 (notification worker,
   banners, ticket lifecycle), P8 (RLS, DPDP, trend analytics, the staging real-OTP endpoint), multi-tenant SSR

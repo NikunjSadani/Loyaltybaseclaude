@@ -46,7 +46,10 @@ differences — the harness must not assume `FIXED_OTP`/`localhost` semantics.)
 > **🔴 PRE-UAT BLOCKERS still OPEN before UAT:** (a) **gap #57** — admin-visible pages render mock/empty data
 > (sub-dashboards "4,821", Outlet Master, empty `/admin/hierarchy`, sales-shell demo notifications); these MUST be wired
 > to real data first or UAT testers hit them as visible "fake/unfinished" defects (owner re-prioritised — NOT a
-> fast-follow). (b) **real Deoleo master-data load** into empty prod (#76). (c) **observability alerts** (#74, owner).
+> fast-follow). (b) **real Deoleo master-data load** into empty prod (#76) — ⚠️ **gated by #78: tenant provisioning must auto-create
+> `OutletTypeClientConfig` rows first, else outlet creation fails "Unknown outlet type" for the new tenant.** (c)
+> **observability alerts** (#74, owner). (d) **#78 — auto-provision outlet-type configs on tenant creation** (pre-prod
+> prerequisite; band-aided in seed for the demo tenant only).
 
 - [ ] **Auth:** login works for **all roles** (real flow), route-by-role correct, logout clears session. *(GIFSY broken #39 → fixed; staging real-OTP login DONE; full role matrix on prod pending real-data load.)*
 - [ ] **RBAC + tenant isolation:** every endpoint role+tenant scoped to the `DATA-VISIBILITY.md` audience; cross-tenant never leaks; the Gifsy operator can reach the cross-tenant data it must (#38/#41). RBAC enablement decided (`RBAC-ENABLEMENT.md`).
