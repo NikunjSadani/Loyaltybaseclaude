@@ -226,8 +226,10 @@ export class AdminCoreService {
     const clientId = user.clientId;
     const action = dto.action;
 
-    // ── DEMO_MODE ─────────────────────────────────────────────────────────────
-    if (process.env.DEMO_MODE === 'true') {
+    // ── DEMO_MODE (dev/staging only) ──────────────────────────────────────────
+    // Defense-in-depth: never short-circuit a real bulk edit into a fabricated
+    // "(demo mode)" response in production, even if DEMO_MODE is misconfigured there.
+    if (process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production') {
       if (action === 'resign') {
         return { resigned: (dto.employeeCodes ?? []).length, message: 'Resigned (demo mode)' };
       }

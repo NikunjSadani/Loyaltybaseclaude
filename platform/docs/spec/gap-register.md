@@ -1,5 +1,24 @@
 # Gap & Inconsistency Register (living)
 
+> ## 🔴 COMPREHENSIVE GO-LIVE AUDIT — 2026-06-21 — VERDICT: **NOT GO-LIVE READY** (6 blockers + 4 majors)
+> Four independent adversarial audits (money, auth/isolation, core-loop/dead-writes, data/migration/config) ran after the S0–S6
+> hardening wave. **Confirmed SOUND:** core money machinery (atomic claims + reversal idempotency — "could not break it"),
+> tenant data-isolation (no unscoped query across 33 services), schema↔migration parity (73 tables/50 enums), BigInt/JSON,
+> secrets fail-closed, the S0–S6 hardening. **BLOCKERS to fix before real money moves (the post-compact fix wave):**
+> 1. **GLB-1 money — eligibility gate missing on BOTH rails.** `credits.createPayoutDownload` hardcodes `kycStatus:'APPROVED'`
+>    (no join to real `KycSubmission.status`) so RE_KYC_REQUIRED / deactivated partners land in the payable bank file; the
+>    redemption rail (`confirmRedeem`/`assignPending`/`processBatch`) has ZERO KYC/`isActive` check. A partner moved
+>    APPROVED→RE_KYC_REQUIRED (`kyc.reKyc`) still gets paid. Fix: exclude non-APPROVED + inactive/deleted at the bank-file build,
+>    mirror at redeem-confirm + processBatch, write the REAL kycStatus. (`credits.service.ts:567`, `rewards.service.ts:587/899`, `payouts.service.ts:390`)
+> 2. **GLB-2 money — zero-value redemption.** `conversionRate=0` → `valuePaise=0` → points debited, ₹0 payout, order unsettleable. Fix: hard-fail inside the confirm tx (rollback debit) + validate rate>0 at boot.
+> 3. **GLB-3 data — stale coarse TDS indexes drop rows.** The squashed baseline still carries old `(clientId,uploadBatchId)` unique indexes (`tds_off_platform_entries_client_batch_key`, `tds_deposits_client_section_batch_key`); the S4 file-hash uploadBatchId is shared by all rows → only the FIRST row of any multi-row TDS upload inserts, rest dropped by skipDuplicates → understated tax base. Fix: a migration DROPping the two stale indexes; runtime-verify a multi-row upload persists. (Regression from S4 + my skipped S4 real-DB runtime check.)
+> 4. **GLB-4 auth — privilege escalation.** `admin-core.createUser`/`updateUser` write `dto.role` with no allow-list; `/admin/users` is open to CLIENT_ADMIN → a tenant admin can create/promote a user to GIFSY_ADMIN (global super-admin that bypasses @Roles + flips every tenant filter to all-tenants) → full cross-tenant breach. Fix: per-caller assignable-role allow-list; stop spreading `...dto` into role.
+> 5. **GLB-5 core-loop — scheme enrollment doesn't persist.** Partner self-enroll (`partner/dashboard` → `lib/schemes.ts:253`) + sales-assisted (`sales/tasks` → `schemes.ts:283`) write `localStorage`, never `POST /v1/schemes/:id/enroll` (which EXISTS + is E2E-proven). Fix: wire both to the real route.
+> 6. **GLB-6 core-loop — payout settlement has no working UI.** `admin/payouts` "Process Batch" is `setTimeout+alert` (`page.tsx:204`); no FE creates/assigns/processes/UTR-uploads a batch. The S1 settle endpoints (real, runtime-proven) have NO FE driver → operators cannot settle redemptions through the product. Fix: build the GIFSY payout-settlement UI on the existing endpoints.
+>
+> **MAJORS:** GLM-1 credit PAYOUT-reversal is a no-op even after cash paid (no clawback/receivable); GLM-2 a FAILED credit entry never returns to PENDING (un-bankable, no retry); GLM-3 beneficiary bank fields (UPI/acct+IFSC) never validated → blank-beneficiary bank rows; GLM-4 no DB unique on `PayoutTransaction.redemptionOrderId` (one-payout-per-order rests only on an app claim — add a partial unique); GLM-5 `/admin/kyc` list page fake bulk-approve+export (real path exists at `/admin/kyc/[id]` + `/approvals`).
+> **MINORS (some already fixed):** ✅ FIXED_OTP send-side (`msg91`) + rate-limit `skipIf` (`app.module`) now NODE_ENV-gated; ✅ DEMO_MODE (`admin-core.bulkEditUsers`) now NODE_ENV-gated. Remaining: tickets.escalate assignee not in-tenant-validated; kyc.slaMetrics one un-tenant-scoped histogram (GIFSY-only); legacy `sid`-less JWT hard-cutover post-launch; in-memory per-instance throttler + dead `REDIS_URL` (track); confirm `DEMO_MODE` unset in prod env; #76 load must create GIFSY_ADMIN + OutletType masters via API (seed is prod-firewalled).
+
 Accumulated while reverse-engineering the spec. Each entry: current state vs target,
 and where it surfaced. Severity is a first pass, to be refined.
 

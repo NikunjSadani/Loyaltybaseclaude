@@ -1,5 +1,18 @@
 # Go-Live Readiness — the enforcement mechanism + the gate
 
+> ## 🚦 READINESS STATUS — 2026-06-21: **NOT GO-LIVE READY (6 blockers open)**
+> A 4-angle comprehensive adversarial audit (money · auth/isolation · core-loop/dead-writes · data/migration/config) ran after
+> the S0–S6 UAT-hardening wave. **What is SOUND:** money atomic-claims/reversal-idempotency, tenant data-isolation (no unscoped
+> query in 33 services), schema↔migration parity, BigInt/secrets, the S0–S6 hardening (all runtime/audit-verified). **6 BLOCKERS
+> remain (full detail + file:line in `docs/spec/gap-register.md` GO-LIVE AUDIT block):** GLB-1 eligibility (KYC/active) gate
+> missing on both money rails · GLB-2 zero-value redemption debits points · GLB-3 stale coarse TDS indexes drop upload rows ·
+> GLB-4 CLIENT_ADMIN→GIFSY_ADMIN privilege escalation · GLB-5 scheme enrollment is localStorage-only (never persists) · GLB-6
+> payout settlement has no working operator UI (S1 settle endpoints have no FE driver). **Plus 4 majors** (credit reversal
+> clawback, FAILED-credit retry, beneficiary validation, PayoutTransaction.redemptionOrderId unique, /admin/kyc fake bulk-approve).
+> Already-fixed minors: FIXED_OTP + DEMO_MODE prod-gates. **The post-compact fix wave closes GLB-1..6 + the majors → re-audit →
+> THEN load real prod data (#76) → owner UAT.** Do NOT load real money data or open UAT against money/enrollment/settlement until
+> GLB-1..6 are fixed and runtime-verified against the real DB.
+
 > Created 2026-06-19. Documentation alone is **passive** and gets shortcut (proven repeatedly this session).
 > "Done / ready to ship" must be **enforced by something executable**, not trusted to a checklist. This doc
 > defines (1) the intent, (2) the automated enforcement, (3) the readiness gate, (4) who does what.

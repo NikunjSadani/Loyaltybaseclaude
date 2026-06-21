@@ -8,23 +8,27 @@ Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch **develop**). Fron
 Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic). Last verified state: 2026-06-21.
 
 ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
-⚠️ STATE: DEOLEO IS LIVE IN PRODUCTION ON THE CORE LOOP — but the prod DB is intentionally EMPTY.
+⚠️ STATE (2026-06-21): platform serving in prod (empty DB) — but a COMPREHENSIVE GO-LIVE AUDIT found **6 BLOCKERS → NOT go-live ready.**
 ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
-The whole P0–P6 + P0.6 platform is built, audited, and **now serving in prod** (`gifsy-api`+`gifsy-frontend` on
-`b3ab2e0`, at `https://deoleoloyalty.gifsy.in`). The prod cutover is DONE; staging works end-to-end with REAL MSG91 OTP.
-**We are in the GO-LIVE phase now — preparing for owner UAT on STAGING.** Launch-readiness:
-**(1) ✅ gap-#57 (b/c/e) + #78 + GIFSY operator login (#59) DONE & DEPLOYED to staging (`fc5de23`, 2026-06-21).** ⚠️ A whole
-day's work had silently NOT deployed (staging-deploy-freeze #60 — CI `test` red on 2 stale specs skipped all `needs: test`
-deploys); FIXED → FE+API now serving the current build (verified image SHA + surfaces 200). **(2) 🔴 UAT IS PENDING A DEFECT
-TRIAGE:** the UAT-plan build (4 module + 3 hardening + 3 Excel agents) found a **defect register** (see `gap-register.md`
-"UAT Hardening Defect Register" + the Excel round-trip block) — incl. **real money-integrity + broken Excel round-trips**
-(achievement upload may store 0 rows; final-targets/outlet-master re-upload broken; double-payout on INR cancel). **NONE
-fixed yet.** Owner money rule: an **INR redemption can't be cancelled once OTP-confirmed — reversal ONLY on transfer
-FAILURE.** (3) load real Deoleo data into empty prod (no longer gated by #78), (4) owner UAT, (5) owner ops.
-**UAT creds (staging, real SMS OTP):** GIFSY operator `uat.app.gifsy.in` / **9830011252** · deoleo admin
-`uat.deoleoloyalty.gifsy.in` / **6289864191** · partner `7795096288` · sales `9875436349`. **E2E 290 green (local).
-Read FIRST:** `DEOLEO-GO-LIVE-BUNDLE.md` · `GO-LIVE-READINESS.md` · `docs/spec/gap-register.md` (#57/#59/#60 + Defect Register) ·
-`runbooks/PROD-CUTOVER-RECORD.md` · `MIGRATIONS.md` · `ENVIRONMENTS.md` · [[staging-deploy-gate]].
+The P0–P6 + P0.6 platform is built and serving in prod (`gifsy-api`+`gifsy-frontend`, `https://deoleoloyalty.gifsy.in`; prod DB
+intentionally EMPTY). The **S0–S6 UAT-hardening wave is DONE + pushed** (S0 migration; S5 Excel round-trips `c9bf80e`; S1
+redemption UTR-ingest + BUG-1 close `0aa6490`; S2 auth + S3 KYC + S4 TDS + S6 FE-mock `ad4fbe2`; small FIXED_OTP/DEMO_MODE
+prod-gates uncommitted-as-of-this-write) — each executor→independent-audit→gate→runtime-verify; money (S1/S5) + auth (S2)
+runtime-PROVEN. **THEN a 4-angle comprehensive adversarial audit (money · auth/isolation · core-loop · data/config) found the
+platform is NOT go-live ready — 6 BLOCKERS + 4 majors** (full detail + file:line in `gap-register.md` "GO-LIVE AUDIT" block +
+`GO-LIVE-READINESS.md` status):
+  • **GLB-1** eligibility (KYC-APPROVED + isActive) gate MISSING on BOTH money rails (credit bank-file hardcodes kycStatus:APPROVED; redemption has no KYC check) → revoked/inactive partners get paid.
+  • **GLB-2** zero-value redemption (`conversionRate=0`) debits points for ₹0.
+  • **GLB-3** stale coarse TDS unique indexes in the baseline drop all-but-first row of every multi-row TDS upload (regression from S4 + my skipped S4 real-DB runtime check).
+  • **GLB-4** CLIENT_ADMIN can create/promote a user to GIFSY_ADMIN → full cross-tenant breach (`admin-core` createUser/updateUser, no role allow-list).
+  • **GLB-5** scheme enrollment writes localStorage-only, never `POST /v1/schemes/:id/enroll` (the real route exists).
+  • **GLB-6** payout settlement has NO working operator UI (`admin/payouts` Process = setTimeout+alert; S1 settle endpoints have no FE driver).
+  Majors: credit PAYOUT-reversal clawback, FAILED-credit retry, beneficiary-field validation, PayoutTransaction.redemptionOrderId unique, /admin/kyc fake bulk-approve.
+  **What the audit CONFIRMED SOUND (don't re-audit):** money atomic-claims + reversal idempotency, tenant data-isolation (no unscoped query / 33 services), schema↔migration parity, BigInt/secrets, the S0–S6 hardening.
+**Next phases:** (1) THE FIX WAVE below (close GLB-1..6 + majors) → (2) re-audit money/auth/data → (3) load real Deoleo data into
+empty prod (#76) → (4) owner UAT on staging → (5) owner ops (#74).
+**UAT creds (staging, real SMS OTP):** GIFSY `uat.app.gifsy.in`/**9830011252** · deoleo admin `uat.deoleoloyalty.gifsy.in`/**6289864191** · partner `7795096288` · sales `9875436349`.
+**Read FIRST:** `gap-register.md` (GO-LIVE AUDIT block) · `GO-LIVE-READINESS.md` (status) · `DEOLEO-GO-LIVE-BUNDLE.md` · `MIGRATIONS.md` · `ENVIRONMENTS.md` · [[staging-deploy-gate]] · [[audit-every-build-item]] · [[verify-flows-at-runtime]].
 
 ## ✅ What is LIVE / DONE
 - **The platform** — P0–P6 (onboarding/KYC, programs/targets/enrollment, wallet/points/rewards, finance/credits/
@@ -56,21 +60,34 @@ read-back endpoint OR temp `FIXED_OTP`.
 
 ## 🔴 The GO-LIVE critical path — what's LEFT
 
-**⭐ THE POST-COMPACT WORK (do FIRST, owner directive 2026-06-21): CREATE A FIX PLAN — don't start coding yet.** Produce a
-written plan to fix **(a)** the **UAT Hardening Defect Register** (~26 candidates: money-integrity + auth + data-integrity —
-`gap-register.md` "UAT Hardening Defect Register"), **(b)** the **broken Excel round-trips** (achievement upload may store 0
-rows; final-targets & outlet-master re-upload; locale `"1,234"`→1; TDS re-upload double-insert; reactivate-via-upload no-op;
-missing error-reports — `gap-register.md` Excel block), **(c)** the **#57-class UI mock-data** items (enrollments page, partner/admin
-visibility demo data, partner DemoSwitcher/demo-wallet, the deferred #57a sub-dashboards), and **(d) anything else brought up.**
-**The plan MUST be structured so MULTIPLE AGENTS work SIMULTANEOUSLY (parallel disjoint-file streams) to cut lead time — with
-NO quality compromise:** every defect first VERIFIED at runtime (many are code-reasoned candidates — esp. "achievement upload
-stores 0 rows" + the money races), then per-stream build→independent-adversarial-audit→Opus-gate→runtime-verify→FULL-suite→commit
-(Opus owns `schema.prisma`/migrations so executors never collide; the TDS-dup + any `@@unique` need a migration). **MONEY RULE
-(owner, do not relitigate):** there is **NO in-portal fund balance / gateway** — INR transfer is OFFLINE, a UTR/status report is
-uploaded; an INR redemption **cannot be cancelled once OTP-confirmed**; reversal is driven **ONLY by an uploaded UTR=FAILED**
-(→ reverse points + mark order/payout FAILED, idempotent). So **remove the manual `CONFIRMED→CANCELLED` INR cancel path** (BUG-1)
-and **drop the fund-shortfall/fund-check-race items** (not in the real model — `payouts.service` fund-check is vestigial). Live
-env is clean (FIXED_OTP/DEMO_MODE unset, no tenant leak). Present the plan for owner approval BEFORE executing.
+**⭐ THE POST-COMPACT WORK (do FIRST, 2026-06-21): EXECUTE THE GO-LIVE-AUDIT FIX WAVE — close the 6 blockers + 4 majors the
+comprehensive audit found.** The S0–S6 hardening wave is DONE; THIS wave fixes what the 4-angle go-live audit surfaced (full
+detail + file:line in `gap-register.md` "GO-LIVE AUDIT" block). Run it as parallel disjoint-file streams, same discipline as
+S0–S6: executor → INDEPENDENT adversarial audit (hand the problem, not the fix) → Opus gate → **RUNTIME-VERIFY AGAINST THE REAL
+DEV DB** (not just jest — GLB-3 slipped precisely because S4 was jest-only) → FULL suites → commit. Opus owns `schema.prisma` +
+migrations so executors never collide. Streams (disjoint files):
+  - **GLM (migration, Opus-owned):** DROP the two stale coarse TDS indexes `tds_off_platform_entries_client_batch_key` +
+    `tds_deposits_client_section_batch_key` (GLB-3); ADD partial unique on `PayoutTransaction.redemptionOrderId WHERE NOT NULL` (GLM-4).
+    Show SQL → apply to dev → **runtime-verify a multi-row TDS upload persists ALL rows** (the proof S4 lacked).
+  - **GL-Money (`rewards`/`payouts`/`credits`):** GLB-1 eligibility gate — exclude non-APPROVED-KYC + inactive/deleted at the
+    credit bank-file build (`createPayoutDownload`, write the REAL kycStatus not hardcoded), mirror the check at redeem-confirm
+    (`confirmRedeem`/`confirmRedeemForOutlet`, UPI/BANK only) + `payouts.processBatch`; GLB-2 hard-fail zero-value cash redemption
+    inside the confirm tx (rollback the debit) + validate conversionRate>0 at boot; GLM-1 PAYOUT-reversal clawback/receivable;
+    GLM-2 FAILED-credit retry (FAILED→PENDING or include in re-download); GLM-3 beneficiary-field validation in processBatch.
+    **MONEY MODEL (owner, do not relitigate):** no in-portal fund; offline transfer + UTR upload; INR uncancellable once
+    OTP-confirmed; reversal ONLY on UTR=FAILED. **Runtime-verify against a partner moved APPROVED→RE_KYC_REQUIRED mid-flow.**
+  - **GL-RBAC (`admin-core`):** GLB-4 — per-caller assignable-role allow-list in createUser/updateUser (non-GIFSY callers can't
+    assign GIFSY_ADMIN/CLIENT_ADMIN); stop spreading `...dto` into role; + validate tickets.escalate assignee is in-tenant.
+    Runtime-verify a CLIENT_ADMIN cannot create/promote a GIFSY_ADMIN.
+  - **GL-FE-enroll (`platform`):** GLB-5 — wire partner self-enroll + sales-assisted enroll to `POST /v1/schemes/:id/enroll`
+    (replace the localStorage writes in `lib/schemes.ts:253/283`). Runtime-verify the enrollment persists + shows in the admin export.
+  - **GL-FE-settle (`platform`, the biggest):** GLB-6 — build the GIFSY payout-settlement UI driving the EXISTING S1/payouts
+    endpoints (create batch → assign-pending → process → UTR-template download → UTR upload), replacing the `setTimeout+alert`
+    stub in `admin/payouts/page.tsx`; + remove/wire the fake `/admin/kyc` bulk-approve (GLM-5). Runtime-verify a redemption
+    settles end-to-end through the UI.
+Already done (small, gated, uncommitted-as-of-write): FIXED_OTP send-side (`msg91`) + rate-limit `skipIf` (`app.module`) +
+DEMO_MODE (`admin-core.bulkEditUsers`) now NODE_ENV-gated. After the wave: re-run the 4 go-live audits on the changed paths,
+THEN proceed to #76 prod data load. Present the stream plan for owner go-ahead, then execute (owner already wants these closed).
 
 1. **✅ DONE (2026-06-21, task #77) — gap-#57 (b/c/e) wired; (a) sub-dashboards DEFERRED.** (b) orphan `/admin/outlets` mock
    removed → redirect to the already-real `/admin/users/outlets`, + real per-outlet KYC-status join (derived from the owning

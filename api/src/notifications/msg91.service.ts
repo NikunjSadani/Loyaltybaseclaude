@@ -19,10 +19,14 @@ export class Msg91Service {
     // ByteString error ("character … value 65279") when set as the authkey header.
     const authKey    = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
     const templateId = this.config.get<string>('MSG91_OTP_TEMPLATE_ID')?.trim();
-    const fixedOtp   = this.config.get<string>('FIXED_OTP');
+    // Defense-in-depth: FIXED_OTP is a dev/staging convenience only — NEVER honor it
+    // in production (a leaked/misconfigured prod FIXED_OTP would otherwise silently
+    // suppress real SMS = a login outage, and log the OTP). In prod, fall through to
+    // the real MSG91 call regardless of the env var.
+    const fixedOtp   =
+      process.env.NODE_ENV !== 'production' ? this.config.get<string>('FIXED_OTP') : undefined;
 
     // FIXED_OTP mode — skip MSG91, log OTP to console (dev/staging only)
-    // Production Cloud Run will never have FIXED_OTP set
     if (fixedOtp) {
       this.logger.warn(`[FIXED_OTP MODE] OTP for ${phone} is always: ${fixedOtp} — MSG91 not called`);
       return;

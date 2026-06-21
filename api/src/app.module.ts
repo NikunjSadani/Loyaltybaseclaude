@@ -57,9 +57,10 @@ import { TdsModule }          from './tds/tds.module';
         limit: 60,
       }],
       // DEV-ONLY: skip ALL rate limiting when FIXED_OTP is set (local dev + the E2E harness, whose
-      // real-login setup makes several OTP requests per run). FIXED_OTP is NEVER set in staging/prod,
-      // so throttling — incl. the tighter per-controller OTP limits — stays fully active there.
-      skipIf: () => !!process.env.FIXED_OTP,
+      // real-login setup makes several OTP requests per run). Defense-in-depth: ALSO require
+      // non-production, so a leaked/misconfigured prod FIXED_OTP can never disable throttling on
+      // the OTP endpoints. Throttling stays fully active in staging/prod.
+      skipIf: () => !!process.env.FIXED_OTP && process.env.NODE_ENV !== 'production',
     }),
     PrismaModule,
     StorageModule,
