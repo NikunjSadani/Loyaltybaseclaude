@@ -92,6 +92,13 @@ export class ReconciliationQueryDto {
   batchId?: string;
 }
 
+/** POST /v1/payouts/batches/:id/utr — preview unless ?apply=true. */
+export class PayoutUtrUploadQueryDto {
+  @IsOptional()
+  @IsString()
+  apply?: string;
+}
+
 /** POST /v1/payouts/batches — create a DRAFT batch.
  *  Source restricts payoutMode to a 4-value set that matches the PayoutMode enum. */
 export class CreateBatchDto {

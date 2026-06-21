@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -6,7 +7,10 @@ import {
   Post,
   Query,
   StreamableFile,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { PayoutsService } from './payouts.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -16,6 +20,7 @@ import {
   CreateBatchDto,
   ListBatchesQueryDto,
   ListTransactionsQueryDto,
+  PayoutUtrUploadQueryDto,
   ReceiveFundDto,
   ReconciliationQueryDto,
 } from './dto/payouts.dto';
@@ -96,6 +101,41 @@ export class PayoutsController {
   @RequirePermission('payouts:process_batch')
   processBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.payouts.processBatch(user, id);
+  }
+
+  @Get('batches/:id/utr-template')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('payouts:reconcile')
+  async utrTemplate(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+  ): Promise<StreamableFile> {
+    const { buffer, filename } = await this.payouts.buildPayoutUtrTemplate(user, id);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${filename}"`,
+    });
+  }
+
+  @Post('batches/:id/utr')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('payouts:reconcile')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB ceiling — bound memory on parse
+      fileFilter: (_req, file, cb) =>
+        /\.(xlsx|xls)$/i.test(file.originalname)
+          ? cb(null, true)
+          : cb(new BadRequestException('Only .xlsx/.xls files are accepted'), false),
+    }),
+  )
+  uploadUtr(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @UploadedFile() file: Express.Multer.File,
+    @Query() query: PayoutUtrUploadQueryDto,
+  ) {
+    return this.payouts.uploadPayoutUtr(user, id, file, query.apply === 'true');
   }
 
   @Get('reconciliation')

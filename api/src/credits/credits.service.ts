@@ -184,6 +184,12 @@ export class CreditsService {
       const confirmed = await tx.creditBatch.findFirst({ where: { id } });
 
       // ── PAYOUT rows → CreditPayoutEntry ───────────────────────────────────
+      // NOTE (duplicate-outletCode safety): one CreditPayoutEntry is created per
+      // PAYOUT row, so the same outletCode CAN produce multiple entries (e.g. an
+      // outlet awarded under several credit fields). This does NOT double the
+      // payout: createPayoutDownload groups entries by outletId and SUMS amountPaise
+      // into a single bank-file line per outlet, so two entries become one payout
+      // for their combined amount — the intended behaviour. No dedup needed here.
       if (payoutRows.length > 0) {
         await tx.creditPayoutEntry.createMany({
           data: payoutRows.map((r) => ({
@@ -325,22 +331,39 @@ export class CreditsService {
       );
     }
 
-    return this.prisma.creditReversal.create({
-      data: {
-        clientId: user.clientId,
-        batchId: id,
-        outletId: dto.outletId,
-        outletName: dto.outletName,
-        fieldId: dto.fieldId,
-        fieldName: dto.fieldName,
-        period: batch.period,
-        awardType: dto.awardType,
-        // Store as BigInt paise (or whole points for POINTS awardType).
-        originalPaise: toPaiseBigInt(dto.originalPaise),
-        requestedPaise: toPaiseBigInt(dto.requestedPaise),
-        requestedBy: user.sub,
-      },
-    });
+    // The pre-check above is the fast path, but a concurrent request can slip past
+    // it (read-then-write race). The DB partial-unique index
+    // `credit_reversals_pending_unique` on (batchId,outletId,fieldId) WHERE
+    // status='PENDING_GIFSY' is the authoritative guard — translate its P2002 into
+    // the same clean 400.
+    try {
+      return await this.prisma.creditReversal.create({
+        data: {
+          clientId: user.clientId,
+          batchId: id,
+          outletId: dto.outletId,
+          outletName: dto.outletName,
+          fieldId: dto.fieldId,
+          fieldName: dto.fieldName,
+          period: batch.period,
+          awardType: dto.awardType,
+          // Store as BigInt paise (or whole points for POINTS awardType).
+          originalPaise: toPaiseBigInt(dto.originalPaise),
+          requestedPaise: toPaiseBigInt(dto.requestedPaise),
+          requestedBy: user.sub,
+        },
+      });
+    } catch (e) {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
+        throw new BadRequestException(
+          'A pending reversal already exists for this outlet and field in this batch.',
+        );
+      }
+      throw e;
+    }
   }
 
   // ─── GET /v1/admin/credits/eligible-outlets ────────────────────────────────

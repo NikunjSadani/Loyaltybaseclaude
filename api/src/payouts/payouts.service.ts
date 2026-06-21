@@ -3,11 +3,13 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { PayoutStatus, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { WalletService } from '../wallet/wallet.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
 import { rupeesToPaise } from '../common/money';
+import { parsePayoutUtrUpload } from './payout-utr.helpers';
 import {
   BatchDetailQueryDto,
   CreateBatchDto,
@@ -27,7 +29,10 @@ import {
  */
 @Injectable()
 export class PayoutsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly wallet: WalletService,
+  ) {}
 
   /** GET /v1/payouts/transactions — paginated, filterable payout transactions. */
   async listTransactions(user: JwtPayload, q: ListTransactionsQueryDto) {
@@ -356,10 +361,13 @@ export class PayoutsService {
       throw new BadRequestException('Batch is not in a processable state');
     }
 
+    // No in-portal fund / gateway exists — the bank transfer is offline — so there
+    // is no fund-availability gate. Processing flags the valid transactions to
+    // INITIATED and finalises the batch SUBMITTED; completion/reversal happen later
+    // via the uploaded UTR (uploadPayoutUtr).
     const steps = {
       validation: { status: 'PENDING', count: 0, errors: [] as string[] },
       invoiceGeneration: { status: 'PENDING', count: 0 },
-      fundCheck: { status: 'PENDING', available: 0, required: 0 },
       disbursement: { status: 'PENDING', flagged: 0 },
     };
     let finalStatus: 'SUBMITTED' | 'FAILED' = 'FAILED';
@@ -401,35 +409,19 @@ export class PayoutsService {
       steps.invoiceGeneration.count = validTransactions.length;
       steps.invoiceGeneration.status = 'COMPLETED';
 
-      // Step 3: Fund check — the full gross amount is required (no TDS deduction).
-      // balancePaise is BigInt from Prisma; Number() is safe.
-      const fundLedger = await this.prisma.fundLedger.findFirst({
-        where: { clientId },
-        orderBy: { createdAt: 'desc' },
-      });
-      const totalRequired = validTransactions.reduce(
-        (sum, tx) => sum + Number(tx.amountPaise),
-        0,
-      );
-      const availableBalance = Number(fundLedger?.balancePaise ?? 0n);
-      steps.fundCheck.available = availableBalance;
-      steps.fundCheck.required = totalRequired;
-      steps.fundCheck.status = availableBalance >= totalRequired ? 'PASSED' : 'FAILED';
-
-      // Step 4: Flag for disbursement + finalise — all per-transaction writes and the
+      // Step 3: Flag for disbursement + finalise — all per-transaction writes and the
       // batch finalisation run in one transaction so a partial failure rolls back.
+      // No fund gate: any batch that survives validation is SUBMITTED.
       let flagged = 0;
-      finalStatus = steps.fundCheck.status === 'PASSED' ? 'SUBMITTED' : 'FAILED';
+      finalStatus = 'SUBMITTED';
 
       await this.prisma.$transaction(async (tx) => {
-        if (steps.fundCheck.status === 'PASSED') {
-          for (const vt of validTransactions) {
-            await tx.payoutTransaction.update({
-              where: { id: vt.id },
-              data: { status: 'INITIATED' },
-            });
-            flagged++;
-          }
+        for (const vt of validTransactions) {
+          await tx.payoutTransaction.update({
+            where: { id: vt.id },
+            data: { status: 'INITIATED' },
+          });
+          flagged++;
         }
 
         await tx.payoutBatch.update({
@@ -503,5 +495,221 @@ export class PayoutsService {
       filename: `reconciliation-${Date.now()}.xlsx`,
       recordCount: rows.length,
     };
+  }
+
+  /**
+   * GET /v1/payouts/batches/:id/utr-template — build the fillable UTR template for a
+   * batch and return its bytes. One row per PayoutTransaction keyed by its stable id
+   * (Transaction ID). The admin fills UTR + Status (PAID/FAILED) offline and
+   * re-uploads via uploadPayoutUtr. The Transaction ID column is the ONLY join key —
+   * never edited by the admin.
+   */
+  async buildPayoutUtrTemplate(user: JwtPayload, batchId: string) {
+    const batch = await this.prisma.payoutBatch.findFirst({
+      where: { id: batchId, clientId: user.clientId },
+    });
+    if (!batch) throw new NotFoundException('Payout batch not found');
+
+    const transactions = await this.prisma.payoutTransaction.findMany({
+      where: { batchId, batch: { clientId: user.clientId } },
+      include: {
+        partner: { select: { businessName: true, panNumber: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    // amountPaise is BigInt from Prisma; Number() is safe (paise « MAX_SAFE_INTEGER).
+    // UTR + Status are intentionally blank for the admin to fill offline.
+    const rows = transactions.map((t) => ({
+      'Transaction ID': t.id,
+      'Partner Name': t.partner?.businessName ?? '',
+      PAN: t.partner?.panNumber ?? 'N/A',
+      'Amount (₹)': (Number(t.amountPaise) / 100).toFixed(2),
+      Mode: t.payoutMode,
+      UTR: '',
+      Status: '',
+    }));
+
+    return {
+      buffer: buildXlsx([{ name: 'UTR Upload', rows }]),
+      filename: `payout-utr-${batch.batchCode}.xlsx`,
+      recordCount: rows.length,
+    };
+  }
+
+  /**
+   * POST /v1/payouts/batches/:id/utr?apply=true — ingest the filled UTR report.
+   *
+   * Mirrors credits.uploadUtr: preview unless apply=true, a knownUtrs Set for
+   * cross-batch duplicate-UTR detection, and a single $transaction that mutates each
+   * OK row. The OFFLINE bank transfer's outcome is the ONLY thing that completes or
+   * reverses an INR redemption:
+   *   - PAID  → PayoutTransaction SUCCESS (providerRefId = UTR, completedAt = now);
+   *             linked RedemptionOrder → DELIVERED (if not already terminal). No
+   *             points change.
+   *   - FAILED → PayoutTransaction FAILED (failureReason); linked RedemptionOrder
+   *              points reversed ONCE (M2 claim) then → FAILED.
+   *
+   * Idempotency: terminal PayoutTransactions (SUCCESS/FAILED/REVERSED) are skipped,
+   * and the FAILED refund uses the exact M2 claim
+   * (updateMany where pointsDeducted>0 → 0; reverse only if count>0), so
+   * re-uploading the same report is a no-op.
+   */
+  async uploadPayoutUtr(
+    user: JwtPayload,
+    batchId: string,
+    file: Express.Multer.File,
+    apply: boolean,
+  ) {
+    const batch = await this.prisma.payoutBatch.findFirst({
+      where: { id: batchId, clientId: user.clientId },
+    });
+    if (!batch) throw new NotFoundException('Payout batch not found');
+
+    if (!file) throw new BadRequestException('No file uploaded');
+
+    const transactions = await this.prisma.payoutTransaction.findMany({
+      where: { batchId, batch: { clientId: user.clientId } },
+      select: {
+        id: true,
+        status: true,
+        providerRefId: true,
+        payoutMode: true,
+        partnerId: true,
+        redemptionOrderId: true,
+      },
+    });
+
+    const ab = file.buffer.buffer.slice(
+      file.buffer.byteOffset,
+      file.buffer.byteOffset + file.buffer.byteLength,
+    );
+
+    const batchTxnIds = new Set(transactions.map((t) => t.id));
+
+    // Known UTRs across ALL of this client's payout transactions (cross-batch dup
+    // detection), upper-cased to match the parser's normalisation.
+    const usedUtrs = await this.prisma.payoutTransaction.findMany({
+      where: { batch: { clientId: user.clientId }, providerRefId: { not: null } },
+      select: { providerRefId: true },
+    });
+    const knownUtrs = new Set<string>(
+      usedUtrs
+        .filter((t) => t.providerRefId != null)
+        .map((t) => t.providerRefId!.toUpperCase()),
+    );
+
+    const parseResult = parsePayoutUtrUpload(ab, { batchTxnIds, knownUtrs });
+
+    // Preview unless apply=true.
+    if (!apply) {
+      return { parseResult, batchCode: batch.batchCode };
+    }
+
+    if (!parseResult.canProceed) {
+      throw new BadRequestException(
+        'Cannot apply — parse result has errors or no valid rows',
+      );
+    }
+
+    const txnMap = new Map(transactions.map((t) => [t.id, t]));
+    const TERMINAL_PAYOUT: PayoutStatus[] = [
+      PayoutStatus.SUCCESS,
+      PayoutStatus.FAILED,
+      PayoutStatus.REVERSED,
+    ];
+    const now = new Date();
+
+    let paidCount = 0;
+    let failedCount = 0;
+    let reversedCount = 0;
+
+    await this.prisma.$transaction(async (tx) => {
+      for (const row of parseResult.rows) {
+        if (row.status !== 'OK' || !row.outcome) continue;
+
+        const txn = txnMap.get(row.txnId);
+        if (!txn) continue;
+
+        // Idempotency: never re-process a payout transaction already in a terminal
+        // state. A re-upload of the same report falls through here as a no-op.
+        if (TERMINAL_PAYOUT.includes(txn.status)) continue;
+
+        if (row.outcome === 'PAID') {
+          await tx.payoutTransaction.update({
+            where: { id: txn.id },
+            data: {
+              status: 'SUCCESS',
+              providerRefId: row.utr,
+              completedAt: now,
+            },
+          });
+          paidCount++;
+
+          // Complete the linked redemption (DELIVERED) unless it is already in a
+          // terminal state. No points change on success.
+          if (txn.redemptionOrderId) {
+            await tx.redemptionOrder.updateMany({
+              where: {
+                id: txn.redemptionOrderId,
+                status: {
+                  notIn: [
+                    RedemptionStatus.DELIVERED,
+                    RedemptionStatus.CANCELLED,
+                    RedemptionStatus.RETURNED,
+                    RedemptionStatus.FAILED,
+                  ],
+                },
+              },
+              data: { status: RedemptionStatus.DELIVERED, deliveredAt: now },
+            });
+          }
+        } else {
+          // FAILED.
+          await tx.payoutTransaction.update({
+            where: { id: txn.id },
+            data: {
+              status: 'FAILED',
+              failureReason: row.remarks || 'UTR report: FAILED',
+            },
+          });
+          failedCount++;
+
+          // Reverse the redemption points ONCE (M2 claim), then mark the order
+          // FAILED. The claim makes a re-upload of the same FAILED a no-op.
+          if (txn.redemptionOrderId) {
+            const orderId = txn.redemptionOrderId;
+            const order = await tx.redemptionOrder.findFirst({
+              where: { id: orderId },
+              select: { pointsDeducted: true, partnerId: true, orderNumber: true },
+            });
+            if (order) {
+              const refundClaim = await tx.redemptionOrder.updateMany({
+                where: { id: orderId, pointsDeducted: { gt: 0 } },
+                data: { pointsDeducted: 0 },
+              });
+              if (refundClaim.count > 0) {
+                await this.wallet.reverse(
+                  order.partnerId,
+                  order.pointsDeducted,
+                  {
+                    referenceId: orderId,
+                    description: `Reversal ${order.orderNumber}`,
+                  },
+                  tx,
+                );
+                reversedCount++;
+              }
+              await tx.redemptionOrder.update({
+                where: { id: orderId },
+                data: { status: RedemptionStatus.FAILED },
+              });
+            }
+          }
+        }
+      }
+    });
+
+    return { applied: true, paidCount, failedCount, reversedCount };
   }
 }

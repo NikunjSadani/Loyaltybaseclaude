@@ -977,6 +977,25 @@ export class RewardsService {
       toStatus === RedemptionStatus.RETURNED ||
       toStatus === RedemptionStatus.FAILED;
 
+    // INR (cash) redemptions cannot be manually reversed once OTP-confirmed: the
+    // bank transfer happens offline and reversal is driven ONLY by an uploaded
+    // UTR=FAILED (payouts.uploadPayoutUtr, which marks the order FAILED + refunds
+    // points + flips the PayoutTransaction together). A manual transitionOrder to
+    // ANY refund target (CANCELLED / RETURNED / FAILED) would re-credit the points
+    // while leaving the PayoutTransaction PENDING and still payable → double-payout
+    // (BUG-1). So block every refund-target edge for cash modes, not just CANCELLED.
+    // Non-refund progressions (PROCESSING/DISPATCHED/DELIVERED) and non-cash
+    // redemptions (gift card / physical gift) are unaffected.
+    const isCashMode =
+      order.redemptionMode === PayoutMode.UPI ||
+      order.redemptionMode === PayoutMode.BANK_TRANSFER;
+    if (isCashMode && isRefundTarget) {
+      throw new BadRequestException(
+        'INR redemptions cannot be cancelled, returned or failed manually once confirmed; ' +
+          'reversal is driven only by an uploaded UTR=FAILED.',
+      );
+    }
+
     const now = new Date();
     const data: Prisma.RedemptionOrderUpdateInput = {
       status: toStatus,

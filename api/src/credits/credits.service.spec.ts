@@ -5,6 +5,7 @@
 
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import * as XLSX from 'xlsx';
 import { CreditsService } from './credits.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -371,6 +372,26 @@ describe('CreditsService', () => {
       // BigInt writes
       expect(data.originalPaise).toBe(BigInt(10000));
       expect(data.requestedPaise).toBe(BigInt(5000));
+    });
+
+    it('translates a DB P2002 (pending-reversal unique index) into a clean 400', async () => {
+      // The fast-path pre-check passes (no existing pending), but a concurrent
+      // request already inserted one — the partial-unique index
+      // `credit_reversals_pending_unique` rejects with P2002.
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockPrisma.creditReversal.findFirst.mockResolvedValue(null);
+      const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+      });
+      mockPrisma.creditReversal.create.mockRejectedValue(p2002);
+      const dto: CreateReversalDto = {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.PAYOUT, originalPaise: 10000, requestedPaise: 5000,
+      };
+      await expect(service.createReversal(admin, 'b1', dto)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
     });
   });
 

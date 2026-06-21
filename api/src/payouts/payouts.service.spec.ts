@@ -5,8 +5,10 @@
 
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import * as XLSX from 'xlsx';
 import { PayoutsService } from './payouts.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { WalletService } from '../wallet/wallet.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockTx = {
@@ -15,6 +17,11 @@ const mockTx = {
   auditLog: { create: jest.fn() },
   payoutTransaction: { update: jest.fn() },
   payoutBatch: { update: jest.fn() },
+  redemptionOrder: {
+    findFirst: jest.fn(),
+    update: jest.fn(),
+    updateMany: jest.fn(),
+  },
 };
 
 const mockPrisma = {
@@ -41,6 +48,10 @@ const mockPrisma = {
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
+const mockWallet = {
+  reverse: jest.fn(),
+};
+
 const gifsy: JwtPayload = {
   sub: 'admin1',
   role: 'GIFSY_ADMIN',
@@ -58,7 +69,11 @@ describe('PayoutsService', () => {
     // Individual tests override to exercise the 0-count bad-state path.
     mockPrisma.payoutBatch.updateMany.mockResolvedValue({ count: 1 });
     const module: TestingModule = await Test.createTestingModule({
-      providers: [PayoutsService, { provide: PrismaService, useValue: mockPrisma }],
+      providers: [
+        PayoutsService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: WalletService, useValue: mockWallet },
+      ],
     }).compile();
     service = module.get(PayoutsService);
   });
@@ -208,7 +223,7 @@ describe('PayoutsService', () => {
       expect(mockPrisma.payoutTransaction.findMany).not.toHaveBeenCalled();
     });
 
-    it('passes the fund check (FULL amount, no TDS), flags transactions and SUBMITs', async () => {
+    it('flags valid transactions to INITIATED and SUBMITs with NO fund gate', async () => {
       mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
       // One eligible tx (amountPaise 3,000,000 = ₹30,000).
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([
@@ -219,16 +234,16 @@ describe('PayoutsService', () => {
           partner: { panNumber: 'ABCDE1234F' },
         },
       ]);
-      // Required is now the FULL 3,000,000 (no TDS deduction); ledger 5,000,000 passes.
-      mockPrisma.fundLedger.findFirst.mockResolvedValue({ balancePaise: 5000000 });
 
       const res = await service.processBatch(gifsy, 'b1');
 
       // Payouts do NOT withhold TDS — the TDS engine owns that.
       expect(mockPrisma.tdsRecord.create).not.toHaveBeenCalled();
       expect(res.steps).not.toHaveProperty('tdsComputation');
-      expect(res.steps.fundCheck.required).toBe(3000000); // full gross, not netted
-      expect(res.steps.fundCheck.status).toBe('PASSED');
+      // The fund gate is gone — there is no in-portal fund / gateway.
+      expect(res.steps).not.toHaveProperty('fundCheck');
+      // No fund ledger should be consulted during processing.
+      expect(mockPrisma.fundLedger.findFirst).not.toHaveBeenCalled();
       expect(res.steps.disbursement.flagged).toBe(1);
       expect(res.status).toBe('SUBMITTED');
       // The disbursement + finalisation run inside the $transaction.
@@ -239,19 +254,16 @@ describe('PayoutsService', () => {
       expect(mockPrisma.auditLog.create).toHaveBeenCalled();
     });
 
-    it('FAILs the batch when funds are insufficient', async () => {
+    it('SUBMITs even when no on-portal funds exist (offline transfer — no fund gate)', async () => {
       mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([
         { id: 't1', partnerId: 'p1', amountPaise: 500000, partner: { panNumber: 'ABCDE1234F' } },
       ]);
-      // Required = full 500,000; ledger 1,000 is short.
-      mockPrisma.fundLedger.findFirst.mockResolvedValue({ balancePaise: 1000 });
 
       const res = await service.processBatch(gifsy, 'b1');
-      expect(res.steps.fundCheck.required).toBe(500000);
-      expect(res.steps.fundCheck.status).toBe('FAILED');
-      expect(res.steps.disbursement.flagged).toBe(0);
-      expect(res.status).toBe('FAILED');
+      // Previously this FAILED on an insufficient-fund gate; now it always SUBMITs.
+      expect(res.steps.disbursement.flagged).toBe(1);
+      expect(res.status).toBe('SUBMITTED');
     });
 
     it('flags PAN-less transactions as validation warnings and excludes them', async () => {
@@ -259,11 +271,12 @@ describe('PayoutsService', () => {
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([
         { id: 't1', partnerId: 'p1', amountPaise: 100000, partner: { panNumber: null } },
       ]);
-      mockPrisma.fundLedger.findFirst.mockResolvedValue({ balancePaise: 5000000 });
 
       const res = await service.processBatch(gifsy, 'b1');
       expect(res.steps.validation.status).toBe('PASSED_WITH_WARNINGS');
       expect(res.steps.disbursement.flagged).toBe(0); // invalid tx excluded
+      // Even with zero valid transactions, the batch finalises SUBMITTED (no gate).
+      expect(res.status).toBe('SUBMITTED');
     });
 
     it('resets a claimed batch to FAILED if a step throws (never strands it in PROCESSING)', async () => {
@@ -354,6 +367,199 @@ describe('PayoutsService', () => {
       await service.buildReconciliationFile(gifsy, { batchId: 'b9' });
       const where = mockPrisma.payoutTransaction.findMany.mock.calls[0][0].where;
       expect(where).toEqual({ batch: { clientId: 'deoleo' }, batchId: 'b9' });
+    });
+  });
+
+  describe('buildPayoutUtrTemplate', () => {
+    it('throws NotFound for a batch outside the tenant', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue(null);
+      await expect(
+        service.buildPayoutUtrTemplate(gifsy, 'b1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('builds a fillable xlsx keyed by Transaction ID with blank UTR/Status', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 'txn1',
+          amountPaise: 250000,
+          payoutMode: 'UPI',
+          partner: { businessName: 'Acme', panNumber: 'ABCDE1234F' },
+        },
+      ]);
+      const res = await service.buildPayoutUtrTemplate(gifsy, 'b1');
+      expect(res.recordCount).toBe(1);
+      expect(Buffer.isBuffer(res.buffer)).toBe(true);
+      expect(res.buffer.length).toBeGreaterThan(0);
+      expect(res.filename).toBe('payout-utr-PB-1.xlsx');
+    });
+  });
+
+  describe('uploadPayoutUtr', () => {
+    // Build a real .xlsx the parser can read: header row 0, data from row 1, the
+    // txn id under the "Transaction ID" column (parser reads by named-column index).
+    function buildUpload(
+      rows: { txnId: string; utr?: string; status: string }[],
+    ): Express.Multer.File {
+      const aoa: (string | number)[][] = [
+        ['Transaction ID', 'Partner Name', 'PAN', 'Amount (₹)', 'Mode', 'UTR', 'Status'],
+        ...rows.map((r) => [r.txnId, '', '', '', '', r.utr ?? '', r.status]),
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'UTR Upload');
+      const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+      return { buffer: buf } as Express.Multer.File;
+    }
+
+    beforeEach(() => {
+      mockWallet.reverse.mockResolvedValue(undefined);
+      mockTx.redemptionOrder.update.mockResolvedValue({});
+      mockTx.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+      mockTx.payoutTransaction.update.mockResolvedValue({});
+    });
+
+    it('throws NotFound for a batch outside the tenant', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue(null);
+      await expect(
+        service.uploadPayoutUtr(gifsy, 'b1', buildUpload([]), true),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('previews (does not mutate) when apply=false', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          { id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1' },
+        ]) // batch txns
+        .mockResolvedValueOnce([]); // knownUtrs
+      const res = await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+        false,
+      );
+      expect((res as { parseResult: unknown }).parseResult).toBeDefined();
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('PAID → marks payout SUCCESS (UTR) and the order DELIVERED, no reversal', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          { id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1' },
+        ])
+        .mockResolvedValueOnce([]);
+
+      const res = await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+        true,
+      );
+
+      expect(res).toMatchObject({ applied: true, paidCount: 1, failedCount: 0, reversedCount: 0 });
+      expect(mockTx.payoutTransaction.update).toHaveBeenCalledWith({
+        where: { id: 'txn1' },
+        data: expect.objectContaining({ status: 'SUCCESS', providerRefId: 'UTR12345678' }),
+      });
+      // Order completed; no reversal.
+      expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'DELIVERED' }),
+        }),
+      );
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('FAILED → marks payout FAILED, reverses points ONCE (M2 claim) and order FAILED', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          { id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1' },
+        ])
+        .mockResolvedValueOnce([]);
+      mockTx.redemptionOrder.findFirst.mockResolvedValue({
+        pointsDeducted: 500,
+        partnerId: 'p1',
+        orderNumber: 'RO-1',
+      });
+      mockTx.redemptionOrder.updateMany.mockResolvedValue({ count: 1 }); // claim wins
+
+      const res = await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', status: 'FAILED' }]),
+        true,
+      );
+
+      expect(res).toMatchObject({ applied: true, paidCount: 0, failedCount: 1, reversedCount: 1 });
+      expect(mockTx.payoutTransaction.update).toHaveBeenCalledWith({
+        where: { id: 'txn1' },
+        data: expect.objectContaining({ status: 'FAILED' }),
+      });
+      // The exact M2 claim shape.
+      expect(mockTx.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o1', pointsDeducted: { gt: 0 } },
+        data: { pointsDeducted: 0 },
+      });
+      expect(mockWallet.reverse).toHaveBeenCalledWith(
+        'p1',
+        500,
+        expect.objectContaining({ referenceId: 'o1' }),
+        expect.anything(),
+      );
+      expect(mockTx.redemptionOrder.update).toHaveBeenCalledWith({
+        where: { id: 'o1' },
+        data: { status: 'FAILED' },
+      });
+    });
+
+    it('FAILED re-upload is a no-op when the claim finds 0 (idempotent reversal)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      // The payout txn is still non-terminal (e.g. INITIATED) but the order points
+      // were already zeroed by a prior FAILED upload → claim finds 0, no reverse.
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          { id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1' },
+        ])
+        .mockResolvedValueOnce([]);
+      mockTx.redemptionOrder.findFirst.mockResolvedValue({
+        pointsDeducted: 0,
+        partnerId: 'p1',
+        orderNumber: 'RO-1',
+      });
+      mockTx.redemptionOrder.updateMany.mockResolvedValue({ count: 0 }); // claim loses
+
+      const res = await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', status: 'FAILED' }]),
+        true,
+      );
+      expect(res).toMatchObject({ failedCount: 1, reversedCount: 0 });
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('skips a payout transaction already in a terminal state (idempotency)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          { id: 'txn1', status: 'SUCCESS', providerRefId: 'UTROLD123456', payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1' },
+        ])
+        .mockResolvedValueOnce([{ providerRefId: 'UTROLD123456' }]);
+
+      const res = await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', status: 'FAILED' }]),
+        true,
+      );
+      // Terminal txn → never re-processed.
+      expect(res).toMatchObject({ paidCount: 0, failedCount: 0, reversedCount: 0 });
+      expect(mockTx.payoutTransaction.update).not.toHaveBeenCalled();
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
     });
   });
 });

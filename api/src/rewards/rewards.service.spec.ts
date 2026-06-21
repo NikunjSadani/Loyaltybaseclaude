@@ -712,6 +712,75 @@ describe('RewardsService', () => {
       expect(mockWallet.reverse).not.toHaveBeenCalled();
     });
 
+    it('REJECTS a manual CANCELLED for a cash (UPI) redemption — reversal is UTR-driven', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'RDM-x',
+        pointsDeducted: 1000, redemptionMode: 'UPI',
+      });
+      await expect(
+        service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      // No refund, no write — the cash redemption cannot be manually cancelled.
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.update).not.toHaveBeenCalled();
+    });
+
+    it('REJECTS a manual CANCELLED for a cash (BANK_TRANSFER) redemption too', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: 'PROCESSING', partnerId: 'cp1', orderNumber: 'RDM-x',
+        pointsDeducted: 1000, redemptionMode: 'BANK_TRANSFER',
+      });
+      await expect(
+        service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('REJECTS a manual RETURNED for a cash (UPI) redemption — would double-pay (BUG-1)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'RDM-x',
+        pointsDeducted: 1000, redemptionMode: 'UPI',
+      });
+      await expect(
+        service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.RETURNED }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      // The refund must NOT fire — the PayoutTransaction is still payable via UTR.
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('REJECTS a manual FAILED for a cash (BANK_TRANSFER) redemption — would double-pay (BUG-1)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: 'PROCESSING', partnerId: 'cp1', orderNumber: 'RDM-x',
+        pointsDeducted: 1000, redemptionMode: 'BANK_TRANSFER',
+      });
+      await expect(
+        service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.FAILED }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('STILL allows CANCELLED for a non-cash (gift card) redemption + refunds once', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'RDM-x',
+        pointsDeducted: 1000, redemptionMode: 'GIFT_CARD',
+      });
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o1', status: 'CANCELLED' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'user1', phone: '9991112222' });
+
+      await service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED });
+
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o1', pointsDeducted: { gt: 0 } },
+        data: { pointsDeducted: 0 },
+      });
+      expect(mockWallet.reverse).toHaveBeenCalled();
+      const upd = mockPrisma.redemptionOrder.update.mock.calls?.[0]?.[0];
+      expect(upd.data.cancelledAt).toBeInstanceOf(Date);
+    });
+
     it('PROCESSING→DISPATCHED stamps dispatchedAt and writes history', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
         id: 'o1', status: 'PROCESSING', partnerId: 'cp1', orderNumber: 'RDM-x', pointsDeducted: 1000,
