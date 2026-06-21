@@ -14,36 +14,11 @@ import type { NavItem } from '@/components/layout/nav-bottom';
 import type { SidebarSection } from '@/components/layout/sidebar';
 import {
   usePartnerSession, OUTLET_TYPE_LABELS, OUTLET_TYPE_COLORS,
-  type OutletType,
 } from '@/lib/partner-session';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
-
-/* ── Demo switcher (dev only) ────────────────────────────────────────────────
-   In production this is replaced by actual auth. */
-import { setDemoOutletType } from '@/lib/partner-session';
-
-function DemoSwitcher({ current }: { current: OutletType }) {
-  const types: OutletType[] = ['WHOLESALER', 'SSS', 'SUB_STOCKIST', 'SSS_TOT'];
-  return (
-    <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-40 flex gap-1 bg-gray-900/90 backdrop-blur rounded-full px-3 py-1.5 shadow-lg lg:bottom-4">
-      <span className="text-[10px] text-gray-400 self-center mr-1">Demo:</span>
-      {types.map(t => (
-        <button
-          key={t}
-          onClick={() => { setDemoOutletType(t); window.location.reload(); }}
-          className={`text-[10px] font-semibold px-2 py-0.5 rounded-full transition-colors ${
-            current === t ? 'bg-[var(--brand-primary)] text-white' : 'text-gray-300 hover:text-white'
-          }`}
-        >
-          {t === 'SUB_STOCKIST' ? 'SS' : t === 'WHOLESALER' ? 'WS' : t}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 /* ── Notifications ───────────────────────────────────────────────────────────── */
 
@@ -181,9 +156,6 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
 
       {/* Bottom nav */}
       <NavBottom items={mobileNavItems} />
-
-      {/* Demo outlet type switcher */}
-      <DemoSwitcher current={session.outletType} />
 
       {/* Notification panel */}
       {notifOpen && (

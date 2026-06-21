@@ -131,4 +131,14 @@ describe('PW — Partner wallet API wiring (live data)', () => {
     await renderWallet();
     expect(screen.queryByTestId('wallet-kpi-filter')).toBeInTheDocument();
   });
+
+  // ── No mock/demo scaffolding (#57 mock-data removal) ──────────────────────────
+
+  it('PW6: page source no longer imports demo-wallet-data or demo fallbacks', async () => {
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const src = await fs.readFile(path.resolve(__dirname, '..', 'page.tsx'), 'utf8');
+    expect(src).not.toMatch(/demo-wallet-data/);
+    expect(src).not.toMatch(/isDemoSession|DEMO_WALLET_BALANCE|DEMO_POINTS_TRANSACTIONS|DEMO_INR_PAYOUTS/);
+  });
 });

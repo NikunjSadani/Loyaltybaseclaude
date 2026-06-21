@@ -36,7 +36,7 @@ const mockTx = {
   auditLog: { create: jest.fn() },
   user: { update: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
-  outlet: { update: jest.fn() },
+  outlet: { update: jest.fn(), updateMany: jest.fn() },
 };
 
 const mockPrisma = {
@@ -624,6 +624,55 @@ describe('KycService', () => {
       expect(mockNotifications.enqueue).toHaveBeenCalled();
     });
 
+    it('item #2: on APPROVED, activates the partner\'s outlet(s) in the tx (isActive=true)', async () => {
+      seedApproveHappyPath();
+      await service.approve(gifsy, 's1');
+      // The outlet activation is a partner-scoped updateMany that excludes
+      // soft-deleted and NOT_INTERESTED outlets.
+      expect(mockTx.outlet.updateMany).toHaveBeenCalledWith({
+        where: {
+          partnerId: 'p1',
+          deletedAt: null,
+          // null-intent (the common case) OR explicitly-not-declined — Prisma's bare
+          // `{not}` would exclude NULL rows (the approval no-op BLOCKER).
+          OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
+        },
+        data: { isActive: true, reactivatedAt: expect.any(Date) },
+      });
+    });
+
+    it('item #2: does NOT activate outlets when the partner is null (no partnerId)', async () => {
+      // Outer pre-tx load with no partner
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        partnerId: null,
+        user: { name: 'n', phone: 'p' },
+        partner: null,
+      });
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        partnerId: null,
+        user: { name: 'n', phone: 'p' },
+        partner: null,
+      });
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
+      mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+
+      await service.approve(gifsy, 's1');
+      expect(mockTx.wallet.create).not.toHaveBeenCalled();
+      expect(mockTx.outlet.updateMany).not.toHaveBeenCalled();
+    });
+
     it('does NOT create a wallet when one already exists', async () => {
       seedApproveHappyPath();
       // Override wallet.findFirst to return an existing wallet
@@ -831,6 +880,31 @@ describe('KycService', () => {
       await expect(
         service.verifyField(gifsy, 'no-such-sub', { fieldKey: 'PAYMENT', decision: 'APPROVED' }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('item #1: RE_UPLOAD outcome with no primary outlet → ConflictException (not 500) and no id leak', async () => {
+      // Partner has NO primary outlet → applyBridgeOutcome cannot attach reKycFlags.
+      seedVerifyTx({ outlets: [] });
+      mockTx.kycVerificationItem.upsert.mockResolvedValueOnce({});
+      // All 7 terminal with 1 REJECTED → bridge = RE_UPLOAD_REQUIRED
+      const items = KYC_FIELD_KEYS.map((k) => ({
+        fieldKey: k,
+        decision: k === 'OWNER_PHOTO' ? ('REJECTED' as const) : ('APPROVED' as const),
+      }));
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(items);
+
+      const err = await service
+        .verifyField(gifsy, 's1', { fieldKey: 'PAYMENT', decision: 'APPROVED' })
+        .catch((e) => e);
+
+      // Clean 4xx, not a raw Error → 500.
+      expect(err).toBeInstanceOf(ConflictException);
+      // The message must NOT leak the internal submission id.
+      expect(err.message).not.toContain('s1');
+      // No status flip happened (thrown before the conditional updateMany).
+      expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+      expect(mockNotifications.enqueue).not.toHaveBeenCalled();
     });
 
     it('Gifsy in-tx re-assert is cross-tenant (id+status only, #38)', async () => {
@@ -1059,7 +1133,7 @@ describe('KycService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('throws (rolls back) when fieldKeys given but no primary outlet', async () => {
+    it('item #1: throws ConflictException (rolls back, no id leak) when fieldKeys given but no primary outlet', async () => {
       mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
         id: 's-approved',
         userId: 'user1',
@@ -1068,9 +1142,14 @@ describe('KycService', () => {
         partner: { outlets: [] }, // no primary outlet
       });
 
-      await expect(
-        service.reKyc(gifsy, 's-approved', { reason: 'test', fieldKeys: ['PAYMENT'] }),
-      ).rejects.toThrow('No primary outlet');
+      const err = await service
+        .reKyc(gifsy, 's-approved', { reason: 'test', fieldKeys: ['PAYMENT'] })
+        .catch((e) => e);
+
+      // Clean 4xx instead of a raw Error → 500.
+      expect(err).toBeInstanceOf(ConflictException);
+      // The message must NOT leak the internal submission id.
+      expect(err.message).not.toContain('s-approved');
       // status must NOT have been flipped
       expect(mockTx.kycSubmission.update).not.toHaveBeenCalled();
     });

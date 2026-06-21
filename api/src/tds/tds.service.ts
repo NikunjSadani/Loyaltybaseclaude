@@ -28,7 +28,6 @@
  */
 
 import { Injectable, Logger } from '@nestjs/common';
-import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   fyFromLabel,
@@ -41,6 +40,9 @@ import {
   parseDepositUpload,
   buildOffPlatformTemplate,
   buildDepositTemplate,
+  offPlatformFileHash,
+  depositFileHash,
+  cellSafe,
 } from './tds.helpers';
 import type { UploadResult } from './dto/tds.dto';
 import { buildXlsx } from '../common/xlsx';
@@ -489,8 +491,17 @@ export class TdsService {
    * @param apply     - if false → preview only; if true → createMany to DB
    *
    * Validation: PAN non-empty, amount > 0, date parseable.
-   * On apply: generates one uploadBatchId (uuid) stamped on every row for
-   * re-upload dedup + traceability.
+   *
+   * On apply: the uploadBatchId is a DETERMINISTIC sha256 of the file's parsed
+   * rows (offPlatformFileHash), NOT a random uuid. Re-uploading the SAME file
+   * therefore produces the SAME uploadBatchId, so every row collides on the
+   * tds_off_platform_entries_dedup_unique partial index and is skipped (no
+   * double-count). A DIFFERENT file gets a different hash → its rows insert,
+   * preserving a genuine repeat 194R entry. We query the rows already present
+   * for this (clientId, section, uploadBatchId) BEFORE the createMany so each
+   * skipped row is surfaced in the result as "skipped — duplicate entry"
+   * (createMany({skipDuplicates}) otherwise drops collisions silently); skipDuplicates
+   * is kept as the race safety-net.
    */
   async uploadOffPlatform(
     clientId: string,
@@ -509,24 +520,87 @@ export class TdsService {
       return result;
     }
 
-    // One uploadBatchId per applied upload — uuid-based, unique per call.
-    const uploadBatchId = `OP-${randomUUID()}`;
+    // Deterministic file-level batch id → same file re-upload = same id = full collision.
+    const uploadBatchId = offPlatformFileHash(rows);
 
-    await this.prisma.tdsOffPlatformEntry.createMany({
-      data: rows.map((r) => ({
+    // Which of these natural-keys are ALREADY present for this file's batch id?
+    // (Re-upload of the identical file → all of them.) Build the dedup tuple set.
+    const existing = await this.prisma.tdsOffPlatformEntry.findMany({
+      where: {
         clientId,
-        section: 'SEC_194R' as const,
-        entryDate: r.entryDate,
-        panNumber: r.panNumber,
-        outletCode: r.outletCode ?? undefined,
-        amountPaise: r.amountPaise,
+        section: 'SEC_194R',
         uploadBatchId,
-        uploadedBy,
-      })),
-      skipDuplicates: true, // DB partial-unique catches true dups; this is a safety net
+      },
+      select: {
+        panNumber: true,
+        entryDate: true,
+        amountPaise: true,
+        outletCode: true,
+      },
+    });
+    const existingKeys = new Set(
+      existing.map((e) =>
+        this.offPlatformDedupKey(
+          e.panNumber,
+          e.entryDate,
+          e.amountPaise,
+          e.outletCode ?? null,
+        ),
+      ),
+    );
+
+    const toInsert: typeof rows = [];
+    rows.forEach((r, idx) => {
+      const key = this.offPlatformDedupKey(
+        r.panNumber,
+        r.entryDate,
+        r.amountPaise,
+        r.outletCode ?? null,
+      );
+      if (existingKeys.has(key)) {
+        result.skipped += 1;
+        result.succeeded -= 1;
+        result.errors.push({
+          row: idx + 2, // 1-based + header row
+          message: `Row ${idx + 2}: skipped — duplicate entry (already uploaded in this file)`,
+        });
+      } else {
+        toInsert.push(r);
+      }
     });
 
+    if (toInsert.length > 0) {
+      await this.prisma.tdsOffPlatformEntry.createMany({
+        data: toInsert.map((r) => ({
+          clientId,
+          section: 'SEC_194R' as const,
+          entryDate: r.entryDate,
+          panNumber: r.panNumber,
+          outletCode: r.outletCode ?? undefined,
+          amountPaise: r.amountPaise,
+          uploadBatchId,
+          uploadedBy,
+        })),
+        skipDuplicates: true, // DB partial-unique catches true dups; this is a race safety net
+      });
+    }
+
     return result;
+  }
+
+  /** Natural-key string mirroring the tds_off_platform_entries_dedup_unique index. */
+  private offPlatformDedupKey(
+    panNumber: string,
+    entryDate: Date,
+    amountPaise: bigint,
+    outletCode: string | null,
+  ): string {
+    return [
+      panNumber,
+      entryDate.toISOString(),
+      amountPaise.toString(),
+      outletCode ?? '',
+    ].join('|');
   }
 
   // ─── 6.5b: Deposit upload ────────────────────────────────────────────────────
@@ -537,7 +611,11 @@ export class TdsService {
    * section=194R → depositorType=CLIENT, clientId set from JWT.
    * section=194C → depositorType=GIFSY, clientId=null (platform).
    *
-   * One uploadBatchId per applied upload stamped on every row.
+   * uploadBatchId is a DETERMINISTIC sha256 of the file's parsed rows
+   * (depositFileHash) → re-uploading the SAME file produces the SAME id, every
+   * row collides on tds_deposits_dedup_unique and is skipped + reported as
+   * "skipped — duplicate entry"; a DIFFERENT file inserts. skipDuplicates kept
+   * as the race safety-net.
    */
   async uploadDeposit(
     section: '194R' | '194C',
@@ -559,24 +637,86 @@ export class TdsService {
 
     const prismaSection = sectionParamToEnum(section);
     const depositorType = section === '194R' ? 'CLIENT' : 'GIFSY';
-    const uploadBatchId = `DEP-${randomUUID()}`;
+    const uploadBatchId = depositFileHash(rows);
 
-    await this.prisma.tdsDeposit.createMany({
-      data: rows.map((r) => ({
+    // Rows already present for this file's batch id (same file re-upload → all).
+    const existing = await this.prisma.tdsDeposit.findMany({
+      where: {
         section: prismaSection,
-        depositorType: depositorType as 'CLIENT' | 'GIFSY',
-        clientId: clientId ?? undefined,
-        depositDate: r.depositDate,
-        panNumber: r.panNumber,
-        outletCode: r.outletCode ?? undefined,
-        amountPaise: r.amountPaise,
+        clientId: clientId ?? null,
         uploadBatchId,
-        uploadedBy,
-      })),
-      skipDuplicates: true,
+      },
+      select: {
+        panNumber: true,
+        depositDate: true,
+        amountPaise: true,
+        outletCode: true,
+      },
+    });
+    const existingKeys = new Set(
+      existing.map((e) =>
+        this.depositDedupKey(
+          e.panNumber,
+          e.depositDate,
+          e.amountPaise,
+          e.outletCode ?? null,
+        ),
+      ),
+    );
+
+    const toInsert: typeof rows = [];
+    rows.forEach((r, idx) => {
+      const key = this.depositDedupKey(
+        r.panNumber,
+        r.depositDate,
+        r.amountPaise,
+        r.outletCode ?? null,
+      );
+      if (existingKeys.has(key)) {
+        result.skipped += 1;
+        result.succeeded -= 1;
+        result.errors.push({
+          row: idx + 2,
+          message: `Row ${idx + 2}: skipped — duplicate entry (already uploaded in this file)`,
+        });
+      } else {
+        toInsert.push(r);
+      }
     });
 
+    if (toInsert.length > 0) {
+      await this.prisma.tdsDeposit.createMany({
+        data: toInsert.map((r) => ({
+          section: prismaSection,
+          depositorType: depositorType as 'CLIENT' | 'GIFSY',
+          clientId: clientId ?? undefined,
+          depositDate: r.depositDate,
+          panNumber: r.panNumber,
+          outletCode: r.outletCode ?? undefined,
+          amountPaise: r.amountPaise,
+          uploadBatchId,
+          uploadedBy,
+        })),
+        skipDuplicates: true,
+      });
+    }
+
     return result;
+  }
+
+  /** Natural-key string mirroring the tds_deposits_dedup_unique index. */
+  private depositDedupKey(
+    panNumber: string,
+    depositDate: Date,
+    amountPaise: bigint,
+    outletCode: string | null,
+  ): string {
+    return [
+      panNumber,
+      depositDate.toISOString(),
+      amountPaise.toString(),
+      outletCode ?? '',
+    ].join('|');
   }
 
   // ─── 6.5c: Excel reference exports ──────────────────────────────────────────
@@ -635,8 +775,8 @@ export class TdsService {
 
       return {
         'S.No': i + 1,
-        'Deductee Name': deducteeName,
-        PAN: hasPan ? r.panNumber : '',
+        'Deductee Name': cellSafe(deducteeName),
+        PAN: cellSafe(hasPan ? r.panNumber : ''),
         Section: '194R',
         'Amount Paid (₹)': paiseToRupees(r.baseFyTotalPaise).toFixed(2),
         'TDS Rate %': tdsRatePct,
@@ -743,9 +883,9 @@ export class TdsService {
 
       return {
         'S.No': i + 1,
-        'Deductee Name': deducteeName,
-        PAN: hasPan ? r.panNumber : '',
-        'Entity Type': r.entityType,
+        'Deductee Name': cellSafe(deducteeName),
+        PAN: cellSafe(hasPan ? r.panNumber : ''),
+        'Entity Type': cellSafe(r.entityType),
         Section: '194C',
         'Amount Paid (₹)': paiseToRupees(r.baseFyTotalPaise).toFixed(2),
         'TDS Rate %': tdsRatePct,

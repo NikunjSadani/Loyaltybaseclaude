@@ -24,7 +24,7 @@
 
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@/lib/redemption-store', () => ({
   loadRedemptions: () => [],
@@ -34,13 +34,49 @@ import WalletPage from '../page';
 
 const SESSION_KEY = 'partner_outlet_type_demo';
 
+// Real API data (the demo fallback was removed in the #57 cleanup). Provide, in the
+// default 2026-05 window: a CREDIT with a kpiLabel (POINTS dropdown option, W2), a
+// DEBIT redemption with no kpiLabel (W3 hide / W4 restore), and a PAID INR payout with
+// a Visibility kpiLabel (RETAILER-only Visibility option, W6).
+const POINTS_TXNS = [
+  { id: 'tx1', transactionType: 'CREDIT_POINTS_EARNED', description: 'Monthly Target — May 2026',
+    points: 1000, date: '2026-05-10T00:00:00.000Z', balanceType: 'EARNED', balanceAfter: 1000,
+    referenceType: 'SCHEME', referenceId: 's1', kpiLabel: 'Monthly Target' },
+  { id: 'tx2', transactionType: 'DEBIT_REDEMPTION', description: 'Redemption — Amazon Voucher',
+    points: 500, date: '2026-05-12T00:00:00.000Z', balanceType: 'REDEEMED', balanceAfter: 500,
+    referenceType: 'REDEMPTION', referenceId: 'r1', kpiLabel: null },
+];
+const INR_PAYOUTS = [
+  { id: 'p1', status: 'PAID', period: '2026-05', kpiLabel: 'Visibility Drive',
+    payoutAmountPaise: 500_000, paidAt: '2026-05-10T00:00:00.000Z', utr: 'UTR123', narration: null },
+];
+const BALANCE = {
+  earnedPoints: 1000, lockedPoints: 0, redeemablePoints: 500, redeemedPoints: 500,
+  expiredPoints: 0, lifetimeEarned: 1000, lifetimeRedeemed: 500, currency: 'POINTS', conversionRate: 1,
+};
+
+function stubFetch() {
+  vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+    const u = url as string;
+    if (u.includes('/api/wallet/transactions'))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { transactions: POINTS_TXNS } }) });
+    if (u.includes('/api/partner/payouts'))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts: INR_PAYOUTS } }) });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: BALANCE }) });
+  }));
+}
+
 describe('W — KPI filter in partner wallet (POINTS track)', () => {
   beforeEach(() => {
     localStorage.clear();
   });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   // Helper: render wallet and wait for spinner to clear (500ms load delay in page)
   async function renderWallet() {
+    stubFetch();
     render(<WalletPage />);
     // The wallet has a 350-500ms load delay; wait for content
     await waitFor(

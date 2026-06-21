@@ -326,7 +326,7 @@ describe('TdsService — uploadOffPlatform', () => {
     expect(mockPrisma.tdsOffPlatformEntry.createMany).not.toHaveBeenCalled();
   });
 
-  it('multiple apply=true calls produce distinct uploadBatchIds (dedup)', async () => {
+  it('DIFFERENT files produce distinct (deterministic) uploadBatchIds', async () => {
     const ab1 = buildXlsxBuffer([validHeader, ['2025-08-15', 'ABCDE1234F', '', 500]]);
     const ab2 = buildXlsxBuffer([validHeader, ['2025-09-01', 'ABCDE1234F', '', 1000]]);
 
@@ -337,6 +337,76 @@ describe('TdsService — uploadOffPlatform', () => {
     const batchId2 = mockPrisma.tdsOffPlatformEntry.createMany.mock.calls[1][0].data[0].uploadBatchId;
 
     expect(batchId1).not.toBe(batchId2);
+  });
+
+  it('uploadBatchId is a deterministic sha256 (same content → same id) across two calls', async () => {
+    const make = () => buildXlsxBuffer([validHeader, ['2025-08-15', 'ABCDE1234F', 'OUT001', 500]]);
+
+    await service.uploadOffPlatform(CLIENT_ID, USER_ID, multerFile(make()), true);
+    await service.uploadOffPlatform(CLIENT_ID, USER_ID, multerFile(make()), true);
+
+    const batchId1 = mockPrisma.tdsOffPlatformEntry.createMany.mock.calls[0][0].data[0].uploadBatchId;
+    const batchId2 = mockPrisma.tdsOffPlatformEntry.createMany.mock.calls[1][0].data[0].uploadBatchId;
+
+    expect(batchId1).toBe(batchId2);
+    expect(batchId1).toMatch(/^OP-[0-9a-f]{64}$/);
+  });
+
+  it('re-uploading the SAME file: all rows reported as duplicate-skipped, 0 new inserts', async () => {
+    const make = () =>
+      buildXlsxBuffer([
+        validHeader,
+        ['2025-08-15', 'ABCDE1234F', 'OUT001', 500],
+        ['2025-09-01', 'XYZPQ5678G', '', 1000],
+      ]);
+
+    // First upload: nothing present yet → both rows insert.
+    mockPrisma.tdsOffPlatformEntry.findMany.mockResolvedValueOnce([]);
+    const first = await service.uploadOffPlatform(CLIENT_ID, USER_ID, multerFile(make()), true);
+    expect(first.succeeded).toBe(2);
+    expect(first.skipped).toBe(0);
+
+    const firstInsert = mockPrisma.tdsOffPlatformEntry.createMany.mock.calls[0][0].data;
+    expect(firstInsert).toHaveLength(2);
+    const batchId = firstInsert[0].uploadBatchId;
+
+    // Second upload of the IDENTICAL file → simulate that both rows now exist
+    // for that (clientId, section, uploadBatchId).
+    mockPrisma.tdsOffPlatformEntry.findMany.mockResolvedValueOnce([
+      { panNumber: 'ABCDE1234F', entryDate: firstInsert[0].entryDate, amountPaise: 50000n, outletCode: 'OUT001' },
+      { panNumber: 'XYZPQ5678G', entryDate: firstInsert[1].entryDate, amountPaise: 100000n, outletCode: null },
+    ]);
+    mockPrisma.tdsOffPlatformEntry.createMany.mockClear();
+
+    const second = await service.uploadOffPlatform(CLIENT_ID, USER_ID, multerFile(make()), true);
+
+    // Same deterministic batch id was used to look up existing rows.
+    expect(mockPrisma.tdsOffPlatformEntry.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ uploadBatchId: batchId }) }),
+    );
+    // Both rows skipped, none inserted.
+    expect(second.skipped).toBe(2);
+    expect(second.succeeded).toBe(0);
+    expect(second.errors.some((e) => /duplicate entry/i.test(e.message))).toBe(true);
+    expect(mockPrisma.tdsOffPlatformEntry.createMany).not.toHaveBeenCalled();
+  });
+
+  it('a DIFFERENT file with the same PAN/date/amount still inserts (genuine repeat preserved)', async () => {
+    // Earlier file's row exists, but under a DIFFERENT batch id. The new file
+    // hashes differently, so the existing-row lookup (scoped to the new batch id)
+    // returns nothing → the row inserts.
+    const ab = buildXlsxBuffer([
+      validHeader,
+      ['2025-08-15', 'ABCDE1234F', 'OUT001', 500],
+      ['2025-10-10', 'NEWPAN1234Z', '', 750], // extra row → different file hash
+    ]);
+    mockPrisma.tdsOffPlatformEntry.findMany.mockResolvedValue([]); // new batch id → none present
+
+    const res = await service.uploadOffPlatform(CLIENT_ID, USER_ID, multerFile(ab), true);
+
+    expect(res.succeeded).toBe(2);
+    expect(res.skipped).toBe(0);
+    expect(mockPrisma.tdsOffPlatformEntry.createMany.mock.calls[0][0].data).toHaveLength(2);
   });
 });
 
@@ -420,16 +490,44 @@ describe('TdsService — uploadDeposit', () => {
     expect(mockPrisma.tdsDeposit.createMany).not.toHaveBeenCalled();
   });
 
-  it('deposit uploadBatchId is unique across two calls', async () => {
+  it('deposit uploadBatchId differs for DIFFERENT files, matches for IDENTICAL files', async () => {
     const ab1 = buildXlsxBuffer([depositHeader, ['2025-09-15', '', 'ABCDE1234F', 1000]]);
     const ab2 = buildXlsxBuffer([depositHeader, ['2025-10-01', '', 'ABCDE1234F', 2000]]);
+    const ab1again = buildXlsxBuffer([depositHeader, ['2025-09-15', '', 'ABCDE1234F', 1000]]);
 
     await service.uploadDeposit('194R', CLIENT_ID, USER_ID, multerFile(ab1), true);
     await service.uploadDeposit('194R', CLIENT_ID, USER_ID, multerFile(ab2), true);
+    await service.uploadDeposit('194R', CLIENT_ID, USER_ID, multerFile(ab1again), true);
 
     const id1 = mockPrisma.tdsDeposit.createMany.mock.calls[0][0].data[0].uploadBatchId;
     const id2 = mockPrisma.tdsDeposit.createMany.mock.calls[1][0].data[0].uploadBatchId;
+    const id3 = mockPrisma.tdsDeposit.createMany.mock.calls[2][0].data[0].uploadBatchId;
     expect(id1).not.toBe(id2);
+    expect(id3).toBe(id1); // identical content → identical deterministic id
+    expect(id1).toMatch(/^DEP-[0-9a-f]{64}$/);
+  });
+
+  it('re-uploading the SAME deposit file: all rows duplicate-skipped, 0 inserts', async () => {
+    const make = () =>
+      buildXlsxBuffer([depositHeader, ['2025-09-15', 'OUT002', 'ABCDE1234F', 1000]]);
+
+    // First upload inserts.
+    mockPrisma.tdsDeposit.findMany.mockResolvedValueOnce([]);
+    const first = await service.uploadDeposit('194R', CLIENT_ID, USER_ID, multerFile(make()), true);
+    expect(first.succeeded).toBe(1);
+    const inserted = mockPrisma.tdsDeposit.createMany.mock.calls[0][0].data[0];
+
+    // Second upload of identical file → row already present under same batch id.
+    mockPrisma.tdsDeposit.findMany.mockResolvedValueOnce([
+      { panNumber: 'ABCDE1234F', depositDate: inserted.depositDate, amountPaise: 100000n, outletCode: 'OUT002' },
+    ]);
+    mockPrisma.tdsDeposit.createMany.mockClear();
+
+    const second = await service.uploadDeposit('194R', CLIENT_ID, USER_ID, multerFile(make()), true);
+    expect(second.skipped).toBe(1);
+    expect(second.succeeded).toBe(0);
+    expect(second.errors.some((e) => /duplicate entry/i.test(e.message))).toBe(true);
+    expect(mockPrisma.tdsDeposit.createMany).not.toHaveBeenCalled();
   });
 });
 

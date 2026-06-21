@@ -23,20 +23,25 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   }
 
   async validate(payload: JwtPayload) {
-    // Verify the session for THIS token's context is still active (not revoked).
-    // Match on clientId too (not just userId): a GIFSY operator can hold multiple
-    // concurrent sessions for the same user with different clientIds (their home
-    // `gifsy` session + an assumed tenant session, A2/#51) — each token must
-    // validate against its OWN context's session, so revoking one doesn't keep
-    // authorising the other.
-    const session = await this.prisma.userSession.findFirst({
-      where: {
-        userId:    payload.sub,
-        clientId:  payload.clientId,
-        revokedAt: null,
-        expiresAt: { gt: new Date() },
-      },
-    });
+    // Bind the bearer token to its OWN session row. Tokens minted after the
+    // auth-hardening change carry `sid` (the UserSession PK) → match on it, so
+    // revoking/rotating that exact session invalidates this access token on its
+    // NEXT request (instead of letting it live out its 7-day TTL).
+    //
+    // Legacy fallback: tokens issued before `sid` existed match on (userId,
+    // clientId) — a GIFSY operator can hold concurrent sessions for the same user
+    // under different clientIds (home `gifsy` + an assumed tenant, A2/#51), so the
+    // tenant is part of the legacy key. These age out as old tokens expire.
+    const where = payload.sid
+      ? { id: payload.sid, revokedAt: null, expiresAt: { gt: new Date() } }
+      : {
+          userId:    payload.sub,
+          clientId:  payload.clientId,
+          revokedAt: null,
+          expiresAt: { gt: new Date() },
+        };
+
+    const session = await this.prisma.userSession.findFirst({ where });
 
     if (!session) {
       throw new UnauthorizedException('Session expired or revoked — please log in again.');

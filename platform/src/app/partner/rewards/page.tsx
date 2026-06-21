@@ -438,10 +438,13 @@ function VoucherRedeemSheet({
   const canAfford = myBalance >= ptsNeeded && (isFixed || freeAmt >= minFreeAmount);
 
   // Client-side UX validation for FREE_AMOUNT (server is authoritative).
-  const maxAffordableInr = Math.floor(myBalance / conversionRate);
+  // Guard against a zero/invalid conversionRate so we never divide by zero
+  // (which would yield Infinity/NaN in the balance hint). null => unknown cap.
+  const hasRate = Number.isFinite(conversionRate) && conversionRate > 0;
+  const maxAffordableInr = hasRate ? Math.floor(myBalance / conversionRate) : null;
   const amountError = !isFixed && freeAmt > 0 && freeAmt < minFreeAmount
     ? `Minimum redemption is ${fmtInr(minFreeAmount)}`
-    : !isFixed && freeAmt > maxAffordableInr
+    : !isFixed && maxAffordableInr !== null && freeAmt > maxAffordableInr
     ? `Exceeds your balance (max ${fmtInr(maxAffordableInr)})`
     : '';
 
@@ -523,7 +526,7 @@ function VoucherRedeemSheet({
           {/* Balance display */}
           <div className="bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3 flex items-center justify-between">
             <p className="text-xs text-emerald-700 font-medium">Your balance</p>
-            <p className="text-base font-bold text-emerald-700">{formatPoints(myBalance)} pts = {fmtInr(maxAffordableInr)}</p>
+            <p className="text-base font-bold text-emerald-700">{formatPoints(myBalance)} pts = {maxAffordableInr !== null ? fmtInr(maxAffordableInr) : '—'}</p>
           </div>
 
           {/* Fixed: show points cost */}
@@ -628,11 +631,14 @@ function BankTransferSheet({
 
   const inrAmt    = parseInt(amount, 10) || 0;
   const ptsNeeded = Math.ceil(inrAmt * conversionRate);
-  const maxInr    = Math.floor(myBalance / conversionRate);
+  // Guard against a zero/invalid conversionRate to avoid dividing by zero
+  // (Infinity/NaN in the balance hint). null => unknown cap (don't block on it).
+  const hasRate   = Number.isFinite(conversionRate) && conversionRate > 0;
+  const maxInr    = hasRate ? Math.floor(myBalance / conversionRate) : null;
 
   const amountError = inrAmt > 0 && inrAmt < minAmount
     ? `Minimum transfer is ${fmtInr(minAmount)}`
-    : inrAmt > maxInr
+    : maxInr !== null && inrAmt > maxInr
     ? `Exceeds balance (max ${fmtInr(maxInr)})`
     : '';
 
@@ -712,13 +718,13 @@ function BankTransferSheet({
           {/* Balance */}
           <div className="bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3 flex items-center justify-between">
             <p className="text-xs text-emerald-700 font-medium">Available balance</p>
-            <p className="text-base font-bold text-emerald-700">{formatPoints(myBalance)} pts = {fmtInr(maxInr)}</p>
+            <p className="text-base font-bold text-emerald-700">{formatPoints(myBalance)} pts = {maxInr !== null ? fmtInr(maxInr) : '—'}</p>
           </div>
 
           {/* Amount input */}
           <div>
             <label className="text-xs font-medium text-gray-600 block mb-1">
-              Amount to transfer * <span className="text-gray-400 font-normal">(min {fmtInr(minAmount)}, max {fmtInr(maxInr)})</span>
+              Amount to transfer * <span className="text-gray-400 font-normal">(min {fmtInr(minAmount)}, max {maxInr !== null ? fmtInr(maxInr) : '—'})</span>
             </label>
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-bold text-gray-500">₹</span>

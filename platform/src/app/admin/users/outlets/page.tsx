@@ -213,6 +213,7 @@ function UploadSection({
   onConfirm,
   onClear,
   confirmLabel,
+  submitError,
 }: {
   testIdInput:       string;
   testIdPanel:       string;
@@ -222,6 +223,8 @@ function UploadSection({
   onConfirm:         () => void;
   onClear:           () => void;
   confirmLabel?:     string;
+  /** API error surfaced after a failed confirm (e.g. all-invalid 400). */
+  submitError?:      string | null;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileError, setFileError] = useState('');
@@ -280,6 +283,13 @@ function UploadSection({
         </button>
       )}
 
+      {submitError && (
+        <div data-testid="submit-error" className="flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{submitError}</span>
+        </div>
+      )}
+
       {(uploadState === 'parsed' || uploadState === 'confirmed') && validationResult && (
         uploadState === 'confirmed' ? (
           <SuccessPanel
@@ -327,6 +337,12 @@ export default function OutletsPage() {
   const [deactivateValidation, setDeactivateValidation] = useState<OutletDeactivateValidationResult | null>(null);
   const [deactivateUploadState, setDeactivateUploadState] = useState<UploadState>('idle');
 
+  // Confirm-submit errors (surfaced when the backend rejects the confirm POST,
+  // e.g. an all-invalid 400 — previously swallowed by a `.catch(()=>{})`).
+  const [outletSubmitError,     setOutletSubmitError]     = useState<string | null>(null);
+  const [rekycSubmitError,      setRekycSubmitError]      = useState<string | null>(null);
+  const [deactivateSubmitError, setDeactivateSubmitError] = useState<string | null>(null);
+
   // ── API fetch on mount ──
   useEffect(() => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
@@ -354,9 +370,9 @@ export default function OutletsPage() {
   // ── Tab switch — resets upload state to prevent stale panels ──
   const handleTabSwitch = useCallback((tabId: TabId) => {
     setActiveTab(tabId);
-    setOutletValidation(null);    setOutletParsedRows([]); setOutletUploadState('idle');
-    setRekycValidation(null);     setRekycParsedRows([]); setRekycUploadState('idle');
-    setDeactivateValidation(null); setDeactivateUploadState('idle');
+    setOutletValidation(null);    setOutletParsedRows([]); setOutletUploadState('idle');     setOutletSubmitError(null);
+    setRekycValidation(null);     setRekycParsedRows([]); setRekycUploadState('idle');         setRekycSubmitError(null);
+    setDeactivateValidation(null); setDeactivateUploadState('idle');                          setDeactivateSubmitError(null);
   }, []);
 
   // ── Filtered list ──
@@ -685,20 +701,32 @@ export default function OutletsPage() {
               validationResult={outletValidation}
               uploadState={outletUploadState}
               onConfirm={async () => {
+                setOutletSubmitError(null);
                 // Send the full parsed rows (the field data) for the OK rows, not the
                 // gutted validation results — the route needs name/type/xsr/etc to persist.
                 const okIds = new Set((outletValidation?.rows ?? []).filter(r => r.status === 'OK').map(r => r.outletId));
                 const rows = outletParsedRows.filter(r => okIds.has(r.outletId));
                 const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-                await fetch('/api/admin/outlets/upsert', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                  body: JSON.stringify({ rows }),
-                }).catch(() => {});
-                setOutletUploadState('confirmed');
+                try {
+                  const res = await fetch('/api/admin/outlets/upsert', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ rows }),
+                  });
+                  if (!res.ok) {
+                    let msg = `Upload failed (${res.status})`;
+                    try { const j = await res.json(); msg = j?.error ?? j?.message ?? msg; } catch { /* non-JSON body */ }
+                    setOutletSubmitError(msg);
+                    return;
+                  }
+                  setOutletUploadState('confirmed');
+                } catch {
+                  setOutletSubmitError('Network error — please try again');
+                }
               }}
-              onClear={() => { setOutletValidation(null); setOutletParsedRows([]); setOutletUploadState('idle'); }}
+              onClear={() => { setOutletValidation(null); setOutletParsedRows([]); setOutletUploadState('idle'); setOutletSubmitError(null); }}
               confirmLabel="Apply Changes"
+              submitError={outletSubmitError}
             />
           </div>
 
@@ -867,6 +895,7 @@ export default function OutletsPage() {
               validationResult={rekycValidation}
               uploadState={rekycUploadState}
               onConfirm={async () => {
+                setRekycSubmitError(null);
                 // Post the full parsed ReKYCFlagRow[] (raw per-field "Yes"/blank cells),
                 // not the gutted validation results — the route maps each row to the
                 // persisted ReKYCFlags JSON. Filter to the rows validation marked OK.
@@ -875,15 +904,26 @@ export default function OutletsPage() {
                 );
                 const rows = rekycParsedRows.filter(r => okOutletIds.has(r.outletId));
                 const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-                await fetch('/api/admin/outlets/rekyc-flag', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                  body: JSON.stringify({ rows }),
-                }).catch(() => {});
-                setRekycUploadState('confirmed');
+                try {
+                  const res = await fetch('/api/admin/outlets/rekyc-flag', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ rows }),
+                  });
+                  if (!res.ok) {
+                    let msg = `Re-KYC flagging failed (${res.status})`;
+                    try { const j = await res.json(); msg = j?.error ?? j?.message ?? msg; } catch { /* non-JSON body */ }
+                    setRekycSubmitError(msg);
+                    return;
+                  }
+                  setRekycUploadState('confirmed');
+                } catch {
+                  setRekycSubmitError('Network error — please try again');
+                }
               }}
-              onClear={() => { setRekycValidation(null); setRekycUploadState('idle'); }}
+              onClear={() => { setRekycValidation(null); setRekycUploadState('idle'); setRekycSubmitError(null); }}
               confirmLabel="Flag for Re-KYC"
+              submitError={rekycSubmitError}
             />
           </div>
 
@@ -959,17 +999,31 @@ export default function OutletsPage() {
               validationResult={deactivateValidation}
               uploadState={deactivateUploadState}
               onConfirm={async () => {
+                setDeactivateSubmitError(null);
                 const codes = deactivateValidation?.rows.filter(r => r.status === 'OK').map(r => r.outletId) ?? [];
                 const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-                await fetch('/api/admin/outlets/deactivate', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                  body: JSON.stringify({ outletCodes: codes }),
-                }).catch(() => {});
-                setDeactivateUploadState('confirmed');
+                try {
+                  const res = await fetch('/api/admin/outlets/deactivate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    body: JSON.stringify({ outletCodes: codes }),
+                  });
+                  if (!res.ok) {
+                    // Surface the API error (e.g. all-invalid 400) instead of a
+                    // false success — the swallowed `.catch(()=>{})` hid this.
+                    let msg = `Deactivation failed (${res.status})`;
+                    try { const j = await res.json(); msg = j?.error ?? j?.message ?? msg; } catch { /* non-JSON body */ }
+                    setDeactivateSubmitError(msg);
+                    return;
+                  }
+                  setDeactivateUploadState('confirmed');
+                } catch {
+                  setDeactivateSubmitError('Network error — please try again');
+                }
               }}
-              onClear={() => { setDeactivateValidation(null); setDeactivateUploadState('idle'); }}
+              onClear={() => { setDeactivateValidation(null); setDeactivateUploadState('idle'); setDeactivateSubmitError(null); }}
               confirmLabel="Deactivate Outlets"
+              submitError={deactivateSubmitError}
             />
           </div>
 

@@ -12,12 +12,6 @@ import type { PayoutLedgerEntry } from '@/types';
 import { usePartnerSession } from '@/lib/partner-session';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 import { authHeader } from '@/lib/api-client';
-import {
-  isDemoSession,
-  DEMO_WALLET_BALANCE,
-  DEMO_POINTS_TRANSACTIONS,
-  DEMO_INR_PAYOUTS,
-} from './demo-wallet-data';
 
 
 /* ─── API types & mappers (wallet wiring) ────────────────────────────────────── */
@@ -162,15 +156,11 @@ function InrWalletView() {
       .then((json) => {
         if (json.success && json.data?.payouts?.length > 0) {
           setAllPayouts(json.data.payouts);
-        } else if (isDemoSession()) {
-          // Demo fallback — only when the backend returned no payouts.
-          setAllPayouts(DEMO_INR_PAYOUTS);
         }
       })
       .catch((e) => {
         if ((e as Error).name === 'AbortError') return;
-        // Network failure — fall back to demo sample under a demo session.
-        if (isDemoSession()) setAllPayouts(DEMO_INR_PAYOUTS);
+        // Network failure — leave the ledger empty (real data is the only source).
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
@@ -438,13 +428,6 @@ export default function WalletPage() {
           : [];
       if (apiTxs.length > 0) {
         setTransactions(apiTxs);
-      }
-
-      // Demo fallback — only when the backend returned NO data AND we are
-      // running under a demo session. Real fetched data always wins.
-      if (isDemoSession()) {
-        if (!hasApiBalance) setBalance(DEMO_WALLET_BALANCE);
-        if (apiTxs.length === 0) setTransactions(DEMO_POINTS_TRANSACTIONS);
       }
     }).finally(() => setLoading(false));
   }, []);

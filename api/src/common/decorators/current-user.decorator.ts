@@ -13,6 +13,14 @@ export interface JwtPayload {
    * "Working in <Brand>" banner when this is set. A normal session omits it.
    */
   assumed?: boolean;
+  /**
+   * Session-binding claim (#auth-hardening): the id of the UserSession this token
+   * was minted against. jwt.strategy matches the bearer token to THIS session row,
+   * so revoking/rotating the session invalidates the access token on its next
+   * request (not after a 7-day TTL). Optional for backward-compat: tokens issued
+   * before this change have no `sid` and fall back to the legacy (user+tenant) match.
+   */
+  sid?:     string;
   iat?:     number;
   exp?:     number;
 }

@@ -24,7 +24,6 @@ vi.mock('next/link', () => ({
 }));
 vi.mock('@/lib/visibility-upload', () => ({
   generateVisibilityTemplate: vi.fn().mockReturnValue(new ArrayBuffer(0)),
-  DEMO_VISIBILITY_MAP: {},
 }));
 vi.mock('@/lib/gifsy-settings', () => ({
   getGifsySettings: () => ({
@@ -83,6 +82,16 @@ describe('ADVIS — Admin Visibility API wiring', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')));
     render(<VisibilityPage />);
     expect(await screen.findByText(/failed to load/i)).toBeInTheDocument();
+  });
+
+  it('ADVIS5: page source no longer references the DEMO_VISIBILITY_MAP mock constant', async () => {
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const src = await fs.readFile(
+      path.resolve(__dirname, '..', 'page.tsx'),
+      'utf8',
+    );
+    expect(src).not.toMatch(/DEMO_VISIBILITY_MAP/);
   });
 
   it('ADVIS4: renders queue tab with partner count after load', async () => {

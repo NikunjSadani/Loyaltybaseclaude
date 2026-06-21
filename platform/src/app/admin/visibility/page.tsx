@@ -18,10 +18,7 @@ import {
   Loader2,
   CheckCircle2,
 } from 'lucide-react';
-import {
-  generateVisibilityTemplate,
-  DEMO_VISIBILITY_MAP,
-} from '@/lib/visibility-upload';
+import { generateVisibilityTemplate } from '@/lib/visibility-upload';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { Spinner } from '@/components/ui/spinner';
 

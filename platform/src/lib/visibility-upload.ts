@@ -191,19 +191,6 @@ export function generateVisibilityTemplate(): Uint8Array {
 // ─── Demo data ────────────────────────────────────────────────────────────────
 
 /**
- * Sample visibility map for demo/dev mode so the badge renders on sales pages
- * even before real DB records exist.
- * Keys match the demo outletCodes assigned in sales/outlets/page.tsx.
- */
-export const DEMO_VISIBILITY_MAP: VisibilityStatusMap = {
-  'OUT-MH-2841': { status: 'APPROVED',     dateOfCapture: '2026-06-01', approvedBy: 'Amit Singh', capturedByEmployeeName: 'Ravi Kumar'  },
-  'OUT-MH-2843': { status: 'UNDER_REVIEW', dateOfCapture: '2026-06-08', approvedBy: null,         capturedByEmployeeName: 'Vijay Sharma' },
-  'OUT-MH-2847': { status: 'PENDING',      dateOfCapture: null,         approvedBy: null,         capturedByEmployeeName: null          },
-  'OUT-MH-2850': { status: 'APPROVED',     dateOfCapture: '2026-06-03', approvedBy: 'Riya Patel', capturedByEmployeeName: 'Suresh Nair' },
-  'OUT-MH-2852': { status: 'PENDING',      dateOfCapture: null,         approvedBy: null,         capturedByEmployeeName: null          },
-};
-
-/**
  * Sample visibility map keyed by the task-page demo outletCodes.
  */
 export const DEMO_TASK_VISIBILITY_MAP: VisibilityStatusMap = {

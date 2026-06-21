@@ -274,6 +274,19 @@ describe('TdsService — export194R (P6.5c)', () => {
     expect(rows[0]['S.No']).toBe(1);
     expect(rows[1]['S.No']).toBe(2);
   });
+
+  it('neutralises spreadsheet formula injection in the Deductee Name cell', async () => {
+    jest.spyOn(service, 'compute194R').mockResolvedValue([ROW_194R_PAN]);
+    // Partner-supplied owner name is a live-formula payload.
+    mockPrisma.channelPartner.findMany.mockResolvedValue([
+      { panNumber: 'ABCDE1234F', ownerName: '=cmd()|/c calc', businessName: '' },
+    ]);
+
+    const { buffer } = await service.export194R(CLIENT_ID, FY);
+    const rows = parseXlsx(buffer, 0);
+    // Prefixed with an apostrophe so Excel treats it as text, not a formula.
+    expect(rows[0]['Deductee Name']).toBe(`'=cmd()|/c calc`);
+  });
 });
 
 // ─── 194C export ─────────────────────────────────────────────────────────────
@@ -454,5 +467,16 @@ describe('TdsService — export194C (P6.5c)', () => {
     const rows = parseXlsx(buffer, 0);
     expect(rows).toHaveLength(0);
     expect(filename).toBe(`tds-194c-${FY}.xlsx`);
+  });
+
+  it('neutralises spreadsheet formula injection in Deductee Name', async () => {
+    jest.spyOn(service, 'compute194C').mockResolvedValue([ROW_194C_COMPANY]);
+    mockPrisma.channelPartner.findMany.mockResolvedValue([
+      { panNumber: 'COM0022222B', ownerName: '=WEBSERVICE("http://evil")', businessName: '' },
+    ]);
+
+    const { buffer } = await service.export194C(FY);
+    const rows = parseXlsx(buffer, 0);
+    expect(rows[0]['Deductee Name']).toBe(`'=WEBSERVICE("http://evil")`);
   });
 });

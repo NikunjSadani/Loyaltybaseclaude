@@ -82,7 +82,7 @@ const mockTx = {
   auditLog: { create: jest.fn() },
   user: { update: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
-  outlet: { update: jest.fn() },
+  outlet: { update: jest.fn(), updateMany: jest.fn() },
 };
 
 const mockPrisma = {
@@ -252,6 +252,20 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'partner-1' } });
     });
 
+    it('item #2: activates the partner\'s outlet(s) on approval (isActive=true)', async () => {
+      const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
+      await service.bulkVerify(gifsy, file, true);
+      expect(mockTx.outlet.updateMany).toHaveBeenCalledWith({
+        where: {
+          partnerId: 'partner-1',
+          deletedAt: null,
+          // null-intent (common case) OR not-declined — bare `{not}` excludes NULL rows.
+          OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
+        },
+        data: { isActive: true, reactivatedAt: expect.any(Date) },
+      });
+    });
+
     it('does NOT create a wallet when one already exists (idempotency)', async () => {
       mockTx.wallet.findFirst.mockResolvedValue({ id: 'existing-wallet' });
       const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
@@ -369,7 +383,10 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       const file = { buffer: makeXlsx([ownerRejectRow(SUB_ID)]), size: 1 } as Express.Multer.File;
       const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string; detail?: string }> };
       expect(result.results[0].outcome).toBe('error');
-      expect(result.results[0].detail).toContain('primary outlet');
+      // item #1: applyBridgeOutcome now throws a clean ConflictException whose message
+      // does not leak the internal submission id; the bulk path surfaces it as the row detail.
+      expect(result.results[0].detail).toContain('no active outlet');
+      expect(result.results[0].detail).not.toContain(SUB_ID);
       // S1 fix: the outlet is resolved BEFORE the flip, so no status mutation happened.
       expect(mockTx.kycSubmission.updateMany).not.toHaveBeenCalled();
       expect(mockNotifications.enqueue).not.toHaveBeenCalled();

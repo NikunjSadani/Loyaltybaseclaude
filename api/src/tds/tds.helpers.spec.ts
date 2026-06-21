@@ -99,23 +99,30 @@ describe('rate194C', () => {
 // ─── financialYear / fyOfToday / fyFromLabel ─────────────────────────────────
 
 describe('financialYear', () => {
-  it('1 Apr 2025 → FY 2025-26', () => {
-    const fy = financialYear(new Date('2025-04-01T00:00:00Z'));
+  // FY boundaries are anchored to 1 Apr 00:00 IST = 31 Mar 18:30 UTC.
+  const FY_2025_START_UTC = new Date('2025-03-31T18:30:00Z'); // 1 Apr 2025 00:00 IST
+  const FY_2026_START_UTC = new Date('2026-03-31T18:30:00Z'); // 1 Apr 2026 00:00 IST
+  const FY_2027_START_UTC = new Date('2027-03-31T18:30:00Z'); // 1 Apr 2027 00:00 IST
+
+  it('1 Apr 2025 05:30 IST → FY 2025-26 with IST-anchored start/end', () => {
+    const fy = financialYear(new Date('2025-04-01T00:00:00Z')); // = 1 Apr 05:30 IST
     expect(fy.fyLabel).toBe('2025-26');
-    expect(fy.start).toEqual(new Date('2025-04-01T00:00:00Z'));
-    expect(fy.endExclusive).toEqual(new Date('2026-04-01T00:00:00Z'));
+    expect(fy.start).toEqual(FY_2025_START_UTC);
+    expect(fy.endExclusive).toEqual(FY_2026_START_UTC);
   });
 
-  it('31 Mar 2026 23:59:59 UTC → still FY 2025-26', () => {
+  it('31 Mar 2026 23:59:59 UTC (= 1 Apr 05:29 IST) → FY 2026-27 (past the IST boundary)', () => {
+    // IST-anchored: FY 2025-26 ends 31 Mar 2026 23:59:59 IST. 23:59:59 UTC is already
+    // 1 Apr 05:29 IST, so it belongs to the NEW FY (this was the pre-IST UTC bug).
     const fy = financialYear(new Date('2026-03-31T23:59:59Z'));
-    expect(fy.fyLabel).toBe('2025-26');
+    expect(fy.fyLabel).toBe('2026-27');
   });
 
-  it('1 Apr 2026 → FY 2026-27 (boundary flip)', () => {
+  it('1 Apr 2026 05:30 IST → FY 2026-27 (boundary flip)', () => {
     const fy = financialYear(new Date('2026-04-01T00:00:00Z'));
     expect(fy.fyLabel).toBe('2026-27');
-    expect(fy.start).toEqual(new Date('2026-04-01T00:00:00Z'));
-    expect(fy.endExclusive).toEqual(new Date('2027-04-01T00:00:00Z'));
+    expect(fy.start).toEqual(FY_2026_START_UTC);
+    expect(fy.endExclusive).toEqual(FY_2027_START_UTC);
   });
 
   it('1 Jan 2026 → FY 2025-26 (January is still in prior FY)', () => {
@@ -127,19 +134,42 @@ describe('financialYear', () => {
     const fy = financialYear(new Date('2026-03-31T12:00:00Z'));
     expect(fy.fyLabel).toBe('2025-26');
   });
+
+  // ── IST boundary regression (the UTC-vs-IST bug) ──────────────────────────
+  // 31 Mar 18:30–23:59 UTC = 1 Apr 00:00–05:29 IST → MUST be the NEW FY.
+
+  it('31 Mar 2026 18:30:00 UTC (= 1 Apr 00:00 IST) flips to FY 2026-27', () => {
+    const fy = financialYear(new Date('2026-03-31T18:30:00Z'));
+    expect(fy.fyLabel).toBe('2026-27');
+    expect(fy.start).toEqual(FY_2026_START_UTC);
+  });
+
+  it('31 Mar 2026 19:00:00 UTC (= 1 Apr 00:30 IST) is in the NEW FY 2026-27', () => {
+    const ts = new Date('2026-03-31T19:00:00Z');
+    const fy = financialYear(ts);
+    expect(fy.fyLabel).toBe('2026-27');
+    // The timestamp falls within [start, endExclusive) of the new FY.
+    expect(ts.getTime()).toBeGreaterThanOrEqual(fy.start.getTime());
+    expect(ts.getTime()).toBeLessThan(fy.endExclusive.getTime());
+  });
+
+  it('31 Mar 2026 18:29:59 UTC (= 31 Mar 23:59:59 IST) is still the OLD FY 2025-26', () => {
+    const fy = financialYear(new Date('2026-03-31T18:29:59Z'));
+    expect(fy.fyLabel).toBe('2025-26');
+  });
 });
 
 describe('fyFromLabel', () => {
-  it('parses "2025-26" correctly', () => {
+  it('parses "2025-26" correctly (IST-anchored start)', () => {
     const fy = fyFromLabel('2025-26');
     expect(fy.fyLabel).toBe('2025-26');
-    expect(fy.start).toEqual(new Date('2025-04-01T00:00:00Z'));
+    expect(fy.start).toEqual(new Date('2025-03-31T18:30:00Z')); // 1 Apr 2025 00:00 IST
   });
 
-  it('parses "2023-24" correctly', () => {
+  it('parses "2023-24" correctly (IST-anchored start)', () => {
     const fy = fyFromLabel('2023-24');
     expect(fy.fyLabel).toBe('2023-24');
-    expect(fy.start).toEqual(new Date('2023-04-01T00:00:00Z'));
+    expect(fy.start).toEqual(new Date('2023-03-31T18:30:00Z')); // 1 Apr 2023 00:00 IST
   });
 
   it('throws on invalid format', () => {
@@ -160,8 +190,10 @@ describe('fyOfToday', () => {
     // Span is either 365 or 366 days (leap year)
     const day = 24 * 3600 * 1000;
     expect(spanMs === 365 * day || spanMs === 366 * day).toBe(true);
-    // start is always 1 April
-    expect(fy.start.getUTCMonth()).toBe(3); // month 3 = April (0-indexed)
-    expect(fy.start.getUTCDate()).toBe(1);
+    // start is always 1 April 00:00 IST → in IST wall-clock that is April 1.
+    const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
+    const startIst = new Date(fy.start.getTime() + IST_OFFSET_MS);
+    expect(startIst.getUTCMonth()).toBe(3); // April (0-indexed) in IST
+    expect(startIst.getUTCDate()).toBe(1);
   });
 });

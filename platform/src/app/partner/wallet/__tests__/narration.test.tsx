@@ -32,8 +32,40 @@ import WalletPage from '../page';
 
 const SESSION_KEY = 'partner_outlet_type_demo';
 
+// Real API shapes (demo fallback was removed in the #57 mock-data cleanup), so the
+// page now renders narration only from live data — stub the live endpoints with a
+// PAID payout (INR track) and an earned transaction (POINTS track) that carry a
+// narration, both in the default 2026-05 period window.
+const PAYOUT_WITH_NARRATION = {
+  id: 'p1', status: 'PAID', period: '2026-05', kpiLabel: 'Visibility Drive',
+  payoutAmountPaise: 500_000, paidAt: '2026-05-10T00:00:00.000Z', utr: 'UTR123',
+  narration: 'Store branding bonus',
+};
+const TX_WITH_NARRATION = {
+  id: 'tx1', transactionType: 'CREDIT_POINTS_EARNED', description: 'Monthly Target — May 2026',
+  points: 1000, date: '2026-05-10T00:00:00.000Z', balanceType: 'EARNED', balanceAfter: 1000,
+  referenceType: 'SCHEME', referenceId: 's1', kpiLabel: 'Monthly Target',
+  narration: 'Q1 performance bonus',
+};
+const BALANCE = {
+  earnedPoints: 1000, lockedPoints: 0, redeemablePoints: 1000, redeemedPoints: 0,
+  expiredPoints: 0, lifetimeEarned: 1000, lifetimeRedeemed: 0, currency: 'POINTS', conversionRate: 1,
+};
+
+function stubFetch() {
+  vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+    const u = url as string;
+    if (u.includes('/api/wallet/transactions'))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { transactions: [TX_WITH_NARRATION] } }) });
+    if (u.includes('/api/partner/payouts'))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { payouts: [PAYOUT_WITH_NARRATION] } }) });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: BALANCE }) });
+  }));
+}
+
 async function renderAndWait(outletType: string) {
   localStorage.setItem(SESSION_KEY, outletType);
+  stubFetch();
   render(<WalletPage />);
   // Wait for loading to settle — statement-controls-row appears once data is loaded
   await waitFor(
@@ -50,6 +82,7 @@ describe('Y — Narration on wallet transactions', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   // ── INR track (RETAILER) ──

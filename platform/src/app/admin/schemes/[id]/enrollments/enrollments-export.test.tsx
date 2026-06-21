@@ -109,6 +109,15 @@ describe('Enrollment Dashboard — Export Excel', () => {
     await waitFor(() => expect(mockRevokeObjectURL).toHaveBeenCalledWith('blob:mock-url'));
   });
 
+  it('page source no longer references MOCK enrollment constants (#57 mock-data removal)', async () => {
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const src = await fs.readFile(path.resolve(__dirname, 'page.tsx'), 'utf8');
+    expect(src).not.toMatch(/MOCK_ENROLLMENTS/);
+    expect(src).not.toMatch(/MOCK_CAMPAIGN_OUTLETS/);
+    expect(src).not.toMatch(/DEMO_FORM_FIELDS/);
+  });
+
   it('shows an error message when the backend returns non-OK', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,

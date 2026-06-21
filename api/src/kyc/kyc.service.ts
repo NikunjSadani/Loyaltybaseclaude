@@ -1239,8 +1239,9 @@ export class KycService {
    * the reKycFlags on the primary outlet for the specified fieldKeys.
    *
    * B1: notification enqueued AFTER the tx.
-   * S1: if fieldKeys are supplied but no primary outlet exists, throws inside the tx
-   *     → full rollback, no half-commit.
+   * S1: if fieldKeys are supplied but no primary outlet exists, throws a ConflictException
+   *     inside the tx → full rollback, no half-commit. (item #1: a clean 409, not a raw
+   *     Error → 500, and the message does not leak the internal submission id.)
    *
    * Permission: @Roles('GIFSY_ADMIN') + @RequirePermission('kyc:gifsy_approve').
    * Closest existing perm is kyc:gifsy_approve (the Gifsy-side approve action);
@@ -1282,8 +1283,10 @@ export class KycService {
       // S1: if fieldKeys given, we must have a primary outlet to write reKycFlags.
       const primaryOutlet = submission.partner?.outlets[0] ?? null;
       if (fieldKeys?.length && !primaryOutlet) {
-        throw new Error(
-          `No primary outlet found for submission ${id} — cannot set reKycFlags for fields: ${fieldKeys.join(', ')}`,
+        // Clean 409 instead of a raw Error → 500. Do not leak the internal submission
+        // id or the field list in the client message; the tx rolls back (no status flip).
+        throw new ConflictException(
+          'Cannot set re-KYC field flags: this submission has no active outlet to attach them to. Activate the outlet first.',
         );
       }
 
@@ -1545,7 +1548,10 @@ export class KycService {
    *   B1 — does NOT enqueue notifications; returns a CommitNotifyIntent that the
    *        caller enqueues AFTER the tx commits. A rolled-back tx never notifies.
    *   S1 — for RE_UPLOAD_REQUIRED, resolves the primary outlet BEFORE the status flip
-   *        and throws if none, rolling back the entire tx (no half-commit).
+   *        and throws if none, rolling back the entire tx (no half-commit). item #1: the
+   *        throw is a ConflictException (clean 409, no internal-id leak) — not a raw Error.
+   *   item #2 — for APPROVED, also flips the partner's outlet(s) to isActive=true so they
+   *        become visible to targets/credits/payouts (outlets are created isActive=false).
    *
    * @param tx         The open Prisma interactive-transaction client.
    * @param submission The full submission row (with user + partner.outlets[0]).
@@ -1597,6 +1603,29 @@ export class KycService {
         if (!existingWallet) {
           await tx.wallet.create({ data: { partnerId: submission.partnerId } });
         }
+
+        // Activate the owning partner's outlet(s). Outlets are created PENDING
+        // (isActive=false, see admin-outlets buildOutletCreate); KYC approval is the
+        // event that brings them live so they become visible to targets/credits/payouts.
+        // KYC owns this side-effect (distinct from the admin-outlets upsert path). Scope:
+        //   - partnerId match (the approved partner's outlets only)
+        //   - deletedAt: null (never resurrect a soft-deleted outlet)
+        //   - kycIntent != NOT_INTERESTED (an outlet the agent explicitly declined stays
+        //     deactivated — notInterested() set isActive=false deliberately)
+        // Tenant-safe: outlets are reached via partnerId, and the partner itself was
+        // already tenant-resolved by the submission load.
+        await tx.outlet.updateMany({
+          where: {
+            partnerId: submission.partnerId,
+            deletedAt: null,
+            // kycIntent is nullable — a freshly-created outlet awaiting KYC has it NULL.
+            // Prisma's `{ not: 'X' }` compiles to `<> 'X'`, which is NULL (not TRUE) for
+            // NULL rows, so a bare `not` would SILENTLY EXCLUDE the common null-intent
+            // outlets (approval no-op). Match null OR not-declined explicitly.
+            OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
+          },
+          data: { isActive: true, reactivatedAt: now },
+        });
       }
 
       // Audit + history.
@@ -1647,9 +1676,14 @@ export class KycService {
       // counts the thrown row as 'error' and the status is never mutated.
       const primaryOutlet = submission.partner?.outlets[0] ?? null;
       if (!primaryOutlet) {
-        throw new Error(
-          `No primary outlet for submission ${submissionId} — cannot set reKycFlags ` +
-            `(rejected: ${bridgeResult.rejectedFields.join(', ')})`,
+        // No active primary outlet to carry the reKycFlags. Fail with a clean 409
+        // (not a raw Error → 500) and DO NOT leak the internal submission id or the
+        // partner's internal field list in the client-facing message. The rejected
+        // fields + submissionId are still recorded in the thrown context via the
+        // status/audit rows? No — we throw BEFORE the status flip, so the whole tx
+        // rolls back (audit S1: no half-commit). Operators see detail in server logs.
+        throw new ConflictException(
+          'Cannot record re-upload: this submission has no active outlet to attach the re-KYC flags to. Activate the outlet first.',
         );
       }
 

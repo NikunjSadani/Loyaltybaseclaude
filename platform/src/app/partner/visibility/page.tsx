@@ -33,11 +33,13 @@ interface Submission {
 }
 
 export default function VisibilityPage() {
-  const [submissions] = useState<Submission[]>([
-    { id: 's1', programName: 'Shelf Branding', outletName: 'Ramesh General Store', status: 'APPROVED', submittedAt: '2026-05-10', payoutAmount: 50000 },
-    { id: 's2', programName: 'Counter Display', outletName: 'Meena Kirana', status: 'PENDING', submittedAt: '2026-05-14' },
-    { id: 's3', programName: 'Standee', outletName: 'Ramesh General Store', status: 'REJECTED', submittedAt: '2026-05-08', rejectionReason: 'Standee not properly visible. Brand name obscured.' },
-  ])
+  // NOTE (#57 mock-data removal): the previous submission history was hardcoded
+  // demo data. The backend does NOT expose a partner-facing list of a partner's
+  // own visibility submissions — GET /v1/visibility/submissions explicitly
+  // FORBIDS partner roles (SSS/WHOLESALER/SUB_STOCKIST → 403; partners submit via
+  // POST /v1/visibility/submit but cannot list). Until a partner "my submissions"
+  // endpoint ships, this list stays empty rather than showing fabricated history.
+  const [submissions] = useState<Submission[]>([])
   const [showUpload, setShowUpload] = useState(false)
   const [selectedProgram, setSelectedProgram] = useState('')
   const [imageFile, setImageFile] = useState<File | null>(null)
@@ -111,6 +113,13 @@ export default function VisibilityPage() {
 
         <div>
           <h2 className="text-sm font-semibold text-gray-700 mb-3">My Submissions</h2>
+          {submissions.length === 0 && (
+            <div className="bg-white border border-gray-200 rounded-lg py-10 px-4 text-center">
+              <Clock className="h-8 w-8 text-gray-200 mx-auto mb-2" />
+              <p className="text-sm text-gray-500">No submissions yet</p>
+              <p className="text-xs text-gray-400 mt-1">Submit a branding photo above to get started.</p>
+            </div>
+          )}
           <div className="space-y-3">
             {submissions.map(sub => {
               const cfg = statusConfig[sub.status]

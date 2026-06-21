@@ -138,7 +138,12 @@ export class AuthService {
       throw new UnauthorizedException('OTP expired — please request a new one.');
     }
 
-    const fixedOtp = this.config.get<string>('FIXED_OTP');
+    // FIXED_OTP is a dev/staging convenience bypass. Defense-in-depth: NEVER
+    // honor it in production even if the env var leaks into a prod config, so a
+    // misconfig can't turn into a universal-OTP backdoor. (Mirrors the guard on
+    // the redemption OTP path.)
+    const fixedOtp =
+      process.env.NODE_ENV !== 'production' ? this.config.get<string>('FIXED_OTP') : undefined;
     const isCorrect = fixedOtp ? otp === fixedOtp : otp === record.code;
 
     if (!isCorrect) {
@@ -210,12 +215,17 @@ export class AuthService {
     opts?: { clientIdOverride?: string; assumed?: boolean; expiresIn?: string },
   ): Promise<{ accessToken: string; refreshToken: string }> {
     const clientId = opts?.clientIdOverride ?? user.clientId;
+    // Pre-generate the session id so it can be embedded in the JWT (`sid`) AND used as
+    // the UserSession PK — jwt.strategy then binds the bearer token to THIS session, so
+    // revoke/rotate kills the access token on its next request (not after a 7-day TTL).
+    const sid = crypto.randomUUID();
     const payload = {
       sub:      user.id,
       role:     user.role,
       clientId,
       phone:    user.phone,
       name:     user.name,
+      sid,
       ...(opts?.assumed ? { assumed: true } : {}),
     };
 
@@ -235,6 +245,7 @@ export class AuthService {
 
     await this.prisma.userSession.create({
       data: {
+        id:           sid,              // PK = the JWT's `sid` claim (token↔session binding)
         userId:       user.id,
         clientId,                       // canonical model binds the tenant to the session
         token:        accessToken,
@@ -312,6 +323,9 @@ export class AuthService {
   // ── Refresh token ────────────────────────────────────────────────────────────
 
   async refreshToken(refreshToken: string): Promise<{ accessToken: string; refreshToken: string }> {
+    // Read the session (with its user) so the A2 assumed-tenant scope can be
+    // carried onto the new token. This read alone is NOT the gate — the atomic
+    // claim below is.
     const session = await this.prisma.userSession.findFirst({
       where:   { refreshToken, revokedAt: null },
       include: { user: true },
@@ -321,11 +335,19 @@ export class AuthService {
       throw new UnauthorizedException('Session expired — please log in again.');
     }
 
-    // Revoke old session
-    await this.prisma.userSession.update({
-      where: { id: session.id },
+    // ATOMIC single-use claim (token-reuse / session-fixation fix): revoke the
+    // row by its refreshToken in one statement and only proceed if THIS call
+    // won the revoke. Two concurrent refreshes with the same token both pass the
+    // findFirst above, but the DB serialises this updateMany — exactly one sees
+    // count===1; the loser sees count===0 and is rejected, so a single refresh
+    // token can mint at most one new token set.
+    const claim = await this.prisma.userSession.updateMany({
+      where: { refreshToken, revokedAt: null },
       data:  { revokedAt: new Date() },
     });
+    if (claim.count === 0) {
+      throw new UnauthorizedException('Session expired — please log in again.');
+    }
 
     // Preserve the operator-context (A2): an assumed session's row carries the
     // TENANT clientId while its user's home clientId is `gifsy`. Refresh must keep

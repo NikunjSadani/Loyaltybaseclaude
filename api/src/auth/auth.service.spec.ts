@@ -15,7 +15,7 @@ import { Msg91Service } from '../notifications/msg91.service';
 const mockPrisma = {
   user:    { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
   otpCode: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
-  userSession: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+  userSession: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   client:  { findFirst: jest.fn() },
   auditLog: { create: jest.fn() },
 };
@@ -187,6 +187,7 @@ describe('AuthService', () => {
         expiresAt: new Date(Date.now() + 3600_000),
         user: { id: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' },
       });
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 }); // claim wins
       mockPrisma.userSession.update.mockResolvedValue({});
       mockPrisma.userSession.create.mockResolvedValue({});
 
@@ -202,6 +203,7 @@ describe('AuthService', () => {
         expiresAt: new Date(Date.now() + 3600_000),
         user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
       });
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 }); // claim wins
       mockPrisma.userSession.update.mockResolvedValue({});
       mockPrisma.userSession.create.mockResolvedValue({});
 
@@ -210,6 +212,61 @@ describe('AuthService', () => {
       const payload = mockJwt.sign.mock.calls[0][0];
       expect(payload.clientId).toBe('deoleo');
       expect(payload.assumed).toBeUndefined();
+    });
+  });
+
+  // ── refreshToken atomic single-use claim (token-reuse / session-fixation fix) ─
+  describe('refreshToken (atomic single-use)', () => {
+    const liveSession = {
+      id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
+      expiresAt: new Date(Date.now() + 3600_000),
+      user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
+    };
+
+    it('revokes via an ATOMIC updateMany claim keyed on the refreshToken (not a read-then-update by id)', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue(liveSession);
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.userSession.create.mockResolvedValue({});
+
+      await service.refreshToken('rt');
+
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+        where: { refreshToken: 'rt', revokedAt: null },
+        data:  { revokedAt: expect.any(Date) },
+      });
+      // new tokens minted exactly once
+      expect(mockPrisma.userSession.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a SECOND concurrent refresh with the same token (claim lost → count 0)', async () => {
+      // Both racers see the un-revoked session (findFirst passes for both)…
+      mockPrisma.userSession.findFirst.mockResolvedValue(liveSession);
+      // …but the DB serialises the claim: first wins (count 1), second loses (count 0).
+      mockPrisma.userSession.updateMany
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 });
+      mockPrisma.userSession.create.mockResolvedValue({});
+
+      await expect(service.refreshToken('rt')).resolves.toBeDefined();          // winner
+      await expect(service.refreshToken('rt')).rejects.toThrow('Session expired'); // loser rejected
+
+      // the loser must NOT mint a new token set
+      expect(mockPrisma.userSession.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves the assumed operator-context only when the claim WINS', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({
+        id: 'sess_a', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
+        expiresAt: new Date(Date.now() + 3600_000),
+        user: { id: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' },
+      });
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.userSession.create.mockResolvedValue({});
+
+      await service.refreshToken('rt');
+
+      const payload = mockJwt.sign.mock.calls[0][0];
+      expect(payload).toMatchObject({ sub: 'op1', clientId: 'deoleo', assumed: true });
     });
   });
 
@@ -290,6 +347,23 @@ describe('AuthService', () => {
 
       // '5678' is neither the stored code nor the fixed OTP
       await expect(service.verifyOtp('9876543210', '5678', 'deoleo')).rejects.toThrow('Invalid OTP');
+    });
+
+    it('REFUSES to honor FIXED_OTP in production (defense-in-depth NODE_ENV guard)', async () => {
+      const prev = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      try {
+        // Even with FIXED_OTP=1234 configured, prod must fall back to the stored code.
+        mockConfig.get.mockImplementation((key: string): any => key === 'FIXED_OTP' ? '1234' : undefined);
+        const record = { id: 'otp_1', code: '9999', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000), verifiedAt: null };
+        mockPrisma.otpCode.findFirst.mockResolvedValue(record);
+        mockPrisma.otpCode.update.mockResolvedValue({});
+
+        // Submitting the would-be fixed OTP must be rejected — only the real stored code works.
+        await expect(service.verifyOtp('9876543210', '1234', 'deoleo')).rejects.toThrow('Invalid OTP');
+      } finally {
+        process.env.NODE_ENV = prev;
+      }
     });
   });
 
