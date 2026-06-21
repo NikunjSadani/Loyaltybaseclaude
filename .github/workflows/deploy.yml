@@ -113,6 +113,23 @@ jobs:
           docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:${{ github.sha }}
           docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:latest
 
+      # Apply DB migrations BEFORE the new revision serves (mirrors deploy-staging.yml).
+      # gifsy_prod was reconciled to an empty DB at the 2026-06-20 cutover, so the squashed
+      # baseline applies cleanly via `migrate deploy`. SHA-pinned image; --wait fails the deploy
+      # if the migration fails (so broken-schema code never serves).
+      - name: Run DB migrations (production)
+        run: |
+          gcloud run jobs deploy gifsy-migrate \
+            --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/api:${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --command=npx \
+            --args=prisma,migrate,deploy \
+            --set-secrets=DATABASE_URL=DATABASE_URL:latest \
+            --vpc-connector=gifsy-connector \
+            --set-cloudsql-instances=${{ env.SQL_INSTANCE }} \
+            --service-account=gifsy-api-sa@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
+            --execute-now --wait
+
       - name: Deploy API to Cloud Run
         run: |
           gcloud run deploy gifsy-api \
