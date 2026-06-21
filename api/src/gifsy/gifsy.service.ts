@@ -1,11 +1,13 @@
 import {
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { UpdateOutletTypeConfigDto } from './dto/gifsy.dto';
+import { CreateClientDto, UpdateOutletTypeConfigDto } from './dto/gifsy.dto';
 
 /**
  * GIFSY platform-operator domain — ported from
@@ -62,6 +64,104 @@ export class GifsyService {
 
   private assertGifsy(user: JwtPayload): void {
     if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden');
+  }
+
+  /**
+   * Idempotently upserts an `OutletTypeClientConfig` row for every active
+   * `OutletType`, applying the DEFAULT_FLAGS for each.  Accepts a Prisma
+   * transaction client so it can be called inside a `$transaction`.
+   */
+  private async provisionOutletTypeConfigs(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+  ): Promise<void> {
+    const allTypes = await tx.outletType.findMany({
+      where: { isActive: true },
+      select: { id: true },
+    });
+
+    for (const ot of allTypes) {
+      await tx.outletTypeClientConfig.upsert({
+        where: { clientId_outletTypeId: { clientId, outletTypeId: ot.id } },
+        update: { isEnabled: DEFAULT_FLAGS.isEnabled },
+        create: { clientId, outletTypeId: ot.id, ...DEFAULT_FLAGS },
+      });
+    }
+  }
+
+  /**
+   * POST /v1/gifsy/clients — create a new tenant Client row and provision its
+   * OutletTypeClientConfig rows in a single transaction. GIFSY_ADMIN only.
+   * Throws 409 ConflictException if the slug already exists.
+   */
+  async createClient(user: JwtPayload, dto: CreateClientDto) {
+    this.assertGifsy(user);
+
+    const existing = await this.prisma.client.findUnique({ where: { id: dto.slug } });
+    if (existing) {
+      throw new ConflictException(`Client with slug "${dto.slug}" already exists.`);
+    }
+
+    let client;
+    try {
+      client = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.client.create({
+          data: {
+            id: dto.slug,
+            internalName: dto.internalName,
+            status: dto.status ?? 'ONBOARDING',
+            onboardedAt: new Date(),
+            branding: {
+              displayName: dto.displayName ?? '',
+              primaryColor: dto.primaryColor ?? '#6b7280',
+              supportEmail: dto.supportEmail ?? '',
+              supportPhone: dto.supportPhone ?? '',
+              invoicePrefix: dto.invoicePrefix ?? '',
+            } as Prisma.InputJsonValue,
+            features: (dto.features ?? {}) as Prisma.InputJsonValue,
+            approvalHierarchy: {} as Prisma.InputJsonValue,
+            notifications: {} as Prisma.InputJsonValue,
+            invoicing: {
+              invoicePrefix: dto.invoicePrefix ?? '',
+            } as Prisma.InputJsonValue,
+            wallet: {} as Prisma.InputJsonValue,
+          },
+        });
+
+        await this.provisionOutletTypeConfigs(tx, created.id);
+
+        return created;
+      });
+    } catch (e) {
+      // Race: a concurrent POST with the same slug won the unique (PK) constraint
+      // between our pre-check and create. Surface the intended 409, not a raw 500.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ConflictException(`Client with slug "${dto.slug}" already exists.`);
+      }
+      throw e;
+    }
+
+    const branding = (client.branding ?? {}) as Record<string, unknown>;
+    const features = (client.features ?? {}) as Record<string, unknown>;
+    return {
+      id: client.id,
+      slug: client.id,
+      internalName: client.internalName,
+      status: client.status,
+      onboardedAt: client.onboardedAt,
+      displayName: branding.displayName,
+      primaryColor: branding.primaryColor,
+      logoUrl: branding.logoUrl,
+      supportEmail: branding.supportEmail,
+      productBrands: branding.productBrands,
+      features: {
+        visibilityInvoiceModule: features.visibilityInvoiceModule,
+        kycApprovalFlow: features.kycApprovalFlow,
+        walletModule: features.walletModule,
+        salesTeamApp: features.salesTeamApp,
+        referralModule: features.referralModule,
+      },
+    };
   }
 
   /**

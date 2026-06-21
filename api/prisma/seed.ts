@@ -52,6 +52,39 @@ const pool = new Pool({ connectionString: process.env['DATABASE_URL'] });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
+// ── Shared provisioning helper ────────────────────────────────────────────────
+//
+// Mirrors GifsyService.provisionOutletTypeConfigs() exactly. Any change here
+// must also be applied there (and vice-versa). Idempotent upsert — safe to
+// call repeatedly. Uses the module-level `prisma` client (no tx required for
+// seed context, which runs outside a transaction).
+
+const DEFAULT_OUTLET_TYPE_CONFIG_FLAGS = {
+  isEnabled: true,
+  displayName: null as string | null,
+  loyaltyEnabled: true,
+  schemesEnabled: true,
+  visibilityEnabled: true,
+  payoutsEnabled: true,
+  leaderboardEnabled: true,
+  targetsEnabled: true,
+  kycRequired: true,
+};
+
+async function provisionOutletTypeConfigs(clientId: string): Promise<void> {
+  const allTypes = await prisma.outletType.findMany({
+    where: { isActive: true },
+    select: { id: true },
+  });
+  for (const ot of allTypes) {
+    await prisma.outletTypeClientConfig.upsert({
+      where: { clientId_outletTypeId: { clientId, outletTypeId: ot.id } },
+      update: { isEnabled: DEFAULT_OUTLET_TYPE_CONFIG_FLAGS.isEnabled },
+      create: { clientId, outletTypeId: ot.id, ...DEFAULT_OUTLET_TYPE_CONFIG_FLAGS },
+    });
+  }
+}
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 const GIFSY_CLIENT_ID    = 'gifsy';
@@ -228,16 +261,10 @@ async function seedDeoleoDemo() {
 
   // 3.2b Per-tenant outlet-type configs. The admin outlet-upsert maps an outlet's type CODE → id via
   // OutletTypeClientConfig; without a row per (tenant, type) every upsert fails "Unknown outlet type"
-  // and nothing persists. Enable all global types for deoleo (mirrors what tenant provisioning does).
-  const allOutletTypes = await prisma.outletType.findMany({ select: { id: true } });
-  for (const ot of allOutletTypes) {
-    await prisma.outletTypeClientConfig.upsert({
-      where: { clientId_outletTypeId: { clientId: DEOLEO_CLIENT_ID, outletTypeId: ot.id } },
-      update: { isEnabled: true },
-      create: { clientId: DEOLEO_CLIENT_ID, outletTypeId: ot.id, isEnabled: true },
-    });
-  }
-  console.log(`   ✓ OutletTypeClientConfig × ${allOutletTypes.length} (deoleo) — enables outlet upsert`);
+  // and nothing persists. Enable all active types for deoleo via the shared provisioning helper
+  // (idempotent upsert, mirrors exactly what createClient() does at runtime).
+  await provisionOutletTypeConfigs(DEOLEO_CLIENT_ID);
+  console.log(`   ✓ OutletTypeClientConfig (deoleo) — enables outlet upsert`);
 
   // 3.3 Two channel partners, each: User → ChannelPartner → Wallet → Outlet.
   // Ids + natural keys align with the manual-test rows already in gifsy_dev.
@@ -461,6 +488,49 @@ async function seedDeoleoDemo() {
     },
   });
   console.log(`   ✓ SalesUser (SO) ${salesUser.employeeCode} → reports to ${salesMgr.employeeCode}`);
+
+  // 3.4 (snapshot) — upsert the `employee_hierarchy` ProgramSetting so that
+  // GET /v1/admin/hierarchy-config returns employees instead of [].
+  // This mirrors EXACTLY what the real PUT saveHierarchyConfig writes:
+  // one HierarchyEmployee entry per seeded SalesUser, with the relationships
+  // that have just been established above.
+  const hierarchySnapshot = [
+    {
+      id: salesMgr.employeeCode,          // 'EMPASM1'
+      tenantId: DEOLEO_CLIENT_ID,
+      roleCode: 'ASM',
+      roleLabel: 'ASM',
+      reportsToId: null,
+      name: 'Demo Area Sales Manager',
+      mobile: '9000000006',
+      status: 'ACTIVE',
+      hasOutlets: false,
+      hasSubReports: true,
+    },
+    {
+      id: salesUser.employeeCode,         // 'EMP001'
+      tenantId: DEOLEO_CLIENT_ID,
+      roleCode: 'SO',
+      roleLabel: 'SO',
+      reportsToId: salesMgr.employeeCode, // 'EMPASM1'
+      name: 'Demo Sales Officer',
+      mobile: '9000000003',
+      status: 'ACTIVE',
+      hasOutlets: true,
+      hasSubReports: false,
+    },
+  ];
+
+  await prisma.programSetting.upsert({
+    where: { clientId_settingKey: { clientId: DEOLEO_CLIENT_ID, settingKey: 'employee_hierarchy' } },
+    update: { settingValue: hierarchySnapshot },
+    create: {
+      clientId: DEOLEO_CLIENT_ID,
+      settingKey: 'employee_hierarchy',
+      settingValue: hierarchySnapshot,
+    },
+  });
+  console.log(`   ✓ ProgramSetting [employee_hierarchy] — ${hierarchySnapshot.length} employees (EMPASM1, EMP001)`);
 
   // 3.4a Assign the SO to the first partner's outlet (CP001 / O001).
   const firstOutletId = createdPartners[0]?.outletId;
@@ -977,6 +1047,10 @@ async function seedClientBDemo() {
       submittedAt: new Date(),
     },
   });
+
+  // Outlet-type configs for clientb — same provisioning as deoleo so the
+  // cross-tenant harness can upsert outlets without "Unknown outlet type".
+  await provisionOutletTypeConfigs(CLIENTB_CLIENT_ID);
 
   console.log(
     `   ✓ clientb: admin ${clientAdmin.phone} + partner CPB001 (Zenith Trading Co) + wallet + outlet OB001 + PENDING_GIFSY KYC`,

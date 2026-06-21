@@ -1,9 +1,9 @@
-import { Body, Controller, Get, Param, Put } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put } from '@nestjs/common';
 import { GifsyService } from './gifsy.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { UpdateOutletTypeConfigDto } from './dto/gifsy.dto';
+import { CreateClientDto, UpdateOutletTypeConfigDto } from './dto/gifsy.dto';
 
 /**
  * GIFSY platform super-admin API — re-homed from
@@ -21,6 +21,13 @@ export class GifsyController {
   @RequirePermission('tenancy:read')
   getOverview(@CurrentUser() user: JwtPayload) {
     return this.gifsy.getOverview(user);
+  }
+
+  @Post('clients')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('tenancy:write')
+  createClient(@CurrentUser() user: JwtPayload, @Body() dto: CreateClientDto) {
+    return this.gifsy.createClient(user, dto);
   }
 
   @Get('clients')

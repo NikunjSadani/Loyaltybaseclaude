@@ -13,8 +13,7 @@ Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic). Last v
 The whole P0–P6 + P0.6 platform is built, audited, and **now serving in prod** (`gifsy-api`+`gifsy-frontend` on
 `b3ab2e0`, at `https://deoleoloyalty.gifsy.in`). The prod cutover is DONE; staging works end-to-end with REAL MSG91 OTP.
 **We are in the GO-LIVE phase now — NOT building new features.** Launch-readiness, in order:
-**(1) 🔴 WIRE the gap-#57 admin pages to real data (PRE-UAT BLOCKER — the NEXT thing to do)**, (2) load real Deoleo
-data into empty prod, (3) owner UAT, (4) owner ops. **E2E coverage (Waves 0–4, 291 green) is DONE + pushed** — and it
+**(1) ✅ gap-#57 (b/c/e) WIRED + #78 tenant-provisioning DONE (2026-06-21, tasks #77+#78; 2 audits + E2E 290/0/9) — (a) sub-dashboards DEFERRED post-launch**, (2) load real Deoleo data into empty prod (**no longer gated by #78**), (3) owner UAT, (4) owner ops. **E2E coverage (Waves 0–4 + the #77/#78 slice, 290 green) is DONE** — and it
 CAUGHT gap #57. **Read FIRST:** `DEOLEO-GO-LIVE-BUNDLE.md` · `GO-LIVE-READINESS.md` · `docs/spec/gap-register.md` (#57) ·
 `runbooks/PROD-CUTOVER-RECORD.md` · `E2E-COVERAGE-PLAN.md` · `MIGRATIONS.md` · `ENVIRONMENTS.md`.
 
@@ -47,25 +46,25 @@ proxy `:5433`→gifsy_dev + backend `:4000` (`node dist/main.js`; ⚠️ **rebui
 read-back endpoint OR temp `FIXED_OTP`.
 
 ## 🔴 The GO-LIVE critical path — what's LEFT
-1. **🔴 WIRE THE GAP-#57 ADMIN PAGES TO REAL DATA — PRE-UAT BLOCKER (task #77). ⭐ THE POST-COMPACT WORK = #77 + #78 (do both).**
-   The E2E expansion proved several **admin/sales-facing** pages render **mock/empty data** — a UAT tester hits them as
-   visible "fake/empty/unfinished" defects: **(a)** `/admin/dashboards/{payments,engagement,redemptions,kyc}` render
-   hardcoded demo values ("4,821", "Kumar General Store") — only the main `/admin/dashboard` was wired (P0.6-H/#47);
-   **(b)** `/admin/outlets` Outlet Master is a mock constant; **(c)** `/admin/hierarchy` is empty (`GET /api/admin/hierarchy-config`
-   returns `employees:[]` despite seeded sales users); **(d)** the sales shell shows hardcoded demo notifications. Wire these to
-   real aggregations/lists/endpoints. **Lower priority** (roles not in Deoleo's first UAT): GIFSY tenant-settings write path, MIS
-   KPI-read RBAC. The blocking E2E tests are `test.fixme(...)` citing **gap-register #57** — remove the fixme to re-assert real
-   data once wired. NOT money/auth/scope (those ARE covered). Full detail: `gap-register.md` #57 + `E2E-COVERAGE-PLAN.md`.
-2. **🔴 AUTO-PROVISION `OutletTypeClientConfig` ON TENANT CREATION — pre-prod prerequisite (task #78; the OTHER post-compact item).**
-   A new tenant has ZERO outlet types enabled, so admin outlet create/upload fails "Unknown outlet type" until manually
-   configured (only path today = the manual GIFSY `updateOutletTypeConfig` endpoint, one type at a time; band-aided in
-   `seed.ts §3.2b` for the demo tenant only). Fix: tenant provisioning (`gifsy.service` create-client + the `/gifsy/clients/new`
-   flow) auto-creates the default outlet-type configs. Required before the prod data load (#76). NOT a staging-UAT blocker (seed
-   covers the demo tenant). Detail: `gap-register.md` #58.
+1. **✅ DONE (2026-06-21, task #77) — gap-#57 (b/c/e) wired; (a) sub-dashboards DEFERRED.** (b) orphan `/admin/outlets` mock
+   removed → redirect to the already-real `/admin/users/outlets`, + real per-outlet KYC-status join (derived from the owning
+   **partner's** `KycSubmission` — KYC is partner-keyed, not outlet-keyed); (c) hierarchy read stays snapshot-fed **by P2.1
+   design** — the empty page was a SEED-FIXTURE gap, fixed by seeding the `employee_hierarchy` snapshot (NOT a new relational
+   read); (e) notification bells hidden in both shells until P7. **⚠️ (a) `/admin/dashboards/{payments,engagement,redemptions,kyc}`
+   STILL render mock ("4,821"/"Kumar General Store")** — owner deferred wiring 2026-06-21; **open pre-UAT call: hide that nav
+   sub-group OR wire the aggregations** before UAT (else a tester sees fake data there). (d) tenant-settings write + (f) MIS
+   KPI-read RBAC = lower, still open. 2 independent audits + E2E 290/0/9. Detail: `gap-register.md` #57.
+2. **✅ DONE (2026-06-21, task #78) — `OutletTypeClientConfig` auto-provisioned on tenant creation.** `GifsyService.createClient`
+   + a `provisionOutletTypeConfigs(tx, clientId)` chokepoint create one enabled config per active `OutletType` inside the
+   client-create `$transaction`; `POST /v1/gifsy/clients` (GIFSY_ADMIN) + the `/gifsy/clients/new` wizard wired; `seed.ts`
+   routed through the same helper (§3.2b band-aid retired). Race-safe (P2002→409). Runtime-verified: fresh tenant → 5 enabled
+   configs; dup → 409. **#76 is no longer gated on this.** Detail: `gap-register.md` #58.
 3. **LOAD REAL DEOLEO MASTER DATA into the empty prod** — prod is migrated but has 0 users/0 clients; no real user can
    log in until the real client + admins + sales team + partners/outlets + reward catalog + schemes are loaded (owner
-   provides the file; I author+audit the load). ⚠️ **Gated by #78** (outlet-type configs must exist first). THE data blocker. Task #76.
-4. **Owner UAT** of the core loop on staging with real OTP (login done; KYC/earn/redeem pending) — gate on #1 (+ #78) first.
+   provides the file; I author+audit the load). ✅ **#78 done — no longer gated** (a fresh tenant self-provisions outlet-type
+   configs; load the real Client via `POST /v1/gifsy/clients` or seed-style script so provisioning runs). THE data blocker. Task #76.
+4. **Owner UAT** of the core loop on staging with real OTP (login done; KYC/earn/redeem pending) — first resolve the #57(a)
+   sub-dashboards (hide-or-wire) so UAT doesn't surface mock data there.
 5. **Owner ops** (owner-only; I prepare exact steps): Cloud Monitoring alert email · automated backups + PITR on
    `gifsy-db` (a one-off backup was taken at cutover; ongoing is OFF) · rotate prod-only secrets. Task #74.
 - **Deferred fast-follows (NOT blockers):** sales-team leaderboard (nav hidden), rest of P7 (notification worker,
@@ -102,7 +101,16 @@ read-back endpoint OR temp `FIXED_OTP`.
 You ORCHESTRATE, plan, GATE, own docs. **Per task: plan (Opus) → execute (Sonnet executor, background, NO shell — you
 run the gate) → ONE independent adversarial audit (fresh agent, Read/Grep) → Opus gate → RUNTIME-VERIFY → commit → doc
 sweep.** **AUDIT EVERYTHING — do not risk-tier** (the owner caught me skipping audits TWICE this session; the audit
-then found a real defect every time, incl. a money-path TDS-index drop on the prod cutover). Parallelize disjoint-file
+then found a real defect every time, incl. a money-path TDS-index drop on the prod cutover). **DIAGNOSE BEFORE BUILD
+(owner caught me 2026-06-21 about to rebuild a hierarchy read that P2.1 deliberately designed as snapshot-fed):** before
+proposing ANY fix, answer two questions and cite evidence — (1) **Design intent:** what do the plan/reconcile docs say
+this was MEANT to do? Is the current behaviour deliberate? (`00-MASTER-PLAN` 2.1 = "save persists the relational tree IN
+ADDITION TO the JSON snapshot" → the snapshot is the intended read model; the empty page was a *seed-fixture* artifact,
+not a code gap.) (2) **Real data path:** how does data ACTUALLY arrive for go-live — the upload/PUT or the #76 load
+script, NOT the seed fixture? Does that path already satisfy the requirement? Never inherit a gap-register entry's framing
+without re-deriving it; never mistake the seed (a test fixture) for the canonical data path. **Auditors must be handed the
+PROBLEM to re-derive, NOT my proposed FIX to rubber-stamp** — a leading, solution-shaped claim makes the audit validate
+the wrong thing (that's how the hierarchy misframe slipped 2 auditors). Parallelize disjoint-file
 streams; **Opus owns `schema.prisma` + migrations** so executors never collide. **Definition of done
 (`VERIFICATION-PROTOCOL.md`):** a real user, in the correct role, completes the flow end-to-end at RUNTIME against
 realistic data — `tsc`/unit-tests/audits are necessary, NEVER sufficient. ⚠️ **The hard lesson this session: staging

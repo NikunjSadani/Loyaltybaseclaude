@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { KycStatus, OutletKycIntent, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
@@ -171,7 +171,7 @@ export class AdminOutletsService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  /** GET /v1/admin/outlets — tenant-scoped outlet list with the active XSR. */
+  /** GET /v1/admin/outlets — tenant-scoped outlet list with the active XSR and real KYC status. */
   async list(user: JwtPayload) {
     const outlets = await this.prisma.outlet.findMany({
       where: { deletedAt: null, clientId: user.clientId },
@@ -188,6 +188,10 @@ export class AdminOutletsService {
         metro: true,
         programName: true,
         programCategory: true,
+        // Fields needed for real KYC-status derivation
+        partnerId: true,
+        reKycFlags: true,
+        kycIntent: true,
         salesAssignments: {
           where: { unassignedAt: null },
           take: 1,
@@ -201,6 +205,91 @@ export class AdminOutletsService {
       },
       orderBy: { createdAt: 'desc' },
     });
+
+    // ── Batched KYC-status lookup (no N+1) ───────────────────────────────────────
+    // Collect all distinct partnerIds for outlets that have an owner (post-KYC-start).
+    const partnerIds = [...new Set(
+      outlets.map((o) => o.partnerId).filter((id): id is string => id !== null),
+    )];
+
+    // For each partnerId, fetch only the single latest KycSubmission (ordered by createdAt desc).
+    // We do this with a single findMany then group in JS to avoid N+1.
+    const latestSubmissions = partnerIds.length > 0
+      ? await this.prisma.kycSubmission.findMany({
+          where: { partnerId: { in: partnerIds } },
+          select: { partnerId: true, status: true, createdAt: true },
+          orderBy: { createdAt: 'desc' },
+        })
+      : [];
+
+    // Build a map: partnerId → latest KycStatus
+    const latestStatusByPartnerId = new Map<string, KycStatus>();
+    for (const sub of latestSubmissions) {
+      if (sub.partnerId && !latestStatusByPartnerId.has(sub.partnerId)) {
+        // findMany is ordered desc so the first hit per partnerId is the latest
+        latestStatusByPartnerId.set(sub.partnerId, sub.status);
+      }
+    }
+
+    /**
+     * Derive the display KYC status for a single outlet.
+     * Priority:
+     *   1. reKycFlags non-null ⇒ RE_KYC_REQUIRED
+     *   2. kycIntent === NOT_INTERESTED ⇒ NOT_STARTED (outlet declined)
+     *   3. Latest submission status mapped to the UI enum
+     *   4. No submission ⇒ NOT_STARTED
+     */
+    function deriveKycStatus(
+      reKycFlags: unknown,
+      kycIntent: OutletKycIntent | null,
+      partnerId: string | null,
+    ): string {
+      // Only a NON-EMPTY reKycFlags object means re-KYC is pending; an empty {}
+      // (or null) must not falsely flag the outlet.
+      if (
+        reKycFlags !== null &&
+        typeof reKycFlags === 'object' &&
+        Object.keys(reKycFlags as Record<string, unknown>).length > 0
+      ) {
+        return 'RE_KYC_REQUIRED';
+      }
+      if (kycIntent === OutletKycIntent.NOT_INTERESTED) {
+        return 'NOT_STARTED';
+      }
+      if (!partnerId) {
+        return 'NOT_STARTED';
+      }
+      const latest = latestStatusByPartnerId.get(partnerId);
+      if (!latest) {
+        return 'NOT_STARTED';
+      }
+      switch (latest) {
+        case KycStatus.APPROVED:
+          return 'APPROVED';
+        case KycStatus.REJECTED:
+          return 'REJECTED';
+        case KycStatus.SUBMITTED:
+          return 'SUBMITTED';
+        case KycStatus.RE_KYC_REQUIRED:
+          return 'RE_KYC_REQUIRED';
+        case KycStatus.UNDER_REVIEW:
+        case KycStatus.PENDING_PENNY_DROP:
+        case KycStatus.PENDING_AGREEMENT:
+        case KycStatus.PENDING_SO_APPROVAL:
+        case KycStatus.PENDING_ASM_APPROVAL:
+        case KycStatus.PENDING_RSM_APPROVAL:
+        case KycStatus.PENDING_GIFSY:
+        case KycStatus.RE_UPLOAD_REQUIRED:
+        case KycStatus.RESUBMISSION_REQUIRED:
+        case KycStatus.DRAFT:
+          return 'IN_PROGRESS';
+        case KycStatus.SUSPENDED:
+        case KycStatus.NOT_INTERESTED:
+          return 'NOT_STARTED';
+        default:
+          return 'NOT_STARTED';
+      }
+    }
 
     const mapped = outlets.map((o) => {
       const xsr = o.salesAssignments[0]?.salesUser;
@@ -217,7 +306,7 @@ export class AdminOutletsService {
         metro: !!(o.metro && o.metro.trim()),
         xsrId: xsr?.employeeCode ?? '',
         xsrName: xsr?.user?.name ?? '',
-        kycStatus: 'NOT_STARTED',
+        kycStatus: deriveKycStatus(o.reKycFlags, o.kycIntent, o.partnerId),
         isActive: o.isActive,
         addedDate: o.createdAt.toISOString().slice(0, 10),
       };

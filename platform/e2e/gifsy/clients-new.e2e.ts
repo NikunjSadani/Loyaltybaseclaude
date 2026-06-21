@@ -58,12 +58,12 @@ test.describe('@gifsy Clients → New (S4g route smoke)', () => {
 
   test('breadcrumb back-link to /gifsy/clients is present', async ({ page }) => {
     await page.goto('/gifsy/clients/new');
-    await expect(page.getByRole('link', { name: /Clients/i })).toBeVisible();
+    await expect(page.getByRole('link', { name: /Clients/i }).first()).toBeVisible();
   });
 
   test('Next button is present on the Identity step', async ({ page }) => {
     await page.goto('/gifsy/clients/new');
-    await expect(page.getByRole('button', { name: /Next/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Next', exact: true })).toBeVisible();
   });
 
   test('deferred-persistence note is visible', async ({ page }) => {

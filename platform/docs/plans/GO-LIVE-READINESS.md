@@ -43,13 +43,15 @@ differences — the harness must not assume `FIXED_OTP`/`localhost` semantics.)
 > **Update (2026-06-21): the E2E role×page matrix is now COVERED + GREEN (291 passed, Waves 0–4; commits `961d5fa`/
 > `7b3828a`/`5119c1d`, pushed).** The expansion caught + fixed real prod bugs (money-path #42, the `/api/auth/me`
 > profile-mock bug, outlet-config, admin demo-identity #55) and surfaced **gap #57**.
-> **🔴 PRE-UAT BLOCKERS still OPEN before UAT:** (a) **gap #57** — admin-visible pages render mock/empty data
-> (sub-dashboards "4,821", Outlet Master, empty `/admin/hierarchy`, sales-shell demo notifications); these MUST be wired
-> to real data first or UAT testers hit them as visible "fake/unfinished" defects (owner re-prioritised — NOT a
-> fast-follow). (b) **real Deoleo master-data load** into empty prod (#76) — ⚠️ **gated by #78: tenant provisioning must auto-create
-> `OutletTypeClientConfig` rows first, else outlet creation fails "Unknown outlet type" for the new tenant.** (c)
-> **observability alerts** (#74, owner). (d) **#78 — auto-provision outlet-type configs on tenant creation** (pre-prod
-> prerequisite; band-aided in seed for the demo tenant only).
+> **Update (2026-06-21, tasks #77 + #78 — 2 audits + E2E 290/0/9):** **gap #57 (b/c/e) ✅ RESOLVED** — orphan Outlet Master
+> removed (live `/admin/users/outlets` already real) + real per-outlet KYC-status join; `/admin/hierarchy` populated (seed now
+> writes the `employee_hierarchy` snapshot — the read is snapshot-fed by P2.1 design, so this was a seed-fixture gap not a code
+> gap); notification bells hidden (P7). **#78 ✅ RESOLVED** — `createClient`/`provisionOutletTypeConfigs` chokepoint auto-creates
+> outlet-type configs on tenant creation (`POST /v1/gifsy/clients` + wizard + seed share it); **so #76 is NO LONGER gated by #78.**
+> **🔴 REMAINING before UAT:** (a) **gap #57(a) sub-dashboards** `/admin/dashboards/{payments,engagement,redemptions,kyc}` STILL
+> render mock ("4,821"/"Kumar General Store") — owner deferred wiring; **decide hide-the-nav-vs-wire before UAT** or testers hit
+> fake data. (b) **real Deoleo master-data load** into empty prod (#76, owner provides file). (c) **observability alerts** (#74, owner).
+> (d) gap #57(d) tenant-settings write + (f) MIS KPI-read RBAC — lower, roles not in Deoleo's first UAT.
 
 - [ ] **Auth:** login works for **all roles** (real flow), route-by-role correct, logout clears session. *(GIFSY broken #39 → fixed; staging real-OTP login DONE; full role matrix on prod pending real-data load.)*
 - [ ] **RBAC + tenant isolation:** every endpoint role+tenant scoped to the `DATA-VISIBILITY.md` audience; cross-tenant never leaks; the Gifsy operator can reach the cross-tenant data it must (#38/#41). RBAC enablement decided (`RBAC-ENABLEMENT.md`).

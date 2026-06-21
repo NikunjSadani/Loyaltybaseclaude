@@ -15,7 +15,6 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
-  Bell,
   LogOut,
   ChevronDown,
   Wallet,
@@ -136,7 +135,6 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     logout(); // clears token + user, redirects to /auth/login
   }
   const [collapsed, setCollapsed] = useState(false);
-  const [notifOpen, setNotifOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   // Filter nav items by feature flags AND role
@@ -337,41 +335,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Notifications */}
-            <div className="relative">
-              <button
-                onClick={() => { setNotifOpen(!notifOpen); setUserMenuOpen(false); }}
-                className="relative p-2 rounded-lg text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors"
-              >
-                <Bell className="w-5 h-5" />
-                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[var(--brand-primary)]"></span>
-              </button>
-              {notifOpen && (
-                <div className="absolute right-0 top-11 w-80 bg-white rounded-xl shadow-lg border border-gray-200 z-50">
-                  <div className="p-4 border-b border-gray-100">
-                    <h3 className="font-semibold text-gray-900 text-sm">Notifications</h3>
-                  </div>
-                  <div className="divide-y divide-gray-50 max-h-72 overflow-y-auto">
-                    {[
-                      { text: '14 KYC submissions pending review', time: '2 min ago', type: 'warn' },
-                      { text: 'Payout batch March 2025 processed', time: '1 hr ago', type: 'success' },
-                      { text: 'Fund balance below threshold', time: '3 hrs ago', type: 'error' },
-                      { text: 'New scheme "Summer Push" published', time: '5 hrs ago', type: 'info' },
-                    ].map((n, i) => (
-                      <div key={i} className="px-4 py-3 hover:bg-gray-50 cursor-pointer">
-                        <p className="text-xs text-gray-700">{n.text}</p>
-                        <p className="text-xs text-gray-400 mt-0.5">{n.time}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
+            {/* Notifications hidden until P7 notification worker (#21) */}
 
             {/* User menu */}
             <div className="relative">
               <button
-                onClick={() => { setUserMenuOpen(!userMenuOpen); setNotifOpen(false); }}
+                onClick={() => { setUserMenuOpen(!userMenuOpen); }}
                 className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-100 transition-colors"
               >
                 <div className="w-7 h-7 rounded-full bg-[var(--brand-primary)] flex items-center justify-center text-white text-xs font-bold">

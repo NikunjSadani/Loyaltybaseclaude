@@ -29,7 +29,6 @@ test.describe('@clientAdmin hierarchy', () => {
   });
 
   test('shows the seeded SO employee code EMP001', async ({ page }) => {
-    test.fixme(true, '/api/admin/hierarchy-config returns employees:[] for this tenant (real data-wiring gap) — real #40/data gap, tracked in gap-register #57');
     await page.goto('/admin/hierarchy');
     await expect(page.locator('.animate-spin').or(page.locator('[aria-label="Loading"]'))).toHaveCount(0, {
       timeout: 12_000,
@@ -39,16 +38,14 @@ test.describe('@clientAdmin hierarchy', () => {
   });
 
   test('shows the seeded ASM employee code EMPASM1', async ({ page }) => {
-    test.fixme(true, '/api/admin/hierarchy-config returns employees:[] for this tenant (real data-wiring gap) — real #40/data gap, tracked in gap-register #57');
     await page.goto('/admin/hierarchy');
     await expect(page.locator('.animate-spin').or(page.locator('[aria-label="Loading"]'))).toHaveCount(0, {
       timeout: 12_000,
     });
-    await expect(page.getByText('EMPASM1')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('EMPASM1', { exact: true })).toBeVisible({ timeout: 10_000 });
   });
 
   test('stat cards show at least 2 employees (the two seeded)', async ({ page }) => {
-    test.fixme(true, '/api/admin/hierarchy-config returns employees:[] for this tenant (real data-wiring gap) — real #40/data gap, tracked in gap-register #57');
     await page.goto('/admin/hierarchy');
     await expect(page.locator('.animate-spin').or(page.locator('[aria-label="Loading"]'))).toHaveCount(0, {
       timeout: 12_000,

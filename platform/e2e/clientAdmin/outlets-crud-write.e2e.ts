@@ -46,7 +46,7 @@ import { uniqueMarker } from '../helpers/persist';
 
 test.describe('@clientAdmin outlet upsert write-persistence (W11)', () => {
   test('upsert an outlet → fresh GET list shows it, and it is deoleo-scoped', async ({ page }) => {
-    await page.goto('/admin/outlets');
+    await page.goto('/admin/users/outlets');
 
     const token = await page.evaluate(() => localStorage.getItem('token'));
     expect(token, 'CLIENT_ADMIN must be logged in (storageState)').toBeTruthy();

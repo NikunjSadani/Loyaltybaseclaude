@@ -80,28 +80,13 @@ test.describe('@clientAdmin /admin/users/outlets — real API-backed outlet list
   });
 });
 
-// ─── /admin/outlets ────────────────────────────────────────────────────────────
+// ─── /admin/outlets (legacy URL → redirects to the live page) ───────────────────
+// The orphan mock-backed Outlet Master page (gap #57b) was removed; /admin/outlets
+// now redirects to the real, data-wired /admin/users/outlets (covered above).
 
-test.describe('@clientAdmin /admin/outlets — Outlet Master (mock-backed)', () => {
-  test('routes to /admin/outlets and is not bounced', async ({ page }) => {
+test.describe('@clientAdmin /admin/outlets — legacy redirect', () => {
+  test('redirects to /admin/users/outlets (orphan mock page removed)', async ({ page }) => {
     await page.goto('/admin/outlets');
-    await expect(page).toHaveURL(/\/admin\/outlets/);
-  });
-
-  test('heading "Outlet Master" renders', async ({ page }) => {
-    await page.goto('/admin/outlets');
-    await expect(page.getByRole('heading', { name: 'Outlet Master' })).toBeVisible();
-  });
-
-  test('Add Outlet and Bulk Upload buttons present', async ({ page }) => {
-    await page.goto('/admin/outlets');
-    await expect(page.getByRole('button', { name: 'Add Outlet' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Bulk Upload' })).toBeVisible();
-  });
-
-  test('no fabricated values (#40)', async ({ page }) => {
-    test.fixme(true, '/admin/outlets is backed by a hardcoded OUTLET_MASTER mock constant with demo data — real #40/data gap, tracked in gap-register #57');
-    await page.goto('/admin/outlets');
-    await expectNoFabricatedData(page);
+    await expect(page).toHaveURL(/\/admin\/users\/outlets/);
   });
 });

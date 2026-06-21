@@ -6,6 +6,7 @@ import { ArrowLeft, ArrowRight, Check, AlertCircle, Building2 } from 'lucide-rea
 import { CLIENT_REGISTRY } from '@/lib/platform/client-registry';
 import { validateNewClientSlug } from '@/lib/platform/platform-admin';
 import type { FeatureKey } from '@/lib/platform/client-config';
+import { getToken } from '@/lib/auth-client';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Step types
@@ -87,6 +88,8 @@ export default function OnboardClientPage() {
   });
 
   const [slugErrors, setSlugErrors] = useState<string[]>([]);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const updateForm = (patch: Partial<OnboardingForm>) =>
     setForm((p) => ({ ...p, ...patch }));
@@ -108,9 +111,39 @@ export default function OnboardClientPage() {
     if (prevIndex >= 0) setStep(STEPS[prevIndex].key);
   };
 
-  const submit = () => {
-    // In Phase 2 this will call a server action to persist to DB
-    setSubmitted(true);
+  const submit = async () => {
+    setSubmitError(null);
+    setSubmitting(true);
+    try {
+      const res = await fetch('/api/gifsy/clients', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getToken() ?? ''}`,
+        },
+        body: JSON.stringify({
+          slug: form.slug,
+          internalName: form.internalName,
+          status: form.status,
+          displayName: form.displayName,
+          primaryColor: form.primaryColor,
+          supportEmail: form.supportEmail,
+          supportPhone: form.supportPhone,
+          invoicePrefix: form.invoicePrefix,
+          features: form.features,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json?.success) {
+        setSubmitError(json?.error ?? json?.message ?? 'Failed to create client.');
+        return;
+      }
+      setSubmitted(true);
+    } catch {
+      setSubmitError('Network error — please try again.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   if (submitted) {
@@ -176,10 +209,16 @@ export default function OnboardClientPage() {
       </div>
 
       {/* Navigation */}
+      {submitError && (
+        <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-300 text-sm">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          {submitError}
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <button
           onClick={goBack}
-          disabled={currentStepIndex === 0}
+          disabled={currentStepIndex === 0 || submitting}
           className="flex items-center gap-1.5 px-3 py-2 text-sm text-white/50 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />Back
@@ -187,9 +226,20 @@ export default function OnboardClientPage() {
         {step === 'review' ? (
           <button
             onClick={submit}
-            className="flex items-center gap-1.5 px-5 py-2 bg-[var(--brand-primary)] text-white text-sm font-medium rounded-lg hover:opacity-90 transition-opacity"
+            disabled={submitting}
+            className="flex items-center gap-1.5 px-5 py-2 bg-[var(--brand-primary)] text-white text-sm font-medium rounded-lg hover:opacity-90 transition-opacity disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            <Check className="w-4 h-4" />Onboard Client
+            {submitting ? (
+              <>
+                <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                </svg>
+                Saving…
+              </>
+            ) : (
+              <><Check className="w-4 h-4" />Onboard Client</>
+            )}
           </button>
         ) : (
           <button
@@ -355,7 +405,7 @@ function FeaturesStep({
     <div className="space-y-4">
       <StepHeader
         title="Feature Flags"
-        description={`Choose which modules this client has access to. ${enabledCount}/9 enabled.`}
+        description={`Choose which modules this client has access to. ${enabledCount}/${Object.keys(FEATURE_META).length} enabled.`}
       />
       <div className="space-y-2">
         {(Object.keys(FEATURE_META) as FeatureKey[]).map((key) => {
@@ -439,9 +489,9 @@ function SuccessScreen({ form }: { form: OnboardingForm }) {
         {form.displayName[0] || <Building2 className="w-8 h-8" />}
       </div>
       <div>
-        <h2 className="text-xl font-bold text-white">{form.displayName} onboarded!</h2>
+        <h2 className="text-xl font-bold text-white">{form.displayName || form.internalName} onboarded!</h2>
         <p className="text-sm text-white/50 mt-1">
-          Config saved in-memory (dev). DB persistence will apply in Phase 2.
+          Client <code className="font-mono text-white/70">{form.slug}</code> created and outlet-type configs provisioned.
         </p>
       </div>
       <div className="flex items-center gap-3 mt-2">
