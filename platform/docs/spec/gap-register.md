@@ -84,7 +84,14 @@ and where it surfaced. Severity is a first pass, to be refined.
 > leak anywhere (all list/detail scope by JWT `clientId`; `x-forwarded-host`/`x-tenant-slug` never trusted for scope);
 > role denial enforced by `@Roles`. So these are LATENT code defects, not live holes.
 
-**🔴 MONEY-INTEGRITY (fix before redemption/payout UAT):**
+**🟢 MONEY-INTEGRITY — ✅ RESOLVED & RUNTIME-VERIFIED (S1, 2026-06-21, commit `0aa6490`).** The redemption-payout UTR ingest
+is built (`GET/POST /v1/payouts/batches/:id/utr[-template]`), reusing the credits UTR rail + the M2 refund-once claim: UTR=PAID →
+payout SUCCESS + order DELIVERED (no points change); UTR=FAILED → payout FAILED + order FAILED + idempotent points reversal;
+duplicate-UTR detection; the vestigial fund-gate is gone; `createReversal` P2002→400 on the S0 index. **The hard audit caught a
+surviving BUG-1**: the first cancel-block closed only `CONFIRMED→CANCELLED`, leaving cash-mode `CONFIRMED→RETURNED` /
+`PROCESSING→FAILED` as a live double-payout (manual refund while the payout stayed payable) → fixed to block EVERY refund-target
+edge for cash modes. Runtime proof on dev: confirm debits exactly; UTR=FAILED reverses exactly + re-upload reverses 0; manual cash
+RETURNED→400 (no refund); UTR=PAID→DELIVERED (no wallet change). Original finding below, kept for history.
 - **BUG-1 ✅ double-payout** — a manual `CONFIRMED→CANCELLED` UPI/BANK redemption refunds points but leaves the linked
   `PayoutTransaction` PENDING+payable → partner gets refund AND cash. **OWNER RULE (2026-06-21): an INR redemption CANNOT
   be cancelled/blocked once OTP-confirmed; the ONLY reversal is on transfer FAILURE (UTR=FAILED → reverse points).** Fix =
