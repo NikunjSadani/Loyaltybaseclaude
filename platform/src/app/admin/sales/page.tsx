@@ -285,6 +285,13 @@ function PaceView({ month }: { month: string }) {
     );
   }
 
+  // Column set = the UNION of KPI codes across ALL outlets. The pace response OMITS a KPI for any
+  // outlet whose cell was blank (no target AND no achievement), so each outlet's `kpis` array can be
+  // a different length. Rendering each row's array positionally against a fixed header (taken from
+  // outlets[0]) slid every value left for an outlet missing an earlier KPI. Build one stable column
+  // list and look each outlet's value up BY CODE so a blank renders "—" in the RIGHT column.
+  const kpiCodes = Array.from(new Set(paceData.outlets.flatMap(o => o.kpis.map(k => k.code))));
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs border-collapse">
@@ -292,21 +299,21 @@ function PaceView({ month }: { month: string }) {
           <tr className="bg-gray-50 border-b border-gray-200">
             <th className="text-left px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Outlet</th>
             <th className="text-left px-3 py-2 font-semibold text-gray-600 whitespace-nowrap">Type</th>
-            {paceData.outlets[0]?.kpis.map(k => (
+            {kpiCodes.map(code => (
               <th
-                key={k.code}
+                key={code}
                 colSpan={3}
                 className="text-center px-3 py-2 font-semibold text-gray-600 border-l border-gray-200 whitespace-nowrap"
               >
-                {k.code}
+                {code}
               </th>
             ))}
           </tr>
           <tr className="bg-gray-50 border-b border-gray-200">
             <th className="px-3 py-1" />
             <th className="px-3 py-1" />
-            {paceData.outlets[0]?.kpis.map(k => (
-              <React.Fragment key={k.code}>
+            {kpiCodes.map(code => (
+              <React.Fragment key={code}>
                 <th className="text-center px-2 py-1 font-medium text-gray-500 border-l border-gray-200">Target</th>
                 <th className="text-center px-2 py-1 font-medium text-gray-500">Achieved</th>
                 <th className="text-center px-2 py-1 font-medium text-gray-500">Pace</th>
@@ -322,8 +329,9 @@ function PaceView({ month }: { month: string }) {
                 <span className="block text-[10px] text-gray-400 font-mono">{outlet.outletCode}</span>
               </td>
               <td className="px-3 py-2 text-gray-500 whitespace-nowrap">{outlet.outletType}</td>
-              {outlet.kpis.map(k => {
-                const pctVal = k.pace !== null ? Math.round(k.pace * 100) : null;
+              {kpiCodes.map(code => {
+                const k = outlet.kpis.find(x => x.code === code);
+                const pctVal = k && k.pace !== null ? Math.round(k.pace * 100) : null;
                 const pctColor =
                   pctVal === null  ? 'text-gray-400' :
                   pctVal >= 100    ? 'text-emerald-600 font-semibold' :
@@ -331,12 +339,12 @@ function PaceView({ month }: { month: string }) {
                   pctVal >= 60     ? 'text-orange-500' :
                                      'text-red-500';
                 return (
-                  <React.Fragment key={`${outlet.outletCode}-${k.code}`}>
+                  <React.Fragment key={`${outlet.outletCode}-${code}`}>
                     <td className="text-center px-2 py-2 border-l border-gray-100 text-gray-700">
-                      {k.target ?? '—'}
+                      {k?.target ?? '—'}
                     </td>
                     <td className="text-center px-2 py-2 text-gray-700">
-                      {k.achieved ?? '—'}
+                      {k?.achieved ?? '—'}
                     </td>
                     <td className={`text-center px-2 py-2 ${pctColor}`}>
                       {pctVal !== null ? `${pctVal}%` : '—'}
