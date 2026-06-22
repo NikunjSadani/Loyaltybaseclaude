@@ -565,6 +565,11 @@ export class AdminCoreService {
     if (!Array.isArray(employees)) {
       throw new BadRequestException('Expected { employees: [...] }');
     }
+    // The PUT route accepts the raw body (no DTO transform), so reject malformed elements with a
+    // clean 400 rather than letting a null/primitive/array element throw a 500 deep in persistHierarchy.
+    if (employees.some((e) => e === null || typeof e !== 'object' || Array.isArray(e))) {
+      throw new BadRequestException('Each employee must be a JSON object');
+    }
 
     // 1. Keep the denormalized JSON snapshot for the admin UI (GET) AND
     // 2. Persist the authoritative relational tree — both in one transaction.

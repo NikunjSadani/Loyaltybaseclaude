@@ -150,9 +150,14 @@ export async function persistHierarchy(
   const salesUserIdByCode = new Map<string, string>();
 
   for (const emp of employees) {
-    const levelId = levelIdByCode.get(emp.roleCode.trim().toUpperCase());
+    // Defensive: the PUT route accepts the raw request body (no DTO transform), so coerce the role
+    // code safely and skip null / non-object / missing-roleCode elements instead of crashing on
+    // `undefined.trim()`. (Service-layer guard already rejects non-object elements with a 400.)
+    if (emp == null || typeof emp !== 'object') continue;
+    const roleCode = String(emp.roleCode ?? '').trim().toUpperCase();
+    const levelId = levelIdByCode.get(roleCode);
     if (!levelId) {
-      // Role not in tenant config — skip rather than crash.
+      // Role not in tenant config (or missing) — skip rather than crash.
       continue;
     }
 
