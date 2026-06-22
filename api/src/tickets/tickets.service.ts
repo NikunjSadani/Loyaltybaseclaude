@@ -106,6 +106,19 @@ export class TicketsService {
     // GIFSY-only is enforced by @Roles on the controller; tenant scope re-checked here.
     const ticket = await this.prisma.ticket.findFirst({ where: { id, clientId: user.clientId } });
     if (!ticket) throw new NotFoundException('Ticket not found');
+
+    // GLm-2: verify the assignee exists AND belongs to the caller's tenant before
+    // assigning — prevents cross-tenant escalation via a foreign user ID.
+    const assignee = await this.prisma.user.findFirst({
+      where: { id: dto.escalateTo, clientId: user.clientId },
+      select: { id: true },
+    });
+    if (!assignee) {
+      throw new BadRequestException(
+        `Assignee user '${dto.escalateTo}' not found in this tenant`,
+      );
+    }
+
     const priority: TicketPriority = dto.priority ?? 'HIGH';
 
     await this.prisma.$transaction(async (tx) => {

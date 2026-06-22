@@ -1,10 +1,11 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, KycStatus } from '@prisma/client';
+import { Prisma, KycStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -40,6 +41,39 @@ export class AdminCoreService {
     private readonly prisma: PrismaService,
     private readonly tenant: TenantService,
   ) {}
+
+  // ─── Role assignment allow-list (GLB-4) ─────────────────────────────────────
+  /**
+   * Roles that a non-GIFSY caller (e.g. CLIENT_ADMIN) is permitted to assign.
+   * Only GIFSY_ADMIN may mint a CLIENT_ADMIN or another GIFSY_ADMIN; the
+   * operational in-tenant roles below are the maximum a tenant admin can assign.
+   */
+  private static readonly TENANT_ASSIGNABLE_ROLES: ReadonlySet<UserRole> = new Set<UserRole>([
+    'MIS_USER',
+    'SALES_HO',
+    'SALES_STATE_HEAD',
+    'SALES_ASM',
+    'SALES_SO',
+    'SALES_ISR',
+    'SSS',
+    'WHOLESALER',
+    'SUB_STOCKIST',
+  ]);
+
+  /**
+   * Validates that the caller is permitted to assign `role` to another user.
+   * GIFSY_ADMIN may assign any role (no restriction).
+   * Any other caller is limited to TENANT_ASSIGNABLE_ROLES; attempting to set
+   * GIFSY_ADMIN or CLIENT_ADMIN throws ForbiddenException.
+   */
+  private assertRoleAssignable(caller: JwtPayload, role: UserRole): void {
+    if (caller.role === 'GIFSY_ADMIN') return; // unrestricted
+    if (!AdminCoreService.TENANT_ASSIGNABLE_ROLES.has(role)) {
+      throw new ForbiddenException(
+        `Role '${role}' can only be assigned by a GIFSY_ADMIN`,
+      );
+    }
+  }
 
   // ─── ProgramSetting setting keys (mirror the Next routes) ───────────────────
   private static readonly HIERARCHY_KEY = 'employee_hierarchy';
@@ -122,6 +156,9 @@ export class AdminCoreService {
     const existing = await this.prisma.user.findFirst({ where: { phone: dto.phone, clientId } });
     if (existing) throw new BadRequestException('User with this phone already exists');
 
+    // GLB-4: reject disallowed role assignments before any write
+    this.assertRoleAssignable(user, dto.role);
+
     const created = await this.prisma.user.create({
       data: {
         phone: dto.phone,
@@ -169,12 +206,36 @@ export class AdminCoreService {
       if (clash) throw new ConflictException('Phone number already in use');
     }
 
+    // GLB-4: validate the requested role change BEFORE any write; silently skip
+    // the guard when no role change is requested (dto.role is absent).
+    if (dto.role !== undefined) {
+      this.assertRoleAssignable(user, dto.role);
+    }
+
     const phoneChanged = Boolean(dto.phone && dto.phone !== target.phone);
 
-    const updated = await this.prisma.user.update({
-      where: { id },
-      data: { ...dto, updatedAt: new Date() },
+    // Build an explicit allow-listed update object — do NOT spread dto directly,
+    // which would let any future DTO field silently reach Prisma.
+    const updateData: Prisma.UserUpdateInput = { updatedAt: new Date() };
+    if (dto.name     !== undefined) updateData.name   = dto.name;
+    if (dto.email    !== undefined) updateData.email  = dto.email;
+    if (dto.status   !== undefined) updateData.status = dto.status;
+    if (dto.role     !== undefined) updateData.role   = dto.role;
+    if (dto.phone    !== undefined) updateData.phone  = dto.phone;
+
+    // Defense-in-depth: scope the write to the tenant so a race between the
+    // findFirst gate above and the write cannot affect a row from another tenant.
+    const { count } = await this.prisma.user.updateMany({
+      where: { id, clientId },
+      data: updateData,
     });
+    if (count === 0) {
+      // Row vanished between the gate and the write (race), or clientId mismatch.
+      throw new NotFoundException('User not found');
+    }
+
+    // Re-fetch the full row to return the correct updated state.
+    const updated = await this.prisma.user.findFirst({ where: { id, clientId } });
 
     // Force re-login on all devices when login identity (phone) changes
     if (phoneChanged) {
@@ -202,11 +263,14 @@ export class AdminCoreService {
     const target = await this.prisma.user.findFirst({ where: { id, clientId } });
     if (!target) throw new NotFoundException('User not found');
 
-    // Soft delete
-    await this.prisma.user.update({
-      where: { id },
+    // Soft delete — scoped to tenant for defense-in-depth.
+    const { count: deleteCount } = await this.prisma.user.updateMany({
+      where: { id, clientId },
       data: { status: 'INACTIVE', deletedAt: new Date() },
     });
+    if (deleteCount === 0) {
+      throw new NotFoundException('User not found');
+    }
 
     await this.prisma.auditLog.create({
       data: {

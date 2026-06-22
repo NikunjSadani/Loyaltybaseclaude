@@ -7,6 +7,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
 import { AdminCoreService } from './admin-core.service';
@@ -44,6 +45,7 @@ const mockTenant = { resolveClient: jest.fn(), upsertClientConfig: jest.fn() };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
+const misUser: JwtPayload  = { sub: 'mis1',  role: 'MIS_USER',     clientId: 'deoleo', phone: '', name: '' };
 
 describe('AdminCoreService', () => {
   let service: AdminCoreService;
@@ -96,6 +98,46 @@ describe('AdminCoreService', () => {
       expect(mockPrisma.user.create.mock.calls[0][0].data.clientId).toBe('deoleo');
       expect(mockPrisma.auditLog.create).toHaveBeenCalled();
     });
+
+    // ── GLB-4 role-assignment guard ───────────────────────────────────────────
+    it('GLB-4: CLIENT_ADMIN cannot create a GIFSY_ADMIN (privilege escalation)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null); // no duplicate
+      await expect(
+        service.createUser(clientAdmin, { phone: '9000000001', name: 'Evil', role: 'GIFSY_ADMIN' as never }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.user.create).not.toHaveBeenCalled();
+    });
+
+    it('GLB-4: CLIENT_ADMIN cannot create another CLIENT_ADMIN', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null);
+      await expect(
+        service.createUser(clientAdmin, { phone: '9000000002', name: 'Evil2', role: 'CLIENT_ADMIN' as never }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.user.create).not.toHaveBeenCalled();
+    });
+
+    it('GLB-4: MIS_USER cannot create a GIFSY_ADMIN', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null);
+      await expect(
+        service.createUser(misUser, { phone: '9000000003', name: 'Evil3', role: 'GIFSY_ADMIN' as never }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('GLB-4: GIFSY_ADMIN can freely create a CLIENT_ADMIN', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null);
+      mockPrisma.user.create.mockResolvedValue({ id: 'u2' });
+      await expect(
+        service.createUser(gifsy, { phone: '9000000004', name: 'LegitAdmin', role: 'CLIENT_ADMIN' as never }),
+      ).resolves.toBeDefined();
+    });
+
+    it('GLB-4: CLIENT_ADMIN can create an in-tenant operational role (SALES_SO)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null);
+      mockPrisma.user.create.mockResolvedValue({ id: 'u3' });
+      await expect(
+        service.createUser(clientAdmin, { phone: '9000000005', name: 'Field', role: 'SALES_SO' as never }),
+      ).resolves.toBeDefined();
+    });
   });
 
   describe('getUser', () => {
@@ -131,8 +173,9 @@ describe('AdminCoreService', () => {
     it('revokes all sessions for the user when the phone changes', async () => {
       mockPrisma.user.findFirst
         .mockResolvedValueOnce({ id: 'u1', phone: '1111111111' }) // target
-        .mockResolvedValueOnce(null); // no clash
-      mockPrisma.user.update.mockResolvedValue({ id: 'u1' });
+        .mockResolvedValueOnce(null)                               // no clash
+        .mockResolvedValueOnce({ id: 'u1', phone: '2222222222' }); // re-fetch after updateMany
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 2 });
 
       await service.updateUser(clientAdmin, 'u1', { phone: '2222222222' });
@@ -144,10 +187,62 @@ describe('AdminCoreService', () => {
     });
 
     it('does NOT revoke sessions when the phone is unchanged', async () => {
-      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'u1', phone: '1111111111' });
-      mockPrisma.user.update.mockResolvedValue({ id: 'u1' });
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u1', phone: '1111111111' })  // target
+        .mockResolvedValueOnce({ id: 'u1', phone: '1111111111' }); // re-fetch after updateMany
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
       await service.updateUser(clientAdmin, 'u1', { name: 'New Name' });
       expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    // ── GLB-4 role-assignment guard via updateUser ────────────────────────────
+    it('GLB-4: CLIENT_ADMIN cannot escalate a user to GIFSY_ADMIN via updateUser', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'u1', phone: '1111111111' });
+      await expect(
+        service.updateUser(clientAdmin, 'u1', { role: 'GIFSY_ADMIN' as never }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      // updateMany must NOT be called — the guard fires before any write
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('GLB-4: CLIENT_ADMIN cannot escalate a user to CLIENT_ADMIN via updateUser', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'u1', phone: '1111111111' });
+      await expect(
+        service.updateUser(clientAdmin, 'u1', { role: 'CLIENT_ADMIN' as never }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('GLB-4: GIFSY_ADMIN CAN set role to GIFSY_ADMIN via updateUser', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u1', phone: '1111111111' })  // target
+        .mockResolvedValueOnce({ id: 'u1', role: 'GIFSY_ADMIN' }); // re-fetch
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      await expect(
+        service.updateUser(gifsy, 'u1', { role: 'GIFSY_ADMIN' as never }),
+      ).resolves.toBeDefined();
+      expect(mockPrisma.user.updateMany).toHaveBeenCalled();
+    });
+
+    it('GLB-4: GIFSY_ADMIN CAN set role to CLIENT_ADMIN via updateUser', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u1', phone: '1111111111' })   // target
+        .mockResolvedValueOnce({ id: 'u1', role: 'CLIENT_ADMIN' }); // re-fetch
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      await expect(
+        service.updateUser(gifsy, 'u1', { role: 'CLIENT_ADMIN' as never }),
+      ).resolves.toBeDefined();
+      expect(mockPrisma.user.updateMany).toHaveBeenCalled();
+    });
+
+    it('GLB-4: CLIENT_ADMIN updating only non-role fields (name) still succeeds', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u1', phone: '1111111111' })  // target
+        .mockResolvedValueOnce({ id: 'u1', name: 'New Name' });    // re-fetch
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      const result = await service.updateUser(clientAdmin, 'u1', { name: 'New Name' });
+      expect(result).toBeDefined();
+      expect(mockPrisma.user.updateMany).toHaveBeenCalled();
     });
   });
 
@@ -158,11 +253,13 @@ describe('AdminCoreService', () => {
 
     it('soft-deletes (status INACTIVE + deletedAt) and audits', async () => {
       mockPrisma.user.findFirst.mockResolvedValue({ id: 'u1' });
-      mockPrisma.user.update.mockResolvedValue({ id: 'u1' });
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
       await service.deleteUser(gifsy, 'u1');
-      const data = mockPrisma.user.update.mock.calls[0][0].data;
-      expect(data.status).toBe('INACTIVE');
-      expect(data.deletedAt).toBeInstanceOf(Date);
+      const call = mockPrisma.user.updateMany.mock.calls[0][0];
+      expect(call.data.status).toBe('INACTIVE');
+      expect(call.data.deletedAt).toBeInstanceOf(Date);
+      // Confirm the write is scoped to both id AND clientId (defense-in-depth)
+      expect(call.where).toEqual({ id: 'u1', clientId: 'deoleo' });
       expect(mockPrisma.auditLog.create).toHaveBeenCalled();
     });
   });

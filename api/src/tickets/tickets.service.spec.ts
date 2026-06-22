@@ -16,6 +16,7 @@ const mockTx = {
 
 const mockPrisma = {
   ticket: { findMany: jest.fn(), count: jest.fn(), create: jest.fn(), findFirst: jest.fn() },
+  user: { findFirst: jest.fn() },
   ticketMessage: { create: jest.fn() },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
@@ -23,7 +24,7 @@ const mockPrisma = {
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const clientAdmin: JwtPayload = { sub: 'cadmin1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
-const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' };
+const partner: JwtPayload = { sub: 'user1', role: 'WHOLESALER', clientId: 'deoleo', phone: '', name: '' };
 
 describe('TicketsService', () => {
   let service: TicketsService;
@@ -120,8 +121,26 @@ describe('TicketsService', () => {
       );
     });
 
+    it('GLm-2: throws BadRequest when the assignee is not in the caller tenant', async () => {
+      // Ticket exists in the caller's tenant but the proposed assignee does not.
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', clientId: 'deoleo' });
+      mockPrisma.user.findFirst.mockResolvedValue(null); // foreign / unknown user
+      await expect(
+        service.escalate(gifsy, 't1', { escalateTo: 'foreign-user', reason: 'x' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('GLm-2: assignee lookup is scoped to the caller clientId', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', clientId: 'deoleo' });
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'u2' }); // in-tenant assignee
+      await service.escalate(gifsy, 't1', { escalateTo: 'u2', reason: 'urgent' });
+      const where = mockPrisma.user.findFirst.mock.calls[0][0].where;
+      expect(where).toEqual({ id: 'u2', clientId: 'deoleo' });
+    });
+
     it('updates status/priority, posts an internal note, and writes an audit log', async () => {
-      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1' });
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', clientId: 'deoleo' });
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'u2' }); // valid in-tenant assignee
       await service.escalate(gifsy, 't1', { escalateTo: 'u2', reason: 'urgent' });
       expect(mockTx.ticket.update).toHaveBeenCalledWith({
         where: { id: 't1' },
