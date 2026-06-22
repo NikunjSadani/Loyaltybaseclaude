@@ -363,23 +363,59 @@ export function parseTargetUploadBuffer(
     }
   }
 
-  // For each month block, map column offset → kpiCode (using row2 labels).
-  // A null entry means the column label did not match any known KPI (skip silently).
+  // For each month block, map each KPI to its ABSOLUTE row-2 column index by
+  // matching the row-2 header NAME — NOT by `startCol + offset`.
+  //
+  // Why: the row-1 month-group header is a merged span; its anchor column can
+  // drift relative to the row-2 KPI block when Excel re-saves, a column is
+  // inserted, or the merge shifts. A positional `startCol + offset` window then
+  // slides and every value lands on the WRONG KpiDef (exposed when a KPI cell is
+  // blank — values jump to neighbouring KPIs). Matching by name is both
+  // order-independent (KPIs may appear in any order within the block) and
+  // drift-immune (the row-1 anchor offset no longer matters).
+  //
+  // A KPI column is assigned to the month block whose column range contains it:
+  //   block.startCol <= colIndex < nextBlock.startCol  (end-of-row for the last).
   interface KpiColumn {
-    offset: number;  // relative to block's startCol
+    colIndex: number;  // ABSOLUTE row-2 column index
     code: string;
   }
-  const monthKpiCols: KpiColumn[][] = monthBlocks.map(({ startCol }) => {
+  const monthKpiCols: KpiColumn[][] = monthBlocks.map((block, bi) => {
+    const blockStart = block.startCol;
+    const blockEnd =
+      bi + 1 < monthBlocks.length ? monthBlocks[bi + 1].startCol : headerRow2.length;
     const cols: KpiColumn[] = [];
-    for (let offset = 0; offset < enabled.length; offset++) {
-      const ci = startCol + offset;
-      if (ci >= headerRow2.length) break;
+    const seen = new Set<string>();
+    for (let ci = blockStart; ci < blockEnd && ci < headerRow2.length; ci++) {
       const label = headerRow2[ci].toLowerCase().trim();
       const code = labelToCode.get(label);
-      if (code) cols.push({ offset, code });
+      // Skip the fixed columns / blanks / unknown labels. Guard against a label
+      // appearing twice inside one block (ambiguous → keep the first match only).
+      if (code && !seen.has(code)) {
+        seen.add(code);
+        cols.push({ colIndex: ci, code });
+      }
     }
     return cols;
   });
+
+  // ── Integrity guard ─────────────────────────────────────────────────────────
+  // Target/achievement data is too sensitive to accept a partial/ambiguous
+  // column match: silently storing values against the wrong KpiDef corrupts the
+  // dataset. If a month block resolves ZERO KPI columns, or the set of
+  // name-matched codes does not cover the enabled KPIs for that block, reject the
+  // whole file rather than persist shifted/partial data.
+  const enabledCodes = enabled.map((k) => k.code);
+  for (let bi = 0; bi < monthBlocks.length; bi++) {
+    const matchedCodes = new Set(monthKpiCols[bi].map((c) => c.code));
+    const missing = enabledCodes.filter((code) => !matchedCodes.has(code));
+    if (matchedCodes.size === 0 || missing.length > 0) {
+      throw new Error(
+        `Template KPI columns don't match the configured KPIs for "${monthBlocks[bi].month}" ` +
+          `(missing: ${missing.join(', ') || '(none resolved)'}) — re-download the template`,
+      );
+    }
+  }
 
   // ── Parse data rows ─────────────────────────────────────────────────────────
   const rows: ParsedRow[] = [];
@@ -420,12 +456,12 @@ export function parseTargetUploadBuffer(
     let hasAnyValue = false;
 
     for (let bi = 0; bi < monthBlocks.length; bi++) {
-      const { month, startCol } = monthBlocks[bi];
+      const { month } = monthBlocks[bi];
       const kpiCols = monthKpiCols[bi];
       const monthTargetMap: Record<string, number> = {};
 
-      for (const { offset, code } of kpiCols) {
-        const ci = startCol + offset;
+      for (const { colIndex, code } of kpiCols) {
+        const ci = colIndex; // ABSOLUTE column — drift-immune, order-independent
         if (ci >= row.length) continue;
         const rawVal = row[ci];
 

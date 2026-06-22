@@ -371,6 +371,134 @@ describe('parseTargetUploadBuffer', () => {
     expect(kpiMap['MONTH_TGT']).toBe(0);
     expect(kpiMap['FOCUS_PACK_1']).toBe(100);
   });
+
+  // ── DATA-INTEGRITY: name-based KPI→column mapping (anchor drift / order) ─────
+  //
+  // The merged month-group header in row 1 can drift relative to the row-2 KPI
+  // block (Excel re-save / inserted column / shifted merge). The OLD parser read
+  // KPIs at `startCol + offset`, so a one-column drift slid the whole window and
+  // every value landed on the WRONG KpiDef — exposed when a KPI cell is blank.
+  // The fix maps each KPI by its row-2 header NAME at its ABSOLUTE column.
+
+  it('REGRESSION: row-1 anchor drifted ONE COLUMN LEFT of the KPI block + a blank KPI cell → values still map to the CORRECT KpiDef', () => {
+    // The row-1 month-group label is anchored ONE COLUMN to the LEFT of the first
+    // KPI header — the merge did not shift with the data. There are THREE KPIs
+    // enabled so the OLD positional window [startCol, startCol+3) genuinely
+    // mis-reads: it slides one column left of the real KPI columns.
+    //   Row1: [ , , , "Jul '26 Target"(col 3), "", "", "" ]   (anchor = col 3)
+    //   Row2: [Outlet ID, Outlet Name, Outlet Type, "",  Monthly,      Consistency, Focus Product]
+    //   Data: [O002,      Outlet Two,  HORECA,       "",  100,          5,           ""          ]
+    // OLD code window = cols 3,4,5 → reads labels "", "Monthly", "Consistency"
+    //   and VALUES from cols 3,4,5 = "", 100, 5 → MONTHLY=100, CONSISTENCY=5
+    //   BUT "Focus Product" (col 6) is OUTSIDE the window → dropped, and worse the
+    //   value alignment is one column short of the real layout. With the blank
+    //   Focus-Product cell the shift surfaces: the OLD reader cannot see col 6.
+    // FIX: name-match the absolute cols 4,5,6 → MONTHLY=100, CONSISTENCY=5,
+    //   FOCUS_PRODUCT blank (omitted) — correct.
+    const kpiMonthly: KpiDefLike = {
+      code: 'MONTHLY', label: 'Monthly', isPrimary: true,
+      hasNameOverride: false, nameOverrideLabel: null, order: 1, enabled: true,
+    };
+    const kpiConsistency: KpiDefLike = {
+      code: 'CONSISTENCY', label: 'Consistency', isPrimary: false,
+      hasNameOverride: false, nameOverrideLabel: null, order: 2, enabled: true,
+    };
+    const kpiFocus: KpiDefLike = {
+      code: 'FOCUS_PRODUCT', label: 'Focus Product', isPrimary: false,
+      hasNameOverride: false, nameOverrideLabel: null, order: 3, enabled: true,
+    };
+    const kpis = [kpiMonthly, kpiConsistency, kpiFocus];
+
+    const row1 = ['', '', '', "Jun '26 Target", '', '', ''];
+    const row2 = ['Outlet ID', 'Outlet Name', 'Outlet Type', '', 'Monthly', 'Consistency', 'Focus Product'];
+    const data = ['O002', 'Outlet Two', 'HORECA', '', 100, 5, ''];
+    const buf = makeXlsx([row1, row2, data]);
+
+    const result = parseTargetUploadBuffer(buf, kpis, KNOWN_CODES);
+
+    const kpiMap = result.acceptedTargets['2026-06']?.['O002'];
+    expect(kpiMap).toBeDefined();
+    // Each value maps to the CORRECT KpiDef; Focus Product blank → omitted.
+    expect(kpiMap['MONTHLY']).toBe(100);
+    expect(kpiMap['CONSISTENCY']).toBe(5);
+    expect('FOCUS_PRODUCT' in kpiMap).toBe(false);
+  });
+
+  it('REGRESSION: reordered + drifted block with a blank KPI cell → values still map correctly by name', () => {
+    // The KPI block is BOTH reordered (Focus Pack before Month Target) AND the
+    // Focus Pack cell is blank. Under positional reads this is exactly the case
+    // that mis-assigns: the OLD code would have read MONTH_TGT from the first KPI
+    // column (Focus Pack header) and slid the 100 onto the wrong code.
+    //   Row1: [ , , , "Jul '26 Target", "" ]   (anchor at col 3)
+    //   Row2: [Outlet ID, Outlet Name, Outlet Type, Focus Pack - 1, Month Target]
+    //   Data: [O002,      Outlet Two,  HORECA,       "",             100         ]
+    const row1 = ['', '', '', "Jul '26 Target", ''];
+    const row2 = ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Focus Pack - 1', 'Month Target'];
+    const data = ['O002', 'Outlet Two', 'HORECA', '', 100];
+    const buf = makeXlsx([row1, row2, data]);
+
+    const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
+
+    const kpiMap = result.acceptedTargets['2026-07']?.['O002'];
+    expect(kpiMap).toBeDefined();
+    // Focus Pack column is blank → omitted; Month Target column holds 100.
+    expect(kpiMap['MONTH_TGT']).toBe(100);
+    expect('FOCUS_PACK_1' in kpiMap).toBe(false);
+  });
+
+  it('ORDER-INDEPENDENCE: KPI columns in non-template order → mapped correctly by name', () => {
+    // Row 2 lists Focus Pack BEFORE Month Target (reverse of template order).
+    //   Row2: [Outlet ID, Outlet Name, Outlet Type, Focus Pack - 1, Month Target]
+    //   Data: [O001,      Outlet One,  RETAIL,       77,             42          ]
+    const row1 = ['', '', '', "Jul '26 Target", ''];
+    const row2 = ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Focus Pack - 1', 'Month Target'];
+    const data = ['O001', 'Outlet One', 'RETAIL', 77, 42];
+    const buf = makeXlsx([row1, row2, data]);
+
+    const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
+
+    const kpiMap = result.acceptedTargets['2026-07']?.['O001'];
+    expect(kpiMap).toBeDefined();
+    // Mapped by NAME, not position: Focus Pack=77, Month Target=42.
+    expect(kpiMap['FOCUS_PACK_1']).toBe(77);
+    expect(kpiMap['MONTH_TGT']).toBe(42);
+  });
+
+  it('CLEAN TEMPLATE still parses correctly (no regression)', () => {
+    const buf = buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 100, 50]]);
+    const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
+
+    const kpiMap = result.acceptedTargets['2026-07']?.['O001'];
+    expect(kpiMap).toBeDefined();
+    expect(kpiMap['MONTH_TGT']).toBe(100);
+    expect(kpiMap['FOCUS_PACK_1']).toBe(50);
+  });
+
+  // ── Integrity guard: KPI columns don't match the configured KPIs ────────────
+
+  it('INTEGRITY GUARD: a block whose columns do not cover the enabled KPIs → file rejected', () => {
+    // Only ONE of the two enabled KPI labels is present in row 2 → the block
+    // cannot be unambiguously mapped → reject the whole upload.
+    const row1 = ['', '', '', "Jul '26 Target", ''];
+    const row2 = ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Some Other Column'];
+    const data = ['O001', 'Outlet One', 'RETAIL', 100, 50];
+    const buf = makeXlsx([row1, row2, data]);
+
+    expect(() => parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES)).toThrow(
+      /KPI columns don't match the configured KPIs/i,
+    );
+  });
+
+  it('INTEGRITY GUARD: a block resolving ZERO KPI columns → file rejected', () => {
+    const row1 = ['', '', '', "Jul '26 Target", ''];
+    const row2 = ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Foo', 'Bar'];
+    const data = ['O001', 'Outlet One', 'RETAIL', 100, 50];
+    const buf = makeXlsx([row1, row2, data]);
+
+    expect(() => parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES)).toThrow(
+      /re-download the template/i,
+    );
+  });
 });
 
 // ─── buildResolvedTargetsBuffer round-trip ────────────────────────────────────
