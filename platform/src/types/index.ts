@@ -636,7 +636,8 @@ export interface HierarchyChainRowError {
     | 'NAME_CONFLICT'    // A1: same employee ID, different names across rows
     | 'PHONE_CONFLICT'   // A2: same employee ID, different phone numbers across rows
     | 'LEVEL_CONFLICT'   // A3: same employee ID, different role across rows
-    | 'PARENT_CONFLICT'; // A4: same employee ID, different reporting manager across rows
+    | 'PARENT_CONFLICT'  // A4: same employee ID, different reporting manager across rows
+    | 'BLANK_CONFLICT';  // A5: same employee ID, a cell (name/phone) blank in some rows but filled in others
   /** All row numbers (1-based, row 1 = header) affected by this error */
   rowNums: number[];
   /** The employee ID at the centre of the conflict; empty string for MISSING_ID */

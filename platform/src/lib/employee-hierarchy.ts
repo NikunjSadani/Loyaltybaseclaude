@@ -1158,6 +1158,37 @@ export function parseHierarchyChainRows(
       });
     }
 
+    // A5: BLANK_CONFLICT — the same employee ID has a cell filled in some rows but
+    // left blank in others. `entry.roleCodes` carries one entry per occurrence, while
+    // `entry.names` / `entry.phones` collect only the NON-blank values; so a count that
+    // is >0 but < the number of occurrences means at least one row left it blank while
+    // another supplied a value. That is contradictory data — reject it rather than
+    // silently healing to the first non-blank value. (An all-blank field is a legitimate
+    // placeholder and is left alone: 0 non-blank values never trips the `> 0` guard.)
+    const occurrences = entry.roleCodes.length;
+    if (entry.names.length > 0 && entry.names.length < occurrences) {
+      chainErrors.push({
+        type:       'BLANK_CONFLICT',
+        rowNums:    dedupedRowNums,
+        employeeId: id,
+        message:
+          `Employee ID "${id}" has a name in some rows but a blank name in others ` +
+          `(rows ${dedupedRowNums.join(', ')}). ` +
+          `Fill the name in every row it appears, or leave it blank in every row.`,
+      });
+    }
+    if (entry.phones.length > 0 && entry.phones.length < occurrences) {
+      chainErrors.push({
+        type:       'BLANK_CONFLICT',
+        rowNums:    dedupedRowNums,
+        employeeId: id,
+        message:
+          `Employee ID "${id}" has a phone number in some rows but a blank phone in others ` +
+          `(rows ${dedupedRowNums.join(', ')}). ` +
+          `Fill the phone in every row it appears, or leave it blank in every row.`,
+      });
+    }
+
     if (uniqueParents.size > 1) {
       const humanParents = [...entry.reportsToIds]
         .map(r => r ?? '(none)')

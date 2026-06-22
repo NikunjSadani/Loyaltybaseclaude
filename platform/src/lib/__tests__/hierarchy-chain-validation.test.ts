@@ -216,6 +216,45 @@ describe('HA — Cross-row conflicts', () => {
     expect(err!.message).toMatch(/different phone/i);
   });
 
+  it('HA2b: same SO ID with a phone in one row but BLANK in another → BLANK_CONFLICT', () => {
+    // The owner's real case: a manager repeated across chain rows has a phone in most
+    // rows but a blank phone cell in one. Previously the parser silently healed to the
+    // first non-blank value; now it is a hard error so the data inconsistency surfaces.
+    const row1 = makeRow({ 'SO Phone': '9900000002' });
+    const row2 = { ...makeRow2(), 'SO Phone': '' }; // ← SO-001 blank phone here
+    const result = parseHierarchyChainRows([row1, row2], config);
+    const err = result.chainErrors.find(
+      e => e.type === 'BLANK_CONFLICT' && e.employeeId === 'SO-001',
+    );
+    expect(err).toBeDefined();
+    expect(err!.rowNums).toEqual(expect.arrayContaining([2, 3]));
+    expect(err!.message).toMatch(/blank phone/i);
+    expect(result.hasErrors).toBe(true);
+  });
+
+  it('HA2c: same ASM ID with a name in one row but BLANK in another → BLANK_CONFLICT', () => {
+    const row1 = makeRow({ 'ASM Name': 'Priya Mehta' });
+    const row2 = { ...makeRow2(), 'ASM Name': '' }; // ← ASM-001 blank name here
+    const result = parseHierarchyChainRows([row1, row2], config);
+    const err = result.chainErrors.find(
+      e => e.type === 'BLANK_CONFLICT' && e.employeeId === 'ASM-001',
+    );
+    expect(err).toBeDefined();
+    expect(err!.message).toMatch(/blank name/i);
+    expect(result.hasErrors).toBe(true);
+  });
+
+  it('HA2d: a manager with a blank phone in EVERY row is a placeholder, NOT a conflict', () => {
+    // All-blank is legitimate (placeholder) — only a MIX of blank and filled is an error.
+    const row1 = { ...makeRow(), 'SO Phone': '' };
+    const row2 = { ...makeRow2(), 'SO Phone': '' };
+    const result = parseHierarchyChainRows([row1, row2], config);
+    const err = result.chainErrors.find(
+      e => e.type === 'BLANK_CONFLICT' && e.employeeId === 'SO-001',
+    );
+    expect(err).toBeUndefined();
+  });
+
   it('HA3: same ID appearing as different roles in two rows → LEVEL_CONFLICT', () => {
     // Row 1: SO-001 is SO; Row 2: SO-001 appears in ASM column
     const row1 = makeRow();

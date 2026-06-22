@@ -12,6 +12,7 @@
  * Idempotent.
  */
 
+import { BadRequestException } from '@nestjs/common';
 import type { Prisma, UserRole } from '@prisma/client';
 
 // ─── Ported types (from platform/src/types) ───────────────────────────────────
@@ -132,6 +133,88 @@ export async function persistHierarchy(
 ): Promise<PersistHierarchyResult> {
   const levelRows = buildLevelRows(config);
 
+  // ── 0. Validate phone ↔ employeeCode uniqueness BEFORE any write ──────────
+  // A phone number is a person's login, so it must map to exactly ONE employee per
+  // tenant. SalesUser.userId is @unique and User is keyed on (clientId, phone); if a
+  // phone in the upload already belongs to a different employee code (or a non-sales
+  // account), the salesUser.upsert below explodes with a P2002 on `userId` — surfacing
+  // as a raw 500 that also rolls back the snapshot ("0 after refresh"). Reject those
+  // conflicts up-front with a clean, actionable 400 instead. Resolve each employee's
+  // REAL phone here (blank/empty = no phone → a unique synthetic placeholder is used in
+  // the loop, never a shared empty string that would collapse many users into one).
+  // employeeCode is the stable business key and is uniquely constrained as
+  // (clientId, employeeCode). A blank id would upsert SalesUser with employeeCode='' and a
+  // synthetic phone '__vacant__:undefined'; two such rows collide → P2002 on employeeCode
+  // (the SAME 500/"0 after refresh" symptom this guard targets, just a different column).
+  // A duplicate id would upsert the same code twice, orphaning the first user. The chain
+  // parser already enforces this, but the PUT body is raw/untrusted, so re-assert it here.
+  const realPhoneByCode = new Map<string, string>();
+  const seenCodes = new Set<string>();
+  for (const emp of employees) {
+    if (emp == null || typeof emp !== 'object') continue;
+    const code = String(emp.id ?? '').trim();
+    if (!code) {
+      throw new BadRequestException('Every employee must have a non-blank Employee ID.');
+    }
+    if (seenCodes.has(code)) {
+      throw new BadRequestException(
+        `Employee ID "${code}" appears more than once in the upload. Each Employee ID must be unique.`,
+      );
+    }
+    seenCodes.add(code);
+    const raw = String(emp.mobile ?? '').trim();
+    if (raw !== '') realPhoneByCode.set(code, raw);
+  }
+
+  // (a) Within-file: the same phone handed to two different employee codes.
+  const codesByPhone = new Map<string, string[]>();
+  for (const [code, phone] of realPhoneByCode) {
+    const arr = codesByPhone.get(phone) ?? [];
+    arr.push(code);
+    codesByPhone.set(phone, arr);
+  }
+  const dupInFile = [...codesByPhone.entries()].filter(([, codes]) => codes.length > 1);
+  if (dupInFile.length > 0) {
+    const detail = dupInFile
+      .map(([phone, codes]) => `phone ${phone} → ${codes.join(', ')}`)
+      .join('; ');
+    throw new BadRequestException(
+      `The same phone number is assigned to more than one employee (${detail}). ` +
+        `Each phone may belong to only one employee.`,
+    );
+  }
+
+  // (b) Against the DB: a phone already used by a DIFFERENT employee code, or by a
+  // non-sales account (admin/partner). employeeCode is the stable key — an upload may
+  // only update the SAME code's existing user, never re-point another user's phone.
+  // Re-uploading the same (code, phone) is fine: the existing owner code equals the
+  // upload code, so it is not flagged.
+  const phones = [...realPhoneByCode.values()];
+  if (phones.length > 0) {
+    const existingUsers = await tx.user.findMany({
+      where: { clientId, phone: { in: phones } },
+      select: { phone: true, salesUser: { select: { employeeCode: true } } },
+    });
+    const conflicts: string[] = [];
+    for (const u of existingUsers) {
+      const uploadCode = codesByPhone.get(u.phone)?.[0]; // unique by (a) above
+      const ownerCode = u.salesUser?.employeeCode ?? null;
+      if (ownerCode !== uploadCode) {
+        conflicts.push(
+          ownerCode
+            ? `phone ${u.phone} already belongs to employee ${ownerCode}`
+            : `phone ${u.phone} is already used by another account`,
+        );
+      }
+    }
+    if (conflicts.length > 0) {
+      throw new BadRequestException(
+        `Upload rejected — ${conflicts.join('; ')}. ` +
+          `A phone number can belong to only one employee; remove or correct it and re-upload.`,
+      );
+    }
+  }
+
   // ── 1. Levels ────────────────────────────────────────────────────────────
   // The level upsert below re-assigns each code to its config `level`. SalesHierarchyLevel has a
   // SECOND unique on (clientId, level), so if the tenant already has rows with a DIFFERENT
@@ -176,10 +259,14 @@ export async function persistHierarchy(
       continue;
     }
 
-    const isPlaceholder = emp.status === 'PLACEHOLDER' || (!emp.name && !emp.mobile);
+    // Treat a blank/empty mobile as MISSING (not as the literal ''): an empty string would
+    // make every phone-less employee collapse to one User(clientId, '') and trip the
+    // SalesUser.userId unique. Use the validated real phone, else a per-code synthetic.
+    const realMobile = String(emp.mobile ?? '').trim();
+    const isPlaceholder = emp.status === 'PLACEHOLDER' || (!emp.name && !realMobile);
     if (isPlaceholder) placeholders++;
 
-    const phone = emp.mobile ?? syntheticPlaceholderPhone(emp.id);
+    const phone = realMobile !== '' ? realMobile : syntheticPlaceholderPhone(emp.id);
     const name = emp.name ?? `(vacant) ${emp.id}`;
     const userRole = mapRoleCodeToUserRole(emp.roleCode);
     const userStatus = isPlaceholder ? 'INACTIVE' : 'ACTIVE';
