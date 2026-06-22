@@ -516,12 +516,15 @@ export function parseUploadRows(
 ): EmployeeUploadRow[] {
   return rawRows.map((raw, idx) => ({
     rowNum:                      idx + 2, // row 1 = header
-    hierarchy:                   (raw['Hierarchy']                        ?? '').trim(),
-    employeeId:                  (raw['Employee ID']                      ?? '').trim(),
-    employeeName:                (raw['Employee Name']                    ?? '').trim(),
-    employeePhone:               (raw['Employee Phone Number']            ?? '').trim(),
-    reportingManagerHierarchy:   (raw['Reporting Manager Hierarchy']      ?? '').trim(),
-    reportingManagerEmployeeId:  (raw['Reporting Manager Employee ID']    ?? '').trim(),
+    // String() coerces numeric cells — SheetJS returns NUMBERS for numeric cells (phones,
+    // numeric IDs), and `(v ?? '')` keeps a number, so a bare `.trim()` throws "trim is not a
+    // function". The Record<string,string> type is a runtime lie; coerce before trimming.
+    hierarchy:                   String(raw['Hierarchy']                   ?? '').trim(),
+    employeeId:                  String(raw['Employee ID']                 ?? '').trim(),
+    employeeName:                String(raw['Employee Name']               ?? '').trim(),
+    employeePhone:               String(raw['Employee Phone Number']       ?? '').trim(),
+    reportingManagerHierarchy:   String(raw['Reporting Manager Hierarchy'] ?? '').trim(),
+    reportingManagerEmployeeId:  String(raw['Reporting Manager Employee ID'] ?? '').trim(),
   }));
 }
 
@@ -998,11 +1001,13 @@ export function parseHierarchyChainRows(
     // Extract per-level data
     const levels = sorted.map((l, i) => ({
       cfg:       l,
-      id:        (raw[`${l.roleCode} ID`]    ?? '').trim(),
-      name:      (raw[`${l.roleCode} Name`]  ?? '').trim(),
-      phone:     (raw[`${l.roleCode} Phone`] ?? '').trim(),
+      // String() coerces numeric cells (SheetJS returns numbers for numeric IDs/phones) — a bare
+      // `(v ?? '').trim()` throws "trim is not a function" on those. (#hierarchy-upload real-data)
+      id:        String(raw[`${l.roleCode} ID`]    ?? '').trim(),
+      name:      String(raw[`${l.roleCode} Name`]  ?? '').trim(),
+      phone:     String(raw[`${l.roleCode} Phone`] ?? '').trim(),
       parentId:  i + 1 < sorted.length
-        ? (raw[`${sorted[i + 1].roleCode} ID`] ?? '').trim()
+        ? String(raw[`${sorted[i + 1].roleCode} ID`] ?? '').trim()
         : null, // root has no parent
     }));
 
