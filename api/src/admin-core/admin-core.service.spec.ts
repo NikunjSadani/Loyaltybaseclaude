@@ -347,24 +347,11 @@ describe('AdminCoreService', () => {
     });
   });
 
-  describe('saveKpiConfig / saveGiftConfig', () => {
-    it('rejects a non-array KPI body', async () => {
-      await expect(service.saveKpiConfig(clientAdmin, { not: 'array' })).rejects.toBeInstanceOf(
-        BadRequestException,
-      );
-    });
-
+  describe('saveGiftConfig', () => {
     it('rejects a non-array gift body', async () => {
       await expect(service.saveGiftConfig(clientAdmin, { not: 'array' })).rejects.toBeInstanceOf(
         BadRequestException,
       );
-    });
-
-    it('upserts the KPI array scoped to clientId', async () => {
-      mockPrisma.programSetting.upsert.mockResolvedValue({ id: 'p1' });
-      await service.saveKpiConfig(clientAdmin, [{ id: 'k1' }]);
-      const args = mockPrisma.programSetting.upsert.mock.calls[0][0];
-      expect(args.where.clientId_settingKey).toEqual({ clientId: 'deoleo', settingKey: 'kpi_defs' });
     });
   });
 

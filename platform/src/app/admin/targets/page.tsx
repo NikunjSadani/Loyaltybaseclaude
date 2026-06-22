@@ -3,13 +3,17 @@
 /**
  * Admin KPI Management page — FE-A (Targets / Stream T).
  *
- * Data source rewire: was /api/admin/target-config (old TargetConfig wizard).
- * Now backed by the real KpiDef CRUD endpoints:
+ * Backed by the real KpiDef CRUD endpoints:
  *
- *   GET    /api/admin/kpis              → KpiDef[]
- *   POST   /api/admin/kpis              → upsert by (clientId, code)
- *   DELETE /api/admin/kpis/:id          → { deleted: id }
- *   POST   /api/admin/kpis/seed-defaults → { seeded, skippedReason? }
+ *   GET    /api/admin/kpis                → KpiDef[]
+ *   POST   /api/admin/kpis                → upsert by (clientId, code)
+ *   DELETE /api/admin/kpis/:id            → { deleted: id }
+ *   POST   /api/admin/kpis/:id/set-primary → atomically demote others + set this primary
+ *   POST   /api/admin/kpis/seed-defaults  → { seeded, skippedReason? }
+ *
+ * Primary KPI is single-select: it is chosen ONLY via the radio control in the
+ * KPI list (which calls set-primary), never via the add/edit form. A DB
+ * constraint enforces at-most-one primary, so "two primaries" cannot be expressed.
  *
  * UI shell / styling is preserved; only the data layer changes.
  */
@@ -62,14 +66,34 @@ function KpiRow({
   kpi,
   onEdit,
   onDelete,
+  onSetPrimary,
+  settingPrimary,
 }: {
   kpi: KpiDef;
   onEdit: (k: KpiDef) => void;
   onDelete: (id: string) => void;
+  onSetPrimary: (id: string) => void;
+  settingPrimary: boolean;
 }) {
   return (
     <tr className={`text-sm border-b border-gray-50 ${!kpi.enabled ? 'opacity-50' : ''}`}>
-      <td className="py-2.5 pl-5 pr-2 font-mono text-xs text-gray-500">{kpi.code}</td>
+      <td className="py-2.5 pl-5 pr-2 text-center">
+        <label
+          className={`inline-flex items-center justify-center ${settingPrimary ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+          title={kpi.isPrimary ? 'Primary KPI' : 'Make this the Primary KPI'}
+        >
+          <input
+            type="radio"
+            name="primary-kpi"
+            checked={kpi.isPrimary}
+            disabled={settingPrimary}
+            onChange={() => { if (!kpi.isPrimary) onSetPrimary(kpi.id); }}
+            aria-label={`Set ${kpi.label} as the Primary KPI`}
+            className="h-4 w-4 accent-[var(--brand-primary)] disabled:opacity-50"
+          />
+        </label>
+      </td>
+      <td className="py-2.5 pl-2 pr-2 font-mono text-xs text-gray-500">{kpi.code}</td>
       <td className="py-2.5 px-2 font-medium text-gray-900">
         {kpi.label}
         {kpi.isPrimary && (
@@ -187,18 +211,9 @@ function KpiForm({
         </div>
       </div>
 
-      {/* Checkboxes */}
+      {/* Checkboxes — Primary is NOT set here; it is a single-select chosen via
+          the radio in the KPI list (set-primary endpoint + DB constraint). */}
       <div className="flex flex-wrap gap-5">
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={form.isPrimary}
-            onChange={e => set('isPrimary', e.target.checked)}
-            className="rounded"
-          />
-          <span className="text-xs text-gray-700 font-medium">Primary KPI</span>
-        </label>
-
         <label className="flex items-center gap-2 cursor-pointer">
           <input
             type="checkbox"
@@ -270,6 +285,9 @@ export default function AdminTargetsPage() {
   const [seeding,   setSeeding]   = useState(false);
   const [seedMsg,   setSeedMsg]   = useState('');
 
+  const [settingPrimary, setSettingPrimary] = useState(false);
+  const [primaryError,   setPrimaryError]   = useState('');
+
   const [showEnabled, setShowEnabled] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [expandHelp, setExpandHelp]  = useState(false);
 
@@ -315,6 +333,23 @@ export default function AdminTargetsPage() {
     } else {
       alert(res.error ?? 'Delete failed');
     }
+  };
+
+  /* ── Set primary (single-select; atomic on the server) ───────────────────── */
+
+  const handleSetPrimary = async (id: string) => {
+    setSettingPrimary(true);
+    setPrimaryError('');
+    const res = await api.post<KpiDef>(`/api/admin/kpis/${id}/set-primary`, {});
+    if (res.success) {
+      // Reload so the badge/summary reflect the server's atomic demote+promote.
+      await reload();
+    } else {
+      // Do NOT optimistically move the badge — surface the error and leave the
+      // previously-reloaded list (with the old primary) intact.
+      setPrimaryError(res.error ?? 'Failed to set primary KPI');
+    }
+    setSettingPrimary(false);
   };
 
   /* ── Seed defaults ────────────────────────────────────────────────────────── */
@@ -408,6 +443,13 @@ export default function AdminTargetsPage() {
         </div>
       )}
 
+      {/* Set-primary error */}
+      {primaryError && (
+        <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-4 py-2.5 text-sm text-red-700">
+          <AlertCircle className="h-4 w-4 shrink-0" /> {primaryError}
+        </div>
+      )}
+
       {/* ── Help accordion ─────────────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm">
         <button
@@ -460,7 +502,9 @@ export default function AdminTargetsPage() {
             <span className="text-sm font-semibold text-gray-700">
               {kpis.length} KPI{kpis.length !== 1 ? 's' : ''} ·{' '}
               {enabledCount} enabled
-              {primaryKpi ? ` · Primary: ${primaryKpi.label}` : ''}
+              {kpis.length > 0
+                ? ` · Primary: ${primaryKpi ? primaryKpi.label : '— none —'}`
+                : ''}
             </span>
           </div>
 
@@ -504,7 +548,8 @@ export default function AdminTargetsPage() {
             <table className="w-full text-left">
               <thead>
                 <tr className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide bg-gray-50">
-                  <th className="py-2.5 pl-5 pr-2">Code</th>
+                  <th className="py-2.5 pl-5 pr-2 text-center">Primary</th>
+                  <th className="py-2.5 pl-2 pr-2">Code</th>
                   <th className="py-2.5 px-2">Label</th>
                   <th className="py-2.5 px-2">Unit</th>
                   <th className="py-2.5 px-2 text-center">Status</th>
@@ -523,6 +568,8 @@ export default function AdminTargetsPage() {
                         kpi={kpi}
                         onEdit={k => { setEditing(k); setFormOpen(false); setSaveError(''); }}
                         onDelete={handleDelete}
+                        onSetPrimary={handleSetPrimary}
+                        settingPrimary={settingPrimary}
                       />
                     )
                   ))}

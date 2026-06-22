@@ -7,12 +7,11 @@ import { AdminHierarchyConfigController } from './hierarchy-config.controller';
 import { AdminForceLogoutAllController } from './force-logout-all.controller';
 import { AdminDashboardController } from './dashboard.controller';
 import { AdminTaskConfigController } from './task-config.controller';
-import { AdminKpiConfigController } from './kpi-config.controller';
 import { AdminGiftConfigController } from './gift-config.controller';
 
 /**
  * AdminCoreModule — the ported admin sub-domains (users, settings,
- * hierarchy-config, force-logout-all, dashboard, task-config, kpi-config,
+ * hierarchy-config, force-logout-all, dashboard, task-config,
  * gift-config) as ONE module with ONE path-mirrored controller per sub-domain
  * and ONE cohesive AdminCoreService. Re-homed from platform/src/app/api/admin/*.
  *
@@ -27,7 +26,6 @@ import { AdminGiftConfigController } from './gift-config.controller';
     AdminForceLogoutAllController,
     AdminDashboardController,
     AdminTaskConfigController,
-    AdminKpiConfigController,
     AdminGiftConfigController,
   ],
   providers: [AdminCoreService],

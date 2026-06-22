@@ -92,6 +92,18 @@ export class KpisController {
     return this.targets.upsertKpi(user, dto);
   }
 
+  /**
+   * POST /v1/admin/kpis/:id/set-primary
+   * Make this KPI the SINGLE primary for the tenant — choosing a primary MOVES it.
+   * Mirrors upsertKpi's guards.
+   */
+  @Post(':id/set-primary')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:manage_config')
+  setPrimary(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.targets.setPrimary(user, id);
+  }
+
   /** DELETE /v1/admin/kpis/:id — remove a KPI definition. */
   @Delete(':id')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')

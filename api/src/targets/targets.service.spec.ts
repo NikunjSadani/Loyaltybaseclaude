@@ -20,7 +20,8 @@
  */
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import * as XLSX from 'xlsx';
 import { TargetsService } from './targets.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -39,6 +40,7 @@ import {
 // ─── Mock Prisma ──────────────────────────────────────────────────────────────
 
 const mockTx = {
+  kpiDef:             { upsert: jest.fn(), updateMany: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
   targetUploadBatch:  { create: jest.fn() },
   outletTarget:       { upsert: jest.fn() },
   salesUploadBatch:   { create: jest.fn() },
@@ -149,7 +151,9 @@ describe('TargetsService', () => {
 
       const arg = mockPrisma.kpiDef.findMany.mock.calls[0][0];
       expect(arg.where.clientId).toBe('deoleo');
-      expect(arg.orderBy).toEqual({ order: 'asc' });
+      // Deterministic order: primary tiebreak on `code` so "first primary"
+      // can never flip on equal `order`.
+      expect(arg.orderBy).toEqual([{ order: 'asc' }, { code: 'asc' }]);
     });
 
     it('filters to enabled only when enabledOnly=true', async () => {
@@ -167,13 +171,30 @@ describe('TargetsService', () => {
       const arg = mockPrisma.kpiDef.findMany.mock.calls[0][0];
       expect(arg.where.enabled).toBeUndefined();
     });
+
+    it('DETERMINISM: orderBy carries a `code` tiebreak so equal-`order` rows never flip', async () => {
+      // Two KPIs share order=1; only the `code` tiebreak makes their relative
+      // order (and therefore the "first primary" pick) stable across queries.
+      const a = { ...kpiRow, id: 'a', code: 'AAA', order: 1, isPrimary: true };
+      const b = { ...kpiRow, id: 'b', code: 'BBB', order: 1, isPrimary: true };
+      mockPrisma.kpiDef.findMany.mockResolvedValue([a, b]);
+
+      await service.listKpis(admin, {} as ListKpisQueryDto);
+
+      const arg = mockPrisma.kpiDef.findMany.mock.calls[0][0];
+      // The query asks the DB for [order asc, code asc] — the only thing that
+      // guarantees "first match wins" is reproducible on equal `order`.
+      expect(arg.orderBy).toEqual([{ order: 'asc' }, { code: 'asc' }]);
+      expect(arg.orderBy[0]).toEqual({ order: 'asc' });
+      expect(arg.orderBy[1]).toEqual({ code: 'asc' });
+    });
   });
 
   // ─── upsertKpi ─────────────────────────────────────────────────────────────
 
   describe('upsertKpi', () => {
-    it('calls prisma.kpiDef.upsert with the correct clientId and code', async () => {
-      mockPrisma.kpiDef.upsert.mockResolvedValue(kpiRow);
+    it('calls tx.kpiDef.upsert with the correct clientId and code (inside a transaction)', async () => {
+      mockTx.kpiDef.upsert.mockResolvedValue(kpiRow);
 
       const dto: UpsertKpiDefDto = {
         code: 'MONTH_TGT',
@@ -186,19 +207,119 @@ describe('TargetsService', () => {
       };
       await service.upsertKpi(admin, dto);
 
-      const arg = mockPrisma.kpiDef.upsert.mock.calls[0][0];
+      // The write runs inside $transaction for atomicity with the demotion.
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+
+      const arg = mockTx.kpiDef.upsert.mock.calls[0][0];
       expect(arg.where).toEqual({ clientId_code: { clientId: 'deoleo', code: 'MONTH_TGT' } });
       expect(arg.create.clientId).toBe('deoleo');
       expect(arg.create.code).toBe('MONTH_TGT');
     });
 
     it('sets enabled=true by default when not supplied', async () => {
-      mockPrisma.kpiDef.upsert.mockResolvedValue(kpiRow);
+      mockTx.kpiDef.upsert.mockResolvedValue(kpiRow);
       const dto: UpsertKpiDefDto = { code: 'NEW_KPI', label: 'New KPI' };
       await service.upsertKpi(admin, dto);
 
-      const arg = mockPrisma.kpiDef.upsert.mock.calls[0][0];
+      const arg = mockTx.kpiDef.upsert.mock.calls[0][0];
       expect(arg.create.enabled).toBe(true);
+    });
+
+    it('INVARIANT: isPrimary=true demotes every OTHER KPI for the tenant before upserting, in one transaction', async () => {
+      mockTx.kpiDef.updateMany.mockResolvedValue({ count: 1 });
+      mockTx.kpiDef.upsert.mockResolvedValue({ ...kpiRow, code: 'FOCUS_PACK_1', isPrimary: true });
+
+      const dto: UpsertKpiDefDto = {
+        code: 'FOCUS_PACK_1',
+        label: 'Focus Pack - 1',
+        isPrimary: true,
+      };
+      await service.upsertKpi(admin, dto);
+
+      // 1) The demotion runs, scoped to the tenant, excluding the incoming code.
+      expect(mockTx.kpiDef.updateMany).toHaveBeenCalledTimes(1);
+      const demote = mockTx.kpiDef.updateMany.mock.calls[0][0];
+      expect(demote.where).toEqual({ clientId: 'deoleo', NOT: { code: 'FOCUS_PACK_1' } });
+      expect(demote.data).toEqual({ isPrimary: false });
+
+      // 2) The upsert writes this row as primary — only ONE primary remains.
+      const upsertArg = mockTx.kpiDef.upsert.mock.calls[0][0];
+      expect(upsertArg.create.isPrimary).toBe(true);
+      expect(upsertArg.update.isPrimary).toBe(true);
+
+      // 3) Demotion and upsert share the SAME tx object (atomic).
+      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT demote other KPIs when isPrimary is false', async () => {
+      mockTx.kpiDef.upsert.mockResolvedValue({ ...kpiRow, isPrimary: false });
+      const dto: UpsertKpiDefDto = { code: 'CONSISTENCY', label: 'Consistency', isPrimary: false };
+      await service.upsertKpi(admin, dto);
+
+      expect(mockTx.kpiDef.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('does NOT demote other KPIs when isPrimary is omitted', async () => {
+      mockTx.kpiDef.upsert.mockResolvedValue(kpiRow);
+      const dto: UpsertKpiDefDto = { code: 'CONSISTENCY', label: 'Consistency' };
+      await service.upsertKpi(admin, dto);
+
+      expect(mockTx.kpiDef.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── setPrimary ────────────────────────────────────────────────────────────
+
+  describe('setPrimary', () => {
+    it('INVARIANT: demotes every OTHER primary (by id) then sets the target one primary, in one transaction', async () => {
+      mockTx.kpiDef.findFirst.mockResolvedValue(kpiRow2);
+      mockTx.kpiDef.updateMany.mockResolvedValue({ count: 1 });
+      mockTx.kpiDef.update.mockResolvedValue({ ...kpiRow2, isPrimary: true });
+
+      await service.setPrimary(admin, 'kpi2');
+
+      // The whole move runs in ONE transaction (atomic).
+      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+
+      // 1) Existence/tenant check on the target KPI.
+      const findArg = mockTx.kpiDef.findFirst.mock.calls[0][0];
+      expect(findArg.where).toEqual({ id: 'kpi2', clientId: 'deoleo' });
+
+      // 2) Demotion is scoped to the tenant and excludes the target by ID (NOT by code).
+      expect(mockTx.kpiDef.updateMany).toHaveBeenCalledTimes(1);
+      const demote = mockTx.kpiDef.updateMany.mock.calls[0][0];
+      expect(demote.where).toEqual({ clientId: 'deoleo', NOT: { id: 'kpi2' } });
+      expect(demote.data).toEqual({ isPrimary: false });
+
+      // 3) The target KPI is set primary.
+      const updateArg = mockTx.kpiDef.update.mock.calls[0][0];
+      expect(updateArg.where).toEqual({ id: 'kpi2' });
+      expect(updateArg.data).toEqual({ isPrimary: true });
+    });
+
+    it('throws NotFoundException for a non-existent / other-tenant KPI and never demotes', async () => {
+      mockTx.kpiDef.findFirst.mockResolvedValue(null);
+
+      await expect(service.setPrimary(admin, 'kpi-other')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(mockTx.kpiDef.updateMany).not.toHaveBeenCalled();
+      expect(mockTx.kpiDef.update).not.toHaveBeenCalled();
+    });
+
+    it('CONFLICT: a P2002 from the transaction surfaces as ConflictException (409)', async () => {
+      mockTx.kpiDef.findFirst.mockResolvedValue(kpiRow2);
+      mockTx.kpiDef.updateMany.mockResolvedValue({ count: 1 });
+      mockTx.kpiDef.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: 'test',
+        }),
+      );
+
+      await expect(service.setPrimary(admin, 'kpi2')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
     });
   });
 

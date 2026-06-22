@@ -3,9 +3,8 @@
 /**
  * Admin Target Upload page — FE-A (Targets / Stream T).
  *
- * Data source rewire:
- *   OLD: client-side xlsx parsing (lib/target-excel-upload) + /api/admin/kpi-config
- *   NEW:
+ * Data source:
+ *   Server-side xlsx (the client-side parsing path is REMOVED — backend parses now):
  *     Template download: GET /api/admin/targets/template?months=YYYY-MM,YYYY-MM
  *                        → RAW xlsx binary (NOT JSON-wrapped) → browser download
  *     Upload:            POST /api/admin/targets/upload (FormData, field "file")

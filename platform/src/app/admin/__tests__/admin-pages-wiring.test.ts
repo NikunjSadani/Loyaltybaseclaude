@@ -138,9 +138,12 @@ describe('D — admin/targets page', () => {
     expect(code).not.toMatch(/deleteTargetConfig\s*\(/);
   });
 
-  it('D4: fetches from /api/admin/target-config', () => {
+  it('D4: sets the primary KPI via POST /api/admin/kpis/:id/set-primary (single-select)', () => {
+    // The old /api/admin/target-config route is retired (#31); primary KPI is now
+    // a single-select that MOVES via the atomic set-primary endpoint.
     const code = src('app/admin/targets/page.tsx');
-    expect(code).toMatch(/\/api\/admin\/target-config/);
+    expect(code).not.toMatch(/\/api\/admin\/target-config/);
+    expect(code).toMatch(/\/api\/admin\/kpis\/\$\{[^}]+\}\/set-primary/);
   });
 
   it('D5: deletes a KPI def via /api/admin/kpis/:id', () => {
@@ -176,9 +179,11 @@ describe('E — admin/targets/upload page', () => {
     expect(code).not.toMatch(/upsertTargetConfig\s*\(/);
   });
 
-  it('E5: fetches from /api/admin/kpi-config', () => {
+  it('E5: no longer references the retired /api/admin/kpi-config route', () => {
+    // The /api/admin/kpi-config route is retired (#31); the upload page parses
+    // server-side and no longer references the old blob route.
     const code = src('app/admin/targets/upload/page.tsx');
-    expect(code).toMatch(/\/api\/admin\/kpi-config/);
+    expect(code).not.toMatch(/\/api\/admin\/kpi-config/);
   });
 
   // E6–E8 (platform app/api/admin/kpi-config route) retired with D2 (#31).

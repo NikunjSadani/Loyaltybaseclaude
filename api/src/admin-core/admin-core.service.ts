@@ -26,7 +26,7 @@ import {
 /**
  * AdminCoreService — business logic for the ported admin sub-domains
  * (users, settings, hierarchy-config, force-logout-all, dashboard, task-config,
- * kpi-config, gift-config). Re-homed from platform/src/app/api/admin/* onto /v1.
+ * gift-config). Re-homed from platform/src/app/api/admin/* onto /v1.
  *
  * Every query is tenant-scoped by `user.clientId` (the old `userId` is `user.sub`).
  * Role/permission gates live on the controllers (@Roles / @RequirePermission);
@@ -78,7 +78,6 @@ export class AdminCoreService {
   // ─── ProgramSetting setting keys (mirror the Next routes) ───────────────────
   private static readonly HIERARCHY_KEY = 'employee_hierarchy';
   private static readonly TASK_CONFIG_KEY = 'task_config';
-  private static readonly KPI_DEFS_KEY = 'kpi_defs';
   private static readonly GIFT_CATALOGUE_KEY = 'gift_catalogue';
 
   // ════════════════════════════════════════════════════════════════════════
@@ -724,38 +723,6 @@ export class AdminCoreService {
     });
 
     return { config: dto };
-  }
-
-  // ════════════════════════════════════════════════════════════════════════
-  // KPI-CONFIG — admin/kpi-config
-  // ════════════════════════════════════════════════════════════════════════
-
-  async getKpiConfig(user: JwtPayload) {
-    const setting = await this.prisma.programSetting.findFirst({
-      where: { clientId: user.clientId, settingKey: AdminCoreService.KPI_DEFS_KEY },
-    });
-    const kpiDefs = (setting?.settingValue as unknown[]) ?? [];
-    return { kpiDefs };
-  }
-
-  async saveKpiConfig(user: JwtPayload, body: unknown) {
-    const clientId = user.clientId;
-    if (!Array.isArray(body)) {
-      throw new BadRequestException('Expected an array of KPI definitions');
-    }
-
-    await this.prisma.programSetting.upsert({
-      where: { clientId_settingKey: { clientId, settingKey: AdminCoreService.KPI_DEFS_KEY } },
-      update: { settingValue: body as Prisma.InputJsonValue, updatedById: user.sub },
-      create: {
-        clientId,
-        settingKey: AdminCoreService.KPI_DEFS_KEY,
-        settingValue: body as Prisma.InputJsonValue,
-        updatedById: user.sub,
-      },
-    });
-
-    return { message: 'KPI definitions saved' };
   }
 
   // ════════════════════════════════════════════════════════════════════════

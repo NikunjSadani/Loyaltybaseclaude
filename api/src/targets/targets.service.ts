@@ -15,6 +15,7 @@
 
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -95,7 +96,9 @@ export class TargetsService {
         clientId: user.clientId,
         ...(enabledOnly ? { enabled: true } : {}),
       },
-      orderBy: { order: 'asc' },
+      // Stable, deterministic order: primary tiebreak on `code` so the
+      // "first primary" selection can never flip on equal `order`.
+      orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
   }
 
@@ -109,29 +112,103 @@ export class TargetsService {
     const { code, label, unit, isPrimary, hasNameOverride, nameOverrideLabel, order, enabled } =
       dto;
 
-    return this.prisma.kpiDef.upsert({
-      where: { clientId_code: { clientId: user.clientId, code } },
-      create: {
-        clientId: user.clientId,
-        code,
-        label,
-        unit: unit ?? '',
-        isPrimary: isPrimary ?? false,
-        hasNameOverride: hasNameOverride ?? false,
-        nameOverrideLabel: nameOverrideLabel ?? null,
-        order: order ?? 0,
-        enabled: enabled ?? true,
-      },
-      update: {
-        label,
-        ...(unit !== undefined ? { unit } : {}),
-        ...(isPrimary !== undefined ? { isPrimary } : {}),
-        ...(hasNameOverride !== undefined ? { hasNameOverride } : {}),
-        ...(nameOverrideLabel !== undefined ? { nameOverrideLabel } : {}),
-        ...(order !== undefined ? { order } : {}),
-        ...(enabled !== undefined ? { enabled } : {}),
-      },
-    });
+    // Invariant: at most ONE primary KpiDef per tenant. The upsert is keyed by
+    // (clientId, code), so when this write makes a KPI primary we first demote
+    // every OTHER KPI for the same clientId (code != incoming code) in the SAME
+    // transaction, then write this row as primary. This is atomic — a concurrent
+    // reader never sees two primaries, and either both steps land or neither does.
+    // The DB partial unique index (kpi_defs_one_primary_per_client) is the
+    // race-condition backstop: a concurrent writer that slips between the demote
+    // and the upsert surfaces a P2002 → ConflictException (409), never two primaries.
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        if (isPrimary === true) {
+          await tx.kpiDef.updateMany({
+            where: { clientId: user.clientId, NOT: { code } },
+            data: { isPrimary: false },
+          });
+        }
+
+        return tx.kpiDef.upsert({
+          where: { clientId_code: { clientId: user.clientId, code } },
+          create: {
+            clientId: user.clientId,
+            code,
+            label,
+            unit: unit ?? '',
+            isPrimary: isPrimary ?? false,
+            hasNameOverride: hasNameOverride ?? false,
+            nameOverrideLabel: nameOverrideLabel ?? null,
+            order: order ?? 0,
+            enabled: enabled ?? true,
+          },
+          update: {
+            label,
+            ...(unit !== undefined ? { unit } : {}),
+            ...(isPrimary !== undefined ? { isPrimary } : {}),
+            ...(hasNameOverride !== undefined ? { hasNameOverride } : {}),
+            ...(nameOverrideLabel !== undefined ? { nameOverrideLabel } : {}),
+            ...(order !== undefined ? { order } : {}),
+            ...(enabled !== undefined ? { enabled } : {}),
+          },
+        });
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'Another KPI is already primary for this client — retry.',
+        );
+      }
+      throw error;
+    }
+  }
+
+  // ─── KpiDef: set primary (MOVES the single primary) ──────────────────────────
+
+  /**
+   * Make `kpiId` the SINGLE primary KPI for the caller's tenant.
+   *
+   * Invariant: at most ONE primary KpiDef per tenant — choosing a primary MOVES
+   * it. In one transaction we (a) verify the KPI is this tenant's, (b) demote
+   * every OTHER primary (by id, NOT by code), then (c) set this one primary.
+   * Atomic: a concurrent reader never sees two primaries.
+   *
+   * The DB partial unique index (kpi_defs_one_primary_per_client) is the
+   * race-condition backstop: a concurrent writer slipping between the demote and
+   * the set surfaces a P2002 → ConflictException (409), never two primaries.
+   */
+  async setPrimary(user: JwtPayload, kpiId: string) {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const kpi = await tx.kpiDef.findFirst({
+          where: { id: kpiId, clientId: user.clientId },
+        });
+        if (!kpi) throw new NotFoundException('KpiDef not found');
+
+        await tx.kpiDef.updateMany({
+          where: { clientId: user.clientId, NOT: { id: kpiId } },
+          data: { isPrimary: false },
+        });
+
+        return tx.kpiDef.update({
+          where: { id: kpiId },
+          data: { isPrimary: true },
+        });
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'Another KPI is already primary for this client — retry.',
+        );
+      }
+      throw error;
+    }
   }
 
   // ─── KpiDef: delete ────────────────────────────────────────────────────────
@@ -191,7 +268,7 @@ export class TargetsService {
     // Fetch enabled KPIs for the tenant
     const kpiRows = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
-      orderBy: { order: 'asc' },
+      orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
 
     if (kpiRows.length === 0) {
@@ -242,7 +319,7 @@ export class TargetsService {
 
     const kpiRows = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
-      orderBy: { order: 'asc' },
+      orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
     if (kpiRows.length === 0) {
       throw new BadRequestException('No enabled KPIs found for this tenant.');
@@ -287,7 +364,7 @@ export class TargetsService {
     // ── Fetch KPIs ────────────────────────────────────────────────────────────
     const kpiRows = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
-      orderBy: { order: 'asc' },
+      orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
 
     if (kpiRows.length === 0) {
@@ -436,7 +513,7 @@ export class TargetsService {
     // Enabled KPIs for the tenant — same query as the target template path.
     const kpiRows = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
-      orderBy: { order: 'asc' },
+      orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
 
     if (kpiRows.length === 0) {
@@ -499,7 +576,7 @@ export class TargetsService {
     // ── Fetch KPIs (same KpiDef set drives the achievement template) ──────────
     const kpiRows = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
-      orderBy: { order: 'asc' },
+      orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
 
     if (kpiRows.length === 0) {

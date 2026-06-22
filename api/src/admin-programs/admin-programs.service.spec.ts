@@ -10,7 +10,6 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 import { ChannelPartnersService } from './channel-partners.service';
 import { VisibilityService } from './visibility.service';
-import { TargetConfigService } from './target-config.service';
 import { BannersService } from './banners.service';
 import { BannerConfigService } from './banner-config.service';
 import { SchemesService } from './schemes.service';
@@ -125,25 +124,6 @@ describe('VisibilityService', () => {
   it('rejects a bulk-upload with no file', async () => {
     const service = await build(VisibilityService);
     await expect(service.bulkUpload(gifsy, undefined)).rejects.toBeInstanceOf(BadRequestException);
-  });
-});
-
-describe('TargetConfigService', () => {
-  it('rejects a config without an id', async () => {
-    const service = await build(TargetConfigService);
-    await expect(service.upsert(gifsy, { name: 'x' })).rejects.toBeInstanceOf(BadRequestException);
-  });
-
-  it('upserts the ProgramSetting scoped by clientId + key', async () => {
-    const service = await build(TargetConfigService);
-    mockPrisma.programSetting.findFirst.mockResolvedValue({ settingValue: [] });
-    mockPrisma.programSetting.upsert.mockResolvedValue({});
-
-    await service.upsert(clientAdmin, { id: 'tc1', threshold: 100 });
-
-    const args = mockPrisma.programSetting.upsert.mock.calls[0][0];
-    expect(args.where.clientId_settingKey).toEqual({ clientId: 'deoleo', settingKey: 'target_configs' });
-    expect(args.update.updatedById).toBe('ca1');
   });
 });
 
