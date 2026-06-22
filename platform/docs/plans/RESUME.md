@@ -8,7 +8,7 @@ Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch **develop**). Fron
 Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic). Last verified state: 2026-06-22.
 
 ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
-✅ STATE (2026-06-22): GO-LIVE FIX WAVE COMPLETE — all 6 blockers (GLB-1..6) + 5 majors (GLM-1..5) CLOSED, independently re-audited, GATE-GREEN (api jest 921/921, FE vitest 1459, E2E green, doc-consistency), runtime-verified (GLB-3 proven on gifsy_dev; backend boots clean). ⛔ NOT YET COMMITTED — awaiting owner go; do NOT re-execute the fix wave. The POST-COMPACT FIX-WAVE section below is DONE — see GO-LIVE-ISSUE-LIST.md for the per-item table.
+✅ STATE (2026-06-22): GO-LIVE FIX WAVE COMPLETE — all 6 blockers (GLB-1..6) + 5 majors (GLM-1..5) CLOSED, independently re-audited, GATE-GREEN (api jest 921/921, FE vitest 1459, E2E green, doc-consistency), runtime-verified (GLB-3 proven on gifsy_dev; backend boots clean). ✅ COMMITTED + PUSHED to develop (a4b5a35..6003522, 6 commits). **NEXT = run the FULL UAT end-to-end (incl. UI/UX) as PARALLEL MULTI-AGENT workstreams — see THE POST-COMPACT WORK below + UAT-CHECKLIST.md.** Do NOT re-execute the fix wave.
 ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 The P0–P6 + P0.6 platform is built and serving in prod (`gifsy-api`+`gifsy-frontend`, `https://deoleoloyalty.gifsy.in`; prod DB
 intentionally EMPTY). The **S0–S6 UAT-hardening wave is DONE + pushed** (S0 migration; S5 Excel round-trips `c9bf80e`; S1
@@ -25,8 +25,7 @@ platform is NOT go-live ready — 6 BLOCKERS + 4 majors** (full detail + file:li
   • **GLB-6** payout settlement has NO working operator UI (`admin/payouts` Process = setTimeout+alert; S1 settle endpoints have no FE driver).
   Majors: credit PAYOUT-reversal clawback, FAILED-credit retry, beneficiary-field validation, PayoutTransaction.redemptionOrderId unique, /admin/kyc fake bulk-approve.
   **What the audit CONFIRMED SOUND (don't re-audit):** money atomic-claims + reversal idempotency, tenant data-isolation (no unscoped query / 33 services), schema↔migration parity, BigInt/secrets, the S0–S6 hardening.
-**Next phases:** (1) THE FIX WAVE below (close GLB-1..6 + majors) → (2) re-audit money/auth/data → (3) load real Deoleo data into
-empty prod (#76) → (4) owner UAT on staging → (5) owner ops (#74).
+**Next phases:** (1) ✅ FIX WAVE done+pushed → (2) **RUN THE FULL UAT (incl. UI/UX) as parallel multi-agent workstreams — THE POST-COMPACT WORK below** → (3) owner real-OTP confirmation on staging → (4) load real Deoleo data into empty prod (#76) → (5) owner ops (#74).
 **UAT creds (staging, real SMS OTP):** GIFSY `uat.app.gifsy.in`/**9830011252** · deoleo admin `uat.deoleoloyalty.gifsy.in`/**6289864191** · partner `7795096288` · sales `9875436349`.
 **Read FIRST:** `GO-LIVE-ISSUE-LIST.md` (⭐ the authoritative master tracker — every issue + file:line + E2E status) · `gap-register.md` (GO-LIVE AUDIT block) · `GO-LIVE-READINESS.md` (status) · `DEOLEO-GO-LIVE-BUNDLE.md` · `MIGRATIONS.md` · `ENVIRONMENTS.md` · [[staging-deploy-gate]] · [[audit-every-build-item]] · [[verify-flows-at-runtime]].
 **E2E runtime audit of S0–S6 (2026-06-21):** harness 292/0/7 + targeted drives → S1/S2/S3/S5 runtime-CONFIRMED good; **S4/S0 TDS runtime-CONFIRMED BROKEN (GLB-3: 2-row upload stored 1, reported succeeded:2)**; S6 harness-green. Details in `GO-LIVE-ISSUE-LIST.md`.
@@ -61,34 +60,52 @@ read-back endpoint OR temp `FIXED_OTP`.
 
 ## 🔴 The GO-LIVE critical path — what's LEFT
 
-**⭐ THE POST-COMPACT WORK (do FIRST, 2026-06-21): EXECUTE THE GO-LIVE-AUDIT FIX WAVE — close the 6 blockers + 4 majors the
-comprehensive audit found.** The S0–S6 hardening wave is DONE; THIS wave fixes what the 4-angle go-live audit surfaced (full
-detail + file:line in `gap-register.md` "GO-LIVE AUDIT" block). Run it as parallel disjoint-file streams, same discipline as
-S0–S6: executor → INDEPENDENT adversarial audit (hand the problem, not the fix) → Opus gate → **RUNTIME-VERIFY AGAINST THE REAL
-DEV DB** (not just jest — GLB-3 slipped precisely because S4 was jest-only) → FULL suites → commit. Opus owns `schema.prisma` +
-migrations so executors never collide. Streams (disjoint files):
-  - **GLM (migration, Opus-owned):** DROP the two stale coarse TDS indexes `tds_off_platform_entries_client_batch_key` +
-    `tds_deposits_client_section_batch_key` (GLB-3); ADD partial unique on `PayoutTransaction.redemptionOrderId WHERE NOT NULL` (GLM-4).
-    Show SQL → apply to dev → **runtime-verify a multi-row TDS upload persists ALL rows** (the proof S4 lacked).
-  - **GL-Money (`rewards`/`payouts`/`credits`):** GLB-1 eligibility gate — exclude non-APPROVED-KYC + inactive/deleted at the
-    credit bank-file build (`createPayoutDownload`, write the REAL kycStatus not hardcoded), mirror the check at redeem-confirm
-    (`confirmRedeem`/`confirmRedeemForOutlet`, UPI/BANK only) + `payouts.processBatch`; GLB-2 hard-fail zero-value cash redemption
-    inside the confirm tx (rollback the debit) + validate conversionRate>0 at boot; GLM-1 PAYOUT-reversal clawback/receivable;
-    GLM-2 FAILED-credit retry (FAILED→PENDING or include in re-download); GLM-3 beneficiary-field validation in processBatch.
-    **MONEY MODEL (owner, do not relitigate):** no in-portal fund; offline transfer + UTR upload; INR uncancellable once
-    OTP-confirmed; reversal ONLY on UTR=FAILED. **Runtime-verify against a partner moved APPROVED→RE_KYC_REQUIRED mid-flow.**
-  - **GL-RBAC (`admin-core`):** GLB-4 — per-caller assignable-role allow-list in createUser/updateUser (non-GIFSY callers can't
-    assign GIFSY_ADMIN/CLIENT_ADMIN); stop spreading `...dto` into role; + validate tickets.escalate assignee is in-tenant.
-    Runtime-verify a CLIENT_ADMIN cannot create/promote a GIFSY_ADMIN.
-  - **GL-FE-enroll (`platform`):** GLB-5 — wire partner self-enroll + sales-assisted enroll to `POST /v1/schemes/:id/enroll`
-    (replace the localStorage writes in `lib/schemes.ts:253/283`). Runtime-verify the enrollment persists + shows in the admin export.
-  - **GL-FE-settle (`platform`, the biggest):** GLB-6 — build the GIFSY payout-settlement UI driving the EXISTING S1/payouts
-    endpoints (create batch → assign-pending → process → UTR-template download → UTR upload), replacing the `setTimeout+alert`
-    stub in `admin/payouts/page.tsx`; + remove/wire the fake `/admin/kyc` bulk-approve (GLM-5). Runtime-verify a redemption
-    settles end-to-end through the UI.
-Already done (small, gated, uncommitted-as-of-write): FIXED_OTP send-side (`msg91`) + rate-limit `skipIf` (`app.module`) +
-DEMO_MODE (`admin-core.bulkEditUsers`) now NODE_ENV-gated. After the wave: re-run the 4 go-live audits on the changed paths,
-THEN proceed to #76 prod data load. Present the stream plan for owner go-ahead, then execute (owner already wants these closed).
+**⭐ THE POST-COMPACT WORK (do FIRST, 2026-06-22): RUN THE FULL UAT END-TO-END — including UI/UX — as PARALLEL MULTI-AGENT
+WORKSTREAMS.** The fix wave is DONE + pushed; now exhaustively exercise every flow in `UAT-CHECKLIST.md` (auth · KYC ·
+schemes/enrollment · wallet/rewards · money eligibility+settlement · finance/TDS · RBAC/isolation · integrity + the unhappy-path
+matrix) **plus a real UI/UX pass** (layout, copy, empty/loading/error states, dead buttons/links, console errors, responsive/
+mobile, NO fabricated data). Agents run this AUTOMATED on the LOCAL stack (`FIXED_OTP=123456` — they cannot receive real SMS);
+the owner does the short real-OTP confirmation on STAGING afterward. Definition of done = [[verify-flows-at-runtime]]: a real user
+per role completes each flow end-to-end, a 2nd session sees the persisted write, unhappy paths are honest. `tsc`/unit/E2E-green are
+necessary, never sufficient.
+
+**STEP 0 (orchestrator):** bring up + re-seed the LOCAL stack CLEAN — DB proxy `127.0.0.1:5433/gifsy_dev` (assert
+`current_database='gifsy_dev'`), rebuild backend (`rm tsconfig.build.tsbuildinfo dist && npx tsc -p tsconfig.build.json
+--incremental false && node dist/main.js` on :4000), FE :3000 (`next dev`), `npx prisma db seed`. **DECIDE gap #57(a) FIRST**
+(recommended: HIDE the `/admin/dashboards/{payments,engagement,redemptions,kyc}` nav group + stub the 4 routes — they are 100%
+mock, ~1.8k lines, 0 API calls — so testers never hit fake data; alt = wire 4 real aggregations = a mini-phase). Then launch the
+streams as `general-purpose` agents (`run_in_background`). Each agent DRIVES the real browser via the existing Playwright harness
+(`platform/e2e` — login helper + per-role `storageState`, isolated browser contexts) + captures SCREENSHOTS for the UI/UX review,
+and returns a structured defect list (section · role · steps · expected vs actual · severity · screenshot path).
+
+⚠️ **COLLISION RULE (single shared gifsy_dev DB — streams MUST mutate DISJOINT entities):** Partner partition — **B owns seed-cp-2**
+(its RE_KYC target), **D owns seed-cp-1** (stays APPROVED, for redemptions), **E owns the distributor partner** (credit rail);
+A/C/F are read-mostly. Disjoint rails: **D = redemption rail** (RedemptionOrder/PayoutTransaction/PayoutBatch/wallet) vs
+**E = credit rail** (CreditPayoutEntry/Download/Reversal) + TDS + invoices — they do NOT collide. **F is READ-ONLY** → safe
+alongside all. Each agent uses its own browser context (never a shared session).
+
+**PARALLEL WORKSTREAMS (each = one agent; each covers happy + unhappy + UI/UX for its area):**
+  - **UAT-A — Auth + RBAC + tenant isolation** (UAT §1, §7): login every role, route guards, logout/session-revoke, **GLB-4
+    privilege-escalation blocked** (CLIENT_ADMIN cannot create/promote a GIFSY_ADMIN), cross-tenant isolation, KYC-export GIFSY-only,
+    ticket-escalation tenant check.
+  - **UAT-B — KYC & onboarding** (§2, on seed-cp-2): submit → field-level approve → **approval activates the outlet** → RE_KYC →
+    re-upload (no 500).
+  - **UAT-C — Schemes & enrollment** (§3): catalog shows REAL schemes (no demo IDs), **SELF enroll persists + does NOT re-show on
+    reload**, **SALES enroll keys ChannelPartner.id**, targets/achievement Excel round-trips.
+  - **UAT-D — Wallet/Rewards/Redemption + Money settlement** (§4, §5, on seed-cp-1): redeem→OTP→debit, insufficient-balance,
+    double-submit guard, lifecycle/refund; **GLB-1 cash eligibility (RE_KYC/inactive blocked BEFORE debit)**, **GLB-2 zero-value**,
+    manual-cancel refused; **GLB-6 settlement lifecycle** (create→assign→process→UTR template→SUCCESS/FAILED upload→idempotent re-upload).
+  - **UAT-E — Finance: credits / invoicing / TDS** (§6, on the distributor partner): credit bank-file **held vs payable (GLB-1)**,
+    **FAILED→re-bank (GLM-2)**, **multi-entry REVERSED reversal (GLM-1)**, **beneficiary validation (GLM-3)**, **TDS multi-row stores
+    ALL rows (GLB-3)** + dup-skip, liability/export, invoicing.
+  - **UAT-F — UI/UX + no-fabrication visual sweep** (§8, READ-ONLY, runs alongside all): every page × role — screenshots, layout,
+    empty/loading/error states, dead buttons/links, console errors, responsive/mobile, copy; flag the #57(a) sub-dashboards as
+    KNOWN-mock (not new defects unless they were un-hidden).
+
+**AFTER the streams report:** orchestrator triages → fixes real defects via disjoint-file sub-executors (executor → INDEPENDENT
+audit → gate → runtime-verify, same discipline) → re-runs the affected stream → records ✅/❌ per row in `UAT-CHECKLIST.md` and any
+defects in `GO-LIVE-ISSUE-LIST.md`. THEN: hand the owner the short real-OTP STAGING confirmation pass → #76 prod data load →
+owner ops (#74) → go-live. Present the workstream plan + the #57(a) hide/wire call for owner go-ahead, then execute.
 
 1. **✅ DONE (2026-06-21, task #77) — gap-#57 (b/c/e) wired; (a) sub-dashboards DEFERRED.** (b) orphan `/admin/outlets` mock
    removed → redirect to the already-real `/admin/users/outlets`, + real per-outlet KYC-status join (derived from the owning
