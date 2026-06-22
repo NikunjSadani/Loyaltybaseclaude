@@ -33,6 +33,7 @@ import {
   ThumbsDown,
 } from 'lucide-react';
 import { useAdminSession } from '@/lib/admin-session';
+import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import type { UtrParseResult } from '@/types';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -558,6 +559,22 @@ function PayoutPageInner() {
                     <RefreshCw className="w-3.5 h-3.5" />
                     Reset
                   </button>
+                  <DownloadErrorReportButton
+                    columns={['Row', 'Outlet ID', 'Batch ID', 'UTR', 'Status']}
+                    rows={utrResult.rows
+                      .filter(r => r.errors.length > 0)
+                      .map(r => ({
+                        Row:        r.rowNum,
+                        'Outlet ID': r.outletId,
+                        'Batch ID':  r.batchId,
+                        UTR:        r.utr,
+                        Status:     r.status,
+                        __errors:   r.errors,
+                      }))}
+                    errorsByRow={(row) => (row.__errors as string[]) ?? []}
+                    filename="utr-upload-errors.xlsx"
+                    sheetName="UTR Errors"
+                  />
                 </div>
               </div>
             )}

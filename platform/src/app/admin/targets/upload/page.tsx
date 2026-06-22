@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
 import { buildMonthRange, formatMonth } from '@/lib/targets';
+import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -511,6 +512,24 @@ export default function TargetUploadPage() {
               {result.rows.filter(r => r.status !== 'accepted' && r.status !== 'updated').length > 20 && (
                 <p className="text-xs text-amber-500">…{result.rows.filter(r => r.status !== 'accepted' && r.status !== 'updated').length - 20} more rows not shown</p>
               )}
+              <div className="pt-2">
+                <DownloadErrorReportButton
+                  columns={['Row', 'Outlet Code', 'Month', 'Status']}
+                  rows={result.rows
+                    .filter(r => r.status !== 'accepted' && r.status !== 'updated')
+                    .map(r => ({
+                      Row:          r.rowIndex,
+                      'Outlet Code': r.outletCode ?? r.outletId ?? '',
+                      Month:        r.month ?? '',
+                      Status:       r.status,
+                      __errors:     [r.remarks ?? String(r.status)],
+                    }))}
+                  errorsByRow={(row) => (row.__errors as string[]) ?? []}
+                  filename={`target-upload-errors-${result.batchId || 'batch'}.xlsx`}
+                  sheetName="Upload Report"
+                  errorHeader="Remarks"
+                />
+              </div>
             </div>
           )}
 

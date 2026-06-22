@@ -22,6 +22,7 @@ import {
   getDeactivateTemplateData,
   generateOutletGuideHtml,
 } from '@/lib/outlet-upload';
+import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import type { HierarchyEmployee } from '@/types';
 import type {
   OutletUploadRow,
@@ -91,12 +92,14 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
   onConfirm,
   onClear,
   confirmLabel = 'Confirm Upload',
+  errorReportFilename,
 }: {
   testId:        string;
   result:        { headerError: string | null; rows: R[]; hasErrors: boolean; canProceed: boolean; summary: Record<string, number> };
   onConfirm:     () => void;
   onClear:       () => void;
   confirmLabel?: string;
+  errorReportFilename: string;
 }) {
   if (result.headerError) {
     return (
@@ -159,9 +162,20 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
       )}
 
       {result.hasErrors && (
-        <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-700">
-          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>Fix all errors in the Excel file and re-upload. The file will not be processed until all rows are valid.</span>
+        <div className="space-y-3">
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-700">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>Fix all errors in the Excel file and re-upload. The file will not be processed until all rows are valid.</span>
+          </div>
+          <DownloadErrorReportButton
+            columns={['Row', 'Outlet ID', 'Status']}
+            rows={result.rows
+              .filter(r => r.status === 'ERROR')
+              .map(r => ({ Row: r.rowNum, 'Outlet ID': r.outletId, Status: r.status, __errors: r.errors }))}
+            errorsByRow={(row) => (row.__errors as string[]) ?? []}
+            filename={errorReportFilename}
+            sheetName="Errors"
+          />
         </div>
       )}
 
@@ -214,9 +228,11 @@ function UploadSection({
   onClear,
   confirmLabel,
   submitError,
+  errorReportFilename,
 }: {
   testIdInput:       string;
   testIdPanel:       string;
+  errorReportFilename: string;
   onFileChange:      (file: File) => void;
   validationResult:  OutletUploadValidationResult | ReKYCFlagValidationResult | OutletDeactivateValidationResult | null;
   uploadState:       UploadState;
@@ -303,6 +319,7 @@ function UploadSection({
             onConfirm={onConfirm}
             onClear={onClear}
             confirmLabel={confirmLabel}
+            errorReportFilename={errorReportFilename}
           />
         )
       )}
@@ -697,6 +714,7 @@ export default function OutletsPage() {
             <UploadSection
               testIdInput="outlet-upload-input"
               testIdPanel="outlet-validation-panel"
+              errorReportFilename="outlet-upload-errors.xlsx"
               onFileChange={handleOutletFile}
               validationResult={outletValidation}
               uploadState={outletUploadState}
@@ -891,6 +909,7 @@ export default function OutletsPage() {
             <UploadSection
               testIdInput="rekyc-upload-input"
               testIdPanel="rekyc-validation-panel"
+              errorReportFilename="outlet-rekyc-errors.xlsx"
               onFileChange={handleReKYCFile}
               validationResult={rekycValidation}
               uploadState={rekycUploadState}
@@ -995,6 +1014,7 @@ export default function OutletsPage() {
             <UploadSection
               testIdInput="deactivate-upload-input"
               testIdPanel="deactivate-validation-panel"
+              errorReportFilename="outlet-deactivate-errors.xlsx"
               onFileChange={handleDeactivateFile}
               validationResult={deactivateValidation}
               uploadState={deactivateUploadState}

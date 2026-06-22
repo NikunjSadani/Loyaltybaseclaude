@@ -32,6 +32,7 @@ import {
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton'
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -560,7 +561,7 @@ export default function KycApprovalsPage() {
                 )}
               </p>
               {previewResult.errors.length > 0 && (
-                <ErrorTable errors={previewResult.errors} />
+                <ErrorTable errors={previewResult.errors} filename="kyc-bulk-verify-preview-errors.xlsx" />
               )}
             </div>
           )}
@@ -581,7 +582,7 @@ export default function KycApprovalsPage() {
                 )}
               </p>
               {commitResult.errors.length > 0 && (
-                <ErrorTable errors={commitResult.errors} />
+                <ErrorTable errors={commitResult.errors} filename="kyc-bulk-verify-commit-errors.xlsx" />
               )}
             </div>
           )}
@@ -923,8 +924,9 @@ export default function KycApprovalsPage() {
 
 // ─── Error table (shared by preview + commit) ─────────────────────────────────
 
-function ErrorTable({ errors }: { errors: { rowNumber: number; submissionId: string; message: string }[] }) {
+function ErrorTable({ errors, filename = 'kyc-bulk-verify-errors.xlsx' }: { errors: { rowNumber: number; submissionId: string; message: string }[]; filename?: string }) {
   return (
+    <div className="space-y-2">
     <div className="overflow-x-auto rounded border border-red-200">
       <table className="text-xs border-collapse w-full">
         <thead>
@@ -944,6 +946,19 @@ function ErrorTable({ errors }: { errors: { rowNumber: number; submissionId: str
           ))}
         </tbody>
       </table>
+    </div>
+      <DownloadErrorReportButton
+        columns={['Row', 'Submission ID', 'Message']}
+        rows={errors.map(e => ({
+          Row:            e.rowNumber,
+          'Submission ID': e.submissionId,
+          Message:        e.message,
+          __errors:       [e.message],
+        }))}
+        errorsByRow={(row) => (row.__errors as string[]) ?? []}
+        filename={filename}
+        sheetName="KYC Errors"
+      />
     </div>
   )
 }
