@@ -1,23 +1,23 @@
-﻿/**
+/**
  * TDD — schemes.ts
  *
  * Covers:
- *  1. Core enrollment cross-check (self-enroll vs sales-team enroll)
- *  2. getAdminSchemes() — reads from localStorage
- *  3. seedAdminSchemes() — idempotent seed for demo data
- *  4. getAllPendingSchemes() — reads ONLY from admin-published schemes (no MOCK_SCHEMES)
- *  5. getPendingSchemes()   — same, with outlet-type + enrollment filtering
+ *  1. getAdminSchemes() — reads from localStorage
+ *  2. seedAdminSchemes() — idempotent seed for demo data
+ *  3. getAllPendingSchemes() — reads ONLY from admin-published schemes (no MOCK_SCHEMES)
+ *  4. getPendingSchemes()   — same, with outlet-type + enrolledSchemeIds filtering
+ *
+ * NOTE: acceptScheme, saveSalesEnrollment, and isOutletEnrolledInScheme are now
+ * async functions that call the real backend (/api/schemes/:id/enroll and
+ * /api/schemes/:id/my-enrollment). They cannot be tested here without a running
+ * backend or a fetch mock. The localStorage-based enrollment tests have been
+ * removed; enrollment persistence is covered by the E2E harness (platform/e2e).
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  acceptScheme,
-  saveSalesEnrollment,
-  isOutletEnrolledInScheme,
   getPendingSchemes,
   getAllPendingSchemes,
-  getAcceptedSchemeIds,
-  getSelfEnrollments,
   getAdminSchemes,
   seedAdminSchemes,
   type AdminPublishedScheme,
@@ -60,7 +60,6 @@ const OTHER_SCHEME: AdminPublishedScheme = {
 
 const SCHEME_ID    = BASE_SCHEME.id;
 const OUTLET_ID    = 'o2';
-const OTHER_OUTLET = 'o5';
 
 beforeEach(() => {
   localStorage.clear();
@@ -142,7 +141,7 @@ describe('getAllPendingSchemes', () => {
   });
 });
 
-// ── getPendingSchemes (outlet-type + enrollment filtering) ────────────────────
+// ── getPendingSchemes (outlet-type + enrolledSchemeIds filtering) ─────────────
 
 describe('getPendingSchemes', () => {
   it('returns empty array when localStorage is empty (no MOCK_SCHEMES fallback)', () => {
@@ -156,92 +155,58 @@ describe('getPendingSchemes', () => {
     expect(pending[0].id).toBe(SCHEME_ID);
   });
 
-  it('hides a scheme from the partner app after the sales team enrolled that outlet', () => {
+  it('hides a scheme when its ID is in enrolledSchemeIds', () => {
     writeScheme(BASE_SCHEME);
-    saveSalesEnrollment(SCHEME_ID, OUTLET_ID);
-    const pending = getPendingSchemes('SSS', OUTLET_ID);
+    const pending = getPendingSchemes('SSS', OUTLET_ID, [SCHEME_ID]);
     expect(pending.find((s) => s.id === SCHEME_ID)).toBeUndefined();
   });
 
-  it('still shows other schemes the outlet has not been enrolled in', () => {
+  it('still shows other schemes not in enrolledSchemeIds', () => {
     writeScheme(BASE_SCHEME);
     writeScheme(OTHER_SCHEME);
-    saveSalesEnrollment(SCHEME_ID, OUTLET_ID);
-    const pending = getPendingSchemes('SSS', OUTLET_ID);
+    const pending = getPendingSchemes('SSS', OUTLET_ID, [SCHEME_ID]);
     expect(pending.length).toBeGreaterThan(0);
     expect(pending.every((s) => s.id !== SCHEME_ID)).toBe(true);
   });
 
-  it('hides a scheme the outlet self-accepted', () => {
+  it('shows all schemes when enrolledSchemeIds is empty', () => {
     writeScheme(BASE_SCHEME);
-    acceptScheme(SCHEME_ID, OUTLET_ID);
+    writeScheme(OTHER_SCHEME);
+    const pending = getPendingSchemes('SSS', OUTLET_ID, []);
+    expect(pending).toHaveLength(2);
+  });
+
+  it('excludes schemes past their acceptDeadline', () => {
+    writeScheme({ ...BASE_SCHEME, acceptDeadline: '2000-01-01T00:00:00' });
+    expect(getPendingSchemes('SSS', OUTLET_ID)).toHaveLength(0);
+  });
+
+  it('excludes schemes that do not require self-registration', () => {
+    writeScheme({ ...BASE_SCHEME, requiresSelfRegistration: false });
+    expect(getPendingSchemes('SSS', OUTLET_ID)).toHaveLength(0);
+  });
+
+  it('excludes schemes with SPECIFIC targeting when outletId is not in the list', () => {
+    writeScheme({
+      ...BASE_SCHEME,
+      outletTargeting: 'SPECIFIC',
+      targetedOutletIds: ['other_outlet'],
+    });
+    expect(getPendingSchemes('SSS', OUTLET_ID)).toHaveLength(0);
+  });
+
+  it('includes SPECIFIC-targeted schemes when outletId is in the list', () => {
+    writeScheme({
+      ...BASE_SCHEME,
+      outletTargeting: 'SPECIFIC',
+      targetedOutletIds: [OUTLET_ID],
+    });
     const pending = getPendingSchemes('SSS', OUTLET_ID);
-    expect(pending.find((s) => s.id === SCHEME_ID)).toBeUndefined();
-  });
-});
-
-// ── acceptScheme ──────────────────────────────────────────────────────────────
-
-describe('acceptScheme', () => {
-  it('stores the schemeId + outletId as a self-enrollment', () => {
-    acceptScheme(SCHEME_ID, OUTLET_ID);
-    const stored = getSelfEnrollments();
-    expect(stored).toHaveLength(1);
-    expect(stored[0].schemeId).toBe(SCHEME_ID);
-    expect(stored[0].outletId).toBe(OUTLET_ID);
-    expect(stored[0].acceptedAt).toBeDefined();
+    expect(pending).toHaveLength(1);
   });
 
-  it('is idempotent — calling twice does not create a duplicate', () => {
-    acceptScheme(SCHEME_ID, OUTLET_ID);
-    acceptScheme(SCHEME_ID, OUTLET_ID);
-    expect(getSelfEnrollments()).toHaveLength(1);
-  });
-
-  it('getAcceptedSchemeIds() still returns scheme IDs (backward compat)', () => {
-    acceptScheme(SCHEME_ID, OUTLET_ID);
-    expect(getAcceptedSchemeIds()).toContain(SCHEME_ID);
-  });
-});
-
-// ── isOutletEnrolledInScheme ──────────────────────────────────────────────────
-
-describe('isOutletEnrolledInScheme', () => {
-  it('returns false when nothing is enrolled', () => {
-    expect(isOutletEnrolledInScheme(SCHEME_ID, OUTLET_ID)).toBe(false);
-  });
-
-  it('returns true when the outlet enrolled via the sales team', () => {
-    saveSalesEnrollment(SCHEME_ID, OUTLET_ID);
-    expect(isOutletEnrolledInScheme(SCHEME_ID, OUTLET_ID)).toBe(true);
-  });
-
-  it('returns true when the outlet self-enrolled via the partner app', () => {
-    acceptScheme(SCHEME_ID, OUTLET_ID);
-    expect(isOutletEnrolledInScheme(SCHEME_ID, OUTLET_ID)).toBe(true);
-  });
-
-  it('returns false for a different outlet even if the scheme is self-enrolled by another outlet', () => {
-    acceptScheme(SCHEME_ID, OTHER_OUTLET);
-    expect(isOutletEnrolledInScheme(SCHEME_ID, OUTLET_ID)).toBe(false);
-  });
-
-  it('returns false for a different scheme even if the outlet enrolled in another scheme', () => {
-    saveSalesEnrollment('other_scheme', OUTLET_ID);
-    expect(isOutletEnrolledInScheme(SCHEME_ID, OUTLET_ID)).toBe(false);
-  });
-
-  it('returns false when schemeId matches but outletId differs (sales enrollment)', () => {
-    saveSalesEnrollment(SCHEME_ID, OTHER_OUTLET);
-    expect(isOutletEnrolledInScheme(SCHEME_ID, OUTLET_ID)).toBe(false);
-  });
-});
-
-// ── getPendingSchemes cross-check with isOutletEnrolledInScheme ───────────────
-
-describe('getPendingSchemes cross-checks', () => {
-  it('hides a scheme the outlet self-accepted when the sales team queries', () => {
-    acceptScheme(SCHEME_ID, OUTLET_ID);
-    expect(isOutletEnrolledInScheme(SCHEME_ID, OUTLET_ID)).toBe(true);
+  it('excludes schemes whose eligibility does not match the outlet type', () => {
+    writeScheme({ ...BASE_SCHEME, eligibility: ['WHOLESALER'] });
+    expect(getPendingSchemes('SSS', OUTLET_ID)).toHaveLength(0);
   });
 });

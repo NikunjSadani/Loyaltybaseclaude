@@ -23,7 +23,7 @@ import { classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
 import { fetchBanners, getActiveSalesBanners, getBgStyle, type Banner } from '@/lib/banner';
-import { getAllPendingSchemes, type Scheme } from '@/lib/schemes';
+import { fetchAllSchemes, type Scheme } from '@/lib/schemes';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -192,7 +192,8 @@ export default function SalesDashboard() {
 
     const cp = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
     setTargetConfig(resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, cp));
-    setPendingSchemes(getAllPendingSchemes());
+    // Real backend schemes (no localStorage demo data on this live surface).
+    void fetchAllSchemes().then(setPendingSchemes).catch(() => setPendingSchemes([]));
 
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
     const authHeaders = { Authorization: `Bearer ${token}` };
@@ -223,7 +224,7 @@ export default function SalesDashboard() {
   useEffect(() => {
     const onStorage = () => {
       setRoleState(getRole());
-      setPendingSchemes(getAllPendingSchemes());
+      void fetchAllSchemes().then(setPendingSchemes).catch(() => setPendingSchemes([]));
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);

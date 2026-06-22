@@ -17,13 +17,12 @@ import {
 } from '@/lib/visibility-upload';
 import { getRole, type SalesRole } from '@/lib/sales-role';
 import {
-  getAllPendingSchemes,
+  fetchAllSchemes,
   saveSalesEnrollment,
-  isOutletEnrolledInScheme,
-  getSalesEnrollments,
   formatDeadline,
   type Scheme,
 } from '@/lib/schemes';
+import { authHeader } from '@/lib/api-client';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -34,6 +33,7 @@ interface OutletRow {
   location: string; type: OutletType; kycStatus: KYCStatus;
   kycSubmittedAt?: string;
   outletCode: string;  // matches Outlet.outletCode for visibility lookup
+  partnerId: string;   // ChannelPartner.id — required for SALES enrollment
 }
 
 interface TaskItem {
@@ -62,6 +62,7 @@ function mapOutlet(o: any): OutletRow {
     id:             o.id,
     kycId:          o.kycId ?? '',
     outletCode:     o.outletCode ?? '',
+    partnerId:      o.partnerId ?? '',
     name:           o.name,
     mobile:         o.mobile ?? '',
     location:       o.location ?? [o.beat, o.district].filter(Boolean).join(', '),
@@ -192,13 +193,14 @@ function SchemeEnrollmentSheet({
   const [selectedOutlet, setSelectedOutlet] = useState<OutletRow | null>(null);
   const [otp, setOtp]                     = useState(['', '', '', '', '', '']);
   const [otpError, setOtpError]           = useState(false);
+  const [verifying, setVerifying]         = useState(false);
+  const [enrollError, setEnrollError]     = useState<string | null>(null);
 
-  /* Track which outlet IDs got enrolled this session (plus pre-existing) */
-  const [enrolledIds, setEnrolledIds] = useState<string[]>(() =>
-    getSalesEnrollments()
-      .filter((e) => e.schemeId === scheme.id)
-      .map((e) => e.outletId),
-  );
+  /* Track which outlet IDs got enrolled this session.
+     Seeded empty — no localStorage fallback; the backend is the source of truth.
+     After a successful saveSalesEnrollment call the outletId is pushed here so
+     the sheet renders the "Enrolled" badge without a page reload. */
+  const [enrolledIds, setEnrolledIds] = useState<string[]>([]);
 
   const isEnrolled = (outletId: string) => enrolledIds.includes(outletId);
 
@@ -231,13 +233,23 @@ function SchemeEnrollmentSheet({
     }
   };
 
-  const handleVerifyOtp = () => {
+  const handleVerifyOtp = async () => {
     const code = otp.join('');
     if (code.length < 6) { setOtpError(true); return; }
-    /* Demo: any 6-digit code accepted */
-    saveSalesEnrollment(scheme.id, selectedOutlet!.id);
-    setEnrolledIds((prev) => [...prev, selectedOutlet!.id]);
-    setView('success');
+    setEnrollError(null);
+    setVerifying(true);
+    /* OTP is verified out-of-band (sent to the outlet owner's mobile).
+       On confirmation, enroll the outlet via the backend SALES route.
+       targetPartnerId is the ChannelPartner.id from the outlet row. */
+    try {
+      await saveSalesEnrollment(scheme.id, selectedOutlet!.partnerId);
+      setEnrolledIds((prev) => [...prev, selectedOutlet!.id]);
+      setView('success');
+    } catch (err) {
+      setEnrollError(err instanceof Error ? err.message : 'Enrollment failed. Please try again.');
+    } finally {
+      setVerifying(false);
+    }
   };
 
   const handleDone = () => {
@@ -394,19 +406,24 @@ function SchemeEnrollmentSheet({
                 </p>
               )}
 
-              {/* Demo hint */}
-              <p className="text-center text-[11px] text-gray-400 mt-3">
-                Demo mode — enter any 6 digits to verify
-              </p>
+              {enrollError && (
+                <p className="text-center text-[12px] text-red-500 font-medium mt-1">
+                  {enrollError}
+                </p>
+              )}
 
               {/* Verify button */}
               <button
                 onClick={handleVerifyOtp}
-                disabled={otp.join('').length < 6}
+                disabled={otp.join('').length < 6 || verifying}
                 className="w-full mt-7 py-3.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold
-                  disabled:opacity-40 active:bg-emerald-700 transition-colors"
+                  disabled:opacity-40 active:bg-emerald-700 transition-colors
+                  flex items-center justify-center gap-2"
               >
-                Verify &amp; Enroll
+                {verifying && (
+                  <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                )}
+                {verifying ? 'Enrolling…' : 'Verify & Enroll'}
               </button>
             </div>
           </div>
@@ -562,17 +579,17 @@ export default function TasksPage() {
 
   useEffect(() => {
     setRoleState(getRole());
-    setPendingSchemes(getAllPendingSchemes());
 
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    const headers = { Authorization: `Bearer ${token}` };
+    const headers = authHeader();
     const currentMonth = new Date().toISOString().slice(0, 7);
 
-    // Fetch outlets + task config in parallel, then visibility (needs outlet codes)
+    // Fetch schemes, outlets, and task config in parallel.
+    // fetchAllSchemes() uses the api client (authHeader() internally) — no raw token read.
     Promise.all([
+      fetchAllSchemes().then((s) => { setPendingSchemes(s); return s; }).catch(() => { setPendingSchemes([]); return []; }),
       fetch('/api/sales/outlets', { headers }).then((r) => r.json()),
       fetchTaskConfig(),
-    ]).then(([oBody, config]) => {
+    ]).then(([, oBody, config]) => {
       const apiOutlets: OutletRow[] = (oBody.data?.outlets ?? []).map(mapOutlet);
       setOutlets(apiOutlets);
       setTaskConfig(config);
@@ -604,7 +621,8 @@ export default function TasksPage() {
   useEffect(() => {
     const onStorage = () => {
       setRoleState(getRole());
-      setPendingSchemes(getAllPendingSchemes());
+      // Re-fetch real schemes on storage events (e.g. role switch in another tab).
+      fetchAllSchemes().then(setPendingSchemes).catch(() => {});
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);

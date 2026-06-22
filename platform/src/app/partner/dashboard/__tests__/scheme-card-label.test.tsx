@@ -37,28 +37,33 @@ vi.mock('@/lib/banner', () => ({
   toEmbedUrl:                (u: string) => u,
 }));
 
-/* Inject a pending scheme into localStorage before the component reads it */
-const SCHEME_KEY = 'loyaltybase_admin_schemes_v1';
-const MOCK_SCHEME = {
-  id: 'scm-test-01',
-  name: 'Summer Push',
-  description: 'Push summer targets',
-  period: 'Jul 26 – Sept 26',
-  startDate: '2026-07-01T00:00:00',
-  endDate:   '2026-09-30T23:59:59',
-  acceptDeadline: '2027-09-23T23:59:59',
-  kpis: [{ label: 'Volume', unit: 'cases', target: 500 }],
-  requiresSelfRegistration: true,
-  publishedAt: new Date().toISOString(),
-  status: 'PUBLISHED',
-  enrolledOutlets: [],
-};
+/* The partner banner now reads the catalog from the REAL backend via
+ * fetchPendingSchemes() (no longer localStorage); mock it to return one pending
+ * scheme so the banner card renders. */
+const { HOISTED_SCHEME } = vi.hoisted(() => ({
+  HOISTED_SCHEME: {
+    id: 'scm-test-01',
+    name: 'Summer Push',
+    description: 'Push summer targets',
+    period: 'Jul 26 – Sept 26',
+    startDate: '2026-07-01T00:00:00',
+    endDate:   '2026-09-30T23:59:59',
+    acceptDeadline: '2027-09-23T23:59:59',
+    kpis: [{ label: 'Volume', unit: 'cases', target: 500 }],
+    requiresSelfRegistration: true,
+    status: 'PENDING_ACCEPTANCE',
+    eligibility: ['ALL'],
+  },
+}));
+vi.mock('@/lib/schemes', async (importActual) => {
+  const actual = await importActual<typeof import('@/lib/schemes')>();
+  return { ...actual, fetchPendingSchemes: vi.fn().mockResolvedValue([HOISTED_SCHEME]) };
+});
 
 import PartnerDashboardPage from '../page';
 
 describe('AA — Scheme card label', () => {
   beforeEach(() => {
-    localStorage.setItem(SCHEME_KEY, JSON.stringify([MOCK_SCHEME]));
     vi.useFakeTimers({ shouldAdvanceTime: true });
   });
 

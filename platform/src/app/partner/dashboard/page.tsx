@@ -29,7 +29,7 @@ import {
 import type { ApiSchemeTarget } from '@/types';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import {
-  getPendingSchemes, acceptScheme, formatDeadline,
+  fetchPendingSchemes, acceptScheme, formatDeadline,
   hasEnrollmentForm, getEnrollmentFields,
   type Scheme,
 } from '@/lib/schemes';
@@ -519,6 +519,7 @@ function SchemeSheet({
   const [agreed,      setAgreed]      = useState(false);
   const [submitting,  setSubmitting]  = useState(false);
   const [success,     setSuccess]     = useState(false);
+  const [enrollError, setEnrollError] = useState<string | null>(null);
   const [formValues,  setFormValues]  = useState<Record<string, unknown>>({});
   const [prefillData, setPrefillData] = useState<Record<string, string>>({});
 
@@ -542,13 +543,16 @@ function SchemeSheet({
 
   const handleAccept = async (submittedValues?: Record<string, unknown>) => {
     setSubmitting(true);
-    await new Promise((r) => setTimeout(r, 700));
-    acceptScheme(scheme.id, outletId);
-    onAccept(scheme.id);
-    setSubmitting(false);
-    setSuccess(true);
-    // submittedValues carries form data when the enrollment form is used
-    void submittedValues;
+    setEnrollError(null);
+    try {
+      await acceptScheme(scheme.id, outletId, submittedValues ?? {});
+      onAccept(scheme.id);
+      setSuccess(true);
+    } catch (err) {
+      setEnrollError(err instanceof Error ? err.message : 'Enrollment failed. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -669,6 +673,10 @@ function SchemeSheet({
                   </p>
                 </label>
 
+                {enrollError && (
+                  <p className="text-xs text-red-600 font-medium text-center">{enrollError}</p>
+                )}
+
                 <button
                   onClick={() => handleAccept()}
                   disabled={!agreed || submitting}
@@ -704,18 +712,26 @@ function SchemeAcceptanceBanner({
   outletId: string;
   isLoyaltyMember: boolean;
 }) {
-  const [pending,  setPending]  = useState<Scheme[]>([]);
-  const [active,   setActive]   = useState<Scheme | null>(null);
+  const [pending,      setPending]      = useState<Scheme[]>([]);
+  const [active,       setActive]       = useState<Scheme | null>(null);
+  const [schemeError,  setSchemeError]  = useState(false);
 
   useEffect(() => {
-    setPending(getPendingSchemes(outletType, outletId));
+    let cancelled = false;
+    setSchemeError(false);
+    fetchPendingSchemes(outletType, outletId)
+      .then((schemes) => { if (!cancelled) setPending(schemes); })
+      .catch(() => { if (!cancelled) setSchemeError(true); });
+    return () => { cancelled = true; };
   }, [outletType, outletId]);
 
   const handleAccepted = (id: string) => {
     setPending((prev) => prev.filter((s) => s.id !== id));
   };
 
-  if (pending.length === 0) return null;
+  // On fetch error: silently suppress the banner (non-critical feature; the
+  // partner can still use the rest of the dashboard).
+  if (schemeError || pending.length === 0) return null;
 
   const first = pending[0];
 
