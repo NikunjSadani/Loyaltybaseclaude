@@ -6,7 +6,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -37,16 +37,23 @@ import PartnerDashboardPage from '../page';
 
 describe('Z — Partner dashboard chart header', () => {
   beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (url.includes('/api/partner/targets')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { period: '2026-06', outlets: [] } }) });
+      }
+      if (url.includes('/api/auth/me')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { user: { channelPartner: { wallets: [] } } } }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ banners: [], popups: [] }) });
+    }));
   });
 
   afterEach(() => {
-    vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it('Z1: heading reads "Target vs. Achievement"', async () => {
     render(<PartnerDashboardPage />);
-    await act(async () => { vi.advanceTimersByTime(500); });
     await waitFor(() =>
       expect(screen.getByText('Target vs. Achievement')).toBeInTheDocument()
     );
@@ -54,9 +61,9 @@ describe('Z — Partner dashboard chart header', () => {
 
   it('Z2: sub-line "Target vs Achieved" is not shown', async () => {
     render(<PartnerDashboardPage />);
-    await act(async () => { vi.advanceTimersByTime(500); });
     await waitFor(() =>
-      expect(screen.queryByText(/target vs achieved/i)).not.toBeInTheDocument()
+      expect(screen.getByText('Target vs. Achievement')).toBeInTheDocument()
     );
+    expect(screen.queryByText(/target vs achieved/i)).not.toBeInTheDocument();
   });
 });

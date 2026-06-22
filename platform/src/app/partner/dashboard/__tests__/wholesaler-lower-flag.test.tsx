@@ -1,19 +1,18 @@
 /// <reference types="vitest/globals" />
 /**
- * WLF — WholesalerLower feature-flag gating (dashboard page)
+ * WLF — Wholesaler leaderboard card removed from the partner dashboard
  *
- * WLF1: renders a navigable link to /partner/leaderboard when showLeaderboard=true
- * WLF2: does NOT render a link to /partner/leaderboard when showLeaderboard=false
+ * The old WholesalerLower "rank #12 of 248" card had no real data source
+ * (fabricated leaderboard numbers) and was removed. The leaderboard feature
+ * is separately flag-gated on its own page — it must NOT appear on the
+ * dashboard hero area regardless of the client feature flag.
  *
- * Default session (usePartnerSession) returns WHOLESALER outlet so WholesalerLower renders.
- * Default client config (DEOLEO_CONFIG) has showLeaderboard=false.
+ * WLF1: dashboard renders WITHOUT a /partner/leaderboard link (real WHOLESALER data).
  */
 
 import React from 'react';
-import { render, screen, act } from '@testing-library/react';
-import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-
-// ── Shared mocks (same as chart-header.test.tsx) ─────────────────────────────
+import { render, screen, waitFor } from '@testing-library/react';
+import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -42,44 +41,41 @@ vi.mock('@/lib/banner', () => ({
   toEmbedUrl:               (u: string) => u,
 }));
 
-// Closure-captured flag: tests set it before rendering
-let mockShowLeaderboard = false;
-
-vi.mock('@/lib/platform/client-config-context', () => ({
-  useClientConfig: () => ({
-    features: {
-      walletModule: true,
-      partnerApp: {
-        showSchemes: true, showInvoices: true, showWallet: true,
-        showTeam: true, showLeaderboard: mockShowLeaderboard,
-      },
-    },
-    branding: { displayName: 'Test', primaryColor: '#16a34a' },
-  }),
-  ClientConfigProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  useFeatureFlag: () => true,
-}));
-
 import PartnerDashboardPage from '../page';
 
-describe('WLF — WholesalerLower flag gate (partner dashboard)', () => {
-  beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true }); });
-  afterEach(() => { vi.useRealTimers(); });
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
-  it('WLF1: renders a link to /partner/leaderboard when showLeaderboard=true', async () => {
-    mockShowLeaderboard = true;
+describe('WLF — leaderboard card removed from partner dashboard', () => {
+  it('WLF1: dashboard renders without a /partner/leaderboard link', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (url.includes('/api/partner/targets')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: {
+              period: '2026-06',
+              outlets: [{
+                outletCode: 'WS-1', outletName: 'Outlet 1', outletType: 'WHOLESALER',
+                kpis: [{ code: 'SV', name: 'Secondary Volume', target: 800, achieved: 400, pace: null, unit: 'cases', isPrimary: true }],
+              }],
+            },
+          }),
+        });
+      }
+      if (url.includes('/api/auth/me')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ success: true, data: { user: { channelPartner: { wallets: [{ redeemablePoints: 100 }] } } } }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ banners: [], popups: [] }) });
+    }));
+
     render(<PartnerDashboardPage />);
-    await act(async () => { vi.advanceTimersByTime(500); });
-
-    const links = screen.queryAllByRole('link');
-    const leaderboardLink = links.find(l => l.getAttribute('href') === '/partner/leaderboard');
-    expect(leaderboardLink).toBeTruthy();
-  });
-
-  it('WLF2: does NOT render a link to /partner/leaderboard when showLeaderboard=false', async () => {
-    mockShowLeaderboard = false;
-    render(<PartnerDashboardPage />);
-    await act(async () => { vi.advanceTimersByTime(500); });
+    await waitFor(() => expect(screen.getByText('My Targets')).toBeInTheDocument());
 
     const links = screen.queryAllByRole('link');
     const leaderboardLink = links.find(l => l.getAttribute('href') === '/partner/leaderboard');

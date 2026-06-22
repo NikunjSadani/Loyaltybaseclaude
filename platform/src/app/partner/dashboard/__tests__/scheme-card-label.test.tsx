@@ -9,7 +9,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
@@ -64,17 +64,24 @@ import PartnerDashboardPage from '../page';
 
 describe('AA — Scheme card label', () => {
   beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (url.includes('/api/partner/targets')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { period: '2026-06', outlets: [{ outletCode: 'O1', outletName: 'O1', outletType: 'SSS', kpis: [] }] } }) });
+      }
+      if (url.includes('/api/auth/me')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { user: { channelPartner: { wallets: [] } } } }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ banners: [], popups: [] }) });
+    }));
   });
 
   afterEach(() => {
     localStorage.clear();
-    vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it('AA1: scheme banner card shows "New Activation" not "New Scheme"', async () => {
     render(<PartnerDashboardPage />);
-    await act(async () => { vi.advanceTimersByTime(500); });
 
     await waitFor(() =>
       expect(screen.getByText('New Activation')).toBeInTheDocument()
@@ -83,9 +90,8 @@ describe('AA — Scheme card label', () => {
   });
 
   it('AA2: scheme detail sheet shows "New Activation" not "New Scheme"', async () => {
-    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+    const user = userEvent.setup();
     render(<PartnerDashboardPage />);
-    await act(async () => { vi.advanceTimersByTime(500); });
 
     // Open the scheme sheet by clicking the card
     await waitFor(() => expect(screen.getByText('New Activation')).toBeInTheDocument());

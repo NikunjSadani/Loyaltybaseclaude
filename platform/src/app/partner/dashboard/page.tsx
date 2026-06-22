@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useState, useEffect, useContext, createContext } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
-  TrendingUp, Gift, Trophy, Wallet, Target,
+  TrendingUp, Gift, Wallet, Target,
   HeadphonesIcon, CheckCircle,
   ChevronRight, X, Megaphone, ArrowRight, Sparkles, ListChecks,
 } from 'lucide-react';
@@ -19,15 +19,8 @@ import {
 import { formatPoints } from '@/lib/utils';
 import { buildCasesToGoMsg, classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
-import { usePartnerSession, type OutletType } from '@/lib/partner-session';
-import {
-  resolveConfig, pct,
-  DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD,
-  getPrimaryParam, currentPeriod, getPrimarySchemeTarget,
-  type OutletAchievement,
-} from '@/lib/targets';
-import type { ApiSchemeTarget } from '@/types';
-import { useClientConfig } from '@/lib/platform/client-config-context';
+import type { OutletType } from '@/lib/partner-session';
+import { pct, currentPeriod } from '@/lib/targets';
 import {
   fetchPendingSchemes, acceptScheme, formatDeadline,
   hasEnrollmentForm, getEnrollmentFields,
@@ -39,13 +32,42 @@ import { EnrollmentFormRenderer } from '@/components/partner/enrollment-form-ren
 import { formatLastUpdated, getLastSalesUploadDate } from '@/lib/sales-upload-utils';
 import { authHeader } from '@/lib/api-client';
 
-/* ─── Real-data context ──────────────────────────────────────────────────── */
+/* ─── Real-data model ────────────────────────────────────────────────────────
+   The dashboard hero consumes the SAME endpoints as the Targets page
+   (GET /api/partner/targets) and the wallet (GET /api/auth/me). No demo data.
+─────────────────────────────────────────────────────────────────────────────── */
 
-type AchievementsMap = Record<string, OutletAchievement>;
-const DashboardAchievementsContext = createContext<AchievementsMap>({});
+/** A KPI row from GET /api/partner/targets (per outlet). */
+interface ApiKpi {
+  code:      string;
+  name:      string;
+  target:    number | null;
+  achieved:  number | null;
+  pace:      number | null;
+  unit:      string;
+  isPrimary: boolean;
+}
 
-function useDashboardAchievements(): AchievementsMap {
-  return useContext(DashboardAchievementsContext);
+interface ApiOutlet {
+  outletCode: string;
+  outletName: string;
+  outletType: string;
+  kpis:       ApiKpi[];
+}
+
+interface ApiTargetsResponse {
+  period:  string | null;
+  outlets: ApiOutlet[];
+}
+
+/** Aggregated KPI across ALL of the partner's outlets (target/achieved summed). */
+interface AggKpi {
+  code:      string;
+  name:      string;
+  unit:      string;
+  isPrimary: boolean;
+  target:    number;
+  achieved:  number;
 }
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
@@ -56,17 +78,6 @@ function computePace() {
   const elapsed    = today.getDate();
   return { timePct: Math.round((elapsed / daysInMonth) * 100), daysLeft: daysInMonth - elapsed };
 }
-
-function fmtInr(n: number) {
-  return `₹${n.toLocaleString('en-IN')}`;
-}
-
-function fmtInrShort(n: number) {
-  if (n >= 1_00_000) return `₹${(n / 1_00_000).toFixed(1)}L`;
-  if (n >= 1_000)    return `₹${(n / 1_000).toFixed(1)}K`;
-  return `₹${n}`;
-}
-
 
 /* ─── Progress bar ────────────────────────────────────────────────────────── */
 
@@ -89,56 +100,17 @@ function ProgressBar({ pct, status }: { pct: number; status: KpiStatus }) {
   );
 }
 
-function ProgressBarLight({ pct, status }: { pct: number; status: string }) {
-  const clampedPct = Math.min(pct, 100);
-  const barColor =
-    status === 'MET'      ? 'bg-emerald-500' :
-    status === 'ON_TRACK' ? 'bg-blue-500'    :
-    status === 'AT_RISK'  ? 'bg-amber-500'   : 'bg-red-400';
-  const trackColor =
-    status === 'MET'      ? 'bg-emerald-100' :
-    status === 'ON_TRACK' ? 'bg-blue-100'    :
-    status === 'AT_RISK'  ? 'bg-amber-100'   : 'bg-red-100';
-
-  return (
-    <div className={`w-full ${trackColor} rounded-full h-2 overflow-hidden`}>
-      <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${clampedPct}%` }} />
-    </div>
-  );
-}
-
-/* ─── Status chip ─────────────────────────────────────────────────────────── */
-
-function StatusChip({ status }: { status: KpiStatus }) {
-  const cfg = {
-    MET:      { label: 'Target Met ✓',  cls: 'bg-emerald-400/20 text-emerald-100' },
-    ON_TRACK: { label: 'On Track',      cls: 'bg-blue-400/20 text-blue-100'       },
-    AT_RISK:  { label: 'At Risk',       cls: 'bg-amber-400/20 text-amber-200'     },
-    FAILED:   { label: 'Not Eligible',  cls: 'bg-red-400/20 text-red-200'         },
-    MISSED:   { label: 'Missed',        cls: 'bg-red-400/20 text-red-200'         },
-  }[status] ?? { label: status, cls: 'bg-white/10 text-white/60' };
-
-  return (
-    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${cfg.cls}`}>
-      {cfg.label}
-    </span>
-  );
-}
-
 /* ─── Shared: Sales vs Target chart section ──────────────────────────────── */
 
-function PerformanceChart({ outletId }: { outletId: string }) {
+function PerformanceChart({ primary }: { primary: AggKpi | null }) {
   const [chartView, setChartView] = useState<ChartView>('monthly');
   const { timePct, daysLeft } = computePace();
 
-  // Resolve real target data — reads from context (updated by API via PartnerDashboard)
-  const config      = resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD);
-  const achievement = useDashboardAchievements()[outletId];
-  const svParam     = config ? getPrimaryParam(config.params) : null;
-  const achieved    = svParam ? (achievement?.achievements[svParam.id] ?? 0) : 0;
-  const target      = svParam?.target ?? 0;
+  // Cases-to-go badge derived from the REAL primary KPI (achieved/target/unit).
+  const achieved    = primary?.achieved ?? 0;
+  const target      = primary?.target   ?? 0;
   const remaining   = Math.max(0, target - achieved);
-  const unit        = svParam?.unit ?? 'cases';
+  const unit        = primary?.unit ?? 'cases';
   const achievePct  = pct(achieved, target);
   const gap         = timePct - achievePct;
 
@@ -173,7 +145,7 @@ function PerformanceChart({ outletId }: { outletId: string }) {
       </CardHeader>
       <CardContent className="px-2 pb-2">
         <AchievementChart view={chartView} />
-        {chartView === 'monthly' && (
+        {chartView === 'monthly' && primary && (
           <div className={`mx-2 mb-1 mt-2 rounded-lg px-3 py-1.5 flex items-center gap-2 text-[10px] font-semibold ${badgeClass}`}>
             <TrendingUp className="h-3 w-3 shrink-0" />
             {buildCasesToGoMsg(remaining, unit, daysLeft)}
@@ -216,37 +188,41 @@ function QuickActions({ outletType }: { outletType: OutletType }) {
   );
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
-   WHOLESALER HERO — current cycle pts earned + available balance
-══════════════════════════════════════════════════════════════════════════ */
+/* ─── Shared single-KPI computation (pace-gap status from real data) ──────── */
 
-function WholesalerHero({ session, lastUpdatedLabel }: { session: ReturnType<typeof usePartnerSession>; lastUpdatedLabel?: string }) {
-  const { daysLeft, timePct } = computePace();
-
-  // ── Single source of truth: same data as the Targets page ──────────────
-  // Reads from context — PartnerDashboard updates context with real API data
-  const config      = resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD);
-  const achievement = useDashboardAchievements()[session.outletId];
-  const svParam     = config ? getPrimaryParam(config.params) : null;
-  const achieved    = svParam ? (achievement?.achievements[svParam.id] ?? 0) : 0;
-  const target      = svParam?.target ?? 0;
+function kpiView(primary: AggKpi | null, daysLeft: number, timePct: number) {
+  const achieved    = primary?.achieved ?? 0;
+  const target      = primary?.target   ?? 0;
   const achievedPct = pct(achieved, target);
   const remaining   = Math.max(0, target - achieved);
-  const label       = svParam?.label ?? 'Monthly Volume';
-  const unit        = svParam?.unit  ?? 'cases';
+  const unit        = primary?.unit ?? 'cases';
 
-  // ── Pace-gap status (time-correlated) ───────────────────────────────────
-  const paceGap = timePct - achievedPct;
-  const isMet      = achievedPct >= 100;
+  const paceGap    = timePct - achievedPct;
+  const isMet      = target > 0 && achievedPct >= 100;
   const isCritical = !isMet && (paceGap > 20 || (daysLeft <= 3 && paceGap > 5));
   const isAtRisk   = !isMet && !isCritical && paceGap > 5;
 
-  // Urgency colour for the days-left badge
   const urgencyBadge = isCritical
     ? 'bg-red-400/25 text-red-200'
     : isAtRisk
     ? 'bg-amber-400/25 text-amber-200'
     : 'bg-white/15 text-white/80';
+
+  const status: KpiStatus = isMet ? 'MET' : isCritical ? 'FAILED' : isAtRisk ? 'AT_RISK' : 'ON_TRACK';
+
+  return { achieved, target, achievedPct, remaining, unit, isMet, urgencyBadge, status };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   WHOLESALER HERO — primary KPI + real wallet balance
+══════════════════════════════════════════════════════════════════════════ */
+
+function WholesalerHero({
+  primary, walletPoints, lastUpdatedLabel,
+}: { primary: AggKpi | null; walletPoints: number | null; lastUpdatedLabel?: string }) {
+  const { daysLeft, timePct } = computePace();
+  const v = kpiView(primary, daysLeft, timePct);
+  const label = primary?.name ?? 'Monthly Volume';
 
   return (
     <div className="rounded-2xl overflow-hidden"
@@ -271,24 +247,26 @@ function WholesalerHero({ session, lastUpdatedLabel }: { session: ReturnType<typ
         {/* Hero row: achieved (left) + % and days left (right) */}
         <div className="flex items-end justify-between mb-2.5">
           <div>
-            <p className="text-3xl font-extrabold text-white leading-none">{achieved} <span className="text-lg font-bold text-white/70">{unit}</span></p>
-            <p className="text-[11px] text-white/50 mt-1">of {target} {unit}</p>
+            <p className="text-3xl font-extrabold text-white leading-none">{v.achieved} <span className="text-lg font-bold text-white/70">{v.unit}</span></p>
+            <p className="text-[11px] text-white/50 mt-1">of {v.target} {v.unit}</p>
           </div>
           <div className="text-right">
-            <p className="text-3xl font-extrabold text-white/90 leading-none">{achievedPct}%</p>
-            {!isMet && (
-              <span className={`inline-block mt-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${urgencyBadge}`}>
+            <p className="text-3xl font-extrabold text-white/90 leading-none">{v.achievedPct}%</p>
+            {!v.isMet && (
+              <span className={`inline-block mt-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${v.urgencyBadge}`}>
                 {daysLeft === 0 ? 'Last day' : `${daysLeft} day${daysLeft !== 1 ? 's' : ''} left`}
               </span>
             )}
           </div>
         </div>
 
-        <ProgressBar pct={achievedPct} status={isMet ? 'MET' : isCritical ? 'FAILED' : isAtRisk ? 'AT_RISK' : 'ON_TRACK'} />
+        <ProgressBar pct={v.achievedPct} status={v.status} />
 
-        {isMet && (
+        {v.isMet ? (
           <p className="text-[11px] text-emerald-300 font-semibold mt-2">Target achieved 🎉</p>
-        )}
+        ) : v.target === 0 ? (
+          <p className="text-[11px] text-white/40 mt-2">No targets yet</p>
+        ) : null}
       </Link>
 
       {/* ── Zone 2: Wallet ──────────────────────────────────────────────── */}
@@ -296,7 +274,7 @@ function WholesalerHero({ session, lastUpdatedLabel }: { session: ReturnType<typ
         <div>
           <p className="text-[10px] text-white/40 font-medium mb-0.5">Available</p>
           <p className="text-base font-extrabold text-white">
-            {formatPoints(session.pointsBalance)}
+            {walletPoints === null ? '—' : formatPoints(walletPoints)}
             <span className="text-sm font-medium text-white/50 ml-1">pts</span>
           </p>
         </div>
@@ -310,59 +288,15 @@ function WholesalerHero({ session, lastUpdatedLabel }: { session: ReturnType<typ
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   WHOLESALER LOWER — rank card
+   SSS / SUB-STOCKIST HERO — primary KPI (no wallet zone)
 ══════════════════════════════════════════════════════════════════════════ */
 
-function WholesalerLower({ session }: { session: ReturnType<typeof usePartnerSession> }) {
-  const { features } = useClientConfig();
-  const inner = (
-    <>
-      <div className="w-9 h-9 rounded-full bg-amber-100 flex items-center justify-center shrink-0">
-        <Trophy className="h-4 w-4 text-amber-500" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-[11px] text-gray-500 font-medium">Your Rank This Month</p>
-        <p className="text-sm font-bold text-gray-900">
-          #{session.leaderboardRank} <span className="text-gray-400 font-normal">of {session.leaderboardTotal} partners</span>
-        </p>
-      </div>
-      <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />
-    </>
-  );
-  const cls = 'bg-white rounded-xl border border-gray-200 px-4 py-3 flex items-center gap-3';
-  return features.partnerApp.showLeaderboard
-    ? <Link href="/partner/leaderboard" className={`${cls} hover:border-gray-300 hover:shadow-sm active:scale-95 transition-all`}>{inner}</Link>
-    : <div className={cls}>{inner}</div>;
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
-   RETAILER / SUB-STOCKIST HERO — cycle achievement
-══════════════════════════════════════════════════════════════════════════ */
-
-function RetailerHero({ outletId, lastUpdatedLabel }: { outletId: string; lastUpdatedLabel?: string }) {
+function RetailerHero({
+  primary, lastUpdatedLabel,
+}: { primary: AggKpi | null; lastUpdatedLabel?: string }) {
   const { daysLeft, timePct } = computePace();
-
-  // ── Same data source as targets page (from context) ───────────────────────
-  const config      = resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD);
-  const achievement = useDashboardAchievements()[outletId];
-  const svParam     = config ? getPrimaryParam(config.params) : null;
-  const achieved    = svParam ? (achievement?.achievements[svParam.id] ?? 0) : 0;
-  const target      = svParam?.target ?? 0;
-  const achievedPct = pct(achieved, target);
-  const remaining   = Math.max(0, target - achieved);
-  const label       = svParam?.label ?? 'Monthly Target';
-  const unit        = svParam?.unit  ?? 'cases';
-
-  const paceGap    = timePct - achievedPct;
-  const isMet      = achievedPct >= 100;
-  const isCritical = !isMet && (paceGap > 20 || (daysLeft <= 3 && paceGap > 5));
-  const isAtRisk   = !isMet && !isCritical && paceGap > 5;
-
-  const urgencyBadge = isCritical
-    ? 'bg-red-400/25 text-red-200'
-    : isAtRisk
-    ? 'bg-amber-400/25 text-amber-200'
-    : 'bg-white/15 text-white/80';
+  const v = kpiView(primary, daysLeft, timePct);
+  const label = primary?.name ?? 'Monthly Target';
 
   return (
     <div className="rounded-2xl overflow-hidden"
@@ -388,26 +322,28 @@ function RetailerHero({ outletId, lastUpdatedLabel }: { outletId: string; lastUp
         <div className="flex items-end justify-between mb-2.5">
           <div>
             <p className="text-3xl font-extrabold text-white leading-none">
-              {achieved} <span className="text-lg font-bold text-white/70">{unit}</span>
+              {v.achieved} <span className="text-lg font-bold text-white/70">{v.unit}</span>
             </p>
-            <p className="text-[11px] text-white/50 mt-1">of {target} {unit}</p>
+            <p className="text-[11px] text-white/50 mt-1">of {v.target} {v.unit}</p>
           </div>
           <div className="text-right">
-            <p className="text-3xl font-extrabold text-white/90 leading-none">{achievedPct}%</p>
-            {!isMet && (
-              <span className={`inline-block mt-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${urgencyBadge}`}>
+            <p className="text-3xl font-extrabold text-white/90 leading-none">{v.achievedPct}%</p>
+            {!v.isMet && (
+              <span className={`inline-block mt-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${v.urgencyBadge}`}>
                 {daysLeft === 0 ? 'Last day' : `${daysLeft} day${daysLeft !== 1 ? 's' : ''} left`}
               </span>
             )}
           </div>
         </div>
 
-        <ProgressBar pct={achievedPct} status={isMet ? 'MET' : isCritical ? 'FAILED' : isAtRisk ? 'AT_RISK' : 'ON_TRACK'} />
+        <ProgressBar pct={v.achievedPct} status={v.status} />
 
-        {isMet ? (
+        {v.isMet ? (
           <p className="text-[11px] text-emerald-300 font-semibold mt-2">Target achieved 🎉</p>
-        ) : remaining > 0 ? (
-          <p className="text-[11px] text-white/50 mt-2">{remaining} {unit} remaining</p>
+        ) : v.target === 0 ? (
+          <p className="text-[11px] text-white/40 mt-2">No targets yet</p>
+        ) : v.remaining > 0 ? (
+          <p className="text-[11px] text-white/50 mt-2">{v.remaining} {v.unit} remaining</p>
         ) : null}
       </Link>
     </div>
@@ -415,30 +351,25 @@ function RetailerHero({ outletId, lastUpdatedLabel }: { outletId: string; lastUp
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   MT HERO — dual-KPI breakdown
+   MT HERO (SSS_TOT) — multi-KPI breakdown across all aggregated KPIs
 ══════════════════════════════════════════════════════════════════════════ */
 
-function MTHero({ outletId, lastUpdatedLabel }: { outletId: string; lastUpdatedLabel?: string }) {
+function MTHero({
+  aggKpis, lastUpdatedLabel,
+}: { aggKpis: AggKpi[]; lastUpdatedLabel?: string }) {
   const { daysLeft, timePct } = computePace();
 
-  // ── Same data source as targets page (from context) ───────────────────────
-  const config      = resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, DEMO_PERIOD);
-  const achievement = useDashboardAchievements()[outletId];
-  const params      = config?.params ?? [];
-
-  // Build per-KPI rows from config (same params as targets page)
-  const kpiRows = params.map((p) => {
-    const achieved    = achievement?.achievements[p.id] ?? 0;
-    const achievedPct = pct(achieved, p.target);
+  const kpiRows = aggKpis.map((k) => {
+    const achievedPct = pct(k.achieved, k.target);
     const gap         = timePct - achievedPct;
-    const isMet       = achievedPct >= 100;
+    const isMet       = k.target > 0 && achievedPct >= 100;
     const isCritical  = !isMet && (gap > 20 || (daysLeft <= 3 && gap > 5));
     const isAtRisk    = !isMet && !isCritical && gap > 5;
-    return { param: p, achieved, achievedPct, isMet, isCritical, isAtRisk };
+    return { kpi: k, achievedPct, isMet, isCritical, isAtRisk };
   });
 
   const metCount = kpiRows.filter(r => r.isMet).length;
-  const allMet   = metCount === kpiRows.length;
+  const allMet   = kpiRows.length > 0 && metCount === kpiRows.length;
 
   return (
     <div className="rounded-2xl overflow-hidden"
@@ -460,33 +391,38 @@ function MTHero({ outletId, lastUpdatedLabel }: { outletId: string; lastUpdatedL
           </span>
         </div>
 
-        {/* Per-KPI rows — sourced from same config as targets page */}
-        <div className="space-y-3">
-          {kpiRows.map(({ param, achieved, achievedPct, isMet, isCritical, isAtRisk }) => {
-            const badge = isCritical
-              ? 'bg-red-400/25 text-red-200'
-              : isAtRisk
-              ? 'bg-amber-400/25 text-amber-200'
-              : isMet ? 'bg-emerald-400/20 text-emerald-200'
-              : 'bg-white/15 text-white/80';
+        {/* Per-KPI rows — sourced from the same aggregated API data */}
+        {kpiRows.length === 0 ? (
+          <p className="text-sm font-semibold text-white/70">No targets yet</p>
+        ) : (
+          <div className="space-y-3">
+            {kpiRows.map(({ kpi, achievedPct, isMet, isCritical, isAtRisk }) => {
+              const badge = isCritical
+                ? 'bg-red-400/25 text-red-200'
+                : isAtRisk
+                ? 'bg-amber-400/25 text-amber-200'
+                : isMet ? 'bg-emerald-400/20 text-emerald-200'
+                : 'bg-white/15 text-white/80';
+              const status: KpiStatus = isMet ? 'MET' : isCritical ? 'FAILED' : isAtRisk ? 'AT_RISK' : 'ON_TRACK';
 
-            return (
-              <div key={param.id} className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <p className="text-xs font-semibold text-white/90">{param.label}</p>
-                  <div className="flex items-center gap-2">
-                    <p className="text-xs font-bold text-white">{achievedPct}%</p>
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${badge}`}>
-                      {isMet ? '✓ Met' : daysLeft === 0 ? 'Last day' : `${daysLeft}d left`}
-                    </span>
+              return (
+                <div key={kpi.code} className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold text-white/90">{kpi.name}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-xs font-bold text-white">{achievedPct}%</p>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${badge}`}>
+                        {isMet ? '✓ Met' : daysLeft === 0 ? 'Last day' : `${daysLeft}d left`}
+                      </span>
+                    </div>
                   </div>
+                  <ProgressBar pct={achievedPct} status={status} />
+                  <p className="text-[10px] text-white/50">{kpi.achieved} of {kpi.target} {kpi.unit}</p>
                 </div>
-                <ProgressBar pct={achievedPct} status={isMet ? 'MET' : isCritical ? 'FAILED' : isAtRisk ? 'AT_RISK' : 'ON_TRACK'} />
-                <p className="text-[10px] text-white/50">{achieved} of {param.target} {param.unit}</p>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
 
         {allMet && (
           <p className="text-[11px] text-emerald-300 font-semibold mt-3">All targets achieved 🎉</p>
@@ -792,14 +728,17 @@ function SchemeAcceptanceBanner({
 ══════════════════════════════════════════════════════════════════════════ */
 
 export default function PartnerDashboard() {
-  const session = usePartnerSession();
   const [loading,           setLoading]           = useState(true);
   const [banners,           setBanners]           = useState<Banner[]>([]);
   const [bannerIndex,       setBannerIndex]       = useState(0);
   const [popup,             setPopup]             = useState<Popup | null>(null);
   const [lastUpdatedLabel,  setLastUpdatedLabel]  = useState<string>('');
-  // Achievements state — starts with mock data, silently updated by API (leaderboard pattern)
-  const [achievements, setAchievements]           = useState<AchievementsMap>({});
+
+  // ── Real data: aggregated targets + wallet ──────────────────────────────
+  const [aggKpis,      setAggKpis]      = useState<AggKpi[]>([]);
+  const [outletType,   setOutletType]   = useState<OutletType>('SSS');
+  const [firstOutletCode, setFirstOutletCode] = useState<string>('');
+  const [walletPoints, setWalletPoints] = useState<number | null>(null);
 
   // Touch / swipe state
   const touchStartX = React.useRef<number | null>(null);
@@ -819,35 +758,70 @@ export default function PartnerDashboard() {
       const activePopup = getActivePopup();
       if (activePopup && shouldShowPopup(activePopup)) setPopup(activePopup);
     });
-    const t = setTimeout(() => setLoading(false), 400);
 
     // Read last sales-data upload date from localStorage (set by admin on each upload)
     const storedDate = getLastSalesUploadDate();
     if (storedDate) setLastUpdatedLabel(formatLastUpdated(storedDate));
-
-    return () => clearTimeout(t);
   }, []);
 
-  // API hydration — leaderboard pattern: mock shown first, API updates silently
+  // ── Real data hydration: targets (per-outlet KPIs) + wallet (auth/me) ────
   useEffect(() => {
+    let cancelled = false;
     const period = currentPeriod();
-    fetch(`/api/partner/targets?period=${period}`, { headers: { ...authHeader() } })
+
+    const targetsP = fetch(`/api/partner/targets?period=${period}`, { headers: { ...authHeader() } })
       .then(r => r.json())
-      .then((json: { success: boolean; data?: { targets: ApiSchemeTarget[] } }) => {
-        if (json.success && json.data?.targets && json.data.targets.length > 0) {
-          const primary = getPrimarySchemeTarget(json.data.targets);
-          if (!primary) return;
-          setAchievements(prev => {
-            const existing = prev[session.outletId];
-            const next: OutletAchievement = existing
-              ? { ...existing, achievements: { ...existing.achievements, p_sv: primary.achievedValue } }
-              : { outletId: session.outletId, period, achievements: { p_sv: primary.achievedValue, p_fp1: 0, p_fp2: 0, p_fc: 0, p_ln: 0 } };
-            return { ...prev, [session.outletId]: next };
-          });
+      .then((json: { success: boolean; data?: ApiTargetsResponse }) => {
+        if (cancelled || !json.success || !json.data) return;
+        const outlets = json.data.outlets ?? [];
+
+        // Aggregate each KPI across ALL outlets: sum target + achieved (null → 0).
+        const order: string[] = [];
+        const byCode = new Map<string, AggKpi>();
+        for (const outlet of outlets) {
+          for (const k of outlet.kpis) {
+            const existing = byCode.get(k.code);
+            if (existing) {
+              existing.target   += k.target   ?? 0;
+              existing.achieved += k.achieved ?? 0;
+              existing.isPrimary = existing.isPrimary || k.isPrimary;
+            } else {
+              order.push(k.code);
+              byCode.set(k.code, {
+                code:      k.code,
+                name:      k.name,
+                unit:      k.unit ?? 'cases',
+                isPrimary: k.isPrimary,
+                target:    k.target   ?? 0,
+                achieved:  k.achieved ?? 0,
+              });
+            }
+          }
         }
+        setAggKpis(order.map(c => byCode.get(c)!));
+        setOutletType((outlets[0]?.outletType as OutletType) ?? 'SSS');
+        setFirstOutletCode(outlets[0]?.outletCode ?? '');
       })
-      .catch(() => {}); // silent — mock data already shown
-  }, [session.outletId]);
+      .catch(() => {}); // honest empty state — heroes render "No targets yet"
+
+    const walletP = fetch('/api/auth/me', { headers: { ...authHeader() } })
+      .then(r => r.json())
+      .then((json: {
+        success: boolean;
+        data?: { user?: { channelPartner?: { wallets?: Array<{ redeemablePoints?: number }> } | null } };
+      }) => {
+        if (cancelled || !json.success) return;
+        const pts = json.data?.user?.channelPartner?.wallets?.[0]?.redeemablePoints;
+        setWalletPoints(typeof pts === 'number' ? pts : null);
+      })
+      .catch(() => {}); // wallet zone falls back to "—"
+
+    Promise.allSettled([targetsP, walletP]).then(() => {
+      if (!cancelled) setLoading(false);
+    });
+
+    return () => { cancelled = true; };
+  }, []);
 
   // Auto-advance carousel every 5 s when multiple banners exist
   useEffect(() => {
@@ -879,12 +853,11 @@ export default function PartnerDashboard() {
     return <div className="flex items-center justify-center min-h-64"><Spinner size="lg" /></div>;
   }
 
-  const isMT         = session.outletType === 'SSS_TOT';
-  const isWholesaler = session.outletType === 'WHOLESALER';
+  const primary = aggKpis.find(k => k.isPrimary) ?? aggKpis[0] ?? null;
+  const isMT         = outletType === 'SSS_TOT';
+  const isWholesaler = outletType === 'WHOLESALER';
 
   return (
-    <DashboardAchievementsContext.Provider value={achievements}>
-
     <div className="space-y-4 fade-in">
 
       {/* ── Admin announcement carousel (stays at top) ── */}
@@ -958,27 +931,24 @@ export default function PartnerDashboard() {
       )}
 
       {/* ── 1. CURRENT CYCLE KPI HERO (outlet-specific) ── */}
-      {isWholesaler && <WholesalerHero session={session} lastUpdatedLabel={lastUpdatedLabel} />}
-      {isMT         && <MTHero outletId={session.outletId} lastUpdatedLabel={lastUpdatedLabel} />}
-      {!isWholesaler && !isMT && <RetailerHero outletId={session.outletId} lastUpdatedLabel={lastUpdatedLabel} />}
+      {isWholesaler && <WholesalerHero primary={primary} walletPoints={walletPoints} lastUpdatedLabel={lastUpdatedLabel} />}
+      {isMT         && <MTHero aggKpis={aggKpis} lastUpdatedLabel={lastUpdatedLabel} />}
+      {!isWholesaler && !isMT && <RetailerHero primary={primary} lastUpdatedLabel={lastUpdatedLabel} />}
 
       {/* ── 1b. SCHEME ACCEPTANCE BANNER (non-MT only) ── */}
       {!isMT && (
         <SchemeAcceptanceBanner
-          outletType={session.outletType}
-          outletId={session.outletId}
-          isLoyaltyMember={session.outletType !== 'WHOLESALER'}
+          outletType={outletType}
+          outletId={firstOutletCode}
+          isLoyaltyMember={outletType !== 'WHOLESALER'}
         />
       )}
 
       {/* ── 2. SALES vs TARGET CHART ── */}
-      <PerformanceChart outletId={session.outletId} />
+      <PerformanceChart primary={primary} />
 
-      {/* ── 4. WHOLESALER LOWER: rank + bonus offer ── */}
-      {isWholesaler && <WholesalerLower session={session} />}
-
-      {/* ── 5. QUICK ACTIONS ── */}
-      <QuickActions outletType={session.outletType} />
+      {/* ── 3. QUICK ACTIONS ── */}
+      <QuickActions outletType={outletType} />
 
       {/* ── POPUP ── */}
       {popup && (
@@ -1019,6 +989,5 @@ export default function PartnerDashboard() {
         </div>
       )}
     </div>
-    </DashboardAchievementsContext.Provider>
   );
 }

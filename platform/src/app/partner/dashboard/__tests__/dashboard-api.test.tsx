@@ -1,16 +1,17 @@
 /// <reference types="vitest/globals" />
 /**
- * PDB — Partner Dashboard page API wiring
+ * PDB — Partner Dashboard page real-data wiring
  *
  * PDB1: dashboard renders after loading resolves (smoke test)
  * PDB2: fetch IS called to /api/partner/targets for real KPI data
- * PDB3: graceful fallback — dashboard shown when fetch fails
- * PDB4: primary KPI value updates when API returns higher achievedValue (> mock)
+ * PDB3: graceful fallback — dashboard shown when fetch fails (honest empty state)
+ * PDB4: hero shows the REAL aggregated primary-KPI target (summed across outlets)
+ *       and the REAL wallet points — NOT the old demo numbers (800 / 4250).
  */
 
 import React from 'react';
 import { render, screen, waitFor, act } from '@testing-library/react';
-import { vi, describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -42,102 +43,99 @@ vi.mock('@/lib/banner', () => ({
   toEmbedUrl:               (u: string) => u,
 }));
 
-vi.mock('@/lib/partner-session', () => ({
-  usePartnerSession: () => ({
-    outletId: 'o1', outletType: 'WHOLESALER', firmName: 'Kumar General Store',
-    partnerName: 'Rajesh Kumar', tier: 'Gold', mobile: '9876543210',
-    track: 'POINTS',
-    pointsBalance: 4250, pointsLifetime: 8550,
-    leaderboardRank: 12, leaderboardTotal: 248,
-    inrEarnedThisCycle: 0, pendingPayoutInr: 0,
-  }),
-  OUTLET_TYPE_LABELS: { SSS: 'SSS', WHOLESALER: 'Wholesaler', SUB_STOCKIST: 'Sub-Stockist', SSS_TOT: 'SSS TOT' },
-  OUTLET_TYPE_COLORS: {
-    WHOLESALER: { bg: 'bg-amber-100', text: 'text-amber-700' },
-    SSS: { bg: 'bg-blue-100', text: 'text-blue-700' },
-    SUB_STOCKIST: { bg: 'bg-purple-100', text: 'text-purple-700' },
-    SSS_TOT: { bg: 'bg-emerald-100', text: 'text-emerald-700' },
-  },
-}));
-
 import PartnerDashboardPage from '../page';
+
+/** Builds a fetch stub routing /api/partner/targets and /api/auth/me. */
+function stubFetch({
+  targets,
+  me,
+  targetsReject = false,
+}: {
+  targets?: unknown;
+  me?: unknown;
+  targetsReject?: boolean;
+}) {
+  return vi.fn((url: string) => {
+    if (url.includes('/api/partner/targets')) {
+      if (targetsReject) return Promise.reject(new Error('Network error'));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(targets) });
+    }
+    if (url.includes('/api/auth/me')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(me) });
+    }
+    // banners etc.
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ banners: [], popups: [] }) });
+  });
+}
+
+const EMPTY_TARGETS = { success: true, data: { period: '2026-06', outlets: [] } };
+const EMPTY_ME      = { success: true, data: { user: { channelPartner: { wallets: [] } } } };
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
-describe('PDB — Partner Dashboard API wiring', () => {
+describe('PDB — Partner Dashboard real-data wiring', () => {
 
   it('PDB1: dashboard renders after loading resolves', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ banners: [], popups: [] }),
-    }));
+    vi.stubGlobal('fetch', stubFetch({ targets: EMPTY_TARGETS, me: EMPTY_ME }));
 
     render(<PartnerDashboardPage />);
-    await act(async () => { vi.advanceTimersByTime(500); });
-
-    // Page renders after 400ms loading timeout — should show "My Targets" link
-    expect(screen.getByText('My Targets')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('My Targets')).toBeInTheDocument());
   });
 
   it('PDB2: fetch IS called to /api/partner/targets for real KPI data', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ success: true, data: { targets: [] } }),
-    });
+    const mockFetch = stubFetch({ targets: EMPTY_TARGETS, me: EMPTY_ME });
     vi.stubGlobal('fetch', mockFetch);
 
     render(<PartnerDashboardPage />);
-    await act(async () => { vi.advanceTimersByTime(500); });
-    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    await waitFor(() => expect(screen.getByText('My Targets')).toBeInTheDocument());
 
     const calls = mockFetch.mock.calls.map((c: unknown[]) => c[0] as string);
     expect(calls.some((url: string) => url.includes('/api/partner/targets'))).toBe(true);
   });
 
   it('PDB3: graceful fallback — dashboard renders when fetch fails', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')));
+    vi.stubGlobal('fetch', stubFetch({ targetsReject: true, me: EMPTY_ME }));
 
     render(<PartnerDashboardPage />);
-    await act(async () => { vi.advanceTimersByTime(500); });
-
-    // Dashboard should still render with mock data
-    expect(screen.getByText('My Targets')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('My Targets')).toBeInTheDocument());
   });
 
-  it('PDB4: primary KPI value updates when API returns higher achievedValue', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-
-    // DEMO: o1 WHOLESALER, p_sv = 610/800 = 76%
-    // API returns achievedValue=800 → 100%
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({
-        success: true,
-        data: {
-          targets: [
-            {
-              id: 'st1', schemeId: 's1', schemeName: 'Volume Scheme',
-              period: '2026-05', targetValue: 800, achievedValue: 800,
-              percentage: 100, status: 'ACTIVE',
-            },
-          ],
-        },
-      }),
-    }));
+  it('PDB4: hero shows REAL aggregated primary-KPI target + REAL wallet points', async () => {
+    // Two WHOLESALER outlets, each with a primary KPI target 400 / achieved 200
+    // → aggregated target 800, achieved 400 (50%). Wallet redeemablePoints = 1234.
+    const targets = {
+      success: true,
+      data: {
+        period: '2026-06',
+        outlets: [
+          {
+            outletCode: 'WS-1', outletName: 'Outlet 1', outletType: 'WHOLESALER',
+            kpis: [{ code: 'SV', name: 'Secondary Volume', target: 400, achieved: 200, pace: null, unit: 'cases', isPrimary: true }],
+          },
+          {
+            outletCode: 'WS-2', outletName: 'Outlet 2', outletType: 'WHOLESALER',
+            kpis: [{ code: 'SV', name: 'Secondary Volume', target: 400, achieved: 200, pace: null, unit: 'cases', isPrimary: true }],
+          },
+        ],
+      },
+    };
+    const me = {
+      success: true,
+      data: { user: { channelPartner: { wallets: [{ redeemablePoints: 1234 }] } } },
+    };
+    vi.stubGlobal('fetch', stubFetch({ targets, me }));
 
     render(<PartnerDashboardPage />);
-    await act(async () => { vi.advanceTimersByTime(500); });
-    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
 
-    // After API update, the KPI hero should show 100% (achieved = target)
-    await waitFor(() => {
-      expect(screen.getByText('100%')).toBeInTheDocument();
-    }, { timeout: 2000 });
+    // Summed target (800) appears, summed achieved + percentage shown.
+    await waitFor(() => expect(screen.getByText(/of 800 cases/)).toBeInTheDocument());
+    expect(screen.getByText('50%')).toBeInTheDocument();
+
+    // REAL wallet points (1,234) — NOT the old demo 4,250.
+    expect(screen.getByText('1,234')).toBeInTheDocument();
+    expect(screen.queryByText('4,250')).not.toBeInTheDocument();
   });
 });

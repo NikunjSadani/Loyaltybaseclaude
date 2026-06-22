@@ -236,6 +236,39 @@ describe('PartnerService', () => {
       expect(focusPack.pace).toBe(0);
     });
 
+    it('returns isPrimary + unit per KPI (so the dashboard hero can pick THE primary KPI + label it)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O001' }]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'MONTH_TGT', label: 'Month Target', unit: 'cases', isPrimary: true },
+        { code: 'FOCUS_PACK_1', label: 'Focus Pack - 1', unit: 'units', isPrimary: false },
+      ]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        {
+          outletCode: 'O001',
+          outletName: 'Outlet One',
+          outletType: 'SSS',
+          targetValues: { MONTH_TGT: 800, FOCUS_PACK_1: 50 },
+        },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O001', kpiValues: { MONTH_TGT: 200 } },
+      ]);
+
+      const res = await service.getTargets(partner, { period: '2026-05' });
+      const kpis = res.outlets[0].kpis;
+
+      const month = kpis.find((k: { code: string }) => k.code === 'MONTH_TGT')!;
+      expect(month.isPrimary).toBe(true);
+      expect(month.unit).toBe('cases');
+      expect(month.target).toBe(800);
+      expect(month.achieved).toBe(200);
+
+      const focus = kpis.find((k: { code: string }) => k.code === 'FOCUS_PACK_1')!;
+      expect(focus.isPrimary).toBe(false);
+      expect(focus.unit).toBe('units');
+    });
+
     it('surfaces the per-outlet __names override as kpi.name AND never as a phantom KPI', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
       mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O001' }]);

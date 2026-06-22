@@ -181,12 +181,16 @@ export class PartnerService {
       }),
       this.prisma.kpiDef.findMany({
         where: { clientId: user.clientId },
-        select: { code: true, label: true },
+        select: { code: true, label: true, unit: true, isPrimary: true },
       }),
     ]);
 
-    // KPI code → generic label (the fallback when no per-outlet override is set).
-    const kpiLabel = new Map(kpiRows.map((k) => [k.code, k.label]));
+    // KPI code → generic label (the fallback when no per-outlet override is set),
+    // plus unit + primary flag so the partner dashboard hero can pick THE primary
+    // KPI and label its number (e.g. "of 800 cases") from real data.
+    const kpiLabel   = new Map(kpiRows.map((k) => [k.code, k.label]));
+    const kpiUnit    = new Map(kpiRows.map((k) => [k.code, k.unit]));
+    const kpiPrimary = new Map(kpiRows.map((k) => [k.code, k.isPrimary]));
 
     const targetIndex      = new Map(targetRows.map((r) => [r.outletCode, r]));
     const achievementIndex = new Map(achievementRows.map((r) => [r.outletCode, r]));
@@ -233,8 +237,10 @@ export class PartnerService {
           // Display rule: per-outlet custom name if set, else the KPI's generic
           // label (else the raw code as a last resort).
           const name = names[code] || kpiLabel.get(code) || code;
+          const unit = kpiUnit.get(code) ?? '';
+          const isPrimary = kpiPrimary.get(code) ?? false;
 
-          return { code, name, target, achieved, pace };
+          return { code, name, target, achieved, pace, unit, isPrimary };
         });
 
         return {
