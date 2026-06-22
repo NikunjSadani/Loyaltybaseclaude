@@ -75,10 +75,18 @@ export function resolveSlugFromHostname(hostname: string): string | null {
     return DEFAULT_DEV_SLUG;
   }
 
-  // Custom branded domain (full-hostname match) wins over the subdomain heuristic.
-  if (DOMAIN_TO_SLUG[host]) return DOMAIN_TO_SLUG[host];
+  // Staging serves every TENANT under a `uat.` prefix (uat.deoleoloyalty.gifsy.in,
+  // uat.clientb.app.gifsy.in, …). Strip it so the prod-shaped custom-domain map and the
+  // subdomain heuristic match. Without this, uat.deoleoloyalty.gifsy.in resolves to the
+  // bogus slug `uat` (parts[0]) and EVERY direct tenant login on staging is rejected with
+  // a wrong clientId. The operator host (uat.app.gifsy.in) is matched above before this,
+  // so it is never stripped.
+  const resolveHost = host.startsWith('uat.') ? host.slice(4) : host;
 
-  const parts = host.split('.');
+  // Custom branded domain (full-hostname match) wins over the subdomain heuristic.
+  if (DOMAIN_TO_SLUG[resolveHost]) return DOMAIN_TO_SLUG[resolveHost];
+
+  const parts = resolveHost.split('.');
 
   // Bare domain (e.g. "gifsy.in") — 2 parts or fewer
   if (parts.length <= 2) return null;

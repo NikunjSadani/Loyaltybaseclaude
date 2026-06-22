@@ -48,6 +48,23 @@ describe('resolveSlugFromHostname', () => {
     expect(resolveSlugFromHostname('uat.app.gifsy.in')).toBe('gifsy');
   });
 
+  // ── Staging `uat.` prefix on TENANT domains (the login-bounce bug) ───────────
+  it('maps the staging branded tenant domain uat.deoleoloyalty.gifsy.in to deoleo', () => {
+    expect(resolveSlugFromHostname('uat.deoleoloyalty.gifsy.in')).toBe('deoleo');
+  });
+
+  it('maps a staging subdomain tenant uat.deoleo.gifsy.in to deoleo', () => {
+    expect(resolveSlugFromHostname('uat.deoleo.gifsy.in')).toBe('deoleo');
+  });
+
+  it('maps a staging subdomain tenant uat.clientb.app.gifsy.in to clientb', () => {
+    expect(resolveSlugFromHostname('uat.clientb.app.gifsy.in')).toBe('clientb');
+  });
+
+  it('is case/port-insensitive for the staging tenant prefix', () => {
+    expect(resolveSlugFromHostname('UAT.DeoleoLoyalty.Gifsy.In:443')).toBe('deoleo');
+  });
+
   it('operator-console match is case-insensitive and ignores the port', () => {
     expect(resolveSlugFromHostname('APP.Gifsy.In:443')).toBe('gifsy');
     expect(resolveSlugFromHostname('UAT.App.Gifsy.In')).toBe('gifsy');
