@@ -1,3 +1,5 @@
+import { getStoredUser } from '@/lib/auth-client';
+
 // XSR → SO → ASM → RSM → ZNM → NSM
 export type SalesRole = 'XSR' | 'SO' | 'ASM' | 'RSM' | 'ZNM' | 'NSM';
 
@@ -113,16 +115,37 @@ export const HAS_TEAM: SalesRole[] = ['SO', 'ASM', 'RSM', 'ZNM', 'NSM'];
 
 const STORAGE_KEY = 'loyaltybase_sales_role';
 
+/**
+ * Map a backend UserRole (the JWT `role`, e.g. `SALES_ISR`) to the FE sales taxonomy
+ * used across the /sales UI. Inverse of api `mapRoleCodeToUserRole` (RSM/ZNM both
+ * collapse to SALES_STATE_HEAD → we surface RSM). Unknown/non-sales → 'SO'.
+ */
+export function roleFromBackend(backendRole?: string | null): SalesRole {
+  switch (backendRole) {
+    case 'SALES_HO':         return 'NSM';
+    case 'SALES_STATE_HEAD': return 'RSM';
+    case 'SALES_ASM':        return 'ASM';
+    case 'SALES_SO':         return 'SO';
+    case 'SALES_ISR':        return 'XSR';
+    default:                 return 'SO';
+  }
+}
+
 export function getRole(): SalesRole {
   if (typeof window === 'undefined') return 'SO';
   const stored = localStorage.getItem(STORAGE_KEY) as SalesRole | null;
-  // Migrate legacy codes → current canonical codes
-  if (stored === ('ISR' as string))        return 'XSR';
-  if (stored === ('ZM' as string))         return 'ZNM';
-  if (stored === ('NM' as string))         return 'NSM';
-  if (stored === ('STATE_HEAD' as string)) return 'RSM';
-  if (stored === ('HO' as string))         return 'NSM';
-  return stored ?? 'SO';
+  // An explicit demo/role-switcher override wins (test aid) — migrate legacy codes.
+  if (stored) {
+    if (stored === ('ISR' as string))        return 'XSR';
+    if (stored === ('ZM' as string))         return 'ZNM';
+    if (stored === ('NM' as string))         return 'NSM';
+    if (stored === ('STATE_HEAD' as string)) return 'RSM';
+    if (stored === ('HO' as string))         return 'NSM';
+    return stored;
+  }
+  // No override → reflect the REAL logged-in user's role from the JWT. Previously this
+  // returned 'SO' unconditionally, so every sales user appeared as a Sales Officer.
+  return roleFromBackend(getStoredUser()?.role);
 }
 
 export function setRole(role: SalesRole): void {

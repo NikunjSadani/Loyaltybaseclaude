@@ -121,7 +121,7 @@ export async function proxy(request: NextRequest) {
       }
     }
 
-    headers.set('x-user-id',   payload.userId as string)
+    headers.set('x-user-id',   payload.sub as string) // JWT user id is the `sub` claim, not `userId`
     headers.set('x-user-role', role)
     if (payload.partnerId) headers.set('x-partner-id', payload.partnerId as string)
 
