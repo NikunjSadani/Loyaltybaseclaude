@@ -37,7 +37,10 @@ export default defineConfig({
   // state-independent (unique fixtures per run).
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
+  // 1 retry locally too: `next dev` compiles a route on its first hit, which can exceed the 10s
+  // expect timeout on a cold route and flake a `toBeVisible` (the page renders fine on retry, once
+  // the route is warm). A single retry absorbs that dev-server-only first-compile latency.
+  retries: 1,
   workers: 1,
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'e2e/.report' }]],
   timeout: 30_000,

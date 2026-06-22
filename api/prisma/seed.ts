@@ -861,10 +861,12 @@ async function seedDeoleoDemo() {
   }
 
   // 3.10 Payout pipeline (W9 — the REAL INR-disbursement money path, #42). A FundLedger receipt
-  // (sufficient balance), a DRAFT PayoutBatch with one PENDING transaction for CP001 (which has a
-  // PAN, required by processBatch validation), and a COMPLETED batch to exercise the claim-guard
-  // rejection. The update paths RESET status (batch→DRAFT, txn→PENDING) so a re-seed re-arms the
-  // process test after a prior run flipped them to SUBMITTED/INITIATED.
+  // (sufficient balance), a DRAFT PayoutBatch with one PENDING transaction for the APPROVED
+  // distributor partner (seed-cp-3) — the GLB-1 eligibility gate (payouts.service processBatch)
+  // SKIPS any txn whose partner's effective KYC ≠ APPROVED, so the disbursement fixture MUST use an
+  // approved partner (seed-cp-1/2 are intentionally KYC-pending). The txn also carries beneficiary
+  // fields (GLM-3). The update paths RESET status (batch→DRAFT, txn→PENDING) AND re-pin partnerId so
+  // a re-seed re-arms the process test after a prior run flipped them to SUBMITTED/INITIATED.
   await prisma.fundLedger.upsert({
     where: { id: 'seed-fl-1' },
     update: { balancePaise: 10_000_000n },
@@ -892,11 +894,11 @@ async function seedDeoleoDemo() {
   });
   await prisma.payoutTransaction.upsert({
     where: { id: 'seed-pt-1' },
-    update: { status: PayoutStatus.PENDING, batchId: 'seed-pb-1', initiatedAt: null },
+    update: { status: PayoutStatus.PENDING, batchId: 'seed-pb-1', initiatedAt: null, partnerId: distPartner.id },
     create: {
       id: 'seed-pt-1',
       batchId: 'seed-pb-1',
-      partnerId: cp1?.partnerId ?? 'seed-cp-1',
+      partnerId: distPartner.id,
       payoutMode: PayoutMode.BANK_TRANSFER,
       status: PayoutStatus.PENDING,
       amountPaise: 500_000n, // ₹5,000

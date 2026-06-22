@@ -261,7 +261,15 @@ export default function HierarchyPage() {
     reader.onload = (e) => {
       try {
         const data     = e.target?.result;
-        const workbook = XLSX.read(data, { type: 'array' });
+        // SheetJS `type:'array'` expects a Uint8Array, NOT a raw ArrayBuffer. FileReader's
+        // readAsArrayBuffer yields an ArrayBuffer — the dev build tolerates it but the PRODUCTION
+        // browser bundle cannot read `.length` off it and throws (surfaced as "not a valid .xlsx"
+        // on a perfectly valid file). Narrow to ArrayBuffer + convert to Uint8Array explicitly.
+        if (!(data instanceof ArrayBuffer)) {
+          setParseError('Could not read the file — it appears empty or unreadable. Re-download the template and try again.');
+          return;
+        }
+        const workbook = XLSX.read(new Uint8Array(data), { type: 'array' });
         // Read the first sheet that contains data (skip Dos & Don'ts if present)
         const sheetName = workbook.SheetNames.find(
           n => n !== 'Dos & Don\'ts',
@@ -297,8 +305,13 @@ export default function HierarchyPage() {
         // Pass 3: employee-level validation (outlet guards, circular deps, etc.)
         const empResult = validateEmployeeUpload(cr.employeeRows, employees, CONFIG);
         setValidation(empResult);
-      } catch {
-        setParseError('Could not read the file. Please ensure it is a valid Excel (.xlsx) file.');
+      } catch (err) {
+        // Surface the real cause instead of a blanket "not a valid file" — the catch wraps the
+        // XLSX read AND the parse/validate passes, so a genuine parse bug must not masquerade as a
+        // bad upload (this swallowing hid the real round-trip defect during UAT).
+        const detail = err instanceof Error ? err.message : String(err);
+        console.error('[hierarchy upload] parse failed:', err);
+        setParseError(`Could not read the file: ${detail}. Ensure it is a valid Excel (.xlsx) file from the template.`);
       }
     };
     reader.readAsArrayBuffer(file);
