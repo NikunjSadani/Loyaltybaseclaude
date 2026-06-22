@@ -139,6 +139,13 @@ const NEXT_STATUS: Record<string, string[]> = {
 
 const VOUCHER_LIKE = new Set<PayoutMode | string>(['GIFT_CARD']);
 
+/** Cash payout modes (points → INR) — these also support a free-amount minimum. */
+const CASH_MODES = new Set<PayoutMode | string>(['UPI', 'BANK_TRANSFER']);
+/** Modes that support the FIXED / FREE_AMOUNT toggle + min/max config. */
+function supportsFreeAmount(mode: PayoutMode | string): boolean {
+  return mode === 'GIFT_CARD' || CASH_MODES.has(mode);
+}
+
 function fmtPts(n: number) { return n.toLocaleString('en-IN'); }
 function fmtPaise(p?: number | null) {
   if (p == null) return '—';
@@ -458,7 +465,9 @@ function ItemModal({
 
   const [form, setForm] = useState<ItemFormState>(() => {
     if (!editing) return blankItemForm(activeCats[0]?.id ?? '');
-    const isFree = editing.redemptionMode === 'GIFT_CARD'
+    // FREE_AMOUNT applies to gift cards AND cash modes (UPI / BANK_TRANSFER):
+    // pointsCost 0 with a configured minimum.
+    const isFree = supportsFreeAmount(editing.redemptionMode)
       && editing.pointsCost === 0
       && (editing.minRedemptionPoints ?? 0) >= 1;
     return {
@@ -483,8 +492,10 @@ function ItemModal({
   const set = <K extends keyof ItemFormState>(k: K, v: ItemFormState[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
 
-  const isGiftCard = form.redemptionMode === 'GIFT_CARD';
-  const isFreeAmount = isGiftCard && form.voucherMode === 'FREE_AMOUNT';
+  const isCashMode = CASH_MODES.has(form.redemptionMode);
+  // Free-amount config is available for gift cards and cash modes (UPI / BANK_TRANSFER).
+  const canFreeAmount = supportsFreeAmount(form.redemptionMode);
+  const isFreeAmount = canFreeAmount && form.voucherMode === 'FREE_AMOUNT';
 
   const validate = (): boolean => {
     const e: Record<string, string> = {};
@@ -494,7 +505,7 @@ function ItemModal({
     if (isFreeAmount) {
       const min = parseInt(form.minRedemptionPoints);
       const max = parseInt(form.maxRedemptionPoints);
-      if (!min || min < 1) e.minRedemptionPoints = 'Min must be ≥ 1 for a free-amount voucher';
+      if (!min || min < 1) e.minRedemptionPoints = 'Min must be ≥ 1 for a free-amount item';
       if (max && min && max < min) e.maxRedemptionPoints = 'Max must be ≥ min';
     } else {
       if (form.pointsCost <= 0) e.pointsCost = 'Points cost must be > 0';
@@ -621,12 +632,16 @@ function ItemModal({
             </div>
           </div>
 
-          {/* Voucher denomination (GIFT_CARD only) */}
-          {isGiftCard && (
+          {/* Denomination config — gift cards AND cash modes (UPI / BANK_TRANSFER). */}
+          {canFreeAmount && (
             <div className="rounded-xl border border-amber-100 bg-amber-50 p-4 space-y-4">
               <div className="flex items-center gap-2">
-                <Ticket className="h-4 w-4 text-amber-600 shrink-0" />
-                <p className="text-sm font-semibold text-amber-900">Voucher Configuration</p>
+                {isCashMode
+                  ? <Banknote className="h-4 w-4 text-amber-600 shrink-0" />
+                  : <Ticket className="h-4 w-4 text-amber-600 shrink-0" />}
+                <p className="text-sm font-semibold text-amber-900">
+                  {isCashMode ? 'Cash Payout Configuration' : 'Voucher Configuration'}
+                </p>
               </div>
               <div className="flex gap-3">
                 {(['FIXED', 'FREE_AMOUNT'] as VoucherMode[]).map((t) => (
@@ -647,13 +662,15 @@ function ItemModal({
               <p className="text-[10px] text-gray-500">
                 {isFreeAmount
                   ? 'pointsCost = 0; the partner redeems any amount whose points fall in the min/max range below.'
+                  : isCashMode
+                  ? 'Fixed points cost paid out as cash.'
                   : 'Fixed face value redeemed for a set points cost.'}
               </p>
 
               {isFreeAmount && (
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1">
-                    <label className="text-xs font-medium text-gray-700">Min points *</label>
+                    <label className="text-xs font-medium text-gray-700">Minimum redemption (points) *</label>
                     <input
                       type="number"
                       value={form.minRedemptionPoints}

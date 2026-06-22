@@ -67,6 +67,64 @@ describe('AuthService', () => {
     expect(service).toBeDefined();
   });
 
+  // â”€â”€ getMe â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  describe('getMe', () => {
+    const partnerUser = { sub: 'u1', role: 'CHANNEL_PARTNER', clientId: 'deoleo', phone: '99', name: 'P' } as any;
+
+    beforeEach(() => {
+      // getMe queries channelPartner/salesUser/wallet — extend the mock for this block.
+      (mockPrisma as any).channelPartner = { findUnique: jest.fn() };
+      (mockPrisma as any).salesUser = { findUnique: jest.fn() };
+      (mockPrisma as any).wallet = { findUnique: jest.fn() };
+    });
+
+    it('returns the partner beneficiary fields + the authoritative conversionRate', async () => {
+      process.env.POINTS_CONVERSION_RATE = '2';
+      (mockPrisma.user.findFirst as any); // unused here
+      (mockPrisma as any).user.findUnique = jest.fn().mockResolvedValue({ name: 'P', phone: '99' });
+      (mockPrisma as any).channelPartner.findUnique.mockResolvedValue({
+        id: 'cp1', partnerCode: 'PC1', businessName: 'Biz', ownerName: 'Owner',
+        phone: '99', email: 'e@e.com', gstNumber: null, panNumber: null, entityType: 'PROPRIETORSHIP',
+        bankName: 'HDFC', bankAccountNumber: '123456', bankAccountHolder: 'Owner',
+        ifscCode: 'HDFC0001', upiId: 'owner@upi', paymentMode: 'UPI',
+      });
+      (mockPrisma as any).salesUser.findUnique.mockResolvedValue(null);
+      (mockPrisma as any).wallet.findUnique.mockResolvedValue({
+        earnedPoints: 100, redeemablePoints: 80, lockedPoints: 0, lifetimeEarned: 100,
+      });
+
+      const result = await service.getMe(partnerUser);
+
+      // The select passed to channelPartner.findUnique must include the beneficiary fields.
+      const selectArg = (mockPrisma as any).channelPartner.findUnique.mock.calls[0][0].select;
+      expect(selectArg).toMatchObject({
+        bankName: true, bankAccountNumber: true, bankAccountHolder: true,
+        ifscCode: true, upiId: true, paymentMode: true,
+      });
+
+      const cp = result.user.channelPartner as any;
+      expect(cp.bankName).toBe('HDFC');
+      expect(cp.bankAccountNumber).toBe('123456');
+      expect(cp.bankAccountHolder).toBe('Owner');
+      expect(cp.ifscCode).toBe('HDFC0001');
+      expect(cp.upiId).toBe('owner@upi');
+      expect(cp.paymentMode).toBe('UPI');
+
+      // Authoritative server-side conversion rate from env.
+      expect((result as any).conversionRate).toBe(2);
+    });
+
+    it('defaults conversionRate to 1 when POINTS_CONVERSION_RATE is unset', async () => {
+      delete process.env.POINTS_CONVERSION_RATE;
+      (mockPrisma as any).user.findUnique = jest.fn().mockResolvedValue({ name: 'P', phone: '99' });
+      (mockPrisma as any).channelPartner.findUnique.mockResolvedValue(null);
+      (mockPrisma as any).salesUser.findUnique.mockResolvedValue(null);
+
+      const result = await service.getMe(partnerUser);
+      expect((result as any).conversionRate).toBe(1);
+    });
+  });
+
   // â”€â”€ sendOtp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   describe('sendOtp', () => {

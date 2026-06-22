@@ -207,3 +207,154 @@ describe('RR — Rewards live catalogue + redeem flow', () => {
     expect(screen.queryByText(/voucher confirmed/i)).not.toBeInTheDocument();
   });
 });
+
+/* ════════════════════════════════════════════════════════════════════════════
+   CASH — Cash Payout tab: real beneficiary + free-amount, no fabricated data
+   ════════════════════════════════════════════════════════════════════════════ */
+
+// A FREE_AMOUNT cash catalog item (pointsCost 0 with a min) — the deterministic
+// cash item the page should resolve.
+const CASH_ITEM = {
+  id: 'cash-1',
+  name: 'Cash Payout',
+  brand: 'Cash',
+  category: 'Cash',
+  pointsCost: 0,
+  redemptionMode: 'BANK_TRANSFER',
+  minRedemptionPoints: 500,
+  available: true,
+  isAffordable: true,
+};
+
+function catalogWithCash() {
+  return {
+    ok: true,
+    json: () => Promise.resolve({
+      success: true,
+      data: { items: [CASH_ITEM], userBalance: 50_000, pagination: { page: 1, limit: 20, total: 1, pages: 1 } },
+    }),
+  };
+}
+
+/** /api/auth/me with a real on-file bank beneficiary + conversionRate. */
+function meWithBank() {
+  return {
+    ok: true,
+    json: () => Promise.resolve({
+      success: true,
+      data: {
+        conversionRate: 1,
+        user: {
+          channelPartner: {
+            bankName: 'Axis Bank',
+            bankAccountNumber: '998877665544',
+            bankAccountHolder: 'Test Partner',
+            ifscCode: 'UTIB0001234',
+            upiId: null,
+            paymentMode: 'BANK_TRANSFER',
+          },
+        },
+      },
+    }),
+  };
+}
+
+/** /api/auth/me with NO bank/UPI on file. */
+function meEmpty() {
+  return {
+    ok: true,
+    json: () => Promise.resolve({
+      success: true,
+      data: {
+        conversionRate: 1,
+        user: { channelPartner: { bankName: null, bankAccountNumber: null, ifscCode: null, upiId: null } },
+      },
+    }),
+  };
+}
+
+describe('CASH — Cash Payout tab (real beneficiary, free-amount)', () => {
+  it('CASH1: shows the REAL on-file bank details (never the fabricated HDFC/****3210)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/auth/me')) return Promise.resolve(meWithBank());
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWithCash());
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: /bank transfer/i }));
+
+    // Real beneficiary rendered, masked account — no fabricated literals anywhere.
+    expect(await screen.findByText(/axis bank/i)).toBeInTheDocument();
+    expect(screen.getByText(/5544/)).toBeInTheDocument();        // last-4 of the real acct
+    expect(screen.queryByText(/HDFC/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/3210/)).not.toBeInTheDocument();
+  });
+
+  it('CASH2: free-amount input renders with the ₹-min derived from the cash item + real rate', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/auth/me')) return Promise.resolve(meWithBank());
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWithCash());
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: /bank transfer/i }));
+    await user.click(await screen.findByRole('button', { name: /redeem for cash/i }));
+
+    // The free-amount ₹ input is present, and the ₹-min (500 pts ÷ rate 1 = ₹500) is shown.
+    expect(await screen.findByLabelText(/payout amount/i)).toBeInTheDocument();
+    expect(screen.getByText(/min ₹500/i)).toBeInTheDocument();
+  });
+
+  it('CASH3: posts { rewardId, amount } to the redeem endpoint for a cash payout', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/auth/me')) return Promise.resolve(meWithBank());
+      if (url.includes('/api/rewards/redeem')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: { orderId: 'ord-c', orderNumber: 'RDM-C', requiredPoints: 500, message: 'OTP sent' },
+          }),
+        });
+      }
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWithCash());
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /bank transfer/i }));
+    await user.click(await screen.findByRole('button', { name: /redeem for cash/i }));
+
+    await user.type(await screen.findByLabelText(/payout amount/i), '600');
+    await user.click(screen.getByRole('button', { name: /redeem ₹600/i }));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([u]) => u === '/api/rewards/redeem');
+      expect(call).toBeTruthy();
+      const body = JSON.parse((call![1] as RequestInit).body as string);
+      expect(body).toEqual({ rewardId: 'cash-1', amount: 600 });
+    });
+  });
+
+  it('CASH4: with NO bank/UPI on file, shows the complete-KYC empty-state and hides the form', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/auth/me')) return Promise.resolve(meEmpty());
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWithCash());
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: /bank transfer/i }));
+
+    expect(await screen.findByText(/complete your bank\/upi details in kyc/i)).toBeInTheDocument();
+    // No redeem CTA when there's no beneficiary.
+    expect(screen.queryByRole('button', { name: /redeem for cash/i })).not.toBeInTheDocument();
+  });
+});

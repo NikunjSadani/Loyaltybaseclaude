@@ -45,6 +45,10 @@ export class AuthService {
         select: {
           id: true, partnerCode: true, businessName: true, ownerName: true,
           phone: true, email: true, gstNumber: true, panNumber: true, entityType: true,
+          // Beneficiary (KYC) — the partner reading THEIR OWN payout rails so the
+          // cash-redeem FE can show what it will pay to (tenant-safe: keyed on user.sub).
+          bankName: true, bankAccountNumber: true, bankAccountHolder: true,
+          ifscCode: true, upiId: true, paymentMode: true,
         },
       }),
       this.prisma.salesUser.findUnique({
@@ -66,6 +70,9 @@ export class AuthService {
       clientId: user.clientId,
       name: user.name,
       assumed: user.assumed ?? false,
+      // Authoritative points→₹ conversion rate so the partner FE previews points
+      // and shows the ₹ minimum from the server, not its stale localStorage rate.
+      conversionRate: parseFloat(process.env.POINTS_CONVERSION_RATE ?? '1'),
       user: {
         id: user.sub,
         name: dbUser?.name ?? user.name,

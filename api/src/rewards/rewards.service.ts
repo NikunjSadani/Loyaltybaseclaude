@@ -492,6 +492,10 @@ export class RewardsService {
             userId: true,
             isActive: true,
             deletedAt: true,
+            // Beneficiary rails for the pre-debit presence check (cash modes).
+            bankAccountNumber: true,
+            ifscCode: true,
+            upiId: true,
             // GLB-1b pre-tx gate: fetch all KYC submissions for the canonical
             // resolver (deterministic tiebreak). No take:1 limit — the resolver
             // picks the effective status. See kyc-eligibility.ts for rationale.
@@ -526,6 +530,17 @@ export class RewardsService {
       if (kycStatus !== 'APPROVED') {
         throw new BadRequestException(
           `Outlet partner KYC is not approved (current status: ${kycStatus ?? 'NO_SUBMISSION'}); cash redemption cannot be confirmed`,
+        );
+      }
+      // BENEFICIARY-PRESENCE GUARD (pre-debit). The outlet needs at least one
+      // COMPLETE rail to be payable; otherwise the order becomes an unpayable,
+      // UNCANCELLABLE PayoutTransaction. Reject BEFORE any points debit /
+      // valuePaise freeze / PayoutTransaction create.
+      const hasBank = !!(p.bankAccountNumber && p.ifscCode);
+      const hasUpi = !!p.upiId;
+      if (!hasBank && !hasUpi) {
+        throw new BadRequestException(
+          'Add your bank or UPI details (complete KYC) to redeem for cash.',
         );
       }
     }
@@ -847,6 +862,10 @@ export class RewardsService {
             userId: true,
             isActive: true,
             deletedAt: true,
+            // Beneficiary rails for the pre-debit presence check (cash modes).
+            bankAccountNumber: true,
+            ifscCode: true,
+            upiId: true,
             // GLB-1b pre-tx gate: fetch all KYC submissions for the canonical
             // resolver (deterministic tiebreak). No take:1 limit — the resolver
             // picks the effective status. See kyc-eligibility.ts for rationale.
@@ -882,6 +901,17 @@ export class RewardsService {
       if (kycStatus !== 'APPROVED') {
         throw new BadRequestException(
           `Partner KYC is not approved (current status: ${kycStatus ?? 'NO_SUBMISSION'}); cash redemption cannot be confirmed`,
+        );
+      }
+      // BENEFICIARY-PRESENCE GUARD (pre-debit). A cash payout needs at least one
+      // COMPLETE rail to be payable. Without it the order becomes an unpayable,
+      // UNCANCELLABLE PayoutTransaction — so reject BEFORE any points debit /
+      // valuePaise freeze / PayoutTransaction create.
+      const hasBank = !!(p.bankAccountNumber && p.ifscCode);
+      const hasUpi = !!p.upiId;
+      if (!hasBank && !hasUpi) {
+        throw new BadRequestException(
+          'Add your bank or UPI details (complete KYC) to redeem for cash.',
         );
       }
     }

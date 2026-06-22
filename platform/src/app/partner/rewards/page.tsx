@@ -13,11 +13,30 @@ import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
 import { useToast } from '@/components/ui/toast';
-import { formatPoints } from '@/lib/utils';
+import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { api } from '@/lib/api-client';
 import { usePartnerSession } from '@/lib/partner-session';
 import { getGifsySettings } from '@/lib/gifsy-settings';
+
+/* ─── Partner cash beneficiary (from GET /api/auth/me) ─────────────────────────
+   The partner's real, on-file KYC payout details + the tenant conversionRate.
+   This is the single source of truth for the cash-payout flow — there is NO
+   hardcoded bank/UPI literal and the cash min/rate no longer come from the
+   localStorage gifsy-settings drift. */
+interface CashBeneficiary {
+  bankName: string | null;
+  bankAccountNumber: string | null;
+  bankAccountHolder: string | null;
+  ifscCode: string | null;
+  upiId: string | null;
+  paymentMode: string | null;
+}
+
+/** True when the partner has at least one payout rail (bank or UPI) on file. */
+function hasBeneficiary(b: CashBeneficiary | null): boolean {
+  return !!b && (!!b.upiId || (!!b.bankAccountNumber && !!b.ifscCode));
+}
 
 /* ─── Catalogue item (live API shape, UI-augmented) ───────────────────────────
    Live data only — fields come straight from GET /api/rewards/catalog. We keep a
@@ -604,20 +623,21 @@ function VoucherRedeemSheet({
   );
 }
 
-/* ─── Bank Transfer sheet (points → INR; cash settlement is P6) ────────────────
-   The points debit is created via the same redeem endpoint when the tenant has a
-   bank-transfer catalog reward; the INR cash rail (UTR/payout) is owned by P6.
-   No catalog reward => no rewardId => sheet stays informational. */
+/* ─── Cash Payout sheet (points → INR via UPI / Bank Transfer) ─────────────────
+   ONE unified cash flow. The partner enters a free-amount ₹ figure; the points
+   debit is created via the same redeem endpoint as { rewardId, amount }. The
+   beneficiary (bank and/or UPI) is the partner's REAL on-file KYC detail, sourced
+   from GET /api/auth/me — never a hardcoded literal. The ₹-min is derived from
+   the cash catalog item's minRedemptionPoints using the real conversionRate. */
 
-function BankTransferSheet({
-  onClose, myBalance, minAmount, conversionRate, bankName, accountNumber, rewardId, onRedeemed,
+function CashPayoutSheet({
+  onClose, myBalance, minPoints, conversionRate, beneficiary, rewardId, onRedeemed,
 }: {
   onClose: () => void;
   myBalance: number;
-  minAmount: number;
+  minPoints: number;
   conversionRate: number;
-  bankName: string;
-  accountNumber: string;
+  beneficiary: CashBeneficiary;
   rewardId: string | null;
   onRedeemed: (pts: number) => void;
 }) {
@@ -629,43 +649,53 @@ function BankTransferSheet({
   const [success,    setSuccess]    = useState(false);
   const [orderId,    setOrderId]    = useState<string | null>(null);
 
-  const inrAmt    = parseInt(amount, 10) || 0;
-  const ptsNeeded = Math.ceil(inrAmt * conversionRate);
-  // Guard against a zero/invalid conversionRate to avoid dividing by zero
-  // (Infinity/NaN in the balance hint). null => unknown cap (don't block on it).
+  // Guard against a zero/invalid conversionRate to avoid dividing by zero.
   const hasRate   = Number.isFinite(conversionRate) && conversionRate > 0;
+  // ₹min = minRedemptionPoints / conversionRate (the cash item's minimum, in ₹).
+  const minInr    = hasRate ? Math.ceil(minPoints / conversionRate) : 0;
   const maxInr    = hasRate ? Math.floor(myBalance / conversionRate) : null;
 
-  const amountError = inrAmt > 0 && inrAmt < minAmount
-    ? `Minimum transfer is ${fmtInr(minAmount)}`
+  const inrAmt    = parseInt(amount, 10) || 0;
+  // Preview points with the REAL conversionRate (matches the backend), not localStorage.
+  const ptsNeeded = Math.ceil(inrAmt * conversionRate);
+
+  const amountError = inrAmt > 0 && inrAmt < minInr
+    ? `Minimum redemption is ${fmtInr(minInr)}`
     : maxInr !== null && inrAmt > maxInr
     ? `Exceeds balance (max ${fmtInr(maxInr)})`
     : '';
 
-  const canProceed = inrAmt >= minAmount && !amountError && myBalance >= ptsNeeded;
+  const canProceed = inrAmt >= minInr && !amountError && myBalance >= ptsNeeded;
 
   const handleSendOtp = async () => {
-    if (!rewardId) { toast.error('Bank transfer is not available right now'); return; }
+    if (!rewardId) { toast.error('Cash payout is not available right now'); return; }
     setSubmitting(true);
     const result = await api.post<RedeemInitResult>('/api/rewards/redeem', { rewardId, amount: inrAmt });
     setSubmitting(false);
-    if (!result.success) { toast.error(result.error || 'Could not start transfer'); return; }
+    if (!result.success) { toast.error(result.error || 'Could not start payout'); return; }
     setOrderId(result.data.orderId);
     setOtpSent(true);
   };
 
   const handleConfirm = async () => {
     if (otp.length < 6) { toast.error('Enter the OTP'); return; }
-    if (!orderId) { toast.error('Transfer session expired, please retry'); return; }
+    if (!orderId) { toast.error('Payout session expired, please retry'); return; }
     setSubmitting(true);
     const result = await api.post<{ orderId: string; status: string; message: string }>(
       '/api/rewards/redeem/confirm', { orderId, otp },
     );
     setSubmitting(false);
-    if (!result.success) { toast.error(result.error || 'Could not confirm transfer'); return; }
+    if (!result.success) { toast.error(result.error || 'Could not confirm payout'); return; }
     onRedeemed(ptsNeeded);
     setSuccess(true);
   };
+
+  // The destination summary for the success screen — UPI preferred, else bank.
+  const payoutTarget = beneficiary.upiId
+    ? beneficiary.upiId
+    : beneficiary.bankName
+    ? `${beneficiary.bankName} (${maskAccountNumber(beneficiary.bankAccountNumber ?? '')})`
+    : 'your registered account';
 
   if (success) {
     return (
@@ -676,11 +706,11 @@ function BankTransferSheet({
             <CheckCircle className="h-8 w-8 text-emerald-600" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-gray-900">Transfer Initiated!</h3>
+            <h3 className="text-lg font-bold text-gray-900">Payout Initiated!</h3>
             <p className="text-sm text-gray-500 mt-1">
-              {fmtInr(inrAmt)} will be transferred to {bankName} ({accountNumber}) within 2–3 working days.
+              {fmtInr(inrAmt)} will be paid to {payoutTarget} within 2–3 working days.
             </p>
-            <p className="text-xs text-gray-400 mt-1">{ptsNeeded} pts deducted. You will receive a WhatsApp with UTR once paid.</p>
+            <p className="text-xs text-gray-400 mt-1">{ptsNeeded} pts deducted. You will receive a WhatsApp confirmation once paid.</p>
           </div>
           <Button variant="primary" className="w-full" onClick={onClose}>Done</Button>
         </div>
@@ -703,16 +733,28 @@ function BankTransferSheet({
               <Banknote className="h-6 w-6 text-blue-600" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-gray-900">Bank Transfer</h3>
-              <p className="text-xs text-gray-500">Redeem points directly to your bank account</p>
+              <h3 className="text-base font-bold text-gray-900">Cash Payout</h3>
+              <p className="text-xs text-gray-500">Redeem points to your registered account</p>
             </div>
           </div>
 
-          {/* Bank account details */}
+          {/* Beneficiary on file — REAL details (bank and/or UPI). */}
           <div className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 space-y-1.5">
-            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Transfer to</p>
-            <p className="text-sm font-semibold text-gray-900">{bankName}</p>
-            <p className="text-xs text-gray-500 font-mono">Account ****{accountNumber.slice(-4)}</p>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Pay to</p>
+            {beneficiary.upiId && (
+              <p className="text-sm font-semibold text-gray-900" data-testid="cash-upi">UPI · {beneficiary.upiId}</p>
+            )}
+            {beneficiary.bankAccountNumber && beneficiary.ifscCode && (
+              <div data-testid="cash-bank">
+                <p className="text-sm font-semibold text-gray-900">{beneficiary.bankName ?? 'Bank account'}</p>
+                <p className="text-xs text-gray-500 font-mono">
+                  {maskAccountNumber(beneficiary.bankAccountNumber)} · {beneficiary.ifscCode}
+                </p>
+                {beneficiary.bankAccountHolder && (
+                  <p className="text-[11px] text-gray-400">{beneficiary.bankAccountHolder}</p>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Balance */}
@@ -721,25 +763,25 @@ function BankTransferSheet({
             <p className="text-base font-bold text-emerald-700">{formatPoints(myBalance)} pts = {maxInr !== null ? fmtInr(maxInr) : '—'}</p>
           </div>
 
-          {/* Amount input */}
+          {/* Amount input (free-amount) */}
           <div>
             <label className="text-xs font-medium text-gray-600 block mb-1">
-              Amount to transfer * <span className="text-gray-400 font-normal">(min {fmtInr(minAmount)}, max {maxInr !== null ? fmtInr(maxInr) : '—'})</span>
+              Amount to redeem * <span className="text-gray-400 font-normal">(min {fmtInr(minInr)}, max {maxInr !== null ? fmtInr(maxInr) : '—'})</span>
             </label>
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-bold text-gray-500">₹</span>
               <input
                 className={cn('w-full border rounded-xl pl-7 pr-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]',
                   amountError ? 'border-red-300' : 'border-gray-200')}
-                placeholder={`${minAmount}`}
+                placeholder={`${minInr}`}
                 value={amount}
                 onChange={e => setAmount(e.target.value.replace(/\D/g, ''))}
                 inputMode="numeric"
-                aria-label="Transfer amount"
+                aria-label="Payout amount"
               />
             </div>
             {amountError && <p className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{amountError}</p>}
-            {inrAmt >= minAmount && !amountError && (
+            {inrAmt >= minInr && !amountError && (
               <p className="text-xs text-emerald-600 mt-1 font-medium">
                 = {ptsNeeded} pts · {formatPoints(myBalance - ptsNeeded)} pts remaining after
               </p>
@@ -761,7 +803,7 @@ function BankTransferSheet({
         <div className="px-5 pb-6 pt-3 border-t border-gray-100">
           {!otpSent ? (
             <Button variant="primary" className="w-full" loading={submitting} disabled={!canProceed} onClick={handleSendOtp}>
-              {!canProceed && inrAmt > 0 ? amountError || 'Insufficient balance' : `Transfer ${inrAmt ? fmtInr(inrAmt) : ''}`}
+              {!canProceed && inrAmt > 0 ? amountError || 'Insufficient balance' : `Redeem ${inrAmt ? fmtInr(inrAmt) : ''}`}
             </Button>
           ) : (
             <div className="flex gap-3">
@@ -792,6 +834,10 @@ export default function RewardsPage() {
   const [voucherDetail, setVoucherDetail] = useState<CatalogueItem | null>(null);
   const [showBank,  setShowBank]  = useState(false);
   const [balance,   setBalance]   = useState(0);
+  // Real cash beneficiary + conversionRate from /api/auth/me (source of truth for
+  // the cash-payout flow). Null until loaded / when the partner has no rails.
+  const [beneficiary,    setBeneficiary]    = useState<CashBeneficiary | null>(null);
+  const [conversionRate, setConversionRate] = useState<number | null>(null);
   const settings = getGifsySettings();
 
   useEffect(() => {
@@ -811,6 +857,40 @@ export default function RewardsPage() {
         // On failure we simply show an empty catalogue (EmptyState) — no demo data.
       })
       .finally(() => setLoading(false));
+
+    // Real beneficiary + conversionRate for the cash-payout flow.
+    // No hardcoded bank/UPI literals — these come straight from the KYC record.
+    api.get<{
+      conversionRate?: number;
+      user?: {
+        channelPartner?: {
+          bankName?: string | null;
+          bankAccountNumber?: string | null;
+          bankAccountHolder?: string | null;
+          ifscCode?: string | null;
+          upiId?: string | null;
+          paymentMode?: string | null;
+        } | null;
+      };
+    }>('/api/auth/me')
+      .then((result) => {
+        if (!result.success || !result.data) return;
+        const cp = result.data.user?.channelPartner;
+        if (cp) {
+          setBeneficiary({
+            bankName:          cp.bankName ?? null,
+            bankAccountNumber: cp.bankAccountNumber ?? null,
+            bankAccountHolder: cp.bankAccountHolder ?? null,
+            ifscCode:          cp.ifscCode ?? null,
+            upiId:             cp.upiId ?? null,
+            paymentMode:       cp.paymentMode ?? null,
+          });
+        }
+        if (typeof result.data.conversionRate === 'number') {
+          setConversionRate(result.data.conversionRate);
+        }
+      });
+      // Failure simply leaves beneficiary null → the cash tab shows the KYC empty-state.
   }, [session.pointsBalance]);
 
   /* ── Gate: non-wholesalers don't have a points balance ── */
@@ -832,6 +912,29 @@ export default function RewardsPage() {
 
   const physicalItems = useMemo(() => gifts.filter(g => g.category !== 'Vouchers'), [gifts]);
   const voucherItems  = useMemo(() => gifts.filter(g => g.category === 'Vouchers'), [gifts]);
+
+  // Resolve the cash payout catalog item deterministically: among the cash-mode
+  // items (UPI / BANK_TRANSFER), prefer a FREE_AMOUNT one (pointsCost 0 with a
+  // minRedemptionPoints), else the first cash item by id for stable ordering.
+  const cashItem = useMemo(() => {
+    const cash = gifts
+      .filter(g => g.redemptionMode === 'UPI' || g.redemptionMode === 'BANK_TRANSFER')
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const freeAmount = cash.find(
+      g => g.points === 0 && (g.minRedemptionPoints ?? 0) >= 1,
+    );
+    return freeAmount ?? cash[0] ?? null;
+  }, [gifts]);
+
+  // Effective conversionRate — REAL /me value, with a safe fallback while loading
+  // or if the server sends a zero/invalid rate (never divide by zero downstream).
+  const effectiveRate = (conversionRate != null && Number.isFinite(conversionRate) && conversionRate > 0)
+    ? conversionRate
+    : settings.pointsConversionRate;
+  // The cash item's minimum, in points (server-validated). Falls back to a 1-point
+  // floor so the ₹-min is never below the configured minimum.
+  const cashMinPoints = cashItem?.minRedemptionPoints ?? 1;
+  const partnerHasBeneficiary = hasBeneficiary(beneficiary);
 
   const categories = useMemo(() => {
     const cats = Array.from(new Set(physicalItems.map(g => g.category)));
@@ -892,7 +995,7 @@ export default function RewardsPage() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1.5">
           <span className="text-sm font-bold text-[var(--brand-primary)]">{formatPoints(balance)} pts</span>
-          <span className="text-[10px] text-emerald-600 font-medium">= {fmtInr(balance * settings.pointsConversionRate)}</span>
+          <span className="text-[10px] text-emerald-600 font-medium">= {fmtInr(Math.floor(balance / effectiveRate))}</span>
         </div>
         <button
           onClick={() => router.push('/partner/rewards/orders')}
@@ -918,45 +1021,84 @@ export default function RewardsPage() {
         ))}
       </div>
 
-      {/* ── Bank Transfer tab ── */}
+      {/* ── Cash Payout tab (unified UPI / Bank Transfer) ── */}
       {activeTab === 'bank' && (
         <div className="space-y-4">
           <div className="bg-blue-50 border border-blue-100 rounded-xl px-4 py-4 space-y-2">
             <div className="flex items-center gap-2">
               <Banknote className="h-4 w-4 text-blue-600 shrink-0" />
-              <p className="text-sm font-semibold text-blue-800">Direct Bank Transfer</p>
+              <p className="text-sm font-semibold text-blue-800">Cash Payout</p>
             </div>
             <p className="text-xs text-blue-700">
-              Convert your points to INR and receive directly in your registered bank account.
-              1 pt = {fmtInr(settings.pointsConversionRate)}. Minimum transfer: {fmtInr(settings.minBankTransferAmount)}.
+              Convert your points to INR, paid directly to your registered account.
+              Minimum redemption: {fmtInr(Math.ceil(cashMinPoints / effectiveRate))}.
             </p>
           </div>
 
-          {/* Bank account on file */}
-          <div className="bg-white rounded-xl border border-gray-200 px-4 py-4 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gray-100 rounded-xl flex items-center justify-center">
-                <CreditCard className="h-5 w-5 text-gray-500" />
-              </div>
+          {!partnerHasBeneficiary ? (
+            /* No bank or UPI on file — mirror the backend guard; hide the form. */
+            <div
+              data-testid="cash-no-beneficiary"
+              className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-4 flex items-start gap-3"
+            >
+              <AlertCircle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
               <div>
-                <p className="text-sm font-semibold text-gray-900">HDFC Bank</p>
-                <p className="text-xs text-gray-500 font-mono">Account ****3210</p>
+                <p className="text-sm font-semibold text-amber-900">Bank / UPI details needed</p>
+                <p className="text-xs text-amber-700 mt-0.5">
+                  Complete your bank/UPI details in KYC to redeem for cash.
+                </p>
+                <button
+                  onClick={() => router.push('/partner/profile')}
+                  className="mt-2 text-xs font-semibold text-amber-800 underline"
+                >
+                  Go to KYC / Profile
+                </button>
               </div>
             </div>
-            <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">Verified</span>
-          </div>
+          ) : (
+            <>
+              {/* Beneficiary on file — REAL details (bank and/or UPI). */}
+              <div className="bg-white rounded-xl border border-gray-200 px-4 py-4 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-gray-100 rounded-xl flex items-center justify-center">
+                    <CreditCard className="h-5 w-5 text-gray-500" />
+                  </div>
+                  <div>
+                    {beneficiary!.upiId && (
+                      <p className="text-sm font-semibold text-gray-900" data-testid="cash-tab-upi">
+                        UPI · {beneficiary!.upiId}
+                      </p>
+                    )}
+                    {beneficiary!.bankAccountNumber && beneficiary!.ifscCode && (
+                      <div data-testid="cash-tab-bank">
+                        <p className="text-sm font-semibold text-gray-900">
+                          {beneficiary!.bankName ?? 'Bank account'}
+                        </p>
+                        <p className="text-xs text-gray-500 font-mono">
+                          {maskAccountNumber(beneficiary!.bankAccountNumber)} · {beneficiary!.ifscCode}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">On file</span>
+              </div>
 
-          <Button
-            variant="primary"
-            className="w-full"
-            disabled={balance < Math.ceil(settings.minBankTransferAmount * settings.pointsConversionRate)}
-            onClick={() => setShowBank(true)}
-          >
-            <Banknote className="h-4 w-4" />
-            {balance < Math.ceil(settings.minBankTransferAmount * settings.pointsConversionRate)
-              ? `Need ${formatPoints(Math.ceil(settings.minBankTransferAmount * settings.pointsConversionRate) - balance)} more pts`
-              : `Transfer Funds`}
-          </Button>
+              <Button
+                variant="primary"
+                className="w-full"
+                disabled={!cashItem || balance < cashMinPoints}
+                onClick={() => setShowBank(true)}
+              >
+                <Banknote className="h-4 w-4" />
+                {!cashItem
+                  ? 'Cash payout unavailable'
+                  : balance < cashMinPoints
+                  ? `Need ${formatPoints(cashMinPoints - balance)} more pts`
+                  : 'Redeem for Cash'}
+              </Button>
+            </>
+          )}
         </div>
       )}
 
@@ -1080,13 +1222,14 @@ export default function RewardsPage() {
           onRedeemed={handleRedeemed}
         />
       )}
-      {showBank && (
-        <BankTransferSheet
+      {showBank && partnerHasBeneficiary && (
+        <CashPayoutSheet
           onClose={() => setShowBank(false)}
-          myBalance={balance} minAmount={settings.minBankTransferAmount}
-          conversionRate={settings.pointsConversionRate}
-          bankName="HDFC Bank" accountNumber="****3210"
-          rewardId={gifts.find(g => g.redemptionMode === 'BANK_TRANSFER' || g.redemptionMode === 'UPI')?.id ?? null}
+          myBalance={balance}
+          minPoints={cashMinPoints}
+          conversionRate={effectiveRate}
+          beneficiary={beneficiary!}
+          rewardId={cashItem?.id ?? null}
           onRedeemed={handleRedeemed}
         />
       )}

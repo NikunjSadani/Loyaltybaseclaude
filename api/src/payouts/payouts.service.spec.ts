@@ -644,6 +644,81 @@ describe('PayoutsService', () => {
       expect(res.buffer.length).toBeGreaterThan(0);
       expect(res.filename).toBe('payout-utr-PB-1.xlsx');
     });
+
+    it('export carries ALL beneficiary columns from the PayoutTransaction snapshot (blank where missing)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          // Bank-rail beneficiary.
+          id: 'txn-bank',
+          amountPaise: 100000,
+          payoutMode: 'BANK_TRANSFER',
+          partner: { businessName: 'Acme', panNumber: 'ABCDE1234F' },
+          beneficiaryName: 'Ravi Kumar',
+          bankAccountNumber: '0011223344',
+          ifscCode: 'HDFC0001234',
+          bankName: 'HDFC Bank',
+          upiId: null, // blank in the file
+        },
+        {
+          // UPI-only beneficiary — bank columns blank.
+          id: 'txn-upi',
+          amountPaise: 50000,
+          payoutMode: 'UPI',
+          partner: { businessName: 'Beta', panNumber: 'ZZZZZ9999Z' },
+          beneficiaryName: 'Sara',
+          bankAccountNumber: null,
+          ifscCode: null,
+          bankName: null,
+          upiId: 'sara@upi',
+        },
+      ]);
+
+      const res = await service.buildPayoutUtrTemplate(gifsy, 'b1');
+
+      // Re-parse the produced sheet to assert the columns + values round-trip.
+      const wb = XLSX.read(res.buffer, { type: 'buffer' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const aoa = XLSX.utils.sheet_to_json<(string | number)[]>(ws, {
+        header: 1,
+        defval: '',
+      }) as (string | number)[][];
+
+      const headers = aoa[0].map(String);
+      // New read-only beneficiary columns are present.
+      for (const col of [
+        'Beneficiary Name',
+        'Bank Account Number',
+        'IFSC',
+        'Bank Name',
+        'UPI ID',
+      ]) {
+        expect(headers).toContain(col);
+      }
+      // The existing round-trip key + fill columns are still present.
+      for (const col of ['Transaction ID', 'UTR', 'Status']) {
+        expect(headers).toContain(col);
+      }
+
+      const idIdx = headers.indexOf('Transaction ID');
+      const benIdx = headers.indexOf('Beneficiary Name');
+      const acctIdx = headers.indexOf('Bank Account Number');
+      const ifscIdx = headers.indexOf('IFSC');
+      const bankIdx = headers.indexOf('Bank Name');
+      const upiIdx = headers.indexOf('UPI ID');
+
+      const bankRow = aoa.find((r) => r[idIdx] === 'txn-bank')!;
+      expect(bankRow[benIdx]).toBe('Ravi Kumar');
+      expect(bankRow[acctIdx]).toBe('0011223344');
+      expect(bankRow[ifscIdx]).toBe('HDFC0001234');
+      expect(bankRow[bankIdx]).toBe('HDFC Bank');
+      expect(bankRow[upiIdx]).toBe(''); // blank where missing
+
+      const upiRow = aoa.find((r) => r[idIdx] === 'txn-upi')!;
+      expect(upiRow[upiIdx]).toBe('sara@upi');
+      expect(upiRow[acctIdx]).toBe(''); // bank columns blank for a UPI-only beneficiary
+      expect(upiRow[ifscIdx]).toBe('');
+    });
   });
 
   describe('uploadPayoutUtr', () => {

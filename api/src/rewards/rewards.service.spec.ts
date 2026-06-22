@@ -476,6 +476,97 @@ describe('RewardsService', () => {
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 
+    // ── BENEFICIARY-PRESENCE GUARD (pre-debit) ────────────────────────────────
+
+    it('rejects a UPI redemption when the partner has NEITHER bank NOR upi (pre-debit)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'UPI',
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+          // No rails at all.
+          bankAccountNumber: null, ifscCode: null, upiId: null,
+        },
+      });
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toThrow('Add your bank or UPI details');
+      // Guard sits before OTP verification and any debit.
+      expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('rejects a BANK_TRANSFER redemption with a partial bank rail (acct but no IFSC) and no upi', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'BANK_TRANSFER',
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+          // Incomplete bank rail (no IFSC), no upi → not payable.
+          bankAccountNumber: '0011223344', ifscCode: null, upiId: null,
+        },
+      });
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('allows a UPI redemption when ONLY upi is present (no bank)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'UPI',
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+          bankAccountNumber: null, ifscCode: null, upiId: 'only@upi',
+        },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      // In-tx TOCTOU re-read + bank snapshot return an eligible partner.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        isActive: true, deletedAt: null,
+        kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+        bankAccountHolder: null, ownerName: 'Owner', upiId: 'only@upi',
+        bankAccountNumber: null, ifscCode: null, bankName: null,
+      });
+      mockPrisma.payoutTransaction.create.mockResolvedValue({ id: 'pt1' });
+
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .resolves.toMatchObject({ status: 'CONFIRMED' });
+      expect(mockWallet.debitRedeem).toHaveBeenCalled();
+    });
+
+    it('allows a BANK_TRANSFER redemption when ONLY a complete bank rail is present (no upi)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'BANK_TRANSFER',
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+          bankAccountNumber: '0011223344', ifscCode: 'HDFC0001234', upiId: null,
+        },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        isActive: true, deletedAt: null,
+        kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+        bankAccountHolder: 'Holder', ownerName: 'Owner', upiId: null,
+        bankAccountNumber: '0011223344', ifscCode: 'HDFC0001234', bankName: 'HDFC',
+      });
+      mockPrisma.payoutTransaction.create.mockResolvedValue({ id: 'pt1' });
+
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .resolves.toMatchObject({ status: 'CONFIRMED' });
+      expect(mockWallet.debitRedeem).toHaveBeenCalled();
+    });
+
     it('GLB-1b: DOES NOT apply the KYC gate to non-cash (GIFT_CARD) redemptions', async () => {
       // A GIFT_CARD order with a non-APPROVED partner still goes through (gate is cash-only).
       const nonCashOrder = {
@@ -510,7 +601,14 @@ describe('RewardsService', () => {
         partner: {
           id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
           kycSubmissions: [{ status: 'APPROVED' }],
+          // Rail present so the pre-tx beneficiary guard passes and we reach GLB-2.
+          bankAccountNumber: '0011223344', ifscCode: 'HDFC0001234', upiId: 'ravi@upi',
         },
+      });
+      // The in-tx TOCTOU re-read must also return an eligible partner so we reach GLB-2.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        isActive: true, deletedAt: null,
+        kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
       });
       mockPrisma.otpCode.findFirst.mockResolvedValue({
         id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
@@ -886,6 +984,64 @@ describe('RewardsService', () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    // ── BENEFICIARY-PRESENCE GUARD (pre-debit, outlet) ───────────────────────
+
+    it('rejects an outlet cash redemption when the outlet has NEITHER bank NOR upi', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(outletPartner);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'UPI',
+        partner: {
+          id: 'cp-out', userId: 'outletUser1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+          bankAccountNumber: null, ifscCode: null, upiId: null,
+        },
+      });
+      await expect(
+        service.confirmRedeemForOutlet(sales, {
+          orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+        }),
+      ).rejects.toThrow('Add your bank or UPI details');
+      expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('allows an outlet cash redemption when at least one rail (upi) is present', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        // outlet partner resolution + in-tx TOCTOU/snapshot read all proxy here.
+        ...outletPartner,
+        isActive: true, deletedAt: null,
+        kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+        bankAccountHolder: null, ownerName: 'Outlet Owner', upiId: 'outlet@upi',
+        bankAccountNumber: null, ifscCode: null, bankName: null,
+      });
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'UPI',
+        partner: {
+          id: 'cp-out', userId: 'outletUser1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+          bankAccountNumber: null, ifscCode: null, upiId: 'outlet@upi',
+        },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockWallet.debitRedeem.mockResolvedValue({});
+      mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
+      mockPrisma.payoutTransaction.create.mockResolvedValue({ id: 'pt1' });
+
+      await expect(
+        service.confirmRedeemForOutlet(sales, {
+          orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+        }),
+      ).resolves.toMatchObject({ status: 'CONFIRMED' });
+      expect(mockWallet.debitRedeem).toHaveBeenCalled();
     });
   });
 
@@ -1610,6 +1766,8 @@ describe('RewardsService', () => {
       partner: {
         id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
         kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+        // Beneficiary rails present so the pre-tx beneficiary-presence guard passes.
+        bankAccountNumber: '0011223344', ifscCode: 'HDFC0001234', upiId: 'ravi@upi',
       },
       reward: { name: 'Cash ₹1000', stockQuantity: null },
     };
@@ -1780,6 +1938,8 @@ describe('RewardsService', () => {
       partner: {
         id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
         kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+        // Beneficiary rails present so the pre-tx beneficiary-presence guard passes.
+        bankAccountNumber: '9988776655', ifscCode: 'ICIC0001234', upiId: 'alice@upi',
       },
       reward: { name: 'Cash ₹500', stockQuantity: null },
     };

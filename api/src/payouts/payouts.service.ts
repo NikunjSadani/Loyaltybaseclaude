@@ -570,6 +570,12 @@ export class PayoutsService {
     });
 
     // amountPaise is BigInt from Prisma; Number() is safe (paise « MAX_SAFE_INTEGER).
+    // Beneficiary columns are sourced from the PayoutTransaction's frozen snapshot
+    // (captured at confirm time) — NOT live partner data — so the admin pays the
+    // exact beneficiary the redemption was confirmed against. One file for both
+    // rails; blank where a field wasn't entered. These columns are READ-ONLY: the
+    // re-upload parser keys off "Transaction ID" + "Status"/"UTR" (by header name,
+    // ignoring extra columns), so the round-trip is unaffected.
     // UTR + Status are intentionally blank for the admin to fill offline.
     const rows = transactions.map((t) => ({
       'Transaction ID': t.id,
@@ -577,6 +583,11 @@ export class PayoutsService {
       PAN: t.partner?.panNumber ?? 'N/A',
       'Amount (₹)': (Number(t.amountPaise) / 100).toFixed(2),
       Mode: t.payoutMode,
+      'Beneficiary Name': t.beneficiaryName ?? '',
+      'Bank Account Number': t.bankAccountNumber ?? '',
+      IFSC: t.ifscCode ?? '',
+      'Bank Name': t.bankName ?? '',
+      'UPI ID': t.upiId ?? '',
       UTR: '',
       Status: '',
     }));

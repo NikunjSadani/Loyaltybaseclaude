@@ -147,4 +147,36 @@ describe('parsePayoutUtrUpload', () => {
     expect(res.headerError).toMatch(/no payout transactions/i);
     expect(res.canProceed).toBe(false);
   });
+
+  it('round-trip: ignores the new read-only beneficiary columns and keys off ID/UTR/Status', () => {
+    // Build an upload that mirrors the EXPORT layout — the beneficiary columns sit
+    // BETWEEN "Mode" and "UTR". The parser must locate columns by header name and
+    // ignore the extras, so the re-upload round-trip is unaffected.
+    const headers = [
+      'Transaction ID', 'Partner Name', 'PAN', 'Amount (₹)', 'Mode',
+      'Beneficiary Name', 'Bank Account Number', 'IFSC', 'Bank Name', 'UPI ID',
+      'UTR', 'Status',
+    ];
+    const aoa: (string | number)[][] = [
+      headers,
+      // txn1 PAID with a UTR; the beneficiary cells are filled but must be ignored.
+      ['txn1', 'Acme', 'ABCDE1234F', '1000.00', 'BANK_TRANSFER',
+        'Ravi Kumar', '0011223344', 'HDFC0001234', 'HDFC Bank', '',
+        'UTR12345678', 'PAID'],
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'UTR Upload');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+
+    const res = parsePayoutUtrUpload(ab, ctx(['txn1']));
+    expect(res.headerError).toBeNull();
+    expect(res.canProceed).toBe(true);
+    expect(res.summary.paidCount).toBe(1);
+    const row = res.rows[0];
+    expect(row.txnId).toBe('txn1');
+    expect(row.outcome).toBe('PAID');
+    expect(row.utr).toBe('UTR12345678');
+  });
 });

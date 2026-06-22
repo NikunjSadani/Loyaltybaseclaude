@@ -27,12 +27,21 @@ export function isValidUtr(utr: string): boolean {
   return UTR_RE.test(utr.trim());
 }
 
+// Reference list of the template's columns. The parser locates columns by header
+// NAME (indexOf), not position, and only requires "Transaction ID" + "Status"
+// (reading "UTR"/"Remarks" if present) — so the read-only beneficiary columns
+// below are ignored on re-upload and never break the round-trip.
 export const PAYOUT_UTR_HEADERS = [
   'Transaction ID',
   'Partner Name',
   'PAN',
   'Amount (₹)',
   'Mode',
+  'Beneficiary Name',
+  'Bank Account Number',
+  'IFSC',
+  'Bank Name',
+  'UPI ID',
   'UTR',
   'Status',
 ] as const;
