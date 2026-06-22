@@ -16,6 +16,8 @@ import {
   parseHierarchyChainRows,
   generateHierarchyChainErrorReport,
   getHierarchyChainTemplateData,
+  getHierarchyChainHeaders,
+  buildHierarchyChainExportRows,
 } from '@/lib/employee-hierarchy';
 import type {
   HierarchyEmployee,
@@ -162,6 +164,34 @@ function downloadTemplate() {
   const link = document.createElement('a');
   link.href = url;
   link.download = 'Employee_Hierarchy_Chain_Template.xlsx';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+/** Export the CURRENTLY stored hierarchy as the same 18-column chain workbook the upload
+ *  accepts — so the admin can view what's saved and download → edit → re-upload. */
+function downloadCurrentHierarchy(employees: HierarchyEmployee[]) {
+  const headers  = getHierarchyChainHeaders(CONFIG);
+  const dataRows = buildHierarchyChainExportRows(employees, CONFIG);
+
+  const wb    = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet([headers, ...dataRows]);
+  sheet['!cols'] = headers.map(h => ({
+    wch: h.endsWith('Phone') ? 16 : h.endsWith('Name') ? 24 : 18,
+  }));
+  XLSX.utils.book_append_sheet(wb, sheet, 'Hierarchy Chain');
+
+  const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob   = new Blob(
+    [buffer],
+    { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+  );
+  const url  = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'Employee_Hierarchy_Current.xlsx';
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
@@ -441,6 +471,16 @@ export default function HierarchyPage() {
           >
             <BookOpen className="h-3.5 w-3.5" />
             Download Guide
+          </button>
+          <button
+            data-testid="download-current"
+            onClick={() => downloadCurrentHierarchy(employees)}
+            disabled={employees.length === 0}
+            title={employees.length === 0 ? 'No hierarchy saved yet' : 'Download the currently saved hierarchy as Excel'}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-700 text-xs font-semibold hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Download Current
           </button>
           <button
             data-testid="download-template"

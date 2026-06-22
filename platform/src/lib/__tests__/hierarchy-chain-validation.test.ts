@@ -17,8 +17,10 @@ import {
   validateHierarchyChainHeaders,
   parseHierarchyChainRows,
   generateHierarchyChainErrorReport,
+  buildHierarchyChainExportRows,
   DEOLEO_HIERARCHY,
 } from '../employee-hierarchy';
+import type { HierarchyEmployee } from '@/types';
 
 const config = DEOLEO_HIERARCHY; // XSR(1) → SO(2) → ASM(3) → RSM(4) → ZNM(5) → NSM(6)
 
@@ -412,5 +414,87 @@ describe('HR — Error report', () => {
     expect(row1Remarks ?? '').toBe('');           // clean row — no remarks
     expect(row2Remarks).toBeTruthy();             // error row — has remarks
     expect(String(row2Remarks)).toMatch(/SO ID/i); // message mentions the missing column
+  });
+});
+
+// ─── HE: buildHierarchyChainExportRows (Download current hierarchy) ─────────────
+
+describe('HE — buildHierarchyChainExportRows', () => {
+  const emp = (o: Partial<HierarchyEmployee>): HierarchyEmployee => ({
+    id: 'X', tenantId: 'deoleo', roleCode: 'XSR', roleLabel: 'XSR',
+    reportsToId: null, hierarchyPath: '', name: null, mobile: null,
+    status: 'ACTIVE', hasOutlets: false, hasSubReports: false, ...o,
+  });
+
+  // A full chain shared by two XSRs under one SO.
+  const tree: HierarchyEmployee[] = [
+    emp({ id: 'NSM-1', roleCode: 'NSM', name: 'Top',  mobile: '9000000006', reportsToId: null }),
+    emp({ id: 'ZNM-1', roleCode: 'ZNM', name: 'Zone', mobile: '9000000005', reportsToId: 'NSM-1' }),
+    emp({ id: 'RSM-1', roleCode: 'RSM', name: 'Reg',  mobile: '9000000004', reportsToId: 'ZNM-1' }),
+    emp({ id: 'ASM-1', roleCode: 'ASM', name: 'Area', mobile: '9000000003', reportsToId: 'RSM-1' }),
+    emp({ id: 'SO-1',  roleCode: 'SO',  name: 'SaleO',mobile: '9000000002', reportsToId: 'ASM-1' }),
+    emp({ id: 'XSR-1', roleCode: 'XSR', name: 'Rep A',mobile: '9000000010', reportsToId: 'SO-1' }),
+    emp({ id: 'XSR-2', roleCode: 'XSR', name: 'Rep B',mobile: '9000000011', reportsToId: 'SO-1' }),
+  ];
+
+  it('HE1: empty snapshot → no rows', () => {
+    expect(buildHierarchyChainExportRows([], config)).toEqual([]);
+  });
+
+  it('HE2: one row per tree-leaf, each a full leaf→root chain', () => {
+    const rows = buildHierarchyChainExportRows(tree, config);
+    expect(rows).toHaveLength(2); // two XSR leaves
+    // XSR ID is column 0; NSM ID is the last level's first column (5*3 = 15)
+    expect(rows[0][0]).toMatch(/^XSR-/);
+    expect(rows[0][15]).toBe('NSM-1');
+    expect(rows[0][16]).toBe('Top');        // NSM name
+    expect(rows[0][2]).toMatch(/^900000001/); // XSR phone present
+  });
+
+  it('HE3: round-trips back through parseHierarchyChainRows with no errors and all employees', () => {
+    const headers = getHierarchyChainHeaders(config);
+    const rows    = buildHierarchyChainExportRows(tree, config);
+    const records = rows.map(r => Object.fromEntries(headers.map((h, i) => [h, r[i]])));
+    const parsed  = parseHierarchyChainRows(records, config);
+    expect(parsed.hasErrors).toBe(false);
+    expect(parsed.employeeRows.map(e => e.employeeId).sort())
+      .toEqual(['ASM-1', 'NSM-1', 'RSM-1', 'SO-1', 'XSR-1', 'XSR-2', 'ZNM-1']);
+  });
+
+  it('HE4: a manager with no leaf below still appears (covered as its own chain start)', () => {
+    const partial = [
+      emp({ id: 'NSM-9', roleCode: 'NSM', name: 'Lonely', reportsToId: null }),
+    ];
+    const rows = buildHierarchyChainExportRows(partial, config);
+    expect(rows).toHaveLength(1);
+    expect(rows[0][15]).toBe('NSM-9'); // placed in the NSM column-set
+  });
+
+  it('HE5: a malformed same-role chain never silently drops an employee', () => {
+    // Two XSRs in one reporting line can't share the single XSR column in one row; the
+    // safety net guarantees both still appear somewhere in the export.
+    const malformed = [
+      emp({ id: 'XSR-A', roleCode: 'XSR', reportsToId: 'XSR-B' }),
+      emp({ id: 'XSR-B', roleCode: 'XSR', reportsToId: null }),
+    ];
+    const rows = buildHierarchyChainExportRows(malformed, config);
+    const idCols = [0, 3, 6, 9, 12, 15];
+    const seen = new Set<string>();
+    for (const r of rows) for (const c of idCols) if (r[c]) seen.add(r[c]);
+    expect(seen.has('XSR-A')).toBe(true);
+    expect(seen.has('XSR-B')).toBe(true);
+  });
+
+  it('HE6: an employee whose role is not in the config still appears (not dropped)', () => {
+    const withUnknownRole = [
+      emp({ id: 'XSR-1', roleCode: 'XSR', reportsToId: 'CEO-1' }),
+      emp({ id: 'CEO-1', roleCode: 'CEO', reportsToId: null }), // role not in DEOLEO config
+    ];
+    const rows = buildHierarchyChainExportRows(withUnknownRole, config);
+    const idCols = [0, 3, 6, 9, 12, 15];
+    const seen = new Set<string>();
+    for (const r of rows) for (const c of idCols) if (r[c]) seen.add(r[c]);
+    expect(seen.has('XSR-1')).toBe(true);
+    expect(seen.has('CEO-1')).toBe(true);
   });
 });

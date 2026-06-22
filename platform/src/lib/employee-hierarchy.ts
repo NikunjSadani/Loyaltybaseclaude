@@ -938,6 +938,84 @@ export function getHierarchyChainHeaders(config: TenantHierarchyLevel[]): string
 }
 
 /**
+ * Reconstruct the denormalized 18-column chain DATA rows from the stored employee
+ * snapshot — the inverse of parseHierarchyChainRows, for "Download current hierarchy".
+ *
+ * Walks every TREE-LEAF (an employee nobody reports to) up via reportsToId to its root,
+ * placing each employee's ID / Name / Phone in its role's column-set. For a well-formed
+ * ladder (one employee per role per chain — what the upload enforces) every employee is
+ * covered and the file round-trips cleanly through parseHierarchyChainRows (a manager
+ * shared by several leaves repeats across rows — the same denormalization the upload uses).
+ *
+ * The 18-column chain shape has ONE slot per role per row, so a malformed snapshot (e.g.
+ * two same-role employees in one reporting line, or a role not in the config — neither
+ * possible via the app's own upload, but possible via seed/migration data) can't be fully
+ * represented. A completeness safety net guarantees every stored employee still appears in
+ * AT LEAST one row (placed in its role's columns, or the leaf columns if its role is
+ * unknown) rather than being silently dropped — so the admin always sees the full set.
+ * Columns follow getHierarchyChainHeaders order. Returns DATA rows only (no header); empty
+ * input → [].
+ */
+export function buildHierarchyChainExportRows(
+  employees: HierarchyEmployee[],
+  config: TenantHierarchyLevel[],
+): string[][] {
+  const sorted = [...config].sort((a, b) => a.level - b.level); // leaf→root
+  const colByRole = new Map<string, number>();                  // roleCode → first of its 3 cols
+  sorted.forEach((l, i) => colByRole.set(l.roleCode.toUpperCase(), i * 3));
+  const width = sorted.length * 3;
+
+  const byId = new Map(employees.map(e => [e.id, e]));
+  const isManager = new Set(
+    employees.map(e => e.reportsToId).filter((id): id is string => !!id),
+  );
+  // Tree-leaves = employees nobody reports to. A degenerate snapshot where everyone is a
+  // manager (a cycle, or roots-only) would yield no leaves → fall back to every employee
+  // so nothing is silently dropped.
+  const leaves = employees.filter(e => !isManager.has(e.id));
+  const starts = leaves.length > 0 ? leaves : employees;
+
+  const rows: string[][] = [];
+  for (const start of starts) {
+    const row = new Array<string>(width).fill('');
+    const seen = new Set<string>(); // cycle guard
+    let cur: HierarchyEmployee | undefined = start;
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      const col = colByRole.get((cur.roleCode ?? '').toUpperCase());
+      if (col !== undefined) {
+        row[col]     = cur.id;
+        row[col + 1] = cur.name   ?? '';
+        row[col + 2] = cur.mobile ?? '';
+      }
+      cur = cur.reportsToId ? byId.get(cur.reportsToId) : undefined;
+    }
+    rows.push(row);
+  }
+
+  // Completeness safety net: scan the ID columns of every emitted row and, for any stored
+  // employee that ended up in none (dropped because its role column was overwritten by a
+  // same-role ancestor, or its role isn't in the config), append a standalone row so it is
+  // never silently lost. No-op for a well-formed ladder (everyone is already present), so
+  // the normal-case output and its clean round-trip are unchanged.
+  const idCols = sorted.map((_, i) => i * 3);
+  const present = new Set<string>();
+  for (const row of rows) for (const ic of idCols) if (row[ic]) present.add(row[ic]);
+  for (const e of employees) {
+    if (present.has(e.id)) continue;
+    const row = new Array<string>(width).fill('');
+    const col = colByRole.get((e.roleCode ?? '').toUpperCase()) ?? 0; // unknown role → leaf cols, still visible
+    row[col]     = e.id;
+    row[col + 1] = e.name   ?? '';
+    row[col + 2] = e.mobile ?? '';
+    rows.push(row);
+    present.add(e.id);
+  }
+
+  return rows;
+}
+
+/**
  * Pass 1 header validation for the chain format.
  * Returns null if all expected columns are present; otherwise an error string
  * that names every missing column.
