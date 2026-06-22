@@ -130,7 +130,7 @@ describe('SalesService', () => {
       expect(res).toEqual({ outlets: [] });
     });
 
-    it('scopes outlet assignments to the caller sales user and skips partner-less outlets', async () => {
+    it('scopes to the caller and INCLUDES partner-less (un-KYC\'d) outlets as NOT_STARTED so the rep can enrol them', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
         {
@@ -153,31 +153,37 @@ describe('SalesService', () => {
             },
           },
         },
-        // partner-less outlet (pre-KYC) → filtered out
-        { outlet: { id: 'o2', partner: null, outletType: { code: 'RETAIL' } } },
+        // partner-less outlet (uploaded via master file, not yet KYC'd) → MUST be
+        // surfaced (this was the bug: a rep whose outlets were all un-KYC'd saw none).
+        {
+          outlet: {
+            id: 'o2',
+            outletCode: 'OC2',
+            name: 'Outlet 2',
+            phone: '777',
+            city: 'Mumbai',
+            district: 'West',
+            state: 'MH',
+            outletType: { code: 'RETAIL' },
+            partner: null,
+          },
+        },
       ]);
       const res = await service.getMyOutlets(caller);
       const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
       expect(where).toEqual({ salesUserId: 'caller-su', outletId: { not: null }, unassignedAt: null });
-      expect(res.outlets).toEqual([
-        {
-          id: 'o1',
-          partnerId: 'cp1',
-          balance: 1500,
-          kycId: 'k1',
-          outletCode: 'OC1',
-          name: 'Outlet 1',
-          mobile: '999',
-          location: 'Delhi',
-          beat: 'Central',
-          district: 'Central',
-          state: 'DL',
-          type: 'RETAIL',
-          kycStatus: 'APPROVED',
-          kycSubmittedAt: '2024-05-01',
-          targetPct: 0,
-        },
-      ]);
+
+      expect(res.outlets).toHaveLength(2);
+      expect(res.outlets[0]).toMatchObject({
+        id: 'o1', partnerId: 'cp1', balance: 1500, kycId: 'k1', kycStatus: 'APPROVED', kycSubmittedAt: '2024-05-01',
+      });
+      // the un-KYC'd outlet: surfaced, partner-derived fields null/0, NOT_STARTED.
+      expect(res.outlets[1]).toMatchObject({
+        id: 'o2', partnerId: null, balance: 0, kycId: '',
+        outletCode: 'OC2', name: 'Outlet 2', mobile: '777', location: 'Mumbai',
+        type: 'RETAIL', kycStatus: 'NOT_STARTED', targetPct: 0,
+      });
+      expect(res.outlets[1].kycSubmittedAt).toBeUndefined();
     });
   });
 });

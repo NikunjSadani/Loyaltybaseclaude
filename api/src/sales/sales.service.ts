@@ -261,25 +261,26 @@ export class SalesService {
 
     return (
       assignments
-        // partnerId is nullable — an outlet uploaded via the master file has no
-        // owner/partner until KYC. Skip those here (no partner-derived data).
-        .filter((a) => a.outlet !== null && a.outlet.partner !== null)
+        // An outlet uploaded via the master file has NO owner/partner until KYC.
+        // INCLUDE those — a sales rep must see the outlets they're assigned that
+        // still need NEW enrollment/KYC. (Previously these were filtered out, so a
+        // rep whose assigned outlets were all un-KYC'd saw an EMPTY list and could
+        // not start enrollment.) Partner-derived fields are null/0 for partner-less
+        // outlets; sales-assisted redeem (B1) is gated on an APPROVED partner FE-side.
+        .filter((a) => a.outlet !== null)
         .map((a) => {
           const outlet = a.outlet!;
-          const partner = outlet.partner!;
-          const latestKyc = partner.kycSubmissions[0] ?? null;
+          const partner = outlet.partner; // null until the outlet is KYC'd
+          const latestKyc = partner?.kycSubmissions[0] ?? null;
 
           return {
             id: outlet.id,
-            // The outlet's owning partner + its real redeemable balance — drives
-            // sales-assisted redeem (B1, #50-E). Only outlets WITH a partner reach
-            // here (filtered above), so partnerId is always present.
-            partnerId: partner.id,
-            balance: partner.wallets[0]?.redeemablePoints ?? 0,
+            partnerId: partner?.id ?? null,
+            balance: partner?.wallets[0]?.redeemablePoints ?? 0,
             kycId: latestKyc?.id ?? '',
             outletCode: outlet.outletCode,
             name: outlet.name,
-            mobile: outlet.phone ?? partner.phone ?? '',
+            mobile: outlet.phone ?? partner?.phone ?? '',
             location: outlet.city,
             beat: outlet.district ?? '',
             district: outlet.district ?? '',
