@@ -2201,6 +2201,10 @@ enum CreditEntryStatus {
   PROCESSING
   PAID
   FAILED
+  // REVERSED = clawed back via an approved CreditReversal — terminally removed from
+  // payability. Distinct from FAILED (a bank-rejected disbursement, which GLM-2 RE-banks);
+  // keeping them separate prevents a reversed award from being resurrected into a download.
+  REVERSED
 }
 
 model CreditField {

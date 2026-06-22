@@ -1,0 +1,11 @@
+-- Go-live fix wave (round 2): add a distinct REVERSED terminal state to CreditEntryStatus.
+--
+-- Rationale: GLM-1 (PAYOUT reversal) must REMOVE an entry from payability, while GLM-2
+-- must RE-bank a genuinely bank-rejected (FAILED) entry. With only PENDING/PROCESSING/
+-- PAID/FAILED, both collapsed onto FAILED — so re-banking FAILED would resurrect a
+-- reversed award (double-pay). REVERSED gives reversals their own terminal state so the
+-- re-download can include FAILED (bank rejections) while excluding REVERSED.
+--
+-- ALTER TYPE ... ADD VALUE is not used elsewhere in this migration, so it is safe on
+-- PostgreSQL 12+ (the new label is only referenced by later migrations/runtime).
+ALTER TYPE "CreditEntryStatus" ADD VALUE IF NOT EXISTS 'REVERSED';
