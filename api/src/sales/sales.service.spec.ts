@@ -111,6 +111,76 @@ describe('SalesService', () => {
       ]);
       await expect(service.getMember(caller, 'target1')).rejects.toBeInstanceOf(NotFoundException);
     });
+
+    it("INCLUDES partner-less (un-KYC'd) outlets in outlets[] and COUNTS them in kycPending", async () => {
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'caller-su' }) // caller lookup (guard)
+        .mockResolvedValueOnce({
+          // member-detail lookup
+          id: 'target1',
+          employeeCode: 'E9',
+          region: 'NCR',
+          zone: null,
+          user: { name: 'Rep Nine', phone: '555' },
+          hierarchyLevel: { code: 'SO', name: 'Sales Officer', level: 1 },
+          _count: { subordinates: 0 },
+          assignments: [
+            {
+              // KYC'd / partnered outlet → APPROVED
+              outlet: {
+                id: 'o1',
+                name: 'Outlet 1',
+                city: 'Delhi',
+                outletCode: 'OC1',
+                phone: '999',
+                partner: {
+                  id: 'cp1',
+                  kycSubmissions: [{ id: 'k1', status: 'APPROVED' }],
+                },
+              },
+            },
+            {
+              // partner-less outlet (uploaded, not yet KYC'd) → NOT_STARTED.
+              // MUST be included AND counted in kycPending (the bug being fixed).
+              outlet: {
+                id: 'o2',
+                name: 'Outlet 2',
+                city: 'Mumbai',
+                outletCode: 'OC2',
+                phone: '777',
+                partner: null,
+              },
+            },
+          ],
+        });
+      mockPrisma.salesUser.findMany.mockResolvedValueOnce([
+        { id: 'caller-su', reportingToId: null },
+        { id: 'target1', reportingToId: 'caller-su' },
+      ]);
+
+      const res = await service.getMember(caller, 'target1');
+
+      // The detail query selects partner.id so the projection works for both.
+      const include = mockPrisma.salesUser.findFirst.mock.calls[1][0].include;
+      expect(include.assignments.include.outlet.include.partner.select.id).toBe(true);
+
+      expect(res.member.kycDone).toBe(1);
+      expect(res.member.kycPending).toBe(1); // the partner-less NOT_STARTED outlet
+      expect(res.member.outlets).toHaveLength(2);
+
+      const o2 = res.member.outlets.find((o) => o.id === 'o2')!;
+      expect(o2).toMatchObject({
+        id: 'o2',
+        partnerId: null,
+        name: 'Outlet 2',
+        location: 'Mumbai',
+        outletCode: 'OC2',
+        mobile: '777',
+        kycId: '',
+        kycStatus: 'NOT_STARTED',
+        targetPct: 0,
+      });
+    });
   });
 
   describe('getMemberOutlets', () => {

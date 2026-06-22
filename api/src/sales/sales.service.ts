@@ -120,6 +120,7 @@ export class SalesService {
               include: {
                 partner: {
                   select: {
+                    id: true,
                     kycSubmissions: {
                       orderBy: { createdAt: 'desc' },
                       take: 1,
@@ -136,30 +137,41 @@ export class SalesService {
 
     if (!salesUser) throw new NotFoundException('Member not found');
 
-    // partnerId is nullable — an uploaded outlet has no partner until KYC.
-    // Restrict the partner-derived metrics to assignments that have a partner.
-    const outletAssignments = salesUser.assignments.filter((a) => a.outlet && a.outlet.partner);
+    // partnerId is nullable — an outlet uploaded via the master file has NO
+    // partner until KYC. INCLUDE those partner-less outlets (mirroring the
+    // just-fixed buildOutlets): they are exactly the un-KYC'd outlets the rep
+    // must act on, so the member-detail counts reconcile with the dedicated
+    // /sales/team/:id/outlets list. Previously they were filtered out, so the
+    // counts under-reported and disagreed with that list.
+    const outletAssignments = salesUser.assignments.filter((a) => a.outlet !== null);
 
-    const kycDone = outletAssignments.filter(
-      (a) => a.outlet!.partner!.kycSubmissions[0]?.status === 'APPROVED',
+    // A partner-less outlet has no KYC submission → NOT_STARTED (pending action).
+    const latestStatusOf = (a: (typeof outletAssignments)[number]): string =>
+      a.outlet!.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED';
+
+    const kycDone = outletAssignments.filter((a) => latestStatusOf(a) === 'APPROVED').length;
+
+    // kycPending = outlets still awaiting KYC action: anything not in a terminal
+    // state. NOT_STARTED (partner-less / un-KYC'd) counts here — those are the
+    // outlets the rep must enrol.
+    const kycPending = outletAssignments.filter(
+      (a) => !['APPROVED', 'REJECTED', 'NOT_INTERESTED'].includes(latestStatusOf(a)),
     ).length;
-
-    const kycPending = outletAssignments.filter((a) => {
-      const s = a.outlet!.partner!.kycSubmissions[0]?.status;
-      return !s || !['APPROVED', 'REJECTED', 'NOT_INTERESTED'].includes(s);
-    }).length;
 
     // Target/TargetAchievement dropped — no achievement aggregate available.
     const targetPct = 0;
 
     const outlets = outletAssignments.map((a) => {
       const outlet = a.outlet!;
-      const latestKyc = outlet.partner!.kycSubmissions[0] ?? null;
+      const partner = outlet.partner; // null until the outlet is KYC'd
+      const latestKyc = partner?.kycSubmissions[0] ?? null;
       return {
         id: outlet.id,
+        partnerId: partner?.id ?? null,
         name: outlet.name,
         location: outlet.city,
         outletCode: outlet.outletCode,
+        mobile: outlet.phone ?? '',
         kycId: latestKyc?.id ?? '',
         kycStatus: latestKyc?.status ?? 'NOT_STARTED',
         targetPct: 0,
