@@ -1,17 +1,18 @@
 # Go-Live Readiness — the enforcement mechanism + the gate
 
-> ## 🚦 READINESS STATUS — 2026-06-21: **NOT GO-LIVE READY (6 blockers open)**
-> A 4-angle comprehensive adversarial audit (money · auth/isolation · core-loop/dead-writes · data/migration/config) ran after
-> the S0–S6 UAT-hardening wave. **What is SOUND:** money atomic-claims/reversal-idempotency, tenant data-isolation (no unscoped
-> query in 33 services), schema↔migration parity, BigInt/secrets, the S0–S6 hardening (all runtime/audit-verified). **6 BLOCKERS
-> remain (full detail + file:line in `docs/spec/gap-register.md` GO-LIVE AUDIT block):** GLB-1 eligibility (KYC/active) gate
-> missing on both money rails · GLB-2 zero-value redemption debits points · GLB-3 stale coarse TDS indexes drop upload rows ·
-> GLB-4 CLIENT_ADMIN→GIFSY_ADMIN privilege escalation · GLB-5 scheme enrollment is localStorage-only (never persists) · GLB-6
-> payout settlement has no working operator UI (S1 settle endpoints have no FE driver). **Plus 4 majors** (credit reversal
-> clawback, FAILED-credit retry, beneficiary validation, PayoutTransaction.redemptionOrderId unique, /admin/kyc fake bulk-approve).
-> Already-fixed minors: FIXED_OTP + DEMO_MODE prod-gates. **The post-compact fix wave closes GLB-1..6 + the majors → re-audit →
-> THEN load real prod data (#76) → owner UAT.** Do NOT load real money data or open UAT against money/enrollment/settlement until
-> GLB-1..6 are fixed and runtime-verified against the real DB.
+> ## 🚦 READINESS STATUS — 2026-06-22: **GO-LIVE FIX WAVE COMPLETE — all 6 blockers + 5 majors CLOSED (committed to `develop`)**
+> The post-audit fix wave (GLM migration · GL-Money · GL-RBAC · GL-FE-enroll[+catalog] · GL-FE-settle[+GLM-5]) closed every
+> blocker — GLB-1 eligibility gate on both money rails · GLB-2 zero-value redemption · GLB-3 stale coarse TDS indexes · GLB-4
+> CLIENT_ADMIN→GIFSY_ADMIN privilege escalation · GLB-5 scheme enrollment + catalog · GLB-6 payout settlement UI — and the majors
+> (GLM-1 reversal clawback, GLM-2 FAILED-credit re-bank, GLM-3 beneficiary validation, GLM-4 one-payout-per-order unique, GLM-5
+> fake KYC bulk-approve). Each ran executor → INDEPENDENT adversarial audit → gate → runtime-verify. The money re-audit caught a
+> real lost-awards bug (GLM-2 was never implemented in pass 1) + a payouts-rail resolver gap — both fixed + re-verified. A canonical
+> `api/src/kyc/kyc-eligibility.ts` resolver now feeds all four payment rails; a new `CreditEntryStatus.REVERSED` separates reversals
+> from re-bankable bank failures. **GATE GREEN:** api jest **921/921**, FE vitest **1459**, Playwright E2E green, doc-consistency;
+> **GLB-3 runtime-proven** on `gifsy_dev` (2 same-file-hash TDS rows persist, dup rejected); backend boots clean. Per-item table =
+> [`GO-LIVE-ISSUE-LIST.md`](GO-LIVE-ISSUE-LIST.md). **➡️ The exhaustive UAT script is now [`UAT-CHECKLIST.md`](UAT-CHECKLIST.md).**
+> **REMAINING BEFORE GO-LIVE (not fix-wave):** (a) gap #57(a) admin sub-dashboards still render mock — hide-or-wire before UAT;
+> (b) real Deoleo master-data load into empty prod (#76); (c) owner ops — monitoring alert + backups/PITR + secret rotation (#74).
 
 > Created 2026-06-19. Documentation alone is **passive** and gets shortcut (proven repeatedly this session).
 > "Done / ready to ship" must be **enforced by something executable**, not trusted to a checklist. This doc

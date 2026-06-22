@@ -53,7 +53,9 @@ test.describe('@gifsy KYC cross-tenant access (A1 / #38)', () => {
     await expect(page.getByRole('heading', { name: /KYC Approvals/i })).toBeVisible();
 
     // clientb's distinctively-named seeded outlet is a row in the queue (cross-tenant read).
-    await expect(page.getByText('Zenith Trading Co')).toBeVisible();
+    // .first(): the name legitimately renders in both the queue button and the auto-selected
+    // detail panel, so match the first occurrence — presence is what proves the cross-tenant read.
+    await expect(page.getByText('Zenith Trading Co').first()).toBeVisible();
 
     // The brand-filter <select> only renders when the queue spans >1 brand (the Gifsy view, #38),
     // and exposes BOTH brands as options — proof the rendered list is multi-tenant, not single-scope.
