@@ -14,6 +14,7 @@ import {
   CATEGORY_LABELS, STATUS_LABELS, PRIORITY_LABELS,
 } from '@/lib/tickets';
 import { api } from '@/lib/api-client';
+import { getAssumedBrand } from '@/lib/auth-client';
 import { useAdminSession } from '@/lib/admin-session';
 
 /* ─── DB ↔ local category / status / priority mappings ─────────────────────── */
@@ -180,11 +181,20 @@ function TicketDetailPanel({ ticket: initial, canEscalate, onClose, onUpdate }: 
 
   const { variant } = STATUS_STYLE[ticket.status];
 
+  // The persistent GIFSY operator banner (sticky, z-60) overlays this fixed drawer
+  // (z-50) and would otherwise hide the panel's top header (close button / status).
+  // When an operator is in an assumed-tenant context, push the panel below the banner.
+  const [bannerOffset, setBannerOffset] = useState(0);
+  useEffect(() => { setBannerOffset(getAssumedBrand() ? 40 : 0); }, []);
+
   return (
     <div className="fixed inset-0 z-50 flex">
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
       {/* Slide-in panel from right */}
-      <div className="relative ml-auto bg-white w-full max-w-md h-full flex flex-col shadow-2xl border-l border-gray-100">
+      <div
+        className="relative ml-auto bg-white w-full max-w-md h-full flex flex-col shadow-2xl border-l border-gray-100"
+        style={{ paddingTop: bannerOffset }}
+      >
         {/* Header */}
         <div className="flex items-start justify-between p-5 border-b border-gray-100 shrink-0">
           <div className="flex-1 min-w-0 pr-3">
