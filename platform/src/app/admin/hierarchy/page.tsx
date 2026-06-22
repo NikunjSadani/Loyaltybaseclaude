@@ -223,15 +223,38 @@ export default function HierarchyPage() {
       .catch(() => {});
   }, []);
 
-  const persistEmployees = useCallback((list: HierarchyEmployee[]) => {
-    setEmployees(list);
+  // Persist to the backend and CONFIRM the write succeeded before the caller shows success.
+  // Resolves only on a confirmed PUT (HTTP ok AND no { success:false } body). On failure it
+  // reverts the optimistic list to `prev` and throws with a real message — the swallowed
+  // fire-and-forget here is exactly what hid the "shows N then 0 after refresh" round-trip bug.
+  const persistEmployees = useCallback(async (list: HierarchyEmployee[]) => {
+    const prev = employees;
+    setEmployees(list); // optimistic
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch('/api/admin/hierarchy-config', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ employees: list }),
-    }).catch(() => {});
-  }, []);
+    let res: Response;
+    try {
+      res = await fetch('/api/admin/hierarchy-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ employees: list }),
+      });
+    } catch (err) {
+      setEmployees(prev); // revert — nothing was saved
+      throw new Error(
+        `Could not reach the server to save the hierarchy: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    let json: { success?: boolean; error?: string; message?: string } = {};
+    try { json = await res.json(); } catch { /* non-JSON body — fall through to status check */ }
+
+    if (!res.ok || json.success === false) {
+      setEmployees(prev); // revert — the relational write rolled back, so don't show ghost rows
+      throw new Error(
+        json.error || json.message || `Save failed (HTTP ${res.status}). Please try again.`,
+      );
+    }
+  }, [employees]);
 
   // ── Stats ──────────────────────────────────────────────────────────────────
   const totalCount       = employees.length;
@@ -332,9 +355,10 @@ export default function HierarchyPage() {
   };
 
   // ── Confirm upload ─────────────────────────────────────────────────────────
-  const confirmUpload = () => {
+  const confirmUpload = async () => {
     if (!validation?.canProceed || !chainResult) return;
     setConfirming(true);
+    setParseError(null);
 
     // Use the already-deduplicated employeeRows from the chain parse result
     const uploadRows = chainResult.employeeRows;
@@ -368,7 +392,18 @@ export default function HierarchyPage() {
     }
 
     const newList = Array.from(updatedMap.values());
-    persistEmployees(newList);
+
+    try {
+      // Only declare success AFTER a confirmed round-trip — a rolled-back relational write
+      // (the P2002 level-collision bug) returns an error here and must NOT show the banner.
+      await persistEmployees(newList);
+    } catch (err) {
+      setParseError(
+        `Upload could not be saved: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      setConfirming(false);
+      return; // keep the validation panel up so the user can retry; no success banner
+    }
 
     const { creates, updates } = validation.summary;
     setSuccessMsg(

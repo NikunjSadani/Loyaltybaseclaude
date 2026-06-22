@@ -33,4 +33,51 @@ test.describe('@clientAdmin hierarchy template round-trip', () => {
     //    the negative assertion could pass vacuously if the upload silently no-op'd.)
     await expect(page.locator('[data-testid="validation-panel"]')).toBeVisible({ timeout: 15_000 });
   });
+
+  /**
+   * Persistence round-trip — the test that would have caught "shows N then 0 after refresh".
+   *
+   * Root cause was server-side: persistHierarchy's SalesHierarchyLevel.upsert re-assigned each code
+   * to its config `level`, colliding with the SECOND unique (clientId, level) when the tenant already
+   * had a different code→level arrangement → P2002 → the whole $transaction rolled back → the
+   * ProgramSetting snapshot was never written → a reload read nothing → 0. The FE then HID the 500
+   * with a fire-and-forget PUT + swallowed .catch, so the success banner showed regardless.
+   *
+   * This test confirms the upload, asserts a real success indicator (NOT an error), then RELOADS and
+   * asserts the uploaded employee is STILL rendered — proving the write actually persisted.
+   */
+  test('upload → confirm → SUCCESS (no error) → reload → employees STILL persist (not 0)', async ({ page }) => {
+    await page.goto('/admin/hierarchy');
+    await expect(page.locator('[data-testid="download-template"]')).toBeVisible({ timeout: 15_000 });
+
+    // 1) Download the in-browser template and re-upload it verbatim — a valid chain set.
+    const downloadPromise = page.waitForEvent('download');
+    await page.locator('[data-testid="download-template"]').click();
+    const download = await downloadPromise;
+    const filePath = await download.path();
+    expect(filePath, 'template downloaded to a real path').toBeTruthy();
+    await page.locator('[data-testid="hierarchy-upload-input"]').setInputFiles(filePath!);
+
+    // 2) The validation panel must reach the "ready to confirm" state (clean chain → Confirm button).
+    await expect(page.locator('[data-testid="validation-panel"]')).toBeVisible({ timeout: 15_000 });
+    const confirmBtn = page.locator('[data-testid="confirm-upload-btn"]');
+    await expect(confirmBtn).toBeVisible({ timeout: 10_000 });
+
+    // 3) Confirm the upload — this drives persistEmployees → PUT /api/admin/hierarchy-config.
+    await confirmBtn.click();
+
+    // 4) SUCCESS, not error: the green banner must appear AND the failure path must NOT fire.
+    //    (Pre-fix, a rolled-back relational write returned 500 but the banner showed anyway; post-fix
+    //    the banner is gated on a confirmed PUT, and a failure shows the "could not be saved" error.)
+    await expect(page.getByText(/Upload confirmed:/i)).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/Upload could not be saved/i)).toHaveCount(0);
+
+    // 5) PERSISTENCE: reload (forces a fresh backend GET, not optimistic state) and assert the
+    //    template's leaf employee code is STILL rendered. This is the "0 after refresh" guard.
+    await page.reload();
+    await expect(page.locator('.animate-spin').or(page.locator('[aria-label="Loading"]'))).toHaveCount(0, {
+      timeout: 12_000,
+    });
+    await expect(page.getByText('XSR-M001').first()).toBeVisible({ timeout: 12_000 });
+  });
 });

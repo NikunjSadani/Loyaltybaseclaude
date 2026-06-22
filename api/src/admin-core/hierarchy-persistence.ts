@@ -133,6 +133,21 @@ export async function persistHierarchy(
   const levelRows = buildLevelRows(config);
 
   // ── 1. Levels ────────────────────────────────────────────────────────────
+  // The level upsert below re-assigns each code to its config `level`. SalesHierarchyLevel has a
+  // SECOND unique on (clientId, level), so if the tenant already has rows with a DIFFERENT
+  // code→level arrangement, upserting a code to its target level collides with whatever code
+  // currently holds that level (P2002 → the whole tx rolls back → snapshot lost → "0 after
+  // refresh"). Free the positive target space first: shift every row that is still at a positive
+  // level far negative (a large constant > any real level; config levels are a fixed 1..6 set), so
+  // levels 1..N are all free before the upsert. Scoped to `level >= 0` so a row already parked
+  // negative by a previous upload (an orphan code no longer in the config) is NOT shifted again —
+  // the offset never accumulates across repeated uploads. UPDATE-only (never delete), so
+  // SalesUser.hierarchyLevelId FKs stay valid.
+  await tx.salesHierarchyLevel.updateMany({
+    where: { clientId, level: { gte: 0 } },
+    data: { level: { decrement: 1_000_000 } },
+  });
+
   const levelIdByCode = new Map<string, string>();
   for (const lr of levelRows) {
     const level = await tx.salesHierarchyLevel.upsert({

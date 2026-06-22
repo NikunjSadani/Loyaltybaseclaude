@@ -591,7 +591,7 @@ export class AdminCoreService {
         DEOLEO_HIERARCHY,
         tx,
       );
-    });
+    }, { timeout: 20_000, maxWait: 10_000 });
 
     return { message: 'Employee hierarchy saved', persisted: result };
   }
