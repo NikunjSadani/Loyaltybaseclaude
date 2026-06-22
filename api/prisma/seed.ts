@@ -99,7 +99,7 @@ const CLIENTB_CLIENT_ID = 'clientb';
 // OutletType master list. code is the stable key — name is the display label
 // and can be changed at any time without touching code or migrations.
 const OUTLET_TYPES = [
-  { code: 'RETAILER',     name: 'Retailer',     description: 'Retail channel partner' },
+  { code: 'SSS',          name: 'SSS',          description: 'SSS channel partner' },
   { code: 'WHOLESALER',   name: 'Wholesaler',   description: 'Wholesale channel partner' },
   { code: 'SUB_STOCKIST', name: 'Sub-Stockist', description: 'Sub-stockist channel partner' },
   { code: 'SSS_TOT',      name: 'SSS TOT',      description: 'Super stockist / TOT channel partner' },
@@ -256,7 +256,7 @@ async function seedDeoleoDemo() {
   console.log(`   ✓ MIS_USER — id: ${misUser.id}, phone: ${misUser.phone}`);
 
   // 3.2 OutletType lookups (created above).
-  const retailerType = await prisma.outletType.findFirstOrThrow({ where: { code: 'RETAILER' } });
+  const retailerType = await prisma.outletType.findFirstOrThrow({ where: { code: 'SSS' } });
   const wholesalerType = await prisma.outletType.findFirstOrThrow({ where: { code: 'WHOLESALER' } });
 
   // 3.2b Per-tenant outlet-type configs. The admin outlet-upsert maps an outlet's type CODE → id via
