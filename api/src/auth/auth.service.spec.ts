@@ -423,6 +423,52 @@ describe('AuthService', () => {
         process.env.NODE_ENV = prev;
       }
     });
+
+    it('HONORS FIXED_OTP in production-NODE_ENV staging when ALLOW_FIXED_OTP=true (the opt-in)', async () => {
+      const prevEnv = process.env.NODE_ENV;
+      const prevFlag = process.env.ALLOW_FIXED_OTP;
+      const prevDb = process.env.DATABASE_URL;
+      process.env.NODE_ENV = 'production';
+      process.env.ALLOW_FIXED_OTP = 'true';
+      process.env.DATABASE_URL = 'postgresql://u:p@h/gifsy_staging'; // not the prod DB
+      try {
+        mockConfig.get.mockImplementation((key: string): any => key === 'FIXED_OTP' ? '1234' : undefined);
+        const record = { id: 'otp_1', code: '9999', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000), verifiedAt: null };
+        mockPrisma.otpCode.findFirst.mockResolvedValue(record);
+        mockPrisma.otpCode.update.mockResolvedValue({});
+        mockPrisma.user.findFirst.mockResolvedValue({ id: 'user_1', role: 'RETAILER', clientId: 'deoleo', status: 'ACTIVE' });
+        mockPrisma.user.update.mockResolvedValue({});
+        mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_1' });
+
+        // staging opt-in: the fixed OTP is accepted even though NODE_ENV=production
+        const result = await service.verifyOtp('9876543210', '1234', 'deoleo');
+        expect(result.accessToken).toBe('mock.jwt.token');
+      } finally {
+        process.env.NODE_ENV = prevEnv;
+        if (prevFlag === undefined) delete process.env.ALLOW_FIXED_OTP; else process.env.ALLOW_FIXED_OTP = prevFlag;
+        if (prevDb === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = prevDb;
+      }
+    });
+
+    it('still HARD-refuses FIXED_OTP when ALLOW_FIXED_OTP=true but the DB is prod', async () => {
+      const prevEnv = process.env.NODE_ENV;
+      const prevFlag = process.env.ALLOW_FIXED_OTP;
+      const prevDb = process.env.DATABASE_URL;
+      process.env.NODE_ENV = 'production';
+      process.env.ALLOW_FIXED_OTP = 'true';
+      process.env.DATABASE_URL = 'postgresql://u:p@h/gifsy_prod';
+      try {
+        mockConfig.get.mockImplementation((key: string): any => key === 'FIXED_OTP' ? '1234' : undefined);
+        const record = { id: 'otp_1', code: '9999', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000), verifiedAt: null };
+        mockPrisma.otpCode.findFirst.mockResolvedValue(record);
+        mockPrisma.otpCode.update.mockResolvedValue({});
+        await expect(service.verifyOtp('9876543210', '1234', 'deoleo')).rejects.toThrow('Invalid OTP');
+      } finally {
+        process.env.NODE_ENV = prevEnv;
+        if (prevFlag === undefined) delete process.env.ALLOW_FIXED_OTP; else process.env.ALLOW_FIXED_OTP = prevFlag;
+        if (prevDb === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = prevDb;
+      }
+    });
   });
 
   describe('Business rule constants', () => {

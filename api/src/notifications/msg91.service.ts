@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { isFixedOtpAllowed } from '../common/fixed-otp';
 
 /**
  * Shared MSG91 OTP provider. Sends OTPs synchronously via the MSG91 v5 OTP API.
@@ -19,12 +20,10 @@ export class Msg91Service {
     // ByteString error ("character … value 65279") when set as the authkey header.
     const authKey    = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
     const templateId = this.config.get<string>('MSG91_OTP_TEMPLATE_ID')?.trim();
-    // Defense-in-depth: FIXED_OTP is a dev/staging convenience only — NEVER honor it
-    // in production (a leaked/misconfigured prod FIXED_OTP would otherwise silently
-    // suppress real SMS = a login outage, and log the OTP). In prod, fall through to
-    // the real MSG91 call regardless of the env var.
-    const fixedOtp   =
-      process.env.NODE_ENV !== 'production' ? this.config.get<string>('FIXED_OTP') : undefined;
+    // FIXED_OTP is a dev/staging convenience only, gated by isFixedOtpAllowed (non-prod
+    // NODE_ENV, or an explicit ALLOW_FIXED_OTP opt-in; always refused on the prod DB). On
+    // prod we fall through to the real MSG91 call so a stray env var can't suppress real SMS.
+    const fixedOtp = isFixedOtpAllowed() ? this.config.get<string>('FIXED_OTP') : undefined;
 
     // FIXED_OTP mode — skip MSG91, log OTP to console (dev/staging only)
     if (fixedOtp) {

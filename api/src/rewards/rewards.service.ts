@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { WalletService } from '../wallet/wallet.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
@@ -1454,8 +1455,7 @@ export class RewardsService {
       throw new UnauthorizedException('OTP expired — please restart the redemption.');
     }
 
-    const fixedOtp =
-      process.env.NODE_ENV !== 'production' ? process.env.FIXED_OTP : undefined;
+    const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
     const isCorrect = fixedOtp ? otp === fixedOtp : otp === record.code;
     if (!isCorrect) {
       await this.prisma.otpCode.update({

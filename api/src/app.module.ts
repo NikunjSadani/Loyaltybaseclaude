@@ -1,5 +1,6 @@
 import { Module }                   from '@nestjs/common';
 import { ConfigModule }             from '@nestjs/config';
+import { isFixedOtpAllowed }        from './common/fixed-otp';
 import { APP_GUARD, APP_INTERCEPTOR, APP_FILTER } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ScheduleModule }           from '@nestjs/schedule';
@@ -56,11 +57,11 @@ import { TdsModule }          from './tds/tds.module';
         ttl:   60_000,  // 1 minute window (ms)
         limit: 60,
       }],
-      // DEV-ONLY: skip ALL rate limiting when FIXED_OTP is set (local dev + the E2E harness, whose
-      // real-login setup makes several OTP requests per run). Defense-in-depth: ALSO require
-      // non-production, so a leaked/misconfigured prod FIXED_OTP can never disable throttling on
-      // the OTP endpoints. Throttling stays fully active in staging/prod.
-      skipIf: () => !!process.env.FIXED_OTP && process.env.NODE_ENV !== 'production',
+      // Skip ALL rate limiting when FIXED_OTP is honored here (local dev + the E2E harness,
+      // whose real-login setup makes several OTP requests per run). Gated by isFixedOtpAllowed
+      // (non-prod NODE_ENV, or an explicit ALLOW_FIXED_OTP opt-in; always refused on the prod
+      // DB), so throttling can never be disabled on the real production data plane.
+      skipIf: () => isFixedOtpAllowed() && !!process.env.FIXED_OTP,
     }),
     PrismaModule,
     StorageModule,

@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { User } from '@prisma/client';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { Msg91Service } from '../notifications/msg91.service';
+import { isFixedOtpAllowed } from '../common/fixed-otp';
 import * as crypto from 'crypto';
 
 // ─── Business rule constants — single source of truth ─────────────────────────
@@ -145,12 +146,10 @@ export class AuthService {
       throw new UnauthorizedException('OTP expired — please request a new one.');
     }
 
-    // FIXED_OTP is a dev/staging convenience bypass. Defense-in-depth: NEVER
-    // honor it in production even if the env var leaks into a prod config, so a
-    // misconfig can't turn into a universal-OTP backdoor. (Mirrors the guard on
-    // the redemption OTP path.)
-    const fixedOtp =
-      process.env.NODE_ENV !== 'production' ? this.config.get<string>('FIXED_OTP') : undefined;
+    // FIXED_OTP is a dev/staging convenience bypass, gated by isFixedOtpAllowed (non-prod
+    // NODE_ENV, or an explicit ALLOW_FIXED_OTP opt-in; always refused on the prod DB) so a
+    // misconfig can't turn into a universal-OTP backdoor. (Mirrors the redemption OTP path.)
+    const fixedOtp = isFixedOtpAllowed() ? this.config.get<string>('FIXED_OTP') : undefined;
     const isCorrect = fixedOtp ? otp === fixedOtp : otp === record.code;
 
     if (!isCorrect) {
