@@ -30,10 +30,10 @@ const PUBLIC_PATHS = [
   '/favicon.ico',
 ]
 
-const ROLE_ROUTES: Record<string, string[]> = {
+export const ROLE_ROUTES: Record<string, string[]> = {
   '/admin/gifsy': ['GIFSY_ADMIN'],                                                // Gifsy-internal only — checked before /admin
   '/admin':   ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'],
-  '/sales':   ['HO', 'STATE_HEAD', 'ASM', 'SO', 'XSR', 'SALES_EXECUTIVE', 'TERRITORY_SALES_OFFICER', 'AREA_SALES_MANAGER', 'SALES_MANAGER'],
+  '/sales':   ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'], // canonical UserRole enum — must match PORTAL_ROLES.sales (stale legacy codes here 307'd every sales login to /auth/login)
   '/partner': ['SSS', 'WHOLESALER', 'SUB_STOCKIST'],
 }
 
