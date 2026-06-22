@@ -1,10 +1,22 @@
 # Go-Live Issue List — authoritative master tracker (updated 2026-06-22)
 
-> **STATUS: FIX WAVE COMPLETE — all 6 blockers + 5 majors CLOSED, audited, and runtime-verified. Pending: owner commit/push.**
+> **STATUS: FIX WAVE COMPLETE + pushed. NOW = OWNER-DRIVEN UAT on staging — fix-as-you-find (see the UAT-FOUND block below).**
 > Originally NOT go-live ready (6 blockers + 4 majors). The GO-LIVE FIX WAVE (2026-06-21→22) closed them via disjoint streams
 > (GLM · GL-Money · GL-RBAC · GL-FE-enroll · GL-FE-settle), each executor → INDEPENDENT adversarial audit → Opus gate →
 > runtime-verify. The money re-audit caught a real BLOCKER the first pass missed (GLM-2 never implemented = lost awards) plus
 > a payouts-rail resolver gap — both then fixed and re-verified. See the FIX WAVE RESULTS block below.
+
+## 🔎 UAT-FOUND FIXES (2026-06-22, owner testing staging) — each diagnosed → executor → INDEPENDENT audit → gate → runtime-verify
+| # | Found | Fix | Commit | Status |
+|---|---|---|---|---|
+| U1 | Employee Hierarchy upload "not a valid .xlsx" on the **downloaded template** | `XLSX.read(ArrayBuffer,{type:'array'})` needs a **Uint8Array** — dev-build tolerates it, **`next build` (staging) throws**. Coerce + un-swallow the real error + Playwright round-trip test. | `5601ba8` | ✅ pushed |
+| U2 | Hierarchy upload `(raw[..]??'').trim is not a function` | SheetJS returns **numbers** for numeric cells; `String(v??'').trim()` in both parse paths + numeric-cell vitest. | `be9d685` | ✅ pushed |
+| U3 | Sales-data/target upload values land on the **WRONG KPI** (when a cell is blank) — DATA INTEGRITY | parser mapped KPI cols POSITIONALLY off the row-1 merged month header → drift mis-assigns; rewrote to **name-keyed absolute-column** mapping + integrity guard. Covers target + achievement (shared parser). | `089270d` | ✅ pushed |
+| U4 | Upload error lists are a 100-row on-screen table, un-fixable | shared **downloadable .xlsx error report** (`lib/error-report.ts` + button) on Outlet Master + Targets + Payout-UTR + KYC bulk-verify. | `a811fe2` | ✅ pushed |
+| U5 | "Primary" KPI could be ticked on **multiple** rows (should be exactly one; "changeable not addition") | **4-layer single-primary:** UI radio (move) + backend `setPrimary`+`P2002→409` + **self-healing partial unique index** `20260622120000` + retired 2 **dead** KPI blob stores. Plan + impl independently audited. **Layer 4b (partner surface honors isPrimary) DEFERRED.** | `c17887c` | ✅ pushed |
+| U6 | Cash redemption (UPI/Bank): partner saw **fabricated** bank details; should be one free-amount flow from KYC, one offline settlement file | **Unified cash payout:** real-KYC beneficiary on `/me`; admin cash-item free-amount-with-min (un-gated); settlement export = one file (all bank/UPI cols, blank where missing); **upstream beneficiary guard BEFORE debit.** Independently audited SAFE. | `4de8794` | ⚠️ **committed, NOT pushed (money path — owner pushes)** |
+
+**Migration this session (dev-applied):** `20260622120000_kpi_one_primary_per_client` (self-healing partial unique index). **Session-end gate:** api jest **940**, FE vitest green, tsc clean. **Open:** push `4de8794`; owner re-test pushed fixes on staging; gap-#57(a) sub-dashboards still mock (hide/wire); the planned **5-agent parallel UAT sweep is still queued** (went owner-driven). **Recurring lesson:** `next dev` (tolerant, skips tsc) ≠ `next build` (strict) — verify FE fixes against a prod build or deploy + owner-retest.
 
 ## ✅ FIX WAVE RESULTS (2026-06-22)
 **Gate (all green):** backend `tsc` ✅ · backend jest **921/921 (42 suites)** ✅ · FE `tsc` ✅ · FE vitest **1459 passed** ✅
