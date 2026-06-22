@@ -64,8 +64,12 @@ read-back endpoint OR temp `FIXED_OTP`.
 WORKSTREAMS.** The fix wave is DONE + pushed; now exhaustively exercise every flow in `UAT-CHECKLIST.md` (auth · KYC ·
 schemes/enrollment · wallet/rewards · money eligibility+settlement · finance/TDS · RBAC/isolation · integrity + the unhappy-path
 matrix) **plus a real UI/UX pass** (layout, copy, empty/loading/error states, dead buttons/links, console errors, responsive/
-mobile, NO fabricated data). Agents run this AUTOMATED on the LOCAL stack (`FIXED_OTP=123456` — they cannot receive real SMS);
-the owner does the short real-OTP confirmation on STAGING afterward. Definition of done = [[verify-flows-at-runtime]]: a real user
+mobile, NO fabricated data). **EXHAUSTIVE means: every Excel download→fill→upload AND RE-upload (UAT §10 matrix — targets,
+achievements, fulfilment, credit bank-file+UTR, redemption UTR, TDS off-platform+deposits, KYC bulk-verify, invoices, enrollments,
+bulk users/outlets — incl. malformed/wrong-template/dup files); every navigation link · route · button (UAT §11 — no dead links,
+404s, infinite spinners, or console errors); and every EDGE CASE (boundary values, empty states, double-submit, back/forward,
+deep-link, cross-shell URL).** Agents run this AUTOMATED on the LOCAL stack (`FIXED_OTP=123456`) — **so OTP-gated flows ARE tested
+locally; only the real-SMS OTP is deferred to the owner's short STAGING confirmation afterward** (they cannot receive real SMS). Definition of done = [[verify-flows-at-runtime]]: a real user
 per role completes each flow end-to-end, a 2nd session sees the persisted write, unhappy paths are honest. `tsc`/unit/E2E-green are
 necessary, never sufficient.
 
@@ -98,9 +102,14 @@ alongside all. Each agent uses its own browser context (never a shared session).
   - **UAT-E — Finance: credits / invoicing / TDS** (§6, on the distributor partner): credit bank-file **held vs payable (GLB-1)**,
     **FAILED→re-bank (GLM-2)**, **multi-entry REVERSED reversal (GLM-1)**, **beneficiary validation (GLM-3)**, **TDS multi-row stores
     ALL rows (GLB-3)** + dup-skip, liability/export, invoicing.
-  - **UAT-F — UI/UX + no-fabrication visual sweep** (§8, READ-ONLY, runs alongside all): every page × role — screenshots, layout,
-    empty/loading/error states, dead buttons/links, console errors, responsive/mobile, copy; flag the #57(a) sub-dashboards as
-    KNOWN-mock (not new defects unless they were un-hidden).
+  - **UAT-F — UI/UX + navigation/link integrity + no-fabrication sweep** (§8 + §11, READ-ONLY, runs alongside all): every page ×
+    role — screenshots, layout, empty/loading/error states; **click EVERY nav item · link · button · tab (no dead link, 404,
+    infinite spinner, or console error)**; deep-link every route; back/forward; bad-route 404 grace; responsive/mobile; copy; flag
+    the #57(a) sub-dashboards as KNOWN-mock (not new defects unless un-hidden).
+
+**Excel ownership (every UAT §10 row round-tripped AND RE-uploaded by its stream, incl. malformed/wrong-template/dup files):**
+C = targets · achievements · enrollments-export; D = fulfilment · redemption-UTR · reconciliation; E = credit bank-file+UTR ·
+TDS off-platform+deposits · 194R/194C export · invoices; A = KYC review-dump+bulk-verify · bulk users/outlets.
 
 **AFTER the streams report:** orchestrator triages → fixes real defects via disjoint-file sub-executors (executor → INDEPENDENT
 audit → gate → runtime-verify, same discipline) → re-runs the affected stream → records ✅/❌ per row in `UAT-CHECKLIST.md` and any

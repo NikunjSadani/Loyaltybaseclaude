@@ -161,7 +161,43 @@
 
 ---
 
-## 10. Sign-off
+## 10. Excel round-trip & re-upload matrix — *every upload/export surface (exhaustive)*
+
+For **each** row: the template/export **downloads a real `.xlsx`** (open it — headers + sheet correct); fill it; the upload
+**parses + persists** (verify in a 2nd session); **bad rows are reported per-row** (not a silent drop); and the **re-upload**
+behaves per its design. Also test a **malformed/corrupt file** and a **wrong-template** upload → honest error, **no partial
+corruption**. Owning stream in brackets.
+
+| # | Surface | Role | Download→fill→upload | Re-upload expected | ✅/❌ |
+|---|---|---|---|---|---|
+| 10.1 | **Targets** [C] | CLIENT_ADMIN | template → fill → upload (verbatim, NO compute) | re-upload updates; **past-month lock** enforced | |
+| 10.2 | **Achievements** [C] | CLIENT_ADMIN | template → fill → upload; pace recomputes; delete-batch works | re-upload updates the batch | |
+| 10.3 | **Bulk fulfilment** (rewards) [D] | admin | download pending → fill statuses → upload | idempotent / status updates | |
+| 10.4 | **Credit payout bank-file** [E] | GIFSY/admin | build download (held vs payable) → UTR upload (PAID/FAILED) | re-download **includes FAILED (GLM-2)**; corrected UTR flips FAILED→PAID; **REVERSED never re-appears** | |
+| 10.5 | **Redemption payout UTR** (settlement) [D] | GIFSY | `utr-template` → fill → upload (SUCCESS/FAILED) | **idempotent** re-upload — no double settle / double reverse | |
+| 10.6 | **Reconciliation** [D] | GIFSY | download reconciliation `.xlsx` | read-only | |
+| 10.7 | **TDS 194R off-platform** [E] | CLIENT_ADMIN | template → **multi-row** fill → upload — **ALL rows persist (GLB-3)** | exact-dup re-upload **skipped (reported)**; a *different* file is recorded | |
+| 10.8 | **TDS deposits** [E] | CLIENT_ADMIN/GIFSY | template → fill → upload | file-level dedup on re-upload | |
+| 10.9 | **TDS 194R / 194C export** [E] | admin | download liability export (IST FY; PAN/name cells sanitised) | read-only | |
+| 10.10 | **KYC review-dump / bulk-verify** [A/B] | GIFSY | export dump → fill decisions → `bulk-verify` (dry-run `apply=false`, then `apply=true`) | re-apply idempotent | |
+| 10.11 | **Invoices export** [E] | admin | download invoice export | read-only | |
+| 10.12 | **Scheme enrollments export** [C] | admin | download enrollments export (reflects real enrollments) | read-only | |
+| 10.13 | **Visibility export/upload** [F-adj] | admin | per visibility flow | per design | |
+| 10.14 | **Admin users/outlets bulk** [A] | admin | `bulk-upload` (template → fill → upload), `bulk-edit`, `bulk-delete` | re-upload behaves; partial-failure reporting | |
+
+## 11. Navigation & link integrity — *nothing dead, every route reachable*
+
+| # | Steps | Expected | ✅/❌ |
+|---|---|---|---|
+| 11.1 | For **each role**, click **every item** in that role's nav/shell (and every sub-item). | Each loads a real page — no 404, no infinite spinner, no error boundary, no console error. | |
+| 11.2 | On every page reached, click **every button / link / tab / action**. | Each does something valid — no dead `#`/no-op, no console error, no broken modal. | |
+| 11.3 | **Deep-link** each route by pasting the URL directly (fresh load). | Loads with auth + real data (not a flash of error/empty then content). | |
+| 11.4 | Browser **back/forward** across a multi-step flow (e.g. redeem, settlement, KYC). | State stays coherent; no broken/blank screen. | |
+| 11.5 | Navigate to a **truly-bad route** (`/admin/nonexistent`). | Graceful 404/not-found page, not a crash. | |
+| 11.6 | Confirm **no orphan route renders mock data** (e.g. the #57(a) sub-dashboards if not hidden). | Either hidden, or known-mock + flagged — never presented as real. | |
+| 11.7 | Cross-shell: a partner/sales URL opened as admin (and vice-versa). | Scoped out, never the wrong shell's data. | |
+
+## 12. Sign-off
 
 | Gate | Owner | Status |
 |---|---|---|
@@ -173,9 +209,11 @@
 | §6 Finance/TDS | | |
 | §7 RBAC/Isolation | | |
 | §8–9 Integrity & unhappy paths | | |
+| §10 Excel round-trips & re-uploads | | |
+| §11 Navigation & link integrity | | |
 
-**UAT is PASS only when §1–§9 are all green for the in-scope roles**, every write was independently verified to persist, and every
-unhappy path was honest. Defects → log against `GO-LIVE-ISSUE-LIST.md` with role + steps + expected vs actual.
+**UAT is PASS only when §1–§11 are all green for the in-scope roles**, every write was independently verified to persist, every
+Excel surface round-tripped **and** re-uploaded correctly, every navigation link/route worked, and every unhappy/edge path was honest. Defects → log against `GO-LIVE-ISSUE-LIST.md` with role + steps + expected vs actual.
 
 **Out of UAT scope (tracked separately):** admin sub-dashboards #57(a) (mock — hide/wire first), notification worker/banners
 (P7), the post-launch backlog (`POST-GO-LIVE-BACKLOG.md`), and owner-ops (monitoring/backups/secret-rotation #74). Real Deoleo
