@@ -38,6 +38,7 @@ import {
   parseTargetUploadBuffer,
   currentMonthKey,
   isMonthLocked,
+  kpiCodeKeys,
   KpiDefLike,
   OutletLike,
 } from './targets.helpers';
@@ -643,7 +644,13 @@ export class TargetsService {
 
       // Write one OutletSalesRecord per (outletCode, month) with non-blank values
       for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
-        for (const [outletCode, kpiMap] of Object.entries(outletMap)) {
+        for (const [outletCode, kpiMapRaw] of Object.entries(outletMap)) {
+          // Achievements have no per-outlet display-name concept. The shared target
+          // parser may have collected an override-name column into `__names`; strip it
+          // here so it never persists as inert dead data in kpiValues (audit O-1).
+          const kpiMap = Object.fromEntries(
+            kpiCodeKeys(kpiMapRaw).map((k) => [k, kpiMapRaw[k]]),
+          );
           if (Object.keys(kpiMap).length === 0) continue; // skip fully-blank rows
 
           const meta = outletMeta.get(outletCode);
@@ -800,9 +807,11 @@ export class TargetsService {
       const targetValues    = (targetRow?.targetValues   ?? {}) as Record<string, number>;
       const kpiValues       = (achievementRow?.kpiValues ?? {}) as Record<string, number>;
 
+      // Enumerate KPI codes from both sides, EXCLUDING the reserved `__names`
+      // key (per-outlet custom display names live there, not a KPI value).
       const allKpiCodes = new Set([
-        ...Object.keys(targetValues),
-        ...Object.keys(kpiValues),
+        ...kpiCodeKeys(targetValues),
+        ...kpiCodeKeys(kpiValues),
       ]);
 
       const kpis: Array<{

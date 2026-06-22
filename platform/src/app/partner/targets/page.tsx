@@ -30,6 +30,11 @@ import { getGifsySettings } from '@/lib/gifsy-settings';
 
 interface KpiRow {
   code:     string;
+  // Per-outlet display name from the backend: the custom "name override" if the
+  // admin set one for this outlet/month, else the KPI's generic label. The API
+  // already applies the "custom name if set, else label" rule (it reads
+  // targetValues.__names[code]); the FE just renders `name`.
+  name?:    string;
   target:   number | null;
   achieved: number | null;
   pace:     number | null;
@@ -233,6 +238,10 @@ export default function PartnerTargetsPage() {
     // Build per-KPI aggregate sums (target sum, achieved sum)
     const targetSum:   Record<string, number>  = {};
     const achievedSum: Record<string, number>  = {};
+    // Display name per KPI code. The override name is per-outlet, but the param
+    // cards aggregate across outlets — take the FIRST non-empty backend `name`
+    // seen for the code (custom name if set, else the KPI's generic label).
+    const nameByCode:  Record<string, string>  = {};
     // isPrimary: first KPI is treated as primary if none is explicitly marked
     // Backend does not return isPrimary in this shape — use order position (first = primary)
     const kpiCodes = [...kpiCodeSet];
@@ -241,6 +250,7 @@ export default function PartnerTargetsPage() {
       for (const k of outlet.kpis) {
         targetSum[k.code]   = (targetSum[k.code]   ?? 0) + (k.target   ?? 0);
         achievedSum[k.code] = (achievedSum[k.code] ?? 0) + (k.achieved ?? 0);
+        if (!nameByCode[k.code] && k.name) nameByCode[k.code] = k.name;
       }
     }
 
@@ -248,7 +258,9 @@ export default function PartnerTargetsPage() {
       .filter(code => (targetSum[code] ?? 0) > 0)  // only show KPIs that have a target
       .map((code, idx) => ({
         id:        code,
-        label:     code.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+        // Custom name if set, else label (from backend); else format the code.
+        label:     nameByCode[code]
+          ?? code.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
         unit:      'cases',
         target:    targetSum[code] ?? 0,
         isPrimary: idx === 0,
@@ -426,7 +438,8 @@ export default function PartnerTargetsPage() {
                       <th className="py-2 px-2 text-left">Type</th>
                       {(data.outlets[0]?.kpis ?? []).map(k => (
                         <th key={k.code} className="py-2 px-2 text-right">
-                          {k.code.replace(/_/g, ' ')}
+                          {/* custom name if set, else label (backend `name`), else code */}
+                          {k.name ?? k.code.replace(/_/g, ' ')}
                         </th>
                       ))}
                     </tr>

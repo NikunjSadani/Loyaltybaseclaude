@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
+import { kpiCodeKeys, NAMES_KEY } from '../targets/targets.helpers';
 
 /**
  * Partner self-service — ported from platform/src/app/api/partner/* onto /v1.
@@ -168,8 +169,8 @@ export class PartnerService {
       outletCode: { in: outletCodes },
     };
 
-    // ── Fetch both sides in parallel ──────────────────────────────────────────
-    const [targetRows, achievementRows] = await Promise.all([
+    // ── Fetch both sides in parallel (+ KPI labels for the name fallback) ──────
+    const [targetRows, achievementRows, kpiRows] = await Promise.all([
       this.prisma.outletTarget.findMany({
         where: whereBase,
         select: { outletCode: true, outletName: true, outletType: true, targetValues: true },
@@ -178,7 +179,14 @@ export class PartnerService {
         where: whereBase,
         select: { outletCode: true, kpiValues: true },
       }),
+      this.prisma.kpiDef.findMany({
+        where: { clientId: user.clientId },
+        select: { code: true, label: true },
+      }),
     ]);
+
+    // KPI code → generic label (the fallback when no per-outlet override is set).
+    const kpiLabel = new Map(kpiRows.map((k) => [k.code, k.label]));
 
     const targetIndex      = new Map(targetRows.map((r) => [r.outletCode, r]));
     const achievementIndex = new Map(achievementRows.map((r) => [r.outletCode, r]));
@@ -194,9 +202,18 @@ export class PartnerService {
         const targetValues  = (tRow?.targetValues  ?? {}) as Record<string, number>;
         const kpiValues     = (aRow?.kpiValues     ?? {}) as Record<string, number>;
 
+        // Per-outlet custom KPI display names (the "name override") live under the
+        // reserved `__names` key inside targetValues — never a KPI value.
+        const names = ((targetValues as Record<string, unknown>)[NAMES_KEY] ?? {}) as Record<
+          string,
+          string
+        >;
+
+        // Enumerate KPI codes from both sides, EXCLUDING the reserved `__names`
+        // key so it can never surface as a phantom KPI row.
         const allKpiCodes = new Set([
-          ...Object.keys(targetValues),
-          ...Object.keys(kpiValues),
+          ...kpiCodeKeys(targetValues),
+          ...kpiCodeKeys(kpiValues),
         ]);
 
         const kpis = [...allKpiCodes].map((code) => {
@@ -213,7 +230,11 @@ export class PartnerService {
             pace = achieved / target;
           }
 
-          return { code, target, achieved, pace };
+          // Display rule: per-outlet custom name if set, else the KPI's generic
+          // label (else the raw code as a last resort).
+          const name = names[code] || kpiLabel.get(code) || code;
+
+          return { code, name, target, achieved, pace };
         });
 
         return {

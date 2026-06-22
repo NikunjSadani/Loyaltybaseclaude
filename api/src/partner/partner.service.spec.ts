@@ -19,6 +19,7 @@ const mockPrisma = {
   outlet:            { findMany: jest.fn() },
   outletTarget:      { findFirst: jest.fn(), findMany: jest.fn() },
   outletSalesRecord: { findMany: jest.fn() },
+  kpiDef:            { findMany: jest.fn() },
 };
 
 const partner: JwtPayload = {
@@ -36,6 +37,9 @@ describe('PartnerService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    // getTargets now also fetches KpiDef labels (for the name-override fallback);
+    // default to an empty KPI set so existing target tests are unaffected.
+    mockPrisma.kpiDef.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [PartnerService, { provide: PrismaService, useValue: mockPrisma }],
     }).compile();
@@ -230,6 +234,41 @@ describe('PartnerService', () => {
       expect(focusPack.achieved).toBe(0);
       // pace = 0 / 50 = 0  (0 achieved, non-zero target → pace = 0, not null)
       expect(focusPack.pace).toBe(0);
+    });
+
+    it('surfaces the per-outlet __names override as kpi.name AND never as a phantom KPI', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O001' }]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'MONTH_TGT', label: 'Month Target' },
+        { code: 'FOCUS_PACK_1', label: 'Focus Pack - 1' },
+      ]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        {
+          outletCode: 'O001',
+          outletName: 'Outlet One',
+          outletType: 'RETAIL',
+          // __names is the reserved override-name key — must NOT become a KPI row.
+          targetValues: {
+            MONTH_TGT: 100,
+            FOCUS_PACK_1: 50,
+            __names: { FOCUS_PACK_1: 'Diwali Combo' },
+          },
+        },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+
+      const res = await service.getTargets(partner, { period: '2026-05' });
+      const kpis = res.outlets[0].kpis;
+
+      // No phantom "__names" KPI row.
+      expect(kpis.find((k: { code: string }) => k.code === '__names')).toBeUndefined();
+
+      // FOCUS_PACK_1 shows the custom override name; MONTH_TGT falls back to label.
+      const focus = kpis.find((k: { code: string }) => k.code === 'FOCUS_PACK_1')!;
+      expect(focus.name).toBe('Diwali Combo');
+      const month = kpis.find((k: { code: string }) => k.code === 'MONTH_TGT')!;
+      expect(month.name).toBe('Month Target');
     });
 
     it('CRITICAL: pace is null when target is 0 (divide-by-zero guard)', async () => {

@@ -53,7 +53,7 @@ function makeTargetsResponse(outlets: Array<{
   outletCode:  string;
   outletName:  string;
   outletType:  string;
-  kpis: Array<{ code: string; target: number | null; achieved: number | null; pace: number | null }>;
+  kpis: Array<{ code: string; name?: string; target: number | null; achieved: number | null; pace: number | null }>;
 }> = []) {
   return {
     success: true,
@@ -170,5 +170,34 @@ describe('PT — Partner Targets page API wiring (new shape)', () => {
     // Outlet breakdown table shows both outlet names
     expect(screen.getByText('Kumar General Store')).toBeInTheDocument();
     expect(screen.getByText('Singh Traders')).toBeInTheDocument();
+  });
+
+  it('PT6: per-outlet custom KPI name (override) is rendered instead of the code', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    // Backend supplies kpi.name = the override (custom name if set, else label).
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok:   true,
+      json: () => Promise.resolve(makeTargetsResponse([
+        {
+          outletCode: 'OUT-001',
+          outletName: 'Kumar General Store',
+          outletType: 'WHOLESALER',
+          kpis: [
+            { code: 'FOCUS_PACK_1', name: 'Diwali Combo', target: 100, achieved: 40, pace: 0.4 },
+          ],
+        },
+      ])),
+    }));
+
+    render(<PartnerTargetsPage />);
+    await act(async () => { vi.advanceTimersByTime(500); });
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    // The custom name shows (it renders in several spots — the param card, the hero
+    // subtitle, and the outlet breakdown header), and the formatted code "Focus Pack 1"
+    // never appears: the per-outlet override fully replaces the generic label.
+    expect(screen.getAllByText('Diwali Combo').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Focus Pack 1')).not.toBeInTheDocument();
   });
 });

@@ -137,8 +137,9 @@ describe('generateTargetTemplateBuffer', () => {
     const row1 = aoa[0] as string[];
     // "Jul '26 Target" should appear at column 3 (after 3 fixed cols)
     expect(row1[3]).toMatch(/jul.*26.*target/i);
-    // "Aug '26 Target" at column 3 + 2 (2 enabled KPIs)
-    expect(row1[5]).toMatch(/aug.*26.*target/i);
+    // Block width = 3 (Month Target value + Focus Pack value + Focus Pack name —
+    // KPI_B has a name override). So "Aug '26 Target" starts at col 3 + 3 = 6.
+    expect(row1[6]).toMatch(/aug.*26.*target/i);
   });
 
   it('contains KPI labels in row 2 for each month', () => {
@@ -151,12 +152,14 @@ describe('generateTargetTemplateBuffer', () => {
     expect(row2[0]).toBe('Outlet ID');
     expect(row2[1]).toBe('Outlet Name');
     expect(row2[2]).toBe('Outlet Type');
-    // KPIs for month 1 at cols 3, 4
-    expect(row2[3]).toBe('Month Target');
-    expect(row2[4]).toBe('Focus Pack - 1');
-    // KPIs for month 2 at cols 5, 6
-    expect(row2[5]).toBe('Month Target');
-    expect(row2[6]).toBe('Focus Pack - 1');
+    // Month 1 block (width 3): value, value, name-override.
+    expect(row2[3]).toBe('Month Target');     // KPI_A value (no override)
+    expect(row2[4]).toBe('Focus Pack - 1');   // KPI_B value
+    expect(row2[5]).toBe('Focus Pack 1 Name'); // KPI_B name-override column
+    // Month 2 block starts at col 6.
+    expect(row2[6]).toBe('Month Target');
+    expect(row2[7]).toBe('Focus Pack - 1');
+    expect(row2[8]).toBe('Focus Pack 1 Name');
   });
 
   it('pre-fills outlet rows (data starts at row 3)', () => {
@@ -544,6 +547,30 @@ describe('buildResolvedTargetsBuffer ↔ parseTargetUploadBuffer round-trip', ()
     expect(o2['FOCUS_PACK_1']).toBe(78.5);
   });
 
+  it('does NOT surface the reserved __names key as a column in the export', () => {
+    // A stored row whose targetValues carries a __names override must export only
+    // KPI-value columns — __names is read by code, never enumerated as a column.
+    const buf = buildResolvedTargetsBuffer('2026-07', ENABLED_KPIS, [
+      {
+        outletCode: 'O001',
+        outletName: 'Outlet One',
+        outletType: 'RETAIL',
+        targetValues: {
+          MONTH_TGT: 10,
+          FOCUS_PACK_1: 5,
+          __names: { FOCUS_PACK_1: 'Diwali Combo' },
+        },
+      },
+    ]);
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json<(string | number)[]>(ws, { header: 1, defval: '' });
+    const row2 = (aoa[1] as string[]).map((c) => String(c));
+    // Only the fixed cols + KPI value labels — no "__names" / "Diwali Combo" col.
+    expect(row2.join(',')).not.toContain('__names');
+    expect(row2.join(',')).not.toContain('Diwali Combo');
+  });
+
   it('the export emits the two-row month-group header (row1 month label, row2 fixed cols)', () => {
     const buf = buildResolvedTargetsBuffer('2026-07', ENABLED_KPIS, [
       {
@@ -565,5 +592,118 @@ describe('buildResolvedTargetsBuffer ↔ parseTargetUploadBuffer round-trip', ()
     expect(row2[1]).toBe('Outlet Name');
     expect(row2[2]).toBe('Outlet Type');
     expect(row2[3]).toBe('Month Target');
+  });
+});
+
+// ─── KPI name-override (__names) round-trip ───────────────────────────────────
+//
+// A KPI configured with hasNameOverride + nameOverrideLabel emits an EXTRA Row-2
+// column (the nameOverrideLabel) right after its value column. On upload, the
+// per-outlet string typed in that column is stored at targetValues.__names[code].
+// KPIs WITHOUT an override are byte-identical to before (single value column).
+//
+// Fixture KPI_B (FOCUS_PACK_1) has hasNameOverride:true, nameOverrideLabel:'Focus
+// Pack 1 Name'. KPI_A (MONTH_TGT) has no override.
+
+describe('KPI name-override (__names) round-trip', () => {
+  it('template emits the nameOverrideLabel as an extra Row-2 header after the value column', () => {
+    const buf = generateTargetTemplateBuffer(ENABLED_KPIS, ['2026-07'], OUTLETS);
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' });
+    const row2 = aoa[1] as string[];
+    // [Outlet ID, Outlet Name, Outlet Type, Month Target, Focus Pack - 1, Focus Pack 1 Name]
+    expect(row2[3]).toBe('Month Target');           // KPI_A value (no override)
+    expect(row2[4]).toBe('Focus Pack - 1');         // KPI_B value
+    expect(row2[5]).toBe('Focus Pack 1 Name');      // KPI_B override-name column
+    // KPI_A (no override) must NOT have emitted a name column.
+    expect(row2).not.toContain('');                 // no stray blank header in the block
+  });
+
+  it('a KPI WITHOUT an override stays single-column (round-trip unchanged)', () => {
+    // Only KPI_A enabled → no override columns at all; row 2 = fixed + Month Target.
+    const buf = generateTargetTemplateBuffer([KPI_A], ['2026-07'], OUTLETS);
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' });
+    const row2 = aoa[1] as string[];
+    expect(row2).toEqual(['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target']);
+  });
+
+  it('upload stores a per-outlet name at targetValues.__names[code] AND keeps the KPI value', () => {
+    // Row 2: fixed + Month Target + Focus Pack - 1 + Focus Pack 1 Name
+    const row1 = ['', '', '', "Jul '26 Target", '', ''];
+    const row2 = ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', 'Focus Pack 1 Name'];
+    // O001: MONTH_TGT=100, FOCUS_PACK_1=20, name="Diwali Combo"
+    const data = ['O001', 'Outlet One', 'RETAIL', 100, 20, 'Diwali Combo'];
+    const buf = makeXlsx([row1, row2, data]);
+
+    const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
+    const kpiMap = result.acceptedTargets['2026-07']?.['O001'] as Record<string, unknown>;
+    expect(kpiMap).toBeDefined();
+    // KPI values still parsed correctly.
+    expect(kpiMap['MONTH_TGT']).toBe(100);
+    expect(kpiMap['FOCUS_PACK_1']).toBe(20);
+    // The custom name landed under the reserved __names key, keyed by KPI code.
+    expect(kpiMap['__names']).toEqual({ FOCUS_PACK_1: 'Diwali Combo' });
+  });
+
+  it('a numeric-looking name cell is coerced to a trimmed string', () => {
+    const row1 = ['', '', '', "Jul '26 Target", '', ''];
+    const row2 = ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', 'Focus Pack 1 Name'];
+    // SheetJS may hand back a number for "2024" — must be stored as the string "2024".
+    const data = ['O001', 'Outlet One', 'RETAIL', 100, 20, 2024];
+    const buf = makeXlsx([row1, row2, data]);
+
+    const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
+    const kpiMap = result.acceptedTargets['2026-07']?.['O001'] as Record<string, unknown>;
+    expect(kpiMap['__names']).toEqual({ FOCUS_PACK_1: '2024' });
+  });
+
+  it('a BLANK name cell → __names key OMITTED entirely (never {})', () => {
+    const row1 = ['', '', '', "Jul '26 Target", '', ''];
+    const row2 = ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', 'Focus Pack 1 Name'];
+    // Name column blank → no override stored.
+    const data = ['O001', 'Outlet One', 'RETAIL', 100, 20, ''];
+    const buf = makeXlsx([row1, row2, data]);
+
+    const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
+    const kpiMap = result.acceptedTargets['2026-07']?.['O001'] as Record<string, unknown>;
+    expect(kpiMap['MONTH_TGT']).toBe(100);
+    expect(kpiMap['FOCUS_PACK_1']).toBe(20);
+    expect('__names' in kpiMap).toBe(false);
+  });
+
+  it('full template→upload round-trip: generated template parses names back', () => {
+    // Build the real template, then simulate an admin filling in values + a name.
+    const tmpl = generateTargetTemplateBuffer(ENABLED_KPIS, ['2026-07'], OUTLETS);
+    const wb = XLSX.read(tmpl, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json<(string | number)[]>(ws, { header: 1, defval: '' });
+    // Row 2 layout: [..fixed, Month Target(3), Focus Pack - 1(4), Focus Pack 1 Name(5)]
+    // Fill O001 (first data row, index 2): value cols + the name col.
+    (aoa[2] as (string | number)[])[3] = 150;            // MONTH_TGT
+    (aoa[2] as (string | number)[])[4] = 30;             // FOCUS_PACK_1
+    (aoa[2] as (string | number)[])[5] = 'Festive Pack'; // FOCUS_PACK_1 name override
+    const filled = makeXlsx(aoa as (string | number | null)[][]);
+
+    const result = parseTargetUploadBuffer(filled, ENABLED_KPIS, KNOWN_CODES);
+    const kpiMap = result.acceptedTargets['2026-07']?.['O001'] as Record<string, unknown>;
+    expect(kpiMap['MONTH_TGT']).toBe(150);
+    expect(kpiMap['FOCUS_PACK_1']).toBe(30);
+    expect(kpiMap['__names']).toEqual({ FOCUS_PACK_1: 'Festive Pack' });
+  });
+
+  it('a name with NO numeric value in the block → __names omitted (name only is not a value)', () => {
+    // O001 has only the name filled, both KPI value cells blank → row is skipped
+    // as blank (names ride with values; a name alone is meaningless).
+    const row1 = ['', '', '', "Jul '26 Target", '', ''];
+    const row2 = ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', 'Focus Pack 1 Name'];
+    const data = ['O001', 'Outlet One', 'RETAIL', '', '', 'Orphan Name'];
+    const buf = makeXlsx([row1, row2, data]);
+
+    const result = parseTargetUploadBuffer(buf, ENABLED_KPIS, KNOWN_CODES);
+    expect(result.rows[0].status).toBe('skipped_blank');
+    expect(result.acceptedTargets['2026-07']?.['O001']).toBeUndefined();
   });
 });

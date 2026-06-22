@@ -856,6 +856,25 @@ describe('TargetsService', () => {
       expect(kpi.pace).toBeNull();
     });
 
+    it('ignores the reserved __names key (no phantom KPI in pace output)', async () => {
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        {
+          outletCode: 'O001',
+          outletName: 'Outlet One',
+          outletType: 'RETAIL',
+          targetValues: { MONTH_TGT: 100, __names: { MONTH_TGT: 'Diwali Combo' } },
+        },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O001', kpiValues: { MONTH_TGT: 80 } },
+      ]);
+
+      const res = await service.getPace(admin, { month: '2026-07' });
+      const codes = res.outlets[0].kpis.map((k: { code: string }) => k.code);
+      expect(codes).toContain('MONTH_TGT');
+      expect(codes).not.toContain('__names');
+    });
+
     it('CRITICAL: pace is null when target key is absent', async () => {
       // Target row has no MONTH_TGT key; achievement side has it
       mockPrisma.outletTarget.findMany.mockResolvedValue([

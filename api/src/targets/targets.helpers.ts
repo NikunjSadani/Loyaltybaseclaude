@@ -12,6 +12,16 @@
  *   Only cells with a valid positive number are recorded.
  *   Numbers are stored VERBATIM — no computation.
  *
+ * `__names` reserved key convention:
+ *   Per-outlet custom KPI display names ("name override") are stored INSIDE the
+ *   same `targetValues` JSON under a single reserved nested key `__names`, keyed
+ *   by KPI code, e.g.
+ *     targetValues = { "FOCUS_PACK_1": 120, "__names": { "FOCUS_PACK_1": "Diwali Combo" } }
+ *   KPI VALUES stay keyed by code as before; `__names` is the ONLY non-code key.
+ *   Consumers that read values by KPI code ignore `__names` automatically; any
+ *   path that ENUMERATES targetValues keys as KPI codes must filter `__names` out
+ *   (see NAMES_KEY below).
+ *
  * Both functions are free of Prisma / NestJS imports so they can be tested
  * directly without bootstrapping the DI container.
  */
@@ -31,6 +41,23 @@ export interface KpiDefLike {
   enabled: boolean;
 }
 
+/**
+ * Reserved nested key inside `targetValues` that holds per-outlet custom KPI
+ * display names (the "name override"), keyed by KPI code. NEVER a KPI code.
+ * Any code that iterates targetValues keys as KPI codes must skip this one.
+ */
+export const NAMES_KEY = '__names' as const;
+
+/**
+ * Returns the KPI-code keys of a `targetValues` JSON, EXCLUDING the reserved
+ * `__names` key. Use this anywhere you would otherwise `Object.keys(targetValues)`
+ * and treat each key as a KPI code.
+ */
+export function kpiCodeKeys(targetValues: Record<string, unknown> | null | undefined): string[] {
+  if (!targetValues) return [];
+  return Object.keys(targetValues).filter((k) => k !== NAMES_KEY);
+}
+
 /** Minimal outlet shape used for template generation and upload validation. */
 export interface OutletLike {
   outletCode: string;
@@ -42,13 +69,21 @@ export interface OutletLike {
 
 export type RowStatus = 'accepted' | 'rejected_outlet' | 'rejected_kpi' | 'skipped_blank';
 
+/**
+ * Per-outlet-per-month value map: KPI code → number, PLUS the optional reserved
+ * `__names` key (NAMES_KEY) → { kpiCode → custom display name }. The `__names`
+ * sub-object is the ONLY non-numeric, non-code entry; everything else is a KPI
+ * value keyed by code.
+ */
+export type TargetValueMap = Record<string, number | Record<string, string>>;
+
 export interface ParsedRow {
   rowIndex: number;      // 1-based (1 = header block; data starts at 3)
   outletCode: string;
   outletName: string;
   outletType: string;
-  /** month (YYYY-MM) → kpiCode → number (only non-blank cells) */
-  monthTargets: Record<string, Record<string, number>>;
+  /** month (YYYY-MM) → kpiCode → number (only non-blank cells), + optional __names */
+  monthTargets: Record<string, TargetValueMap>;
   status: RowStatus;
   remarks: string;
 }
@@ -56,10 +91,10 @@ export interface ParsedRow {
 export interface ParseResult {
   rows: ParsedRow[];
   /**
-   * month → outletCode → { kpiCode → number }.
+   * month → outletCode → { kpiCode → number, [+ __names: { kpiCode → name }] }.
    * ONLY rows with status === 'accepted' and at least one non-blank KPI value.
    */
-  acceptedTargets: Record<string, Record<string, Record<string, number>>>;
+  acceptedTargets: Record<string, Record<string, TargetValueMap>>;
   summary: {
     total: number;
     accepted: number;
@@ -135,6 +170,18 @@ export function generateTargetTemplateBuffer(
 ): Buffer {
   const enabled = getEnabledKpis(kpis);
 
+  // A KPI emits a "name override" column (a per-outlet custom display name) ONLY
+  // when it is explicitly configured with hasNameOverride + a nameOverrideLabel.
+  // KPIs without an override keep their single value column — the template /
+  // parse round-trip is byte-identical for them.
+  const hasOverrideCol = (k: KpiDefLike): boolean =>
+    !!(k.hasNameOverride && k.nameOverrideLabel);
+
+  // Per-month block width = one value column per enabled KPI, PLUS one extra
+  // name column for each KPI that has a name override.
+  const overrideCount = enabled.filter(hasOverrideCol).length;
+  const blockWidth = enabled.length + overrideCount;
+
   // ── Row 1: month group headers ──────────────────────────────────────────────
   const row1: (string | number)[] = Array(FIXED_COLS.length).fill('');
   for (const month of months) {
@@ -144,27 +191,32 @@ export function generateTargetTemplateBuffer(
     ];
     const label = `${abbr} '${year.slice(2)} Target`;
     row1.push(label);
-    for (let i = 1; i < enabled.length; i++) row1.push('');
+    for (let i = 1; i < blockWidth; i++) row1.push('');
   }
 
   // ── Row 2: column headers ────────────────────────────────────────────────────
+  // For each KPI emit its value-label column; immediately AFTER it (adjacent,
+  // value-first) emit the nameOverrideLabel header when the KPI has an override.
   const row2: string[] = [...FIXED_COLS];
   for (let mi = 0; mi < months.length; mi++) {
-    for (const kpi of enabled) row2.push(kpi.label);
+    for (const kpi of enabled) {
+      row2.push(kpi.label);
+      if (hasOverrideCol(kpi)) row2.push(kpi.nameOverrideLabel as string);
+    }
   }
 
-  // ── Data rows (pre-filled outlet info; KPI cells blank) ───────────────────
+  // ── Data rows (pre-filled outlet info; KPI + name cells blank) ─────────────
   const dataRows = outlets.map((o) => {
     const row: (string | number)[] = [o.outletCode, o.name, o.outletType];
     for (let mi = 0; mi < months.length; mi++) {
-      for (let ki = 0; ki < enabled.length; ki++) row.push('');
+      for (let ci = 0; ci < blockWidth; ci++) row.push('');
     }
     return row;
   });
 
   const ws = XLSX.utils.aoa_to_sheet([row1, row2, ...dataRows]);
 
-  // Column widths
+  // Column widths — mirror the value+name column layout per month block.
   const colWidths: { wch: number }[] = [
     { wch: 16 }, // Outlet ID
     { wch: 24 }, // Outlet Name
@@ -173,19 +225,20 @@ export function generateTargetTemplateBuffer(
   for (let mi = 0; mi < months.length; mi++) {
     for (const kpi of enabled) {
       colWidths.push({ wch: kpi.isPrimary ? 14 : 18 });
+      if (hasOverrideCol(kpi)) colWidths.push({ wch: 22 }); // name override column
     }
   }
   ws['!cols'] = colWidths;
 
-  // Merge month group header cells (row 1)
+  // Merge month group header cells (row 1) across the full (wider) block.
   const merges: XLSX.Range[] = [];
   let colOffset = FIXED_COLS.length;
   for (let mi = 0; mi < months.length; mi++) {
     merges.push({
       s: { r: 0, c: colOffset },
-      e: { r: 0, c: colOffset + enabled.length - 1 },
+      e: { r: 0, c: colOffset + blockWidth - 1 },
     });
-    colOffset += enabled.length;
+    colOffset += blockWidth;
   }
   ws['!merges'] = merges;
 
@@ -305,10 +358,20 @@ export function parseTargetUploadBuffer(
 ): ParseResult {
   const enabled = getEnabledKpis(kpis);
 
-  // label → code map (for resolving uploaded headers back to KPI codes)
+  // label → code map (for resolving uploaded VALUE headers back to KPI codes)
   const labelToCode = new Map<string, string>();
   for (const kpi of enabled) {
     labelToCode.set(kpi.label.toLowerCase().trim(), kpi.code);
+  }
+
+  // nameOverrideLabel → code map (for the OPTIONAL per-outlet custom-name column
+  // that sits adjacent to a KPI's value column when hasNameOverride is set). The
+  // string typed under this column is stored at targetValues.__names[code].
+  const overrideLabelToCode = new Map<string, string>();
+  for (const kpi of enabled) {
+    if (kpi.hasNameOverride && kpi.nameOverrideLabel) {
+      overrideLabelToCode.set(kpi.nameOverrideLabel.toLowerCase().trim(), kpi.code);
+    }
   }
 
   const wb = XLSX.read(buffer, { type: 'buffer' });
@@ -379,22 +442,32 @@ export function parseTargetUploadBuffer(
   interface KpiColumn {
     colIndex: number;  // ABSOLUTE row-2 column index
     code: string;
+    kind: 'value' | 'name';  // 'value' = KPI target value; 'name' = override name
   }
   const monthKpiCols: KpiColumn[][] = monthBlocks.map((block, bi) => {
     const blockStart = block.startCol;
     const blockEnd =
       bi + 1 < monthBlocks.length ? monthBlocks[bi + 1].startCol : headerRow2.length;
     const cols: KpiColumn[] = [];
-    const seen = new Set<string>();
+    const seen = new Set<string>();       // KPI value columns already matched
+    const seenNames = new Set<string>();  // KPI name-override columns already matched
     for (let ci = blockStart; ci < blockEnd && ci < headerRow2.length; ci++) {
       const label = headerRow2[ci].toLowerCase().trim();
+      // Match KPI VALUE labels FIRST, override labels SECOND, so a string that is
+      // both a KPI label and a nameOverrideLabel can never be confused.
       const code = labelToCode.get(label);
-      // Skip the fixed columns / blanks / unknown labels. Guard against a label
-      // appearing twice inside one block (ambiguous → keep the first match only).
       if (code && !seen.has(code)) {
         seen.add(code);
-        cols.push({ colIndex: ci, code });
+        cols.push({ colIndex: ci, code, kind: 'value' });
+        continue;
       }
+      // Otherwise, this may be a per-outlet name-override column for a KPI.
+      const nameCode = overrideLabelToCode.get(label);
+      if (nameCode && !seenNames.has(nameCode)) {
+        seenNames.add(nameCode);
+        cols.push({ colIndex: ci, code: nameCode, kind: 'name' });
+      }
+      // Skip fixed columns / blanks / unknown labels.
     }
     return cols;
   });
@@ -407,7 +480,11 @@ export function parseTargetUploadBuffer(
   // whole file rather than persist shifted/partial data.
   const enabledCodes = enabled.map((k) => k.code);
   for (let bi = 0; bi < monthBlocks.length; bi++) {
-    const matchedCodes = new Set(monthKpiCols[bi].map((c) => c.code));
+    // Only VALUE columns count toward KPI coverage; name-override columns are
+    // optional and must not affect the "all KPIs present" integrity guard.
+    const matchedCodes = new Set(
+      monthKpiCols[bi].filter((c) => c.kind === 'value').map((c) => c.code),
+    );
     const missing = enabledCodes.filter((code) => !matchedCodes.has(code));
     if (matchedCodes.size === 0 || missing.length > 0) {
       throw new Error(
@@ -419,7 +496,7 @@ export function parseTargetUploadBuffer(
 
   // ── Parse data rows ─────────────────────────────────────────────────────────
   const rows: ParsedRow[] = [];
-  const acceptedTargets: Record<string, Record<string, Record<string, number>>> = {};
+  const acceptedTargets: Record<string, Record<string, TargetValueMap>> = {};
 
   for (let ri = 2; ri < rawAoa.length; ri++) {
     const row = rawAoa[ri] as (string | number | null | undefined)[];
@@ -458,15 +535,27 @@ export function parseTargetUploadBuffer(
     for (let bi = 0; bi < monthBlocks.length; bi++) {
       const { month } = monthBlocks[bi];
       const kpiCols = monthKpiCols[bi];
-      const monthTargetMap: Record<string, number> = {};
+      const monthTargetMap: TargetValueMap = {};
+      // Per-outlet custom names collected from the override-NAME columns. Stored
+      // under the reserved `__names` key only if non-empty (never `{}`).
+      const nameMap: Record<string, string> = {};
 
-      for (const { colIndex, code } of kpiCols) {
+      for (const { colIndex, code, kind } of kpiCols) {
         const ci = colIndex; // ABSOLUTE column — drift-immune, order-independent
         if (ci >= row.length) continue;
         const rawVal = row[ci];
 
         // CRITICAL: blank / null / undefined / empty string → omit the key
         if (rawVal === null || rawVal === undefined || String(rawVal).trim() === '') continue;
+
+        if (kind === 'name') {
+          // Override-name column: a free-text per-outlet display name. SheetJS may
+          // return a number for a numeric-looking name → coerce to a trimmed
+          // string. Blank already skipped above; non-blank → store under __names.
+          const name = String(rawVal ?? '').trim();
+          if (name) nameMap[code] = name;
+          continue;
+        }
 
         // Locale-aware: India/en-IN uses commas as thousands separators
         // ("1,23,456.78"). Strip grouping commas before parseFloat so "1,234"
@@ -485,7 +574,14 @@ export function parseTargetUploadBuffer(
         hasAnyValue = true;
       }
 
+      // Attach collected custom names under the reserved `__names` key. Omit the
+      // key entirely when empty (never store `{}`). Names ride along with the
+      // month's values; they are only meaningful when there ARE values, so only
+      // store them on a block that has at least one numeric value.
       if (Object.keys(monthTargetMap).length > 0) {
+        if (Object.keys(nameMap).length > 0) {
+          monthTargetMap[NAMES_KEY] = nameMap;
+        }
         parsedRow.monthTargets[month] = monthTargetMap;
       }
     }
