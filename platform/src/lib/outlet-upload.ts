@@ -102,8 +102,6 @@ export const REKYC_KEY_TO_FLAG: Record<string, keyof Omit<ReKYCFlags, 'remarks'>
   'Self Declaration (Document)':    'selfDeclaration',
 };
 
-const VALID_OUTLET_TYPES = new Set(['SSS', 'WHOLESALER', 'SUB_STOCKIST', 'SSS_TOT']);
-
 // ─── Utility helpers ──────────────────────────────────────────────────────────
 
 /** "Yes" / "YES" / "yes" → true. Everything else → false. */
@@ -196,12 +194,20 @@ export function validateOutletUpload(
   existingOutlets:   Pick<OutletRecord, 'outletId' | 'isActive'>[],
   validPrograms:     string[],
   validCategories:   string[],
+  validOutletTypes:  string[],
   employees:         HierarchyEmployee[],
   leafRoleCode:      string,
 ): OutletUploadValidationResult {
   const existingMap  = new Map(existingOutlets.map(o => [o.outletId, o]));
   const seenInUpload = new Map<string, number>(); // outletId → first rowNum
   const empById      = new Map(employees.map(e => [e.id, e]));
+  // Outlet types come from the tenant's enabled OutletTypeClientConfig (passed in by the
+  // page from GET /admin/outlets) — NOT a hardcoded list — so FE validation matches what
+  // the backend upsert will actually accept. Empty ⇒ none enabled for this tenant.
+  const validTypeSet = new Set(validOutletTypes.map(t => t.toUpperCase()));
+  const typeHint = validOutletTypes.length
+    ? `must be one of: ${validOutletTypes.join(', ')}`
+    : 'no outlet types are enabled for this tenant — ask Gifsy to enable outlet types before adding outlets';
 
   const rowResults: OutletUploadRowResult[] = [];
 
@@ -260,8 +266,8 @@ export function validateOutletUpload(
       // 7. Outlet Type must be valid enum
       if (!row.outletType) {
         errors.push('Outlet Type is required');
-      } else if (!VALID_OUTLET_TYPES.has(row.outletType.toUpperCase())) {
-        errors.push(`Outlet Type "${row.outletType}" is invalid — must be one of: SSS, WHOLESALER, SUB_STOCKIST, SSS_TOT`);
+      } else if (!validTypeSet.has(row.outletType.toUpperCase())) {
+        errors.push(`Outlet Type "${row.outletType}" is invalid — ${typeHint}`);
       }
 
       // 8. Beat required
@@ -325,8 +331,8 @@ export function validateOutletUpload(
         errors.push(`Program Category "${row.programCategory}" is not in the configured list. Valid values: ${validCategories.join(', ')}`);
       }
 
-      if (row.outletType && !VALID_OUTLET_TYPES.has(row.outletType.toUpperCase())) {
-        errors.push(`Outlet Type "${row.outletType}" is invalid — must be one of: SSS, WHOLESALER, SUB_STOCKIST, SSS_TOT`);
+      if (row.outletType && !validTypeSet.has(row.outletType.toUpperCase())) {
+        errors.push(`Outlet Type "${row.outletType}" is invalid — ${typeHint}`);
       }
 
       if (row.metro && !['yes', 'no'].includes(row.metro.toLowerCase())) {
@@ -476,13 +482,24 @@ export interface OutletTemplateData {
 export function getOutletAdditionTemplateData(
   validPrograms:    string[],
   validCategories:  string[],
+  validOutletTypes: string[],
   leafRoleCode:     string,
 ): OutletTemplateData {
   const headers = [...OUTLET_UPLOAD_HEADERS];
 
+  // Outlet types are tenant-specific (the enabled OutletTypeClientConfig codes). The
+  // template MUST use the same source as validateOutletUpload, or it would instruct users
+  // to type a value the validator/backend then reject. Examples fall back only if the
+  // tenant has no enabled types (in which case the column reference says so explicitly).
+  const exType1 = validOutletTypes[0] ?? 'RETAILER';
+  const exType2 = validOutletTypes[1] ?? exType1;
+  const outletTypeRef = validOutletTypes.length
+    ? `Must be exactly one of: ${validOutletTypes.join(', ')}`
+    : 'No outlet types are enabled for this tenant yet — ask Gifsy to enable outlet types before adding outlets';
+
   const exampleRows: string[][] = [
-    ['OUT-2026-001', 'Verma Traders', validPrograms[0] ?? 'Trade Loyalty', validCategories[0] ?? 'Standard', 'SSS',        'Andheri Beat',  'DIST-01', 'ABC Distributors', 'Yes', 'Mumbai', 'Maharashtra', 'West Zone',   `${leafRoleCode}-M001`],
-    ['OUT-2026-002', 'Patel Kirana',  validPrograms[0] ?? 'Trade Loyalty', validCategories[1] ?? 'Premium',  'WHOLESALER', 'Borivali Beat', 'DIST-02', 'XYZ Distributors', 'No',  'Pune',   'Maharashtra', '',            `${leafRoleCode}-P001`],
+    ['OUT-2026-001', 'Verma Traders', validPrograms[0] ?? 'Trade Loyalty', validCategories[0] ?? 'Standard', exType1, 'Andheri Beat',  'DIST-01', 'ABC Distributors', 'Yes', 'Mumbai', 'Maharashtra', 'West Zone',   `${leafRoleCode}-M001`],
+    ['OUT-2026-002', 'Patel Kirana',  validPrograms[0] ?? 'Trade Loyalty', validCategories[1] ?? 'Premium',  exType2, 'Borivali Beat', 'DIST-02', 'XYZ Distributors', 'No',  'Pune',   'Maharashtra', '',            `${leafRoleCode}-P001`],
   ];
 
   const dosAndDonts: string[][] = [
@@ -493,7 +510,7 @@ export function getOutletAdditionTemplateData(
     ['Outlet Name',       'Shop/store name as it appears on the board'],
     ['Program Name',      `Must be one of: ${validPrograms.join(', ')}`],
     ['Program Category',  `Must be one of: ${validCategories.join(', ')}`],
-    ['Outlet Type',       'Must be exactly: SSS, WHOLESALER, SUB_STOCKIST, or SSS_TOT'],
+    ['Outlet Type',       outletTypeRef],
     ['Beat',              'Beat/area name this outlet belongs to'],
     ['Distributor ID',    'Reference only — enter distributor code if known, or leave blank'],
     ['Distributor Name',  'Reference only — distributor\'s business name, or leave blank'],
@@ -717,7 +734,11 @@ export function getDeactivateTemplateData(): OutletTemplateData {
 
 // ─── HTML Operations Guide ────────────────────────────────────────────────────
 
-export function generateOutletGuideHtml(): string {
+export function generateOutletGuideHtml(validOutletTypes: string[] = []): string {
+  // Same tenant source as the template/validator so the guide can't contradict them.
+  const outletTypeCell = validOutletTypes.length
+    ? 'Exactly one of: ' + validOutletTypes.map(t => `<code>${t}</code>`).join(', ')
+    : 'No outlet types are enabled for this tenant yet — ask Gifsy to enable outlet types first';
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -797,7 +818,7 @@ export function generateOutletGuideHtml(): string {
   <tr><td><code>Outlet Name</code></td><td><span class="badge badge-red">Required</span></td><td>Shop name as it appears</td></tr>
   <tr><td><code>Program Name</code></td><td><span class="badge badge-red">Required</span></td><td>Must match a value from Settings → Programs</td></tr>
   <tr><td><code>Program Category</code></td><td><span class="badge badge-red">Required</span></td><td>Must match a value from Settings → Program Categories</td></tr>
-  <tr><td><code>Outlet Type</code></td><td><span class="badge badge-red">Required</span></td><td>Exactly: <code>SSS</code>, <code>WHOLESALER</code>, <code>SUB_STOCKIST</code>, or <code>SSS_TOT</code></td></tr>
+  <tr><td><code>Outlet Type</code></td><td><span class="badge badge-red">Required</span></td><td>${outletTypeCell}</td></tr>
   <tr><td><code>Beat</code></td><td><span class="badge badge-red">Required</span></td><td>Beat name for this outlet</td></tr>
   <tr><td><code>Distributor ID</code></td><td><span class="badge badge-green">Optional</span></td><td>Reference only — stored as-is, not validated</td></tr>
   <tr><td><code>Distributor Name</code></td><td><span class="badge badge-green">Optional</span></td><td>Reference only</td></tr>

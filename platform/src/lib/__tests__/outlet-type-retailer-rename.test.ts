@@ -59,7 +59,7 @@ describe('AG — SSS internal key rename (was RETAILER)', () => {
   it('AG4: "SSS" is accepted as a valid outlet type in upload validation', () => {
     const result = validateOutletUpload(
       [makeRow({ outletType: 'SSS' })],
-      [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      [], VALID_PROGRAMS, VALID_CATEGORIES, ['SSS', 'WHOLESALER', 'SUB_STOCKIST', 'SSS_TOT'], MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     const errors = result.rows.flatMap(r => r.errors ?? []);
     expect(errors.some(e => e.toLowerCase().includes('invalid') && e.includes('SSS'))).toBe(false);
@@ -69,7 +69,7 @@ describe('AG — SSS internal key rename (was RETAILER)', () => {
   it("AG5: 'RETAILER' is no longer a valid outlet type in upload validation", () => {
     const result = validateOutletUpload(
       [makeRow({ outletType: 'RETAILER' })],
-      [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      [], VALID_PROGRAMS, VALID_CATEGORIES, ['SSS', 'WHOLESALER', 'SUB_STOCKIST', 'SSS_TOT'], MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     const errors = result.rows.flatMap(r => r.errors ?? []);
     expect(errors.some(e => e.toLowerCase().includes('invalid'))).toBe(true);

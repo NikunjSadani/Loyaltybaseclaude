@@ -44,6 +44,9 @@ describe('AdminOutletsService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    // list() now also reads the tenant's enabled outlet types; default to none so the
+    // pre-existing list tests don't have to mock it (upsert tests override as needed).
+    mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdminOutletsService,
@@ -92,6 +95,19 @@ describe('AdminOutletsService', () => {
         metro: true,
         addedDate: '2026-05-01',
       });
+    });
+
+    it('returns the tenant enabled outlet-type codes (sorted) for FE validation', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletType: { code: 'WHOLESALER' } },
+        { outletType: { code: 'RETAILER' } },
+      ]);
+      const res = await service.list(admin);
+      expect(res.outletTypes).toEqual(['RETAILER', 'WHOLESALER']);
+      // tenant-scoped + only enabled + only active types
+      const where = mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0].where;
+      expect(where).toMatchObject({ clientId: TENANT_A, isEnabled: true });
     });
   });
 

@@ -312,7 +312,17 @@ export class AdminOutletsService {
       };
     });
 
-    return { outlets: mapped };
+    // The tenant's enabled outlet-type codes — the FE validates uploads against THESE
+    // (not a hardcoded list) so it never green-lights a type the upsert will reject as
+    // "Unknown outlet type". Empty ⇒ no types enabled for this tenant: outlets cannot be
+    // added until an operator enables outlet types (the false-success this used to hide).
+    const typeConfigs = await this.prisma.outletTypeClientConfig.findMany({
+      where: { clientId: user.clientId, isEnabled: true, outletType: { isActive: true } },
+      select: { outletType: { select: { code: true } } },
+    });
+    const outletTypes = typeConfigs.map((c) => c.outletType.code).sort();
+
+    return { outlets: mapped, outletTypes };
   }
 
   /**

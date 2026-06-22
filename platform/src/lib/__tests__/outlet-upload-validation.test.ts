@@ -48,6 +48,9 @@ const LEAF_ROLE_CODE = 'XSR'; // for Deoleo
 
 const VALID_PROGRAMS   = ['Trade Loyalty', 'Gold Programme'];
 const VALID_CATEGORIES = ['Premium', 'Standard', 'Economy'];
+// The tenant's enabled outlet types (in production these come from the backend's
+// OutletTypeClientConfig; here a fixed set exercises the validation logic).
+const VALID_OUTLET_TYPES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST', 'SSS_TOT'];
 
 /** Build a minimal valid outlet upload row (for CREATE — new outlet) */
 function makeRow(overrides: Partial<OutletUploadRow> = {}): OutletUploadRow {
@@ -123,7 +126,7 @@ describe('outlet master header validation', () => {
 
 describe('outlet master row validation — happy paths (CREATE)', () => {
   it('O6 — valid RETAILER row creates outlet', () => {
-    const result = validateOutletUpload([makeRow()], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow()], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.headerError).toBeNull();
     expect(result.rows[0].status).toBe('OK');
     expect(result.rows[0].action).toBe('CREATE');
@@ -131,34 +134,34 @@ describe('outlet master row validation — happy paths (CREATE)', () => {
   });
 
   it('O7 — valid WHOLESALER row', () => {
-    const result = validateOutletUpload([makeRow({ outletType: 'WHOLESALER' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ outletType: 'WHOLESALER' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('OK');
   });
 
   it('O8 — valid SUB_STOCKIST row', () => {
-    const result = validateOutletUpload([makeRow({ outletType: 'SUB_STOCKIST' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ outletType: 'SUB_STOCKIST' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('OK');
   });
 
   it('O9 — valid SSS_TOT row', () => {
-    const result = validateOutletUpload([makeRow({ outletType: 'SSS_TOT' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ outletType: 'SSS_TOT' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('OK');
   });
 
   it('O10 — metro "No" is accepted', () => {
-    const result = validateOutletUpload([makeRow({ metro: 'No' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ metro: 'No' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('OK');
   });
 
   it('O11 — metro case-insensitive ("yes" and "YES" accepted)', () => {
-    const r1 = validateOutletUpload([makeRow({ metro: 'yes' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
-    const r2 = validateOutletUpload([makeRow({ metro: 'YES' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const r1 = validateOutletUpload([makeRow({ metro: 'yes' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const r2 = validateOutletUpload([makeRow({ metro: 'YES' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(r1.rows[0].status).toBe('OK');
     expect(r2.rows[0].status).toBe('OK');
   });
 
   it('O12 — distributor ID and name are optional (empty accepted)', () => {
-    const result = validateOutletUpload([makeRow({ distributorId: '', distributorName: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ distributorId: '', distributorName: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('OK');
   });
 
@@ -168,7 +171,7 @@ describe('outlet master row validation — happy paths (CREATE)', () => {
       makeRow({ outletId: 'OUT-B', rowNum: 3 }),
       makeRow({ outletId: 'OUT-C', rowNum: 4 }),
     ];
-    const result = validateOutletUpload(rows, [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload(rows, [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.summary.total).toBe(3);
     expect(result.summary.creates).toBe(3);
     expect(result.summary.updates).toBe(0);
@@ -183,7 +186,7 @@ describe('outlet master row validation — happy paths (CREATE)', () => {
       outletType: '', beat: '', distributorId: '', distributorName: '', metro: '',
       city: '', state: '', zone: '', xsrId: '',
     };
-    const result = validateOutletUpload([blankRow], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([blankRow], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows).toHaveLength(0);
   });
 });
@@ -192,13 +195,13 @@ describe('outlet master row validation — happy paths (CREATE)', () => {
 
 describe('outlet master row validation — errors (CREATE)', () => {
   it('O15 — missing outlet ID is an error', () => {
-    const result = validateOutletUpload([makeRow({ outletId: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ outletId: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /outlet id/i.test(e))).toBe(true);
   });
 
   it('O16 — outlet ID with invalid chars is an error', () => {
-    const result = validateOutletUpload([makeRow({ outletId: 'OUT 001 @#' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ outletId: 'OUT 001 @#' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /alphanumeric/i.test(e))).toBe(true);
   });
@@ -208,7 +211,7 @@ describe('outlet master row validation — errors (CREATE)', () => {
       makeRow({ outletId: 'OUT-DUP', rowNum: 2 }),
       makeRow({ outletId: 'OUT-DUP', rowNum: 3 }),
     ];
-    const result = validateOutletUpload(rows, [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload(rows, [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     const errors = result.rows.filter(r => r.status === 'ERROR');
     expect(errors.length).toBeGreaterThanOrEqual(1);
     expect(errors.some(r => r.errors.some(e => /duplicate/i.test(e)))).toBe(true);
@@ -218,56 +221,71 @@ describe('outlet master row validation — errors (CREATE)', () => {
     const result = validateOutletUpload(
       [makeRow({ outletId: 'OUT-ACTIVE-01', xsrId: 'ISR-M001' })],
       OUTLET_UPLOAD_EXISTING,
-      VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('OK');
     expect(result.rows[0].action).toBe('UPDATE');
   });
 
   it('O19 — missing outlet name is an error for new outlets', () => {
-    const result = validateOutletUpload([makeRow({ outletName: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ outletName: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /outlet name/i.test(e))).toBe(true);
   });
 
   it('O20 — invalid outlet type is an error', () => {
-    const result = validateOutletUpload([makeRow({ outletType: 'KIRANA' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ outletType: 'KIRANA' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /outlet type/i.test(e))).toBe(true);
   });
 
+  it('O20b — a type valid in one tenant is rejected when not in THIS tenant\'s enabled set', () => {
+    // The list comes from the tenant's enabled OutletTypeClientConfig, not a hardcoded set.
+    const result = validateOutletUpload([makeRow({ outletType: 'WHOLESALER' })], [], VALID_PROGRAMS, VALID_CATEGORIES, ['SSS_TOT'], MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].status).toBe('ERROR');
+    expect(result.rows[0].errors.some(e => /must be one of: SSS_TOT/i.test(e))).toBe(true);
+  });
+
+  it('O20c — when the tenant has NO enabled outlet types, every typed row errors with guidance', () => {
+    // The exact Deoleo situation: zero enabled OutletTypeClientConfig rows. Previously the
+    // FE green-lit the rows and the backend silently rejected them (false "added").
+    const result = validateOutletUpload([makeRow({ outletType: 'WHOLESALER' })], [], VALID_PROGRAMS, VALID_CATEGORIES, [], MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].status).toBe('ERROR');
+    expect(result.rows[0].errors.some(e => /no outlet types are enabled/i.test(e))).toBe(true);
+  });
+
   it('O21 — program name not in configured list is an error', () => {
-    const result = validateOutletUpload([makeRow({ programName: 'Unknown Programme' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ programName: 'Unknown Programme' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /program name/i.test(e))).toBe(true);
   });
 
   it('O22 — program category not in configured list is an error', () => {
-    const result = validateOutletUpload([makeRow({ programCategory: 'Unknown Cat' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ programCategory: 'Unknown Cat' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /program category/i.test(e))).toBe(true);
   });
 
   it('O23 — metro value not Yes/No is an error', () => {
-    const result = validateOutletUpload([makeRow({ metro: 'Maybe' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ metro: 'Maybe' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /metro/i.test(e))).toBe(true);
   });
 
   it('O24 — missing XSR ID is an error for new outlets', () => {
-    const result = validateOutletUpload([makeRow({ xsrId: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ xsrId: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /xsr id/i.test(e))).toBe(true);
   });
 
   it('O25 — XSR ID not found in employee hierarchy is an error', () => {
-    const result = validateOutletUpload([makeRow({ xsrId: 'GHOST-99' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ xsrId: 'GHOST-99' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /not found/i.test(e))).toBe(true);
   });
 
   it('O26 — XSR ID exists but is NOT a leaf-level role is an error', () => {
-    const result = validateOutletUpload([makeRow({ xsrId: 'NSM-01' })], [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload([makeRow({ xsrId: 'NSM-01' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /leaf|XSR/i.test(e))).toBe(true);
   });
@@ -491,7 +509,7 @@ describe('outlet master — outlet ID underscore rejection (M2 fix)', () => {
   it('O54 — outlet ID with underscore is rejected (docs: "alphanumeric and hyphens only")', () => {
     const result = validateOutletUpload(
       [makeRow({ outletId: 'OUT_2026_001' })],
-      [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /alphanumeric/i.test(e))).toBe(true);
@@ -524,7 +542,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
   it('O70 — existing active outlet ID → action UPDATE, status OK', () => {
     const result = validateOutletUpload(
       [makeRow({ outletId: 'OUT-ACTIVE-01', xsrId: 'ISR-M001' })],
-      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('OK');
     expect(result.rows[0].action).toBe('UPDATE');
@@ -533,7 +551,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
   it('O71 — existing inactive outlet ID → action REACTIVATE, status OK', () => {
     const result = validateOutletUpload(
       [makeRow({ outletId: 'OUT-INACTIVE-01', xsrId: 'ISR-M001' })],
-      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('OK');
     expect(result.rows[0].action).toBe('REACTIVATE');
@@ -542,7 +560,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
   it('O72 — UPDATE with blank XSR ID → OK (XSR change not required for updates)', () => {
     const result = validateOutletUpload(
       [makeRow({ outletId: 'OUT-ACTIVE-01', xsrId: '', outletName: '' })],
-      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('OK');
     expect(result.rows[0].action).toBe('UPDATE');
@@ -551,7 +569,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
   it('O73 — UPDATE with valid leaf XSR ID → OK (re-tag via outlet master)', () => {
     const result = validateOutletUpload(
       [makeRow({ outletId: 'OUT-ACTIVE-01', xsrId: 'ISR-M001', outletName: '' })],
-      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('OK');
     expect(result.rows[0].action).toBe('UPDATE');
@@ -560,7 +578,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
   it('O74 — UPDATE with XSR ID not in hierarchy → ERROR', () => {
     const result = validateOutletUpload(
       [makeRow({ outletId: 'OUT-ACTIVE-01', xsrId: 'GHOST-99', outletName: '' })],
-      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /not found/i.test(e))).toBe(true);
@@ -569,7 +587,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
   it('O75 — UPDATE with non-leaf XSR ID → ERROR', () => {
     const result = validateOutletUpload(
       [makeRow({ outletId: 'OUT-ACTIVE-01', xsrId: 'NSM-01', outletName: '' })],
-      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /leaf|XSR/i.test(e))).toBe(true);
@@ -578,7 +596,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
   it('O76 — UPDATE with outlet name provided → silently ignored (no error, action stays UPDATE)', () => {
     const result = validateOutletUpload(
       [makeRow({ outletId: 'OUT-ACTIVE-01', outletName: 'New Name Attempt', xsrId: 'ISR-M001' })],
-      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('OK');
     expect(result.rows[0].action).toBe('UPDATE');
@@ -593,7 +611,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
         beat: '', distributorId: '', distributorName: '',
         metro: '', city: '', state: '', zone: '', xsrId: '',
       }],
-      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('ERROR');
     expect(result.rows[0].errors.some(e => /at least one/i.test(e))).toBe(true);
@@ -607,7 +625,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
         beat: '', distributorId: '', distributorName: '',
         metro: '', city: '', state: '', zone: '', xsrId: '',
       }],
-      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('OK');
     expect(result.rows[0].action).toBe('REACTIVATE');
@@ -624,7 +642,7 @@ describe('outlet master — summary counts creates, updates, reactivates', () =>
       makeRow({ outletId: 'OUT-INACTIVE-01', rowNum: 4, outletName: '' }),              // REACTIVATE
       makeRow({ outletId: 'OUT-NEW-2',     rowNum: 5 }),                               // CREATE
     ];
-    const result = validateOutletUpload(rows, OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    const result = validateOutletUpload(rows, OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.summary.creates).toBe(2);
     expect(result.summary.updates).toBe(1);
     expect(result.summary.reactivates).toBe(1);
@@ -721,9 +739,27 @@ describe('O82–O87 — Zone column in outlet addition template', () => {
     const { headers } = getOutletAdditionTemplateData(
       ['Trade Loyalty'],
       ['Standard'],
+      ['RETAILER', 'WHOLESALER'],
       'XSR',
     );
     expect(headers).toContain('Zone');
+  });
+
+  it('O88 — template Outlet Type guidance + examples use the tenant\'s enabled types (not a hardcoded list)', () => {
+    const { exampleRows, dosAndDonts } = getOutletAdditionTemplateData(
+      ['Trade Loyalty'], ['Standard'], ['RETAILER', 'WHOLESALER'], 'XSR',
+    );
+    // example Outlet Type cell (index 4) is a real enabled code
+    expect(exampleRows[0][4]).toBe('RETAILER');
+    const typeRef = dosAndDonts.find(r => r[0] === 'Outlet Type')?.[1] ?? '';
+    expect(typeRef).toContain('RETAILER');
+    expect(typeRef).not.toContain('SSS');
+  });
+
+  it('O89 — template tells the admin to enable types when the tenant has none', () => {
+    const { dosAndDonts } = getOutletAdditionTemplateData(['Trade Loyalty'], ['Standard'], [], 'XSR');
+    const typeRef = dosAndDonts.find(r => r[0] === 'Outlet Type')?.[1] ?? '';
+    expect(typeRef).toMatch(/no outlet types are enabled/i);
   });
 
   it('O88 — a row with blank Zone still passes validation (Zone is optional)', () => {
@@ -737,7 +773,7 @@ describe('O82–O87 — Zone column in outlet addition template', () => {
       xsrId: 'ISR-M001',
     };
     const result = validateOutletUpload(
-      [row], EXISTING, ['Trade Loyalty'], ['Standard'], MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      [row], EXISTING, ['Trade Loyalty'], ['Standard'], VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     expect(result.rows[0].status).toBe('OK');
   });

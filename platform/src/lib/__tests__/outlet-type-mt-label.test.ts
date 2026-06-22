@@ -58,7 +58,7 @@ describe('AF — SSS_TOT internal key rename', () => {
   it('AF4: "SSS_TOT" is accepted as a valid outlet type in upload validation', () => {
     const result = validateOutletUpload(
       [makeRow({ outletType: 'SSS_TOT' })],
-      [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      [], VALID_PROGRAMS, VALID_CATEGORIES, ['SSS', 'WHOLESALER', 'SUB_STOCKIST', 'SSS_TOT'], MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     const errors = result.rows.flatMap(r => r.errors ?? []);
     expect(errors.some(e => e.toLowerCase().includes('invalid') && e.includes('SSS_TOT'))).toBe(false);
@@ -67,7 +67,7 @@ describe('AF — SSS_TOT internal key rename', () => {
   it('AF5: "MT" is no longer a valid outlet type in upload validation', () => {
     const result = validateOutletUpload(
       [makeRow({ outletType: 'MT' })],
-      [], VALID_PROGRAMS, VALID_CATEGORIES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+      [], VALID_PROGRAMS, VALID_CATEGORIES, ['SSS', 'WHOLESALER', 'SUB_STOCKIST', 'SSS_TOT'], MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
     const errors = result.rows.flatMap(r => r.errors ?? []);
     expect(errors.some(e => e.toLowerCase().includes('invalid'))).toBe(true);

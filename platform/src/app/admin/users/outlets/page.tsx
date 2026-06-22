@@ -336,6 +336,7 @@ export default function OutletsPage() {
 
   // Outlet list state
   const [outlets, setOutlets]         = useState<MockOutlet[]>([]);
+  const [outletTypes, setOutletTypes] = useState<string[]>([]);
   const [employees, setEmployees]     = useState<HierarchyEmployee[]>([]);
   const [search,        setSearch]    = useState('');
   const [kycFilter,     setKycFilter] = useState<KYCStatusLocal | 'ALL'>('ALL');
@@ -360,19 +361,29 @@ export default function OutletsPage() {
   const [rekycSubmitError,      setRekycSubmitError]      = useState<string | null>(null);
   const [deactivateSubmitError, setDeactivateSubmitError] = useState<string | null>(null);
 
+  // ── Outlet list loader (also called after a successful upsert to reflect new rows) ──
+  const loadOutlets = useCallback(async () => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    try {
+      const j = await fetch('/api/admin/outlets', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json());
+      if (j.success) {
+        if (Array.isArray(j.data.outlets)) setOutlets(j.data.outlets);
+        // Enabled outlet types come from the backend (tenant's OutletTypeClientConfig).
+        if (Array.isArray(j.data.outletTypes)) setOutletTypes(j.data.outletTypes);
+      }
+    } catch { /* leave prior state on transient error */ }
+  }, []);
+
   // ── API fetch on mount ──
   useEffect(() => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
     const headers = { Authorization: `Bearer ${token}` };
-    fetch('/api/admin/outlets', { headers })
-      .then(r => r.json())
-      .then(j => { if (j.success && Array.isArray(j.data.outlets)) setOutlets(j.data.outlets); })
-      .catch(() => {});
+    void loadOutlets();
     fetch('/api/admin/hierarchy-config', { headers })
       .then(r => r.json())
       .then(j => { if (j.success && Array.isArray(j.data.employees)) setEmployees(j.data.employees); })
       .catch(() => {});
-  }, []);
+  }, [loadOutlets]);
 
   // ── Derived stats ──
   const stats = useMemo(() => ({
@@ -447,7 +458,7 @@ export default function OutletsPage() {
       }
       const parsed   = parseOutletUploadRows(rows as Record<string, string>[]);
       const existing = outlets.map(o => ({ outletId: o.outletId, isActive: o.isActive }));
-      const result   = validateOutletUpload(parsed, existing, VALID_PROGRAMS, VALID_CATEGORIES, employees, LEAF_ROLE_CODE);
+      const result   = validateOutletUpload(parsed, existing, VALID_PROGRAMS, VALID_CATEGORIES, outletTypes, employees, LEAF_ROLE_CODE);
       setOutletParsedRows(parsed);
       setOutletValidation(result);
       setOutletUploadState('parsed');
@@ -455,7 +466,7 @@ export default function OutletsPage() {
       setOutletValidation({ headerError: 'Failed to read file — please ensure it is a valid XLSX file', rows: [], hasErrors: true, canProceed: false, summary: { total: 0, creates: 0, updates: 0, reactivates: 0, errors: 0 } });
       setOutletUploadState('parsed');
     }
-  }, [outlets, parseXlsx]);
+  }, [outlets, outletTypes, employees, parseXlsx]);
 
   // ── Handle re-KYC upload ──
   const handleReKYCFile = useCallback(async (file: File) => {
@@ -515,7 +526,7 @@ export default function OutletsPage() {
   }
 
   function downloadOutletTemplate() {
-    const { headers, exampleRows, dosAndDonts } = getOutletAdditionTemplateData(VALID_PROGRAMS, VALID_CATEGORIES, LEAF_ROLE_CODE);
+    const { headers, exampleRows, dosAndDonts } = getOutletAdditionTemplateData(VALID_PROGRAMS, VALID_CATEGORIES, outletTypes, LEAF_ROLE_CODE);
     const wb = XLSX.utils.book_new();
     // Sheet 1: Dos & Don'ts (opens first)
     const ddSheet = XLSX.utils.aoa_to_sheet(dosAndDonts);
@@ -553,7 +564,7 @@ export default function OutletsPage() {
   }
 
   function downloadGuide() {
-    const html = generateOutletGuideHtml();
+    const html = generateOutletGuideHtml(outletTypes);
     const blob = new Blob([html], { type: 'text/html' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
@@ -731,13 +742,29 @@ export default function OutletsPage() {
                     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                     body: JSON.stringify({ rows }),
                   });
+                  const j = await res.json().catch(() => null);
                   if (!res.ok) {
-                    let msg = `Upload failed (${res.status})`;
-                    try { const j = await res.json(); msg = j?.error ?? j?.message ?? msg; } catch { /* non-JSON body */ }
-                    setOutletSubmitError(msg);
+                    setOutletSubmitError(j?.error ?? j?.message ?? `Upload failed (${res.status})`);
+                    return;
+                  }
+                  // A 200 does NOT mean rows were written — the backend validates each row
+                  // and returns created/updated counts + a per-row errors[] for any it
+                  // rejected (e.g. "Unknown outlet type"). Treat zero writes as a failure
+                  // and surface the real reason, instead of showing a false "added".
+                  const d = j?.data ?? j ?? {};
+                  const created = Number(d.created ?? 0);
+                  const updated = Number(d.updated ?? 0);
+                  if (created + updated === 0) {
+                    const rowErrs: Array<{ rowNum?: number; outletId?: string; errors?: string[] }> =
+                      Array.isArray(d.errors) ? d.errors : [];
+                    const detail = rowErrs.length
+                      ? rowErrs.slice(0, 6).map(e => `Row ${e.rowNum} (${e.outletId}): ${(e.errors ?? []).join('; ')}`).join('  |  ')
+                      : (d.message ?? 'The server accepted the request but saved no outlets.');
+                    setOutletSubmitError(`No outlets were saved. ${detail}`);
                     return;
                   }
                   setOutletUploadState('confirmed');
+                  void loadOutlets(); // reflect the new/updated rows without a manual reload
                 } catch {
                   setOutletSubmitError('Network error — please try again');
                 }
