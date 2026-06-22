@@ -37,11 +37,12 @@ const mockTx = {
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     findFirst: jest.fn(),
   },
-  creditPayoutEntry: { createMany: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+  creditPayoutEntry: { createMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   creditPayoutDownload: { create: jest.fn(), update: jest.fn() },
   creditReversal: {
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     findFirst: jest.fn(),
+    update: jest.fn().mockResolvedValue({}),
   },
   outlet: { findFirst: jest.fn() },
   wallet: { findFirst: jest.fn() },
@@ -84,8 +85,11 @@ describe('CreditsService', () => {
     mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED' });
     mockTx.creditReversal.updateMany.mockResolvedValue({ count: 1 });
     mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
+    mockTx.creditReversal.update.mockResolvedValue({});
     mockTx.outlet.findFirst.mockResolvedValue(null);
     mockTx.wallet.findFirst.mockResolvedValue(null);
+    // Default: no matching payout entries for PAYOUT-reversal path (tests override per case).
+    mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -408,6 +412,10 @@ describe('CreditsService', () => {
       mockPrisma.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(10000), awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1' });
       // tx.creditReversal.findFirst returns the updated row
       mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'PARTIAL' });
+      // PAYOUT reversal calls tx.creditPayoutEntry.findMany for the GLM-1 multi-entry path.
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'pe1', status: 'PENDING', amountPaise: BigInt(4000) },
+      ]);
 
       const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 4000 });
       expect(res).toMatchObject({ id: 'r1', status: 'PARTIAL' });
@@ -466,6 +474,8 @@ describe('CreditsService', () => {
     });
 
     it('does NOT call clawbackAward for PAYOUT reversal approval', async () => {
+      // PAYOUT reversals do NOT call walletService.clawbackAward — instead they
+      // iterate CreditPayoutEntry rows and mark them REVERSED (or record a receivable).
       mockPrisma.creditReversal.findFirst.mockResolvedValue({
         id: 'r1',
         status: 'PENDING_GIFSY',
@@ -475,12 +485,22 @@ describe('CreditsService', () => {
         fieldId: 'f1',
       });
       mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
-      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
-      mockTx.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+      // PAYOUT reversal now calls tx.creditPayoutEntry.findMany (GLM-1 multi-entry path)
+      // and then tx.creditPayoutEntry.update for each PENDING/PROCESSING/FAILED entry.
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'pe1', status: 'PENDING', amountPaise: BigInt(10000) },
+      ]);
 
       await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 10000 });
 
+      // The new PAYOUT-reversal path marks entries REVERSED via creditPayoutEntry.update —
+      // it does NOT call walletService.clawbackAward (that is POINTS-only).
       expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
+      // Verify the entry was marked REVERSED with downloadId=null.
+      expect(mockTx.creditPayoutEntry.update).toHaveBeenCalledWith({
+        where: { id: 'pe1' },
+        data: { status: 'REVERSED', downloadId: null },
+      });
     });
 
     it('does NOT call clawbackAward when action is reject (POINTS type)', async () => {
@@ -518,6 +538,53 @@ describe('CreditsService', () => {
         service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 50 }),
       ).resolves.not.toThrow();
       expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
+    });
+
+    // ── GLM-1: multi-entry PAYOUT reversal (new behavior) ────────────────────
+
+    it('GLM-1: PAYOUT reversal marks ALL matching PENDING/PROCESSING/FAILED entries REVERSED and sums PAID receivable', async () => {
+      // Three entries for the same outlet+field:
+      //   pe-pending  → status PENDING  → should be REVERSED
+      //   pe-proc     → status PROCESSING → should be REVERSED
+      //   pe-paid     → status PAID     → cash already left; contributes to receivable
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({
+        id: 'r1', status: 'PENDING_GIFSY', requestedPaise: BigInt(30000),
+        awardType: 'PAYOUT', outletId: 'O1', fieldId: 'f1',
+      });
+      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'pe-pending',  status: 'PENDING',    amountPaise: BigInt(10000) },
+        { id: 'pe-proc',     status: 'PROCESSING', amountPaise: BigInt(10000) },
+        { id: 'pe-paid',     status: 'PAID',       amountPaise: BigInt(10000) },
+      ]);
+
+      const res = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve, approvedPaise: 30000 });
+
+      // PENDING and PROCESSING entries must be marked REVERSED + downloadId=null.
+      expect(mockTx.creditPayoutEntry.update).toHaveBeenCalledWith({
+        where: { id: 'pe-pending' },
+        data: { status: 'REVERSED', downloadId: null },
+      });
+      expect(mockTx.creditPayoutEntry.update).toHaveBeenCalledWith({
+        where: { id: 'pe-proc' },
+        data: { status: 'REVERSED', downloadId: null },
+      });
+      // PAID entry is NOT mutated; instead its amount is reported as receivable.
+      const updateCalls = mockTx.creditPayoutEntry.update.mock.calls.map(
+        (c: unknown[]) => (c[0] as { where: { id: string } }).where.id,
+      );
+      expect(updateCalls).not.toContain('pe-paid');
+
+      // walletService.clawbackAward must NOT be called for PAYOUT reversals.
+      expect(mockWalletService.clawbackAward).not.toHaveBeenCalled();
+
+      // clawbackShortfall in the result equals the PAID entry amount (₹100 = 10000 paise).
+      expect(res.clawbackShortfall).toBe(10000);
+      // The shortfall is persisted on the reversal record.
+      expect(mockTx.creditReversal.update).toHaveBeenCalledWith({
+        where: { id: 'r1' },
+        data: { shortfallPaise: BigInt(10000) },
+      });
     });
   });
 
@@ -576,8 +643,17 @@ describe('CreditsService', () => {
         { id: 'e1', outletId: 'O1', outletName: 'A', amountPaise: BigInt(10000), batch: { batchCode: 'CB-1' } },
         { id: 'e2', outletId: 'O1', outletName: 'A', amountPaise: BigInt(5000),  batch: { batchCode: 'CB-1' } },
       ]);
+      // GLB-1(a): partner must have isActive:true, deletedAt:null, and an APPROVED KYC submission
+      // with the 4 required fields {id, status, createdAt, updatedAt} so the eligibility gate passes.
       mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'O1', name: 'A', phone: '900', isActive: true, partner: { bankName: 'HDFC', bankAccountNumber: '123', ifscCode: 'IFSC', upiId: '' } },
+        {
+          outletCode: 'O1', name: 'A', phone: '900', isActive: true,
+          partner: {
+            bankName: 'HDFC', bankAccountNumber: '123', ifscCode: 'IFSC', upiId: '',
+            isActive: true, deletedAt: null,
+            kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+          },
+        },
       ]);
       mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
       mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-001' });
@@ -619,8 +695,16 @@ describe('CreditsService', () => {
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
         { id: 'e1', outletId: 'O1', outletName: 'A', amountPaise: BigInt(10000), fieldId: 'f-std', batch: { batchCode: 'CB-1' } },
       ]);
+      // GLB-1(a): partner must be eligible (APPROVED KYC, active, non-deleted).
       mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'O1', name: 'A', phone: '', isActive: true, partner: { bankName: '', bankAccountNumber: '', ifscCode: '', upiId: '' } },
+        {
+          outletCode: 'O1', name: 'A', phone: '', isActive: true,
+          partner: {
+            bankName: '', bankAccountNumber: '', ifscCode: '', upiId: '',
+            isActive: true, deletedAt: null,
+            kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+          },
+        },
       ]);
       mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
       mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd2', downloadCode: 'PD-2026-05-002' });
@@ -639,8 +723,16 @@ describe('CreditsService', () => {
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
         { id: 'e2', outletId: 'O2', outletName: 'B', amountPaise: BigInt(5000), fieldId: 'f-sep', batch: { batchCode: 'CB-1' } },
       ]);
+      // GLB-1(a): partner must be eligible (APPROVED KYC, active, non-deleted).
       mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'O2', name: 'B', phone: '', isActive: true, partner: { bankName: '', bankAccountNumber: '', ifscCode: '', upiId: '' } },
+        {
+          outletCode: 'O2', name: 'B', phone: '', isActive: true,
+          partner: {
+            bankName: '', bankAccountNumber: '', ifscCode: '', upiId: '',
+            isActive: true, deletedAt: null,
+            kycSubmissions: [{ id: 'ks2', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+          },
+        },
       ]);
       mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
       mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd3', downloadCode: 'PD-2026-05-003' });
@@ -652,6 +744,101 @@ describe('CreditsService', () => {
       expect(where.fieldId).toBe('f-sep');
       // No NOT exclusion for SEPARATE downloads.
       expect(where.NOT).toBeUndefined();
+    });
+
+    // ── GLM-2: FAILED re-bankable / REVERSED excluded ─────────────────────────
+
+    it('GLM-2: a FAILED entry IS re-selected (re-bankable) by createPayoutDownload', async () => {
+      // A FAILED entry (bank-rejected, never paid) must appear in the query — the
+      // status filter is `{ in: ['PENDING', 'FAILED'] }`, so FAILED is included.
+      mockPrisma.creditField.findMany.mockResolvedValue([]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'e-fail', outletId: 'O1', outletName: 'A', amountPaise: BigInt(7000), batch: { batchCode: 'CB-1' } },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'O1', name: 'A', phone: '', isActive: true,
+          partner: {
+            bankName: '', bankAccountNumber: '', ifscCode: '', upiId: '',
+            isActive: true, deletedAt: null,
+            kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+          },
+        },
+      ]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd4', downloadCode: 'PD-2026-05-004' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.STANDARD });
+
+      // The query must include FAILED entries via the `status: { in: [...] }` filter.
+      const where = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where;
+      expect(where.status).toEqual({ in: ['PENDING', 'FAILED'] });
+      // The FAILED entry was included and therefore marked PROCESSING.
+      const updateArg = mockTx.creditPayoutEntry.updateMany.mock.calls[0][0];
+      expect(updateArg.where.id.in).toContain('e-fail');
+    });
+
+    it('GLM-2: a REVERSED entry is NOT re-selected (excluded by status filter)', async () => {
+      // REVERSED entries must never re-enter the bank file. The status filter
+      // `{ in: ['PENDING', 'FAILED'] }` does NOT include REVERSED. We verify via the
+      // query shape — the service throws BadRequest if findMany returns nothing.
+      mockPrisma.creditField.findMany.mockResolvedValue([]);
+      // Simulate the DB returning 0 rows (as if the only entry is REVERSED, excluded).
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+
+      await expect(
+        service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.STANDARD }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      // Confirm REVERSED is not in the status filter.
+      const where = mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where;
+      expect(where.status).toEqual({ in: ['PENDING', 'FAILED'] });
+      const statuses = where.status.in as string[];
+      expect(statuses).not.toContain('REVERSED');
+    });
+
+    // ── GLB-1(a): non-APPROVED KYC partner goes to heldEntries ───────────────
+
+    it('GLB-1(a): a non-APPROVED-KYC partner entry goes to heldEntries and is NOT marked PROCESSING', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([]);
+      // Entry for O-held whose partner has PENDING_RSM_APPROVAL KYC.
+      // Entry for O-ok whose partner has APPROVED KYC → payable.
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'e-held', outletId: 'O-held', outletName: 'Held', amountPaise: BigInt(5000), batch: { batchCode: 'CB-1' } },
+        { id: 'e-ok',   outletId: 'O-ok',   outletName: 'OK',   amountPaise: BigInt(3000), batch: { batchCode: 'CB-1' } },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'O-held', name: 'Held', phone: '', isActive: true,
+          partner: {
+            bankName: '', bankAccountNumber: '', ifscCode: '', upiId: '',
+            isActive: true, deletedAt: null,
+            kycSubmissions: [{ id: 'ks-h', status: 'PENDING_RSM_APPROVAL', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+          },
+        },
+        {
+          outletCode: 'O-ok', name: 'OK', phone: '', isActive: true,
+          partner: {
+            bankName: '', bankAccountNumber: '', ifscCode: '', upiId: '',
+            isActive: true, deletedAt: null,
+            kycSubmissions: [{ id: 'ks-ok', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+          },
+        },
+      ]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd5', downloadCode: 'PD-2026-05-005' });
+
+      const res = await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.STANDARD });
+
+      // The non-approved partner's entry must appear in heldEntries.
+      expect(res.heldEntries).toHaveLength(1);
+      expect(res.heldEntries[0].outletId).toBe('O-held');
+      expect(res.heldEntries[0].reason).toMatch(/KYC_NOT_APPROVED/);
+
+      // Only the APPROVED partner's entry is marked PROCESSING.
+      const updateArg = mockTx.creditPayoutEntry.updateMany.mock.calls[0][0];
+      expect(updateArg.where.id.in).toEqual(['e-ok']);
+      expect(updateArg.where.id.in).not.toContain('e-held');
     });
   });
 

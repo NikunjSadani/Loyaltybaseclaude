@@ -10,6 +10,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
 import { rupeesToPaise } from '../common/money';
 import { parsePayoutUtrUpload } from './payout-utr.helpers';
+import { resolveEffectiveKycStatus } from '../kyc/kyc-eligibility';
 import {
   BatchDetailQueryDto,
   CreateBatchDto,
@@ -381,7 +382,20 @@ export class PayoutsService {
       // Step 1: Validation.
       const transactions = await this.prisma.payoutTransaction.findMany({
         where: { batchId: id, status: 'PENDING' },
-        include: { partner: true },
+        include: {
+          partner: {
+            include: {
+              // GLB-1b: feed ALL of the partner's submissions to the canonical
+              // resolveEffectiveKycStatus (deterministic createdAt→updatedAt→id
+              // tiebreak) so a stale APPROVED row cannot win a millisecond tie after
+              // an in-place reKyc() mutation. Select the 4 fields the resolver needs.
+              kycSubmissions: {
+                orderBy: [{ createdAt: 'desc' }, { updatedAt: 'desc' }, { id: 'desc' }],
+                select: { id: true, status: true, createdAt: true, updatedAt: true },
+              },
+            },
+          },
+        },
       });
 
       steps.validation.count = transactions.length;
@@ -396,6 +410,43 @@ export class PayoutsService {
         if (!tx.amountPaise || Number(tx.amountPaise) <= 0) {
           errors.push(`Invalid amount for tx ${tx.id}`);
         }
+
+        // GLB-1b — partner eligibility gate: inactive/deleted or non-KYC-APPROVED
+        // partners must be excluded from disbursement (mirrors the credit-rail gate
+        // in credits.service.ts; uses the same latest-submission query pattern).
+        const partner = tx.partner;
+        if (!partner || partner.isActive === false || partner.deletedAt != null) {
+          const reason = partner?.deletedAt != null ? 'PARTNER_DELETED' : 'PARTNER_INACTIVE';
+          errors.push(`Partner ${tx.partnerId} is ineligible (${reason}); excluded from batch`);
+        } else {
+          // Canonical resolver (matches the credit + redemption rails); default for
+          // no submission = null = NOT approved (never paid).
+          const kycStatus = resolveEffectiveKycStatus(partner.kycSubmissions ?? []);
+          if (kycStatus !== 'APPROVED') {
+            errors.push(
+              `Partner ${tx.partnerId} KYC is not approved (status: ${kycStatus ?? 'NO_SUBMISSION'}); excluded from batch`,
+            );
+          }
+        }
+
+        // GLM-3 — beneficiary field validation: mode-required fields must be present
+        // at process time (they are snapshotted at confirm time but could be null if
+        // the partner had no KYC-verified bank/UPI details when the order was confirmed).
+        if (tx.payoutMode === 'UPI') {
+          if (!tx.upiId) {
+            errors.push(`Missing upiId for UPI transaction ${tx.id}`);
+          }
+        } else if (tx.payoutMode === 'BANK_TRANSFER') {
+          if (!tx.bankAccountNumber || !tx.ifscCode) {
+            const missing: string[] = [];
+            if (!tx.bankAccountNumber) missing.push('bankAccountNumber');
+            if (!tx.ifscCode) missing.push('ifscCode');
+            errors.push(
+              `Missing beneficiary field(s) [${missing.join(', ')}] for BANK_TRANSFER transaction ${tx.id}`,
+            );
+          }
+        }
+
         if (errors.length === 0) {
           validTransactions.push(tx);
         } else {

@@ -6,6 +6,10 @@ import { WalletService } from '../wallet/wallet.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { paiseToRupees, formatINR, toPaiseBigInt } from '../common/money';
 import {
+  resolveEffectiveKycStatus,
+  isPartnerPayable,
+} from '../kyc/kyc-eligibility';
+import {
   CreateBatchDto,
   CreateFieldDto,
   CreatePayoutDownloadDto,
@@ -459,7 +463,21 @@ export class CreditsService {
   async createPayoutDownload(
     user: JwtPayload,
     dto: CreatePayoutDownloadDto,
-  ): Promise<{ buffer: Buffer; downloadCode: string; downloadId: string }> {
+  ): Promise<{
+    buffer: Buffer;
+    downloadCode: string;
+    downloadId: string;
+    // GLB-1(a): entries excluded from the bank file because the partner is not
+    // KYC-APPROVED or the outlet is inactive/deleted. The awards stay PENDING and
+    // re-enter the next download once the gate clears.
+    heldEntries: Array<{
+      outletId: string;
+      outletName: string;
+      amountPaise: number;
+      reason: string;
+      entryIds: string[];
+    }>;
+  }> {
     const { period, groupType, fieldId, fieldName } = dto;
 
     // Active separate fields (used to exclude from STANDARD).
@@ -469,12 +487,20 @@ export class CreditsService {
     });
     const separateFieldIds = new Set(separateFields.map((f) => f.id));
 
-    const baseWhere = {
+    // GLM-2: include FAILED entries (bank-rejected, never paid) alongside PENDING so
+    // they can be re-banked in a fresh download. A corrected re-upload then flips
+    // FAILED→PAID via the existing UTR path (no double-pay: FAILED was never paid).
+    // REVERSED entries are intentionally EXCLUDED: they have been clawed back and
+    // must never re-enter the bank file (REVERSED ≠ bank-rejected; REVERSED = clawed back).
+    const baseWhere: Prisma.CreditPayoutEntryWhereInput = {
       clientId: user.clientId,
       period,
-      status: 'PENDING' as const,
+      status: { in: ['PENDING', 'FAILED'] },
     };
 
+    // GLM-2: baseWhere now carries `status: { in: ['PENDING','FAILED'] }` so that
+    // bank-rejected (FAILED) entries are eligible for re-banking. REVERSED entries
+    // are excluded because the `in` list does not include 'REVERSED'.
     let entryWhere: Prisma.CreditPayoutEntryWhereInput = baseWhere;
     if (groupType === PayoutGroupType.SEPARATE && fieldId) {
       entryWhere = { ...baseWhere, fieldId };
@@ -495,7 +521,7 @@ export class CreditsService {
 
     if (entries.length === 0) {
       throw new BadRequestException(
-        `No PENDING payout entries found for period ${period}${
+        `No PENDING or FAILED payout entries found for period ${period}${
           fieldId ? ` / field ${fieldId}` : ''
         }.`,
       );
@@ -522,17 +548,40 @@ export class CreditsService {
     }
 
     // Fetch bank details from ChannelPartner via Outlet.outletCode (tenant-scoped).
+    // GLB-1(a): also fetch the partner's KycSubmission candidates and isActive/deletedAt
+    // so that non-KYC-APPROVED or inactive/deleted outlets are excluded from the payable
+    // rows and surfaced in a "heldEntries" list instead.
+    //
+    // KYC resolver note: we fetch ALL submissions for the partner (no take:1 limit)
+    // and pass them to resolveEffectiveKycStatus() which applies a deterministic
+    // createdAt→updatedAt→id tiebreak. This avoids the stale-APPROVED race where
+    // a millisecond-tie could surface an old APPROVED after a reKyc() in-place mutation.
+    //
+    // Null-partnerId: a KycSubmission may have partnerId=null but a matching userId
+    // (submitted before the partner record was created). Including all partner-keyed
+    // submissions covers the normal path; the service will call resolveEffectiveKycStatus
+    // on whatever candidates Prisma returns.
     const outletCodes = [...outletMap.keys()];
     const outlets = await this.prisma.outlet.findMany({
       where: { clientId: user.clientId, outletCode: { in: outletCodes } },
       include: {
         partner: {
           select: {
+            id: true,
+            userId: true,
             bankName: true,
             bankAccountNumber: true,
             bankAccountHolder: true,
             ifscCode: true,
             upiId: true,
+            isActive: true,
+            deletedAt: true,
+            // Fetch ALL submissions so resolveEffectiveKycStatus can apply the
+            // deterministic tiebreak. The resolver selects the effective status.
+            kycSubmissions: {
+              orderBy: [{ createdAt: 'desc' }, { updatedAt: 'desc' }, { id: 'desc' }],
+              select: { id: true, status: true, createdAt: true, updatedAt: true },
+            },
           },
         },
       },
@@ -552,10 +601,64 @@ export class CreditsService {
     });
     const snapshotMap = new Map(bankSnapshots.map((s) => [s.outletId, s]));
 
-    const rows: PayoutBatchRow[] = outletCodes.map((code) => {
+    // GLB-1(a): Split codes into payable (KYC-APPROVED + active) vs held.
+    // Held entries stay PENDING and re-enter the next download once the gate clears —
+    // their downloadId is NOT set here and their status is NOT flipped to PROCESSING.
+    const payableCodes: string[] = [];
+    const heldEntries: Array<{
+      outletId: string;
+      outletName: string;
+      amountPaise: number;
+      reason: string;
+      entryIds: string[];
+    }> = [];
+
+    for (const code of outletCodes) {
+      const o = outletDbMap.get(code);
+      const partner = o?.partner;
+      const info = outletMap.get(code)!;
+
+      // Canonical eligibility gate: inactive or soft-deleted partner → held.
+      if (!partner || partner.isActive === false || partner.deletedAt != null) {
+        heldEntries.push({
+          outletId: code,
+          outletName: info.outletName,
+          amountPaise: info.amountPaise,
+          reason: partner?.deletedAt != null ? 'PARTNER_DELETED' : 'PARTNER_INACTIVE',
+          entryIds: info.entryIds,
+        });
+        continue;
+      }
+
+      // Partner KYC must be APPROVED. Use the canonical resolver (deterministic
+      // createdAt→updatedAt→id tiebreak) so a stale APPROVED row cannot sneak
+      // through after a reKyc() in-place mutation. Default for no submission = null
+      // = NOT approved (never ?? 'APPROVED').
+      const kycStatus = resolveEffectiveKycStatus(partner.kycSubmissions ?? []);
+      if (kycStatus !== 'APPROVED') {
+        heldEntries.push({
+          outletId: code,
+          outletName: info.outletName,
+          amountPaise: info.amountPaise,
+          reason: `KYC_NOT_APPROVED:${kycStatus ?? 'NO_SUBMISSION'}`,
+          entryIds: info.entryIds,
+        });
+        continue;
+      }
+
+      payableCodes.push(code);
+    }
+
+    const rows: PayoutBatchRow[] = payableCodes.map((code) => {
       const info = outletMap.get(code)!;
       const o = outletDbMap.get(code);
       const snapshot = snapshotMap.get(code)!;
+      // Populate the real KYC status from the canonical resolver (will always be
+      // 'APPROVED' here because non-approved codes were excluded into heldEntries
+      // above). Fallback is 'APPROVED' ONLY because we know the code is payable —
+      // this is a display value, not a gate. The gate above uses ?? null (never
+      // ?? 'APPROVED'), so a no-submission partner is correctly held, not paid.
+      const kycStatus = resolveEffectiveKycStatus(o?.partner?.kycSubmissions ?? []) ?? 'APPROVED';
       return {
         outletId: code,
         outletName: info.outletName,
@@ -564,7 +667,7 @@ export class CreditsService {
         accountNumber: snapshot.accountNumber,
         ifscCode: snapshot.ifscCode,
         upiId: snapshot.upiId,
-        kycStatus: 'APPROVED',
+        kycStatus,
         // amount in the Excel file is rupees for human readability; convert from paise.
         amount: paiseToRupees(info.amountPaise),
         isDeactivated: !(o?.isActive ?? true),
@@ -573,9 +676,19 @@ export class CreditsService {
       };
     });
 
+    // Abort if every entry is held and nothing is payable.
+    if (payableCodes.length === 0) {
+      throw new BadRequestException(
+        `No payable entries for period ${period}: all ${heldEntries.length} outlet(s) are held (KYC not approved or partner inactive/deleted).`,
+      );
+    }
+
     const downloadCode = await this.generateDownloadCode(user.clientId, period);
-    // totalAmountPaise: integer sum in paise (exact, no float drift).
-    const totalAmountPaise = outletCodes.reduce(
+    // totalAmountPaise: integer sum in paise for PAYABLE rows only (exact, no float drift).
+    // GLB-1(a): held entries are excluded from the bank file and their entryIds must
+    // NOT be marked PROCESSING — they stay PENDING and re-enter the next download.
+    const payableEntryIds = payableCodes.flatMap((code) => outletMap.get(code)!.entryIds);
+    const totalAmountPaise = payableCodes.reduce(
       (s, code) => s + outletMap.get(code)!.amountPaise,
       0,
     );
@@ -596,7 +709,9 @@ export class CreditsService {
       rows,
     };
 
-    // Create download record + mark entries with downloadId.
+    // Create download record + mark ONLY payable entries with downloadId/PROCESSING.
+    // Held entries retain status=PENDING and downloadId=null so they re-enter the next
+    // download once KYC clears — the award is never abandoned, just deferred.
     const download = await this.prisma.$transaction(async (tx) => {
       const rec = await tx.creditPayoutDownload.create({
         data: {
@@ -612,17 +727,24 @@ export class CreditsService {
         },
       });
 
-      await tx.creditPayoutEntry.updateMany({
-        where: { id: { in: entries.map((e) => e.id) } },
-        data: { downloadId: rec.id, status: 'PROCESSING' },
-      });
+      // GLB-1(a): only flip the payable subset to PROCESSING; held entries stay PENDING/FAILED.
+      // GLM-2: FAILED entries (bank-rejected, re-selected for re-banking) are also flipped
+      // to PROCESSING here, with their prior downloadId replaced by the new download's id.
+      // This is correct: FAILED was never paid — treating it like PENDING for re-banking
+      // incurs no double-pay risk. REVERSED entries are excluded by the entryWhere above.
+      if (payableEntryIds.length > 0) {
+        await tx.creditPayoutEntry.updateMany({
+          where: { id: { in: payableEntryIds } },
+          data: { downloadId: rec.id, status: 'PROCESSING' },
+        });
+      }
 
       return rec;
     });
 
     const buffer = generatePayoutFileBuffer(payoutBatch);
 
-    return { buffer, downloadCode, downloadId: download.id };
+    return { buffer, downloadCode, downloadId: download.id, heldEntries };
   }
 
   // ─── POST /v1/admin/credits/payout-downloads/:id/utr ───────────────────────
@@ -818,7 +940,6 @@ export class CreditsService {
       }
 
       // ── POINTS reversal → wallet clawback (#16 reversal) ─────────────────
-      // PAYOUT reversals are handled via the cash-payout rail (out of scope here).
       let clawbackShortfall = 0;
       if (action === ReversalAction.approve && reversal.awardType === 'POINTS') {
         // approvedPaise field holds approved whole points for POINTS-type reversals.
@@ -858,9 +979,104 @@ export class CreditsService {
         }
       }
 
+      // ── GLM-1: PAYOUT reversal → cash clawback ────────────────────────────
+      // A PAYOUT-type reversal means cash (not points) was (or will be) disbursed.
+      //
+      // WHY ITERATE ALL ENTRIES (not findFirst):
+      //   One outlet+field can legitimately produce MULTIPLE CreditPayoutEntry rows
+      //   across different batches (e.g. monthly top-ups). The old findFirst(orderBy
+      //   createdAt desc) clawed back only the LATEST entry — silently missing any
+      //   earlier outstanding entries for the same outlet+field+scope. We now iterate
+      //   ALL matching entries and apply the correct action to each.
+      //
+      // ACTION PER ENTRY:
+      //   PENDING / PROCESSING → status=REVERSED + downloadId=null (permanently
+      //     removed from payability — GLM-2's re-download excludes REVERSED entries).
+      //     IMPORTANT: must be REVERSED (not FAILED) so GLM-2 cannot resurrect them.
+      //     Cash never left; no receivable.
+      //   PAID → cash already disbursed; record its amount as a recoverable receivable
+      //     and accumulate into clawbackShortfall.
+      //   REVERSED → already clawed back (idempotent for a repeated reversal attempt);
+      //     skip silently.
+      //   FAILED → bank-rejected; cash never left; mark REVERSED to permanently
+      //     remove from payability (GLM-2 would otherwise re-bank it, which we do NOT
+      //     want after an approved reversal).
+      let payoutClawbackNote: string | null = null;
+      if (action === ReversalAction.approve && reversal.awardType === 'PAYOUT') {
+        const approvedPaiseNum = Number(finalApprovedPaise ?? 0n);
+        if (approvedPaiseNum > 0) {
+          // Find ALL CreditPayoutEntry rows for this outlet+field combination
+          // (tenant-scoped). outletId in the reversal is the outletCode (same as
+          // CreditPayoutEntry.outletId).
+          const payoutEntries = await tx.creditPayoutEntry.findMany({
+            where: {
+              clientId: user.clientId,
+              outletId: reversal.outletId,
+              fieldId: reversal.fieldId ?? undefined,
+              // Only actionable statuses: REVERSED is already done (idempotent),
+              // FAILED needs to be permanently removed (not re-bankable).
+              status: { in: ['PENDING', 'PROCESSING', 'PAID', 'FAILED'] },
+            },
+            orderBy: { createdAt: 'desc' },
+          });
+
+          if (payoutEntries.length === 0) {
+            // No matching payout entries found: the award may have been reversed before
+            // confirmation or the entries were already deleted. Reversal lands cleanly.
+            payoutClawbackNote = `No matching PAYOUT entries found for outlet ${reversal.outletId} / field ${reversal.fieldId ?? 'any'}; reversal recorded with no cash action.`;
+          } else {
+            let reversedCount = 0;
+            let paidReceivablePaise = 0;
+            const entryNotes: string[] = [];
+
+            for (const payoutEntry of payoutEntries) {
+              if (
+                payoutEntry.status === 'PENDING' ||
+                payoutEntry.status === 'PROCESSING' ||
+                payoutEntry.status === 'FAILED'
+              ) {
+                // Cash not yet disbursed (PENDING/PROCESSING) OR bank-rejected (FAILED):
+                // permanently remove from payability by marking REVERSED with downloadId=null.
+                // REVERSED is the correct terminal status — GLM-2 excludes REVERSED from
+                // re-banking, whereas FAILED is considered bank-rejected and re-bankable.
+                await tx.creditPayoutEntry.update({
+                  where: { id: payoutEntry.id },
+                  data: { status: 'REVERSED', downloadId: null },
+                });
+                reversedCount++;
+                entryNotes.push(
+                  `entry ${payoutEntry.id} (was ${payoutEntry.status}) → REVERSED`,
+                );
+              } else if (payoutEntry.status === 'PAID') {
+                // Cash already disbursed: record a recoverable receivable (off-platform).
+                // Accumulate across all PAID entries for this outlet+field.
+                paidReceivablePaise += Number(payoutEntry.amountPaise);
+                entryNotes.push(
+                  `entry ${payoutEntry.id} (PAID ₹${(Number(payoutEntry.amountPaise) / 100).toFixed(2)}) → recoverable receivable`,
+                );
+              }
+            }
+
+            // clawbackShortfall is the aggregate of all PAID entries' amounts.
+            // This mirrors the POINTS-clawback shortfall pattern.
+            if (paidReceivablePaise > 0) {
+              clawbackShortfall = paidReceivablePaise;
+            }
+
+            payoutClawbackNote = [
+              `GLM-1 clawback: ${payoutEntries.length} entries processed`,
+              `(${reversedCount} reversed, ${paidReceivablePaise > 0 ? `₹${(paidReceivablePaise / 100).toFixed(2)} recoverable receivable` : 'no paid receivable'}).`,
+              ...entryNotes,
+            ].join(' | ');
+          }
+        }
+      }
+
       // Persist the PENDING (un-reversible) portion for the reversal report:
       //   supposed = approvedPaise · reversed = approvedPaise - shortfallPaise · pending = shortfallPaise.
       // The client settles `pending` off-platform; the platform does nothing with it.
+      // This applies to both POINTS shortfalls (wallet balance shortfall) and PAYOUT
+      // shortfalls (already-paid cash recoverable).
       if (clawbackShortfall > 0) {
         await tx.creditReversal.update({
           where: { id },
@@ -869,7 +1085,7 @@ export class CreditsService {
       }
 
       const finalReversal = await tx.creditReversal.findFirst({ where: { id } });
-      return { ...finalReversal, clawbackShortfall };
+      return { ...finalReversal, clawbackShortfall, payoutClawbackNote };
     });
   }
 }

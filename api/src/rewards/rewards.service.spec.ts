@@ -414,6 +414,136 @@ describe('RewardsService', () => {
         .rejects.toBeInstanceOf(ConflictException);
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
+
+    // ── GLB-1b: CASH-MODE ELIGIBILITY GATE ────────────────────────────────────
+
+    it('GLB-1b: rejects a UPI redemption when the partner KYC is not APPROVED', async () => {
+      // Partner KYC status is PENDING_RSM_APPROVAL — not APPROVED.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'UPI',
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'PENDING_RSM_APPROVAL' }],
+        },
+      });
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      // Gate fires before the OTP is verified and before any debit.
+      expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('GLB-1b: rejects a UPI redemption when the partner has no KYC submission', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'UPI',
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+          kycSubmissions: [],
+        },
+      });
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('GLB-1b: rejects a BANK_TRANSFER redemption when the partner is inactive', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'BANK_TRANSFER',
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: false, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+        },
+      });
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('GLB-1b: rejects a BANK_TRANSFER redemption when the partner is soft-deleted', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'BANK_TRANSFER',
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: true, deletedAt: new Date(),
+          kycSubmissions: [{ status: 'APPROVED' }],
+        },
+      });
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('GLB-1b: DOES NOT apply the KYC gate to non-cash (GIFT_CARD) redemptions', async () => {
+      // A GIFT_CARD order with a non-APPROVED partner still goes through (gate is cash-only).
+      const nonCashOrder = {
+        ...pendingOrder,
+        redemptionMode: 'GIFT_CARD',
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'PENDING_SO_APPROVAL' }],
+        },
+      };
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(nonCashOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      // Confirm proceeds (debitRedeem called) — no BadRequest from eligibility gate.
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .resolves.toMatchObject({ status: 'CONFIRMED' });
+      expect(mockWallet.debitRedeem).toHaveBeenCalled();
+    });
+
+    // ── GLB-2: ZERO-VALUE HARD FAIL (cash modes) ──────────────────────────────
+
+    it('GLB-2: hard-fails inside the transaction when valuePaise would be 0 for a UPI redemption', async () => {
+      // POINTS_CONVERSION_RATE is read at module init. We simulate a zero-value
+      // result by using 0 totalPointsCost (0 pts × any rate = 0 paise). The gate
+      // catches this inside the transaction — before the claim and wallet debit.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        totalPointsCost: 0, // causes valuePaise = 0n
+        redemptionMode: 'UPI',
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+        },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      // The transaction rolled back — no debit and no order flip.
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'CONFIRMED' }) }),
+      );
+    });
+
+    it('GLB-2: does NOT hard-fail for a non-cash (GIFT_CARD) order with zero points (no payout)', async () => {
+      // Non-cash modes never create a PayoutTransaction, so zero valuePaise is safe.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        totalPointsCost: 0,
+        redemptionMode: 'GIFT_CARD',
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+        },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      // Should NOT throw BadRequest from GLB-2 (debitRedeem may still get called).
+      await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
+        .resolves.toMatchObject({ status: 'CONFIRMED' });
+    });
   });
 
   // ─── B1 / #50-E — Sales-assisted redemption (redeem on behalf of an outlet) ───
@@ -661,6 +791,100 @@ describe('RewardsService', () => {
           orderId: 'o-out', otp: '000000', targetPartnerId: 'cp-out',
         }),
       ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    // ── GLB-1b: CASH-MODE ELIGIBILITY GATE for the OUTLET ────────────────────
+
+    it('GLB-1b: rejects a UPI outlet redemption when the outlet KYC is not APPROVED', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(outletPartner);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'UPI',
+        partner: {
+          id: 'cp-out', userId: 'outletUser1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'PENDING_SO_APPROVAL' }],
+        },
+      });
+      await expect(
+        service.confirmRedeemForOutlet(sales, {
+          orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('GLB-1b: rejects a BANK_TRANSFER outlet redemption when the outlet is inactive', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(outletPartner);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'BANK_TRANSFER',
+        partner: {
+          id: 'cp-out', userId: 'outletUser1', isActive: false, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+        },
+      });
+      await expect(
+        service.confirmRedeemForOutlet(sales, {
+          orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('GLB-1b: DOES NOT apply the KYC gate to non-cash outlet redemptions', async () => {
+      // GIFT_CARD outlet order — the KYC gate is CASH-only.
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(outletPartner);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        redemptionMode: 'GIFT_CARD',
+        partner: {
+          id: 'cp-out', userId: 'outletUser1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'DRAFT' }],
+        },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockWallet.debitRedeem.mockResolvedValue({});
+      mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
+
+      await expect(
+        service.confirmRedeemForOutlet(sales, {
+          orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+        }),
+      ).resolves.toMatchObject({ status: 'CONFIRMED' });
+      expect(mockWallet.debitRedeem).toHaveBeenCalled();
+    });
+
+    // ── GLB-2: ZERO-VALUE HARD FAIL for outlet cash redemptions ──────────────
+
+    it('GLB-2: hard-fails inside the tx when valuePaise is 0 for a BANK_TRANSFER outlet redemption', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(outletPartner);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      // 0 totalPointsCost → valuePaise = 0n → hard-fail.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...pendingOrder,
+        totalPointsCost: 0,
+        redemptionMode: 'BANK_TRANSFER',
+        partner: {
+          id: 'cp-out', userId: 'outletUser1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+        },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      await expect(
+        service.confirmRedeemForOutlet(sales, {
+          orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
   });
@@ -1355,10 +1579,16 @@ describe('RewardsService', () => {
     /**
      * Partner bank snapshot returned by the channelPartner.findFirst inside the tx.
      * The tx mock proxies to mockPrisma, so channelPartner.findFirst serves both
-     * the outer requirePartner call (not used in confirmRedeem) and the inner
-     * snapshot fetch; we use mockResolvedValueOnce sequencing to differentiate.
+     * the TOCTOU eligibility re-check (first call in tx) and the bank snapshot fetch
+     * (second call in tx). We include KYC fields so the TOCTOU check passes, and bank
+     * fields so the snapshot fetch succeeds — extra fields are ignored by each select.
      */
     const partnerSnap = {
+      // Eligibility fields (TOCTOU in-tx re-check)
+      isActive: true,
+      deletedAt: null,
+      kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+      // Bank snapshot fields
       bankAccountHolder: 'Ravi Kumar',
       ownerName: 'Ravi Kumar Proprietor',
       upiId: 'ravi@upi',
@@ -1367,7 +1597,8 @@ describe('RewardsService', () => {
       bankName: 'HDFC Bank',
     };
 
-    /** A PENDING UPI-mode order (valuePaise will be computed as 100000n for 1000 pts). */
+    /** A PENDING UPI-mode order (valuePaise will be computed as 100000n for 1000 pts).
+     *  partner must include kycSubmissions for the pre-tx GLB-1b eligibility gate. */
     const upiOrder = {
       id: 'o-upi',
       status: 'PENDING',
@@ -1376,7 +1607,10 @@ describe('RewardsService', () => {
       totalPointsCost: 1000,
       quantity: 1,
       redemptionMode: 'UPI',
-      partner: { id: 'cp1', userId: 'user1' },
+      partner: {
+        id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+        kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+      },
       reward: { name: 'Cash ₹1000', stockQuantity: null },
     };
 
@@ -1472,8 +1706,11 @@ describe('RewardsService', () => {
       expect(mockPrisma.payoutTransaction.create).not.toHaveBeenCalled();
     });
 
-    it('falls back to amountPaise=0n (with a logged warning) when valuePaise would be 0n', async () => {
-      // Force conversionRate=0 so valuePaise=0n
+    it('GLB-2: throws BadRequestException (not 0n fallback) when valuePaise is 0 for a cash UPI mode', async () => {
+      // GLB-2: cash modes with valuePaise=0n hard-fail inside the transaction
+      // (POINTS_CONVERSION_RATE=0 → valuePaise=0n → BadRequest before debit/payout).
+      // The old "fallback to 0n" behavior was superseded — the zero-value fallback
+      // only applies to non-cash modes (where no PayoutTransaction is created).
       const original = process.env.POINTS_CONVERSION_RATE;
       process.env.POINTS_CONVERSION_RATE = '0';
 
@@ -1498,14 +1735,12 @@ describe('RewardsService', () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(partnerSnap);
       mockPrisma.payoutTransaction.create.mockResolvedValue({ id: 'pt-warn' });
 
-      await svc0.confirmRedeem(partner, { orderId: 'o-upi', otp: '123456' });
-
-      // Even with zero conversionRate, a PayoutTransaction IS created (with 0n),
-      // so the admin can see and correct it.
-      expect(mockPrisma.payoutTransaction.create).toHaveBeenCalledTimes(1);
-      const call = mockPrisma.payoutTransaction.create.mock.calls[0][0];
-      expect(call.data.amountPaise).toBe(0n);
-      expect(call.data.netAmountPaise).toBe(0n);
+      // GLB-2 fires inside the tx: valuePaise=0n for UPI → BadRequest, tx rolls back.
+      await expect(svc0.confirmRedeem(partner, { orderId: 'o-upi', otp: '123456' }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      // No PayoutTransaction created (tx rolled back before the payout create).
+      expect(mockPrisma.payoutTransaction.create).not.toHaveBeenCalled();
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
 
       if (original === undefined) delete process.env.POINTS_CONVERSION_RATE;
       else process.env.POINTS_CONVERSION_RATE = original;
@@ -1522,6 +1757,96 @@ describe('RewardsService', () => {
 
       const call = mockPrisma.payoutTransaction.create.mock.calls[0][0];
       expect(call.data.beneficiaryName).toBe('Ravi Kumar Proprietor');
+    });
+  });
+
+  // ─── GLB-1b / TOCTOU — additional eligibility gate coverage ─────────────────
+
+  describe('confirmRedeem — GLB-1b cash-eligibility extended coverage', () => {
+    const goodOtp = {
+      id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+      expiresAt: new Date(Date.now() + 60_000), verifiedAt: null,
+    };
+
+    /** An order whose partner is APPROVED at the pre-tx read. */
+    const approvedCashOrder = {
+      id: 'o-cash',
+      status: 'PENDING',
+      partnerId: 'cp1',
+      orderNumber: 'RDM-CASH',
+      totalPointsCost: 500,
+      quantity: 1,
+      redemptionMode: 'UPI',
+      partner: {
+        id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+        kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+      },
+      reward: { name: 'Cash ₹500', stockQuantity: null },
+    };
+
+    it('pre-tx gate throws before OTP check when partner KYC is not APPROVED', async () => {
+      // Partner has PENDING_SO_APPROVAL status → pre-tx eligibility gate fires immediately.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...approvedCashOrder,
+        partner: {
+          id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+          kycSubmissions: [{ id: 'ks1', status: 'PENDING_SO_APPROVAL', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+        },
+      });
+      await expect(service.confirmRedeem(partner, { orderId: 'o-cash', otp: '123456' }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      // Gate fires before the OTP lookup — OTP never queried.
+      expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    it('TOCTOU in-tx re-check: pre-tx eligible but in-tx fresh-read ineligible throws without debit', async () => {
+      // Pre-tx: partner is APPROVED. In-tx fresh read returns RE_KYC_REQUIRED.
+      // The TOCTOU guard must catch the suspension and throw, rolling back the tx.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(approvedCashOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+
+      // The first channelPartner.findFirst (in-tx TOCTOU) returns ineligible partner;
+      // since $transaction proxies to mockPrisma and there is only one channelPartner
+      // lookup per-call sequence, a single mockResolvedValue suffices.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        isActive: true,
+        deletedAt: null,
+        kycSubmissions: [{ id: 'ks1', status: 'RE_KYC_REQUIRED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+      });
+
+      await expect(service.confirmRedeem(partner, { orderId: 'o-cash', otp: '123456' }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      // Tx rolled back — no debit and no payout.
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+      expect(mockPrisma.payoutTransaction.create).not.toHaveBeenCalled();
+    });
+
+    it('fully eligible APPROVED partner completes confirmRedeem for a UPI order', async () => {
+      // End-to-end happy path: pre-tx gate passes, TOCTOU passes, debit + payout created.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(approvedCashOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockWallet.debitRedeem.mockResolvedValue({});
+      mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
+      mockPrisma.payoutTransaction.create.mockResolvedValue({ id: 'pt1' });
+      // Both TOCTOU check and bank snapshot return partnerSnap (which has APPROVED KYC).
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        isActive: true, deletedAt: null,
+        kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+        bankAccountHolder: 'Alice', ownerName: 'Alice Owner', upiId: 'alice@upi',
+        bankAccountNumber: '9988776655', ifscCode: 'ICIC0001234', bankName: 'ICICI',
+      });
+
+      const res = await service.confirmRedeem(partner, { orderId: 'o-cash', otp: '123456' });
+
+      expect(res.status).toBe('CONFIRMED');
+      expect(mockWallet.debitRedeem).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.payoutTransaction.create).toHaveBeenCalledTimes(1);
+      const ptCall = mockPrisma.payoutTransaction.create.mock.calls[0][0];
+      expect(ptCall.data.payoutMode).toBe('UPI');
+      expect(ptCall.data.status).toBe('PENDING');
     });
   });
 });

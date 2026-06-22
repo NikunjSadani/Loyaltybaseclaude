@@ -225,13 +225,23 @@ describe('PayoutsService', () => {
 
     it('flags valid transactions to INITIATED and SUBMITs with NO fund gate', async () => {
       mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
-      // One eligible tx (amountPaise 3,000,000 = ₹30,000).
+      // One eligible tx (amountPaise 3,000,000 = ₹30,000). Partner must be
+      // KYC-APPROVED, active, non-deleted, and have mode-required beneficiary fields.
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([
         {
           id: 't1',
           partnerId: 'p1',
           amountPaise: 3000000,
-          partner: { panNumber: 'ABCDE1234F' },
+          payoutMode: 'UPI',
+          upiId: 'partner@upi',
+          bankAccountNumber: null,
+          ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F',
+            isActive: true,
+            deletedAt: null,
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
         },
       ]);
 
@@ -257,7 +267,14 @@ describe('PayoutsService', () => {
     it('SUBMITs even when no on-portal funds exist (offline transfer — no fund gate)', async () => {
       mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([
-        { id: 't1', partnerId: 'p1', amountPaise: 500000, partner: { panNumber: 'ABCDE1234F' } },
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 500000,
+          payoutMode: 'UPI', upiId: 'partner@upi', bankAccountNumber: null, ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: null,
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
       ]);
 
       const res = await service.processBatch(gifsy, 'b1');
@@ -269,7 +286,14 @@ describe('PayoutsService', () => {
     it('flags PAN-less transactions as validation warnings and excludes them', async () => {
       mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([
-        { id: 't1', partnerId: 'p1', amountPaise: 100000, partner: { panNumber: null } },
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'UPI', upiId: 'partner@upi', bankAccountNumber: null, ifscCode: null,
+          partner: {
+            panNumber: null, isActive: true, deletedAt: null,
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
       ]);
 
       const res = await service.processBatch(gifsy, 'b1');
@@ -293,6 +317,232 @@ describe('PayoutsService', () => {
         where: { id: 'b1' },
         data: { status: 'FAILED' },
       });
+    });
+
+    // ── GLB-1b: partner eligibility gate in processBatch ──────────────────────
+
+    it('GLB-1b: excludes a transaction whose partner KYC is not APPROVED', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'UPI', upiId: 'partner@upi', bankAccountNumber: null, ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: null,
+            kycSubmissions: [{ status: 'PENDING_ASM_APPROVAL' }],
+          },
+        },
+      ]);
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.status).toBe('PASSED_WITH_WARNINGS');
+      expect(res.steps.validation.errors.length).toBeGreaterThan(0);
+      expect(res.steps.validation.errors[0]).toMatch(/KYC.*not approved/i);
+      expect(res.steps.disbursement.flagged).toBe(0); // excluded from INITIATED
+      expect(res.status).toBe('SUBMITTED');
+    });
+
+    it('GLB-1b: excludes a transaction whose partner has no KYC submission', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'UPI', upiId: 'partner@upi', bankAccountNumber: null, ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: null,
+            kycSubmissions: [], // no submission
+          },
+        },
+      ]);
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.errors[0]).toMatch(/KYC.*not approved/i);
+      expect(res.steps.disbursement.flagged).toBe(0);
+    });
+
+    it('GLB-1b: excludes a transaction whose partner is inactive', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'UPI', upiId: 'partner@upi', bankAccountNumber: null, ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: false, deletedAt: null,
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.errors[0]).toMatch(/PARTNER_INACTIVE/);
+      expect(res.steps.disbursement.flagged).toBe(0);
+    });
+
+    it('GLB-1b: excludes a transaction whose partner is soft-deleted', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'UPI', upiId: 'partner@upi', bankAccountNumber: null, ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: new Date(),
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.errors[0]).toMatch(/PARTNER_DELETED/);
+      expect(res.steps.disbursement.flagged).toBe(0);
+    });
+
+    // ── GLM-3: beneficiary field validation ───────────────────────────────────
+
+    it('GLM-3: excludes a UPI transaction missing upiId', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'UPI', upiId: null, bankAccountNumber: null, ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: null,
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.status).toBe('PASSED_WITH_WARNINGS');
+      expect(res.steps.validation.errors[0]).toMatch(/upiId/);
+      expect(res.steps.disbursement.flagged).toBe(0);
+    });
+
+    it('GLM-3: excludes a BANK_TRANSFER transaction missing bankAccountNumber', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'BANK_TRANSFER', upiId: null, bankAccountNumber: null, ifscCode: 'SBIN0000123',
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: null,
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.errors[0]).toMatch(/bankAccountNumber/);
+      expect(res.steps.disbursement.flagged).toBe(0);
+    });
+
+    it('GLM-3: excludes a BANK_TRANSFER transaction missing ifscCode', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'BANK_TRANSFER', upiId: null, bankAccountNumber: '123456789', ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: null,
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.errors[0]).toMatch(/ifscCode/);
+      expect(res.steps.disbursement.flagged).toBe(0);
+    });
+
+    it('GLM-3: excludes a BANK_TRANSFER transaction missing BOTH bankAccountNumber and ifscCode', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'BANK_TRANSFER', upiId: null, bankAccountNumber: null, ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: null,
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      const res = await service.processBatch(gifsy, 'b1');
+      const err = res.steps.validation.errors[0];
+      expect(err).toMatch(/bankAccountNumber/);
+      expect(err).toMatch(/ifscCode/);
+      expect(res.steps.disbursement.flagged).toBe(0);
+    });
+
+    it('GLM-3: passes a fully-valid BANK_TRANSFER transaction (both fields present)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'BANK_TRANSFER', upiId: null,
+          bankAccountNumber: '123456789', ifscCode: 'SBIN0000123',
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: null,
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      const res = await service.processBatch(gifsy, 'b1');
+      expect(res.steps.validation.status).toBe('PASSED');
+      expect(res.steps.disbursement.flagged).toBe(1);
+      expect(res.status).toBe('SUBMITTED');
+    });
+
+    // ── resolveEffectiveKycStatus ordering coverage ───────────────────────────
+
+    it('resolver: stale APPROVED loses to a newer RE_KYC_REQUIRED when createdAt is later', async () => {
+      // Two submissions: older APPROVED (2026-01-01) + newer RE_KYC_REQUIRED (2026-06-01).
+      // resolveEffectiveKycStatus sorts createdAt DESC → newer RE_KYC wins → not payable.
+      // This exercises the multi-submission sort path (single-element sort skips comparator).
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'UPI', upiId: 'p@upi', bankAccountNumber: null, ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: null,
+            kycSubmissions: [
+              // OLDER submission — was APPROVED (stale)
+              { id: 'ks-old', status: 'APPROVED',        createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') },
+              // NEWER submission — reKyc triggered RE_KYC_REQUIRED in-place on this row
+              { id: 'ks-new', status: 'RE_KYC_REQUIRED', createdAt: new Date('2026-06-01'), updatedAt: new Date('2026-06-15') },
+            ],
+          },
+        },
+      ]);
+
+      const res = await service.processBatch(gifsy, 'b1');
+
+      // The newer RE_KYC_REQUIRED status wins — partner is ineligible → excluded.
+      expect(res.steps.validation.errors.length).toBeGreaterThan(0);
+      expect(res.steps.validation.errors[0]).toMatch(/KYC.*not approved/i);
+      expect(res.steps.disbursement.flagged).toBe(0);
+    });
+
+    it('resolver: updatedAt tiebreak surfaces the in-place reKyc mutation over stale APPROVED', async () => {
+      // Both submissions have the SAME createdAt (millisecond tie) — tests the secondary
+      // updatedAt DESC sort path. ks-rekyc was mutated later (updatedAt 2026-06-15)
+      // even though both were created at the same timestamp.
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      const sameCreated = new Date('2026-06-01T12:00:00.000Z');
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'UPI', upiId: 'p@upi', bankAccountNumber: null, ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: null,
+            kycSubmissions: [
+              // Same createdAt — stale APPROVED (updatedAt also same)
+              { id: 'ks-a', status: 'APPROVED',         createdAt: sameCreated, updatedAt: new Date('2026-06-01T12:00:00.000Z') },
+              // Same createdAt — RE_KYC mutated later (updatedAt > ks-a.updatedAt) → wins
+              { id: 'ks-b', status: 'RE_KYC_REQUIRED',  createdAt: sameCreated, updatedAt: new Date('2026-06-15T09:00:00.000Z') },
+            ],
+          },
+        },
+      ]);
+
+      const res = await service.processBatch(gifsy, 'b1');
+
+      // updatedAt tiebreak: ks-b (RE_KYC_REQUIRED, updated 2026-06-15) wins over
+      // ks-a (APPROVED, updated same timestamp) → partner excluded.
+      expect(res.steps.validation.errors[0]).toMatch(/KYC.*not approved/i);
+      expect(res.steps.disbursement.flagged).toBe(0);
     });
   });
 

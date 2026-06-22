@@ -15,6 +15,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { roundToRupeePaise } from '../tds/tds.helpers';
+import { resolveEffectiveKycStatus, isPartnerPayable } from '../kyc/kyc-eligibility';
 import {
   AdminListCatalogQueryDto,
   CreateRewardCatalogDto,
@@ -483,11 +484,50 @@ export class RewardsService {
     // assigned reps race.)
     const order = await this.prisma.redemptionOrder.findFirst({
       where: { id: dto.orderId, partnerId: partner.id },
-      include: { reward: true, partner: { select: { id: true, userId: true } } },
+      include: {
+        reward: true,
+        partner: {
+          select: {
+            id: true,
+            userId: true,
+            isActive: true,
+            deletedAt: true,
+            // GLB-1b pre-tx gate: fetch all KYC submissions for the canonical
+            // resolver (deterministic tiebreak). No take:1 limit — the resolver
+            // picks the effective status. See kyc-eligibility.ts for rationale.
+            kycSubmissions: {
+              orderBy: [{ createdAt: 'desc' }, { updatedAt: 'desc' }, { id: 'desc' }],
+              select: { id: true, status: true, createdAt: true, updatedAt: true },
+            },
+          },
+        },
+      },
     });
     if (!order) throw new NotFoundException('Redemption order not found');
     if (order.status !== 'PENDING') {
       throw new BadRequestException('Order is not awaiting confirmation');
+    }
+
+    // GLB-1b — CASH-MODE ELIGIBILITY GATE for the OUTLET (pre-transaction, fast path).
+    // For UPI and BANK_TRANSFER modes, the outlet must be KYC-APPROVED, active,
+    // and not soft-deleted. Uses the canonical resolver for a deterministic tiebreak.
+    // A second check INSIDE the transaction (TOCTOU guard) ensures no suspension
+    // between here and the claim/debit can produce a debit for an ineligible partner.
+    const isCashModeForOutlet =
+      order.redemptionMode === 'UPI' || order.redemptionMode === 'BANK_TRANSFER';
+    if (isCashModeForOutlet) {
+      const p = order.partner;
+      if (!p || p.isActive === false || p.deletedAt != null) {
+        throw new BadRequestException(
+          'Outlet partner account is inactive or deleted; cash redemption cannot be confirmed',
+        );
+      }
+      const kycStatus = resolveEffectiveKycStatus(p.kycSubmissions ?? []);
+      if (kycStatus !== 'APPROVED') {
+        throw new BadRequestException(
+          `Outlet partner KYC is not approved (current status: ${kycStatus ?? 'NO_SUBMISSION'}); cash redemption cannot be confirmed`,
+        );
+      }
     }
 
     // OTP is bound to the OUTLET's user (it was delivered to the outlet's phone).
@@ -504,6 +544,39 @@ export class RewardsService {
         rateCenti > 0
           ? roundToRupeePaise((BigInt(requiredPoints) * 10000n) / BigInt(rateCenti))
           : 0n;
+
+      // GLB-2 — ZERO-VALUE HARD FAIL for cash modes (inside the transaction so
+      // the claim + wallet debit all roll back). Non-cash modes are unaffected.
+      if (isCashModeForOutlet && valuePaise === 0n) {
+        throw new BadRequestException(
+          'Computed payout value is zero (check POINTS_CONVERSION_RATE); cash redemption cannot be confirmed',
+        );
+      }
+
+      // TOCTOU in-tx eligibility re-check (cash modes only).
+      // The pre-tx gate above is the fast path (fail early, clean 400). But a partner
+      // can be suspended between the pre-tx read and this transaction's start. Re-asserting
+      // here ensures the wallet debit never happens for an ineligible partner: a throw
+      // inside $transaction triggers a full rollback (no debit, claim reverts).
+      if (isCashModeForOutlet) {
+        const freshPartner = await tx.channelPartner.findFirst({
+          where: { id: order.partnerId },
+          select: {
+            isActive: true,
+            deletedAt: true,
+            kycSubmissions: {
+              orderBy: [{ createdAt: 'desc' }, { updatedAt: 'desc' }, { id: 'desc' }],
+              select: { id: true, status: true, createdAt: true, updatedAt: true },
+            },
+          },
+        });
+        const freshKyc = resolveEffectiveKycStatus(freshPartner?.kycSubmissions ?? []);
+        if (!isPartnerPayable({ isActive: freshPartner?.isActive, deletedAt: freshPartner?.deletedAt, effectiveKyc: freshKyc })) {
+          throw new BadRequestException(
+            `Outlet partner is no longer eligible for cash redemption (status changed after pre-tx check; KYC: ${freshKyc ?? 'NO_SUBMISSION'})`,
+          );
+        }
+      }
 
       // Atomic claim: only the tx that flips PENDING→CONFIRMED proceeds → a single
       // order can never be debited twice (double-submit matches 0 rows, aborts).
@@ -576,10 +649,13 @@ export class RewardsService {
           },
         });
 
+        // MINOR: this zero-value fallback is only reachable for non-cash modes
+        // (GLB-2 above throws first for UPI/BANK_TRANSFER when valuePaise=0n).
+        // It is kept for defence-in-depth but must NEVER be reached in cash paths.
         const amountPaise: bigint =
           valuePaise != null && valuePaise > 0n ? valuePaise : (() => {
             this.logger.warn(
-              `[confirmRedeemForOutlet] valuePaise null/zero for order ${order.id} — PayoutTransaction created with amountPaise=0; manual correction required`,
+              `[confirmRedeemForOutlet] valuePaise null/zero for order ${order.id} — PayoutTransaction created with amountPaise=0; manual correction required (non-cash path only)`,
             );
             return 0n;
           })();
@@ -763,12 +839,51 @@ export class RewardsService {
   async confirmRedeem(user: JwtPayload, dto: RedeemConfirmDto) {
     const order = await this.prisma.redemptionOrder.findFirst({
       where: { id: dto.orderId, partner: { user: { clientId: user.clientId } } },
-      include: { reward: true, partner: { select: { id: true, userId: true } } },
+      include: {
+        reward: true,
+        partner: {
+          select: {
+            id: true,
+            userId: true,
+            isActive: true,
+            deletedAt: true,
+            // GLB-1b pre-tx gate: fetch all KYC submissions for the canonical
+            // resolver (deterministic tiebreak). No take:1 limit — the resolver
+            // picks the effective status. See kyc-eligibility.ts for rationale.
+            kycSubmissions: {
+              orderBy: [{ createdAt: 'desc' }, { updatedAt: 'desc' }, { id: 'desc' }],
+              select: { id: true, status: true, createdAt: true, updatedAt: true },
+            },
+          },
+        },
+      },
     });
     if (!order) throw new NotFoundException('Redemption order not found');
     if (order.partner?.userId !== user.sub) throw new ForbiddenException('Forbidden');
     if (order.status !== 'PENDING') {
       throw new BadRequestException('Order is not awaiting confirmation');
+    }
+
+    // GLB-1b — CASH-MODE ELIGIBILITY GATE (pre-transaction, fast path).
+    // For UPI and BANK_TRANSFER redemptions, the owning partner must be KYC-APPROVED,
+    // active (isActive=true), and not soft-deleted (deletedAt=null). Uses the canonical
+    // resolver for a deterministic tiebreak. A second check INSIDE the transaction
+    // (TOCTOU guard) ensures a suspension between here and the claim/debit is caught.
+    const isCashModeConfirm =
+      order.redemptionMode === 'UPI' || order.redemptionMode === 'BANK_TRANSFER';
+    if (isCashModeConfirm) {
+      const p = order.partner;
+      if (!p || p.isActive === false || p.deletedAt != null) {
+        throw new BadRequestException(
+          'Partner account is inactive or deleted; cash redemption cannot be confirmed',
+        );
+      }
+      const kycStatus = resolveEffectiveKycStatus(p.kycSubmissions ?? []);
+      if (kycStatus !== 'APPROVED') {
+        throw new BadRequestException(
+          `Partner KYC is not approved (current status: ${kycStatus ?? 'NO_SUBMISSION'}); cash redemption cannot be confirmed`,
+        );
+      }
     }
 
     const otpId = await this.verifyRedemptionOtp(user.sub, dto.otp);
@@ -792,6 +907,44 @@ export class RewardsService {
         rateCenti > 0
           ? roundToRupeePaise((BigInt(requiredPoints) * 10000n) / BigInt(rateCenti))
           : 0n;
+
+      // GLB-2 — ZERO-VALUE HARD FAIL for cash modes (inside the transaction so
+      // the whole tx — claim + wallet debit — rolls back). A zero valuePaise means
+      // either the conversionRate is 0/misconfigured (caught by the boot check) or
+      // the arithmetic produced 0 despite a non-zero rate (e.g. tiny point count).
+      // Either way, creating a PayoutTransaction with amountPaise=0 is a silent
+      // money-path bug; fail loudly here so ops can correct the root cause.
+      // Non-cash modes are NOT affected — they don't create a PayoutTransaction.
+      if (isCashModeConfirm && valuePaise === 0n) {
+        throw new BadRequestException(
+          'Computed payout value is zero (check POINTS_CONVERSION_RATE); cash redemption cannot be confirmed',
+        );
+      }
+
+      // TOCTOU in-tx eligibility re-check (cash modes only).
+      // The pre-tx gate above is the fast path (fail early, clean 400). But a partner
+      // can be suspended between the pre-tx read and this transaction's start. Re-reading
+      // partner state here ensures the wallet debit never happens for an ineligible
+      // partner: a throw inside $transaction triggers a full rollback (claim reverts).
+      if (isCashModeConfirm) {
+        const freshPartner = await tx.channelPartner.findFirst({
+          where: { id: order.partnerId },
+          select: {
+            isActive: true,
+            deletedAt: true,
+            kycSubmissions: {
+              orderBy: [{ createdAt: 'desc' }, { updatedAt: 'desc' }, { id: 'desc' }],
+              select: { id: true, status: true, createdAt: true, updatedAt: true },
+            },
+          },
+        });
+        const freshKyc = resolveEffectiveKycStatus(freshPartner?.kycSubmissions ?? []);
+        if (!isPartnerPayable({ isActive: freshPartner?.isActive, deletedAt: freshPartner?.deletedAt, effectiveKyc: freshKyc })) {
+          throw new BadRequestException(
+            `Partner is no longer eligible for cash redemption (status changed after pre-tx check; KYC: ${freshKyc ?? 'NO_SUBMISSION'})`,
+          );
+        }
+      }
 
       const claim = await tx.redemptionOrder.updateMany({
         where: { id: order.id, status: 'PENDING' },
@@ -888,10 +1041,14 @@ export class RewardsService {
 
         // valuePaise is set by the claim update just above; the re-read is not
         // needed — we computed it in `valuePaise` (BigInt) in this scope.
+        //
+        // MINOR: this zero-value fallback is only reachable for non-cash modes
+        // (GLB-2 throws first for UPI/BANK_TRANSFER when valuePaise=0n). It is kept
+        // for defence-in-depth but must NEVER be reached in cash paths.
         const amountPaise: bigint =
           valuePaise != null && valuePaise > 0n ? valuePaise : (() => {
             this.logger.warn(
-              `[confirmRedeem] valuePaise null/zero for order ${order.id} — PayoutTransaction created with amountPaise=0; manual correction required`,
+              `[confirmRedeem] valuePaise null/zero for order ${order.id} — PayoutTransaction created with amountPaise=0; manual correction required (non-cash path only)`,
             );
             return 0n;
           })();

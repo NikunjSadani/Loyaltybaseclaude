@@ -52,6 +52,21 @@ async function bootstrap() {
     }),
   );
 
+  // GLB-2 boot check — POINTS_CONVERSION_RATE must be a finite positive number.
+  // RewardsService uses this rate to convert points → paise for cash redemptions;
+  // a zero or non-numeric rate silently produces zero-value PayoutTransactions
+  // (GLB-2). Fail fast before the app accepts any traffic.
+  // Default matches RewardsService: '1' when the env var is absent.
+  const conversionRateRaw = process.env.POINTS_CONVERSION_RATE ?? '1';
+  const conversionRate = parseFloat(conversionRateRaw);
+  if (!isFinite(conversionRate) || conversionRate <= 0) {
+    logger.error(
+      `FATAL: POINTS_CONVERSION_RATE="${conversionRateRaw}" is not a finite positive number. ` +
+        `Set a valid value (e.g. "1" for 1 point = ₹1) and restart the service.`,
+    );
+    process.exit(1);
+  }
+
   const port = config.get<number>('PORT') ?? 4000;
   await app.listen(port);
   logger.log(`API listening on port ${port}`);
