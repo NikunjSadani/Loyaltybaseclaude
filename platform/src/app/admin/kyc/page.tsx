@@ -4,7 +4,6 @@ import { useState, useMemo, useEffect } from 'react';
 import {
   Search,
   Download,
-  CheckSquare,
   AlertTriangle,
   Clock,
   CheckCircle,
@@ -16,6 +15,7 @@ import {
 import Link from 'next/link';
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
+import { useAdminSession } from '@/lib/admin-session';
 
 type KYCStatusType = 'PENDING' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
 
@@ -24,7 +24,6 @@ interface KYCEntry {
   outletName: string;
   mobile: string;
   salesUser: string;
-  territory: string;
   status: KYCStatusType;
   submittedDate: string;
   ageHrs: number;
@@ -61,7 +60,6 @@ function mapApiKyc(s: ApiKycSub): KYCEntry {
     outletName:    s.partner?.businessName ?? s.user.name,
     mobile:        s.user.phone,
     salesUser:     s.user.name,
-    territory:     '',
     status:        DB_STATUS_MAP[s.status] ?? 'PENDING',
     submittedDate: submittedAt.slice(0, 10),
     ageHrs,
@@ -87,13 +85,17 @@ const STATUS_LABELS: Record<KYCStatusType, string> = {
 };
 
 export default function KYCPage() {
+  // Role gate: GET /api/kyc/review-dump is @Roles('GIFSY_ADMIN') only.
+  const adminSession = useAdminSession();
+  const isGifsyAdmin = adminSession.role === 'GIFSY_ADMIN';
+
   const [kycList, setKycList] = useState<KYCEntry[]>([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<KYCStatusType | 'ALL'>('ALL');
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [bulkApproving, setBulkApproving] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/kyc', { headers: { ...authHeader() } })
@@ -129,39 +131,26 @@ export default function KYCPage() {
     });
   }, [search, statusFilter, kycList]);
 
-  const pendingIds = filtered.filter((k) => k.status === 'PENDING').map((k) => k.id);
-  const allPendingSelected = pendingIds.length > 0 && pendingIds.every((id) => selected.has(id));
-
-  const toggleSelectAll = () => {
-    if (allPendingSelected) {
-      setSelected((s) => {
-        const next = new Set(s);
-        pendingIds.forEach((id) => next.delete(id));
-        return next;
+  const handleExport = async () => {
+    setExportLoading(true);
+    setExportError(null);
+    try {
+      const res = await fetch('/api/kyc/review-dump', {
+        headers: { ...authHeader() },
       });
-    } else {
-      setSelected((s) => new Set([...s, ...pendingIds]));
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const blob = await res.blob();
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = `kyc-review-dump-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(href);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : 'Export failed.');
+    } finally {
+      setExportLoading(false);
     }
-  };
-
-  const toggleOne = (id: string) => {
-    setSelected((s) => {
-      const next = new Set(s);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
-  };
-
-  const handleBulkApprove = async () => {
-    setBulkApproving(true);
-    await new Promise((r) => setTimeout(r, 1200));
-    setSelected(new Set());
-    setBulkApproving(false);
-    alert(`${selected.size} KYC submissions approved successfully.`);
-  };
-
-  const handleExport = () => {
-    alert('Exporting KYC data to Excel...');
   };
 
   if (loading) {
@@ -239,25 +228,23 @@ export default function KYCPage() {
               <option value="RESUBMISSION_REQUIRED">Re-upload Required</option>
             </select>
           </div>
-          <div className="flex gap-2">
-            {selected.size > 0 && (
+          {isGifsyAdmin && (
+            <div className="flex flex-col items-end gap-1">
               <button
-                onClick={handleBulkApprove}
-                disabled={bulkApproving}
-                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors disabled:opacity-60"
+                onClick={handleExport}
+                disabled={exportLoading}
+                className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 text-sm rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60"
               >
-                <CheckSquare className="w-4 h-4" />
-                {bulkApproving ? 'Approving...' : `Approve ${selected.size} Selected`}
+                <Download className="w-4 h-4" />
+                {exportLoading ? 'Exporting...' : 'Export Excel'}
               </button>
-            )}
-            <button
-              onClick={handleExport}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 text-sm rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <Download className="w-4 h-4" />
-              Export Excel
-            </button>
-          </div>
+              {exportError && (
+                <span className="flex items-center gap-1 text-xs text-red-600">
+                  <AlertTriangle className="w-3 h-3" />{exportError}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -267,14 +254,6 @@ export default function KYCPage() {
           <table className="w-full">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
-                <th className="px-4 py-3 w-10">
-                  <input
-                    type="checkbox"
-                    checked={allPendingSelected}
-                    onChange={toggleSelectAll}
-                    className="rounded accent-[var(--brand-primary)]"
-                  />
-                </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Outlet</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Mobile</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Sales User</th>
@@ -287,7 +266,7 @@ export default function KYCPage() {
             <tbody className="divide-y divide-gray-50">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-12 text-center text-sm text-gray-400">
+                  <td colSpan={7} className="px-4 py-12 text-center text-sm text-gray-400">
                     No KYC records match your filters
                   </td>
                 </tr>
@@ -299,20 +278,7 @@ export default function KYCPage() {
                   return (
                   <tr key={k.id} className={`hover:bg-gray-50 transition-colors ${k.slaBreached ? 'border-l-2 border-l-red-400' : ''}`}>
                     <td className="px-4 py-3">
-                      {k.status === 'PENDING' && (
-                        <input
-                          type="checkbox"
-                          checked={selected.has(k.id)}
-                          onChange={() => toggleOne(k.id)}
-                          className="rounded accent-[var(--brand-primary)]"
-                        />
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">{k.outletName}</p>
-                        <p className="text-xs text-gray-400">{k.territory}</p>
-                      </div>
+                      <p className="text-sm font-medium text-gray-900">{k.outletName}</p>
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-600">{k.mobile}</td>
                     <td className="px-4 py-3 text-sm text-gray-600">{k.salesUser}</td>

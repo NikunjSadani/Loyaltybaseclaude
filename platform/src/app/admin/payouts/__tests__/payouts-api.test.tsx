@@ -51,6 +51,30 @@ const MOCK_TRANSACTIONS = [
   },
 ];
 
+const MOCK_FUND = {
+  totalReceivedPaise:  10000000,
+  totalUtilisedPaise:   4000000,
+  closingBalancePaise:  6000000,
+  availablePaise:       6000000,
+};
+
+/* URL-aware fetch stub matching the rewritten page: load() fetches batches + fund,
+ * and a separate effect fetches transactions for the selected batch (?batchId=). */
+function stubPayoutFetch() {
+  vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+    const u = String(url);
+    let body: unknown = { success: true, data: {} };
+    if (u.includes('/api/payouts/batches')) {
+      body = { success: true, data: { batches: MOCK_BATCHES, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } };
+    } else if (u.includes('/api/payouts/fund')) {
+      body = { success: true, data: MOCK_FUND };
+    } else if (u.includes('/api/payouts/transactions')) {
+      body = { success: true, data: { transactions: MOCK_TRANSACTIONS, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } };
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+  }));
+}
+
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('PAY — Admin Payouts API wiring', () => {
@@ -64,37 +88,16 @@ describe('PAY — Admin Payouts API wiring', () => {
   });
 
   it('PAY2: renders batch code from API response', async () => {
-    let callCount = 0;
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => {
-      callCount++;
-      const isFirst = callCount <= 1;
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve(
-          isFirst
-            ? { success: true, data: { batches: MOCK_BATCHES, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } }
-            : { success: true, data: { transactions: MOCK_TRANSACTIONS, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } }
-        ),
-      });
-    }));
+    stubPayoutFetch();
     render(<PayoutsPage />);
-    expect(await screen.findByText('BAT-2026-05')).toBeInTheDocument();
+    // The code legitimately renders in both the batch-list item and the selected
+    // batch's detail header, so assert at least one occurrence.
+    const matches = await screen.findAllByText('BAT-2026-05');
+    expect(matches.length).toBeGreaterThanOrEqual(1);
   });
 
   it('PAY3: renders transaction partner name from API response', async () => {
-    let callCount = 0;
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => {
-      callCount++;
-      const isFirst = callCount <= 1;
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve(
-          isFirst
-            ? { success: true, data: { batches: MOCK_BATCHES, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } }
-            : { success: true, data: { transactions: MOCK_TRANSACTIONS, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } }
-        ),
-      });
-    }));
+    stubPayoutFetch();
     render(<PayoutsPage />);
     expect(await screen.findByText('K. Krishnamurthy & Sons')).toBeInTheDocument();
   });
