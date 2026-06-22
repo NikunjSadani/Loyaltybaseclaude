@@ -9,6 +9,20 @@
 > [`GO-LIVE-ISSUE-LIST.md`](GO-LIVE-ISSUE-LIST.md)). New/strengthened sections call out the just-fixed behaviours: **§5 money
 > eligibility + settlement**, **§6 TDS multi-row + finance**, **§3 scheme catalog + enrollment persistence**, **§7 RBAC /
 > privilege-escalation**. Run those with extra care — they are the riskiest and newest.
+>
+> **Robustness expansion (2026-06-22, independent platform audit).** §1–§11 cover **functional correctness** (the axis we've
+> been burned on). §12–§19 add the three axes an industry-grade go-live for a **real-money, multi-tenant, India-tax platform**
+> also needs: **security beyond RBAC** (§12–§13), **non-functional** (§14 scale, §15 concurrency/resilience), and
+> **operational + regulatory readiness** (§16 tax/DLT/audit, §17 ops, §18 real-data load, §19 device/locale). Every row is
+> tiered and owned — see the legend below.
+>
+> **Tier legend.** 🔴 = **go-live BLOCKER** (the "passed UAT, broke at launch" class — must be green). 🟠 = **strongly
+> recommended before real money**. 🟡 = **post-launch acceptable** (verify or consciously defer to `POST-GO-LIVE-BACKLOG.md`).
+>
+> **Owner legend.** `[A]`–`[F]` = the parallel UAT streams (A Auth/RBAC · B KYC · C Schemes/Targets · D Wallet/Redemption ·
+> E Finance/TDS · F UI/UX-readonly). **`[operator]` = run by the owner/orchestrator on STAGING/PROD** — these cannot be proven
+> on the local automated stack (DLT delivery, prod backdoor state, backups/PITR, scheduled-job execution, real-data load,
+> Cloud Run scale/timeout, multi-instance throttling).
 
 ---
 
@@ -197,7 +211,110 @@ corruption**. Owning stream in brackets.
 | 11.6 | Confirm **no orphan route renders mock data** (e.g. the #57(a) sub-dashboards if not hidden). | Either hidden, or known-mock + flagged — never presented as real. | |
 | 11.7 | Cross-shell: a partner/sales URL opened as admin (and vice-versa). | Scoped out, never the wrong shell's data. | |
 
-## 12. Sign-off
+## 12. Security — authorization depth & abuse *(beyond §7 role/tenant; covers audit findings A1/A2/A5/A6 + mass-assignment)*
+
+| # | Tier | Owner | Steps | Expected | ✅/❌ |
+|---|---|---|---|---|---|
+| 12.1 | 🔴 | [D] | **IDOR — redemption rail.** As partner A, fetch/act on **partner B's** `RedemptionOrder` / `PayoutTransaction` id directly (same tenant — guess/increment the id). | 403/404 — never B's data or B's order acted on. Object-level (horizontal) auth, not just tenant scope. | |
+| 12.2 | 🔴 | [A/E] | **IDOR — finance/KYC.** Same probe against another owner's `Invoice`, `CreditPayoutEntry`, `KycSubmission`, `Wallet` ids within the tenant. | Scoped to the authenticated owner; foreign-owner ids rejected. | |
+| 12.3 | 🔴 | [A] | **OTP send-throttle.** Request OTP for one phone repeatedly/rapidly (resend spam). | A per-phone cooldown/limit kicks in; no unbounded SMS (cost + bombing); the attempts counter can't be reset to grant unlimited guesses. *(Code today: `sendOtp` has no resend cooldown — confirm behaviour.)* | |
+| 12.4 | 🟠 | [operator] | **Throttler is global, not per-instance.** With prod scaled to >1 Cloud Run instance, confirm rate-limiting is backed by Redis/DB, not in-memory per-instance. | Limits hold across instances (known gap — readiness §3.2). | |
+| 12.5 | 🔴 | [A] | **Token after logout/revoke** (extends §1.8). After logout, the old access token is rejected; token never appears in a URL/query string or logs. | Old token → 401; no token leakage. | |
+| 12.6 | 🟠 | [F] | **Token storage.** Inspect where the FE keeps the JWT. | If `localStorage`, note the XSS-exfiltration exposure (vs httpOnly cookie) as a finding. | |
+| 12.7 | 🟠 | [operator/F] | **FE security headers.** `curl -I` the user-facing HTML origin (Next/Cloudflare, not the API). | CSP / HSTS / `X-Frame-Options`(or `frame-ancestors`) present — partner app not clickjackable. (`helmet()` only covers the API.) | |
+| 12.8 | 🟠 | [A] | **Mass-assignment / over-posting.** POST/PATCH a write with extra fields (`clientId`, `role`, `isActive`, wallet/points). | Stripped or 400 — verify `forbidNonWhitelisted` actually blocks at runtime on real write DTOs (GLB-4 was this class). | |
+
+---
+
+## 13. Injection & file-upload safety *(audit findings A3/A4)*
+
+| # | Tier | Owner | Steps | Expected | ✅/❌ |
+|---|---|---|---|---|---|
+| 13.1 | 🟠 | [B] | **Stored XSS.** Register/KYC a partner with `businessName` = `<script>alert(1)</script>` (and similar in ticket text, names). | Rendered inert everywhere it surfaces (admin lists/detail, exports) — no script execution. | |
+| 13.2 | 🟠 | [E/A] | **CSV/formula injection across ALL exports.** A field starting with `=` `+` `-` `@` flows into **every** Excel export (TDS, invoices, enrollments, bulk users/outlets, reconciliation — not just §6.9's TDS). | Every export neutralises the cell (leading-quote/escape); none is formula-executable in Excel. | |
+| 13.3 | 🟠 | [C/E] | **Oversized upload.** Upload a very large `.xlsx` (e.g. 50k rows / large file). | Honest size/timeout handling; size cap enforced; no OOM/500; no Cloud Run memory blow-up. | |
+| 13.4 | 🟠 | [A] | **Content-type spoof.** Upload a non-xlsx (renamed `.exe`/`.html`/`.csv`) to a template-upload surface. | Rejected by content sniffing, not extension alone; honest error. | |
+| 13.5 | 🟠 | [E] | **Re-export of an accepted formula cell.** A formula-like value accepted on upload is later exported. | Neutralised on export (no round-trip injection). | |
+
+---
+
+## 14. Performance & scale *(audit finding B1 — nothing in §1–§11 runs at volume)*
+
+| # | Tier | Owner | Steps | Expected | ✅/❌ |
+|---|---|---|---|---|---|
+| 14.1 | 🔴 | [operator+F] | **Volume pages.** Seed/point at realistic volume (≈10k outlets, ≈100k ledger rows); load outlets, users, wallet/ledger, dashboards, lists. | Acceptable load time; correct pagination; no N+1 stalls or timeouts that a tiny seed hides. | |
+| 14.2 | 🔴 | [E] | **Large export vs Cloud Run request timeout.** Export a large TDS/invoice/reconciliation dataset. | Completes within the request timeout (≈60s) **or** is async/streamed — no 5xx/timeout in prod. | |
+| 14.3 | 🔴 | [C] | **Large upload vs timeout.** Upload a max-size targets/achievements file. | Completes or chunks; doesn't hit the Cloud Run request cap. | |
+| 14.4 | 🟠 | [A] | **Pagination integrity at volume.** List with many pages of rows. | Every row reachable; no dup/skip across pages; stable sort. | |
+
+---
+
+## 15. Concurrency & resilience *(audit findings B2/B3/B4 — beyond §4.5/§9.7 double-submit)*
+
+| # | Tier | Owner | Steps | Expected | ✅/❌ |
+|---|---|---|---|---|---|
+| 15.1 | 🟠 | [D] | **Parallel wallet drain.** Two sessions/devices for the **same** partner redeem concurrently against a balance that covers only one. | Exactly one succeeds; no negative balance / oversell (atomic claim proven under real parallelism). | |
+| 15.2 | 🟠 | [A] | **Concurrent edit.** Two admins edit the same user/outlet at once. | Coherent last-write or version-conflict — no silent clobber/corruption. | |
+| 15.3 | 🟠 | [D] | **Concurrent batch process.** Process the same payout batch from two sessions. | Single effect; the second is guarded. | |
+| 15.4 | 🟠 | [operator] | **OTP provider down/slow.** Simulate MSG91 failure/slow response. | Honest error within ~10s (the timeout exists); no hang; user can retry. | |
+| 15.5 | 🟠 | [F] | **Backend/DB down mid-flow.** Kill the backend mid-action. | FE surfaces an honest error (no fake success); on recovery, state is consistent. | |
+| 15.6 | 🔴 | [D] | **Transaction rollback proof.** Force a failure inside a redemption/credit `$transaction`. | Wallet + ledger + order roll back **together** — no half-debit / orphaned order. | |
+| 15.7 | 🟠 | [D] | **Retry idempotency.** Replay the same redeem-confirm / credit-award POST (network-retry simulation). | Single effect — no double-charge (FMCG field 3G makes this real). | |
+
+---
+
+## 16. Regulatory & tax compliance *(audit findings C1/C3/C4 — India-specific)*
+
+| # | Tier | Owner | Steps | Expected | ✅/❌ |
+|---|---|---|---|---|---|
+| 16.1 | 🔴 | [operator] | **DLT template registration.** Confirm the MSG91 OTP (and any txn) template is **DLT-approved** with the correct sender ID; send a real OTP to an unfamiliar number on a different telco. | Delivered. *(DLT lives in the MSG91 dashboard, not code — the classic "works in UAT, telcos drop it in prod" trap.)* | |
+| 16.2 | 🟠 | [E] | **TDS correctness.** Verify 194R/194C **rate, threshold, grossing-up** on known inputs vs a hand calculation. | Numbers match the rule, not just "a number appears". | |
+| 16.3 | 🟠 | [E] | **26Q export format + FY boundary.** Download the TDS export. | Matches Form 26Q expected columns/format; FY boundary is IST-correct. | |
+| 16.4 | 🟠 | [B/E] | **GSTIN checksum + GST rate.** Enter an invalid GSTIN (bad checksum) and a valid one. | Invalid rejected on input; valid accepted; GST rate/derivation correct. | |
+| 16.5 | 🟠 | [E] | **Invoice numbering.** Generate self-bill invoices across a month. | Numbers are sequential, **gap-free**, unique per series (a GST requirement) — no dup/missing. | |
+| 16.6 | 🟡 | [E/A] | **PAN masking.** View PAN in UI and exports. | Masked in UI (full only where authorised); exports sanitised. | |
+| 16.7 | 🟠 | [A] | **Audit-trail coverage.** Spot-check that every money action, KYC decision, and role change writes an immutable `auditLog` row attributable to the real actor (incl. assumed-tenant → real operator). | Coverage is complete, not partial (model exists — verify it's actually written on each path). | |
+
+---
+
+## 17. Operational readiness *(audit findings C2/C5/C6/C7 — mostly operator-run on staging/prod)*
+
+| # | Tier | Owner | Steps | Expected | ✅/❌ |
+|---|---|---|---|---|---|
+| 17.1 | 🔴 | [operator] | **Prod backdoor sweep** (runtime, not code). Confirm `NODE_ENV=production`, `FIXED_OTP` inert, DemoSwitcher absent, no seed/debug routes reachable, errors don't leak stack traces. | No dev backdoor live in prod. | |
+| 17.2 | 🔴 | [operator] | **Backups + PITR** on `gifsy-db`, with **one restore rehearsed** to a scratch DB. (#74) | Automated daily backup + PITR ON **before** any real data lands (unrecoverable otherwise). | |
+| 17.3 | 🟠 | [operator] | **Scheduled jobs.** Confirm how points-expiry / FY jobs actually execute in prod (`ScheduleModule` is wired; an in-process `@Cron` won't fire reliably on a scale-to-zero / multi-instance Cloud Run — likely needs Cloud Scheduler). | Job runs exactly once — no double-fire, no never-fire. | |
+| 17.4 | 🟠 | [operator] | **Observability.** Trace a single redemption end-to-end in Cloud Logging (request/correlation id); fire a synthetic error. | Traceable; the #74 monitoring alert actually fires. | |
+| 17.5 | 🟠 | [operator] | **Deploy rollback.** Confirm a bad deploy can be rolled back (prior Cloud Run revision). | Rollback path proven; migrate `--wait` is the real gate. | |
+
+---
+
+## 18. Real-data-load acceptance (#76) *(audit finding D1 — the riskiest single go-live event)*
+
+| # | Tier | Owner | Steps | Expected | ✅/❌ |
+|---|---|---|---|---|---|
+| 18.1 | 🔴 | [operator] | **Dry-run** the Deoleo master load against a realistic **copy** (never prod first). | Completes; row counts reconcile (rows-in = rows-out). | |
+| 18.2 | 🔴 | [operator] | **Idempotency.** Re-run the load. | No duplicates (same phone/GSTIN/PAN deduped); no corruption. | |
+| 18.3 | 🔴 | [operator] | **Encoding/format.** Indian names/special chars intact; phone/GSTIN/PAN validated; bad rows **reported, not silently dropped**. | Clean, attributable rejection of bad rows. | |
+| 18.4 | 🔴 | [operator] | **Post-load spot-check.** Sample partners/outlets/catalog/schemes vs the source file; a real loaded user logs in. | Loaded data matches source; login works. | |
+| 18.5 | 🔴 | [operator] | **Gate order.** Confirm the load runs only **after §17.2** backups/PITR are ON. | No real data before recoverability. | |
+
+---
+
+## 19. Device / browser / network / localization *(audit findings D2/D3/D4)*
+
+| # | Tier | Owner | Steps | Expected | ✅/❌ |
+|---|---|---|---|---|---|
+| 19.1 | 🟠 | [F] | **Cross-browser.** Partner & sales apps on Chrome / Safari / Edge. | Render + function correctly on each. | |
+| 19.2 | 🟠 | [F] | **Mobile viewport.** Partner/sales are field-mobile users. | Layout, tap targets, no overflow on a real phone viewport. | |
+| 19.3 | 🟠 | [F] | **Slow network.** Throttled 3G on partner/sales flows. | Usable; honest loading states; no broken timeouts (rural field reality). | |
+| 19.4 | 🟡 | [F] | **Currency/number format.** ₹ + Indian grouping (lakh/crore). | Correct formatting; amounts reconcile to paise. | |
+| 19.5 | 🟡 | [operator] | **IST consistency.** FY boundary, expiry, lastLogin, invoice date. | IST everywhere — no UTC slip mis-dating a TDS FY. | |
+| 19.6 | 🟡 | [F/operator] | **Launch comms posture.** Confirm which transactional notifications are live for launch (DLT applies to those too); absence of the rest is an accepted decision. | Explicit launch decision, not a silent gap. | |
+
+---
+
+## 20. Sign-off
 
 | Gate | Owner | Status |
 |---|---|---|
@@ -211,9 +328,20 @@ corruption**. Owning stream in brackets.
 | §8–9 Integrity & unhappy paths | | |
 | §10 Excel round-trips & re-uploads | | |
 | §11 Navigation & link integrity | | |
+| §12 Security (authz depth & abuse) | | |
+| §13 Injection & file-upload safety | | |
+| §14 Performance & scale | | |
+| §15 Concurrency & resilience | | |
+| §16 Regulatory & tax compliance | | |
+| §17 Operational readiness | | |
+| §18 Real-data-load acceptance (#76) | | |
+| §19 Device/browser/network/localization | | |
 
-**UAT is PASS only when §1–§11 are all green for the in-scope roles**, every write was independently verified to persist, every
-Excel surface round-tripped **and** re-uploaded correctly, every navigation link/route worked, and every unhappy/edge path was honest. Defects → log against `GO-LIVE-ISSUE-LIST.md` with role + steps + expected vs actual.
+**UAT is PASS only when every 🔴 blocker across §1–§19 is green** for the in-scope roles, every 🟠 row is green or explicitly
+risk-accepted, every write was independently verified to persist, every Excel surface round-tripped **and** re-uploaded
+correctly, every navigation link/route worked, and every unhappy/edge/security/concurrency path was honest. 🟡 rows are verified
+or consciously deferred to `POST-GO-LIVE-BACKLOG.md`. Defects → log against `GO-LIVE-ISSUE-LIST.md` with role + steps +
+expected vs actual + tier.
 
 **Out of UAT scope (tracked separately):** admin sub-dashboards #57(a) (mock — hide/wire first), notification worker/banners
 (P7), the post-launch backlog (`POST-GO-LIVE-BACKLOG.md`), and owner-ops (monitoring/backups/secret-rotation #74). Real Deoleo

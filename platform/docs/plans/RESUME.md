@@ -73,6 +73,17 @@ locally; only the real-SMS OTP is deferred to the owner's short STAGING confirma
 per role completes each flow end-to-end, a 2nd session sees the persisted write, unhappy paths are honest. `tsc`/unit/E2E-green are
 necessary, never sufficient.
 
+**🆕 ROBUSTNESS EXPANSION (2026-06-22 independent platform audit — now folded into `UAT-CHECKLIST.md` §12–§19, tiered 🔴/🟠/🟡).**
+§1–§11 = functional correctness; §12–§19 add the missing axes: **§12 security authz-depth & abuse** (IDOR/horizontal auth,
+OTP send-throttle, token/session, FE headers, mass-assignment), **§13 injection & file-upload** (stored XSS, CSV-formula across
+ALL exports, oversized/spoofed uploads), **§14 performance & scale** (volume pages, large export/upload vs Cloud Run timeout),
+**§15 concurrency & resilience** (parallel wallet drain, MSG91/DB/backend-down, tx-rollback proof, retry-idempotency),
+**§16 regulatory** (DLT, TDS/GST correctness + 26Q + invoice-sequence, audit-trail coverage), **§17 ops** (prod-backdoor sweep,
+backups/PITR + restore drill, scheduled-job execution, observability), **§18 real-data-load acceptance (#76)**, **§19 device/
+browser/network/localization**. The agents drive §12/§13/§15(parts) automatically on local; **`[operator]`-tagged rows (§14 scale,
+§16.1 DLT, §17 all, §18 load, §15.4 MSG91-down) are STAGING/PROD checks the owner+orchestrator run OUTSIDE the local harness** —
+assign them, don't expect a local agent to prove them.
+
 **STEP 0 (orchestrator):** bring up + re-seed the LOCAL stack CLEAN — DB proxy `127.0.0.1:5433/gifsy_dev` (assert
 `current_database='gifsy_dev'`), rebuild backend (`rm tsconfig.build.tsbuildinfo dist && npx tsc -p tsconfig.build.json
 --incremental false && node dist/main.js` on :4000), FE :3000 (`next dev`), `npx prisma db seed`. **DECIDE gap #57(a) FIRST**
@@ -88,24 +99,34 @@ A/C/F are read-mostly. Disjoint rails: **D = redemption rail** (RedemptionOrder/
 **E = credit rail** (CreditPayoutEntry/Download/Reversal) + TDS + invoices — they do NOT collide. **F is READ-ONLY** → safe
 alongside all. Each agent uses its own browser context (never a shared session).
 
-**PARALLEL WORKSTREAMS (each = one agent; each covers happy + unhappy + UI/UX for its area):**
-  - **UAT-A — Auth + RBAC + tenant isolation** (UAT §1, §7): login every role, route guards, logout/session-revoke, **GLB-4
-    privilege-escalation blocked** (CLIENT_ADMIN cannot create/promote a GIFSY_ADMIN), cross-tenant isolation, KYC-export GIFSY-only,
-    ticket-escalation tenant check.
-  - **UAT-B — KYC & onboarding** (§2, on seed-cp-2): submit → field-level approve → **approval activates the outlet** → RE_KYC →
-    re-upload (no 500).
-  - **UAT-C — Schemes & enrollment** (§3): catalog shows REAL schemes (no demo IDs), **SELF enroll persists + does NOT re-show on
-    reload**, **SALES enroll keys ChannelPartner.id**, targets/achievement Excel round-trips.
-  - **UAT-D — Wallet/Rewards/Redemption + Money settlement** (§4, §5, on seed-cp-1): redeem→OTP→debit, insufficient-balance,
-    double-submit guard, lifecycle/refund; **GLB-1 cash eligibility (RE_KYC/inactive blocked BEFORE debit)**, **GLB-2 zero-value**,
-    manual-cancel refused; **GLB-6 settlement lifecycle** (create→assign→process→UTR template→SUCCESS/FAILED upload→idempotent re-upload).
-  - **UAT-E — Finance: credits / invoicing / TDS** (§6, on the distributor partner): credit bank-file **held vs payable (GLB-1)**,
-    **FAILED→re-bank (GLM-2)**, **multi-entry REVERSED reversal (GLM-1)**, **beneficiary validation (GLM-3)**, **TDS multi-row stores
-    ALL rows (GLB-3)** + dup-skip, liability/export, invoicing.
-  - **UAT-F — UI/UX + navigation/link integrity + no-fabrication sweep** (§8 + §11, READ-ONLY, runs alongside all): every page ×
-    role — screenshots, layout, empty/loading/error states; **click EVERY nav item · link · button · tab (no dead link, 404,
-    infinite spinner, or console error)**; deep-link every route; back/forward; bad-route 404 grace; responsive/mobile; copy; flag
-    the #57(a) sub-dashboards as KNOWN-mock (not new defects unless un-hidden).
+**PARALLEL WORKSTREAMS (each = one agent; each covers happy + unhappy + UI/UX + its assigned security/non-functional rows):**
+  - **UAT-A — Auth + RBAC + tenant isolation + security-authz** (UAT §1, §7, **§12, §13.4, §16.7**): login every role, route guards,
+    logout/session-revoke, **GLB-4 privilege-escalation blocked** (CLIENT_ADMIN cannot create/promote a GIFSY_ADMIN), cross-tenant
+    isolation, KYC-export GIFSY-only, ticket-escalation tenant check; **§12 IDOR/horizontal-auth on finance/KYC ids, OTP send-throttle,
+    token-after-logout, mass-assignment over-post; §13.4 content-type-spoof upload; §16.7 audit-trail coverage spot-check.**
+  - **UAT-B — KYC & onboarding + injection** (§2, on seed-cp-2, **§13.1, §16.4**): submit → field-level approve → **approval activates
+    the outlet** → RE_KYC → re-upload (no 500); **§13.1 stored-XSS via businessName; §16.4 GSTIN-checksum reject on input.**
+  - **UAT-C — Schemes & enrollment + upload-scale** (§3, **§14.3**): catalog shows REAL schemes (no demo IDs), **SELF enroll persists +
+    does NOT re-show on reload**, **SALES enroll keys ChannelPartner.id**, targets/achievement Excel round-trips; **§14.3 max-size
+    targets/achievements upload vs Cloud Run timeout.**
+  - **UAT-D — Wallet/Rewards/Redemption + Money settlement + concurrency** (§4, §5, on seed-cp-1, **§12.1, §15.1/15.3/15.6/15.7**):
+    redeem→OTP→debit, insufficient-balance, double-submit guard, lifecycle/refund; **GLB-1 cash eligibility (RE_KYC/inactive blocked
+    BEFORE debit)**, **GLB-2 zero-value**, manual-cancel refused; **GLB-6 settlement lifecycle** (create→assign→process→UTR template→
+    SUCCESS/FAILED upload→idempotent re-upload); **§12.1 IDOR redemption rail; §15 parallel wallet-drain, concurrent batch-process,
+    tx-rollback proof, retry-idempotency.**
+  - **UAT-E — Finance: credits / invoicing / TDS + injection/compliance** (§6, on the distributor partner, **§13.2/13.5, §14.2, §16.2/16.3/16.5/16.6**):
+    credit bank-file **held vs payable (GLB-1)**, **FAILED→re-bank (GLM-2)**, **multi-entry REVERSED reversal (GLM-1)**, **beneficiary
+    validation (GLM-3)**, **TDS multi-row stores ALL rows (GLB-3)** + dup-skip, liability/export, invoicing; **§13.2 CSV-formula
+    injection across all finance exports + §13.5 re-export safety; §14.2 large finance export vs timeout; §16 TDS rate/threshold/grossing
+    correctness, 26Q format, gap-free invoice numbering, PAN masking.**
+  - **UAT-F — UI/UX + navigation + concurrency/resilience(FE) + device/locale** (§8 + §11, **§12.6, §15.2/15.5, §19**, READ-ONLY where
+    possible, runs alongside all): every page × role — screenshots, layout, empty/loading/error states; **click EVERY nav item · link ·
+    button · tab (no dead link, 404, infinite spinner, or console error)**; deep-link every route; back/forward; bad-route 404 grace;
+    responsive/mobile; copy; flag the #57(a) sub-dashboards as KNOWN-mock (not new defects unless un-hidden); **§12.6 JWT-storage check;
+    §15.2 concurrent-edit clobber, §15.5 backend-down honest-error; §19 cross-browser/mobile/3G/₹-format.**
+  - **UAT-OPS — operator-run staging/prod checks** (NOT a local agent — owner+orchestrator): **§14.1 volume-seeded perf, §15.4 MSG91-down,
+    §16.1 DLT delivery, §17 prod-backdoor sweep + backups/PITR + restore drill + scheduled-job + observability, §18 real-data-load
+    acceptance (#76), §12.4/12.7 multi-instance throttle + FE security headers, §19.5 IST.** These prove what the local stack can't.
 
 **Excel ownership (every UAT §10 row round-tripped AND RE-uploaded by its stream, incl. malformed/wrong-template/dup files):**
 C = targets · achievements · enrollments-export; D = fulfilment · redemption-UTR · reconciliation; E = credit bank-file+UTR ·
