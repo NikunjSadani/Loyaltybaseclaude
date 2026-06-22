@@ -178,7 +178,7 @@ owner ops (#74) → go-live. Present the workstream plan + the #57(a) hide/wire 
   branding (before client #2). Full list: `POST-GO-LIVE-BACKLOG.md`.
 
 ## Known gaps to watch (staging + prod)
-- **Staging E2E can't run there right now** (FIXED_OTP removed → needs the OTP read-back endpoint or temp FIXED_OTP).
+- **Staging E2E can run there now** — `FIXED_OTP=123456` is re-enabled on staging (2026-06-22), gated to the `gifsy_staging` DB only (`isFixedOtpAllowed`).
 - **Staging shares the prod `gifsy-db` Cloud SQL instance** (different DB names) — any DB op must double-guard the DB name.
 - **Prod is empty** (the data-load blocker) · **no backups/PITR, no monitoring alerts, creds not rotated** (owner ops).
 - **Prod deploy health-check is advisory** (doesn't fail the deploy) — the migrate `--wait` step is the real gate.
@@ -197,8 +197,7 @@ owner ops (#74) → go-live. Present the workstream plan + the #57(a) hide/wire 
   `MSG91_AUTH_KEY` v5, `CORS_ORIGINS` v3). **`wrangler` is Cloudflare-authed.** The dev Cloud SQL proxy uses the
   `--token` trick (`& "$env:TEMP\cloud-sql-proxy.exe" <conn> --port 5433 --token (gcloud auth print-access-token)`;
   ADC is NOT set up — don't ask the owner for `application-default login`).
-- **Real MSG91 OTP everywhere** (no `FIXED_OTP` on staging/prod). **MSG91 secrets must be saved WITHOUT a UTF-8 BOM**
-  (a BOM on `MSG91_AUTH_KEY` 500'd OTP via a fetch ByteString error; `.trim()` in `msg91.service` now defends).
+- **OTP: prod = real MSG91 only; staging = `FIXED_OTP=123456`** (re-enabled 2026-06-22 for fast UAT, gated by `isFixedOtpAllowed` to the `gifsy_staging` DB, hard-denied on `gifsy_prod`; set in `deploy-staging.yml`, revert by unsetting `ALLOW_FIXED_OTP`). Local dev = `FIXED_OTP=123456`. **MSG91 secrets must be saved WITHOUT a UTF-8 BOM** (a BOM on `MSG91_AUTH_KEY` 500'd OTP via a fetch ByteString error; `.trim()` in `msg91.service` now defends).
 - **The Chrome extension blocks NEW domains** until the owner adds them to the extension's own allowed-sites list
   (separate from Chrome's site-access). It refused `uat.deoleoloyalty.gifsy.in` ("Navigation to this domain is not
   allowed") even with Chrome site-access on — so own-domain UI driving may need the owner to allow the domain first.
@@ -263,7 +262,7 @@ reconcile/memory) after every task (`DOC-MAINTENANCE.md`).
   [[e2e-harness]] · [[environments-topology]] · [[architecture-backend-split]] · [[platform-real-model]] · the P3–P6 completes.
 - **Seeded phones — LOCAL `gifsy_dev`** (FIXED_OTP=123456): gifsy `9830011252`/clientId `gifsy`, deoleo admin
   `9000000001`, partner `9000000002`, sales `9000000003`, clientb admin `9000000020`. **STAGING `gifsy_staging`**
-  (REAL OTP): deoleo admin `9830011252`, partner+outlet `7795096288`, sales `9875436349`. **PROD `gifsy_prod`: EMPTY.**
+  (**FIXED_OTP=123456** since 2026-06-22): GIFSY admin `9830011252`/clientId `gifsy`, deoleo admin `6289864191`, partner+outlet `7795096288` (sales `9875436349` parked off its user 2026-06-22). **PROD `gifsy_prod`: EMPTY.**
 - Local: dev proxy `127.0.0.1:5433` (DEV-DB.md); FE `:3000` (`next dev`); backend `:4000` (rebuild `dist` + `node
   dist/main.js`). Confirm on `develop` + dev DB reachable. Before any irreversible/prod step, show the plan (audited) + wait.
 ```

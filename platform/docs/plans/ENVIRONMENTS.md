@@ -24,7 +24,7 @@
 | Environment | Data in its DB |
 |---|---|
 | Local dev / `gifsy_dev` | the seeded test set (`npx prisma db seed`): gifsy admin + deoleo admin/partner/sales users, 2 partners+wallets+outlets, sales hierarchy, 2 KYC, rewards, tickets created during testing |
-| Staging / `gifsy_staging` | **seeded 2026-06-20** (full deoleo + clientb demo set via the seed job). Real-OTP UAT phones set: deoleo admin `9830011252`, partner+outlet `7795096288`, sales `9875436349` (the other seeded numbers are fake → no real SMS) |
+| Staging / `gifsy_staging` | **seeded 2026-06-20** (full deoleo + clientb demo set via the seed job). **OTP = `FIXED_OTP=123456` for fast UAT (re-enabled 2026-06-22; see below).** Login phones: GIFSY admin `9830011252` (clientId `gifsy`), deoleo admin `6289864191`, partner+outlet `7795096288`. *(Sales `9875436349` was parked off the demo sales-user during the 2026-06-22 hierarchy-conflict cleanup — no longer a live login.)* |
 | Prod / `gifsy_prod` | **confirmed EMPTY — 0 users (2026-06-20)** — on the stale June-6 schema (has `otp_codes` + dead World-A `tier_configs`, MISSING P4–P6 tables + the `clients` table; 6 recorded migrations → P3005 on the baseline). Greenfield → recreated empty + migrated at the gated cutover |
 
 **Visibility by role (same in all envs):** GIFSY operator → cross-tenant (all tenants) · CLIENT_ADMIN / MIS_USER → their whole tenant · sales → their assigned outlets/team · partner → only their own.
@@ -32,7 +32,7 @@
 ## Local-vs-staging differences that break despite identical code
 
 Comprehensive testing is done on **local dev** (fast iteration); **staging is the final pre-prod confirmation** because these differ:
-- **`FIXED_OTP` — REMOVED from staging (2026-06-20):** staging now uses **real MSG91 OTP** (the original design intent), so **only REAL phone numbers receive OTPs**; `FIXED_OTP` is also out of `deploy-staging.yml` (persistent across deploys). Local dev still uses `FIXED_OTP=123456`. Prod has **no** `FIXED_OTP` (real MSG91 only). ⚠️ MSG91 secrets must be saved **without a UTF-8 BOM** — a BOM on `MSG91_AUTH_KEY` 500'd OTP (fixed: secret re-saved + defensive `.trim()` in `msg91.service`).
+- **`FIXED_OTP` on staging — RE-ENABLED for fast UAT (2026-06-22):** staging uses **`FIXED_OTP=123456`** (every login/redemption OTP is `123456`; no real SMS). Gated by `isFixedOtpAllowed` (`api/src/common/fixed-otp.ts`): honored only when `ALLOW_FIXED_OTP=true` **AND** the DB is `gifsy_staging`, and **hard-refused whenever the DB is `gifsy_prod`** — so prod can never be backdoored even if the flag leaks. Set via `deploy-staging.yml` (staging workflow only). **To revert staging to real MSG91 OTP, unset `ALLOW_FIXED_OTP` there.** Local dev uses `FIXED_OTP=123456` too. **Prod has NO `FIXED_OTP`** (real MSG91 only, `NODE_ENV=production`); an independent security audit confirmed prod stays safe even under a fat-fingered `ALLOW_FIXED_OTP`. ⚠️ MSG91 secrets must be saved **without a UTF-8 BOM** — a BOM on `MSG91_AUTH_KEY` 500'd OTP (fixed: secret re-saved + defensive `.trim()` in `msg91.service`).
 - **`resolveClientId(host)`**: `localhost`→`deoleo` locally; real subdomains on staging → different tenant resolution. *(Exactly why the GIFSY-login bug #39 can't be fully exercised locally.)*
 - **Secrets/config** (JWT, GCS, `DATABASE_URL` via Cloud SQL socket) come from Secret Manager on staging vs `.env` locally.
 - **Build**: local `next dev` (HMR) vs the `output:standalone` production Docker build on staging.
