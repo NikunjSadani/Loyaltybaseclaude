@@ -99,13 +99,23 @@ export default function SalesProfilePage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/auth/me', { headers: { ...authHeader() } })
-      .then(r => r.json())
-      .then((json: { success: boolean; data?: { user: Parameters<typeof mapUserToProfile>[0] }; error?: string }) => {
-        if (json.success && json.data) {
-          setProfile(mapUserToProfile(json.data.user));
+    Promise.all([
+      fetch('/api/auth/me', { headers: { ...authHeader() } }).then(r => r.json()),
+      // Real outlet counts for the stat tiles (replaces the hardcoded 0s).
+      fetch('/api/sales/outlets', { headers: { ...authHeader() } }).then(r => r.json()).catch(() => null),
+    ])
+      .then(([meJson, outletJson]: [
+        { success: boolean; data?: { user: Parameters<typeof mapUserToProfile>[0] }; error?: string },
+        { success: boolean; data?: { outlets: { kycStatus?: string }[] } } | null,
+      ]) => {
+        if (meJson.success && meJson.data) {
+          const p = mapUserToProfile(meJson.data.user);
+          const outlets = outletJson?.success ? (outletJson.data?.outlets ?? []) : [];
+          p.totalOutlets = outlets.length;
+          p.kycCompleted = outlets.filter((o) => o.kycStatus === 'APPROVED').length;
+          setProfile(p);
         } else {
-          setError(json.error ?? 'Failed to load profile');
+          setError(meJson.error ?? 'Failed to load profile');
         }
       })
       .catch(() => setError('Failed to load profile'))

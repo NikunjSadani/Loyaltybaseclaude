@@ -7,17 +7,11 @@ import {
   ChevronRight, Clock, MapPin, TrendingUp, Target,
   CheckCircle2, Bell, ListTodo, RefreshCw, Layers, Tag,
 } from 'lucide-react';
-import { SalesAchievementChart, type SalesChartView, type SalesOutletFilter } from '@/components/charts/sales-achievement-chart';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus } from '@/types';
-import {
-  type GeoTargetConfig,
-  OUTLET_ACHIEVEMENTS, resolveConfig,
-  pct, pctBarColor,
-  DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE,
-} from '@/lib/targets';
+import { pct, pctBarColor } from '@/lib/targets';
 import { type SalesRole, getRole } from '@/lib/sales-role';
 import { classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
@@ -64,40 +58,30 @@ function ageInDays(dateStr?: string): number {
 
 /* ─── Target achievement card ────────────────────────────────────────────────── */
 
-const OUTLET_FILTERS: { value: OutletType | 'ALL'; label: string }[] = [
-  { value: 'ALL',          label: 'All'          },
-  { value: 'SSS',     label: 'SSS'     },
-  { value: 'WHOLESALER',   label: 'Wholesaler'   },
-  { value: 'SUB_STOCKIST', label: 'Sub-Stockist' },
-];
+interface SalesKpi {
+  code: string; name: string; unit: string; isPrimary: boolean;
+  target: number; achieved: number; pace: number | null;
+}
+interface SalesTargets {
+  period: string | null; outletCount: number;
+  kpis: SalesKpi[];
+  trend: { month: string; target: number; achieved: number }[];
+}
 
-function TargetSummaryCard({ outlets, config }: { outlets: OutletRow[]; config: GeoTargetConfig }) {
-  const [typeFilter, setTypeFilter] = useState<OutletType | 'ALL'>('ALL');
-  const approvedOutlets = useMemo(() => outlets.filter((o) => o.kycStatus === KYCStatus.APPROVED), [outlets]);
-  const visibleOutlets  = useMemo(
-    () => typeFilter === 'ALL' ? approvedOutlets : approvedOutlets.filter((o) => o.type === typeFilter),
-    [approvedOutlets, typeFilter],
-  );
+/** Real target vs achievement, summed across the rep's outlets (GET /api/sales/targets). */
+function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
+  const kpis = targets.kpis;
+  const withTarget = kpis.filter((k) => k.target > 0);
+  const overallAvgPct = withTarget.length > 0
+    ? Math.round(withTarget.reduce((s, k) => s + pct(k.achieved, k.target), 0) / withTarget.length)
+    : 0;
 
-  /* ── Dynamic period (1D) ── */
   const now          = new Date();
-  const periodLabel  = now.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const periodLabel  = (targets.period ? new Date(`${targets.period}-01T00:00:00`) : now)
+    .toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
   const daysInMonth  = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const daysLeft     = daysInMonth - now.getDate();
   const timePct      = Math.round((now.getDate() / daysInMonth) * 100);
-
-  /* ── Pace context (1A) ── */
-  const avgPcts = useMemo(() => config.params.map((param) => {
-    const perOutlet = visibleOutlets.map((o) => {
-      const ach = OUTLET_ACHIEVEMENTS[o.id];
-      return pct(ach?.achievements[param.id] ?? 0, param.target);
-    });
-    return perOutlet.length > 0 ? Math.round(perOutlet.reduce((s, v) => s + v, 0) / perOutlet.length) : 0;
-  }), [config.params, visibleOutlets]);
-
-  const overallAvgPct = avgPcts.length > 0
-    ? Math.round(avgPcts.reduce((a, b) => a + b, 0) / avgPcts.length)
-    : 0;
 
   const paceGap       = timePct - overallAvgPct;
   const paceStatus    = classifyPaceGap(paceGap, timePct, getGifsySettings().paceAmberThreshold ?? 10);
@@ -113,7 +97,6 @@ function TargetSummaryCard({ outlets, config }: { outlets: OutletRow[]; config: 
             <CardTitle className="flex items-center gap-2">
               <Target className="h-4 w-4 text-[var(--brand-primary)]" /> Target Achievement
             </CardTitle>
-            {/* 1D: dynamic period + days left */}
             <div className="flex items-center gap-1.5">
               <span className="text-[11px] text-gray-400 font-medium">{periodLabel}</span>
               {daysLeft > 0 && (
@@ -123,50 +106,76 @@ function TargetSummaryCard({ outlets, config }: { outlets: OutletRow[]; config: 
               )}
             </div>
           </div>
-          <div className="flex gap-1.5 mt-2 flex-wrap">
-            {OUTLET_FILTERS.map((f) => (
-              <button key={f.value}
-                onClick={(e) => { e.preventDefault(); e.stopPropagation(); setTypeFilter(f.value); }}
-                className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-all ${
-                  typeFilter === f.value ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)]' : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300'
-                }`}>
-                {f.label}
-              </button>
-            ))}
-          </div>
+          {targets.outletCount > 0 && (
+            <p className="text-[11px] text-gray-400 mt-1">Across {targets.outletCount} assigned outlet{targets.outletCount === 1 ? '' : 's'}</p>
+          )}
         </CardHeader>
         <CardContent className="space-y-2.5">
-          {config.params.map((param, idx) => {
-            const avgPct = avgPcts[idx] ?? 0;
-            const bar    = pctBarColor(avgPct);
-            return (
-              <div key={param.id} className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <p className="text-xs font-medium text-gray-700 flex-1 truncate">{param.label}</p>
-                  <span className={`text-[11px] font-bold shrink-0 ${avgPct >= 100 ? 'text-emerald-600' : avgPct >= 80 ? 'text-amber-600' : avgPct >= 60 ? 'text-orange-500' : 'text-red-500'}`}>
-                    avg {avgPct}%
-                  </span>
+          {kpis.length === 0 ? (
+            <p className="text-xs text-gray-400 py-2">No targets have been uploaded for your outlets yet.</p>
+          ) : (
+            <>
+              {kpis.map((k) => {
+                const p   = k.target > 0 ? pct(k.achieved, k.target) : 0;
+                const bar = pctBarColor(p);
+                return (
+                  <div key={k.code} className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <p className="text-xs font-medium text-gray-700 flex-1 truncate">
+                        {k.name}{k.isPrimary && <span className="ml-1 text-[9px] font-bold text-[var(--brand-primary)] align-middle">PRIMARY</span>}
+                      </p>
+                      <span className={`text-[11px] font-bold shrink-0 ${p >= 100 ? 'text-emerald-600' : p >= 80 ? 'text-amber-600' : p >= 60 ? 'text-orange-500' : 'text-red-500'}`}>
+                        {k.achieved.toLocaleString('en-IN')}/{k.target.toLocaleString('en-IN')}{k.unit ? ` ${k.unit}` : ''} · {p}%
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full transition-all ${bar}`} style={{ width: `${Math.min(p, 100)}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+
+              {withTarget.length > 0 && (
+                <div className={`flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1.5 rounded-lg mt-1 ${paceBg} ${paceTextColor}`}>
+                  <TrendingUp className="h-3 w-3 shrink-0" />
+                  {paceText} · {timePct}% of {periodLabel} elapsed
+                  {daysLeft > 0 && ` · ${daysLeft} days left`}
                 </div>
-                <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                  <div className={`h-full rounded-full transition-all ${bar}`} style={{ width: `${Math.min(avgPct, 100)}%` }} />
-                </div>
+              )}
+
+              <div className="flex items-center justify-center gap-1 text-xs font-semibold text-[var(--brand-primary)] pt-1">
+                View full outlet KPIs <ChevronRight className="h-3.5 w-3.5" />
               </div>
-            );
-          })}
-
-          {/* Overall pace context */}
-          <div className={`flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1.5 rounded-lg mt-1 ${paceBg} ${paceTextColor}`}>
-            <TrendingUp className="h-3 w-3 shrink-0" />
-            {paceText} · {timePct}% of {periodLabel} elapsed
-            {daysLeft > 0 && ` · ${daysLeft} days left`}
-          </div>
-
-          <div className="flex items-center justify-center gap-1 text-xs font-semibold text-[var(--brand-primary)] pt-1">
-            View full outlet KPIs <ChevronRight className="h-3.5 w-3.5" />
-          </div>
+            </>
+          )}
         </CardContent>
       </Card>
     </Link>
+  );
+}
+
+/** Real 6-month target-vs-achieved bar chart on the primary KPI (GET /api/sales/targets → trend). */
+function TargetTrendChart({ trend, unit }: { trend: SalesTargets['trend']; unit: string }) {
+  const hasData = trend.some((t) => t.target > 0 || t.achieved > 0);
+  if (!hasData) {
+    return <p className="text-xs text-gray-400 text-center py-6">No target history yet for your outlets.</p>;
+  }
+  const max = Math.max(1, ...trend.map((t) => Math.max(t.target, t.achieved)));
+  return (
+    <div className="flex items-end justify-between gap-2 h-40 px-1 pt-2">
+      {trend.map((t) => {
+        const label = new Date(`${t.month}-01T00:00:00`).toLocaleDateString('en-IN', { month: 'short' });
+        return (
+          <div key={t.month} className="flex-1 flex flex-col items-center gap-1 min-w-0">
+            <div className="flex items-end gap-0.5 h-32 w-full justify-center">
+              <div className="w-2.5 bg-gray-200 rounded-t" style={{ height: `${(t.target / max) * 100}%` }} title={`Target ${t.target.toLocaleString('en-IN')} ${unit}`} />
+              <div className="w-2.5 bg-[var(--brand-primary)] rounded-t" style={{ height: `${(t.achieved / max) * 100}%` }} title={`Achieved ${t.achieved.toLocaleString('en-IN')} ${unit}`} />
+            </div>
+            <span className="text-[9px] text-gray-400">{label}</span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -179,9 +188,7 @@ export default function SalesDashboard() {
   const [search,       setSearch]       = useState('');
   const [searchOpen,   setSearchOpen]   = useState(false);
   const searchRef = useRef<HTMLDivElement>(null);
-  const [chartView,    setChartView]    = useState<SalesChartView>('monthly');
-  const [outletFilter, setOutletFilter] = useState<SalesOutletFilter>('ALL');
-  const [targetConfig,  setTargetConfig]  = useState<GeoTargetConfig | null>(null);
+  const [salesTargets,  setSalesTargets]  = useState<SalesTargets | null>(null);
   const [role,          setRoleState]     = useState<SalesRole>('SO');
   const [taskConfig,    setTaskConfig]    = useState<TaskConfig | null>(null);
   const [salesBanners,  setSalesBanners]  = useState<Banner[]>([]);
@@ -190,8 +197,6 @@ export default function SalesDashboard() {
   useEffect(() => {
     setRoleState(getRole());
 
-    const cp = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-    setTargetConfig(resolveConfig(DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE, cp));
     // Real backend schemes (no localStorage demo data on this live surface).
     void fetchAllSchemes().then(setPendingSchemes).catch(() => setPendingSchemes([]));
 
@@ -202,9 +207,11 @@ export default function SalesDashboard() {
       fetchTaskConfig(),
       fetchBanners(),
       fetch('/api/sales/outlets', { headers: authHeaders }).then((r) => r.json()),
-    ]).then(([config, { banners }, outletResult]) => {
+      fetch('/api/sales/targets', { headers: authHeaders }).then((r) => r.json()).catch(() => null),
+    ]).then(([config, { banners }, outletResult, targetResult]) => {
       setTaskConfig(config);
       setSalesBanners(getActiveSalesBanners(banners));
+      if (targetResult?.success) setSalesTargets(targetResult.data as SalesTargets);
       if (outletResult.success) {
         setOutlets((outletResult.data.outlets ?? []).map((o: any) => ({
           id:             o.id,
@@ -267,6 +274,26 @@ export default function SalesDashboard() {
     // ── Field-only tasks (XSR & SO) ───────────────────────────────────────────
 
     if (isFieldRole) {
+      // To-enroll: outlets that exist (master-loaded) but KYC was never started.
+      // These were previously matched by NO group (the "Pending KYC" group keys on
+      // PENDING = submitted-awaiting-processing, not NOT_STARTED), so a rep with
+      // only fresh un-KYC'd outlets saw "no tasks" despite enrollment being the job.
+      const notStartedOutlets = outlets.filter((o) => o.kycStatus === KYCStatus.NOT_STARTED);
+      if (notStartedOutlets.length > 0) {
+        groups.push({
+          id: 'kyc_to_do', label: 'KYC to be done',
+          icon: <FileCheck className="h-4 w-4 text-emerald-600" />,
+          items: notStartedOutlets.map((o) => ({
+            id: o.id, title: o.name,
+            subtitle: `${o.location} · New enrollment — KYC not started`,
+            href: '/sales/kyc/new', priority: 'high' as const,
+          })),
+          accentBg: 'bg-emerald-50', accentBorder: 'border-emerald-200',
+          accentText: 'text-emerald-700', badgeBg: 'bg-emerald-100',
+          href: '/sales/kyc?status=NOT_STARTED',
+        });
+      }
+
       // Re-KYC
       const rekycOutlets = outlets.filter((o) => o.kycStatus === KYCStatus.RE_KYC_REQUIRED);
       if (rekycOutlets.length > 0) {
@@ -493,9 +520,9 @@ export default function SalesDashboard() {
             </CardContent>
           </Card>
 
-          {/* ── Target Achievement ── */}
-          {targetConfig && (
-            <TargetSummaryCard outlets={outlets} config={targetConfig} />
+          {/* ── Target Achievement (real /api/sales/targets) ── */}
+          {salesTargets && (
+            <TargetSummaryCard targets={salesTargets} />
           )}
 
           {/* ── My Outlets ── */}
@@ -587,44 +614,31 @@ export default function SalesDashboard() {
             </CardHeader>
           </Card>
 
-          {/* ── Sales vs Target chart ── */}
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between gap-2">
-                <CardTitle className="flex items-center gap-2 text-sm">
-                  <TrendingUp className="h-4 w-4 text-[var(--brand-primary)]" /> Target vs. Achievement
-                </CardTitle>
-                <div className="flex bg-gray-100 rounded-lg p-0.5 gap-0.5">
-                  {(['monthly', 'yoy'] as SalesChartView[]).map((v) => (
-                    <button key={v} onClick={() => setChartView(v)}
-                      className={`px-2 py-1 rounded-md text-[10px] font-semibold transition-all ${chartView === v ? 'bg-white text-[var(--brand-primary)] shadow-sm' : 'text-gray-500'}`}>
-                      {v === 'monthly' ? 'Monthly' : 'Year on Year'}
-                    </button>
-                  ))}
+          {/* ── Target vs Achievement — real 6-month trend on the primary KPI ── */}
+          {salesTargets && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between gap-2">
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <TrendingUp className="h-4 w-4 text-[var(--brand-primary)]" /> Target vs. Achievement
+                  </CardTitle>
+                  <div className="flex items-center gap-2 text-[10px] text-gray-400">
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-gray-200" /> Target</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-[var(--brand-primary)]" /> Achieved</span>
+                  </div>
                 </div>
-              </div>
-              <p className="text-xs text-gray-400 mt-0.5">
-                {chartView === 'monthly' ? 'Last 6 months · ₹L' : 'FY 24-25 vs FY 25-26 · ₹L'}
-              </p>
-              <div className="flex gap-1.5 mt-2 flex-wrap">
-                {([
-                  { value: 'ALL', label: 'All' },
-                  { value: 'VRIDDHI', label: 'Vriddhi' },
-                  { value: 'SAMBANDH', label: 'Sambandh 2.0' },
-                ] as { value: SalesOutletFilter; label: string }[]).map((opt) => (
-                  <button key={opt.value} onClick={() => setOutletFilter(opt.value)}
-                    className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition-all ${
-                      outletFilter === opt.value ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)]' : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300'
-                    }`}>
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </CardHeader>
-            <CardContent className="px-2 pb-3">
-              <SalesAchievementChart view={chartView} outlet={outletFilter} />
-            </CardContent>
-          </Card>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Last 6 months · {salesTargets.kpis.find((k) => k.isPrimary)?.name ?? salesTargets.kpis[0]?.name ?? 'Primary KPI'}
+                </p>
+              </CardHeader>
+              <CardContent className="px-2 pb-3">
+                <TargetTrendChart
+                  trend={salesTargets.trend}
+                  unit={salesTargets.kpis.find((k) => k.isPrimary)?.unit ?? salesTargets.kpis[0]?.unit ?? ''}
+                />
+              </CardContent>
+            </Card>
+          )}
         </>
       )}
     </div>

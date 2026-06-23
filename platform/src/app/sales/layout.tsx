@@ -3,16 +3,13 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { LayoutDashboard, ClipboardList, MapPin, User, Users, ChevronDown, HeadphonesIcon, ListTodo, Trophy } from 'lucide-react';
+import { LayoutDashboard, ClipboardList, MapPin, User, Users, HeadphonesIcon, Trophy } from 'lucide-react';
 import { NavBottom } from '@/components/layout/nav-bottom';
 import type { NavItem } from '@/components/layout/nav-bottom';
 import { SiteFooter } from '@/components/layout/site-footer';
 import {
   type SalesRole,
-  ROLE_LABELS,
-  ROLE_TERRITORY,
   getRole,
-  setRole,
   hasTeamView,
 } from '@/lib/sales-role';
 import { RequireAuth } from '@/components/auth/require-auth';
@@ -28,27 +25,31 @@ const BASE_NAV: NavItem[] = [
 
 const TEAM_NAV: NavItem = { href: '/sales/team', label: 'Team', icon: Users };
 
-const ALL_ROLES: SalesRole[] = ['XSR', 'SO', 'ASM', 'RSM', 'ZNM', 'NSM'];
-
 // Notifications hidden until P7 notification worker (#21)
 
 export default function SalesLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [role, setRoleState] = useState<SalesRole>('SO');
-  const [rolePicker, setRolePicker] = useState(false);
-  // REAL identity from the JWT (replaces the demo ROLE_NAMES/ROLE_EMP_IDS persona, #40).
+  // REAL identity from the backend sales record (name + employee ID), replacing
+  // the demo ROLE_NAMES/ROLE_EMP_IDS personas AND the demo role switcher.
   const [userName, setUserName] = useState('');
+  const [empId, setEmpId] = useState('');
 
   useEffect(() => {
     setRoleState(getRole());
-    setUserName(getStoredUser()?.name ?? '');
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch('/api/sales/me', { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((res) => {
+        if (res?.success) {
+          setUserName(res.data.name ?? getStoredUser()?.name ?? '');
+          setEmpId(res.data.employeeCode ?? '');
+        } else {
+          setUserName(getStoredUser()?.name ?? '');
+        }
+      })
+      .catch(() => setUserName(getStoredUser()?.name ?? ''));
   }, []);
-
-  const switchRole = (r: SalesRole) => {
-    setRole(r);
-    setRoleState(r);
-    setRolePicker(false);
-  };
 
   // For manager roles swap "Outlets" for "Team" (managers work through people, not direct outlets)
   const navItems: NavItem[] = hasTeamView(role)
@@ -69,38 +70,10 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
             </div>
             <div>
               <p className="text-white font-semibold text-sm leading-tight">{userName}</p>
-              <p className="text-white/50 text-xs">{ROLE_LABELS[role]}</p>
+              <p className="text-white/50 text-xs">{empId || ' '}</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {/* Demo role switcher */}
-            <div className="relative">
-              <button
-                onClick={() => setRolePicker((v) => !v)}
-                className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/10 hover:bg-white/20 text-white/70 text-[10px] font-semibold transition-colors"
-              >
-                DEMO
-                <ChevronDown className="h-3 w-3" />
-              </button>
-              {rolePicker && (
-                <>
-                  <div className="fixed inset-0 z-40" onClick={() => setRolePicker(false)} />
-                  <div className="absolute right-0 top-full mt-1.5 z-50 bg-white rounded-xl shadow-xl border border-gray-100 py-1 min-w-[160px]">
-                    {ALL_ROLES.map((r) => (
-                      <button
-                        key={r}
-                        onClick={() => switchRole(r)}
-                        className={`w-full text-left px-3 py-2 text-sm flex items-center justify-between gap-2 hover:bg-gray-50 transition-colors ${r === role ? 'text-[var(--brand-primary)] font-semibold' : 'text-gray-700'}`}
-                      >
-                        <span>{ROLE_LABELS[r]}</span>
-                        {r === role && <span className="w-1.5 h-1.5 rounded-full bg-[var(--brand-primary)]" />}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-
             {/* Notifications hidden until P7 notification worker (#21) */}
             <Link
               href="/sales/profile"

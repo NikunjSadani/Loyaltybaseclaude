@@ -2,6 +2,7 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isSelfOrDescendant } from './sales-hierarchy-access.helper';
+import { kpiCodeKeys } from '../targets/targets.helpers';
 
 /**
  * Sales Organization — ported from platform/src/app/api/sales/* onto /v1.
@@ -230,6 +231,145 @@ export class SalesService {
     if (!salesUser) return { outlets: [] };
 
     return { outlets: await this.buildOutlets(salesUser.id) };
+  }
+
+  /**
+   * GET /v1/sales/me — the caller's own sales-org identity (real, JWT-scoped).
+   * Feeds the sales shell header (employee ID) + profile page, replacing the
+   * demo personas in lib/sales-role.ts (ROLE_EMP_IDS / ROLE_TERRITORY). Returns
+   * nulls when the caller is not a sales user so the FE can fall back to the JWT.
+   */
+  async getMe(user: JwtPayload) {
+    const su = await this.prisma.salesUser.findFirst({
+      where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
+      select: {
+        employeeCode: true,
+        region: true,
+        zone: true,
+        user: { select: { name: true, phone: true } },
+        hierarchyLevel: { select: { code: true, name: true, level: true } },
+      },
+    });
+    return {
+      employeeCode: su?.employeeCode ?? null,
+      role:         su?.hierarchyLevel?.code ?? null,
+      roleLabel:    su?.hierarchyLevel?.name ?? null,
+      level:        su?.hierarchyLevel?.level ?? null,
+      region:       su?.region ?? null,
+      zone:         su?.zone ?? null,
+      name:         su?.user?.name ?? user.name ?? null,
+      phone:        su?.user?.phone ?? user.phone ?? null,
+    };
+  }
+
+  /**
+   * GET /v1/sales/targets — REAL target vs achievement for the caller's assigned
+   * outlets, summed per KPI for a month (replaces the FE OUTLET_ACHIEVEMENTS /
+   * resolveConfig(DEMO_*) mock on the sales dashboard). Mirrors the partner
+   * getTargets join (OutletTarget ⋈ OutletSalesRecord on clientId+outletCode+month)
+   * but scopes by the rep's active outlet assignments instead of partner ownership.
+   * Also returns a 6-month trend on the PRIMARY KPI for the dashboard chart.
+   */
+  async getTargets(user: JwtPayload, period?: string) {
+    const su = await this.prisma.salesUser.findFirst({
+      where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true },
+    });
+    if (!su) return { period: null, outletCount: 0, kpis: [], trend: [] };
+
+    const assignments = await this.prisma.salesUserAssignment.findMany({
+      where: { salesUserId: su.id, unassignedAt: null, outletId: { not: null } },
+      select: { outlet: { select: { outletCode: true } } },
+    });
+    const outletCodes = [...new Set(
+      assignments.map((a) => a.outlet?.outletCode).filter((c): c is string => !!c),
+    )];
+    if (outletCodes.length === 0) return { period: null, outletCount: 0, kpis: [], trend: [] };
+
+    // Month to report: the caller's period, else the most recent month with target data.
+    let month: string | null = period ?? null;
+    if (!month) {
+      const latest = await this.prisma.outletTarget.findFirst({
+        where: { clientId: user.clientId, outletCode: { in: outletCodes } },
+        orderBy: { month: 'desc' },
+        select: { month: true },
+      });
+      month = latest?.month ?? null;
+    }
+    if (!month) return { period: null, outletCount: outletCodes.length, kpis: [], trend: [] };
+
+    const whereBase = { clientId: user.clientId, outletCode: { in: outletCodes } };
+    const [targetRows, achRows, kpiRows] = await Promise.all([
+      this.prisma.outletTarget.findMany({ where: { ...whereBase, month }, select: { targetValues: true } }),
+      this.prisma.outletSalesRecord.findMany({ where: { ...whereBase, month }, select: { kpiValues: true } }),
+      this.prisma.kpiDef.findMany({
+        where: { clientId: user.clientId },
+        select: { code: true, label: true, unit: true, isPrimary: true },
+      }),
+    ]);
+
+    // Sum each KPI's target + achieved across all the rep's outlets for the month.
+    const sumByCode = (rows: { v: unknown }[]) => {
+      const acc: Record<string, number> = {};
+      for (const { v } of rows) {
+        const obj = (v ?? {}) as Record<string, number>;
+        for (const code of kpiCodeKeys(obj)) acc[code] = (acc[code] ?? 0) + (Number(obj[code]) || 0);
+      }
+      return acc;
+    };
+    const targetSum = sumByCode(targetRows.map((r) => ({ v: r.targetValues })));
+    const achSum    = sumByCode(achRows.map((r) => ({ v: r.kpiValues })));
+
+    const kpiMeta = new Map(kpiRows.map((k) => [k.code, k]));
+    const codes = [...new Set([...Object.keys(targetSum), ...Object.keys(achSum)])];
+    const kpis = codes.map((code) => {
+      const target = targetSum[code] ?? 0;
+      const achieved = achSum[code] ?? 0;
+      const meta = kpiMeta.get(code);
+      return {
+        code,
+        name: meta?.label ?? code,
+        unit: meta?.unit ?? '',
+        isPrimary: meta?.isPrimary ?? false,
+        target,
+        achieved,
+        pace: target > 0 ? achieved / target : null,
+      };
+    }).sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || a.name.localeCompare(b.name));
+
+    // 6-month trend on the primary KPI (else the first KPI) for the chart.
+    const primaryCode = kpis.find((k) => k.isPrimary)?.code ?? kpis[0]?.code ?? null;
+    const trend = primaryCode
+      ? await this.buildTargetTrend(user.clientId, outletCodes, month, primaryCode)
+      : [];
+
+    return { period: month, outletCount: outletCodes.length, kpis, trend };
+  }
+
+  /** Last-6-months target vs achieved totals for one KPI code (chart series). */
+  private async buildTargetTrend(
+    clientId: string, outletCodes: string[], latestMonth: string, kpiCode: string,
+  ) {
+    // Build the 6 month keys ending at latestMonth (YYYY-MM), oldest first.
+    const [y, m] = latestMonth.split('-').map(Number);
+    const months: string[] = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(Date.UTC(y, (m - 1) - i, 1));
+      months.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+    }
+    const where = { clientId, outletCode: { in: outletCodes }, month: { in: months } };
+    const [tRows, aRows] = await Promise.all([
+      this.prisma.outletTarget.findMany({ where, select: { month: true, targetValues: true } }),
+      this.prisma.outletSalesRecord.findMany({ where, select: { month: true, kpiValues: true } }),
+    ]);
+    const sumFor = (rows: { month: string; v: unknown }[], mo: string) =>
+      rows.filter((r) => r.month === mo)
+        .reduce((s, r) => s + (Number(((r.v ?? {}) as Record<string, number>)[kpiCode]) || 0), 0);
+    return months.map((mo) => ({
+      month: mo,
+      target:   sumFor(tRows.map((r) => ({ month: r.month, v: r.targetValues })), mo),
+      achieved: sumFor(aRows.map((r) => ({ month: r.month, v: r.kpiValues })), mo),
+    }));
   }
 
   /**

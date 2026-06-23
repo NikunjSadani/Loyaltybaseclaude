@@ -13,6 +13,9 @@ import { isSelfOrDescendant } from './sales-hierarchy-access.helper';
 const mockPrisma = {
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUserAssignment: { findMany: jest.fn() },
+  outletTarget: { findFirst: jest.fn(), findMany: jest.fn() },
+  outletSalesRecord: { findMany: jest.fn() },
+  kpiDef: { findMany: jest.fn() },
 };
 
 const caller: JwtPayload = { sub: 'user-mgr', role: 'SALES', clientId: 'deoleo', phone: '', name: '' };
@@ -254,6 +257,90 @@ describe('SalesService', () => {
         type: 'RETAIL', kycStatus: 'NOT_STARTED', targetPct: 0,
       });
       expect(res.outlets[1].kycSubmittedAt).toBeUndefined();
+    });
+  });
+
+  // ─── getMe (real sales identity for the header employee ID + profile) ──────────
+  describe('getMe', () => {
+    it('returns the real employeeCode + role from the SalesUser, scoped to the caller', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        employeeCode: 'XSR-M001', region: 'West', zone: 'Z1',
+        user: { name: 'Anita Rep', phone: '9900000041' },
+        hierarchyLevel: { code: 'SALES_ISR', name: 'Executive Sales Representative', level: 5 },
+      });
+      const res = await service.getMe(caller);
+      const where = mockPrisma.salesUser.findFirst.mock.calls[0][0].where;
+      expect(where).toEqual({ userId: 'user-mgr', user: { clientId: 'deoleo' }, deletedAt: null });
+      expect(res).toEqual({
+        employeeCode: 'XSR-M001', role: 'SALES_ISR', roleLabel: 'Executive Sales Representative',
+        level: 5, region: 'West', zone: 'Z1', name: 'Anita Rep', phone: '9900000041',
+      });
+    });
+
+    it('falls back to JWT name/phone + null employeeCode when not a sales user', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      const res = await service.getMe({ ...caller, name: 'JWT Name', phone: '99' });
+      expect(res.employeeCode).toBeNull();
+      expect(res.role).toBeNull();
+      expect(res.name).toBe('JWT Name');
+      expect(res.phone).toBe('99');
+    });
+  });
+
+  // ─── getTargets (real target vs achievement, summed across the rep's outlets) ──
+  describe('getTargets', () => {
+    it('returns empty when the caller is not a sales user', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      const res = await service.getTargets(caller);
+      expect(res).toEqual({ period: null, outletCount: 0, kpis: [], trend: [] });
+    });
+
+    it('returns empty when the rep has no assigned outlets', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      const res = await service.getTargets(caller);
+      expect(res).toEqual({ period: null, outletCount: 0, kpis: [], trend: [] });
+    });
+
+    it('sums target + achieved per KPI across the rep\'s outlets, primary first, with pace', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { outlet: { outletCode: 'O1' } }, { outlet: { outletCode: 'O2' } },
+      ]);
+      mockPrisma.outletTarget.findFirst.mockResolvedValue({ month: '2026-05' });
+      // current-month targets: two outlets
+      mockPrisma.outletTarget.findMany
+        .mockResolvedValueOnce([
+          { targetValues: { CONSISTENCY: 500, FOCUS: 100 } },
+          { targetValues: { CONSISTENCY: 400 } },
+        ])
+        // trend query (6 months) — return nothing extra
+        .mockResolvedValueOnce([]);
+      mockPrisma.outletSalesRecord.findMany
+        .mockResolvedValueOnce([
+          { kpiValues: { CONSISTENCY: 450, FOCUS: 0 } },
+          { kpiValues: { CONSISTENCY: 200 } },
+        ])
+        .mockResolvedValueOnce([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'FOCUS', label: 'Focus Pack', unit: 'units', isPrimary: false },
+        { code: 'CONSISTENCY', label: 'Consistency', unit: 'Litre', isPrimary: true },
+      ]);
+
+      const res = await service.getTargets(caller, '2026-05');
+      expect(res.period).toBe('2026-05');
+      expect(res.outletCount).toBe(2);
+      // primary KPI first
+      expect(res.kpis[0]).toMatchObject({
+        code: 'CONSISTENCY', isPrimary: true, unit: 'Litre',
+        target: 900, achieved: 650, // 500+400 vs 450+200
+      });
+      expect(res.kpis[0].pace).toBeCloseTo(650 / 900);
+      const focus = res.kpis.find((k: { code: string }) => k.code === 'FOCUS')!;
+      expect(focus).toMatchObject({ target: 100, achieved: 0, pace: 0 });
+      // trend has 6 month buckets on the primary KPI
+      expect(res.trend).toHaveLength(6);
+      expect(res.trend[5].month).toBe('2026-05');
     });
   });
 });

@@ -1,4 +1,4 @@
-import { Controller, Get, Param } from '@nestjs/common';
+import { Controller, Get, Param, Query } from '@nestjs/common';
 import { SalesService } from './sales.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -29,6 +29,19 @@ export class SalesController {
   @RequirePermission('sales_org:read')
   getMyOutlets(@CurrentUser() user: JwtPayload) {
     return this.sales.getMyOutlets(user);
+  }
+
+  // The caller's own sales-org identity (header employee ID + profile). Self-info.
+  @Get('me')
+  getMe(@CurrentUser() user: JwtPayload) {
+    return this.sales.getMe(user);
+  }
+
+  // Real target vs achievement for the caller's assigned outlets (dashboard card + chart).
+  @Get('targets')
+  @RequirePermission('targets:read')
+  getTargets(@CurrentUser() user: JwtPayload, @Query('period') period?: string) {
+    return this.sales.getTargets(user, period);
   }
 
   @Get('team/:memberId')

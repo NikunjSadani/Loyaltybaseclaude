@@ -34,9 +34,24 @@ vi.mock('@/lib/banner', () => ({
 
 import SalesDashboardPage from '../page';
 
+// The Target-vs-Achievement card now renders from the real /api/sales/targets
+// feed, so stub global fetch to return a targets payload (with trend) + outlets.
+const fetchMock = vi.fn();
+vi.stubGlobal('fetch', fetchMock);
+
 describe('Z — Sales dashboard chart header', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fetchMock.mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('/api/sales/targets')) {
+        return Promise.resolve({ json: () => Promise.resolve({ success: true, data: {
+          period: '2026-05', outletCount: 2,
+          kpis: [{ code: 'CONSISTENCY', name: 'Consistency', unit: 'Litre', isPrimary: true, target: 900, achieved: 650, pace: 0.72 }],
+          trend: [{ month: '2026-05', target: 900, achieved: 650 }],
+        } }) });
+      }
+      return Promise.resolve({ json: () => Promise.resolve({ success: true, data: { outlets: [] } }) });
+    });
   });
 
   it('Z3: heading reads "Target vs. Achievement"', async () => {
