@@ -12,6 +12,7 @@ import * as XLSX from 'xlsx';
 import { KycService } from './kyc.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { Msg91Service } from '../notifications/msg91.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { KYC_FIELD_ORDER, kycFieldDecisionHeader, kycFieldRemarkHeader } from './kyc-review-dump';
@@ -123,6 +124,7 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
         KycService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: NotificationsService, useValue: mockNotifications },
+        { provide: Msg91Service, useValue: { sendOtp: jest.fn() } },
         { provide: StorageService, useValue: mockStorage },
       ],
     }).compile();

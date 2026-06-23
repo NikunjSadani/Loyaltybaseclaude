@@ -266,6 +266,8 @@ export default function NewKYCPage() {
   const [submitOtpError,     setSubmitOtpError]     = useState('');
   const [submitOtpVerifying, setSubmitOtpVerifying] = useState(false);
   const [submitOtpCountdown, setSubmitOtpCountdown] = useState(0);
+  /** Submit/OTP-send failure shown on the form (e.g. duplicate/employee phone) */
+  const [submitError,        setSubmitError]        = useState('');
 
   /* File error */
   const [fileError, setFileError] = useState('');
@@ -742,9 +744,28 @@ export default function NewKYCPage() {
     setHasSigned(false);
   };
 
+  /** Send the outlet-owner consent OTP (real MSG91 in prod; FIXED_OTP on staging). */
+  const sendConsentOtp = async (subId: string | null): Promise<{ ok: boolean; error?: string }> => {
+    if (!subId) return { ok: false, error: 'Could not start OTP — please retry the submission.' };
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+      const res = await fetch('/api/kyc/consent-otp', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body:    JSON.stringify({ submissionId: subId, mobile: form.mobile }),
+      });
+      if (res.ok) return { ok: true };
+      const err = await res.json().catch(() => ({}));
+      return { ok: false, error: err.error ?? 'Could not send the OTP. Please try again.' };
+    } catch {
+      return { ok: false, error: 'Network error while sending the OTP. Please try again.' };
+    }
+  };
+
   /* ── D: Submit → OTP step ── */
   const handleSubmit = async () => {
     setSubmitting(true);
+    setSubmitError('');
     try {
       // Build documents payload using GCS references (fileKey/fileUrl) — never send base64
       interface DocPayload {
@@ -817,21 +838,33 @@ export default function NewKYCPage() {
         }),
       });
 
-      if (res.ok) {
-        const responseData = await res.json();
-        setSubmissionId(responseData.data?.submissionId ?? null);
-      } else {
+      // A failed submission must NOT silently advance to the OTP step — surface
+      // the real error (e.g. duplicate / employee phone) and stay on the form.
+      if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
-        console.error('[KYC submit]', errorData);
-        // Continue to OTP step even on error in demo mode
+        setSubmitting(false);
+        setSubmitError(errorData.error ?? 'Could not submit the KYC. Please review and try again.');
+        return;
       }
+
+      const responseData = await res.json();
+      const newSubmissionId = responseData.data?.submissionId ?? null;
+      setSubmissionId(newSubmissionId);
+
+      // Send the consent OTP; only advance to the OTP screen once it's actually sent.
+      const sent = await sendConsentOtp(newSubmissionId);
+      setSubmitting(false);
+      if (!sent.ok) {
+        setSubmitError(sent.error ?? 'Could not send the OTP. Please check the number and try again.');
+        return;
+      }
+      setSubmitOtpCountdown(30);
+      setStep('otp');
     } catch (e) {
       console.error('[KYC submit error]', e);
-    } finally {
       setSubmitting(false);
+      setSubmitError('Something went wrong while submitting. Please try again.');
     }
-    setSubmitOtpCountdown(30);
-    setStep('otp');
   };
 
   const handleVerifySubmitOtp = async () => {
@@ -872,7 +905,11 @@ export default function NewKYCPage() {
 
   const handleResendOtp = async () => {
     setSubmitOtp(''); setSubmitOtpError('');
-    await new Promise((r) => setTimeout(r, 400));
+    const sent = await sendConsentOtp(submissionId);
+    if (!sent.ok) {
+      setSubmitOtpError(sent.error ?? 'Could not resend the OTP. Please try again.');
+      return;
+    }
     setSubmitOtpCountdown(30);
   };
 
@@ -1950,6 +1987,18 @@ export default function NewKYCPage() {
                 </p>
               )}
             </div>
+
+            {/* Submit/OTP-send error (e.g. duplicate or employee phone) */}
+            {submitError && (
+              <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
+                <AlertCircle className="h-4 w-4 text-red-500 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-red-700">Could not submit</p>
+                  <p className="text-xs text-red-600 mt-0.5">{submitError}</p>
+                </div>
+                <button onClick={() => setSubmitError('')} className="shrink-0 text-red-400 hover:text-red-600"><X className="h-3.5 w-3.5" /></button>
+              </div>
+            )}
 
             {/* Submit */}
             <div className="flex gap-3 pt-1">

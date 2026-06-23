@@ -238,6 +238,16 @@ export class ConsentKycDto {
   otp!: string;
 }
 
+// POST /v1/kyc/consent-otp — send the outlet-owner consent OTP
+export class SendConsentOtpDto {
+  @IsString()
+  @MinLength(1)
+  submissionId!: string;
+
+  @Matches(/^\d{10}$/, { message: 'Mobile must be 10 digits' })
+  mobile!: string;
+}
+
 // POST /v1/kyc/not-interested
 export class NotInterestedKycDto {
   @IsString()

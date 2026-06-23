@@ -13,6 +13,7 @@ import {
 import { KycService } from './kyc.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { Msg91Service } from '../notifications/msg91.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { KYC_FIELD_KEYS } from './kyc-verification.helper';
@@ -50,7 +51,7 @@ const mockPrisma = {
   },
   kycStatusHistory: { create: jest.fn(), findMany: jest.fn() },
   kycDocument: { create: jest.fn() },
-  otpCode: { findFirst: jest.fn(), update: jest.fn() },
+  otpCode: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
   outlet: { findUnique: jest.fn(), update: jest.fn() },
   salesUser: { findFirst: jest.fn() },
   consentRecord: { create: jest.fn() },
@@ -59,6 +60,8 @@ const mockPrisma = {
 };
 
 const mockNotifications = { enqueue: jest.fn().mockResolvedValue({ id: 'n1' }) };
+
+const mockMsg91 = { sendOtp: jest.fn().mockResolvedValue(undefined) };
 
 const mockStorage = {
   generateKey: jest.fn((folder: string, name: string) => `${folder}/2026-06/uuid-${name}`),
@@ -91,6 +94,7 @@ describe('KycService', () => {
         KycService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: NotificationsService, useValue: mockNotifications },
+        { provide: Msg91Service, useValue: mockMsg91 },
         { provide: StorageService, useValue: mockStorage },
       ],
     }).compile();
@@ -1463,6 +1467,90 @@ describe('KycService', () => {
       const approvedWhere = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
       expect(approvedWhere.status).toBe('APPROVED');
       expect(approvedWhere.user).toBeUndefined();
+    });
+  });
+
+  // ─── sendConsentOtp (the previously-missing OTP send) + phone validation ───────
+  describe('sendConsentOtp', () => {
+    const dto = { submissionId: 'sub1', mobile: '7795096288' };
+
+    beforeEach(() => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: null });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      mockPrisma.salesUser.findFirst.mockReset();
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+    });
+
+    it('creates a KYC_CONSENT OtpCode and sends it via MSG91', async () => {
+      const res = await service.sendConsentOtp(partner, dto);
+      expect(res).toEqual({ success: true, expiresIn: 600 });
+      const created = mockPrisma.otpCode.create.mock.calls[0][0].data;
+      expect(created.purpose).toBe('KYC_CONSENT');
+      expect(created.phone).toBe('7795096288');
+      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('7795096288', expect.any(String), 'SMS');
+    });
+
+    it('rejects a number already registered to another enrolled outlet', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ businessName: 'Ravi Stores' });
+      await expect(service.sendConsentOtp(partner, dto)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.otpCode.create).not.toHaveBeenCalled();
+      expect(mockMsg91.sendOtp).not.toHaveBeenCalled();
+    });
+
+    it('rejects a sales-employee number', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ user: { name: 'Anil Sharma' } });
+      await expect(service.sendConsentOtp(partner, dto)).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockMsg91.sendOtp).not.toHaveBeenCalled();
+    });
+
+    it('excludes the submission\'s own partner so Re-KYC of the same outlet does not self-collide', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', partnerId: 'cpSelf' });
+      await service.sendConsentOtp(partner, dto);
+      const where = mockPrisma.channelPartner.findFirst.mock.calls[0][0].where;
+      expect(where.id).toEqual({ not: 'cpSelf' });
+    });
+
+    it('404s when the submission is not the caller\'s', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue(null);
+      await expect(service.sendConsentOtp(partner, dto)).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  // ─── consent honors FIXED_OTP (staging) when the gate allows it ────────────────
+  describe('consent — FIXED_OTP bypass', () => {
+    // Surgical save/restore of ONLY the keys we touch — never replace the whole
+    // process.env object (that breaks Node env handling for sibling suites).
+    const keys = ['NODE_ENV', 'FIXED_OTP', 'DATABASE_URL'] as const;
+    const saved: Record<string, string | undefined> = {};
+    beforeEach(() => { for (const k of keys) saved[k] = process.env[k]; });
+    afterEach(() => {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    });
+
+    it('accepts FIXED_OTP even when it differs from the stored code, when isFixedOtpAllowed', async () => {
+      // non-prod NODE_ENV → isFixedOtpAllowed() true
+      process.env.NODE_ENV = 'development';
+      process.env.FIXED_OTP = '123456';
+      process.env.DATABASE_URL = 'postgresql://u:p@127.0.0.1:5433/gifsy_dev';
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'o1', code: '999999', attempts: 0, maxAttempts: 3,
+      });
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'sub1', userId: 'user1' });
+      mockPrisma.consentRecord.create.mockResolvedValue({ id: 'c1' });
+
+      // Stored code is 999999 but the user enters the fixed 123456 → accepted.
+      await expect(
+        service.consent(partner, { submissionId: 'sub1', mobile: '7795096288', otp: '123456' }),
+      ).resolves.toBeDefined();
+      // marked verified (not an attempt-increment / throw)
+      expect(mockPrisma.consentRecord.create).toHaveBeenCalled();
     });
   });
 });

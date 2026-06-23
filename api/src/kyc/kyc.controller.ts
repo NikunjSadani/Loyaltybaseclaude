@@ -25,6 +25,7 @@ import {
   NotInterestedKycDto,
   RejectKycDto,
   ReKycDto,
+  SendConsentOtpDto,
   UpdateKycDto,
   UploadKycDocumentDto,
   VerifyKycFieldDto,
@@ -65,6 +66,13 @@ export class KycController {
     @Body() dto: UploadKycDocumentDto,
   ) {
     return this.kyc.uploadDocument(user, file, dto);
+  }
+
+  // Send the outlet-owner consent OTP (real MSG91 in prod; FIXED_OTP on staging).
+  @Post('consent-otp')
+  @RequirePermission('kyc:initiate')
+  sendConsentOtp(@CurrentUser() user: JwtPayload, @Body() dto: SendConsentOtpDto) {
+    return this.kyc.sendConsentOtp(user, dto);
   }
 
   @Post('consent')

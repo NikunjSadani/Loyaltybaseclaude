@@ -11,6 +11,8 @@ import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource } from '@prisma/cl
 import * as XLSX from 'xlsx';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { Msg91Service } from '../notifications/msg91.service';
+import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { KYC_FIELD_KEYS, BridgeResult } from './kyc-verification.helper';
@@ -124,8 +126,89 @@ export class KycService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly msg91: Msg91Service,
     private readonly storage: StorageService,
   ) {}
+
+  /** 6-digit OTP (100000–999999), matching auth/rewards generateOtpCode. */
+  private generateOtpCode(): string {
+    return String(Math.floor(100000 + Math.random() * 900000));
+  }
+
+  /**
+   * Guard the outlet-owner mobile entered for KYC: it must NOT already belong to
+   * another enrolled partner/outlet in the tenant, and must NOT be a sales
+   * employee's number. Format-tolerant match on the last 10 digits.
+   * `exceptPartnerId` skips the partner being (re-)enrolled so Re-KYC of the same
+   * outlet doesn't self-collide.
+   */
+  private async assertPhoneAvailable(clientId: string, rawMobile: string, exceptPartnerId?: string | null): Promise<void> {
+    const mobile = (rawMobile ?? '').replace(/\D/g, '').slice(-10);
+    if (mobile.length !== 10) {
+      throw new BadRequestException('Enter a valid 10-digit mobile number');
+    }
+
+    const partnerClash = await this.prisma.channelPartner.findFirst({
+      where: {
+        clientId,
+        phone: { endsWith: mobile },
+        ...(exceptPartnerId ? { id: { not: exceptPartnerId } } : {}),
+      },
+      select: { businessName: true },
+    });
+    if (partnerClash) {
+      throw new BadRequestException(
+        `This number is already registered to another outlet${partnerClash.businessName ? ` (${partnerClash.businessName})` : ''}. Each outlet must have a unique contact number.`,
+      );
+    }
+
+    const employeeClash = await this.prisma.salesUser.findFirst({
+      where: { deletedAt: null, user: { clientId, phone: { endsWith: mobile } } },
+      select: { user: { select: { name: true } } },
+    });
+    if (employeeClash) {
+      throw new BadRequestException(
+        `This number belongs to a sales employee${employeeClash.user?.name ? ` (${employeeClash.user.name})` : ''} and cannot be used for an outlet KYC.`,
+      );
+    }
+  }
+
+  /**
+   * POST /v1/kyc/consent-otp — send the outlet-owner consent OTP. Permanent path
+   * is real MSG91 (prod); FIXED_OTP is honored ONLY where isFixedOtpAllowed (local
+   * dev + staging UAT). Stores a KYC_CONSENT OtpCode that consent() verifies.
+   * Re-validates the phone (employee / duplicate-outlet) as a gate before sending.
+   */
+  async sendConsentOtp(user: JwtPayload, dto: { submissionId: string; mobile: string }): Promise<{ success: boolean; expiresIn: number }> {
+    const submission = await this.prisma.kycSubmission.findFirst({
+      where: { id: dto.submissionId, userId: user.sub, user: { clientId: user.clientId } },
+      select: { id: true, partnerId: true },
+    });
+    if (!submission) throw new NotFoundException('KYC submission not found');
+
+    await this.assertPhoneAvailable(user.clientId, dto.mobile, submission.partnerId);
+
+    const mobile = dto.mobile.replace(/\D/g, '').slice(-10);
+    const otp = this.generateOtpCode();
+
+    // One active consent OTP per number.
+    await this.prisma.otpCode.deleteMany({
+      where: { phone: mobile, purpose: 'KYC_CONSENT', verifiedAt: null },
+    });
+    await this.prisma.otpCode.create({
+      data: {
+        phone: mobile,
+        code: otp,
+        purpose: 'KYC_CONSENT',
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+        maxAttempts: 3,
+      },
+    });
+
+    // Real send in prod; a no-op when FIXED_OTP is honored (msg91 service handles it).
+    await this.msg91.sendOtp(mobile, otp, 'SMS');
+    return { success: true, expiresIn: 600 };
+  }
 
   // ─── POST /v1/kyc/documents ──────────────────────────────────────────────────
   /**
@@ -1073,7 +1156,11 @@ export class KycService {
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
-    if (otpRecord.code !== otp) {
+    // FIXED_OTP is a dev/staging-only bypass (gated by isFixedOtpAllowed; always
+    // refused on the prod DB). Permanent path is the real MSG91 code stored above.
+    const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
+    const otpMatches = otpRecord.code === otp || (!!fixedOtp && otp === fixedOtp);
+    if (!otpMatches) {
       await this.prisma.otpCode.update({
         where: { id: otpRecord.id },
         data: { attempts: { increment: 1 } },
