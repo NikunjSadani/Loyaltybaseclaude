@@ -95,10 +95,11 @@ interface ApiKycDetail {
   reviewerNotes?: string | null;
   user: { id: string; name: string; phone: string; role?: string };
   partner?: {
-    id: string; businessName: string;
+    id: string; businessName: string; partnerCode?: string | null;
     gstNumber?: string | null; panNumber?: string | null;
     address?: string | null; city?: string | null; state?: string | null; pincode?: string | null;
     bankName?: string | null; bankAccountNumber?: string | null; ifscCode?: string | null;
+    outlets?: { outletCode: string }[];
   } | null;
   documents?: { id: string; documentType: string; fileUrl?: string; status: string }[];
   verificationItems?: { fieldKey: string; decision: string; remark?: string | null; source?: string | null }[];
@@ -106,7 +107,7 @@ interface ApiKycDetail {
 }
 
 type KycDetailShape = {
-  id: string; outletName: string; firmName: string; mobile: string; email: string;
+  id: string; outletCode: string; outletName: string; firmName: string; mobile: string; email: string;
   partnerClass: string; gstNumber: string; panNumber: string;
   address: string; city: string; state: string; pincode: string;
   salesUser: string; territory: string; region: string;
@@ -131,6 +132,9 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
   return {
     id:               s.id,
     verificationItems: s.verificationItems ?? [],
+    // Human outlet ID for the header (KYC is partner-keyed → the enrolled outlet's code).
+    // Prefer the real Outlet code; fall back to the partner code if no outlet is linked yet.
+    outletCode:       s.partner?.outlets?.[0]?.outletCode ?? s.partner?.partnerCode ?? '',
     outletName:       s.partner?.businessName ?? s.user.name,
     firmName:         s.partner?.businessName ?? s.user.name,
     mobile:           s.user.phone,
@@ -513,7 +517,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           </Link>
           <div>
             <h1 className="text-lg font-bold text-gray-900">{kyc.outletName}</h1>
-            <p className="text-xs text-gray-500">KYC ID: {kyc.id} · Submitted: {kyc.submittedDate}</p>
+            <p className="text-xs text-gray-500">Outlet ID: <span className="font-mono">{kyc.outletCode || '—'}</span> · Submitted: {kyc.submittedDate}</p>
           </div>
         </div>
         <span className={`px-3 py-1 rounded-full text-xs font-semibold ${STATUS_COLORS[kyc.status]}`}>

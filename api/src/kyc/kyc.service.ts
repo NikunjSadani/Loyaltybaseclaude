@@ -611,7 +611,9 @@ export class KycService {
         documents: true,
         statusHistory: { orderBy: { createdAt: 'desc' } },
         user: { select: { id: true, name: true, phone: true, role: true } },
-        partner: true,
+        // partner.outlets[].outletCode is the human "outlet ID" surfaced in the detail header
+        // (KYC is partner-keyed; the enrolled outlet's code lives on the partner's outlets).
+        partner: { include: { outlets: { select: { outletCode: true } } } },
         // 3.4d: the detail-page field panel seeds its current state from these.
         verificationItems: {
           select: { fieldKey: true, decision: true, remark: true, source: true, verifiedAt: true },

@@ -50,10 +50,11 @@ const MOCK_SUBMISSION = {
   reviewerNotes: null,
   user: { id: 'u1', name: 'Rohit Verma', phone: '9820184321', role: 'SALES_SO' },
   partner: {
-    id: 'p1', businessName: 'Sharma General Store',
+    id: 'p1', businessName: 'Sharma General Store', partnerCode: 'CP777',
     gstNumber: '27AABCS1429B1Z5', panNumber: 'AABCS1429B',
     address: 'Shop No. 12', city: 'Mumbai', state: 'Maharashtra', pincode: '400053',
     bankName: 'HDFC Bank', bankAccountNumber: '50100XXXXXX12', ifscCode: 'HDFC0004832',
+    outlets: [{ outletCode: 'O999' }],
   },
   documents: [
     { id: 'd1', documentType: 'PAN_CARD', fileUrl: 'https://placehold.co/600x400', status: 'SUBMITTED' },
@@ -113,6 +114,17 @@ describe('KYCID — Admin KYC detail API wiring', () => {
     // The list route is /admin/kyc (this page is /admin/kyc/[id]); /kyc does not exist.
     expect(container.querySelector('a[href="/admin/kyc"]')).toBeTruthy();
     expect(container.querySelector('a[href="/kyc"]')).toBeNull();
+  });
+
+  it('KYCID7: header shows the outlet ID, not the internal KYC id', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { submission: MOCK_SUBMISSION } }),
+    }));
+    render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
+    expect(await screen.findByText('O999')).toBeInTheDocument();   // outlet code from partner.outlets
+    expect(screen.getByText(/Outlet ID:/)).toBeInTheDocument();
+    expect(screen.queryByText(/KYC ID:/)).not.toBeInTheDocument(); // old CUID label removed
   });
 
   it('KYCID6: the not-found state back link also points to /admin/kyc', async () => {

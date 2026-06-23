@@ -356,6 +356,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           const s = json.data.submission;
           setKyc({
             id:              s.id,
+            outletCode:      s.partner?.outlets?.[0]?.outletCode ?? '',
             partnerName:     s.user?.name                       ?? '',
             firmName:        s.partner?.businessName            ?? '',
             mobile:          s.user?.phone                      ?? '',
