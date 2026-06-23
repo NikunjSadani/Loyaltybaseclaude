@@ -6,7 +6,7 @@
  * All tests are source-read (no runtime); they run locally.
  *
  * Groups:
- *   A — sales/outlets     : no OUTLET_ACHIEVEMENTS; uses targetPct
+ *   A — sales/outlets     : no OUTLET_ACHIEVEMENTS / resolveConfig; real /api/sales/outlet-targets (AF-4)
  *   B — team/[id]/outlets : no OUTLET_ACHIEVEMENTS; uses targetPct
  *   C — sales/tasks       : no HO_TASKS hardcoded demo array
  *   D — sales/catalogue   : no loadGifts() fallback
@@ -30,20 +30,22 @@ describe('A — sales/outlets page', () => {
     expect(code).not.toMatch(/OUTLET_ACHIEVEMENTS/);
   });
 
-  it('A2: imports resolveConfig and pct from @/lib/targets (config still used)', () => {
+  it('A2: no longer uses the DEMO target mock (resolveConfig / DEMO_*); keeps pure helpers from @/lib/targets', () => {
     const code = src('src/app/sales/outlets/page.tsx');
-    expect(code).toMatch(/resolveConfig/);
-    expect(code).toMatch(/from ['"]@\/lib\/targets['"]/);
+    expect(code).not.toMatch(/resolveConfig/);
+    expect(code).not.toMatch(/DEMO_BEAT|DEMO_DISTRICT|DEMO_STATE/);
+    expect(code).toMatch(/from ['"]@\/lib\/targets['"]/); // pct/pctBg/pctBarColor/PERIODS still imported
   });
 
-  it('A3: Outlet interface has targetPct field', () => {
+  it('A3: fetches real per-outlet targets from /api/sales/outlet-targets', () => {
     const code = src('src/app/sales/outlets/page.tsx');
-    expect(code).toMatch(/targetPct/);
+    expect(code).toMatch(/\/api\/sales\/outlet-targets/);
   });
 
-  it('A4: uses outlet.targetPct for sorting approved outlets', () => {
+  it('A4: derives achievement from real per-KPI data, not a back-computed targetPct', () => {
     const code = src('src/app/sales/outlets/page.tsx');
-    expect(code).toMatch(/targetPct/);
+    expect(code).not.toMatch(/targetPct/);
+    expect(code).toMatch(/outletOverallPct/);
   });
 
   it('A5: fetches /api/sales/outlets', () => {

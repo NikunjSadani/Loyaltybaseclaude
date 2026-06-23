@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
@@ -8,13 +8,7 @@ import {
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { Badge } from '@/components/ui/badge';
-import {
-  type GeoTargetConfig, type TargetParam,
-  PERIODS,
-  resolveConfig, pct, pctBg, pctBarColor,
-  DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE,
-  getPrimaryParam,
-} from '@/lib/targets';
+import { PERIODS, pct, pctBg, pctBarColor, getPrimaryParam } from '@/lib/targets';
 import { KYCStatus } from '@/types';
 import { getRole, type SalesRole } from '@/lib/sales-role';
 import { classifyPaceGap } from '@/lib/pace';
@@ -32,7 +26,7 @@ type OutletType = 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST' | 'SSS_TOT';
 interface Outlet {
   id:         string;
   kycId:      string;
-  outletCode: string;  // matches Outlet.outletCode in DB (used for visibility lookup)
+  outletCode: string;  // matches Outlet.outletCode in DB (used for target + visibility lookup)
   name:       string;
   location:   string;
   beat:       string;
@@ -40,10 +34,12 @@ interface Outlet {
   state:      string;
   type:       OutletType;
   kycStatus:  KYCStatus;
-  targetPct?: number;  // overall achievement % from API
 }
 
-/* (outlet data wired to /api/sales/outlets) */
+/* ─── Real per-outlet target data (GET /api/sales/outlet-targets) ─────────────── */
+
+interface KpiCol { code: string; name: string; unit: string; isPrimary: boolean; }
+type OutletKpis = Record<string, { target: number | null; achieved: number | null; pace: number | null }>;
 
 const TYPE_FILTERS: { value: OutletType | 'ALL'; label: string }[] = [
   { value: 'ALL',          label: 'All'          },
@@ -70,8 +66,7 @@ const kycBadge: Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 
 
 /* ─── Pace-based traffic light ─────────────────────────────────────────────── */
 
-/** Compare % of month elapsed vs % of target achieved.
- *  Returns the CSS bg class for the card-top strip. */
+/** Compare % of month elapsed vs % of target achieved → CSS bg class for the card strip. */
 function paceStrip(achievePct: number, period: string): string {
   const [year, month] = period.split('-').map(Number);
   const today    = new Date();
@@ -87,21 +82,35 @@ function paceStrip(achievePct: number, period: string): string {
   return 'bg-red-400';
 }
 
-/* ─── Achievement cell ──────────────────────────────────────────────────────── */
+/** Overall achievement % for an outlet = its primary KPI's pace, else the avg of KPIs with a target. */
+function outletOverallPct(kpis: OutletKpis, primaryCode: string | null): number {
+  if (primaryCode) {
+    const k = kpis[primaryCode];
+    if (k && k.target && k.target > 0) return pct(k.achieved ?? 0, k.target);
+  }
+  const withTarget = Object.values(kpis).filter((k) => k.target && k.target > 0);
+  if (withTarget.length === 0) return 0;
+  return Math.round(withTarget.reduce((s, k) => s + pct(k.achieved ?? 0, k.target ?? 0), 0) / withTarget.length);
+}
 
-function AchCell({ achieved, param }: { achieved: number; param: TargetParam }) {
-  const p      = pct(achieved, param.target);
+const fmtNum = (n: number | null) => (n === null ? '–' : n.toLocaleString('en-IN'));
+
+/* ─── Achievement cell (real target + achieved) ──────────────────────────────── */
+
+function AchCell({ achieved, target }: { achieved: number | null; target: number | null }) {
+  if (target === null && achieved === null) {
+    return <td className="px-3 py-2.5 text-center"><span className="text-[10px] text-gray-300">–</span></td>;
+  }
+  const p      = target ? pct(achieved ?? 0, target) : 0;
   const cls    = pctBg(p);
-  // Heat-map cell tint — very subtle, gives instant scan-ability across columns
   const cellBg = p >= 100 ? 'bg-emerald-50' : p >= 80 ? 'bg-amber-50' : p >= 60 ? 'bg-orange-50' : 'bg-rose-50';
-  const fmt    = (n: number) => param.unit === '₹L' ? `₹${n}L` : `${n}`;
 
   return (
     <td className={`px-3 py-2.5 min-w-[96px] ${cellBg}`}>
       <div className="flex items-baseline justify-between gap-1">
         <span className="text-xs font-semibold text-gray-800">
-          {fmt(achieved)}
-          <span className="text-[10px] font-normal text-gray-400"> /{fmt(param.target)}</span>
+          {fmtNum(achieved)}
+          <span className="text-[10px] font-normal text-gray-400"> /{fmtNum(target)}</span>
         </span>
         <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full whitespace-nowrap ${cls}`}>{p}%</span>
       </div>
@@ -109,9 +118,7 @@ function AchCell({ achieved, param }: { achieved: number; param: TargetParam }) 
   );
 }
 
-/* ─── Page ──────────────────────────────────────────────────────────────────── */
-
-// ─── Visibility badge ────────────────────────────────────────────────────────
+/* ─── Visibility badge ────────────────────────────────────────────────────────── */
 
 const VIS_CHIP_CLASS: Record<string, string> = {
   PENDING:      'bg-amber-50 text-amber-700',
@@ -122,12 +129,15 @@ const VIS_LABEL: Record<string, string> = {
   PENDING: 'Pending', UNDER_REVIEW: 'Under Review', APPROVED: 'Approved',
 };
 
+/* ─── Page ──────────────────────────────────────────────────────────────────── */
+
 export default function SalesOutletsPage() {
   const router = useRouter();
   const [outlets,    setOutlets]    = useState<Outlet[]>([]);
   const [period,     setPeriod]     = useState('2026-05');
   const [loading,    setLoading]    = useState(true);
-  const [config,     setConfig]     = useState<GeoTargetConfig | null>(null);
+  const [kpiColumns, setKpiColumns] = useState<KpiCol[]>([]);
+  const [targetsByOutlet, setTargetsByOutlet] = useState<Record<string, OutletKpis>>({});
   const [view,       setView]       = useState<'table' | 'cards'>('table');
   const [typeFilter, setTypeFilter] = useState<OutletType | 'ALL'>('ALL');
   const [beatFilter, setBeatFilter] = useState<string>('ALL');
@@ -138,11 +148,12 @@ export default function SalesOutletsPage() {
   // Cards on portrait mobile, table on landscape / desktop
   useEffect(() => {
     const update = () => setView(window.innerWidth < 768 ? 'cards' : 'table');
-    update(); // set on mount
+    update();
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
   }, []);
 
+  // Roster (real /api/sales/outlets)
   useEffect(() => {
     setRoleState(getRole());
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
@@ -158,32 +169,38 @@ export default function SalesOutletsPage() {
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
+  // Real per-outlet KPI target vs achievement for the selected month.
+  useEffect(() => {
+    setLoading(true);
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch(`/api/sales/outlet-targets?period=${encodeURIComponent(period)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((body) => {
+        if (body.success) {
+          setKpiColumns(body.data.kpiColumns ?? []);
+          const map: Record<string, OutletKpis> = {};
+          for (const row of (body.data.rows ?? []) as { outletCode: string; kpis: OutletKpis }[]) {
+            map[row.outletCode] = row.kpis;
+          }
+          setTargetsByOutlet(map);
+        } else {
+          setKpiColumns([]); setTargetsByOutlet({});
+        }
+      })
+      .catch(() => { setKpiColumns([]); setTargetsByOutlet({}); })
+      .finally(() => setLoading(false));
+  }, [period]);
+
   const isFieldRole = role === 'XSR' || role === 'SO';
 
-  // Unique beats sorted alphabetically
   const allBeats = useMemo(
-    () => ['ALL', ...Array.from(new Set(outlets.map((o) => o.beat))).sort()],
+    () => ['ALL', ...Array.from(new Set(outlets.map((o) => o.beat).filter(Boolean))).sort()],
     [outlets],
   );
 
-  // Monthly periods only (no quarters)
-  const monthlyPeriods = useMemo(
-    () => PERIODS.filter((p) => !p.value.includes('Q')),
-    [],
-  );
-
-
-  useEffect(() => {
-    setLoading(true);
-    const beat     = outlets[0]?.beat     ?? DEMO_BEAT;
-    const district = outlets[0]?.district ?? DEMO_DISTRICT;
-    const state    = outlets[0]?.state    ?? DEMO_STATE;
-    const t = setTimeout(() => {
-      setConfig(resolveConfig(beat, district, state, period));
-      setLoading(false);
-    }, 300);
-    return () => clearTimeout(t);
-  }, [period, outlets]);
+  const monthlyPeriods = useMemo(() => PERIODS.filter((p) => !p.value.includes('Q')), []);
 
   // Fetch visibility statuses for the selected month (RETAILER + MT outlets only)
   useEffect(() => {
@@ -192,15 +209,14 @@ export default function SalesOutletsPage() {
       .map((o) => o.outletCode);
     if (eligibleCodes.length === 0) return;
     fetchOutletVisibilityStatuses(eligibleCodes, period)
-      .then((map) => {
-        if (Object.keys(map).length > 0) {
-          setVisibilityMap(map);
-        }
-      });
+      .then((map) => { if (Object.keys(map).length > 0) setVisibilityMap(map); });
   }, [period, outlets]);
 
-  const params      = config?.params ?? [];
+  const params      = kpiColumns;
+  const primaryCode = getPrimaryParam(kpiColumns)?.code ?? null;
   const periodLabel = PERIODS.find((p) => p.value === period)?.label ?? period;
+
+  const kpisFor = (o: Outlet): OutletKpis => targetsByOutlet[o.outletCode] ?? {};
 
   const visibleOutlets = useMemo(() => outlets.filter((o) => {
     const matchesType = typeFilter === 'ALL' || o.type === typeFilter;
@@ -212,38 +228,40 @@ export default function SalesOutletsPage() {
   const sortedVisibleOutlets = useMemo(() => {
     const approved = visibleOutlets
       .filter((o) => o.kycStatus === KYCStatus.APPROVED)
-      .sort((a, b) => (a.targetPct ?? 0) - (b.targetPct ?? 0));
+      .sort((a, b) => outletOverallPct(kpisFor(a), primaryCode) - outletOverallPct(kpisFor(b), primaryCode));
     const others = visibleOutlets.filter((o) => o.kycStatus !== KYCStatus.APPROVED);
     return [...approved, ...others];
-  }, [visibleOutlets, params]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleOutlets, targetsByOutlet, primaryCode]);
 
-  // Header context label for the table
-  const tableGeoLabel = beatFilter !== 'ALL' ? beatFilter : 'Mumbai West';
+  const tableGeoLabel = beatFilter !== 'ALL' ? beatFilter : 'My Outlets';
 
+  // Team total = real sums across approved outlets, per KPI column.
   const teamSummary = useMemo(() => {
     if (!params.length) return null;
     const totals: Record<string, { achieved: number; target: number }> = {};
-    params.forEach((p) => { totals[p.id] = { achieved: 0, target: 0 }; });
+    params.forEach((p) => { totals[p.code] = { achieved: 0, target: 0 }; });
     visibleOutlets
       .filter((o) => o.kycStatus === KYCStatus.APPROVED)
       .forEach((o) => {
-        // Use targetPct (overall %) from API to derive a per-param achieved value.
-        // Individual KPI breakdowns are not yet returned by the API.
-        const overallPct = o.targetPct ?? 0;
+        const kpis = kpisFor(o);
         params.forEach((p) => {
-          totals[p.id].achieved += Math.round(overallPct * p.target / 100);
-          totals[p.id].target   += p.target;
+          const k = kpis[p.code];
+          if (!k) return;
+          totals[p.code].achieved += k.achieved ?? 0;
+          totals[p.code].target   += k.target ?? 0;
         });
       });
     return totals;
-  }, [params, visibleOutlets]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params, visibleOutlets, targetsByOutlet]);
 
   const approvedCount  = visibleOutlets.filter((o) => o.kycStatus === KYCStatus.APPROVED).length;
   const filteredCount  = outlets.length - visibleOutlets.length;
 
   return (
     <div className="space-y-2.5 fade-in">
-      {/* Row 1: title + view toggle (icons) */}
+      {/* Row 1: title + view toggle */}
       <div className="flex items-center justify-between gap-2">
         <h1 className="text-xl font-bold text-gray-900">
           Outlets
@@ -269,9 +287,8 @@ export default function SalesOutletsPage() {
         </div>
       </div>
 
-      {/* Row 2: unified filter strip — all dropdowns, consistent style */}
+      {/* Row 2: filter strip */}
       <div className="flex items-center gap-1.5 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
-        {/* Period dropdown */}
         <div className="relative shrink-0">
           <select
             value={period}
@@ -282,18 +299,13 @@ export default function SalesOutletsPage() {
               <option key={p.value} value={p.value}>{p.label}</option>
             ))}
           </select>
-          <svg
-            className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 text-gray-400"
-            viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"
-          >
+          <svg className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 text-gray-400" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
         </div>
 
-        {/* Divider */}
         <div className="h-4 w-px bg-gray-200 shrink-0" />
 
-        {/* Beat dropdown — XSR and SO only */}
         {isFieldRole && (
           <div className="relative shrink-0">
             <select
@@ -307,16 +319,12 @@ export default function SalesOutletsPage() {
                 <option key={beat} value={beat}>{beat === 'ALL' ? 'All Beats' : beat}</option>
               ))}
             </select>
-            <svg
-              className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${beatFilter !== 'ALL' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`}
-              viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"
-            >
+            <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${beatFilter !== 'ALL' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
           </div>
         )}
 
-        {/* Outlet type dropdown */}
         <div className="relative shrink-0">
           <select
             value={typeFilter}
@@ -329,10 +337,7 @@ export default function SalesOutletsPage() {
               <option key={f.value} value={f.value}>{f.value === 'ALL' ? 'All Types' : f.label}</option>
             ))}
           </select>
-          <svg
-            className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${typeFilter !== 'ALL' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`}
-            viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"
-          >
+          <svg className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 h-2.5 w-2.5 ${typeFilter !== 'ALL' ? 'text-[var(--brand-primary)]' : 'text-gray-400'}`} viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
         </div>
@@ -340,27 +345,24 @@ export default function SalesOutletsPage() {
 
       {loading ? (
         <div className="flex items-center justify-center min-h-48"><Spinner size="lg" /></div>
-      ) : !config ? (
+      ) : params.length === 0 ? (
         <div className="flex flex-col items-center gap-3 py-8 bg-amber-50 rounded-2xl border border-amber-100">
           <AlertTriangle className="h-8 w-8 text-amber-400" />
           <p className="text-sm text-amber-700 font-medium">No targets set for {periodLabel}</p>
-          <p className="text-xs text-amber-500">Admin needs to configure targets for your territory</p>
+          <p className="text-xs text-amber-500">Targets for your outlets haven&apos;t been uploaded for this month yet</p>
         </div>
       ) : (
         <>
           {/* ── TABLE VIEW ── */}
           {view === 'table' && visibleOutlets.length > 0 && (
             <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-              {/* Table header bar */}
               <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between shrink-0">
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
                   {periodLabel} · {tableGeoLabel}
                 </p>
                 <div className="flex items-center gap-1.5 text-xs text-gray-400">
                   <span>{visibleOutlets.length} outlets</span>
-                  {filteredCount > 0 && (
-                    <span className="text-gray-300">· {filteredCount} filtered</span>
-                  )}
+                  {filteredCount > 0 && <span className="text-gray-300">· {filteredCount} filtered</span>}
                   {approvedCount < visibleOutlets.length && (
                     <span className="text-amber-500">· {visibleOutlets.length - approvedCount} KYC pending</span>
                   )}
@@ -371,11 +373,10 @@ export default function SalesOutletsPage() {
                 <table className="w-full text-left" style={{ minWidth: `${180 + params.length * 105}px` }}>
                   <thead className="border-b border-gray-100 bg-gray-50/50">
                     <tr className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">
-                      {/* Wider first column — no separate Overall col */}
                       <th className="py-3 pl-4 pr-3 sticky left-0 bg-gray-50/80 z-10 min-w-[160px]">Outlet</th>
                       {params.map((p) => (
-                        <th key={p.id} className="py-3 px-3 min-w-[92px]">
-                          <span className="block truncate max-w-[88px]">{p.label}</span>
+                        <th key={p.code} className="py-3 px-3 min-w-[92px]">
+                          <span className="block truncate max-w-[88px]">{p.name}</span>
                           <span className="block font-normal text-gray-300 normal-case">{p.unit}</span>
                         </th>
                       ))}
@@ -385,9 +386,8 @@ export default function SalesOutletsPage() {
                   <tbody className="divide-y divide-gray-50">
                     {visibleOutlets.map((outlet) => {
                       const isKycApproved = outlet.kycStatus === KYCStatus.APPROVED;
-                      const overallPct = outlet.targetPct ?? 0;
-                      const avgPct = isKycApproved ? overallPct : 0;
-                      // Link to the KYC record for this outlet
+                      const kpis = kpisFor(outlet);
+                      const avgPct = isKycApproved ? outletOverallPct(kpis, primaryCode) : 0;
                       const href = `/sales/kyc/${outlet.kycId}`;
                       return (
                         <tr
@@ -395,7 +395,6 @@ export default function SalesOutletsPage() {
                           onClick={() => router.push(href)}
                           className="hover:bg-gray-50 transition-colors group cursor-pointer"
                         >
-                          {/* Sticky outlet name — overall % moved here */}
                           <td className="py-2.5 pl-4 pr-3 sticky left-0 bg-white group-hover:bg-gray-50 z-10 transition-colors">
                             <div className="flex items-center gap-2">
                               <div className="min-w-0">
@@ -405,12 +404,11 @@ export default function SalesOutletsPage() {
                                   <Badge variant={kycBadge[outlet.kycStatus].variant} className="text-[8px] px-1 py-0">
                                     {kycBadge[outlet.kycStatus].label}
                                   </Badge>
-                                  {isKycApproved && (
+                                  {isKycApproved && Object.keys(kpis).length > 0 && (
                                     <span className={`text-[9px] font-bold px-1 py-0.5 rounded-full ${pctBg(avgPct)}`}>
                                       {avgPct}%
                                     </span>
                                   )}
-                                  {/* Visibility badge — RETAILER and MT only */}
                                   {VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(outlet.type) && visibilityMap[outlet.outletCode] && (
                                     <span className={`text-[8px] font-semibold px-1 py-0 rounded-full leading-tight ${VIS_CHIP_CLASS[visibilityMap[outlet.outletCode].status] ?? ''}`}>
                                       Visibility: {VIS_LABEL[visibilityMap[outlet.outletCode].status] ?? visibilityMap[outlet.outletCode].status}
@@ -421,11 +419,10 @@ export default function SalesOutletsPage() {
                             </div>
                           </td>
 
-                          {/* Parameter cells */}
                           {params.map((p) => (
                             isKycApproved
-                              ? <AchCell key={p.id} param={p} achieved={Math.round(overallPct * p.target / 100)} />
-                              : <td key={p.id} className="px-3 py-2.5 text-center"><span className="text-[10px] text-gray-300">–</span></td>
+                              ? <AchCell key={p.code} achieved={kpis[p.code]?.achieved ?? null} target={kpis[p.code]?.target ?? null} />
+                              : <td key={p.code} className="px-3 py-2.5 text-center"><span className="text-[10px] text-gray-300">–</span></td>
                           ))}
 
                           <td className="pl-3 pr-4 py-2.5">
@@ -435,7 +432,6 @@ export default function SalesOutletsPage() {
                       );
                     })}
 
-                    {/* Team total row */}
                     {teamSummary && (
                       <tr className="bg-[var(--brand-primary)]/5 border-t-2 border-[var(--brand-primary)]/20">
                         <td className="py-2.5 pl-4 pr-3 sticky left-0 bg-[var(--brand-primary)]/5 z-10">
@@ -450,13 +446,12 @@ export default function SalesOutletsPage() {
                           </div>
                         </td>
                         {params.map((p) => {
-                          const { achieved, target } = teamSummary[p.id];
+                          const { achieved, target } = teamSummary[p.code];
                           const pp  = pct(achieved, target);
-                          const fmt = (n: number) => p.unit === '₹L' ? `₹${n}L` : `${n}`;
                           return (
-                            <td key={p.id} className="px-3 py-2.5">
+                            <td key={p.code} className="px-3 py-2.5">
                               <p className="text-[10px] font-bold text-gray-700">
-                                {fmt(achieved)}<span className="text-gray-400 font-normal">/{fmt(target)}</span>
+                                {fmtNum(achieved)}<span className="text-gray-400 font-normal">/{fmtNum(target)}</span>
                               </p>
                               <span className={`text-[9px] font-bold px-1 py-0.5 rounded-full ${pctBg(pp)}`}>{pp}%</span>
                             </td>
@@ -490,13 +485,13 @@ export default function SalesOutletsPage() {
             <div className="space-y-3">
               {sortedVisibleOutlets.map((outlet) => {
                 const isKycApproved = outlet.kycStatus === KYCStatus.APPROVED;
-                const overallPct    = outlet.targetPct ?? 0;
+                const kpis      = kpisFor(outlet);
                 const svParam   = getPrimaryParam(params);
                 const kpiParams = params.filter((p) => !p.isPrimary);
 
-                const svAchieved  = svParam ? Math.round(overallPct * svParam.target / 100) : 0;
-                const svPct       = svParam ? pct(svAchieved, svParam.target) : 0;
-                const stripClass  = isKycApproved ? paceStrip(svPct, period) : 'bg-gray-100';
+                const svK    = svParam ? kpis[svParam.code] : undefined;
+                const svPct  = svParam && svK?.target ? pct(svK.achieved ?? 0, svK.target) : 0;
+                const stripClass = isKycApproved ? paceStrip(svPct, period) : 'bg-gray-100';
 
                 return (
                   <Link
@@ -504,10 +499,8 @@ export default function SalesOutletsPage() {
                     href={`/sales/kyc/${outlet.kycId}`}
                     className="block bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-all active:scale-[0.99]"
                   >
-                    {/* Traffic-light pace strip */}
                     <div className={`h-1 ${stripClass}`} />
 
-                    {/* Header */}
                     <div className="flex items-center gap-3 px-4 py-2.5">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
@@ -524,53 +517,51 @@ export default function SalesOutletsPage() {
                     </div>
 
                     {isKycApproved ? (
-                      <>
-                        {/* Monthly Target progress bar — acts as header/body divider */}
-                        {svParam && (() => {
-                          const achieved = Math.round(overallPct * svParam.target / 100);
-                          const pp  = pct(achieved, svParam.target);
-                          const fmt = (n: number) => `₹${n}L`;
-                          return (
+                      Object.keys(kpis).length === 0 ? (
+                        <div className="border-t border-gray-50 px-4 py-1.5 flex items-center gap-1.5">
+                          <p className="text-[11px] text-gray-400">No targets uploaded for this outlet this month</p>
+                        </div>
+                      ) : (
+                        <>
+                          {svParam && svK && (
                             <div className="px-4 pt-2 pb-2.5 border-t border-gray-200">
                               <div className="flex items-center justify-between mb-1">
-                                <span className="text-[11px] font-semibold text-gray-600">Monthly Target</span>
+                                <span className="text-[11px] font-semibold text-gray-600">{svParam.name}</span>
                                 <div className="flex items-center gap-1.5">
                                   <span className="text-[14px] font-bold text-gray-800">
-                                    {fmt(achieved)}<span className="text-[12px] text-gray-400 font-normal"> /{fmt(svParam.target)}</span>
+                                    {fmtNum(svK.achieved)}<span className="text-[12px] text-gray-400 font-normal"> /{fmtNum(svK.target)}{svParam.unit ? ` ${svParam.unit}` : ''}</span>
                                   </span>
-                                  <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(pp)}`}>{pp}%</span>
+                                  <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(svPct)}`}>{svPct}%</span>
                                 </div>
                               </div>
                               <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                <div className={`h-full rounded-full ${pctBarColor(pp)}`} style={{ width: `${Math.min(pp, 100)}%` }} />
+                                <div className={`h-full rounded-full ${pctBarColor(svPct)}`} style={{ width: `${Math.min(svPct, 100)}%` }} />
                               </div>
                             </div>
-                          );
-                        })()}
+                          )}
 
-                        {/* KPI grid — 2 columns, neutral accent border, % badge is the colour signal */}
-                        {kpiParams.length > 0 && (
-                          <div className="border-t border-gray-200 px-4 pt-2.5 pb-3 grid grid-cols-2 gap-x-3 gap-y-3">
-                            {kpiParams.map((p) => {
-                              const achieved = Math.round(overallPct * p.target / 100);
-                              const pp  = pct(achieved, p.target);
-                              const fmt = (n: number) => p.unit === '₹L' ? `₹${n}L` : `${n}`;
-                              return (
-                                <div key={p.id} className="border-l-[3px] border-gray-200 pl-2">
-                                  <p className="text-[11px] font-semibold text-gray-600 truncate leading-tight">{p.label}</p>
-                                  <div className="flex items-center justify-between mt-0.5">
-                                    <p className="text-[15px] font-bold text-gray-900 leading-tight">
-                                      {fmt(achieved)}
-                                      <span className="text-[12px] font-semibold text-gray-500"> /{fmt(p.target)}</span>
-                                    </p>
-                                    <span className={`text-[12px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(pp)}`}>{pp}%</span>
+                          {kpiParams.length > 0 && (
+                            <div className="border-t border-gray-200 px-4 pt-2.5 pb-3 grid grid-cols-2 gap-x-3 gap-y-3">
+                              {kpiParams.map((p) => {
+                                const k = kpis[p.code];
+                                const pp = k?.target ? pct(k.achieved ?? 0, k.target) : 0;
+                                return (
+                                  <div key={p.code} className="border-l-[3px] border-gray-200 pl-2">
+                                    <p className="text-[11px] font-semibold text-gray-600 truncate leading-tight">{p.name}</p>
+                                    <div className="flex items-center justify-between mt-0.5">
+                                      <p className="text-[15px] font-bold text-gray-900 leading-tight">
+                                        {fmtNum(k?.achieved ?? null)}
+                                        <span className="text-[12px] font-semibold text-gray-500"> /{fmtNum(k?.target ?? null)}</span>
+                                      </p>
+                                      <span className={`text-[12px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(pp)}`}>{pp}%</span>
+                                    </div>
                                   </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </>
+                      )
                     ) : (
                       <div className="border-t border-gray-50 px-4 py-1.5 flex items-center gap-1.5">
                         <Lock className="h-3 w-3 text-gray-300" />
@@ -578,7 +569,6 @@ export default function SalesOutletsPage() {
                       </div>
                     )}
 
-                    {/* Visibility badge strip — RETAILER and MT outlets only */}
                     {VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(outlet.type) && visibilityMap[outlet.outletCode] && (
                       <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-1.5">
                         <Eye className="h-3 w-3 text-gray-400 shrink-0" />

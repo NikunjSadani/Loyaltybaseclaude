@@ -346,6 +346,73 @@ export class SalesService {
     return { period: month, outletCount: outletCodes.length, kpis, trend };
   }
 
+  /**
+   * GET /v1/sales/outlet-targets?period= — REAL per-outlet × per-KPI target vs
+   * achievement for the caller's assigned outlets (the sales Outlets list page),
+   * replacing the FE `resolveConfig(DEMO_*)` fake params + `targetPct:0`
+   * back-computed numbers. Returns the KPI column set (KpiDef, primary-first) +
+   * a per-outlet map keyed by outletCode. Caller- + tenant-scoped.
+   */
+  async getOutletTargets(user: JwtPayload, period?: string) {
+    const su = await this.prisma.salesUser.findFirst({
+      where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true },
+    });
+    if (!su) return { period: null, kpiColumns: [], rows: [] };
+
+    const assignments = await this.prisma.salesUserAssignment.findMany({
+      where: { salesUserId: su.id, unassignedAt: null, outletId: { not: null } },
+      select: { outlet: { select: { outletCode: true } } },
+    });
+    const outletCodes = [...new Set(
+      assignments.map((a) => a.outlet?.outletCode).filter((c): c is string => !!c),
+    )];
+    if (outletCodes.length === 0) return { period: null, kpiColumns: [], rows: [] };
+
+    let month: string | null = period ?? null;
+    if (!month) {
+      const latest = await this.prisma.outletTarget.findFirst({
+        where: { clientId: user.clientId, outletCode: { in: outletCodes } },
+        orderBy: { month: 'desc' },
+        select: { month: true },
+      });
+      month = latest?.month ?? null;
+    }
+    if (!month) return { period: null, kpiColumns: [], rows: [] };
+
+    const whereBase = { clientId: user.clientId, outletCode: { in: outletCodes }, month };
+    const [targetRows, achRows, kpiRows] = await Promise.all([
+      this.prisma.outletTarget.findMany({ where: whereBase, select: { outletCode: true, targetValues: true } }),
+      this.prisma.outletSalesRecord.findMany({ where: whereBase, select: { outletCode: true, kpiValues: true } }),
+      this.prisma.kpiDef.findMany({
+        where: { clientId: user.clientId },
+        select: { code: true, label: true, unit: true, isPrimary: true },
+      }),
+    ]);
+
+    const tIdx = new Map(targetRows.map((r) => [r.outletCode, (r.targetValues ?? {}) as Record<string, number>]));
+    const aIdx = new Map(achRows.map((r) => [r.outletCode, (r.kpiValues ?? {}) as Record<string, number>]));
+
+    const kpiColumns = kpiRows
+      .map((k) => ({ code: k.code, name: k.label, unit: k.unit, isPrimary: k.isPrimary }))
+      .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || a.name.localeCompare(b.name));
+
+    const rows = outletCodes.map((code) => {
+      const tv = tIdx.get(code) ?? {};
+      const kv = aIdx.get(code) ?? {};
+      const kpis: Record<string, { target: number | null; achieved: number | null; pace: number | null }> = {};
+      for (const c of new Set([...kpiCodeKeys(tv), ...kpiCodeKeys(kv)])) {
+        const target = Object.prototype.hasOwnProperty.call(tv, c) ? (Number(tv[c]) || 0) : null;
+        const achieved = Object.prototype.hasOwnProperty.call(kv, c) ? (Number(kv[c]) || 0) : null;
+        const pace = target !== null && target !== 0 && achieved !== null ? achieved / target : null;
+        kpis[c] = { target, achieved, pace };
+      }
+      return { outletCode: code, kpis };
+    });
+
+    return { period: month, kpiColumns, rows };
+  }
+
   /** Last-6-months target vs achieved totals for one KPI code (chart series). */
   private async buildTargetTrend(
     clientId: string, outletCodes: string[], latestMonth: string, kpiCode: string,

@@ -44,6 +44,13 @@ export class SalesController {
     return this.sales.getTargets(user, period);
   }
 
+  // Real per-outlet × per-KPI target vs achievement (the Outlets list page).
+  @Get('outlet-targets')
+  @RequirePermission('targets:read')
+  getOutletTargets(@CurrentUser() user: JwtPayload, @Query('period') period?: string) {
+    return this.sales.getOutletTargets(user, period);
+  }
+
   @Get('team/:memberId')
   @RequirePermission('sales_org:read')
   getMember(@CurrentUser() user: JwtPayload, @Param('memberId') memberId: string) {

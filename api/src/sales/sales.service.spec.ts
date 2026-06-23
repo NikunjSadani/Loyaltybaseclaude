@@ -343,6 +343,59 @@ describe('SalesService', () => {
       expect(res.trend[5].month).toBe('2026-05');
     });
   });
+
+  // ─── getOutletTargets (real PER-OUTLET KPIs for the Outlets list page) ─────────
+  describe('getOutletTargets', () => {
+    it('returns empty when not a sales user', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      const res = await service.getOutletTargets(caller);
+      expect(res).toEqual({ period: null, kpiColumns: [], rows: [] });
+    });
+
+    it('returns per-outlet KPI columns (primary first) + per-outlet target/achieved/pace', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { outlet: { outletCode: 'O1' } }, { outlet: { outletCode: 'O2' } },
+      ]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', targetValues: { CONSISTENCY: 500, FOCUS: 100 } },
+        { outletCode: 'O2', targetValues: { CONSISTENCY: 400 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', kpiValues: { CONSISTENCY: 250, FOCUS: 0 } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'FOCUS', label: 'Focus Pack', unit: 'units', isPrimary: false },
+        { code: 'CONSISTENCY', label: 'Consistency', unit: 'Litre', isPrimary: true },
+      ]);
+
+      const res = await service.getOutletTargets(caller, '2026-05');
+      expect(res.period).toBe('2026-05');
+      // primary KPI column first
+      expect(res.kpiColumns.map((c: { code: string }) => c.code)).toEqual(['CONSISTENCY', 'FOCUS']);
+
+      const o1 = res.rows.find((r: { outletCode: string }) => r.outletCode === 'O1')!;
+      expect(o1.kpis.CONSISTENCY).toEqual({ target: 500, achieved: 250, pace: 0.5 });
+      expect(o1.kpis.FOCUS).toEqual({ target: 100, achieved: 0, pace: 0 });
+
+      const o2 = res.rows.find((r: { outletCode: string }) => r.outletCode === 'O2')!;
+      // O2 has a target but NO achievement row → achieved null, pace null
+      expect(o2.kpis.CONSISTENCY).toEqual({ target: 400, achieved: null, pace: null });
+    });
+
+    it('tenant- + caller-scopes the target/achievement reads to the rep clientId + outlet codes', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outlet: { outletCode: 'O1' } }]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+
+      await service.getOutletTargets(caller, '2026-05');
+      expect(mockPrisma.outletTarget.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { clientId: 'deoleo', outletCode: { in: ['O1'] }, month: '2026-05' } }),
+      );
+    });
+  });
 });
 
 // Direct coverage of the ported pure access helper (cross-tenant IDOR fix).
