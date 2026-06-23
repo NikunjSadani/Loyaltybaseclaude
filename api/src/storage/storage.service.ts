@@ -21,8 +21,16 @@ export class StorageService {
   private readonly defaultExpirySec = 3600;
 
   constructor(private readonly config: ConfigService) {
-    this.storage = new Storage({ projectId: this.config.get<string>('GCP_PROJECT_ID') });
-    this.bucket = this.config.get<string>('GCS_BUCKET') ?? 'gifsy-platform-files';
+    // Secret Manager values can arrive with a leading UTF-8 BOM (U+FEFF) and/or
+    // trailing CR/LF — a Windows Out-File/echo artifact (same class as the MSG91
+    // key BOM fixed at cutover). GCS rejects such values outright
+    // ("Invalid bucket name: '<BOM>gifsy-platform-files'"), turning every KYC
+    // document/photo upload into a bare 500. Strip a leading BOM and surrounding
+    // whitespace/newlines so a dirty secret can never break uploads again.
+    const clean = (v?: string): string | undefined =>
+      v?.replace(/^\uFEFF/, '').trim() || undefined;
+    this.storage = new Storage({ projectId: clean(this.config.get<string>('GCP_PROJECT_ID')) });
+    this.bucket = clean(this.config.get<string>('GCS_BUCKET')) ?? 'gifsy-platform-files';
   }
 
   /**
