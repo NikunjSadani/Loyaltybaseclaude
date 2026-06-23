@@ -60,6 +60,20 @@ describe('TenantSettingsService', () => {
     expect(await svc.getConversionRate('deoleo')).toBe(1);
   });
 
+  it('rejects a conversionRate too small for the centi snapshot (< 0.005), keeps default', async () => {
+    process.env.POINTS_CONVERSION_RATE = '1';
+    // 0.001 would round to conversionRateCenti=0 and defeat the rate-freeze → rejected.
+    const tooSmall = new TenantSettingsService(makePrisma([
+      { settingKey: 'conversionRate', settingValue: 0.001 },
+    ]));
+    expect(await tooSmall.getConversionRate('deoleo')).toBe(1);
+    // 0.005 is the smallest representable rate (centi=1) and IS accepted.
+    const ok = new TenantSettingsService(makePrisma([
+      { settingKey: 'conversionRate', settingValue: 0.005 },
+    ]));
+    expect(await ok.getConversionRate('deoleo')).toBe(0.005);
+  });
+
   it('DEEP-MERGES a partial nested override, keeping sibling defaults', async () => {
     const svc = new TenantSettingsService(makePrisma([
       { settingKey: 'redemptionChannels', settingValue: { bankTransfer: false } },
@@ -77,10 +91,11 @@ describe('TenantSettingsService', () => {
   it('coerces a numeric string and filters non-string notifyEmails', async () => {
     const svc = new TenantSettingsService(makePrisma([
       { settingKey: 'minVoucherFreeAmount', settingValue: '300' },
-      { settingKey: 'creditsPayouts', settingValue: { notifyEmails: ['a@b.com', 5, null, 'c@d.com'] } },
+      { settingKey: 'creditsPayouts', settingValue: { notifyEmails: ['a@b.com', 5, null, '', '   ', 'c@d.com'] } },
     ]));
     const s = await svc.getEffectiveSettings('deoleo');
     expect(s.minVoucherFreeAmount).toBe(300);
+    // non-strings AND empty/whitespace strings are dropped (so a `[""]` can't swallow notifications)
     expect(s.creditsPayouts.notifyEmails).toEqual(['a@b.com', 'c@d.com']);
   });
 

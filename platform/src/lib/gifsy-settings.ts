@@ -80,20 +80,24 @@ function writeCache(s: GifsySettings): void {
   listeners.forEach((l) => l());
 }
 
-/** Map the server EffectiveSettings onto the FE GifsySettings shape. */
+/**
+ * Map the server EffectiveSettings onto the FE GifsySettings shape. Every field falls back
+ * to the prior cached value when a (partial/legacy) response omits it, so a refresh can never
+ * STOMP a known field to undefined (which would e.g. silently hide the sales visibility action
+ * or partner reward tabs). `??` (not `||`) so a legitimate 0/false is preserved.
+ */
 function fromServer(srv: ServerSettings, prev: GifsySettings): GifsySettings {
   return {
-    pointsConversionRate:   srv.conversionRate,
-    minBankTransferAmount:  srv.minBankTransferAmount,
-    minVoucherFreeAmount:   srv.minVoucherFreeAmount,
-    paceAmberThreshold:     srv.paceAmberThreshold,
-    visibilityPhotoEnabled: srv.visibilityPhotoEnabled,
-    // /me + /settings both carry it; keep prior value if a (legacy) response omits it.
-    visibilityCaptureMode:  srv.visibilityCaptureMode ?? prev.visibilityCaptureMode ?? 'PHOTO_APPROVAL',
-    redemptionChannels:     srv.redemptionChannels,
-    salesApp:               srv.salesApp,
+    pointsConversionRate:   srv.conversionRate         ?? prev.pointsConversionRate,
+    minBankTransferAmount:  srv.minBankTransferAmount  ?? prev.minBankTransferAmount,
+    minVoucherFreeAmount:   srv.minVoucherFreeAmount   ?? prev.minVoucherFreeAmount,
+    paceAmberThreshold:     srv.paceAmberThreshold     ?? prev.paceAmberThreshold,
+    visibilityPhotoEnabled: srv.visibilityPhotoEnabled ?? prev.visibilityPhotoEnabled,
+    visibilityCaptureMode:  srv.visibilityCaptureMode  ?? prev.visibilityCaptureMode ?? 'PHOTO_APPROVAL',
+    redemptionChannels:     srv.redemptionChannels     ?? prev.redemptionChannels,
+    salesApp:               srv.salesApp               ?? prev.salesApp,
     // /me omits creditsPayouts (operator-only) — keep the previous/cached value then.
-    creditsPayouts:         srv.creditsPayouts ?? prev.creditsPayouts,
+    creditsPayouts:         srv.creditsPayouts         ?? prev.creditsPayouts,
   };
 }
 

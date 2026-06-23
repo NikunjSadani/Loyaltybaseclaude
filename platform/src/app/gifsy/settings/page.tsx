@@ -46,7 +46,9 @@ export default function GifsySettingsPage() {
       </div>
 
       <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3 text-xs text-amber-300">
-        <strong>Dev mode:</strong> Settings are in-memory only. DB persistence applies in Phase 2.
+        <strong>Note:</strong> The minimum bank-transfer and voucher amounts below save to the
+        server per tenant and are enforced at redemption. The other sections on this page are
+        display-only placeholders and are not yet wired.
       </div>
 
       {/* Platform identity */}

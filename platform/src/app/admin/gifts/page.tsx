@@ -1531,7 +1531,11 @@ function GifsySettingsPanel() {
 
   const flash = (ok: boolean) => {
     if (ok) { setError(null); setSaved(true); setTimeout(() => setSaved(false), 2000); }
-    else setError('Could not save — please retry.');
+    else {
+      setError('Could not save — please retry.');
+      // Revert the optimistic change so the UI never shows an unsaved (e.g. 403'd) edit.
+      setSettings(getGifsySettings());
+    }
   };
 
   const applyAndSave = (updater: (s: GifsySettings) => GifsySettings) => {

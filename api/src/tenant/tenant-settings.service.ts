@@ -98,9 +98,18 @@ export class TenantSettingsService {
    * (which validates POINTS_CONVERSION_RATE is finite/positive) stays meaningful and the
    * per-tenant default never diverges from the deploy-wide default.
    */
+  /**
+   * Smallest conversion rate the centi-rate snapshot (Math.round(rate*100)) can represent
+   * without collapsing to 0. A rate below this rounds to conversionRateCenti=0, which the
+   * confirm path can't distinguish from a pre-migration null — so such a rate is rejected at
+   * the validation boundary and the env/per-tenant default is kept instead. Guarantees the
+   * order snapshot is always >= 1 and the rate-freeze invariant always holds.
+   */
+  static readonly MIN_RATE = 0.005; // Math.round(0.005 * 100) === 1
+
   static envConversionRate(): number {
     const raw = parseFloat(process.env.POINTS_CONVERSION_RATE ?? '1');
-    return Number.isFinite(raw) && raw > 0 ? raw : 1;
+    return Number.isFinite(raw) && raw >= TenantSettingsService.MIN_RATE ? raw : 1;
   }
 
   /** Typed defaults. Mirrors the prior localStorage DEFAULT_SETTINGS so no behaviour shifts. */
@@ -178,7 +187,9 @@ export class TenantSettingsService {
       switch (key) {
         case 'conversionRate': {
           const n = this.num(v);
-          if (n != null && n > 0) out.conversionRate = n;
+          // Reject <= 0 (div-by-zero) AND rates too small for the centi snapshot (< 0.005),
+          // which would defeat the rate-freeze; keep the default in both cases.
+          if (n != null && n >= TenantSettingsService.MIN_RATE) out.conversionRate = n;
           break;
         }
         case 'minBankTransferAmount': {
@@ -230,8 +241,11 @@ export class TenantSettingsService {
               safetyCapInr:    this.numOr(v.safetyCapInr,    d.safetyCapInr),
               fourEyesEnabled: this.bool(v.fourEyesEnabled,  d.fourEyesEnabled),
               notifyEmails:    Array.isArray(v.notifyEmails)
-                ? v.notifyEmails.filter((e): e is string => typeof e === 'string')
-                : d.notifyEmails,
+                // Drop empties/whitespace so a `[""]` can't silently swallow the batch-confirm
+                // notification (it would skip the ops@ fallback yet send to nobody).
+                ? v.notifyEmails.filter((e): e is string => typeof e === 'string' && e.trim().length > 0)
+                // Copy the default array — never share the reference held by the cached entry.
+                : [...d.notifyEmails],
             };
           }
           break;
