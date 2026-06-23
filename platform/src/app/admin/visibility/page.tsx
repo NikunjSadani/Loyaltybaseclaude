@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { generateVisibilityTemplate } from '@/lib/visibility-upload';
 import { getGifsySettings } from '@/lib/gifsy-settings';
+import { fetchVisibilityCaptureMode, type VisibilityCaptureMode } from '@/lib/visibility-capture-mode';
 import { Spinner } from '@/components/ui/spinner';
 
 type VisTab = 'queue' | 'fraud' | 'upload';
@@ -173,9 +174,19 @@ interface VisibilityRecord {
 }
 
 export default function VisibilityPage() {
-  // When visibilityPhotoEnabled=false the tenant captures photos via their own
-  // portal — the Approval Queue and Fraud Log are not applicable.
-  const photoApprovalEnabled = getGifsySettings().visibilityPhotoEnabled;
+  // Photo-approval workflow precedence: the authoritative DB flag (visibilityCaptureMode,
+  // enforced by the backend visibility.service) wins. The display-only visibilityPhotoEnabled
+  // is ANDed in so the FE never shows the Approval Queue / Fraud Log when the backend is in
+  // AMOUNT_UPLOAD mode (which rejects photo uploads). Capture mode is fetched async; until it
+  // resolves we fall back to PHOTO_APPROVAL (matching the lib default) so the initial paint
+  // doesn't hide the queue from a tenant that actually uses it.
+  const visibilityPhotoEnabled = getGifsySettings().visibilityPhotoEnabled;
+  const [captureMode, setCaptureMode] = useState<VisibilityCaptureMode>('PHOTO_APPROVAL');
+  const photoApprovalEnabled = captureMode === 'PHOTO_APPROVAL' && visibilityPhotoEnabled;
+
+  useEffect(() => {
+    fetchVisibilityCaptureMode().then(setCaptureMode);
+  }, []);
 
   const [queueItems, setQueueItems] = useState<VisibilityItem[]>([]);
   const [queueLoading, setQueueLoading] = useState(true);
@@ -196,6 +207,11 @@ export default function VisibilityPage() {
   }, []);
 
   const [tab, setTab] = useState<VisTab>(photoApprovalEnabled ? 'queue' : 'upload');
+  // If the capture mode resolves to AMOUNT_UPLOAD after mount, the queue/fraud tabs are hidden —
+  // fall back to the only remaining tab (upload) so the active tab is never a hidden one.
+  useEffect(() => {
+    if (!photoApprovalEnabled && (tab === 'queue' || tab === 'fraud')) setTab('upload');
+  }, [photoApprovalEnabled, tab]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [approved, setApproved] = useState<Set<string>>(new Set());
   const [rejected, setRejected] = useState<Set<string>>(new Set());

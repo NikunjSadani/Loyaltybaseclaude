@@ -22,6 +22,18 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import GifsySettingsPage from '../page';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 
+// Settings now persist to the SERVER (PUT /v1/admin/settings via the api client) instead of
+// localStorage. Mock the api client: PUT succeeds (so the local cache updates), GET no-ops
+// (so the background refresh doesn't clobber the just-saved value).
+vi.mock('@/lib/api-client', () => ({
+  authHeader: () => ({}),
+  api: {
+    get: vi.fn().mockResolvedValue({ success: false, error: 'no server in test' }),
+    put: vi.fn().mockResolvedValue({ success: true, data: {} }),
+    post: vi.fn().mockResolvedValue({ success: true, data: {} }),
+  },
+}));
+
 describe('U — Redemption Threshold Settings', () => {
   beforeEach(() => {
     localStorage.clear();

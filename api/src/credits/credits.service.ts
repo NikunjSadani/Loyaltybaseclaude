@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { WalletService } from '../wallet/wallet.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { paiseToRupees, formatINR, toPaiseBigInt } from '../common/money';
 import {
@@ -49,7 +50,75 @@ export class CreditsService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly walletService: WalletService,
+    private readonly tenantSettings: TenantSettingsService,
   ) {}
+
+  // ─── Settings-enforcement helpers (Stream MONEY-CREDITS) ──────────────────
+  // The credit/payout safety caps and the month-cutoff window were previously
+  // FRONTEND-ONLY (platform/src/app/admin/credits-payouts/upload/page.tsx +
+  // credits-payouts-parser.ts). They are bypassable via a direct API call, so we
+  // now MIRROR them server-side from the per-tenant TenantSettingsService.
+
+  /** Current month as `YYYY-MM` on the server clock — matches the FE's `getPreviousMonth`
+   *  baseline and the existing `targets.helpers.currentMonthKey` (both server-clock, no IST
+   *  conversion; the FE's `isUploadWindowOpen` likewise reads a plain `new Date()`). */
+  private currentPeriodKey(now: Date = new Date()): string {
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  }
+
+  /**
+   * Mirror of the FE `isUploadWindowOpen(cutoffDay)` =
+   * `new Date().getDate() <= cutoffDay`. A batch for a PRIOR month (period strictly
+   * before the current month, `YYYY-MM` string compare) may only be created/confirmed
+   * while today's day-of-month is on/before `monthCutoffDay`. Current/future-month
+   * batches are unaffected (the FE only ever uploads the previous month, so the prior-
+   * month case is the one the window guards).
+   */
+  private assertWithinUploadWindow(period: string, monthCutoffDay: number): void {
+    const now = new Date();
+    const current = this.currentPeriodKey(now);
+    // Only PRIOR-month batches are gated. Same string-compare as targets isMonthLocked.
+    if (period < current && now.getDate() > monthCutoffDay) {
+      throw new BadRequestException(
+        `The upload window for prior-month period ${period} closed on day ${monthCutoffDay} ` +
+          `of the current month (today is day ${now.getDate()}). Batches for past months ` +
+          `can no longer be created or confirmed.`,
+      );
+    }
+  }
+
+  /**
+   * Mirror of the FE safety-cap rule (credits-payouts-parser.ts ~L219): a POINTS-award
+   * row's whole-points value may not exceed `safetyCapPoints`; a PAYOUT-award row's
+   * rupee value (row.amount is integer PAISE → ÷100 rupees) may not exceed `safetyCapInr`.
+   * Only OK rows are checked (ERROR/SKIP rows carry no live award). Rejects naming the
+   * offending outlet/field so the admin can locate the row.
+   */
+  private assertWithinSafetyCaps(
+    rows: { outletId: string; outletName?: string; fieldName?: string; amount: number; awardType: string; status: string }[],
+    safetyCapPoints: number,
+    safetyCapInr: number,
+  ): void {
+    for (const r of rows) {
+      if (r.status !== 'OK') continue;
+      const who = `${r.outletName ?? r.outletId} (${r.outletId})${r.fieldName ? ` / field "${r.fieldName}"` : ''}`;
+      if (r.awardType === 'POINTS') {
+        if (r.amount > safetyCapPoints) {
+          throw new BadRequestException(
+            `Row for ${who} awards ${r.amount} points, exceeding the safety cap of ${safetyCapPoints} points.`,
+          );
+        }
+      } else if (r.awardType === 'PAYOUT') {
+        // row.amount is integer paise; the cap is in rupees.
+        const rupees = r.amount / 100;
+        if (rupees > safetyCapInr) {
+          throw new BadRequestException(
+            `Row for ${who} awards ₹${rupees.toFixed(2)}, exceeding the safety cap of ₹${safetyCapInr}.`,
+          );
+        }
+      }
+    }
+  }
 
   // ─── Code generators ───────────────────────────────────────────────────────
 
@@ -101,6 +170,18 @@ export class CreditsService {
 
   // ─── POST /v1/admin/credits/batches ────────────────────────────────────────
   async createBatch(user: JwtPayload, dto: CreateBatchDto) {
+    // Load per-tenant settings and ENFORCE the safety caps + month-cutoff window
+    // server-side (these were FE-only and bypassable via direct API).
+    const { creditsPayouts } = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    // NOTE: creditsPayouts.fourEyesEnabled is intentionally NOT enforced here — the
+    // maker-checker approval workflow is DEFERRED to post-go-live (no UI toggle exists yet).
+    this.assertWithinUploadWindow(dto.period, creditsPayouts.monthCutoffDay);
+    this.assertWithinSafetyCaps(
+      dto.rows,
+      creditsPayouts.safetyCapPoints,
+      creditsPayouts.safetyCapInr,
+    );
+
     const batchCode = await this.generateBatchCode(user.clientId, dto.period);
 
     const batch = await this.prisma.creditBatch.create({
@@ -143,6 +224,12 @@ export class CreditsService {
     if (batch.status !== 'PENDING_CONFIRM') {
       throw new BadRequestException(`Batch is already ${batch.status}`);
     }
+
+    // Enforce the month-cutoff window on confirm too (a PENDING batch created before
+    // the cutoff must not be confirmed after it has closed). fourEyesEnabled is
+    // intentionally NOT enforced (deferred to post-go-live — see createBatch note).
+    const { creditsPayouts } = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    this.assertWithinUploadWindow(batch.period, creditsPayouts.monthCutoffDay);
 
     // Parse rows from JSON.
     const rows = batch.rows as unknown as {
@@ -259,27 +346,35 @@ export class CreditsService {
       return confirmed;
     });
 
-    // Notify Gifsy team (fire-and-forget; don't block confirm on failure).
+    // Notify the team (fire-and-forget; don't block confirm on failure).
+    // Recipients come from the tenant's creditsPayouts.notifyEmails; if that list is
+    // empty we KEEP the legacy ops@gifsy.in fallback so notifications never silently stop.
     // totalPayoutPaise is a BigInt from Prisma — convert to rupees for the human-readable email.
-    await this.notify({
-      userId: batch.uploadedBy,
-      channel: 'EMAIL',
-      recipientEmail: 'ops@gifsy.in',
-      subject: `[Gifsy] New Batch Confirmed — ${user.clientId} — ${batch.period}`,
-      body: `New batch ${id} confirmed for ${user.clientId} (period ${batch.period}).`,
-      variables: {
-        event: 'CREDITS_NEW_BATCH_CONFIRMED',
-        tenantName: user.clientId,
-        batchId: id,
-        period: batch.period,
-        totalOutlets: Number(batch.totalOutlets),
-        totalPoints: Number(batch.totalPoints),
-        // Express as rupees for the Gifsy team email — humans read ₹, not paise.
-        totalPayoutRupees: paiseToRupees(batch.totalPayoutPaise ?? 0n),
-        uploadedBy: batch.uploadedBy,
-        recipientEmails: ['ops@gifsy.in'],
-      },
-    });
+    const recipientEmails =
+      creditsPayouts.notifyEmails.length > 0
+        ? creditsPayouts.notifyEmails
+        : ['ops@gifsy.in'];
+    for (const recipientEmail of recipientEmails) {
+      await this.notify({
+        userId: batch.uploadedBy,
+        channel: 'EMAIL',
+        recipientEmail,
+        subject: `[Gifsy] New Batch Confirmed — ${user.clientId} — ${batch.period}`,
+        body: `New batch ${id} confirmed for ${user.clientId} (period ${batch.period}).`,
+        variables: {
+          event: 'CREDITS_NEW_BATCH_CONFIRMED',
+          tenantName: user.clientId,
+          batchId: id,
+          period: batch.period,
+          totalOutlets: Number(batch.totalOutlets),
+          totalPoints: Number(batch.totalPoints),
+          // Express as rupees for the team email — humans read ₹, not paise.
+          totalPayoutRupees: paiseToRupees(batch.totalPayoutPaise ?? 0n),
+          uploadedBy: batch.uploadedBy,
+          recipientEmails,
+        },
+      });
+    }
 
     return {
       batch: updated,

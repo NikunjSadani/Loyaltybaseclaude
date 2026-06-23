@@ -1201,6 +1201,10 @@ model RedemptionOrder {
   // INR value of the benefit (paise), frozen at redemption from the points↔₹ converter
   // (pointsDeducted ÷ conversionRate). Used as the 194R TDS base. See P6.5-TDS-SPEC.
   valuePaise           BigInt?
+  // Points↔₹ conversion rate ×100 (centi-rate), SNAPSHOT at redeem time so the
+  // confirm-time valuePaise/TDS math is deterministic even if a tenant later edits
+  // the per-tenant rate. Nullable: pre-migration orders fall back to the live rate.
+  conversionRateCenti  Int?
   redemptionMode       PayoutMode
   deliveryName         String?
   deliveryPhone        String?

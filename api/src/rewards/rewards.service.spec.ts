@@ -16,6 +16,7 @@ import { plainToInstance } from 'class-transformer';
 import { RewardsService } from './rewards.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -66,6 +67,25 @@ const mockMsg91 = {
   sendOtp: jest.fn().mockResolvedValue(undefined),
 };
 
+// Per-tenant settings. Defaults are LENIENT (rate 1, no min-floor, all channels on) so the
+// legacy redeem/confirm tests are unaffected; the dedicated "settings enforcement" block
+// mutates these per case. Reset in beforeEach.
+const LENIENT_SETTINGS = () => ({
+  conversionRate: 1,
+  minBankTransferAmount: 0,
+  minVoucherFreeAmount: 0,
+  paceAmberThreshold: 10,
+  visibilityPhotoEnabled: false,
+  redemptionChannels: { physicalGifts: true, vouchers: true, bankTransfer: true },
+  salesApp: { ledgerLabel: 'Wallet', redeemGiftWholesalerOnly: true },
+  creditsPayouts: { monthCutoffDay: 28, safetyCapPoints: 50000, safetyCapInr: 100000, fourEyesEnabled: false, notifyEmails: [] },
+});
+let mockSettings = LENIENT_SETTINGS();
+const mockTenantSettings = {
+  getEffectiveSettings: jest.fn(async () => mockSettings),
+  getConversionRate: jest.fn(async () => mockSettings.conversionRate),
+};
+
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '9990001111', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '9991112222', name: '' };
 const sales: JwtPayload = { sub: 'salesUser1', role: 'SALES_SO', clientId: 'deoleo', phone: '9993334444', name: '' };
@@ -80,11 +100,13 @@ describe('RewardsService', () => {
         RewardsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: WalletService, useValue: mockWallet },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: Msg91Service, useValue: mockMsg91 },
       ],
     }).compile();
     service = module.get(RewardsService);
+    mockSettings = LENIENT_SETTINGS();
     // Default: atomic claims (PENDING→CONFIRMED, refund pointsDeducted>0→0, stock
     // decrement) win. Individual tests override to simulate a lost race.
     mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
@@ -274,6 +296,45 @@ describe('RewardsService', () => {
       await expect(service.redeem(partner, { rewardId: 'r1', amount: 50 }))
         .rejects.toBeInstanceOf(BadRequestException);
       expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+
+    // ── Global settings enforcement (channels + cash/voucher floor + rate snapshot) ──
+    it('rejects redeem on a DISABLED redemption channel (server-side) before any order', async () => {
+      mockSettings.redemptionChannels = { physicalGifts: true, vouchers: true, bankTransfer: false };
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        ...fixedItem, redemptionMode: 'BANK_TRANSFER', pointsCost: 0,
+        minRedemptionPoints: 1, maxRedemptionPoints: 1_000_000,
+      });
+      await expect(service.redeem(partner, { rewardId: 'r1', amount: 500 }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+
+    it('enforces the GLOBAL voucher floor even when within the per-item [min,max]', async () => {
+      mockSettings.minVoucherFreeAmount = 250; // ₹250 floor, rate 1 → 250 points
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        ...fixedItem, redemptionMode: 'GIFT_CARD', pointsCost: 0,
+        minRedemptionPoints: 1, maxRedemptionPoints: 1_000_000, // item range allows it
+      });
+      // amount 100 → 100 points: passes the per-item min(1) but below the global floor(250).
+      await expect(service.redeem(partner, { rewardId: 'r1', amount: 100 }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+    });
+
+    it('snapshots the conversion rate (centi) on the order at redeem time', async () => {
+      mockSettings.conversionRate = 2; // centi 200
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o1', orderNumber: 'RDM-x' });
+      mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+
+      await service.redeem(partner, { rewardId: 'r1', quantity: 1 });
+
+      const created = mockPrisma.redemptionOrder.create.mock.calls?.[0]?.[0];
+      expect(created.data.conversionRateCenti).toBe(200);
     });
 
     it('happy path: creates a PENDING order, clears prior OTPs, stores a new OTP', async () => {
@@ -1687,24 +1748,10 @@ describe('RewardsService', () => {
       expect(claimData.valuePaise).toBe(50000n);
     });
 
-    it('valuePaise = 0 when conversionRate env is 0 (guard against division-by-zero)', async () => {
-      // Override POINTS_CONVERSION_RATE to 0
-      const original = process.env.POINTS_CONVERSION_RATE;
-      process.env.POINTS_CONVERSION_RATE = '0';
-
-      // Re-instantiate the service so it picks up the new env
-      const module2: TestingModule = await Test.createTestingModule({
-        providers: [
-          (await import('./rewards.service')).RewardsService,
-          { provide: PrismaService, useValue: mockPrisma },
-          { provide: (await import('../wallet/wallet.service')).WalletService, useValue: mockWallet },
-          { provide: (await import('../notifications/notifications.service')).NotificationsService, useValue: mockNotifications },
-          { provide: (await import('../notifications/msg91.service')).Msg91Service, useValue: mockMsg91 },
-        ],
-      }).compile();
-      const svc0 = module2.get((await import('./rewards.service')).RewardsService);
-
-      jest.clearAllMocks();
+    it('valuePaise = 0 when the tenant conversionRate is 0 (guard against division-by-zero)', async () => {
+      // Rate now comes from TenantSettingsService, not env. baseOrder has no per-order
+      // snapshot (conversionRateCenti), so confirm falls back to the live tenant rate (0).
+      mockSettings.conversionRate = 0;
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(baseOrder);
       mockPrisma.otpCode.findFirst.mockResolvedValue({
         id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
@@ -1716,16 +1763,37 @@ describe('RewardsService', () => {
       mockPrisma.redemptionOrder.update.mockResolvedValue({});
       mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
 
-      await svc0.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+      await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
 
       const claimCall = mockPrisma.redemptionOrder.updateMany.mock.calls.find(
         (c: unknown[]) => (c[0] as { where?: { status?: string } }).where?.status === 'PENDING',
       );
       const claimData = (claimCall![0] as { data: { valuePaise?: bigint } }).data;
       expect(claimData.valuePaise).toBe(0n);
+    });
 
-      if (original === undefined) delete process.env.POINTS_CONVERSION_RATE;
-      else process.env.POINTS_CONVERSION_RATE = original;
+    it('FREEZE: confirm values the order at the SNAPSHOT rate, not the live rate', async () => {
+      // Order snapshotted at rate 2 (centi 200); admin since changed the live rate to 5.
+      // valuePaise must use the snapshot: 500 points × 100 / 200 = 25000 paise (₹250).
+      mockSettings.conversionRate = 5;
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ ...baseOrder, conversionRateCenti: 200 });
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60_000), verifiedAt: null,
+      });
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockWallet.debitRedeem.mockResolvedValue({});
+      mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({});
+      mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
+
+      await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' });
+
+      const claimCall = mockPrisma.redemptionOrder.updateMany.mock.calls.find(
+        (c: unknown[]) => (c[0] as { where?: { status?: string } }).where?.status === 'PENDING',
+      );
+      const claimData = (claimCall![0] as { data: { valuePaise?: bigint } }).data;
+      expect(claimData.valuePaise).toBe(25000n);
     });
   });
 
@@ -1869,21 +1937,8 @@ describe('RewardsService', () => {
       // (POINTS_CONVERSION_RATE=0 → valuePaise=0n → BadRequest before debit/payout).
       // The old "fallback to 0n" behavior was superseded — the zero-value fallback
       // only applies to non-cash modes (where no PayoutTransaction is created).
-      const original = process.env.POINTS_CONVERSION_RATE;
-      process.env.POINTS_CONVERSION_RATE = '0';
-
-      const module2 = await Test.createTestingModule({
-        providers: [
-          (await import('./rewards.service')).RewardsService,
-          { provide: PrismaService, useValue: mockPrisma },
-          { provide: (await import('../wallet/wallet.service')).WalletService, useValue: mockWallet },
-          { provide: (await import('../notifications/notifications.service')).NotificationsService, useValue: mockNotifications },
-          { provide: (await import('../notifications/msg91.service')).Msg91Service, useValue: mockMsg91 },
-        ],
-      }).compile();
-      const svc0 = module2.get((await import('./rewards.service')).RewardsService);
-
-      jest.clearAllMocks();
+      // Rate now comes from TenantSettingsService. upiOrder has no snapshot → live rate 0.
+      mockSettings.conversionRate = 0;
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(upiOrder);
       mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
       mockPrisma.otpCode.update.mockResolvedValue({});
@@ -1894,14 +1949,11 @@ describe('RewardsService', () => {
       mockPrisma.payoutTransaction.create.mockResolvedValue({ id: 'pt-warn' });
 
       // GLB-2 fires inside the tx: valuePaise=0n for UPI → BadRequest, tx rolls back.
-      await expect(svc0.confirmRedeem(partner, { orderId: 'o-upi', otp: '123456' }))
+      await expect(service.confirmRedeem(partner, { orderId: 'o-upi', otp: '123456' }))
         .rejects.toBeInstanceOf(BadRequestException);
       // No PayoutTransaction created (tx rolled back before the payout create).
       expect(mockPrisma.payoutTransaction.create).not.toHaveBeenCalled();
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
-
-      if (original === undefined) delete process.env.POINTS_CONVERSION_RATE;
-      else process.env.POINTS_CONVERSION_RATE = original;
     });
 
     it('uses ownerName as beneficiaryName when bankAccountHolder is null', async () => {

@@ -13,6 +13,7 @@ import {
 import { AdminCoreService } from './admin-core.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockTx = {
@@ -42,6 +43,7 @@ const mockPrisma = {
 };
 
 const mockTenant = { resolveClient: jest.fn(), upsertClientConfig: jest.fn() };
+const mockTenantSettings = { invalidate: jest.fn() };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
@@ -57,6 +59,7 @@ describe('AdminCoreService', () => {
         AdminCoreService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TenantService, useValue: mockTenant },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
       ],
     }).compile();
     service = module.get(AdminCoreService);

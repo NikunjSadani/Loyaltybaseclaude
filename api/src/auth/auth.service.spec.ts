@@ -9,6 +9,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { Msg91Service } from '../notifications/msg91.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { TenantService } from '../tenant/tenant.service';
+
+// getMe surfaces the tenant visibility-capture mode; default PHOTO_APPROVAL for tests.
+const mockTenant = { resolveVisibilityCaptureMode: jest.fn(async () => 'PHOTO_APPROVAL') };
 
 // â”€â”€â”€ Mocks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -18,6 +23,8 @@ const mockPrisma = {
   userSession: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   client:  { findFirst: jest.fn() },
   auditLog: { create: jest.fn() },
+  // TenantSettingsService reads this (no rows -> typed defaults, conversionRate = env).
+  programSetting: { findMany: jest.fn().mockResolvedValue([]) },
 };
 
 const gifsyOp = { sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' } as any;
@@ -56,6 +63,10 @@ describe('AuthService', () => {
         // Real Msg91Service (A-2a): thin wrapper over the mocked ConfigService + global.fetch,
         // so the existing MSG91/fetch behaviour tests run unchanged through the delegate.
         Msg91Service,
+        // Real TenantSettingsService over the mocked Prisma (no rows -> typed defaults,
+        // so getMe's conversionRate still reflects POINTS_CONVERSION_RATE env in these tests).
+        TenantSettingsService,
+        { provide: TenantService, useValue: mockTenant },
       ],
     }).compile();
 

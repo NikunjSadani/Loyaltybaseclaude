@@ -8,8 +8,12 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { WalletService } from './wallet.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { AdjustType } from './dto/wallet.dto';
+
+// Plain object (NOT jest.fn) so the per-tenant rate survives jest.resetAllMocks() in beforeEach.
+const mockTenantSettings = { getConversionRate: async () => 1 };
 
 // The transaction client mock — every mutation composes through this inside $transaction.
 const mockTx = {
@@ -43,7 +47,11 @@ describe('WalletService', () => {
     // Expiry sweep claims each lot via a guarded updateMany; default = claim succeeds.
     mockTx.pointsLedger.updateMany.mockResolvedValue({ count: 1 });
     const module: TestingModule = await Test.createTestingModule({
-      providers: [WalletService, { provide: PrismaService, useValue: mockPrisma }],
+      providers: [
+        WalletService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
+      ],
     }).compile();
     service = module.get(WalletService);
   });

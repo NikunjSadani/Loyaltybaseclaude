@@ -1,0 +1,13 @@
+-- Snapshot the points↔₹ conversion rate (×100, centi-rate integer) on each redemption
+-- order at redeem time. Once the conversion rate becomes a per-tenant, admin-editable
+-- setting (replacing the per-deploy POINTS_CONVERSION_RATE env var), an admin could edit
+-- the rate BETWEEN a partner's redeem (which freezes points in totalPointsCost) and the
+-- OTP confirm (which computes valuePaise / the 194R TDS base from the live rate). That
+-- would debit points at one rate but value the payout/TDS at another. Freezing the rate
+-- here makes confirm deterministic: confirm reads order.conversionRateCenti, not the live
+-- setting.
+--
+-- Additive + nullable: existing PENDING orders created before this migration have NULL and
+-- the confirm path falls back to the live rate (today's behaviour), so no backfill is
+-- required and no in-flight order breaks.
+ALTER TABLE "redemption_orders" ADD COLUMN "conversionRateCenti" INTEGER;

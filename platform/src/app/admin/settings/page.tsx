@@ -38,9 +38,9 @@ interface TierConfig {
   upgradeThreshold: number
 }
 
-function SettingRow({ label, description, value, onChange, type = 'number', min, max, step }: {
+function SettingRow({ label, description, value, onChange, type = 'number', min, max, step, disabled = false }: {
   label: string, description: string, value: number | string, onChange: (v: string) => void,
-  type?: string, min?: number, max?: number, step?: number
+  type?: string, min?: number, max?: number, step?: number, disabled?: boolean
 }) {
   return (
     <div className="flex items-start justify-between gap-4 py-4 border-b border-gray-100 last:border-0">
@@ -49,8 +49,8 @@ function SettingRow({ label, description, value, onChange, type = 'number', min,
         <p className="text-xs text-gray-500 mt-0.5">{description}</p>
       </div>
       <input type={type} value={value} onChange={e => onChange(e.target.value)}
-        min={min} max={max} step={step}
-        className="w-28 text-sm border border-gray-200 rounded px-2 py-1.5 text-right focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]" />
+        min={min} max={max} step={step} disabled={disabled}
+        className="w-28 text-sm border border-gray-200 rounded px-2 py-1.5 text-right focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed" />
     </div>
   )
 }
@@ -79,11 +79,25 @@ export default function SettingsPage() {
   const [saved,  setSaved]  = useState(false)
 
   // ── Pace threshold (per-client, saved via GifsySettings) ──
+  // saveGifsySettings PUTs to /v1/admin/settings, which is GIFSY_ADMIN-only — so the field is
+  // editable/savable only for GIFSY_ADMIN. For CLIENT_ADMIN/MIS_USER it is read-only (the save
+  // would 403); we surface the current value but disable the input + save.
   const [paceThreshold,      setPaceThreshold]      = useState<number>(() => getGifsySettings().paceAmberThreshold ?? 10)
   const [paceThresholdSaved, setPaceThresholdSaved] = useState(false)
+  const [paceThresholdError, setPaceThresholdError] = useState<string | null>(null)
 
-  function savePaceThreshold() {
-    saveGifsySettings({ paceAmberThreshold: paceThreshold })
+  // Keep the displayed value in sync once server settings hydrate (/me → cache).
+  useEffect(() => {
+    setPaceThreshold(getGifsySettings().paceAmberThreshold ?? 10)
+  }, [])
+
+  async function savePaceThreshold() {
+    setPaceThresholdError(null)
+    const ok = await saveGifsySettings({ paceAmberThreshold: paceThreshold })
+    if (!ok) {
+      setPaceThresholdError('Could not save — pace threshold can only be changed by a Gifsy Admin.')
+      return
+    }
     setPaceThresholdSaved(true)
     setTimeout(() => setPaceThresholdSaved(false), 3000)
   }
@@ -322,16 +336,18 @@ export default function SettingsPage() {
                 This setting is per-client — different clients can have different thresholds.
               </CardDescription>
             </div>
-            <button
-              onClick={savePaceThreshold}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                paceThresholdSaved
-                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                  : 'bg-[var(--brand-primary)] text-white hover:bg-[var(--brand-primary-dark)]'
-              }`}
-            >
-              {paceThresholdSaved ? '✓ Saved' : <><Save className="h-3.5 w-3.5" /> Save</>}
-            </button>
+            {isGifsyAdmin && (
+              <button
+                onClick={savePaceThreshold}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  paceThresholdSaved
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-[var(--brand-primary)] text-white hover:bg-[var(--brand-primary-dark)]'
+                }`}
+              >
+                {paceThresholdSaved ? '✓ Saved' : <><Save className="h-3.5 w-3.5" /> Save</>}
+              </button>
+            )}
           </div>
         </CardHeader>
         <CardContent>
@@ -343,7 +359,16 @@ export default function SettingsPage() {
             min={1}
             max={30}
             step={1}
+            disabled={!isGifsyAdmin}
           />
+          {!isGifsyAdmin && (
+            <p className="text-xs text-gray-400 mt-2">
+              The pace threshold is a Gifsy-operated setting — only a Gifsy Admin can change it.
+            </p>
+          )}
+          {paceThresholdError && (
+            <p className="text-xs text-red-600 mt-2">{paceThresholdError}</p>
+          )}
         </CardContent>
       </Card>
 

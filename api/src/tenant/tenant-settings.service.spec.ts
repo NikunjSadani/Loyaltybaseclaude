@@ -1,0 +1,104 @@
+import { TenantSettingsService } from './tenant-settings.service';
+
+/** Minimal Prisma mock — only programSetting.findMany is used. */
+function makePrisma(rows: { settingKey: string; settingValue: unknown }[]) {
+  return {
+    programSetting: { findMany: jest.fn().mockResolvedValue(rows) },
+  } as any;
+}
+
+describe('TenantSettingsService', () => {
+  const ORIGINAL_ENV = process.env.POINTS_CONVERSION_RATE;
+  afterEach(() => {
+    if (ORIGINAL_ENV === undefined) delete process.env.POINTS_CONVERSION_RATE;
+    else process.env.POINTS_CONVERSION_RATE = ORIGINAL_ENV;
+  });
+
+  it('returns typed defaults when there are no rows', async () => {
+    const svc = new TenantSettingsService(makePrisma([]));
+    const s = await svc.getEffectiveSettings('deoleo');
+    expect(s.minBankTransferAmount).toBe(250);
+    expect(s.minVoucherFreeAmount).toBe(250);
+    expect(s.paceAmberThreshold).toBe(10);
+    expect(s.redemptionChannels).toEqual({ physicalGifts: true, vouchers: true, bankTransfer: true });
+    expect(s.salesApp).toEqual({ ledgerLabel: 'Wallet', redeemGiftWholesalerOnly: true });
+    expect(s.creditsPayouts.notifyEmails).toEqual([]);
+  });
+
+  it('derives the default conversionRate from POINTS_CONVERSION_RATE env', async () => {
+    process.env.POINTS_CONVERSION_RATE = '2';
+    const svc = new TenantSettingsService(makePrisma([]));
+    expect(await svc.getConversionRate('deoleo')).toBe(2);
+  });
+
+  it('falls back to 1 when the env rate is unset or invalid', async () => {
+    delete process.env.POINTS_CONVERSION_RATE;
+    expect(await new TenantSettingsService(makePrisma([])).getConversionRate('x')).toBe(1);
+    process.env.POINTS_CONVERSION_RATE = '0';
+    expect(await new TenantSettingsService(makePrisma([])).getConversionRate('x')).toBe(1);
+    process.env.POINTS_CONVERSION_RATE = 'abc';
+    expect(await new TenantSettingsService(makePrisma([])).getConversionRate('x')).toBe(1);
+  });
+
+  it('overlays a scalar override and rejects an invalid one', async () => {
+    const svc = new TenantSettingsService(makePrisma([
+      { settingKey: 'conversionRate', settingValue: 5 },
+      { settingKey: 'minBankTransferAmount', settingValue: 500 },
+      { settingKey: 'paceAmberThreshold', settingValue: -3 }, // invalid (<0) -> ignored
+    ]));
+    const s = await svc.getEffectiveSettings('deoleo');
+    expect(s.conversionRate).toBe(5);
+    expect(s.minBankTransferAmount).toBe(500);
+    expect(s.paceAmberThreshold).toBe(10); // default kept
+  });
+
+  it('rejects a non-positive conversionRate override (keeps env default)', async () => {
+    process.env.POINTS_CONVERSION_RATE = '1';
+    const svc = new TenantSettingsService(makePrisma([
+      { settingKey: 'conversionRate', settingValue: 0 },
+    ]));
+    expect(await svc.getConversionRate('deoleo')).toBe(1);
+  });
+
+  it('DEEP-MERGES a partial nested override, keeping sibling defaults', async () => {
+    const svc = new TenantSettingsService(makePrisma([
+      { settingKey: 'redemptionChannels', settingValue: { bankTransfer: false } },
+      { settingKey: 'creditsPayouts', settingValue: { monthCutoffDay: 5 } },
+    ]));
+    const s = await svc.getEffectiveSettings('deoleo');
+    // only bankTransfer flipped; the other two stay default true
+    expect(s.redemptionChannels).toEqual({ physicalGifts: true, vouchers: true, bankTransfer: false });
+    // only monthCutoffDay overridden; caps + notifyEmails stay default
+    expect(s.creditsPayouts.monthCutoffDay).toBe(5);
+    expect(s.creditsPayouts.safetyCapPoints).toBe(50000);
+    expect(s.creditsPayouts.notifyEmails).toEqual([]);
+  });
+
+  it('coerces a numeric string and filters non-string notifyEmails', async () => {
+    const svc = new TenantSettingsService(makePrisma([
+      { settingKey: 'minVoucherFreeAmount', settingValue: '300' },
+      { settingKey: 'creditsPayouts', settingValue: { notifyEmails: ['a@b.com', 5, null, 'c@d.com'] } },
+    ]));
+    const s = await svc.getEffectiveSettings('deoleo');
+    expect(s.minVoucherFreeAmount).toBe(300);
+    expect(s.creditsPayouts.notifyEmails).toEqual(['a@b.com', 'c@d.com']);
+  });
+
+  it('caches per clientId and busts on invalidate', async () => {
+    const prisma = makePrisma([]);
+    const svc = new TenantSettingsService(prisma);
+    await svc.getEffectiveSettings('deoleo');
+    await svc.getEffectiveSettings('deoleo');
+    expect(prisma.programSetting.findMany).toHaveBeenCalledTimes(1); // 2nd read cached
+    svc.invalidate('deoleo');
+    await svc.getEffectiveSettings('deoleo');
+    expect(prisma.programSetting.findMany).toHaveBeenCalledTimes(2); // re-read after bust
+  });
+
+  it('falls back to defaults if the settings read throws (never crashes a money path)', async () => {
+    const prisma = { programSetting: { findMany: jest.fn().mockRejectedValue(new Error('db down')) } } as any;
+    const svc = new TenantSettingsService(prisma);
+    const s = await svc.getEffectiveSettings('deoleo');
+    expect(s.minBankTransferAmount).toBe(250);
+  });
+});

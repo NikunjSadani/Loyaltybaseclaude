@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, PointsLedgerType, WalletTransactionType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { AdjustType, AdjustWalletDto, ListTransactionsQueryDto } from './dto/wallet.dto';
 
@@ -40,10 +41,10 @@ import { AdjustType, AdjustWalletDto, ListTransactionsQueryDto } from './dto/wal
  */
 @Injectable()
 export class WalletService {
-  constructor(private readonly prisma: PrismaService) {}
-
-  // 1 point = ₹1 by default; overridable via env (matches the source route).
-  private readonly conversionRate = parseFloat(process.env.POINTS_CONVERSION_RATE ?? '1');
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenantSettings: TenantSettingsService,
+  ) {}
 
   // ─── Core ledger-aware primitive ────────────────────────────────────────────
 
@@ -205,6 +206,8 @@ export class WalletService {
 
   /** GET /v1/wallet — the caller's own wallet summary (zeros if no partner/wallet). */
   async getWallet(user: JwtPayload) {
+    // Per-tenant points→₹ rate (was a per-deploy env constant).
+    const conversionRate = await this.tenantSettings.getConversionRate(user.clientId);
     const emptyWallet = {
       earnedPoints: 0,
       lockedPoints: 0,
@@ -215,7 +218,7 @@ export class WalletService {
       lifetimeRedeemed: 0,
       lifetimeExpired: 0,
       currency: 'POINTS',
-      conversionRate: this.conversionRate,
+      conversionRate,
     };
 
     const channelPartner = await this.prisma.channelPartner.findFirst({
@@ -238,7 +241,7 @@ export class WalletService {
       lifetimeRedeemed: wallet.lifetimeRedeemed,
       lifetimeExpired: wallet.lifetimeExpired,
       currency: 'POINTS',
-      conversionRate: this.conversionRate,
+      conversionRate,
     };
   }
 

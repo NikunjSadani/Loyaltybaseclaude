@@ -11,6 +11,7 @@ import { CreditsService } from './credits.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { WalletService } from '../wallet/wallet.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   CreateBatchDto,
@@ -60,6 +61,22 @@ const mockPrisma = {
 
 const mockNotifications = { enqueue: jest.fn().mockResolvedValue({ id: 'n1' }) };
 
+// ─── Mock TenantSettingsService (Stream MONEY-CREDITS) ──────────────────────────
+// The credit/payout caps + month-cutoff are read from here. `mockCreditsPayouts` is
+// mutable so individual tests can override; the default is intentionally LENIENT
+// (cutoff 31 → window always open for any prior month; high caps) so the legacy
+// createBatch/confirmBatch tests pass regardless of today's wall-clock date.
+let mockCreditsPayouts: {
+  monthCutoffDay: number;
+  safetyCapPoints: number;
+  safetyCapInr: number;
+  fourEyesEnabled: boolean;
+  notifyEmails: string[];
+};
+const mockTenantSettings = {
+  getEffectiveSettings: jest.fn(async () => ({ creditsPayouts: mockCreditsPayouts })),
+};
+
 const admin: JwtPayload = {
   sub: 'admin1',
   role: 'CLIENT_ADMIN',
@@ -80,6 +97,15 @@ describe('CreditsService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    // Lenient default settings (window always open, high caps) so legacy tests are
+    // unaffected by the new server-side enforcement; settings-specific tests override.
+    mockCreditsPayouts = {
+      monthCutoffDay: 31,
+      safetyCapPoints: 1_000_000,
+      safetyCapInr: 10_000_000,
+      fourEyesEnabled: false,
+      notifyEmails: [],
+    };
     // Restore default resolved values that tests may override.
     mockTx.creditBatch.updateMany.mockResolvedValue({ count: 1 });
     mockTx.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED' });
@@ -97,6 +123,7 @@ describe('CreditsService', () => {
         { provide: PrismaService, useValue: mockPrisma },
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: WalletService, useValue: mockWalletService },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
       ],
     }).compile();
     service = module.get(CreditsService);
@@ -937,6 +964,195 @@ describe('CreditsService', () => {
       await service.listReversals(gifsy, { status: 'PENDING_GIFSY', period: '2026-05' });
       const where = mockPrisma.creditReversal.findMany.mock.calls[0][0].where;
       expect(where).toEqual({ clientId: 'deoleo', status: 'PENDING_GIFSY', period: '2026-05' });
+    });
+  });
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Stream MONEY-CREDITS — backend enforcement of the per-tenant settings
+  // (safety caps + month-cutoff window + notifyEmails routing). These were
+  // previously frontend-only and bypassable via a direct API call.
+  // ════════════════════════════════════════════════════════════════════════════
+
+  describe('settings enforcement', () => {
+    // Pin the wall clock so the month-cutoff window is deterministic.
+    function pinDate(iso: string) {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date(iso));
+    }
+    afterEach(() => jest.useRealTimers());
+
+    /** A CreateBatchDto with a single OK row. `amount` is paise for PAYOUT, points for POINTS. */
+    function batchDto(period: string, awardType: CreditAwardType, amount: number): CreateBatchDto {
+      return {
+        period,
+        totalOutlets: 1,
+        totalPoints: awardType === CreditAwardType.POINTS ? amount : 0,
+        totalPayoutPaise: awardType === CreditAwardType.PAYOUT ? amount : 0,
+        rows: [
+          {
+            rowNum: 1,
+            outletId: 'OUT-001',
+            outletName: 'Test Outlet',
+            fieldId: 'field-1',
+            fieldName: 'Sales Bonus',
+            amount,
+            narration: '',
+            awardType,
+            status: 'OK',
+          } as unknown as CreateBatchDto['rows'][number],
+        ],
+      };
+    }
+
+    // ── Safety caps (createBatch) ────────────────────────────────────────────────
+
+    describe('safety caps', () => {
+      it('rejects a POINTS row exceeding safetyCapPoints', async () => {
+        mockCreditsPayouts.safetyCapPoints = 50000;
+        pinDate('2026-06-10T08:00:00.000Z'); // current-month period → cutoff irrelevant
+        const dto = batchDto('2026-06', CreditAwardType.POINTS, 50001);
+        await expect(service.createBatch(admin, dto)).rejects.toBeInstanceOf(BadRequestException);
+        await expect(service.createBatch(admin, dto)).rejects.toThrow(/safety cap of 50000 points/);
+        expect(mockPrisma.creditBatch.create).not.toHaveBeenCalled();
+      });
+
+      it('rejects a PAYOUT row whose rupee value exceeds safetyCapInr', async () => {
+        mockCreditsPayouts.safetyCapInr = 100000;
+        pinDate('2026-06-10T08:00:00.000Z');
+        // 100001 rupees = 10000100 paise → over the ₹100000 cap.
+        const dto = batchDto('2026-06', CreditAwardType.PAYOUT, 10000100);
+        await expect(service.createBatch(admin, dto)).rejects.toBeInstanceOf(BadRequestException);
+        await expect(service.createBatch(admin, dto)).rejects.toThrow(/safety cap of ₹100000/);
+        expect(mockPrisma.creditBatch.create).not.toHaveBeenCalled();
+      });
+
+      it('allows rows within both caps', async () => {
+        mockCreditsPayouts.safetyCapPoints = 50000;
+        mockCreditsPayouts.safetyCapInr = 100000;
+        mockPrisma.creditBatch.create.mockResolvedValue({ id: 'b1' });
+        pinDate('2026-06-10T08:00:00.000Z');
+        const dto = batchDto('2026-06', CreditAwardType.POINTS, 50000); // exactly at the cap
+        dto.rows.push({
+          rowNum: 2,
+          outletId: 'OUT-002',
+          outletName: 'Outlet Two',
+          fieldId: 'field-2',
+          fieldName: 'Payout Field',
+          amount: 10000000, // ₹100000 in paise — exactly at the ₹100000 cap
+          narration: '',
+          awardType: CreditAwardType.PAYOUT,
+          status: 'OK',
+        } as unknown as CreateBatchDto['rows'][number]);
+        await expect(service.createBatch(admin, dto)).resolves.toBeDefined();
+        expect(mockPrisma.creditBatch.create).toHaveBeenCalledTimes(1);
+      });
+
+      it('ignores non-OK rows when checking caps', async () => {
+        mockCreditsPayouts.safetyCapPoints = 50000;
+        mockPrisma.creditBatch.create.mockResolvedValue({ id: 'b1' });
+        pinDate('2026-06-10T08:00:00.000Z');
+        const dto = batchDto('2026-06', CreditAwardType.POINTS, 999999); // over cap…
+        (dto.rows[0] as unknown as { status: string }).status = 'ERROR'; // …but not OK
+        await expect(service.createBatch(admin, dto)).resolves.toBeDefined();
+      });
+    });
+
+    // ── Month cutoff (createBatch) ────────────────────────────────────────────────
+
+    describe('month cutoff window', () => {
+      it('rejects a PRIOR-month batch created AFTER the cutoff day', async () => {
+        mockCreditsPayouts.monthCutoffDay = 28;
+        // Today = 29 June (> cutoff 28); batch period = May (prior month).
+        pinDate('2026-06-29T08:00:00.000Z');
+        const dto = batchDto('2026-05', CreditAwardType.POINTS, 100);
+        await expect(service.createBatch(admin, dto)).rejects.toBeInstanceOf(BadRequestException);
+        await expect(service.createBatch(admin, dto)).rejects.toThrow(
+          /window for prior-month period 2026-05 closed/,
+        );
+        expect(mockPrisma.creditBatch.create).not.toHaveBeenCalled();
+      });
+
+      it('allows a PRIOR-month batch created ON/BEFORE the cutoff day', async () => {
+        mockCreditsPayouts.monthCutoffDay = 28;
+        mockPrisma.creditBatch.create.mockResolvedValue({ id: 'b1' });
+        // Today = 28 June (== cutoff, still open); batch period = May.
+        pinDate('2026-06-28T08:00:00.000Z');
+        const dto = batchDto('2026-05', CreditAwardType.POINTS, 100);
+        await expect(service.createBatch(admin, dto)).resolves.toBeDefined();
+        expect(mockPrisma.creditBatch.create).toHaveBeenCalledTimes(1);
+      });
+
+      it('does NOT gate a CURRENT-month batch even after the cutoff day', async () => {
+        mockCreditsPayouts.monthCutoffDay = 5;
+        mockPrisma.creditBatch.create.mockResolvedValue({ id: 'b1' });
+        // Today = 29 June (past cutoff 5) but the batch period IS the current month.
+        pinDate('2026-06-29T08:00:00.000Z');
+        const dto = batchDto('2026-06', CreditAwardType.POINTS, 100);
+        await expect(service.createBatch(admin, dto)).resolves.toBeDefined();
+      });
+
+      it('also enforces the cutoff on confirmBatch for a prior-month batch', async () => {
+        mockCreditsPayouts.monthCutoffDay = 28;
+        pinDate('2026-06-29T08:00:00.000Z'); // past cutoff
+        mockPrisma.creditBatch.findFirst.mockResolvedValue({
+          id: 'b1',
+          status: 'PENDING_CONFIRM',
+          period: '2026-05', // prior month
+          uploadedBy: 'admin1',
+          totalOutlets: 0,
+          totalPoints: 0,
+          totalPayoutPaise: BigInt(0),
+          rows: [],
+        });
+        await expect(service.confirmBatch(admin, 'b1')).rejects.toBeInstanceOf(BadRequestException);
+        // The status flip must NOT have happened.
+        expect(mockTx.creditBatch.updateMany).not.toHaveBeenCalled();
+      });
+    });
+
+    // ── notifyEmails routing (confirmBatch) ──────────────────────────────────────
+
+    describe('confirmBatch notification routing', () => {
+      beforeEach(() => {
+        // Current-month period + open window so the cutoff never blocks confirm.
+        pinDate('2026-06-10T08:00:00.000Z');
+        mockPrisma.creditBatch.findFirst.mockResolvedValue({
+          id: 'b1',
+          clientId: 'deoleo',
+          status: 'PENDING_CONFIRM',
+          period: '2026-06',
+          uploadedBy: 'admin1',
+          totalOutlets: 1,
+          totalPoints: 100,
+          totalPayoutPaise: BigInt(0),
+          rows: [],
+        });
+      });
+
+      it('routes to the configured notifyEmails when non-empty (one enqueue per address)', async () => {
+        mockCreditsPayouts.notifyEmails = ['finance@acme.com', 'ops@acme.com'];
+        await service.confirmBatch(admin, 'b1');
+        const emailCalls = mockNotifications.enqueue.mock.calls
+          .map((c) => c[0])
+          .filter((p: { channel: string }) => p.channel === 'EMAIL');
+        expect(emailCalls.map((p: { recipientEmail: string }) => p.recipientEmail).sort()).toEqual(
+          ['finance@acme.com', 'ops@acme.com'].sort(),
+        );
+        // The legacy fallback must NOT be used when a list is configured.
+        expect(emailCalls.map((p: { recipientEmail: string }) => p.recipientEmail)).not.toContain(
+          'ops@gifsy.in',
+        );
+      });
+
+      it('falls back to ops@gifsy.in when notifyEmails is empty', async () => {
+        mockCreditsPayouts.notifyEmails = [];
+        await service.confirmBatch(admin, 'b1');
+        const emailCalls = mockNotifications.enqueue.mock.calls
+          .map((c) => c[0])
+          .filter((p: { channel: string }) => p.channel === 'EMAIL');
+        expect(emailCalls).toHaveLength(1);
+        expect(emailCalls[0].recipientEmail).toBe('ops@gifsy.in');
+      });
     });
   });
 });

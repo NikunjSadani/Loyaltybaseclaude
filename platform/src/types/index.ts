@@ -464,6 +464,11 @@ export interface GifsySettings {
    */
   visibilityPhotoEnabled?: boolean;
   /**
+   * Authoritative ClientConfig visibility-capture mode, surfaced via /me + /settings so the
+   * sales shell (which cannot read the admin-only /admin/settings/config) can gate correctly.
+   */
+  visibilityCaptureMode?: 'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD';
+  /**
    * Controls which redemption channels are visible in the partner rewards catalogue.
    * All three default to true. Disable any to hide that tab entirely for the tenant.
    */

@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
+import { useAdminSession } from '@/lib/admin-session';
 import type { GifsySettings } from '@/types';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
@@ -1520,21 +1521,29 @@ function FulfilmentTab() {
 function GifsySettingsPanel() {
   const [settings, setSettings] = useState<GifsySettings>(() => getGifsySettings());
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // These settings persist via PUT /v1/admin/settings, which is GIFSY_ADMIN-only, and they
+  // are Gifsy operating config (conversion rate, channels, min thresholds). Hide the panel
+  // entirely for non-Gifsy admins rather than show controls whose save would 403.
+  const isGifsyAdmin = useAdminSession().role === 'GIFSY_ADMIN';
+  if (!isGifsyAdmin) return null;
+
+  const flash = (ok: boolean) => {
+    if (ok) { setError(null); setSaved(true); setTimeout(() => setSaved(false), 2000); }
+    else setError('Could not save — please retry.');
+  };
 
   const applyAndSave = (updater: (s: GifsySettings) => GifsySettings) => {
     setSettings((prev) => {
       const next = updater(prev);
-      saveGifsySettings(next);
+      void saveGifsySettings(next).then(flash);
       return next;
     });
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
   };
 
   const handleSave = () => {
-    saveGifsySettings(settings);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+    void saveGifsySettings(settings).then(flash);
   };
 
   return (
@@ -1636,7 +1645,8 @@ function GifsySettingsPanel() {
 
       <div className="px-5 pb-4 flex items-center justify-between">
         <p className="text-[10px] text-gray-400 flex items-center gap-1">
-          <Info className="h-3 w-3" /> Changes apply immediately to all partner sessions.
+          <Info className="h-3 w-3" />
+          {error ? <span className="text-red-500">{error}</span> : 'Changes apply immediately to all partner sessions.'}
         </p>
         <button
           onClick={handleSave}

@@ -19,7 +19,7 @@ import {
   pct, pctBg, pctBarColor, getPrimaryParam,
 } from '@/lib/targets';
 import { getRole, resolveApprover, statusForApprover, type SalesRole } from '@/lib/sales-role';
-import { getGifsySettings } from '@/lib/gifsy-settings';
+import { useGifsySettings } from '@/lib/gifsy-settings';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -327,7 +327,12 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   const [resubmitFiles,     setResubmitFiles]     = useState<File[]>([]);
   const [resubmitting,      setResubmitting]      = useState(false);
   const [escalatedFrom,     setEscalatedFrom]     = useState<SalesRole | null>(null);
-  const [settings,          setSettings]          = useState(() => getGifsySettings());
+  // Settings are SERVER-sourced and reactive — reflects the tenant after /me hydrates.
+  const settings = useGifsySettings();
+  // Authoritative DB flag for the visibility workflow (TenantService.resolveVisibilityCaptureMode),
+  // delivered via the server settings block (/me + /settings) so SALES roles can read it — the
+  // /admin/settings/config endpoint is admin-only and would 403 for sales, defaulting wrongly.
+  const captureMode = settings.visibilityCaptureMode ?? 'PHOTO_APPROVAL';
 
   /* ── Dynamic period: always current month ── */
   const now           = new Date();
@@ -338,7 +343,6 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   useEffect(() => {
     setRoleState(getRole());
     setTargetConfig(resolveConfig('Andheri Beat', 'Mumbai West', 'Maharashtra', currentPeriod));
-    setSettings(getGifsySettings());
   }, [currentPeriod]);
 
   /* ── Fetch KYC from API ── */
@@ -844,7 +848,12 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
         {(() => {
           const ledgerLabel = settings.salesApp?.ledgerLabel ?? 'View Points Ledger';
           const showRedeem  = !(settings.salesApp?.redeemGiftWholesalerOnly && kyc.outletType !== 'WHOLESALER');
-          const showVis     = settings.visibilityPhotoEnabled === true;
+          // Visibility-photo action precedence: the authoritative DB flag (visibilityCaptureMode)
+          // wins. The backend REJECTS photo upload unless the tenant is in PHOTO_APPROVAL mode, so
+          // showing the action when the display-only visibilityPhotoEnabled disagrees would lead the
+          // agent into a guaranteed backend rejection. Require BOTH: PHOTO_APPROVAL mode AND the
+          // display flag — they can no longer contradict the backend.
+          const showVis     = captureMode === 'PHOTO_APPROVAL' && settings.visibilityPhotoEnabled === true;
           const actions = [
             { href: `/sales/kyc/${id}/ledger`,         icon: <BookOpen       className="h-4 w-4 text-blue-500" />,    bg: 'bg-blue-50',       title: ledgerLabel,              sub: 'Transaction history & balance',             show: true      },
             { href: `/sales/catalogue?outletId=${id}`, icon: <Gift           className="h-4 w-4 text-purple-500" />,  bg: 'bg-purple-50',     title: 'Redeem Gift for Outlet', sub: 'Browse catalogue & redeem with OTP',        show: showRedeem },

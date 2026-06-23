@@ -8,6 +8,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { User } from '@prisma/client';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { Msg91Service } from '../notifications/msg91.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { TenantService } from '../tenant/tenant.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import * as crypto from 'crypto';
 
@@ -27,6 +29,8 @@ export class AuthService {
     private readonly jwt:     JwtService,
     private readonly config:  ConfigService,
     private readonly msg91:   Msg91Service,
+    private readonly tenantSettings: TenantSettingsService,
+    private readonly tenant:  TenantService,
   ) {}
 
   // ── Current user (enriched) ───────────────────────────────────────────────────
@@ -39,7 +43,7 @@ export class AuthService {
    * The flat identity fields are kept for any consumer that reads them (and the A2 operator banner).
    */
   async getMe(user: JwtPayload) {
-    const [dbUser, channelPartner, salesUser] = await Promise.all([
+    const [dbUser, channelPartner, salesUser, settings, visibilityCaptureMode] = await Promise.all([
       this.prisma.user.findUnique({ where: { id: user.sub }, select: { name: true, phone: true } }),
       this.prisma.channelPartner.findUnique({
         where: { userId: user.sub },
@@ -56,6 +60,11 @@ export class AuthService {
         where: { userId: user.sub },
         select: { id: true, employeeCode: true, region: true, zone: true },
       }),
+      this.tenantSettings.getEffectiveSettings(user.clientId),
+      // The authoritative visibility-capture mode (ClientConfig.features) — surfaced here so
+      // the SALES shell can read it (the /admin/settings/config endpoint is admin-only, so
+      // sales would 403 and wrongly default to PHOTO_APPROVAL).
+      this.tenant.resolveVisibilityCaptureMode(user.clientId),
     ]);
 
     const wallet = channelPartner
@@ -73,7 +82,20 @@ export class AuthService {
       assumed: user.assumed ?? false,
       // Authoritative points→₹ conversion rate so the partner FE previews points
       // and shows the ₹ minimum from the server, not its stale localStorage rate.
-      conversionRate: parseFloat(process.env.POINTS_CONVERSION_RATE ?? '1'),
+      // Now per-tenant (TenantSettingsService), defaulting to the env rate.
+      conversionRate: settings.conversionRate,
+      // Partner/sales-facing tenant settings block — the server source of truth that
+      // replaces the browser localStorage blob. Operator-only creditsPayouts is omitted.
+      settings: {
+        conversionRate:         settings.conversionRate,
+        minBankTransferAmount:  settings.minBankTransferAmount,
+        minVoucherFreeAmount:   settings.minVoucherFreeAmount,
+        paceAmberThreshold:     settings.paceAmberThreshold,
+        visibilityPhotoEnabled: settings.visibilityPhotoEnabled,
+        visibilityCaptureMode,
+        redemptionChannels:     settings.redemptionChannels,
+        salesApp:               settings.salesApp,
+      },
       user: {
         id: user.sub,
         name: dbUser?.name ?? user.name,

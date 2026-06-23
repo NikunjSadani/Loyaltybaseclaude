@@ -8,6 +8,7 @@ import {
 import { Prisma, KycStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   BulkEditUsersDto,
@@ -40,6 +41,7 @@ export class AdminCoreService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenant: TenantService,
+    private readonly tenantSettings: TenantSettingsService,
   ) {}
 
   // ─── Role assignment allow-list (GLB-4) ─────────────────────────────────────
@@ -452,7 +454,13 @@ export class AdminCoreService {
   async getSettings(user: JwtPayload) {
     const rows = await this.prisma.programSetting.findMany({ where: { clientId: user.clientId } });
 
-    const settings: Record<string, unknown> = { ...AdminCoreService.SETTINGS_DEFAULTS };
+    const settings: Record<string, unknown> = {
+      ...AdminCoreService.SETTINGS_DEFAULTS,
+      // conversionRate default is env-derived (single source of truth with the boot guard +
+      // TenantSettingsService), not the literal `1` above, so the deploy-wide default and the
+      // per-tenant default never diverge. An explicit programSetting row still overrides it.
+      conversionRate: TenantSettingsService.envConversionRate(),
+    };
     for (const row of rows) {
       settings[row.settingKey] = row.settingValue;
     }
@@ -485,6 +493,10 @@ export class AdminCoreService {
         metadata: { key: dto.key, value: dto.value },
       },
     });
+
+    // Bust the typed settings cache so the new value is visible immediately on the money
+    // path (conversionRate) and everywhere else — not after the 5-min TTL.
+    this.tenantSettings.invalidate(clientId);
 
     return { setting };
   }

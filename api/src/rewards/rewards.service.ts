@@ -12,6 +12,7 @@ import { PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { WalletService } from '../wallet/wallet.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -55,18 +56,40 @@ import {
 export class RewardsService {
   private readonly logger = new Logger(RewardsService.name);
 
-  // Matches WalletService: 1 point = ₹1 by default; overridable via env.
-  private readonly conversionRate = parseFloat(process.env.POINTS_CONVERSION_RATE ?? '1');
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly wallet: WalletService,
+    private readonly tenantSettings: TenantSettingsService,
     private readonly notifications: NotificationsService,
     private readonly msg91: Msg91Service,
   ) {}
 
   private isGifsy(user: JwtPayload): boolean {
     return user.role === 'GIFSY_ADMIN';
+  }
+
+  /** Map a redemption mode to the tenant channel toggle that governs it. */
+  private channelKey(mode: PayoutMode): 'physicalGifts' | 'vouchers' | 'bankTransfer' {
+    if (mode === 'PHYSICAL_GIFT') return 'physicalGifts';
+    if (mode === 'UPI' || mode === 'BANK_TRANSFER') return 'bankTransfer';
+    return 'vouchers'; // GIFT_CARD (the only remaining PayoutMode) maps to the voucher channel
+  }
+
+  /**
+   * The points↔₹ centi-rate to use when freezing valuePaise at CONFIRM time.
+   * Prefer the rate SNAPSHOT taken on the order at redeem (so an admin editing the
+   * per-tenant rate between redeem and confirm cannot shift the TDS/payout value);
+   * fall back to the live tenant rate for pre-migration orders (conversionRateCenti null).
+   */
+  private async confirmRateCenti(
+    order: { conversionRateCenti: number | null },
+    clientId: string,
+  ): Promise<number> {
+    if (order.conversionRateCenti != null && order.conversionRateCenti > 0) {
+      return order.conversionRateCenti;
+    }
+    const live = await this.tenantSettings.getConversionRate(clientId);
+    return Math.round(live * 100);
   }
 
   /** GET /v1/rewards/catalog — active catalog with per-item affordability vs the caller's wallet. */
@@ -336,18 +359,36 @@ export class RewardsService {
       throw new BadRequestException('Delivery address is required for physical gifts');
     }
 
+    // Per-tenant settings: the points↔₹ rate, channel availability, and the global
+    // cash/voucher floor. Server-enforced (the FE gate is bypassable via direct API).
+    const settings = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    const rate = settings.conversionRate;
+    if (!settings.redemptionChannels[this.channelKey(item.redemptionMode)]) {
+      throw new BadRequestException('This redemption channel is currently unavailable.');
+    }
+
     // Points cost: FREE_AMOUNT = round(amount × rate) bounded by min/max; else pointsCost × qty.
     let requiredPoints: number;
     if (this.isFreeAmount(item)) {
       if (dto.amount == null) {
         throw new BadRequestException('amount (₹) is required for a variable-amount voucher');
       }
-      requiredPoints = Math.round(dto.amount * this.conversionRate);
+      requiredPoints = Math.round(dto.amount * rate);
       const min = item.minRedemptionPoints as number;
       const max = item.maxRedemptionPoints as number;
       if (requiredPoints < min || requiredPoints > max) {
         throw new BadRequestException(
           `Amount out of range. Allowed: ${min}–${max} points, requested: ${requiredPoints}`,
+        );
+      }
+      // Global floor: a variable-amount redemption must clear the tenant minimum ₹
+      // (bank/DBT vs free-amount voucher). The global floor WINS over the per-item min.
+      const isCash = item.redemptionMode === 'UPI' || item.redemptionMode === 'BANK_TRANSFER';
+      const floorInr = isCash ? settings.minBankTransferAmount : settings.minVoucherFreeAmount;
+      const floorPoints = Math.round(floorInr * rate);
+      if (requiredPoints < floorPoints) {
+        throw new BadRequestException(
+          `Minimum ${isCash ? 'transfer' : 'voucher'} amount is ₹${floorInr} (${floorPoints} points).`,
         );
       }
     } else {
@@ -395,6 +436,9 @@ export class RewardsService {
           quantity,
           pointsDeducted: 0,
           totalPointsCost: requiredPoints,
+          // Snapshot the rate so confirm-time valuePaise/TDS is deterministic even if
+          // an admin edits the per-tenant rate before the OTP is confirmed.
+          conversionRateCenti: Math.round(rate * 100),
           redemptionMode: item.redemptionMode,
           status: 'PENDING',
           deliveryName: addr?.name,
@@ -555,7 +599,7 @@ export class RewardsService {
       // valuePaise: freeze the ₹-equivalent at confirm time (194R TDS base).
       // value(₹) = points ÷ conversionRate; centi-rate integer math avoids
       // truncating a fractional rate. rate 0 (misconfig) → 0 (guard div-by-zero).
-      const rateCenti = Math.round(this.conversionRate * 100);
+      const rateCenti = await this.confirmRateCenti(order, user.clientId);
       const valuePaise =
         rateCenti > 0
           ? roundToRupeePaise((BigInt(requiredPoints) * 10000n) / BigInt(rateCenti))
@@ -739,18 +783,36 @@ export class RewardsService {
       throw new BadRequestException('Delivery address is required for physical gifts');
     }
 
+    // Per-tenant settings: the points↔₹ rate, channel availability, and the global
+    // cash/voucher floor. Server-enforced (the FE gate is bypassable via direct API).
+    const settings = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    const rate = settings.conversionRate;
+    if (!settings.redemptionChannels[this.channelKey(item.redemptionMode)]) {
+      throw new BadRequestException('This redemption channel is currently unavailable.');
+    }
+
     // Points cost: FREE_AMOUNT = round(amount × rate) bounded by min/max; else pointsCost × qty.
     let requiredPoints: number;
     if (this.isFreeAmount(item)) {
       if (dto.amount == null) {
         throw new BadRequestException('amount (₹) is required for a variable-amount voucher');
       }
-      requiredPoints = Math.round(dto.amount * this.conversionRate);
+      requiredPoints = Math.round(dto.amount * rate);
       const min = item.minRedemptionPoints as number;
       const max = item.maxRedemptionPoints as number;
       if (requiredPoints < min || requiredPoints > max) {
         throw new BadRequestException(
           `Amount out of range. Allowed: ${min}–${max} points, requested: ${requiredPoints}`,
+        );
+      }
+      // Global floor: a variable-amount redemption must clear the tenant minimum ₹
+      // (bank/DBT vs free-amount voucher). The global floor WINS over the per-item min.
+      const isCash = item.redemptionMode === 'UPI' || item.redemptionMode === 'BANK_TRANSFER';
+      const floorInr = isCash ? settings.minBankTransferAmount : settings.minVoucherFreeAmount;
+      const floorPoints = Math.round(floorInr * rate);
+      if (requiredPoints < floorPoints) {
+        throw new BadRequestException(
+          `Minimum ${isCash ? 'transfer' : 'voucher'} amount is ₹${floorInr} (${floorPoints} points).`,
         );
       }
     } else {
@@ -795,6 +857,9 @@ export class RewardsService {
           quantity,
           pointsDeducted: 0,
           totalPointsCost: requiredPoints,
+          // Snapshot the rate so confirm-time valuePaise/TDS is deterministic even if
+          // an admin edits the per-tenant rate before the OTP is confirmed.
+          conversionRateCenti: Math.round(rate * 100),
           redemptionMode: item.redemptionMode,
           status: 'PENDING',
           deliveryName: addr?.name,
@@ -933,7 +998,7 @@ export class RewardsService {
       // valuePaise = 0 (no TDS base, visible in reports for manual correction).
       // value(₹) = points ÷ conversionRate. Work in centi-rate (rate×100) integer math so a
       // fractional conversionRate (e.g. 0.5 pts/₹) isn't truncated: paise = points×10000 ÷ (rate×100).
-      const rateCenti = Math.round(this.conversionRate * 100);
+      const rateCenti = await this.confirmRateCenti(order, user.clientId);
       const valuePaise =
         rateCenti > 0
           ? roundToRupeePaise((BigInt(requiredPoints) * 10000n) / BigInt(rateCenti))
