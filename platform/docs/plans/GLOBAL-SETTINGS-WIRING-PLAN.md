@@ -232,3 +232,30 @@ and the sales/kyc page reads it from the settings hook.
 **Deferred / noted:** fourEyes approval workflow → `POST-GO-LIVE-BACKLOG.md`. Non-blocking audit
 nits: admin/visibility reads the display flag non-reactively (LOW); sales/kyc local `paceBadge`
 hardcodes 15 (pre-existing, out of scope).
+
+## Zero-defect E2E audit + runtime verification (2026-06-23, owner-demanded)
+
+4 independent code auditors over commit `4670b7f` (full-diff line-by-line · money deep re-derivation
+· foundation+credits · FE) + runtime E2E on gifsy_dev. The money/auth/correctness paths were
+re-derived SOUND. 5 real defects found and FIXED in `6b440af`:
+- **F1 (money, MEDIUM):** a per-tenant conversionRate < 0.005 rounded to `conversionRateCenti=0`,
+  which confirm mistook for a pre-migration null → fell back to the LIVE rate, defeating the
+  freeze. Fixed: reject rates below `MIN_RATE=0.005` at validation (overlay + envConversionRate).
+- **M1:** notifyEmails default fallback shared the cached array reference → copy `[...d.notifyEmails]`.
+- **L1:** notifyEmails accepted empty/whitespace strings → filtered (`e.trim().length>0`).
+- **P3 (FE):** `fromServer` stomped visibilityPhotoEnabled/redemptionChannels/salesApp to undefined
+  on a partial payload → every field now `?? prev`.
+- **P4 (FE):** admin/gifts panel left an optimistic edit after a failed save → reverts from cache.
+- **UX:** the gifsy/settings "Dev mode: in-memory only" banner was stale → reworded.
+
+**Runtime E2E proofs (gifsy_dev):** GET /v1/settings + /me real per-tenant read · visibilityCaptureMode
+to non-admins · creditsPayouts withheld from /me · CLIENT_ADMIN write → 403 · GIFSY save → immediate
+cache-busted read (250→777) · global voucher floor rejects ₹100, ₹300 passes · **confirm-side FREEZE:
+rate changed 1→2 between redeem and confirm, valuePaise stayed ₹30000 (snapshot), not ₹15000 (live)**
+· rate snapshot persisted on order (conversionRateCenti=100) · channel rejection (bankTransfer off →
+400) · F1 (0.001 rate rejected → default 1). Gate: api jest 1023/1023, FE vitest 1502, tsc clean.
+
+**Non-blocking residue (flagged, not fixed):** pre-existing decorative no-op sections on the
+gifsy/settings page (Platform Identity / Security / Notifications / Data Retention — out of this
+work's scope); FE/BE credit-upload-window predicate drift (cosmetic — BE enforces correctly, FE is
+stricter, both gate the same default period); `dayOr` accepts 29–31 (config foot-gun, FE/BE agree).
