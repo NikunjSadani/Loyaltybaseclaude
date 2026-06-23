@@ -8,6 +8,8 @@ import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings';
 
 const INPUT_CLS =
   'w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-white/30';
+// Read-only variant for the not-yet-wired sections (shows the value, can't edit, no fake Save).
+const RO_CLS = INPUT_CLS + ' opacity-50 cursor-not-allowed';
 
 export default function GifsySettingsPage() {
   const [saved,       setSaved]       = useState(false);
@@ -51,32 +53,32 @@ export default function GifsySettingsPage() {
         display-only placeholders and are not yet wired.
       </div>
 
-      {/* Platform identity */}
+      {/* Platform identity — read-only until wired (see POST-GO-LIVE-BACKLOG) */}
       <SettingSection icon={Globe} title="Platform Identity">
         <Field label="Platform name">
-          <input defaultValue="Gifsy Loyalty Platform" className={INPUT_CLS} />
+          <input defaultValue="Gifsy Loyalty Platform" disabled className={RO_CLS} />
         </Field>
         <Field label="Default domain">
-          <input defaultValue="gifsy.in" className={INPUT_CLS + ' font-mono'} />
+          <input defaultValue="gifsy.in" disabled className={RO_CLS + ' font-mono'} />
         </Field>
         <Field label="Support email">
-          <input defaultValue="support@gifsy.in" className={INPUT_CLS} />
+          <input defaultValue="support@gifsy.in" disabled className={RO_CLS} />
         </Field>
-        <SaveButton onClick={flashSaved} />
+        <ReadOnlyNote />
       </SettingSection>
 
-      {/* Security */}
+      {/* Security — read-only until wired */}
       <SettingSection icon={Shield} title="Security">
         <Field label="JWT expiry (days)">
-          <input type="number" defaultValue={7} min={1} max={90} className={INPUT_CLS} />
+          <input type="number" defaultValue={7} disabled className={RO_CLS} />
         </Field>
         <Field label="OTP expiry (minutes)">
-          <input type="number" defaultValue={10} min={5} max={60} className={INPUT_CLS} />
+          <input type="number" defaultValue={10} disabled className={RO_CLS} />
         </Field>
         <Field label="Max OTP attempts per session">
-          <input type="number" defaultValue={3} min={1} max={10} className={INPUT_CLS} />
+          <input type="number" defaultValue={3} disabled className={RO_CLS} />
         </Field>
-        <SaveButton onClick={flashSaved} />
+        <ReadOnlyNote />
       </SettingSection>
 
       {/* Redemption Thresholds */}
@@ -104,26 +106,26 @@ export default function GifsySettingsPage() {
         <SaveButton data-testid="settings-redemption-save" onClick={handleRedemptionSave} />
       </SettingSection>
 
-      {/* Notifications */}
+      {/* Notifications — read-only until wired */}
       <SettingSection icon={Bell} title="Platform Notifications">
         <Field label="Platform alert email (for GIFSY_ADMIN)">
-          <input defaultValue="alerts@gifsy.in" className={INPUT_CLS} />
+          <input defaultValue="alerts@gifsy.in" disabled className={RO_CLS} />
         </Field>
         <Field label="SLA breach alert threshold (hours)">
-          <input type="number" defaultValue={48} min={1} className={INPUT_CLS} />
+          <input type="number" defaultValue={48} disabled className={RO_CLS} />
         </Field>
-        <SaveButton onClick={flashSaved} />
+        <ReadOnlyNote />
       </SettingSection>
 
-      {/* DB */}
+      {/* DB — read-only until wired */}
       <SettingSection icon={Database} title="Data Retention">
         <Field label="Audit log retention (days)">
-          <input type="number" defaultValue={365} min={90} className={INPUT_CLS} />
+          <input type="number" defaultValue={365} disabled className={RO_CLS} />
         </Field>
         <Field label="Notification queue retention (days)">
-          <input type="number" defaultValue={30} min={7} className={INPUT_CLS} />
+          <input type="number" defaultValue={30} disabled className={RO_CLS} />
         </Field>
-        <SaveButton onClick={flashSaved} />
+        <ReadOnlyNote />
       </SettingSection>
 
       {/* Environment info */}
@@ -173,6 +175,14 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <label className="block text-xs font-medium text-white/50 mb-1.5">{label}</label>
       {children}
     </div>
+  );
+}
+
+function ReadOnlyNote() {
+  return (
+    <p className="text-[11px] text-white/30 pt-1">
+      Display only — managed in deployment config. Not editable here yet.
+    </p>
   );
 }
 

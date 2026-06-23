@@ -68,3 +68,25 @@ These are invisible while Deoleo is the only real tenant; they matter when a sec
   commit message or a gap-register cell.
 - At launch planning, scan section **A + B** first — those are the soonest-needed.
 - Anything that turns out to be a launch blocker → promote it to `GO-LIVE-READINESS.md` §3.
+
+## GIFSY settings page — wire the read-only sections (deferred, owner 2026-06-23)
+
+The GIFSY operator settings page (`platform/src/app/gifsy/settings/page.tsx`) has four sections
+now shown **read-only** (disabled inputs, no fake Save) so nothing pretends to persist:
+**Platform Identity** (name/domain/support email), **Security** (JWT expiry / OTP expiry / max
+OTP attempts), **Notifications** (alert email / SLA hours), **Data Retention** (audit / queue days).
+The real **Redemption Thresholds** section on the same page is unaffected (it persists + is enforced).
+
+Pick up per-field as needed — effort is very uneven because several have NO backend consumer yet:
+- **Enforceable with moderate work** (read the setting at the enforcement point + audit): OTP expiry
+  (`auth.service.ts:121`, hardcoded `10*60*1000`), max OTP attempts (`auth.service.ts:134`, hardcoded
+  `3`), JWT expiry (`auth.module.ts:19`, boot-time env), support email / platform name (display only).
+- **Need NET-NEW subsystems before they can be "real"** (do NOT just store them — that re-creates the
+  fake-setting problem): alert email (no alerting pipeline), SLA breach threshold (no SLA engine
+  consumes `slaTargetHours`), audit/queue retention (no scheduled purge job — touches data deletion).
+
+Also deferred from the same audit: the credit-upload-window FE check
+(`admin/credits-payouts/upload/page.tsx:46` `isUploadWindowOpen`) blocks any-period-after-cutoff
+while the backend (`credits.service.ts:77`) blocks only prior-month. Cosmetic today (the page only
+uploads the previous month, and the BACKEND enforces correctly); make the FE check period-aware if
+the period selector ever allows the current month.
