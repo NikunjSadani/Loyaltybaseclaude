@@ -11,6 +11,22 @@
 > has a real guard (the audit found enforcement is a mix of `@Roles` / in-service / inert `@RequirePermission`).
 > Turning RBAC on (below) becomes worthwhile once custom sub-roles exist. Decision home: `DATA-VISIBILITY.md §3.1`.
 
+> **2026-06-23 RE-VERIFICATION (surfaced during the ticket Resolve build; owner: "deal with this later").**
+> Re-confirmed the fail-open state is **SAFE for the current launch model**, and recorded the precise picture:
+> - The new `POST /v1/tickets/:id/status` and **every privileged admin controller** (`users`, `admin-outlets`,
+>   `sales`, `partner`, `settings`, `credits`, `payouts`, `gifsy`, `wallet`, `targets`, `kyc`-admin-routes) carry a
+>   **class- or method-level `@Roles`** — that is the ACTIVE gate (the global `RolesGuard` enforces it) — plus
+>   in-service role/tenant checks. The `@RequirePermission(...)` on them is **inert today** (fail-open) but harmless.
+> - The routes with **no `@Roles` at all** are the by-design "any authenticated user" ones (leaderboard reads,
+>   KYC/ticket self-service create+view-own, some scheme/visibility reads); they rely on **service-level
+>   tenant/ownership scoping**, not on the permission lock.
+> - **Repercussion if `RBAC_ENFORCEMENT` is flipped ON without prep:** every inert `@RequirePermission` activates at
+>   once; if the role→permission map isn't fully + correctly + per-tenant populated, **legitimate admins get 403'd on
+>   real flows**. So it stays a deliberate, prepped, post-go-live operation — not a UAT-time switch.
+> - **DEFERRED (owner, 2026-06-23):** keep RBAC **OFF** for go-live. The single open item is the pre-enable
+>   re-run of the **gap-#2 route-coverage audit** — confirm no privileged WRITE sits on a no-`@Roles` route before
+>   ever enabling. Not a launch blocker.
+
 ## What "RBAC enforcement" is
 The admin backend has a permission engine (`src/lib/rbac/`): a catalog of permission keys, a default
 **role → permission** map, and `requirePermission(...)` checks wired into every admin route. Until it's
