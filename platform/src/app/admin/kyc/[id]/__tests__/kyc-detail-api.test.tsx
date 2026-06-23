@@ -102,4 +102,27 @@ describe('KYCID — Admin KYC detail API wiring', () => {
     render(<KYCDetailPage params={Promise.resolve({ id: 'NOTFOUND' })} />);
     expect(await screen.findByText(/not found/i)).toBeInTheDocument();
   });
+
+  it('KYCID5: the back arrow links to the real KYC list (/admin/kyc), not the dead /kyc route', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { submission: MOCK_SUBMISSION } }),
+    }));
+    const { container } = render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
+    await screen.findAllByText('Sharma General Store');
+    // The list route is /admin/kyc (this page is /admin/kyc/[id]); /kyc does not exist.
+    expect(container.querySelector('a[href="/admin/kyc"]')).toBeTruthy();
+    expect(container.querySelector('a[href="/kyc"]')).toBeNull();
+  });
+
+  it('KYCID6: the not-found state back link also points to /admin/kyc', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: () => Promise.resolve({ success: false, error: 'KYC submission not found' }),
+    }));
+    render(<KYCDetailPage params={Promise.resolve({ id: 'NOTFOUND' })} />);
+    const back = await screen.findByText(/back to kyc list/i);
+    expect(back.closest('a')).toHaveAttribute('href', '/admin/kyc');
+  });
 });

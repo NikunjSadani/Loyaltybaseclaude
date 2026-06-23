@@ -485,7 +485,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
     return (
       <div className="text-center py-20">
         <p className="text-gray-500 text-sm">{error ?? 'KYC submission not found'}</p>
-        <Link href="/kyc" className="text-[var(--brand-primary)] text-sm mt-2 inline-block">← Back to KYC List</Link>
+        <Link href="/admin/kyc" className="text-[var(--brand-primary)] text-sm mt-2 inline-block">← Back to KYC List</Link>
       </div>
     );
   }
@@ -506,7 +506,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Link
-            href="/kyc"
+            href="/admin/kyc"
             className="p-2 rounded-lg hover:bg-gray-100 text-gray-500 transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
