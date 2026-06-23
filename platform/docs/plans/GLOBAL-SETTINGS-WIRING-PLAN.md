@@ -255,7 +255,14 @@ rate changed 1→2 between redeem and confirm, valuePaise stayed ₹30000 (snaps
 · rate snapshot persisted on order (conversionRateCenti=100) · channel rejection (bankTransfer off →
 400) · F1 (0.001 rate rejected → default 1). Gate: api jest 1023/1023, FE vitest 1502, tsc clean.
 
-**Non-blocking residue (flagged, not fixed):** pre-existing decorative no-op sections on the
-gifsy/settings page (Platform Identity / Security / Notifications / Data Retention — out of this
-work's scope); FE/BE credit-upload-window predicate drift (cosmetic — BE enforces correctly, FE is
-stricter, both gate the same default period); `dayOr` accepts 29–31 (config foot-gun, FE/BE agree).
+**Residue handled:** the pre-existing decorative no-op sections on the gifsy/settings page
+(Platform Identity / Security / Notifications / Data Retention) are now **read-only** (`20a58d8`)
+— disabled inputs + "display only" note, no fake Save; wiring them per-field is DEFERRED to
+`POST-GO-LIVE-BACKLOG.md` + task #101 (owner: as-needed). Still parked there (cosmetic): the
+FE/BE credit-upload-window predicate drift (BE enforces correctly; FE is stricter; both gate the
+same default period). `dayOr` accepting 29–31 is the intended config range (FE/BE agree), not a defect.
+
+## Status: COMPLETE (2026-06-23)
+Pushed `4670b7f` (build) → `6b440af` (audit fixes) → `54ca807` (audit doc) → `20a58d8` (read-only)
+on `develop`. Gate api jest 1023/1023, FE vitest 1502, tsc clean. E2E-audited + runtime-verified.
+Deferred: fourEyes approval workflow + wiring the read-only sections (both in POST-GO-LIVE-BACKLOG).
