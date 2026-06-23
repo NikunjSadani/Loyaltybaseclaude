@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { useToast } from '@/components/ui/toast';
 import { sendOTP, verifyOTP } from './actions';
 import { cn } from '@/lib/utils';
+import { clearAssumedContext } from '@/lib/auth-client';
 
 type Step = 'mobile' | 'otp';
 
@@ -115,6 +116,11 @@ export default function LoginPage() {
       setTimeout(() => otpRefs.current[0]?.focus(), 100);
       return;
     }
+
+    // A fresh login is a clean session — drop any GIFSY operator assumed-tenant context
+    // left over from a prior session, so a stale "working in <brand>" banner can never
+    // outlive its token (the banner/token desync that showed an operator empty tenant data).
+    clearAssumedContext();
 
     // Store the JWT where api-client.ts reads it (localStorage → Authorization: Bearer).
     if (result.token) {

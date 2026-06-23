@@ -82,10 +82,59 @@ export function logout(): void {
 
 // ── Operator-context switcher (A2/#51) ───────────────────────────────────────
 
-/** The brand the GIFSY operator is currently "working in", or null if at platform level. */
+/**
+ * True when the ACTIVE access token is a GIFSY operator's assumed-tenant token (its JWT
+ * carries `assumed: true`). Decodes the JWT payload only — this is a UI-context check, not
+ * an auth decision (the backend still enforces). Used so the "working in <brand>" banner can
+ * never outlive the token it belongs to.
+ */
+function isAssumedToken(token: string | null): boolean {
+  if (!token) return false;
+  const part = token.split('.')[1];
+  if (!part) return false;
+  try {
+    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=');
+    const json = decodeURIComponent(
+      atob(padded)
+        .split('')
+        .map((ch) => '%' + ('00' + ch.charCodeAt(0).toString(16)).slice(-2))
+        .join(''),
+    );
+    return (JSON.parse(json) as { assumed?: boolean })?.assumed === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The brand the GIFSY operator is currently "working in", or null if at platform level.
+ * SELF-HEALING: the `assumedBrand` key only means something while the ACTIVE token is an
+ * assumed-tenant token. A stale brand (assume token expired, or a fresh login that didn't
+ * clear it) is dropped here so the banner ALWAYS follows the real token — preventing the
+ * "banner says Deoleo but data is gifsy's" desync.
+ */
 export function getAssumedBrand(): string | null {
   if (typeof window === 'undefined') return null;
-  return localStorage.getItem(ASSUMED_BRAND_KEY);
+  const brand = localStorage.getItem(ASSUMED_BRAND_KEY);
+  if (!brand) return null;
+  if (!isAssumedToken(getToken())) {
+    clearAssumedContext();
+    return null;
+  }
+  return brand;
+}
+
+/**
+ * Clear any GIFSY operator assumed-tenant context (home session + brand). Called on a fresh
+ * login so a stale "working in <brand>" banner from a prior session can never outlive its token,
+ * and by getAssumedBrand() when it detects the active token is not an assumed-tenant token.
+ */
+export function clearAssumedContext(): void {
+  if (typeof window === 'undefined') return;
+  localStorage.removeItem(HOME_TOKEN_KEY);
+  localStorage.removeItem(HOME_USER_KEY);
+  localStorage.removeItem(ASSUMED_BRAND_KEY);
 }
 
 /**
