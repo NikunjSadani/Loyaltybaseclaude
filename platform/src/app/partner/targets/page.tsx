@@ -38,6 +38,8 @@ interface KpiRow {
   target:   number | null;
   achieved: number | null;
   pace:     number | null;
+  unit?:      string;   // KpiDef.unit (e.g. 'litre')
+  isPrimary?: boolean;  // real KpiDef.isPrimary — replaces the old idx===0 guess
 }
 
 interface OutletRow {
@@ -242,8 +244,12 @@ export default function PartnerTargetsPage() {
     // cards aggregate across outlets — take the FIRST non-empty backend `name`
     // seen for the code (custom name if set, else the KPI's generic label).
     const nameByCode:  Record<string, string>  = {};
-    // isPrimary: first KPI is treated as primary if none is explicitly marked
-    // Backend does not return isPrimary in this shape — use order position (first = primary)
+    // Real primary flag + unit from the backend (KpiDef). Aggregate across outlets:
+    // OR the primary flag, take the first non-empty unit. This matches the dashboard
+    // hero (find(isPrimary) ?? first), so the two partner screens never disagree on
+    // which KPI is primary (the old code guessed "first by position").
+    const primaryByCode: Record<string, boolean> = {};
+    const unitByCode:    Record<string, string>  = {};
     const kpiCodes = [...kpiCodeSet];
 
     for (const outlet of data.outlets) {
@@ -251,19 +257,21 @@ export default function PartnerTargetsPage() {
         targetSum[k.code]   = (targetSum[k.code]   ?? 0) + (k.target   ?? 0);
         achievedSum[k.code] = (achievedSum[k.code] ?? 0) + (k.achieved ?? 0);
         if (!nameByCode[k.code] && k.name) nameByCode[k.code] = k.name;
+        primaryByCode[k.code] = (primaryByCode[k.code] ?? false) || (k.isPrimary ?? false);
+        if (!unitByCode[k.code] && k.unit) unitByCode[k.code] = k.unit;
       }
     }
 
     const displayParams: DisplayParam[] = kpiCodes
       .filter(code => (targetSum[code] ?? 0) > 0)  // only show KPIs that have a target
-      .map((code, idx) => ({
+      .map((code) => ({
         id:        code,
         // Custom name if set, else label (from backend); else format the code.
         label:     nameByCode[code]
           ?? code.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-        unit:      'cases',
+        unit:      unitByCode[code] ?? 'cases',
         target:    targetSum[code] ?? 0,
-        isPrimary: idx === 0,
+        isPrimary: primaryByCode[code] ?? false, // real flag; primaryParam falls back to first
       }));
 
     return { params: displayParams, achievementMap: achievedSum };
