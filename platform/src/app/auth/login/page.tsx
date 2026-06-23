@@ -60,18 +60,24 @@ export default function LoginPage() {
     setMobileError('');
     setSending(true);
 
-    const result = await sendOTP(mobile, 'SMS');
-    setSending(false);
-
-    if (!result.success) {
-      toast.error(result.error ?? 'Failed to send OTP');
-      return;
+    // A server action can reject at the framework level (the client→server POST
+    // failing, a serialization error, etc.) — without try/finally the spinner
+    // would never clear. Guarantee it always clears and an error always shows.
+    try {
+      const result = await sendOTP(mobile, 'SMS');
+      if (!result.success) {
+        toast.error(result.error ?? 'Failed to send OTP');
+        return;
+      }
+      toast.success('OTP sent via SMS');
+      setStep('otp');
+      setCountdown(RESEND_COUNTDOWN);
+      setTimeout(() => otpRefs.current[0]?.focus(), 100);
+    } catch {
+      toast.error('Could not send the OTP. Please check your connection and try again.');
+    } finally {
+      setSending(false);
     }
-
-    toast.success('OTP sent via SMS');
-    setStep('otp');
-    setCountdown(RESEND_COUNTDOWN);
-    setTimeout(() => otpRefs.current[0]?.focus(), 100);
   };
 
   const handleOTPChange = (idx: number, value: string) => {
@@ -106,30 +112,43 @@ export default function LoginPage() {
     setOtpError('');
     setVerifying(true);
 
-    const result = await verifyOTP(mobile, code, clientId.trim() || undefined);
-    setVerifying(false);
+    // Without try/finally a framework-level server-action rejection (the
+    // client→server POST failing, a serialization error, etc.) would leave the
+    // Verify spinner stuck forever with no error — the "sat forever after I
+    // entered the OTP" bug. Guarantee the spinner clears and an error surfaces.
+    try {
+      const result = await verifyOTP(mobile, code, clientId.trim() || undefined);
 
-    if (!result.success) {
-      toast.error(result.error ?? 'Incorrect OTP');
-      setOtpError(result.error ?? 'Incorrect OTP');
+      if (!result.success) {
+        toast.error(result.error ?? 'Incorrect OTP');
+        setOtpError(result.error ?? 'Incorrect OTP');
+        setOtp(['', '', '', '', '', '']);
+        setTimeout(() => otpRefs.current[0]?.focus(), 100);
+        return;
+      }
+
+      // A fresh login is a clean session — drop any GIFSY operator assumed-tenant context
+      // left over from a prior session, so a stale "working in <brand>" banner can never
+      // outlive its token (the banner/token desync that showed an operator empty tenant data).
+      clearAssumedContext();
+
+      // Store the JWT where api-client.ts reads it (localStorage → Authorization: Bearer).
+      if (result.token) {
+        localStorage.setItem('token', result.token);
+        if (result.user) localStorage.setItem('user', JSON.stringify(result.user));
+      }
+
+      toast.success('Logged in successfully!');
+      window.location.href = getRoleDashboard(result.role);
+    } catch {
+      const msg = 'Could not verify the OTP. Please check your connection and try again.';
+      toast.error(msg);
+      setOtpError(msg);
       setOtp(['', '', '', '', '', '']);
       setTimeout(() => otpRefs.current[0]?.focus(), 100);
-      return;
+    } finally {
+      setVerifying(false);
     }
-
-    // A fresh login is a clean session — drop any GIFSY operator assumed-tenant context
-    // left over from a prior session, so a stale "working in <brand>" banner can never
-    // outlive its token (the banner/token desync that showed an operator empty tenant data).
-    clearAssumedContext();
-
-    // Store the JWT where api-client.ts reads it (localStorage → Authorization: Bearer).
-    if (result.token) {
-      localStorage.setItem('token', result.token);
-      if (result.user) localStorage.setItem('user', JSON.stringify(result.user));
-    }
-
-    toast.success('Logged in successfully!');
-    window.location.href = getRoleDashboard(result.role);
   }, [otp, mobile, router, toast]);
 
   // Auto-submit when all 6 digits filled
