@@ -142,6 +142,7 @@ function TicketDetailPanel({ ticket: initial, canEscalate, onClose, onUpdate }: 
   const [isInt,         setIsInt]         = useState(false);
   const [sending,       setSending]       = useState(false);
   const [escalating,    setEscalating]    = useState(false);
+  const [statusBusy,    setStatusBusy]    = useState(false);
 
   // Keep the panel in sync when the parent loads the full thread via GET :id.
   useEffect(() => { setTicket(initial); }, [initial]);
@@ -178,6 +179,15 @@ function TicketDetailPanel({ ticket: initial, canEscalate, onClose, onUpdate }: 
     if (res.success) await refresh();
     setEscalating(false);
   };
+
+  const handleSetStatus = async (status: 'RESOLVED' | 'CLOSED' | 'IN_PROGRESS') => {
+    setStatusBusy(true);
+    const res = await api.post(`/api/tickets/${ticket.id}/status`, { status });
+    if (res.success) await refresh();
+    setStatusBusy(false);
+  };
+
+  const isDone = ticket.status === 'resolved' || ticket.status === 'closed';
 
   const { variant } = STATUS_STYLE[ticket.status];
 
@@ -222,6 +232,40 @@ function TicketDetailPanel({ ticket: initial, canEscalate, onClose, onUpdate }: 
           <div className="flex items-center gap-3">
             <span className="text-xs text-gray-400 w-16 shrink-0">Assigned</span>
             <span className="text-xs font-medium text-gray-700">{ticket.assignedTo ?? 'Unassigned'}</span>
+          </div>
+
+          {/* Status actions — Resolve / Close, or Reopen once done */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-gray-400 w-16 shrink-0">Status</span>
+            {isDone ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={statusBusy}
+                onClick={() => handleSetStatus('IN_PROGRESS')}
+              >
+                <Clock className="h-3.5 w-3.5" /> Reopen
+              </Button>
+            ) : (
+              <>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={statusBusy}
+                  onClick={() => handleSetStatus('RESOLVED')}
+                >
+                  <CheckCircle className="h-3.5 w-3.5" /> Mark Resolved
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={statusBusy}
+                  onClick={() => handleSetStatus('CLOSED')}
+                >
+                  <X className="h-3.5 w-3.5" /> Close
+                </Button>
+              </>
+            )}
           </div>
 
           {/* Escalate — GIFSY-only, requires an assignee */}

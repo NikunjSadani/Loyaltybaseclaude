@@ -111,6 +111,63 @@ describe('TicketsService', () => {
         data: { status: 'IN_PROGRESS', updatedAt: expect.any(Date) },
       });
     });
+
+    // Close-the-loop: the raiser responding to a RESOLVED ticket reopens it.
+    it('reopens a RESOLVED ticket to IN_PROGRESS when the non-admin creator replies', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', createdById: 'user1', status: 'RESOLVED' });
+      mockTx.ticketMessage.create.mockResolvedValue({ id: 'm2' });
+      await service.addMessage(partner, 't1', { message: 'still broken' });
+      expect(mockTx.ticket.update).toHaveBeenCalledWith({
+        where: { id: 't1' },
+        data: { status: 'IN_PROGRESS', updatedAt: expect.any(Date) },
+      });
+    });
+  });
+
+  describe('setStatus', () => {
+    it('throws Forbidden when a non-admin calls it', async () => {
+      await expect(service.setStatus(partner, 't1', { status: 'RESOLVED' })).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+
+    it('throws NotFound for a missing / cross-tenant ticket', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(null);
+      await expect(service.setStatus(gifsy, 't1', { status: 'RESOLVED' })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      const where = mockPrisma.ticket.findFirst.mock.calls[0][0].where;
+      expect(where).toEqual({ id: 't1', clientId: 'deoleo' });
+    });
+
+    it('throws BadRequest for an invalid status', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', clientId: 'deoleo' });
+      await expect(
+        service.setStatus(gifsy, 't1', { status: 'BOGUS' as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('resolves: updates status to RESOLVED + posts a NON-internal system message + audit', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', clientId: 'deoleo' });
+      const res = await service.setStatus(gifsy, 't1', { status: 'RESOLVED' });
+      expect(res).toEqual({ message: 'Ticket status updated' });
+      expect(mockTx.ticket.update).toHaveBeenCalledWith({
+        where: { id: 't1' },
+        data: { status: 'RESOLVED', updatedAt: expect.any(Date) },
+      });
+      const msgArg = mockTx.ticketMessage.create.mock.calls[0][0].data;
+      expect(msgArg.isInternal).toBe(false);
+      expect(mockTx.auditLog.create).toHaveBeenCalled();
+    });
+
+    it('allows a CLIENT_ADMIN to close a ticket', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', clientId: 'deoleo' });
+      await service.setStatus(clientAdmin, 't1', { status: 'CLOSED' });
+      expect(mockTx.ticket.update).toHaveBeenCalledWith({
+        where: { id: 't1' },
+        data: { status: 'CLOSED', updatedAt: expect.any(Date) },
+      });
+    });
   });
 
   describe('escalate', () => {

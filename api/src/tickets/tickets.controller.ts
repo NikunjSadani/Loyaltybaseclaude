@@ -3,7 +3,7 @@ import { TicketsService } from './tickets.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { AddMessageDto, CreateTicketDto, EscalateTicketDto, ListTicketsQueryDto } from './dto/tickets.dto';
+import { AddMessageDto, CreateTicketDto, EscalateTicketDto, ListTicketsQueryDto, SetTicketStatusDto } from './dto/tickets.dto';
 
 /**
  * Support tickets API — re-homed from platform/src/app/api/tickets/* onto /v1.
@@ -38,6 +38,13 @@ export class TicketsController {
   @RequirePermission('support:escalate')
   escalate(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: EscalateTicketDto) {
     return this.tickets.escalate(user, id, dto);
+  }
+
+  @Post(':id/status')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER')
+  @RequirePermission('support:write')
+  setStatus(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: SetTicketStatusDto) {
+    return this.tickets.setStatus(user, id, dto);
   }
 
   @Post(':id/messages')

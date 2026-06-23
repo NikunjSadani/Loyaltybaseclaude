@@ -3,6 +3,7 @@ import {
   IsArray,
   IsBoolean,
   IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -38,6 +39,16 @@ export class EscalateTicketDto {
   @IsOptional()
   @IsEnum(TicketPriority)
   priority?: TicketPriority; // service defaults to HIGH
+}
+
+/** Allowed status transitions a support admin can drive from the console. */
+export const SETTABLE_TICKET_STATUSES = ['RESOLVED', 'CLOSED', 'IN_PROGRESS', 'OPEN'] as const;
+export type SettableTicketStatus = (typeof SETTABLE_TICKET_STATUSES)[number];
+
+export class SetTicketStatusDto {
+  @IsString()
+  @IsIn(SETTABLE_TICKET_STATUSES)
+  status!: SettableTicketStatus;
 }
 
 export class AddMessageDto {

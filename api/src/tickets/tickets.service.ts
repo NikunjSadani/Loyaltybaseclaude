@@ -7,7 +7,22 @@ import {
 import { Prisma, TicketPriority } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { AddMessageDto, CreateTicketDto, EscalateTicketDto, ListTicketsQueryDto } from './dto/tickets.dto';
+import {
+  AddMessageDto,
+  CreateTicketDto,
+  EscalateTicketDto,
+  ListTicketsQueryDto,
+  SetTicketStatusDto,
+  SETTABLE_TICKET_STATUSES,
+} from './dto/tickets.dto';
+
+/** Human-readable labels for the system message posted on a status change. */
+const STATUS_ACTION_LABEL: Record<string, string> = {
+  RESOLVED: 'marked Resolved',
+  CLOSED: 'Closed',
+  IN_PROGRESS: 'Reopened',
+  OPEN: 'Reopened',
+};
 
 /**
  * Support tickets — ported from platform/src/app/api/tickets/* (S4 pilot).
@@ -143,6 +158,50 @@ export class TicketsService {
     return { message: 'Ticket escalated successfully' };
   }
 
+  /**
+   * Support-admin status transition: Resolve / Close / Reopen. Re-checks
+   * isSupportAdmin (defense in depth; the controller @Roles-gates too) and
+   * tenant scope, then atomically updates the ticket, posts a NON-internal
+   * system message so the raiser SEES the outcome, and writes an audit log.
+   */
+  async setStatus(user: JwtPayload, id: string, dto: SetTicketStatusDto) {
+    if (!this.isSupportAdmin(user)) throw new ForbiddenException('Forbidden');
+
+    const ticket = await this.prisma.ticket.findFirst({ where: { id, clientId: user.clientId } });
+    if (!ticket) throw new NotFoundException('Ticket not found');
+
+    const status = dto.status;
+    if (!SETTABLE_TICKET_STATUSES.includes(status)) {
+      throw new BadRequestException(`Invalid status '${status}'`);
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.ticket.update({
+        where: { id },
+        data: { status, updatedAt: new Date() },
+      });
+      await tx.ticketMessage.create({
+        data: {
+          ticketId: id,
+          message: `Ticket ${STATUS_ACTION_LABEL[status] ?? `set to ${status}`} by support.`,
+          senderId: user.sub,
+          isInternal: false,
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entityType: 'TICKET',
+          entityId: id,
+          actorId: user.sub,
+          metadata: { status },
+        },
+      });
+    });
+
+    return { message: 'Ticket status updated' };
+  }
+
   async addMessage(user: JwtPayload, id: string, dto: AddMessageDto) {
     const ticket = await this.loadAccessible(user, id);
     if (ticket.status === 'CLOSED') throw new BadRequestException('Cannot add message to a closed ticket');
@@ -163,6 +222,11 @@ export class TicketsService {
       });
       // A support admin replying to an OPEN ticket moves it to IN_PROGRESS.
       if (this.isSupportAdmin(user) && ticket.status === 'OPEN') {
+        await tx.ticket.update({ where: { id }, data: { status: 'IN_PROGRESS', updatedAt: new Date() } });
+      }
+      // The raiser (a non-admin) replying to a RESOLVED ticket reopens it so the
+      // support loop resumes. (A CLOSED ticket is already rejected above.)
+      if (!this.isSupportAdmin(user) && ticket.status === 'RESOLVED') {
         await tx.ticket.update({ where: { id }, data: { status: 'IN_PROGRESS', updatedAt: new Date() } });
       }
       return msg;
