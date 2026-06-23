@@ -27,14 +27,25 @@ interface KYCEntry {
   rejectionReason?: string;
   /** ID of the team member (XSR / SO / etc.) who submitted this KYC */
   submittedById?: string;
+  /** True for an assigned outlet that has NOT been enrolled yet (no submission) —
+   *  synthesised from /api/sales/outlets so the rep's to-do outlets appear here. */
+  isNotStarted?: boolean;
 }
 
 interface TeamMember { id: string; name: string; }
 
 const APPROVAL_REQUIRED_KEY = 'APPROVAL_REQUIRED' as const;
 const UNDER_REVIEW_KEY      = 'UNDER_REVIEW'      as const;
-type FilterKey = 'ALL' | typeof APPROVAL_REQUIRED_KEY | typeof UNDER_REVIEW_KEY | KYCStatus;
+const PENDING_KYC_KEY       = 'PENDING_KYC'       as const;
+type FilterKey = 'ALL' | typeof APPROVAL_REQUIRED_KEY | typeof UNDER_REVIEW_KEY | typeof PENDING_KYC_KEY | KYCStatus;
 type SortOrder = 'newest' | 'oldest';
+
+/** "Pending KYC" = outlets the rep still needs to act on: never-enrolled
+ *  (NOT_STARTED) + saved-but-unsubmitted drafts (PENDING). */
+const PENDING_KYC_STATUSES = new Set<KYCStatus>([
+  KYCStatus.NOT_STARTED,
+  KYCStatus.PENDING,
+]);
 
 function getApprovalStatus(): KYCStatus | null {
   const role = getRole();
@@ -59,7 +70,7 @@ const APPROVAL_REQUIRED_STATUSES = new Set<KYCStatus>([
 
 const STATUS_FILTERS: { key: FilterKey; label: string }[] = [
   { key: 'ALL',                  label: 'All'               },
-  { key: KYCStatus.PENDING,      label: 'Pending KYC'       },
+  { key: PENDING_KYC_KEY,        label: 'Pending KYC'       },
   { key: APPROVAL_REQUIRED_KEY,  label: 'Approval Pending'  },
   { key: UNDER_REVIEW_KEY,       label: 'Under Review'      },
   { key: KYCStatus.APPROVED,     label: 'Approved'          },
@@ -115,7 +126,9 @@ function KYCListContent() {
       ? APPROVAL_REQUIRED_KEY
       : rawStatus === UNDER_REVIEW_KEY || UNDER_REVIEW_STATUSES.has(rawStatus as KYCStatus)
         ? UNDER_REVIEW_KEY
-        : (rawStatus as FilterKey)
+        : rawStatus === PENDING_KYC_KEY || PENDING_KYC_STATUSES.has(rawStatus as KYCStatus)
+          ? PENDING_KYC_KEY
+          : (rawStatus as FilterKey)
     : null;
 
   const [entries,      setEntries]      = useState<KYCEntry[]>([]);
@@ -141,25 +154,51 @@ function KYCListContent() {
       partner?: { id: string; businessName: string } | null;
     }
 
-    const kycFetch = fetch('/api/kyc', { headers: authHeaders })
+    const kycFetch: Promise<KYCEntry[]> = fetch('/api/kyc', { headers: authHeaders })
       .then((r) => r.json())
       .then((result) => {
-        if (result.success) {
-          setEntries((result.data.submissions as ApiSubmission[]).map((s) => ({
-            id:              s.id,
-            partnerName:     s.user.name,
-            firmName:        s.partner?.businessName ?? s.user.name,
-            outletCode:      '',
-            mobile:          s.user.phone,
-            status:          s.status as KYCStatus,
-            submittedAt:     s.createdAt,
-            updatedAt:       s.updatedAt,
-            rejectionReason: s.reviewerNotes ?? undefined,
-            submittedById:   s.userId,
-          })));
-        }
+        if (!result.success) return [];
+        return (result.data.submissions as ApiSubmission[]).map((s): KYCEntry => ({
+          id:              s.id,
+          partnerName:     s.user.name,
+          firmName:        s.partner?.businessName ?? s.user.name,
+          outletCode:      '',
+          mobile:          s.user.phone,
+          status:          s.status as KYCStatus,
+          submittedAt:     s.createdAt,
+          updatedAt:       s.updatedAt,
+          rejectionReason: s.reviewerNotes ?? undefined,
+          submittedById:   s.userId,
+        }));
       })
-      .catch(() => {});
+      .catch(() => [] as KYCEntry[]);
+
+    // The rep's assigned outlets that have NOT been enrolled yet (NOT_STARTED) have
+    // no submission, so they never appear in /api/kyc. Pull them from the roster and
+    // surface them as actionable "Pending KYC" entries that link to enrollment —
+    // only for the field roles who enroll (XSR / SO).
+    const canEnrollNow = role === 'XSR' || role === 'SO';
+    const outletsFetch: Promise<KYCEntry[]> = canEnrollNow
+      ? fetch('/api/sales/outlets', { headers: authHeaders })
+          .then((r) => r.json())
+          .then((body): KYCEntry[] => {
+            if (!body.success) return [];
+            return (body.data.outlets ?? [])
+              .filter((o: any) => o.kycStatus === 'NOT_STARTED')
+              .map((o: any): KYCEntry => ({
+                id:          o.id,
+                partnerName: o.name,
+                firmName:    o.name,
+                outletCode:  o.outletCode ?? '',
+                mobile:      o.mobile ?? '',
+                status:      KYCStatus.NOT_STARTED,
+                submittedAt: '',
+                updatedAt:   '',
+                isNotStarted: true,
+              }));
+          })
+          .catch(() => [] as KYCEntry[])
+      : Promise.resolve([] as KYCEntry[]);
 
     const teamFetch = hasTeamView(role)
       ? fetch('/api/sales/team', { headers: authHeaders })
@@ -172,7 +211,12 @@ function KYCListContent() {
           .catch(() => {})
       : Promise.resolve();
 
-    Promise.all([kycFetch, teamFetch]).finally(() => setLoading(false));
+    Promise.all([kycFetch, outletsFetch, teamFetch])
+      .then(([subs, notStarted]) => {
+        // Disjoint by construction: NOT_STARTED outlets have no submission, so no overlap.
+        setEntries([...(notStarted ?? []), ...(subs ?? [])]);
+      })
+      .finally(() => setLoading(false));
   }, [role]);
 
   const filtered = entries
@@ -180,6 +224,7 @@ function KYCListContent() {
       const matchesMember = !memberFilter || e.submittedById === memberFilter;
       const matchesStatus =
         filter === 'ALL'                 ? true :
+        filter === PENDING_KYC_KEY       ? PENDING_KYC_STATUSES.has(e.status) :
         filter === APPROVAL_REQUIRED_KEY ? (approvalStatus ? e.status === approvalStatus : false) :
         filter === UNDER_REVIEW_KEY      ? (UNDER_REVIEW_STATUSES.has(e.status) && e.status !== approvalStatus) :
         e.status === filter;
@@ -191,8 +236,10 @@ function KYCListContent() {
       return matchesMember && matchesStatus && matchesSearch;
     })
     .sort((a, b) => {
-      const da = new Date(a.updatedAt).getTime();
-      const db = new Date(b.updatedAt).getTime();
+      // Un-enrolled outlets are the most actionable → always pinned to the top.
+      if (!!a.isNotStarted !== !!b.isNotStarted) return a.isNotStarted ? -1 : 1;
+      const da = new Date(a.updatedAt).getTime() || 0;
+      const db = new Date(b.updatedAt).getTime() || 0;
       return sortOrder === 'newest' ? db - da : da - db;
     });
 
@@ -285,10 +332,12 @@ function KYCListContent() {
               {filtered.map((entry) => {
                 const { variant, label } = kycBadge[entry.status];
                 const borderClass = rowBorder(entry.status, approvalStatus);
+                // Un-enrolled outlets have no submission to open → start enrollment instead.
+                const href = entry.isNotStarted ? '/sales/kyc/new' : `/sales/kyc/${entry.id}`;
                 return (
                   <Link
                     key={entry.id}
-                    href={`/sales/kyc/${entry.id}`}
+                    href={href}
                     className={`flex items-center gap-3 px-4 py-3.5 hover:bg-gray-50 transition-colors ${borderClass}`}
                   >
                     <div className="flex-1 min-w-0">
@@ -297,19 +346,25 @@ function KYCListContent() {
                         <Badge variant={variant}>{label}</Badge>
                       </div>
                       <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                        <p className="text-xs text-gray-500">{entry.partnerName} · {entry.mobile}</p>
-                        <span
-                          data-testid="kyc-entry-outlet-code"
-                          className="text-[10px] font-mono font-semibold text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded"
-                        >
-                          {entry.outletCode}
-                        </span>
+                        <p className="text-xs text-gray-500">
+                          {entry.partnerName}{entry.mobile ? ` · ${entry.mobile}` : ''}
+                        </p>
+                        {entry.outletCode && (
+                          <span
+                            data-testid="kyc-entry-outlet-code"
+                            className="text-[10px] font-mono font-semibold text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded"
+                          >
+                            {entry.outletCode}
+                          </span>
+                        )}
                       </div>
                       {entry.rejectionReason && (
                         <p className="text-xs text-red-600 mt-0.5 truncate">Reason: {entry.rejectionReason}</p>
                       )}
                       <p className="text-xs text-gray-400 mt-0.5">
-                        Updated {relativeDate(entry.updatedAt)}
+                        {entry.isNotStarted
+                          ? 'Tap to start enrollment'
+                          : `Updated ${relativeDate(entry.updatedAt)}`}
                       </p>
                     </div>
                     <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />
