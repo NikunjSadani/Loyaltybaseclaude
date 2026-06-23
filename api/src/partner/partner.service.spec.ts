@@ -20,6 +20,7 @@ const mockPrisma = {
   outletTarget:      { findFirst: jest.fn(), findMany: jest.fn() },
   outletSalesRecord: { findMany: jest.fn() },
   kpiDef:            { findMany: jest.fn() },
+  salesUserAssignment: { findMany: jest.fn() },
 };
 
 const partner: JwtPayload = {
@@ -399,6 +400,109 @@ describe('PartnerService', () => {
       // If schemeTarget were called, mockPrisma.schemeTarget would be undefined
       // and the call would throw. Reaching here confirms it is not called.
       expect((mockPrisma as Record<string, unknown>)['schemeTarget']).toBeUndefined();
+    });
+  });
+
+  // ─── getSalesTeam (real assigned reps + their manager) ──────────────────────────
+
+  describe('getSalesTeam', () => {
+    const rep = (id: string, name: string, phone: string, role: string, level: number, mgr?: any) => ({
+      salesUser: {
+        id, employeeCode: `E-${id}`,
+        user: { name, phone },
+        hierarchyLevel: { name: role, level },
+        reportingTo: mgr ?? null,
+      },
+    });
+
+    it('returns an empty team when the caller has no channel partner', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      const res = await service.getSalesTeam(partner);
+      expect(res).toEqual({ team: [] });
+      expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
+    });
+
+    it('scopes the assignment query to active mappings on the partner OR its outlets, active sales users only', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1' }, { id: 'o2' }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+
+      await service.getSalesTeam(partner);
+
+      expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            unassignedAt: null,
+            salesUser: { isActive: true, deletedAt: null, clientId: 'deoleo' },
+            OR: [{ partnerId: 'cp1' }, { outletId: { in: ['o1', 'o2'] } }],
+          }),
+        }),
+      );
+    });
+
+    it('maps the assigned rep + their manager, rep first (tier), manager second', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1' }]);
+      const manager = {
+        id: 'm1', clientId: 'deoleo', employeeCode: 'E-m1', isActive: true, deletedAt: null,
+        user: { name: 'Rita Manager', phone: '9000000002' },
+        hierarchyLevel: { name: 'Sales Officer', level: 4 },
+      };
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        rep('r1', 'Anita Rep', '9000000001', 'ISR', 5, manager),
+      ]);
+
+      const res = await service.getSalesTeam(partner);
+      expect(res.team).toEqual([
+        { name: 'Anita Rep', role: 'ISR', phone: '9000000001', employeeCode: 'E-r1', level: 5 },
+        { name: 'Rita Manager', role: 'Sales Officer', phone: '9000000002', employeeCode: 'E-m1', level: 4 },
+      ]);
+    });
+
+    it('dedupes a rep assigned to multiple outlets into one entry', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1' }, { id: 'o2' }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        rep('r1', 'Anita Rep', '9000000001', 'ISR', 5),
+        rep('r1', 'Anita Rep', '9000000001', 'ISR', 5),
+      ]);
+      const res = await service.getSalesTeam(partner);
+      expect(res.team).toHaveLength(1);
+      expect(res.team[0].employeeCode).toBe('E-r1');
+    });
+
+    it('excludes an inactive/deleted reporting manager', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1' }]);
+      const deletedMgr = {
+        id: 'm1', employeeCode: 'E-m1', isActive: false, deletedAt: new Date(),
+        user: { name: 'Gone Manager', phone: '9' }, hierarchyLevel: { name: 'SO', level: 4 },
+      };
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        rep('r1', 'Anita Rep', '9000000001', 'ISR', 5, deletedMgr),
+      ]);
+      const res = await service.getSalesTeam(partner);
+      expect(res.team).toHaveLength(1);
+      expect(res.team[0].name).toBe('Anita Rep');
+    });
+
+    it('keeps a user who is BOTH a direct rep and another rep\'s manager at the direct (rep) tier', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1' }]);
+      const shared = {
+        id: 'so1', clientId: 'deoleo', employeeCode: 'E-so1', isActive: true, deletedAt: null,
+        user: { name: 'Sam Officer', phone: '9000000009' },
+        hierarchyLevel: { name: 'Sales Officer', level: 4 },
+      };
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        rep('r1', 'Anita Rep', '9000000001', 'ISR', 5, shared), // shared is r1's manager (tier 1)
+        rep('so1', 'Sam Officer', '9000000009', 'Sales Officer', 4), // shared is ALSO directly assigned (tier 0)
+      ]);
+      const res = await service.getSalesTeam(partner);
+      // Sam appears once; because directly assigned (tier 0) he sorts before the ISR? No —
+      // tier 0 reps sort by level asc (4 before 5), so Sam (level 4) comes first.
+      expect(res.team.map((m) => m.employeeCode)).toEqual(['E-so1', 'E-r1']);
+      expect(res.team.filter((m) => m.employeeCode === 'E-so1')).toHaveLength(1);
     });
   });
 });

@@ -61,12 +61,21 @@ function mapDbTicket(t: any): Ticket {
   };
 }
 
-/* ─── Sales team contacts (would come from outlet's assigned team in production) */
+/* ─── Sales team — the REAL reps mapped to the partner's outlets (GET /api/partner/sales-team) */
 
-const SALES_TEAM = [
-  { role: 'XSR',            name: 'Anil Sharma',   phone: '9876543210', initials: 'AS', color: 'var(--brand-primary)' },
-  { role: 'Sales Officer',  name: 'Rajesh Kumar',  phone: '9765432109', initials: 'RK', color: '#1A1A2E' },
-];
+interface SalesTeamMember {
+  name: string;
+  role: string;
+  phone: string;
+  employeeCode: string;
+  level: number;
+}
+
+/** Avatar colors cycled by position (purely cosmetic). */
+const TEAM_COLORS = ['var(--brand-primary)', '#1A1A2E', '#0F766E', '#7C3AED'];
+
+const initialsOf = (name: string) =>
+  name.split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 2).toUpperCase() || '?';
 
 const STATUS_STYLE: Record<TicketStatus, { variant: 'success' | 'warning' | 'danger' | 'info' | 'default'; dot: string }> = {
   open:        { variant: 'warning',  dot: 'bg-amber-400' },
@@ -206,6 +215,18 @@ export default function PartnerSupportPage() {
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState<NewTicketForm>({ category: '', title: '', description: '' });
 
+  /* Real assigned sales team (replaces the old hardcoded SALES_TEAM demo personas) */
+  const [salesTeam,        setSalesTeam]        = useState<SalesTeamMember[]>([]);
+  const [salesTeamLoading, setSalesTeamLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.get<{ team: SalesTeamMember[] }>('/api/partner/sales-team')
+      .then((res) => { if (!cancelled && res.success) setSalesTeam(res.data.team ?? []); })
+      .finally(() => { if (!cancelled) setSalesTeamLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -278,40 +299,53 @@ export default function PartnerSupportPage() {
           <User className="h-4 w-4 text-[var(--brand-primary)]" />
           <p className="text-sm font-bold text-gray-800">Your Sales Team</p>
         </div>
-        <div className="divide-y divide-gray-50">
-          {SALES_TEAM.map((member) => (
-            <div key={member.phone} className="flex items-center gap-3 px-4 py-3.5">
-              {/* Avatar */}
-              <div
-                className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-white text-xs font-bold"
-                style={{ backgroundColor: member.color }}
-              >
-                {member.initials}
-              </div>
+        {salesTeamLoading ? (
+          <div className="flex items-center justify-center py-6"><Spinner /></div>
+        ) : salesTeam.length === 0 ? (
+          <div className="px-4 py-6 text-center">
+            <p className="text-xs text-gray-400">No sales team is mapped to your outlets yet.</p>
+            <p className="text-[11px] text-gray-300 mt-0.5">It will appear here once your rep is assigned.</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-50">
+            {salesTeam.map((member, i) => (
+              <div key={member.employeeCode || `${member.name}-${i}`} className="flex items-center gap-3 px-4 py-3.5">
+                {/* Avatar */}
+                <div
+                  className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 text-white text-xs font-bold"
+                  style={{ backgroundColor: TEAM_COLORS[i % TEAM_COLORS.length] }}
+                >
+                  {initialsOf(member.name)}
+                </div>
 
-              {/* Info — name, role, and phone number all in the flexible column */}
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-gray-900 leading-tight">{member.name}</p>
-                <p className="text-[11px] text-gray-400 mt-0.5">{member.role}</p>
-                <p className="text-[11px] text-gray-500 font-mono mt-0.5">{member.phone}</p>
-              </div>
+                {/* Info — name, role, and phone number all in the flexible column */}
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-gray-900 leading-tight">{member.name}</p>
+                  {member.role && <p className="text-[11px] text-gray-400 mt-0.5">{member.role}</p>}
+                  {member.phone && <p className="text-[11px] text-gray-500 font-mono mt-0.5">{member.phone}</p>}
+                </div>
 
-              {/* Call button — icon only, no phone number text */}
-              <a
-                href={`tel:${member.phone}`}
-                aria-label={`Call ${member.name}`}
-                className="w-9 h-9 flex items-center justify-center bg-[var(--brand-primary)]/10 hover:bg-[var(--brand-primary)]/20 text-[var(--brand-primary)] rounded-xl transition-colors shrink-0"
-              >
-                <Phone className="h-4 w-4" />
-              </a>
-            </div>
-          ))}
-        </div>
-        <div className="px-4 py-2.5 bg-amber-50/60 border-t border-amber-100">
-          <p className="text-[10px] text-amber-700 leading-relaxed">
-            💡 Reach out to your ISR or Sales Officer directly for billing queries, scheme clarifications, or any field support.
-          </p>
-        </div>
+                {/* Call button — icon only, no phone number text */}
+                {member.phone && (
+                  <a
+                    href={`tel:${member.phone}`}
+                    aria-label={`Call ${member.name}`}
+                    className="w-9 h-9 flex items-center justify-center bg-[var(--brand-primary)]/10 hover:bg-[var(--brand-primary)]/20 text-[var(--brand-primary)] rounded-xl transition-colors shrink-0"
+                  >
+                    <Phone className="h-4 w-4" />
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {!salesTeamLoading && salesTeam.length > 0 && (
+          <div className="px-4 py-2.5 bg-amber-50/60 border-t border-amber-100">
+            <p className="text-[10px] text-amber-700 leading-relaxed">
+              💡 Reach out to your sales rep directly for billing queries, scheme clarifications, or any field support.
+            </p>
+          </div>
+        )}
       </div>
 
       {loading ? (

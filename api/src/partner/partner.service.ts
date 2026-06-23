@@ -254,6 +254,98 @@ export class PartnerService {
     return { period: month, outlets: result };
   }
 
+  /**
+   * GET /v1/partner/sales-team — the REAL sales reps mapped to the caller's
+   * outlets, for the partner Support page "Your Sales Team" card (replaces the
+   * hardcoded demo personas Anil Sharma / Rajesh Kumar).
+   *
+   * Source of truth: active SalesUserAssignment rows tied to the partner itself
+   * or any of its outlets → the assigned SalesUser(s) + each one's immediate
+   * reporting manager (so the partner gets both their field rep and an
+   * escalation contact, matching the "reach your ISR or Sales Officer" intent).
+   * Caller-scoped (own partner only) + tenant-scoped (clientId from the JWT).
+   * Inactive/deleted sales users are excluded; results are deduped.
+   */
+  async getSalesTeam(user: JwtPayload) {
+    const partner = await this.prisma.channelPartner.findFirst({
+      where: { userId: user.sub, clientId: user.clientId },
+      select: { id: true },
+    });
+    if (!partner) return { team: [] };
+
+    const outlets = await this.prisma.outlet.findMany({
+      where: { clientId: user.clientId, partnerId: partner.id, deletedAt: null },
+      select: { id: true },
+    });
+    const outletIds = outlets.map((o) => o.id);
+
+    const assignments = await this.prisma.salesUserAssignment.findMany({
+      where: {
+        unassignedAt: null,
+        salesUser: { isActive: true, deletedAt: null, clientId: user.clientId },
+        OR: [
+          { partnerId: partner.id },
+          ...(outletIds.length ? [{ outletId: { in: outletIds } }] : []),
+        ],
+      },
+      select: {
+        salesUser: {
+          select: {
+            id: true,
+            employeeCode: true,
+            user: { select: { name: true, phone: true } },
+            hierarchyLevel: { select: { name: true, level: true } },
+            reportingTo: {
+              select: {
+                id: true,
+                clientId: true,
+                employeeCode: true,
+                isActive: true,
+                deletedAt: true,
+                user: { select: { name: true, phone: true } },
+                hierarchyLevel: { select: { name: true, level: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    // Dedup by sales-user id; tier 0 = directly assigned (field rep), tier 1 =
+    // their manager. A user seen at both tiers keeps the lower (more direct) tier.
+    type Member = { name: string; role: string; phone: string; employeeCode: string; level: number; tier: number };
+    const byId = new Map<string, Member>();
+    const add = (su: any, tier: number) => {
+      if (!su) return;
+      const existing = byId.get(su.id);
+      if (existing) { existing.tier = Math.min(existing.tier, tier); return; }
+      byId.set(su.id, {
+        name: su.user?.name ?? 'Unknown',
+        role: su.hierarchyLevel?.name ?? '',
+        phone: su.user?.phone ?? '',
+        employeeCode: su.employeeCode,
+        level: su.hierarchyLevel?.level ?? 0,
+        tier,
+      });
+    };
+    for (const a of assignments) {
+      add(a.salesUser, 0);
+      const mgr = a.salesUser?.reportingTo;
+      // Defense-in-depth: a reporting chain is same-tenant by construction, but
+      // assert clientId explicitly before surfacing a manager so a bad
+      // cross-tenant reportingToId could never leak a foreign contact.
+      if (mgr && mgr.isActive && !mgr.deletedAt && mgr.clientId === user.clientId) add(mgr, 1);
+    }
+
+    // Field reps first (tier), then by seniority within a tier, then name.
+    const team = [...byId.values()]
+      .sort((x, y) => x.tier - y.tier || x.level - y.level || x.name.localeCompare(y.name))
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      .map(({ tier, ...m }) => m);
+
+    return { team };
+  }
+
   private toPeriod(d: Date): string {
     const yr = d.getFullYear();
     const mo = String(d.getMonth() + 1).padStart(2, '0');

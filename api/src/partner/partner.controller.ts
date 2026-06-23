@@ -39,4 +39,11 @@ export class PartnerController {
   getTargets(@CurrentUser() user: JwtPayload, @Query() query: ListPartnerTargetsQueryDto) {
     return this.partner.getTargets(user, query);
   }
+
+  // The caller's own assigned sales reps (Support page "Your Sales Team").
+  // Caller- + tenant-scoped in the service; basic self-info, like /me.
+  @Get('sales-team')
+  getSalesTeam(@CurrentUser() user: JwtPayload) {
+    return this.partner.getSalesTeam(user);
+  }
 }
