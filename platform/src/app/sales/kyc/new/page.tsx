@@ -21,7 +21,10 @@ import type { GeoCapture } from '@/types';
 type Step = 'outlet' | 'basic' | 'address' | 'bank' | 'otp' | 'done';
 
 interface AssignedOutlet {
+  /** Internal identity (Prisma CUID) — used as the select key + the Not-Interested POST id. NOT shown to users. */
   outletId: string;
+  /** Human-readable outlet code (e.g. OUT-2026-003) — the value shown in the UI. */
+  outletCode: string;
   name: string;
   beat: string;
   type: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
@@ -185,7 +188,7 @@ export default function NewKYCPage() {
 
   /* Assigned outlets (from API) */
   const [assignedOutlets, setAssignedOutlets] = useState<AssignedOutlet[]>([]);
-  const [registeredPhones, setRegisteredPhones] = useState<Map<string, { name: string; outletId: string }>>(new Map());
+  const [registeredPhones, setRegisteredPhones] = useState<Map<string, { name: string; outletCode: string }>>(new Map());
 
   /* Not Interested flow */
   const [confirmNotInterestedId, setConfirmNotInterestedId] = useState<string | null>(null);
@@ -275,19 +278,20 @@ export default function NewKYCPage() {
       .then((body) => {
         if (body.success) {
           const outlets: AssignedOutlet[] = (body.data.outlets ?? []).map((o: any) => ({
-            outletId:  o.id,
-            name:      o.name,
-            beat:      o.beat || o.district || '',
-            type:      (o.type ?? 'SSS') as AssignedOutlet['type'],
-            kycStatus: o.kycStatus === 'RE_KYC_REQUIRED' ? 'RE_KYC_REQUIRED' : undefined,
+            outletId:   o.id,
+            outletCode: o.outletCode ?? o.id, // human code for display; fall back to id if ever absent
+            name:       o.name,
+            beat:       o.beat || o.district || '',
+            type:       (o.type ?? 'SSS') as AssignedOutlet['type'],
+            kycStatus:  o.kycStatus === 'RE_KYC_REQUIRED' ? 'RE_KYC_REQUIRED' : undefined,
           }));
           setAssignedOutlets(outlets);
           // Build registered phones map from outlet mobiles for conflict detection
-          const phones = new Map<string, { name: string; outletId: string }>();
+          const phones = new Map<string, { name: string; outletCode: string }>();
           (body.data.outlets ?? []).forEach((o: any) => {
             if (o.mobile) {
               const normalized = String(o.mobile).replace(/^(\+91|91)/, '');
-              phones.set(normalized, { name: o.name, outletId: o.id });
+              phones.set(normalized, { name: o.name, outletCode: o.outletCode ?? o.id });
             }
           });
           setRegisteredPhones(phones);
@@ -426,7 +430,7 @@ export default function NewKYCPage() {
       const existingOutlet = registeredPhones.get(val);
       if (existingOutlet) {
         setMobileCheck('outlet_conflict');
-        setMobileCheckMsg(`Already registered to ${existingOutlet.name} (${existingOutlet.outletId}). Each outlet must have a unique contact number.`);
+        setMobileCheckMsg(`Already registered to ${existingOutlet.name} (${existingOutlet.outletCode}). Each outlet must have a unique contact number.`);
         return;
       }
       const employee = EMPLOYEE_PHONES[val];
@@ -583,8 +587,8 @@ export default function NewKYCPage() {
   const downloadSelfDeclarationTemplate = async () => {
     const { jsPDF } = await import('jspdf');
 
-    const outletId   = selectedOutlet?.outletId ?? '___________';
-    const outletName = selectedOutlet?.name     ?? '___________';
+    const outletCode = selectedOutlet?.outletCode ?? '___________';
+    const outletName = selectedOutlet?.name       ?? '___________';
 
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const PW  = 210;          // page width mm
@@ -639,7 +643,7 @@ export default function NewKYCPage() {
 
     // ── Row 2: Employee ID | Outlet ID (pre-filled) ────────────────────────────
     drawField('Employee ID', '',       M,             y, half);
-    drawField('Outlet ID',   outletId, M + half + 10, y, half);
+    drawField('Outlet ID',   outletCode, M + half + 10, y, half);
     y += 18;
 
     // ── Outlet Name (full width, pre-filled) ───────────────────────────────────
@@ -649,7 +653,7 @@ export default function NewKYCPage() {
     // ── Declaration box ────────────────────────────────────────────────────────
     const declText =
       'I hereby declare that the address proof submitted for the enrollment of outlet ' +
-      outletId + ' — ' + outletName + ' is the correct and valid address proof of the said ' +
+      outletCode + ' — ' + outletName + ' is the correct and valid address proof of the said ' +
       'outlet. The name appearing on the address proof may differ from the shop board name ' +
       'due to ownership, registration, or operational reasons. I confirm that both refer to ' +
       'the same physical premises and I take full responsibility for the accuracy and ' +
@@ -685,7 +689,7 @@ export default function NewKYCPage() {
       PW / 2, 285, { align: 'center' },
     );
 
-    doc.save('self-declaration-' + (selectedOutlet?.outletId ?? 'template') + '.pdf');
+    doc.save('self-declaration-' + (selectedOutlet?.outletCode ?? 'template') + '.pdf');
   };
 
   /* ── C: Signature pad handlers ── */
@@ -877,7 +881,7 @@ export default function NewKYCPage() {
     (o) =>
       !dismissedOutlets.has(o.outletId) && (
         o.name.toLowerCase().includes(outletSearch.toLowerCase()) ||
-        o.outletId.toLowerCase().includes(outletSearch.toLowerCase()) ||
+        o.outletCode.toLowerCase().includes(outletSearch.toLowerCase()) ||
         o.beat.toLowerCase().includes(outletSearch.toLowerCase())
       ),
   );
@@ -1102,7 +1106,7 @@ export default function NewKYCPage() {
               Payment · {paymentGeo.lat.toFixed(5)}, {paymentGeo.lng.toFixed(5)}
             </p>
           )}
-          {selectedOutlet && <p className="text-xs text-gray-400 mt-1">{selectedOutlet.outletId}</p>}
+          {selectedOutlet && <p className="text-xs text-gray-400 mt-1">{selectedOutlet.outletCode}</p>}
         </div>
         <Button variant="primary" onClick={() => router.push('/sales/kyc')}>Back to KYC List</Button>
       </div>
@@ -1272,7 +1276,7 @@ export default function NewKYCPage() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-gray-900 truncate">{selectedOutlet.name}</p>
-                      <p className="text-[11px] text-gray-400">{selectedOutlet.outletId} · {TYPE_LABEL[selectedOutlet.type]}</p>
+                      <p className="text-[11px] text-gray-400">{selectedOutlet.outletCode} · {TYPE_LABEL[selectedOutlet.type]}</p>
                     </div>
                   </div>
                 ) : (
@@ -1320,7 +1324,7 @@ export default function NewKYCPage() {
                                 <span className="text-[10px] font-semibold px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded-full shrink-0">Re-KYC</span>
                               )}
                             </div>
-                            <p className="text-xs text-gray-400">{o.outletId} · {o.beat}</p>
+                            <p className="text-xs text-gray-400">{o.outletCode} · {o.beat}</p>
                           </div>
                           <span className="text-[11px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full shrink-0">{TYPE_LABEL[o.type]}</span>
                           {selectedOutlet?.outletId === o.outletId && <Check className="h-4 w-4 text-[var(--brand-primary)] shrink-0" />}
@@ -1353,7 +1357,7 @@ export default function NewKYCPage() {
                   )}
                 </div>
                 <p className="text-sm font-bold text-gray-900">{selectedOutlet.name}</p>
-                <p className="text-xs text-gray-500">{selectedOutlet.outletId} · {selectedOutlet.beat} · {TYPE_LABEL[selectedOutlet.type]}</p>
+                <p className="text-xs text-gray-500">{selectedOutlet.outletCode} · {selectedOutlet.beat} · {TYPE_LABEL[selectedOutlet.type]}</p>
                 {selectedOutlet.kycStatus === 'RE_KYC_REQUIRED' && selectedOutlet.reKycFlags && (
                   <p className="text-xs text-amber-700">
                     {Object.values(selectedOutlet.reKycFlags).filter(Boolean).length} field(s) flagged for re-entry
@@ -1446,7 +1450,7 @@ export default function NewKYCPage() {
                 <Building2 className="h-3.5 w-3.5 text-gray-400 shrink-0" />
                 <div className="min-w-0">
                   <p className="text-xs font-semibold text-gray-700 truncate">{selectedOutlet?.name}</p>
-                  <p className="text-[11px] text-gray-400 truncate">{selectedOutlet?.outletId} · {TYPE_LABEL[selectedOutlet?.type ?? 'SSS']}</p>
+                  <p className="text-[11px] text-gray-400 truncate">{selectedOutlet?.outletCode} · {TYPE_LABEL[selectedOutlet?.type ?? 'SSS']}</p>
                 </div>
               </div>
               <div className="flex items-center gap-2 px-3 py-1.5 bg-[var(--brand-primary)]/5 rounded-lg border border-[var(--brand-primary)]/20 min-w-0">
