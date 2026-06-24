@@ -6,6 +6,15 @@
 > runtime-verify. The money re-audit caught a real BLOCKER the first pass missed (GLM-2 never implemented = lost awards) plus
 > a payouts-rail resolver gap — both then fixed and re-verified. See the FIX WAVE RESULTS block below.
 
+## 🟢 2026-06-24 SESSION — KYC sales-assisted submit + identity display (all pushed `develop`, gate api jest 1024/1024 · FE vitest 1483 · tsc 0, each independently audited + runtime-verified on gifsy_dev)
+| # | Found | Fix | Commit | Status |
+|---|---|---|---|---|
+| **K1** 🔴 | **Sales rep blocked from submitting KYC** after one pending ("You already have a pending KYC submission"); submission orphaned (partnerId null), no owner created | `POST /v1/kyc` `create()` was self-enrol-only (dup-guard on `userId:user.sub`=rep; ignored `dto.outletId`). Rewrote **outlet-driven**: resolve outlet from outletId (added to DTO+FE), find-or-create owner `ChannelPartner`+`User`(PENDING_VERIFICATION; login only at GIFSY approval), dup-guard scoped to the **outlet's partner** (rep enrols UNLIMITED outlets), approval activates the **owner** not the submitter; `assertPhoneAvailable` guards the owner phone (H1). Runtime: 1 rep→5 outlets 5/5 201. | `25bc2da` | ✅ pushed (task #110) |
+| **K2** | KYC list/detail/approvals showed the **rep's** name/phone as the store identity (side-effect of K1) | Sales (`2b91484` #111) + admin/Gifsy (`00e1d56` #112): TITLE=outlet name, Outlet-ID=code, Phone=outlet/owner — never `s.user`. Backend `getOne`/`list` return `partner.outlets{name,code,phone}`; reviewQueue/export were already partner-first. Removed dead `KYC_DATA`+`MOCK_PENDING` mocks. | `2b91484`,`00e1d56` | ✅ pushed (#111/#112) |
+| **K3** | **Owner name** missing — Gifsy reviewer must validate it against submitted documents | Added a distinct **"Owner Name"** field = `partner.ownerName` to sales+admin KYC detail/list/approvals (`list()` select +ownerName). Title stays outlet name; "Submitted by"=rep. Runtime-verified on admin detail. | `3b5cabe` | ✅ pushed (#113) |
+| **K4** | AF-2/AF-3 sales fabricated data | approve/reject persist + KYC re-entry flow (P3 prefill was unwired) + retired OUTLET_ACHIEVEMENTS + retired dup `/sales/kyc/[id]/edit` + leaderboard/support real identity + backend phone-uniqueness + sales-role cleanup; sales `/profile` 5 UI tweaks | `e998282`,`02f6d52` | ✅ pushed (#102–109) |
+> **OWNER DECISIONS (2026-06-24):** `admin/dashboards/kyc` is 100% hardcoded mock (gap-#57a) → **owner: "let it be"** (do NOT hide/wire). Sales **"Ranks" leaderboard** has NO sales-rep backend (`/v1/leaderboard` is partner-based) → recommend hide (DEFERRED). **NEXT (owner-ordered):** AF-5 CSV-injection 🔴 → AF-6 JWT-localStorage 🔴 → AF-7/8 GSTIN/invoice 🟠 → #76 prod data load → #74 owner ops → go-live.
+
 ## 🔎 UAT-FOUND FIXES (2026-06-22, owner testing staging) — each diagnosed → executor → INDEPENDENT audit → gate → runtime-verify
 | # | Found | Fix | Commit | Status |
 |---|---|---|---|---|
