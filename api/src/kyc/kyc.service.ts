@@ -5,6 +5,7 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource } from '@prisma/client';
@@ -127,6 +128,8 @@ type CommitOutcome = BulkVerifySubmissionResult & { notification?: CommitNotifyI
  */
 @Injectable()
 export class KycService {
+  private readonly logger = new Logger(KycService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
@@ -991,31 +994,52 @@ export class KycService {
     // admin) can actually OPEN each uploaded doc/photo. GCS objects are private —
     // they only render via a short-lived signed URL; legacy inline data URLs pass
     // through; `pending://` placeholders (no file uploaded yet) resolve to null.
-    const documents = await Promise.all(
-      submission.documents.map(async (d) => ({
-        ...d,
-        viewUrl: await this.resolveDocumentViewUrl(d),
-      })),
-    );
+    // Inline docs sequentially under a per-RESPONSE byte budget. KycDocument has no
+    // unique (submission, type) constraint, so a submission could in theory accrete
+    // many ≤5MB uploads; without an aggregate cap, inlining them all would build a
+    // huge JSON in memory. Once the budget is spent, remaining docs resolve to null
+    // (the FE shows a placeholder) rather than ballooning the payload.
+    const MAX_INLINE_BYTES = 24 * 1024 * 1024; // ~24MB across all docs in one review
+    let remaining = MAX_INLINE_BYTES;
+    const documents: Array<(typeof submission.documents)[number] & { viewUrl: string | null }> = [];
+    for (const d of submission.documents) {
+      const viewUrl = remaining > 0 ? await this.resolveDocumentViewUrl(d, remaining) : null;
+      if (viewUrl) remaining -= viewUrl.length;
+      documents.push({ ...d, viewUrl });
+    }
 
     return { submission: { ...submission, partner, documents } };
   }
 
-  /** Signed (or pass-through) read URL for a single KYC document. Fails CLOSED:
-   *  any signing error or a not-yet-uploaded `pending://` ref resolves to null so
-   *  the caller never leaks a raw private-object URL. Mirrors resolveDumpDocuments. */
-  private async resolveDocumentViewUrl(d: {
-    fileUrl: string;
-    fileKey: string;
-  }): Promise<string | null> {
-    if (d.fileKey && d.fileUrl?.startsWith('https://storage.googleapis.com/')) {
+  /** A browser-renderable read URL for a single KYC document. Fails CLOSED:
+   *  a not-yet-uploaded `pending://` ref or any read error resolves to null so the
+   *  caller never leaks a raw private-object URL (the FE shows a placeholder).
+   *
+   *  GCS objects are PRIVATE — we inline them as base64 `data:` URLs read via the
+   *  runtime SA's objectAdmin grant, deliberately NOT via V4 signed URLs. Signed
+   *  URLs require the SA to sign blobs over IAM, which is unreliable on Cloud Run
+   *  here (every signed URL came back null at runtime) and impossible locally (no
+   *  keyfile); object READ works wherever uploads work. Already-inline data URLs
+   *  (e.g. SIGNATURE, legacy base64) pass through untouched. */
+  private async resolveDocumentViewUrl(
+    d: { fileUrl: string; fileKey: string; mimeType?: string | null },
+    maxBytes = 8 * 1024 * 1024,
+  ): Promise<string | null> {
+    if (!d.fileUrl || d.fileUrl.startsWith('pending://')) return null;
+    if (d.fileUrl.startsWith('data:')) return d.fileUrl; // already inline
+    if (d.fileKey && d.fileUrl.startsWith('https://storage.googleapis.com/')) {
       try {
-        return await this.storage.getSignedUrl(d.fileKey);
-      } catch {
+        return await this.storage.downloadAsDataUrl(d.fileKey, d.mimeType ?? undefined, maxBytes);
+      } catch (err) {
+        // Don't swallow silently — a read failure here is exactly why the reviewer
+        // sees a blank doc; log it so the cause is visible in Cloud Run logs.
+        this.logger.warn(
+          `KYC doc inline failed for ${d.fileKey}: ${err instanceof Error ? err.message : String(err)}`,
+        );
         return null;
       }
     }
-    return d.fileUrl && !d.fileUrl.startsWith('pending://') ? d.fileUrl : null;
+    return null;
   }
 
   // ─── PATCH /v1/kyc/:id ───────────────────────────────────────────────────────
@@ -2543,6 +2567,13 @@ export class KycService {
    * links. NOTE: the submission form overloads documentType 'OTHER' for both the store
    * board photo and the self-declaration, so those two are split best-effort by file
    * name — the proper fix is distinct KycDocumentType values (tracked follow-up).
+   *
+   * KNOWN RESIDUAL (2026-06-25): this export still uses V4 getSignedUrl, which fails
+   * on Cloud Run here (same root cause that made the portal-review images blank — see
+   * resolveDocumentViewUrl, now switched to inline reads). So these Excel doc links
+   * come back blank in that environment. Not switched to data: URLs because an Excel
+   * cell can't carry a multi-MB data URL as a clickable link — the proper fix is at
+   * the IAM/signing layer (or a per-doc redirect endpoint). Fails CLOSED meanwhile.
    */
   private async resolveDumpDocuments(
     docs: { documentType: string; fileUrl: string; fileKey: string; fileName: string | null }[],

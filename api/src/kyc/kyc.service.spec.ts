@@ -68,6 +68,7 @@ const mockStorage = {
   generateKey: jest.fn((folder: string, name: string) => `${folder}/2026-06/uuid-${name}`),
   uploadFile: jest.fn().mockResolvedValue('https://storage.googleapis.com/bucket/key'),
   getSignedUrl: jest.fn(),
+  downloadAsDataUrl: jest.fn(),
   publicUrl: jest.fn((k: string) => `https://storage.googleapis.com/bucket/${k}`),
   deleteFile: jest.fn(),
 };
@@ -721,7 +722,8 @@ describe('KycService', () => {
       expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled();
     });
 
-    it('returns a signed viewUrl for a private GCS document so the reviewer can open it', async () => {
+    it('inlines a private GCS document as a data URL (read, not signed) so the reviewer can open it', async () => {
+      // Signed URLs fail on Cloud Run here; we inline via the SA's object-read grant.
       primeSalesNodes([
         { id: 'so-su', reportingToId: null, userId: 'so1' },
         { id: 'xsr-su', reportingToId: 'so-su', userId: 'other' },
@@ -731,13 +733,57 @@ describe('KycService', () => {
         documents: [
           { documentType: 'STORE_BOARD_PHOTO', status: 'PENDING',
             fileUrl: 'https://storage.googleapis.com/bucket/kyc/deoleo/board.jpg',
-            fileKey: 'kyc/deoleo/board.jpg' },
+            fileKey: 'kyc/deoleo/board.jpg', mimeType: 'image/jpeg' },
         ],
       });
-      mockStorage.getSignedUrl.mockResolvedValueOnce('https://signed/board');
+      mockStorage.downloadAsDataUrl.mockResolvedValueOnce('data:image/jpeg;base64,ZZZ');
       const res = await service.getOne(so, 's1');
-      expect(mockStorage.getSignedUrl).toHaveBeenCalledWith('kyc/deoleo/board.jpg');
-      expect(res.submission.documents[0].viewUrl).toBe('https://signed/board');
+      expect(mockStorage.downloadAsDataUrl).toHaveBeenCalledWith(
+        'kyc/deoleo/board.jpg', 'image/jpeg', expect.any(Number),
+      );
+      expect(mockStorage.getSignedUrl).not.toHaveBeenCalled();
+      expect(res.submission.documents[0].viewUrl).toBe('data:image/jpeg;base64,ZZZ');
+    });
+
+    it('threads a shrinking per-response inline budget across documents (caps total payload)', async () => {
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'xsr-su', reportingToId: 'so-su', userId: 'other' },
+      ]);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, statusHistory: [],
+        documents: [
+          { documentType: 'STORE_BOARD_PHOTO', status: 'PENDING',
+            fileUrl: 'https://storage.googleapis.com/bucket/a.jpg', fileKey: 'a.jpg', mimeType: 'image/jpeg' },
+          { documentType: 'SELFIE', status: 'PENDING',
+            fileUrl: 'https://storage.googleapis.com/bucket/b.jpg', fileKey: 'b.jpg', mimeType: 'image/jpeg' },
+        ],
+      });
+      const first = `data:image/jpeg;base64,${'A'.repeat(1000)}`;
+      mockStorage.downloadAsDataUrl.mockResolvedValueOnce(first).mockResolvedValueOnce('data:image/jpeg;base64,B');
+      await service.getOne(so, 's1');
+      const firstCap = mockStorage.downloadAsDataUrl.mock.calls[0][2] as number;
+      const secondCap = mockStorage.downloadAsDataUrl.mock.calls[1][2] as number;
+      // The second doc's budget is the first doc's budget minus the bytes already inlined.
+      expect(secondCap).toBe(firstCap - first.length);
+    });
+
+    it('nulls the viewUrl (placeholder) when the GCS read throws — never leaks a raw private URL', async () => {
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'xsr-su', reportingToId: 'so-su', userId: 'other' },
+      ]);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, statusHistory: [],
+        documents: [
+          { documentType: 'STORE_BOARD_PHOTO', status: 'PENDING',
+            fileUrl: 'https://storage.googleapis.com/bucket/kyc/deoleo/board.jpg',
+            fileKey: 'kyc/deoleo/board.jpg', mimeType: 'image/jpeg' },
+        ],
+      });
+      mockStorage.downloadAsDataUrl.mockRejectedValueOnce(new Error('boom'));
+      const res = await service.getOne(so, 's1');
+      expect(res.submission.documents[0].viewUrl).toBeNull();
     });
 
     it('passes through an inline data URL and nulls a not-yet-uploaded pending:// ref', async () => {
@@ -755,6 +801,7 @@ describe('KycService', () => {
       const res = await service.getOne(so, 's1');
       expect(res.submission.documents[0].viewUrl).toBe('data:image/png;base64,AAAA');
       expect(res.submission.documents[1].viewUrl).toBeNull();
+      expect(mockStorage.downloadAsDataUrl).not.toHaveBeenCalled();
       expect(mockStorage.getSignedUrl).not.toHaveBeenCalled();
     });
   });
@@ -858,6 +905,42 @@ describe('KycService', () => {
       });
       await expect(service.firstApprove(so, 's1', { remarks: 'ok' })).rejects.toBeInstanceOf(
         ForbiddenException,
+      );
+    });
+  });
+
+  describe('reject (GIFSY_ADMIN final-stage rejection)', () => {
+    it('lets GIFSY_ADMIN reject a PENDING_GIFSY submission — exempt from the routed-approver check', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'user1', status: 'PENDING_GIFSY', user: { name: 'n', phone: 'p' },
+      });
+      const res = await service.reject(gifsy, 's1', { reason: 'fraudulent documents' });
+      expect(res.message).toMatch(/rejected/i);
+      expect(mockTx.kycSubmission.update).toHaveBeenCalledWith({
+        where: { id: 's1' },
+        data: { status: 'REJECTED', rejectionReason: 'fraudulent documents' },
+      });
+      // Gifsy acts at the final stage — no subtree / routed-approver lookup.
+      expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('supports a Gifsy RE_UPLOAD_REQUIRED request (re-upload, not outright reject)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'user1', status: 'PENDING_GIFSY', user: { name: 'n', phone: 'p' },
+      });
+      await service.reject(gifsy, 's1', { reason: 'blurry cheque', status: 'RE_UPLOAD_REQUIRED' });
+      expect(mockTx.kycSubmission.update).toHaveBeenCalledWith({
+        where: { id: 's1' },
+        data: { status: 'RE_UPLOAD_REQUIRED', rejectionReason: 'blurry cheque' },
+      });
+    });
+
+    it('refuses to re-reject an already-REJECTED submission', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'user1', status: 'REJECTED', user: { name: 'n', phone: 'p' },
+      });
+      await expect(service.reject(gifsy, 's1', { reason: 'x' })).rejects.toBeInstanceOf(
+        BadRequestException,
       );
     });
   });

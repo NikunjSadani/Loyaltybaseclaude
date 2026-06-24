@@ -64,4 +64,43 @@ describe('StorageService', () => {
       expect(key).not.toContain('?');
     });
   });
+
+  describe('downloadAsDataUrl', () => {
+    /** Swap in a fake GCS file whose metadata + bytes we control. */
+    function stubFile(opts: { size: number; contentType?: string; bytes?: Buffer }) {
+      const file = {
+        getMetadata: jest.fn().mockResolvedValue([{ size: opts.size, contentType: opts.contentType }]),
+        download: jest.fn().mockResolvedValue([opts.bytes ?? Buffer.from('xx')]),
+      };
+      (service as unknown as { storage: unknown }).storage = {
+        bucket: () => ({ file: () => file }),
+      };
+      return file;
+    }
+
+    it('returns a base64 data URL using the object metadata content-type', async () => {
+      stubFile({ size: 3, contentType: 'image/png', bytes: Buffer.from('abc') });
+      const out = await service.downloadAsDataUrl('kyc/x.png');
+      expect(out).toBe(`data:image/png;base64,${Buffer.from('abc').toString('base64')}`);
+    });
+
+    it('prefers the caller-supplied content-type over the object metadata', async () => {
+      stubFile({ size: 2, contentType: 'application/octet-stream', bytes: Buffer.from('hi') });
+      const out = await service.downloadAsDataUrl('kyc/x.jpg', 'image/jpeg');
+      expect(out).toBe(`data:image/jpeg;base64,${Buffer.from('hi').toString('base64')}`);
+    });
+
+    it('returns null (no download) when the object exceeds the size cap', async () => {
+      const file = stubFile({ size: 20 * 1024 * 1024, contentType: 'image/jpeg' });
+      const out = await service.downloadAsDataUrl('kyc/big.jpg', undefined, 8 * 1024 * 1024);
+      expect(out).toBeNull();
+      expect(file.download).not.toHaveBeenCalled();
+    });
+
+    it('falls back to octet-stream when no content-type is known', async () => {
+      stubFile({ size: 1, bytes: Buffer.from('z') });
+      const out = await service.downloadAsDataUrl('kyc/x.bin');
+      expect(out).toBe(`data:application/octet-stream;base64,${Buffer.from('z').toString('base64')}`);
+    });
+  });
 });

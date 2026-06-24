@@ -207,8 +207,12 @@ export class KycController {
     return this.kyc.approve(user, id);
   }
 
+  // GIFSY_ADMIN must be able to reject outright at the final (PENDING_GIFSY) stage —
+  // the service's reject() already implements the Gifsy branch (exempt from the
+  // routed-approver check, may reject at any stage). It was missing from @Roles, so
+  // a Gifsy admin was 403'd before reaching that logic.
   @Post(':id/reject')
-  @Roles('SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR', 'CLIENT_ADMIN')
+  @Roles('GIFSY_ADMIN', 'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR', 'CLIENT_ADMIN')
   @RequirePermission('kyc:reject')
   reject(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: RejectKycDto) {
     return this.kyc.reject(user, id, dto);

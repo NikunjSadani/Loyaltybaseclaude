@@ -68,6 +68,37 @@ export class StorageService {
     return url;
   }
 
+  /**
+   * Read a private object and return it as a `data:` URL (base64-inlined).
+   *
+   * This is the signing-free way to surface a private GCS doc to the browser: a
+   * data URL needs no auth and renders in an <img>, so we never depend on V4
+   * signed URLs. Signing (getSignedUrl) requires the runtime SA to sign blobs via
+   * IAM — that path is unreliable on Cloud Run here and impossible locally (no
+   * keyfile) — whereas object READ works wherever the SA has objectAdmin (the same
+   * grant that lets uploadFile write). Used for KYC document/photo review.
+   *
+   * Bounded: objects larger than maxBytes return null (caller falls back to a
+   * placeholder) so a stray large upload can't bloat a JSON response. The caller
+   * decides what to do with null.
+   */
+  async downloadAsDataUrl(
+    key: string,
+    contentType?: string,
+    maxBytes = 8 * 1024 * 1024,
+  ): Promise<string | null> {
+    const file = this.storage.bucket(this.bucket).file(key);
+    const [meta] = await file.getMetadata();
+    const size = Number(meta.size ?? 0);
+    if (size > maxBytes) {
+      this.logger.warn(`downloadAsDataUrl: ${key} is ${size}B (> ${maxBytes}B cap) — skipping inline`);
+      return null;
+    }
+    const ct = contentType || meta.contentType || 'application/octet-stream';
+    const [buf] = await file.download();
+    return `data:${ct};base64,${buf.toString('base64')}`;
+  }
+
   /** Delete an object. */
   async deleteFile(key: string): Promise<void> {
     await this.storage.bucket(this.bucket).file(key).delete();

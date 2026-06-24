@@ -386,28 +386,34 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState<string | null>(null);
   const [actionResult, setActionResult] = useState<string | null>(null);
+  const [actionError, setActionError]   = useState<string | null>(null);
 
   // Gifsy-admin-only fields set during KYC approval
   const [entityType, setEntityType] = useState<EntityType>('INDIVIDUAL');
   const [gstRegType, setGstRegType] = useState<GSTRegistrationType>('UNREGISTERED');
   const [taxFieldsSaved, setTaxFieldsSaved] = useState(false);
 
+  const loadKyc = useCallback(async () => {
+    const res = await fetch(`/api/kyc/${id}`, {
+      headers: { Authorization: `Bearer ${authToken()}` },
+    });
+    const json = (await res.json().catch(() => ({ success: false }))) as {
+      success: boolean; data?: { submission: ApiKycDetail }; error?: string;
+    };
+    if (json.success && json.data) {
+      setKyc(mapApiKycDetail(json.data.submission));
+      setError(null);
+    } else {
+      setError(json.error ?? 'KYC submission not found');
+    }
+  }, [id]);
+
   useEffect(() => {
     if (!id) return;
-    fetch(`/api/kyc/${id}`, {
-      headers: { Authorization: `Bearer ${authToken()}` },
-    })
-      .then(r => r.json())
-      .then((json: { success: boolean; data?: { submission: ApiKycDetail }; error?: string }) => {
-        if (json.success && json.data) {
-          setKyc(mapApiKycDetail(json.data.submission));
-        } else {
-          setError(json.error ?? 'KYC submission not found');
-        }
-      })
+    loadKyc()
       .catch(() => setError('Failed to load KYC submission'))
       .finally(() => setLoading(false));
-  }, [id]);
+  }, [id, loadKyc]);
 
   if (loading) {
     return (
@@ -426,15 +432,46 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
     );
   }
 
-  const handleApprove = (id: string) => {
-    setActionResult(`KYC ${id} approved successfully. Partner notified via WhatsApp.`);
+  // Real decision actions — these used to be local-only stubs that just flashed a
+  // success banner without ever calling the backend (so a Gifsy admin's "Reject KYC"
+  // did nothing). They now POST to the API and refresh the submission so the status
+  // badge + document panel reflect the new state.
+  const postAction = async (
+    path: string,
+    body: Record<string, unknown> | undefined,
+    onOkMessage: string,
+  ) => {
+    setActionError(null);
+    setActionResult(null);
+    try {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken()}` },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const json = (await res.json().catch(() => ({ success: false }))) as {
+        success: boolean; error?: string; message?: string;
+      };
+      if (!res.ok || !json.success) {
+        throw new Error(json.error ?? json.message ?? `Request failed (${res.status})`);
+      }
+      await loadKyc();
+      setActionResult(onOkMessage);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Action failed.');
+    }
   };
-  const handleReject = (id: string, reason: string) => {
-    setActionResult(`KYC ${id} rejected. Reason: ${reason}`);
-  };
-  const handleReupload = (id: string, reason: string) => {
-    setActionResult(`Re-upload requested for KYC ${id}. Partner notified. Reason: ${reason}`);
-  };
+
+  const handleApprove = (kycId: string) =>
+    postAction(`/api/kyc/${kycId}/approve`, undefined, 'KYC approved successfully. Partner notified.');
+  const handleReject = (kycId: string, reason: string) =>
+    postAction(`/api/kyc/${kycId}/reject`, { reason, status: 'REJECTED' }, `KYC rejected. Reason: ${reason}`);
+  const handleReupload = (kycId: string, reason: string) =>
+    postAction(
+      `/api/kyc/${kycId}/reject`,
+      { reason, status: 'RE_UPLOAD_REQUIRED' },
+      `Re-upload requested. Partner notified. Reason: ${reason}`,
+    );
 
   return (
     <div className="space-y-5 fade-in">
@@ -461,6 +498,13 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
         <div className="bg-green-50 border border-green-200 rounded-xl p-4 flex items-center gap-2 text-sm text-green-700">
           <CheckCircle className="w-4 h-4 flex-shrink-0" />
           {actionResult}
+        </div>
+      )}
+
+      {actionError && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center gap-2 text-sm text-red-700">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+          {actionError}
         </div>
       )}
 
