@@ -108,6 +108,23 @@ function relativeDate(dateStr: string): string {
   return `${months} month${months !== 1 ? 's' : ''} ago`;
 }
 
+/* ─── Collapse multiple submissions for one outlet to the latest (current) one ─── */
+/** A rejected attempt + its resubmission are two KycSubmission rows for the SAME
+ *  outlet. The list must show each outlet ONCE with its current status, so keep only
+ *  the most-recently-updated submission per outletCode. Entries with no outletCode
+ *  (a submission not linked to an outlet) are kept individually. */
+function dedupeByOutlet(entries: KYCEntry[]): KYCEntry[] {
+  const ts = (e: KYCEntry) => new Date(e.updatedAt || e.submittedAt || 0).getTime();
+  const latestByOutlet = new Map<string, KYCEntry>();
+  const noOutlet: KYCEntry[] = [];
+  for (const e of entries) {
+    if (!e.outletCode) { noOutlet.push(e); continue; }
+    const existing = latestByOutlet.get(e.outletCode);
+    if (!existing || ts(e) >= ts(existing)) latestByOutlet.set(e.outletCode, e);
+  }
+  return [...latestByOutlet.values(), ...noOutlet];
+}
+
 /* ─── Row border by status ───────────────────────────────────────────────────── */
 function rowBorder(status: KYCStatus, approvalStatus: KYCStatus | null): string {
   if (approvalStatus && status === approvalStatus) return 'border-l-4 border-l-blue-400';
@@ -226,8 +243,9 @@ function KYCListContent() {
 
     Promise.all([kycFetch, outletsFetch, teamFetch])
       .then(([subs, notStarted]) => {
-        // Disjoint by construction: NOT_STARTED outlets have no submission, so no overlap.
-        setEntries([...(notStarted ?? []), ...(subs ?? [])]);
+        // Collapse repeat submissions for the same outlet to its latest (current) status;
+        // NOT_STARTED outlets have no submission → disjoint, appended as-is.
+        setEntries([...(notStarted ?? []), ...dedupeByOutlet(subs ?? [])]);
       })
       .finally(() => setLoading(false));
   }, [role]);
