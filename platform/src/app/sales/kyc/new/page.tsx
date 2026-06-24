@@ -66,6 +66,9 @@ interface UploadedFile {
   fileSizeBytes?: number;
   uploadState: DocUploadState;
   uploadError?: string;
+  /** True when this slot was pre-filled from the previous (rejected/re-KYC)
+   *  submission rather than freshly uploaded this session. */
+  carriedOver?: boolean;
 }
 
 /* ─── Constants ──────────────────────────────────────────────────────────────── */
@@ -137,6 +140,15 @@ const DOC_TYPE_MAP: Record<DocKey, string> = {
   cheque:          'CANCELLED_CHEQUE',
   selfDeclaration: 'SELF_DECLARATION',
 };
+
+/** documentType → form slot key — reverse of DOC_TYPE_MAP, used to re-fill the
+ *  document/photo slots from a previous submission on re-entry (resubmit / re-KYC). */
+const DOC_TYPE_TO_KEY: Record<string, DocKey> = Object.fromEntries(
+  Object.entries(DOC_TYPE_MAP).map(([k, v]) => [v, k as DocKey]),
+) as Record<string, DocKey>;
+
+/** Statuses for which the SAME outlet's KYC is re-opened pre-filled. */
+const RE_ENTRY_STATUSES = new Set(['REJECTED', 'RESUBMISSION_REQUIRED', 'RE_KYC_REQUIRED']);
 
 /* ─── GCS upload helper ───────────────────────────────────────────────────────── */
 
@@ -258,6 +270,15 @@ export default function NewKYCPage() {
   const [isDrawing,  setIsDrawing]  = useState(false);
   const [hasSigned,  setHasSigned]  = useState(false);
   const lastPoint = useRef<{ x: number; y: number } | null>(null);
+  /* Signature carried over from the previous submission — drawn onto the canvas
+   *  once the Bank step (where the pad mounts) renders. */
+  const [pendingSignature, setPendingSignature] = useState<string | null>(null);
+  /* True once a previous signature has been carried over (drives the "reused" hint;
+   *  cleared when the rep clears the pad to re-sign). */
+  const [signatureCarriedOver, setSignatureCarriedOver] = useState(false);
+  /* Guards the re-entry prefill so it fetches+fills a given submission only once
+   *  (re-running would clobber the rep's edits). */
+  const prefilledKycRef = useRef<string | null>(null);
 
   /* D — Post-submit OTP */
   const [submitOtp,          setSubmitOtp]          = useState('');
@@ -367,6 +388,130 @@ export default function NewKYCPage() {
     // Trigger mobile-conflict check for the pre-filled number
     if (k.mobile.length === 10) setMobileCheck('ok');
   }, [selectedOutlet]);
+
+  /* ── Reset all captured/carried-over evidence whenever the SELECTED OUTLET changes,
+   *     so one outlet's documents/photos/geo/signature can NEVER bleed into another
+   *     outlet's submission (the rep can switch outlets on the picker mid-flow).
+   *     Keyed on outletId so re-selecting the SAME outlet preserves the rep's edits.
+   *     Declared BEFORE the prefill effect so it runs first on an outlet change. ── */
+  const lastOutletIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const oid = selectedOutlet?.outletId ?? null;
+    if (lastOutletIdRef.current === oid) return; // same outlet → keep the rep's edits
+    lastOutletIdRef.current = oid;
+    setDocs({ businessDoc: null, ownerPhoto: null, shopAddressDoc: null, storeBoardPhoto: null, cheque: null, selfDeclaration: null });
+    setBoardPhotoGeo(null); setBoardPhotoGeoError(''); setBoardPhotoGeoLoading(false);
+    setPaymentGeo(null); setPaymentGeoError(''); setPaymentGeoLoading(false);
+    setPendingSignature(null); setSignatureCarriedOver(false); setHasSigned(false);
+    const canvas = signatureCanvasRef.current;
+    canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+    prefilledKycRef.current = null; // re-arm the prefill for the new outlet
+  }, [selectedOutlet?.outletId]);
+
+  /* ── Re-entry: pre-fill the DOCUMENTS, PHOTOS, geo + signature from the previous
+   *     (rejected / re-KYC) submission so the rep edits only what's needed, instead
+   *     of re-uploading everything. Fetches the one submission (GET /api/kyc/:id —
+   *     which already inlines each doc as a data URL) on outlet selection, once. ── */
+  useEffect(() => {
+    const kycId  = selectedOutlet?.kycId;
+    const status = selectedOutlet?.kycStatus ?? '';
+    if (!kycId || !RE_ENTRY_STATUSES.has(status)) return;
+    if (prefilledKycRef.current === kycId) return; // fill a given submission only once
+    prefilledKycRef.current = kycId;
+
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    (async () => {
+      try {
+        const res = await fetch(`/api/kyc/${kycId}`, { headers: { Authorization: `Bearer ${token}` } });
+        const body = await res.json().catch(() => ({ success: false }));
+        if (!body?.success || !body.data?.submission) return;
+        const sub = body.data.submission as {
+          documents?: Array<{
+            documentType: string; fileKey?: string; fileUrl?: string; viewUrl?: string | null;
+            fileName?: string | null; mimeType?: string | null; fileSizeBytes?: number | null;
+          }>;
+          boardPhotoLat?: string | number | null; boardPhotoLng?: string | number | null;
+          boardPhotoGeoAccuracy?: string | number | null; boardPhotoGeoAt?: string | null;
+          paymentLat?: string | number | null; paymentLng?: string | number | null;
+          paymentGeoAccuracy?: string | number | null; paymentGeoAt?: string | null;
+        };
+
+        // Documents + photos → form slots. SIGNATURE is handled via the pad below.
+        const nextDocs: Partial<Record<DocKey, UploadedFile>> = {};
+        for (const d of sub.documents ?? []) {
+          if (d.documentType === 'SIGNATURE') {
+            if (d.viewUrl) { setPendingSignature(d.viewUrl); setSignatureCarriedOver(true); }
+            continue;
+          }
+          const key = DOC_TYPE_TO_KEY[d.documentType];
+          // Only carry over real GCS-backed docs we can both preview (viewUrl) and
+          // re-reference on resubmit (fileKey + fileUrl). pending:// / unmapped → skip.
+          if (!key || !d.viewUrl || !d.fileKey || !d.fileUrl) continue;
+          nextDocs[key] = {
+            name:          d.fileName ?? d.documentType,
+            size:          d.fileSizeBytes ?? 0,
+            type:          d.mimeType ?? 'image/jpeg',
+            dataUrl:       d.viewUrl,            // inlined preview
+            fileKey:       d.fileKey,            // resubmit reuses the same GCS object
+            fileUrl:       d.fileUrl,
+            fileName:      d.fileName ?? undefined,
+            mimeType:      d.mimeType ?? undefined,
+            fileSizeBytes: d.fileSizeBytes ?? undefined,
+            uploadState:   'uploaded',
+            carriedOver:   true,
+          };
+        }
+        if (Object.keys(nextDocs).length) setDocs((cur) => ({ ...cur, ...nextDocs }));
+
+        // Carry over the geo proofs so the rep isn't forced back on-site to re-shoot
+        // a photo that was fine (the store hasn't moved). A fresh re-take re-captures.
+        // Prisma Decimal columns arrive as strings → coerce; reject NaN so a bad value
+        // can't poison the geo (Number.isFinite, not `?? 0`, which lets NaN through).
+        const fin = (v: unknown): number | null => {
+          if (v == null) return null;
+          const n = Number(v);
+          return Number.isFinite(n) ? n : null;
+        };
+        const lat1 = fin(sub.boardPhotoLat), lng1 = fin(sub.boardPhotoLng);
+        if (lat1 != null && lng1 != null) {
+          setBoardPhotoGeo({
+            lat: lat1, lng: lng1,
+            accuracy: Math.round(fin(sub.boardPhotoGeoAccuracy) ?? 0),
+            ts: sub.boardPhotoGeoAt ?? new Date().toISOString(),
+          });
+        }
+        const lat2 = fin(sub.paymentLat), lng2 = fin(sub.paymentLng);
+        if (lat2 != null && lng2 != null) {
+          setPaymentGeo({
+            lat: lat2, lng: lng2,
+            accuracy: Math.round(fin(sub.paymentGeoAccuracy) ?? 0),
+            ts: sub.paymentGeoAt ?? new Date().toISOString(),
+          });
+        }
+      } catch {
+        // Best-effort prefill — a failure just means the rep re-uploads (text fields
+        // + remark still pre-fill from the outlets list payload).
+        prefilledKycRef.current = null; // allow a retry on re-selection
+      }
+    })();
+  }, [selectedOutlet]);
+
+  /* Draw a carried-over signature onto the pad once the Bank step mounts it. */
+  useEffect(() => {
+    if (step !== 'bank' || !pendingSignature || hasSigned) return;
+    const canvas = signatureCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const img = new Image();
+    img.onload = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      setHasSigned(true);
+      setPendingSignature(null);
+    };
+    img.src = pendingSignature;
+  }, [step, pendingSignature, hasSigned]);
 
   /* ── Geo capture helpers ── */
   const captureBoardPhotoGeo = useCallback(() => {
@@ -737,6 +882,7 @@ export default function NewKYCPage() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     setIsDrawing(true);
+    setSignatureCarriedOver(false); // drawing over it makes it the rep's own signature
     const pos = getSigPos(canvas, e);
     lastPoint.current = pos;
     ctx.beginPath();
@@ -769,6 +915,7 @@ export default function NewKYCPage() {
     if (!canvas) return;
     canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
     setHasSigned(false);
+    setSignatureCarriedOver(false); // clearing it means the rep will re-sign fresh
   };
 
   /** Send the outlet-owner consent OTP (real MSG91 in prod; FIXED_OTP on staging). */
@@ -1108,7 +1255,12 @@ export default function NewKYCPage() {
               <Loader2 className="h-2.5 w-2.5 animate-spin" /> Uploading to server…
             </p>
           )}
-          {file.uploadState === 'uploaded' && (
+          {file.uploadState === 'uploaded' && file.carriedOver && (
+            <p className="text-[11px] text-amber-600 flex items-center gap-1">
+              <RefreshCw className="h-2.5 w-2.5" /> From previous submission · replace if it needs changing
+            </p>
+          )}
+          {file.uploadState === 'uploaded' && !file.carriedOver && (
             <p className="text-[11px] text-emerald-600 flex items-center gap-1">
               <Check className="h-2.5 w-2.5" /> Uploaded · {formatBytes(file.size)}
             </p>
@@ -1314,13 +1466,16 @@ export default function NewKYCPage() {
               <>
                 <p className="text-xs font-semibold text-amber-800">This KYC was rejected — please review and resubmit</p>
                 <p className="text-xs text-amber-700 mt-0.5">
-                  See the remark below. Everything is pre-filled from the previous entry —{' '}
+                  All details, documents and photos are pre-filled from the previous entry —{' '}
                   <span className="font-semibold">edit what&apos;s needed and resubmit.</span>
                 </p>
               </>
             )}
             {selectedOutlet?.reKycRemarks && (
-              <p className="text-[11px] text-amber-600 mt-1 italic">Note: {selectedOutlet.reKycRemarks}</p>
+              <div className="mt-2 rounded-lg bg-amber-100/70 border border-amber-300 px-2.5 py-1.5">
+                <p className="text-[11px] font-semibold text-amber-800">Reviewer remark — fix this:</p>
+                <p className="text-xs text-amber-900 mt-0.5">{selectedOutlet.reKycRemarks}</p>
+              </div>
             )}
           </div>
         </div>
@@ -2011,6 +2166,11 @@ export default function NewKYCPage() {
                 )}
               </div>
               <p className="text-[11px] text-gray-400">Owner signs below to confirm KYC consent</p>
+              {signatureCarriedOver && (
+                <p className="text-[11px] text-amber-600 flex items-center gap-1">
+                  <RefreshCw className="h-3 w-3 shrink-0" /> Signature carried over from the previous submission — Clear to re-sign.
+                </p>
+              )}
 
               <div className={`relative rounded-xl border-2 overflow-hidden transition-colors ${
                 hasSigned ? 'border-[var(--brand-primary)]/40' : 'border-dashed border-gray-300'
