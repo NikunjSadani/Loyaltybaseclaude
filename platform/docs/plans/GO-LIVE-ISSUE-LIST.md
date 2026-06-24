@@ -26,6 +26,11 @@
 | **K10** | **Same outlet appeared multiple times** in the sales KYC list (a rejected attempt + its resubmission are 2 rows) | The list **collapses to one row per outlet = the latest (current) status** (`dedupeByOutlet` by outletCode, max updatedAt); NOT_STARTED are disjoint; no-outlet submissions kept individually. | `16ba382` | ✅ pushed |
 > **STILL OPEN (flagged honestly):** the **"Anil Sharma / Awaiting SO" no-outlet KYC entry** (a submission whose partner has no linked outlet → falls back to the rep name) is a separate data oddity, not addressed.
 
+## 🟢 2026-06-25 SESSION (cont.) — sales dashboard "achievement not showing" in Target Achievement
+| # | Found | Fix | Status |
+|---|---|---|---|
+| **K14** | The SO dashboard **Target Achievement** card showed the target (e.g. 0/100 Litre) but **achievement = 0**, even though achievement was uploaded. Diagnosed at runtime (in-VPC DB query): targets existed for **2026-06/07/08** but achievements (`outlet_sales_records`) only for **2026-06**; `getTargets` auto-picked the **latest TARGET month = 2026-08** (a future target, no period passed by the dashboard FE) and read achievement for August → none → 0. The real June achievement was on a month the card never displayed (and that's why the card oddly read "August 2026"). | New shared `reportMonth(period)`: when the caller names no period, anchor on the **CURRENT calendar month** (`currentMonthKey`, server-clock `YYYY-MM` — same basis as the FE's CURRENT_MONTH + the upload month-lock; **owner decision 2026-06-25**). Used by `getTargets` (dashboard) + `readOutletTargets` (outlets list / team drill-down). The outlets/team views pass an explicit period so they're unchanged; only the no-period dashboard auto-pick moves from latest-target → current-month. Regression test added (no-period → current month, no "latest" DB lookup). Gate: api jest **1057** · tsc 0. | ✅ fixed (pending push runtime-verify) |
+
 ## 🟢 2026-06-25 SESSION — Gifsy-admin KYC reject + uploaded-photo visibility (owner UAT on staging; diagnosed at runtime → fix → INDEPENDENT audit → full gate api jest 1056 · FE vitest 1492 · tsc 0)
 | # | Found | Fix | Status |
 |---|---|---|---|

@@ -2,7 +2,7 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-access.helper';
-import { kpiCodeKeys } from '../targets/targets.helpers';
+import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 
 /**
  * Sales Organization — ported from platform/src/app/api/sales/* onto /v1.
@@ -310,17 +310,10 @@ export class SalesService {
     const outletCodes = await this.subtreeOutletCodes(user);
     if (outletCodes.length === 0) return { period: null, outletCount: 0, kpis: [], trend: [] };
 
-    // Month to report: the caller's period, else the most recent month with target data.
-    let month: string | null = period ?? null;
-    if (!month) {
-      const latest = await this.prisma.outletTarget.findFirst({
-        where: { clientId: user.clientId, outletCode: { in: outletCodes } },
-        orderBy: { month: 'desc' },
-        select: { month: true },
-      });
-      month = latest?.month ?? null;
-    }
-    if (!month) return { period: null, outletCount: outletCodes.length, kpis: [], trend: [] };
+    // Month to report: the caller's period, else the CURRENT calendar month (owner
+    // decision) — not the latest target month, which may be a future month with no
+    // achievement yet (that left the card showing 0 achievement).
+    const month = this.reportMonth(period);
 
     const whereBase = { clientId: user.clientId, outletCode: { in: outletCodes } };
     const [targetRows, achRows, kpiRows] = await Promise.all([
@@ -402,24 +395,27 @@ export class SalesService {
   }
 
   /**
+   * The reporting month a target/achievement view defaults to when the caller names
+   * none: the CURRENT calendar month (server-clock `YYYY-MM`, same basis as the FE's
+   * CURRENT_MONTH and the upload month-lock `currentMonthKey`). Owner decision
+   * 2026-06-25: the dashboard "Target Achievement" card always reflects the current
+   * month — NOT whatever month happens to have the most/least data. (A target uploaded
+   * for a future month no longer hijacks the card and shows 0 achievement.)
+   */
+  private reportMonth(period?: string): string {
+    return period ?? currentMonthKey();
+  }
+
+  /**
    * Shared per-outlet target/achievement read for a fixed set of outlet codes.
-   * Resolves the month (caller's period, else the latest month with target data),
-   * joins OutletTarget.targetValues ⋈ OutletSalesRecord.kpiValues ⋈ KpiDef, and
-   * returns { period, kpiColumns (primary-first), rows keyed by outletCode }.
+   * Resolves the month (caller's period, else the current calendar month), joins
+   * OutletTarget.targetValues ⋈ OutletSalesRecord.kpiValues ⋈ KpiDef, and returns
+   * { period, kpiColumns (primary-first), rows keyed by outletCode }.
    */
   private async readOutletTargets(clientId: string, outletCodes: string[], period?: string) {
     if (outletCodes.length === 0) return { period: null, kpiColumns: [], rows: [] };
 
-    let month: string | null = period ?? null;
-    if (!month) {
-      const latest = await this.prisma.outletTarget.findFirst({
-        where: { clientId, outletCode: { in: outletCodes } },
-        orderBy: { month: 'desc' },
-        select: { month: true },
-      });
-      month = latest?.month ?? null;
-    }
-    if (!month) return { period: null, kpiColumns: [], rows: [] };
+    const month = this.reportMonth(period);
 
     const whereBase = { clientId, outletCode: { in: outletCodes }, month };
     const [targetRows, achRows, kpiRows] = await Promise.all([

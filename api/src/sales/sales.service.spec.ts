@@ -9,12 +9,13 @@ import { SalesService } from './sales.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isSelfOrDescendant } from './sales-hierarchy-access.helper';
+import { currentMonthKey } from '../targets/targets.helpers';
 
 const mockPrisma = {
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUserAssignment: { findMany: jest.fn() },
   outletTarget: { findFirst: jest.fn(), findMany: jest.fn() },
-  outletSalesRecord: { findMany: jest.fn() },
+  outletSalesRecord: { findFirst: jest.fn(), findMany: jest.fn() },
   kpiDef: { findMany: jest.fn() },
 };
 
@@ -343,6 +344,34 @@ describe('SalesService', () => {
       // trend has 6 month buckets on the primary KPI
       expect(res.trend).toHaveLength(6);
       expect(res.trend[5].month).toBe('2026-05');
+    });
+
+    it('with NO period, defaults to the CURRENT calendar month — not a future target month', async () => {
+      // Regression: targets existed for a future month (2026-08) but achievements only
+      // for the current month; picking the latest TARGET month showed 0 achievement.
+      const cm = currentMonthKey();
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outlet: { outletCode: 'O1' } }]);
+      mockPrisma.outletTarget.findMany
+        .mockResolvedValueOnce([{ targetValues: { MONTH: 100 } }]) // target for the current month
+        .mockResolvedValueOnce([]);                                // trend
+      mockPrisma.outletSalesRecord.findMany
+        .mockResolvedValueOnce([{ kpiValues: { MONTH: 40 } }])     // achievement for the current month
+        .mockResolvedValueOnce([]);                                // trend
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'MONTH', label: 'Monthly', unit: 'Litre', isPrimary: true },
+      ]);
+
+      const res = await service.getTargets(caller); // no period
+      expect(res.period).toBe(cm);
+      expect(res.kpis[0]).toMatchObject({ code: 'MONTH', target: 100, achieved: 40 });
+      // Anchored on the calendar month — no "latest target/achievement month" DB lookup.
+      expect(mockPrisma.outletTarget.findFirst).not.toHaveBeenCalled();
+      expect(mockPrisma.outletSalesRecord.findFirst).not.toHaveBeenCalled();
+      // The month-scoped queries used the current month.
+      expect(mockPrisma.outletTarget.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ month: cm }) }),
+      );
     });
   });
 
