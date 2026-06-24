@@ -28,8 +28,10 @@ interface AssignedOutlet {
   name: string;
   beat: string;
   type: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
-  /** Present only for outlets flagged for Re-KYC */
-  kycStatus?:    'APPROVED' | 'RE_KYC_REQUIRED';
+  /** Present for re-entry outlets (rejected/resubmission/re-KYC) and approved */
+  kycStatus?:    'APPROVED' | 'RE_KYC_REQUIRED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
+  /** Latest KYC submission id (for deep-link / reference) */
+  kycId?:        string;
   /** Fields that must be re-captured; keys match form field names */
   reKycFlags?:   Partial<Record<string, boolean>>;
   /** Existing KYC data — pre-fills the form for Re-KYC outlets */
@@ -279,13 +281,20 @@ export default function NewKYCPage() {
       .then((r) => r.json())
       .then((body) => {
         if (body.success) {
+          const RE_ENTRY = ['RE_KYC_REQUIRED', 'REJECTED', 'RESUBMISSION_REQUIRED'];
           const outlets: AssignedOutlet[] = (body.data.outlets ?? []).map((o: any) => ({
             outletId:   o.id,
             outletCode: o.outletCode ?? o.id, // human code for display; fall back to id if ever absent
             name:       o.name,
             beat:       o.beat || o.district || '',
             type:       (o.type ?? 'SSS') as AssignedOutlet['type'],
-            kycStatus:  o.kycStatus === 'RE_KYC_REQUIRED' ? 'RE_KYC_REQUIRED' : undefined,
+            // Pass through the real status for any re-entry status so the wizard
+            // pre-fills; otherwise leave undefined (NOT_STARTED outlets etc.).
+            kycStatus:    RE_ENTRY.includes(o.kycStatus) ? o.kycStatus : undefined,
+            kycId:        o.kycId,
+            existingKyc:  o.existingKyc ?? undefined,
+            reKycFlags:   o.reKycFlags ?? undefined,
+            reKycRemarks: o.kycRejectionReason ?? o.reKycFlags?.remarks ?? undefined,
           }));
           setAssignedOutlets(outlets);
           // Build registered phones map from outlet mobiles for conflict detection
@@ -301,6 +310,15 @@ export default function NewKYCPage() {
       })
       .catch(() => {});
   }, []);
+
+  /* ── Deep-link: ?outletId=<id> auto-selects that assigned outlet once loaded ── */
+  useEffect(() => {
+    if (typeof window === 'undefined' || selectedOutlet) return;
+    const outletId = new URLSearchParams(window.location.search).get('outletId');
+    if (!outletId) return;
+    const match = assignedOutlets.find((o) => o.outletId === outletId);
+    if (match) setSelectedOutlet(match);
+  }, [assignedOutlets, selectedOutlet]);
 
   /* ── Outside-click: outlet dropdown ── */
   useEffect(() => {
@@ -318,8 +336,8 @@ export default function NewKYCPage() {
     return () => clearInterval(t);
   }, [submitOtpCountdown]);
 
-  /* Derived: is this a Re-KYC flow? */
-  const isReKYC = selectedOutlet?.kycStatus === 'RE_KYC_REQUIRED';
+  /* Derived: is this a re-entry (re-KYC / rejected / resubmission) flow? */
+  const isReKYC = !!selectedOutlet && ['RE_KYC_REQUIRED', 'REJECTED', 'RESUBMISSION_REQUIRED'].includes(selectedOutlet.kycStatus as string);
 
   /** Returns true when a form field or doc key is flagged for re-capture */
   const isReKYCFlagged = (key: string) => !!(isReKYC && selectedOutlet?.reKycFlags?.[key]);
@@ -1264,13 +1282,25 @@ export default function NewKYCPage() {
         <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
           <RefreshCw className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
-            <p className="text-xs font-semibold text-amber-800">Re-KYC mode — some fields need re-entering</p>
-            <p className="text-xs text-amber-700 mt-0.5">
-              Other fields are pre-filled from the existing KYC.{' '}
-              <span className="font-semibold">Fields highlighted in amber must be re-entered.</span>
-            </p>
+            {Object.values(selectedOutlet?.reKycFlags ?? {}).some(Boolean) ? (
+              <>
+                <p className="text-xs font-semibold text-amber-800">Re-KYC mode — some fields need re-entering</p>
+                <p className="text-xs text-amber-700 mt-0.5">
+                  Other fields are pre-filled from the existing KYC.{' '}
+                  <span className="font-semibold">Fields highlighted in amber must be re-entered.</span>
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-xs font-semibold text-amber-800">This KYC was rejected — please review and resubmit</p>
+                <p className="text-xs text-amber-700 mt-0.5">
+                  See the remark below. Everything is pre-filled from the previous entry —{' '}
+                  <span className="font-semibold">edit what&apos;s needed and resubmit.</span>
+                </p>
+              </>
+            )}
             {selectedOutlet?.reKycRemarks && (
-              <p className="text-[11px] text-amber-600 mt-1 italic">Admin note: {selectedOutlet.reKycRemarks}</p>
+              <p className="text-[11px] text-amber-600 mt-1 italic">Note: {selectedOutlet.reKycRemarks}</p>
             )}
           </div>
         </div>

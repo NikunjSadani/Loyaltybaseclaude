@@ -462,6 +462,15 @@ export class SalesService {
               select: {
                 id: true,
                 phone: true,
+                // Prior-KYC fields — surfaced so the new-KYC wizard can pre-fill
+                // when a senior/admin rejected the submission and the rep re-enters.
+                businessName: true,
+                gstNumber: true,
+                panNumber: true,
+                bankName: true,
+                bankAccountNumber: true,
+                ifscCode: true,
+                upiId: true,
                 // Sales-assisted redeem (B1) drives off the outlet's partnerId +
                 // its real redeemable balance, so the FE can offer "redeem for
                 // this outlet" with the points headroom shown.
@@ -469,7 +478,7 @@ export class SalesService {
                 kycSubmissions: {
                   orderBy: { createdAt: 'desc' },
                   take: 1,
-                  select: { id: true, status: true, createdAt: true },
+                  select: { id: true, status: true, createdAt: true, rejectionReason: true },
                 },
               },
             },
@@ -491,6 +500,31 @@ export class SalesService {
           const outlet = a.outlet!;
           const partner = outlet.partner; // null until the outlet is KYC'd
           const latestKyc = partner?.kycSubmissions[0] ?? null;
+          // Re-entry statuses: the rep re-opens the SAME outlet's KYC wizard
+          // pre-filled. Only build existingKyc for these (else null).
+          const RE_ENTRY = ['REJECTED', 'RESUBMISSION_REQUIRED', 'RE_KYC_REQUIRED'];
+          const isReEntry = !!latestKyc && RE_ENTRY.includes(latestKyc.status);
+          // Address lives on the Outlet (ChannelPartner has no address columns).
+          const fullAddress = [outlet.addressLine1, outlet.addressLine2]
+            .filter(Boolean)
+            .join(', ');
+          const existingKyc =
+            partner && isReEntry
+              ? {
+                  partnerName: partner.businessName,
+                  mobile: outlet.phone ?? partner.phone ?? '',
+                  gstNumber: partner.gstNumber ?? '',
+                  panNumber: partner.panNumber ?? '',
+                  address: fullAddress,
+                  city: outlet.city ?? '',
+                  state: outlet.state ?? '',
+                  pincode: outlet.pincode ?? '',
+                  bankName: partner.bankName ?? '',
+                  accountNumber: partner.bankAccountNumber ?? '',
+                  ifscCode: partner.ifscCode ?? '',
+                  upiId: partner.upiId ?? '',
+                }
+              : null;
 
           return {
             id: outlet.id,
@@ -507,6 +541,9 @@ export class SalesService {
             type: outlet.outletType.code,
             kycStatus: latestKyc?.status ?? 'NOT_STARTED',
             kycSubmittedAt: latestKyc?.createdAt?.toISOString().split('T')[0],
+            kycRejectionReason: latestKyc?.rejectionReason ?? null,
+            reKycFlags: outlet.reKycFlags ?? null,
+            existingKyc,
             targetPct: 0,
           };
         })

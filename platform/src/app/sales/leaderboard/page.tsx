@@ -3,7 +3,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Trophy, Medal, TrendingUp, TrendingDown, Minus, Users, MapPin } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
-import { getRole, ROLE_NAMES, ROLE_TERRITORY, type SalesRole } from '@/lib/sales-role';
+import { getRole, type SalesRole } from '@/lib/sales-role';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -74,7 +74,7 @@ export default function SalesLeaderboardPage() {
   useEffect(() => {
     setLoading(true);
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch(`/api/sales/leaderboard?scope=${scope}`, {
+    fetch(`/api/leaderboard`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((r) => r.json())
@@ -99,7 +99,7 @@ export default function SalesLeaderboardPage() {
       <div>
         <h1 className="text-2xl font-black text-gray-900 tracking-tight">Leaderboard</h1>
         <p className="text-xs font-medium text-gray-500 mt-0.5">
-          {SCOPE_LABELS[scope]} peers · {ROLE_NAMES[role]}
+          {SCOPE_LABELS[scope]} peers · {myEntry?.name ?? ''}
           {loading && <span className="ml-2 text-gray-300">loading…</span>}
         </p>
       </div>
@@ -130,8 +130,8 @@ export default function SalesLeaderboardPage() {
             <p className="text-2xl font-black leading-none mt-0.5 tabular-nums">#{myEntry.rank}</p>
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-base font-bold truncate">{ROLE_NAMES[role]}</p>
-            <p className="text-xs text-white/50 truncate">{ROLE_TERRITORY[role]}</p>
+            <p className="text-base font-bold truncate">{myEntry?.name ?? ''}</p>
+            <p className="text-xs text-white/50 truncate">{myEntry?.territory ?? ''}</p>
             <div className="flex items-center gap-2 mt-1.5">
               <ChangeChip change={myEntry.change} />
               <span className="text-[11px] text-white/40">vs last month</span>

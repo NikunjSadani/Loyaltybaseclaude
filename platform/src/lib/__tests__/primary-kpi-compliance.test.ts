@@ -110,19 +110,11 @@ describe('F — sales/team/[memberId]/outlets/page.tsx', () => {
   });
 });
 
-// ─── G: sales/kyc/[id]/page.tsx ──────────────────────────────────────────────
-describe('G — sales/kyc/[id]/page.tsx', () => {
-  const code = src('app/sales/kyc/[id]/page.tsx');
-
-  it('G1: does NOT hardcode p_sv param ID for the hero param', () => {
-    // The old code: params.find(p => p.id === 'p_sv')
-    expect(code).not.toMatch(/\.find\(\s*p\s*=>\s*p\.id\s*===\s*['"]p_sv['"]\s*\)/);
-  });
-
-  it('G2: uses isPrimary / getPrimaryParam for hero param', () => {
-    expect(code).toMatch(/isPrimary|getPrimaryParam/);
-  });
-});
+// G (sales/kyc/[id] Target-Achievement card) retired 2026-06-24 (#104) — the mock
+// OUTLET_ACHIEVEMENTS/resolveConfig target card was removed from the KYC detail page
+// (it was keyed by the wrong id and never rendered for real outlets). The page no
+// longer carries a primary-KPI hero, so G1/G2 are obsolete. Targets live on the
+// dashboard + outlets pages (sections D/E above).
 
 // H (admin/dashboard Target-Achievement card) retired with D1 (#45) — the
 // fabricated demo card was removed from the dashboard; the assertion is obsolete.

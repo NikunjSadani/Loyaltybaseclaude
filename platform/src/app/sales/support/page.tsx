@@ -13,7 +13,8 @@ import {
   type Ticket, type TicketCategory, type TicketPriority, type TicketStatus,
   CATEGORY_LABELS, STATUS_LABELS, PRIORITY_LABELS,
 } from '@/lib/tickets';
-import { ROLE_NAMES, ROLE_LABELS, getRole, type SalesRole } from '@/lib/sales-role';
+import { ROLE_LABELS, getRole, type SalesRole } from '@/lib/sales-role';
+import { getStoredUser } from '@/lib/auth-client';
 
 /* ─── Outlets (from /api/sales/outlets) ─────────────────────────────────────── */
 
@@ -238,7 +239,7 @@ export default function SalesSupportPage() {
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
-  const myName   = `${ROLE_NAMES[role]} (${ROLE_LABELS[role]})`;
+  const myName   = `${getStoredUser()?.name ?? ''} (${ROLE_LABELS[role]})`;
   const filtered = outlets.filter((o) => o.name.toLowerCase().includes(form.outletSearch.toLowerCase()));
 
   const isSelf    = form.ticketFor === 'self';

@@ -1,24 +1,19 @@
 'use client';
 
-import { use, useState, useEffect } from 'react';
+import { use, useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import {
   ArrowLeft, Building2, Phone, MapPin, User,
   CheckCircle, XCircle, Clock, AlertTriangle,
-  CreditCard, Camera, ChevronRight, ChevronDown,
-  BookOpen, Gift, HeadphonesIcon, Target, ThumbsUp,
-  TrendingUp, ShoppingCart,
+  Camera, ChevronRight, ChevronDown,
+  BookOpen, Gift, HeadphonesIcon, ThumbsUp,
+  ShoppingCart,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { KYCStatus, type ApprovalEvent, type KYCSubmitterRole } from '@/types';
-import {
-  type GeoTargetConfig,
-  resolveConfig, OUTLET_ACHIEVEMENTS,
-  pct, pctBg, pctBarColor, getPrimaryParam,
-} from '@/lib/targets';
-import { getRole, resolveApprover, statusForApprover, type SalesRole } from '@/lib/sales-role';
+import { getRole } from '@/lib/sales-role';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -32,6 +27,7 @@ interface KYCDetail {
   city: string;
   state: string;
   partnerClass: string;
+  outletId?: string;
   outletCode?: string;
   outletType?: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
   status: KYCStatus;
@@ -48,11 +44,6 @@ interface KYCDetail {
   documents: { label: string; status: 'uploaded' | 'missing' | 'verified' }[];
   approvalHistory: ApprovalEvent[];
 }
-
-/* ─── Camera-only documents ──────────────────────────────────────────────────── */
-
-/** Documents that must be captured on-site via camera (not gallery/PDF). */
-const CAMERA_ONLY_DOCS = new Set(['Owner Photo', 'Board Photo', 'Shop Photo']);
 
 /* ─── API types & mapping (leaderboard pattern) ─────────────────────────────── */
 
@@ -105,6 +96,39 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
   };
 }
 
+/** Map the backend KycStatusHistory rows (returned by GET /v1/kyc/:id) into the
+ *  ApprovalEvent shape the timeline reads. No fabricated names — `by`/`role` come
+ *  from the persisted approver role (history.metadata.approverRole) when present. */
+interface ApiStatusHistory {
+  toStatus: string;
+  createdAt: string;
+  notes?: string | null;
+  metadata?: { stage?: string; approverRole?: string } | null;
+}
+const REJECT_TO_STATUSES = new Set(['REJECTED', 'RESUBMISSION_REQUIRED', 'RE_UPLOAD_REQUIRED']);
+const APPROVAL_TO_STATUSES = new Set([
+  'REJECTED', 'RESUBMISSION_REQUIRED', 'RE_UPLOAD_REQUIRED',
+  'PENDING_ASM_APPROVAL', 'PENDING_GIFSY', 'APPROVED',
+]);
+function mapStatusHistory(history: ApiStatusHistory[]): ApprovalEvent[] {
+  return history
+    .filter((h) => APPROVAL_TO_STATUSES.has(h.toStatus))
+    .map((h) => {
+      const rejected = REJECT_TO_STATUSES.has(h.toStatus);
+      const stage: ApprovalEvent['stage'] =
+        h.metadata?.stage === 'GIFSY' || h.toStatus === 'APPROVED' ? 'GIFSY' : 'FIRST_APPROVER';
+      return {
+        stage,
+        action: (rejected ? 'REJECTED' : 'APPROVED') as ApprovalEvent['action'],
+        by:    h.metadata?.approverRole ?? '',
+        role:  h.metadata?.approverRole ?? '',
+        timestamp: h.createdAt,
+        remarks: h.notes ?? undefined,
+      };
+    })
+    .reverse(); // backend returns newest-first; timeline reads chronologically
+}
+
 /* ─── Status config ──────────────────────────────────────────────────────────── */
 
 const statusConfig: Partial<Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 'info' | 'default'; label: string }>> = {
@@ -135,24 +159,6 @@ function relativeDate(dateStr: string): string {
   if (diff < 30)   return `${diff} days ago`;
   const months = Math.floor(diff / 30);
   return `${months} month${months !== 1 ? 's' : ''} ago`;
-}
-
-/* ─── Pace helpers ───────────────────────────────────────────────────────────── */
-
-function computeMonthPace(): { timePct: number; daysLeft: number; elapsed: number; daysInMonth: number } {
-  const today      = new Date();
-  const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
-  const elapsed    = today.getDate();
-  const daysLeft   = daysInMonth - elapsed;
-  const timePct    = Math.round((elapsed / daysInMonth) * 100);
-  return { timePct, daysLeft, elapsed, daysInMonth };
-}
-
-function paceBadge(achievePct: number, timePct: number): { label: string; bg: string; text: string; strip: string } {
-  const gap = timePct - achievePct;
-  if (gap <= 0)  return { label: 'On pace',            bg: 'bg-emerald-50', text: 'text-emerald-700', strip: 'bg-emerald-400' };
-  if (gap <= 15) return { label: `${gap}% behind pace`, bg: 'bg-amber-50',   text: 'text-amber-700',   strip: 'bg-amber-400'   };
-  return           { label: `${gap}% behind pace`, bg: 'bg-red-50',     text: 'text-red-600',     strip: 'bg-red-400'     };
 }
 
 /* ─── Approval Timeline ──────────────────────────────────────────────────────── */
@@ -317,16 +323,12 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   const [kyc,     setKyc]     = useState<KYCDetail | null>(null);
   const [loadingKyc, setLoadingKyc] = useState(true);
 
-  const [submitting,        setSubmitting]        = useState(false);
   const [approving,         setApproving]         = useState(false);
   const [showRejectModal,   setShowRejectModal]   = useState(false);
-  const [targetConfig,      setTargetConfig]      = useState<GeoTargetConfig | null>(null);
+  const [actionError,       setActionError]       = useState<string | null>(null);
   const [role,              setRoleState]         = useState<string>('SO');
   const [detailsOpen,       setDetailsOpen]       = useState(false);
   const [photoLightboxOpen, setPhotoLightboxOpen] = useState(false);
-  const [resubmitFiles,     setResubmitFiles]     = useState<File[]>([]);
-  const [resubmitting,      setResubmitting]      = useState(false);
-  const [escalatedFrom,     setEscalatedFrom]     = useState<SalesRole | null>(null);
   // Settings are SERVER-sourced and reactive — reflects the tenant after /me hydrates.
   const settings = useGifsySettings();
   // Authoritative DB flag for the visibility workflow (TenantService.resolveVisibilityCaptureMode),
@@ -334,59 +336,56 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   // /admin/settings/config endpoint is admin-only and would 403 for sales, defaulting wrongly.
   const captureMode = settings.visibilityCaptureMode ?? 'PHOTO_APPROVAL';
 
-  /* ── Dynamic period: always current month ── */
-  const now           = new Date();
-  const currentPeriod = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const periodLabel   = now.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
-  const monthPace     = computeMonthPace();
-
   useEffect(() => {
     setRoleState(getRole());
-    setTargetConfig(resolveConfig('Andheri Beat', 'Mumbai West', 'Maharashtra', currentPeriod));
-  }, [currentPeriod]);
+  }, []);
 
-  /* ── Fetch KYC from API ── */
-  useEffect(() => {
+  /* ── Fetch KYC from API (reusable — re-run after approve/reject to reflect the
+   *    authoritative persisted status + history, never an optimistic local guess) ── */
+  const loadKyc = useCallback(async () => {
     setLoadingKyc(true);
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch(`/api/kyc/${id}`, { headers: { Authorization: `Bearer ${token}` } })
-      .then((r) => r.json())
-      .then((json) => {
-        if (json.success && json.data?.submission) {
-          const s = json.data.submission;
-          setKyc({
-            id:              s.id,
-            outletCode:      s.partner?.outlets?.[0]?.outletCode ?? '',
-            partnerName:     s.user?.name                       ?? '',
-            firmName:        s.partner?.businessName            ?? '',
-            mobile:          s.user?.phone                      ?? '',
-            address:         s.partner?.address                 ?? '',
-            city:            s.partner?.city                    ?? '',
-            state:           s.partner?.state                   ?? '',
-            partnerClass:    '',
-            status:          (s.status as KYCStatus)            ?? KYCStatus.SUBMITTED,
-            submittedAt:     s.submittedAt                      ?? new Date().toISOString(),
-            submittedByRole: (s.user?.role as KYCSubmitterRole) ?? 'SO',
-            submittedByName: s.user?.name                       ?? '',
-            rejectionReason: s.rejectionReason                  ?? undefined,
-            gstNumber:       s.partner?.gstNumber,
-            panNumber:       s.partner?.panNumber,
-            bankName:        s.partner?.bankName,
-            accountNumber:   s.partner?.bankAccountNumber,
-            ifscCode:        s.partner?.ifscCode,
-            documents:       (s.documents ?? []).map((d: { label: string; status?: string }) => ({
-              label:  d.label,
-              status: (d.status as 'uploaded' | 'missing' | 'verified') ?? 'uploaded',
-            })),
-            approvalHistory: [],
-          });
-        }
-      })
-      .catch(() => {})
-      .finally(() => setLoadingKyc(false));
+    try {
+      const r = await fetch(`/api/kyc/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+      const json = await r.json();
+      if (json.success && json.data?.submission) {
+        const s = json.data.submission;
+        setKyc({
+          id:              s.id,
+          outletId:        s.partner?.outlets?.[0]?.id ?? '',
+          outletCode:      s.partner?.outlets?.[0]?.outletCode ?? '',
+          partnerName:     s.user?.name                       ?? '',
+          firmName:        s.partner?.businessName            ?? '',
+          mobile:          s.user?.phone                      ?? '',
+          address:         s.partner?.address                 ?? '',
+          city:            s.partner?.city                    ?? '',
+          state:           s.partner?.state                   ?? '',
+          partnerClass:    '',
+          status:          (s.status as KYCStatus)            ?? KYCStatus.SUBMITTED,
+          submittedAt:     s.submittedAt                      ?? new Date().toISOString(),
+          submittedByRole: (s.user?.role as KYCSubmitterRole) ?? 'SO',
+          submittedByName: s.user?.name                       ?? '',
+          rejectionReason: s.rejectionReason                  ?? undefined,
+          gstNumber:       s.partner?.gstNumber,
+          panNumber:       s.partner?.panNumber,
+          bankName:        s.partner?.bankName,
+          accountNumber:   s.partner?.bankAccountNumber,
+          ifscCode:        s.partner?.ifscCode,
+          documents:       (s.documents ?? []).map((d: { label: string; status?: string }) => ({
+            label:  d.label,
+            status: (d.status as 'uploaded' | 'missing' | 'verified') ?? 'uploaded',
+          })),
+          approvalHistory: mapStatusHistory(s.statusHistory ?? []),
+        });
+      }
+    } catch {
+      /* leave kyc null → the not-found UI renders */
+    } finally {
+      setLoadingKyc(false);
+    }
   }, [id]);
 
-  const achievement = OUTLET_ACHIEVEMENTS[id];
+  useEffect(() => { void loadKyc(); }, [loadKyc]);
 
   if (loadingKyc) {
     return (
@@ -416,78 +415,56 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
 
   const handleApprove = async () => {
     setApproving(true);
-    await new Promise(r => setTimeout(r, 800));
-    const newEvent: ApprovalEvent = {
-      stage:     'FIRST_APPROVER',
-      action:    'APPROVED',
-      by:        role === 'SO' ? 'Rajesh Kumar' : 'Sanjay Kapoor',
-      role,
-      timestamp: new Date().toISOString(),
-    };
-    setKyc((prev) => prev ? {
-      ...prev,
-      status: KYCStatus.PENDING_GIFSY,
-      approvalHistory: [...prev.approvalHistory, newEvent],
-    } : prev);
-    setApproving(false);
+    setActionError(null);
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+      const res = await fetch(`/api/kyc/${id}/first-approve`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body:    JSON.stringify({}),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json?.success === false) {
+        setActionError(json?.error ?? 'Approval failed. Please try again.');
+        return;
+      }
+      await loadKyc(); // authoritative persisted status + history
+    } catch {
+      setActionError('Approval failed. Please check your connection and try again.');
+    } finally {
+      setApproving(false);
+    }
   };
 
   const handleReject = async (remarks: string) => {
     setShowRejectModal(false);
     setApproving(true);
-    await new Promise(r => setTimeout(r, 800));
-    const newEvent: ApprovalEvent = {
-      stage:     'FIRST_APPROVER',
-      action:    'REJECTED',
-      by:        role === 'SO' ? 'Rajesh Kumar' : 'Sanjay Kapoor',
-      role,
-      timestamp: new Date().toISOString(),
-      remarks,
-    };
-    setKyc((prev) => prev ? {
-      ...prev,
-      status: KYCStatus.REJECTED,
-      rejectionReason: remarks,
-      approvalHistory: [...prev.approvalHistory, newEvent],
-    } : prev);
-    setApproving(false);
+    setActionError(null);
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+      const res = await fetch(`/api/kyc/${id}/reject`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body:    JSON.stringify({ reason: remarks }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json?.success === false) {
+        setActionError(json?.error ?? 'Rejection failed. Please try again.');
+        return;
+      }
+      await loadKyc(); // authoritative persisted status + history
+    } catch {
+      setActionError('Rejection failed. Please check your connection and try again.');
+    } finally {
+      setApproving(false);
+    }
   };
 
-  const handleSubmitForReview = async () => {
-    setSubmitting(true);
-    await new Promise(r => setTimeout(r, 1000));
-    const nextStatus = role === 'XSR' ? KYCStatus.PENDING_SO_APPROVAL : KYCStatus.PENDING_ASM_APPROVAL;
-    setKyc((prev) => prev ? { ...prev, status: nextStatus } : prev);
-    setSubmitting(false);
-  };
-
-  const handleResubmit = async () => {
-    if (resubmitFiles.length === 0 || !kyc) return;
-    setResubmitting(true);
-    await new Promise(r => setTimeout(r, 1000));
-    const submitterRole = kyc.submittedByRole as SalesRole;
-    const approverRole  = resolveApprover(submitterRole);
-    const nextStatus    = statusForApprover(approverRole) as KYCStatus;
-    const escalated     = approverRole !== (submitterRole === 'XSR' ? 'SO' : submitterRole === 'SO' ? 'ASM' : 'RSM');
-    if (escalated) setEscalatedFrom(approverRole === 'ASM' ? 'SO' : 'ASM');
-    setKyc((prev) => prev ? { ...prev, status: nextStatus, rejectionReason: undefined } : prev);
-    setResubmitFiles([]);
-    setResubmitting(false);
-  };
-
-  /* ── Target section helpers ── */
-  const heroParam   = targetConfig ? getPrimaryParam(targetConfig.params) : null;
-  const otherParams = targetConfig?.params.filter(p => !p.isPrimary) ?? [];
-
-  const overallPct = targetConfig && achievement
-    ? Math.round(
-        targetConfig.params
-          .map(p => pct(achievement.achievements[p.id] ?? 0, p.target))
-          .reduce((a, b) => a + b, 0) / targetConfig.params.length
-      )
-    : 0;
-
-  const pace = paceBadge(overallPct, monthPace.timePct);
+  /* Re-entry: route the junior into the pre-filled new-KYC wizard (selects by outlet). */
+  const isReEntry =
+    kyc.status === KYCStatus.REJECTED ||
+    kyc.status === KYCStatus.RESUBMISSION_REQUIRED ||
+    kyc.status === KYCStatus.RE_KYC_REQUIRED;
 
   return (
     <div className="space-y-4 fade-in">
@@ -500,7 +477,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           <h1 className="text-base font-bold text-gray-900 truncate">{kyc.firmName}</h1>
           <div className="flex items-center gap-2 flex-wrap mt-0.5">
             <div className="flex items-center gap-2 flex-wrap">
-              <p className="text-xs text-gray-500">{kyc.partnerName} · {kyc.id}</p>
+              <p className="text-xs text-gray-500">{kyc.partnerName}</p>
               {kyc.outletCode && (
                 <span data-testid="kyc-header-outlet-code" className="font-mono text-[10px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
                   {kyc.outletCode}
@@ -526,14 +503,6 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
         </div>
       )}
 
-      {/* Escalation notice */}
-      {escalatedFrom && (
-        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-2">
-          <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
-          <p className="text-sm text-amber-700">Approval escalated — {escalatedFrom} was vacant. Escalated to next approver.</p>
-        </div>
-      )}
-
       {/* Approval Timeline — hidden for approved outlets (no longer actionable) */}
       {!isApproved && <ApprovalTimeline kyc={kyc} />}
 
@@ -544,6 +513,11 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
             <p className="text-xs text-amber-700 font-medium mb-3">
               This KYC requires your review before it proceeds to Gifsy validation.
             </p>
+            {actionError && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-3">
+                {actionError}
+              </p>
+            )}
             <div className="flex gap-3">
               <Button
                 variant="outline"
@@ -572,94 +546,6 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           <Clock className="h-4 w-4 text-blue-500 shrink-0 mt-0.5" />
           <p className="text-sm text-blue-700">Awaiting final validation by Gifsy. No action required from your side.</p>
         </div>
-      )}
-
-      {/* ─── Target Achievement (4A + 4B) ──────────────────────────────────────── */}
-      {targetConfig && achievement && (
-        <Card className="overflow-hidden">
-          {/* Pace strip */}
-          <div className={`h-1 ${pace.strip}`} />
-
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-sm">
-                <Target className="h-4 w-4 text-[#16a34a]" /> {periodLabel} Targets
-              </CardTitle>
-              <div className="flex items-center gap-2">
-                {monthPace.daysLeft > 0 && (
-                  <span className={`text-[10px] font-semibold ${
-                    monthPace.daysLeft <= 7 ? 'text-red-500' : monthPace.daysLeft <= 14 ? 'text-amber-600' : 'text-gray-400'
-                  }`}>
-                    {monthPace.daysLeft}d left
-                  </span>
-                )}
-                <span className="text-[10px] text-gray-400">{targetConfig.geoName}</span>
-              </div>
-            </div>
-          </CardHeader>
-
-          <CardContent className="space-y-4 pb-4">
-            {/* Hero: Monthly Target */}
-            {heroParam && (() => {
-              const achieved = achievement.achievements[heroParam.id] ?? 0;
-              const pp  = pct(achieved, heroParam.target);
-              const bar = pctBarColor(pp);
-              const fmt = (n: number) => heroParam.unit === '₹L' ? `₹${n}L` : `${n} ${heroParam.unit}`;
-              const remaining = Math.max(0, heroParam.target - achieved);
-              return (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-semibold text-gray-800">Monthly Target</span>
-                    <span className={`text-sm font-bold px-2.5 py-1 rounded-full ${pctBg(pp)}`}>{pp}%</span>
-                  </div>
-                  <div className="h-3 bg-gray-100 rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full ${bar} transition-all`} style={{ width: `${Math.min(pp, 100)}%` }} />
-                  </div>
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-gray-500">{fmt(achieved)} achieved</span>
-                    <span className="text-gray-400">Target: {fmt(heroParam.target)}</span>
-                  </div>
-                  {remaining > 0 && (
-                    <p className="text-[10px] font-semibold text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg">
-                      {fmt(remaining)} remaining to hit target
-                    </p>
-                  )}
-                </div>
-              );
-            })()}
-
-            {/* Other params in 2-col KPI grid */}
-            {otherParams.length > 0 && (
-              <div className="grid grid-cols-2 gap-2.5">
-                {otherParams.map(p => {
-                  const achieved = achievement.achievements[p.id] ?? 0;
-                  const pp  = pct(achieved, p.target);
-                  const bar = pctBarColor(pp);
-                  const fmt = (n: number) => p.unit === '₹L' ? `₹${n}L` : `${n} ${p.unit}`;
-                  return (
-                    <div key={p.id} className="bg-gray-50 rounded-xl p-3 space-y-1.5">
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="text-[11px] font-medium text-gray-600 leading-tight truncate">{p.label}</span>
-                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${pctBg(pp)}`}>{pp}%</span>
-                      </div>
-                      <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full ${bar} transition-all`} style={{ width: `${Math.min(pp, 100)}%` }} />
-                      </div>
-                      <p className="text-[10px] text-gray-500">{fmt(achieved)} / {fmt(p.target)}</p>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Pace badge */}
-            <div className={`flex items-center gap-1.5 text-[10px] font-semibold px-2 py-1.5 rounded-lg ${pace.bg} ${pace.text}`}>
-              <TrendingUp className="h-3 w-3 shrink-0" />
-              {pace.label} · {monthPace.timePct}% of {periodLabel} elapsed
-              {monthPace.daysLeft > 0 && ` · ${monthPace.daysLeft} days left`}
-            </div>
-          </CardContent>
-        </Card>
       )}
 
       {/* ─── Partner + Document + Bank details (collapsible for all, default closed) ── */}
@@ -790,55 +676,23 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
         )}
       </div>
 
-      {/* Submit for review (draft state) */}
-      {(kyc.status === KYCStatus.PENDING || kyc.status === KYCStatus.SUBMITTED) && (
-        <Card>
-          <CardContent className="pt-4">
-            <p className="text-xs text-gray-500 mb-3">
-              Once all documents are collected, submit for the first-level approval.
-            </p>
-            <Button variant="primary" className="w-full" loading={submitting} onClick={handleSubmitForReview}>
-              Submit for Review
-            </Button>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Fix & Resubmit — shown only for REJECTED */}
-      {kyc.status === KYCStatus.REJECTED && (
+      {/* Edit & Resubmit — opens the pre-filled new-KYC wizard for the outlet.
+          Shown for rejected / resubmission / re-KYC. The rejection remark banner
+          above shows the reason first; the wizard pre-fills the prior entry. */}
+      {isReEntry && (
         <Card className="border-red-200">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm text-red-700">Fix & Resubmit</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3 pb-4">
-            <p className="text-xs text-gray-500">Upload corrected documents and resubmit for review.</p>
-            <div className="space-y-2">
-              {kyc.documents.map(doc => (
-                <div key={doc.label} className="flex items-center gap-3 py-1">
-                  <span className="text-sm text-gray-700 flex-1">{doc.label}</span>
-                  <input
-                    type="file"
-                    accept={CAMERA_ONLY_DOCS.has(doc.label) ? 'image/*' : 'image/*,application/pdf'}
-                    {...(CAMERA_ONLY_DOCS.has(doc.label) ? { capture: 'environment' as const } : {})}
-                    className="text-xs text-gray-500"
-                    onChange={(e) => {
-                      if (e.target.files?.[0]) {
-                        setResubmitFiles((prev) => [...prev, e.target.files![0]]);
-                      }
-                    }}
-                  />
-                </div>
-              ))}
-            </div>
-            <Button
-              variant="primary"
-              className="w-full"
-              disabled={resubmitFiles.length === 0}
-              loading={resubmitting}
-              onClick={handleResubmit}
+          <CardContent className="pt-4 pb-4 space-y-3">
+            <p className="text-xs text-gray-500">
+              Review the remark above, then re-open the KYC form pre-filled with the previous entry. Edit what&apos;s needed and resubmit.
+            </p>
+            <Link
+              href={`/sales/kyc/new?outletId=${kyc.outletId ?? ''}`}
+              className="block"
             >
-              Resubmit for Review
-            </Button>
+              <Button variant="primary" className="w-full" disabled={!kyc.outletId}>
+                Edit &amp; Resubmit KYC
+              </Button>
+            </Link>
           </CardContent>
         </Card>
       )}

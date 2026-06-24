@@ -613,7 +613,7 @@ export class KycService {
         user: { select: { id: true, name: true, phone: true, role: true } },
         // partner.outlets[].outletCode is the human "outlet ID" surfaced in the detail header
         // (KYC is partner-keyed; the enrolled outlet's code lives on the partner's outlets).
-        partner: { include: { outlets: { select: { outletCode: true } } } },
+        partner: { include: { outlets: { select: { id: true, outletCode: true } } } },
         // 3.4d: the detail-page field panel seeds its current state from these.
         verificationItems: {
           select: { fieldKey: true, decision: true, remark: true, source: true, verifiedAt: true },
@@ -731,6 +731,9 @@ export class KycService {
           toStatus: nextStatus as never,
           changedByUserId: user.sub,
           notes: remarks ?? `Approved by ${user.role}`,
+          // Self-describe the row (mirrors reject()) so the sales timeline can show
+          // the approver stage/role without a separate User join.
+          metadata: { stage: 'FIRST_APPROVER', approverRole: user.role },
         },
       });
 

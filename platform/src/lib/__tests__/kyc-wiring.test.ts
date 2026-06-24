@@ -9,7 +9,10 @@
  * pages call the (proxied) `/api/kyc*` endpoints with the right payload.
  *
  *   B — KYC new page:  handleSubmit calls real API
- *   C — KYC edit page: handleSubmit calls PATCH API + accountHolderName
+ *
+ * (The standalone KYC edit page was retired — re-entry/resubmission now routes the
+ *  junior back into the pre-filled new-KYC wizard via /sales/kyc/new?outletId=...,
+ *  so the old `[id]/edit` page + its source-read tests (group C) were removed.)
  */
 
 import { describe, it, expect } from 'vitest';
@@ -58,36 +61,5 @@ describe('B — KYC new page wiring', () => {
     const code = src('src/app/sales/kyc/new/page.tsx');
     expect(code).toMatch(/setSubmissionId/);
     expect(code).toMatch(/submissionId/);
-  });
-});
-
-// ─── C: KYC edit page ────────────────────────────────────────────────────────
-
-describe('C — KYC edit page', () => {
-  it('C1: form state includes accountHolderName', () => {
-    const code = src('src/app/sales/kyc/[id]/edit/page.tsx');
-    expect(code).toMatch(/accountHolderName/);
-  });
-
-  it('C2: handleSubmit calls fetch with PATCH method', () => {
-    const code = src('src/app/sales/kyc/[id]/edit/page.tsx');
-    expect(code).toMatch(/method.*PATCH/s);
-    expect(code).toMatch(/\/api\/kyc\//);
-  });
-
-  it('C3: Account Holder Name is passed as prop to BankOrUpiSection', () => {
-    const code = src('src/app/sales/kyc/[id]/edit/page.tsx');
-    expect(code).toMatch(/BankOrUpiSection/);
-    expect(code).toMatch(/accountHolderName=\{form\.accountHolderName\}/);
-  });
-
-  it('C4: accountHolderName included in PATCH body', () => {
-    const code = src('src/app/sales/kyc/[id]/edit/page.tsx');
-    expect(code).toMatch(/accountHolderName.*form\.accountHolderName/s);
-  });
-
-  it('C5: step3Valid includes accountHolderName check', () => {
-    const code = src('src/app/sales/kyc/[id]/edit/page.tsx');
-    expect(code).toMatch(/step3Valid.*accountHolderName/s);
   });
 });
