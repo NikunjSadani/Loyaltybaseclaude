@@ -808,7 +808,16 @@ export class KycService {
         where,
         include: {
           user: { select: { id: true, name: true, phone: true } },
-          partner: { select: { id: true, businessName: true } },
+          // Identity shown on the sales KYC list = the OUTLET (name/code/phone), with
+          // businessName kept only as a fallback. The submitter (user) stays the rep.
+          partner: {
+            select: {
+              id: true,
+              businessName: true,
+              phone: true,
+              outlets: { select: { id: true, name: true, outletCode: true, phone: true } },
+            },
+          },
           documents: { select: { id: true, documentType: true, status: true } },
         },
         skip,
@@ -850,7 +859,7 @@ export class KycService {
         user: { select: { id: true, name: true, phone: true, role: true } },
         // partner.outlets[].outletCode is the human "outlet ID" surfaced in the detail header
         // (KYC is partner-keyed; the enrolled outlet's code lives on the partner's outlets).
-        partner: { include: { outlets: { select: { id: true, outletCode: true } } } },
+        partner: { include: { outlets: { select: { id: true, name: true, outletCode: true, phone: true } } } },
         // 3.4d: the detail-page field panel seeds its current state from these.
         verificationItems: {
           select: { fieldKey: true, decision: true, remark: true, source: true, verifiedAt: true },

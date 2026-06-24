@@ -22,6 +22,8 @@ interface KYCDetail {
   id: string;
   partnerName: string;
   firmName: string;
+  outletName: string;
+  outletPhone: string;
   mobile: string;
   address: string;
   city: string;
@@ -64,6 +66,8 @@ interface ApiSalesKYC {
     bankName?: string;
     bankAccountNumber?: string;
     ifscCode?: string;
+    phone?: string;
+    outlets?: { id: string; name: string; outletCode: string; phone?: string }[];
   };
   documents?: { label: string; status?: string }[];
 }
@@ -73,6 +77,8 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
     id: s.id,
     partnerName: s.user.name,
     firmName: s.partner.businessName,
+    outletName:  s.partner.outlets?.[0]?.name  ?? s.partner.businessName ?? '',
+    outletPhone: s.partner.outlets?.[0]?.phone ?? s.partner.phone        ?? '',
     mobile: s.user.phone,
     address: s.partner.address,
     city: s.partner.city,
@@ -356,6 +362,9 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           outletCode:      s.partner?.outlets?.[0]?.outletCode ?? '',
           partnerName:     s.user?.name                       ?? '',
           firmName:        s.partner?.businessName            ?? '',
+          // Identity = the OUTLET (name/phone), not the rep. submittedByName below stays the rep.
+          outletName:      s.partner?.outlets?.[0]?.name      ?? s.partner?.businessName ?? '',
+          outletPhone:     s.partner?.outlets?.[0]?.phone     ?? s.partner?.phone        ?? '',
           mobile:          s.user?.phone                      ?? '',
           address:         s.partner?.address                 ?? '',
           city:            s.partner?.city                    ?? '',
@@ -474,10 +483,10 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           <ArrowLeft className="h-4 w-4 text-gray-600" />
         </Link>
         <div className="flex-1 min-w-0">
-          <h1 className="text-base font-bold text-gray-900 truncate">{kyc.firmName}</h1>
+          <h1 className="text-base font-bold text-gray-900 truncate">{kyc.outletName || kyc.firmName}</h1>
           <div className="flex items-center gap-2 flex-wrap mt-0.5">
             <div className="flex items-center gap-2 flex-wrap">
-              <p className="text-xs text-gray-500">{kyc.partnerName}</p>
+              <p className="text-xs text-gray-500">+91 {kyc.outletPhone}</p>
               {kyc.outletCode && (
                 <span data-testid="kyc-header-outlet-code" className="font-mono text-[10px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
                   {kyc.outletCode}
@@ -571,8 +580,8 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
               <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Partner Details</p>
               <div className="space-y-2.5">
                 {[
-                  { icon: <User className="h-3.5 w-3.5" />,   label: 'Name',    value: kyc.partnerName },
-                  { icon: <Phone className="h-3.5 w-3.5" />,  label: 'Mobile',  value: `+91 ${kyc.mobile}` },
+                  { icon: <User className="h-3.5 w-3.5" />,   label: 'Name',    value: kyc.outletName },
+                  { icon: <Phone className="h-3.5 w-3.5" />,  label: 'Mobile',  value: `+91 ${kyc.outletPhone}` },
                   { icon: <MapPin className="h-3.5 w-3.5" />, label: 'Address', value: `${kyc.address}, ${kyc.city}, ${kyc.state}` },
                 ].map(row => (
                   <div key={row.label} className="flex items-start gap-2">

@@ -151,7 +151,12 @@ function KYCListContent() {
       id: string; status: string; createdAt: string; updatedAt: string; userId: string;
       reviewerNotes?: string | null;
       user: { id: string; name: string; phone: string };
-      partner?: { id: string; businessName: string } | null;
+      partner?: {
+        id: string;
+        businessName: string;
+        phone?: string;
+        outlets?: { name: string; outletCode: string; phone?: string }[];
+      } | null;
     }
 
     const kycFetch: Promise<KYCEntry[]> = fetch('/api/kyc', { headers: authHeaders })
@@ -160,10 +165,12 @@ function KYCListContent() {
         if (!result.success) return [];
         return (result.data.submissions as ApiSubmission[]).map((s): KYCEntry => ({
           id:              s.id,
-          partnerName:     s.user.name,
-          firmName:        s.partner?.businessName ?? s.user.name,
-          outletCode:      '',
-          mobile:          s.user.phone,
+          // Store identity = the OUTLET (name/code/phone), NOT the rep. partnerName is
+          // kept only as a secondary field; the title/subtitle/chip render the outlet.
+          partnerName:     s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? s.user.name,
+          firmName:        s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? s.user.name,
+          outletCode:      s.partner?.outlets?.[0]?.outletCode ?? '',
+          mobile:          s.partner?.outlets?.[0]?.phone ?? s.partner?.phone ?? '',
           status:          s.status as KYCStatus,
           submittedAt:     s.createdAt,
           updatedAt:       s.updatedAt,
