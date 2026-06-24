@@ -37,7 +37,12 @@ interface ApiKycSubmission {
   submittedAt?: string | null;
   createdAt?: string;
   user: { id: string; name: string; phone: string };
-  partner?: { id: string; businessName: string } | null;
+  partner?: {
+    id: string;
+    businessName: string;
+    phone?: string;
+    outlets?: { name: string; outletCode: string; phone?: string }[];
+  } | null;
   documents?: { id: string; documentType: string; status: string }[];
 }
 
@@ -47,9 +52,9 @@ function mapApiSubmission(s: ApiKycSubmission): PendingKYC {
   };
   return {
     id:              s.id,
-    firmName:        s.partner?.businessName ?? s.user.name,
-    partnerName:     s.user.name,
-    mobile:          s.user.phone,
+    firmName:        s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
+    partnerName:     s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
+    mobile:          s.partner?.outlets?.[0]?.phone ?? s.partner?.phone ?? '',
     city:            '',
     partnerClass:    '',
     submittedAt:     (s.submittedAt ?? s.createdAt ?? '').slice(0, 10),
@@ -63,41 +68,6 @@ function mapApiSubmission(s: ApiKycSubmission): PendingKYC {
     })),
   };
 }
-
-/* ─── Mock data — these are entries in PENDING_GIFSY state ──────────────────── */
-
-const MOCK_PENDING: PendingKYC[] = [
-  {
-    id: 'k5', firmName: 'Mehta Provisions', partnerName: 'Vijay Mehta',
-    mobile: '9432109876', city: 'Mumbai', partnerClass: 'SILVER',
-    submittedAt: '2026-05-14', submittedByRole: 'SO', submittedByName: 'Rajesh Kumar',
-    firstApprovedBy: 'Sanjay Kapoor (ASM)', firstApprovedAt: '2026-05-15',
-    documents: [
-      { label: 'GST Certificate', status: 'uploaded' }, { label: 'PAN Card', status: 'uploaded' },
-      { label: 'Shop Photo',      status: 'uploaded' }, { label: 'Cancelled Cheque', status: 'uploaded' },
-    ],
-  },
-  {
-    id: 'k9', firmName: 'Desai Mart', partnerName: 'Ramesh Desai',
-    mobile: '9123456789', city: 'Pune', partnerClass: 'GOLD',
-    submittedAt: '2026-05-20', submittedByRole: 'XSR', submittedByName: 'Deepak Pillai',
-    firstApprovedBy: 'Rajesh Kumar (SO)', firstApprovedAt: '2026-05-21',
-    documents: [
-      { label: 'GST Certificate', status: 'verified' }, { label: 'PAN Card', status: 'verified' },
-      { label: 'Shop Photo',      status: 'uploaded' }, { label: 'Cancelled Cheque', status: 'verified' },
-    ],
-  },
-  {
-    id: 'k10', firmName: 'Nair Provisions', partnerName: 'Suresh Nair',
-    mobile: '9988776655', city: 'Nagpur', partnerClass: 'BRONZE',
-    submittedAt: '2026-05-22', submittedByRole: 'SO', submittedByName: 'Anita Patel',
-    firstApprovedBy: 'Ravi Mehta (ASM)', firstApprovedAt: '2026-05-23',
-    documents: [
-      { label: 'GST Certificate', status: 'uploaded' }, { label: 'PAN Card', status: 'uploaded' },
-      { label: 'Shop Photo',      status: 'uploaded' }, { label: 'Cancelled Cheque', status: 'uploaded' },
-    ],
-  },
-];
 
 const docStatusColor: Record<string, string> = {
   verified: 'text-emerald-600',
@@ -237,7 +207,7 @@ export default function AdminApprovalsPage() {
   const [loading,       setLoading]       = useState(true);
   const [error,         setError]         = useState<string | null>(null);
   // Keep a snapshot of all fetched entries for the "Actioned Today" section
-  const [allFetched,    setAllFetched]    = useState<PendingKYC[]>(MOCK_PENDING);
+  const [allFetched,    setAllFetched]    = useState<PendingKYC[]>([]);
 
   useEffect(() => {
     fetch('/api/kyc?status=PENDING_GIFSY', { headers: { ...authHeader() } })

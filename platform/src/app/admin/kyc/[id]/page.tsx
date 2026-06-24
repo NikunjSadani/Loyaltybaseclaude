@@ -96,10 +96,11 @@ interface ApiKycDetail {
   user: { id: string; name: string; phone: string; role?: string };
   partner?: {
     id: string; businessName: string; partnerCode?: string | null;
+    phone?: string;
     gstNumber?: string | null; panNumber?: string | null;
     address?: string | null; city?: string | null; state?: string | null; pincode?: string | null;
     bankName?: string | null; bankAccountNumber?: string | null; ifscCode?: string | null;
-    outlets?: { outletCode: string }[];
+    outlets?: { name?: string; outletCode: string; phone?: string }[];
   } | null;
   documents?: { id: string; documentType: string; fileUrl?: string; status: string }[];
   verificationItems?: { fieldKey: string; decision: string; remark?: string | null; source?: string | null }[];
@@ -135,9 +136,9 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     // Human outlet ID for the header (KYC is partner-keyed → the enrolled outlet's code).
     // Prefer the real Outlet code; fall back to the partner code if no outlet is linked yet.
     outletCode:       s.partner?.outlets?.[0]?.outletCode ?? s.partner?.partnerCode ?? '',
-    outletName:       s.partner?.businessName ?? s.user.name,
-    firmName:         s.partner?.businessName ?? s.user.name,
-    mobile:           s.user.phone,
+    outletName:       s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
+    firmName:         s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
+    mobile:           s.partner?.outlets?.[0]?.phone ?? s.partner?.phone ?? '',
     email:            '',
     partnerClass:     '',
     gstNumber:        s.partner?.gstNumber ?? '',
@@ -174,80 +175,6 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     })),
   };
 }
-
-const KYC_DATA: Record<string, {
-  id: string;
-  outletName: string;
-  firmName: string;
-  mobile: string;
-  email: string;
-  partnerClass: string;
-  gstNumber: string;
-  panNumber: string;
-  address: string;
-  city: string;
-  state: string;
-  pincode: string;
-  salesUser: string;
-  territory: string;
-  region: string;
-  submittedDate: string;
-  ageHrs: number;
-  status: string;
-  bankName: string;
-  accountNumber: string;
-  ifscCode: string;
-  pennyDropStatus: 'verified' | 'failed' | 'pending';
-  agreementStatus: 'signed' | 'pending';
-  agreementDate: string;
-  statusHistory: Array<{ status: string; timestamp: string; user: string; remark?: string }>;
-  auditLog: Array<{ action: string; user: string; timestamp: string; detail: string }>;
-  documents: Array<{ id: string; type: string; label: string; url: string; status: 'pending' | 'verified' | 'rejected' }>;
-}> = {
-  KYC001: {
-    id: 'KYC001',
-    outletName: 'Sharma General Store',
-    firmName: 'Sharma General Store (Prop. Rakesh Sharma)',
-    mobile: '9820184321',
-    email: 'rakesh.sharma@gmail.com',
-    partnerClass: 'GOLD',
-    gstNumber: '27AABCS1429B1Z5',
-    panNumber: 'AABCS1429B',
-    address: 'Shop No. 12, Andheri Market',
-    city: 'Mumbai',
-    state: 'Maharashtra',
-    pincode: '400053',
-    salesUser: 'Rohit Verma',
-    territory: 'Mumbai West',
-    region: 'West India',
-    submittedDate: '2025-04-30',
-    ageHrs: 18,
-    status: 'PENDING',
-    bankName: 'HDFC Bank',
-    accountNumber: '50100XXXXXXXX12',
-    ifscCode: 'HDFC0004832',
-    pennyDropStatus: 'verified',
-    agreementStatus: 'signed',
-    agreementDate: '2025-04-29',
-    statusHistory: [
-      { status: 'SUBMITTED', timestamp: '2025-04-30 09:14', user: 'Rakesh Sharma (Partner)', remark: 'Initial KYC submission' },
-      { status: 'PENDING', timestamp: '2025-04-30 09:15', user: 'System', remark: 'Assigned to KYC queue' },
-    ],
-    auditLog: [
-      { action: 'KYC Submitted', user: 'Partner Self', timestamp: '2025-04-30 09:14', detail: 'Partner submitted KYC via mobile app' },
-      { action: 'Documents Received', user: 'System', timestamp: '2025-04-30 09:14', detail: '5 documents uploaded and virus scanned' },
-      { action: 'Penny Drop Initiated', user: 'System', timestamp: '2025-04-30 09:15', detail: 'Bank verification via HDFC0004832' },
-      { action: 'Penny Drop Verified', user: 'System', timestamp: '2025-04-30 09:17', detail: 'Account holder name matched: RAKESH SHARMA' },
-    ],
-    documents: [
-      { id: 'd1', type: 'pan', label: 'PAN Card', url: 'https://placehold.co/600x400/e2e8f0/1a1a2e?text=PAN+Card', status: 'pending' },
-      { id: 'd2', type: 'gst', label: 'GST Certificate', url: 'https://placehold.co/600x400/e2e8f0/1a1a2e?text=GST+Certificate', status: 'verified' },
-      { id: 'd3', type: 'bank', label: 'Cancelled Cheque', url: 'https://placehold.co/600x400/e2e8f0/1a1a2e?text=Cancelled+Cheque', status: 'verified' },
-      { id: 'd4', type: 'address', label: 'Address Proof', url: 'https://placehold.co/600x400/e2e8f0/1a1a2e?text=Address+Proof', status: 'pending' },
-      { id: 'd5', type: 'photo', label: 'Proprietor Photo', url: 'https://placehold.co/600x400/e2e8f0/1a1a2e?text=Proprietor+Photo', status: 'pending' },
-    ],
-  },
-};
 
 const STATUS_COLORS: Record<string, string> = {
   SUBMITTED: 'bg-blue-100 text-blue-700',

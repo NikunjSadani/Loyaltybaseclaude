@@ -38,7 +38,12 @@ interface ApiKycSub {
   submittedAt?: string | null;
   createdAt?: string;
   user: { id: string; name: string; phone: string };
-  partner?: { id: string; businessName: string } | null;
+  partner?: {
+    id: string;
+    businessName: string;
+    phone?: string;
+    outlets?: { name: string; outletCode: string; phone?: string }[];
+  } | null;
   documents?: { id: string; documentType: string; status: string }[];
 }
 
@@ -57,8 +62,8 @@ function mapApiKyc(s: ApiKycSub): KYCEntry {
   const slaBreached = ageHrs > 48;
   return {
     id:            s.id,
-    outletName:    s.partner?.businessName ?? s.user.name,
-    mobile:        s.user.phone,
+    outletName:    s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
+    mobile:        s.partner?.outlets?.[0]?.phone ?? s.partner?.phone ?? '',
     salesUser:     s.user.name,
     status:        DB_STATUS_MAP[s.status] ?? 'PENDING',
     submittedDate: submittedAt.slice(0, 10),
