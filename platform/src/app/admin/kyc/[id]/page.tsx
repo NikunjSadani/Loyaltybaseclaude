@@ -95,7 +95,7 @@ interface ApiKycDetail {
   reviewerNotes?: string | null;
   user: { id: string; name: string; phone: string; role?: string };
   partner?: {
-    id: string; businessName: string; partnerCode?: string | null;
+    id: string; businessName: string; ownerName?: string | null; partnerCode?: string | null;
     phone?: string;
     gstNumber?: string | null; panNumber?: string | null;
     address?: string | null; city?: string | null; state?: string | null; pincode?: string | null;
@@ -108,7 +108,7 @@ interface ApiKycDetail {
 }
 
 type KycDetailShape = {
-  id: string; outletCode: string; outletName: string; firmName: string; mobile: string; email: string;
+  id: string; outletCode: string; outletName: string; firmName: string; ownerName: string; mobile: string; email: string;
   partnerClass: string; gstNumber: string; panNumber: string;
   address: string; city: string; state: string; pincode: string;
   salesUser: string; territory: string; region: string;
@@ -138,6 +138,8 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     outletCode:       s.partner?.outlets?.[0]?.outletCode ?? s.partner?.partnerCode ?? '',
     outletName:       s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
     firmName:         s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
+    // OWNER/contact-person name — the reviewer checks this against the PAN/Aadhaar docs.
+    ownerName:        s.partner?.ownerName ?? '',
     mobile:           s.partner?.outlets?.[0]?.phone ?? s.partner?.phone ?? '',
     email:            '',
     partnerClass:     '',
@@ -472,6 +474,10 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">Firm Name</span>
                 <span className="text-gray-800 font-medium">{kyc.firmName}</span>
+              </div>
+              <div className="flex gap-2">
+                <span className="text-gray-500 w-24 flex-shrink-0">Owner Name</span>
+                <span className="text-gray-800 font-medium">{kyc.ownerName || '—'}</span>
               </div>
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">Class</span>

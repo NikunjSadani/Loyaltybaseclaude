@@ -814,6 +814,7 @@ export class KycService {
             select: {
               id: true,
               businessName: true,
+              ownerName: true,
               phone: true,
               outlets: { select: { id: true, name: true, outletCode: true, phone: true } },
             },

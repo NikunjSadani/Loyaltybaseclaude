@@ -21,6 +21,7 @@ import { useGifsySettings } from '@/lib/gifsy-settings';
 interface KYCDetail {
   id: string;
   partnerName: string;
+  ownerName: string;
   firmName: string;
   outletName: string;
   outletPhone: string;
@@ -58,6 +59,7 @@ interface ApiSalesKYC {
   partner: {
     id: string;
     businessName: string;
+    ownerName?: string;
     gstNumber?: string;
     panNumber?: string;
     address: string;
@@ -76,6 +78,7 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
   return {
     id: s.id,
     partnerName: s.user.name,
+    ownerName: s.partner.ownerName ?? '',
     firmName: s.partner.businessName,
     outletName:  s.partner.outlets?.[0]?.name  ?? s.partner.businessName ?? '',
     outletPhone: s.partner.outlets?.[0]?.phone ?? s.partner.phone        ?? '',
@@ -361,6 +364,10 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           outletId:        s.partner?.outlets?.[0]?.id ?? '',
           outletCode:      s.partner?.outlets?.[0]?.outletCode ?? '',
           partnerName:     s.user?.name                       ?? '',
+          // OWNER/contact-person name — captured in the KYC form, validated by the
+          // Gifsy reviewer against the submitted PAN/Aadhaar. Distinct from the rep
+          // (partnerName/submittedByName) and from the store/outlet name (title).
+          ownerName:       s.partner?.ownerName               ?? '',
           firmName:        s.partner?.businessName            ?? '',
           // Identity = the OUTLET (name/phone), not the rep. submittedByName below stays the rep.
           outletName:      s.partner?.outlets?.[0]?.name      ?? s.partner?.businessName ?? '',
@@ -580,7 +587,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
               <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Partner Details</p>
               <div className="space-y-2.5">
                 {[
-                  { icon: <User className="h-3.5 w-3.5" />,   label: 'Name',    value: kyc.outletName },
+                  { icon: <User className="h-3.5 w-3.5" />,   label: 'Owner Name', value: kyc.ownerName },
                   { icon: <Phone className="h-3.5 w-3.5" />,  label: 'Mobile',  value: `+91 ${kyc.outletPhone}` },
                   { icon: <MapPin className="h-3.5 w-3.5" />, label: 'Address', value: `${kyc.address}, ${kyc.city}, ${kyc.state}` },
                 ].map(row => (

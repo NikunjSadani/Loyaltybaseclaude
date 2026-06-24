@@ -17,6 +17,8 @@ import { api } from '@/lib/api-client';
 interface KYCEntry {
   id: string;
   partnerName: string;
+  /** OWNER/contact-person name captured in the KYC form (Gifsy validates against PAN/Aadhaar) */
+  ownerName: string;
   firmName: string;
   /** Outlet code assigned to this outlet — shown to help distinguish same-name stores */
   outletCode: string;
@@ -154,6 +156,7 @@ function KYCListContent() {
       partner?: {
         id: string;
         businessName: string;
+        ownerName?: string;
         phone?: string;
         outlets?: { name: string; outletCode: string; phone?: string }[];
       } | null;
@@ -168,6 +171,8 @@ function KYCListContent() {
           // Store identity = the OUTLET (name/code/phone), NOT the rep. partnerName is
           // kept only as a secondary field; the title/subtitle/chip render the outlet.
           partnerName:     s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? s.user.name,
+          // OWNER/contact-person name (NOT the rep) — secondary line on the row.
+          ownerName:       s.partner?.ownerName ?? '',
           firmName:        s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? s.user.name,
           outletCode:      s.partner?.outlets?.[0]?.outletCode ?? '',
           mobile:          s.partner?.outlets?.[0]?.phone ?? s.partner?.phone ?? '',
@@ -195,6 +200,7 @@ function KYCListContent() {
               .map((o: any): KYCEntry => ({
                 id:          o.id,
                 partnerName: o.name,
+                ownerName:   '',
                 firmName:    o.name,
                 outletCode:  o.outletCode ?? '',
                 mobile:      o.mobile ?? '',
@@ -354,7 +360,7 @@ function KYCListContent() {
                       </div>
                       <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                         <p className="text-xs text-gray-500">
-                          {entry.partnerName}{entry.mobile ? ` · ${entry.mobile}` : ''}
+                          {[entry.ownerName, entry.mobile].filter(Boolean).join(' · ')}
                         </p>
                         {entry.outletCode && (
                           <span

@@ -40,6 +40,7 @@ interface ApiKycSubmission {
   partner?: {
     id: string;
     businessName: string;
+    ownerName?: string;
     phone?: string;
     outlets?: { name: string; outletCode: string; phone?: string }[];
   } | null;
@@ -53,7 +54,7 @@ function mapApiSubmission(s: ApiKycSubmission): PendingKYC {
   return {
     id:              s.id,
     firmName:        s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
-    partnerName:     s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
+    partnerName:     s.partner?.ownerName ?? '',
     mobile:          s.partner?.outlets?.[0]?.phone ?? s.partner?.phone ?? '',
     city:            '',
     partnerClass:    '',

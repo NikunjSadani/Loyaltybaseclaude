@@ -22,6 +22,7 @@ type KYCStatusType = 'PENDING' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RES
 interface KYCEntry {
   id: string;
   outletName: string;
+  ownerName: string;
   mobile: string;
   salesUser: string;
   status: KYCStatusType;
@@ -41,6 +42,7 @@ interface ApiKycSub {
   partner?: {
     id: string;
     businessName: string;
+    ownerName?: string;
     phone?: string;
     outlets?: { name: string; outletCode: string; phone?: string }[];
   } | null;
@@ -63,6 +65,7 @@ function mapApiKyc(s: ApiKycSub): KYCEntry {
   return {
     id:            s.id,
     outletName:    s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
+    ownerName:     s.partner?.ownerName ?? '',
     mobile:        s.partner?.outlets?.[0]?.phone ?? s.partner?.phone ?? '',
     salesUser:     s.user.name,
     status:        DB_STATUS_MAP[s.status] ?? 'PENDING',
@@ -129,6 +132,7 @@ export default function KYCPage() {
       const matchSearch =
         !search ||
         k.outletName.toLowerCase().includes(search.toLowerCase()) ||
+        k.ownerName.toLowerCase().includes(search.toLowerCase()) ||
         k.mobile.includes(search) ||
         k.salesUser.toLowerCase().includes(search.toLowerCase());
       const matchStatus = statusFilter === 'ALL' || k.status === statusFilter;
@@ -284,6 +288,7 @@ export default function KYCPage() {
                   <tr key={k.id} className={`hover:bg-gray-50 transition-colors ${k.slaBreached ? 'border-l-2 border-l-red-400' : ''}`}>
                     <td className="px-4 py-3">
                       <p className="text-sm font-medium text-gray-900">{k.outletName}</p>
+                      {k.ownerName && <p className="text-xs text-gray-400">Owner: {k.ownerName}</p>}
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-600">{k.mobile}</td>
                     <td className="px-4 py-3 text-sm text-gray-600">{k.salesUser}</td>
