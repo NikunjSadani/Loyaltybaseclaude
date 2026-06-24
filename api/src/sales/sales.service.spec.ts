@@ -426,6 +426,48 @@ describe('SalesService', () => {
       expect(ox.kpis.CONSISTENCY).toEqual({ target: 300, achieved: 120, pace: 0.4 });
     });
   });
+
+  // ─── getMemberOutletTargets (team-member drill-down: real per-outlet targets) ──
+  describe('getMemberOutletTargets', () => {
+    it('returns the MEMBER\'s outlet targets for a viewable descendant', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' }); // assertCanViewMember caller
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'caller-su', reportingToId: null },
+        { id: 'member-su', reportingToId: 'caller-su' }, // member reports to caller → viewable
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outlet: { outletCode: 'OM' } }]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'OM', targetValues: { CONSISTENCY: 200 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'OM', kpiValues: { CONSISTENCY: 50 } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'CONSISTENCY', label: 'Consistency', unit: 'Litre', isPrimary: true },
+      ]);
+
+      const res = await service.getMemberOutletTargets(caller, 'member-su', '2026-05');
+      // The read targets exactly the member's outlets.
+      expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ salesUserId: 'member-su' }) }),
+      );
+      const om = res.rows.find((r: { outletCode: string }) => r.outletCode === 'OM')!;
+      expect(om.kpis.CONSISTENCY).toEqual({ target: 200, achieved: 50, pace: 0.25 });
+    });
+
+    it('forbids viewing an out-of-subtree member (IDOR guard)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'caller-su', reportingToId: null },
+        { id: 'stranger-su', reportingToId: null }, // NOT under the caller
+      ]);
+      await expect(
+        service.getMemberOutletTargets(caller, 'stranger-su', '2026-05'),
+      ).rejects.toThrow();
+      // The guard must fire BEFORE any target/assignment read.
+      expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // Direct coverage of the ported pure access helper (cross-tenant IDOR fix).

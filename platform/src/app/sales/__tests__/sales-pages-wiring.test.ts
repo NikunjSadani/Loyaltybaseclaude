@@ -62,15 +62,19 @@ describe('B — sales/team/[memberId]/outlets page', () => {
     expect(code).not.toMatch(/OUTLET_ACHIEVEMENTS/);
   });
 
-  it('B2: retains targetPct-based sorting (already present)', () => {
+  it('B2: sorts by REAL per-KPI achievement, not a mock targetPct/resolveConfig', () => {
     const code = src('src/app/sales/team/[memberId]/outlets/page.tsx');
-    expect(code).toMatch(/targetPct/);
+    expect(code).not.toMatch(/targetPct/);
+    expect(code).not.toMatch(/resolveConfig/);
+    expect(code).not.toMatch(/DEMO_PERIOD|DEMO_BEAT|DEMO_DISTRICT|DEMO_STATE/);
+    expect(code).toMatch(/outletOverallPct/);
   });
 
-  it('B3: fetches /api/sales/team/[memberId]/outlets', () => {
+  it('B3: fetches the member roster AND real per-outlet targets', () => {
     const code = src('src/app/sales/team/[memberId]/outlets/page.tsx');
     expect(code).toMatch(/\/api\/sales\/team\//);
     expect(code).toMatch(/\/outlets/);
+    expect(code).toMatch(/\/outlet-targets/); // real per-outlet × per-KPI targets
   });
 
   it('B4: does NOT reference ach?.achievements', () => {

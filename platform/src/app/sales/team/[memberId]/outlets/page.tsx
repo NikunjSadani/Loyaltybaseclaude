@@ -10,10 +10,8 @@ import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus } from '@/types';
 import {
-  resolveConfig, pct, pctBg, pctBarColor, DEMO_PERIOD, PERIODS,
-  DEMO_BEAT, DEMO_DISTRICT, DEMO_STATE,
+  pct, pctBg, pctBarColor, PERIODS, CURRENT_MONTH,
   getPrimaryParam,
-  type GeoTargetConfig,
 } from '@/lib/targets';
 
 /* ─── Outlet metadata ───────────────────────────────────────────────────────── */
@@ -22,6 +20,7 @@ type OutletType = 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
 
 interface OutletMeta {
   id: string;
+  outletCode: string;
   name: string;
   location: string;
   type: OutletType;
@@ -30,8 +29,25 @@ interface OutletMeta {
   beat: string;
   district?: string;
   state?: string;
-  targetPct?: number;
 }
+
+/* ─── Real per-outlet target data (GET /api/sales/team/[memberId]/outlet-targets) ─ */
+
+interface KpiCol { code: string; name: string; unit: string; isPrimary: boolean; }
+type OutletKpis = Record<string, { target: number | null; achieved: number | null; pace: number | null }>;
+
+/** Overall achievement % for an outlet = its primary KPI's pct, else the avg of KPIs with a target. */
+function outletOverallPct(kpis: OutletKpis, primaryCode: string | null): number {
+  if (primaryCode) {
+    const k = kpis[primaryCode];
+    if (k && k.target && k.target > 0) return pct(k.achieved ?? 0, k.target);
+  }
+  const withTarget = Object.values(kpis).filter((k) => k.target && k.target > 0);
+  if (withTarget.length === 0) return 0;
+  return Math.round(withTarget.reduce((s, k) => s + pct(k.achieved ?? 0, k.target ?? 0), 0) / withTarget.length);
+}
+
+const fmtNum = (n: number | null) => (n === null ? '–' : n.toLocaleString('en-IN'));
 
 /* (member + outlet data wired to /api/sales/team/[memberId] and /api/sales/team/[memberId]/outlets) */
 
@@ -86,9 +102,10 @@ export default function MemberOutletsPage() {
 
   const [member,     setMember]     = useState<{ name: string; role: string; territory: string } | null>(null);
   const [allOutlets, setAllOutlets] = useState<OutletMeta[]>([]);
-  const [period,     setPeriod]     = useState(DEMO_PERIOD);
+  const [period,     setPeriod]     = useState(CURRENT_MONTH);
   const [loading,    setLoading]    = useState(true);
-  const [config,     setConfig]     = useState<GeoTargetConfig | null>(null);
+  const [kpiColumns, setKpiColumns] = useState<KpiCol[]>([]);
+  const [targetsByOutlet, setTargetsByOutlet] = useState<Record<string, OutletKpis>>({});
   const [view,       setView]       = useState<'table' | 'cards'>('cards');
   const [typeFilter, setTypeFilter] = useState<OutletType | 'ALL'>('ALL');
   const [beatFilter, setBeatFilter] = useState<string>('ALL');
@@ -120,16 +137,34 @@ export default function MemberOutletsPage() {
     }).catch(() => {}).finally(() => setLoading(false));
   }, [memberId]);
 
-  // Resolve config when period or outlets change
+  // Real per-outlet KPI target vs achievement for the selected month, scoped to this member.
   useEffect(() => {
-    const beat     = allOutlets[0]?.beat     ?? DEMO_BEAT;
-    const district = allOutlets[0]?.district ?? DEMO_DISTRICT;
-    const state    = allOutlets[0]?.state    ?? DEMO_STATE;
-    setConfig(resolveConfig(beat, district, state, period));
-  }, [memberId, period, allOutlets]);
+    if (!memberId) return;
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+    fetch(`/api/sales/team/${memberId}/outlet-targets?period=${encodeURIComponent(period)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((body) => {
+        if (body.success) {
+          setKpiColumns(body.data.kpiColumns ?? []);
+          const map: Record<string, OutletKpis> = {};
+          for (const row of (body.data.rows ?? []) as { outletCode: string; kpis: OutletKpis }[]) {
+            map[row.outletCode] = row.kpis;
+          }
+          setTargetsByOutlet(map);
+        } else {
+          setKpiColumns([]); setTargetsByOutlet({});
+        }
+      })
+      .catch(() => { setKpiColumns([]); setTargetsByOutlet({}); });
+  }, [memberId, period]);
 
-  const params2 = config?.params ?? [];
+  const params2 = kpiColumns;
+  const primaryCode = getPrimaryParam(kpiColumns)?.code ?? null;
   const periodLabel = PERIODS.find((p) => p.value === period)?.label ?? period;
+
+  const kpisFor = (o: OutletMeta): OutletKpis => targetsByOutlet[o.outletCode] ?? {};
 
   // All beats from this member's outlets
   const allBeats = useMemo(() => {
@@ -144,14 +179,15 @@ export default function MemberOutletsPage() {
     return matchesType && matchesBeat;
   }), [allOutlets, typeFilter, beatFilter]);
 
-  // Sort: worst-performing approved first (use targetPct from API), non-KYC last
+  // Sort: worst-performing approved first (real primary-KPI %), non-KYC last
   const sortedOutlets = useMemo(() => {
     const approved = visibleOutlets
       .filter((o) => o.kycStatus === KYCStatus.APPROVED)
-      .sort((a, b) => (a.targetPct ?? 0) - (b.targetPct ?? 0));
+      .sort((a, b) => outletOverallPct(kpisFor(a), primaryCode) - outletOverallPct(kpisFor(b), primaryCode));
     const others = visibleOutlets.filter((o) => o.kycStatus !== KYCStatus.APPROVED);
     return [...approved, ...others];
-  }, [visibleOutlets, params2]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleOutlets, targetsByOutlet, primaryCode]);
 
   const approvedCount = visibleOutlets.filter((o) => o.kycStatus === KYCStatus.APPROVED).length;
   const filteredCount = allOutlets.length - visibleOutlets.length;
@@ -285,13 +321,13 @@ export default function MemberOutletsPage() {
 
       {loading && allOutlets.length > 0 ? (
         <div className="flex items-center justify-center min-h-48"><Spinner size="lg" /></div>
-      ) : !config && allOutlets.length > 0 ? (
+      ) : kpiColumns.length === 0 && allOutlets.length > 0 ? (
         <div className="flex flex-col items-center gap-3 py-8 bg-amber-50 rounded-2xl border border-amber-100">
           <AlertTriangle className="h-8 w-8 text-amber-400" />
           <p className="text-sm text-amber-700 font-medium">No targets set for {periodLabel}</p>
-          <p className="text-xs text-amber-500">Admin needs to configure targets for this territory</p>
+          <p className="text-xs text-amber-500">Targets for this member&apos;s outlets haven&apos;t been uploaded for this month yet</p>
         </div>
-      ) : config && allOutlets.length > 0 ? (
+      ) : kpiColumns.length > 0 && allOutlets.length > 0 ? (
         <>
           {/* ── TABLE VIEW ── */}
           {view === 'table' && visibleOutlets.length > 0 && (
@@ -315,8 +351,8 @@ export default function MemberOutletsPage() {
                     <tr className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">
                       <th className="py-3 pl-4 pr-3 sticky left-0 bg-gray-50/80 z-10 min-w-[160px]">Outlet</th>
                       {params2.map((p) => (
-                        <th key={p.id} className="py-3 px-3 min-w-[92px]">
-                          <span className="block truncate max-w-[88px]">{p.label}</span>
+                        <th key={p.code} className="py-3 px-3 min-w-[92px]">
+                          <span className="block truncate max-w-[88px]">{p.name}</span>
                           <span className="block font-normal text-gray-300 normal-case">{p.unit}</span>
                         </th>
                       ))}
@@ -326,8 +362,8 @@ export default function MemberOutletsPage() {
                   <tbody className="divide-y divide-gray-50">
                     {visibleOutlets.map((outlet) => {
                       const isApproved = outlet.kycStatus === KYCStatus.APPROVED;
-                      const overallPct = outlet.targetPct ?? 0;
-                      const avgPct = isApproved ? overallPct : 0;
+                      const kpis = kpisFor(outlet);
+                      const avgPct = isApproved ? outletOverallPct(kpis, primaryCode) : 0;
                       return (
                         <tr
                           key={outlet.id}
@@ -340,7 +376,7 @@ export default function MemberOutletsPage() {
                                 <Badge variant={kycBadge[outlet.kycStatus].variant} className="text-[8px] px-1 py-0">
                                   {kycBadge[outlet.kycStatus].label}
                                 </Badge>
-                                {isApproved && (
+                                {isApproved && Object.keys(kpis).length > 0 && (
                                   <span className={`text-[9px] font-bold px-1 py-0.5 rounded-full ${pctBg(avgPct)}`}>
                                     {avgPct}%
                                   </span>
@@ -349,25 +385,27 @@ export default function MemberOutletsPage() {
                             </div>
                           </td>
                           {params2.map((p) => {
-                            const achieved = isApproved ? Math.round(overallPct * p.target / 100) : null;
-                            const pp = achieved !== null ? pct(achieved, p.target) : 0;
-                            const fmt = (n: number) => p.unit === '₹L' ? `₹${n}L` : `${n}`;
-                            const cellBg = achieved !== null
-                              ? (pp >= 100 ? 'bg-emerald-50' : pp >= 80 ? 'bg-amber-50' : pp >= 60 ? 'bg-orange-50' : 'bg-rose-50')
-                              : '';
-                            return isApproved && achieved !== null ? (
-                              <td key={p.id} className={`px-3 py-2.5 min-w-[96px] ${cellBg}`}>
+                            const k = kpis[p.code];
+                            const achieved = isApproved ? (k?.achieved ?? null) : null;
+                            const target   = isApproved ? (k?.target ?? null) : null;
+                            if (!isApproved || (achieved === null && target === null)) {
+                              return (
+                                <td key={p.code} className="px-3 py-2.5 text-center">
+                                  <span className="text-[10px] text-gray-300">–</span>
+                                </td>
+                              );
+                            }
+                            const pp     = target ? pct(achieved ?? 0, target) : 0;
+                            const cellBg = pp >= 100 ? 'bg-emerald-50' : pp >= 80 ? 'bg-amber-50' : pp >= 60 ? 'bg-orange-50' : 'bg-rose-50';
+                            return (
+                              <td key={p.code} className={`px-3 py-2.5 min-w-[96px] ${cellBg}`}>
                                 <div className="flex items-baseline justify-between gap-1">
                                   <span className="text-xs font-semibold text-gray-800">
-                                    {fmt(achieved)}
-                                    <span className="text-[10px] font-normal text-gray-400"> /{fmt(p.target)}</span>
+                                    {fmtNum(achieved)}
+                                    <span className="text-[10px] font-normal text-gray-400"> /{fmtNum(target)}</span>
                                   </span>
                                   <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full whitespace-nowrap ${pctBg(pp)}`}>{pp}%</span>
                                 </div>
-                              </td>
-                            ) : (
-                              <td key={p.id} className="px-3 py-2.5 text-center">
-                                <span className="text-[10px] text-gray-300">–</span>
                               </td>
                             );
                           })}
@@ -402,12 +440,12 @@ export default function MemberOutletsPage() {
             <div className="space-y-3">
               {sortedOutlets.map((outlet) => {
                 const isApproved = outlet.kycStatus === KYCStatus.APPROVED;
-                const overallPct = outlet.targetPct ?? 0;
+                const kpis       = kpisFor(outlet);
                 const svParam    = getPrimaryParam(params2);
                 const kpiParams  = params2.filter((p) => !p.isPrimary);
 
-                const svAchieved = svParam ? Math.round(overallPct * svParam.target / 100) : 0;
-                const svPct      = svParam ? pct(svAchieved, svParam.target) : 0;
+                const svK        = svParam ? kpis[svParam.code] : undefined;
+                const svPct      = svParam && svK?.target ? pct(svK.achieved ?? 0, svK.target) : 0;
                 const stripClass = isApproved ? paceStrip(svPct, period) : 'bg-gray-100';
 
                 return (
@@ -436,54 +474,53 @@ export default function MemberOutletsPage() {
                     </div>
 
                     {isApproved ? (
-                      <>
-                        {/* Monthly Target progress bar */}
-                        {svParam && (() => {
-                          const achieved = Math.round(overallPct * svParam.target / 100);
-                          const pp  = pct(achieved, svParam.target);
-                          const fmt = (n: number) => svParam.unit === '₹L' ? `₹${n}L` : `${n}`;
-                          return (
+                      Object.keys(kpis).length === 0 ? (
+                        <div className="border-t border-gray-50 px-4 py-1.5 flex items-center gap-1.5">
+                          <p className="text-[11px] text-gray-400">No targets uploaded for this outlet this month</p>
+                        </div>
+                      ) : (
+                        <>
+                          {/* Monthly Target progress bar */}
+                          {svParam && svK && (
                             <div className="px-4 pt-2 pb-2.5 border-t border-gray-200">
                               <div className="flex items-center justify-between mb-1">
-                                <span className="text-[11px] font-semibold text-gray-600">{svParam.label}</span>
+                                <span className="text-[11px] font-semibold text-gray-600">{svParam.name}</span>
                                 <div className="flex items-center gap-1.5">
                                   <span className="text-[14px] font-bold text-gray-800">
-                                    {fmt(achieved)}
-                                    <span className="text-[12px] text-gray-400 font-normal"> /{fmt(svParam.target)} {svParam.unit}</span>
+                                    {fmtNum(svK.achieved)}<span className="text-[12px] text-gray-400 font-normal"> /{fmtNum(svK.target)}{svParam.unit ? ` ${svParam.unit}` : ''}</span>
                                   </span>
-                                  <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(pp)}`}>{pp}%</span>
+                                  <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(svPct)}`}>{svPct}%</span>
                                 </div>
                               </div>
                               <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                <div className={`h-full rounded-full ${pctBarColor(pp)}`} style={{ width: `${Math.min(pp, 100)}%` }} />
+                                <div className={`h-full rounded-full ${pctBarColor(svPct)}`} style={{ width: `${Math.min(svPct, 100)}%` }} />
                               </div>
                             </div>
-                          );
-                        })()}
+                          )}
 
-                        {/* KPI grid */}
-                        {kpiParams.length > 0 && (
-                          <div className="border-t border-gray-200 px-4 pt-2.5 pb-3 grid grid-cols-2 gap-x-3 gap-y-3">
-                            {kpiParams.map((p) => {
-                              const achieved = Math.round(overallPct * p.target / 100);
-                              const pp  = pct(achieved, p.target);
-                              const fmt = (n: number) => p.unit === '₹L' ? `₹${n}L` : `${n}`;
-                              return (
-                                <div key={p.id} className="border-l-[3px] border-gray-200 pl-2">
-                                  <p className="text-[11px] font-semibold text-gray-600 truncate leading-tight">{p.label}</p>
-                                  <div className="flex items-center justify-between mt-0.5">
-                                    <p className="text-[15px] font-bold text-gray-900 leading-tight">
-                                      {fmt(achieved)}
-                                      <span className="text-[12px] font-semibold text-gray-500"> /{fmt(p.target)}</span>
-                                    </p>
-                                    <span className={`text-[12px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(pp)}`}>{pp}%</span>
+                          {/* KPI grid */}
+                          {kpiParams.length > 0 && (
+                            <div className="border-t border-gray-200 px-4 pt-2.5 pb-3 grid grid-cols-2 gap-x-3 gap-y-3">
+                              {kpiParams.map((p) => {
+                                const k  = kpis[p.code];
+                                const pp = k?.target ? pct(k.achieved ?? 0, k.target) : 0;
+                                return (
+                                  <div key={p.code} className="border-l-[3px] border-gray-200 pl-2">
+                                    <p className="text-[11px] font-semibold text-gray-600 truncate leading-tight">{p.name}</p>
+                                    <div className="flex items-center justify-between mt-0.5">
+                                      <p className="text-[15px] font-bold text-gray-900 leading-tight">
+                                        {fmtNum(k?.achieved ?? null)}
+                                        <span className="text-[12px] font-semibold text-gray-500"> /{fmtNum(k?.target ?? null)}</span>
+                                      </p>
+                                      <span className={`text-[12px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(pp)}`}>{pp}%</span>
+                                    </div>
                                   </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </>
+                      )
                     ) : (
                       <div className="border-t border-gray-50 px-4 py-1.5 flex items-center gap-1.5">
                         <Lock className="h-3 w-3 text-gray-300" />

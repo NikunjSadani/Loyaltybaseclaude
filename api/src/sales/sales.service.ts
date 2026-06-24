@@ -379,12 +379,41 @@ export class SalesService {
    */
   async getOutletTargets(user: JwtPayload, period?: string) {
     const outletCodes = await this.subtreeOutletCodes(user);
+    return this.readOutletTargets(user.clientId, outletCodes, period);
+  }
+
+  /**
+   * GET /v1/sales/team/:memberId/outlet-targets?period= — REAL per-outlet × per-KPI
+   * target vs achievement for ONE team member's assigned outlets (the manager's
+   * team-member drill-down), replacing the FE resolveConfig(DEMO_*) mock. Same shape
+   * as getOutletTargets but scoped to the member's outlets, guarded by the hierarchy
+   * IDOR check (the caller must be the member or an ancestor).
+   */
+  async getMemberOutletTargets(user: JwtPayload, memberId: string, period?: string) {
+    await this.assertCanViewMember(user, memberId);
+    const assignments = await this.prisma.salesUserAssignment.findMany({
+      where: { salesUserId: memberId, unassignedAt: null, outletId: { not: null } },
+      select: { outlet: { select: { outletCode: true } } },
+    });
+    const outletCodes = [...new Set(
+      assignments.map((a) => a.outlet?.outletCode).filter((c): c is string => !!c),
+    )];
+    return this.readOutletTargets(user.clientId, outletCodes, period);
+  }
+
+  /**
+   * Shared per-outlet target/achievement read for a fixed set of outlet codes.
+   * Resolves the month (caller's period, else the latest month with target data),
+   * joins OutletTarget.targetValues ⋈ OutletSalesRecord.kpiValues ⋈ KpiDef, and
+   * returns { period, kpiColumns (primary-first), rows keyed by outletCode }.
+   */
+  private async readOutletTargets(clientId: string, outletCodes: string[], period?: string) {
     if (outletCodes.length === 0) return { period: null, kpiColumns: [], rows: [] };
 
     let month: string | null = period ?? null;
     if (!month) {
       const latest = await this.prisma.outletTarget.findFirst({
-        where: { clientId: user.clientId, outletCode: { in: outletCodes } },
+        where: { clientId, outletCode: { in: outletCodes } },
         orderBy: { month: 'desc' },
         select: { month: true },
       });
@@ -392,12 +421,12 @@ export class SalesService {
     }
     if (!month) return { period: null, kpiColumns: [], rows: [] };
 
-    const whereBase = { clientId: user.clientId, outletCode: { in: outletCodes }, month };
+    const whereBase = { clientId, outletCode: { in: outletCodes }, month };
     const [targetRows, achRows, kpiRows] = await Promise.all([
       this.prisma.outletTarget.findMany({ where: whereBase, select: { outletCode: true, targetValues: true } }),
       this.prisma.outletSalesRecord.findMany({ where: whereBase, select: { outletCode: true, kpiValues: true } }),
       this.prisma.kpiDef.findMany({
-        where: { clientId: user.clientId },
+        where: { clientId },
         select: { code: true, label: true, unit: true, isPrimary: true },
       }),
     ]);

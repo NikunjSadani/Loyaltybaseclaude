@@ -62,4 +62,14 @@ export class SalesController {
   getMemberOutlets(@CurrentUser() user: JwtPayload, @Param('memberId') memberId: string) {
     return this.sales.getMemberOutlets(user, memberId);
   }
+
+  @Get('team/:memberId/outlet-targets')
+  @RequirePermission('sales_org:read')
+  getMemberOutletTargets(
+    @CurrentUser() user: JwtPayload,
+    @Param('memberId') memberId: string,
+    @Query('period') period?: string,
+  ) {
+    return this.sales.getMemberOutletTargets(user, memberId, period);
+  }
 }
