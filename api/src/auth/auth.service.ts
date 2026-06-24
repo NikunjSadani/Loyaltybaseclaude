@@ -58,7 +58,16 @@ export class AuthService {
       }),
       this.prisma.salesUser.findUnique({
         where: { userId: user.sub },
-        select: { id: true, employeeCode: true, region: true, zone: true },
+        select: {
+          id: true, employeeCode: true, region: true, zone: true,
+          // Reporting manager — surfaced on /sales/profile (name + designation + phone).
+          reportingTo: {
+            select: {
+              user: { select: { name: true, phone: true } },
+              hierarchyLevel: { select: { name: true } },
+            },
+          },
+        },
       }),
       this.tenantSettings.getEffectiveSettings(user.clientId),
       // The authoritative visibility-capture mode (ClientConfig.features) — surfaced here so

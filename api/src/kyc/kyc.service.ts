@@ -431,59 +431,114 @@ export class KycService {
       });
   }
 
-  // ─── POST /v1/kyc ────────────────────────────────────────────────────────────
-  async create(user: JwtPayload, dto: CreateKycDto) {
-    // 1. Find channel partner for this user (tenant-scoped).
-    let partner = await this.prisma.channelPartner.findFirst({
-      where: { userId: user.sub, clientId: user.clientId },
-    });
+  /**
+   * Create a ChannelPartner with a partnerCode that is unique per (clientId,
+   * partnerCode). The code is derived deterministically from the outletCode
+   * (CP-<outletCode>) and a numeric suffix is appended on a P2002 collision.
+   * A P2002 on the (clientId, gstNumber) unique is surfaced as a clean
+   * BadRequestException (never a 500).
+   */
+  private async createPartnerWithUniqueCode(
+    tx: Prisma.TransactionClient,
+    args: {
+      clientId: string;
+      userId: string;
+      outletCode: string;
+      details: {
+        businessName: string;
+        ownerName: string;
+        phone: string;
+        gstNumber?: string;
+        panNumber?: string;
+        bankName?: string;
+        bankAccountNumber?: string;
+        bankAccountHolder?: string;
+        ifscCode?: string;
+        upiId?: string;
+        paymentMode?: string;
+      };
+    },
+  ): Promise<string> {
+    const base = `CP-${args.outletCode}`;
+    const MAX_ATTEMPTS = 20;
 
-    // 2. Update ChannelPartner with submitted details (bank + identity).
-    if (partner) {
-      partner = await this.prisma.channelPartner.update({
-        where: { id: partner.id },
-        data: {
-          businessName: dto.partnerName,
-          phone: dto.mobile,
-          gstNumber: dto.gstNumber ?? undefined,
-          panNumber: dto.panNumber ?? undefined,
-          bankName: dto.bankName ?? undefined,
-          bankAccountNumber: dto.accountNumber ?? undefined,
-          bankAccountHolder: dto.accountHolderName ?? undefined,
-          ifscCode: dto.ifscCode ?? undefined,
-          upiId: dto.upiId ?? undefined,
-          paymentMode: dto.paymentMode ?? undefined,
-        },
-      });
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const partnerCode = attempt === 0 ? base : `${base}-${attempt}`;
+      try {
+        const created = await tx.channelPartner.create({
+          data: {
+            clientId: args.clientId,
+            userId: args.userId,
+            partnerCode,
+            isActive: true,
+            ...args.details,
+          },
+          select: { id: true },
+        });
+        return created.id;
+      } catch (e) {
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+          // Identify which unique collided. Prisma exposes the target fields.
+          const target = (e.meta?.target ?? []) as string[] | string;
+          const fields = Array.isArray(target) ? target : [target];
+          if (fields.some((f) => f.toLowerCase().includes('gst'))) {
+            throw new BadRequestException(
+              `This GST number is already registered to another partner in this tenant.`,
+            );
+          }
+          if (fields.some((f) => f.toLowerCase().includes('userid'))) {
+            // The owner User already owns a partner — a logic race; do not loop.
+            throw new BadRequestException(
+              `This owner already has a registered partner profile.`,
+            );
+          }
+          // partnerCode collision → retry with the next suffix.
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw new BadRequestException(
+      `Could not generate a unique partner code for outlet ${args.outletCode}.`,
+    );
+  }
+
+  /**
+   * Insert the KycSubmission row. The duplicate-submission guard is scoped to the
+   * resolved OUTLET partner (partnerId), NOT the rep, so a rep can have many
+   * in-flight submissions across DIFFERENT outlets while a single outlet still
+   * can't have two concurrent in-flight KYCs. `userId` stays the submitter/rep so
+   * consent()/sendConsentOtp() ownership checks (submission.userId === user.sub)
+   * keep passing for the rep.
+   */
+  private async createSubmissionRow(
+    tx: Prisma.TransactionClient,
+    args: {
+      user: JwtPayload;
+      dto: CreateKycDto;
+      status: string;
+      escalatedFrom: string | null;
+      partnerId: string;
+      inFlightStatuses: string[];
+    },
+  ) {
+    const { user, dto, status, escalatedFrom, partnerId, inFlightStatuses } = args;
+
+    const existing = await tx.kycSubmission.findFirst({
+      where: {
+        partnerId,
+        status: { in: inFlightStatuses as never },
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new BadRequestException('You already have a pending KYC submission');
     }
 
-    // 3. Block duplicate in-flight submissions.
-    const existing = await this.prisma.kycSubmission.findFirst({
-      where: {
-        userId: user.sub,
-        status: {
-          in: [
-            'DRAFT',
-            'SUBMITTED',
-            'UNDER_REVIEW',
-            'PENDING_SO_APPROVAL',
-            'PENDING_ASM_APPROVAL',
-            'PENDING_RSM_APPROVAL',
-            'PENDING_GIFSY',
-          ],
-        },
-      },
-    });
-    if (existing) throw new BadRequestException('You already have a pending KYC submission');
-
-    // 4. Escalation routing — DB-backed via the real SalesUser reporting tree.
-    const { status, escalatedFrom } = await this.resolveInitialRouting(user);
-
-    // 5. Create KycSubmission with all geo + notes.
-    const submission = await this.prisma.kycSubmission.create({
+    return tx.kycSubmission.create({
       data: {
         userId: user.sub,
-        partnerId: partner?.id ?? null,
+        partnerId,
         status: status as never,
         escalatedFrom: escalatedFrom ?? null,
         reviewerNotes: dto.reviewerNotes ?? null,
@@ -499,6 +554,152 @@ export class KycService {
         paymentGeoAccuracy: dto.paymentGeo?.accuracy ?? null,
         paymentGeoAt: dto.paymentGeo?.ts ? new Date(dto.paymentGeo.ts) : null,
       },
+    });
+  }
+
+  // ─── POST /v1/kyc ────────────────────────────────────────────────────────────
+  async create(user: JwtPayload, dto: CreateKycDto) {
+    // ── OUTLET-DRIVEN KYC ─────────────────────────────────────────────────────
+    // The submission is FILED BY the rep (user.sub) but is ABOUT dto.outletId's
+    // outlet/owner. We (a) resolve the target outlet, (b) resolve-or-create the
+    // outlet-owner User (PENDING_VERIFICATION) + its ChannelPartner, (c) block
+    // duplicates PER OUTLET-PARTNER (not per rep), then create the submission
+    // with partnerId = the OUTLET's partner. Self-enrolment still works: an owner
+    // submitting for their own outlet resolves their existing partner unchanged.
+
+    // 1. Resolve the target outlet FIRST (tenant-scoped). dto.outletId is the
+    //    Outlet `id` (CUID), confirmed from the FE (sales/kyc/new/page.tsx sends
+    //    selectedOutlet.outletId = o.id, NOT outletCode).
+    const outlet = await this.prisma.outlet.findFirst({
+      where: { id: dto.outletId, clientId: user.clientId },
+      include: { outletType: { select: { code: true } } },
+    });
+    if (!outlet) throw new NotFoundException('Outlet not found');
+
+    // Guard the owner phone BEFORE any write (H1): it must not belong to a sales
+    // EMPLOYEE or to a DIFFERENT existing partner/outlet. `exceptPartnerId` skips this
+    // outlet's own partner so Re-KYC of the same outlet doesn't self-collide. This
+    // prevents attaching the outlet's wallet/payouts (and the on-approval activation)
+    // to the wrong account. Throws a clean 400.
+    await this.assertPhoneAvailable(user.clientId, dto.mobile, outlet.partnerId ?? undefined);
+
+    // Map outlet type code → owner UserRole. Unknown/other → SSS (default).
+    const OUTLET_TYPE_TO_ROLE: Record<string, 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST'> = {
+      SSS: 'SSS',
+      WHOLESALER: 'WHOLESALER',
+      SUB_STOCKIST: 'SUB_STOCKIST',
+    };
+    const ownerRole = OUTLET_TYPE_TO_ROLE[outlet.outletType?.code ?? ''] ?? 'SSS';
+
+    // Common ChannelPartner detail patch (bank + identity) from the dto.
+    const partnerDetails = {
+      businessName: dto.partnerName,
+      ownerName: dto.partnerName,
+      phone: dto.mobile,
+      gstNumber: dto.gstNumber ?? undefined,
+      panNumber: dto.panNumber ?? undefined,
+      bankName: dto.bankName ?? undefined,
+      bankAccountNumber: dto.accountNumber ?? undefined,
+      bankAccountHolder: dto.accountHolderName ?? undefined,
+      ifscCode: dto.ifscCode ?? undefined,
+      upiId: dto.upiId ?? undefined,
+      paymentMode: dto.paymentMode ?? undefined,
+    };
+
+    // 2. Escalation routing — DB-backed via the real SalesUser reporting tree.
+    //    Read-only; computed before the write transaction.
+    const { status, escalatedFrom } = await this.resolveInitialRouting(user);
+
+    const IN_FLIGHT_STATUSES = [
+      'DRAFT',
+      'SUBMITTED',
+      'UNDER_REVIEW',
+      'PENDING_SO_APPROVAL',
+      'PENDING_ASM_APPROVAL',
+      'PENDING_RSM_APPROVAL',
+      'PENDING_GIFSY',
+    ] as const;
+
+    // 3. All resolve-or-create + submission writes in ONE transaction so a partial
+    //    failure can't orphan a User without a ChannelPartner.
+    const submission = await this.prisma.$transaction(async (tx) => {
+      // 3a. Resolve-or-create the ChannelPartner that OWNS this outlet.
+      let partnerId: string;
+
+      if (outlet.partnerId) {
+        // Re-KYC / already-owned outlet → update the existing partner's details.
+        try {
+          const updated = await tx.channelPartner.update({
+            where: { id: outlet.partnerId },
+            data: partnerDetails,
+            select: { id: true },
+          });
+          partnerId = updated.id;
+        } catch (e) {
+          // A GST collision on @@unique([clientId,gstNumber]) → clean 400, not a 500 (M1).
+          if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+            const fields = ([] as string[]).concat((e.meta?.target ?? []) as string[]);
+            if (fields.some((f) => String(f).toLowerCase().includes('gst'))) {
+              throw new BadRequestException(
+                'This GST number is already registered to another partner in this tenant.',
+              );
+            }
+          }
+          throw e;
+        }
+      } else {
+        // Partner-less (brand-new) outlet → create the owner User + its partner.
+        // assertPhoneAvailable() above already blocked the phone if it belongs to a
+        // sales employee or an existing partner, so any user STILL found by this
+        // phone is some OTHER account (e.g. an admin) and must NOT be repurposed as
+        // an outlet owner (H1). Skip soft-deleted rows (M2). Reject cleanly.
+        const existingUser = await tx.user.findFirst({
+          where: { clientId: user.clientId, phone: dto.mobile, deletedAt: null },
+          select: { id: true },
+        });
+        if (existingUser) {
+          throw new BadRequestException(
+            'This number is already registered to another account and cannot be used for an outlet.',
+          );
+        }
+
+        // Create the owner User in PENDING_VERIFICATION (NOT a usable login until
+        // GIFSY approval flips it to ACTIVE), then its ChannelPartner.
+        const created = await tx.user.create({
+          data: {
+            clientId: user.clientId,
+            phone: dto.mobile,
+            name: dto.partnerName,
+            role: ownerRole,
+            status: 'PENDING_VERIFICATION',
+          },
+          select: { id: true },
+        });
+        partnerId = await this.createPartnerWithUniqueCode(tx, {
+          clientId: user.clientId,
+          userId: created.id,
+          outletCode: outlet.outletCode,
+          details: partnerDetails,
+        });
+      }
+
+      // 3b. Link the outlet to the resolved partner if not already linked.
+      if (outlet.partnerId !== partnerId) {
+        await tx.outlet.update({
+          where: { id: outlet.id },
+          data: { partnerId },
+        });
+      }
+
+      // 3c. Create the submission (duplicate guard scoped to THIS partner).
+      return this.createSubmissionRow(tx, {
+        user,
+        dto,
+        status,
+        escalatedFrom,
+        partnerId,
+        inFlightStatuses: [...IN_FLIGHT_STATUSES],
+      });
     });
 
     // 6. Log initial status history.
@@ -1696,7 +1897,10 @@ export class KycService {
       userId: string;
       partnerId: string | null;
       user: { name: string | null; phone: string | null };
-      partner: { outlets: Array<{ id: string; reKycFlags: Prisma.JsonValue | null }> } | null;
+      partner: {
+        userId: string;
+        outlets: Array<{ id: string; reKycFlags: Prisma.JsonValue | null }>;
+      } | null;
     },
     bridgeResult: BridgeResult,
     source: KycFieldSource,
@@ -1717,9 +1921,15 @@ export class KycService {
         return { outcome: 'skipped' };
       }
 
-      // Activate the user.
+      // Activate the OUTLET OWNER — NOT the submitter. For sales-assisted KYC the
+      // submitter (submission.userId) is the REP, whose login must stay as-is;
+      // the account that becomes login-able is the outlet owner = the submission's
+      // partner's user. For self-enrolment partner.userId === submission.userId so
+      // behavior is unchanged. Legacy rows with no partner fall back to the
+      // submitter (no regression).
+      const ownerUserId = submission.partner?.userId ?? submission.userId;
       await tx.user.update({
-        where: { id: submission.userId },
+        where: { id: ownerUserId },
         data: { status: 'ACTIVE' },
       });
 

@@ -26,7 +26,7 @@ import {
 // Includes all table operations needed by the new approve(), verifyField(),
 // and the shared applyBridgeOutcome() helper.
 const mockTx = {
-  kycSubmission: { update: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
+  kycSubmission: { update: jest.fn(), findFirst: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
   kycVerificationItem: {
     upsert: jest.fn(),
     findMany: jest.fn(),
@@ -35,7 +35,8 @@ const mockTx = {
   },
   kycStatusHistory: { create: jest.fn() },
   auditLog: { create: jest.fn() },
-  user: { update: jest.fn() },
+  user: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
+  channelPartner: { update: jest.fn(), create: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
   outlet: { update: jest.fn(), updateMany: jest.fn() },
 };
@@ -52,7 +53,7 @@ const mockPrisma = {
   kycStatusHistory: { create: jest.fn(), findMany: jest.fn() },
   kycDocument: { create: jest.fn() },
   otpCode: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
-  outlet: { findUnique: jest.fn(), update: jest.fn() },
+  outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
   salesUser: { findFirst: jest.fn() },
   consentRecord: { create: jest.fn() },
   kycVerificationItem: { upsert: jest.fn() },
@@ -86,9 +87,34 @@ describe('KycService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
-    // clearAllMocks does not drain mockResolvedValueOnce queues; reset the
-    // salesUser mock explicitly so stale Once-values from prior tests don't bleed.
+    // clearAllMocks does not drain mockResolvedValueOnce queues nor clear a
+    // mockResolvedValue impl; reset the mocks that create() now also touches so
+    // stale values from prior suites (sendConsentOtp etc.) don't bleed.
+    // create() order on mockPrisma: outlet.findFirst → channelPartner.findFirst
+    // (assertPhoneAvailable partner-clash) → salesUser.findFirst (assertPhoneAvailable
+    // employee-clash, nested where.user) → salesUser.findFirst (resolveInitialRouting).
     mockPrisma.salesUser.findFirst.mockReset();
+    mockPrisma.channelPartner.findFirst.mockReset();
+    mockPrisma.outlet.findFirst.mockReset();
+    // The shared mockTx is a module-level singleton. clearAllMocks() clears its
+    // call records but does NOT drain mockResolvedValueOnce queues — so a test that
+    // throws before consuming all its primed Once-values leaks residue into the next
+    // test's tx (the "passes in isolation, fails in-suite" symptom). Fully reset every
+    // mockTx op so each test starts with empty queues.
+    for (const table of Object.values(mockTx)) {
+      for (const fn of Object.values(table)) {
+        (fn as jest.Mock).mockReset();
+      }
+    }
+    // Same hazard on mockPrisma table ops (kycSubmission.findFirst etc. are primed
+    // with mockResolvedValueOnce across approve/verifyField/reKyc/consent suites).
+    // Reset every table op but PRESERVE $transaction's impl (cb → mockTx).
+    for (const [key, val] of Object.entries(mockPrisma)) {
+      if (key === '$transaction') continue;
+      for (const fn of Object.values(val as Record<string, unknown>)) {
+        (fn as jest.Mock).mockReset();
+      }
+    }
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         KycService,
@@ -134,6 +160,7 @@ describe('KycService', () => {
 
   describe('create() document references (tenant safety)', () => {
     const baseDto = {
+      outletId: 'outlet-1',
       partnerName: 'Kumar Store',
       mobile: '9820100001',
       address: '12 SV Road',
@@ -143,11 +170,26 @@ describe('KycService', () => {
     };
 
     const primeCreateMocks = () => {
+      // Outlet-driven create(): resolve a partner-less outlet, then find-or-create
+      // the owner + partner inside the tx.
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1',
+        clientId: 'deoleo',
+        partnerId: null,
+        outletCode: 'OUT-1',
+        outletType: { code: 'SSS' },
+      });
+      // assertPhoneAvailable: partner-clash null + employee-clash null → phone available.
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
       // resolveInitialRouting: no SalesUser → SUBMITTED (simplest case for doc tests)
       mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
-      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
-      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(null); // no in-flight dup
-      mockPrisma.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-1' });
+      mockTx.user.findFirst.mockResolvedValueOnce(null); // no existing owner user
+      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-1' });
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-1' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null); // no in-flight dup
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-1' });
       mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
       mockPrisma.kycDocument.create.mockResolvedValue({});
     };
@@ -264,14 +306,17 @@ describe('KycService', () => {
 
   // ─── resolveInitialRouting (DB-backed) ────────────────────────────────────────
   // These tests exercise the private method via create() with mocked SalesUser
-  // queries. The salesUser mock is called first (resolveInitialRouting), then the
-  // rest of the create() pipeline (channelPartner, kycSubmission, etc.).
+  // queries. NOTE: create() runs assertPhoneAvailable (channelPartner.findFirst +
+  // salesUser.findFirst employee-clash) BEFORE resolveInitialRouting, so the first
+  // salesUser.findFirst call is the employee-clash probe, not the routing submitter.
+  // primePhoneAvailable() handles that; routingCalls() selects the routing reads.
 
   describe('resolveInitialRouting (via create)', () => {
     /** Build a minimal SO-role submitter */
     const isr: JwtPayload = { sub: 'isr1', role: 'SALES_ISR', clientId: 'deoleo', phone: '', name: '' };
 
     const baseDto = {
+      outletId: 'outlet-1',
       partnerName: 'Test Store',
       mobile: '9000000001',
       address: '1 Main St',
@@ -280,15 +325,55 @@ describe('KycService', () => {
       pincode: '400001',
     };
 
-    /** Prime create() mocks after resolveInitialRouting resolves. */
-    const primeCreate = () => {
+    /**
+     * Prime the create() pipeline AFTER resolveInitialRouting.
+     *
+     * IMPORTANT call-order note. The order of reads on mockPrisma inside create() is:
+     *   1. outlet.findFirst                       (outlet load)
+     *   2. channelPartner.findFirst               (assertPhoneAvailable partner-clash)
+     *   3. salesUser.findFirst (nested where.user) (assertPhoneAvailable employee-clash)
+     *   4. salesUser.findFirst (flat where.clientId+userId) (resolveInitialRouting submitter)
+     *   5+. salesUser.findFirst                    (resolveInitialRouting walk)
+     * So the FIRST salesUser.findFirst.mockResolvedValueOnce a test queues is consumed
+     * by the employee-clash probe, NOT the routing submitter. Each routing test must
+     * therefore queue an employee-clash `null` FIRST (via primePhoneAvailable) so the
+     * phone is "available", then its routing values. primeCreate() handles the outlet
+     * load + channelPartner-clash null + the in-tx writes.
+     */
+    const primePhoneAvailable = () => {
+      // assertPhoneAvailable: partner-clash null, then employee-clash null → available.
       mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
-      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(null);
-      mockPrisma.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-rt-1' });
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+    };
+    const primeCreate = () => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1',
+        clientId: 'deoleo',
+        partnerId: null,
+        outletCode: 'OUT-1',
+        outletType: { code: 'SSS' },
+      });
+      mockTx.user.findFirst.mockResolvedValueOnce(null);
+      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-rt-1' });
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-rt-1' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-rt-1' });
       mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
     };
+    /**
+     * After a create() that primed phone-availability, the routing-relevant
+     * salesUser.findFirst calls are every call EXCEPT the first (the employee-clash
+     * probe). This returns those calls' `where` clauses in order so assertions can
+     * target resolveInitialRouting without coupling to the absolute call index.
+     */
+    const routingCalls = () =>
+      mockPrisma.salesUser.findFirst.mock.calls
+        .map((c) => c[0].where)
+        .filter((w: Record<string, unknown>) => w.clientId !== undefined && w.user === undefined);
 
     it('submitter with no SalesUser record → status SUBMITTED, escalatedFrom null', async () => {
+      primePhoneAvailable();
       // resolveInitialRouting: no SalesUser → SUBMITTED
       mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
       primeCreate();
@@ -297,13 +382,15 @@ describe('KycService', () => {
         baseDto as never,
       );
       expect(res).toMatchObject({ status: 'SUBMITTED', escalatedFrom: null });
-      // Confirm the salesUser query was tenant-scoped
-      const suWhere = mockPrisma.salesUser.findFirst.mock.calls[0][0].where;
+      // Confirm the resolveInitialRouting submitter query was tenant-scoped (the
+      // routing call, not the assertPhoneAvailable employee-clash probe).
+      const suWhere = routingCalls()[0];
       expect(suWhere.clientId).toBe('deoleo');
       expect(suWhere.deletedAt).toBe(null);
     });
 
     it("direct manager active -- routes to that manager's level status", async () => {
+      primePhoneAvailable();
       // Submitter SalesUser → reportingToId = 'so-id'
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' }) // submitter
@@ -319,10 +406,12 @@ describe('KycService', () => {
       expect(res).toMatchObject({ status: 'PENDING_SO_APPROVAL', escalatedFrom: null });
       // audit NIT-1: the per-hop manager lookup must ALSO be tenant-scoped, not just
       // the submitter lookup — guard the highest-value invariant of this change.
-      expect(mockPrisma.salesUser.findFirst.mock.calls[1][0].where.clientId).toBe('deoleo');
+      // routingCalls()[1] = the first manager-walk lookup (after the submitter lookup).
+      expect(routingCalls()[1].clientId).toBe('deoleo');
     });
 
     it('direct manager resigned (inactive) → escalates to next active manager, escalatedFrom set', async () => {
+      primePhoneAvailable();
       // Submitter → SO (inactive) → ASM (active)
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' })   // submitter
@@ -346,6 +435,7 @@ describe('KycService', () => {
     });
 
     it('direct manager soft-deleted → treated as inactive and skipped', async () => {
+      primePhoneAvailable();
       // Submitter → SO (deletedAt set) → ASM (active)
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' })
@@ -369,6 +459,7 @@ describe('KycService', () => {
     });
 
     it('no active manager anywhere up the chain → fallback PENDING_RSM_APPROVAL', async () => {
+      primePhoneAvailable();
       // Submitter → SO (inactive) → no further manager
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' })
@@ -385,10 +476,13 @@ describe('KycService', () => {
     });
 
     it('lookup is tenant-scoped (clientId in salesUser where clause)', async () => {
+      primePhoneAvailable();
       mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
       primeCreate();
       await service.create(isr, baseDto as never);
-      const suWhere = mockPrisma.salesUser.findFirst.mock.calls[0][0].where;
+      // The resolveInitialRouting submitter lookup (routingCalls()[0]), not the
+      // assertPhoneAvailable employee-clash probe.
+      const suWhere = routingCalls()[0];
       expect(suWhere.clientId).toBe('deoleo');
       expect(suWhere.userId).toBe('isr1');
     });
@@ -398,6 +492,7 @@ describe('KycService', () => {
       // The walk makes exactly 3 salesUser.findFirst calls:
       //   1. submitter lookup  2. a-su  3. b-su  → then a-su is already in visitedIds → break.
       // Fallback: no active manager found → PENDING_RSM_APPROVAL.
+      primePhoneAvailable();
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'a-su' })
         .mockResolvedValueOnce({ id: 'a-su', isActive: false, deletedAt: null, reportingToId: 'b-su', hierarchyLevel: { code: 'SO' } })
@@ -410,17 +505,56 @@ describe('KycService', () => {
   });
 
   describe('create', () => {
-    it('rejects a duplicate in-flight submission', async () => {
-      // resolveInitialRouting: SO has no SalesUser → SUBMITTED
-      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
-      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
-      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ id: 'existing' });
-      await expect(service.create(so, { partnerName: 'Acme', mobile: '9000000000', address: 'addr1', city: 'X', state: 'Y', pincode: '110011' } as never)).rejects.toBeInstanceOf(
-        BadRequestException,
-      );
+    it('404s when the target outlet is missing in this tenant', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce(null);
+      await expect(
+        service.create(so, {
+          outletId: 'nope',
+          partnerName: 'Acme',
+          mobile: '9000000000',
+          address: 'addr1',
+          city: 'X',
+          state: 'Y',
+          pincode: '110011',
+        } as never),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('creates a submission scoped to the caller and records history', async () => {
+    it('rejects a duplicate in-flight submission scoped to the OUTLET partner', async () => {
+      // Outlet already has a partner → we update its details, then the per-partner
+      // dup guard finds an in-flight submission → BadRequest (rolls back the tx).
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1',
+        clientId: 'deoleo',
+        partnerId: 'cp-existing',
+        outletCode: 'OUT-1',
+        outletType: { code: 'SSS' },
+      });
+      // assertPhoneAvailable (exceptPartnerId='cp-existing'): both clashes null → available.
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // employee-clash null
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // routing submitter → SUBMITTED
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'cp-existing' });
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({ id: 'existing' });
+      await expect(
+        service.create(so, {
+          outletId: 'outlet-1',
+          partnerName: 'Acme',
+          mobile: '9000000000',
+          address: 'addr1',
+          city: 'X',
+          state: 'Y',
+          pincode: '110011',
+        } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      // The dup guard keys on the resolved OUTLET partner, not the rep.
+      expect(mockTx.kycSubmission.findFirst.mock.calls[0][0].where.partnerId).toBe('cp-existing');
+    });
+
+    it('creates owner User + ChannelPartner for a partner-less outlet, links it, files under the rep', async () => {
+      // assertPhoneAvailable: partner-clash null + employee-clash null → available.
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // employee-clash null
       // resolveInitialRouting: SO → ASM (active)
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'so-su', reportingToId: 'asm-su' })  // submitter
@@ -431,11 +565,22 @@ describe('KycService', () => {
           reportingToId: null,
           hierarchyLevel: { code: 'ASM' },
         });
-      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
-      mockPrisma.kycSubmission.findFirst.mockResolvedValue(null);
-      mockPrisma.kycSubmission.create.mockResolvedValue({ id: 'sub1' });
-      mockPrisma.kycStatusHistory.create.mockResolvedValue({});
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1',
+        clientId: 'deoleo',
+        partnerId: null,
+        outletCode: 'OUT-1',
+        outletType: { code: 'WHOLESALER' },
+      });
+      mockTx.user.findFirst.mockResolvedValueOnce(null); // no existing owner
+      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-1' });
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-new' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub1' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
       const res = await service.create(so, {
+        outletId: 'outlet-1',
         partnerName: 'Acme',
         mobile: '9000000000',
         address: 'addr1',
@@ -444,7 +589,17 @@ describe('KycService', () => {
         pincode: '110011',
       } as never);
       expect(res).toEqual({ submissionId: 'sub1', status: 'PENDING_ASM_APPROVAL', escalatedFrom: null });
-      expect(mockPrisma.kycSubmission.create.mock.calls[0][0].data.userId).toBe('so1');
+      // Owner created in PENDING_VERIFICATION with the outletType-mapped role.
+      expect(mockTx.user.create.mock.calls[0][0].data).toMatchObject({
+        status: 'PENDING_VERIFICATION',
+        role: 'WHOLESALER',
+      });
+      // Partner code derived from the outletCode; outlet linked to the new partner.
+      expect(mockTx.channelPartner.create.mock.calls[0][0].data.partnerCode).toBe('CP-OUT-1');
+      expect(mockTx.outlet.update.mock.calls[0][0].data.partnerId).toBe('cp-new');
+      // Submission filed BY the rep but ABOUT the outlet's partner.
+      expect(mockTx.kycSubmission.create.mock.calls[0][0].data.userId).toBe('so1');
+      expect(mockTx.kycSubmission.create.mock.calls[0][0].data.partnerId).toBe('cp-new');
     });
   });
 
@@ -575,7 +730,7 @@ describe('KycService', () => {
         status: 'PENDING_GIFSY',
         partnerId: 'p1',
         user: { name: 'n', phone: 'p' },
-        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+        partner: { userId: 'owner-9', outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
       });
       // In-tx re-assert
       mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
@@ -584,7 +739,7 @@ describe('KycService', () => {
         status: 'PENDING_GIFSY',
         partnerId: 'p1',
         user: { name: 'n', phone: 'p' },
-        partner: { outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
+        partner: { userId: 'owner-9', outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null }] },
       });
       // Step 1: load existing items (none yet, so all 7 are missing)
       mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
@@ -615,12 +770,14 @@ describe('KycService', () => {
       await expect(service.approve(gifsy, 's1')).rejects.toBeInstanceOf(ConflictException);
     });
 
-    it('approves, activates the user, creates a wallet, and enqueues notify post-tx', async () => {
+    it('approves, activates the OWNER (not the submitter), creates a wallet, and enqueues notify post-tx', async () => {
       seedApproveHappyPath();
       const res = await service.approve(gifsy, 's1');
       expect(res).toEqual({ message: 'KYC approved successfully' });
+      // STEP 2: activate the outlet OWNER (partner.userId='owner-9'), NOT the
+      // submitter/rep (submission.userId='user1'). For self-enrol they're equal.
       expect(mockTx.user.update).toHaveBeenCalledWith({
-        where: { id: 'user1' },
+        where: { id: 'owner-9' },
         data: { status: 'ACTIVE' },
       });
       expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'p1' } });

@@ -75,6 +75,13 @@ export class UploadKycDocumentDto {
 
 // ─── Full KYC submission schema ───────────────────────────────────────────────
 export class CreateKycDto {
+  // Target outlet (Prisma CUID — the outlet `id`, NOT the human outletCode). The
+  // submission is FILED BY the rep but is ABOUT this outlet/owner. Required so a
+  // sales rep can enrol an outlet they don't personally own.
+  @IsString()
+  @MinLength(1, { message: 'outletId is required' })
+  outletId!: string;
+
   // Partner / outlet owner identity
   @IsString()
   @MinLength(2)

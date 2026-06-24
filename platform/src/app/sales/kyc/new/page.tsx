@@ -834,6 +834,7 @@ export default function NewKYCPage() {
           'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify({
+          outletId:         selectedOutlet?.outletId,
           partnerName:      form.partnerName,
           mobile:           form.mobile,
           partnerClass:     form.partnerClass,

@@ -3,12 +3,10 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  User, Phone, Mail, MapPin, Award, LogOut,
-  ChevronRight, Shield, Bell, HelpCircle,
+  User, Phone, Mail, Award, LogOut,
+  ChevronRight, Shield, Bell, X,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { ROLE_LABELS, type SalesRole } from '@/lib/sales-role';
 import { authHeader } from '@/lib/api-client';
@@ -21,6 +19,8 @@ interface SalesProfile {
   territory: string;
   employeeId: string;
   reportingManager: string;
+  reportingDesignation: string;
+  reportingPhone: string;
   joinedDate: string;
   totalOutlets: number;
   kycCompleted: number;
@@ -34,9 +34,11 @@ interface MenuItemProps {
   value?: string;
   onClick?: () => void;
   danger?: boolean;
+  /** Show the right-hand chevron (an affordance that the row is interactive). Default true. */
+  showChevron?: boolean;
 }
 
-function MenuItem({ icon, label, value, onClick, danger }: MenuItemProps) {
+function MenuItem({ icon, label, value, onClick, danger, showChevron = true }: MenuItemProps) {
   return (
     <button
       onClick={onClick}
@@ -49,7 +51,7 @@ function MenuItem({ icon, label, value, onClick, danger }: MenuItemProps) {
         <p className={`text-sm font-medium ${danger ? 'text-red-600' : 'text-gray-800'}`}>{label}</p>
         {value && <p className="text-xs text-gray-400 mt-0.5 truncate">{value}</p>}
       </div>
-      {!danger && <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />}
+      {!danger && showChevron && <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />}
     </button>
   );
 }
@@ -64,7 +66,7 @@ function mapUserToProfile(user: {
     region?: string;
     zone?: string;
     joinedAt?: string;
-    reportingTo?: { user?: { name?: string }; hierarchyLevel?: { name?: string } } | null;
+    reportingTo?: { user?: { name?: string; phone?: string }; hierarchyLevel?: { name?: string } } | null;
   } | null;
 }): SalesProfile {
   const su = user.salesUser;
@@ -85,6 +87,8 @@ function mapUserToProfile(user: {
     territory,
     employeeId:      su?.employeeCode ?? '',
     reportingManager,
+    reportingDesignation: reportingLevel,
+    reportingPhone:       su?.reportingTo?.user?.phone ?? '',
     joinedDate,
     totalOutlets:         0,
     kycCompleted:         0,
@@ -97,6 +101,7 @@ export default function SalesProfilePage() {
   const [profile, setProfile] = useState<SalesProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showManager, setShowManager] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -159,11 +164,7 @@ export default function SalesProfilePage() {
             </div>
             <div className="flex-1 min-w-0">
               <h2 className="text-lg font-bold text-gray-900 truncate">{profile.name}</h2>
-              <div className="flex items-center gap-2 mt-1">
-                <Badge variant="info" className="text-[10px]">{profile.role}</Badge>
-                <span className="text-xs text-gray-400">{profile.employeeId}</span>
-              </div>
-              <p className="text-xs text-gray-500 mt-1 truncate">{profile.territory}</p>
+              <span className="text-xs text-gray-400">{profile.employeeId}</span>
             </div>
           </div>
 
@@ -192,24 +193,24 @@ export default function SalesProfilePage() {
             icon={<Phone className="h-4 w-4" />}
             label="Mobile"
             value={`+91 ${profile.mobile}`}
+            showChevron={false}
           />
           {profile.email && (
             <MenuItem
               icon={<Mail className="h-4 w-4" />}
               label="Email"
               value={profile.email}
+              showChevron={false}
             />
           )}
-          <MenuItem
-            icon={<MapPin className="h-4 w-4" />}
-            label="Territory"
-            value={profile.territory}
-          />
-          <MenuItem
-            icon={<Award className="h-4 w-4" />}
-            label="Reporting Manager"
-            value={profile.reportingManager}
-          />
+          {profile.reportingManager && (
+            <MenuItem
+              icon={<Award className="h-4 w-4" />}
+              label="Reporting Manager"
+              value={profile.reportingManager}
+              onClick={() => setShowManager(true)}
+            />
+          )}
         </CardContent>
       </Card>
 
@@ -223,10 +224,6 @@ export default function SalesProfilePage() {
           <MenuItem
             icon={<Shield className="h-4 w-4" />}
             label="Privacy & Security"
-          />
-          <MenuItem
-            icon={<HelpCircle className="h-4 w-4" />}
-            label="Help & Support"
           />
         </CardContent>
       </Card>
@@ -242,6 +239,46 @@ export default function SalesProfilePage() {
           />
         </CardContent>
       </Card>
+
+      {/* Reporting Manager details modal */}
+      {showManager && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-4"
+          onClick={() => setShowManager(false)}
+        >
+          <div
+            className="bg-white rounded-2xl w-full max-w-sm p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-bold text-gray-900">Reporting Manager</h3>
+              <button onClick={() => setShowManager(false)} className="p-1 rounded-lg hover:bg-gray-100" aria-label="Close">
+                <X className="h-4 w-4 text-gray-400" />
+              </button>
+            </div>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 bg-[#1A1A2E] rounded-xl flex items-center justify-center shrink-0">
+                <User className="h-6 w-6 text-white" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-gray-900 truncate">{profile.reportingManager}</p>
+                {profile.reportingDesignation && (
+                  <p className="text-xs text-gray-500 truncate">{profile.reportingDesignation}</p>
+                )}
+              </div>
+            </div>
+            {profile.reportingPhone && (
+              <a
+                href={`tel:+91${profile.reportingPhone}`}
+                className="flex items-center gap-3 px-4 py-3 bg-gray-50 rounded-xl hover:bg-gray-100 transition-colors"
+              >
+                <Phone className="h-4 w-4 text-[var(--brand-primary)] shrink-0" />
+                <span className="text-sm font-medium text-gray-800">+91 {profile.reportingPhone}</span>
+              </a>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
