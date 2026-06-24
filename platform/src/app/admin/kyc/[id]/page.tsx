@@ -102,7 +102,7 @@ interface ApiKycDetail {
     bankName?: string | null; bankAccountNumber?: string | null; ifscCode?: string | null;
     outlets?: { name?: string; outletCode: string; phone?: string }[];
   } | null;
-  documents?: { id: string; documentType: string; fileUrl?: string; status: string }[];
+  documents?: { id: string; documentType: string; fileUrl?: string; viewUrl?: string | null; status: string }[];
   verificationItems?: { fieldKey: string; decision: string; remark?: string | null; source?: string | null }[];
   statusHistory?: { id: string; toStatus: string; createdAt: string; notes?: string | null }[];
 }
@@ -172,7 +172,9 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
       id:     d.id,
       type:   d.documentType.toLowerCase(),
       label:  d.documentType.replace(/_/g, ' '),
-      url:    d.fileUrl ?? `https://placehold.co/600x400/e2e8f0/1a1a2e?text=${d.documentType}`,
+      // viewUrl is the signed (or fail-closed null) read URL; never fall back to the
+      // raw private GCS fileUrl (renders a 403/broken image) — use the placeholder.
+      url:    d.viewUrl ?? `https://placehold.co/600x400/e2e8f0/1a1a2e?text=${d.documentType}`,
       status: docStatusMap[d.status] ?? 'pending',
     })),
   };

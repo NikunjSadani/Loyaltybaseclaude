@@ -44,8 +44,53 @@ interface KYCDetail {
   bankName?: string;
   accountNumber?: string;
   ifscCode?: string;
-  documents: { label: string; status: 'uploaded' | 'missing' | 'verified' }[];
+  documents: KYCDoc[];
+  photos: { label: string; url: string }[];
   approvalHistory: ApprovalEvent[];
+}
+
+/** A single uploaded KYC document, with a short-lived signed URL to open it. */
+interface KYCDoc {
+  id: string;
+  documentType: string;
+  label: string;
+  status: 'pending' | 'verified' | 'rejected';
+  viewUrl: string | null;
+}
+
+/** Friendly labels for the KycDocumentType enum (fallback: title-case the enum). */
+const DOC_LABELS: Record<string, string> = {
+  AADHAAR_FRONT: 'Aadhaar (Front)',
+  AADHAAR_BACK: 'Aadhaar (Back)',
+  PAN_CARD: 'PAN Card',
+  GST_CERTIFICATE: 'GST Certificate',
+  TRADE_LICENSE: 'Trade License',
+  SHOP_ESTABLISHMENT: 'Shop & Establishment',
+  BANK_PASSBOOK: 'Bank Passbook',
+  CANCELLED_CHEQUE: 'Cancelled Cheque',
+  SELFIE: 'Owner Photo',
+  SIGNATURE: 'Signature',
+  STORE_BOARD_PHOTO: 'Store Board Photo',
+  SELF_DECLARATION: 'Self Declaration',
+  OTHER: 'Other Document',
+};
+function docLabel(type: string): string {
+  return DOC_LABELS[type] ?? type.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** The document types that are store/owner PHOTOS (rendered as images, not list rows). */
+const PHOTO_DOC_TYPES = new Set(['STORE_BOARD_PHOTO', 'SELFIE']);
+
+/** Map a raw KycDocument row (id + documentType + status + viewUrl) into the view shape. */
+function mapDoc(d: { id?: string; documentType: string; status?: string; viewUrl?: string | null }): KYCDoc {
+  const raw = (d.status ?? 'PENDING').toUpperCase();
+  return {
+    id: d.id ?? d.documentType,
+    documentType: d.documentType,
+    label: docLabel(d.documentType),
+    status: raw === 'VERIFIED' ? 'verified' : raw === 'REJECTED' ? 'rejected' : 'pending',
+    viewUrl: d.viewUrl ?? null,
+  };
 }
 
 /* ─── API types & mapping (leaderboard pattern) ─────────────────────────────── */
@@ -71,7 +116,7 @@ interface ApiSalesKYC {
     phone?: string;
     outlets?: { id: string; name: string; outletCode: string; phone?: string }[];
   };
-  documents?: { label: string; status?: string }[];
+  documents?: { id?: string; documentType: string; status?: string; viewUrl?: string | null }[];
 }
 
 function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
@@ -97,10 +142,10 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
     bankName: s.partner.bankName,
     accountNumber: s.partner.bankAccountNumber,
     ifscCode: s.partner.ifscCode,
-    documents: (s.documents ?? []).map(d => ({
-      label: d.label,
-      status: (d.status as 'uploaded' | 'missing' | 'verified') ?? 'uploaded',
-    })),
+    documents: (s.documents ?? []).map(mapDoc),
+    photos: (s.documents ?? [])
+      .filter(d => PHOTO_DOC_TYPES.has(d.documentType) && d.viewUrl)
+      .map(d => ({ label: docLabel(d.documentType), url: d.viewUrl as string })),
     approvalHistory: [],
   };
 }
@@ -155,8 +200,8 @@ const statusConfig: Partial<Record<KYCStatus, { variant: 'success' | 'warning' |
 
 const docStatusColor: Record<string, string> = {
   verified: 'text-emerald-600',
-  uploaded: 'text-blue-600',
-  missing:  'text-red-500',
+  pending:  'text-amber-600',
+  rejected: 'text-red-500',
 };
 
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
@@ -337,7 +382,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   const [actionError,       setActionError]       = useState<string | null>(null);
   const [role,              setRoleState]         = useState<string>('SO');
   const [detailsOpen,       setDetailsOpen]       = useState(false);
-  const [photoLightboxOpen, setPhotoLightboxOpen] = useState(false);
+  const [photoLightboxIndex, setPhotoLightboxIndex] = useState<number | null>(null);
   // Settings are SERVER-sourced and reactive — reflects the tenant after /me hydrates.
   const settings = useGifsySettings();
   // Authoritative DB flag for the visibility workflow (TenantService.resolveVisibilityCaptureMode),
@@ -387,10 +432,15 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           bankName:        s.partner?.bankName,
           accountNumber:   s.partner?.bankAccountNumber,
           ifscCode:        s.partner?.ifscCode,
-          documents:       (s.documents ?? []).map((d: { label: string; status?: string }) => ({
-            label:  d.label,
-            status: (d.status as 'uploaded' | 'missing' | 'verified') ?? 'uploaded',
-          })),
+          documents:       (s.documents ?? []).map(mapDoc),
+          // Store/owner photos are rendered as images; everything else lists as a doc row.
+          photos:          (s.documents ?? [])
+            .filter((d: { documentType: string; viewUrl?: string | null }) =>
+              PHOTO_DOC_TYPES.has(d.documentType) && d.viewUrl)
+            .map((d: { documentType: string; viewUrl?: string | null }) => ({
+              label: docLabel(d.documentType),
+              url:   d.viewUrl as string,
+            })),
           approvalHistory: mapStatusHistory(s.statusHistory ?? []),
         });
       }
@@ -617,32 +667,43 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                     <span data-testid="kyc-store-pan" className="text-sm font-mono text-gray-800">{kyc.panNumber}</span>
                   </div>
                 )}
-                <span className={`inline-block text-xs font-semibold px-2 py-0.5 rounded-full ${
-                  kyc.partnerClass === 'GOLD' ? 'bg-amber-50 text-amber-700' :
-                  kyc.partnerClass === 'SILVER' ? 'bg-gray-100 text-gray-600' : 'bg-orange-50 text-orange-700'
-                }`}>{kyc.partnerClass} Tier</span>
               </div>
             </div>
 
             <div className="border-t border-gray-100" />
 
-            {/* Outlet Photos */}
+            {/* Outlet Photos — real store-board + owner photos (signed GCS URLs). */}
             <div>
               <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Outlet Photos</p>
-              <button
-                data-testid="outlet-photo-view-btn"
-                onClick={() => setPhotoLightboxOpen(true)}
-                className="flex items-center gap-2 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 hover:bg-gray-100 transition-colors"
-              >
-                <Camera className="h-4 w-4 text-gray-400" />
-                View Photos
-              </button>
-              {photoLightboxOpen && (
-                <div data-testid="outlet-photo-lightbox" className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center" onClick={() => setPhotoLightboxOpen(false)}>
-                  <div className="bg-white rounded-xl p-6 text-center">
-                    <p className="text-sm text-gray-600">No photos available in demo mode.</p>
-                    <button className="mt-3 text-xs text-gray-400 underline" onClick={() => setPhotoLightboxOpen(false)}>Close</button>
+              {kyc.photos.length > 0 ? (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    {kyc.photos.map((photo, i) => (
+                      <button
+                        key={photo.url}
+                        data-testid="outlet-photo-thumb"
+                        onClick={() => setPhotoLightboxIndex(i)}
+                        className="relative aspect-video rounded-lg overflow-hidden border border-gray-200 bg-gray-50 group"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={photo.url} alt={photo.label} className="w-full h-full object-cover group-hover:opacity-90 transition-opacity" />
+                        <span className="absolute bottom-0 inset-x-0 bg-black/55 text-white text-[10px] font-medium px-1.5 py-0.5 text-left truncate">{photo.label}</span>
+                      </button>
+                    ))}
                   </div>
+                  {photoLightboxIndex !== null && kyc.photos[photoLightboxIndex] && (
+                    <div data-testid="outlet-photo-lightbox" className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4" onClick={() => setPhotoLightboxIndex(null)}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={kyc.photos[photoLightboxIndex].url} alt={kyc.photos[photoLightboxIndex].label} className="max-w-full max-h-[80vh] rounded-lg object-contain" />
+                      <p className="text-white text-sm mt-3">{kyc.photos[photoLightboxIndex].label}</p>
+                      <button className="mt-2 text-xs text-gray-300 underline" onClick={() => setPhotoLightboxIndex(null)}>Close</button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-400">
+                  <Camera className="h-4 w-4 text-gray-300" />
+                  No photos uploaded
                 </div>
               )}
             </div>
@@ -653,17 +714,35 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
             <div>
               <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Documents</p>
               <div className="space-y-1.5">
-                {kyc.documents.map(doc => (
-                  <div key={doc.label} className="flex items-center justify-between py-0.5">
-                    <span className="text-sm text-gray-700">{doc.label}</span>
-                    <span className={`text-xs font-medium capitalize ${docStatusColor[doc.status]}`}>
-                      {doc.status === 'verified' && <CheckCircle className="h-3.5 w-3.5 inline mr-1" />}
-                      {doc.status === 'uploaded'  && <Clock       className="h-3.5 w-3.5 inline mr-1" />}
-                      {doc.status === 'missing'   && <XCircle     className="h-3.5 w-3.5 inline mr-1" />}
-                      {doc.status}
-                    </span>
+                {(() => {
+                  // Photos are rendered above as images; the checklist lists the rest.
+                  const docRows = kyc.documents.filter(d => !PHOTO_DOC_TYPES.has(d.documentType));
+                  if (docRows.length === 0) return <p className="text-xs text-gray-400">No documents uploaded</p>;
+                  return docRows.map(doc => (
+                  <div key={doc.id} className="flex items-center justify-between py-0.5 gap-2">
+                    <span className="text-sm text-gray-700 truncate">{doc.label}</span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {doc.viewUrl && (
+                        <a
+                          href={doc.viewUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          data-testid="kyc-doc-view-link"
+                          className="text-xs text-blue-600 hover:underline"
+                        >
+                          View
+                        </a>
+                      )}
+                      <span className={`text-xs font-medium capitalize ${docStatusColor[doc.status]}`}>
+                        {doc.status === 'verified' && <CheckCircle className="h-3.5 w-3.5 inline mr-1" />}
+                        {doc.status === 'pending'  && <Clock       className="h-3.5 w-3.5 inline mr-1" />}
+                        {doc.status === 'rejected' && <XCircle     className="h-3.5 w-3.5 inline mr-1" />}
+                        {doc.status}
+                      </span>
+                    </div>
                   </div>
-                ))}
+                  ));
+                })()}
               </div>
             </div>
 

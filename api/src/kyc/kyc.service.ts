@@ -45,6 +45,10 @@ import {
   nextStatusAfterFirstApprove,
   statusForApproverCode,
 } from './kyc-approval.helper';
+import {
+  descendantSalesUserIds,
+  firstActiveApproverId,
+} from '../sales/sales-hierarchy-access.helper';
 
 // ─── KycFieldKey → ReKYCFlags map (reconcile §6 SHOULD-FIX #3) ──────────────
 // Proposed map from the spec; drives which boolean flags are set on the
@@ -285,6 +289,17 @@ export class KycService {
   }
 
   /**
+   * Roles that READ tenant-wide (no sales-subtree scoping): the admins plus the
+   * tenant-side read-only observer MIS_USER (DATA-VISIBILITY Q5). Used ONLY for
+   * read-access scoping — NOT for writes (MIS can't approve: canFirstApprove is
+   * false for it) and NOT for PII unmasking (masking still keys off isAdmin, so
+   * MIS sees PAN/bank as last-4).
+   */
+  private canReadTenantWide(role: string): boolean {
+    return this.isAdmin(role) || role === 'MIS_USER';
+  }
+
+  /**
    * Tenant filter for KYC submission lookups (gap #38 / VERIFICATION-PROTOCOL §72).
    * The GIFSY_ADMIN is the cross-tenant platform operator: final KYC approval + bulk
    * validation act on ANY tenant's records, so they are EXEMPT from the caller-tenant
@@ -408,6 +423,85 @@ export class KycService {
 
     // Step 5: no active manager found up the chain → escalate to RSM bucket.
     return { status: 'PENDING_RSM_APPROVAL', escalatedFrom: firstSkippedCode };
+  }
+
+  /**
+   * Resolve the calling sales user's reporting subtree (Q4 — a manager sees the
+   * WHOLE downline's KYC). Returns the caller's SalesUser.id plus the User.ids of
+   * every sales user in their subtree (self + all descendants), so list/view can
+   * scope by submitter in one query. Returns null when the caller is not a sales
+   * user (e.g. a partner owner) — those callers fall back to "own submissions only".
+   * Tenant-scoped throughout.
+   */
+  private async resolveSalesScope(
+    user: JwtPayload,
+  ): Promise<{ callerSalesUserId: string; subtreeUserIds: string[] } | null> {
+    const caller = await this.prisma.salesUser.findFirst({
+      where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true },
+    });
+    if (!caller) return null;
+
+    const nodes = await this.prisma.salesUser.findMany({
+      where: { user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true, userId: true },
+    });
+    const subtree = descendantSalesUserIds(caller.id, nodes);
+    const subtreeUserIds = nodes.filter((n) => subtree.has(n.id)).map((n) => n.userId);
+    return { callerSalesUserId: caller.id, subtreeUserIds };
+  }
+
+  /**
+   * Guard a single-submission READ (getOne/ledger): a non-admin caller who is not
+   * the submitter may view ONLY if the submitter is in their sales subtree (their
+   * own downline). A sales manager who is NOT in the submitter's reporting chain —
+   * or a partner (no SalesUser) — gets Forbidden. (Owner: "some other SO who is not
+   * the reporting manager of the XSR cannot view anything about the outlet.")
+   */
+  private async assertCanViewSubmission(
+    user: JwtPayload,
+    submitterUserId: string,
+  ): Promise<void> {
+    if (this.canReadTenantWide(user.role)) return; // admins/Gifsy + MIS read tenant-wide
+    if (submitterUserId === user.sub) return; // own submission
+    const scope = await this.resolveSalesScope(user);
+    if (!scope || !scope.subtreeUserIds.includes(submitterUserId)) {
+      throw new ForbiddenException('Forbidden');
+    }
+  }
+
+  /**
+   * Guard a first-approval/rejection ACTION: only the submission's ROUTED approver
+   * may act — the first ACTIVE manager up the submitter's reporting chain ("the next
+   * level approves; if vacant, the level above"). A wrong-branch manager, or one
+   * whose level no longer matches, is rejected even if their role nominally matches
+   * the status. Admins/Gifsy are not subject to this (they act via their own queues).
+   */
+  private async assertRoutedApprover(
+    user: JwtPayload,
+    submitterUserId: string,
+  ): Promise<void> {
+    if (this.isAdmin(user.role)) return;
+
+    const caller = await this.prisma.salesUser.findFirst({
+      where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true },
+    });
+    const submitter = await this.prisma.salesUser.findFirst({
+      where: { userId: submitterUserId, user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true },
+    });
+    if (!caller || !submitter) {
+      throw new ForbiddenException('Only the submitting rep’s reporting manager can approve this KYC.');
+    }
+
+    const nodes = await this.prisma.salesUser.findMany({
+      where: { user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true, isActive: true },
+    });
+    if (firstActiveApproverId(submitter.id, nodes) !== caller.id) {
+      throw new ForbiddenException('Only the submitting rep’s reporting manager can approve this KYC.');
+    }
   }
 
   /** Enqueue a KYC notification, mirroring the source's fire-and-forget semantics. */
@@ -789,17 +883,20 @@ export class KycService {
 
     const where: Prisma.KycSubmissionWhereInput = { ...this.kycTenantFilter(user) };
 
-    if (user.role === 'SALES_SO') {
-      where.status = 'PENDING_SO_APPROVAL';
-    } else if (user.role === 'SALES_ASM') {
-      where.status = 'PENDING_ASM_APPROVAL';
-    } else if (user.role === 'SALES_STATE_HEAD') {
-      where.status = 'PENDING_RSM_APPROVAL';
-    } else if (!this.isAdmin(user.role)) {
-      where.userId = user.sub;
+    // Sales hierarchy scoping (Q4 + owner 2026-06-24): a sales manager sees their
+    // WHOLE downline's KYC (every status — the FE "Approval Pending" tab filters to
+    // the caller's level); a leaf rep sees their own. The old per-level tenant-wide
+    // status filter leaked every SO's queue to every other SO — replaced here. The
+    // submitter (KycSubmission.userId = the rep who filed it) must be in the caller's
+    // subtree. Admins/MIS/Gifsy stay tenant-wide / cross-tenant.
+    let submitterScope: string[] | null = null;
+    if (!this.canReadTenantWide(user.role)) {
+      const scope = await this.resolveSalesScope(user);
+      submitterScope = scope ? scope.subtreeUserIds : [user.sub];
+      where.userId = { in: submitterScope };
     }
 
-    if (q.status && this.isAdmin(user.role)) {
+    if (q.status && this.canReadTenantWide(user.role)) {
       where.status = q.status;
     }
 
@@ -830,9 +927,9 @@ export class KycService {
 
     const statusCounts = await this.prisma.kycSubmission.groupBy({
       by: ['status'],
-      where: this.isAdmin(user.role)
+      where: this.canReadTenantWide(user.role)
         ? { ...this.kycTenantFilter(user) }
-        : { userId: user.sub, ...this.kycTenantFilter(user) },
+        : { userId: { in: submitterScope ?? [user.sub] }, ...this.kycTenantFilter(user) },
       _count: { status: true },
     });
 
@@ -870,16 +967,13 @@ export class KycService {
 
     if (!submission) throw new NotFoundException('KYC submission not found');
 
-    // Partners may only view their OWN submission. Admins, MIS, and SALES reviewers
-    // get tenant-wide read — sales work the tenant approval queue by stage (see
-    // list(); owner decision 2026-06-19: "sales team can review"). Cross-tenant is
-    // already prevented by kycTenantFilter on the fetch above; sensitive PII is
-    // still masked below for any non-admin non-owner (a sales reviewer sees PAN/
-    // bank as last-4).
-    const PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
-    if (PARTNER_ROLES.includes(user.role) && submission.userId !== user.sub) {
-      throw new ForbiddenException('Forbidden');
-    }
+    // Access scoping (owner 2026-06-24): a partner sees only their OWN submission;
+    // a sales caller sees their own + their DOWNLINE's (Q4) — an SO outside the
+    // submitting rep's reporting chain is Forbidden ("cannot view anything about the
+    // outlet"). Admins/MIS/Gifsy get tenant-wide / cross-tenant read. Cross-tenant is
+    // already prevented by kycTenantFilter above; PII is still masked below for any
+    // non-admin non-owner (a sales reviewer sees PAN/bank as last-4).
+    await this.assertCanViewSubmission(user, submission.userId);
 
     // ── Task 3.4e: DPDP read-masking ─────────────────────────────────────────
     // Mask sensitive fields (bank account, PAN, GST → last 4) for non-admin callers
@@ -893,7 +987,35 @@ export class KycService {
       ? this.maskPartnerSensitiveFields(submission.partner, masked)
       : null;
 
-    return { submission: { ...submission, partner } };
+    // Resolve a viewable URL per document so the reviewer (sales SO/ASM or Gifsy
+    // admin) can actually OPEN each uploaded doc/photo. GCS objects are private —
+    // they only render via a short-lived signed URL; legacy inline data URLs pass
+    // through; `pending://` placeholders (no file uploaded yet) resolve to null.
+    const documents = await Promise.all(
+      submission.documents.map(async (d) => ({
+        ...d,
+        viewUrl: await this.resolveDocumentViewUrl(d),
+      })),
+    );
+
+    return { submission: { ...submission, partner, documents } };
+  }
+
+  /** Signed (or pass-through) read URL for a single KYC document. Fails CLOSED:
+   *  any signing error or a not-yet-uploaded `pending://` ref resolves to null so
+   *  the caller never leaks a raw private-object URL. Mirrors resolveDumpDocuments. */
+  private async resolveDocumentViewUrl(d: {
+    fileUrl: string;
+    fileKey: string;
+  }): Promise<string | null> {
+    if (d.fileKey && d.fileUrl?.startsWith('https://storage.googleapis.com/')) {
+      try {
+        return await this.storage.getSignedUrl(d.fileKey);
+      } catch {
+        return null;
+      }
+    }
+    return d.fileUrl && !d.fileUrl.startsWith('pending://') ? d.fileUrl : null;
   }
 
   // ─── PATCH /v1/kyc/:id ───────────────────────────────────────────────────────
@@ -962,6 +1084,10 @@ export class KycService {
         `Your role (${user.role}) cannot approve a submission in status "${submission.status}"`,
       );
     }
+
+    // …and only the ROUTED approver (the submitting rep's first active manager up
+    // the chain) may act — a same-level manager in a different branch is rejected.
+    await this.assertRoutedApprover(user, submission.userId);
 
     const nextStatus = nextStatusAfterFirstApprove(submission.status);
 
@@ -1282,6 +1408,12 @@ export class KycService {
       );
     }
 
+    // A field approver may reject only as the ROUTED approver (the submitting rep's
+    // first active manager). Gifsy admin is exempt (acts at the final stage).
+    if (!isGifsyAdmin) {
+      await this.assertRoutedApprover(user, submission.userId);
+    }
+
     const stage = isGifsyAdmin ? 'GIFSY' : 'FIRST_APPROVER';
 
     await this.prisma.$transaction(async (tx) => {
@@ -1362,6 +1494,11 @@ export class KycService {
     });
 
     if (!submission) throw new NotFoundException('KYC submission not found');
+
+    // A sales caller may read the ledger only for their own + downline submissions
+    // (Q4); an out-of-chain manager is Forbidden. (Partner callers are already scoped
+    // to their own via the where.userId filter above → a foreign id 404s here.)
+    await this.assertCanViewSubmission(user, submission.userId);
 
     const partner = submission.partner;
     const wallet = partner?.wallets[0] ?? null;

@@ -203,8 +203,10 @@ describe('SalesService', () => {
       expect(res).toEqual({ outlets: [] });
     });
 
-    it('scopes to the caller and INCLUDES partner-less (un-KYC\'d) outlets as NOT_STARTED so the rep can enrol them', async () => {
+    it('scopes to the caller + downline and INCLUDES partner-less (un-KYC\'d) outlets as NOT_STARTED so the rep can enrol them', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+      // No subordinates → subtree is just the caller.
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
         {
           outlet: {
@@ -244,7 +246,7 @@ describe('SalesService', () => {
       ]);
       const res = await service.getMyOutlets(caller);
       const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ salesUserId: 'caller-su', outletId: { not: null }, unassignedAt: null });
+      expect(where).toEqual({ salesUserId: { in: ['caller-su'] }, outletId: { not: null }, unassignedAt: null });
 
       expect(res.outlets).toHaveLength(2);
       expect(res.outlets[0]).toMatchObject({

@@ -1,7 +1,7 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { isSelfOrDescendant } from './sales-hierarchy-access.helper';
+import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-access.helper';
 import { kpiCodeKeys } from '../targets/targets.helpers';
 
 /**
@@ -219,7 +219,10 @@ export class SalesService {
 
   /**
    * GET /v1/sales/outlets
-   * The outlets assigned to the calling sales user.
+   * The outlets assigned to the calling sales user AND their whole reporting
+   * downline (Q4 + owner 2026-06-24: "an SO has access to all outlets tagged to the
+   * XSRs mapped to him" — so a manager can do KYC for any outlet under them). A leaf
+   * rep (no subordinates) gets just their own assignments.
    * Source: platform sales/outlets GET.
    */
   async getMyOutlets(user: JwtPayload) {
@@ -230,7 +233,13 @@ export class SalesService {
 
     if (!salesUser) return { outlets: [] };
 
-    return { outlets: await this.buildOutlets(salesUser.id) };
+    const edges = await this.prisma.salesUser.findMany({
+      where: { user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true },
+    });
+    const subtreeIds = [...descendantSalesUserIds(salesUser.id, edges)];
+
+    return { outlets: await this.buildOutlets(subtreeIds) };
   }
 
   /**
@@ -447,10 +456,11 @@ export class SalesService {
    * Target/TargetAchievement are dropped, so the partner-target read and the
    * achievement-derived targetPct are removed; targetPct is reported as 0.
    */
-  private async buildOutlets(salesUserId: string) {
+  private async buildOutlets(salesUserId: string | string[]) {
+    const ids = Array.isArray(salesUserId) ? salesUserId : [salesUserId];
     const assignments = await this.prisma.salesUserAssignment.findMany({
       where: {
-        salesUserId,
+        salesUserId: { in: ids },
         outletId: { not: null },
         unassignedAt: null,
       },

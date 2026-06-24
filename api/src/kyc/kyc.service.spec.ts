@@ -54,7 +54,7 @@ const mockPrisma = {
   kycDocument: { create: jest.fn() },
   otpCode: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
   outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
-  salesUser: { findFirst: jest.fn() },
+  salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   consentRecord: { create: jest.fn() },
   kycVerificationItem: { upsert: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
@@ -78,9 +78,36 @@ const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo'
 // A real channel-partner role (one of SSS / WHOLESALER / SUB_STOCKIST) — used to
 // prove the intra-tenant read-leak fix (a partner may only read their own KYC).
 const sss: JwtPayload = { sub: 'sss1', role: 'SSS', clientId: 'deoleo', phone: '', name: '' };
+// Tenant-side read-only observer (Q5) — must keep tenant-wide KYC read after the
+// sales-subtree scoping change (it is NOT a sales user, so it must not collapse to "own only").
+const mis: JwtPayload = { sub: 'mis1', role: 'MIS_USER', clientId: 'deoleo', phone: '', name: '' };
 
 /** All-7-APPROVED items for the bridge */
 const ALL_APPROVED = KYC_FIELD_KEYS.map((k) => ({ fieldKey: k, decision: 'APPROVED' as const }));
+
+/**
+ * Prime the salesUser mocks used by the hierarchy-scoping helpers
+ * (resolveSalesScope / assertCanViewSubmission / assertRoutedApprover).
+ * `nodes` are SalesUser rows, each linked to a User via `userId`. findFirst resolves
+ * a row by its where.userId; findMany returns the whole node set. isActive defaults true.
+ */
+function primeSalesNodes(
+  nodes: { id: string; reportingToId: string | null; userId: string; isActive?: boolean }[],
+): void {
+  mockPrisma.salesUser.findFirst.mockImplementation((args: { where?: { userId?: string } }) => {
+    const uid = args?.where?.userId;
+    const n = nodes.find((x) => x.userId === uid);
+    return Promise.resolve(n ? { id: n.id } : null);
+  });
+  mockPrisma.salesUser.findMany.mockResolvedValue(
+    nodes.map((n) => ({
+      id: n.id,
+      reportingToId: n.reportingToId,
+      userId: n.userId,
+      isActive: n.isActive ?? true,
+    })),
+  );
+}
 
 describe('KycService', () => {
   let service: KycService;
@@ -604,22 +631,28 @@ describe('KycService', () => {
   });
 
   describe('list', () => {
-    it('scopes non-admin sales submitters to their own submissions', async () => {
+    it('scopes a non-sales caller (partner) to their own submissions', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null); // not a sales user → own only
       mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
       mockPrisma.kycSubmission.count.mockResolvedValue(0);
       mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
       await service.list(partner, {});
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ user: { clientId: 'deoleo' }, userId: 'user1' });
+      expect(where).toEqual({ user: { clientId: 'deoleo' }, userId: { in: ['user1'] } });
     });
 
-    it('scopes a SALES_SO to PENDING_SO_APPROVAL within the tenant', async () => {
+    it('scopes a SALES_SO to their whole downline by submitter (Q4), not a tenant-wide status', async () => {
+      // SO 'so1' has one XSR ('xsr1') reporting to them → both in the subtree.
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'xsr-su', reportingToId: 'so-su', userId: 'xsr1' },
+      ]);
       mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
       mockPrisma.kycSubmission.count.mockResolvedValue(0);
       mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
       await service.list(so, {});
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ user: { clientId: 'deoleo' }, status: 'PENDING_SO_APPROVAL' });
+      expect(where).toEqual({ user: { clientId: 'deoleo' }, userId: { in: ['so1', 'xsr1'] } });
     });
 
     it('lets a GIFSY admin filter by status', async () => {
@@ -630,6 +663,16 @@ describe('KycService', () => {
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
       // GIFSY is the cross-tenant operator (#38) — no caller-tenant filter, all brands.
       expect(where).toEqual({ status: 'APPROVED' });
+    });
+
+    it('keeps MIS_USER tenant-wide (NOT sales-subtree scoped) — read-only observer', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+      mockPrisma.kycSubmission.count.mockResolvedValue(0);
+      mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+      await service.list(mis, {});
+      const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ user: { clientId: 'deoleo' } }); // no userId scoping
+      expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled(); // never resolves a subtree
     });
   });
 
@@ -644,14 +687,75 @@ describe('KycService', () => {
       await expect(service.getOne(sss, 's1')).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('allows a SALES reviewer to view a non-owned submission (tenant approval queue)', async () => {
-      // Owner decision 2026-06-19: sales can review. Sales gets tenant-wide read
-      // (consistent with list()); sensitive PII is masked for the non-owner.
+    it('allows a SALES reviewer to view a DOWNLINE submission (own subtree), masked', async () => {
+      // Owner 2026-06-24: a manager sees their downline's KYC. 'other' reports to the SO.
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'xsr-su', reportingToId: 'so-su', userId: 'other' },
+      ]);
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({
         id: 's1', userId: 'other', partner: null, documents: [], statusHistory: [],
       });
       const res = await service.getOne(so, 's1');
       expect(res.submission.id).toBe('s1');
+    });
+
+    it('forbids a SALES reviewer from viewing an OUT-OF-CHAIN submission', async () => {
+      // 'other' is NOT in the SO's subtree → Forbidden ("some other SO cannot view").
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'far-su', reportingToId: null, userId: 'other' },
+      ]);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, documents: [], statusHistory: [],
+      });
+      await expect(service.getOne(so, 's1')).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('lets MIS_USER view any tenant submission (tenant-wide read), no subtree lookup', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, documents: [], statusHistory: [],
+      });
+      const res = await service.getOne(mis, 's1');
+      expect(res.submission.id).toBe('s1');
+      expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('returns a signed viewUrl for a private GCS document so the reviewer can open it', async () => {
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'xsr-su', reportingToId: 'so-su', userId: 'other' },
+      ]);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, statusHistory: [],
+        documents: [
+          { documentType: 'STORE_BOARD_PHOTO', status: 'PENDING',
+            fileUrl: 'https://storage.googleapis.com/bucket/kyc/deoleo/board.jpg',
+            fileKey: 'kyc/deoleo/board.jpg' },
+        ],
+      });
+      mockStorage.getSignedUrl.mockResolvedValueOnce('https://signed/board');
+      const res = await service.getOne(so, 's1');
+      expect(mockStorage.getSignedUrl).toHaveBeenCalledWith('kyc/deoleo/board.jpg');
+      expect(res.submission.documents[0].viewUrl).toBe('https://signed/board');
+    });
+
+    it('passes through an inline data URL and nulls a not-yet-uploaded pending:// ref', async () => {
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'xsr-su', reportingToId: 'so-su', userId: 'other' },
+      ]);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, statusHistory: [],
+        documents: [
+          { documentType: 'SIGNATURE', status: 'PENDING', fileUrl: 'data:image/png;base64,AAAA', fileKey: 'k1' },
+          { documentType: 'PAN_CARD', status: 'PENDING', fileUrl: 'pending://kyc/s1/PAN_CARD', fileKey: 'k2' },
+        ],
+      });
+      const res = await service.getOne(so, 's1');
+      expect(res.submission.documents[0].viewUrl).toBe('data:image/png;base64,AAAA');
+      expect(res.submission.documents[1].viewUrl).toBeNull();
+      expect(mockStorage.getSignedUrl).not.toHaveBeenCalled();
     });
   });
 
@@ -670,12 +774,26 @@ describe('KycService', () => {
       expect(where).toEqual({ id: 's1', user: { clientId: 'deoleo' }, userId: 'sss1' });
     });
 
-    it('does NOT restrict a sales reviewer by userId', async () => {
+    it('does NOT where-restrict a sales reviewer by userId (subtree checked post-fetch)', async () => {
+      // 'someone-else' is in the SO's downline → the post-fetch subtree guard passes.
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'xsr-su', reportingToId: 'so-su', userId: 'someone-else' },
+      ]);
       seedLedgerSubmission('someone-else');
       await service.ledger(so, 's1');
       const where = mockPrisma.kycSubmission.findFirst.mock.calls[0][0].where;
       expect(where).toEqual({ id: 's1', user: { clientId: 'deoleo' } });
       expect(where.userId).toBeUndefined();
+    });
+
+    it('forbids a sales reviewer from reading an OUT-OF-CHAIN ledger', async () => {
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'far-su', reportingToId: null, userId: 'someone-else' },
+      ]);
+      seedLedgerSubmission('someone-else');
+      await expect(service.ledger(so, 's1')).rejects.toBeInstanceOf(ForbiddenException);
     });
 
     it('does NOT restrict a GIFSY admin by userId (cross-tenant)', async () => {
@@ -703,7 +821,12 @@ describe('KycService', () => {
       await expect(service.firstApprove(so, 's1', {})).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('transitions to PENDING_GIFSY and notifies the partner', async () => {
+    it('transitions to PENDING_GIFSY and notifies the partner (routed approver acts)', async () => {
+      // The SO is the submitter's first active manager → the routed approver.
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'xsr-su', reportingToId: 'so-su', userId: 'user1' },
+      ]);
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({
         id: 's1',
         userId: 'user1',
@@ -717,6 +840,25 @@ describe('KycService', () => {
         data: { status: 'PENDING_GIFSY', reviewedAt: expect.any(Date) },
       });
       expect(mockNotifications.enqueue).toHaveBeenCalled();
+    });
+
+    it('forbids a same-level manager in a DIFFERENT branch from approving', async () => {
+      // The SO caller is NOT the submitter's reporting manager → Forbidden, even though
+      // their role matches the PENDING_SO_APPROVAL status.
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' }, // the caller (other branch)
+        { id: 'other-so-su', reportingToId: null, userId: 'other-so' },
+        { id: 'xsr-su', reportingToId: 'other-so-su', userId: 'user1' }, // reports elsewhere
+      ]);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_SO_APPROVAL',
+        user: { name: 'n', phone: 'p' },
+      });
+      await expect(service.firstApprove(so, 's1', { remarks: 'ok' })).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
     });
   });
 
