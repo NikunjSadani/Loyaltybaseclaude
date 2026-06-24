@@ -87,6 +87,21 @@ export class KycController {
     return this.kyc.notInterested(user, dto);
   }
 
+  /**
+   * GET /v1/kyc/phone-available?phone=<digits>
+   *
+   * Pre-submit uniqueness probe used by the new-KYC form: is this outlet-owner
+   * phone already a SALES EMPLOYEE in THIS tenant? Tenant-scoped via the JWT
+   * clientId in the service. Returns ONLY { available, conflictType } — no
+   * employee PII. Static route declared before :id so Nest does not match it as
+   * an :id param. Same gate as the other enrollment actions (kyc:initiate).
+   */
+  @Get('phone-available')
+  @RequirePermission('kyc:initiate')
+  phoneAvailable(@CurrentUser() user: JwtPayload, @Query('phone') phone: string) {
+    return this.kyc.checkPhoneAvailable(user, phone ?? '');
+  }
+
   @Get('sla-metrics')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('kyc:read')

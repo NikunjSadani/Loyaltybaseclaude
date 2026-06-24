@@ -174,6 +174,42 @@ export class KycService {
   }
 
   /**
+   * GET /v1/kyc/phone-available — pre-submit uniqueness probe for the new-KYC form.
+   *
+   * Answers ONLY: "is this phone already a sales employee (SalesUser) in THIS
+   * tenant?" so the form can block enrolling an outlet whose owner phone collides
+   * with a real team member — replacing a hardcoded fake roster in the FE.
+   *
+   * Tenant-safe: the SalesUser is reached through its related User, filtered by
+   * `user.clientId === user.clientId` (the JWT's tenant); we NEVER query across
+   * clientId. Soft-deleted employees are excluded (deletedAt: null). The phone is
+   * normalized to its last 10 digits (strips +91/91/punctuation) before an
+   * endsWith match, mirroring assertPhoneAvailable.
+   *
+   * PII-safe: returns ONLY { available, conflictType } — no employee name/id is
+   * exposed. The OUTLET-duplicate check stays in the FE (it reads the rep's own
+   * assigned-outlet list, which the rep is already authorized to see).
+   */
+  async checkPhoneAvailable(
+    user: JwtPayload,
+    rawPhone: string,
+  ): Promise<{ available: boolean; conflictType: 'EMPLOYEE' | null }> {
+    const mobile = (rawPhone ?? '').replace(/\D/g, '').slice(-10);
+    if (mobile.length !== 10) {
+      throw new BadRequestException('Enter a valid 10-digit mobile number');
+    }
+
+    const employeeClash = await this.prisma.salesUser.findFirst({
+      where: { deletedAt: null, user: { clientId: user.clientId, phone: { endsWith: mobile } } },
+      select: { id: true },
+    });
+
+    return employeeClash
+      ? { available: false, conflictType: 'EMPLOYEE' }
+      : { available: true, conflictType: null };
+  }
+
+  /**
    * POST /v1/kyc/consent-otp — send the outlet-owner consent OTP. Permanent path
    * is real MSG91 (prod); FIXED_OTP is honored ONLY where isFixedOtpAllowed (local
    * dev + staging UAT). Stores a KYC_CONSENT OtpCode that consent() verifies.

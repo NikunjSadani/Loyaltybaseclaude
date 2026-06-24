@@ -30,8 +30,8 @@ const TEAM_NAV: NavItem = { href: '/sales/team', label: 'Team', icon: Users };
 export default function SalesLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [role, setRoleState] = useState<SalesRole>('SO');
-  // REAL identity from the backend sales record (name + employee ID), replacing
-  // the demo ROLE_NAMES/ROLE_EMP_IDS personas AND the demo role switcher.
+  // REAL identity from the backend sales record (name + employee ID) — the demo
+  // personas and role switcher have been retired.
   const [userName, setUserName] = useState('');
   const [empId, setEmpId] = useState('');
 

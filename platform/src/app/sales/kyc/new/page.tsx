@@ -75,15 +75,6 @@ const TYPE_LABEL: Record<AssignedOutlet['type'], string> = {
 };
 
 
-const EMPLOYEE_PHONES: Record<string, string> = {
-  '9800000001': 'Anil Sharma (ISR)',   '9800000002': 'Rajesh Kumar (SO)',
-  '9800000003': 'Priya Mehta (ASM)',   '9800000004': 'Suresh Nair (State Head)',
-  '9800000005': 'Vikram Singh (HO)',   '9800000006': 'Ravi Pillai (ISR)',
-  '9800000007': 'Deepa Nair (ISR)',    '9800000008': 'Kiran Joshi (ISR)',
-  '9800000009': 'Sanjay Kumar (ISR)',  '9700000001': 'Anita Rao (ISR)',
-  '9700000002': 'Manoj Desai (ISR)',
-};
-
 type MobileCheckState = 'idle' | 'checking' | 'ok' | 'outlet_conflict' | 'employee_conflict';
 
 /* ─── Step config ────────────────────────────────────────────────────────────── */
@@ -453,11 +444,22 @@ export default function NewKYCPage() {
         setMobileCheckMsg(`Already registered to ${existingOutlet.name} (${existingOutlet.outletCode}). Each outlet must have a unique contact number.`);
         return;
       }
-      const employee = EMPLOYEE_PHONES[val];
-      if (employee) {
-        setMobileCheck('employee_conflict');
-        setMobileCheckMsg(`This number belongs to employee ${employee} and cannot be used for an outlet KYC.`);
-        return;
+      // Real tenant-scoped employee uniqueness check (PII-free: backend returns
+      // only { available, conflictType }). Fail OPEN on any network/parse error so
+      // a transient failure never hard-blocks submit nor shows a false conflict.
+      try {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+        const res = await fetch(`/api/kyc/phone-available?phone=${val}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const body = await res.json().catch(() => ({}));
+        if (res.ok && body.success && body.data?.available === false && body.data?.conflictType === 'EMPLOYEE') {
+          setMobileCheck('employee_conflict');
+          setMobileCheckMsg("This number is registered to a team member and can't be used for an outlet.");
+          return;
+        }
+      } catch {
+        // Fail open — ignore; do not block submit or assert an employee conflict.
       }
       setMobileCheck('ok');
     }
