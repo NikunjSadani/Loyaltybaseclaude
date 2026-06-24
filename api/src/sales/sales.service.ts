@@ -272,27 +272,42 @@ export class SalesService {
   }
 
   /**
-   * GET /v1/sales/targets — REAL target vs achievement for the caller's assigned
-   * outlets, summed per KPI for a month (replaces the FE OUTLET_ACHIEVEMENTS /
-   * resolveConfig(DEMO_*) mock on the sales dashboard). Mirrors the partner
-   * getTargets join (OutletTarget ⋈ OutletSalesRecord on clientId+outletCode+month)
-   * but scopes by the rep's active outlet assignments instead of partner ownership.
-   * Also returns a 6-month trend on the PRIMARY KPI for the dashboard chart.
+   * Outlet codes assigned to the caller AND their whole reporting downline (Q4 +
+   * owner 2026-06-24: a manager's targets/achievements roll up the team). A leaf rep
+   * gets just their own. Returns [] when the caller is not a sales user. Tenant-scoped.
+   * Shared by the dashboard (getTargets) and outlets-list (getOutletTargets) reads so
+   * managers see their team's numbers, not an empty page.
    */
-  async getTargets(user: JwtPayload, period?: string) {
+  private async subtreeOutletCodes(user: JwtPayload): Promise<string[]> {
     const su = await this.prisma.salesUser.findFirst({
       where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
       select: { id: true },
     });
-    if (!su) return { period: null, outletCount: 0, kpis: [], trend: [] };
-
+    if (!su) return [];
+    const edges = await this.prisma.salesUser.findMany({
+      where: { user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true },
+    });
+    const subtreeIds = [...descendantSalesUserIds(su.id, edges)];
     const assignments = await this.prisma.salesUserAssignment.findMany({
-      where: { salesUserId: su.id, unassignedAt: null, outletId: { not: null } },
+      where: { salesUserId: { in: subtreeIds }, unassignedAt: null, outletId: { not: null } },
       select: { outlet: { select: { outletCode: true } } },
     });
-    const outletCodes = [...new Set(
+    return [...new Set(
       assignments.map((a) => a.outlet?.outletCode).filter((c): c is string => !!c),
     )];
+  }
+
+  /**
+   * GET /v1/sales/targets — REAL target vs achievement for the caller's whole
+   * DOWNLINE's outlets, summed per KPI for a month (replaces the FE OUTLET_ACHIEVEMENTS /
+   * resolveConfig(DEMO_*) mock on the sales dashboard). Mirrors the partner
+   * getTargets join (OutletTarget ⋈ OutletSalesRecord on clientId+outletCode+month)
+   * but scopes by the rep's + downline's active outlet assignments instead of partner
+   * ownership. Also returns a 6-month trend on the PRIMARY KPI for the dashboard chart.
+   */
+  async getTargets(user: JwtPayload, period?: string) {
+    const outletCodes = await this.subtreeOutletCodes(user);
     if (outletCodes.length === 0) return { period: null, outletCount: 0, kpis: [], trend: [] };
 
     // Month to report: the caller's period, else the most recent month with target data.
@@ -357,25 +372,13 @@ export class SalesService {
 
   /**
    * GET /v1/sales/outlet-targets?period= — REAL per-outlet × per-KPI target vs
-   * achievement for the caller's assigned outlets (the sales Outlets list page),
+   * achievement for the caller's + DOWNLINE's outlets (the sales Outlets list page),
    * replacing the FE `resolveConfig(DEMO_*)` fake params + `targetPct:0`
    * back-computed numbers. Returns the KPI column set (KpiDef, primary-first) +
-   * a per-outlet map keyed by outletCode. Caller- + tenant-scoped.
+   * a per-outlet map keyed by outletCode. Downline- + tenant-scoped.
    */
   async getOutletTargets(user: JwtPayload, period?: string) {
-    const su = await this.prisma.salesUser.findFirst({
-      where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
-      select: { id: true },
-    });
-    if (!su) return { period: null, kpiColumns: [], rows: [] };
-
-    const assignments = await this.prisma.salesUserAssignment.findMany({
-      where: { salesUserId: su.id, unassignedAt: null, outletId: { not: null } },
-      select: { outlet: { select: { outletCode: true } } },
-    });
-    const outletCodes = [...new Set(
-      assignments.map((a) => a.outlet?.outletCode).filter((c): c is string => !!c),
-    )];
+    const outletCodes = await this.subtreeOutletCodes(user);
     if (outletCodes.length === 0) return { period: null, kpiColumns: [], rows: [] };
 
     let month: string | null = period ?? null;

@@ -99,7 +99,7 @@ interface ApiKycDetail {
     phone?: string;
     gstNumber?: string | null; panNumber?: string | null;
     address?: string | null; city?: string | null; state?: string | null; pincode?: string | null;
-    bankName?: string | null; bankAccountNumber?: string | null; ifscCode?: string | null;
+    bankName?: string | null; bankAccountNumber?: string | null; ifscCode?: string | null; upiId?: string | null;
     outlets?: { name?: string; outletCode: string; phone?: string }[];
   } | null;
   documents?: { id: string; documentType: string; fileUrl?: string; viewUrl?: string | null; status: string }[];
@@ -113,7 +113,7 @@ type KycDetailShape = {
   address: string; city: string; state: string; pincode: string;
   salesUser: string; territory: string; region: string;
   submittedDate: string; ageHrs: number; status: string;
-  bankName: string; accountNumber: string; ifscCode: string;
+  bankName: string; accountNumber: string; ifscCode: string; upiId: string;
   pennyDropStatus: 'verified' | 'failed' | 'pending';
   agreementStatus: 'signed' | 'pending'; agreementDate: string;
   statusHistory: Array<{ status: string; timestamp: string; user: string; remark?: string }>;
@@ -158,6 +158,7 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     bankName:         s.partner?.bankName ?? '',
     accountNumber:    s.partner?.bankAccountNumber ?? '',
     ifscCode:         s.partner?.ifscCode ?? '',
+    upiId:            s.partner?.upiId ?? '',
     pennyDropStatus:  'pending',
     agreementStatus:  'pending',
     agreementDate:    '',
@@ -594,6 +595,12 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                 <span className="text-gray-500 w-24 flex-shrink-0">IFSC</span>
                 <span className="font-mono text-gray-800">{kyc.ifscCode}</span>
               </div>
+              {kyc.upiId && (
+                <div className="flex gap-2">
+                  <span className="text-gray-500 w-24 flex-shrink-0">UPI ID</span>
+                  <span className="font-mono text-gray-800">{kyc.upiId}</span>
+                </div>
+              )}
               <div className="flex gap-2 items-center">
                 <span className="text-gray-500 w-24 flex-shrink-0">Penny Drop</span>
                 <span className={`flex items-center gap-1 font-medium ${

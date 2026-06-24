@@ -331,15 +331,21 @@ export function computeParamAchievements(
   return result;
 }
 
-export const PERIODS = [
-  { value: '2026-05', label: "May '26" },
-  { value: '2026-04', label: "Apr '26" },
-  { value: '2026-03', label: "Mar '26" },
-  { value: '2026-02', label: "Feb '26" },
-  { value: '2026-01', label: "Jan '26" },
-  { value: '2025-12', label: "Dec '25" },
-  { value: '2026-Q2', label: "Q2 FY26" },
-];
+/** Month period options for the sales/target views — the last 12 months ending at
+ *  the CURRENT month, newest first. Generated at load (NOT a stale hardcoded list)
+ *  so the dropdown always offers the current month + recent ones, and targets
+ *  uploaded for the current month are selectable. */
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+export const PERIODS: { value: string; label: string }[] = (() => {
+  const now = new Date();
+  const out: { value: string; label: string }[] = [];
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    out.push({ value, label: `${MONTH_ABBR[d.getMonth()]} '${String(d.getFullYear()).slice(2)}` });
+  }
+  return out;
+})();
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // NEW TARGET CONFIG SYSTEM (v4) — Admin Targets Redesign

@@ -44,6 +44,7 @@ interface KYCDetail {
   bankName?: string;
   accountNumber?: string;
   ifscCode?: string;
+  upiId?: string;
   documents: KYCDoc[];
   photos: { label: string; url: string }[];
   approvalHistory: ApprovalEvent[];
@@ -113,6 +114,7 @@ interface ApiSalesKYC {
     bankName?: string;
     bankAccountNumber?: string;
     ifscCode?: string;
+    upiId?: string;
     phone?: string;
     outlets?: { id: string; name: string; outletCode: string; phone?: string }[];
   };
@@ -142,6 +144,7 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
     bankName: s.partner.bankName,
     accountNumber: s.partner.bankAccountNumber,
     ifscCode: s.partner.ifscCode,
+    upiId: s.partner.upiId,
     documents: (s.documents ?? []).map(mapDoc),
     photos: (s.documents ?? [])
       .filter(d => PHOTO_DOC_TYPES.has(d.documentType) && d.viewUrl)
@@ -432,6 +435,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           bankName:        s.partner?.bankName,
           accountNumber:   s.partner?.bankAccountNumber,
           ifscCode:        s.partner?.ifscCode,
+          upiId:           s.partner?.upiId,
           documents:       (s.documents ?? []).map(mapDoc),
           // Store/owner photos are rendered as images; everything else lists as a doc row.
           photos:          (s.documents ?? [])
@@ -624,7 +628,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
             <Building2 className="h-4 w-4 text-gray-400" />
             <span className="text-sm font-semibold text-gray-600">Store Information</span>
             <span className="text-[10px] text-gray-400 bg-gray-200 px-1.5 py-0.5 rounded-full">
-              KYC · {kyc.documents.length} docs{kyc.bankName ? ' · Bank' : ''}
+              KYC · {kyc.documents.length} docs{(kyc.bankName || kyc.upiId) ? ' · Payment' : ''}
             </span>
           </div>
           <ChevronDown className={`h-4 w-4 text-gray-400 transition-transform duration-200 ${detailsOpen ? 'rotate-180' : ''}`} />
@@ -746,18 +750,19 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
               </div>
             </div>
 
-            {/* Bank Details */}
-            {kyc.bankName && (
+            {/* Payment Details — the KYC form captures bank OR UPI; show whichever was given. */}
+            {(kyc.bankName || kyc.upiId) && (
               <>
                 <div className="border-t border-gray-100" />
                 <div>
-                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Bank Details</p>
+                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Payment Details</p>
                   <div className="space-y-1.5">
                     {[
                       { label: 'Bank',    value: kyc.bankName       },
                       { label: 'Account', value: kyc.accountNumber  },
                       { label: 'IFSC',    value: kyc.ifscCode       },
-                    ].map(row => (
+                      { label: 'UPI ID',  value: kyc.upiId          },
+                    ].filter(row => row.value).map(row => (
                       <div key={row.label} className="flex items-center justify-between">
                         <span className="text-xs text-gray-400">{row.label}</span>
                         <span className="text-sm font-medium text-gray-800 font-mono">{row.value}</span>

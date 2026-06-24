@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { Badge } from '@/components/ui/badge';
-import { PERIODS, pct, pctBg, pctBarColor, getPrimaryParam } from '@/lib/targets';
+import { PERIODS, CURRENT_MONTH, pct, pctBg, pctBarColor, getPrimaryParam } from '@/lib/targets';
 import { KYCStatus } from '@/types';
 import { getRole, type SalesRole } from '@/lib/sales-role';
 import { classifyPaceGap } from '@/lib/pace';
@@ -134,7 +134,7 @@ const VIS_LABEL: Record<string, string> = {
 export default function SalesOutletsPage() {
   const router = useRouter();
   const [outlets,    setOutlets]    = useState<Outlet[]>([]);
-  const [period,     setPeriod]     = useState('2026-05');
+  const [period,     setPeriod]     = useState(CURRENT_MONTH);
   const [loading,    setLoading]    = useState(true);
   const [kpiColumns, setKpiColumns] = useState<KpiCol[]>([]);
   const [targetsByOutlet, setTargetsByOutlet] = useState<Record<string, OutletKpis>>({});

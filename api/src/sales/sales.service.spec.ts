@@ -387,6 +387,7 @@ describe('SalesService', () => {
 
     it('tenant- + caller-scopes the target/achievement reads to the rep clientId + outlet codes', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'su1', reportingToId: null }]);
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outlet: { outletCode: 'O1' } }]);
       mockPrisma.outletTarget.findMany.mockResolvedValue([]);
       mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
@@ -396,6 +397,33 @@ describe('SalesService', () => {
       expect(mockPrisma.outletTarget.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: { clientId: 'deoleo', outletCode: { in: ['O1'] }, month: '2026-05' } }),
       );
+    });
+
+    it('a MANAGER sees the DOWNLINE\'s outlet targets (Q4) — not just their own assignments', async () => {
+      // caller su1 manages su2; su2 is assigned outlet OX. The manager must see OX's targets.
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'su1', reportingToId: null },
+        { id: 'su2', reportingToId: 'su1' },
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outlet: { outletCode: 'OX' } }]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'OX', targetValues: { CONSISTENCY: 300 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'OX', kpiValues: { CONSISTENCY: 120 } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'CONSISTENCY', label: 'Consistency', unit: 'Litre', isPrimary: true },
+      ]);
+
+      const res = await service.getOutletTargets(caller, '2026-05');
+      // The assignment query must span the whole subtree [su1, su2].
+      expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ salesUserId: { in: ['su1', 'su2'] } }) }),
+      );
+      const ox = res.rows.find((r: { outletCode: string }) => r.outletCode === 'OX')!;
+      expect(ox.kpis.CONSISTENCY).toEqual({ target: 300, achieved: 120, pace: 0.4 });
     });
   });
 });

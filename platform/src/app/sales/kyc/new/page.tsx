@@ -30,6 +30,11 @@ interface AssignedOutlet {
   type: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
   /** Present for re-entry outlets (rejected/resubmission/re-KYC) and approved */
   kycStatus?:    'APPROVED' | 'RE_KYC_REQUIRED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
+  /** The REAL latest KYC status from the API (NOT_STARTED / SUBMITTED / PENDING_GIFSY /
+   *  APPROVED / …). Drives the picker filter: only never-submitted outlets are
+   *  manually selectable for a NEW KYC. (Re-entry of rejected/re-KYC outlets comes via
+   *  the KYC list's "Edit & Resubmit" deep-link, which bypasses this filter.) */
+  rawStatus?:    string;
   /** Latest KYC submission id (for deep-link / reference) */
   kycId?:        string;
   /** Fields that must be re-captured; keys match form field names */
@@ -282,6 +287,8 @@ export default function NewKYCPage() {
             // Pass through the real status for any re-entry status so the wizard
             // pre-fills; otherwise leave undefined (NOT_STARTED outlets etc.).
             kycStatus:    RE_ENTRY.includes(o.kycStatus) ? o.kycStatus : undefined,
+            // The REAL status (unfiltered) — drives the "startable" picker filter below.
+            rawStatus:    o.kycStatus ?? 'NOT_STARTED',
             kycId:        o.kycId,
             existingKyc:  o.existingKyc ?? undefined,
             reKycFlags:   o.reKycFlags ?? undefined,
@@ -934,14 +941,24 @@ export default function NewKYCPage() {
     setSubmitOtpCountdown(30);
   };
 
-  /* Filtered outlets — excludes dismissed (not interested) outlets */
-  const filteredOutlets = assignedOutlets.filter(
+  /* Outlets a rep may START a NEW KYC on = those NOT yet submitted. Everything that
+   * has gone into the pipeline — submitted / under review / approval-pending / Gifsy
+   * review / approved / rejected / re-upload / re-KYC — is excluded from the manual
+   * picker (owner 2026-06-24). Re-entry of rejected/re-KYC outlets is driven by the
+   * KYC list's "Edit & Resubmit" deep-link (?outletId=), which pre-selects from the
+   * full roster and bypasses this filter. */
+  const STARTABLE_KYC = new Set(['NOT_STARTED', 'PENDING', 'DRAFT']);
+  const isStartable = (o: AssignedOutlet) => !o.rawStatus || STARTABLE_KYC.has(o.rawStatus);
+  const startableOutlets = assignedOutlets.filter(
+    (o) => isStartable(o) && !dismissedOutlets.has(o.outletId),
+  );
+
+  /* Filtered outlets — startable, minus dismissed, matching the search text */
+  const filteredOutlets = startableOutlets.filter(
     (o) =>
-      !dismissedOutlets.has(o.outletId) && (
-        o.name.toLowerCase().includes(outletSearch.toLowerCase()) ||
-        o.outletCode.toLowerCase().includes(outletSearch.toLowerCase()) ||
-        o.beat.toLowerCase().includes(outletSearch.toLowerCase())
-      ),
+      o.name.toLowerCase().includes(outletSearch.toLowerCase()) ||
+      o.outletCode.toLowerCase().includes(outletSearch.toLowerCase()) ||
+      o.beat.toLowerCase().includes(outletSearch.toLowerCase()),
   );
 
   /* ── Not Interested handler ── */
@@ -1367,7 +1384,11 @@ export default function NewKYCPage() {
                   </div>
                   <div className="max-h-60 overflow-y-auto divide-y divide-gray-50">
                     {filteredOutlets.length === 0 ? (
-                      <div className="px-4 py-8 text-center text-xs text-gray-400">No outlets match your search</div>
+                      <div className="px-4 py-8 text-center text-xs text-gray-400">
+                        {startableOutlets.length === 0
+                          ? 'No outlets pending KYC — all your assigned outlets are already enrolled or in progress.'
+                          : 'No outlets match your search'}
+                      </div>
                     ) : filteredOutlets.map((o) => (
                       <div key={o.outletId} className={`flex items-center gap-2 px-3 py-2.5 transition-colors ${
                         selectedOutlet?.outletId === o.outletId
@@ -1403,7 +1424,7 @@ export default function NewKYCPage() {
                     ))}
                   </div>
                   <div className="px-4 py-2 border-t border-gray-100 bg-gray-50">
-                    <p className="text-[11px] text-gray-400">{filteredOutlets.length} of {assignedOutlets.filter(o => !dismissedOutlets.has(o.outletId)).length} outlets shown</p>
+                    <p className="text-[11px] text-gray-400">{filteredOutlets.length} of {startableOutlets.length} outlets shown</p>
                   </div>
                 </div>
               )}
