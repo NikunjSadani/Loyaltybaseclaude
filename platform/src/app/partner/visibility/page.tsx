@@ -5,6 +5,7 @@ import { Camera, MapPin, Upload, CheckCircle, XCircle, Clock, AlertTriangle, Ref
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { useGifsySettings } from '@/lib/gifsy-settings'
 
 const statusConfig = {
   PENDING: { label: 'Pending Review', color: 'bg-yellow-100 text-yellow-800', icon: Clock },
@@ -49,6 +50,7 @@ export default function VisibilityPage() {
   const [uploading, setUploading] = useState(false)
   const [uploadResult, setUploadResult] = useState<{ success: boolean; message: string } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const settings = useGifsySettings()
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -90,6 +92,17 @@ export default function VisibilityPage() {
     } finally {
       setUploading(false)
     }
+  }
+
+  // Master Visibility switch (per-tenant, default OFF) — hide the whole surface when off.
+  if (settings.visibilityEnabled !== true) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <p className="text-sm text-gray-500 text-center px-6">
+          Visibility is not enabled for your organization.
+        </p>
+      </div>
+    )
   }
 
   return (

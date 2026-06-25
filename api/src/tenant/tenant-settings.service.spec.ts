@@ -1,9 +1,17 @@
 import { TenantSettingsService } from './tenant-settings.service';
 
-/** Minimal Prisma mock — only programSetting.findMany is used. */
+/**
+ * Minimal Prisma mock. findMany serves getEffectiveSettings; findUnique serves the
+ * uncached getVisibilityEnabledUncached read (resolves the single matching row by key).
+ */
 function makePrisma(rows: { settingKey: string; settingValue: unknown }[]) {
   return {
-    programSetting: { findMany: jest.fn().mockResolvedValue(rows) },
+    programSetting: {
+      findMany: jest.fn().mockResolvedValue(rows),
+      findUnique: jest.fn(({ where }: { where: { clientId_settingKey: { settingKey: string } } }) =>
+        Promise.resolve(rows.find((r) => r.settingKey === where.clientId_settingKey.settingKey) ?? null),
+      ),
+    },
   } as any;
 }
 
@@ -23,6 +31,41 @@ describe('TenantSettingsService', () => {
     expect(s.redemptionChannels).toEqual({ physicalGifts: true, vouchers: true, bankTransfer: true });
     expect(s.salesApp).toEqual({ ledgerLabel: 'Wallet', redeemGiftWholesalerOnly: true });
     expect(s.creditsPayouts.notifyEmails).toEqual([]);
+    // Master visibility switch defaults OFF (opt-in per tenant).
+    expect(s.visibilityEnabled).toBe(false);
+  });
+
+  describe('getVisibilityEnabledUncached', () => {
+    it('returns false when there is no row (default OFF / fail-closed)', async () => {
+      expect(await new TenantSettingsService(makePrisma([])).getVisibilityEnabledUncached('deoleo')).toBe(false);
+    });
+
+    it('returns true only for a strictly-boolean true row', async () => {
+      const on = makePrisma([{ settingKey: 'visibilityEnabled', settingValue: true }]);
+      expect(await new TenantSettingsService(on).getVisibilityEnabledUncached('deoleo')).toBe(true);
+
+      // Non-boolean truthy values do NOT enable (no coercion → fail-closed).
+      const strung = makePrisma([{ settingKey: 'visibilityEnabled', settingValue: 'true' }]);
+      expect(await new TenantSettingsService(strung).getVisibilityEnabledUncached('deoleo')).toBe(false);
+    });
+
+    it('fails CLOSED (false) when the read throws', async () => {
+      const prisma = { programSetting: { findUnique: jest.fn().mockRejectedValue(new Error('db down')) } } as any;
+      expect(await new TenantSettingsService(prisma).getVisibilityEnabledUncached('deoleo')).toBe(false);
+    });
+  });
+
+  it('overlays visibilityEnabled=true and ignores a non-boolean value', async () => {
+    const on = await new TenantSettingsService(
+      makePrisma([{ settingKey: 'visibilityEnabled', settingValue: true }]),
+    ).getEffectiveSettings('deoleo');
+    expect(on.visibilityEnabled).toBe(true);
+
+    // A malformed (non-boolean) row is rejected → default OFF is kept.
+    const bad = await new TenantSettingsService(
+      makePrisma([{ settingKey: 'visibilityEnabled', settingValue: 'yes' }]),
+    ).getEffectiveSettings('deoleo');
+    expect(bad.visibilityEnabled).toBe(false);
   });
 
   it('derives the default conversionRate from POINTS_CONVERSION_RATE env', async () => {

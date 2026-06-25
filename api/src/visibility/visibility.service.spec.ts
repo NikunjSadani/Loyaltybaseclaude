@@ -31,6 +31,9 @@ const mockPrisma = {
 // tests are not blocked by the capture-mode gate.
 const mockTenant = {
   resolveVisibilityCaptureMode: jest.fn().mockResolvedValue('PHOTO_APPROVAL'),
+  // Master visibility switch — default ON so the existing submit/approve/reject/list
+  // tests are not blocked by the master gate (the OFF→403 case is tested separately).
+  resolveVisibilityEnabled: jest.fn().mockResolvedValue(true),
 };
 
 const mockStorage = {
@@ -51,6 +54,7 @@ describe('VisibilityService', () => {
     jest.clearAllMocks();
     // Re-apply the default mock implementation after clearAllMocks resets it.
     mockTenant.resolveVisibilityCaptureMode.mockResolvedValue('PHOTO_APPROVAL');
+    mockTenant.resolveVisibilityEnabled.mockResolvedValue(true);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         VisibilityService,
@@ -239,6 +243,38 @@ describe('VisibilityService', () => {
       const where = mockPrisma.visibilityFraudLog.findMany.mock.calls[0][0].where;
       expect(where).toEqual({});
       expect(res.pagination).toEqual({ page: 1, limit: 20, total: 5, pages: 1 });
+    });
+  });
+
+  // ── Master visibility gate (visibilityEnabled) ───────────────────────────────
+  describe('master visibility gate', () => {
+    const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
+
+    it('403s a tenant user when visibility is OFF — before touching the DB', async () => {
+      mockTenant.resolveVisibilityEnabled.mockResolvedValue(false);
+      await expect(service.listSubmissions(clientAdmin, {})).rejects.toThrow(
+        'Visibility is not enabled for this tenant.',
+      );
+      expect(mockPrisma.visibilitySubmission.findMany).not.toHaveBeenCalled();
+    });
+
+    it('403s a partner submit when visibility is OFF — no GCS upload, no row', async () => {
+      mockTenant.resolveVisibilityEnabled.mockResolvedValue(false);
+      const file = { buffer: Buffer.from('x'), size: 1, mimetype: 'image/jpeg', originalname: 'a.jpg' } as Express.Multer.File;
+      await expect(service.submit(partner, file, { programId: 'p1' } as never)).rejects.toThrow(
+        'Visibility is not enabled for this tenant.',
+      );
+      // Gate throws before any GCS upload or DB write.
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
+
+    it('EXEMPTS the GIFSY operator even when their own tenant flag is OFF', async () => {
+      // The operator approves ENABLED tenants' submissions cross-tenant; the gate must
+      // never block them on the gifsy tenant's own (default-OFF) flag.
+      mockTenant.resolveVisibilityEnabled.mockResolvedValue(false);
+      mockPrisma.visibilitySubmission.findFirst.mockResolvedValue(null);
+      // Passes the gate (exempt) and proceeds to the DB lookup → NotFound, not Forbidden.
+      await expect(service.approve(gifsy, 'sub1')).rejects.toThrow('Submission not found');
     });
   });
 });

@@ -24,6 +24,7 @@ export const DEFAULT_SETTINGS: GifsySettings = {
   minBankTransferAmount:   250,
   minVoucherFreeAmount:    250,
   paceAmberThreshold:      10,
+  visibilityEnabled:       false,
   visibilityPhotoEnabled:  false,
   visibilityCaptureMode:   'PHOTO_APPROVAL',
   redemptionChannels: {
@@ -50,6 +51,7 @@ interface ServerSettings {
   minBankTransferAmount:  number;
   minVoucherFreeAmount:   number;
   paceAmberThreshold:     number;
+  visibilityEnabled:      boolean;
   visibilityPhotoEnabled: boolean;
   /** Present on the /me settings block only (authoritative ClientConfig flag). */
   visibilityCaptureMode?: 'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD';
@@ -92,6 +94,7 @@ function fromServer(srv: ServerSettings, prev: GifsySettings): GifsySettings {
     minBankTransferAmount:  srv.minBankTransferAmount  ?? prev.minBankTransferAmount,
     minVoucherFreeAmount:   srv.minVoucherFreeAmount   ?? prev.minVoucherFreeAmount,
     paceAmberThreshold:     srv.paceAmberThreshold     ?? prev.paceAmberThreshold,
+    visibilityEnabled:      srv.visibilityEnabled      ?? prev.visibilityEnabled,
     visibilityPhotoEnabled: srv.visibilityPhotoEnabled ?? prev.visibilityPhotoEnabled,
     visibilityCaptureMode:  srv.visibilityCaptureMode  ?? prev.visibilityCaptureMode ?? 'PHOTO_APPROVAL',
     redemptionChannels:     srv.redemptionChannels     ?? prev.redemptionChannels,
@@ -135,6 +138,7 @@ const SAVE_KEY_MAP: Partial<Record<keyof GifsySettings, string>> = {
   minBankTransferAmount:  'minBankTransferAmount',
   minVoucherFreeAmount:   'minVoucherFreeAmount',
   paceAmberThreshold:     'paceAmberThreshold',
+  visibilityEnabled:      'visibilityEnabled',
   visibilityPhotoEnabled: 'visibilityPhotoEnabled',
   redemptionChannels:     'redemptionChannels',
   salesApp:               'salesApp',

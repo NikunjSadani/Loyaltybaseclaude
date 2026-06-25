@@ -37,6 +37,9 @@ const mockPrisma = {
 // file-validation errors are not short-circuited by the mode gate.
 const mockTenant = {
   resolveVisibilityCaptureMode: jest.fn().mockResolvedValue('AMOUNT_UPLOAD'),
+  // Master visibility switch — default ON so the existing bulkUpload/listRecords tests
+  // are not blocked by the master gate (the OFF→403 case is tested separately).
+  resolveVisibilityEnabled: jest.fn().mockResolvedValue(true),
 };
 
 async function build<T>(token: new (...args: never[]) => T): Promise<T> {
@@ -56,6 +59,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   // Re-apply the default mock after clearAllMocks resets implementations.
   mockTenant.resolveVisibilityCaptureMode.mockResolvedValue('AMOUNT_UPLOAD');
+  mockTenant.resolveVisibilityEnabled.mockResolvedValue(true);
 });
 
 describe('ChannelPartnersService', () => {
@@ -127,6 +131,34 @@ describe('VisibilityService', () => {
   it('rejects a bulk-upload with no file', async () => {
     const service = await build(VisibilityService);
     await expect(service.bulkUpload(gifsy, undefined)).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  describe('master visibility gate', () => {
+    it('403s a tenant admin bulk-upload when visibility is OFF — before parsing the file', async () => {
+      mockTenant.resolveVisibilityEnabled.mockResolvedValue(false);
+      const service = await build(VisibilityService);
+      const file = { originalname: 'data.xlsx', buffer: Buffer.from('') } as Express.Multer.File;
+      await expect(service.bulkUpload(clientAdmin, file)).rejects.toThrow(
+        'Visibility is not enabled for this tenant.',
+      );
+    });
+
+    it('403s a tenant admin listRecords when visibility is OFF', async () => {
+      mockTenant.resolveVisibilityEnabled.mockResolvedValue(false);
+      const service = await build(VisibilityService);
+      await expect(service.listRecords(clientAdmin, {})).rejects.toThrow(
+        'Visibility is not enabled for this tenant.',
+      );
+    });
+
+    it('EXEMPTS the GIFSY operator even when the flag is OFF', async () => {
+      mockTenant.resolveVisibilityEnabled.mockResolvedValue(false);
+      const service = await build(VisibilityService);
+      mockPrisma.outletVisibilityRecord.findMany.mockResolvedValue([]);
+      mockPrisma.outletVisibilityRecord.count.mockResolvedValue(0);
+      // Passes the gate (exempt) and proceeds to the real query.
+      await expect(service.listRecords(gifsy, {})).resolves.toBeDefined();
+    });
   });
 });
 

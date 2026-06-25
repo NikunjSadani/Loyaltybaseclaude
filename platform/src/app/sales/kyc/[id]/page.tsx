@@ -886,7 +886,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           // showing the action when the display-only visibilityPhotoEnabled disagrees would lead the
           // agent into a guaranteed backend rejection. Require BOTH: PHOTO_APPROVAL mode AND the
           // display flag — they can no longer contradict the backend.
-          const showVis     = captureMode === 'PHOTO_APPROVAL' && settings.visibilityPhotoEnabled === true;
+          const showVis     = settings.visibilityEnabled === true && captureMode === 'PHOTO_APPROVAL' && settings.visibilityPhotoEnabled === true;
           const actions = [
             { href: `/sales/kyc/${id}/ledger`,         icon: <BookOpen       className="h-4 w-4 text-blue-500" />,    bg: 'bg-blue-50',       title: ledgerLabel,              sub: 'Transaction history & balance',             show: true      },
             { href: `/sales/catalogue?outletId=${id}`, icon: <Gift           className="h-4 w-4 text-purple-500" />,  bg: 'bg-purple-50',     title: 'Redeem Gift for Outlet', sub: 'Browse catalogue & redeem with OTP',        show: showRedeem },

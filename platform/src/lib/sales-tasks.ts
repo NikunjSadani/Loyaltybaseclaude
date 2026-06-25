@@ -75,7 +75,10 @@ export interface VisibilityTaskItem {
 export function buildVisibilityTaskItems(
   eligibleOutlets: VisibilityOutlet[],
   statusMap: Record<string, { status?: string } | undefined>,
+  visibilityEnabled?: boolean,
 ): VisibilityTaskItem[] {
+  // Master Visibility switch (per-tenant, default OFF). When off, no visibility tasks surface.
+  if (visibilityEnabled !== true) return [];
   return eligibleOutlets
     .filter((o) => statusMap[o.outletCode]?.status !== 'APPROVED')
     .map((o) => {

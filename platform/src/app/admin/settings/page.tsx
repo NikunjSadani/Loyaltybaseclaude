@@ -102,6 +102,32 @@ export default function SettingsPage() {
     setTimeout(() => setPaceThresholdSaved(false), 3000)
   }
 
+  // ── Visibility module master switch (per-tenant; saved via GifsySettings) ──
+  // Like the pace threshold, saveGifsySettings PUTs to /v1/admin/settings (GIFSY_ADMIN-only),
+  // so the control is editable only for GIFSY_ADMIN. Default OFF — treat missing as OFF.
+  const [visibilityEnabled,      setVisibilityEnabled]      = useState<boolean>(() => getGifsySettings().visibilityEnabled === true)
+  const [visibilityEnabledSaved, setVisibilityEnabledSaved] = useState(false)
+  const [visibilityEnabledError, setVisibilityEnabledError] = useState<string | null>(null)
+
+  // Keep the displayed value in sync once server settings hydrate (/me → cache).
+  useEffect(() => {
+    setVisibilityEnabled(getGifsySettings().visibilityEnabled === true)
+  }, [])
+
+  async function handleVisibilityEnabledChange(next: boolean) {
+    setVisibilityEnabledError(null)
+    const previous = visibilityEnabled
+    setVisibilityEnabled(next) // optimistic
+    const ok = await saveGifsySettings({ visibilityEnabled: next })
+    if (!ok) {
+      setVisibilityEnabled(previous) // revert
+      setVisibilityEnabledError('Could not save — the Visibility module can only be changed by a Gifsy Admin.')
+      return
+    }
+    setVisibilityEnabledSaved(true)
+    setTimeout(() => setVisibilityEnabledSaved(false), 3000)
+  }
+
   // ── Visibility capture mode (GIFSY_ADMIN-only) ──
   const [captureMode,      setCaptureMode]      = useState<VisibilityCaptureMode>('PHOTO_APPROVAL')
   const [captureModeLoading, setCaptureModeLoading] = useState(false)
@@ -232,9 +258,64 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* ── Visibility Module master switch (per-tenant) ── */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Eye className="h-4 w-4 text-[var(--brand-primary)]" /> Visibility Module
+              </CardTitle>
+              <CardDescription className="mt-1">
+                Master on/off switch for the Visibility module for this tenant. When OFF, all
+                visibility capture/approval/upload surfaces are hidden and the API rejects
+                visibility actions for this tenant. This is a Gifsy-operated setting — only a
+                Gifsy Admin can change it.
+              </CardDescription>
+            </div>
+            {visibilityEnabledSaved && (
+              <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg shrink-0">
+                ✓ Saved
+              </span>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3">
+            {/* Segmented ON/OFF control */}
+            <div className="flex bg-gray-100 rounded-lg p-1 gap-1" role="radiogroup" aria-label="Visibility module">
+              {([['OFF', false], ['ON', true]] as const).map(([label, val]) => (
+                <button
+                  key={label}
+                  role="radio"
+                  aria-checked={visibilityEnabled === val}
+                  disabled={!isGifsyAdmin}
+                  onClick={() => visibilityEnabled !== val && handleVisibilityEnabledChange(val)}
+                  className={`px-4 py-2 rounded-md text-sm font-medium transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
+                    visibilityEnabled === val
+                      ? 'bg-white text-gray-900 shadow-sm border border-gray-200'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {!isGifsyAdmin && (
+            <p className="text-xs text-gray-400 mt-2">
+              The Visibility module is a Gifsy-operated setting — only a Gifsy Admin can change it.
+            </p>
+          )}
+          {visibilityEnabledError && (
+            <p className="text-xs text-red-600 mt-2">{visibilityEnabledError}</p>
+          )}
+        </CardContent>
+      </Card>
+
       {/* ── Visibility Capture Mode (GIFSY_ADMIN only) ── */}
       {isGifsyAdmin && (
-        <Card>
+        <Card className={visibilityEnabled ? undefined : 'opacity-50 pointer-events-none'}>
           <CardHeader>
             <div className="flex items-center justify-between">
               <div>

@@ -42,8 +42,25 @@ export class VisibilityService {
   /** Partner roles are external traders — they cannot see admin visibility data. */
   private static readonly PARTNER_ROLES = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
 
+  /**
+   * Master Visibility gate — the module is opt-in per tenant (`visibilityEnabled`,
+   * default OFF). A tenant's own users (CLIENT_ADMIN — clientId IS the tenant) get a
+   * 403 when OFF. The GIFSY operator is EXEMPT only in TRUE platform context (`!assumed`);
+   * when it has ASSUMED a tenant it acts AS that tenant, so the tenant's switch applies —
+   * an operator cannot inject amount-upload records into an OFF assumed tenant. Mirrors the
+   * photo service's gate.
+   */
+  private async assertVisibilityEnabled(user: JwtPayload): Promise<void> {
+    if (user.role === 'GIFSY_ADMIN' && !user.assumed) return;
+    const enabled = await this.tenant.resolveVisibilityEnabled(user.clientId);
+    if (!enabled) {
+      throw new ForbiddenException('Visibility is not enabled for this tenant.');
+    }
+  }
+
   /** GET /v1/admin/visibility/records */
   async listRecords(user: JwtPayload, q: ListVisibilityRecordsQueryDto) {
+    await this.assertVisibilityEnabled(user);
     if (VisibilityService.PARTNER_ROLES.includes(user.role)) {
       throw new ForbiddenException('Forbidden');
     }
@@ -75,6 +92,9 @@ export class VisibilityService {
 
   /** POST /v1/admin/visibility/bulk-upload (multipart "file"). */
   async bulkUpload(user: JwtPayload, file: Express.Multer.File | undefined) {
+    // Master gate — visibility must be enabled for the tenant.
+    await this.assertVisibilityEnabled(user);
+
     // Mode gate — AMOUNT_UPLOAD tenants only.
     // Default mode is PHOTO_APPROVAL, so tenants that have not configured a mode
     // explicitly will be blocked here (they must opt-in to amount-upload).

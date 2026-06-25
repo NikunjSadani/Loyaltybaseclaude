@@ -48,6 +48,29 @@ export class VisibilityService {
   }
 
   /**
+   * Master gate — the whole Visibility module is opt-in per tenant. When the tenant's
+   * `visibilityEnabled` setting is false (the default), visibility endpoints 403 for that
+   * tenant's own users (CLIENT_ADMIN/sales/partner — their clientId IS their tenant).
+   *
+   * The GIFSY platform operator is EXEMPT only in TRUE platform context (`!assumed`) —
+   * keying the gate to the operator's own clientId (the gifsy tenant) would wrongly block
+   * them from working the cross-tenant approval queue for ENABLED tenants. When the operator
+   * has ASSUMED a tenant (`assumed === true`, clientId = the assumed tenant), they act AS that
+   * tenant, so the tenant's own switch applies — this makes "OFF means OFF" hold even for an
+   * operator (matching the FE, which hides every visibility surface for an OFF assumed tenant).
+   * `role`/`assumed` come from the signed JWT and cannot be forged by a non-operator
+   * (assumeTenant requires role GIFSY_ADMIN). The real data-ENTRY teeth (partner submit; admin
+   * bulk-upload — clientId = the tenant) are gated for every non-platform caller.
+   */
+  private async assertVisibilityEnabled(user: JwtPayload): Promise<void> {
+    if (user.role === 'GIFSY_ADMIN' && !user.assumed) return;
+    const enabled = await this.tenant.resolveVisibilityEnabled(user.clientId);
+    if (!enabled) {
+      throw new ForbiddenException('Visibility is not enabled for this tenant.');
+    }
+  }
+
+  /**
    * POST /v1/visibility/submit — partner submits a branding photo for an outlet.
    *
    * Scoping/trust: the partner is resolved from the JWT (user.sub) — never from
@@ -60,6 +83,9 @@ export class VisibilityService {
    * approve/reject gate). Submissions land in SUBMITTED (queued for review).
    */
   async submit(user: JwtPayload, file: Express.Multer.File, dto: SubmitVisibilityDto) {
+    // 0. Master gate — visibility must be enabled for the tenant.
+    await this.assertVisibilityEnabled(user);
+
     // 1. Validate the uploaded image.
     if (!file) throw new BadRequestException('Image file is required');
     if (!file.buffer?.length) throw new BadRequestException('Empty image file');
@@ -149,6 +175,7 @@ export class VisibilityService {
    * scoped through partner.user.clientId (mirrors the source `where`).
    */
   async listSubmissions(user: JwtPayload, q: ListSubmissionsQueryDto) {
+    await this.assertVisibilityEnabled(user);
     // Partners submit via POST /submit; they do not list the tenant's submissions.
     // Mirror the denylist already enforced in outletStatuses (@Roles can't express
     // "everyone except partners", so the block lives in the service).
@@ -194,6 +221,7 @@ export class VisibilityService {
    * (the default). AMOUNT_UPLOAD tenants do not use photo submissions.
    */
   async approve(user: JwtPayload, id: string) {
+    await this.assertVisibilityEnabled(user);
     const captureMode = await this.tenant.resolveVisibilityCaptureMode(user.clientId);
     if (captureMode !== 'PHOTO_APPROVAL') {
       throw new BadRequestException(
@@ -251,6 +279,7 @@ export class VisibilityService {
    * (the default). AMOUNT_UPLOAD tenants do not use photo submissions.
    */
   async reject(user: JwtPayload, id: string, dto: RejectSubmissionDto) {
+    await this.assertVisibilityEnabled(user);
     const captureMode = await this.tenant.resolveVisibilityCaptureMode(user.clientId);
     if (captureMode !== 'PHOTO_APPROVAL') {
       throw new BadRequestException(
@@ -312,6 +341,7 @@ export class VisibilityService {
    * in the service to mirror the source exactly.
    */
   async outletStatuses(user: JwtPayload, q: OutletStatusesQueryDto) {
+    await this.assertVisibilityEnabled(user);
     const partnerRoles = ['SSS', 'WHOLESALER', 'SUB_STOCKIST'];
     if (partnerRoles.includes(user.role)) throw new ForbiddenException('Forbidden');
 
@@ -371,6 +401,7 @@ export class VisibilityService {
    * scoped through submission.partner.user.clientId (mirrors the source `where`).
    */
   async listFraudLog(user: JwtPayload, q: ListFraudLogQueryDto) {
+    await this.assertVisibilityEnabled(user);
     // GIFSY-only is enforced by @Roles on the controller.
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;

@@ -30,6 +30,7 @@ describe('generateHierarchyRowErrorReport — one file, all row errors', () => {
     const rawRows = [blankRow(), blankRow()]; // idx 0 → rowNum 2, idx 1 → rowNum 3
 
     const validation: EmployeeUploadValidationResult = {
+      headerError: null,
       hasErrors: true,
       canProceed: false,
       summary: { total: 3, creates: 0, updates: 0, errors: 2 },

@@ -26,7 +26,8 @@ vi.mock('@/lib/visibility-upload', () => ({
   generateVisibilityTemplate: vi.fn().mockReturnValue(new ArrayBuffer(0)),
 }));
 vi.mock('@/lib/gifsy-settings', () => ({
-  getGifsySettings: () => ({
+  useGifsySettings: () => ({
+    visibilityEnabled: true, // master switch ON
     visibilityPhotoEnabled: true,
     redemptionChannels: { physicalGifts: true, vouchers: true, bankTransfer: true },
     creditsPayouts: { monthCutoffDay: 28, safetyCapPoints: 50000, safetyCapInr: 100000, fourEyesEnabled: false },

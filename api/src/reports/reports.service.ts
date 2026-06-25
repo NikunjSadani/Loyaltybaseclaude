@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ReportFormat, ReportRangeQueryDto, TdsReportQueryDto } from './dto/reports.dto';
 import { buildXlsx, ReportSheet } from '../common/xlsx';
@@ -26,7 +27,24 @@ export type ReportResult =
 
 @Injectable()
 export class ReportsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenant: TenantService,
+  ) {}
+
+  /**
+   * Master Visibility gate (mirrors the visibility services). The visibility-status
+   * report exposes a tenant's VisibilitySubmission rows; when the tenant's master switch
+   * is OFF this must 403 for the tenant's own users (incl. MIS_USER) so residual data from
+   * a previously-enabled period is not leaked. The GIFSY operator is exempt only in true
+   * platform context (`!assumed`).
+   */
+  private async assertVisibilityEnabled(user: JwtPayload): Promise<void> {
+    if (user.role === 'GIFSY_ADMIN' && !user.assumed) return;
+    if (!(await this.tenant.resolveVisibilityEnabled(user.clientId))) {
+      throw new ForbiddenException('Visibility is not enabled for this tenant.');
+    }
+  }
 
   /** Parses an optional ISO date string to a Date, mirroring `new Date(...)`. */
   private parseDate(v?: string): Date | undefined {
@@ -52,6 +70,7 @@ export class ReportsService {
 
   // ── Visibility Status ───────────────────────────────────────────────────────
   async visibilityStatus(user: JwtPayload, q: ReportRangeQueryDto): Promise<ReportResult> {
+    await this.assertVisibilityEnabled(user);
     const dateFrom = this.parseDate(q.dateFrom);
     const dateTo = this.parseDate(q.dateTo);
 

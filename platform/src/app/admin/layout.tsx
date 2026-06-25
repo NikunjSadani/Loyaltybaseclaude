@@ -31,6 +31,7 @@ import {
   Landmark,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { useGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession, adminRoleLabel } from '@/lib/admin-session';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
@@ -127,6 +128,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const clientConfig = useClientConfig();
   const features     = clientConfig.features;
   const adminSession = useAdminSession();
+  // Master Visibility switch (per-tenant, default OFF). Lives in GifsySettings, NOT ClientConfig
+  // features — so it is gated here directly rather than via the featureFlag map below.
+  const visibilityEnabled = useGifsySettings().visibilityEnabled === true;
 
   function handleLogout() {
     if (typeof window !== 'undefined') {
@@ -143,10 +147,14 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       ALL_NAV_ITEMS.filter((item) => {
         // gifsyOnly items (e.g. Scheme Management) are hidden from CLIENT_ADMIN
         if ((item as { gifsyOnly?: boolean }).gifsyOnly && !adminSession.canManageSchemes) return false;
+        // Master Visibility switch gates the Visibility Approval page AND (ANDed with its own
+        // featureFlag) the Visibility Invoices group — both hidden when Visibility is OFF.
+        if (item.href === '/admin/visibility') return visibilityEnabled;
+        if (item.href === '/admin/invoices' && !visibilityEnabled) return false;
         if (!item.featureFlag) return true;
         return !!(features as unknown as Record<string, boolean>)[item.featureFlag];
       }),
-    [features, adminSession.canManageSchemes],
+    [features, adminSession.canManageSchemes, visibilityEnabled],
   );
 
   // Auto-expand the parent whose child matches the current path

@@ -4,8 +4,10 @@
 // Run: npx jest src/reports/reports.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
+import { ForbiddenException } from '@nestjs/common';
 import { ReportsService } from './reports.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ReportFormat } from './dto/reports.dto';
 
@@ -19,6 +21,11 @@ const mockPrisma = {
   kycSubmission: { findMany: jest.fn() },
 };
 
+// visibilityStatus is master-gated; default ON so the existing scoping tests run.
+const mockTenant = {
+  resolveVisibilityEnabled: jest.fn().mockResolvedValue(true),
+};
+
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 
 describe('ReportsService', () => {
@@ -26,8 +33,13 @@ describe('ReportsService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockTenant.resolveVisibilityEnabled.mockResolvedValue(true);
     const module: TestingModule = await Test.createTestingModule({
-      providers: [ReportsService, { provide: PrismaService, useValue: mockPrisma }],
+      providers: [
+        ReportsService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: TenantService, useValue: mockTenant },
+      ],
     }).compile();
     service = module.get(ReportsService);
   });
@@ -38,6 +50,13 @@ describe('ReportsService', () => {
       await service.visibilityStatus(gifsy, {});
       const where = mockPrisma.visibilitySubmission.findMany.mock.calls[0][0].where;
       expect(where).toEqual({ partner: { clientId: 'deoleo' } });
+    });
+
+    it('403s a tenant MIS user when visibility is OFF — no submission read', async () => {
+      mockTenant.resolveVisibilityEnabled.mockResolvedValue(false);
+      const mis: JwtPayload = { sub: 'm1', role: 'MIS_USER', clientId: 'deoleo', phone: '', name: '' };
+      await expect(service.visibilityStatus(mis, {})).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.visibilitySubmission.findMany).not.toHaveBeenCalled();
     });
 
     it('maps a submission row into the report shape', async () => {

@@ -464,6 +464,13 @@ export interface GifsySettings {
    */
   visibilityPhotoEnabled?: boolean;
   /**
+   * Per-tenant master switch for the entire Visibility module. Default: false (OFF).
+   * When false, ALL visibility capture/approval/upload surfaces are hidden in the FE
+   * and the backend rejects visibility actions for this tenant. Treat missing/undefined
+   * as OFF (gate with `=== true`, never `?? true`).
+   */
+  visibilityEnabled?: boolean;
+  /**
    * Authoritative ClientConfig visibility-capture mode, surfaced via /me + /settings so the
    * sales shell (which cannot read the admin-only /admin/settings/config) can gate correctly.
    */

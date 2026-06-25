@@ -19,7 +19,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { generateVisibilityTemplate } from '@/lib/visibility-upload';
-import { getGifsySettings } from '@/lib/gifsy-settings';
+import { useGifsySettings } from '@/lib/gifsy-settings';
 import { fetchVisibilityCaptureMode, type VisibilityCaptureMode } from '@/lib/visibility-capture-mode';
 import { Spinner } from '@/components/ui/spinner';
 
@@ -180,9 +180,12 @@ export default function VisibilityPage() {
   // AMOUNT_UPLOAD mode (which rejects photo uploads). Capture mode is fetched async; until it
   // resolves we fall back to PHOTO_APPROVAL (matching the lib default) so the initial paint
   // doesn't hide the queue from a tenant that actually uses it.
-  const visibilityPhotoEnabled = getGifsySettings().visibilityPhotoEnabled;
+  const settings = useGifsySettings();
+  const visibilityEnabled = settings.visibilityEnabled === true;
+  const visibilityPhotoEnabled = settings.visibilityPhotoEnabled;
   const [captureMode, setCaptureMode] = useState<VisibilityCaptureMode>('PHOTO_APPROVAL');
-  const photoApprovalEnabled = captureMode === 'PHOTO_APPROVAL' && visibilityPhotoEnabled;
+  // Master switch ANDed in so nothing renders when Visibility is disabled for the tenant.
+  const photoApprovalEnabled = visibilityEnabled && captureMode === 'PHOTO_APPROVAL' && visibilityPhotoEnabled;
 
   useEffect(() => {
     fetchVisibilityCaptureMode().then(setCaptureMode);
@@ -355,6 +358,15 @@ export default function VisibilityPage() {
     return (
       <div className="text-center py-20">
         <p className="text-gray-500 text-sm">{queueError}</p>
+      </div>
+    );
+  }
+
+  // Master Visibility switch (per-tenant, default OFF) — hide the whole surface when off.
+  if (!visibilityEnabled) {
+    return (
+      <div className="text-center py-20">
+        <p className="text-gray-500 text-sm">Visibility is disabled for this tenant.</p>
       </div>
     );
   }

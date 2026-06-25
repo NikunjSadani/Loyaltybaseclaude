@@ -51,6 +51,15 @@ export interface EffectiveSettings {
   paceAmberThreshold:     number;
   /** Whether the sales app may submit visibility photos. */
   visibilityPhotoEnabled: boolean;
+  /**
+   * Per-tenant MASTER switch for the whole Visibility module (photo-approval AND
+   * amount-upload paths). When false, every visibility endpoint returns 403 and the
+   * FE hides all visibility surfaces. Default is FALSE (opt-in) — a tenant must be
+   * explicitly turned ON in the Gifsy Settings panel. Distinct from (and above) both
+   * `visibilityPhotoEnabled` and the ClientConfig `visibilityCaptureMode` selector,
+   * and from the per-outlet-type `OutletTypeClientConfig.visibilityEnabled` column.
+   */
+  visibilityEnabled:      boolean;
   redemptionChannels:     RedemptionChannels;
   salesApp:               SalesAppSettings;
   creditsPayouts:         CreditsPayoutsSettings;
@@ -74,6 +83,7 @@ type SettingKey =
   | 'minVoucherFreeAmount'
   | 'paceAmberThreshold'
   | 'visibilityPhotoEnabled'
+  | 'visibilityEnabled'
   | 'redemptionChannels'
   | 'salesApp'
   | 'creditsPayouts';
@@ -120,6 +130,9 @@ export class TenantSettingsService {
       minVoucherFreeAmount:   250,
       paceAmberThreshold:     10,
       visibilityPhotoEnabled: false,
+      // Master Visibility switch defaults OFF — visibility is opt-in per tenant
+      // (owner decision 2026-06-25). A tenant must be turned ON in Gifsy Settings.
+      visibilityEnabled:      false,
       redemptionChannels:     { physicalGifts: true, vouchers: true, bankTransfer: true },
       salesApp:               { ledgerLabel: 'Wallet', redeemGiftWholesalerOnly: true },
       creditsPayouts: {
@@ -160,6 +173,30 @@ export class TenantSettingsService {
   /** Convenience for the money path. */
   async getConversionRate(clientId: string): Promise<number> {
     return (await this.getEffectiveSettings(clientId)).conversionRate;
+  }
+
+  /**
+   * UNCACHED read of the visibility master switch — used by the visibility gate.
+   *
+   * The 5-min in-memory cache above is per-instance and only busted on the instance
+   * that served the write. With multiple Cloud Run instances that makes a tenant
+   * OFF→ON / ON→OFF flip eventually-consistent (up to CACHE_TTL_MS) across the fleet —
+   * unacceptable for a switch sold as an immediate enable/kill control. visibilityEnabled
+   * is NOT on the money hot path (only conversionRate is), and visibility endpoints are
+   * low-traffic, so we read the single program_settings row directly every time. Fails
+   * CLOSED: any read error, a missing row, or a non-boolean value → false (OFF).
+   */
+  async getVisibilityEnabledUncached(clientId: string): Promise<boolean> {
+    try {
+      const row = await this.prisma.programSetting.findUnique({
+        where: { clientId_settingKey: { clientId, settingKey: 'visibilityEnabled' } },
+        select: { settingValue: true },
+      });
+      return row?.settingValue === true;
+    } catch (e) {
+      this.logger.warn(`visibilityEnabled read failed for ${clientId}; treating as OFF: ${e}`);
+      return false;
+    }
   }
 
   /** Bust the cache for a tenant — called by AdminCoreService.upsertSetting after a write. */
@@ -209,6 +246,10 @@ export class TenantSettingsService {
         }
         case 'visibilityPhotoEnabled': {
           if (typeof v === 'boolean') out.visibilityPhotoEnabled = v;
+          break;
+        }
+        case 'visibilityEnabled': {
+          if (typeof v === 'boolean') out.visibilityEnabled = v;
           break;
         }
         case 'redemptionChannels': {

@@ -43,7 +43,10 @@ const mockPrisma = {
 };
 
 const mockTenant = { resolveClient: jest.fn(), upsertClientConfig: jest.fn() };
-const mockTenantSettings = { invalidate: jest.fn() };
+const mockTenantSettings = {
+  invalidate: jest.fn(),
+  getVisibilityEnabledUncached: jest.fn().mockResolvedValue(true),
+};
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };

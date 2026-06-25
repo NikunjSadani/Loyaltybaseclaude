@@ -10,6 +10,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { formatDate } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { authHeader } from '@/lib/api-client';
+import { useGifsySettings } from '@/lib/gifsy-settings';
 
 type VisibilityStatus = 'SUBMITTED' | 'APPROVED' | 'REJECTED' | 'UNDER_REVIEW';
 
@@ -74,6 +75,7 @@ function mapApiSubmission(s: ApiSubmission): VisibilitySubmission {
 }
 
 export default function SalesVisibilityPage() {
+  const settings = useGifsySettings();
   const [submissions, setSubmissions] = useState<VisibilitySubmission[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | VisibilityStatus>('ALL');
@@ -105,6 +107,17 @@ export default function SalesVisibilityPage() {
   const totalEarned = submissions
     .filter((s) => s.status === 'APPROVED')
     .reduce((sum, s) => sum + (s.pointsEarned ?? 0), 0);
+
+  // Master Visibility switch (per-tenant, default OFF) — hide the whole surface when off.
+  if (settings.visibilityEnabled !== true) {
+    return (
+      <div className="flex items-center justify-center min-h-48 fade-in">
+        <p className="text-sm text-gray-500 text-center px-6">
+          Visibility is not enabled for your organization.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5 fade-in">

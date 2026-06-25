@@ -15,6 +15,11 @@ import React from 'react';
 import { render, screen } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
+// Master Visibility switch ON so the page renders its surface (default is OFF → "not enabled").
+vi.mock('@/lib/gifsy-settings', () => ({
+  useGifsySettings: () => ({ visibilityEnabled: true }),
+}));
+
 import VisibilityPage from '../page';
 
 afterEach(() => { vi.unstubAllGlobals(); });

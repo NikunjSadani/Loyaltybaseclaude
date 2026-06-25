@@ -30,9 +30,10 @@ vi.mock('next/link', () => ({
 vi.mock('@/lib/visibility-upload', () => ({
   generateVisibilityTemplate: vi.fn().mockReturnValue(new ArrayBuffer(0)),
 }));
-// Display flag is ON for both cases — the consolidation must still hide the queue in AMOUNT_UPLOAD.
+// Master switch + display flag ON for both cases — the consolidation must still hide the queue in AMOUNT_UPLOAD.
 vi.mock('@/lib/gifsy-settings', () => ({
-  getGifsySettings: () => ({
+  useGifsySettings: () => ({
+    visibilityEnabled: true, // master switch ON
     visibilityPhotoEnabled: true,
     redemptionChannels: { physicalGifts: true, vouchers: true, bankTransfer: true },
     creditsPayouts: { monthCutoffDay: 28, safetyCapPoints: 50000, safetyCapInr: 100000, fourEyesEnabled: false },

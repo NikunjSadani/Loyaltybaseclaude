@@ -2,6 +2,7 @@ import {
   Injectable, NotFoundException, ForbiddenException, Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantSettingsService } from './tenant-settings.service';
 
 /**
  * The two supported visibility capture modes for a tenant.
@@ -45,7 +46,10 @@ export class TenantService {
   private cache = new Map<string, { config: ClientConfig; cachedAt: number }>();
   private readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly settings: TenantSettingsService,
+  ) {}
 
   /**
    * Resolve a client config by slug.
@@ -92,6 +96,18 @@ export class TenantService {
       // config row), fall back to the safe default rather than hard-crashing.
       return 'PHOTO_APPROVAL';
     }
+  }
+
+  /**
+   * Resolve the per-tenant MASTER Visibility switch (program_settings-backed).
+   * Returns false (OFF) when unset — visibility is opt-in. Reads UNCACHED so a tenant
+   * OFF→ON / ON→OFF flip is honoured immediately across every Cloud Run instance (the
+   * per-instance settings cache would otherwise leave the switch stale for up to 5 min
+   * on instances that did not serve the write — unacceptable for an enable/kill control).
+   * Fails CLOSED (read error / missing row / non-boolean → OFF). Callers 403 when false.
+   */
+  async resolveVisibilityEnabled(clientId: string): Promise<boolean> {
+    return this.settings.getVisibilityEnabledUncached(clientId);
   }
 
   /** Check if a specific feature is enabled for a client */

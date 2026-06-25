@@ -24,6 +24,7 @@ import {
 } from '@/lib/schemes';
 import { authHeader } from '@/lib/api-client';
 import { buildKycSubRows, buildVisibilityTaskItems, type KycSubRow } from '@/lib/sales-tasks';
+import { getGifsySettings } from '@/lib/gifsy-settings';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -603,9 +604,10 @@ export default function TasksPage() {
       const visibleOutlets = apiOutlets.filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type));
       const codes = visibleOutlets.map((o) => o.outletCode);
 
+      const visibilityEnabled = getGifsySettings().visibilityEnabled === true;
       return fetchOutletVisibilityStatuses(codes, currentMonth).then((apiMap) => {
         const merged: VisibilityStatusMap = apiMap;
-        setVisibilityItems(buildVisibilityTaskItems(visibleOutlets, merged));
+        setVisibilityItems(buildVisibilityTaskItems(visibleOutlets, merged, visibilityEnabled));
       });
     }).catch(() => {}).finally(() => setLoading(false));
   }, []);

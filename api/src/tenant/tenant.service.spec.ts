@@ -3,6 +3,7 @@
 
 import { Test, TestingModule } from '@nestjs/testing';
 import { TenantService } from './tenant.service';
+import { TenantSettingsService } from './tenant-settings.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotFoundException, ForbiddenException } from '@nestjs/common';
 
@@ -11,6 +12,13 @@ const mockPrisma = {
     findMany: jest.fn(),
     upsert:   jest.fn(),
   },
+};
+
+// TenantSettingsService mock — TenantService.resolveVisibilityEnabled delegates to
+// the UNCACHED read (getVisibilityEnabledUncached) for immediate cross-instance flips.
+const mockSettings = {
+  getEffectiveSettings: jest.fn().mockResolvedValue({ visibilityEnabled: false }),
+  getVisibilityEnabledUncached: jest.fn().mockResolvedValue(false),
 };
 
 const mockDeoleo = {
@@ -35,11 +43,13 @@ describe('TenantService', () => {
       providers: [
         TenantService,
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: TenantSettingsService, useValue: mockSettings },
       ],
     }).compile();
 
     service = module.get<TenantService>(TenantService);
     jest.clearAllMocks();
+    mockSettings.getVisibilityEnabledUncached.mockResolvedValue(false);
   });
 
   it('should be defined', () => {
@@ -93,6 +103,19 @@ describe('TenantService', () => {
       ]);
       const result = await service.isFeatureEnabled('deoleo', 'nonExistentFeature');
       expect(result).toBe(false);
+    });
+  });
+
+  describe('resolveVisibilityEnabled', () => {
+    it('returns the uncached visibilityEnabled flag from TenantSettingsService', async () => {
+      mockSettings.getVisibilityEnabledUncached.mockResolvedValue(true);
+      expect(await service.resolveVisibilityEnabled('deoleo')).toBe(true);
+      expect(mockSettings.getVisibilityEnabledUncached).toHaveBeenCalledWith('deoleo');
+    });
+
+    it('returns false (OFF) by default — visibility is opt-in', async () => {
+      mockSettings.getVisibilityEnabledUncached.mockResolvedValue(false);
+      expect(await service.resolveVisibilityEnabled('deoleo')).toBe(false);
     });
   });
 

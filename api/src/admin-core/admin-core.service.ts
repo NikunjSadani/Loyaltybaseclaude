@@ -644,7 +644,7 @@ export class AdminCoreService {
   async dashboardKpis(user: JwtPayload) {
     const clientId = user.clientId;
 
-    const [activePartners, pendingKyc, pendingVisibility, walletAggregate, payoutGroups] =
+    const [activePartners, pendingKyc, pendingVisibilityRaw, walletAggregate, payoutGroups, visibilityEnabled] =
       await Promise.all([
         this.prisma.channelPartner.count({
           where: { clientId, isActive: true, deletedAt: null },
@@ -675,7 +675,14 @@ export class AdminCoreService {
           _count: { id: true },
           _sum: { netAmountPaise: true },
         }),
+
+        // Master visibility switch — when OFF, the visibility KPI is suppressed so a
+        // disabled tenant's residual SUBMITTED rows are not surfaced on the dashboard.
+        this.tenantSettings.getVisibilityEnabledUncached(clientId),
       ]);
+
+    // Suppress the visibility KPI for a tenant whose visibility module is OFF.
+    const pendingVisibility = visibilityEnabled ? pendingVisibilityRaw : 0;
 
     const totalRedeemablePoints = walletAggregate._sum.redeemablePoints ?? 0;
 

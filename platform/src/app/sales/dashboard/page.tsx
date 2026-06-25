@@ -256,13 +256,15 @@ export default function SalesDashboard() {
        so the dashboard's "Visibility" count matches /sales/tasks. Field roles only. ── */
   useEffect(() => {
     const isFieldRole = role === 'XSR' || role === 'SO';
+    const visibilityEnabled = getGifsySettings().visibilityEnabled === true;
     const eligible = outlets.filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type));
     const codes = eligible.map((o) => o.outletCode).filter(Boolean);
-    if (!isFieldRole || codes.length === 0) { setVisibilityItems([]); return; }
+    // Master Visibility switch OFF (or non-field role / no outlets) → no visibility task group.
+    if (!visibilityEnabled || !isFieldRole || codes.length === 0) { setVisibilityItems([]); return; }
     const month = new Date().toISOString().slice(0, 7);
     let cancelled = false;
     fetchOutletVisibilityStatuses(codes, month)
-      .then((map) => { if (!cancelled) setVisibilityItems(buildVisibilityTaskItems(eligible, map)); })
+      .then((map) => { if (!cancelled) setVisibilityItems(buildVisibilityTaskItems(eligible, map, visibilityEnabled)); })
       .catch(() => { if (!cancelled) setVisibilityItems([]); });
     return () => { cancelled = true; };
   }, [outlets, role]);

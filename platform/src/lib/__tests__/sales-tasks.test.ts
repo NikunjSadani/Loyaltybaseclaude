@@ -56,10 +56,18 @@ describe('ST — buildVisibilityTaskItems', () => {
       O1: { status: 'APPROVED' },     // excluded
       O2: { status: 'UNDER_REVIEW' }, // medium
       O3: undefined,                  // not captured → high
-    });
+    }, true); // visibilityEnabled — master switch on
     expect(items.map((i) => i.id)).toEqual(['vis-2', 'vis-3']);
     expect(items.find((i) => i.id === 'vis-2')?.priority).toBe('medium');
     expect(items.find((i) => i.id === 'vis-3')?.priority).toBe('high');
     expect(items.every((i) => i.href === '/sales/visibility')).toBe(true);
+  });
+
+  it('ST5: master Visibility switch OFF (or omitted) → no task items', () => {
+    const statusMap = { O1: undefined, O2: undefined, O3: undefined };
+    // Omitted flag → default OFF.
+    expect(buildVisibilityTaskItems(outlets, statusMap)).toEqual([]);
+    // Explicit false → OFF.
+    expect(buildVisibilityTaskItems(outlets, statusMap, false)).toEqual([]);
   });
 });

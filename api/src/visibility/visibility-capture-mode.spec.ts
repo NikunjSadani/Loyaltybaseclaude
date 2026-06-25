@@ -21,6 +21,7 @@ import { BadRequestException } from '@nestjs/common';
 import { VisibilityService as PhotoVisibilityService } from './visibility.service';
 import { VisibilityService as AmountVisibilityService } from '../admin-programs/visibility.service';
 import { TenantService } from '../tenant/tenant.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -64,6 +65,9 @@ const mockPrisma = {
 function makeTenant(mode: 'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD' | undefined) {
   return {
     resolveVisibilityCaptureMode: jest.fn().mockResolvedValue(mode ?? 'PHOTO_APPROVAL'),
+    // Master visibility switch — default ON for these mode-gate tests (the master
+    // gate is exercised separately in visibility.service.spec.ts).
+    resolveVisibilityEnabled: jest.fn().mockResolvedValue(true),
   };
 }
 
@@ -220,6 +224,9 @@ describe('VisibilityCaptureMode gate — default (unset = PHOTO_APPROVAL)', () =
       providers: [
         TenantService,
         { provide: PrismaService, useValue: prismaWithConfig },
+        // TenantService now depends on TenantSettingsService (resolveVisibilityEnabled);
+        // this test only exercises resolveVisibilityCaptureMode, so a stub suffices.
+        { provide: TenantSettingsService, useValue: { getEffectiveSettings: jest.fn() } },
       ],
     }).compile();
 
