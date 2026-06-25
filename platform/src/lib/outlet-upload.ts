@@ -126,8 +126,14 @@ function isBlankOutletRow(row: OutletUploadRow): boolean {
 
 // ─── Header validators ────────────────────────────────────────────────────────
 
+/** Columns that may be absent from the upload (still shipped in the template so users
+ *  CAN fill them, but not compulsory). Owner 2026-06-25: Beat + Metro are optional. */
+export const OPTIONAL_OUTLET_HEADERS = ['Beat', 'Metro'] as const;
+
 export function validateOutletUploadHeaders(headers: readonly string[]): string | null {
-  const missing = (OUTLET_UPLOAD_HEADERS as readonly string[]).filter(h => !headers.includes(h));
+  const optional = new Set<string>(OPTIONAL_OUTLET_HEADERS);
+  const missing = (OUTLET_UPLOAD_HEADERS as readonly string[])
+    .filter(h => !optional.has(h) && !headers.includes(h));
   if (missing.length === 0) return null;
   return `Missing required column${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}`;
 }
@@ -140,50 +146,59 @@ export function validateReKYCFlagHeaders(headers: readonly string[]): string | n
 
 // ─── Row parsers ──────────────────────────────────────────────────────────────
 
-export function parseOutletUploadRows(rawRows: Record<string, string>[]): OutletUploadRow[] {
+/**
+ * Coerce a spreadsheet cell to a trimmed string. SheetJS returns NUMBERS for numeric
+ * cells (e.g. a Distributor ID typed as `304077`, or a numeric Outlet ID / Pincode),
+ * so a bare `(v ?? '').trim()` throws "trim is not a function" — which the upload
+ * handlers caught and mis-reported as "Failed to read file". This guards the whole
+ * row-parse layer against that class of crash regardless of how the sheet was read.
+ */
+const cell = (v: unknown): string => String(v ?? '').trim();
+
+export function parseOutletUploadRows(rawRows: Record<string, unknown>[]): OutletUploadRow[] {
   return rawRows.map((raw, idx) => ({
     rowNum:          idx + 2,  // row 1 = header
-    outletId:        (raw['Outlet ID']         ?? '').trim(),
-    outletName:      (raw['Outlet Name']        ?? '').trim(),
-    programName:     (raw['Program Name']       ?? '').trim(),
-    programCategory: (raw['Program Category']   ?? '').trim(),
-    outletType:      (raw['Outlet Type']        ?? '').trim(),
-    beat:            (raw['Beat']               ?? '').trim(),
-    distributorId:   (raw['Distributor ID']     ?? '').trim(),
-    distributorName: (raw['Distributor Name']   ?? '').trim(),
-    metro:           (raw['Metro']              ?? '').trim(),
-    city:            (raw['City']               ?? '').trim(),
-    state:           (raw['State']              ?? '').trim(),
-    zone:            (raw['Zone']               ?? '').trim(),
-    xsrId:           (raw['XSR ID']             ?? '').trim(),
+    outletId:        cell(raw['Outlet ID']),
+    outletName:      cell(raw['Outlet Name']),
+    programName:     cell(raw['Program Name']),
+    programCategory: cell(raw['Program Category']),
+    outletType:      cell(raw['Outlet Type']),
+    beat:            cell(raw['Beat']),
+    distributorId:   cell(raw['Distributor ID']),
+    distributorName: cell(raw['Distributor Name']),
+    metro:           cell(raw['Metro']),
+    city:            cell(raw['City']),
+    state:           cell(raw['State']),
+    zone:            cell(raw['Zone']),
+    xsrId:           cell(raw['XSR ID']),
   }));
 }
 
-export function parseReKYCFlagRows(rawRows: Record<string, string>[]): ReKYCFlagRow[] {
+export function parseReKYCFlagRows(rawRows: Record<string, unknown>[]): ReKYCFlagRow[] {
   return rawRows.map((raw, idx) => ({
     rowNum:          idx + 2,
-    outletId:        (raw['Outlet ID']                    ?? '').trim(),
-    outletName:      (raw['Outlet Name']                  ?? '').trim(),
-    ownerName:       (raw['Owner / Contact Name']          ?? '').trim(),
-    mobileNumber:    (raw['Mobile Number']                 ?? '').trim(),
-    gstNumber:       (raw['GST Number']                    ?? '').trim(),
-    panNumber:       (raw['PAN Number']                    ?? '').trim(),
-    streetAddress:   (raw['Street Address']                ?? '').trim(),
-    city:            (raw['City']                          ?? '').trim(),
-    pincode:         (raw['Pincode']                       ?? '').trim(),
-    state:           (raw['State']                         ?? '').trim(),
-    bankName:          (raw['Bank Name']                   ?? '').trim(),
-    accountHolderName: (raw['Account Holder Name']         ?? '').trim(),
-    accountNumber:     (raw['Account Number']              ?? '').trim(),
-    ifscCode:        (raw['IFSC Code']                     ?? '').trim(),
-    upiId:           (raw['UPI ID']                        ?? '').trim(),
-    gstCertificate:  (raw['GST Certificate (Document)']    ?? '').trim(),
-    ownerPhoto:      (raw['Owner Photo (Document)']        ?? '').trim(),
-    addressProof:    (raw['Address Proof (Document)']      ?? '').trim(),
-    storeBoardPhoto: (raw['Store Board Photo (Document)']  ?? '').trim(),
-    cancelledCheque: (raw['Cancelled Cheque (Document)']   ?? '').trim(),
-    selfDeclaration: (raw['Self Declaration (Document)']   ?? '').trim(),
-    remarks:         (raw['Remarks']                       ?? '').trim(),
+    outletId:        cell(raw['Outlet ID']),
+    outletName:      cell(raw['Outlet Name']),
+    ownerName:       cell(raw['Owner / Contact Name']),
+    mobileNumber:    cell(raw['Mobile Number']),
+    gstNumber:       cell(raw['GST Number']),
+    panNumber:       cell(raw['PAN Number']),
+    streetAddress:   cell(raw['Street Address']),
+    city:            cell(raw['City']),
+    pincode:         cell(raw['Pincode']),
+    state:           cell(raw['State']),
+    bankName:          cell(raw['Bank Name']),
+    accountHolderName: cell(raw['Account Holder Name']),
+    accountNumber:     cell(raw['Account Number']),
+    ifscCode:        cell(raw['IFSC Code']),
+    upiId:           cell(raw['UPI ID']),
+    gstCertificate:  cell(raw['GST Certificate (Document)']),
+    ownerPhoto:      cell(raw['Owner Photo (Document)']),
+    addressProof:    cell(raw['Address Proof (Document)']),
+    storeBoardPhoto: cell(raw['Store Board Photo (Document)']),
+    cancelledCheque: cell(raw['Cancelled Cheque (Document)']),
+    selfDeclaration: cell(raw['Self Declaration (Document)']),
+    remarks:         cell(raw['Remarks']),
   }));
 }
 
@@ -270,15 +285,10 @@ export function validateOutletUpload(
         errors.push(`Outlet Type "${row.outletType}" is invalid — ${typeHint}`);
       }
 
-      // 8. Beat required
-      if (!row.beat) {
-        errors.push('Beat is required');
-      }
+      // 8. Beat is OPTIONAL (owner 2026-06-25) — no requirement.
 
-      // 9. Metro must be Yes or No
-      if (!row.metro) {
-        errors.push('Metro is required — enter "Yes" or "No"');
-      } else if (!['yes', 'no'].includes(row.metro.toLowerCase())) {
+      // 9. Metro is OPTIONAL; if provided it must be Yes or No.
+      if (row.metro && !['yes', 'no'].includes(row.metro.toLowerCase())) {
         errors.push(`Metro "${row.metro}" is invalid — must be "Yes" or "No"`);
       }
 
@@ -511,10 +521,10 @@ export function getOutletAdditionTemplateData(
     ['Program Name',      `Must be one of: ${validPrograms.join(', ')}`],
     ['Program Category',  `Must be one of: ${validCategories.join(', ')}`],
     ['Outlet Type',       outletTypeRef],
-    ['Beat',              'Beat/area name this outlet belongs to'],
+    ['Beat',              'Optional — beat/area name this outlet belongs to, or leave blank'],
     ['Distributor ID',    'Reference only — enter distributor code if known, or leave blank'],
     ['Distributor Name',  'Reference only — distributor\'s business name, or leave blank'],
-    ['Metro',             'Is this outlet in a metro city? Enter Yes or No only'],
+    ['Metro',             'Optional — if filled, enter Yes or No only; otherwise leave blank'],
     ['City',              'City where the outlet is located'],
     ['State',             'State where the outlet is located'],
     ['Zone',              'Geographic sales zone this outlet belongs to (e.g. "West Zone", "North Zone"). Leave blank if not applicable.'],
@@ -523,14 +533,14 @@ export function getOutletAdditionTemplateData(
     ['✓ DOs', ''],
     ['DO',  'Use the exact Outlet ID format — alphanumeric and hyphens only'],
     ['DO',  'Ensure the XSR ID exists in the Employee Hierarchy before uploading'],
-    ['DO',  'Enter exactly "Yes" or "No" (without quotes) for the Metro column'],
+    ['DO',  'If you fill the Metro column, enter exactly "Yes" or "No" (without quotes)'],
     ['DO',  'Use the exact Program Name and Program Category values from the configured list'],
     ['DO',  'Keep Outlet IDs unique — this system does not allow editing via this upload'],
     ['', ''],
     ['✗ DON\'Ts', ''],
     ['DON\'T', 'Re-upload an existing Outlet ID — it will be rejected. This upload is for new outlets only.'],
     ['DON\'T', 'Enter an XSR ID that belongs to a non-field role (SO, ASM, RSM, ZNM, NSM) — only ISR-level IDs are accepted'],
-    ['DON\'T', 'Leave Outlet ID, Outlet Name, Program Name, Program Category, Outlet Type, Beat, Metro, City, State, or XSR ID blank'],
+    ['DON\'T', 'Leave Outlet ID, Outlet Name, Program Name, Program Category, Outlet Type, City, State, or XSR ID blank (Beat and Metro may be left blank)'],
     ['DON\'T', 'Use spaces or special characters in Outlet ID'],
     ['', ''],
     ['COMMON MISTAKES', ''],
@@ -625,11 +635,11 @@ const OUTLET_ID_RE = /^[A-Za-z0-9-]+$/;
  * Row numbers start at 2 (row 1 = header).
  */
 export function parseDeactivateRows(
-  raw: Record<string, string>[],
+  raw: Record<string, unknown>[],
 ): OutletDeactivateRow[] {
   const result: OutletDeactivateRow[] = [];
   raw.forEach((r, idx) => {
-    const outletId = (r['Outlet ID'] ?? '').trim();
+    const outletId = cell(r['Outlet ID']);
     if (!outletId) return; // skip blank rows silently
     result.push({ rowNum: idx + 2, outletId });
   });
@@ -819,10 +829,10 @@ export function generateOutletGuideHtml(validOutletTypes: string[] = []): string
   <tr><td><code>Program Name</code></td><td><span class="badge badge-red">Required</span></td><td>Must match a value from Settings → Programs</td></tr>
   <tr><td><code>Program Category</code></td><td><span class="badge badge-red">Required</span></td><td>Must match a value from Settings → Program Categories</td></tr>
   <tr><td><code>Outlet Type</code></td><td><span class="badge badge-red">Required</span></td><td>${outletTypeCell}</td></tr>
-  <tr><td><code>Beat</code></td><td><span class="badge badge-red">Required</span></td><td>Beat name for this outlet</td></tr>
+  <tr><td><code>Beat</code></td><td><span class="badge badge-green">Optional</span></td><td>Beat name for this outlet, or leave blank</td></tr>
   <tr><td><code>Distributor ID</code></td><td><span class="badge badge-green">Optional</span></td><td>Reference only — stored as-is, not validated</td></tr>
   <tr><td><code>Distributor Name</code></td><td><span class="badge badge-green">Optional</span></td><td>Reference only</td></tr>
-  <tr><td><code>Metro</code></td><td><span class="badge badge-red">Required</span></td><td>Enter exactly <code>Yes</code> or <code>No</code></td></tr>
+  <tr><td><code>Metro</code></td><td><span class="badge badge-green">Optional</span></td><td>If filled, enter exactly <code>Yes</code> or <code>No</code></td></tr>
   <tr><td><code>City</code></td><td><span class="badge badge-red">Required</span></td><td></td></tr>
   <tr><td><code>State</code></td><td><span class="badge badge-red">Required</span></td><td></td></tr>
   <tr><td><code>XSR ID</code></td><td><span class="badge badge-red">Required</span></td><td>Must be a valid ISR-level employee ID in the Employee Hierarchy</td></tr>

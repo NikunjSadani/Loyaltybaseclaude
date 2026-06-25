@@ -26,6 +26,12 @@
 | **K10** | **Same outlet appeared multiple times** in the sales KYC list (a rejected attempt + its resubmission are 2 rows) | The list **collapses to one row per outlet = the latest (current) status** (`dedupeByOutlet` by outletCode, max updatedAt); NOT_STARTED are disjoint; no-outlet submissions kept individually. | `16ba382` | ✅ pushed |
 > **STILL OPEN (flagged honestly):** the **"Anil Sharma / Awaiting SO" no-outlet KYC entry** (a submission whose partner has no linked outlet → falls back to the rep name) is a separate data oddity, not addressed.
 
+## 🟢 2026-06-25 SESSION (cont.) — outlet-master upload "Failed to read file" (numeric cell)
+| # | Found | Fix | Status |
+|---|---|---|---|
+| **K15** | Uploading a filled outlet-master template (to add outlets in Outlet Management) failed with **"Header Error — Failed to read file — please ensure it is a valid XLSX file"**. Diagnosed against the owner's actual file: it IS a valid xlsx (2382 rows, correct headers) — but a `Distributor ID` typed as a bare number (`304077`) comes back from SheetJS as a **number**, and `parseOutletUploadRows` did `(raw['Distributor ID'] ?? '').trim()` → `.trim is not a function` → caught by the handler's generic `catch` and mis-reported as "Failed to read file". (Same numeric-cell class as the earlier hierarchy `.trim` crash.) | (a) shared `parseXlsx` now reads with `{ raw: false }` → SheetJS returns formatted **strings** for every cell (fixes all 3 uploads: outlet / re-KYC / deactivate at the source, makes the `Record<string,string>` type honest); (b) hardened the three row parsers with a `cell(v)=String(v??'').trim()` coercion (defense-in-depth vs the whole numeric-cell class). Runtime-verified: the owner's exact file now parses all 2382 rows (`distributorId` → `"304077"`). Regression test O37 added. Gate: FE vitest **1499** · tsc 0. | ✅ fixed (pending push runtime-verify) |
+| **K15b** | Owner request (bundled): **Beat and Metro should be optional**, not compulsory, in the outlet-master upload. | Dropped the row-level "Beat is required" / "Metro is required" errors (Metro still validates Yes/No **when filled**); `validateOutletUploadHeaders` no longer requires the Beat/Metro **columns** (new `OPTIONAL_OUTLET_HEADERS`) — they remain in the generated template so users can still fill them. Template DO/DON'T + guide HTML re-badged Optional. Tests O5a/O14a/O14b added. | ✅ done |
+
 ## 🟢 2026-06-25 SESSION (cont.) — sales dashboard "achievement not showing" in Target Achievement
 | # | Found | Fix | Status |
 |---|---|---|---|

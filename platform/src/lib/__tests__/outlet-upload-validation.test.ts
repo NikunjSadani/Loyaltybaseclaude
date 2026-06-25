@@ -120,6 +120,11 @@ describe('outlet master header validation', () => {
     const lower = OUTLET_UPLOAD_HEADERS.map(h => h.toLowerCase());
     expect(validateOutletUploadHeaders(lower)).not.toBeNull();
   });
+
+  it('O5a — Beat and Metro columns are OPTIONAL — absence is accepted (owner 2026-06-25)', () => {
+    const without = OUTLET_UPLOAD_HEADERS.filter(h => h !== 'Beat' && h !== 'Metro');
+    expect(validateOutletUploadHeaders(without)).toBeNull();
+  });
 });
 
 // ─── O6–O14: Row validation — happy paths (CREATE) ───────────────────────────
@@ -188,6 +193,17 @@ describe('outlet master row validation — happy paths (CREATE)', () => {
     };
     const result = validateOutletUpload([blankRow], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows).toHaveLength(0);
+  });
+
+  it('O14a — blank Beat and blank Metro are accepted (optional fields, owner 2026-06-25)', () => {
+    const result = validateOutletUpload([makeRow({ beat: '', metro: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].status).not.toBe('ERROR');
+    expect(result.rows[0].errors.some(e => /beat|metro/i.test(e))).toBe(false);
+  });
+
+  it('O14b — a non-Yes/No Metro is still rejected when it IS filled', () => {
+    const result = validateOutletUpload([makeRow({ metro: 'Maybe' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].errors.some(e => /metro/i.test(e))).toBe(true);
   });
 });
 
@@ -377,6 +393,21 @@ describe('utility functions', () => {
     expect(rows[0].outletName).toBe('Test Shop');
     expect(rows[0].xsrId).toBe('ISR-M001');
     expect(rows[0].rowNum).toBe(2);
+  });
+
+  it('O37 — parseOutletUploadRows coerces NUMERIC cells (no .trim crash on a numeric Distributor ID)', () => {
+    // SheetJS returns numbers for numeric cells (a Distributor ID typed as 304077).
+    // Regression: a bare `.trim()` on that threw and surfaced as "Failed to read file".
+    const raw = [{
+      'Outlet ID': 'DAMD0604', 'Outlet Name': 'Alka Stores', 'Program Name': 'Sambandh 2.0',
+      'Program Category': 'Gold', 'Outlet Type': 'SSS', 'Beat': 'TBD',
+      'Distributor ID': 304077, 'Distributor Name': 'V H Marketing (304077)',
+      'City': 'Ahmedabad', 'State': 'Gujarat', 'XSR ID': 'XSR-M00100',
+    }] as unknown as Record<string, unknown>[];
+    expect(() => parseOutletUploadRows(raw)).not.toThrow();
+    const rows = parseOutletUploadRows(raw);
+    expect(rows[0].distributorId).toBe('304077'); // coerced to a trimmed string
+    expect(rows[0].outletId).toBe('DAMD0604');
   });
 
   it('O38 — isYes returns true for Yes/YES/yes, false for everything else', () => {

@@ -434,7 +434,12 @@ export default function OutletsPage() {
             return;
           }
           const sheet = workbook.Sheets[sheetName];
-          const rows      = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, { defval: '' });
+          // raw:false → SheetJS returns FORMATTED STRINGS for every cell. Without it,
+          // a numeric cell (e.g. a Distributor ID typed as 304077) comes back as a
+          // NUMBER, and the row parsers' `.trim()` throws — surfacing as the misleading
+          // "Failed to read file" header error. This makes the Record<string,string>
+          // type honest for all three uploads (outlet / re-KYC / deactivate).
+          const rows      = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, { defval: '', raw: false });
           resolve(rows);
         } catch (err) {
           reject(err);
