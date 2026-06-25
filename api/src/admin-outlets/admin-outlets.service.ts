@@ -557,6 +557,40 @@ export class AdminOutletsService {
         where: { outletId: { in: activeIds }, unassignedAt: null },
         data: { unassignedAt: now },
       });
+
+      // Kick partners whose LAST active outlet was just deactivated: revoke their
+      // live sessions so an already-open app stops working immediately (the login
+      // + refresh gates in AuthService then block re-entry). A multi-outlet partner
+      // who still has an active outlet keeps their session. 3 set-based queries,
+      // independent of batch size.
+      const deactivated = await tx.outlet.findMany({
+        where: { id: { in: activeIds } },
+        select: { partnerId: true },
+      });
+      const partnerIds = [
+        ...new Set(deactivated.map((o) => o.partnerId).filter((p): p is string => !!p)),
+      ];
+      if (partnerIds.length > 0) {
+        const stillActive = await tx.outlet.groupBy({
+          by: ['partnerId'],
+          where: { partnerId: { in: partnerIds }, clientId, isActive: true, deletedAt: null },
+        });
+        const stillActiveIds = new Set(stillActive.map((g) => g.partnerId));
+        const strandedPartnerIds = partnerIds.filter((p) => !stillActiveIds.has(p));
+        if (strandedPartnerIds.length > 0) {
+          const partners = await tx.channelPartner.findMany({
+            where: { id: { in: strandedPartnerIds } },
+            select: { userId: true },
+          });
+          const userIds = partners.map((p) => p.userId).filter((u): u is string => !!u);
+          if (userIds.length > 0) {
+            await tx.userSession.updateMany({
+              where: { userId: { in: userIds }, revokedAt: null },
+              data: { revokedAt: now },
+            });
+          }
+        }
+      }
     });
 
     const notFound = outletCodes.filter((c) => !outlets.some((o) => o.outletCode === c));

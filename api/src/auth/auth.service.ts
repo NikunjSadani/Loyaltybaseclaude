@@ -216,6 +216,11 @@ export class AuthService {
       throw new ForbiddenException('Your account is pending activation. Please contact your Deoleo representative.');
     }
 
+    // Deactivated-outlet gate (see assertPartnerNotDeactivated). Runs on BOTH the
+    // OTP login here AND the refresh path, so a partner deactivated mid-session
+    // cannot keep minting access tokens via their long-lived refresh token.
+    await this.assertPartnerNotDeactivated(user.id, clientId);
+
     // Update last login
     await this.prisma.user.update({
       where: { id: user.id },
@@ -393,6 +398,14 @@ export class AuthService {
     // GIFSY_ADMIN — a demoted operator falls back to their home scope.
     const isAssumed =
       session.clientId !== session.user.clientId && session.user.role === 'GIFSY_ADMIN';
+
+    // Re-apply the deactivated-outlet gate on every refresh. The session row was
+    // already revoked by the atomic claim above, so a deactivated partner who
+    // tries to refresh is denied AND loses the session (must re-login, which is
+    // also blocked). Scoped to the user's HOME tenant — an assumed operator is a
+    // GIFSY_ADMIN with no ChannelPartner, so this is a no-op for that flow.
+    await this.assertPartnerNotDeactivated(session.user.id, session.user.clientId);
+
     return this.generateTokens(
       session.user,
       isAssumed ? { clientIdOverride: session.clientId, assumed: true, expiresIn: '8h' } : undefined,
@@ -400,6 +413,31 @@ export class AuthService {
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────────
+
+  /**
+   * Block a deactivated partner from obtaining OR refreshing a session. The
+   * login identity is the ChannelPartner (1 User → 1 partner → 1..n outlets);
+   * the admin outlet-deactivate flow flips Outlet.isActive=false without touching
+   * User.status, so this is the authoritative live check. No-op for non-partner
+   * users (sales/admin have no ChannelPartner). Throws when the partner is itself
+   * deactivated OR has NO active, non-deleted outlet left. A multi-outlet partner
+   * with ≥1 active outlet is never stranded. Tenant-scoped by `clientId`.
+   */
+  private async assertPartnerNotDeactivated(userId: string, clientId: string): Promise<void> {
+    const partner = await this.prisma.channelPartner.findFirst({
+      where: { userId, clientId, deletedAt: null },
+      select: { id: true, isActive: true },
+    });
+    if (!partner) return;
+    const activeOutlets = await this.prisma.outlet.count({
+      where: { partnerId: partner.id, clientId, isActive: true, deletedAt: null },
+    });
+    if (partner.isActive === false || activeOutlets === 0) {
+      throw new ForbiddenException(
+        'Your account is inactive — your outlet has been deactivated. Please contact your Deoleo representative.',
+      );
+    }
+  }
 
   private generateOtpCode(): string {
     // 6-digit OTP: 100000–999999

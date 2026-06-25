@@ -23,6 +23,10 @@ const mockPrisma = {
   userSession: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   client:  { findFirst: jest.fn() },
   auditLog: { create: jest.fn() },
+  // Deactivated-outlet login gate: default to "no partner" so non-partner logins
+  // skip the gate; the partner-login tests below override these.
+  channelPartner: { findFirst: jest.fn() },
+  outlet: { count: jest.fn() },
   // TenantSettingsService reads this (no rows -> typed defaults, conversionRate = env).
   programSetting: { findMany: jest.fn().mockResolvedValue([]) },
 };
@@ -190,6 +194,13 @@ describe('AuthService', () => {
     const clientId = 'deoleo';
     const validOtp = { id: 'otp_1', code: '1234', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000), verifiedAt: null };
 
+    // The getMe block reassigns mockPrisma.channelPartner to a findUnique-only stub;
+    // restore the findFirst + outlet.count shape the deactivated-outlet gate needs.
+    beforeEach(() => {
+      (mockPrisma as any).channelPartner = { findFirst: jest.fn() };
+      (mockPrisma as any).outlet = { count: jest.fn() };
+    });
+
     it('should return access + refresh tokens on correct OTP', async () => {
       mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
       mockPrisma.otpCode.update.mockResolvedValue({});
@@ -200,6 +211,86 @@ describe('AuthService', () => {
 
       expect(result.accessToken).toBe('mock.jwt.token');
       expect(result.refreshToken).toBeTruthy();
+    });
+
+    // ── Deactivated-outlet login gate (owner: a deactivated outlet must not log in) ──
+    it('blocks a partner login when ALL their outlets are deactivated (0 active)', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'user_1', role: 'WHOLESALER', clientId, status: 'ACTIVE' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', isActive: true });
+      mockPrisma.outlet.count.mockResolvedValue(0); // every outlet deactivated/deleted
+
+      await expect(service.verifyOtp(phone, '1234', clientId)).rejects.toThrow('deactivated');
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled(); // no session minted
+    });
+
+    it('blocks a partner login when the ChannelPartner itself is deactivated', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'user_1', role: 'SSS', clientId, status: 'ACTIVE' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', isActive: false });
+      mockPrisma.outlet.count.mockResolvedValue(1); // even with an active outlet, the partner is off
+
+      await expect(service.verifyOtp(phone, '1234', clientId)).rejects.toThrow('inactive');
+    });
+
+    it('allows a partner login when at least ONE outlet is still active', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'user_1', role: 'WHOLESALER', clientId, status: 'ACTIVE' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', isActive: true });
+      mockPrisma.outlet.count.mockResolvedValue(2); // multi-outlet partner, one deactivated, one still active
+      mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_1' });
+
+      const result = await service.verifyOtp(phone, '1234', clientId);
+      expect(result.accessToken).toBe('mock.jwt.token');
+      // The active-outlet count is scoped to active + non-deleted outlets for THIS partner.
+      expect(mockPrisma.outlet.count).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ partnerId: 'cp1', isActive: true, deletedAt: null }) }),
+      );
+    });
+
+    it('does not gate a non-partner login (sales/admin have no ChannelPartner)', async () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValue(validOtp);
+      mockPrisma.otpCode.update.mockResolvedValue({});
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'su_1', role: 'SALES_SO', clientId, status: 'ACTIVE' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null); // no partner → gate skipped
+      mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_1' });
+
+      const result = await service.verifyOtp(phone, '1234', clientId);
+      expect(result.accessToken).toBe('mock.jwt.token');
+      expect(mockPrisma.outlet.count).not.toHaveBeenCalled(); // never even checks outlets
+    });
+
+    // The same gate MUST run on refresh — else a partner deactivated mid-session
+    // keeps minting access tokens via their 30-day refresh token (audit F1).
+    it('refresh is BLOCKED for a partner whose outlets were all deactivated', async () => {
+      (mockPrisma as any).channelPartner = { findFirst: jest.fn().mockResolvedValue({ id: 'cp1', isActive: true }) };
+      (mockPrisma as any).outlet = { count: jest.fn().mockResolvedValue(0) };
+      mockPrisma.userSession.findFirst.mockResolvedValue({
+        id: 'sess_d', clientId, refreshToken: 'rt', revokedAt: null,
+        expiresAt: new Date(Date.now() + 60000),
+        user: { id: 'u1', role: 'WHOLESALER', clientId },
+      });
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 }); // atomic claim wins (session now revoked)
+
+      await expect(service.refreshToken('rt')).rejects.toThrow('inactive');
+    });
+
+    it('refresh SUCCEEDS for a partner that still has an active outlet', async () => {
+      (mockPrisma as any).channelPartner = { findFirst: jest.fn().mockResolvedValue({ id: 'cp1', isActive: true }) };
+      (mockPrisma as any).outlet = { count: jest.fn().mockResolvedValue(1) };
+      mockPrisma.userSession.findFirst.mockResolvedValue({
+        id: 'sess_ok', clientId, refreshToken: 'rt', revokedAt: null,
+        expiresAt: new Date(Date.now() + 60000),
+        user: { id: 'u1', role: 'WHOLESALER', clientId },
+      });
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_new' });
+
+      const result = await service.refreshToken('rt');
+      expect(result.accessToken).toBe('mock.jwt.token');
     });
 
     it('should throw on expired OTP', async () => {

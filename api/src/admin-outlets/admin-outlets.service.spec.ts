@@ -12,8 +12,10 @@ import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockTx = {
-  outlet: { findUnique: jest.fn(), upsert: jest.fn(), updateMany: jest.fn() },
+  outlet: { findUnique: jest.fn(), upsert: jest.fn(), updateMany: jest.fn(), findMany: jest.fn(), groupBy: jest.fn() },
   salesUserAssignment: { updateMany: jest.fn(), create: jest.fn() },
+  channelPartner: { findMany: jest.fn() },
+  userSession: { updateMany: jest.fn() },
   auditLog: { create: jest.fn() },
 };
 
@@ -47,6 +49,11 @@ describe('AdminOutletsService', () => {
     // list() now also reads the tenant's enabled outlet types; default to none so the
     // pre-existing list tests don't have to mock it (upsert tests override as needed).
     mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
+    // deactivate()'s session-revoke step queries these inside the tx; default to
+    // "no partners stranded" so the pre-existing deactivate tests don't have to mock it.
+    mockTx.outlet.findMany.mockResolvedValue([]);
+    mockTx.outlet.groupBy.mockResolvedValue([]);
+    mockTx.channelPartner.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdminOutletsService,
@@ -229,6 +236,35 @@ describe('AdminOutletsService', () => {
     it('deactivate throws when no active outlets match', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([]);
       await expect(service.deactivate(admin, { outletCodes: ['OUT-X'] })).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('revokes the live sessions of a partner whose LAST active outlet is deactivated', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletCode: 'OUT-1' }]);
+      mockTx.outlet.findMany.mockResolvedValue([{ partnerId: 'cp1' }]);       // deactivated outlet belongs to cp1
+      mockTx.outlet.groupBy.mockResolvedValue([]);                            // cp1 has NO remaining active outlet
+      mockTx.channelPartner.findMany.mockResolvedValue([{ userId: 'u1' }]);
+      mockTx.userSession.updateMany.mockResolvedValue({ count: 1 });
+
+      await service.deactivate(admin, { outletCodes: ['OUT-1'] });
+
+      expect(mockTx.channelPartner.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: { in: ['cp1'] } } }),
+      );
+      expect(mockTx.userSession.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { userId: { in: ['u1'] }, revokedAt: null } }),
+      );
+    });
+
+    it('does NOT revoke sessions when the partner still has another active outlet', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletCode: 'OUT-1' }]);
+      mockTx.outlet.findMany.mockResolvedValue([{ partnerId: 'cp1' }]);
+      mockTx.outlet.groupBy.mockResolvedValue([{ partnerId: 'cp1' }]);        // cp1 STILL has an active outlet
+      mockTx.userSession.updateMany.mockResolvedValue({ count: 0 });
+
+      await service.deactivate(admin, { outletCodes: ['OUT-1'] });
+
+      expect(mockTx.channelPartner.findMany).not.toHaveBeenCalled();
+      expect(mockTx.userSession.updateMany).not.toHaveBeenCalled();
     });
 
     it('reactivate scopes by clientId + isActive false and flips them active', async () => {
