@@ -67,8 +67,10 @@ function downloadBlob(blob: Blob, filename: string) {
 export default function TargetUploadPage() {
   // Month range for template
   const monthOptions = buildMonthRange(12);
+  // Default both ends to the CURRENT month (monthOptions[0]) — a single-month
+  // template is the common case; the admin widens the range when needed.
   const [fromMonth, setFromMonth] = useState(monthOptions[0]?.value ?? '');
-  const [toMonth,   setToMonth]   = useState(monthOptions[2]?.value ?? monthOptions[0]?.value ?? '');
+  const [toMonth,   setToMonth]   = useState(monthOptions[0]?.value ?? '');
 
   // Upload state
   const fileInputRef  = useRef<HTMLInputElement>(null);
