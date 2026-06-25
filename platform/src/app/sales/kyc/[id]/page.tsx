@@ -30,6 +30,10 @@ interface KYCDetail {
   city: string;
   state: string;
   pincode?: string;
+  // KYC-captured geo. boardGeo is taken when the store-board photo is shot (the
+  // outlet's physical location); paymentGeo when the cheque/UPI is captured.
+  boardGeo?: { lat: number; lng: number } | null;
+  paymentGeo?: { lat: number; lng: number } | null;
   partnerClass: string;
   outletId?: string;
   outletCode?: string;
@@ -156,6 +160,15 @@ function openDocument(viewUrl: string): void {
   }
   // Non-data URLs: only follow http(s) (never javascript:/other schemes).
   if (/^https?:\/\//i.test(viewUrl)) window.open(viewUrl, '_blank', 'noopener,noreferrer');
+}
+
+/** Coerce a KYC-captured lat/lng pair (Prisma Decimal → JSON string) into numbers.
+ *  Returns null unless BOTH are present and finite (a half-captured geo is not a point). */
+function parseGeo(lat: unknown, lng: unknown): { lat: number; lng: number } | null {
+  const la = Number(lat);
+  const ln = Number(lng);
+  if (lat == null || lng == null || !Number.isFinite(la) || !Number.isFinite(ln)) return null;
+  return { lat: la, lng: ln };
 }
 
 function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
@@ -466,6 +479,9 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           city:            s.partner?.outlets?.[0]?.city       ?? '',
           state:           s.partner?.outlets?.[0]?.state      ?? '',
           pincode:         s.partner?.outlets?.[0]?.pincode    ?? '',
+          // Geo captured during KYC (lives on the submission, not the outlet).
+          boardGeo:        parseGeo(s.boardPhotoLat, s.boardPhotoLng),
+          paymentGeo:      parseGeo(s.paymentLat, s.paymentLng),
           partnerClass:    '',
           status:          (s.status as KYCStatus)            ?? KYCStatus.SUBMITTED,
           submittedAt:     s.submittedAt                      ?? new Date().toISOString(),
@@ -695,6 +711,20 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                     </div>
                   </div>
                 ))}
+                {(() => {
+                  // KYC-captured geo: prefer the store-board location (the outlet's
+                  // physical spot), fall back to the payment-capture location.
+                  const geo = kyc.boardGeo ?? kyc.paymentGeo;
+                  return geo ? (
+                    <div className="flex items-start gap-2" data-testid="kyc-store-location">
+                      <span className="text-gray-400 mt-0.5 shrink-0"><MapPin className="h-3.5 w-3.5" /></span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs text-gray-400">Location (lat, long)</p>
+                        <p className="text-sm font-mono text-gray-800">{geo.lat.toFixed(6)}, {geo.lng.toFixed(6)}</p>
+                      </div>
+                    </div>
+                  ) : null;
+                })()}
                 {kyc.outletCode && (
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-gray-400">Outlet Code</span>

@@ -93,6 +93,9 @@ interface ApiKycDetail {
   createdAt?: string;
   rejectionReason?: string | null;
   reviewerNotes?: string | null;
+  // KYC-captured geo (Prisma Decimal → JSON string on the wire).
+  boardPhotoLat?: string | number | null; boardPhotoLng?: string | number | null;
+  paymentLat?: string | number | null; paymentLng?: string | number | null;
   user: { id: string; name: string; phone: string; role?: string };
   partner?: {
     id: string; businessName: string; ownerName?: string | null; partnerCode?: string | null;
@@ -113,6 +116,8 @@ type KycDetailShape = {
   id: string; outletCode: string; outletName: string; firmName: string; ownerName: string; mobile: string; email: string;
   partnerClass: string; gstNumber: string; panNumber: string;
   address: string; city: string; state: string; pincode: string;
+  boardGeo: { lat: number; lng: number } | null;
+  paymentGeo: { lat: number; lng: number } | null;
   salesUser: string; territory: string; region: string;
   submittedDate: string; ageHrs: number; status: string;
   bankName: string; accountNumber: string; ifscCode: string; upiId: string;
@@ -123,6 +128,15 @@ type KycDetailShape = {
   documents: Array<{ id: string; type: string; label: string; url: string; status: 'pending' | 'verified' | 'rejected' }>;
   verificationItems: Array<{ fieldKey: string; decision: string; remark?: string | null; source?: string | null }>;
 };
+
+/** Coerce a KYC-captured lat/lng pair (Prisma Decimal → JSON string) into numbers.
+ *  Returns null unless BOTH are present and finite. */
+function parseGeo(lat: unknown, lng: unknown): { lat: number; lng: number } | null {
+  const la = Number(lat);
+  const ln = Number(lng);
+  if (lat == null || lng == null || !Number.isFinite(la) || !Number.isFinite(ln)) return null;
+  return { lat: la, lng: ln };
+}
 
 function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
   const submittedAt = s.submittedAt ?? s.createdAt ?? '';
@@ -152,6 +166,9 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     city:             s.partner?.outlets?.[0]?.city ?? s.partner?.city ?? '',
     state:            s.partner?.outlets?.[0]?.state ?? s.partner?.state ?? '',
     pincode:          s.partner?.outlets?.[0]?.pincode ?? s.partner?.pincode ?? '',
+    // Geo captured during KYC (on the submission, not the outlet).
+    boardGeo:         parseGeo(s.boardPhotoLat, s.boardPhotoLng),
+    paymentGeo:       parseGeo(s.paymentLat, s.paymentLng),
     salesUser:        '',
     territory:        '',
     region:           '',
@@ -546,9 +563,21 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
               <div className="flex gap-2 items-start">
                 <span className="text-gray-500 w-24 flex-shrink-0">Address</span>
                 <span className="text-gray-800">
-                  {kyc.address}, {kyc.city}, {kyc.state} - {kyc.pincode}
+                  {[kyc.address, kyc.city, kyc.state, kyc.pincode].filter(Boolean).join(', ') || '—'}
                 </span>
               </div>
+              {(() => {
+                // KYC-captured geo: store-board location preferred, payment-capture fallback.
+                const geo = kyc.boardGeo ?? kyc.paymentGeo;
+                return geo ? (
+                  <div className="flex gap-2 items-start" data-testid="kyc-location">
+                    <span className="text-gray-500 w-24 flex-shrink-0">Location</span>
+                    <span className="text-gray-800 font-mono">
+                      {geo.lat.toFixed(6)}, {geo.lng.toFixed(6)}
+                    </span>
+                  </div>
+                ) : null;
+              })()}
             </div>
           </div>
 
