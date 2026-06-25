@@ -181,6 +181,38 @@ describe('AdminOutletsService', () => {
       expect(res.updated).toBe(1);
       expect(res.rows[0].action).toBe('UPDATE');
     });
+
+    it('REACTIVATES a previously-deactivated outlet on re-upload (isActive→true, deactivatedAt cleared)', async () => {
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletType: { id: 'type1', code: 'SSS', isActive: true } },
+      ]);
+      // existing, INACTIVE, and was genuinely DEACTIVATED (deactivatedAt set).
+      mockTx.outlet.findUnique.mockResolvedValue({ id: 'o1', isActive: false, deactivatedAt: new Date('2026-06-20') });
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '' }],
+      });
+      expect(res.rows[0].action).toBe('REACTIVATE');
+      expect(res.reactivated).toBe(1);
+      const upsertArgs = mockTx.outlet.upsert.mock.calls[0][0];
+      expect(upsertArgs.update).toMatchObject({ isActive: true, deactivatedAt: null });
+    });
+
+    it('does NOT activate a still-PENDING outlet on re-upload (KYC approval owns activation)', async () => {
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletType: { id: 'type1', code: 'SSS', isActive: true } },
+      ]);
+      // existing, INACTIVE, but NEVER deactivated (deactivatedAt null) → pending KYC.
+      mockTx.outlet.findUnique.mockResolvedValue({ id: 'o1', isActive: false, deactivatedAt: null });
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '' }],
+      });
+      expect(res.rows[0].action).toBe('UPDATE');
+      expect(res.reactivated).toBe(0);
+      const upsertArgs = mockTx.outlet.upsert.mock.calls[0][0];
+      expect(upsertArgs.update.isActive).toBeUndefined(); // isActive left untouched
+    });
   });
 
   describe('rekycFlag', () => {

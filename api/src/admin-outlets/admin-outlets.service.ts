@@ -144,7 +144,7 @@ export interface UpsertRowResult {
   rowNum: number;
   outletId: string;
   status: 'OK' | 'ERROR';
-  action: 'CREATE' | 'UPDATE';
+  action: 'CREATE' | 'UPDATE' | 'REACTIVATE';
   errors: string[];
 }
 
@@ -348,6 +348,7 @@ export class AdminOutletsService {
     const rowResults: UpsertRowResult[] = [];
     let created = 0;
     let updated = 0;
+    let reactivated = 0;
     const now = new Date();
 
     for (const row of dto.rows) {
@@ -386,13 +387,22 @@ export class AdminOutletsService {
       const action = await this.prisma.$transaction(async (tx) => {
         const existing = await tx.outlet.findUnique({
           where: { clientId_outletCode: { clientId, outletCode } },
-          select: { id: true },
+          select: { id: true, isActive: true, deactivatedAt: true },
         });
+
+        // Re-uploading a previously-DEACTIVATED outlet (it was active, then turned
+        // off → deactivatedAt set) REACTIVATES it. A still-PENDING outlet (created
+        // inactive, never deactivated → deactivatedAt null) is NOT activated here —
+        // only KYC approval activates a pending outlet, so a re-upload can't bypass
+        // KYC. (buildOutletUpdate deliberately leaves isActive untouched.)
+        const reactivate = !!existing && !existing.isActive && existing.deactivatedAt != null;
 
         const outlet = await tx.outlet.upsert({
           where: { clientId_outletCode: { clientId, outletCode } },
           create: buildOutletCreate(clientId, outletCode, data),
-          update: buildOutletUpdate(data),
+          update: reactivate
+            ? { ...buildOutletUpdate(data), isActive: true, reactivatedAt: now, deactivatedAt: null }
+            : buildOutletUpdate(data),
         });
 
         // Re-tag: close any active assignment for this outlet, then attach the XSR.
@@ -406,10 +416,11 @@ export class AdminOutletsService {
           });
         }
 
-        return existing ? ('UPDATE' as const) : ('CREATE' as const);
+        return !existing ? ('CREATE' as const) : reactivate ? ('REACTIVATE' as const) : ('UPDATE' as const);
       });
 
       if (action === 'CREATE') created++;
+      else if (action === 'REACTIVATE') reactivated++;
       else updated++;
       rowResults.push({ rowNum: row.rowNum, outletId: outletCode, status: 'OK', action, errors: [] });
     }
@@ -418,9 +429,10 @@ export class AdminOutletsService {
     return {
       created,
       updated,
+      reactivated,
       errors: errorRows,
       rows: rowResults,
-      message: `${created} created, ${updated} updated${errorRows.length ? `, ${errorRows.length} row(s) failed` : ''}`,
+      message: `${created} created, ${updated} updated${reactivated ? `, ${reactivated} reactivated` : ''}${errorRows.length ? `, ${errorRows.length} row(s) failed` : ''}`,
     };
   }
 
@@ -623,7 +635,9 @@ export class AdminOutletsService {
 
     await this.prisma.outlet.updateMany({
       where: { id: { in: inactiveIds } },
-      data: { isActive: true, reactivatedAt: new Date() },
+      // Clear deactivatedAt so a reactivated outlet no longer reads as "deactivated"
+      // (e.g. in the Outlet Master export's Deactivated-At column).
+      data: { isActive: true, reactivatedAt: new Date(), deactivatedAt: null },
     });
 
     const notFound = outletCodes.filter((c) => !outlets.some((o) => o.outletCode === c));
