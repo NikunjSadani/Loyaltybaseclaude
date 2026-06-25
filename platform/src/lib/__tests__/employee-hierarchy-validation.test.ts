@@ -13,7 +13,6 @@ import {
   validateHeaders,
   validateEmployeeUpload,
   validatePhone,
-  validateEmployeeId,
   resolveRole,
   parseUploadRows,
   REQUIRED_HEADERS,
@@ -228,10 +227,11 @@ describe('H14–H25 — Row error cases', () => {
     expect(result.rows[0].errors.some(e => /employee id is required/i.test(e))).toBe(true);
   });
 
-  it('H15: Employee ID with spaces → row error (invalid characters)', () => {
-    const row = makeRow({ employeeId: 'ISR M001' });
+  it('H15: Employee ID with spaces/colons is ACCEPTED (owner removed the char rule)', () => {
+    const row = makeRow({ employeeId: 'Brahma:DSR Bangalore 1' });
     const result = validateEmployeeUpload([row], BASE_EMPLOYEES, config);
-    expect(result.rows[0].errors.some(e => /invalid characters/i.test(e))).toBe(true);
+    // No "invalid characters" error — the only id check left is required + unique.
+    expect(result.rows[0].errors.some(e => /invalid characters/i.test(e))).toBe(false);
   });
 
   it('H16: duplicate Employee ID within upload → error on second row', () => {
@@ -486,17 +486,6 @@ describe('Utility functions', () => {
     expect(validatePhone('+919876543210')).toBe(false);
   });
 
-  it('validateEmployeeId: alphanumeric → true', () => {
-    expect(validateEmployeeId('Pune101')).toBe(true);
-    expect(validateEmployeeId('ISR-M001')).toBe(true);
-    expect(validateEmployeeId('SO_PUN1')).toBe(true);
-  });
-  it('validateEmployeeId: spaces → false', () => {
-    expect(validateEmployeeId('ISR M001')).toBe(false);
-  });
-  it('validateEmployeeId: comma → false', () => {
-    expect(validateEmployeeId('ISR,M001')).toBe(false);
-  });
 
   it('resolveRole: case-insensitive match', () => {
     expect(resolveRole('xsr', DEOLEO_HIERARCHY)).not.toBeNull();

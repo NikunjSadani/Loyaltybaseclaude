@@ -15,6 +15,7 @@ import {
   validateHierarchyChainHeaders,
   parseHierarchyChainRows,
   generateHierarchyChainErrorReport,
+  generateHierarchyRowErrorReport,
   getHierarchyChainTemplateData,
   getHierarchyChainHeaders,
   buildHierarchyChainExportRows,
@@ -198,20 +199,30 @@ function downloadCurrentHierarchy(employees: HierarchyEmployee[]) {
   URL.revokeObjectURL(url);
 }
 
-function downloadErrorReport(
-  rawRows: Record<string, string>[],
-  parseResult: HierarchyChainParseResult,
-) {
-  const bytes  = generateHierarchyChainErrorReport(rawRows, parseResult, CONFIG);
-  const blob   = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const url    = URL.createObjectURL(blob);
-  const link   = document.createElement('a');
-  link.href    = url;
-  link.download = 'Hierarchy_Error_Report.xlsx';
+function triggerXlsxDownload(bytes: Uint8Array, filename: string) {
+  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url  = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href     = url;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
+}
+
+function downloadErrorReport(
+  rawRows: Record<string, string>[],
+  parseResult: HierarchyChainParseResult,
+) {
+  triggerXlsxDownload(generateHierarchyChainErrorReport(rawRows, parseResult, CONFIG), 'Hierarchy_Error_Report.xlsx');
+}
+
+function downloadRowErrorReport(
+  rawRows: Record<string, string>[],
+  validation: EmployeeUploadValidationResult,
+) {
+  triggerXlsxDownload(generateHierarchyRowErrorReport(rawRows, validation, CONFIG), 'Hierarchy_Error_Report.xlsx');
 }
 
 function downloadGuide() {
@@ -641,12 +652,30 @@ export default function HierarchyPage() {
                         }
                       </p>
                     </div>
-                    <div className="flex gap-3 text-xs text-gray-500">
-                      <span>{validation.summary.total} employees</span>
-                      <span className="text-blue-600 font-medium">+{validation.summary.creates} new</span>
-                      <span className="text-purple-600 font-medium">~{validation.summary.updates} updates</span>
+                    <div className="flex items-center gap-3">
+                      {validation.hasErrors && rawRows.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => downloadRowErrorReport(rawRows, validation)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-300 bg-white text-red-700 text-xs font-semibold hover:bg-red-50 transition-colors flex-shrink-0"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          Download Error Report
+                        </button>
+                      )}
+                      <div className="flex gap-3 text-xs text-gray-500">
+                        <span>{validation.summary.total} employees</span>
+                        <span className="text-blue-600 font-medium">+{validation.summary.creates} new</span>
+                        <span className="text-purple-600 font-medium">~{validation.summary.updates} updates</span>
+                      </div>
                     </div>
                   </div>
+                  {validation.hasErrors && (
+                    <p className="text-xs text-red-600 mt-2">
+                      The error report is an Excel file with your original rows and a Remarks column
+                      explaining every issue. Fix all flagged rows and re-upload the same file.
+                    </p>
+                  )}
                 </div>
 
                 {/* Row results */}

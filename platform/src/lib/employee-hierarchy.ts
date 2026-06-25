@@ -167,14 +167,6 @@ export function resolveRole(
   return config.find(l => l.roleCode.toUpperCase() === n) ?? null;
 }
 
-/**
- * Employee ID must contain only word characters (letters, digits, underscores)
- * and hyphens. Spaces, commas, semicolons would corrupt CSV exports.
- */
-export function validateEmployeeId(id: string): boolean {
-  return /^[\w-]+$/.test(id);
-}
-
 // ─── Pass 1: header validation ────────────────────────────────────────────────
 
 /**
@@ -259,15 +251,13 @@ export function validateEmployeeUpload(
     }
 
     // ── Employee ID ────────────────────────────────────────────────────────
+    // No character-set restriction (owner decision 2026-06-25): Employee IDs may
+    // contain spaces, colons, etc. Exports are .xlsx (SheetJS quotes cells), and
+    // the ID is only ever used as an exact-match join key — never split/parsed or
+    // placed in a URL — so arbitrary strings are safe. Still required + unique.
     if (!employeeId) {
       errors.push('Employee ID is required.');
     } else {
-      if (!validateEmployeeId(employeeId)) {
-        errors.push(
-          `Employee ID "${employeeId}" contains invalid characters. ` +
-          `Use only letters, digits, underscores, and hyphens (no spaces or commas).`,
-        );
-      }
       if (seenIds.has(employeeId)) {
         errors.push(
           `Duplicate Employee ID "${employeeId}" — already appears in row ${seenIds.get(employeeId)}.`,
@@ -1325,26 +1315,19 @@ export function parseHierarchyChainRows(
  *
  * The client opens this file, fixes the highlighted rows, and re-uploads.
  */
-export function generateHierarchyChainErrorReport(
+/** Emit the original upload rows + a Remarks column, one row per input row, with
+ *  the supplied per-row errors joined into Remarks. Shared by the chain-level and
+ *  row-level error reports so both produce the same re-uploadable .xlsx layout. */
+function buildHierarchyErrorSheet(
   rawRows: Record<string, string>[],
-  parseResult: HierarchyChainParseResult,
+  errorsByRow: Map<number, string[]>,
   config: TenantHierarchyLevel[],
 ): Uint8Array {
   const chainHeaders = getHierarchyChainHeaders(config);
   const allHeaders   = [...chainHeaders, 'Remarks'];
 
-  // Build a map: rowNum (1-based, row 1 = header) → error messages[]
-  const errorsByRow = new Map<number, string[]>();
-  for (const err of parseResult.chainErrors) {
-    for (const rn of err.rowNums) {
-      const msgs = errorsByRow.get(rn) ?? [];
-      msgs.push(err.message);
-      errorsByRow.set(rn, msgs);
-    }
-  }
-
   const dataRows = rawRows.map((raw, idx) => {
-    const rn      = idx + 2; // idx 0 → rowNum 2
+    const rn      = idx + 2; // idx 0 → rowNum 2 (row 1 = header)
     const values  = chainHeaders.map(h => (raw[h] ?? '').toString());
     const remarks = (errorsByRow.get(rn) ?? []).join(' | ');
     return [...values, remarks];
@@ -1357,6 +1340,43 @@ export function generateHierarchyChainErrorReport(
 
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
   return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+}
+
+export function generateHierarchyChainErrorReport(
+  rawRows: Record<string, string>[],
+  parseResult: HierarchyChainParseResult,
+  config: TenantHierarchyLevel[],
+): Uint8Array {
+  // rowNum (1-based, row 1 = header) → error messages[]
+  const errorsByRow = new Map<number, string[]>();
+  for (const err of parseResult.chainErrors) {
+    for (const rn of err.rowNums) {
+      const msgs = errorsByRow.get(rn) ?? [];
+      msgs.push(err.message);
+      errorsByRow.set(rn, msgs);
+    }
+  }
+  return buildHierarchyErrorSheet(rawRows, errorsByRow, config);
+}
+
+/** Row-level (Phase-3) error report. The 18-column format is denormalized — one
+ *  Excel row carries a whole leaf→root chain — so several employees can map to the
+ *  same row; each error is tagged with the employee it belongs to and all errors
+ *  for a row are aggregated into that row's Remarks cell. Gives the admin ONE
+ *  re-uploadable file with every row error (owner: "resolve it at once"). */
+export function generateHierarchyRowErrorReport(
+  rawRows: Record<string, string>[],
+  validation: EmployeeUploadValidationResult,
+  config: TenantHierarchyLevel[],
+): Uint8Array {
+  const errorsByRow = new Map<number, string[]>();
+  for (const r of validation.rows) {
+    if (r.errors.length === 0) continue;
+    const msgs = errorsByRow.get(r.rowNum) ?? [];
+    for (const e of r.errors) msgs.push(r.employeeId ? `[${r.employeeId}] ${e}` : e);
+    errorsByRow.set(r.rowNum, msgs);
+  }
+  return buildHierarchyErrorSheet(rawRows, errorsByRow, config);
 }
 
 // ─── 18-column template data ─────────────────────────────────────────────────
