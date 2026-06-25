@@ -6,14 +6,16 @@ import {
   Patch,
   Post,
   Query,
+  Res,
   StreamableFile,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { KycService } from './kyc.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Public, Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import {
   BulkVerifyQueryDto,
@@ -43,6 +45,34 @@ import {
 @Controller('kyc')
 export class KycController {
   constructor(private readonly kyc: KycService) {}
+
+  /**
+   * GET /v1/kyc/documents/view?token=<jwt> — PUBLIC tokenized document view.
+   *
+   * No JWT auth guard (@Public): the bearer of a valid, unexpired, typ:'docview'
+   * token may view exactly ONE document for one tenant. Streams the file inline
+   * with its real content-type. ANY failure → bare 404 (no info leak). See
+   * KycService.viewDocument for the full security contract. Static path declared
+   * before the `:id` route so Nest does not match it as an :id param.
+   */
+  @Public()
+  @Get('documents/view')
+  async viewDocument(
+    @Query('token') token: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { bytes, contentType, inline } = await this.kyc.viewDocument(token);
+    // Only image/PDF are served inline; an unsafe (client-supplied) mime is forced
+    // to an octet-stream attachment so the browser downloads — never executes — it.
+    const disposition = inline ? 'inline' : 'attachment; filename="document"';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', disposition);
+    // Stop the browser from MIME-sniffing the body back into an executable type.
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // Private PII — never let an intermediary cache the document bytes.
+    res.setHeader('Cache-Control', 'no-store');
+    return new StreamableFile(bytes, { type: contentType, disposition });
+  }
 
   @Get()
   @RequirePermission('kyc:read')

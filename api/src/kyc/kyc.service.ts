@@ -9,6 +9,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource } from '@prisma/client';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 import * as XLSX from 'xlsx';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -135,7 +137,103 @@ export class KycService {
     private readonly notifications: NotificationsService,
     private readonly msg91: Msg91Service,
     private readonly storage: StorageService,
+    private readonly jwt: JwtService,
+    private readonly config: ConfigService,
   ) {}
+
+  // ─── Tokenized document-view (security-critical) ─────────────────────────────
+  /**
+   * Mint a self-contained, 30-day, single-document view token.
+   *
+   * The token is a JWT signed with the platform JWT_SECRET carrying ONLY:
+   *   { sub: <kycDocumentId>, clientId: <clientId>, typ: 'docview' }
+   * It is unforgeable (HMAC), scoped to exactly one document + one tenant, and
+   * type-gated (`typ:'docview'`) so a normal access token can never be replayed
+   * at the doc-view endpoint and vice-versa. Used to embed copy-pasteable
+   * document links in the Outlet Master export.
+   */
+  signDocViewToken(docId: string, clientId: string): string {
+    return this.jwt.sign(
+      { sub: docId, clientId, typ: 'docview' },
+      { secret: this.config.get('JWT_SECRET'), expiresIn: '30d' },
+    );
+  }
+
+  /**
+   * GET /v1/kyc/documents/view?token=<jwt> (PUBLIC) — stream a private KYC
+   * document inline, authorised SOLELY by the token.
+   *
+   * Security contract — on ANY failure we throw a BARE NotFoundException (no
+   * descriptive detail) so the endpoint never enumerates documents or leaks why a
+   * request failed:
+   *   - token missing / malformed / bad signature / expired → 404
+   *   - payload.typ !== 'docview'                            → 404 (replay guard)
+   *   - document not found                                   → 404
+   *   - document's tenant ≠ token clientId                   → 404 (cross-tenant)
+   *   - object missing / too large in GCS                    → 404
+   *
+   * Tenant scope is enforced by the token's `clientId` claim matched against the
+   * document's real tenant (KycDocument → kycSubmission → user.clientId) — there
+   * is no logged-in user on this public route, so the token IS the authority.
+   */
+  async viewDocument(token: string): Promise<{ bytes: Buffer; contentType: string; inline: boolean }> {
+    const deny = () => new NotFoundException();
+
+    if (!token || typeof token !== 'string') throw deny();
+
+    let payload: { sub?: unknown; clientId?: unknown; typ?: unknown };
+    try {
+      // Pin HS256 (defense-in-depth: never accept alg:none or an asymmetric-key confusion).
+      payload = this.jwt.verify(token, { secret: this.config.get('JWT_SECRET'), algorithms: ['HS256'] });
+    } catch {
+      // Bad signature / expired / malformed — all collapse to a bare 404.
+      throw deny();
+    }
+
+    // Type-gate: ONLY a 'docview' token may be used here. This rejects a replayed
+    // access token (which has no `typ`) and any other token shape.
+    if (payload.typ !== 'docview') throw deny();
+    if (typeof payload.sub !== 'string' || typeof payload.clientId !== 'string') throw deny();
+
+    const docId = payload.sub;
+    const tokenClientId = payload.clientId;
+
+    // Load the doc + walk to its real tenant: KycDocument → kycSubmission → user.clientId.
+    const doc = await this.prisma.kycDocument.findUnique({
+      where: { id: docId },
+      select: {
+        fileKey: true,
+        mimeType: true,
+        kycSubmission: { select: { user: { select: { clientId: true } } } },
+      },
+    });
+    if (!doc) throw deny();
+
+    // Cross-tenant guard: the document's owning tenant MUST equal the token's clientId.
+    const docClientId = doc.kycSubmission?.user?.clientId;
+    if (!docClientId || docClientId !== tokenClientId) throw deny();
+    if (!doc.fileKey) throw deny();
+
+    const file = await this.storage.downloadBytes(doc.fileKey);
+    if (!file) throw deny();
+
+    // Stored-XSS guard: a KYC document's mimeType is CLIENT-supplied at upload, and
+    // this link is opened in the app origin (via the FE /api proxy). Only render
+    // known-safe types INLINE; anything else (e.g. text/html, image/svg+xml) is
+    // served as an octet-stream attachment so the browser downloads it — never
+    // executes it. Mirrors the openDocument allowlist on the KYC review screen (K17).
+    const SAFE = new Set([
+      'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'application/pdf',
+    ]);
+    const rawMime = (doc.mimeType || file.contentType || '').toLowerCase();
+    const inline  = SAFE.has(rawMime);
+
+    return {
+      bytes: file.bytes,
+      contentType: inline ? rawMime : 'application/octet-stream',
+      inline,
+    };
+  }
 
   /** 6-digit OTP (100000–999999), matching auth/rewards generateOtpCode. */
   private generateOtpCode(): string {

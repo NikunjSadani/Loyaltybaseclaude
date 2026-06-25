@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
+import { KycModule } from '../kyc/kyc.module';
 
 import { ChannelPartnersController } from './channel-partners.controller';
 import { VisibilityController } from './visibility.controller';
@@ -24,7 +25,7 @@ import { BannerConfigService } from './banner-config.service';
  * service. Tenant-scoped by clientId; @Roles / @RequirePermission per source.
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, KycModule],
   controllers: [
     ChannelPartnersController,
     VisibilityController,

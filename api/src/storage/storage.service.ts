@@ -99,6 +99,39 @@ export class StorageService {
     return `data:${ct};base64,${buf.toString('base64')}`;
   }
 
+  /**
+   * Read a private object and return its raw BYTES + content-type, or null.
+   *
+   * Same signing-free read path as downloadAsDataUrl (object READ via the runtime
+   * SA's objectAdmin grant — NOT getSignedUrl, which needs IAM blob-signing that is
+   * unreliable on Cloud Run and impossible locally). Used to stream a private KYC
+   * document inline to the browser (the tokenized doc-view endpoint).
+   *
+   * Bounded: objects larger than maxBytes return null (caller → 404) so a stray
+   * large upload can't be streamed in full. Returns null if the object is missing.
+   */
+  async downloadBytes(
+    key: string,
+    maxBytes = 24 * 1024 * 1024,
+  ): Promise<{ bytes: Buffer; contentType: string } | null> {
+    try {
+      const file = this.storage.bucket(this.bucket).file(key);
+      const [meta] = await file.getMetadata();
+      const size = Number(meta.size ?? 0);
+      if (size > maxBytes) {
+        this.logger.warn(`downloadBytes: ${key} is ${size}B (> ${maxBytes}B cap) — refusing`);
+        return null;
+      }
+      const [buf] = await file.download();
+      return { bytes: buf, contentType: meta.contentType || 'application/octet-stream' };
+    } catch (err) {
+      // Missing object / transient read error → null (caller decides; the doc-view
+      // endpoint maps this to a bare 404 so a missing file never leaks detail).
+      this.logger.warn(`downloadBytes: failed to read ${key}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
   /** Delete an object. */
   async deleteFile(key: string): Promise<void> {
     await this.storage.bucket(this.bucket).file(key).delete();

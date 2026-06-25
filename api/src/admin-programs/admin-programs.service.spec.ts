@@ -14,6 +14,7 @@ import { BannersService } from './banners.service';
 import { BannerConfigService } from './banner-config.service';
 import { SchemesService } from './schemes.service';
 import { ReportsService } from './reports.service';
+import { KycService } from '../kyc/kyc.service';
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
@@ -44,6 +45,8 @@ async function build<T>(token: new (...args: never[]) => T): Promise<T> {
       token as never,
       { provide: PrismaService, useValue: mockPrisma },
       { provide: TenantService, useValue: mockTenant },
+      // ReportsService.outletMaster mints doc-view links via KycService.
+      { provide: KycService, useValue: { signDocViewToken: jest.fn(() => 'tok') } },
     ],
   }).compile();
   return module.get(token);

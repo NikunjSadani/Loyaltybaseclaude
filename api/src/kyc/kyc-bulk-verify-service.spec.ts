@@ -9,6 +9,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ForbiddenException, BadRequestException } from '@nestjs/common';
 import * as XLSX from 'xlsx';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 import { KycService } from './kyc.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -126,6 +128,8 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: Msg91Service, useValue: { sendOtp: jest.fn() } },
         { provide: StorageService, useValue: mockStorage },
+        { provide: JwtService, useValue: { sign: jest.fn(), verify: jest.fn() } },
+        { provide: ConfigService, useValue: { get: jest.fn(() => 'test-secret') } },
       ],
     }).compile();
     service = module.get(KycService);

@@ -1,4 +1,5 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Query, Req } from '@nestjs/common';
+import type { Request } from 'express';
 import { ReportsService } from './reports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -19,8 +20,8 @@ export class ReportsController {
   @Get('outlet-master')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('reports:export')
-  outletMaster(@CurrentUser() user: JwtPayload) {
-    return this.reports.outletMaster(user);
+  outletMaster(@CurrentUser() user: JwtPayload, @Req() req: Request) {
+    return this.reports.outletMaster(user, req);
   }
 
   @Get('points-ledger')

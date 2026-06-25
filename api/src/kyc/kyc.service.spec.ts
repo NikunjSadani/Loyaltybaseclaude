@@ -10,6 +10,8 @@ import {
   HttpException,
   NotFoundException,
 } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 import { KycService } from './kyc.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -51,7 +53,7 @@ const mockPrisma = {
     groupBy: jest.fn(),
   },
   kycStatusHistory: { create: jest.fn(), findMany: jest.fn() },
-  kycDocument: { create: jest.fn() },
+  kycDocument: { create: jest.fn(), findUnique: jest.fn() },
   otpCode: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
   outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -69,9 +71,16 @@ const mockStorage = {
   uploadFile: jest.fn().mockResolvedValue('https://storage.googleapis.com/bucket/key'),
   getSignedUrl: jest.fn(),
   downloadAsDataUrl: jest.fn(),
+  downloadBytes: jest.fn(),
   publicUrl: jest.fn((k: string) => `https://storage.googleapis.com/bucket/${k}`),
   deleteFile: jest.fn(),
 };
+
+const mockJwt = {
+  sign: jest.fn(() => 'signed.jwt.token'),
+  verify: jest.fn(),
+};
+const mockConfig = { get: jest.fn(() => 'test-secret') };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const so: JwtPayload = { sub: 'so1', role: 'SALES_SO', clientId: 'deoleo', phone: '', name: '' };
@@ -150,6 +159,8 @@ describe('KycService', () => {
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: Msg91Service, useValue: mockMsg91 },
         { provide: StorageService, useValue: mockStorage },
+        { provide: JwtService, useValue: mockJwt },
+        { provide: ConfigService, useValue: mockConfig },
       ],
     }).compile();
     service = module.get(KycService);
@@ -1962,6 +1973,92 @@ describe('KycService', () => {
       ).resolves.toBeDefined();
       // marked verified (not an attempt-increment / throw)
       expect(mockPrisma.consentRecord.create).toHaveBeenCalled();
+    });
+  });
+
+  // ─── Tokenized document-view (security-critical) ────────────────────────────
+  describe('signDocViewToken + viewDocument', () => {
+    it('signs a token with sub/clientId/typ=docview and 30d expiry', () => {
+      mockJwt.sign.mockReturnValueOnce('the.signed.token');
+      const tok = service.signDocViewToken('doc1', 'deoleo');
+      expect(tok).toBe('the.signed.token');
+      expect(mockJwt.sign).toHaveBeenCalledWith(
+        { sub: 'doc1', clientId: 'deoleo', typ: 'docview' },
+        expect.objectContaining({ expiresIn: '30d' }),
+      );
+    });
+
+    it('valid token → returns the bytes with the doc content-type', async () => {
+      mockJwt.verify.mockReturnValueOnce({ sub: 'doc1', clientId: 'deoleo', typ: 'docview' });
+      mockPrisma.kycDocument.findUnique.mockResolvedValueOnce({
+        fileKey: 'kyc/2026-06/x-gst.pdf',
+        mimeType: 'application/pdf',
+        kycSubmission: { user: { clientId: 'deoleo' } },
+      });
+      const bytes = Buffer.from('PDFDATA');
+      mockStorage.downloadBytes.mockResolvedValueOnce({ bytes, contentType: 'application/octet-stream' });
+
+      const res = await service.viewDocument('valid.token');
+      // mimeType on the doc wins over the storage content-type; pdf is safe → inline.
+      expect(res).toEqual({ bytes, contentType: 'application/pdf', inline: true });
+      expect(mockStorage.downloadBytes).toHaveBeenCalledWith('kyc/2026-06/x-gst.pdf');
+    });
+
+    it('stored-XSS guard: an unsafe client-supplied mime is served as octet-stream, NOT inline', async () => {
+      mockJwt.verify.mockReturnValueOnce({ sub: 'doc1', clientId: 'deoleo', typ: 'docview' });
+      mockPrisma.kycDocument.findUnique.mockResolvedValueOnce({
+        fileKey: 'kyc/2026-06/evil.svg',
+        mimeType: 'image/svg+xml', // attacker-uploaded "document" that could run script
+        kycSubmission: { user: { clientId: 'deoleo' } },
+      });
+      const bytes = Buffer.from('<svg onload=alert(1)>');
+      mockStorage.downloadBytes.mockResolvedValueOnce({ bytes, contentType: 'image/svg+xml' });
+
+      const res = await service.viewDocument('valid.token');
+      expect(res).toEqual({ bytes, contentType: 'application/octet-stream', inline: false });
+    });
+
+    it('expired / invalid signature → 404 (verify throws)', async () => {
+      mockJwt.verify.mockImplementationOnce(() => {
+        throw new Error('jwt expired');
+      });
+      await expect(service.viewDocument('expired.token')).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockPrisma.kycDocument.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("token missing typ:'docview' (e.g. a replayed access token) → 404", async () => {
+      // Looks like a normal access token: has sub/clientId but no typ.
+      mockJwt.verify.mockReturnValueOnce({ sub: 'doc1', clientId: 'deoleo', role: 'GIFSY_ADMIN' });
+      await expect(service.viewDocument('access.token')).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockPrisma.kycDocument.findUnique).not.toHaveBeenCalled();
+    });
+
+    it("doc belonging to ANOTHER tenant → 404 (cross-tenant)", async () => {
+      mockJwt.verify.mockReturnValueOnce({ sub: 'doc1', clientId: 'deoleo', typ: 'docview' });
+      // The document actually belongs to tenant 'other', not 'deoleo'.
+      mockPrisma.kycDocument.findUnique.mockResolvedValueOnce({
+        fileKey: 'kyc/2026-06/x.pdf',
+        mimeType: 'application/pdf',
+        kycSubmission: { user: { clientId: 'other' } },
+      });
+      await expect(service.viewDocument('valid.token')).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+    });
+
+    it('missing token → 404', async () => {
+      await expect(service.viewDocument('')).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockJwt.verify).not.toHaveBeenCalled();
+    });
+
+    it('object missing in storage → 404', async () => {
+      mockJwt.verify.mockReturnValueOnce({ sub: 'doc1', clientId: 'deoleo', typ: 'docview' });
+      mockPrisma.kycDocument.findUnique.mockResolvedValueOnce({
+        fileKey: 'kyc/gone.pdf',
+        mimeType: 'application/pdf',
+        kycSubmission: { user: { clientId: 'deoleo' } },
+      });
+      mockStorage.downloadBytes.mockResolvedValueOnce(null);
+      await expect(service.viewDocument('valid.token')).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });
