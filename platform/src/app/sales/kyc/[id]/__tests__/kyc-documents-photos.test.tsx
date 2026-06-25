@@ -82,9 +82,40 @@ describe('SKDP — Sales KYC detail documents + photos', () => {
     await renderAndExpand();
     await waitFor(() => expect(screen.getByText('PAN Card')).toBeInTheDocument());
     expect(screen.getByText('GST Certificate')).toBeInTheDocument();
+    // "View" is now a button (it opens the doc via a blob: URL — a `data:` URL can't
+    // be opened as a top-level tab, which had shown a blank page).
     const viewLinks = screen.getAllByTestId('kyc-doc-view-link');
     expect(viewLinks.length).toBe(2);
-    expect(viewLinks[0]).toHaveAttribute('href', expect.stringContaining('https://signed/'));
+    expect(viewLinks[0].tagName).toBe('BUTTON');
+  });
+
+  it('SKDP2b: clicking View on a data: doc opens it via a blob: URL (data: nav is blocked → blank page)', async () => {
+    const createObjectURL = vi.fn((_b: Blob) => 'blob:fake');
+    (URL as unknown as { createObjectURL: unknown }).createObjectURL = createObjectURL;
+    (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = vi.fn();
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    stubFetch([{ documentType: 'PAN_CARD', status: 'PENDING', viewUrl: 'data:image/jpeg;base64,/9j/4AAQ' }]);
+    await renderAndExpand();
+    fireEvent.click(await screen.findByTestId('kyc-doc-view-link'));
+    expect(createObjectURL).toHaveBeenCalled();                 // converted to a blob
+    expect((createObjectURL.mock.calls[0][0] as Blob).type).toBe('image/jpeg'); // safe → rendered as-is
+    expect(openSpy).toHaveBeenCalledWith('blob:fake', '_blank', expect.any(String));
+    openSpy.mockRestore();
+    delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+  });
+
+  it('SKDP2c: a malicious SVG/HTML doc is opened as octet-stream (download), never rendered (no stored XSS)', async () => {
+    const createObjectURL = vi.fn((_b: Blob) => 'blob:fake');
+    (URL as unknown as { createObjectURL: unknown }).createObjectURL = createObjectURL;
+    (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = vi.fn();
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    // base64 of "<svg onload=alert(1)>"
+    stubFetch([{ documentType: 'PAN_CARD', status: 'PENDING', viewUrl: 'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+' }]);
+    await renderAndExpand();
+    fireEvent.click(await screen.findByTestId('kyc-doc-view-link'));
+    expect((createObjectURL.mock.calls[0][0] as Blob).type).toBe('application/octet-stream'); // forced download
+    openSpy.mockRestore();
+    delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
   });
 
   it('SKDP3: store/owner photos render as image thumbnails', async () => {

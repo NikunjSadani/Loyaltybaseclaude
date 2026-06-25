@@ -292,6 +292,22 @@ export class KycService {
   }
 
   /**
+   * Who may see UN-masked KYC PII (PAN / GST / bank account): the admins PLUS the
+   * sales reviewers in the approval chain — they validate these values against the
+   * submitted GST/PAN/cheque documents, so masking them to last-4 made the review
+   * impossible (owner 2026-06-25). Access to the submission itself is already gated
+   * by assertCanViewSubmission (own or downline), so this only un-masks for callers
+   * who can already see the row. Pure observers (MIS_USER) and any other incidental
+   * viewer stay masked.
+   */
+  private canSeeFullKycPii(role: string): boolean {
+    return (
+      this.isAdmin(role) ||
+      ['SALES_ISR', 'SALES_SO', 'SALES_ASM', 'SALES_STATE_HEAD', 'SALES_HO'].includes(role)
+    );
+  }
+
+  /**
    * Roles that READ tenant-wide (no sales-subtree scoping): the admins plus the
    * tenant-side read-only observer MIS_USER (DATA-VISIBILITY Q5). Used ONLY for
    * read-access scoping — NOT for writes (MIS can't approve: canFirstApprove is
@@ -780,13 +796,21 @@ export class KycService {
         });
       }
 
-      // 3b. Link the outlet to the resolved partner if not already linked.
-      if (outlet.partnerId !== partnerId) {
-        await tx.outlet.update({
-          where: { id: outlet.id },
-          data: { partnerId },
-        });
-      }
+      // 3b. Link the outlet to the resolved partner (if needed) AND persist the
+      //     KYC-captured address onto the OUTLET. The submitted address lives on
+      //     Outlet, not ChannelPartner (schema: `addressLine1 // captured at KYC`),
+      //     and was previously never written — so the reviewer saw a blank address.
+      //     Always write the address so the latest submission's address is shown.
+      await tx.outlet.update({
+        where: { id: outlet.id },
+        data: {
+          ...(outlet.partnerId !== partnerId ? { partnerId } : {}),
+          addressLine1: dto.address,
+          city: dto.city,
+          state: dto.state,
+          pincode: dto.pincode,
+        },
+      });
 
       // 3c. Create the submission (duplicate guard scoped to THIS partner).
       return this.createSubmissionRow(tx, {
@@ -960,7 +984,12 @@ export class KycService {
         user: { select: { id: true, name: true, phone: true, role: true } },
         // partner.outlets[].outletCode is the human "outlet ID" surfaced in the detail header
         // (KYC is partner-keyed; the enrolled outlet's code lives on the partner's outlets).
-        partner: { include: { outlets: { select: { id: true, name: true, outletCode: true, phone: true } } } },
+        partner: { include: { outlets: { select: {
+          id: true, name: true, outletCode: true, phone: true,
+          // Address lives on the Outlet (captured at KYC) — surfaced so the reviewer
+          // can see the submitted address (ChannelPartner has no address columns).
+          addressLine1: true, addressLine2: true, city: true, state: true, pincode: true,
+        } } } },
         // 3.4d: the detail-page field panel seeds its current state from these.
         verificationItems: {
           select: { fieldKey: true, decision: true, remark: true, source: true, verifiedAt: true },
@@ -985,7 +1014,7 @@ export class KycService {
     // is defensive cover for any future read access (e.g. sales approvers viewing a
     // submission). TODO: switch the privileged check to the `kyc:view_documents`
     // permission once the RBAC flag-gate is enforced (currently role-based).
-    const masked = !this.isAdmin(user.role) && submission.userId !== user.sub;
+    const masked = !this.canSeeFullKycPii(user.role) && submission.userId !== user.sub;
     const partner = submission.partner
       ? this.maskPartnerSensitiveFields(submission.partner, masked)
       : null;

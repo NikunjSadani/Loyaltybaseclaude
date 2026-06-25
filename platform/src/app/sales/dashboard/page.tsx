@@ -29,6 +29,14 @@ interface OutletRow {
   lastVisit?: string; kycSubmittedAt?: string;
 }
 
+/** A KYC SUBMISSION (from /api/kyc) — the unit of approval. The approval/rejected
+ *  task counts derive from these so they match the KYC Submissions list exactly,
+ *  INCLUDING submissions whose partner has no linked outlet (which never appear in
+ *  /api/sales/outlets, so the old outlet-derived counts silently dropped them). */
+interface KycSubRow {
+  id: string; title: string; outletCode: string; status: KYCStatus; updatedAt: string;
+}
+
 interface TaskItem {
   id: string; title: string; subtitle: string;
   href?: string; priority: 'high' | 'medium' | 'low';
@@ -184,6 +192,7 @@ function TargetTrendChart({ trend, unit }: { trend: SalesTargets['trend']; unit:
 
 export default function SalesDashboard() {
   const [outlets,      setOutlets]      = useState<OutletRow[]>([]);
+  const [kycSubs,      setKycSubs]      = useState<KycSubRow[]>([]);
   const [loading,      setLoading]      = useState(true);
   const [search,       setSearch]       = useState('');
   const [searchOpen,   setSearchOpen]   = useState(false);
@@ -208,7 +217,8 @@ export default function SalesDashboard() {
       fetchBanners(),
       fetch('/api/sales/outlets', { headers: authHeaders }).then((r) => r.json()),
       fetch('/api/sales/targets', { headers: authHeaders }).then((r) => r.json()).catch(() => null),
-    ]).then(([config, { banners }, outletResult, targetResult]) => {
+      fetch('/api/kyc', { headers: authHeaders }).then((r) => r.json()).catch(() => null),
+    ]).then(([config, { banners }, outletResult, targetResult, kycResult]) => {
       setTaskConfig(config);
       setSalesBanners(getActiveSalesBanners(banners));
       if (targetResult?.success) setSalesTargets(targetResult.data as SalesTargets);
@@ -223,6 +233,29 @@ export default function SalesDashboard() {
           kycStatus:      (o.kycStatus ?? 'NOT_STARTED') as KYCStatus,
           kycSubmittedAt: o.kycSubmittedAt,
         })));
+      }
+      if (kycResult?.success) {
+        // Map submissions exactly like the KYC Submissions list (title = outlet name,
+        // else firm/owner, else the rep) so the dashboard's approval/rejected counts
+        // match that list — then collapse to one row per outlet (latest), keeping
+        // no-outlet submissions individually (the Anil-Sharma case).
+        const subs: KycSubRow[] = (kycResult.data.submissions ?? []).map((s: any) => ({
+          id:         s.id,
+          title:      s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? s.user?.name ?? 'KYC submission',
+          outletCode: s.partner?.outlets?.[0]?.outletCode ?? '',
+          status:     (s.status ?? '') as KYCStatus,
+          updatedAt:  s.updatedAt ?? s.createdAt ?? '',
+        }));
+        const latestByOutlet = new Map<string, KycSubRow>();
+        const noOutlet: KycSubRow[] = [];
+        for (const e of subs) {
+          if (!e.outletCode) { noOutlet.push(e); continue; }
+          const cur = latestByOutlet.get(e.outletCode);
+          if (!cur || new Date(e.updatedAt || 0).getTime() >= new Date(cur.updatedAt || 0).getTime()) {
+            latestByOutlet.set(e.outletCode, e);
+          }
+        }
+        setKycSubs([...latestByOutlet.values(), ...noOutlet]);
       }
       setLoading(false);
     }).catch(() => setLoading(false));
@@ -333,16 +366,19 @@ export default function SalesDashboard() {
     // ── Approval Required (SO approves XSR; ASM approves SO) ─────────────────
 
     if (approvalStatus) {
-      const approvalOutlets = outlets.filter((o) => o.kycStatus === approvalStatus);
-      if (approvalOutlets.length > 0) {
+      // From SUBMISSIONS (not outlets) so the count matches the KYC list's "Approval
+      // Pending" — including submissions with no linked outlet. href uses the
+      // submission id (the detail page reads /api/kyc/:id, a submission id).
+      const approvalSubs = kycSubs.filter((s) => s.status === approvalStatus);
+      if (approvalSubs.length > 0) {
         groups.push({
           id: 'approval_required', label: 'Approval Required',
           icon: <FileCheck className="h-4 w-4 text-blue-600" />,
-          items: approvalOutlets.map((o) => ({
-            id: o.id, title: o.name,
-            subtitle: `${o.location} · KYC submitted by ${approverLabel} — awaiting your approval`,
-            href: `/sales/kyc/${o.id}`, priority: 'high' as const,
-            ageDays: ageInDays(o.kycSubmittedAt),
+          items: approvalSubs.map((s) => ({
+            id: s.id, title: s.title,
+            subtitle: `KYC submitted by ${approverLabel} — awaiting your approval`,
+            href: `/sales/kyc/${s.id}`, priority: 'high' as const,
+            ageDays: ageInDays(s.updatedAt),
           })),
           accentBg: 'bg-blue-50', accentBorder: 'border-blue-200',
           accentText: 'text-blue-700', badgeBg: 'bg-blue-100',
@@ -354,19 +390,20 @@ export default function SalesDashboard() {
     // ── More field-only tasks ─────────────────────────────────────────────────
 
     if (isFieldRole) {
-      // Rejected KYC
-      const rejectedOutlets = outlets.filter((o) =>
-        o.kycStatus === KYCStatus.REJECTED || o.kycStatus === KYCStatus.RESUBMISSION_REQUIRED,
+      // Rejected KYC — from SUBMISSIONS (same source as the KYC list), so no-outlet
+      // rejected submissions are counted too and the href is the submission id.
+      const rejectedSubs = kycSubs.filter((s) =>
+        s.status === KYCStatus.REJECTED || s.status === KYCStatus.RESUBMISSION_REQUIRED,
       );
-      if (rejectedOutlets.length > 0) {
+      if (rejectedSubs.length > 0) {
         groups.push({
           id: 'rejected_kyc', label: 'Rejected KYC',
           icon: <XCircle className="h-4 w-4 text-red-600" />,
-          items: rejectedOutlets.map((o) => ({
-            id: o.id, title: o.name,
-            subtitle: `${o.location} · Resubmission required`,
-            href: `/sales/kyc/${o.id}`, priority: 'high' as const,
-            ageDays: ageInDays(o.kycSubmittedAt),
+          items: rejectedSubs.map((s) => ({
+            id: s.id, title: s.title,
+            subtitle: 'Resubmission required',
+            href: `/sales/kyc/${s.id}`, priority: 'high' as const,
+            ageDays: ageInDays(s.updatedAt),
           })),
           accentBg: 'bg-red-50', accentBorder: 'border-red-200',
           accentText: 'text-red-700', badgeBg: 'bg-red-100',
@@ -396,7 +433,7 @@ export default function SalesDashboard() {
     }
 
     return groups;
-  }, [outlets, taskConfig, role]);
+  }, [outlets, kycSubs, taskConfig, role]);
 
   const isFieldRole = role === 'XSR' || role === 'SO';
   const schemeCount = isFieldRole ? pendingSchemes.length : 0;

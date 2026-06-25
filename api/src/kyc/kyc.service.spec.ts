@@ -624,7 +624,11 @@ describe('KycService', () => {
       });
       // Partner code derived from the outletCode; outlet linked to the new partner.
       expect(mockTx.channelPartner.create.mock.calls[0][0].data.partnerCode).toBe('CP-OUT-1');
-      expect(mockTx.outlet.update.mock.calls[0][0].data.partnerId).toBe('cp-new');
+      // Outlet linked to the new partner AND the KYC-captured address persisted onto it.
+      expect(mockTx.outlet.update.mock.calls[0][0].data).toMatchObject({
+        partnerId: 'cp-new',
+        addressLine1: 'addr1', city: 'X', state: 'Y', pincode: '110011',
+      });
       // Submission filed BY the rep but ABOUT the outlet's partner.
       expect(mockTx.kycSubmission.create.mock.calls[0][0].data.userId).toBe('so1');
       expect(mockTx.kycSubmission.create.mock.calls[0][0].data.partnerId).toBe('cp-new');
@@ -688,7 +692,7 @@ describe('KycService', () => {
       await expect(service.getOne(sss, 's1')).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('allows a SALES reviewer to view a DOWNLINE submission (own subtree), masked', async () => {
+    it('allows a SALES reviewer to view a DOWNLINE submission (own subtree)', async () => {
       // Owner 2026-06-24: a manager sees their downline's KYC. 'other' reports to the SO.
       primeSalesNodes([
         { id: 'so-su', reportingToId: null, userId: 'so1' },
@@ -1683,6 +1687,31 @@ describe('KycService', () => {
       expect(mask.bankAccountNumber).toBe('****9012');
       expect(mask.panNumber).toBe('****234F');
       expect(mask.gstNumber).toBe('****R1ZM');
+    });
+
+    it('shows FULL GST/PAN/bank to a SALES reviewer viewing a downline submission (owner 2026-06-25)', async () => {
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'xsr-su', reportingToId: 'so-su', userId: 'other' },
+      ]);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', userId: 'other', partner: fullPartner, documents: [], statusHistory: [],
+        user: { id: 'other', name: 'X', phone: '9', role: 'RETAILER' },
+      });
+      const res = await service.getOne(so, 's1');
+      expect(res.submission.partner?.panNumber).toBe('ABCDE1234F');
+      expect(res.submission.partner?.gstNumber).toBe('27AABCU9603R1ZM');
+      expect(res.submission.partner?.bankAccountNumber).toBe('123456789012');
+    });
+
+    it('STILL masks sensitive fields for MIS_USER (a read-only observer, not a reviewer)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1', userId: 'other', partner: fullPartner, documents: [], statusHistory: [],
+        user: { id: 'other', name: 'X', phone: '9', role: 'RETAILER' },
+      });
+      const res = await service.getOne(mis, 's1');
+      expect(res.submission.partner?.panNumber).toBe('****234F');
+      expect(res.submission.partner?.gstNumber).toBe('****R1ZM');
     });
 
     it('shows full sensitive fields for Gifsy admin callers', async () => {

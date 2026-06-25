@@ -29,6 +29,7 @@ interface KYCDetail {
   address: string;
   city: string;
   state: string;
+  pincode?: string;
   partnerClass: string;
   outletId?: string;
   outletCode?: string;
@@ -116,23 +117,62 @@ interface ApiSalesKYC {
     ifscCode?: string;
     upiId?: string;
     phone?: string;
-    outlets?: { id: string; name: string; outletCode: string; phone?: string }[];
+    outlets?: { id: string; name: string; outletCode: string; phone?: string;
+      addressLine1?: string | null; addressLine2?: string | null;
+      city?: string | null; state?: string | null; pincode?: string | null }[];
   };
   documents?: { id?: string; documentType: string; status?: string; viewUrl?: string | null }[];
 }
 
+/** Mimes safe to RENDER in a top-level tab. A doc's mime is client-supplied at upload,
+ *  so anything else (e.g. image/svg+xml or text/html) is opened as octet-stream — the
+ *  browser DOWNLOADS it instead of rendering, preventing stored-XSS via a malicious
+ *  "document" opened in our origin. */
+const SAFE_RENDER_MIMES = new Set([
+  'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'application/pdf',
+]);
+
+/** Open a KYC document in a new tab. The backend inlines docs as `data:` URLs (private
+ *  GCS objects, K12), and modern browsers BLOCK opening a `data:` URL as a top-level
+ *  tab — "View" just showed a blank page. Convert it to a `blob:` URL (allowed). */
+function openDocument(viewUrl: string): void {
+  if (!viewUrl) return;
+  if (viewUrl.startsWith('data:')) {
+    try {
+      const comma = viewUrl.indexOf(',');
+      const rawMime = viewUrl.slice(5, viewUrl.indexOf(';')).toLowerCase();
+      // Only render known-safe types inline; otherwise download (no script execution).
+      const mime = SAFE_RENDER_MIMES.has(rawMime) ? rawMime : 'application/octet-stream';
+      const bin = atob(viewUrl.slice(comma + 1));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      window.open(url, '_blank', 'noopener,noreferrer');
+      setTimeout(() => URL.revokeObjectURL(url), 60_000); // let the tab load, then free
+      return;
+    } catch {
+      /* fall through */
+    }
+  }
+  // Non-data URLs: only follow http(s) (never javascript:/other schemes).
+  if (/^https?:\/\//i.test(viewUrl)) window.open(viewUrl, '_blank', 'noopener,noreferrer');
+}
+
 function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
+  // Address lives on the OUTLET (captured at KYC), not ChannelPartner.
+  const o = s.partner.outlets?.[0];
   return {
     id: s.id,
     partnerName: s.user.name,
     ownerName: s.partner.ownerName ?? '',
     firmName: s.partner.businessName,
-    outletName:  s.partner.outlets?.[0]?.name  ?? s.partner.businessName ?? '',
-    outletPhone: s.partner.outlets?.[0]?.phone ?? s.partner.phone        ?? '',
+    outletName:  o?.name  ?? s.partner.businessName ?? '',
+    outletPhone: o?.phone ?? s.partner.phone        ?? '',
     mobile: s.user.phone,
-    address: s.partner.address,
-    city: s.partner.city,
-    state: s.partner.state,
+    address: [o?.addressLine1, o?.addressLine2].filter(Boolean).join(', '),
+    city: o?.city ?? '',
+    state: o?.state ?? '',
+    pincode: o?.pincode ?? '',
     partnerClass: '',
     status: (s.status as KYCStatus) ?? KYCStatus.SUBMITTED,
     submittedAt: s.submittedAt,
@@ -421,9 +461,11 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           outletName:      s.partner?.outlets?.[0]?.name      ?? s.partner?.businessName ?? '',
           outletPhone:     s.partner?.outlets?.[0]?.phone     ?? s.partner?.phone        ?? '',
           mobile:          s.user?.phone                      ?? '',
-          address:         s.partner?.address                 ?? '',
-          city:            s.partner?.city                    ?? '',
-          state:           s.partner?.state                   ?? '',
+          // Address lives on the OUTLET (captured at KYC), not ChannelPartner.
+          address:         [s.partner?.outlets?.[0]?.addressLine1, s.partner?.outlets?.[0]?.addressLine2].filter(Boolean).join(', '),
+          city:            s.partner?.outlets?.[0]?.city       ?? '',
+          state:           s.partner?.outlets?.[0]?.state      ?? '',
+          pincode:         s.partner?.outlets?.[0]?.pincode    ?? '',
           partnerClass:    '',
           status:          (s.status as KYCStatus)            ?? KYCStatus.SUBMITTED,
           submittedAt:     s.submittedAt                      ?? new Date().toISOString(),
@@ -643,7 +685,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                 {[
                   { icon: <User className="h-3.5 w-3.5" />,   label: 'Owner Name', value: kyc.ownerName },
                   { icon: <Phone className="h-3.5 w-3.5" />,  label: 'Mobile',  value: `+91 ${kyc.outletPhone}` },
-                  { icon: <MapPin className="h-3.5 w-3.5" />, label: 'Address', value: `${kyc.address}, ${kyc.city}, ${kyc.state}` },
+                  { icon: <MapPin className="h-3.5 w-3.5" />, label: 'Address', value: [kyc.address, kyc.city, kyc.state, kyc.pincode].filter(Boolean).join(', ') || '—' },
                 ].map(row => (
                   <div key={row.label} className="flex items-start gap-2">
                     <span className="text-gray-400 mt-0.5 shrink-0">{row.icon}</span>
@@ -727,15 +769,14 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                     <span className="text-sm text-gray-700 truncate">{doc.label}</span>
                     <div className="flex items-center gap-2 shrink-0">
                       {doc.viewUrl && (
-                        <a
-                          href={doc.viewUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
+                        <button
+                          type="button"
+                          onClick={() => openDocument(doc.viewUrl as string)}
                           data-testid="kyc-doc-view-link"
                           className="text-xs text-blue-600 hover:underline"
                         >
                           View
-                        </a>
+                        </button>
                       )}
                       <span className={`text-xs font-medium capitalize ${docStatusColor[doc.status]}`}>
                         {doc.status === 'verified' && <CheckCircle className="h-3.5 w-3.5 inline mr-1" />}

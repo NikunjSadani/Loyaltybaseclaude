@@ -100,7 +100,9 @@ interface ApiKycDetail {
     gstNumber?: string | null; panNumber?: string | null;
     address?: string | null; city?: string | null; state?: string | null; pincode?: string | null;
     bankName?: string | null; bankAccountNumber?: string | null; ifscCode?: string | null; upiId?: string | null;
-    outlets?: { name?: string; outletCode: string; phone?: string }[];
+    outlets?: { name?: string; outletCode: string; phone?: string;
+      addressLine1?: string | null; addressLine2?: string | null;
+      city?: string | null; state?: string | null; pincode?: string | null }[];
   } | null;
   documents?: { id: string; documentType: string; fileUrl?: string; viewUrl?: string | null; status: string }[];
   verificationItems?: { fieldKey: string; decision: string; remark?: string | null; source?: string | null }[];
@@ -145,10 +147,11 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     partnerClass:     '',
     gstNumber:        s.partner?.gstNumber ?? '',
     panNumber:        s.partner?.panNumber ?? '',
-    address:          s.partner?.address ?? '',
-    city:             s.partner?.city ?? '',
-    state:            s.partner?.state ?? '',
-    pincode:          s.partner?.pincode ?? '',
+    // Address lives on the OUTLET (captured at KYC), not ChannelPartner.
+    address:          [s.partner?.outlets?.[0]?.addressLine1, s.partner?.outlets?.[0]?.addressLine2].filter(Boolean).join(', ') || (s.partner?.address ?? ''),
+    city:             s.partner?.outlets?.[0]?.city ?? s.partner?.city ?? '',
+    state:            s.partner?.outlets?.[0]?.state ?? s.partner?.state ?? '',
+    pincode:          s.partner?.outlets?.[0]?.pincode ?? s.partner?.pincode ?? '',
     salesUser:        '',
     territory:        '',
     region:           '',
