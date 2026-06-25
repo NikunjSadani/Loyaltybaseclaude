@@ -2,6 +2,7 @@ import { NestFactory }           from '@nestjs/core';
 import { ValidationPipe, Logger, VersioningType } from '@nestjs/common';
 import { ConfigService }          from '@nestjs/config';
 import helmet                     from 'helmet';
+import { json, urlencoded }       from 'express';
 import { AppModule }              from './app.module';
 
 // Money is stored as BigInt paise. JSON.stringify throws on BigInt by default;
@@ -14,7 +15,15 @@ import { AppModule }              from './app.module';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
-  const app    = await NestFactory.create(AppModule);
+  // bodyParser:false → we install our own json/urlencoded parsers with a raised
+  // limit. The Express default is 100 kB, which a large admin upload-confirm
+  // (employee hierarchy / outlet master — hundreds of rows of JSON) exceeds,
+  // surfacing as PayloadTooLargeError → "Internal server error". Cloud Run caps
+  // the request at 32 MB, so 25 MB is a safe ceiling. Multipart file uploads are
+  // unaffected (multer parses those independently).
+  const app    = await NestFactory.create(AppModule, { bodyParser: false });
+  app.use(json({ limit: '25mb' }));
+  app.use(urlencoded({ extended: true, limit: '25mb' }));
 
   // URI versioning — all feature controllers serve under /v1 (default version).
   // AppController (/, /health) is VERSION_NEUTRAL so liveness probes stay unversioned.
