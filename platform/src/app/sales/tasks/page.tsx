@@ -23,6 +23,7 @@ import {
   type Scheme,
 } from '@/lib/schemes';
 import { authHeader } from '@/lib/api-client';
+import { buildKycSubRows, buildVisibilityTaskItems, type KycSubRow } from '@/lib/sales-tasks';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -571,6 +572,7 @@ function SchemeEnrollmentGroup({ schemes, outlets }: { schemes: Scheme[]; outlet
 
 export default function TasksPage() {
   const [outlets,         setOutlets]         = useState<OutletRow[]>([]);
+  const [kycSubs,         setKycSubs]          = useState<KycSubRow[]>([]);
   const [taskConfig,      setTaskConfig]       = useState<TaskConfig | null>(null);
   const [role,            setRoleState]        = useState<SalesRole>('SO');
   const [pendingSchemes,  setPendingSchemes]   = useState<Scheme[]>([]);
@@ -589,31 +591,21 @@ export default function TasksPage() {
       fetchAllSchemes().then((s) => { setPendingSchemes(s); return s; }).catch(() => { setPendingSchemes([]); return []; }),
       fetch('/api/sales/outlets', { headers }).then((r) => r.json()),
       fetchTaskConfig(),
-    ]).then(([, oBody, config]) => {
+      // Approval/Rejected counts derive from SUBMISSIONS (shared buildKycSubRows)
+      // so they match the dashboard + KYC list — incl. no-outlet submissions.
+      fetch('/api/kyc', { headers }).then((r) => r.json()).catch(() => null),
+    ]).then(([, oBody, config, kycResult]) => {
       const apiOutlets: OutletRow[] = (oBody.data?.outlets ?? []).map(mapOutlet);
       setOutlets(apiOutlets);
       setTaskConfig(config);
+      setKycSubs(buildKycSubRows(kycResult));
 
       const visibleOutlets = apiOutlets.filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type));
       const codes = visibleOutlets.map((o) => o.outletCode);
 
       return fetchOutletVisibilityStatuses(codes, currentMonth).then((apiMap) => {
         const merged: VisibilityStatusMap = apiMap;
-        const items: TaskItem[] = visibleOutlets
-          .filter((o) => merged[o.outletCode]?.status !== 'APPROVED')
-          .map((o) => {
-            const s = merged[o.outletCode]?.status;
-            return {
-              id:       `vis-${o.id}`,
-              title:    o.name,
-              subtitle: s === 'UNDER_REVIEW'
-                ? 'Visibility submitted — awaiting approval'
-                : `${o.location} · Visibility capture pending this month`,
-              href:     '/sales/visibility',
-              priority: s === 'UNDER_REVIEW' ? ('medium' as const) : ('high' as const),
-            };
-          });
-        setVisibilityItems(items);
+        setVisibilityItems(buildVisibilityTaskItems(visibleOutlets, merged));
       });
     }).catch(() => {}).finally(() => setLoading(false));
   }, []);
@@ -681,16 +673,18 @@ export default function TasksPage() {
     }
 
     if (approvalStatus) {
-      const approvalOutlets = outlets.filter((o) => o.kycStatus === approvalStatus);
-      if (approvalOutlets.length > 0) {
+      // From SUBMISSIONS (shared buildKycSubRows) so the count matches the dashboard
+      // + the KYC list "Approval Pending" — including no-outlet submissions.
+      const approvalSubs = kycSubs.filter((s) => s.status === approvalStatus);
+      if (approvalSubs.length > 0) {
         groups.push({
           id: 'approval_required', label: 'Approval Required',
           icon: <FileCheck className="h-4 w-4 text-blue-600" />,
-          items: approvalOutlets.map((o) => ({
-            id: o.id, title: o.name,
-            subtitle: `${o.location} · KYC submitted by ${approverLabel} — awaiting your approval`,
-            href: `/sales/kyc/${o.id}`, priority: 'high' as const,
-            ageDays: ageInDays(o.kycSubmittedAt),
+          items: approvalSubs.map((s) => ({
+            id: s.id, title: s.title,
+            subtitle: `KYC submitted by ${approverLabel} — awaiting your approval`,
+            href: `/sales/kyc/${s.id}`, priority: 'high' as const,
+            ageDays: ageInDays(s.updatedAt),
           })),
           accentBg: 'bg-blue-50', accentBorder: 'border-blue-200',
           accentText: 'text-blue-700', badgeBg: 'bg-blue-100',
@@ -700,18 +694,19 @@ export default function TasksPage() {
     }
 
     if (isFieldRole) {
-      const rejectedOutlets = outlets.filter((o) =>
-        o.kycStatus === KYCStatus.REJECTED || o.kycStatus === KYCStatus.RESUBMISSION_REQUIRED,
+      // From SUBMISSIONS (shared buildKycSubRows) — matches the dashboard + KYC list.
+      const rejectedSubs = kycSubs.filter((s) =>
+        s.status === KYCStatus.REJECTED || s.status === KYCStatus.RESUBMISSION_REQUIRED,
       );
-      if (rejectedOutlets.length > 0) {
+      if (rejectedSubs.length > 0) {
         groups.push({
           id: 'rejected_kyc', label: 'Rejected KYC',
           icon: <XCircle className="h-4 w-4 text-red-600" />,
-          items: rejectedOutlets.map((o) => ({
-            id: o.id, title: o.name,
-            subtitle: `${o.location} · Resubmission required`,
-            href: `/sales/kyc/${o.id}`, priority: 'high' as const,
-            ageDays: ageInDays(o.kycSubmittedAt),
+          items: rejectedSubs.map((s) => ({
+            id: s.id, title: s.title,
+            subtitle: 'Resubmission required',
+            href: `/sales/kyc/${s.id}`, priority: 'high' as const,
+            ageDays: ageInDays(s.updatedAt),
           })),
           accentBg: 'bg-red-50', accentBorder: 'border-red-200',
           accentText: 'text-red-700', badgeBg: 'bg-red-100',
@@ -750,7 +745,7 @@ export default function TasksPage() {
     }
 
     return groups;
-  }, [outlets, taskConfig, role, visibilityItems]);
+  }, [outlets, kycSubs, taskConfig, role, visibilityItems]);
 
   const isFieldRole  = role === 'XSR' || role === 'SO';
   const schemeCount  = pendingSchemes.length;

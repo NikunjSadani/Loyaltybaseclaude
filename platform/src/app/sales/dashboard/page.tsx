@@ -13,11 +13,13 @@ import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus } from '@/types';
 import { pct, pctBarColor } from '@/lib/targets';
 import { type SalesRole, getRole } from '@/lib/sales-role';
-import { classifyPaceGap } from '@/lib/pace';
+import { classifyPaceGap, buildCasesToGoMsg } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
 import { fetchBanners, getActiveSalesBanners, getBgStyle, type Banner } from '@/lib/banner';
 import { fetchAllSchemes, type Scheme } from '@/lib/schemes';
+import { fetchOutletVisibilityStatuses, VISIBILITY_ELIGIBLE_OUTLET_TYPES } from '@/lib/visibility-upload';
+import { buildKycSubRows, buildVisibilityTaskItems, type KycSubRow } from '@/lib/sales-tasks';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -27,14 +29,7 @@ interface OutletRow {
   id: string; kycId: string; name: string; mobile: string;
   location: string; type: OutletType; kycStatus: KYCStatus;
   lastVisit?: string; kycSubmittedAt?: string;
-}
-
-/** A KYC SUBMISSION (from /api/kyc) — the unit of approval. The approval/rejected
- *  task counts derive from these so they match the KYC Submissions list exactly,
- *  INCLUDING submissions whose partner has no linked outlet (which never appear in
- *  /api/sales/outlets, so the old outlet-derived counts silently dropped them). */
-interface KycSubRow {
-  id: string; title: string; outletCode: string; status: KYCStatus; updatedAt: string;
+  outletCode: string; // for the visibility-status lookup
 }
 
 interface TaskItem {
@@ -80,9 +75,6 @@ interface SalesTargets {
 function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
   const kpis = targets.kpis;
   const withTarget = kpis.filter((k) => k.target > 0);
-  const overallAvgPct = withTarget.length > 0
-    ? Math.round(withTarget.reduce((s, k) => s + pct(k.achieved, k.target), 0) / withTarget.length)
-    : 0;
 
   const now          = new Date();
   const periodLabel  = (targets.period ? new Date(`${targets.period}-01T00:00:00`) : now)
@@ -91,11 +83,20 @@ function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
   const daysLeft     = daysInMonth - now.getDate();
   const timePct      = Math.round((now.getDate() / daysInMonth) * 100);
 
-  const paceGap       = timePct - overallAvgPct;
-  const paceStatus    = classifyPaceGap(paceGap, timePct, getGifsySettings().paceAmberThreshold ?? 10);
+  // Pace badge is driven by the PRIMARY metric (owner): a plain "{remaining} {unit}
+  // to go" the rep can act on, coloured by how the PRIMARY KPI is pacing — NOT the
+  // all-KPI average, which is skewed green when a secondary KPI is over-achieved.
+  const primaryKpi    = kpis.find((k) => k.isPrimary) ?? withTarget[0] ?? null;
+  const primaryPct    = primaryKpi && primaryKpi.target > 0 ? pct(primaryKpi.achieved, primaryKpi.target) : 0;
+  const primaryLeft   = primaryKpi ? Math.max(0, primaryKpi.target - primaryKpi.achieved) : 0;
+  const paceStatus    = primaryLeft === 0
+    ? 'green'
+    : classifyPaceGap(timePct - primaryPct, timePct, getGifsySettings().paceAmberThreshold ?? 10);
   const paceBg        = paceStatus === 'green' ? 'bg-emerald-50' : paceStatus === 'amber' ? 'bg-amber-50' : 'bg-red-50';
   const paceTextColor = paceStatus === 'green' ? 'text-emerald-700' : paceStatus === 'amber' ? 'text-amber-700' : 'text-red-600';
-  const paceText      = paceStatus === 'green' ? 'On pace' : `${paceGap}% behind pace`;
+  const paceText      = primaryLeft === 0
+    ? `${primaryKpi?.name ?? 'Primary'} target met 🎉`
+    : buildCasesToGoMsg(primaryLeft, primaryKpi?.unit ?? '', daysLeft);
 
   return (
     <Link href="/sales/outlets" className="block">
@@ -143,11 +144,10 @@ function TargetSummaryCard({ targets }: { targets: SalesTargets }) {
                 );
               })}
 
-              {withTarget.length > 0 && (
+              {primaryKpi && (
                 <div className={`flex items-center gap-1.5 text-[11px] font-semibold px-2 py-1.5 rounded-lg mt-1 ${paceBg} ${paceTextColor}`}>
                   <TrendingUp className="h-3 w-3 shrink-0" />
-                  {paceText} · {timePct}% of {periodLabel} elapsed
-                  {daysLeft > 0 && ` · ${daysLeft} days left`}
+                  {paceText}
                 </div>
               )}
 
@@ -193,6 +193,7 @@ function TargetTrendChart({ trend, unit }: { trend: SalesTargets['trend']; unit:
 export default function SalesDashboard() {
   const [outlets,      setOutlets]      = useState<OutletRow[]>([]);
   const [kycSubs,      setKycSubs]      = useState<KycSubRow[]>([]);
+  const [visibilityItems, setVisibilityItems] = useState<TaskItem[]>([]);
   const [loading,      setLoading]      = useState(true);
   const [search,       setSearch]       = useState('');
   const [searchOpen,   setSearchOpen]   = useState(false);
@@ -226,6 +227,7 @@ export default function SalesDashboard() {
         setOutlets((outletResult.data.outlets ?? []).map((o: any) => ({
           id:             o.id,
           kycId:          o.kycId ?? '',
+          outletCode:     o.outletCode ?? '',
           name:           o.name,
           mobile:         o.mobile,
           location:       o.location ?? o.city ?? '',
@@ -234,29 +236,9 @@ export default function SalesDashboard() {
           kycSubmittedAt: o.kycSubmittedAt,
         })));
       }
-      if (kycResult?.success) {
-        // Map submissions exactly like the KYC Submissions list (title = outlet name,
-        // else firm/owner, else the rep) so the dashboard's approval/rejected counts
-        // match that list — then collapse to one row per outlet (latest), keeping
-        // no-outlet submissions individually (the Anil-Sharma case).
-        const subs: KycSubRow[] = (kycResult.data.submissions ?? []).map((s: any) => ({
-          id:         s.id,
-          title:      s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? s.user?.name ?? 'KYC submission',
-          outletCode: s.partner?.outlets?.[0]?.outletCode ?? '',
-          status:     (s.status ?? '') as KYCStatus,
-          updatedAt:  s.updatedAt ?? s.createdAt ?? '',
-        }));
-        const latestByOutlet = new Map<string, KycSubRow>();
-        const noOutlet: KycSubRow[] = [];
-        for (const e of subs) {
-          if (!e.outletCode) { noOutlet.push(e); continue; }
-          const cur = latestByOutlet.get(e.outletCode);
-          if (!cur || new Date(e.updatedAt || 0).getTime() >= new Date(cur.updatedAt || 0).getTime()) {
-            latestByOutlet.set(e.outletCode, e);
-          }
-        }
-        setKycSubs([...latestByOutlet.values(), ...noOutlet]);
-      }
+      // Approval/Rejected counts derive from SUBMISSIONS (shared with the Tasks
+      // page via buildKycSubRows) so the two views can never disagree.
+      setKycSubs(buildKycSubRows(kycResult));
       setLoading(false);
     }).catch(() => setLoading(false));
   }, []);
@@ -269,6 +251,21 @@ export default function SalesDashboard() {
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
   }, []);
+
+  /* ── Visibility tasks — same source + shape as the Tasks page (buildVisibilityTaskItems)
+       so the dashboard's "Visibility" count matches /sales/tasks. Field roles only. ── */
+  useEffect(() => {
+    const isFieldRole = role === 'XSR' || role === 'SO';
+    const eligible = outlets.filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type));
+    const codes = eligible.map((o) => o.outletCode).filter(Boolean);
+    if (!isFieldRole || codes.length === 0) { setVisibilityItems([]); return; }
+    const month = new Date().toISOString().slice(0, 7);
+    let cancelled = false;
+    fetchOutletVisibilityStatuses(codes, month)
+      .then((map) => { if (!cancelled) setVisibilityItems(buildVisibilityTaskItems(eligible, map)); })
+      .catch(() => { if (!cancelled) setVisibilityItems([]); });
+    return () => { cancelled = true; };
+  }, [outlets, role]);
 
   /* ── Close search dropdown on outside click ── */
   useEffect(() => {
@@ -411,6 +408,18 @@ export default function SalesDashboard() {
         });
       }
 
+      // Visibility — outlets whose monthly capture isn't APPROVED yet (shared
+      // derivation with the Tasks page). Shown when > 0 (owner request).
+      if (visibilityItems.length > 0) {
+        groups.push({
+          id: 'visibility', label: 'Visibility',
+          icon: <FileCheck className="h-4 w-4 text-blue-600" />,
+          items: visibilityItems,
+          accentBg: 'bg-blue-50', accentBorder: 'border-blue-200',
+          accentText: 'text-blue-700', badgeBg: 'bg-blue-100',
+          href: '/sales/visibility',
+        });
+      }
     }
 
     // HO Notifications / Reminders (admin-configurable via Settings → Task Configuration)
@@ -433,7 +442,7 @@ export default function SalesDashboard() {
     }
 
     return groups;
-  }, [outlets, kycSubs, taskConfig, role]);
+  }, [outlets, kycSubs, visibilityItems, taskConfig, role]);
 
   const isFieldRole = role === 'XSR' || role === 'SO';
   const schemeCount = isFieldRole ? pendingSchemes.length : 0;
