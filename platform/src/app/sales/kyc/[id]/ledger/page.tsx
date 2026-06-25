@@ -204,8 +204,15 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
     );
   }
 
-  // Safe after the early-return guard above
-  const o = outlet!;
+  // Until the fetch resolves, `outlet` is null. The title below dereferences
+  // `o.name`/`o.outletCode` BEFORE the inline loading spinner, so a bare `outlet!`
+  // here threw during the loading window — and during SSR (the effect never runs
+  // server-side, so loading stays true), which 500-ed the whole route ("This page
+  // couldn't load"). Render a spinner until the outlet is loaded.
+  if (!outlet) {
+    return <div className="flex items-center justify-center py-20"><Spinner size="lg" /></div>;
+  }
+  const o = outlet;
 
   return (
     <div className="space-y-5 fade-in">
