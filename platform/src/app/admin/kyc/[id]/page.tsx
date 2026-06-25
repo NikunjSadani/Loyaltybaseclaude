@@ -572,9 +572,14 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                 return geo ? (
                   <div className="flex gap-2 items-start" data-testid="kyc-location">
                     <span className="text-gray-500 w-24 flex-shrink-0">Location</span>
-                    <span className="text-gray-800 font-mono">
+                    <a
+                      href={`https://www.google.com/maps/search/?api=1&query=${geo.lat},${geo.lng}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-emerald-700 font-mono underline decoration-dotted underline-offset-2 hover:text-emerald-800"
+                    >
                       {geo.lat.toFixed(6)}, {geo.lng.toFixed(6)}
-                    </span>
+                    </a>
                   </div>
                 ) : null;
               })()}

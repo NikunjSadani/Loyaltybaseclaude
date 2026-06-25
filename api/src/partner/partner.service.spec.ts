@@ -505,4 +505,93 @@ describe('PartnerService', () => {
       expect(res.team.filter((m) => m.employeeCode === 'E-so1')).toHaveLength(1);
     });
   });
+
+  // ─── getTargetTrend (dashboard chart — real primary KPI per month) ────────────
+  describe('getTargetTrend', () => {
+    afterEach(() => jest.useRealTimers());
+
+    it('sums the PRIMARY KPI per month across outlets; honest null where a side has no data', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-06-15T00:00:00Z'));
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O1' }, { outletCode: 'O2' }]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'LINES', label: 'Lines', unit: 'lines', isPrimary: false },
+        { code: 'VOL', label: 'Monthly Volume', unit: 'Litre', isPrimary: true },
+      ]);
+      // Targets: May + Jun (two outlets each); achievements: Jun only.
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { month: '2026-05', targetValues: { VOL: 40, LINES: 5 } },
+        { month: '2026-05', targetValues: { VOL: 60 } },
+        { month: '2026-06', targetValues: { VOL: 50 } },
+        { month: '2026-06', targetValues: { VOL: 50 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { month: '2026-06', kpiValues: { VOL: 30, LINES: 9 } },
+        { month: '2026-06', kpiValues: { VOL: 40 } },
+      ]);
+
+      const res = await service.getTargetTrend(partner, 6);
+
+      expect(res.kpiCode).toBe('VOL');
+      expect(res.kpiName).toBe('Monthly Volume');
+      expect(res.unit).toBe('Litre');
+      expect(res.trend.map((t) => t.month)).toEqual([
+        '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06',
+      ]);
+      const may = res.trend.find((t) => t.month === '2026-05')!;
+      const jun = res.trend.find((t) => t.month === '2026-06')!;
+      const jan = res.trend.find((t) => t.month === '2026-01')!;
+      expect(may).toEqual({ month: '2026-05', target: 100, achieved: null }); // 40+60, no achievement
+      expect(jun).toEqual({ month: '2026-06', target: 100, achieved: 70 });   // 50+50, 30+40 — LINES ignored
+      expect(jan).toEqual({ month: '2026-01', target: null, achieved: null }); // honest gap
+    });
+
+    it('trends the EXPLICIT kpi when the caller passes one (chart ↔ hero convergence); ignores an unknown code', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-06-15T00:00:00Z'));
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O1' }]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([
+        { code: 'LINES', label: 'Lines', unit: 'lines', isPrimary: true },  // flagged primary
+        { code: 'VOL', label: 'Monthly Volume', unit: 'Litre', isPrimary: false },
+      ]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { month: '2026-06', targetValues: { VOL: 80, LINES: 5 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+
+      // Caller asks for VOL even though LINES is the flagged primary → VOL wins.
+      const explicit = await service.getTargetTrend(partner, 6, 'VOL');
+      expect(explicit.kpiCode).toBe('VOL');
+      expect(explicit.unit).toBe('Litre');
+      expect(explicit.trend.find((t) => t.month === '2026-06')!.target).toBe(80);
+
+      // Unknown code → falls back to the flagged primary (LINES).
+      const fallback = await service.getTargetTrend(partner, 6, 'NOPE');
+      expect(fallback.kpiCode).toBe('LINES');
+    });
+
+    it('returns an empty trend when the caller has no partner', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      const res = await service.getTargetTrend(partner, 6);
+      expect(res).toEqual({ kpiCode: null, kpiName: null, unit: null, trend: [] });
+    });
+
+    it('scopes outlet + target queries to the caller tenant', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-06-15T00:00:00Z'));
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O1' }]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'VOL', label: 'V', unit: 'Litre', isPrimary: true }]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+
+      await service.getTargetTrend(partner, 6);
+
+      expect(mockPrisma.outlet.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ clientId: 'deoleo' }) }),
+      );
+      expect(mockPrisma.outletTarget.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ clientId: 'deoleo' }) }),
+      );
+    });
+  });
 });

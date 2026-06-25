@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
-import { kpiCodeKeys, NAMES_KEY } from '../targets/targets.helpers';
+import { kpiCodeKeys, NAMES_KEY, lastNMonths } from '../targets/targets.helpers';
 
 /**
  * Partner self-service — ported from platform/src/app/api/partner/* onto /v1.
@@ -252,6 +252,96 @@ export class PartnerService {
       });
 
     return { period: month, outlets: result };
+  }
+
+  /**
+   * GET /v1/partner/targets/trend — the caller's PRIMARY KPI target vs achieved
+   * for each of the trailing `months` calendar months (oldest first), summed
+   * across all of the partner's outlets. Powers the dashboard "Target vs.
+   * Achievement" chart with REAL data (was hardcoded ₹-lakh mock).
+   *
+   * Same per-outlet × KPI × month model as getTargets:
+   *   - OutletTarget.targetValues[code]   — target side
+   *   - OutletSalesRecord.kpiValues[code] — achievement side
+   * A month with no row on a side stays null (an honest gap, not a fake 0).
+   */
+  async getTargetTrend(
+    user: JwtPayload,
+    months = 24,
+    kpiCode?: string,
+  ): Promise<{
+    kpiCode: string | null;
+    kpiName: string | null;
+    unit: string | null;
+    trend: Array<{ month: string; target: number | null; achieved: number | null }>;
+  }> {
+    const span = Math.min(Math.max(Math.trunc(months) || 0, 1), 36);
+
+    const partner = await this.prisma.channelPartner.findFirst({
+      where: { userId: user.sub, clientId: user.clientId },
+      select: { id: true },
+    });
+    if (!partner) return { kpiCode: null, kpiName: null, unit: null, trend: [] };
+
+    const outlets = await this.prisma.outlet.findMany({
+      where: { partnerId: partner.id, clientId: user.clientId },
+      select: { outletCode: true },
+    });
+    const outletCodes = outlets.map((o) => o.outletCode);
+    if (outletCodes.length === 0) return { kpiCode: null, kpiName: null, unit: null, trend: [] };
+
+    // Pick the KPI to trend. The caller (dashboard) passes the SAME primary KPI
+    // its hero headline resolved, so the chart and the hero never disagree; when
+    // it's absent/unknown, fall back to the flagged primary, then the first KPI.
+    const kpiDefs = await this.prisma.kpiDef.findMany({
+      where: { clientId: user.clientId },
+      select: { code: true, label: true, unit: true, isPrimary: true },
+      orderBy: { code: 'asc' },
+    });
+    const primary =
+      (kpiCode && kpiDefs.find((k) => k.code === kpiCode)) ||
+      kpiDefs.find((k) => k.isPrimary) ||
+      kpiDefs[0] ||
+      null;
+    if (!primary) return { kpiCode: null, kpiName: null, unit: null, trend: [] };
+
+    const monthKeys = lastNMonths(span);
+    const whereBase = {
+      clientId: user.clientId,
+      outletCode: { in: outletCodes },
+      month: { in: monthKeys },
+    };
+
+    const [targetRows, achievementRows] = await Promise.all([
+      this.prisma.outletTarget.findMany({
+        where: whereBase,
+        select: { month: true, targetValues: true },
+      }),
+      this.prisma.outletSalesRecord.findMany({
+        where: whereBase,
+        select: { month: true, kpiValues: true },
+      }),
+    ]);
+
+    const code = primary.code;
+    const targetByMonth = new Map<string, number>();
+    const achievedByMonth = new Map<string, number>();
+    for (const r of targetRows) {
+      const v = (r.targetValues as Record<string, unknown>)?.[code];
+      if (typeof v === 'number') targetByMonth.set(r.month, (targetByMonth.get(r.month) ?? 0) + v);
+    }
+    for (const r of achievementRows) {
+      const v = (r.kpiValues as Record<string, unknown>)?.[code];
+      if (typeof v === 'number') achievedByMonth.set(r.month, (achievedByMonth.get(r.month) ?? 0) + v);
+    }
+
+    const trend = monthKeys.map((m) => ({
+      month: m,
+      target: targetByMonth.has(m) ? targetByMonth.get(m)! : null,
+      achieved: achievedByMonth.has(m) ? achievedByMonth.get(m)! : null,
+    }));
+
+    return { kpiCode: code, kpiName: primary.label, unit: primary.unit ?? '', trend };
   }
 
   /**

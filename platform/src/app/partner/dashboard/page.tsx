@@ -10,6 +10,7 @@ import Link from 'next/link';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
 import { AchievementChart, type ChartView } from '@/components/charts/achievement-chart';
+import { buildChartSeries, type TrendPoint } from '@/lib/target-trend';
 import {
   getActiveBannersFromList, saveBanners, savePopups, loadBanners, fetchBanners,
   getBgStyle, toEmbedUrl,
@@ -102,9 +103,31 @@ function ProgressBar({ pct, status }: { pct: number; status: KpiStatus }) {
 
 /* ─── Shared: Sales vs Target chart section ──────────────────────────────── */
 
+interface TrendResponse { kpiName: string | null; unit: string | null; trend: TrendPoint[]; }
+
 function PerformanceChart({ primary }: { primary: AggKpi | null }) {
   const [chartView, setChartView] = useState<ChartView>('monthly');
+  const [trend, setTrend]         = useState<TrendResponse | null>(null);
   const { timePct, daysLeft } = computePace();
+
+  // Real primary-KPI target-vs-achieved history (was hardcoded ₹-lakh mock).
+  // Trend the SAME KPI the hero headline resolved (passed as ?kpi=) so the chart
+  // and the hero number never disagree; refetch once the hero's primary loads.
+  const primaryCode = primary?.code;
+  useEffect(() => {
+    let cancelled = false;
+    const kpiParam = primaryCode ? `&kpi=${encodeURIComponent(primaryCode)}` : '';
+    fetch(`/api/partner/targets/trend?months=24${kpiParam}`, { headers: { ...authHeader() } })
+      .then(r => r.json())
+      .then((json: { success: boolean; data?: TrendResponse }) => {
+        if (!cancelled && json.success && json.data) setTrend(json.data);
+      })
+      .catch(() => {}); // honest empty state — the chart shows "No target data yet"
+    return () => { cancelled = true; };
+  }, [primaryCode]);
+
+  const series    = buildChartSeries(trend?.trend ?? []);
+  const chartUnit = trend?.unit ?? primary?.unit ?? '';
 
   // Cases-to-go badge derived from the REAL primary KPI (achieved/target/unit).
   const achieved    = primary?.achieved ?? 0;
@@ -144,7 +167,13 @@ function PerformanceChart({ primary }: { primary: AggKpi | null }) {
         </p>
       </CardHeader>
       <CardContent className="px-2 pb-2">
-        <AchievementChart view={chartView} />
+        <AchievementChart
+          view={chartView}
+          unit={chartUnit}
+          monthly={series.monthly}
+          yoy={series.yoy}
+          yoyLabels={series.yoyLabels}
+        />
         {chartView === 'monthly' && primary && (
           <div className={`mx-2 mb-1 mt-2 rounded-lg px-3 py-1.5 flex items-center gap-2 text-[10px] font-semibold ${badgeClass}`}>
             <TrendingUp className="h-3 w-3 shrink-0" />

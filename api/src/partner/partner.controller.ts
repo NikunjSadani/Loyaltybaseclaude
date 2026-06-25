@@ -40,6 +40,17 @@ export class PartnerController {
     return this.partner.getTargets(user, query);
   }
 
+  // Primary-KPI target-vs-achieved trend (last N months) for the dashboard chart.
+  @Get('targets/trend')
+  @RequirePermission('targets:read')
+  getTargetTrend(
+    @CurrentUser() user: JwtPayload,
+    @Query('months') months?: string,
+    @Query('kpi') kpi?: string,
+  ) {
+    return this.partner.getTargetTrend(user, months ? Number(months) : 24, kpi);
+  }
+
   // The caller's own assigned sales reps (Support page "Your Sales Team").
   // Caller- + tenant-scoped in the service; basic self-info, like /me.
   @Get('sales-team')

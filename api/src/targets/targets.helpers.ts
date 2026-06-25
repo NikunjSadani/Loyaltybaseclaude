@@ -135,6 +135,20 @@ export function currentMonthKey(now: Date = new Date()): string {
 }
 
 /**
+ * The trailing `n` months ending at (and including) the current month, oldest
+ * first, as `YYYY-MM` strings. e.g. n=6 in 2026-06 → ['2026-01'..'2026-06'].
+ * Used by the partner dashboard trend chart.
+ */
+export function lastNMonths(n: number, now: Date = new Date()): string[] {
+  const out: string[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  }
+  return out;
+}
+
+/**
  * A target month is LOCKED (not editable) once it is strictly in the PAST. The
  * CURRENT month stays editable (admins adjust the in-flight month); future
  * months are always editable. Strict less-than, so `YYYY-MM` string ordering

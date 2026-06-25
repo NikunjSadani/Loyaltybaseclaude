@@ -720,7 +720,14 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                       <span className="text-gray-400 mt-0.5 shrink-0"><MapPin className="h-3.5 w-3.5" /></span>
                       <div className="flex-1 min-w-0">
                         <p className="text-xs text-gray-400">Location (lat, long)</p>
-                        <p className="text-sm font-mono text-gray-800">{geo.lat.toFixed(6)}, {geo.lng.toFixed(6)}</p>
+                        <a
+                          href={`https://www.google.com/maps/search/?api=1&query=${geo.lat},${geo.lng}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm font-mono text-emerald-700 underline decoration-dotted underline-offset-2 hover:text-emerald-800"
+                        >
+                          {geo.lat.toFixed(6)}, {geo.lng.toFixed(6)}
+                        </a>
                       </div>
                     </div>
                   ) : null;
