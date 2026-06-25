@@ -384,7 +384,9 @@ export default function SalesOutletsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
-                    {visibleOutlets.map((outlet) => {
+                    {/* Approved outlets first, then the rest — same ordering as the
+                        cards view (sortedVisibleOutlets), so the table matches. */}
+                    {sortedVisibleOutlets.map((outlet) => {
                       const isKycApproved = outlet.kycStatus === KYCStatus.APPROVED;
                       const kpis = kpisFor(outlet);
                       const avgPct = isKycApproved ? outletOverallPct(kpis, primaryCode) : 0;
