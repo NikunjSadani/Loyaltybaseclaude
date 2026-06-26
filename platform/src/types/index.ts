@@ -490,6 +490,8 @@ export interface GifsySettings {
     ledgerLabel?: string;
     /** When true, "Redeem Gift" quick action is shown only for WHOLESALER outlets. Default: false */
     redeemGiftWholesalerOnly?: boolean;
+    /** When true, the sales KYC form offers UPI as a payout option. Default: false (bank-only). */
+    upiEnabled?: boolean;
   };
   /** Credits & Payouts bulk upload module settings */
   creditsPayouts?: {

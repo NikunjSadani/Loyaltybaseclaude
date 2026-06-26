@@ -3,6 +3,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { CreditCard, Smartphone, QrCode, StopCircle, X, CheckCircle } from 'lucide-react';
 import { parseUpiFromQr } from '@/lib/upi-utils';
+import { getGifsySettings } from '@/lib/gifsy-settings';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -71,6 +72,16 @@ export function BankOrUpiSection({
   const videoRef  = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+
+  /* ── Per-tenant UPI gate (default OFF → bank-transfer only) ── */
+  const upiEnabled = getGifsySettings().salesApp?.upiEnabled === true;
+
+  /* ── When UPI is disabled, force the effective mode to 'bank' so the parent's
+        submit-validation `paymentMode === 'upi'` branch can never fire. Guarded so it
+        does not loop (only fires while not already 'bank'). ── */
+  useEffect(() => {
+    if (!upiEnabled && paymentMode !== 'bank') onPaymentModeChange('bank');
+  }, [upiEnabled, paymentMode, onPaymentModeChange]);
 
   /* ── Stop camera when mode changes away from UPI ── */
   useEffect(() => {
@@ -146,45 +157,51 @@ export function BankOrUpiSection({
     onPaymentModeChange(mode);
   };
 
+  // Effective mode: when UPI is disabled for the tenant, always bank (regardless of the
+  // controlled prop, which the force-bank effect above is converging to 'bank').
+  const effectiveMode: PaymentMode = upiEnabled ? paymentMode : 'bank';
+
   return (
     <div className="space-y-4">
-      {/* ── Mode toggle ── */}
-      <div className="flex rounded-xl border border-gray-200 overflow-hidden">
-        <button
-          type="button"
-          role="button"
-          aria-pressed={paymentMode === 'bank'}
-          onClick={() => handleModeClick('bank')}
-          className={
-            'flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold transition-colors ' +
-            (paymentMode === 'bank'
-              ? 'bg-[var(--brand-primary)] text-white'
-              : 'bg-white text-gray-500 hover:bg-gray-50')
-          }
-        >
-          <CreditCard className="h-3.5 w-3.5" />
-          Bank Account
-        </button>
+      {/* ── Mode toggle (hidden entirely when UPI is disabled for the tenant) ── */}
+      {upiEnabled && (
+        <div className="flex rounded-xl border border-gray-200 overflow-hidden" data-testid="payment-mode-toggle">
+          <button
+            type="button"
+            role="button"
+            aria-pressed={effectiveMode === 'bank'}
+            onClick={() => handleModeClick('bank')}
+            className={
+              'flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold transition-colors ' +
+              (effectiveMode === 'bank'
+                ? 'bg-[var(--brand-primary)] text-white'
+                : 'bg-white text-gray-500 hover:bg-gray-50')
+            }
+          >
+            <CreditCard className="h-3.5 w-3.5" />
+            Bank Account
+          </button>
 
-        <button
-          type="button"
-          role="button"
-          aria-pressed={paymentMode === 'upi'}
-          onClick={() => handleModeClick('upi')}
-          className={
-            'flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold transition-colors ' +
-            (paymentMode === 'upi'
-              ? 'bg-[var(--brand-primary)] text-white'
-              : 'bg-white text-gray-500 hover:bg-gray-50')
-          }
-        >
-          <Smartphone className="h-3.5 w-3.5" />
-          UPI ID
-        </button>
-      </div>
+          <button
+            type="button"
+            role="button"
+            aria-pressed={effectiveMode === 'upi'}
+            onClick={() => handleModeClick('upi')}
+            className={
+              'flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold transition-colors ' +
+              (effectiveMode === 'upi'
+                ? 'bg-[var(--brand-primary)] text-white'
+                : 'bg-white text-gray-500 hover:bg-gray-50')
+            }
+          >
+            <Smartphone className="h-3.5 w-3.5" />
+            UPI ID
+          </button>
+        </div>
+      )}
 
       {/* ── Bank mode panel ── */}
-      {paymentMode === 'bank' && (
+      {effectiveMode === 'bank' && (
         <div className="space-y-4">
           <div>
             <label className={labelCls}>Bank Name *</label>
@@ -231,7 +248,7 @@ export function BankOrUpiSection({
       )}
 
       {/* ── UPI mode panel — QR scan only, no manual text entry ── */}
-      {paymentMode === 'upi' && (
+      {effectiveMode === 'upi' && (
         <div className="space-y-3">
 
           {/* Scanned UPI ID display — shown only after a successful scan */}

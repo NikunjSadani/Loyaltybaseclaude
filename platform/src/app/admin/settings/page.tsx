@@ -1,7 +1,7 @@
 ﻿'use client'
 
 import { useState, useEffect } from 'react'
-import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X } from 'lucide-react'
+import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
@@ -126,6 +126,35 @@ export default function SettingsPage() {
     }
     setVisibilityEnabledSaved(true)
     setTimeout(() => setVisibilityEnabledSaved(false), 3000)
+  }
+
+  // ── UPI collection toggle (per-tenant; saved via GifsySettings) ──
+  // Like the visibility switch, saveGifsySettings PUTs to /v1/admin/settings (GIFSY_ADMIN-only),
+  // so the control is editable only for GIFSY_ADMIN. Default OFF — treat missing as OFF.
+  // salesApp is a REPLACE-WHOLE nested key, so we MUST send the COMPLETE salesApp object.
+  const [upiEnabled,      setUpiEnabled]      = useState<boolean>(() => getGifsySettings().salesApp?.upiEnabled === true)
+  const [upiEnabledSaved, setUpiEnabledSaved] = useState(false)
+  const [upiEnabledError, setUpiEnabledError] = useState<string | null>(null)
+
+  // Keep the displayed value in sync once server settings hydrate (/me → cache).
+  useEffect(() => {
+    setUpiEnabled(getGifsySettings().salesApp?.upiEnabled === true)
+  }, [])
+
+  async function handleUpiEnabledChange(next: boolean) {
+    setUpiEnabledError(null)
+    const previous = upiEnabled
+    setUpiEnabled(next) // optimistic
+    const ok = await saveGifsySettings({
+      salesApp: { ...getGifsySettings().salesApp, upiEnabled: next },
+    })
+    if (!ok) {
+      setUpiEnabled(previous) // revert
+      setUpiEnabledError('Could not save — UPI collection can only be changed by a Gifsy Admin.')
+      return
+    }
+    setUpiEnabledSaved(true)
+    setTimeout(() => setUpiEnabledSaved(false), 3000)
   }
 
   // ── Outlet Programs & Categories allow-lists (per-tenant; saved via GifsySettings) ──
@@ -459,6 +488,60 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* ── UPI Collection (KYC form) — per-tenant ── */}
+      <Card data-testid="upi-collection-card">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Smartphone className="h-4 w-4 text-[var(--brand-primary)]" /> UPI Collection (KYC form)
+              </CardTitle>
+              <CardDescription className="mt-1">
+                When ON, the sales KYC form offers UPI as a payout option. When OFF (default),
+                only bank transfer is collected. This is a Gifsy-operated setting — only a
+                Gifsy Admin can change it.
+              </CardDescription>
+            </div>
+            {upiEnabledSaved && (
+              <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg shrink-0">
+                ✓ Saved
+              </span>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3">
+            {/* Segmented ON/OFF control */}
+            <div className="flex bg-gray-100 rounded-lg p-1 gap-1" role="radiogroup" aria-label="UPI collection">
+              {([['OFF', false], ['ON', true]] as const).map(([label, val]) => (
+                <button
+                  key={label}
+                  role="radio"
+                  aria-checked={upiEnabled === val}
+                  disabled={!isGifsyAdmin}
+                  onClick={() => upiEnabled !== val && handleUpiEnabledChange(val)}
+                  className={`px-4 py-2 rounded-md text-sm font-medium transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
+                    upiEnabled === val
+                      ? 'bg-white text-gray-900 shadow-sm border border-gray-200'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {!isGifsyAdmin && (
+            <p className="text-xs text-gray-400 mt-2">
+              UPI collection is a Gifsy-operated setting — only a Gifsy Admin can change it.
+            </p>
+          )}
+          {upiEnabledError && (
+            <p className="text-xs text-red-600 mt-2">{upiEnabledError}</p>
+          )}
+        </CardContent>
+      </Card>
 
       {/* TDS Configuration */}
       <Card>

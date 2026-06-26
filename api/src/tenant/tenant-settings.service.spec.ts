@@ -29,7 +29,7 @@ describe('TenantSettingsService', () => {
     expect(s.minVoucherFreeAmount).toBe(250);
     expect(s.paceAmberThreshold).toBe(10);
     expect(s.redemptionChannels).toEqual({ physicalGifts: true, vouchers: true, bankTransfer: true });
-    expect(s.salesApp).toEqual({ ledgerLabel: 'Wallet', redeemGiftWholesalerOnly: true });
+    expect(s.salesApp).toEqual({ ledgerLabel: 'Wallet', redeemGiftWholesalerOnly: true, upiEnabled: false });
     expect(s.creditsPayouts.notifyEmails).toEqual([]);
     // Master visibility switch defaults OFF (opt-in per tenant).
     expect(s.visibilityEnabled).toBe(false);

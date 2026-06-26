@@ -16,6 +16,13 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 // Mock jsqr — the actual decode is exercised via upi-utils.test.ts
 vi.mock('jsqr', () => ({ default: vi.fn().mockReturnValue(null) }));
 
+// Per-tenant UPI gate. The existing suites below assume UPI is available, so the default
+// mock returns upiEnabled: true. The dedicated "UPI gate" describe overrides it per-test.
+const getGifsySettingsMock = vi.fn(() => ({ salesApp: { upiEnabled: true } }));
+vi.mock('@/lib/gifsy-settings', () => ({
+  getGifsySettings: () => getGifsySettingsMock(),
+}));
+
 import { BankOrUpiSection } from '../bank-or-upi-section';
 
 /* ─── Fixtures ──────────────────────────────────────────────────────────────── */
@@ -35,7 +42,11 @@ const baseProps = {
 
 const upiProps = { ...baseProps, paymentMode: 'upi' as const };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  // Restore the default (UPI enabled) — clearAllMocks wipes the implementation.
+  getGifsySettingsMock.mockReturnValue({ salesApp: { upiEnabled: true } });
+});
 afterEach(() => vi.useRealTimers());
 
 /* ─── A: Mode toggle ────────────────────────────────────────────────────────── */
@@ -311,5 +322,74 @@ describe('QR scanner', () => {
     });
 
     vi.useRealTimers();
+  });
+});
+
+/* ─── F: Per-tenant UPI gate (salesApp.upiEnabled) ──────────────────────────── */
+
+describe('UPI gate — salesApp.upiEnabled', () => {
+  describe('disabled (upiEnabled === false, the default)', () => {
+    beforeEach(() => {
+      getGifsySettingsMock.mockReturnValue({ salesApp: { upiEnabled: false } });
+    });
+
+    it('does NOT render the Bank/UPI mode toggle', () => {
+      render(<BankOrUpiSection {...baseProps} />);
+      expect(screen.queryByTestId('payment-mode-toggle')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /upi id/i })).not.toBeInTheDocument();
+    });
+
+    it('renders the bank-details fields only', () => {
+      render(<BankOrUpiSection {...baseProps} />);
+      expect(screen.getByTestId('account-holder-name-input')).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/hdfc bank/i)).toBeInTheDocument();
+    });
+
+    it('does NOT offer the Scan QR affordance', () => {
+      render(<BankOrUpiSection {...baseProps} />);
+      expect(screen.queryByRole('button', { name: /scan qr/i })).not.toBeInTheDocument();
+    });
+
+    it('renders bank panel even when the controlled mode is upi', () => {
+      render(<BankOrUpiSection {...upiProps} />);
+      // Bank fields show; UPI QR panel does not.
+      expect(screen.getByPlaceholderText(/hdfc bank/i)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /scan qr/i })).not.toBeInTheDocument();
+    });
+
+    it('forces the parent payment mode to bank when it is not already bank', () => {
+      const onPaymentModeChange = vi.fn();
+      render(<BankOrUpiSection {...upiProps} onPaymentModeChange={onPaymentModeChange} />);
+      expect(onPaymentModeChange).toHaveBeenCalledWith('bank');
+    });
+
+    it('does NOT force the mode when already bank (no loop)', () => {
+      const onPaymentModeChange = vi.fn();
+      render(<BankOrUpiSection {...baseProps} onPaymentModeChange={onPaymentModeChange} />);
+      expect(onPaymentModeChange).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('enabled (upiEnabled === true)', () => {
+    beforeEach(() => {
+      getGifsySettingsMock.mockReturnValue({ salesApp: { upiEnabled: true } });
+    });
+
+    it('renders the Bank/UPI mode toggle with the UPI option', () => {
+      render(<BankOrUpiSection {...baseProps} />);
+      expect(screen.getByTestId('payment-mode-toggle')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /upi id/i })).toBeInTheDocument();
+    });
+
+    it('offers the Scan QR affordance in UPI mode', () => {
+      render(<BankOrUpiSection {...upiProps} />);
+      expect(screen.getByRole('button', { name: /scan qr/i })).toBeInTheDocument();
+    });
+
+    it('does NOT force the mode to bank', () => {
+      const onPaymentModeChange = vi.fn();
+      render(<BankOrUpiSection {...upiProps} onPaymentModeChange={onPaymentModeChange} />);
+      expect(onPaymentModeChange).not.toHaveBeenCalled();
+    });
   });
 });
