@@ -63,6 +63,17 @@ export interface EffectiveSettings {
   redemptionChannels:     RedemptionChannels;
   salesApp:               SalesAppSettings;
   creditsPayouts:         CreditsPayoutsSettings;
+  /**
+   * Allowed "Program Name" values for the Outlet Master upload (per-tenant). Drives the
+   * upload validator + template generator on the FE. The value stored on each outlet stays
+   * free text — only the ALLOWED list is configurable here. Never empty (default-guarded).
+   */
+  outletPrograms:         string[];
+  /**
+   * Allowed "Program Category" values for the Outlet Master upload (per-tenant). Same model
+   * as outletPrograms. Never empty (default-guarded).
+   */
+  outletCategories:       string[];
 }
 
 /**
@@ -86,7 +97,9 @@ type SettingKey =
   | 'visibilityEnabled'
   | 'redemptionChannels'
   | 'salesApp'
-  | 'creditsPayouts';
+  | 'creditsPayouts'
+  | 'outletPrograms'
+  | 'outletCategories';
 
 const NESTED_KEYS: ReadonlySet<SettingKey> = new Set([
   'redemptionChannels',
@@ -142,6 +155,10 @@ export class TenantSettingsService {
         fourEyesEnabled: false,
         notifyEmails:    [],
       },
+      // Allowed Outlet Master upload lists — default to the prior hardcoded FE constants
+      // so existing tenants see no behaviour change until they customise them.
+      outletPrograms:   ['Trade Loyalty', 'Gold Programme'],
+      outletCategories: ['Premium', 'Standard', 'Economy'],
     };
   }
 
@@ -291,12 +308,42 @@ export class TenantSettingsService {
           }
           break;
         }
+        case 'outletPrograms': {
+          // Replace-whole list. A non-array OR an empty (post-clean) list keeps the default,
+          // so a tenant can never lock itself out of all outlet uploads.
+          out.outletPrograms = this.stringList(v, base.outletPrograms);
+          break;
+        }
+        case 'outletCategories': {
+          out.outletCategories = this.stringList(v, base.outletCategories);
+          break;
+        }
         default:
           break; // unknown key — ignore (admin settings store holds other keys too)
       }
     }
 
     return out;
+  }
+
+  /**
+   * Validate a stored value as a non-empty string list for the outlet allow-lists:
+   * trim each entry, drop blanks, DEDUPE (case-sensitive, order-preserving). If the value is
+   * not an array, or reduces to an empty list, return the (copied) fallback default — a tenant
+   * must never end up with an empty allow-list. Never shares the fallback array reference.
+   */
+  private stringList(v: unknown, fallback: string[]): string[] {
+    if (!Array.isArray(v)) return [...fallback];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of v) {
+      if (typeof item !== 'string') continue;
+      const t = item.trim();
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+    }
+    return out.length > 0 ? out : [...fallback];
   }
 
   private num(v: unknown): number | null {

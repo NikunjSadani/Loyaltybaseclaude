@@ -808,4 +808,21 @@ describe('O82–O87 — Zone column in outlet addition template', () => {
     );
     expect(result.rows[0].status).toBe('OK');
   });
+
+  // O82: a tenant-configured program/category value cannot inject a live spreadsheet
+  // formula into the downloaded template (formula-injection guard via cellSafe).
+  it('O82: sanitises a formula-injecting program/category value in the template', () => {
+    const { exampleRows } = getOutletAdditionTemplateData(
+      ['=cmd|\'/c calc\'!A1'], ['@SUM(A1)'], VALID_OUTLET_TYPES, LEAF_ROLE_CODE,
+    );
+    // Program column (idx 2) and Category column (idx 3) are apostrophe-prefixed.
+    expect(exampleRows[0][2]).toBe('\'=cmd|\'/c calc\'!A1');
+    expect(exampleRows[0][3]).toBe('\'@SUM(A1)');
+    // A benign value is left untouched.
+    const { exampleRows: clean } = getOutletAdditionTemplateData(
+      ['Trade Loyalty'], ['Premium'], VALID_OUTLET_TYPES, LEAF_ROLE_CODE,
+    );
+    expect(clean[0][2]).toBe('Trade Loyalty');
+    expect(clean[0][3]).toBe('Premium');
+  });
 });

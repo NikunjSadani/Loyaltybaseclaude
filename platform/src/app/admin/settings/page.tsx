@@ -1,7 +1,7 @@
 ﻿'use client'
 
 import { useState, useEffect } from 'react'
-import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye } from 'lucide-react'
+import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
@@ -126,6 +126,84 @@ export default function SettingsPage() {
     }
     setVisibilityEnabledSaved(true)
     setTimeout(() => setVisibilityEnabledSaved(false), 3000)
+  }
+
+  // ── Outlet Programs & Categories allow-lists (per-tenant; saved via GifsySettings) ──
+  // Like the pace threshold / visibility switch, saveGifsySettings PUTs to /v1/admin/settings
+  // (GIFSY_ADMIN-only), so editing is enabled only for GIFSY_ADMIN. Saved as whole arrays
+  // (REPLACE-WHOLE). The backend default-guards an empty list, but we also block an empty save
+  // in the UI so a tenant never accidentally clears the allowed values.
+  const DEFAULT_OUTLET_PROGRAMS   = ['Trade Loyalty', 'Gold Programme']
+  const DEFAULT_OUTLET_CATEGORIES = ['Premium', 'Standard', 'Economy']
+
+  const [outletPrograms,   setOutletPrograms]   = useState<string[]>(
+    () => getGifsySettings().outletPrograms   ?? DEFAULT_OUTLET_PROGRAMS,
+  )
+  const [outletCategories, setOutletCategories] = useState<string[]>(
+    () => getGifsySettings().outletCategories ?? DEFAULT_OUTLET_CATEGORIES,
+  )
+  const [newProgram,         setNewProgram]         = useState('')
+  const [newCategory,        setNewCategory]        = useState('')
+  const [outletListsSaved,   setOutletListsSaved]   = useState(false)
+  const [outletListsError,   setOutletListsError]   = useState<string | null>(null)
+
+  // Keep the displayed lists in sync once server settings hydrate (/me → cache).
+  useEffect(() => {
+    const s = getGifsySettings()
+    setOutletPrograms(s.outletPrograms     ?? DEFAULT_OUTLET_PROGRAMS)
+    setOutletCategories(s.outletCategories ?? DEFAULT_OUTLET_CATEGORIES)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function flashOutletListsSaved() {
+    setOutletListsSaved(true)
+    setTimeout(() => setOutletListsSaved(false), 3000)
+  }
+
+  // Persist a whole list to the server with optimistic update + revert-on-failure.
+  async function persistOutletList(
+    which: 'programs' | 'categories',
+    next: string[],
+    prev: string[],
+  ) {
+    setOutletListsError(null)
+    if (which === 'programs') setOutletPrograms(next); else setOutletCategories(next) // optimistic
+    const ok = which === 'programs'
+      ? await saveGifsySettings({ outletPrograms: next })
+      : await saveGifsySettings({ outletCategories: next })
+    if (!ok) {
+      if (which === 'programs') setOutletPrograms(prev); else setOutletCategories(prev) // revert
+      setOutletListsError('Could not save — these lists can only be changed by a Gifsy Admin.')
+      return
+    }
+    flashOutletListsSaved()
+  }
+
+  function addProgram() {
+    const t = newProgram.trim()
+    if (!t || outletPrograms.includes(t)) return
+    setNewProgram('')
+    void persistOutletList('programs', [...outletPrograms, t], outletPrograms)
+  }
+  function removeProgram(value: string) {
+    if (outletPrograms.length <= 1) {
+      setOutletListsError('At least one program must remain.')
+      return
+    }
+    void persistOutletList('programs', outletPrograms.filter((p) => p !== value), outletPrograms)
+  }
+  function addCategory() {
+    const t = newCategory.trim()
+    if (!t || outletCategories.includes(t)) return
+    setNewCategory('')
+    void persistOutletList('categories', [...outletCategories, t], outletCategories)
+  }
+  function removeCategory(value: string) {
+    if (outletCategories.length <= 1) {
+      setOutletListsError('At least one category must remain.')
+      return
+    }
+    void persistOutletList('categories', outletCategories.filter((c) => c !== value), outletCategories)
   }
 
   // ── Visibility capture mode (GIFSY_ADMIN-only) ──
@@ -449,6 +527,134 @@ export default function SettingsPage() {
           )}
           {paceThresholdError && (
             <p className="text-xs text-red-600 mt-2">{paceThresholdError}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Outlet Programs & Categories (per-tenant allow-lists) ── */}
+      <Card data-testid="outlet-programs-card">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Tags className="h-4 w-4 text-[var(--brand-primary)]" /> Outlet Programs &amp; Categories
+              </CardTitle>
+              <CardDescription className="mt-1">
+                These lists control the allowed Program Name / Program Category values in the
+                Outlet Master upload for this tenant. This is a Gifsy-operated setting — only a
+                Gifsy Admin can change it.
+              </CardDescription>
+            </div>
+            {outletListsSaved && (
+              <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg shrink-0">
+                ✓ Saved
+              </span>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-6 md:grid-cols-2">
+            {/* Programs */}
+            <div data-testid="outlet-programs-section">
+              <p className="text-sm font-semibold text-gray-800 mb-2">Program Names</p>
+              <div className="flex flex-wrap gap-2 mb-3">
+                {outletPrograms.length === 0 ? (
+                  <span className="text-xs text-gray-400 italic">No programs yet — add one below.</span>
+                ) : outletPrograms.map((p) => (
+                  <span key={p} data-testid="outlet-program-chip"
+                    className="inline-flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-full pl-3 pr-1.5 py-1 text-xs font-medium text-gray-700">
+                    {p}
+                    {isGifsyAdmin && (
+                      <button
+                        type="button"
+                        aria-label={`Remove ${p}`}
+                        onClick={() => removeProgram(p)}
+                        disabled={outletPrograms.length <= 1}
+                        className="text-gray-400 hover:text-red-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+              {isGifsyAdmin && (
+                <div className="flex gap-2">
+                  <input
+                    data-testid="outlet-program-input"
+                    value={newProgram}
+                    onChange={(e) => setNewProgram(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addProgram() } }}
+                    placeholder="Add a program name"
+                    className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)]"
+                  />
+                  <button
+                    data-testid="outlet-program-add"
+                    type="button"
+                    onClick={addProgram}
+                    disabled={!newProgram.trim() || outletPrograms.includes(newProgram.trim())}
+                    className="flex items-center gap-1 px-3 py-1.5 bg-[var(--brand-primary)] text-white text-xs font-semibold rounded-lg hover:bg-[var(--brand-primary-dark)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> Add
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Categories */}
+            <div data-testid="outlet-categories-section">
+              <p className="text-sm font-semibold text-gray-800 mb-2">Program Categories</p>
+              <div className="flex flex-wrap gap-2 mb-3">
+                {outletCategories.length === 0 ? (
+                  <span className="text-xs text-gray-400 italic">No categories yet — add one below.</span>
+                ) : outletCategories.map((c) => (
+                  <span key={c} data-testid="outlet-category-chip"
+                    className="inline-flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-full pl-3 pr-1.5 py-1 text-xs font-medium text-gray-700">
+                    {c}
+                    {isGifsyAdmin && (
+                      <button
+                        type="button"
+                        aria-label={`Remove ${c}`}
+                        onClick={() => removeCategory(c)}
+                        disabled={outletCategories.length <= 1}
+                        className="text-gray-400 hover:text-red-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+              {isGifsyAdmin && (
+                <div className="flex gap-2">
+                  <input
+                    data-testid="outlet-category-input"
+                    value={newCategory}
+                    onChange={(e) => setNewCategory(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addCategory() } }}
+                    placeholder="Add a category"
+                    className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)]"
+                  />
+                  <button
+                    data-testid="outlet-category-add"
+                    type="button"
+                    onClick={addCategory}
+                    disabled={!newCategory.trim() || outletCategories.includes(newCategory.trim())}
+                    className="flex items-center gap-1 px-3 py-1.5 bg-[var(--brand-primary)] text-white text-xs font-semibold rounded-lg hover:bg-[var(--brand-primary-dark)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> Add
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+          {!isGifsyAdmin && (
+            <p className="text-xs text-gray-400 mt-4">
+              The program and category lists are a Gifsy-operated setting — only a Gifsy Admin can change them.
+            </p>
+          )}
+          {outletListsError && (
+            <p className="text-xs text-red-600 mt-3">{outletListsError}</p>
           )}
         </CardContent>
       </Card>

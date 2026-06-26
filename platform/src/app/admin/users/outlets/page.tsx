@@ -23,6 +23,7 @@ import {
   generateOutletGuideHtml,
 } from '@/lib/outlet-upload';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
+import { useGifsySettings } from '@/lib/gifsy-settings';
 import type { HierarchyEmployee } from '@/types';
 import type {
   OutletUploadRow,
@@ -36,8 +37,10 @@ import type {
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
 const LEAF_ROLE_CODE    = 'XSR';     // Deoleo config
-const VALID_PROGRAMS    = ['Trade Loyalty', 'Gold Programme'];
-const VALID_CATEGORIES  = ['Premium', 'Standard', 'Economy'];
+// Fallback allow-lists used only until per-tenant Gifsy Settings hydrate. The live values
+// come from useGifsySettings().outletPrograms / outletCategories (editable in Gifsy Settings).
+const DEFAULT_PROGRAMS   = ['Trade Loyalty', 'Gold Programme'];
+const DEFAULT_CATEGORIES = ['Premium', 'Standard', 'Economy'];
 
 // ─── Mock outlet master data ───────────────────────────────────────────────────
 
@@ -334,6 +337,12 @@ type TabId = 'master' | 'rekyc' | 'deactivate';
 export default function OutletsPage() {
   const [activeTab, setActiveTab] = useState<TabId>('master');
 
+  // Per-tenant allowed Program Name / Program Category lists (owner-editable in Gifsy Settings).
+  // Falls back to the module defaults until settings hydrate, and if a list is absent/empty.
+  const settings = useGifsySettings();
+  const validPrograms   = settings.outletPrograms?.length   ? settings.outletPrograms   : DEFAULT_PROGRAMS;
+  const validCategories = settings.outletCategories?.length ? settings.outletCategories : DEFAULT_CATEGORIES;
+
   // Outlet list state
   const [outlets, setOutlets]         = useState<MockOutlet[]>([]);
   const [outletTypes, setOutletTypes] = useState<string[]>([]);
@@ -463,7 +472,7 @@ export default function OutletsPage() {
       }
       const parsed   = parseOutletUploadRows(rows as Record<string, string>[]);
       const existing = outlets.map(o => ({ outletId: o.outletId, isActive: o.isActive }));
-      const result   = validateOutletUpload(parsed, existing, VALID_PROGRAMS, VALID_CATEGORIES, outletTypes, employees, LEAF_ROLE_CODE);
+      const result   = validateOutletUpload(parsed, existing, validPrograms, validCategories, outletTypes, employees, LEAF_ROLE_CODE);
       setOutletParsedRows(parsed);
       setOutletValidation(result);
       setOutletUploadState('parsed');
@@ -471,7 +480,7 @@ export default function OutletsPage() {
       setOutletValidation({ headerError: 'Failed to read file — please ensure it is a valid XLSX file', rows: [], hasErrors: true, canProceed: false, summary: { total: 0, creates: 0, updates: 0, reactivates: 0, errors: 0 } });
       setOutletUploadState('parsed');
     }
-  }, [outlets, outletTypes, employees, parseXlsx]);
+  }, [outlets, outletTypes, employees, parseXlsx, validPrograms, validCategories]);
 
   // ── Handle re-KYC upload ──
   const handleReKYCFile = useCallback(async (file: File) => {
@@ -531,7 +540,7 @@ export default function OutletsPage() {
   }
 
   function downloadOutletTemplate() {
-    const { headers, exampleRows, dosAndDonts } = getOutletAdditionTemplateData(VALID_PROGRAMS, VALID_CATEGORIES, outletTypes, LEAF_ROLE_CODE);
+    const { headers, exampleRows, dosAndDonts } = getOutletAdditionTemplateData(validPrograms, validCategories, outletTypes, LEAF_ROLE_CODE);
     const wb = XLSX.utils.book_new();
     // Sheet 1: Dos & Don'ts (opens first)
     const ddSheet = XLSX.utils.aoa_to_sheet(dosAndDonts);

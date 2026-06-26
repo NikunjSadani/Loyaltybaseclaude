@@ -504,6 +504,18 @@ export interface GifsySettings {
     /** Gifsy internal email recipients notified when a client batch is confirmed. */
     notifyEmails:    string[];
   };
+  /**
+   * Allowed "Program Name" values for the Outlet Master upload (per-tenant, owner-editable
+   * in Gifsy Settings). Replaces the former hardcoded frontend constants. The value stored
+   * on each outlet stays free text — only the allowed LIST is configurable.
+   * Default: ['Trade Loyalty', 'Gold Programme'].
+   */
+  outletPrograms?:   string[];
+  /**
+   * Allowed "Program Category" values for the Outlet Master upload (per-tenant).
+   * Default: ['Premium', 'Standard', 'Economy'].
+   */
+  outletCategories?: string[];
 }
 
 // ─── INR Payout Ledger Entry (Retailer / Sub-Stockist / MT) ──────────────────

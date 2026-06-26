@@ -43,6 +43,8 @@ export const DEFAULT_SETTINGS: GifsySettings = {
     fourEyesEnabled: false,
     notifyEmails:    [],
   },
+  outletPrograms:   ['Trade Loyalty', 'Gold Programme'],
+  outletCategories: ['Premium', 'Standard', 'Economy'],
 };
 
 /** Server `EffectiveSettings` shape (GET /v1/settings / me.settings). */
@@ -58,6 +60,8 @@ interface ServerSettings {
   redemptionChannels:     GifsySettings['redemptionChannels'];
   salesApp:               GifsySettings['salesApp'];
   creditsPayouts?:        GifsySettings['creditsPayouts'];
+  outletPrograms:         string[];
+  outletCategories:       string[];
 }
 
 // ── in-memory store (seeded synchronously from the localStorage cache) ────────
@@ -101,6 +105,8 @@ function fromServer(srv: ServerSettings, prev: GifsySettings): GifsySettings {
     salesApp:               srv.salesApp               ?? prev.salesApp,
     // /me omits creditsPayouts (operator-only) — keep the previous/cached value then.
     creditsPayouts:         srv.creditsPayouts         ?? prev.creditsPayouts,
+    outletPrograms:         srv.outletPrograms         ?? prev.outletPrograms,
+    outletCategories:       srv.outletCategories       ?? prev.outletCategories,
   };
 }
 
@@ -143,6 +149,9 @@ const SAVE_KEY_MAP: Partial<Record<keyof GifsySettings, string>> = {
   redemptionChannels:     'redemptionChannels',
   salesApp:               'salesApp',
   creditsPayouts:         'creditsPayouts',
+  // Allow-lists saved as whole arrays (REPLACE-WHOLE — correct for a list editor).
+  outletPrograms:         'outletPrograms',
+  outletCategories:       'outletCategories',
 };
 
 /**

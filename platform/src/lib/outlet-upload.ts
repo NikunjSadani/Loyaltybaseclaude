@@ -489,6 +489,23 @@ export interface OutletTemplateData {
   dosAndDonts:  string[][];
 }
 
+/**
+ * Neutralise spreadsheet formula injection: a cell value beginning with `= + - @`
+ * (or a leading tab/CR) is interpreted as a live formula by Excel / Google Sheets.
+ * Tenant-configured Program/Category values flow into the downloaded template, so a
+ * crafted value like `=cmd()` or `=HYPERLINK("http://evil")` would execute when an
+ * admin opens it. Prefix with an apostrophe to force text. Mirrors the backend
+ * `cellSafe` (tds/invoice helpers + the xlsx serialiser). Idempotent.
+ */
+export function cellSafe(v: string): string {
+  return /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+}
+
+/** Apply cellSafe to every cell of an array-of-arrays template matrix. */
+function safeMatrix(rows: string[][]): string[][] {
+  return rows.map((r) => r.map(cellSafe));
+}
+
 export function getOutletAdditionTemplateData(
   validPrograms:    string[],
   validCategories:  string[],
@@ -550,7 +567,9 @@ export function getOutletAdditionTemplateData(
     ['MISTAKE', 'Program Name or Category that doesn\'t exactly match the configured list (case-sensitive)'],
   ];
 
-  return { headers, exampleRows, dosAndDonts };
+  // Sanitise every cell — the tenant-configured program/category values are
+  // interpolated above and must not be able to inject a live spreadsheet formula.
+  return { headers: headers.map(cellSafe), exampleRows: safeMatrix(exampleRows), dosAndDonts: safeMatrix(dosAndDonts) };
 }
 
 export function getReKYCFlagTemplateData(): OutletTemplateData {
@@ -611,7 +630,7 @@ export function getReKYCFlagTemplateData(): OutletTemplateData {
     ['MISTAKE', 'Uploading the same outlet twice in one file'],
   ];
 
-  return { headers, exampleRows: [exampleRow], dosAndDonts };
+  return { headers: headers.map(cellSafe), exampleRows: safeMatrix([exampleRow]), dosAndDonts: safeMatrix(dosAndDonts) };
 }
 
 // ─── Outlet Deactivation ──────────────────────────────────────────────────────

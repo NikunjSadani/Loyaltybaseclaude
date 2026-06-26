@@ -153,6 +153,51 @@ describe('TenantSettingsService', () => {
     expect(prisma.programSetting.findMany).toHaveBeenCalledTimes(2); // re-read after bust
   });
 
+  describe('outletPrograms / outletCategories allow-lists', () => {
+    it('defaults include the prior hardcoded program + category lists', async () => {
+      const svc = new TenantSettingsService(makePrisma([]));
+      const s = await svc.getEffectiveSettings('deoleo');
+      expect(s.outletPrograms).toEqual(['Trade Loyalty', 'Gold Programme']);
+      expect(s.outletCategories).toEqual(['Premium', 'Standard', 'Economy']);
+    });
+
+    it('a custom array overlays (replaces) the defaults wholesale', async () => {
+      const svc = new TenantSettingsService(makePrisma([
+        { settingKey: 'outletPrograms',   settingValue: ['Alpha', 'Beta'] },
+        { settingKey: 'outletCategories', settingValue: ['Gold', 'Silver', 'Bronze'] },
+      ]));
+      const s = await svc.getEffectiveSettings('deoleo');
+      expect(s.outletPrograms).toEqual(['Alpha', 'Beta']);
+      expect(s.outletCategories).toEqual(['Gold', 'Silver', 'Bronze']);
+    });
+
+    it('keeps the default when the value is a non-array or an empty list', async () => {
+      const notArray = await new TenantSettingsService(makePrisma([
+        { settingKey: 'outletPrograms', settingValue: 'Trade Loyalty' },
+      ])).getEffectiveSettings('deoleo');
+      expect(notArray.outletPrograms).toEqual(['Trade Loyalty', 'Gold Programme']);
+
+      const empty = await new TenantSettingsService(makePrisma([
+        { settingKey: 'outletCategories', settingValue: [] },
+      ])).getEffectiveSettings('deoleo');
+      expect(empty.outletCategories).toEqual(['Premium', 'Standard', 'Economy']);
+
+      // A list that reduces to empty after cleaning (blanks + non-strings only) also keeps default.
+      const reducesToEmpty = await new TenantSettingsService(makePrisma([
+        { settingKey: 'outletPrograms', settingValue: ['', '   ', 5, null] },
+      ])).getEffectiveSettings('deoleo');
+      expect(reducesToEmpty.outletPrograms).toEqual(['Trade Loyalty', 'Gold Programme']);
+    });
+
+    it('trims entries, drops blanks/non-strings, and dedupes (order-preserving)', async () => {
+      const svc = new TenantSettingsService(makePrisma([
+        { settingKey: 'outletPrograms', settingValue: ['  Trade Loyalty  ', 'Gold', '', 'Gold', 7, 'Platinum'] },
+      ]));
+      const s = await svc.getEffectiveSettings('deoleo');
+      expect(s.outletPrograms).toEqual(['Trade Loyalty', 'Gold', 'Platinum']);
+    });
+  });
+
   it('falls back to defaults if the settings read throws (never crashes a money path)', async () => {
     const prisma = { programSetting: { findMany: jest.fn().mockRejectedValue(new Error('db down')) } } as any;
     const svc = new TenantSettingsService(prisma);
