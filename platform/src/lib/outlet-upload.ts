@@ -967,3 +967,86 @@ export function generateOutletGuideHtml(validOutletTypes: string[] = []): string
 </body>
 </html>`;
 }
+
+// ─── Bulk-upload error reports (full file + per-row errors) ───────────────────
+//
+// Reproduce the UPLOADED file (every original column + all rows) and append an
+// annotation column carrying each row's validation errors, so an admin can see
+// exactly which field on which row failed and re-upload after fixing. Rows are
+// joined to the parsed input by rowNum; the leading "Row" column is the original
+// spreadsheet row number (locator). Clean rows get an empty annotation cell.
+
+export interface UploadErrorReport {
+  /** Column headers in order (includes leading 'Row' + the template headers). */
+  columns: string[];
+  /** One record per validated row, keyed by `columns`, plus `__errors: string[]`. */
+  rows: Record<string, unknown>[];
+  /** Annotation column header ('Remarks' or, for Re-KYC, 'Validation Errors'). */
+  errorHeader: string;
+}
+
+/** Outlet Master (Addition/Upsert) error report — full 13-column file + Remarks. */
+export function buildOutletUploadErrorReport(
+  result: OutletUploadValidationResult,
+  parsed: OutletUploadRow[],
+): UploadErrorReport {
+  const byRow = new Map(parsed.map(p => [p.rowNum, p]));
+  const rows = result.rows.map(r => {
+    const p = byRow.get(r.rowNum);
+    return {
+      'Row':              r.rowNum,
+      'Outlet ID':        p?.outletId ?? r.outletId,
+      'Outlet Name':      p?.outletName ?? '',
+      'Program Name':     p?.programName ?? '',
+      'Program Category': p?.programCategory ?? '',
+      'Outlet Type':      p?.outletType ?? '',
+      'Beat':             p?.beat ?? '',
+      'Distributor ID':   p?.distributorId ?? '',
+      'Distributor Name': p?.distributorName ?? '',
+      'Metro':            p?.metro ?? '',
+      'City':             p?.city ?? '',
+      'State':            p?.state ?? '',
+      'Zone':             p?.zone ?? '',
+      'XSR ID':           p?.xsrId ?? '',
+      __errors:           r.errors,
+    } as Record<string, unknown>;
+  });
+  return { columns: ['Row', ...OUTLET_UPLOAD_HEADERS], rows, errorHeader: 'Remarks' };
+}
+
+/** Re-KYC flag error report — full 22-column file + a distinct 'Validation Errors'
+ *  column (the template already has an admin-authored 'Remarks' column, kept intact). */
+export function buildReKYCErrorReport(
+  result: ReKYCFlagValidationResult,
+  parsed: ReKYCFlagRow[],
+): UploadErrorReport {
+  const byRow = new Map(parsed.map(p => [p.rowNum, p]));
+  const rows = result.rows.map(r => {
+    const p = byRow.get(r.rowNum);
+    const pRec = p as unknown as Record<string, string> | undefined;
+    const row: Record<string, unknown> = {
+      'Row':       r.rowNum,
+      'Outlet ID': p?.outletId ?? r.outletId,
+    };
+    for (const key of REKYC_FIELD_KEYS) {
+      const prop = REKYC_KEY_TO_FLAG[key];
+      row[key] = pRec?.[prop] ?? '';
+    }
+    row['Remarks'] = p?.remarks ?? '';
+    row.__errors = r.errors;
+    return row;
+  });
+  return { columns: ['Row', ...REKYC_FLAG_HEADERS], rows, errorHeader: 'Validation Errors' };
+}
+
+/** Deactivate error report — Outlet ID column + Remarks (its template has one column). */
+export function buildDeactivateErrorReport(
+  result: OutletDeactivateValidationResult,
+): UploadErrorReport {
+  const rows = result.rows.map(r => ({
+    'Row':       r.rowNum,
+    'Outlet ID': r.outletId,
+    __errors:    r.errors,
+  } as Record<string, unknown>));
+  return { columns: ['Row', ...DEACTIVATE_HEADERS], rows, errorHeader: 'Remarks' };
+}

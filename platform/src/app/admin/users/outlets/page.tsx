@@ -22,6 +22,10 @@ import {
   getReKYCFlagTemplateData,
   getDeactivateTemplateData,
   generateOutletGuideHtml,
+  buildOutletUploadErrorReport,
+  buildReKYCErrorReport,
+  buildDeactivateErrorReport,
+  type UploadErrorReport,
 } from '@/lib/outlet-upload';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { useGifsySettings } from '@/lib/gifsy-settings';
@@ -97,6 +101,7 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
   onClear,
   confirmLabel = 'Confirm Upload',
   errorReportFilename,
+  errorReport,
 }: {
   testId:        string;
   result:        { headerError: string | null; rows: R[]; hasErrors: boolean; canProceed: boolean; summary: Record<string, number> };
@@ -104,6 +109,7 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
   onClear:       () => void;
   confirmLabel?: string;
   errorReportFilename: string;
+  errorReport?:  UploadErrorReport;
 }) {
   if (result.headerError) {
     return (
@@ -171,15 +177,16 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span>Fix all errors in the Excel file and re-upload. The file will not be processed until all rows are valid.</span>
           </div>
-          <DownloadErrorReportButton
-            columns={['Row', 'Outlet ID', 'Status']}
-            rows={result.rows
-              .filter(r => r.status === 'ERROR')
-              .map(r => ({ Row: r.rowNum, 'Outlet ID': r.outletId, Status: r.status, __errors: r.errors }))}
-            errorsByRow={(row) => (row.__errors as string[]) ?? []}
-            filename={errorReportFilename}
-            sheetName="Errors"
-          />
+          {errorReport && (
+            <DownloadErrorReportButton
+              columns={errorReport.columns}
+              rows={errorReport.rows}
+              errorsByRow={(row) => (row.__errors as string[]) ?? []}
+              filename={errorReportFilename}
+              sheetName="Errors"
+              errorHeader={errorReport.errorHeader}
+            />
+          )}
         </div>
       )}
 
@@ -233,6 +240,7 @@ function UploadSection({
   confirmLabel,
   submitError,
   errorReportFilename,
+  errorReport,
 }: {
   testIdInput:       string;
   testIdPanel:       string;
@@ -245,6 +253,7 @@ function UploadSection({
   confirmLabel?:     string;
   /** API error surfaced after a failed confirm (e.g. all-invalid 400). */
   submitError?:      string | null;
+  errorReport?:      UploadErrorReport;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileError, setFileError] = useState('');
@@ -324,6 +333,7 @@ function UploadSection({
             onClear={onClear}
             confirmLabel={confirmLabel}
             errorReportFilename={errorReportFilename}
+            errorReport={errorReport}
           />
         )
       )}
@@ -741,6 +751,7 @@ export default function OutletsPage() {
               testIdInput="outlet-upload-input"
               testIdPanel="outlet-validation-panel"
               errorReportFilename="outlet-upload-errors.xlsx"
+              errorReport={outletValidation ? buildOutletUploadErrorReport(outletValidation, outletParsedRows) : undefined}
               onFileChange={handleOutletFile}
               validationResult={outletValidation}
               uploadState={outletUploadState}
@@ -952,6 +963,7 @@ export default function OutletsPage() {
               testIdInput="rekyc-upload-input"
               testIdPanel="rekyc-validation-panel"
               errorReportFilename="outlet-rekyc-errors.xlsx"
+              errorReport={rekycValidation ? buildReKYCErrorReport(rekycValidation, rekycParsedRows) : undefined}
               onFileChange={handleReKYCFile}
               validationResult={rekycValidation}
               uploadState={rekycUploadState}
@@ -1057,6 +1069,7 @@ export default function OutletsPage() {
               testIdInput="deactivate-upload-input"
               testIdPanel="deactivate-validation-panel"
               errorReportFilename="outlet-deactivate-errors.xlsx"
+              errorReport={deactivateValidation ? buildDeactivateErrorReport(deactivateValidation) : undefined}
               onFileChange={handleDeactivateFile}
               validationResult={deactivateValidation}
               uploadState={deactivateUploadState}
