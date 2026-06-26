@@ -30,18 +30,21 @@
   unbuilt-feature `it()`/`describe` blocks and keep asserts that exercise shipped render paths; reuse the existing
   `vitest.config` exclude/lane mechanism; co-locate a header comment pointing at `baseline-red-snapshot.txt`. Un-skip each
   as its feature lands (part of its definition-of-done).
-- **D-c — Sales-team leaderboard = FAST-FOLLOW (owner decision 2026-06-20), NOT a launch blocker.** Launch with the
-  sales-leaderboard nav **hidden**; ship the feature ~1 week after go-live. It touches no critical path (read-only, no
-  money/core-loop dependency), so this removes ~5–7 days from the launch window → **time-to-launch ~2.5 weeks.** Spec retained
-  below for the fast-follow build. Metric = **Σ(primary-KPI achievement) ÷ Σ(primary-KPI target)**
-  across all outlets tagged to the sales user. **Reality (audit R4):** there is **NO leaderboard generation pipeline at
-  all** (the partner leaderboard is a read-only, seed-fed endpoint), so this is **greenfield**, not "extend a dimension".
-  `LeaderboardEntry.partnerId` is a **required FK** → use a **separate `SalesLeaderboard*` model set** (cleaner than a
-  breaking nullable migration on the shared prod instance). The data exists (`KpiDef.isPrimary` per-tenant;
-  `OutletTarget.targetValues` + `OutletSalesRecord.kpiValues`, joined like `getPace()`); the generator needs a **key
-  translation** `SalesUserAssignment.outletId → Outlet.outletCode → targets/achievements` (+ decide partner-level
-  assignment expansion). The sales FE page exists but is **dead-wired to a missing `/v1/sales/leaderboard`** (needs the
-  endpoint + the rm/state/national scope hierarchy + rank-change). **Estimate revised to 5–7 build-days.**
+- **D-c — Sales-team leaderboard ✅ BUILT 2026-06-26 (`a525739`+`a272dca`) — NO LONGER deferred / nav-hidden / a fast-follow.**
+  Shipped as a **LIVE-COMPUTED** endpoint `GET /v1/sales/leaderboard?scope=rm|state|national&period=` — **no `SalesLeaderboard*`
+  models, no generator, no snapshot**: it reuses the `getTargets` join (`OutletTarget`⋈`OutletSalesRecord`⋈primary `KpiDef`)
+  + `descendantSalesUserIds` to rank the caller against **same-level peers** (same `hierarchyLevelId`), each scored by their own
+  team subtree primary-KPI achievement %; scopes rm (peers under the same reporting manager) / state (same region) / national.
+  **territory = the rep's nearest ZNM (Zonal Manager) ancestor name.** The sales FE page is wired to it (no longer a 404
+  dead-read). Independently audited (SHIP) + runtime-verified on staging (484 same-level peers, real 47%). The original
+  fast-follow spec below is kept for history but is **superseded** — none of the "deferred / greenfield / new-models / 5–7d"
+  framing applies anymore.
+  - ~~FAST-FOLLOW (owner decision 2026-06-20), launch with the nav hidden, ship ~1 week after go-live~~ → **DONE 2026-06-26.**
+    Metric (as built) = each peer's **own team subtree primary-KPI achievement %**, ranked vs same-level peers.
+  - ~~**Reality (audit R4):** NO leaderboard generation pipeline → this is **greenfield** → use a **separate `SalesLeaderboard*`
+    model set** + a generator + key-translation~~ → **NOT how it shipped:** it is **live-computed at request time** (no new
+    models, no generator, no snapshot); the key translation rides the existing `getTargets` join. The sales FE page was
+    dead-wired to a missing `/v1/sales/leaderboard` — **that endpoint now exists.** ~~Estimate 5–7 build-days.~~
 - **D-d — Banners ON, tickets ON at launch.**
 - **D-e — Data lifecycle:** seed → **UAT on staging** (bulk bug-fixing) → minimal real-OTP smoke on prod → **clean-wipe**
   → upload real Deoleo client data. (Recommended "Both": keep prod pristine; client UAT on a `uat.` subdomain → staging.)
@@ -119,7 +122,7 @@ the MSG91 template application (a 404 link won't get DLT-approved), the worker n
    catalog, schemes. **THE big one — no real user can log in until this lands** (prod is intentionally 0-users/0-clients).
 2. **Owner UAT of the core loop on staging** with real OTP — login DONE; redemption + KYC pending (phones above).
 3. **Owner ops:** Cloud Monitoring alert email; ongoing backups/PITR; prod credential rotation.
-4. Sales-team leaderboard = **explicitly DEFERRED** (fast-follow, nav hidden) — NOT a blocker.
+4. ~~Sales-team leaderboard = explicitly DEFERRED (fast-follow, nav hidden)~~ — **✅ BUILT 2026-06-26 (`a525739`+`a272dca`)**, live-computed, nav visible. (Was never a blocker.)
 
 ## 0. The reframe
 Core platform is built (P0–P6 + P0.6 A–D). Launch needs a small specific set, several items inside P7/P8/P9, sequenced here.
@@ -154,7 +157,7 @@ is false today; the D2/domain push most likely didn't deploy (`gh` not installed
 | B10 | **Cutover runbook + tested rollback** | 9.9 | not written; rollback manual | Me + Owner |
 | B11 | **Prod data lifecycle (seed→UAT→clean→real)** | 9.9 | n/a | Owner + Me |
 | B12 | **Prod-only infra check (Redis/VPC)** | 9.x | prod uses `--vpc-connector` + `REDIS_URL`; **current code stores OTP in the DB, not Redis → verify Redis is actually needed; if unused, the secret just needs to exist** | Me(verify)+Owner |
-| **B13** | **Sales-team leaderboard** (D-c) | 7.3 | **greenfield** — no generation pipeline exists (partner LB is read-only/seed-fed); needs a **new `SalesLeaderboard*` model set** + generator + the missing `/v1/sales/leaderboard` endpoint (FE built but dead-wired) | Me |
+| **B13** ✅ | **Sales-team leaderboard** (D-c) — **✅ DONE 2026-06-26 (`a525739`+`a272dca`)** | 7.3 | ~~greenfield, new `SalesLeaderboard*` models + generator~~ → shipped **live-computed** `GET /v1/sales/leaderboard` (same-level peers, ZNM territory, rm/state/national scopes) reusing the `getTargets` join — **no new models, no generator, no snapshot**; FE wired (was dead-wired); audited + runtime-verified on staging | Me |
 
 **NOT launch blockers** (deferred — §5): the general notification **queue-worker + Cloud Scheduler/OIDC** (D-a moved OTP
 to synchronous, so the worker is post-launch), partner leaderboard polish, banners polish, ticket SLA/lifecycle, trend
@@ -177,12 +180,12 @@ Critical path (head = the domain): **O-3 domain → O-1 MSG91 templates → A-2b
 | A-4 | **Min observability (8.4).** Structured request/error logging; ≥1 error-rate + uptime alert; wire `/health` as a real post-deploy gate. | B7 | ~1–2 | A-1 + owner infra |
 | A-5 | **Prod DB migration runbook + apply (9.5).** **🔄 Model changed 2026-06-20:** now one squashed Prisma **baseline** applied via `prisma migrate deploy` run as the in-VPC `gifsy-migrate` Cloud Run Job (private-IP) — **not** ad-hoc diff-SQL. Prod first-apply needs the **one-time P3005 baseline reconcile** (clear stale `_prisma_migrations` or clean recreate — greenfield). **O-4 backups first.** Model: `MIGRATIONS.md`; procedure: `runbooks/PROD-DB-MIGRATION.md` (Step 1.5). | B5 | ~1–2 | A-1 + **O-4 backups first** + owner prod-DB access |
 | A-6 | **Security hardening min (9.7).** Throttle/headers/CORS; confirm no `FIXED_OTP`/`DEMO_MODE` in prod; rotate dev-shared creds; verify Redis need (B12). | B8,B12 | ~1 | A-1 |
-| ~~A-7~~ | **Sales-team leaderboard → FAST-FOLLOW (post-launch ~wk+1), NOT in the launch window.** Launch ships with the nav hidden. Greenfield: new `SalesLeaderboard*` model set + migration; generator (resolve `isPrimary` KpiDef → translate `SalesUserAssignment.outletId → Outlet.outletCode`, decide partner-level expansion → Σachiev÷Σtarget per sales user → snapshot+publish); build the missing `/v1/sales/leaderboard` endpoint + rm/state/national scope + rank-change; wire the existing FE. | B13 | ~5–7 (post-launch) | a 7.3 reconcile |
+| ~~A-7~~ ✅ | **Sales-team leaderboard — ✅ BUILT 2026-06-26 (`a525739`+`a272dca`).** ~~FAST-FOLLOW, nav hidden, greenfield: new `SalesLeaderboard*` models + generator + snapshot, ~5–7d~~ → shipped **live-computed** (no new models, no generator, no snapshot): `GET /v1/sales/leaderboard` reuses the `getTargets` join + `descendantSalesUserIds` to rank same-level peers by team primary-KPI %; territory = nearest ZNM ancestor; rm/state/national scopes; FE wired; runtime-verified on staging. | B13 | done | — |
 | A-8 | **Staging E2E + REAL-MSG91 dress rehearsal.** Harness on staging (`FIXED_OTP`) for the matrix; then, once O-1 lands (staging shares prod MSG91 secrets), a real-OTP login+redemption rehearsal + cutover/rollback drill. | B9 | ~1–1.5 | A-1 + A-2b + O-1 |
 | A-9 | **Cutover runbook + rollback (9.9).** Cutover steps, re-login comms, prod smoke checklist, **explicit `/health` gate + tested manual rollback**. | B10 | ~1 | A-1..A-8 |
 | A-10 | **Prod data clean-wipe runbook (D-e safety).** A guarded script: **positive `current_database()='gifsy_prod'` assertion first** (mirror `seed.ts` inverted), **FK-ordered scoped `deleteMany` (NEVER `TRUNCATE CASCADE`)**, scoped to `clientId in ('deoleo','clientb')` so the GIFSY admin + OutletType master survive, covering smoke side-effects (`otpCode`/`userSession`/`user.lastLogin`), gated behind **O-4 backups** + a confirmation token + a staging dry-run. | B11 | ~0.5–1 | O-4; staging dry-run |
 
-**Lane A launch total: ~9–11 build-days** (leaderboard A-7 is now a post-launch fast-follow; +~5–7d the week after go-live).
+**Lane A launch total: ~9–11 build-days** (leaderboard A-7 ✅ now BUILT 2026-06-26 live-computed — no longer a post-launch fast-follow).
 
 ### Lane B — owner ops (domain first; I prepare each)
 | Step | Task | Blocker | Lead | Note |
@@ -203,7 +206,7 @@ Wall-clock ≈ the **longest single chain**, not the sum. Three things run at on
 - **② Build burst — concurrent, file-disjoint executors:** A-1 (CI/vitest) · A-2a (rewards/auth/msg91) · A-3 (actions.ts) ·
   A-4 (logging) · A-6 (config) · A-10 (prisma wipe script). Opus owns `schema.prisma` (none of these touch it → no collision).
 - **③ Serial integration tail (owner-gated):** A-2b ← A-2a+**O-1**; A-5 ← **O-4**+prod access; A-8 ← A-1+A-2b+O-1; A-9 ← all.
-- The **leaderboard fast-follow** runs *after* go-live, off the launch critical path entirely.
+- ~~The **leaderboard fast-follow** runs *after* go-live~~ → **leaderboard ✅ BUILT 2026-06-26 (`a525739`+`a272dca`), live-computed — no fast-follow.**
 
 ### 3.2 Owner action list (the irreducible set — everything else is mine)
 Operating principle (owner, 2026-06-20): **I do everything I can; the owner does only what needs their accounts/credentials/
@@ -225,10 +228,10 @@ actions; Cloudflare/MSG91/GCP = your accounts. I can't authenticate to those, an
 ---
 
 ## 4. Effort & timeline
-- **Lane A launch work: ~9–11 build-days** (leaderboard moved to a post-launch fast-follow).
+- **Lane A launch work: ~9–11 build-days** (leaderboard ✅ now BUILT 2026-06-26, live-computed — no longer a post-launch fast-follow).
 - **Calendar paced by Lane B** — **O-3 (domain) → O-1 (MSG91 templates)** is the long pole (MSG91/DLT approval is the real wait).
 - **Realistic time-to-launch: ~2.5 weeks** if O-3 starts immediately; the build burst (§3.1) runs underneath it.
-- **Leaderboard fast-follow: ~1 week after go-live.**
+- ~~**Leaderboard fast-follow: ~1 week after go-live.**~~ → **✅ Leaderboard BUILT 2026-06-26 (`a525739`+`a272dca`), live-computed.**
 - Highest-uncertainty: A-2b/A-8 (real MSG91), A-5/A-10 (prod-DB + shared instance).
 
 ---
@@ -261,7 +264,7 @@ actions; Cloudflare/MSG91/GCP = your accounts. I can't authenticate to those, an
 - [x] `gifsy_prod` migrated (target-DB asserted); **backups + PITR enabled first**; staging dry-run passed. **(A-5; pre-cutover backup taken; recreated empty → baseline. PITR = owner ongoing.)**
 - [x] **Login on `https://deoleoloyalty.gifsy.in`**: Worker routes the host; login reads `x-forwarded-host` → resolves `deoleo`. **(A-9; native resolution, alias removed; login 200.)**
 - [x] Prod: no `FIXED_OTP`, no `DEMO_MODE`; `RBAC_ENFORCEMENT` unset/false. **(A-6.)**
-- [—] **Sales-team leaderboard renders** — **DEFERRED** (fast-follow, nav hidden; D-c). Not a launch blocker.
+- [x] **Sales-team leaderboard renders** — **✅ BUILT 2026-06-26 (`a525739`+`a272dca`)**: live-computed `GET /v1/sales/leaderboard`, same-level peers, ZNM territory; FE wired, nav visible. (D-c; runtime-verified on staging.)
 - [ ] Error visibility: ≥1 error-rate + uptime alert; a real post-deploy `/health` gate. *(`/health` 200; Cloud Monitoring alert = owner, needs alert email — OPEN.)*
 - [x] Cutover runbook + a tested rollback exist. **(`runbooks/PROD-CUTOVER-RECORD.md` as-run; rollback = pre-cutover backup. A tested rollback drill is still recommended.)**
 - [ ] Data lifecycle done: UAT on staging → prod cleaned **via the guarded A-10 runbook** (DB-asserted, FK-ordered, scoped,
@@ -287,7 +290,7 @@ Then `check-doc-consistency.mjs` green.
 | 3 | Sequencing | REORDER-NEEDED (3 critical) | O-4 backups before the shared-instance dry-run + assert target DB; critical path = O-1/MSG91 long pole; added the real-MSG91 staging rehearsal; A-1 universal predecessor; split OTP build/verify. |
 | **R2 owner decisions** | — | applied | D-a OTP synchronous (worker deferred); D-b quarantine-to-green; D-c sales leaderboard → launch (B13/A-7); D-e data lifecycle; **domain-first** (O-3 heads the path). |
 | **4a** | Decision safety (OTP/quarantine/wipe) | FIXES-NEEDED → applied | OTP: keep post-commit + clean up on send failure + **convert the sales-assisted OTP `:437` too** + decide confirmation-SMS → A-2a. Quarantine: **skip per-`it()` not per-file** for launch-shipping sales pages → A-1/D-b. Wipe: **no runbook exists** → new guarded **A-10** (positive `gifsy_prod` assertion, FK-ordered scoped deletes, backups-first). |
-| **4b** | Feasibility (leaderboard/domain) | CORRECTIONS-NEEDED → applied | Leaderboard is **greenfield** (no generator exists), `LeaderboardEntry.partnerId` required → **new `SalesLeaderboard*` models**, key-translation join, dead-wired FE endpoint → **re-estimated 5–7d** (A-7). Domain O-3 + A-3 **confirmed accurate** (exact edits enumerated; `actions.ts:68` is the sole raw-host read; the domain is already in the registry + has passing tests). |
+| **4b** | Feasibility (leaderboard/domain) | CORRECTIONS-NEEDED → applied | Leaderboard was estimated **greenfield** (new `SalesLeaderboard*` models, generator, ~5–7d, A-7). **⚠️ SUPERSEDED — ✅ BUILT 2026-06-26 (`a525739`+`a272dca`) as a LIVE-COMPUTED endpoint instead** (no new models / no generator / no snapshot — reuses the `getTargets` join; territory = ZNM ancestor; rm/state/national). Domain O-3 + A-3 **confirmed accurate** (exact edits enumerated; `actions.ts:68` is the sole raw-host read; the domain is already in the registry + has passing tests). |
 
 **Convergence:** R4 found scope/safety refinements, not structural defects — the plan is stable. Recommend locking at Rev 3
 rather than auditing further (diminishing returns). Residual risks to watch during build: A-7 shared-instance migration,

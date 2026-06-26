@@ -1,5 +1,12 @@
 # Go-Live Readiness — the enforcement mechanism + the gate
 
+> ## 🟢 2026-06-26 update — UAT fast-follows shipped (all gate-green + independently audited + runtime-verified on staging):
+> **sales leaderboard BUILT** (`GET /v1/sales/leaderboard`, live-computed, same-level peers, ZNM territory — `a525739`+`a272dca`);
+> **per-tenant Visibility ON/OFF** master toggle shipped (`visibilityEnabled`, default OFF — **Deoleo launches OFF** — `d5d175e`);
+> **Outlet program/category lists made configurable** per tenant (`outletPrograms`/`outletCategories` — `1bc9315`); **AF-5 export
+> formula-injection substantially closed** at the `buildXlsx` serialisation boundary (`cellSafe` on every string cell — `1bc9315`;
+> residual = the K12 `reviewDump` signed-URL surface). See [`GO-LIVE-ISSUE-LIST.md`](GO-LIVE-ISSUE-LIST.md).
+
 > ## 🚦 READINESS STATUS — 2026-06-22: **FIX WAVE COMPLETE + pushed → NOW in OWNER-DRIVEN UAT on staging (fix-as-you-find).** 6 UAT bugs found+fixed this session (U1–U6 in [`GO-LIVE-ISSUE-LIST.md`](GO-LIVE-ISSUE-LIST.md): hierarchy upload ×2, KPI column mis-mapping, downloadable error reports, single-primary KPI, unified cash payout). All pushed except cash-payout `4de8794` (money path — awaiting owner push). Migration `20260622120000` (KPI single-primary, self-healing). The planned 5-agent parallel UAT sweep is still queued. Below = the original fix-wave status (historical).
 > The post-audit fix wave (GLM migration · GL-Money · GL-RBAC · GL-FE-enroll[+catalog] · GL-FE-settle[+GLM-5]) closed every
 > blocker — GLB-1 eligibility gate on both money rails · GLB-2 zero-value redemption · GLB-3 stale coarse TDS indexes · GLB-4

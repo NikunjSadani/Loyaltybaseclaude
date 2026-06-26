@@ -232,7 +232,12 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
 - **Surface.** `admin/banners`, `partner/leaderboard`, `sales/leaderboard`,
   `api/partner/banners`, `api/leaderboard`, `api/admin/banner-config`, `lib/msg91`.
 - **Current.** Banner config per tenant; templated notifications (SMS/WhatsApp via MSG91);
-  leaderboard snapshots (per-tenant toggle, e.g. Deoleo hides partner leaderboard).
+  **partner** leaderboard = snapshot/seed-fed (`LeaderboardSnapshot`/`LeaderboardEntry`, per-tenant
+  toggle, e.g. Deoleo hides partner leaderboard). The **sales** leaderboard is distinct:
+  `GET /v1/sales/leaderboard` (built 2026-06-26, `a525739`+`a272dca`) is **LIVE-COMPUTED** from
+  targets/achievements — **no** `SalesLeaderboard*` models, no snapshot/generator — ranking the caller
+  against same-level peers (same `hierarchyLevelId`) by team primary-KPI achievement %; territory = the
+  rep's nearest ZNM (Zonal Manager) ancestor; scopes rm/state/national.
 - **Target/gaps.** HO notification authoring flow; notification channel coverage (push/FCM).
 
 ### 14 · Reporting & Analytics

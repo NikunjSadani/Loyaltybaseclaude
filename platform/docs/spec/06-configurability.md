@@ -67,6 +67,7 @@ How the platform stays one codebase across many FMCG clients with per-client cus
 | Approval hierarchy (L1/L2, `requireGifsyFinalApproval`) | KYC approver levels + Gifsy-final | CODE | DB; drive from tree (Gap #9) |
 | **Program / Program category** (per-tenant valid-lists) | **The segmentation dimension** (`Outlet.programName/programCategory`, set at outlet upload) — **replaces partner class** | BLOB (`ProgramSetting`) | optionally DB-backed `Program` master (P4) |
 | Outlet types | Per-tenant outlet-type configs (SSS/WHOLESALER/SUB_STOCKIST/SSS_TOT) | REL (`OutletTypeClientConfig`) | keep |
+| **`outletPrograms[]` / `outletCategories[]`** | **Allowed Outlet "Program Name" / "Program Category" values** (per-tenant valid-lists read by outlet upload/validator/template; default = the prior hardcoded `VALID_PROGRAMS`/`VALID_CATEGORIES`) | DB (`ProgramSetting`) ✅ (`1bc9315`) | done ("Outlet Programs & Categories" Gifsy Settings card) |
 | ~~Partner classes / Tiers~~ | ~~`CP_01/02/03`, multipliers~~ | — | **RETIRED → program (P4.0 de-scaffold)** |
 
 ## D · Enrollment & KYC
@@ -89,6 +90,7 @@ How the platform stays one codebase across many FMCG clients with per-client cus
 | Setting | Controls | Home | Target |
 |---|---|---|---|
 | Visibility capture mode | App photo-capture vs admin upload | — | tenant flag (Gap #17) |
+| **`visibilityEnabled`** (whole Visibility module on/off) | **Master per-tenant kill-switch for the entire Visibility module** (default **OFF**, opt-in; read **uncached + fail-closed**; gates all visibility endpoints + report) | DB (`ProgramSetting`) ✅ (`d5d175e`) | done (Gifsy Settings ON/OFF card) |
 | Loyalty vs Activation audience | Top/KYC ongoing vs all/time-bound | partial | formalize |
 
 ## G · Partner app surface (`features.partnerApp`)

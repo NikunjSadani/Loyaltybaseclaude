@@ -64,6 +64,11 @@ operator, and forced three more decisions. These define how Phase A/B (`00-MASTE
 ## 4. Per-page expected visibility (skeleton — fill as each flow is verified)
 `✅` = behavior confirmed at runtime · `◐` = partially confirmed · `🟦` = needs owner decision · `❌` = known broken (gap#)
 
+> **Note (visibility surfaces, 2026-06-25 `d5d175e`):** every `*/visibility` page + the `/reports/visibility-status`
+> export is additionally gated by the per-tenant **`visibilityEnabled`** master toggle (default **OFF**, read uncached +
+> fail-closed). When a tenant's toggle is OFF, that tenant's own users get **403** and all visibility FE surfaces are
+> hidden; the GIFSY operator is exempt only in true platform context (`!assumed`). Deoleo launches with visibility OFF.
+
 | Page | Intended audience | Expected data | Status |
 |---|---|---|---|
 | `/auth/login` | all | OTP login, route by role to the right portal; GIFSY via subdomain/dev clientId override (Q3, real login only) | ◐ 3/4 roles ✅; GIFSY ❌ #39 |
@@ -83,7 +88,8 @@ operator, and forced three more decisions. These define how Phase A/B (`00-MASTE
 | `/partner/targets`, `/partner/invoices`, `/partner/leaderboard` | partner | own data | ◐ targets/invoices ✅ earlier; leaderboard unverified |
 | `/partner/support`, `/sales/support` | own tickets | own tickets only | ✅ (G verified) |
 | `/sales/kyc` (+[id]) | sales (assigned) | assigned-outlet KYC; first-approve | ◐ list ✅; first-approve unverified #38 |
-| `/sales/outlets`, `/sales/team*`, `/sales/dashboard`, `/sales/leaderboard` | sales (hierarchy) | assigned/team data | 🟦 Q4 + ◐ |
+| `/sales/outlets`, `/sales/team*`, `/sales/dashboard` | sales (hierarchy) | assigned/team data | 🟦 Q4 + ◐ |
+| `/sales/leaderboard` | sales (hierarchy) | same-level peers ranked by team primary-KPI %; territory = ZNM ancestor | ✅ BUILT 2026-06-26 (`a525739`+`a272dca`): real `GET /v1/sales/leaderboard` (live-computed, same-level peers, rm/state/national, ZNM territory, `isMe`); FE wired (was a 404 dead-read); runtime-verified on staging (484 peers, real 47%) |
 | `/sales/catalogue` (redemption) | sales | redeem for outlet (real balance) | ❌ hardcoded balance/OTP #36 |
 | `/partner/visibility` (+submit) | partner | own submissions; submit photo | ✅ submit ported to `POST /v1/visibility/submit` (P0.6); harness write-persistence test green |
 | `/sales/visibility` (+submit) | sales | submissions; submit | ◐ list ✅; sales *submit* deferred — `VisibilitySubmission.partnerId` FKs `ChannelPartner` (a sales user has none); needs a model change (nullable submittedByUserId) before sales can submit |

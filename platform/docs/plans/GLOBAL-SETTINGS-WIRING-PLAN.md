@@ -7,6 +7,23 @@ local stack + push (push pending owner ask).** Build log appended at the bottom.
 Goal: keep the entire Gifsy Settings panel and make every field a real, tenant-scoped,
 backend-enforced setting. No field should be "looks configurable but does nothing."
 
+## 2026-06-24→26 addendum — new Gifsy Settings cards (REAL / DB-backed / per-tenant)
+
+Two more cards were added since the original wave, both real `ProgramSetting`-backed, per-tenant,
+GIFSY-managed (completing the panel inventory):
+
+- **Visibility ON/OFF master toggle** — `visibilityEnabled` (per-tenant `ProgramSetting`, default
+  **OFF**/opt-in; read **UNCACHED + fail-closed**). Master kill-switch for the whole Visibility
+  module: gates all visibility endpoints + `/reports/visibility-status` (403 for a tenant's own
+  users when OFF; GIFSY exempt only in true platform context, `!assumed`); all visibility FE
+  surfaces hidden when OFF. ON/OFF card in the Gifsy Settings panel. Built 2026-06-25 (`d5d175e`);
+  Deoleo launches OFF. See [[global-settings-wiring]] / `GO-LIVE-ISSUE-LIST` VIS block.
+- **Outlet Programs & Categories lists** — `outletPrograms[]` / `outletCategories[]` (per-tenant
+  `ProgramSetting`, default = the prior hardcoded `VALID_PROGRAMS`/`VALID_CATEGORIES`; trim/dedupe,
+  empty→defaults so a tenant can't lock itself out). The allowed Outlet "Program Name"/"Program
+  Category" values; the outlet upload validator + template + outlets page read each tenant's lists.
+  "Outlet Programs & Categories" card (GIFSY-only add/remove chips). Built 2026-06-26 (`1bc9315`).
+
 ## Grounding (verified by recon, file:line)
 
 Settings store ALREADY EXISTS and is per-tenant — we extend it, not invent it:

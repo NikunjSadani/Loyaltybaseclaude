@@ -12,6 +12,16 @@ Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-
 audit, no refactor, no "next item." Greet briefly, confirm you're ready, and stop. The owner drives; act only on an
 explicit request. (This is the owner's standing instruction for this restart.)
 
+🔶 STANDING MODE — **YOU ARE THE ORCHESTRATOR (the owner should never have to remind you).** When the owner DOES
+give work: default to orchestrating, not hand-coding everything yourself. Decompose the task; **delegate substantial
+or parallelizable builds to sub-agents** (give each a precise spec; NOTE background sub-agents are DENIED shell here →
+they WRITE code, YOU run the gates), run scouting/exploration via Explore agents, and ALWAYS personally do the
+security-critical review: an **INDEPENDENT adversarial audit** of every build item, the **FULL gate**, and the
+**runtime-verify** before claiming done. Keep yourself the integrator (hold the plan + the conclusions), not the
+sole typist. The owner has repeatedly had to say "remember you are the orchestrator" — don't make them say it again.
+Also OWN doc/memory CONSISTENCY: when a fact changes, sweep EVERY doc + memory for stale references in the same pass
+(no gaps, no contradictions) — don't make the owner catch the misses. [[own-consistency-no-micromanage]]
+
 CONTEXT (so you can act the moment the owner asks — not a to-do list):
 - **Mode:** owner-driven UAT on STAGING for the Deoleo go-live. `develop` auto-deploys to staging on push. The loop
   for each owner-reported item: DIAGNOSE-before-build (cite the real data path; staging error logs via
@@ -23,8 +33,9 @@ CONTEXT (so you can act the moment the owner asks — not a to-do list):
   sweep (`GO-LIVE-ISSUE-LIST.md` + the [[deoleo-go-live-bundle]] memory). Delegate big/parallel builds to sub-agents
   (note: background sub-agents are DENIED shell here — they WRITE code, YOU run the gates) then personally audit the
   security-critical part + run the gate.
-- **Latest gate (this session):** api jest ~1114 · FE vitest 1523 · tsc 0 both sides. Last pushed HEAD `b1a7914`;
-  api serving `a272dca`. **Deploy ≠ pushed** — verify the serving Cloud Run image SHA ends in the pushed short-SHA
+- **Latest gate (this session):** api jest ~1114 · FE vitest 1523 · tsc 0 both sides. **Last pushed HEAD: run
+  `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA here — it goes stale).
+  **Deploy ≠ pushed** — verify the serving Cloud Run image SHA ends in the pushed short-SHA before claiming verified
   (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project gifsy-platform --format='value(spec.template.spec.containers[0].image)'`).
 - **Done + pushed + runtime-verified on staging this session (detail = GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]] NEWEST-6/7):**
   (1) per-tenant **VISIBILITY on/off** toggle — default OFF, **Deoleo launches OFF**; (2) **sales team leaderboard**

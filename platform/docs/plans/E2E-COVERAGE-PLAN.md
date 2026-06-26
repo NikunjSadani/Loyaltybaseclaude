@@ -148,7 +148,7 @@ Legend for audience: **CA**=CLIENT_ADMIN, **MIS**=MIS_USER (read-only), **P**=pa
 | `/sales/team` | S (manager) | ◻ | downline (Q4) — **needs manager seed** |
 | `/sales/team/[memberId]` | S (manager) | ◻ | member detail (Q4) |
 | `/sales/team/[memberId]/outlets` | S (manager) | ◻ | member outlets (Q4) |
-| `/sales/leaderboard` | S | ◻ | leaderboard (deferred per GO-LIVE §3, but route should still render) |
+| `/sales/leaderboard` | S | ◻ | leaderboard — BUILT 2026-06-26 (`GET /v1/sales/leaderboard`, same-level peers, ZNM territory); renders real rankings |
 | `/sales/tasks` | S | ◻ | tasks list |
 | `/sales/support` | S | ◻ | own tickets only (Q4 individual) |
 | `/sales/visibility` | S | ◻ | list ✅-ish; **submit deferred** — `VisibilitySubmission.partnerId` FKs ChannelPartner; sales has none (model change needed; see §2) |

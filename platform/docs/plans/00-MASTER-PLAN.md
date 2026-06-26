@@ -11,7 +11,7 @@
 > 0 users/0 clients); prod auto-migrate wired into `deploy.yml`; temporary worker host-alias removed; verified
 > (login/health/routing). As-run record: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md).
 > **Remaining go-live work = real Deoleo master-data load into the empty prod + owner core-loop UAT (real OTP) + owner
-> ops (Cloud Monitoring alert, ongoing backups/PITR, cred rotation). Sales-team leaderboard = post-launch fast-follow.**
+> ops (Cloud Monitoring alert, ongoing backups/PITR, cred rotation).** *(Sales-team leaderboard ✅ shipped 2026-06-26, `a525739`+`a272dca` — live-computed, no longer a fast-follow.)*
 
 A phased, bite-sized plan to deliver the **whole Loyaltybase platform** to the
 [spec](../spec/README.md), for an engineer new to this codebase. This is the **top-level plan**:

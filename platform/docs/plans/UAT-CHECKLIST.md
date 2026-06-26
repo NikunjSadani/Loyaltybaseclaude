@@ -198,6 +198,9 @@ corruption**. Owning stream in brackets.
 | 10.12 | **Scheme enrollments export** [C] | admin | download enrollments export (reflects real enrollments) | read-only | |
 | 10.13 | **Visibility export/upload** [F-adj] | admin | per visibility flow | per design | |
 | 10.14 | **Admin users/outlets bulk** [A] | admin | `bulk-upload` (template → fill → upload), `bulk-edit`, `bulk-delete` | re-upload behaves; partial-failure reporting | |
+| 10.15 | **Visibility ON/OFF master gate** (`visibilityEnabled`, `d5d175e`) | GIFSY + tenant | with the tenant's toggle **OFF** (Deoleo default), hit a visibility endpoint/page as the tenant's own user; then a GIFSY operator in true platform context; flip ON and retry | OFF → tenant's own users **403** (incl. `/reports/visibility-status`) + all FE visibility surfaces hidden; GIFSY exempt only when `!assumed`; flip ON → 200 (honoured immediately, uncached) | |
+| 10.16 | **Sales leaderboard renders real peers** (`GET /v1/sales/leaderboard`, `a525739`+`a272dca`) | sales (rep/manager) | open the Ranks/leaderboard page; switch scope rm/state/national | real same-level peers (not mock), self row flagged (`isMe`), **territory = ZNM ancestor name**, achievement %/active-outlets/change populated; no 404/empty dead-read | |
+| 10.17 | **Outlet program/category card round-trip** (`outletPrograms`/`outletCategories`, `1bc9315`) | GIFSY | in the "Outlet Programs & Categories" Gifsy Settings card, add/remove a value → save → reload; download the outlet template + validate an upload | custom list persists per tenant; template + upload validator honour it; clearing the list falls back to defaults (no self-lockout); non-GIFSY PUT → 403 | |
 
 ## 11. Navigation & link integrity — *nothing dead, every route reachable*
 
@@ -231,10 +234,10 @@ corruption**. Owning stream in brackets.
 | # | Tier | Owner | Steps | Expected | ✅/❌ |
 |---|---|---|---|---|---|
 | 13.1 | 🟠 | [B] | **Stored XSS.** Register/KYC a partner with `businessName` = `<script>alert(1)</script>` (and similar in ticket text, names). | Rendered inert everywhere it surfaces (admin lists/detail, exports) — no script execution. | |
-| 13.2 | 🟠 | [E/A] | **CSV/formula injection across ALL exports.** A field starting with `=` `+` `-` `@` flows into **every** Excel export (TDS, invoices, enrollments, bulk users/outlets, reconciliation — not just §6.9's TDS). | Every export neutralises the cell (leading-quote/escape); none is formula-executable in Excel. | |
+| 13.2 | 🟠 | [E/A] | **CSV/formula injection across ALL exports.** A field starting with `=` `+` `-` `@` flows into **every** Excel export (TDS, invoices, enrollments, bulk users/outlets, reconciliation — not just §6.9's TDS). | Every export neutralises the cell (leading-quote/escape); none is formula-executable in Excel. **✅ met by `cellSafe` in `buildXlsx` (AF-5, `1bc9315`)** — applied to every string cell at the serialisation boundary, closing all backend xlsx exports + FE templates. Residual to spot-check: the K12 `reviewDump` signed-URL export (separate, not via `buildXlsx`). | |
 | 13.3 | 🟠 | [C/E] | **Oversized upload.** Upload a very large `.xlsx` (e.g. 50k rows / large file). | Honest size/timeout handling; size cap enforced; no OOM/500; no Cloud Run memory blow-up. | |
 | 13.4 | 🟠 | [A] | **Content-type spoof.** Upload a non-xlsx (renamed `.exe`/`.html`/`.csv`) to a template-upload surface. | Rejected by content sniffing, not extension alone; honest error. | |
-| 13.5 | 🟠 | [E] | **Re-export of an accepted formula cell.** A formula-like value accepted on upload is later exported. | Neutralised on export (no round-trip injection). | |
+| 13.5 | 🟠 | [E] | **Re-export of an accepted formula cell.** A formula-like value accepted on upload is later exported. | Neutralised on export (no round-trip injection). **✅ met by `cellSafe` in `buildXlsx` (AF-5, `1bc9315`)** — neutralisation is at the export serialisation boundary, so any accepted cell is escaped on the way out. | |
 
 ---
 
