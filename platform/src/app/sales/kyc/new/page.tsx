@@ -1904,12 +1904,12 @@ export default function NewKYCPage() {
 
             <div className="pt-1 space-y-4">
               <p className="text-xs font-semibold text-gray-700 flex items-center gap-1.5">
-                <FileText className="h-3.5 w-3.5 text-[var(--brand-primary)]" /> Address &amp; Store Documents
+                <FileText className="h-3.5 w-3.5 text-[var(--brand-primary)]" /> Store Address &amp; Store Documents
               </p>
 
               {/* Address Proof upload */}
               <FileUploadCard docKey="shopAddressDoc" label="Address Proof" required
-                hint="Electricity bill, rent agreement, or govt. address proof · PDF or image · Max 5 MB"
+                hint="Accepted: GST certificate, electricity bill, telephone bill, rent agreement, Aadhaar card (if sole proprietor) · PDF or image · Max 5 MB"
                 inputRef={shopAddressDocRef} />
 
               {/* ── Name mismatch checkbox ── */}
