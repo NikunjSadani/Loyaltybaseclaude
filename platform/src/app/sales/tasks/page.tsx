@@ -638,6 +638,29 @@ export default function TasksPage() {
     const groups: TaskGroup[] = [];
 
     if (isFieldRole) {
+      // KYC to be done: master-loaded outlets whose KYC was never started
+      // (NOT_STARTED). Mirrors the dashboard "KYC to be done" group — without it the
+      // Tasks "View all" page silently dropped these, so the dashboard count and the
+      // Tasks badge disagreed (dashboard showed the group, Tasks omitted it).
+      const notStartedOutlets = outlets.filter((o) => o.kycStatus === KYCStatus.NOT_STARTED);
+      if (notStartedOutlets.length > 0) {
+        groups.push({
+          id: 'kyc_to_do', label: 'KYC to be done',
+          icon: <FileCheck className="h-4 w-4 text-emerald-600" />,
+          items: notStartedOutlets.map((o) => ({
+            id: o.id, title: o.name,
+            subtitle: `${o.location} · New enrollment — KYC not started`,
+            // No submission yet → open the start wizard pre-selected on this outlet
+            // (never a dead /sales/kyc/${id} → "KYC not found").
+            href: `/sales/kyc/new?outletId=${o.id}`,
+            priority: 'high' as const,
+          })),
+          accentBg: 'bg-emerald-50', accentBorder: 'border-emerald-200',
+          accentText: 'text-emerald-700', badgeBg: 'bg-emerald-100',
+          href: '/sales/kyc?status=NOT_STARTED',
+        });
+      }
+
       const reKycOutlets = outlets.filter((o) => o.kycStatus === KYCStatus.RE_KYC_REQUIRED);
       if (reKycOutlets.length > 0) {
         groups.push({
