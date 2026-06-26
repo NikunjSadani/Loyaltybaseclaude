@@ -172,7 +172,12 @@ describe('SalesService', () => {
       const aWhere = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
       expect(aWhere.salesUserId.in.sort()).toEqual(['mgr1', 'sub1', 'sub2']);
       expect(aWhere.unassignedAt).toBeNull();
-      expect(aWhere.outlet).toEqual({ isActive: true, deletedAt: null });
+      // Regression guard: must NOT add an `outlet:{isActive:true}` filter — outlets are
+      // created isActive:false (PENDING) until KYC approval, so filtering it out would
+      // under-count "Outlets" vs /sales/outlets and zero out "KYC Pending". Match
+      // buildOutlets/getMember exactly (assignment-only scoping). O2 above is a
+      // partner-less/NOT_STARTED outlet and STILL counts toward outlets(2)+kycPending(1).
+      expect(aWhere.outlet).toBeUndefined();
       // Exactly ONE assignment query (in-memory rollup, not per-member).
       expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledTimes(1);
     });

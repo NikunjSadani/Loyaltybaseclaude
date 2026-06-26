@@ -126,9 +126,9 @@ export class SalesService {
    * direct member's subtree IN MEMORY. No per-member queries (no N+1).
    *
    * Definitions mirror the rest of the file so the tiles reconcile:
-   *  • outlets   — active assignment (unassignedAt null) to an active outlet
-   *                (isActive, deletedAt null), counted distinct per subtree — same
-   *                outlet-scoping as buildOutlets / /sales/outlets.
+   *  • outlets   — active assignment (unassignedAt null) to any assigned outlet,
+   *                counted distinct per subtree — EXACT same outlet-scoping as
+   *                buildOutlets / /sales/outlets (incl. PENDING / un-KYC'd outlets).
    *  • kycDone   — of those outlets, latest KYC status === 'APPROVED'.
    *  • kycPending— of those outlets, latest status NOT in the terminal set
    *                ['APPROVED','REJECTED','NOT_INTERESTED'] (incl. NOT_STARTED /
@@ -165,10 +165,15 @@ export class SalesService {
     // PLUS the latest KYC submission so we can classify done/pending in memory.
     const assignments = await this.prisma.salesUserAssignment.findMany({
       where: {
+        // EXACT same outlet-scoping as buildOutlets / getMember: an active
+        // assignment (unassignedAt null) to any assigned outlet. Do NOT add an
+        // `outlet: { isActive: true }` filter — outlets are created isActive:false
+        // (PENDING) and only flip to true on KYC approval, so filtering on it would
+        // (a) under-count "Outlets" vs the /sales/outlets list and (b) drop every
+        // pending/un-KYC'd outlet BEFORE classification → "KYC Pending" always 0.
         salesUserId: { in: [...viewerSubtree] },
         unassignedAt: null,
         outletId: { not: null },
-        outlet: { isActive: true, deletedAt: null },
       },
       select: {
         salesUserId: true,
