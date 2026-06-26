@@ -47,7 +47,7 @@ describe('SalesService', () => {
       expect(res).toEqual({ salesUser: null, members: [] });
     });
 
-    it('maps subordinates into member rows', async () => {
+    it('maps subordinates into member rows (incl. the whole-subtree rollup fields)', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({
         id: 'mgr1',
         employeeCode: 'E1',
@@ -67,6 +67,16 @@ describe('SalesService', () => {
           },
         ],
       });
+      // buildTeamRollups: edges → assignments → kpiDef → primary maps.
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'mgr1', reportingToId: null },
+        { id: 'sub1', reportingToId: 'mgr1' },
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]); // no outlets
+      mockPrisma.kpiDef.findMany.mockResolvedValue([]);              // no KPIs
+      mockPrisma.outletTarget.findMany.mockResolvedValue([]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+
       const res = await service.getTeam(caller);
       expect(res.members).toEqual([
         {
@@ -79,8 +89,129 @@ describe('SalesService', () => {
           territory: 'NCR',
           teamSize: 3,
           joinedAt: '2024-01-01T00:00:00.000Z',
+          // No outlets/targets → rollup is all-zero (but the FIELDS are present).
+          outlets: 0,
+          kycDone: 0,
+          kycPending: 0,
+          targetValue: 0,
+          targetPct: 0,
         },
       ]);
+    });
+
+    it("rolls up each direct member's WHOLE SUBTREE (outlets/kyc/target) for the summary tiles", async () => {
+      // Viewer mgr1 has one direct subordinate sub1; sub1 in turn manages sub2.
+      // sub1 is assigned outlet O1 (APPROVED KYC); sub2 is assigned outlet O2
+      // (NOT_STARTED, partner-less). The rollup on sub1 must roll up its WHOLE
+      // subtree {sub1, sub2}: 2 outlets, 1 KYC done, 1 pending, and the primary-KPI
+      // target/achieved summed over O1+O2.
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'mgr1',
+        employeeCode: 'E1',
+        region: 'North',
+        zone: null,
+        hierarchyLevel: { code: 'ASM', name: 'Area Sales Manager', level: 2 },
+        subordinates: [
+          {
+            id: 'sub1',
+            employeeCode: 'E2',
+            region: 'NCR',
+            zone: null,
+            joinedAt: new Date('2024-01-01T00:00:00.000Z'),
+            user: { name: 'Sub One', phone: '9900000041' },
+            hierarchyLevel: { code: 'SO', name: 'Sales Officer', level: 1 },
+            _count: { subordinates: 1 },
+          },
+        ],
+      });
+      // edges: mgr1 → sub1 → sub2 (sub2 is sub1's downline, NOT a direct member).
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'mgr1', reportingToId: null },
+        { id: 'sub1', reportingToId: 'mgr1' },
+        { id: 'sub2', reportingToId: 'sub1' },
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        {
+          salesUserId: 'sub1',
+          outlet: {
+            id: 'o1', outletCode: 'O1',
+            partner: { kycSubmissions: [{ status: 'APPROVED' }] },
+          },
+        },
+        {
+          salesUserId: 'sub2',
+          outlet: {
+            id: 'o2', outletCode: 'O2',
+            partner: null, // partner-less → NOT_STARTED → pending
+          },
+        },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'SALES', isPrimary: true }]);
+      // primaryMapsForMonth: target then achievement reads.
+      mockPrisma.outletTarget.findMany.mockResolvedValue([
+        { outletCode: 'O1', targetValues: { SALES: 100 } },
+        { outletCode: 'O2', targetValues: { SALES: 100 } },
+      ]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+        { outletCode: 'O1', kpiValues: { SALES: 80 } },
+        { outletCode: 'O2', kpiValues: { SALES: 40 } },
+      ]);
+
+      const res = await service.getTeam(caller);
+      const sub1 = res.members.find((m: { id: string }) => m.id === 'sub1')!;
+      expect(sub1).toMatchObject({
+        outlets: 2,        // O1 + O2 across the subtree {sub1, sub2}
+        kycDone: 1,        // O1 APPROVED
+        kycPending: 1,     // O2 NOT_STARTED (partner-less)
+        targetValue: 200,  // 100 + 100
+        targetPct: 60,     // round(100 * (80+40) / 200)
+      });
+
+      // The assignment query is bounded by the viewer's whole subtree (no N+1
+      // per-member queries) and only loads active outlets.
+      const aWhere = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
+      expect(aWhere.salesUserId.in.sort()).toEqual(['mgr1', 'sub1', 'sub2']);
+      expect(aWhere.unassignedAt).toBeNull();
+      expect(aWhere.outlet).toEqual({ isActive: true, deletedAt: null });
+      // Exactly ONE assignment query (in-memory rollup, not per-member).
+      expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('tenant-scopes the rollup edge + target reads to the caller clientId', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'mgr1', employeeCode: 'E1', region: 'North', zone: null,
+        hierarchyLevel: { code: 'ASM', name: 'Area Sales Manager', level: 2 },
+        subordinates: [
+          {
+            id: 'sub1', employeeCode: 'E2', region: 'NCR', zone: null,
+            joinedAt: new Date('2024-01-01T00:00:00.000Z'),
+            user: { name: 'Sub One', phone: '9900000041' },
+            hierarchyLevel: { code: 'SO', name: 'Sales Officer', level: 1 },
+            _count: { subordinates: 0 },
+          },
+        ],
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'mgr1', reportingToId: null },
+        { id: 'sub1', reportingToId: 'mgr1' },
+      ]);
+      // A primary KPI + one assigned outlet so the primary target/achievement reads
+      // actually run (they short-circuit when there is no primary KPI / no outlet).
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { salesUserId: 'sub1', outlet: { id: 'o1', outletCode: 'O1', partner: { kycSubmissions: [{ status: 'APPROVED' }] } } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'SALES', isPrimary: true }]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue([]);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue([]);
+
+      await service.getTeam(caller);
+      // edge list tenant-scoped
+      expect(mockPrisma.salesUser.findMany.mock.calls[0][0].where).toEqual({
+        user: { clientId: 'deoleo' }, deletedAt: null,
+      });
+      // primary target/achievement reads tenant-scoped
+      expect(mockPrisma.outletTarget.findMany.mock.calls[0][0].where).toMatchObject({ clientId: 'deoleo' });
+      expect(mockPrisma.outletSalesRecord.findMany.mock.calls[0][0].where).toMatchObject({ clientId: 'deoleo' });
     });
   });
 

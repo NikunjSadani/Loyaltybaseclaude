@@ -45,6 +45,13 @@ export class SalesService {
    * GET /v1/sales/team
    * The caller's own SalesUser record plus their direct subordinates.
    * Source: platform sales/team GET.
+   *
+   * Each direct subordinate row is enriched with that member's WHOLE-SUBTREE
+   * rollup (self + their entire downline): outlets / kycDone / kycPending /
+   * targetValue / targetPct. Summing the direct members in the FE then yields the
+   * viewer's full downline (the My-Team summary tiles). The rollup is done in
+   * memory off a SINGLE batch of queries spanning the viewer's whole subtree —
+   * NO per-member queries (no N+1). Everything is tenant-scoped by clientId.
    */
   async getTeam(user: JwtPayload) {
     const salesUser = await this.prisma.salesUser.findFirst({
@@ -64,17 +71,32 @@ export class SalesService {
 
     if (!salesUser) return { salesUser: null, members: [] };
 
-    const members = salesUser.subordinates.map((sub) => ({
-      id: sub.id,
-      employeeCode: sub.employeeCode,
-      name: sub.user.name,
-      mobile: sub.user.phone ?? '',
-      role: sub.hierarchyLevel.code,
-      roleLabel: sub.hierarchyLevel.name,
-      territory: sub.region ?? sub.zone ?? '',
-      teamSize: sub._count.subordinates,
-      joinedAt: sub.joinedAt.toISOString(),
-    }));
+    const rollups = await this.buildTeamRollups(
+      user.clientId,
+      salesUser.id,
+      salesUser.subordinates.map((s) => s.id),
+    );
+
+    const members = salesUser.subordinates.map((sub) => {
+      const roll = rollups.get(sub.id) ?? { outlets: 0, kycDone: 0, kycPending: 0, targetValue: 0, targetPct: 0 };
+      return {
+        id: sub.id,
+        employeeCode: sub.employeeCode,
+        name: sub.user.name,
+        mobile: sub.user.phone ?? '',
+        role: sub.hierarchyLevel.code,
+        roleLabel: sub.hierarchyLevel.name,
+        territory: sub.region ?? sub.zone ?? '',
+        teamSize: sub._count.subordinates,
+        joinedAt: sub.joinedAt.toISOString(),
+        // Whole-subtree rollup (self + downline) — drives the FE My-Team tiles.
+        outlets: roll.outlets,
+        kycDone: roll.kycDone,
+        kycPending: roll.kycPending,
+        targetValue: roll.targetValue,
+        targetPct: roll.targetPct,
+      };
+    });
 
     return {
       salesUser: {
@@ -88,6 +110,141 @@ export class SalesService {
       },
       members,
     };
+  }
+
+  /**
+   * Per-direct-member WHOLE-SUBTREE rollup for the My-Team summary tiles.
+   *
+   * Returns a map directMemberId → { outlets, kycDone, kycPending, targetValue,
+   * targetPct } where each metric is rolled up over THAT member's own subtree
+   * (the member + their entire downline). The FE sums these direct-member rows to
+   * get the viewer's full downline totals.
+   *
+   * Efficiency: loads the tenant's reporting edges, the viewer-subtree's active
+   * outlet assignments (+ each outlet's latest KYC status), the primary KpiDef and
+   * the current-month primary target/achievement maps ONCE, then rolls up every
+   * direct member's subtree IN MEMORY. No per-member queries (no N+1).
+   *
+   * Definitions mirror the rest of the file so the tiles reconcile:
+   *  • outlets   — active assignment (unassignedAt null) to an active outlet
+   *                (isActive, deletedAt null), counted distinct per subtree — same
+   *                outlet-scoping as buildOutlets / /sales/outlets.
+   *  • kycDone   — of those outlets, latest KYC status === 'APPROVED'.
+   *  • kycPending— of those outlets, latest status NOT in the terminal set
+   *                ['APPROVED','REJECTED','NOT_INTERESTED'] (incl. NOT_STARTED /
+   *                partner-less). EXACT same definitions as getMember.
+   *  • targetValue/targetPct — the subtree's PRIMARY-KPI current-month target sum
+   *                and round(100 * achieved / target) (0 when target is 0), using
+   *                the SAME period/primary-KPI selection as getLeaderboard.
+   *
+   * Tenant-scoped throughout (edges + assignments + targets all filter clientId).
+   */
+  private async buildTeamRollups(
+    clientId: string,
+    viewerSalesUserId: string,
+    directMemberIds: string[],
+  ): Promise<Map<string, { outlets: number; kycDone: number; kycPending: number; targetValue: number; targetPct: number }>> {
+    const empty = new Map<string, { outlets: number; kycDone: number; kycPending: number; targetValue: number; targetPct: number }>();
+    if (directMemberIds.length === 0) return empty;
+
+    // ── 1. Tenant edge list → each direct member's subtree ids (in memory). ────
+    const edges = await this.prisma.salesUser.findMany({
+      where: { user: { clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true },
+    });
+
+    // The viewer subtree bounds the single assignment query; each direct member's
+    // own subtree is a slice of it. (descendantSalesUserIds is cycle-safe.)
+    const viewerSubtree = descendantSalesUserIds(viewerSalesUserId, edges);
+    const memberSubtrees = new Map<string, Set<string>>(
+      directMemberIds.map((mid) => [mid, descendantSalesUserIds(mid, edges)]),
+    );
+
+    // ── 2. Active assignments → active outlets, with latest KYC status, ONCE. ──
+    // Mirrors buildOutlets' outlet-scoping (active assignment to a live outlet),
+    // PLUS the latest KYC submission so we can classify done/pending in memory.
+    const assignments = await this.prisma.salesUserAssignment.findMany({
+      where: {
+        salesUserId: { in: [...viewerSubtree] },
+        unassignedAt: null,
+        outletId: { not: null },
+        outlet: { isActive: true, deletedAt: null },
+      },
+      select: {
+        salesUserId: true,
+        outlet: {
+          select: {
+            id: true,
+            outletCode: true,
+            partner: {
+              select: {
+                kycSubmissions: {
+                  orderBy: { createdAt: 'desc' },
+                  take: 1,
+                  select: { status: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    // salesUserId → list of its assigned active outlets (id, code, latest status).
+    // A partner-less outlet has no KYC submission → NOT_STARTED (pending action).
+    type OutletInfo = { id: string; outletCode: string | null; status: string };
+    const outletsByUser = new Map<string, OutletInfo[]>();
+    for (const a of assignments) {
+      if (!a.outlet) continue;
+      const status = a.outlet.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED';
+      const arr = outletsByUser.get(a.salesUserId) ?? [];
+      arr.push({ id: a.outlet.id, outletCode: a.outlet.outletCode, status });
+      outletsByUser.set(a.salesUserId, arr);
+    }
+
+    // ── 3. Primary KPI + current-month target/achieved maps, ONCE. ────────────
+    // Same DETERMINISTIC primary pick (isPrimary, else first by code) and current
+    // month as getLeaderboard, so team targets reconcile with the leaderboard.
+    const kpiDefs = await this.prisma.kpiDef.findMany({
+      where: { clientId },
+      select: { code: true, isPrimary: true },
+      orderBy: { code: 'asc' },
+    });
+    const primaryCode = (kpiDefs.find((k) => k.isPrimary) ?? kpiDefs[0])?.code ?? null;
+    const month = this.reportMonth();
+    const [targetMap, achMap] = await this.primaryMapsForMonth(clientId, month, primaryCode);
+
+    // ── 4. Roll up each direct member's subtree IN MEMORY (no per-member query). ─
+    const TERMINAL = ['APPROVED', 'REJECTED', 'NOT_INTERESTED'];
+    const result = new Map<string, { outlets: number; kycDone: number; kycPending: number; targetValue: number; targetPct: number }>();
+    for (const [memberId, subtree] of memberSubtrees) {
+      // Distinct active outlets across the member's subtree.
+      const outletIds = new Set<string>();
+      const outletCodes = new Set<string>();
+      let kycDone = 0;
+      let kycPending = 0;
+      for (const sid of subtree) {
+        for (const o of outletsByUser.get(sid) ?? []) {
+          if (outletIds.has(o.id)) continue; // dedupe across multiple assignees
+          outletIds.add(o.id);
+          if (o.outletCode) outletCodes.add(o.outletCode);
+          if (o.status === 'APPROVED') kycDone++;
+          if (!TERMINAL.includes(o.status)) kycPending++;
+        }
+      }
+
+      // Primary-KPI target/achieved summed over the subtree's outlet codes.
+      let targetValue = 0;
+      let achieved = 0;
+      for (const code of outletCodes) {
+        targetValue += targetMap.get(code) ?? 0;
+        achieved += achMap.get(code) ?? 0;
+      }
+      const targetPct = targetValue > 0 ? Math.round((100 * achieved) / targetValue) : 0;
+
+      result.set(memberId, { outlets: outletIds.size, kycDone, kycPending, targetValue, targetPct });
+    }
+    return result;
   }
 
   /**
