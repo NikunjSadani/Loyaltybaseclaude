@@ -90,3 +90,43 @@ Also deferred from the same audit: the credit-upload-window FE check
 while the backend (`credits.service.ts:77`) blocks only prior-month. Cosmetic today (the page only
 uploads the previous month, and the BACKEND enforces correctly); make the FE check period-aware if
 the period selector ever allows the current month.
+
+---
+
+## F. PWA — installable mobile app for the SALES + OUTLET (partner) apps only
+
+**Scope: the `/sales/*` and `/partner/*` shells ONLY** (owner decision 2026-06-26). The `/admin/*` and
+`/gifsy/*` consoles are desktop-operator tools and are explicitly OUT of scope — no PWA/install/icons for them.
+
+**Current state (2026-06-26):** the FE (Next.js 16) is a responsive, mobile-first web app with dedicated
+`partner` + `sales` layouts, a dynamic `theme-color`, and a `Viewport` export — but it is **NOT a PWA**:
+no web manifest, no icon set, no service worker, no install prompt, no push. Per-tenant branding already
+exists (`config.branding`), so a per-tenant manifest/icons fit that pattern cleanly. **Multi-tenant +
+branded domains means every tenant needs its own app name + icon set + (push) config** — adds ~30–50%
+over a single-brand PWA.
+
+**Why it's safe to defer:** the sales + outlet apps already work in the mobile browser today (incl.
+camera-based KYC capture). A PWA is a distribution/UX/re-engagement enhancement, not a launch blocker.
+
+**⚠️ Do NOT build the service worker while the sales/partner screens are still churning** — a SW over a
+rapidly-changing UI creates stale-asset / cache-busting bugs. The SW wants a STABLE front end.
+
+| Phase | What | Trigger | Effort |
+|---|---|---|---|
+| **F1 — Installable shell (low risk, can do anytime)** | Per-tenant `manifest.webmanifest` (name/short_name/icons 192·512·maskable/colors/`display:standalone`/scope=`/sales`+`/partner`) + iOS meta tags + apple-touch icons. **No service worker** (nothing to go stale). Makes it "Add to Home Screen"-able on Android + iOS. | Optional pre-launch quick win, or anytime | **~1–2 days** |
+| **F2 — Per-tenant icon/splash pipeline** | Generate each tenant's icon set (+ iOS static splash images) from their logo, ideally at tenant onboarding. | Before client #2, or with F1 | +2–4 days |
+| **F3 — Service worker** | Serwist (`next-pwa` successor). Precache the app shell, **network-first for `/api/*`, NEVER cache authed/tenant-scoped responses** (multi-tenant + JWT = caching is a security hazard), offline fallback. | After Deoleo live AND sales/partner mobile flows are STABLE (low churn) | ~3–5 days |
+| **F4 — Install UX** | `beforeinstallprompt` custom prompt on Android; instructional banner on iOS (no install API there). | With F3 | ~1–2 days |
+| **F5 — Web Push notifications** (the real ROI) | VAPID + backend push service + **per-tenant** subscription storage + send triggers (points earned / redeem / KYC approved). **iOS: 16.4+ and ONLY for home-screen-installed PWAs.** | When re-engagement is a priority (usually the actual reason to do a PWA for a loyalty app) | +1–2 weeks |
+| **F6 — Store presence (optional)** | Android Play Store via TWA/Bubblewrap (~2–4 days + Play Console review). iOS App Store via a wrapper (Capacitor/PWABuilder) — +1–2 weeks + Apple review risk for "website wrapper". | If an app-store listing is wanted | varies |
+
+**Rollups:** basic installable PWA (F1+F3+F4) ≈ **1–2 weeks**; full PWA with push (F1–F5) ≈ **4–6 weeks**.
+
+**iOS reality check:** Android PWAs are first-class (install prompt, push, Play Store wrappable). iOS is
+limited — install is Safari "Add to Home Screen" only (no prompt), push needs iOS 16.4+ AND a home-screen
+install, plus storage-eviction / no-background-sync constraints.
+
+**Recommended sequencing:** F1 (+optionally F2) is a cheap, low-risk win that can slot in anytime; F3–F5
+(the heavy part) is a focused **post-go-live** project once the sales/partner mobile UI has settled and
+re-engagement (push) becomes a priority. **Right trigger = Deoleo live + mobile flows stable + a concrete
+push-notification need.**
