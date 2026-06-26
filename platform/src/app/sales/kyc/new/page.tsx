@@ -981,10 +981,30 @@ export default function NewKYCPage() {
       if (docs.cheque)         documents.push(buildDocPayload('cheque',         docs.cheque));
       if (docs.selfDeclaration)documents.push(buildDocPayload('selfDeclaration',docs.selfDeclaration));
 
-      // Capture signature from canvas
-      const signatureDataUrl = hasSigned
-        ? signatureCanvasRef.current?.toDataURL('image/png') ?? undefined
-        : undefined;
+      // Capture signature from canvas.
+      // The pad draws near-black strokes on a TRANSPARENT canvas, so a raw export is a
+      // transparent PNG that disappears on any dark background (e.g. the admin reviewer).
+      // Composite the strokes over an opaque white background via an OFFSCREEN canvas so
+      // the exported PNG is self-visible everywhere — without mutating the live pad
+      // (drawing white onto the on-screen canvas would wipe the visible signature).
+      let signatureDataUrl: string | undefined;
+      if (hasSigned) {
+        const src = signatureCanvasRef.current;
+        if (src) {
+          const flat = document.createElement('canvas');
+          flat.width = src.width;
+          flat.height = src.height;
+          const fctx = flat.getContext('2d');
+          if (fctx) {
+            fctx.fillStyle = '#ffffff';
+            fctx.fillRect(0, 0, flat.width, flat.height);
+            fctx.drawImage(src, 0, 0);
+            signatureDataUrl = flat.toDataURL('image/png');
+          } else {
+            signatureDataUrl = src.toDataURL('image/png');
+          }
+        }
+      }
 
       const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
       const res = await fetch('/api/kyc', {

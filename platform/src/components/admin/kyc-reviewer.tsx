@@ -112,9 +112,14 @@ export function KYCReviewer({
           ))}
         </div>
 
-        {/* Document viewer */}
+        {/* Document viewer.
+            Signatures are transparent-background PNGs with near-black strokes — on a
+            dark container they're invisible, so render them on a light/white background.
+            Opaque photo docs keep the dark backdrop. */}
         {selectedDoc && (
-          <div className="relative flex-1 bg-gray-900 rounded-xl overflow-hidden min-h-[400px] flex items-center justify-center">
+          <div className={`relative flex-1 rounded-xl overflow-hidden min-h-[400px] flex items-center justify-center ${
+            selectedDoc.type === 'signature' ? 'bg-white' : 'bg-gray-900'
+          }`}>
             <img
               src={selectedDoc.url}
               alt={selectedDoc.label}
@@ -235,7 +240,9 @@ export function KYCReviewer({
             <img
               src={zoomedDoc.url}
               alt={zoomedDoc.label}
-              className="w-full rounded-xl"
+              // Signatures are transparent PNGs → a white backing makes the strokes visible
+              // against the dark modal overlay. Photo docs are opaque so it's a no-op for them.
+              className={`w-full rounded-xl ${zoomedDoc.type === 'signature' ? 'bg-white' : ''}`}
               onError={(e) => {
                 (e.target as HTMLImageElement).src = `https://placehold.co/800x600/1a1a2e/ffffff?text=${encodeURIComponent(zoomedDoc.label)}`;
               }}

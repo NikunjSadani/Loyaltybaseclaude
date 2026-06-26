@@ -92,6 +92,10 @@ const STATUS_LABELS: Record<KYCStatusType, string> = {
   RESUBMISSION_REQUIRED: 'Re-upload Required',
 };
 
+/** "Awaiting review" = PENDING or UNDER_REVIEW. Shared by the Pending stat CARD
+ *  and the list's Pending FILTER so the card count and the rows shown reconcile. */
+const isPending = (s: KYCStatusType) => s === 'PENDING' || s === 'UNDER_REVIEW';
+
 export default function KYCPage() {
   // Role gate: GET /api/kyc/review-dump is @Roles('GIFSY_ADMIN') only.
   const adminSession = useAdminSession();
@@ -106,7 +110,7 @@ export default function KYCPage() {
   const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/kyc', { headers: { ...authHeader() } })
+    fetch('/api/kyc?limit=500', { headers: { ...authHeader() } })
       .then(r => r.json())
       .then((json: { success: boolean; data?: { submissions: ApiKycSub[] }; error?: string }) => {
         if (json.success && json.data) {
@@ -121,10 +125,9 @@ export default function KYCPage() {
 
   const stats = useMemo(() => ({
     total:    kycList.length,
-    pending:  kycList.filter((k) => k.status === 'PENDING' || k.status === 'UNDER_REVIEW').length,
+    pending:  kycList.filter((k) => isPending(k.status)).length,
     approved: kycList.filter((k) => k.status === 'APPROVED').length,
     rejected: kycList.filter((k) => k.status === 'REJECTED').length,
-    breached: kycList.filter((k) => k.slaBreached).length,
   }), [kycList]);
 
   const filtered = useMemo(() => {
@@ -135,7 +138,9 @@ export default function KYCPage() {
         k.ownerName.toLowerCase().includes(search.toLowerCase()) ||
         k.mobile.includes(search) ||
         k.salesUser.toLowerCase().includes(search.toLowerCase());
-      const matchStatus = statusFilter === 'ALL' || k.status === statusFilter;
+      const matchStatus =
+        statusFilter === 'ALL' ||
+        (statusFilter === 'PENDING' ? isPending(k.status) : k.status === statusFilter);
       return matchSearch && matchStatus;
     });
   }, [search, statusFilter, kycList]);
@@ -181,13 +186,12 @@ export default function KYCPage() {
   return (
     <div className="space-y-5 fade-in">
       {/* Stats row */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
           { label: 'Total', value: stats.total, icon: Filter, color: 'text-gray-600 bg-gray-100', filter: 'ALL' },
           { label: 'Pending', value: stats.pending, icon: Clock, color: 'text-amber-600 bg-amber-100', filter: 'PENDING' },
           { label: 'Approved', value: stats.approved, icon: CheckCircle, color: 'text-green-600 bg-green-100', filter: 'APPROVED' },
           { label: 'Rejected', value: stats.rejected, icon: XCircle, color: 'text-red-600 bg-red-100', filter: 'REJECTED' },
-          { label: 'SLA Breached', value: stats.breached, icon: AlertTriangle, color: 'text-orange-600 bg-orange-100', filter: 'ALL' },
         ].map((s) => {
           const Icon = s.icon;
           return (
