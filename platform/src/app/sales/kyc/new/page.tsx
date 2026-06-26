@@ -31,6 +31,8 @@ interface AssignedOutlet {
   name: string;
   beat: string;
   type: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
+  programName?: string;
+  programCategory?: string;
   /** Present for re-entry outlets (rejected/resubmission/re-KYC) and approved */
   kycStatus?:    'APPROVED' | 'RE_KYC_REQUIRED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
   /** The REAL latest KYC status from the API (NOT_STARTED / SUBMITTED / PENDING_GIFSY /
@@ -317,6 +319,8 @@ export default function NewKYCPage() {
             existingKyc:  o.existingKyc ?? undefined,
             reKycFlags:   o.reKycFlags ?? undefined,
             reKycRemarks: o.kycRejectionReason ?? o.reKycFlags?.remarks ?? undefined,
+            programName:     o.programName ?? '',
+            programCategory: o.programCategory ?? '',
           }));
           setAssignedOutlets(outlets);
           // Build registered phones map from outlet mobiles for conflict detection
@@ -1612,33 +1616,6 @@ export default function NewKYCPage() {
             </div>
             </div>{/* /dropRef wrapper — only covers the dropdown trigger + popup */}
 
-            {selectedOutlet && (
-              <div className={`border rounded-xl px-4 py-3 space-y-1.5 ${
-                selectedOutlet.kycStatus === 'RE_KYC_REQUIRED'
-                  ? 'bg-amber-50 border-amber-200'
-                  : 'bg-[var(--brand-primary)]/5 border-[var(--brand-primary)]/20'
-              }`}>
-                <div className="flex items-center gap-2">
-                  <p className={`text-[11px] font-semibold uppercase tracking-wide ${
-                    selectedOutlet.kycStatus === 'RE_KYC_REQUIRED' ? 'text-amber-700' : 'text-[var(--brand-primary)]'
-                  }`}>Selected</p>
-                  {selectedOutlet.kycStatus === 'RE_KYC_REQUIRED' && (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 bg-amber-200 text-amber-800 rounded-full">
-                      <RefreshCw className="h-2.5 w-2.5" /> Re-KYC Required
-                    </span>
-                  )}
-                </div>
-                <p className="text-sm font-bold text-gray-900">{selectedOutlet.name}</p>
-                <p className="text-xs text-gray-500">{selectedOutlet.outletCode} · {selectedOutlet.beat} · {TYPE_LABEL[selectedOutlet.type]}</p>
-                {selectedOutlet.kycStatus === 'RE_KYC_REQUIRED' && selectedOutlet.reKycFlags && (
-                  <p className="text-xs text-amber-700">
-                    {Object.values(selectedOutlet.reKycFlags).filter(Boolean).length} field(s) flagged for re-entry
-                    {selectedOutlet.reKycRemarks && ` — ${selectedOutlet.reKycRemarks}`}
-                  </p>
-                )}
-              </div>
-            )}
-
             <Button
               variant="primary"
               className="w-full font-bold"
@@ -1728,8 +1705,8 @@ export default function NewKYCPage() {
               <div className="flex items-center gap-2 px-3 py-1.5 bg-[var(--brand-primary)]/5 rounded-lg border border-[var(--brand-primary)]/20 min-w-0">
                 <ShieldCheck className="h-3.5 w-3.5 text-[var(--brand-primary)] shrink-0" />
                 <div className="min-w-0">
-                  <p className="text-xs font-semibold text-[var(--brand-primary)] truncate">Trade Loyalty</p>
-                  <p className="text-[11px] text-[var(--brand-primary)]/70 truncate">{TYPE_LABEL[selectedOutlet?.type ?? 'SSS']} Programme</p>
+                  <p className="text-xs font-semibold text-[var(--brand-primary)] truncate">{selectedOutlet?.programName || 'Programme'}</p>
+                  <p className="text-[11px] text-[var(--brand-primary)]/70 truncate">{selectedOutlet?.programCategory || '—'}</p>
                 </div>
               </div>
             </div>

@@ -32,6 +32,9 @@ interface KYCEntry {
   /** True for an assigned outlet that has NOT been enrolled yet (no submission) —
    *  synthesised from /api/sales/outlets so the rep's to-do outlets appear here. */
   isNotStarted?: boolean;
+  programName?: string;
+  programCategory?: string;
+  outletType?: string;
 }
 
 interface TeamMember { id: string; name: string; }
@@ -157,6 +160,8 @@ function KYCListContent() {
   const [sortOrder,    setSortOrder]    = useState<SortOrder>('newest');
   const [memberFilter, setMemberFilter] = useState('');
   const [teamMembers,  setTeamMembers]  = useState<TeamMember[]>([]);
+  const [typeFilter,   setTypeFilter]   = useState('');
+  const [programFilter, setProgramFilter] = useState('');
 
   useEffect(() => {
     if (statusParam) setFilter(statusParam);
@@ -175,7 +180,14 @@ function KYCListContent() {
         businessName: string;
         ownerName?: string;
         phone?: string;
-        outlets?: { name: string; outletCode: string; phone?: string }[];
+        outlets?: {
+          name: string;
+          outletCode: string;
+          phone?: string;
+          programName?: string;
+          programCategory?: string;
+          outletType?: { code: string } | null;
+        }[];
       } | null;
     }
 
@@ -198,6 +210,9 @@ function KYCListContent() {
           updatedAt:       s.updatedAt,
           rejectionReason: s.reviewerNotes ?? undefined,
           submittedById:   s.userId,
+          programName:     s.partner?.outlets?.[0]?.programName ?? '',
+          programCategory: s.partner?.outlets?.[0]?.programCategory ?? '',
+          outletType:      s.partner?.outlets?.[0]?.outletType?.code ?? '',
         }));
       })
       .catch(() => [] as KYCEntry[]);
@@ -225,6 +240,9 @@ function KYCListContent() {
                 submittedAt: '',
                 updatedAt:   '',
                 isNotStarted: true,
+                programName:     o.programName ?? '',
+                programCategory: o.programCategory ?? '',
+                outletType:      o.type ?? '',
               }));
           })
           .catch(() => [] as KYCEntry[])
@@ -250,9 +268,14 @@ function KYCListContent() {
       .finally(() => setLoading(false));
   }, [role]);
 
+  const typeOptions    = Array.from(new Set(entries.map((e) => e.outletType).filter(Boolean))) as string[];
+  const programOptions = Array.from(new Set(entries.map((e) => e.programName).filter(Boolean))) as string[];
+
   const filtered = entries
     .filter((e) => {
       const matchesMember = !memberFilter || e.submittedById === memberFilter;
+      const matchesType = !typeFilter || e.outletType === typeFilter;
+      const matchesProgram = !programFilter || e.programName === programFilter;
       const matchesStatus =
         filter === 'ALL'                 ? true :
         filter === PENDING_KYC_KEY       ? PENDING_KYC_STATUSES.has(e.status) :
@@ -264,7 +287,7 @@ function KYCListContent() {
         e.firmName.toLowerCase().includes(search.toLowerCase()) ||
         e.mobile.includes(search) ||
         e.outletCode.toLowerCase().includes(search.toLowerCase());
-      return matchesMember && matchesStatus && matchesSearch;
+      return matchesMember && matchesStatus && matchesSearch && matchesType && matchesProgram;
     })
     .sort((a, b) => {
       // Un-enrolled outlets are the most actionable → always pinned to the top.
@@ -348,6 +371,46 @@ function KYCListContent() {
         </button>
       </div>
 
+      {/* Outlet Type + Program filters */}
+      {(typeOptions.length > 0 || programOptions.length > 0) && (
+        <div className="flex items-center gap-2">
+          {typeOptions.length > 0 && (
+            <select
+              data-testid="kyc-type-filter"
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+              className={cn(
+                'flex-1 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700',
+                'focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]',
+                typeFilter ? 'border-[var(--brand-primary)] text-[var(--brand-primary)] font-semibold' : '',
+              )}
+            >
+              <option value="">All Types</option>
+              {typeOptions.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          )}
+          {programOptions.length > 0 && (
+            <select
+              data-testid="kyc-program-filter"
+              value={programFilter}
+              onChange={(e) => setProgramFilter(e.target.value)}
+              className={cn(
+                'flex-1 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700',
+                'focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]',
+                programFilter ? 'border-[var(--brand-primary)] text-[var(--brand-primary)] font-semibold' : '',
+              )}
+            >
+              <option value="">All Programs</option>
+              {programOptions.map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
+
       {loading ? (
         <div className="flex items-center justify-center min-h-48"><Spinner size="lg" /></div>
       ) : filtered.length === 0 ? (
@@ -386,6 +449,11 @@ function KYCListContent() {
                             className="text-[10px] font-mono font-semibold text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded"
                           >
                             {entry.outletCode}
+                          </span>
+                        )}
+                        {entry.programName && (
+                          <span className="text-[10px] font-semibold text-[var(--brand-primary)] bg-[var(--brand-primary)]/10 px-1.5 py-0.5 rounded">
+                            {entry.programName}{entry.programCategory ? ` · ${entry.programCategory}` : ''}
                           </span>
                         )}
                       </div>

@@ -1049,6 +1049,8 @@ export class SalesService {
             district: outlet.district ?? '',
             state: outlet.state,
             type: outlet.outletType.code,
+            programName: outlet.programName ?? '',
+            programCategory: outlet.programCategory ?? '',
             kycStatus: latestKyc?.status ?? 'NOT_STARTED',
             kycSubmittedAt: latestKyc?.createdAt?.toISOString().split('T')[0],
             kycRejectionReason: latestKyc?.rejectionReason ?? null,

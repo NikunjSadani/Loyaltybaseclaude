@@ -1072,7 +1072,17 @@ export class KycService {
               businessName: true,
               ownerName: true,
               phone: true,
-              outlets: { select: { id: true, name: true, outletCode: true, phone: true } },
+              outlets: {
+                select: {
+                  id: true,
+                  name: true,
+                  outletCode: true,
+                  phone: true,
+                  programName: true,
+                  programCategory: true,
+                  outletType: { select: { code: true } },
+                },
+              },
             },
           },
           documents: { select: { id: true, documentType: true, status: true } },
