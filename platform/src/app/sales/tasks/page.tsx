@@ -646,7 +646,10 @@ export default function TasksPage() {
           items: reKycOutlets.map((o) => ({
             id: o.id, title: o.name,
             subtitle: `${o.location} · Re-KYC required`,
-            href: o.kycId ? `/sales/kyc/${o.kycId}` : '/sales/kyc',
+            // Re-KYC outlets normally carry a prior submission (kycId); when absent,
+            // open the start wizard pre-selected on this outlet rather than the bare
+            // list, matching the rest of the app.
+            href: o.kycId ? `/sales/kyc/${o.kycId}` : `/sales/kyc/new?outletId=${o.id}`,
             priority: 'high' as const,
             ageDays: ageInDays(o.kycSubmittedAt),
           })),
@@ -664,7 +667,12 @@ export default function TasksPage() {
           items: pendingOutlets.map((o) => ({
             id: o.id, title: o.name,
             subtitle: `${o.location} · KYC not yet submitted`,
-            href: `/sales/kyc/${o.id}`, priority: 'medium' as const,
+            // These outlets have NO submission yet (subtitle says so) — the old
+            // `/sales/kyc/${o.id}` linked to a non-existent submission id → "KYC not
+            // found". Open the start wizard on this outlet; deep-link only if a real
+            // kycId exists.
+            href: o.kycId ? `/sales/kyc/${o.kycId}` : `/sales/kyc/new?outletId=${o.id}`,
+            priority: 'medium' as const,
             ageDays: ageInDays(o.kycSubmittedAt),
           })),
           accentBg: 'bg-amber-50', accentBorder: 'border-amber-200',

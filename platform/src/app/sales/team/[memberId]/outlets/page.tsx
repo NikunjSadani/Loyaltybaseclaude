@@ -451,7 +451,13 @@ export default function MemberOutletsPage() {
                 return (
                   <Link
                     key={outlet.id}
-                    href={`/sales/kyc/${outlet.kycId}`}
+                    // No submission yet → start wizard (else the empty kycId yields a dead
+                    // /sales/kyc/ → "KYC not found"). With a kycId → detail deep-link.
+                    href={
+                      outlet.kycId
+                        ? `/sales/kyc/${outlet.kycId}`
+                        : `/sales/kyc/new?outletId=${outlet.id}`
+                    }
                     className="block bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-all active:scale-[0.99]"
                   >
                     {/* Traffic-light pace strip */}

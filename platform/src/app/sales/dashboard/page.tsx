@@ -334,7 +334,11 @@ export default function SalesDashboard() {
           icon: <RefreshCw className="h-4 w-4 text-purple-600" />,
           items: rekycOutlets.map((o) => ({
             id: o.kycId || o.id, title: o.name, subtitle: 'Re-KYC required',
-            href: `/sales/kyc/${o.kycId || o.id}`, priority: 'high' as const,
+            // Re-KYC outlets normally have a prior submission (kycId); guard the empty
+            // case so the fallback never points at a non-existent submission id (an
+            // outlet id) → "KYC not found". Empty → start wizard on this outlet.
+            href: o.kycId ? `/sales/kyc/${o.kycId}` : `/sales/kyc/new?outletId=${o.id}`,
+            priority: 'high' as const,
             ageDays: ageInDays(o.kycSubmittedAt),
           })),
           accentBg: 'bg-purple-50', accentBorder: 'border-purple-200',
@@ -352,7 +356,12 @@ export default function SalesDashboard() {
           items: pendingOutlets.map((o) => ({
             id: o.id, title: o.name,
             subtitle: `${o.location} · KYC not yet submitted`,
-            href: `/sales/kyc/${o.id}`, priority: 'medium' as const,
+            // These outlets have NO submission yet (the subtitle says so), so the old
+            // `/sales/kyc/${o.id}` linked to a non-existent submission id → "KYC not
+            // found". With a real kycId, deep-link to the detail; otherwise open the
+            // start wizard pre-selected on this outlet.
+            href: o.kycId ? `/sales/kyc/${o.kycId}` : `/sales/kyc/new?outletId=${o.id}`,
+            priority: 'medium' as const,
             ageDays: ageInDays(o.kycSubmittedAt),
           })),
           accentBg: 'bg-amber-50', accentBorder: 'border-amber-200',
@@ -598,7 +607,12 @@ export default function SalesDashboard() {
                     if (e.key === 'Enter' && search.trim()) {
                       setSearchOpen(false);
                       if (searchResults.length === 1) {
-                        window.location.href = `/sales/kyc/${searchResults[0].kycId}`;
+                        const only = searchResults[0];
+                        // No submission yet → start wizard (else the empty kycId yields a
+                        // dead /sales/kyc/ → "KYC not found").
+                        window.location.href = only.kycId
+                          ? `/sales/kyc/${only.kycId}`
+                          : `/sales/kyc/new?outletId=${only.id}`;
                       } else {
                         window.location.href = `/sales/outlets?q=${encodeURIComponent(search.trim())}`;
                       }
@@ -619,7 +633,10 @@ export default function SalesDashboard() {
                         onClick={() => {
                           setSearchOpen(false);
                           setSearch('');
-                          window.location.href = `/sales/kyc/${o.kycId}`;
+                          // No submission yet → start wizard (else empty kycId → dead route).
+                          window.location.href = o.kycId
+                            ? `/sales/kyc/${o.kycId}`
+                            : `/sales/kyc/new?outletId=${o.id}`;
                         }}
                         className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-gray-50 text-left transition-colors border-b border-gray-50 last:border-0"
                       >

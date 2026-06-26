@@ -552,7 +552,11 @@ export class KycService {
    */
   private async resolveSalesScope(
     user: JwtPayload,
-  ): Promise<{ callerSalesUserId: string; subtreeUserIds: string[] } | null> {
+  ): Promise<{
+    callerSalesUserId: string;
+    subtreeUserIds: string[];
+    subtreeSalesUserIds: Set<string>;
+  } | null> {
     const caller = await this.prisma.salesUser.findFirst({
       where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
       select: { id: true },
@@ -565,7 +569,7 @@ export class KycService {
     });
     const subtree = descendantSalesUserIds(caller.id, nodes);
     const subtreeUserIds = nodes.filter((n) => subtree.has(n.id)).map((n) => n.userId);
-    return { callerSalesUserId: caller.id, subtreeUserIds };
+    return { callerSalesUserId: caller.id, subtreeUserIds, subtreeSalesUserIds: subtree };
   }
 
   /**
@@ -578,13 +582,37 @@ export class KycService {
   private async assertCanViewSubmission(
     user: JwtPayload,
     submitterUserId: string,
+    partnerId?: string | null,
   ): Promise<void> {
     if (this.canReadTenantWide(user.role)) return; // admins/Gifsy + MIS read tenant-wide
     if (submitterUserId === user.sub) return; // own submission
     const scope = await this.resolveSalesScope(user);
-    if (!scope || !scope.subtreeUserIds.includes(submitterUserId)) {
-      throw new ForbiddenException('Forbidden');
+    if (!scope) {
+      throw new ForbiddenException('Forbidden'); // partner / non-sales caller → own-only
     }
+    // Path A — the submitter is in the caller's reporting subtree (the historical rule).
+    if (scope.subtreeUserIds.includes(submitterUserId)) return;
+    // Path B (reassignment-aware) — the submission's OUTLET is CURRENTLY assigned
+    // (active SalesUserAssignment, unassignedAt null) to a sales user in the caller's
+    // subtree. This aligns "can view detail" with "can see in the list" (buildOutlets):
+    // after an outlet is reassigned to a new rep, the new rep's manager sees it in the
+    // list and must be able to open it, even though the ORIGINAL submitter is in a
+    // different branch. An UNRELATED SO (neither submitter-chain nor current-assignee-
+    // chain) still falls through to Forbidden below. Tenant-scoped via outlet.clientId.
+    if (partnerId) {
+      const activeAssignment = await this.prisma.salesUserAssignment.findFirst({
+        where: {
+          unassignedAt: null,
+          salesUserId: { in: Array.from(scope.subtreeSalesUserIds) },
+          // Outlet carries its own tenant tag (clientId) — scope to this tenant so the
+          // assignment lookup can never cross a tenant boundary.
+          outlet: { partnerId, clientId: user.clientId },
+        },
+        select: { id: true },
+      });
+      if (activeAssignment) return;
+    }
+    throw new ForbiddenException('Forbidden');
   }
 
   /**
@@ -1111,8 +1139,10 @@ export class KycService {
     // submitting rep's reporting chain is Forbidden ("cannot view anything about the
     // outlet"). Admins/MIS/Gifsy get tenant-wide / cross-tenant read. Cross-tenant is
     // already prevented by kycTenantFilter above; PII is still masked below for any
-    // non-admin non-owner (a sales reviewer sees PAN/bank as last-4).
-    await this.assertCanViewSubmission(user, submission.userId);
+    // non-admin non-owner (a sales reviewer sees PAN/bank as last-4). partnerId widens
+    // the read to the outlet's CURRENT assignee chain (reassignment case — matches the
+    // list/targets views in buildOutlets), not just the original submitter chain.
+    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId);
 
     // ── Task 3.4e: DPDP read-masking ─────────────────────────────────────────
     // Mask sensitive fields (bank account, PAN, GST → last 4) for non-admin callers
@@ -1656,9 +1686,11 @@ export class KycService {
     if (!submission) throw new NotFoundException('KYC submission not found');
 
     // A sales caller may read the ledger only for their own + downline submissions
-    // (Q4); an out-of-chain manager is Forbidden. (Partner callers are already scoped
-    // to their own via the where.userId filter above → a foreign id 404s here.)
-    await this.assertCanViewSubmission(user, submission.userId);
+    // (Q4) OR for an outlet currently assigned into their subtree (reassignment case —
+    // same widening as getOne, so the ledger read matches what the list exposes); an
+    // out-of-chain manager is Forbidden. (Partner callers are already scoped to their
+    // own via the where.userId filter above → a foreign id 404s here.)
+    await this.assertCanViewSubmission(user, submission.userId, submission.partnerId);
 
     const partner = submission.partner;
     const wallet = partner?.wallets[0] ?? null;

@@ -390,7 +390,13 @@ export default function SalesOutletsPage() {
                       const isKycApproved = outlet.kycStatus === KYCStatus.APPROVED;
                       const kpis = kpisFor(outlet);
                       const avgPct = isKycApproved ? outletOverallPct(kpis, primaryCode) : 0;
-                      const href = `/sales/kyc/${outlet.kycId}`;
+                      // When the outlet has no KYC submission yet (NOT_STARTED / master-
+                      // uploaded), `kycId` is empty → `/sales/kyc/` is a dead "KYC not
+                      // found" route. Send the rep to the start wizard pre-selected on
+                      // this outlet instead. With a kycId, deep-link to the detail.
+                      const href = outlet.kycId
+                        ? `/sales/kyc/${outlet.kycId}`
+                        : `/sales/kyc/new?outletId=${outlet.id}`;
                       return (
                         <tr
                           key={outlet.id}
@@ -498,7 +504,13 @@ export default function SalesOutletsPage() {
                 return (
                   <Link
                     key={outlet.id}
-                    href={`/sales/kyc/${outlet.kycId}`}
+                    // No submission yet → start wizard (else the empty kycId yields a dead
+                    // /sales/kyc/ → "KYC not found"). With a kycId → detail deep-link.
+                    href={
+                      outlet.kycId
+                        ? `/sales/kyc/${outlet.kycId}`
+                        : `/sales/kyc/new?outletId=${outlet.id}`
+                    }
                     className="block bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-all active:scale-[0.99]"
                   >
                     <div className={`h-1 ${stripClass}`} />

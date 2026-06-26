@@ -57,6 +57,9 @@ const mockPrisma = {
   otpCode: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
   outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
+  // assertCanViewSubmission's reassignment-aware allow-path looks up the outlet's
+  // CURRENT active assignment (unassignedAt null) to a salesUser in the caller's subtree.
+  salesUserAssignment: { findFirst: jest.fn() },
   consentRecord: { create: jest.fn() },
   kycVerificationItem: { upsert: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
@@ -740,6 +743,60 @@ describe('KycService', () => {
       await expect(service.getOne(so, 's1')).rejects.toBeInstanceOf(ForbiddenException);
     });
 
+    it('allows a SALES manager to view when the outlet is CURRENTLY assigned into their subtree (reassignment case)', async () => {
+      // Reassignment divergence: the submission was created by 'far-submitter' (a rep in
+      // a DIFFERENT branch, NOT in the SO's subtree), but the outlet has since been
+      // reassigned to 'xsr-su' (in the SO's subtree). The list/targets views show the
+      // outlet (active assignment), so the detail must open too. The submitter-chain
+      // check FAILS → the assignment-aware path must allow it.
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'xsr-su', reportingToId: 'so-su', userId: 'current-rep' },
+        { id: 'far-su', reportingToId: null, userId: 'far-submitter' },
+      ]);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'far-submitter', partnerId: 'p1', partner: null,
+        documents: [], statusHistory: [],
+      });
+      // The outlet's CURRENT active assignment is to 'xsr-su' (in so1's subtree).
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      const res = await service.getOne(so, 's1');
+      expect(res.submission.id).toBe('s1');
+      // The widened lookup scoped to the active assignment of the partner's outlet,
+      // restricted to the caller's SalesUser subtree.
+      const where = mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where;
+      expect(where.unassignedAt).toBeNull();
+      expect(where.salesUserId.in).toEqual(expect.arrayContaining(['so-su', 'xsr-su']));
+      expect(where.outlet.partnerId).toBe('p1');
+    });
+
+    it('still forbids an UNRELATED SO — neither submitter-chain NOR current-assignee-chain', async () => {
+      // 'far-submitter' is out of chain AND the outlet's current assignment is NOT in the
+      // SO's subtree → the assignment lookup returns null → Forbidden preserved.
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'far-su', reportingToId: null, userId: 'far-submitter' },
+      ]);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'far-submitter', partnerId: 'p1', partner: null,
+        documents: [], statusHistory: [],
+      });
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null); // not assigned into this SO's subtree
+      await expect(service.getOne(so, 's1')).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('does NOT widen for a PARTNER caller (no SalesUser → own-only, ignores assignment)', async () => {
+      // A partner has no SalesUser, so resolveSalesScope is null → Forbidden regardless of
+      // any active assignment. Belt-and-braces: the assignment lookup must not be consulted.
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partnerId: 'p1', partner: null, documents: [], statusHistory: [],
+      });
+      await expect(service.getOne(sss, 's1')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.salesUserAssignment.findFirst).not.toHaveBeenCalled();
+    });
+
     it('lets MIS_USER view any tenant submission (tenant-wide read), no subtree lookup', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({
         id: 's1', userId: 'other', partner: null, documents: [], statusHistory: [],
@@ -867,6 +924,35 @@ describe('KycService', () => {
         { id: 'far-su', reportingToId: null, userId: 'someone-else' },
       ]);
       seedLedgerSubmission('someone-else');
+      await expect(service.ledger(so, 's1')).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('allows the ledger read when the outlet is CURRENTLY assigned into the subtree (reassignment case)', async () => {
+      // Same widening as getOne: submitter is out of chain, but the outlet's current
+      // active assignment is in the SO's subtree → the ledger read is allowed.
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'xsr-su', reportingToId: 'so-su', userId: 'current-rep' },
+        { id: 'far-su', reportingToId: null, userId: 'far-submitter' },
+      ]);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'far-submitter', partnerId: 'p1',
+        partner: { businessName: 'B', phone: 'p', outlets: [], wallets: [] },
+      });
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+      await expect(service.ledger(so, 's1')).resolves.toBeDefined();
+    });
+
+    it('forbids the ledger read when the outlet is NOT assigned into the subtree (unrelated SO preserved)', async () => {
+      primeSalesNodes([
+        { id: 'so-su', reportingToId: null, userId: 'so1' },
+        { id: 'far-su', reportingToId: null, userId: 'far-submitter' },
+      ]);
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'far-submitter', partnerId: 'p1',
+        partner: { businessName: 'B', phone: 'p', outlets: [], wallets: [] },
+      });
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue(null);
       await expect(service.ledger(so, 's1')).rejects.toBeInstanceOf(ForbiddenException);
     });
 
