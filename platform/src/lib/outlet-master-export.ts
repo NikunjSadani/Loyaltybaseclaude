@@ -305,10 +305,8 @@ export function generateOutletMasterExcel(
     wch: Math.max(label.length + 2, 18),
   }));
 
-  // ── Bold header style ──
-  // Note: xlsx CE (community edition) does not support cell styles.
-  // For styled headers, use exceljs in production.
-
+  // Note: xlsx CE (community edition) does not support cell styles, so headers
+  // are not bold-styled here.
   XLSX.utils.book_append_sheet(wb, ws, 'Outlet Master');
 
   // type: 'buffer' returns a Node.js Buffer.  Wrap it in an explicit

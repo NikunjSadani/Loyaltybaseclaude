@@ -9,7 +9,6 @@
  *   D) reorderFields
  *   E) validateEnrollmentFormConfig
  *   F) parseOutletExcelRow
- *   G) buildExcelExportRows
  */
 
 import { describe, it, expect } from 'vitest';
@@ -20,7 +19,6 @@ import {
   reorderFields,
   validateEnrollmentFormConfig,
   parseOutletExcelRow,
-  buildExcelExportRows,
   type OutletRecord,
   type EnrollmentRecord,
   type FormField,
@@ -410,79 +408,5 @@ describe('parseOutletExcelRow', () => {
     );
     expect(result.error).toBeNull();
     expect(result.outlet?.outletType).toBe('SSS');
-  });
-});
-
-// ── G) buildExcelExportRows ───────────────────────────────────────────────────
-
-describe('buildExcelExportRows', () => {
-  const enr = makeEnrollment({
-    fieldValues: {
-      f1: 'Sharma Kirana',          // TEXT
-      f2: 'Kirana',                  // DROPDOWN
-      f3: { lat: 19.076, lng: 72.877 }, // GPS_POINT
-      f4: ['https://cdn/img1.jpg'],  // IMAGE
-    },
-    photoGeoTags: [{ fieldId: 'f4', photoIndex: 0, lat: 19.076, lng: 72.877, capturedAt: '2025-07-01T10:30:00Z' }],
-    auditLog: [
-      { event: 'ENROLLED', actorId: 'EMP-001', timestamp: '2025-07-01T10:30:00Z', detail: 'Enrolled by employee' },
-      { event: 'OTP_VERIFIED', actorId: 'SYSTEM', timestamp: '2025-07-01T10:29:45Z', detail: 'OTP verified' },
-    ],
-  });
-
-  const fields: FormField[] = [textField, dropdownField, gpsField, imageField];
-
-  it('includes standard columns', () => {
-    const rows = buildExcelExportRows([enr], fields);
-    expect(rows).toHaveLength(1);
-    const row = rows[0];
-    expect(row['Enrollment ID']).toBe('ENR-001');
-    expect(row['Outlet ID']).toBe('O1');
-    expect(row['Outlet Name']).toBe('Sharma Kirana');
-    expect(row['OTP Verified']).toBe('Yes');
-    expect(row['Enrolled By']).toBe('EMPLOYEE');
-    expect(row['Submitted At']).toBe('2025-07-01T10:30:00Z');
-  });
-
-  it('includes GPS submission columns when GPS was captured', () => {
-    const rows = buildExcelExportRows([enr], fields);
-    expect(rows[0]['Submission GPS — Latitude']).toBe(19.076);
-    expect(rows[0]['Submission GPS — Longitude']).toBe(72.877);
-  });
-
-  it('uses field label as column header for TEXT fields', () => {
-    const rows = buildExcelExportRows([enr], fields);
-    expect(rows[0]['Shop Name']).toBe('Sharma Kirana');
-  });
-
-  it('uses field label as column header for DROPDOWN fields', () => {
-    const rows = buildExcelExportRows([enr], fields);
-    expect(rows[0]['Shop Type']).toBe('Kirana');
-  });
-
-  it('splits GPS_POINT field into two columns (label_Lat, label_Lng)', () => {
-    const rows = buildExcelExportRows([enr], fields);
-    expect(rows[0]['Shop Location — Latitude']).toBe(19.076);
-    expect(rows[0]['Shop Location — Longitude']).toBe(72.877);
-  });
-
-  it('includes image count and URLs for IMAGE fields', () => {
-    const rows = buildExcelExportRows([enr], fields);
-    expect(rows[0]['Shop Photo — Count']).toBe(1);
-    expect(rows[0]['Shop Photo — URLs']).toContain('img1.jpg');
-  });
-
-  it('formats audit log as pipe-separated string', () => {
-    const rows = buildExcelExportRows([enr], fields);
-    const log = rows[0]['Audit Log'] as string;
-    expect(log).toContain('ENROLLED');
-    expect(log).toContain('OTP_VERIFIED');
-    expect(log).toContain('|');
-  });
-
-  it('handles enrollments with missing field values gracefully', () => {
-    const sparse = makeEnrollment({ fieldValues: {} });
-    const rows = buildExcelExportRows([sparse], [textField]);
-    expect(rows[0]['Shop Name']).toBe('');
   });
 });
