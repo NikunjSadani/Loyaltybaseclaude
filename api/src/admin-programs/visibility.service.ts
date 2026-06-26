@@ -10,6 +10,7 @@ import {
   parseVisibilityStatus,
   VISIBILITY_UPLOAD_HEADERS,
 } from './visibility/visibility-upload';
+import { aoaToSheetSafe } from '../common/xlsx';
 
 interface ErrorRow {
   rowNumber: number;
@@ -352,7 +353,7 @@ export class VisibilityService {
         r.captured_by_employee_phone,
         r.error_remarks,
       ]);
-      const errWs = XLSX.utils.aoa_to_sheet([errHeaders, ...errData]);
+      const errWs = aoaToSheetSafe([errHeaders, ...errData]);
       errWs['!cols'] = errHeaders.map((h) => ({ wch: h === 'error_remarks' ? 60 : h.length + 4 }));
       const errWb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(errWb, errWs, 'Errors');

@@ -707,3 +707,62 @@ describe('KPI name-override (__names) round-trip', () => {
     expect(result.acceptedTargets['2026-07']?.['O001']).toBeUndefined();
   });
 });
+
+// ─── AF-5: formula-injection hardening (admin-typed KPI labels + outlet names) ──
+
+/** Read a generated buffer's first sheet back to raw rows. */
+function readAoa(buf: Buffer): string[][] {
+  const wb = XLSX.read(buf, { type: 'buffer' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  return XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '', raw: false }) as string[][];
+}
+
+describe('formula-injection sanitisation (AF-5)', () => {
+  it('generateTargetTemplateBuffer neutralises injection in KPI labels and outlet names', () => {
+    const evilKpi: KpiDefLike = {
+      code: 'EVIL',
+      label: '=cmd|\'/c calc\'!A1',
+      isPrimary: false,
+      hasNameOverride: false,
+      nameOverrideLabel: null,
+      order: 1,
+      enabled: true,
+    };
+    const evilOutlet: OutletLike = { outletCode: '@SUM(A1)', name: '+1+1', outletType: '-2' };
+    const aoa = readAoa(generateTargetTemplateBuffer([evilKpi], ['2026-07'], [evilOutlet]));
+    // row2 = headers (fixed cols then KPI label at col 3)
+    expect(aoa[1][3]).toBe('\'=cmd|\'/c calc\'!A1'); // KPI label sanitised
+    // row3 = first outlet data row
+    expect(aoa[2][0]).toBe('\'@SUM(A1)'); // Outlet ID
+    expect(aoa[2][1]).toBe('\'+1+1'); // Outlet Name
+    expect(aoa[2][2]).toBe('\'-2'); // Outlet Type
+  });
+
+  it('generateTargetTemplateBuffer leaves a benign label/name unchanged', () => {
+    const aoa = readAoa(generateTargetTemplateBuffer(ENABLED_KPIS, ['2026-07'], OUTLETS));
+    expect(aoa[1][3]).toBe('Month Target');
+    expect(aoa[2][1]).toBe('Outlet One');
+  });
+
+  it('buildResolvedTargetsBuffer neutralises injection in KPI labels and outlet names', () => {
+    const evilKpi: KpiDefLike = {
+      code: 'EVIL',
+      label: '=HYPERLINK("http://x")',
+      isPrimary: false,
+      hasNameOverride: false,
+      nameOverrideLabel: null,
+      order: 1,
+      enabled: true,
+    };
+    const aoa = readAoa(
+      buildResolvedTargetsBuffer('2026-07', [evilKpi], [
+        { outletCode: '@evil', outletName: '+name', outletType: '-type', targetValues: { EVIL: 5 } },
+      ]),
+    );
+    expect(aoa[1][3]).toBe('\'=HYPERLINK("http://x")'); // KPI label header
+    expect(aoa[2][0]).toBe('\'@evil'); // Outlet code
+    expect(aoa[2][1]).toBe('\'+name'); // Outlet name
+    expect(aoa[2][2]).toBe('\'-type'); // Outlet type
+    expect(aoa[2][3]).toBe('5'); // numeric target survives (raw:false → string "5")
+  });
+});

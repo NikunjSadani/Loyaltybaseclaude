@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '../common/xlsx';
 
 /**
  * Credits & Payouts — pure helpers, ported verbatim from the platform libs:
@@ -101,7 +102,7 @@ export function generatePayoutFileBuffer(batch: PayoutBatch): Buffer {
     ]),
   ];
 
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  const ws = aoaToSheetSafe(wsData);
   ws['!cols'] = [
     { wch: 18 },
     { wch: 12 },

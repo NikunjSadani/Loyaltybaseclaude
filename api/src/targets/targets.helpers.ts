@@ -27,6 +27,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '../common/xlsx';
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -228,7 +229,7 @@ export function generateTargetTemplateBuffer(
     return row;
   });
 
-  const ws = XLSX.utils.aoa_to_sheet([row1, row2, ...dataRows]);
+  const ws = aoaToSheetSafe([row1, row2, ...dataRows]);
 
   // Column widths — mirror the value+name column layout per month block.
   const colWidths: { wch: number }[] = [
@@ -315,7 +316,7 @@ export function buildResolvedTargetsBuffer(
     return out;
   });
 
-  const ws = XLSX.utils.aoa_to_sheet([row1, row2, ...dataRows]);
+  const ws = aoaToSheetSafe([row1, row2, ...dataRows]);
   ws['!cols'] = [
     { wch: 16 },
     { wch: 24 },

@@ -18,6 +18,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import type { CreditField } from '@/types';
 
 export interface TemplateOutlet {
@@ -71,7 +72,7 @@ export function generateCreditTemplate(
     ...dataRows,
   ];
 
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  const ws = aoaToSheetSafe(wsData);
 
   ws['!freeze'] = { xSplit: 0, ySplit: 2 };
   ws['!cols'] = [

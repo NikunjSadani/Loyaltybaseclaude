@@ -12,6 +12,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { useAdminSession } from '@/lib/admin-session';
+import { jsonToSheetSafe } from '@/lib/xlsx-safe';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -147,7 +148,7 @@ export default function PayoutStatusPage() {
           'Status':       batch.status,
           'Confirmed At': batch.confirmedAt ?? '',
         }));
-      const ws  = XLSX.utils.json_to_sheet(rows);
+      const ws  = jsonToSheetSafe(rows);
       const wb  = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Payout Status');
       const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;

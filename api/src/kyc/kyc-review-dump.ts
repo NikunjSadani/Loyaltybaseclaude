@@ -16,6 +16,7 @@
 import * as XLSX from 'xlsx';
 import { KycFieldKey, KycFieldDecision, KycFieldSource } from '@prisma/client';
 import { KYC_FIELD_KEYS } from './kyc-verification.helper';
+import { aoaToSheetSafe } from '../common/xlsx';
 
 // ─── Field order (7, fixed) — key + the human label used in the column header ───
 const FIELD_LABELS: Record<KycFieldKey, string> = {
@@ -184,7 +185,7 @@ export function generateKycReviewDumpExcel(entries: KycReviewDumpEntry[]): Buffe
     return row;
   });
 
-  const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows]);
+  const ws = aoaToSheetSafe([headerRow, ...dataRows]);
 
   // Apply hyperlinks to the 6 doc cells (0-based columns 20–25).
   const DOC_URLS: (keyof KycReviewDumpEntry['documents'])[] = [

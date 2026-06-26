@@ -10,6 +10,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import {
   MOCK_OUTLETS,
   type NewOutletType,
@@ -246,7 +247,7 @@ export async function generateSalesTemplate(
     [],
     ...SALES_UPLOAD_INSTRUCTIONS.map((line) => [line]),
   ];
-  const wsInstructions = XLSX.utils.aoa_to_sheet(instructionData);
+  const wsInstructions = aoaToSheetSafe(instructionData);
   XLSX.utils.book_append_sheet(wb, wsInstructions, 'Instructions');
 
   // ── One sheet per outlet type ─────────────────────────────────────────────
@@ -261,7 +262,7 @@ export async function generateSalesTemplate(
       ...kpis.map(() => ''),
     ]);
 
-    const ws = XLSX.utils.aoa_to_sheet([headers, ...dataRows]);
+    const ws = aoaToSheetSafe([headers, ...dataRows]);
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
   }
 
@@ -305,7 +306,7 @@ export function generateReportExcel(
       r.errorRemarks,
     ]);
 
-    const ws = XLSX.utils.aoa_to_sheet([headers, ...dataRows]);
+    const ws = aoaToSheetSafe([headers, ...dataRows]);
     XLSX.utils.book_append_sheet(wb, ws, OUTLET_TYPE_SHEET_NAMES[outletType]);
   }
 

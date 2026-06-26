@@ -10,6 +10,7 @@
  * ─────────────────────────────────────────────────────────────────────────── */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 
 /** One row of the backend achievement-upload response. */
 export interface AchievementReportRow {
@@ -41,7 +42,7 @@ export function buildAchievementReportBuffer(rows: AchievementReportRow[]): Arra
     r.remarks ?? '',
   ]);
 
-  const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows]);
+  const ws = aoaToSheetSafe([headerRow, ...dataRows]);
   ws['!cols'] = [{ wch: 8 }, { wch: 18 }, { wch: 24 }, { wch: 60 }];
 
   const wb = XLSX.utils.book_new();

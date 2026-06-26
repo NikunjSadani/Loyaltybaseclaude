@@ -12,6 +12,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import type { PayoutBatch } from '@/types';
 
 export const PAYOUT_FILE_HEADERS = [
@@ -57,7 +58,7 @@ export function generatePayoutFileBuffer(batch: PayoutBatch): ArrayBuffer {
     ]),
   ];
 
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  const ws = aoaToSheetSafe(wsData);
   ws['!cols'] = [
     { wch: 18 },
     { wch: 12 },

@@ -10,6 +10,7 @@
  * ─────────────────────────────────────────────────────────────────────────── */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import type { TenantKpiDef } from '@/lib/platform/tenant-kpi-config';
 import { getEnabledKpiDefs }  from '@/lib/platform/tenant-kpi-config';
 import { isMonthLocked, formatMonth } from '@/lib/targets';
@@ -108,7 +109,7 @@ export function generateTargetTemplate(
   }
 
   // ── Workbook ─────────────────────────────────────────────────────────────
-  const ws = XLSX.utils.aoa_to_sheet([row1, row2]);
+  const ws = aoaToSheetSafe([row1, row2]);
 
   // Column widths
   const colWidths: { wch: number }[] = [
@@ -376,7 +377,7 @@ export function buildErrorReportBuffer(rows: ParsedTargetRow[]): ArrayBuffer {
     r.remarks,
   ]);
 
-  const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows]);
+  const ws = aoaToSheetSafe([headerRow, ...dataRows]);
   ws['!cols'] = [
     { wch: 6 }, { wch: 14 }, { wch: 22 }, { wch: 10 }, { wch: 14 },
     { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 18 }, { wch: 14 },

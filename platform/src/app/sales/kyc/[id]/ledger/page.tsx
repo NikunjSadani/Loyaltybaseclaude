@@ -4,6 +4,7 @@ import React, { useState, useEffect, useMemo, use } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, AlertTriangle, Calendar, X, Download, Coins } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { jsonToSheetSafe } from '@/lib/xlsx-safe';
 import { Spinner } from '@/components/ui/spinner';
 import { TransactionItem } from '@/components/wallet/transaction-item';
 import { TransactionType, WalletBucket, type WalletTransaction } from '@/types';
@@ -107,7 +108,7 @@ function downloadLedger(entries: LedgerEntry[], outletName: string, period: stri
     Balance:     e.balance,
     Reference:   e.ref ?? '',
   }));
-  const ws = XLSX.utils.json_to_sheet(rows);
+  const ws = jsonToSheetSafe(rows);
   ws['!cols'] = [{ wch: 13 }, { wch: 48 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 18 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Points Ledger');

@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import {
   Store, Search, Upload, Download, X, AlertCircle, CheckCircle2,
   Loader2, Building2, MapPin, Users, FileText, ArrowRightLeft,
@@ -543,11 +544,11 @@ export default function OutletsPage() {
     const { headers, exampleRows, dosAndDonts } = getOutletAdditionTemplateData(validPrograms, validCategories, outletTypes, LEAF_ROLE_CODE);
     const wb = XLSX.utils.book_new();
     // Sheet 1: Dos & Don'ts (opens first)
-    const ddSheet = XLSX.utils.aoa_to_sheet(dosAndDonts);
+    const ddSheet = aoaToSheetSafe(dosAndDonts);
     ddSheet['!cols'] = [{ wch: 28 }, { wch: 90 }];
     XLSX.utils.book_append_sheet(wb, ddSheet, "Dos & Don'ts");
     // Sheet 2: Data
-    const dataSheet = XLSX.utils.aoa_to_sheet([headers, ...exampleRows]);
+    const dataSheet = aoaToSheetSafe([headers, ...exampleRows]);
     dataSheet['!cols'] = headers.map(h => ({ wch: h.includes('Name') ? 28 : h.includes('Manager') ? 34 : 20 }));
     XLSX.utils.book_append_sheet(wb, dataSheet, 'Outlet Upload');
     downloadXlsx(wb, 'outlet-master-template.xlsx');
@@ -556,10 +557,10 @@ export default function OutletsPage() {
   function downloadReKYCTemplate() {
     const { headers, exampleRows, dosAndDonts } = getReKYCFlagTemplateData();
     const wb = XLSX.utils.book_new();
-    const ddSheet = XLSX.utils.aoa_to_sheet(dosAndDonts);
+    const ddSheet = aoaToSheetSafe(dosAndDonts);
     ddSheet['!cols'] = [{ wch: 28 }, { wch: 90 }];
     XLSX.utils.book_append_sheet(wb, ddSheet, "Dos & Don'ts");
-    const dataSheet = XLSX.utils.aoa_to_sheet([headers, ...exampleRows]);
+    const dataSheet = aoaToSheetSafe([headers, ...exampleRows]);
     dataSheet['!cols'] = headers.map(h => ({ wch: h.includes('Document') ? 30 : h === 'Outlet ID' ? 18 : 22 }));
     XLSX.utils.book_append_sheet(wb, dataSheet, 'Re-KYC Flags');
     downloadXlsx(wb, 'outlet-rekyc-flags-template.xlsx');
@@ -568,10 +569,10 @@ export default function OutletsPage() {
   function downloadDeactivateTemplate() {
     const { headers, exampleRows, dosAndDonts } = getDeactivateTemplateData();
     const wb = XLSX.utils.book_new();
-    const ddSheet = XLSX.utils.aoa_to_sheet(dosAndDonts);
+    const ddSheet = aoaToSheetSafe(dosAndDonts);
     ddSheet['!cols'] = [{ wch: 28 }, { wch: 90 }];
     XLSX.utils.book_append_sheet(wb, ddSheet, "Dos & Don'ts");
-    const dataSheet = XLSX.utils.aoa_to_sheet([headers, ...exampleRows]);
+    const dataSheet = aoaToSheetSafe([headers, ...exampleRows]);
     dataSheet['!cols'] = [{ wch: 22 }];
     XLSX.utils.book_append_sheet(wb, dataSheet, 'Deactivate Upload');
     downloadXlsx(wb, 'outlet-deactivation-template.xlsx');

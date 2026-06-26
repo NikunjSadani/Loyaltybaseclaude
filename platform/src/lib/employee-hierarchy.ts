@@ -13,6 +13,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import type {
   TenantHierarchyLevel,
   HierarchyEmployee,
@@ -1334,7 +1335,7 @@ function buildHierarchyErrorSheet(
   });
 
   const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet([allHeaders, ...dataRows]);
+  const ws = aoaToSheetSafe([allHeaders, ...dataRows]);
   ws['!cols'] = allHeaders.map(h => ({ wch: h === 'Remarks' ? 80 : 20 }));
   XLSX.utils.book_append_sheet(wb, ws, 'Hierarchy Chain');
 

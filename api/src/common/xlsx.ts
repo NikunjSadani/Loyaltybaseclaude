@@ -26,22 +26,38 @@ export interface XlsxSheet {
  * not match and is left unchanged (so domains that pre-sanitise — TDS, invoices —
  * are unaffected). Mirrors the proven `cellSafe` in tds/invoice helpers.
  */
-function cellSafe(v: string): string {
+export function cellSafe(v: string): string {
   return /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+}
+
+/**
+ * Drop-in safe replacements for `XLSX.utils.json_to_sheet` / `aoa_to_sheet`.
+ * Every export that builds its OWN workbook (i.e. NOT via `buildXlsx`) must use
+ * these instead of the raw `XLSX.utils.*` so no export can be a formula-injection
+ * sink. They cellSafe every string cell, then delegate. (Reading/parsing uploads is
+ * unaffected — only WRITING needs sanitising.)
+ */
+export function jsonToSheetSafe(rows: Record<string, unknown>[]): XLSX.WorkSheet {
+  const safe = rows.map((row) => {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(row)) {
+      out[k] = typeof val === 'string' ? cellSafe(val) : val;
+    }
+    return out;
+  });
+  return XLSX.utils.json_to_sheet(safe);
+}
+
+export function aoaToSheetSafe(rows: unknown[][]): XLSX.WorkSheet {
+  const safe = rows.map((r) => r.map((c) => (typeof c === 'string' ? cellSafe(c) : c)));
+  return XLSX.utils.aoa_to_sheet(safe);
 }
 
 /** Build a multi-sheet xlsx workbook and return it as a Buffer. */
 export function buildXlsx(sheets: XlsxSheet[]): Buffer {
   const wb = XLSX.utils.book_new();
   for (const sheet of sheets) {
-    const safeRows = sheet.rows.map((row) => {
-      const out: Record<string, unknown> = {};
-      for (const [k, val] of Object.entries(row)) {
-        out[k] = typeof val === 'string' ? cellSafe(val) : val;
-      }
-      return out;
-    });
-    const ws = XLSX.utils.json_to_sheet(safeRows);
+    const ws = jsonToSheetSafe(sheet.rows);
     XLSX.utils.book_append_sheet(wb, ws, sheet.name);
   }
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;

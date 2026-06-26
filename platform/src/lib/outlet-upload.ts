@@ -489,17 +489,12 @@ export interface OutletTemplateData {
   dosAndDonts:  string[][];
 }
 
-/**
- * Neutralise spreadsheet formula injection: a cell value beginning with `= + - @`
- * (or a leading tab/CR) is interpreted as a live formula by Excel / Google Sheets.
- * Tenant-configured Program/Category values flow into the downloaded template, so a
- * crafted value like `=cmd()` or `=HYPERLINK("http://evil")` would execute when an
- * admin opens it. Prefix with an apostrophe to force text. Mirrors the backend
- * `cellSafe` (tds/invoice helpers + the xlsx serialiser). Idempotent.
- */
-export function cellSafe(v: string): string {
-  return /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
-}
+// Formula-injection guard. Re-exported from the shared sanitizer so there is a
+// single source of truth (AF-5). Tenant-configured Program/Category values flow
+// into the downloaded template, so a crafted value like `=cmd()` would otherwise
+// execute when an admin opens it; cellSafe prefixes an apostrophe to force text.
+export { cellSafe } from '@/lib/xlsx-safe';
+import { cellSafe } from '@/lib/xlsx-safe';
 
 /** Apply cellSafe to every cell of an array-of-arrays template matrix. */
 function safeMatrix(rows: string[][]): string[][] {

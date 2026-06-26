@@ -10,6 +10,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import type { OutletMasterRow } from '@/types';
 
 // ─── Column headers (in display order) ───────────────────────────────────────
@@ -297,7 +298,7 @@ export function generateOutletMasterExcel(
   );
 
   const wsData = [sectionRow, headerRow, ...dataRows];
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  const ws = aoaToSheetSafe(wsData);
 
   // ── Column widths ──
   ws['!cols'] = COLUMNS.map(({ label }) => ({

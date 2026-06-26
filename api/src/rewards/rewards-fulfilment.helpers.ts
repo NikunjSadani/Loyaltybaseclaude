@@ -16,6 +16,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '../common/xlsx';
 
 // ── Column headers (the canonical template shape) ─────────────────────────────
 
@@ -61,7 +62,7 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
     '', // New Status
   ]);
 
-  const ws = XLSX.utils.aoa_to_sheet([header, ...dataRows]);
+  const ws = aoaToSheetSafe([header, ...dataRows]);
   ws['!cols'] = [
     { wch: 22 }, // Order Number
     { wch: 28 }, // Reward

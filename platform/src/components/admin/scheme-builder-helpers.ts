@@ -6,6 +6,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { cellSafe } from '@/lib/xlsx-safe';
 import { parseOutletExcelRow, type OutletRecord } from '@/lib/campaign';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -172,7 +173,20 @@ export function buildEnhancedOutletTemplate(customFieldLabels: string[]): Uint8A
     nonKycRow[col] = 'sample value';
   }
 
-  const ws = XLSX.utils.json_to_sheet([kycRow, nonKycRow], { header: headers });
+  // Formula-injection guard (AF-5): custom field labels are admin-supplied and the
+  // sample values may echo them — apply cellSafe to every cell. The `header` option
+  // also fixes column order, so sanitise the row objects in place rather than via
+  // jsonToSheetSafe (which can't carry the header option).
+  const safeHeaders = headers.map(cellSafe);
+  const sanitiseRow = (row: Record<string, string>): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(row)) out[cellSafe(k)] = cellSafe(v);
+    return out;
+  };
+  const ws = XLSX.utils.json_to_sheet(
+    [sanitiseRow(kycRow), sanitiseRow(nonKycRow)],
+    { header: safeHeaders },
+  );
 
   // Column widths
   ws['!cols'] = headers.map((h) => ({ wch: Math.max(h.length + 4, 18) }));

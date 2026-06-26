@@ -16,6 +16,7 @@ import { useAdminSession } from '@/lib/admin-session';
 import { generateCreditTemplate } from '@/lib/credits-payouts-template';
 import { parseCreditUpload }      from '@/lib/credits-payouts-parser';
 import { getGifsySettings }       from '@/lib/gifsy-settings';
+import { jsonToSheetSafe }        from '@/lib/xlsx-safe';
 import type { CreditField, CreditParseResult } from '@/types';
 import type { TemplateOutlet } from '@/lib/credits-payouts-template';
 
@@ -217,7 +218,7 @@ export default function CreditsPayoutsUploadPage() {
         'Narration':   r.narration,
         'Errors':      r.errors.join('; '),
       }));
-      const ws = XLSX.utils.json_to_sheet(rows);
+      const ws = jsonToSheetSafe(rows);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Upload Report');
       const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;

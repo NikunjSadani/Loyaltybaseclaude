@@ -8,6 +8,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import type { TicketAgingRow, TicketAgingSummary } from '@/types';
 
 // ─── Buckets ──────────────────────────────────────────────────────────────────
@@ -204,7 +205,7 @@ export function generateTicketAgingExcel(rows: TicketAgingRow[]): Uint8Array {
   ]);
 
   const wsData = [headerRow, ...dataRows];
-  const ws     = XLSX.utils.aoa_to_sheet(wsData);
+  const ws     = aoaToSheetSafe(wsData);
 
   // Column widths — based on header label lengths (same approach as R1).
   ws['!cols'] = headerRow.map(label => ({ wch: Math.max(label.length + 2, 14) }));

@@ -103,4 +103,25 @@ describe('generateKycReviewDumpExcel', () => {
     const b = parse(generateKycReviewDumpExcel([entry()])).rows;
     expect(a).toEqual(b);
   });
+
+  // ─── AF-5: formula-injection hardening (export is a sink — reviewers open it) ──
+  it('neutralises formula-injection in user/data string cells', () => {
+    const { rows } = parse(
+      generateKycReviewDumpExcel([
+        entry({
+          outletName: '=cmd|\'/c calc\'!A1',
+          ownerName: '@SUM(A1)',
+          address: '+1+1',
+          city: '-2',
+          gstNumber: 'Benign Value',
+        }),
+      ]),
+    );
+    // header at rows[0]; first data row at rows[1]
+    expect(rows[1][2]).toBe('\'=cmd|\'/c calc\'!A1'); // Outlet Name (col 2)
+    expect(rows[1][3]).toBe('\'@SUM(A1)'); // Owner Name (col 3)
+    expect(rows[1][8]).toBe('\'+1+1'); // Address (col 8)
+    expect(rows[1][9]).toBe('\'-2'); // City (col 9)
+    expect(rows[1][6]).toBe('Benign Value'); // GST Number (col 6) — unchanged
+  });
 });

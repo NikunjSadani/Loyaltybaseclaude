@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Coins, Calendar, X, Download, Banknote } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { jsonToSheetSafe } from '@/lib/xlsx-safe';
 import { Spinner } from '@/components/ui/spinner';
 import { BalanceCard } from '@/components/wallet/balance-card';
 import { TransactionItem } from '@/components/wallet/transaction-item';
@@ -107,7 +108,7 @@ function downloadInrStatement(entries: PayoutLedgerEntry[], period: string) {
     'Amount (₹)':  p.payoutAmountPaise / 100,
     UTR:           p.utr ?? '—',
   }));
-  const ws = XLSX.utils.json_to_sheet(rows);
+  const ws = jsonToSheetSafe(rows);
   ws['!cols'] = [{ wch: 16 }, { wch: 38 }, { wch: 14 }, { wch: 20 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Payout Statement');
@@ -133,7 +134,7 @@ function downloadStatement(txs: WalletTransaction[], period: string) {
     Points: tx.type===TransactionType.CREDIT ? `+${tx.amount}` : `-${tx.amount}`,
     'Balance After': tx.balanceAfter,
   }));
-  const ws = XLSX.utils.json_to_sheet(rows);
+  const ws = jsonToSheetSafe(rows);
   ws['!cols'] = [{wch:16},{wch:45},{wch:12},{wch:10},{wch:14}];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Points Statement');

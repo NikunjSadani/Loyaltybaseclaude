@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 
 // ─── Shared bulk-upload error report ──────────────────────────────────────────
 //
@@ -39,7 +40,7 @@ export function buildErrorReportBuffer(
     return [...values, errors];
   });
 
-  const ws = XLSX.utils.aoa_to_sheet([header, ...dataRows]);
+  const ws = aoaToSheetSafe([header, ...dataRows]);
   ws['!cols'] = header.map(h => ({ wch: h === errorHeader ? 80 : 20 }));
 
   const wb = XLSX.utils.book_new();

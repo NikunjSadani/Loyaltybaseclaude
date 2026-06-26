@@ -9,6 +9,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -175,7 +176,7 @@ export function generateVisibilityTemplate(): Uint8Array {
     '9876543210',    // captured_by_employee_phone
   ];
 
-  const ws = XLSX.utils.aoa_to_sheet([headers, example]);
+  const ws = aoaToSheetSafe([headers, example]);
 
   // Generous column widths for readability
   ws['!cols'] = headers.map((h) => ({

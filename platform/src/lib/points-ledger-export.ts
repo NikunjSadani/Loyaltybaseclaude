@@ -9,6 +9,7 @@
  */
 
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import type { PointsLedgerReportRow, PointsLedgerMonthCell } from '@/types';
 
 // ─── Month range ──────────────────────────────────────────────────────────────
@@ -242,7 +243,7 @@ export function generatePointsLedgerExcel(
   });
 
   const wsData = [headerRow, ...dataRows];
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  const ws = aoaToSheetSafe(wsData);
 
   // ── Column widths ──
   ws['!cols'] = headerRow.map(label => ({ wch: Math.max(label.length + 2, 14) }));

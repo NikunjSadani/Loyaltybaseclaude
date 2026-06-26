@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import * as XLSX from 'xlsx';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import {
   validateEmployeeUpload,
   DEOLEO_HIERARCHY,
@@ -141,7 +142,7 @@ function downloadTemplate() {
   const wb = XLSX.utils.book_new();
 
   // ── Sheet 1: Dos & Don'ts ── opens first so users read it before data entry
-  const ddSheet = XLSX.utils.aoa_to_sheet(dosAndDontsRows);
+  const ddSheet = aoaToSheetSafe(dosAndDontsRows);
   ddSheet['!cols'] = [
     { wch: 32 },   // Col A — label
     { wch: 90 },   // Col B — explanation
@@ -150,7 +151,7 @@ function downloadTemplate() {
 
   // ── Sheet 2: Hierarchy Chain ── 18-column data entry sheet (leaf → root)
   const dataRows = [headers, ...exampleRows];
-  const dataSheet = XLSX.utils.aoa_to_sheet(dataRows);
+  const dataSheet = aoaToSheetSafe(dataRows);
   dataSheet['!cols'] = headers.map(h => ({
     wch: h.endsWith('Phone') ? 16 : h.endsWith('Name') ? 24 : 18,
   }));
@@ -178,7 +179,7 @@ function downloadCurrentHierarchy(employees: HierarchyEmployee[]) {
   const dataRows = buildHierarchyChainExportRows(employees, CONFIG);
 
   const wb    = XLSX.utils.book_new();
-  const sheet = XLSX.utils.aoa_to_sheet([headers, ...dataRows]);
+  const sheet = aoaToSheetSafe([headers, ...dataRows]);
   sheet['!cols'] = headers.map(h => ({
     wch: h.endsWith('Phone') ? 16 : h.endsWith('Name') ? 24 : 18,
   }));

@@ -19,6 +19,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { generateVisibilityTemplate } from '@/lib/visibility-upload';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { fetchVisibilityCaptureMode, type VisibilityCaptureMode } from '@/lib/visibility-capture-mode';
 import { Spinner } from '@/components/ui/spinner';
@@ -259,7 +260,7 @@ export default function VisibilityPage() {
             : '',
         ]),
       ];
-      const ws  = XLSX.utils.aoa_to_sheet(sheetData);
+      const ws  = aoaToSheetSafe(sheetData);
       const wb  = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Visibility Records');
       const buf  = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
