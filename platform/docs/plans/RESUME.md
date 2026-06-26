@@ -41,7 +41,8 @@ CONTEXT (so you can act the moment the owner asks — not a to-do list):
   (1) per-tenant **VISIBILITY on/off** toggle — default OFF, **Deoleo launches OFF**; (2) **sales team leaderboard**
   (`GET /v1/sales/leaderboard`, same-level peers by team subtree primary-KPI %; **territory = ZNM ancestor name**);
   (3) **tenant-customizable Outlet program/category lists** (Gifsy Settings card); (4) **xlsx formula-injection
-  hardening** (`cellSafe` at the `buildXlsx` boundary + FE templates → AF-5 substantially closed).
+  hardening — AF-5 FULLY DONE** (`cellSafe` at the `buildXlsx` boundary `1bc9315` + a full sweep `f0d48bc` of EVERY
+  remaining backend/FE export writer via shared `common/xlsx.ts` + `lib/xlsx-safe.ts`; independently audited SHIP).
 - **Open go-live threads (do NOT start without an owner ask):** **#76** load real Deoleo master data into empty prod
   (route through tenant provisioning so outlet-types/configs exist; **set Deoleo's REAL program/category values in the
   Gifsy Settings card before the outlet-master upload if they differ from the defaults** Trade Loyalty/Gold Programme ·
