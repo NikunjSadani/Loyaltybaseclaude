@@ -51,6 +51,19 @@ export class SalesController {
     return this.sales.getOutletTargets(user, period);
   }
 
+  // Sales team leaderboard — ranks the caller against same-level peers (scope
+  // widens the net: rm | state | national), each scored by their own team's
+  // primary-KPI achievement. Entries come back sorted best-first.
+  @Get('leaderboard')
+  @RequirePermission('sales_org:read')
+  getLeaderboard(
+    @CurrentUser() user: JwtPayload,
+    @Query('scope') scope?: string,
+    @Query('period') period?: string,
+  ) {
+    return this.sales.getLeaderboard(user, scope, period);
+  }
+
   @Get('team/:memberId')
   @RequirePermission('sales_org:read')
   getMember(@CurrentUser() user: JwtPayload, @Param('memberId') memberId: string) {

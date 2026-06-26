@@ -3,7 +3,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Trophy, Medal, TrendingUp, TrendingDown, Minus, Users, MapPin } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
-import { getRole, type SalesRole } from '@/lib/sales-role';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -59,22 +58,14 @@ function pctBg(p: number) {
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function SalesLeaderboardPage() {
-  const [role,       setRoleState] = useState<SalesRole>('SO');
   const [scope,      setScope]     = useState<ScopeFilter>('rm');
   const [entries,    setEntries]   = useState<SalesEntry[]>([]);
   const [loading,    setLoading]   = useState(false);
 
   useEffect(() => {
-    setRoleState(getRole());
-    const onStorage = () => setRoleState(getRole());
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
-  }, []);
-
-  useEffect(() => {
     setLoading(true);
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch(`/api/leaderboard`, {
+    fetch(`/api/sales/leaderboard?scope=${scope}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((r) => r.json())
@@ -262,7 +253,7 @@ export default function SalesLeaderboardPage() {
       </div>
 
       <p className="text-[11px] text-gray-400 text-center pb-2">
-        Ranked by secondary sales target achievement · Δ rank = change vs last month · Resets 1 Jun
+        Ranked by sales target achievement · Δ rank = change vs last month · Resets 1 Jun
       </p>
     </div>
   );

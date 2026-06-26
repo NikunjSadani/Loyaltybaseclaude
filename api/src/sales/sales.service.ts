@@ -5,6 +5,24 @@ import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-ac
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 
 /**
+ * One row of the sales team leaderboard — the exact shape the FE
+ * (platform/src/app/sales/leaderboard/page.tsx) consumes. Entries are returned
+ * already sorted best-first; the FE assigns rank by array order.
+ */
+export interface SalesEntry {
+  name: string;
+  territory: string;
+  achievementPct: number;
+  activeOutlets: number;
+  /** previous-month rank − current-month rank (+ve = moved up vs last month). */
+  change: number;
+  isMe?: boolean;
+}
+
+/** Scopes that widen the same-level peer net for the leaderboard. */
+type LeaderboardScope = 'rm' | 'state' | 'national';
+
+/**
  * Sales Organization — ported from platform/src/app/api/sales/* onto /v1.
  *
  * Scope: the REAL sales-org routes only (team / member detail / member outlets /
@@ -407,6 +425,20 @@ export class SalesService {
   }
 
   /**
+   * The calendar month immediately before `month` (YYYY-MM) as a YYYY-MM string.
+   * Pure string math — parses the YYYY-MM and subtracts one, rolling Jan→Dec of
+   * the prior year. Deliberately does NOT call `new Date()` argless so the result
+   * is a pure function of its input (used for the leaderboard's prev-month diff).
+   * e.g. '2026-01' → '2025-12', '2026-06' → '2026-05'.
+   */
+  private previousMonthKey(month: string): string {
+    const [y, m] = month.split('-').map(Number);
+    const prevM = m === 1 ? 12 : m - 1;
+    const prevY = m === 1 ? y - 1 : y;
+    return `${prevY}-${String(prevM).padStart(2, '0')}`;
+  }
+
+  /**
    * Shared per-outlet target/achievement read for a fixed set of outlet codes.
    * Resolves the month (caller's period, else the current calendar month), joins
    * OutletTarget.targetValues ⋈ OutletSalesRecord.kpiValues ⋈ KpiDef, and returns
@@ -474,6 +506,252 @@ export class SalesService {
       target:   sumFor(tRows.map((r) => ({ month: r.month, v: r.targetValues })), mo),
       achieved: sumFor(aRows.map((r) => ({ month: r.month, v: r.kpiValues })), mo),
     }));
+  }
+
+  /**
+   * GET /v1/sales/leaderboard?scope=&period= — ranks the CALLER against their
+   * same-level peers (same hierarchyLevelId), each scored by their OWN team
+   * (subtree) PRIMARY-KPI achievement. Scope widens the peer net:
+   *   rm       = peers under the caller's reporting manager (same reportingToId).
+   *   state    = same level AND same region as the caller.
+   *   national = same level, whole tenant.
+   * Population is restricted to active (isActive, deletedAt null) sales users at
+   * the caller's level. Entries are returned sorted best-first (achievementPct
+   * desc, tie-break activeOutlets desc then name asc); the FE ranks by order.
+   * `change` = prevRank − currRank (+ve = moved up); 0 when the candidate had no
+   * prior-month target data. EVERYTHING is tenant-scoped by user.clientId.
+   */
+  async getLeaderboard(
+    user: JwtPayload,
+    scope: string = 'rm',
+    period?: string,
+  ): Promise<{ entries: SalesEntry[] }> {
+    // ── 1. Resolve the caller's own SalesUser (tenant-scoped). ─────────────────
+    const caller = await this.prisma.salesUser.findFirst({
+      where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true, userId: true, reportingToId: true, hierarchyLevelId: true, region: true },
+    });
+    if (!caller) return { entries: [] };
+
+    // ── 2. Validate scope; default 'rm' on anything else. ─────────────────────
+    const validScope: LeaderboardScope =
+      scope === 'state' || scope === 'national' || scope === 'rm' ? scope : 'rm';
+
+    // Sanitise the user-supplied period: only a well-formed YYYY-MM (months 01-12)
+    // is honoured; anything else falls back to the current month. Prevents a garbage
+    // ?period= from flowing into the month math and silently zeroing the whole board.
+    const safePeriod =
+      period && /^\d{4}-(0[1-9]|1[0-2])$/.test(period) ? period : undefined;
+
+    // ── 3. Load the tenant's sales users once (id,userId,reportingToId,level,
+    //       region,zone,isActive,deletedAt,name). The EDGE set (subtree roll-up)
+    //       spans ALL non-deleted users so a subtree rolls up correctly even
+    //       through inactive intermediate nodes; the POPULATION is the active
+    //       same-level peers per scope. ───────────────────────────────────────
+    const allUsers = await this.prisma.salesUser.findMany({
+      where: { user: { clientId: user.clientId }, deletedAt: null },
+      select: {
+        id: true,
+        userId: true,
+        reportingToId: true,
+        hierarchyLevelId: true,
+        region: true,
+        zone: true,
+        isActive: true,
+        user: { select: { name: true } },
+      },
+    });
+
+    const edges = allUsers.map((u) => ({ id: u.id, reportingToId: u.reportingToId }));
+
+    // Population: active, at the caller's level, narrowed by scope.
+    const population = allUsers.filter((u) => {
+      if (!u.isActive) return false;
+      if (u.hierarchyLevelId !== caller.hierarchyLevelId) return false;
+      if (validScope === 'rm') return u.reportingToId === caller.reportingToId;
+      if (validScope === 'state') return u.region === caller.region;
+      return true; // national — same level, whole tenant
+    });
+    if (population.length === 0) return { entries: [] };
+
+    // ── 4. Load active assignments once → salesUserId → [outletCode]. ─────────
+    const assignments = await this.prisma.salesUserAssignment.findMany({
+      where: {
+        salesUserId: { in: allUsers.map((u) => u.id) },
+        unassignedAt: null,
+        outletId: { not: null },
+      },
+      select: { salesUserId: true, outlet: { select: { outletCode: true } } },
+    });
+    const outletCodesByUser = new Map<string, string[]>();
+    for (const a of assignments) {
+      const code = a.outlet?.outletCode;
+      if (!code) continue;
+      const arr = outletCodesByUser.get(a.salesUserId) ?? [];
+      arr.push(code);
+      outletCodesByUser.set(a.salesUserId, arr);
+    }
+
+    // ── 5. The primary KPI (isPrimary, else the first KpiDef). ────────────────
+    // orderBy code so the pick is DETERMINISTIC even if a tenant mis-configures
+    // more than one isPrimary KpiDef (otherwise `find` would depend on row order).
+    const kpiDefs = await this.prisma.kpiDef.findMany({
+      where: { clientId: user.clientId },
+      select: { code: true, isPrimary: true },
+      orderBy: { code: 'asc' },
+    });
+    const primaryCode = (kpiDefs.find((k) => k.isPrimary) ?? kpiDefs[0])?.code ?? null;
+
+    // ── 6. Both months' primary target/achieved per outletCode. ───────────────
+    const currMonth = this.reportMonth(safePeriod);
+    const prevMonth = this.previousMonthKey(currMonth);
+    const [currTargets, currAch] = await this.primaryMapsForMonth(user.clientId, currMonth, primaryCode);
+    const [prevTargets, prevAch] = await this.primaryMapsForMonth(user.clientId, prevMonth, primaryCode);
+
+    // Subtree sum of a per-outletCode map for one candidate.
+    const sumSubtree = (candidateId: string, map: Map<string, number>): number => {
+      const subtreeIds = descendantSalesUserIds(candidateId, edges);
+      let total = 0;
+      for (const sid of subtreeIds) {
+        for (const code of outletCodesByUser.get(sid) ?? []) total += map.get(code) ?? 0;
+      }
+      return total;
+    };
+
+    // Distinct active-assignment outletCodes in a candidate's subtree.
+    const subtreeOutletCount = (candidateId: string): number => {
+      const subtreeIds = descendantSalesUserIds(candidateId, edges);
+      const codes = new Set<string>();
+      for (const sid of subtreeIds) {
+        for (const code of outletCodesByUser.get(sid) ?? []) codes.add(code);
+      }
+      return codes.size;
+    };
+
+    // round(100 * achieved / target), or 0 when target sum is 0 (never /0).
+    const pctFor = (
+      candidateId: string,
+      targets: Map<string, number>,
+      ach: Map<string, number>,
+    ): { pct: number; hasTarget: boolean } => {
+      const sumTarget = sumSubtree(candidateId, targets);
+      if (sumTarget === 0) return { pct: 0, hasTarget: false };
+      const sumAchieved = sumSubtree(candidateId, ach);
+      return { pct: Math.round((100 * sumAchieved) / sumTarget), hasTarget: true };
+    };
+
+    // ── 7. Build current + previous rankings over the SAME population. ────────
+    type Computed = {
+      userId: string;
+      name: string;
+      territory: string;
+      achievementPct: number;
+      activeOutlets: number;
+      hadPrevTarget: boolean;
+      prevPct: number;
+      isMe: boolean;
+    };
+
+    const computed: Computed[] = population.map((c) => {
+      const curr = pctFor(c.id, currTargets, currAch);
+      const prev = pctFor(c.id, prevTargets, prevAch);
+      return {
+        userId: c.userId,
+        name: c.user.name,
+        territory: c.region ?? c.zone ?? '',
+        achievementPct: curr.pct,
+        activeOutlets: subtreeOutletCount(c.id),
+        hadPrevTarget: prev.hasTarget,
+        prevPct: prev.pct,
+        isMe: c.userId === user.sub,
+      };
+    });
+
+    // Ranking comparator (shared by both months): achievementPct desc,
+    // tie-break activeOutlets desc, then name asc.
+    const byScore = (a: { pct: number; activeOutlets: number; name: string }, b: typeof a) =>
+      b.pct - a.pct || b.activeOutlets - a.activeOutlets || a.name.localeCompare(b.name);
+
+    // Current-month rank: 1-based position in the sorted population.
+    const currentSorted = [...computed].sort((a, b) =>
+      byScore(
+        { pct: a.achievementPct, activeOutlets: a.activeOutlets, name: a.name },
+        { pct: b.achievementPct, activeOutlets: b.activeOutlets, name: b.name },
+      ),
+    );
+    const currRankByUser = new Map<string, number>();
+    currentSorted.forEach((c, i) => currRankByUser.set(c.userId, i + 1));
+
+    // Previous-month rank: SAME population, ranked on each candidate's prev-month
+    // achievement (and the SAME current activeOutlets tie-break — population is
+    // identical, only the score changes).
+    const previousSorted = [...computed].sort((a, b) =>
+      byScore(
+        { pct: a.prevPct, activeOutlets: a.activeOutlets, name: a.name },
+        { pct: b.prevPct, activeOutlets: b.activeOutlets, name: b.name },
+      ),
+    );
+    const prevRankByUser = new Map<string, number>();
+    previousSorted.forEach((c, i) => prevRankByUser.set(c.userId, i + 1));
+
+    // ── 8. Map to SalesEntry[], already sorted best-first, with `change`. ─────
+    const entries: SalesEntry[] = currentSorted.map((c) => {
+      const currRank = currRankByUser.get(c.userId)!;
+      // No prior-month target data in the subtree → change = 0.
+      const change = c.hadPrevTarget ? prevRankByUser.get(c.userId)! - currRank : 0;
+      return {
+        name: c.name,
+        territory: c.territory,
+        achievementPct: c.achievementPct,
+        activeOutlets: c.activeOutlets,
+        change,
+        isMe: c.isMe,
+      };
+    });
+
+    return { entries };
+  }
+
+  /**
+   * For one month, returns [targetByOutletCode, achievedByOutletCode] maps for
+   * the PRIMARY KPI only, tenant-scoped. Mirrors the getTargets join
+   * (OutletTarget.targetValues ⋈ OutletSalesRecord.kpiValues, summed per
+   * outletCode for the primary code via kpiCodeKeys). Returns empty maps when
+   * there is no primary KPI configured.
+   */
+  private async primaryMapsForMonth(
+    clientId: string,
+    month: string,
+    primaryCode: string | null,
+  ): Promise<[Map<string, number>, Map<string, number>]> {
+    if (!primaryCode) return [new Map(), new Map()];
+    const [targetRows, achRows] = await Promise.all([
+      this.prisma.outletTarget.findMany({
+        where: { clientId, month },
+        select: { outletCode: true, targetValues: true },
+      }),
+      this.prisma.outletSalesRecord.findMany({
+        where: { clientId, month },
+        select: { outletCode: true, kpiValues: true },
+      }),
+    ]);
+
+    // Sum the primary KPI per outletCode (kpiCodeKeys filters the reserved
+    // __names key; only count the primary code present on the row).
+    const primaryOf = (v: unknown): number => {
+      const obj = (v ?? {}) as Record<string, number>;
+      if (!kpiCodeKeys(obj).includes(primaryCode)) return 0;
+      return Number(obj[primaryCode]) || 0;
+    };
+    const accumulate = (rows: { outletCode: string; v: unknown }[]): Map<string, number> => {
+      const m = new Map<string, number>();
+      for (const r of rows) m.set(r.outletCode, (m.get(r.outletCode) ?? 0) + primaryOf(r.v));
+      return m;
+    };
+    return [
+      accumulate(targetRows.map((r) => ({ outletCode: r.outletCode, v: r.targetValues }))),
+      accumulate(achRows.map((r) => ({ outletCode: r.outletCode, v: r.kpiValues }))),
+    ];
   }
 
   /**

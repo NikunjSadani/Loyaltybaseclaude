@@ -497,6 +497,281 @@ describe('SalesService', () => {
       expect(mockPrisma.salesUserAssignment.findMany).not.toHaveBeenCalled();
     });
   });
+
+  // ─── getLeaderboard (same-level peer ranking by subtree primary-KPI %) ─────────
+  describe('getLeaderboard', () => {
+    // Helper: wire the standard call sequence the method makes, in order:
+    //   1. salesUser.findFirst  → the caller
+    //   2. salesUser.findMany   → the tenant's sales users (population + edges)
+    //   3. salesUserAssignment.findMany → active assignments
+    //   4. kpiDef.findMany      → KPI defs
+    //   5. outletTarget.findMany / outletSalesRecord.findMany → curr then prev month
+    const wire = (opts: {
+      caller: unknown;
+      users?: unknown[];
+      assignments?: unknown[];
+      kpis?: unknown[];
+      currTargets?: unknown[];
+      currAch?: unknown[];
+      prevTargets?: unknown[];
+      prevAch?: unknown[];
+    }) => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(opts.caller);
+      mockPrisma.salesUser.findMany.mockResolvedValue(opts.users ?? []);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue(opts.assignments ?? []);
+      mockPrisma.kpiDef.findMany.mockResolvedValue(opts.kpis ?? []);
+      // curr month read first, then prev month read.
+      mockPrisma.outletTarget.findMany
+        .mockResolvedValueOnce(opts.currTargets ?? [])
+        .mockResolvedValueOnce(opts.prevTargets ?? []);
+      mockPrisma.outletSalesRecord.findMany
+        .mockResolvedValueOnce(opts.currAch ?? [])
+        .mockResolvedValueOnce(opts.prevAch ?? []);
+    };
+
+    const PRIMARY = [{ code: 'SALES', isPrimary: true }];
+
+    it('(g) returns {entries:[]} when the caller is not a sales user', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      const res = await service.getLeaderboard(caller, 'rm');
+      expect(res).toEqual({ entries: [] });
+      // Never loads the population.
+      expect(mockPrisma.salesUser.findMany).not.toHaveBeenCalled();
+    });
+
+    it('(a) ranks by achievementPct desc; (e) isMe set on the caller', async () => {
+      // Three same-level peers under the same RM. su-me 50%, su-b 90%, su-c 0%.
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
+        users: [
+          { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+          { id: 'su-b',  userId: 'user-b',   reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Bravo' } },
+          { id: 'su-c',  userId: 'user-c',   reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Charlie' } },
+        ],
+        assignments: [
+          { salesUserId: 'su-me', outlet: { outletCode: 'OM' } },
+          { salesUserId: 'su-b',  outlet: { outletCode: 'OB' } },
+          { salesUserId: 'su-c',  outlet: { outletCode: 'OC' } },
+        ],
+        kpis: PRIMARY,
+        currTargets: [
+          { outletCode: 'OM', targetValues: { SALES: 100 } },
+          { outletCode: 'OB', targetValues: { SALES: 100 } },
+          { outletCode: 'OC', targetValues: { SALES: 100 } },
+        ],
+        currAch: [
+          { outletCode: 'OM', kpiValues: { SALES: 50 } },
+          { outletCode: 'OB', kpiValues: { SALES: 90 } },
+          { outletCode: 'OC', kpiValues: { SALES: 0 } },
+        ],
+      });
+
+      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      expect(res.entries.map((e) => [e.name, e.achievementPct])).toEqual([
+        ['Bravo', 90],
+        ['Me', 50],
+        ['Charlie', 0],
+      ]);
+      expect(res.entries.find((e) => e.name === 'Me')!.isMe).toBe(true);
+      expect(res.entries.find((e) => e.name === 'Bravo')!.isMe).toBe(false);
+    });
+
+    it('(b) rm scope returns only same-reportingTo peers incl. the caller', async () => {
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
+        users: [
+          { id: 'su-me',    userId: 'user-mgr', reportingToId: 'rm1',   hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+          { id: 'su-peer',  userId: 'user-p',   reportingToId: 'rm1',   hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Peer' } },
+          // different RM → excluded for rm scope even though same level
+          { id: 'su-other', userId: 'user-o',   reportingToId: 'rm2',   hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Other' } },
+        ],
+        kpis: PRIMARY,
+      });
+
+      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      const names = res.entries.map((e) => e.name).sort();
+      expect(names).toEqual(['Me', 'Peer']);
+    });
+
+    it('(c) state filters by region+level; national by level only', async () => {
+      const users = [
+        { id: 'su-me',  userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+        { id: 'su-n',   userId: 'user-n',   reportingToId: 'rm2', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'NorthPeer' } },
+        { id: 'su-s',   userId: 'user-s',   reportingToId: 'rm3', hierarchyLevelId: 'L1', region: 'South', zone: null, isActive: true, user: { name: 'SouthPeer' } },
+        // different level → never in any scope
+        { id: 'su-lvl', userId: 'user-l',   reportingToId: 'rm2', hierarchyLevelId: 'L2', region: 'North', zone: null, isActive: true, user: { name: 'OtherLevel' } },
+      ];
+      const callerSu = { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' };
+
+      wire({ caller: callerSu, users, kpis: PRIMARY });
+      const stateRes = await service.getLeaderboard(caller, 'state', '2026-06');
+      expect(stateRes.entries.map((e) => e.name).sort()).toEqual(['Me', 'NorthPeer']);
+
+      wire({ caller: callerSu, users, kpis: PRIMARY });
+      const natRes = await service.getLeaderboard(caller, 'national', '2026-06');
+      expect(natRes.entries.map((e) => e.name).sort()).toEqual(['Me', 'NorthPeer', 'SouthPeer']);
+    });
+
+    it('(d) achievementPct = 0 when the subtree target sum is 0 (no div-by-zero)', async () => {
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
+        users: [
+          { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+        ],
+        assignments: [{ salesUserId: 'su-me', outlet: { outletCode: 'OM' } }],
+        kpis: PRIMARY,
+        currTargets: [], // no target rows → target sum 0
+        currAch: [{ outletCode: 'OM', kpiValues: { SALES: 500 } }],
+      });
+      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      expect(res.entries).toHaveLength(1);
+      expect(res.entries[0].achievementPct).toBe(0);
+      expect(Number.isFinite(res.entries[0].achievementPct)).toBe(true);
+    });
+
+    it('(f) change = prevRank − currRank; change = 0 when no prior-month target', async () => {
+      // Two peers. Current month: Me 90% (#1), Peer 50% (#2).
+      // Previous month: Me 10%, Peer 80% → prev ranks Peer #1, Me #2.
+      // So Me change = prevRank(2) − currRank(1) = +1 (moved up);
+      //    Peer change = prevRank(1) − currRank(2) = −1 (moved down).
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
+        users: [
+          { id: 'su-me',   userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+          { id: 'su-peer', userId: 'user-p',   reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Peer' } },
+        ],
+        assignments: [
+          { salesUserId: 'su-me',   outlet: { outletCode: 'OM' } },
+          { salesUserId: 'su-peer', outlet: { outletCode: 'OP' } },
+        ],
+        kpis: PRIMARY,
+        currTargets: [
+          { outletCode: 'OM', targetValues: { SALES: 100 } },
+          { outletCode: 'OP', targetValues: { SALES: 100 } },
+        ],
+        currAch: [
+          { outletCode: 'OM', kpiValues: { SALES: 90 } },
+          { outletCode: 'OP', kpiValues: { SALES: 50 } },
+        ],
+        prevTargets: [
+          { outletCode: 'OM', targetValues: { SALES: 100 } },
+          { outletCode: 'OP', targetValues: { SALES: 100 } },
+        ],
+        prevAch: [
+          { outletCode: 'OM', kpiValues: { SALES: 10 } },
+          { outletCode: 'OP', kpiValues: { SALES: 80 } },
+        ],
+      });
+      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      const me = res.entries.find((e) => e.name === 'Me')!;
+      const peer = res.entries.find((e) => e.name === 'Peer')!;
+      expect(me.change).toBe(1);
+      expect(peer.change).toBe(-1);
+
+      // Now no prior-month target at all → change = 0 for everyone.
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
+        users: [
+          { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+        ],
+        assignments: [{ salesUserId: 'su-me', outlet: { outletCode: 'OM' } }],
+        kpis: PRIMARY,
+        currTargets: [{ outletCode: 'OM', targetValues: { SALES: 100 } }],
+        currAch: [{ outletCode: 'OM', kpiValues: { SALES: 50 } }],
+        prevTargets: [], // no prior-month target data
+        prevAch: [],
+      });
+      const res2 = await service.getLeaderboard(caller, 'rm', '2026-06');
+      expect(res2.entries[0].change).toBe(0);
+    });
+
+    it('aggregates a candidate\'s SUBTREE and counts distinct subtree outlets', async () => {
+      // Manager su-me has a subordinate su-sub; the manager's number rolls up both.
+      // su-me assigned OM, su-sub assigned OS → activeOutlets = 2 for su-me.
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
+        users: [
+          { id: 'su-me',  userId: 'user-mgr', reportingToId: 'rm1',   hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+          // subordinate is a DIFFERENT level — not in the population, but rolls into su-me's subtree
+          { id: 'su-sub', userId: 'user-s',   reportingToId: 'su-me', hierarchyLevelId: 'L2', region: 'North', zone: null, isActive: true, user: { name: 'Sub' } },
+        ],
+        assignments: [
+          { salesUserId: 'su-me',  outlet: { outletCode: 'OM' } },
+          { salesUserId: 'su-sub', outlet: { outletCode: 'OS' } },
+        ],
+        kpis: PRIMARY,
+        currTargets: [
+          { outletCode: 'OM', targetValues: { SALES: 100 } },
+          { outletCode: 'OS', targetValues: { SALES: 100 } },
+        ],
+        currAch: [
+          { outletCode: 'OM', kpiValues: { SALES: 80 } },
+          { outletCode: 'OS', kpiValues: { SALES: 120 } },
+        ],
+      });
+      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      // only su-me is at L1 → single entry, subtree-aggregated
+      expect(res.entries).toHaveLength(1);
+      expect(res.entries[0].achievementPct).toBe(100); // (80+120)/(100+100)
+      expect(res.entries[0].activeOutlets).toBe(2);
+    });
+
+    it('(h) cross-tenant: candidates from another clientId never appear (tenant-scoped queries)', async () => {
+      // The population/target reads are tenant-scoped via the clientId filters;
+      // assert every query carried the caller's clientId.
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
+        users: [
+          { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+        ],
+        kpis: PRIMARY,
+      });
+      await service.getLeaderboard(caller, 'national', '2026-06');
+
+      // caller lookup tenant-scoped
+      expect(mockPrisma.salesUser.findFirst.mock.calls[0][0].where).toMatchObject({
+        user: { clientId: 'deoleo' },
+      });
+      // population/edges tenant-scoped
+      expect(mockPrisma.salesUser.findMany.mock.calls[0][0].where).toEqual({
+        user: { clientId: 'deoleo' }, deletedAt: null,
+      });
+      // both month target reads tenant-scoped
+      for (const call of mockPrisma.outletTarget.findMany.mock.calls) {
+        expect(call[0].where).toMatchObject({ clientId: 'deoleo' });
+      }
+      for (const call of mockPrisma.outletSalesRecord.findMany.mock.calls) {
+        expect(call[0].where).toMatchObject({ clientId: 'deoleo' });
+      }
+    });
+
+    it('excludes inactive sales users from the population', async () => {
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
+        users: [
+          { id: 'su-me',   userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true,  user: { name: 'Me' } },
+          { id: 'su-dead', userId: 'user-d',   reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: false, user: { name: 'Inactive' } },
+        ],
+        kpis: PRIMARY,
+      });
+      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      expect(res.entries.map((e) => e.name)).toEqual(['Me']);
+    });
+
+    it('defaults an unknown scope to rm', async () => {
+      wire({
+        caller: { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' },
+        users: [
+          { id: 'su-me',    userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+          { id: 'su-other', userId: 'user-o',   reportingToId: 'rm2', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Other' } },
+        ],
+        kpis: PRIMARY,
+      });
+      const res = await service.getLeaderboard(caller, 'bogus' as string, '2026-06');
+      // rm behaviour: only same-reportingTo peers
+      expect(res.entries.map((e) => e.name)).toEqual(['Me']);
+    });
+  });
 });
 
 // Direct coverage of the ported pure access helper (cross-tenant IDOR fix).
