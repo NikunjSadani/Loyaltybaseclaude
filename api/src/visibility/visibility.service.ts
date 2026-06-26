@@ -351,9 +351,21 @@ export class VisibilityService {
 
     if (!outletCodesParam) return {};
 
+    // Each code is encodeURIComponent'd by the FE before being joined on ',' (outlet
+    // codes may contain any character, including the ',' delimiter — owner 2026-06-26),
+    // so split on the raw ',' delimiter, then decode each segment back to its real value.
+    // Trim first: stored codes are always trimmed at creation, so a stray edge space from
+    // a hand-built query never removes a meaningful character.
     const outletCodes = outletCodesParam
       .split(',')
-      .map((c) => c.trim())
+      .map((c) => {
+        const t = c.trim();
+        try {
+          return decodeURIComponent(t);
+        } catch {
+          return t; // malformed %-sequence: fall back to the raw segment
+        }
+      })
       .filter(Boolean);
 
     if (outletCodes.length === 0) return {};

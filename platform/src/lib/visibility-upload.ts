@@ -141,7 +141,12 @@ export async function fetchOutletVisibilityStatuses(
   if (outletCodes.length === 0) return {};
   try {
     const params = new URLSearchParams({
-      outletCodes: outletCodes.join(','),
+      // Encode each code individually before joining on ','. Outlet IDs now accept any
+      // characters (owner 2026-06-26) — including the ',' delimiter itself — so a raw
+      // join would shatter a comma-bearing code into phantom codes. encodeURIComponent
+      // turns any internal ',' into %2C (and spaces into %20), keeping the delimiter
+      // unambiguous; the backend trims+decodeURIComponent's each segment back.
+      outletCodes: outletCodes.map(encodeURIComponent).join(','),
       month,
     });
     const res = await fetch(`/api/visibility/outlet-statuses?${params}`, {

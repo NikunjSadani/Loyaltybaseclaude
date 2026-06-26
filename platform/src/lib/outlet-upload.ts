@@ -243,12 +243,14 @@ export function validateOutletUpload(
     if (!row.outletId) {
       errors.push('Outlet ID is required');
     } else {
-      // 2. Outlet ID format: alphanumeric and hyphens only (no underscores — template Dos & Don'ts)
-      if (!/^[A-Za-z0-9-]+$/.test(row.outletId)) {
-        errors.push(`Outlet ID "${row.outletId}" contains invalid characters — only alphanumeric characters and hyphens are allowed`);
-      }
+      // Outlet ID accepts ANY characters (owner 2026-06-26): real distributor/outlet
+      // codes carry slashes, dots, spaces, ampersands, etc. This mirrors the
+      // employee-hierarchy ID rule (required + unique only — no format restriction).
+      // Export safety is handled by cellSafe (AF-5), so a crafted value like "=cmd()"
+      // cannot inject a live spreadsheet formula downstream. Backend persists the ID
+      // verbatim (DTO is @IsString only; no @Matches).
 
-      // 3. Duplicate within upload
+      // 2. Duplicate within upload
       if (seenInUpload.has(row.outletId)) {
         errors.push(`Duplicate Outlet ID "${row.outletId}" — first seen at row ${seenInUpload.get(row.outletId)}`);
       } else {
@@ -528,7 +530,7 @@ export function getOutletAdditionTemplateData(
     ['OUTLET ADDITION — Dos & Don\'ts', ''],
     ['', ''],
     ['COLUMN REFERENCE', ''],
-    ['Outlet ID',         'Unique outlet code you assign — e.g. OUT-2026-001. Alphanumeric and hyphens only. Once created, this ID cannot be changed via upload.'],
+    ['Outlet ID',         'Unique outlet code you assign — e.g. OUT-2026-001. Any characters are accepted (letters, numbers, spaces, /, ., &, etc.). Once created, this ID cannot be changed via upload.'],
     ['Outlet Name',       'Shop/store name as it appears on the board'],
     ['Program Name',      `Must be one of: ${validPrograms.join(', ')}`],
     ['Program Category',  `Must be one of: ${validCategories.join(', ')}`],
@@ -543,7 +545,7 @@ export function getOutletAdditionTemplateData(
     ['XSR ID',            `Employee ID of the ${leafRoleCode} (field sales rep) this outlet is assigned to. Must exist in the Employee Hierarchy.`],
     ['', ''],
     ['✓ DOs', ''],
-    ['DO',  'Use the exact Outlet ID format — alphanumeric and hyphens only'],
+    ['DO',  'Use whatever Outlet ID coding scheme you like — any characters are accepted, just keep each ID unique'],
     ['DO',  'Ensure the XSR ID exists in the Employee Hierarchy before uploading'],
     ['DO',  'If you fill the Metro column, enter exactly "Yes" or "No" (without quotes)'],
     ['DO',  'Use the exact Program Name and Program Category values from the configured list'],
@@ -553,7 +555,6 @@ export function getOutletAdditionTemplateData(
     ['DON\'T', 'Re-upload an existing Outlet ID — it will be rejected. This upload is for new outlets only.'],
     ['DON\'T', 'Enter an XSR ID that belongs to a non-field role (SO, ASM, RSM, ZNM, NSM) — only ISR-level IDs are accepted'],
     ['DON\'T', 'Leave Outlet ID, Outlet Name, Program Name, Program Category, Outlet Type, City, State, or XSR ID blank (Beat and Metro may be left blank)'],
-    ['DON\'T', 'Use spaces or special characters in Outlet ID'],
     ['', ''],
     ['COMMON MISTAKES', ''],
     ['MISTAKE', 'Using a SO/ASM ID in the XSR ID column — only leaf-level (ISR) IDs are accepted'],
@@ -640,9 +641,6 @@ export function validateDeactivateHeaders(headers: readonly string[]): string | 
     : null;
 }
 
-/** Regex for a valid outlet ID — alphanumeric and hyphens only, at least 1 char. */
-const OUTLET_ID_RE = /^[A-Za-z0-9-]+$/;
-
 /**
  * Parse raw XLSX rows (each row is a Record<string, string>) into typed
  * OutletDeactivateRow objects, skipping blank rows.
@@ -663,10 +661,14 @@ export function parseDeactivateRows(
 /**
  * Validate all deactivation rows in one pass.
  * Rules:
- *   1. Outlet ID must pass the regex (alphanumeric + hyphens).
- *   2. Outlet must exist in the system.
- *   3. Outlet must currently be active (isActive = true).
- *   4. No duplicate Outlet ID within the upload.
+ *   1. Outlet must exist in the system.
+ *   2. Outlet must currently be active (isActive = true).
+ *   3. No duplicate Outlet ID within the upload.
+ *
+ * Outlet ID accepts ANY characters (owner 2026-06-26) — it must match an existing
+ * outlet's code EXACTLY, so a format restriction here would only block deactivating
+ * legitimately-created outlets whose IDs contain spaces/special characters. Blank
+ * rows are already dropped by parseDeactivateRows, so every row has a non-empty ID.
  */
 export function validateDeactivateUpload(
   rows:    OutletDeactivateRow[],
@@ -679,25 +681,20 @@ export function validateDeactivateUpload(
   for (const row of rows) {
     const errors: string[] = [];
 
-    // 1. Validate ID format
-    if (!OUTLET_ID_RE.test(row.outletId)) {
-      errors.push(`Invalid Outlet ID "${row.outletId}" — only alphanumeric characters and hyphens are allowed`);
-    } else {
-      // 2. Must exist in system
-      const existing = outletMap.get(row.outletId);
-      if (!existing) {
-        errors.push(`Outlet ID "${row.outletId}" not found in the system`);
-      } else if (!existing.isActive) {
-        // 3. Must be currently active
-        errors.push(`Outlet ID "${row.outletId}" is already inactive`);
-      }
+    // 1. Must exist in system
+    const existing = outletMap.get(row.outletId);
+    if (!existing) {
+      errors.push(`Outlet ID "${row.outletId}" not found in the system`);
+    } else if (!existing.isActive) {
+      // 2. Must be currently active
+      errors.push(`Outlet ID "${row.outletId}" is already inactive`);
+    }
 
-      // 4. No duplicates within the upload
-      if (seenInUpload.has(row.outletId)) {
-        errors.push(`Duplicate Outlet ID "${row.outletId}" — first seen at row ${seenInUpload.get(row.outletId)}`);
-      } else {
-        seenInUpload.set(row.outletId, row.rowNum);
-      }
+    // 3. No duplicates within the upload
+    if (seenInUpload.has(row.outletId)) {
+      errors.push(`Duplicate Outlet ID "${row.outletId}" — first seen at row ${seenInUpload.get(row.outletId)}`);
+    } else {
+      seenInUpload.set(row.outletId, row.rowNum);
     }
 
     rowResults.push({
@@ -749,7 +746,7 @@ export function getDeactivateTemplateData(): OutletTemplateData {
     ['DON\'T', 'Deactivate without cross-checking open KYC submissions — those remain in-flight and must be manually handled'],
     ['', ''],
     ['COMMON MISTAKES', ''],
-    ['MISTAKE', 'Uploading an Outlet ID with spaces or extra characters — must be an exact match'],
+    ['MISTAKE', 'Mis-typing the Outlet ID — it must match the stored ID exactly (including any spaces or special characters it was created with)'],
     ['MISTAKE', 'Deactivating an outlet that still has active targets assigned for the current month'],
   ];
 
@@ -838,7 +835,7 @@ export function generateOutletGuideHtml(validOutletTypes: string[] = []): string
 <h3>Template column requirements</h3>
 <table>
   <tr><th>Column</th><th>Required?</th><th>Rules</th></tr>
-  <tr><td><code>Outlet ID</code></td><td><span class="badge badge-red">Required</span></td><td>Alphanumeric + hyphens only. Must be unique — upload rejected if ID already exists.</td></tr>
+  <tr><td><code>Outlet ID</code></td><td><span class="badge badge-red">Required</span></td><td>Any characters accepted (letters, numbers, spaces, /, ., &, etc.). Must be unique — upload rejected if ID already exists.</td></tr>
   <tr><td><code>Outlet Name</code></td><td><span class="badge badge-red">Required</span></td><td>Shop name as it appears</td></tr>
   <tr><td><code>Program Name</code></td><td><span class="badge badge-red">Required</span></td><td>Must match a value from Settings → Programs</td></tr>
   <tr><td><code>Program Category</code></td><td><span class="badge badge-red">Required</span></td><td>Must match a value from Settings → Program Categories</td></tr>

@@ -222,6 +222,19 @@ describe('VisibilityService', () => {
         A1: { status: 'APPROVED', dateOfCapture: '2026-06-10', approvedBy: 'admin1', capturedByEmployeeName: 'Rep' },
       });
     });
+
+    it('decodes percent-encoded outlet codes so a comma-bearing code is not shattered (owner 2026-06-26)', async () => {
+      // Outlet IDs now accept any character, including the ',' query delimiter. The FE
+      // encodeURIComponent's each code before joining, so "OUT,01" arrives as "OUT%2C01"
+      // and must decode back to the single real code — not split into "OUT" + "01".
+      mockPrisma.outletVisibilityRecord.findMany.mockResolvedValue([]);
+      await service.outletStatuses(partner, { outletCodes: 'OUT%2C01,OUT%2F02 %26A,B2', month: '2026-06' });
+      expect(mockPrisma.outletVisibilityRecord.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { clientId: 'deoleo', month: '2026-06', outletCode: { in: ['OUT,01', 'OUT/02 &A', 'B2'] } },
+        }),
+      );
+    });
   });
 
   describe('listFraudLog', () => {

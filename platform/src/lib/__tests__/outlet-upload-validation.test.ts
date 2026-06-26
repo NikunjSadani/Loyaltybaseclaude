@@ -9,7 +9,7 @@
  *   O36, O38: Utility functions
  *   O41–O42 : Re-KYC flag header validation
  *   O43–O53 : Outlet deactivation validation
- *   O54     : Outlet addition — underscore in outlet ID is rejected (M2 fix)
+ *   O54     : Outlet addition — outlet ID accepts any characters (owner 2026-06-26)
  *   O57     : Re-KYC — outlet with kycStatus=NOT_STARTED is rejected (H3 fix)
  *   O70–O78 : Outlet master — UPDATE and REACTIVATE (upsert behaviour)
  *   O79     : Outlet master — summary counts creates/updates/reactivates
@@ -216,10 +216,10 @@ describe('outlet master row validation — errors (CREATE)', () => {
     expect(result.rows[0].errors.some(e => /outlet id/i.test(e))).toBe(true);
   });
 
-  it('O16 — outlet ID with invalid chars is an error', () => {
+  it('O16 — outlet ID with spaces / special chars is accepted (owner 2026-06-26: no format restriction)', () => {
     const result = validateOutletUpload([makeRow({ outletId: 'OUT 001 @#' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
-    expect(result.rows[0].status).toBe('ERROR');
-    expect(result.rows[0].errors.some(e => /alphanumeric/i.test(e))).toBe(true);
+    expect(result.rows[0].status).toBe('OK');
+    expect(result.rows[0].errors.some(e => /alphanumeric|invalid character/i.test(e))).toBe(false);
   });
 
   it('O17 — duplicate outlet ID within upload is an error (second row fails)', () => {
@@ -495,11 +495,15 @@ describe('outlet deactivation upload validation', () => {
     expect(result.rows[1].errors[0]).toMatch(/duplicate/i);
   });
 
-  it('O50 — outlet ID with invalid characters is an error', () => {
-    const rows   = parseDeactivateRows([{ 'Outlet ID': 'OUT 001 !!' }]);
-    const result = validateDeactivateUpload(rows, ACTIVE_OUTLETS);
-    expect(result.rows[0].status).toBe('ERROR');
-    expect(result.rows[0].errors[0]).toMatch(/invalid/i);
+  it('O50 — outlet ID with spaces/special characters is accepted (no format restriction)', () => {
+    // owner 2026-06-26: any characters allowed; deactivation matches an existing
+    // outlet code exactly, so a special-char ID that exists + is active deactivates.
+    const outlets = [{ outletId: 'OUT 001 !!/&', isActive: true }];
+    const rows    = parseDeactivateRows([{ 'Outlet ID': 'OUT 001 !!/&' }]);
+    const result  = validateDeactivateUpload(rows, outlets);
+    expect(result.rows[0].status).toBe('OK');
+    expect(result.rows[0].errors).toHaveLength(0);
+    expect(result.summary.deactivates).toBe(1);
   });
 
   it('O51 — blank rows are silently skipped', () => {
@@ -534,16 +538,26 @@ describe('outlet deactivation upload validation', () => {
   });
 });
 
-// ─── O54: M2 fix — outlet addition rejects underscore ────────────────────────
+// ─── O54: outlet addition accepts any characters in the outlet ID ─────────────
 
-describe('outlet master — outlet ID underscore rejection (M2 fix)', () => {
-  it('O54 — outlet ID with underscore is rejected (docs: "alphanumeric and hyphens only")', () => {
+describe('outlet master — outlet ID accepts any characters (owner 2026-06-26)', () => {
+  it('O54 — outlet ID with underscores / slashes / spaces / special chars is accepted', () => {
     const result = validateOutletUpload(
-      [makeRow({ outletId: 'OUT_2026_001' })],
+      [makeRow({ outletId: 'OUT_2026/001 &A.#' })],
       [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
-    expect(result.rows[0].status).toBe('ERROR');
-    expect(result.rows[0].errors.some(e => /alphanumeric/i.test(e))).toBe(true);
+    expect(result.rows[0].status).toBe('OK');
+    expect(result.rows[0].errors.some(e => /alphanumeric|invalid character/i.test(e))).toBe(false);
+  });
+
+  it('O54b — a duplicate special-char outlet ID within the file is still rejected', () => {
+    const result = validateOutletUpload(
+      [makeRow({ outletId: 'OUT/01 &' }), makeRow({ rowNum: 3, outletId: 'OUT/01 &' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+    );
+    expect(result.rows[0].status).toBe('OK');
+    expect(result.rows[1].status).toBe('ERROR');
+    expect(result.rows[1].errors.some(e => /duplicate/i.test(e))).toBe(true);
   });
 });
 
