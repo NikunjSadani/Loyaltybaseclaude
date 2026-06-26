@@ -308,6 +308,12 @@ describe('AdminOutletsService', () => {
       expect(mockPrisma.outlet.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: { in: ['o1'] } }, data: expect.objectContaining({ isActive: true }) }),
       );
+      // Re-opening for enrollment also clears the not-interested intent.
+      expect(mockPrisma.outlet.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ kycIntent: null, kycIntentBy: null, kycIntentAt: null }),
+        }),
+      );
     });
 
     it('bulk-delete matches an ownerless (partnerId null) outlet via outlet.clientId and writes an audit log', async () => {

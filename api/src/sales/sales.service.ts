@@ -1051,7 +1051,9 @@ export class SalesService {
             type: outlet.outletType.code,
             programName: outlet.programName ?? '',
             programCategory: outlet.programCategory ?? '',
-            kycStatus: latestKyc?.status ?? 'NOT_STARTED',
+            kycStatus: outlet.kycIntent === 'NOT_INTERESTED'
+              ? 'NOT_INTERESTED'
+              : (latestKyc?.status ?? 'NOT_STARTED'),
             kycSubmittedAt: latestKyc?.createdAt?.toISOString().split('T')[0],
             kycRejectionReason: latestKyc?.rejectionReason ?? null,
             reKycFlags: outlet.reKycFlags ?? null,

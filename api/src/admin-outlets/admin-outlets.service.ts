@@ -401,7 +401,16 @@ export class AdminOutletsService {
           where: { clientId_outletCode: { clientId, outletCode } },
           create: buildOutletCreate(clientId, outletCode, data),
           update: reactivate
-            ? { ...buildOutletUpdate(data), isActive: true, reactivatedAt: now, deactivatedAt: null }
+            ? {
+                ...buildOutletUpdate(data),
+                isActive: true,
+                reactivatedAt: now,
+                deactivatedAt: null,
+                // Re-opening an outlet for enrollment clears the not-interested intent.
+                kycIntent: null,
+                kycIntentBy: null,
+                kycIntentAt: null,
+              }
             : buildOutletUpdate(data),
         });
 
@@ -637,7 +646,16 @@ export class AdminOutletsService {
       where: { id: { in: inactiveIds } },
       // Clear deactivatedAt so a reactivated outlet no longer reads as "deactivated"
       // (e.g. in the Outlet Master export's Deactivated-At column).
-      data: { isActive: true, reactivatedAt: new Date(), deactivatedAt: null },
+      // Also clear the not-interested intent: re-opening an outlet for enrollment
+      // (admin-only) un-marks it as "Not Interested".
+      data: {
+        isActive: true,
+        reactivatedAt: new Date(),
+        deactivatedAt: null,
+        kycIntent: null,
+        kycIntentBy: null,
+        kycIntentAt: null,
+      },
     });
 
     const notFound = outletCodes.filter((c) => !outlets.some((o) => o.outletCode === c));

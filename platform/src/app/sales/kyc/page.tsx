@@ -32,6 +32,9 @@ interface KYCEntry {
   /** True for an assigned outlet that has NOT been enrolled yet (no submission) —
    *  synthesised from /api/sales/outlets so the rep's to-do outlets appear here. */
   isNotStarted?: boolean;
+  /** True for an assigned outlet marked NOT_INTERESTED by a sales rep — shown
+   *  distinctly and NON-actionable (only an admin can re-open it for enrollment). */
+  isNotInterested?: boolean;
   programName?: string;
   programCategory?: string;
   outletType?: string;
@@ -82,6 +85,7 @@ const STATUS_FILTERS: { key: FilterKey; label: string }[] = [
   { key: KYCStatus.REJECTED,     label: 'Rejected'          },
   { key: KYCStatus.RESUBMISSION_REQUIRED, label: 'Re-upload'       },
   { key: KYCStatus.RE_KYC_REQUIRED,       label: 'Re-KYC Required' },
+  { key: KYCStatus.NOT_INTERESTED,        label: 'Not Interested'  },
 ];
 
 const kycBadge: Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 'info' | 'default'; label: string }> = {
@@ -219,17 +223,22 @@ function KYCListContent() {
 
     // The rep's assigned outlets that have NOT been enrolled yet (NOT_STARTED) have
     // no submission, so they never appear in /api/kyc. Pull them from the roster and
-    // surface them as actionable "Pending KYC" entries that link to enrollment —
-    // only for the field roles who enroll (XSR / SO).
+    // surface them here. Fetched for ALL sales roles (rep + downline) so that:
+    //  - NOT_STARTED → actionable "Pending KYC" entries that link to enrollment, but
+    //    ONLY for the field roles who enroll (XSR / SO);
+    //  - NOT_INTERESTED → shown DISTINCTLY and NON-actionable for ALL roles (only an
+    //    admin can re-open such an outlet for enrollment).
     const canEnrollNow = role === 'XSR' || role === 'SO';
-    const outletsFetch: Promise<KYCEntry[]> = canEnrollNow
-      ? fetch('/api/sales/outlets', { headers: authHeaders })
-          .then((r) => r.json())
-          .then((body): KYCEntry[] => {
-            if (!body.success) return [];
-            return (body.data.outlets ?? [])
-              .filter((o: any) => o.kycStatus === 'NOT_STARTED')
-              .map((o: any): KYCEntry => ({
+    const outletsFetch: Promise<KYCEntry[]> = fetch('/api/sales/outlets', { headers: authHeaders })
+      .then((r) => r.json())
+      .then((body): KYCEntry[] => {
+        if (!body.success) return [];
+        const outlets = (body.data.outlets ?? []) as any[];
+
+        const notStarted: KYCEntry[] = canEnrollNow
+          ? outlets
+              .filter((o) => o.kycStatus === 'NOT_STARTED')
+              .map((o): KYCEntry => ({
                 id:          o.id,
                 partnerName: o.name,
                 ownerName:   '',
@@ -243,10 +252,30 @@ function KYCListContent() {
                 programName:     o.programName ?? '',
                 programCategory: o.programCategory ?? '',
                 outletType:      o.type ?? '',
-              }));
-          })
-          .catch(() => [] as KYCEntry[])
-      : Promise.resolve([] as KYCEntry[]);
+              }))
+          : [];
+
+        const notInterested: KYCEntry[] = outlets
+          .filter((o) => o.kycStatus === 'NOT_INTERESTED')
+          .map((o): KYCEntry => ({
+            id:          o.id,
+            partnerName: o.name,
+            ownerName:   '',
+            firmName:    o.name,
+            outletCode:  o.outletCode ?? '',
+            mobile:      o.mobile ?? '',
+            status:      KYCStatus.NOT_INTERESTED,
+            submittedAt: '',
+            updatedAt:   '',
+            isNotInterested: true,
+            programName:     o.programName ?? '',
+            programCategory: o.programCategory ?? '',
+            outletType:      o.type ?? '',
+          }));
+
+        return [...notStarted, ...notInterested];
+      })
+      .catch(() => [] as KYCEntry[]);
 
     const teamFetch = hasTeamView(role)
       ? fetch('/api/sales/team', { headers: authHeaders })
@@ -260,10 +289,11 @@ function KYCListContent() {
       : Promise.resolve();
 
     Promise.all([kycFetch, outletsFetch, teamFetch])
-      .then(([subs, notStarted]) => {
-        // Collapse repeat submissions for the same outlet to its latest (current) status;
-        // NOT_STARTED outlets have no submission → disjoint, appended as-is.
-        setEntries([...(notStarted ?? []), ...dedupeByOutlet(subs ?? [])]);
+      .then(([subs, synthesised]) => {
+        // Collapse repeat submissions for the same outlet to its latest (current) status.
+        // Synthesised NOT_STARTED / NOT_INTERESTED outlets have no submission → disjoint,
+        // appended as-is (NOT run through dedupeByOutlet, which is for submissions).
+        setEntries([...(synthesised ?? []), ...dedupeByOutlet(subs ?? [])]);
       })
       .finally(() => setLoading(false));
   }, [role]);
@@ -428,12 +458,9 @@ function KYCListContent() {
                 const borderClass = rowBorder(entry.status, approvalStatus);
                 // Un-enrolled outlets have no submission to open → start enrollment instead.
                 const href = entry.isNotStarted ? '/sales/kyc/new' : `/sales/kyc/${entry.id}`;
-                return (
-                  <Link
-                    key={entry.id}
-                    href={href}
-                    className={`flex items-center gap-3 px-4 py-3.5 hover:bg-gray-50 transition-colors ${borderClass}`}
-                  >
+
+                const rowBody = (
+                  <>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="text-sm font-semibold text-gray-900 truncate">{entry.firmName}</p>
@@ -461,12 +488,43 @@ function KYCListContent() {
                         <p className="text-xs text-red-600 mt-0.5 truncate">Reason: {entry.rejectionReason}</p>
                       )}
                       <p className="text-xs text-gray-400 mt-0.5">
-                        {entry.isNotStarted
-                          ? 'Tap to start enrollment'
-                          : `Updated ${relativeDate(entry.updatedAt)}`}
+                        {entry.isNotInterested
+                          ? 'Marked not interested — admin can re-open for enrollment'
+                          : entry.isNotStarted
+                            ? 'Tap to start enrollment'
+                            : `Updated ${relativeDate(entry.updatedAt)}`}
                       </p>
                     </div>
-                    <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />
+                    <ChevronRight
+                      className={cn(
+                        'h-4 w-4 shrink-0',
+                        entry.isNotInterested ? 'text-gray-200' : 'text-gray-300',
+                      )}
+                    />
+                  </>
+                );
+
+                // NOT_INTERESTED outlets are NON-actionable for sales — only an admin can
+                // re-open them — so render a plain (non-navigating) row, not a link.
+                if (entry.isNotInterested) {
+                  return (
+                    <div
+                      key={entry.id}
+                      data-testid="kyc-not-interested-row"
+                      className={`flex items-center gap-3 px-4 py-3.5 ${borderClass}`}
+                    >
+                      {rowBody}
+                    </div>
+                  );
+                }
+
+                return (
+                  <Link
+                    key={entry.id}
+                    href={href}
+                    className={`flex items-center gap-3 px-4 py-3.5 hover:bg-gray-50 transition-colors ${borderClass}`}
+                  >
+                    {rowBody}
                   </Link>
                 );
               })}

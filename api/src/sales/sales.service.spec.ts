@@ -382,12 +382,28 @@ describe('SalesService', () => {
             partner: null,
           },
         },
+        // outlet a rep marked NOT_INTERESTED (kycIntent set, no KYC submission) →
+        // kycStatus must derive NOT_INTERESTED (so the sales KYC list shows it distinctly).
+        {
+          outlet: {
+            id: 'o3',
+            outletCode: 'OC3',
+            name: 'Outlet 3',
+            phone: '666',
+            city: 'Pune',
+            district: 'West',
+            state: 'MH',
+            outletType: { code: 'RETAIL' },
+            kycIntent: 'NOT_INTERESTED',
+            partner: null,
+          },
+        },
       ]);
       const res = await service.getMyOutlets(caller);
       const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
       expect(where).toEqual({ salesUserId: { in: ['caller-su'] }, outletId: { not: null }, unassignedAt: null });
 
-      expect(res.outlets).toHaveLength(2);
+      expect(res.outlets).toHaveLength(3);
       expect(res.outlets[0]).toMatchObject({
         id: 'o1', partnerId: 'cp1', balance: 1500, kycId: 'k1', kycStatus: 'APPROVED', kycSubmittedAt: '2024-05-01',
       });
@@ -398,6 +414,10 @@ describe('SalesService', () => {
         type: 'RETAIL', kycStatus: 'NOT_STARTED', targetPct: 0,
       });
       expect(res.outlets[1].kycSubmittedAt).toBeUndefined();
+      // the not-interested outlet: kycIntent overrides the (absent) KYC status.
+      expect(res.outlets[2]).toMatchObject({
+        id: 'o3', outletCode: 'OC3', name: 'Outlet 3', kycStatus: 'NOT_INTERESTED',
+      });
     });
 
     it("re-KYC prefill (REJECTED): existingKyc carries address/pincode from the outlet columns AND the NEW accountHolderName from partner.bankAccountHolder", async () => {
