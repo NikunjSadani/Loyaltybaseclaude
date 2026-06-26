@@ -149,7 +149,13 @@ export default function KYCPage() {
     setExportLoading(true);
     setExportError(null);
     try {
-      const res = await fetch('/api/kyc/review-dump', {
+      // On the Rejected filter, export the "Rejected outlets" report (full KYC +
+      // which fields the admin rejected + per-field remark); otherwise the Lane A
+      // review-dump of pending submissions.
+      const rejected = statusFilter === 'REJECTED';
+      const url = rejected ? '/api/kyc/rejected-export' : '/api/kyc/review-dump';
+      const filePrefix = rejected ? 'kyc-rejected' : 'kyc-review-dump';
+      const res = await fetch(url, {
         headers: { ...authHeader() },
       });
       if (!res.ok) throw new Error(`Export failed (${res.status})`);
@@ -157,7 +163,7 @@ export default function KYCPage() {
       const href = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = href;
-      a.download = `kyc-review-dump-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      a.download = `${filePrefix}-${new Date().toISOString().slice(0, 10)}.xlsx`;
       a.click();
       URL.revokeObjectURL(href);
     } catch (err) {

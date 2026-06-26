@@ -212,3 +212,154 @@ export function generateKycReviewDumpExcel(entries: KycReviewDumpEntry[]): Buffe
   XLSX.utils.book_append_sheet(wb, ws, 'KYC Review Dump');
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
+
+// ─── Rejected-outlets export ────────────────────────────────────────────────────
+/**
+ * One row per REJECTED KycSubmission with the full KYC payload PLUS exactly which
+ * fields the Gifsy admin rejected and the per-field remark. Distinct from the Lane
+ * A review-dump above: this is a read-only operational report (no round-trip /
+ * re-import), so there are no APPROVE/REJECT verb cells and no doc hyperlinks — it
+ * carries human-readable verdicts (OK / REJECTED / PENDING) and remarks.
+ *
+ * Pure & deterministic (no DB / I/O); KycService.rejectedExport assembles the rows.
+ * Every string cell routes through the same AF-5 safe path (`aoaToSheetSafe` →
+ * `cellSafe`) — KYC values are user-supplied, so this export is a formula-injection
+ * sink and must be neutralised like every other workbook in this codebase.
+ */
+export interface RejectedKycFieldState {
+  decision: KycFieldDecision;
+  remark?: string;
+}
+
+export interface RejectedKycRow {
+  outletCode: string;
+  outletName: string;
+  ownerName: string;
+  mobile: string;
+  salesRep: string;
+  submittedDate: string;
+  rejectedDate: string;
+  rejectedBy: string;
+  rejectionReason: string;
+  slaAgeHrs?: number;
+  fields: Record<KycFieldKey, RejectedKycFieldState>;
+  gstNumber: string;
+  panNumber: string;
+  address: string;
+  city: string;
+  state: string;
+  pincode: string;
+  bankName?: string;
+  accountHolderName?: string;
+  accountNumber?: string;
+  ifscCode?: string;
+  upiId?: string;
+}
+
+/** Identity / outcome columns (left block). */
+export const REJECTED_KYC_IDENTITY_HEADERS = [
+  'Outlet ID',
+  'Outlet Name',
+  'Owner Name',
+  'Mobile',
+  'Sales Rep',
+  'Submitted Date',
+  'Rejected Date',
+  'Rejected By',
+  'Overall Rejection Reason',
+  'Rejected Fields',
+] as const;
+
+/** KYC value columns (right block). */
+export const REJECTED_KYC_VALUE_HEADERS = [
+  'GST Number',
+  'PAN',
+  'Address',
+  'City',
+  'State',
+  'Pincode',
+  'Bank Name',
+  'Account Holder',
+  'Account Number',
+  'IFSC',
+  'UPI ID',
+  'SLA Age (hrs)',
+] as const;
+
+/** Verdict column header for a field label. */
+export function rejectedFieldVerdictHeader(label: string): string {
+  return `${label} — Verdict`;
+}
+/** Remark column header for a field label. */
+export function rejectedFieldRemarkHeader(label: string): string {
+  return `${label} — Remark`;
+}
+
+/** Human-readable verdict for a field decision. */
+function verdictLabel(d: KycFieldDecision): string {
+  return d === 'APPROVED' ? 'OK' : d === 'REJECTED' ? 'REJECTED' : 'PENDING';
+}
+
+export function generateRejectedKycExcel(rows: RejectedKycRow[]): Buffer {
+  const perFieldHeaders: string[] = [];
+  for (const { label } of KYC_FIELD_ORDER) {
+    perFieldHeaders.push(rejectedFieldVerdictHeader(label));
+    perFieldHeaders.push(rejectedFieldRemarkHeader(label));
+  }
+
+  const headerRow: string[] = [
+    ...REJECTED_KYC_IDENTITY_HEADERS,
+    ...perFieldHeaders,
+    ...REJECTED_KYC_VALUE_HEADERS,
+  ];
+
+  const dataRows: unknown[][] = rows.map((r) => {
+    // Comma-joined human list of the fields the admin rejected.
+    const rejectedFields = KYC_FIELD_ORDER.filter(({ key }) => r.fields[key]?.decision === 'REJECTED')
+      .map(({ label }) => label)
+      .join(', ');
+
+    const row: unknown[] = [
+      r.outletCode,
+      r.outletName,
+      r.ownerName,
+      r.mobile,
+      r.salesRep,
+      r.submittedDate,
+      r.rejectedDate,
+      r.rejectedBy,
+      r.rejectionReason,
+      rejectedFields,
+    ];
+
+    for (const { key } of KYC_FIELD_ORDER) {
+      const fs = r.fields[key];
+      row.push(verdictLabel(fs?.decision ?? 'PENDING'));
+      row.push(fs?.remark ?? '');
+    }
+
+    row.push(
+      r.gstNumber,
+      r.panNumber,
+      r.address,
+      r.city,
+      r.state,
+      r.pincode,
+      r.bankName ?? '',
+      r.accountHolderName ?? '',
+      r.accountNumber ?? '',
+      r.ifscCode ?? '',
+      r.upiId ?? '',
+      r.slaAgeHrs != null ? String(r.slaAgeHrs) : '',
+    );
+
+    return row;
+  });
+
+  const ws = aoaToSheetSafe([headerRow, ...dataRows]);
+  ws['!cols'] = headerRow.map((label) => ({ wch: Math.max(label.length + 2, 14) }));
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Rejected Outlets');
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+}

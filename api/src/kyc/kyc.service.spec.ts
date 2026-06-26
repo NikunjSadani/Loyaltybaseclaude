@@ -45,6 +45,8 @@ const mockTx = {
 
 const mockPrisma = {
   channelPartner: { findFirst: jest.fn(), update: jest.fn() },
+  // rejectedExport resolves the rejecter's display name in one round-trip.
+  user: { findMany: jest.fn() },
   kycSubmission: {
     findFirst: jest.fn(),
     findMany: jest.fn(),
@@ -339,6 +341,116 @@ describe('KycService', () => {
       expect(where.status).toBe('PENDING_GIFSY');
       expect(where.user).toBeUndefined(); // GIFSY is cross-tenant (#38) — no caller-tenant filter
       expect(mockStorage.getSignedUrl).toHaveBeenCalledWith('key');
+    });
+  });
+
+  describe('rejectedExport (Rejected outlets export)', () => {
+    const rejectedSub = () => ({
+      id: 'KYC-R1',
+      createdAt: new Date('2026-06-20T00:00:00Z'),
+      submittedAt: new Date('2026-06-20T00:00:00Z'),
+      reviewedAt: new Date('2026-06-21T00:00:00Z'),
+      rejectionReason: 'GST mismatch',
+      user: { name: 'Rep A', phone: '9820100001' },
+      partner: {
+        businessName: 'Kumar Store',
+        ownerName: 'Suresh',
+        phone: '9820100001',
+        gstNumber: '27ABCDE1234F1ZK',
+        panNumber: 'ABCDE1234F',
+        bankName: 'HDFC',
+        bankAccountNumber: '50100',
+        bankAccountHolder: 'Suresh',
+        ifscCode: 'HDFC0001',
+        upiId: null,
+        paymentMode: 'bank',
+        outlets: [
+          {
+            outletCode: 'OUT-1',
+            name: 'Kumar Store',
+            addressLine1: '12 SV Road',
+            addressLine2: null,
+            city: 'Mumbai',
+            state: 'Maharashtra',
+            pincode: '400058',
+            programName: 'Gold',
+            outletType: { name: 'SSS' },
+          },
+        ],
+      },
+      verificationItems: [
+        { fieldKey: 'GST_DOCUMENT', decision: 'REJECTED', remark: 'illegible', source: 'PORTAL' },
+        { fieldKey: 'PAYMENT', decision: 'APPROVED', remark: null, source: 'PORTAL' },
+      ],
+      statusHistory: [{ createdAt: new Date('2026-06-21T00:00:00Z'), changedByUserId: 'admin1' }],
+    });
+
+    const parseSheet = (buf: Buffer) => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const XLSX = require('xlsx');
+      const wb = XLSX.read(buf, { type: 'buffer' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      return XLSX.utils.sheet_to_json(ws, { defval: '', raw: false, header: 1 }) as string[][];
+    };
+
+    it('rejects a non-Gifsy caller', async () => {
+      await expect(service.rejectedExport(so)).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('queries status:REJECTED cross-tenant (Gifsy) and returns an xlsx buffer', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([rejectedSub()]);
+      mockPrisma.user.findMany.mockResolvedValueOnce([{ id: 'admin1', name: 'Gifsy Admin' }]);
+
+      const buf = await service.rejectedExport(gifsy);
+
+      expect(Buffer.isBuffer(buf)).toBe(true);
+      expect(buf.length).toBeGreaterThan(0);
+      const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
+      expect(where.status).toBe('REJECTED');
+      expect(where.user).toBeUndefined(); // GIFSY is cross-tenant — no caller-tenant filter
+    });
+
+    it('scopes the rejected-date source to the REJECTED status-history transition', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
+      await service.rejectedExport(gifsy);
+      const args = mockPrisma.kycSubmission.findMany.mock.calls[0][0];
+      expect(args.include.statusHistory.where).toMatchObject({ toStatus: 'REJECTED' });
+      expect(args.include.statusHistory.orderBy).toMatchObject({ createdAt: 'desc' });
+      // No actor lookup when there are no submissions (avoids an empty IN query).
+      expect(mockPrisma.user.findMany).not.toHaveBeenCalled();
+    });
+
+    it('surfaces a REJECTED field in the per-field verdict + remark and maps identity/KYC values', async () => {
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([rejectedSub()]);
+      mockPrisma.user.findMany.mockResolvedValueOnce([{ id: 'admin1', name: 'Gifsy Admin' }]);
+
+      const rows = parseSheet(await service.rejectedExport(gifsy));
+      const header = rows[0];
+      const data = rows[1];
+
+      // Identity / outcome
+      expect(data[header.indexOf('Outlet ID')]).toBe('OUT-1');
+      expect(data[header.indexOf('Owner Name')]).toBe('Suresh');
+      expect(data[header.indexOf('Sales Rep')]).toBe('Rep A');
+      expect(data[header.indexOf('Rejected By')]).toBe('Gifsy Admin');
+      expect(data[header.indexOf('Overall Rejection Reason')]).toBe('GST mismatch');
+      // Rejected-fields summary lists the GST Document label.
+      expect(data[header.indexOf('Rejected Fields')]).toContain('GST Document');
+
+      // Per-field verdict + remark for the rejected field.
+      expect(data[header.indexOf('GST Document — Verdict')]).toBe('REJECTED');
+      expect(data[header.indexOf('GST Document — Remark')]).toBe('illegible');
+      // An approved field reads OK; an untouched one reads PENDING.
+      expect(data[header.indexOf('Payment (Bank/UPI) — Verdict')]).toBe('OK');
+      expect(data[header.indexOf('Owner Photo — Verdict')]).toBe('PENDING');
+
+      // KYC values
+      expect(data[header.indexOf('GST Number')]).toBe('27ABCDE1234F1ZK');
+      expect(data[header.indexOf('PAN')]).toBe('ABCDE1234F');
+      expect(data[header.indexOf('Address')]).toBe('12 SV Road');
+      expect(data[header.indexOf('IFSC')]).toBe('HDFC0001');
+      // SLA age = 24h (submitted → rejected, one day apart).
+      expect(data[header.indexOf('SLA Age (hrs)')]).toBe('24');
     });
   });
 

@@ -22,8 +22,10 @@ import { KYC_FIELD_KEYS, BridgeResult } from './kyc-verification.helper';
 import { evaluateSubmission } from './kyc-verification.helper';
 import {
   generateKycReviewDumpExcel,
+  generateRejectedKycExcel,
   KycReviewDumpEntry,
   KycReviewDumpFieldState,
+  RejectedKycRow,
 } from './kyc-review-dump';
 import {
   parseKycApprovalSheet,
@@ -2712,6 +2714,121 @@ export class KycService {
     }
 
     return generateKycReviewDumpExcel(entries);
+  }
+
+  // ─── GET /v1/kyc/rejected-export ─────────────────────────────────────────────
+  /**
+   * "Rejected outlets" export: one xlsx row per REJECTED submission, with the full
+   * KYC payload PLUS exactly which fields the Gifsy admin rejected and the per-field
+   * remark. Scoped EXACTLY like the on-screen list (`kycTenantFilter`) so the rows
+   * match what the admin sees on the Rejected filter (Gifsy = cross-tenant; a tenant
+   * admin = own tenant only). Pure layout in kyc-review-dump.ts; this assembles rows.
+   *
+   * Rejected-date + rejected-by come from the KycStatusHistory row whose
+   * toStatus = REJECTED (the most recent such transition); the actor name is resolved
+   * from changedByUserId. Overall reason = KycSubmission.rejectionReason.
+   */
+  async rejectedExport(user: JwtPayload): Promise<Buffer> {
+    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
+
+    const submissions = await this.prisma.kycSubmission.findMany({
+      where: { status: 'REJECTED', ...this.kycTenantFilter(user) },
+      include: {
+        user: { select: { name: true, phone: true } },
+        partner: {
+          select: {
+            businessName: true,
+            ownerName: true,
+            phone: true,
+            gstNumber: true,
+            panNumber: true,
+            bankName: true,
+            bankAccountNumber: true,
+            bankAccountHolder: true,
+            ifscCode: true,
+            upiId: true,
+            paymentMode: true,
+            outlets: {
+              where: { isPrimary: true, deletedAt: null },
+              take: 1,
+              select: {
+                outletCode: true,
+                name: true,
+                addressLine1: true,
+                addressLine2: true,
+                city: true,
+                state: true,
+                pincode: true,
+                programName: true,
+                outletType: { select: { name: true } },
+              },
+            },
+          },
+        },
+        verificationItems: { select: { fieldKey: true, decision: true, remark: true, source: true } },
+        // Rejected-date + actor: the (latest) transition INTO the REJECTED status.
+        statusHistory: {
+          where: { toStatus: 'REJECTED' },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { createdAt: true, changedByUserId: true },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    // Resolve the rejecter names in one round-trip (avoid an N+1 user lookup).
+    const actorIds = Array.from(
+      new Set(submissions.map((s) => s.statusHistory[0]?.changedByUserId).filter((v): v is string => !!v)),
+    );
+    const actors = actorIds.length
+      ? await this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, name: true } })
+      : [];
+    const actorName = new Map(actors.map((a) => [a.id, a.name]));
+
+    const rows: RejectedKycRow[] = submissions.map((s) => {
+      const p = s.partner;
+      const o = p?.outlets[0];
+      const hist = s.statusHistory[0];
+      const rejectedAt = hist?.createdAt ?? s.reviewedAt ?? null;
+      const submittedAt = s.submittedAt ?? s.createdAt;
+      // SLA age = submitted → rejected, in whole hours (omit when either is missing).
+      const slaAgeHrs =
+        submittedAt && rejectedAt
+          ? Math.max(0, Math.round((rejectedAt.getTime() - submittedAt.getTime()) / 3_600_000))
+          : undefined;
+      const fieldStates = this.dumpFieldStates(s.verificationItems);
+      const fields = {} as RejectedKycRow['fields'];
+      for (const k of KYC_FIELD_KEYS) {
+        fields[k] = { decision: fieldStates[k].decision, remark: fieldStates[k].remark };
+      }
+      return {
+        outletCode: o?.outletCode ?? '',
+        outletName: o?.name ?? p?.businessName ?? '',
+        ownerName: p?.ownerName ?? '',
+        mobile: p?.phone ?? s.user.phone ?? '',
+        salesRep: s.user.name ?? '',
+        submittedDate: submittedAt ? submittedAt.toISOString().slice(0, 10) : '',
+        rejectedDate: rejectedAt ? rejectedAt.toISOString().slice(0, 10) : '',
+        rejectedBy: (hist?.changedByUserId && actorName.get(hist.changedByUserId)) || '',
+        rejectionReason: s.rejectionReason ?? '',
+        slaAgeHrs,
+        fields,
+        gstNumber: p?.gstNumber ?? '',
+        panNumber: p?.panNumber ?? '',
+        address: [o?.addressLine1, o?.addressLine2].filter(Boolean).join(', '),
+        city: o?.city ?? '',
+        state: o?.state ?? '',
+        pincode: o?.pincode ?? '',
+        bankName: p?.bankName ?? undefined,
+        accountHolderName: p?.bankAccountHolder ?? undefined,
+        accountNumber: p?.bankAccountNumber ?? undefined,
+        ifscCode: p?.ifscCode ?? undefined,
+        upiId: p?.upiId ?? undefined,
+      };
+    });
+
+    return generateRejectedKycExcel(rows);
   }
 
   /** Build the 7-field state map, defaulting any field with no item to PENDING. */

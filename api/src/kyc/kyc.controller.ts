@@ -177,6 +177,24 @@ export class KycController {
    * apply=false → dry-run, 0 DB writes, returns { updates, errors, summary }.
    * apply=true  → per-submission $transaction commit, returns { committed, results, errors, summary }.
    */
+  /**
+   * GET /v1/kyc/rejected-export — "Rejected outlets" xlsx (Gifsy-only).
+   *
+   * One row per REJECTED submission with the full KYC payload + exactly which fields
+   * the admin rejected and the per-field remark. Same tenant scoping as the on-screen
+   * Rejected list. Placed BEFORE the :id route to avoid param shadowing.
+   */
+  @Get('rejected-export')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('kyc:read')
+  async rejectedExport(@CurrentUser() user: JwtPayload): Promise<StreamableFile> {
+    const buffer = await this.kyc.rejectedExport(user);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: 'attachment; filename="kyc-rejected.xlsx"',
+    });
+  }
+
   @Post('bulk-verify')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('kyc:gifsy_approve')
