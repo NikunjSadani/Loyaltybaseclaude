@@ -124,14 +124,22 @@ export class RewardsService {
         skip,
         take: limit,
         orderBy: { pointsCost: 'asc' },
+        include: { category: { select: { name: true } } },
       }),
       this.prisma.rewardCatalog.count({ where }),
     ]);
 
-    const enriched = items.map((item) => ({
-      ...item,
-      isAffordable: userBalance >= item.pointsCost,
-    }));
+    const enriched = items.map((item) => {
+      // Flatten the category relation to its label so the partner catalogue UI
+      // can display/route by category (the FE expects a flat string, not the
+      // nested relation the admin endpoint returns).
+      const { category, ...rest } = item;
+      return {
+        ...rest,
+        category: category?.name,
+        isAffordable: userBalance >= item.pointsCost,
+      };
+    });
 
     return {
       items: enriched,

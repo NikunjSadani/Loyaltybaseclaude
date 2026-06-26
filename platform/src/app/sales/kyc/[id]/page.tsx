@@ -464,6 +464,12 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           id:              s.id,
           outletId:        s.partner?.outlets?.[0]?.id ?? '',
           outletCode:      s.partner?.outlets?.[0]?.outletCode ?? '',
+          // outletType.code (SSS/WHOLESALER/SUB_STOCKIST) gates the "Redeem for Outlet"
+          // action when the tenant restricts redemption to wholesalers
+          // (settings.salesApp.redeemGiftWholesalerOnly). Read from the relation the
+          // detail endpoint now selects — without it the gate sees `undefined` and
+          // hides redeem for every outlet, even wholesalers.
+          outletType:      s.partner?.outlets?.[0]?.outletType?.code ?? undefined,
           partnerName:     s.user?.name                       ?? '',
           // OWNER/contact-person name — captured in the KYC form, validated by the
           // Gifsy reviewer against the submitted PAN/Aadhaar. Distinct from the rep
@@ -594,6 +600,20 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
     kyc.status === KYCStatus.RESUBMISSION_REQUIRED ||
     kyc.status === KYCStatus.RE_KYC_REQUIRED;
 
+  /* ── "Redeem for Outlet" gate ──────────────────────────────────────────────
+     Owner decision: the redeem-on-behalf action lives on the OUTLET DETAIL view
+     (this page, reached by tapping an outlet), surfaced prominently — NOT on the
+     outlet list and NOT as a bottom-nav tab.
+
+     showRedeem hides redeem only when the tenant restricts it to wholesalers
+     (settings.salesApp.redeemGiftWholesalerOnly === true) AND this outlet is not a
+     wholesaler. A normal redeemable outlet (wholesaler, OR any outlet when the
+     restriction is off) shows the button. outletType now comes from the API (the
+     detail endpoint selects outletType.code) so the gate no longer collapses to
+     "always hidden" from an undefined type. */
+  const showRedeem =
+    !(settings.salesApp?.redeemGiftWholesalerOnly && kyc.outletType !== 'WHOLESALER');
+
   return (
     <div className="space-y-4 fade-in">
       {/* Back + header */}
@@ -674,6 +694,19 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           <Clock className="h-4 w-4 text-blue-500 shrink-0 mt-0.5" />
           <p className="text-sm text-blue-700">Awaiting final validation by Gifsy. No action required from your side.</p>
         </div>
+      )}
+
+      {/* Redeem for Outlet — PRIMARY action, surfaced prominently on the outlet detail
+          view (owner decision: only after a rep navigates INTO an outlet). Gated by the
+          tenant's wholesaler-only redemption setting; the same gate also drives the
+          Quick-Actions entry below (kept in sync, no duplicate card). */}
+      {showRedeem && (
+        <Link href={`/sales/catalogue?outletId=${id}`} className="block" data-testid="redeem-for-outlet">
+          <Button variant="primary" className="w-full justify-center gap-2 py-3 text-sm">
+            <Gift className="h-4 w-4" />
+            Redeem for Outlet
+          </Button>
+        </Link>
       )}
 
       {/* ─── Partner + Document + Bank details (collapsible for all, default closed) ── */}
@@ -880,7 +913,8 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
         <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide px-0.5">Quick Actions</p>
         {(() => {
           const ledgerLabel = settings.salesApp?.ledgerLabel ?? 'View Points Ledger';
-          const showRedeem  = !(settings.salesApp?.redeemGiftWholesalerOnly && kyc.outletType !== 'WHOLESALER');
+          // "Redeem for Outlet" is surfaced as the PROMINENT primary button above
+          // (same showRedeem gate), so it is intentionally NOT repeated in this list.
           // Visibility-photo action precedence: the authoritative DB flag (visibilityCaptureMode)
           // wins. The backend REJECTS photo upload unless the tenant is in PHOTO_APPROVAL mode, so
           // showing the action when the display-only visibilityPhotoEnabled disagrees would lead the
@@ -889,7 +923,6 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           const showVis     = settings.visibilityEnabled === true && captureMode === 'PHOTO_APPROVAL' && settings.visibilityPhotoEnabled === true;
           const actions = [
             { href: `/sales/kyc/${id}/ledger`,         icon: <BookOpen       className="h-4 w-4 text-blue-500" />,    bg: 'bg-blue-50',       title: ledgerLabel,              sub: 'Transaction history & balance',             show: true      },
-            { href: `/sales/catalogue?outletId=${id}`, icon: <Gift           className="h-4 w-4 text-purple-500" />,  bg: 'bg-purple-50',     title: 'Redeem Gift for Outlet', sub: 'Browse catalogue & redeem with OTP',        show: showRedeem },
             { href: '/sales/visibility',               icon: <Camera         className="h-4 w-4 text-[#16a34a]" />,   bg: 'bg-[#16a34a]/10',  title: 'Submit Visibility Photo',sub: 'Earn points for branding photos',           show: showVis    },
             { href: '/sales/support',                  icon: <HeadphonesIcon className="h-4 w-4 text-rose-500" />,    bg: 'bg-rose-50',       title: 'Raise Support Ticket',  sub: 'Report an issue on behalf of this outlet',  show: true      },
           ];

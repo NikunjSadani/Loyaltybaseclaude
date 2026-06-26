@@ -209,6 +209,101 @@ describe('RR — Rewards live catalogue + redeem flow', () => {
 });
 
 /* ════════════════════════════════════════════════════════════════════════════
+   TAB — Catalogue tab bucketing keys off redemptionMode, not the category label
+   ════════════════════════════════════════════════════════════════════════════
+
+   Regression for the "Amazon Voucher disappears" bug: a GIFT_CARD reward whose
+   tenant-authored category is "Gift Vouchers" (NOT the literal "Vouchers") must
+   still land in the Vouchers tab; a PHYSICAL_GIFT must land in Physical and must
+   NOT leak into Vouchers. Cash (BANK_TRANSFER) is covered by its own tab below.   */
+
+// A GIFT_CARD voucher whose category label is "Gift Vouchers" — the exact shape
+// the admin configures and that used to fall through every tab (category !== 'Vouchers').
+const GIFT_CARD_LABELLED = {
+  id: 'gc1',
+  name: 'Amazon Voucher',
+  brand: 'Amazon',
+  category: 'Gift Vouchers',
+  pointsCost: 1000,
+  redemptionMode: 'GIFT_CARD',
+  voucherType: 'FIXED',
+  fixedAmount: 1000,
+  available: true,
+  isAffordable: true,
+};
+
+// A physical gift — must show under Physical, never under Vouchers.
+const PHYSICAL_ITEM = {
+  id: 'ph1',
+  name: 'Bluetooth Headphones',
+  brand: 'Sony',
+  category: 'Electronics',
+  pointsCost: 2000,
+  redemptionMode: 'PHYSICAL_GIFT',
+  available: true,
+  isAffordable: true,
+};
+
+function catalogWith(items: unknown[]) {
+  return {
+    ok: true,
+    json: () => Promise.resolve({
+      success: true,
+      data: { items, userBalance: 50_000, pagination: { page: 1, limit: 20, total: items.length, pages: 1 } },
+    }),
+  };
+}
+
+describe('TAB — catalogue tab bucketing by redemptionMode', () => {
+  it('TAB1: a GIFT_CARD with category "Gift Vouchers" appears in the Vouchers tab', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWith([GIFT_CARD_LABELLED, PHYSICAL_ITEM]));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
+    expect(await screen.findByText('Amazon Voucher')).toBeInTheDocument();
+    // The physical item must NOT leak into the Vouchers tab.
+    expect(screen.queryByText('Bluetooth Headphones')).not.toBeInTheDocument();
+  });
+
+  it('TAB2: a PHYSICAL_GIFT appears in the Physical tab (and the voucher does not)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogWith([GIFT_CARD_LABELLED, PHYSICAL_ITEM]));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    render(<RewardsPage />);
+    // Physical is the default tab — the physical item renders without switching tabs.
+    expect(await screen.findByText('Bluetooth Headphones')).toBeInTheDocument();
+    expect(screen.queryByText('Amazon Voucher')).not.toBeInTheDocument();
+  });
+
+  it('TAB3: a 0-points partner still SEES the voucher card (affordability disables, not hides)', async () => {
+    const unaffordable = { ...GIFT_CARD_LABELLED, isAffordable: false };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/catalog')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            success: true,
+            data: { items: [unaffordable], userBalance: 0, pagination: { page: 1, limit: 20, total: 1, pages: 1 } },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    render(<RewardsPage />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: /vouchers/i }));
+    // Card is still visible despite a 0-point balance.
+    expect(await screen.findByText('Amazon Voucher')).toBeInTheDocument();
+  });
+});
+
+/* ════════════════════════════════════════════════════════════════════════════
    CASH — Cash Payout tab: real beneficiary + free-amount, no fabricated data
    ════════════════════════════════════════════════════════════════════════════ */
 

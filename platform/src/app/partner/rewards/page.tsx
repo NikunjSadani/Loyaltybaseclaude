@@ -113,7 +113,10 @@ function hashIndex(id: string, len: number): number {
 /** Infer a voucher type from the API item when not explicitly provided. */
 function inferVoucherType(item: ApiCatalogItem): VoucherDenominationType | undefined {
   if (item.voucherType) return item.voucherType;
-  if (item.category !== 'Vouchers') return undefined;
+  // Vouchers are GIFT_CARD-mode items (the admin's VOUCHER_LIKE definition).
+  // Fall back to the legacy category label for older rows that predate the mode.
+  const isVoucher = item.redemptionMode === 'GIFT_CARD' || item.category === 'Vouchers';
+  if (!isVoucher) return undefined;
   // FREE_AMOUNT = pointsCost 0 with a min/max bound; otherwise FIXED.
   if (item.pointsCost === 0 && (item.minRedemptionPoints != null || item.maxRedemptionPoints != null)) {
     return 'FREE_AMOUNT';
@@ -910,8 +913,13 @@ export default function RewardsPage() {
     );
   }
 
-  const physicalItems = useMemo(() => gifts.filter(g => g.category !== 'Vouchers'), [gifts]);
-  const voucherItems  = useMemo(() => gifts.filter(g => g.category === 'Vouchers'), [gifts]);
+  // Bucket by redemption mode to match the admin's definition (admin/gifts:
+  // VOUCHER_LIKE = {'GIFT_CARD'}). The reward's category label ("Gift Vouchers"
+  // etc.) is tenant-authored and unreliable for tab routing; redemptionMode is
+  // the canonical signal. Cash modes (UPI / BANK_TRANSFER) belong to the Bank
+  // Transfer tab (see cashItem) and must NOT leak into the Physical grid.
+  const voucherItems  = useMemo(() => gifts.filter(g => g.redemptionMode === 'GIFT_CARD'), [gifts]);
+  const physicalItems = useMemo(() => gifts.filter(g => g.redemptionMode === 'PHYSICAL_GIFT'), [gifts]);
 
   // Resolve the cash payout catalog item deterministically: among the cash-mode
   // items (UPI / BANK_TRANSFER), prefer a FREE_AMOUNT one (pointsCost 0 with a

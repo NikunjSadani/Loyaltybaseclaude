@@ -144,6 +144,27 @@ describe('RewardsService', () => {
       expect(res.pagination).toEqual({ page: 1, limit: 20, total: 2, pages: 1 });
     });
 
+    it('includes the category relation and surfaces its name as a flat label', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 100 });
+      mockPrisma.rewardCatalog.findMany.mockResolvedValue([
+        { id: 'r1', pointsCost: 50, redemptionMode: 'GIFT_CARD', category: { name: 'Gift Vouchers' } },
+      ]);
+      mockPrisma.rewardCatalog.count.mockResolvedValue(1);
+
+      const res = await service.listCatalog(partner, {});
+
+      // The findMany must request the category relation so the FE can route tabs.
+      expect(mockPrisma.rewardCatalog.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          include: { category: { select: { name: true } } },
+        }),
+      );
+      // The nested relation is flattened to a plain string label.
+      expect(res.items[0].category).toBe('Gift Vouchers');
+      expect(res.items[0].redemptionMode).toBe('GIFT_CARD');
+    });
+
     it('defaults the balance to 0 when the caller has no partner/wallet', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       mockPrisma.rewardCatalog.findMany.mockResolvedValue([{ id: 'r1', pointsCost: 50 }]);

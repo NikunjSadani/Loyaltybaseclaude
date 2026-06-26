@@ -261,6 +261,18 @@ describe('KycService', () => {
         }),
       );
     });
+
+    it('normalises a blank gstNumber to undefined — no empty-string @@unique([clientId, gstNumber]) collision', async () => {
+      primeCreateMocks();
+      await service.create(so, {
+        ...baseDto,
+        gstNumber: '   ', // whitespace-only → must be treated as "no GST"
+        documents: [{ type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/uuid.pdf' }],
+      } as never);
+      // partnerDetails.gstNumber must be undefined (→ stored NULL), never '' (which
+      // would make a SECOND no-GST outlet collide on the unique index → P2002).
+      expect(mockTx.channelPartner.create.mock.calls[0][0].data.gstNumber).toBeUndefined();
+    });
   });
 
   describe('reviewDump (Lane A export)', () => {

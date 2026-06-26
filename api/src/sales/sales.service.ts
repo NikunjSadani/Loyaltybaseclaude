@@ -809,6 +809,7 @@ export class SalesService {
                 panNumber: true,
                 bankName: true,
                 bankAccountNumber: true,
+                bankAccountHolder: true,
                 ifscCode: true,
                 upiId: true,
                 // Sales-assisted redeem (B1) drives off the outlet's partnerId +
@@ -845,6 +846,11 @@ export class SalesService {
           const RE_ENTRY = ['REJECTED', 'RESUBMISSION_REQUIRED', 'RE_KYC_REQUIRED'];
           const isReEntry = !!latestKyc && RE_ENTRY.includes(latestKyc.status);
           // Address lives on the Outlet (ChannelPartner has no address columns).
+          // These are the canonical "last submitted" values: on every KYC submission
+          // kyc.service writes dto.address→outlet.addressLine1, dto.pincode→outlet.pincode
+          // and dto.accountHolderName→partner.bankAccountHolder. KycSubmission stores no
+          // address/bank snapshot, so the Outlet/ChannelPartner columns ARE the snapshot.
+          // (Re-KYC bug: accountHolderName was dropped — never selected, never set here.)
           const fullAddress = [outlet.addressLine1, outlet.addressLine2]
             .filter(Boolean)
             .join(', ');
@@ -861,6 +867,7 @@ export class SalesService {
                   pincode: outlet.pincode ?? '',
                   bankName: partner.bankName ?? '',
                   accountNumber: partner.bankAccountNumber ?? '',
+                  accountHolderName: partner.bankAccountHolder ?? '',
                   ifscCode: partner.ifscCode ?? '',
                   upiId: partner.upiId ?? '',
                 }

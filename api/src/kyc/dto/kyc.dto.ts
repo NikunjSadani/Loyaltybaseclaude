@@ -94,8 +94,18 @@ export class CreateKycDto {
   @IsString()
   partnerClass?: string = 'SSS';
 
+  // GSTIN format: 2-digit state code + 10-char PAN + entity digit + 'Z' + check char.
+  // Aligns with invoice.helpers.ts (state code = first 2 digits, 15-char GSTIN).
+  // The field stays optional (many outlets have no GST). @IsOptional() skips the
+  // remaining validators for undefined/null; @ValidateIf additionally treats an
+  // empty/whitespace-only string as "no GST" so a blank value does not 400.
+  // @Matches therefore runs ONLY for a non-empty provided value.
   @IsOptional()
+  @ValidateIf((o: CreateKycDto) => o.gstNumber != null && o.gstNumber.trim() !== '')
   @IsString()
+  @Matches(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, {
+    message: 'gstNumber must be a valid 15-character GSTIN',
+  })
   gstNumber?: string;
 
   @IsOptional()

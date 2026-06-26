@@ -262,6 +262,116 @@ describe('SalesService', () => {
       });
       expect(res.outlets[1].kycSubmittedAt).toBeUndefined();
     });
+
+    it("re-KYC prefill (REJECTED): existingKyc carries address/pincode from the outlet columns AND the NEW accountHolderName from partner.bankAccountHolder", async () => {
+      // Re-KYC bug fix (Task E): Street Address, Pincode and Account Holder Name must
+      // prefill from the last-submitted values. KycSubmission stores no address/bank
+      // snapshot, so the canonical source IS the Outlet columns (addressLine1/pincode,
+      // written on each submit) + ChannelPartner.bankAccountHolder. accountHolderName was
+      // previously DROPPED (never selected, never set) → it came back blank.
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        {
+          outlet: {
+            id: 'o1',
+            outletCode: 'OC1',
+            name: 'Outlet 1',
+            phone: '999',
+            addressLine1: '12 MG Road',
+            addressLine2: 'Near Park',
+            city: 'Delhi',
+            district: 'Central',
+            state: 'DL',
+            pincode: '110001',
+            outletType: { code: 'RETAIL' },
+            partner: {
+              id: 'cp1',
+              phone: '888',
+              businessName: 'Acme Stores',
+              gstNumber: '07AAACT9811F1Z9',
+              panNumber: 'AAACT9811F',
+              bankName: 'HDFC',
+              bankAccountNumber: '123456789',
+              bankAccountHolder: 'Ramesh Kumar',
+              ifscCode: 'HDFC0000001',
+              upiId: 'ramesh@upi',
+              wallets: [{ redeemablePoints: 0 }],
+              // Latest submission is REJECTED → re-entry → existingKyc is built.
+              kycSubmissions: [
+                {
+                  id: 'k1',
+                  status: 'REJECTED',
+                  createdAt: new Date('2024-06-01T00:00:00.000Z'),
+                  rejectionReason: 'Bank proof unclear',
+                },
+              ],
+            },
+          },
+        },
+      ]);
+
+      const res = await service.getMyOutlets(caller);
+
+      // The partner select must now include bankAccountHolder (fallback source).
+      const include = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].include;
+      expect(include.outlet.include.partner.select.bankAccountHolder).toBe(true);
+
+      const existingKyc = res.outlets[0].existingKyc!;
+      expect(existingKyc).not.toBeNull();
+      // address/pincode prefill from the outlet columns (last-submitted snapshot).
+      expect(existingKyc.address).toBe('12 MG Road, Near Park');
+      expect(existingKyc.pincode).toBe('110001');
+      // NEW key — account holder name now prefills from partner.bankAccountHolder.
+      expect(existingKyc.accountHolderName).toBe('Ramesh Kumar');
+      // city/state behaviour unchanged.
+      expect(existingKyc.city).toBe('Delhi');
+      expect(existingKyc.state).toBe('DL');
+    });
+
+    it("re-KYC prefill: accountHolderName defaults to '' (never undefined) when partner.bankAccountHolder is null", async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        {
+          outlet: {
+            id: 'o1',
+            outletCode: 'OC1',
+            name: 'Outlet 1',
+            phone: '999',
+            addressLine1: null,
+            addressLine2: null,
+            city: 'Delhi',
+            district: 'Central',
+            state: 'DL',
+            pincode: null,
+            outletType: { code: 'RETAIL' },
+            partner: {
+              id: 'cp1',
+              phone: '888',
+              businessName: 'Acme Stores',
+              gstNumber: null,
+              panNumber: null,
+              bankName: null,
+              bankAccountNumber: null,
+              bankAccountHolder: null,
+              ifscCode: null,
+              upiId: null,
+              wallets: [],
+              kycSubmissions: [
+                { id: 'k1', status: 'REJECTED', createdAt: new Date('2024-06-01T00:00:00.000Z'), rejectionReason: null },
+              ],
+            },
+          },
+        },
+      ]);
+
+      const res = await service.getMyOutlets(caller);
+      const existingKyc = res.outlets[0].existingKyc!;
+      expect(existingKyc.accountHolderName).toBe('');
+      expect(existingKyc.address).toBe('');
+      expect(existingKyc.pincode).toBe('');
+    });
   });
 
   // ─── getMe (real sales identity for the header employee ID + profile) ──────────

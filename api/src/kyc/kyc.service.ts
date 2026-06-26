@@ -807,7 +807,11 @@ export class KycService {
       businessName: dto.partnerName,
       ownerName: dto.partnerName,
       phone: dto.mobile,
-      gstNumber: dto.gstNumber ?? undefined,
+      // Normalise a blank/whitespace GST to undefined → stored as NULL, never ''.
+      // The column is `@@unique([clientId, gstNumber])`; an empty string is a real
+      // value that collides, so a SECOND outlet with no GST would hit P2002. NULLs
+      // do not collide. (undefined also avoids clobbering an existing GST on update.)
+      gstNumber: dto.gstNumber?.trim() || undefined,
       panNumber: dto.panNumber ?? undefined,
       bankName: dto.bankName ?? undefined,
       bankAccountNumber: dto.accountNumber ?? undefined,
@@ -1087,6 +1091,11 @@ export class KycService {
           // Address lives on the Outlet (captured at KYC) — surfaced so the reviewer
           // can see the submitted address (ChannelPartner has no address columns).
           addressLine1: true, addressLine2: true, city: true, state: true, pincode: true,
+          // outletType.code (SSS/WHOLESALER/SUB_STOCKIST) drives the sales-app
+          // "Redeem for Outlet" gate (redeemGiftWholesalerOnly). Without it the FE
+          // sees outletType=undefined and the wholesaler-only gate hides redeem for
+          // EVERY outlet — including genuine wholesalers.
+          outletType: { select: { code: true } },
         } } } },
         // 3.4d: the detail-page field panel seeds its current state from these.
         verificationItems: {

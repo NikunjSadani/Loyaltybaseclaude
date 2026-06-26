@@ -9,6 +9,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
+import { SearchableSelect } from '@/components/ui/searchable-select';
+import { INDIAN_STATES } from '@/lib/indian-states';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 
@@ -294,12 +296,18 @@ export function KYCForm({ initialData, onSuccess, redirectOnSuccess = '/sales/ky
                 onChange={(e) => update('city', e.target.value)}
                 placeholder="Mumbai"
               />
-              <Input
-                label="State *"
-                value={data.state}
-                onChange={(e) => update('state', e.target.value)}
-                placeholder="Maharashtra"
-              />
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-gray-700">State *</label>
+                <SearchableSelect
+                  options={INDIAN_STATES}
+                  value={data.state}
+                  onChange={(v) => update('state', v)}
+                  placeholder="Maharashtra"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-0 focus:border-[var(--brand-primary)] focus:ring-[var(--brand-primary)]/20 transition-colors"
+                  testIdPrefix="state-select"
+                  aria-label="State"
+                />
+              </div>
             </div>
             <Input
               label="PIN Code *"

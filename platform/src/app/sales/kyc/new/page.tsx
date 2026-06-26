@@ -13,7 +13,10 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { BankOrUpiSection, type PaymentMode } from '@/components/bank-or-upi-section';
+import { SearchableSelect } from '@/components/ui/searchable-select';
 import { isValidUpiId } from '@/lib/upi-utils';
+import { INDIAN_STATES } from '@/lib/indian-states';
+import { isValidGstin, panFromGstin, GSTIN_LENGTH } from '@/lib/gstin';
 import type { GeoCapture } from '@/types';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -43,7 +46,7 @@ interface AssignedOutlet {
   existingKyc?:  {
     partnerName: string; mobile: string; gstNumber: string; panNumber: string;
     address: string; city: string; state: string; pincode: string;
-    bankName: string; accountNumber: string; ifscCode: string; upiId: string;
+    bankName: string; accountHolderName: string; accountNumber: string; ifscCode: string; upiId: string;
   };
   reKycRemarks?: string;
 }
@@ -381,6 +384,7 @@ export default function NewKYCPage() {
       state:         k.state,
       pincode:       k.pincode,
       bankName:      k.bankName,
+      accountHolderName: k.accountHolderName,
       accountNumber: k.accountNumber,
       ifscCode:      k.ifscCode,
       upiId:         k.upiId,
@@ -577,8 +581,10 @@ export default function NewKYCPage() {
       setForm((f) => ({ ...f, [key]: e.target.value }));
 
   const handleGSTChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const gst = e.target.value.toUpperCase().slice(0, 12);
-    setForm((f) => ({ ...f, gstNumber: gst, panNumber: gst.length === 12 ? gst.substring(2, 12) : f.panNumber }));
+    // A real GSTIN is 15 chars; the embedded PAN is chars [2..11], available once
+    // 12+ chars are entered. Below 12 we leave the existing PAN untouched.
+    const gst = e.target.value.toUpperCase().slice(0, GSTIN_LENGTH);
+    setForm((f) => ({ ...f, gstNumber: gst, panNumber: gst.length >= 12 ? panFromGstin(gst) : f.panNumber }));
   };
 
   /** Auto-run conflict check when 10 digits entered. No OTP here. */
@@ -1776,12 +1782,32 @@ export default function NewKYCPage() {
               )}
             </div>
 
-            {/* GST */}
+            {/* GST (optional — blank never errors; a non-empty value is validated against the 15-char GSTIN format) */}
             <div>
               <label className={labelCls}>GST Number<FlagBadge field="gstNumber" /></label>
-              <input className={`${inputCls} ${flagCls('gstNumber')}`} placeholder="27AAPFU0939F" maxLength={12} value={form.gstNumber} onChange={handleGSTChange} />
-              {form.gstNumber.length > 0 && form.gstNumber.length < 12 && (
-                <p className="text-[11px] text-amber-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> {12 - form.gstNumber.length} more characters needed</p>
+              <input
+                className={`${inputCls} ${flagCls('gstNumber')} ${
+                  form.gstNumber.length === 0
+                    ? ''
+                    : isValidGstin(form.gstNumber)
+                      ? 'border-emerald-300 bg-emerald-50/40 focus:border-emerald-400 focus:ring-emerald-200/40'
+                      : form.gstNumber.length === GSTIN_LENGTH
+                        ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-200/40'
+                        : ''
+                }`}
+                placeholder="27AAPFU0939F1Z5"
+                maxLength={GSTIN_LENGTH}
+                value={form.gstNumber}
+                onChange={handleGSTChange}
+              />
+              {form.gstNumber.length > 0 && form.gstNumber.length < GSTIN_LENGTH && (
+                <p className="text-[11px] text-amber-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> {GSTIN_LENGTH - form.gstNumber.length} more characters needed</p>
+              )}
+              {form.gstNumber.length === GSTIN_LENGTH && !isValidGstin(form.gstNumber) && (
+                <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Invalid GST number format</p>
+              )}
+              {isValidGstin(form.gstNumber) && (
+                <p className="text-[11px] text-emerald-600 mt-1 flex items-center gap-1"><Check className="h-3 w-3" /> Valid GST number</p>
               )}
             </div>
 
@@ -1789,11 +1815,11 @@ export default function NewKYCPage() {
             <div>
               <label className={labelCls}>
                 PAN Number
-                {form.gstNumber.length === 12 && <span className="ml-1.5 text-[11px] text-emerald-600 font-normal">● Auto-filled from GST</span>}
+                {form.gstNumber.length >= 12 && <span className="ml-1.5 text-[11px] text-emerald-600 font-normal">● Auto-filled from GST</span>}
                 <FlagBadge field="panNumber" />
               </label>
-              <input className={`${inputCls} ${form.gstNumber.length === 12 ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : ''} ${flagCls('panNumber')}`}
-                placeholder="AAPFU0939F" value={form.panNumber} onChange={set('panNumber')} readOnly={form.gstNumber.length === 12} />
+              <input className={`${inputCls} ${form.gstNumber.length >= 12 ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : ''} ${flagCls('panNumber')}`}
+                placeholder="AAPFU0939F" value={form.panNumber} onChange={set('panNumber')} readOnly={form.gstNumber.length >= 12} />
             </div>
 
             {/* KYC Documents */}
@@ -1868,7 +1894,15 @@ export default function NewKYCPage() {
             </div>
             <div>
               <label className={labelCls}>State *<FlagBadge field="state" /></label>
-              <input className={`${inputCls} ${flagCls('state')}`} placeholder="Maharashtra" value={form.state} onChange={set('state')} />
+              <SearchableSelect
+                options={INDIAN_STATES}
+                value={form.state}
+                onChange={(v) => setForm((f) => ({ ...f, state: v }))}
+                placeholder="Maharashtra"
+                className={`${inputCls} ${flagCls('state')}`}
+                testIdPrefix="state-select"
+                aria-label="State"
+              />
             </div>
 
             <div className="pt-1 space-y-4">
