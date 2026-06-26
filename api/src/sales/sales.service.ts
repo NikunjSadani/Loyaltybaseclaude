@@ -54,7 +54,7 @@ export class SalesService {
         subordinates: {
           where: { isActive: true, deletedAt: null },
           include: {
-            user: { select: { name: true } },
+            user: { select: { name: true, phone: true } },
             hierarchyLevel: { select: { code: true, name: true, level: true } },
             _count: { select: { subordinates: true } },
           },
@@ -68,6 +68,7 @@ export class SalesService {
       id: sub.id,
       employeeCode: sub.employeeCode,
       name: sub.user.name,
+      mobile: sub.user.phone ?? '',
       role: sub.hierarchyLevel.code,
       roleLabel: sub.hierarchyLevel.name,
       territory: sub.region ?? sub.zone ?? '',

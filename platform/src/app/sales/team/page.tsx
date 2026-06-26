@@ -17,6 +17,8 @@ import { getGifsySettings } from '@/lib/gifsy-settings';
 
 interface MemberStats {
   id: string;
+  employeeCode: string;
+  mobile: string;
   name: string;
   role: SalesRole;
   territory: string;
@@ -35,6 +37,8 @@ interface MemberStats {
 function mapApiMember(m: any): MemberStats {
   return {
     id:                m.id,
+    employeeCode:      m.employeeCode || '',
+    mobile:            m.mobile || '',
     name:              m.name,
     role:              m.role as SalesRole,
     territory:         m.territory || '',
@@ -98,7 +102,11 @@ function MemberCard({ m, drill }: { m: MemberStats; drill: string }) {
             <p className="text-sm font-semibold text-gray-900 truncate">{m.name}</p>
             {m.targetPct > 0 && <TargetBadge pct={m.targetPct} />}
           </div>
-          <p className="text-xs text-gray-500 truncate">{m.territory || m.id}</p>
+          {/* Owner 2026-06-26: show employee ID + phone here, NOT the internal CUID.
+              Falls back to territory; never renders the raw id. */}
+          <p className="text-xs text-gray-500 truncate">
+            {[m.employeeCode, m.mobile].filter(Boolean).join(' · ') || m.territory}
+          </p>
 
           <div className="flex items-center gap-3 mt-1.5 flex-wrap">
             {m.outlets > 0 && (

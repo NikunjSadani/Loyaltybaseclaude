@@ -61,7 +61,7 @@ describe('SalesService', () => {
             region: 'NCR',
             zone: null,
             joinedAt: new Date('2024-01-01T00:00:00.000Z'),
-            user: { name: 'Sub One' },
+            user: { name: 'Sub One', phone: '9900000041' },
             hierarchyLevel: { code: 'SO', name: 'Sales Officer', level: 1 },
             _count: { subordinates: 3 },
           },
@@ -73,6 +73,7 @@ describe('SalesService', () => {
           id: 'sub1',
           employeeCode: 'E2',
           name: 'Sub One',
+          mobile: '9900000041', // employee phone — shown under the name in the team list
           role: 'SO',
           roleLabel: 'Sales Officer',
           territory: 'NCR',
