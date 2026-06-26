@@ -33,16 +33,23 @@ CONTEXT (so you can act the moment the owner asks — not a to-do list):
   sweep (`GO-LIVE-ISSUE-LIST.md` + the [[deoleo-go-live-bundle]] memory). Delegate big/parallel builds to sub-agents
   (note: background sub-agents are DENIED shell here — they WRITE code, YOU run the gates) then personally audit the
   security-critical part + run the gate.
-- **Latest gate (this session):** api jest ~1114 · FE vitest 1523 · tsc 0 both sides. **Last pushed HEAD: run
+- **Latest gate (this session):** api jest **1151** · FE vitest **1567** · tsc 0 both sides. **Last pushed HEAD: run
   `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA here — it goes stale).
   **Deploy ≠ pushed** — verify the serving Cloud Run image SHA ends in the pushed short-SHA before claiming verified
   (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project gifsy-platform --format='value(spec.template.spec.containers[0].image)'`).
-- **Done + pushed + runtime-verified on staging this session (detail = GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]] NEWEST-6/7):**
-  (1) per-tenant **VISIBILITY on/off** toggle — default OFF, **Deoleo launches OFF**; (2) **sales team leaderboard**
-  (`GET /v1/sales/leaderboard`, same-level peers by team subtree primary-KPI %; **territory = ZNM ancestor name**);
-  (3) **tenant-customizable Outlet program/category lists** (Gifsy Settings card); (4) **xlsx formula-injection
-  hardening — AF-5 FULLY DONE** (`cellSafe` at the `buildXlsx` boundary `1bc9315` + a full sweep `f0d48bc` of EVERY
-  remaining backend/FE export writer via shared `common/xlsx.ts` + `lib/xlsx-safe.ts`; independently audited SHIP).
+- **Done + pushed + (runtime-verified on staging where an API check was possible) this session — FULL detail in
+  GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]] NEWEST-6→10:** per-tenant **VISIBILITY on/off** (default OFF,
+  Deoleo OFF) · **sales LEADERBOARD** (`GET /v1/sales/leaderboard`, same-level peers, **ZNM-ancestor territory**) ·
+  **tenant program/category lists** (Gifsy Settings) · **AF-5 xlsx formula-injection hardening FULLY DONE** ·
+  **outlet-ID accepts ANY character** + outlet-file size parity (OID/OSZ) · then the **UAT batch**: partner **voucher
+  visibility** (catalog buckets by `redemptionMode`) · **XSR redeem-on-outlet-detail** nav (outletType-gated) ·
+  KYC **searchable State dropdown** + **GSTIN 15-char format** + **re-KYC prefill** (accountHolderName) · My-Team
+  **employee-ID + phone** (not CUID) · My-Team **aggregated tiles** (whole-subtree rollup; an audit caught an
+  `outlet.isActive` blocker) · **"KYC not found" scope-fix** (KYC-detail READ access aligned to the outlet's CURRENT
+  assignment — audited SHIP, read-only, fail-closed) + **Start-KYC guard** for empty-`kycId` cards · admin KYC queue:
+  **Pending count reconcile** + **SLA-Breached card removed** + **signature now visible** (white panel + opaque
+  capture) · new **rejected-outlets Excel export** (`GET /v1/kyc/rejected-export`, GIFSY-only, per-field rejection
+  verdict+remark + all fields, cellSafe'd — runtime-verified: 6 rejected rows, all columns).
 - **Open go-live threads (do NOT start without an owner ask):** **#76** load real Deoleo master data into empty prod
   (route through tenant provisioning so outlet-types/configs exist; **set Deoleo's REAL program/category values in the
   Gifsy Settings card before the outlet-master upload if they differ from the defaults** Trade Loyalty/Gold Programme ·
