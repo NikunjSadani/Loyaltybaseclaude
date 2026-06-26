@@ -241,6 +241,7 @@ function UploadSection({
   submitError,
   errorReportFilename,
   errorReport,
+  uploadDisabledReason,
 }: {
   testIdInput:       string;
   testIdPanel:       string;
@@ -254,6 +255,9 @@ function UploadSection({
   /** API error surfaced after a failed confirm (e.g. all-invalid 400). */
   submitError?:      string | null;
   errorReport?:      UploadErrorReport;
+  /** When set, the upload is blocked (tenant config still loading / failed /
+   *  no types enabled) and this reason is shown instead of the dropzone. */
+  uploadDisabledReason?: string | null;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileError, setFileError] = useState('');
@@ -288,7 +292,17 @@ function UploadSection({
         </div>
       )}
 
-      {uploadState === 'idle' && !fileError && (
+      {uploadState === 'idle' && uploadDisabledReason && (
+        <div
+          data-testid="upload-disabled"
+          className="w-full border-2 border-dashed border-gray-200 rounded-xl py-10 flex flex-col items-center gap-3 bg-gray-50/70"
+        >
+          <AlertCircle className="w-7 h-7 text-amber-400" />
+          <p className="text-sm font-medium text-gray-500 text-center px-6">{uploadDisabledReason}</p>
+        </div>
+      )}
+
+      {uploadState === 'idle' && !uploadDisabledReason && !fileError && (
         <button
           type="button"
           onClick={() => fileRef.current?.click()}
@@ -302,7 +316,7 @@ function UploadSection({
         </button>
       )}
 
-      {uploadState === 'idle' && fileError && (
+      {uploadState === 'idle' && !uploadDisabledReason && fileError && (
         <button
           type="button"
           onClick={() => { setFileError(''); fileRef.current?.click(); }}
@@ -375,6 +389,13 @@ export default function OutletsPage() {
   const [deactivateValidation, setDeactivateValidation] = useState<OutletDeactivateValidationResult | null>(null);
   const [deactivateUploadState, setDeactivateUploadState] = useState<UploadState>('idle');
 
+  // Tenant-config load status. The upload validators key on outletTypes (+ the
+  // employee hierarchy); validating BEFORE these load — or when the config fetch
+  // failed — produced false "no outlet types are enabled" rejections for every
+  // row. Track the load so the upload can be gated until the config is ready.
+  const [outletsLoadStatus, setOutletsLoadStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [employeesLoaded,   setEmployeesLoaded]   = useState(false);
+
   // Confirm-submit errors (surfaced when the backend rejects the confirm POST,
   // e.g. an all-invalid 400 — previously swallowed by a `.catch(()=>{})`).
   const [outletSubmitError,     setOutletSubmitError]     = useState<string | null>(null);
@@ -390,8 +411,15 @@ export default function OutletsPage() {
         if (Array.isArray(j.data.outlets)) setOutlets(j.data.outlets);
         // Enabled outlet types come from the backend (tenant's OutletTypeClientConfig).
         if (Array.isArray(j.data.outletTypes)) setOutletTypes(j.data.outletTypes);
+        setOutletsLoadStatus('ready');
+      } else {
+        // Keep a prior good load; otherwise surface the failure so the upload warns.
+        setOutletsLoadStatus((s) => (s === 'ready' ? s : 'error'));
       }
-    } catch { /* leave prior state on transient error */ }
+    } catch {
+      // Leave prior state on transient error, but mark error if we never loaded.
+      setOutletsLoadStatus((s) => (s === 'ready' ? s : 'error'));
+    }
   }, []);
 
   // ── API fetch on mount ──
@@ -402,8 +430,28 @@ export default function OutletsPage() {
     fetch('/api/admin/hierarchy-config', { headers })
       .then(r => r.json())
       .then(j => { if (j.success && Array.isArray(j.data.employees)) setEmployees(j.data.employees); })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setEmployeesLoaded(true));
   }, [loadOutlets]);
+
+  // Why the Outlet Master upload is blocked, if it is (null = ready). The validator
+  // checks each row's Outlet Type against the tenant's enabled types and the XSR ID
+  // against the employee hierarchy — so it must not run until BOTH have loaded. A
+  // genuinely-empty type list (config loaded, zero types) gets the correct message,
+  // not the old "ask Gifsy to enable" applied during a load race.
+  const outletUploadDisabledReason: string | null =
+    outletsLoadStatus === 'loading' ? 'Loading outlet configuration… please wait a moment.'
+    : outletsLoadStatus === 'error' ? 'Could not load this tenant’s outlet configuration. Refresh the page and try again.'
+    : !employeesLoaded ? 'Loading employee hierarchy… please wait a moment.'
+    : outletTypes.length === 0 ? 'No outlet types are enabled for this tenant. Confirm you are in the correct tenant workspace, or ask Gifsy to enable outlet types before adding outlets.'
+    : null;
+
+  // Re-KYC / Deactivate validate Outlet IDs against the loaded outlet list, so they
+  // only need the outlet fetch to have completed (no outlet-type/hierarchy check).
+  const outletListDisabledReason: string | null =
+    outletsLoadStatus === 'loading' ? 'Loading outlet list… please wait a moment.'
+    : outletsLoadStatus === 'error' ? 'Could not load the outlet list. Refresh the page and try again.'
+    : null;
 
   // ── Derived stats ──
   const stats = useMemo(() => ({
@@ -472,6 +520,13 @@ export default function OutletsPage() {
 
   // ── Handle outlet master upload (CREATE / UPDATE / REACTIVATE upsert) ──
   const handleOutletFile = useCallback(async (file: File) => {
+    // Backstop the dropzone guard: never validate Outlet Types against an unloaded
+    // or empty list (it falsely rejects every row). Surface the real reason instead.
+    if (outletUploadDisabledReason) {
+      setOutletValidation({ headerError: outletUploadDisabledReason, rows: [], hasErrors: true, canProceed: false, summary: { total: 0, creates: 0, updates: 0, reactivates: 0, errors: 0 } });
+      setOutletUploadState('parsed');
+      return;
+    }
     try {
       const rows     = await parseXlsx(file);
       const headers  = rows.length > 0 ? Object.keys(rows[0]) : [];
@@ -491,7 +546,7 @@ export default function OutletsPage() {
       setOutletValidation({ headerError: 'Failed to read file — please ensure it is a valid XLSX file', rows: [], hasErrors: true, canProceed: false, summary: { total: 0, creates: 0, updates: 0, reactivates: 0, errors: 0 } });
       setOutletUploadState('parsed');
     }
-  }, [outlets, outletTypes, employees, parseXlsx, validPrograms, validCategories]);
+  }, [outlets, outletTypes, employees, parseXlsx, validPrograms, validCategories, outletUploadDisabledReason]);
 
   // ── Handle re-KYC upload ──
   const handleReKYCFile = useCallback(async (file: File) => {
@@ -751,6 +806,7 @@ export default function OutletsPage() {
               testIdInput="outlet-upload-input"
               testIdPanel="outlet-validation-panel"
               errorReportFilename="outlet-upload-errors.xlsx"
+              uploadDisabledReason={outletUploadDisabledReason}
               errorReport={outletValidation ? buildOutletUploadErrorReport(outletValidation, outletParsedRows) : undefined}
               onFileChange={handleOutletFile}
               validationResult={outletValidation}
@@ -963,6 +1019,7 @@ export default function OutletsPage() {
               testIdInput="rekyc-upload-input"
               testIdPanel="rekyc-validation-panel"
               errorReportFilename="outlet-rekyc-errors.xlsx"
+              uploadDisabledReason={outletListDisabledReason}
               errorReport={rekycValidation ? buildReKYCErrorReport(rekycValidation, rekycParsedRows) : undefined}
               onFileChange={handleReKYCFile}
               validationResult={rekycValidation}
@@ -1069,6 +1126,7 @@ export default function OutletsPage() {
               testIdInput="deactivate-upload-input"
               testIdPanel="deactivate-validation-panel"
               errorReportFilename="outlet-deactivate-errors.xlsx"
+              uploadDisabledReason={outletListDisabledReason}
               errorReport={deactivateValidation ? buildDeactivateErrorReport(deactivateValidation) : undefined}
               onFileChange={handleDeactivateFile}
               validationResult={deactivateValidation}
