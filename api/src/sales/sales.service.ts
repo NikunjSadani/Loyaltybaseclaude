@@ -563,6 +563,29 @@ export class SalesService {
     });
 
     const edges = allUsers.map((u) => ({ id: u.id, reportingToId: u.reportingToId }));
+    const usersById = new Map(allUsers.map((u) => [u.id, u]));
+
+    // Territory proxy = the name of a candidate's nearest ancestor (inclusive) at the
+    // ZNM (Zonal Manager) level — owner decision: ZNM stands in for "zone" (SalesUser has
+    // no zone of its own). Walk up the reporting chain to the first ZNM-level node. Returns
+    // '' when there is no ZNM ancestor (e.g. an NSM above ZNM, or a tenant with no ZNM level);
+    // the caller then falls back to the rep's own region/zone. Iteration is capped at the
+    // user count to defend against a cyclic reporting chain.
+    const znmLevel = await this.prisma.salesHierarchyLevel.findFirst({
+      where: { clientId: user.clientId, code: 'ZNM' },
+      select: { id: true },
+    });
+    const znmTerritory = (startId: string): string => {
+      if (!znmLevel) return '';
+      let curId: string | null = startId;
+      for (let hops = 0; curId && hops <= allUsers.length; hops++) {
+        const u = usersById.get(curId);
+        if (!u) break;
+        if (u.hierarchyLevelId === znmLevel.id) return u.user.name ?? '';
+        curId = u.reportingToId;
+      }
+      return '';
+    };
 
     // Population: active, at the caller's level, narrowed by scope.
     const population = allUsers.filter((u) => {
@@ -658,7 +681,8 @@ export class SalesService {
       return {
         userId: c.userId,
         name: c.user.name,
-        territory: c.region ?? c.zone ?? '',
+        // ZNM ancestor name (owner's zone proxy); fall back to the rep's own region/zone.
+        territory: znmTerritory(c.id) || c.region || c.zone || '',
         achievementPct: curr.pct,
         activeOutlets: subtreeOutletCount(c.id),
         hadPrevTarget: prev.hasTarget,

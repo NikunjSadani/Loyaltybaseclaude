@@ -17,6 +17,7 @@ const mockPrisma = {
   outletTarget: { findFirst: jest.fn(), findMany: jest.fn() },
   outletSalesRecord: { findFirst: jest.fn(), findMany: jest.fn() },
   kpiDef: { findMany: jest.fn() },
+  salesHierarchyLevel: { findFirst: jest.fn() },
 };
 
 const caller: JwtPayload = { sub: 'user-mgr', role: 'SALES', clientId: 'deoleo', phone: '', name: '' };
@@ -515,9 +516,12 @@ describe('SalesService', () => {
       currAch?: unknown[];
       prevTargets?: unknown[];
       prevAch?: unknown[];
+      znmLevel?: unknown;
     }) => {
       mockPrisma.salesUser.findFirst.mockResolvedValue(opts.caller);
       mockPrisma.salesUser.findMany.mockResolvedValue(opts.users ?? []);
+      // ZNM hierarchy level (territory proxy); default null = no ZNM level → region/zone fallback.
+      mockPrisma.salesHierarchyLevel.findFirst.mockResolvedValue(opts.znmLevel ?? null);
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue(opts.assignments ?? []);
       mockPrisma.kpiDef.findMany.mockResolvedValue(opts.kpis ?? []);
       // curr month read first, then prev month read.
@@ -530,6 +534,25 @@ describe('SalesService', () => {
     };
 
     const PRIMARY = [{ code: 'SALES', isPrimary: true }];
+
+    it('territory = the ZNM ancestor name (zone proxy); falls back to region when no ZNM', async () => {
+      const usersWithZnm = [
+        { id: 'su-me', userId: 'user-mgr', reportingToId: 'znm-1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+        // The ZNM ancestor (different level — NOT in the population, but used for the walk-up).
+        { id: 'znm-1', userId: 'user-znm', reportingToId: null, hierarchyLevelId: 'LZ', region: null, zone: null, isActive: true, user: { name: 'North Zone Mgr' } },
+      ];
+      const callerSu = { id: 'su-me', userId: 'user-mgr', reportingToId: 'znm-1', hierarchyLevelId: 'L1', region: 'North' };
+
+      // With a ZNM level configured → territory walks up to the ZNM's name.
+      wire({ caller: callerSu, users: usersWithZnm, znmLevel: { id: 'LZ' }, kpis: PRIMARY });
+      const withZnm = await service.getLeaderboard(caller, 'national', '2026-06');
+      expect(withZnm.entries.find((e) => e.name === 'Me')!.territory).toBe('North Zone Mgr');
+
+      // No ZNM level → falls back to the rep's own region.
+      wire({ caller: callerSu, users: usersWithZnm, znmLevel: null, kpis: PRIMARY });
+      const noZnm = await service.getLeaderboard(caller, 'national', '2026-06');
+      expect(noZnm.entries.find((e) => e.name === 'Me')!.territory).toBe('North');
+    });
 
     it('(g) returns {entries:[]} when the caller is not a sales user', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue(null);
