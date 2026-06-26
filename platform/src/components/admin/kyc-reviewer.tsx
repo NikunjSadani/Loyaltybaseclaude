@@ -12,6 +12,7 @@ import {
   CheckSquare,
   AlertTriangle,
 } from 'lucide-react';
+import { KYC_REJECTION_REASONS, KYC_REJECTION_OTHER_OPTION } from '@/lib/kyc-rejection-reasons';
 
 interface KYCDocument {
   id: string;
@@ -30,17 +31,9 @@ interface KYCReviewerProps {
   onRequestReupload: (id: string, reason: string) => void;
 }
 
-const REJECTION_REASONS = [
-  'Document image is blurry or unreadable',
-  'Document is expired',
-  'Name mismatch between documents',
-  'GST number does not match PAN',
-  'Bank account details mismatch',
-  'Address proof does not match registered address',
-  'Photo ID is incomplete or damaged',
-  'Signed agreement is missing',
-  'Other (specify below)',
-];
+// Single source of truth shared with the sales senior-reject modal (the admin keeps
+// its single-select behaviour; the same option set is preserved verbatim).
+const REJECTION_REASONS = [...KYC_REJECTION_REASONS, KYC_REJECTION_OTHER_OPTION];
 
 export function KYCReviewer({
   partnerId,
