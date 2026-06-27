@@ -1,9 +1,13 @@
 import type { Metadata, Viewport } from 'next';
 import { Inter } from 'next/font/google';
+import { headers } from 'next/headers';
 import './globals.css';
 import { ToastProvider } from '@/components/ui/toast';
 import { getTenantConfig, getBrandStyle } from '@/lib/platform/server';
 import { ClientConfigProvider } from '@/lib/platform/client-config-context';
+import PwaHead from '@/components/pwa/PwaHead';
+import ServiceWorkerRegister from '@/components/pwa/ServiceWorkerRegister';
+import type { PwaScope } from '@/lib/pwa/manifest';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -26,6 +30,8 @@ export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
   maximumScale: 1,
+  // Extend under the iOS notch/home-indicator so an installed PWA can use the safe area.
+  viewportFit: 'cover',
   // themeColor is now dynamic — set via <meta> in head below
 };
 
@@ -37,12 +43,24 @@ export default async function RootLayout({
   const config = await getTenantConfig();
   const brandStyle = getBrandStyle(config);
 
+  // Resolve the active portal from the path (proxy injects x-pathname). PWA install
+  // metadata is only emitted for the installable shells — /sales and /partner — never
+  // for /admin or /gifsy (desktop-operator tools, explicitly out of PWA scope).
+  const pathname = (await headers()).get('x-pathname') ?? '';
+  const pwaScope: PwaScope | null = pathname.startsWith('/sales')
+    ? 'sales'
+    : pathname.startsWith('/partner')
+      ? 'partner'
+      : null;
+
   return (
     <html lang="en" className={`${inter.variable} h-full antialiased overflow-x-hidden`}>
       <head>
         {/* Inject per-tenant CSS variables — drives all brand colours */}
         <style dangerouslySetInnerHTML={{ __html: brandStyle }} />
         <meta name="theme-color" content={config.branding.primaryColor} />
+        {/* PWA install meta (manifest + iOS) — only for the /sales + /partner shells */}
+        {pwaScope && <PwaHead scope={pwaScope} />}
       </head>
       <body
         suppressHydrationWarning
@@ -51,6 +69,9 @@ export default async function RootLayout({
         <ClientConfigProvider config={config}>
           <ToastProvider>{children}</ToastProvider>
         </ClientConfigProvider>
+        {/* PWA service-worker registrar — self-gates on NEXT_PUBLIC_PWA_SW_ENABLED
+            (default OFF) + /sales|/partner path; renders null otherwise. */}
+        <ServiceWorkerRegister />
       </body>
     </html>
   );

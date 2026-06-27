@@ -252,6 +252,9 @@ export class CreditsService {
 
     const skippedNoWallet: string[] = [];
     let pointsCredited = 0;
+    // Collected for the best-effort PUSH "points earned" trigger AFTER commit. We
+    // sum per partner so a partner credited under several fields gets one push.
+    const creditedByPartner = new Map<string, number>();
 
     const updated = await this.prisma.$transaction(async (tx) => {
       // ── Concurrency guard ──────────────────────────────────────────────────
@@ -341,10 +344,38 @@ export class CreditsService {
           tx,
         );
         pointsCredited += 1;
+        creditedByPartner.set(
+          outlet.partnerId,
+          (creditedByPartner.get(outlet.partnerId) ?? 0) + r.amount,
+        );
       }
 
       return confirmed;
     });
+
+    // Best-effort PUSH "points earned" trigger (PWA F5). Resolve each credited
+    // partner's userId AFTER commit and enqueue a PUSH row. Wrapped so push can
+    // NEVER break the money path; the SMS/email below is unaffected.
+    try {
+      for (const [partnerId, totalPoints] of creditedByPartner) {
+        const partner = await this.prisma.channelPartner.findFirst({
+          where: { id: partnerId },
+          select: { userId: true },
+        });
+        if (!partner?.userId) continue;
+        await this.notifications
+          .enqueue({
+            userId: partner.userId,
+            channel: 'PUSH',
+            subject: 'Points credited',
+            body: `You earned ${totalPoints} points.`,
+            variables: { event: 'WALLET_POINTS_EARNED', points: totalPoints, batchId: id },
+          })
+          .catch(() => undefined);
+      }
+    } catch {
+      // Best-effort: a push enqueue failure must never affect a confirmed credit batch.
+    }
 
     // Notify the team (fire-and-forget; don't block confirm on failure).
     // Recipients come from the tenant's creditsPayouts.notifyEmails; if that list is

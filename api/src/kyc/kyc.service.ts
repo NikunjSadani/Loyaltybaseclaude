@@ -670,6 +670,24 @@ export class KycService {
       .catch(() => {
         // Non-critical: notification failures must not fail the request.
       });
+
+    // Best-effort PUSH trigger (PWA F5): on KYC approval, also enqueue a PUSH row
+    // alongside the SMS so a PWA user is notified. Every approval path routes through
+    // this helper with event='KYC_APPROVED', so this single hook covers them all.
+    // Wrapped so push can NEVER break the KYC path.
+    if (event === 'KYC_APPROVED') {
+      await this.notifications
+        .enqueue({
+          userId,
+          channel: 'PUSH',
+          subject: 'KYC approved',
+          body: 'Your KYC is approved.',
+          variables: { event, ...variables },
+        })
+        .catch(() => {
+          // Non-critical: push enqueue failures must not fail the request.
+        });
+    }
   }
 
   /**

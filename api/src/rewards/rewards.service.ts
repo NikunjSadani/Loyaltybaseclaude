@@ -764,6 +764,17 @@ export class RewardsService {
       })
       .catch((e) => this.logger.error(`[confirmRedeemForOutlet] notify failed: ${e}`));
 
+    // Best-effort PUSH trigger (PWA F5) to the OUTLET's partner user. Never throws.
+    await this.notifications
+      .enqueue({
+        userId: partner.userId,
+        channel: 'PUSH',
+        subject: 'Redemption confirmed',
+        body: 'Your redemption is confirmed.',
+        variables: { event: 'REDEMPTION_CONFIRMED', orderId: order.id, orderNumber: order.orderNumber },
+      })
+      .catch((e) => this.logger.error(`[confirmRedeemForOutlet] push enqueue failed: ${e}`));
+
     return {
       orderId: order.id,
       status: 'CONFIRMED',
@@ -1191,6 +1202,17 @@ export class RewardsService {
         variables: { orderId: order.id, orderNumber: order.orderNumber, points: requiredPoints },
       })
       .catch((e) => this.logger.error(`[confirmRedeem] notify failed: ${e}`));
+
+    // Best-effort PUSH trigger (PWA F5) to the partner who redeemed. Never throws.
+    await this.notifications
+      .enqueue({
+        userId: user.sub,
+        channel: 'PUSH',
+        subject: 'Redemption confirmed',
+        body: 'Your redemption is confirmed.',
+        variables: { event: 'REDEMPTION_CONFIRMED', orderId: order.id, orderNumber: order.orderNumber },
+      })
+      .catch((e) => this.logger.error(`[confirmRedeem] push enqueue failed: ${e}`));
 
     return {
       orderId: order.id,

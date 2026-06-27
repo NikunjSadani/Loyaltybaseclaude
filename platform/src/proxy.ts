@@ -40,6 +40,9 @@ export const ROLE_ROUTES: Record<string, string[]> = {
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
   const headers = new Headers(request.headers)
+  // Expose the request path to Server Components (root layout reads this to gate the
+  // per-portal PWA <head> meta to /sales + /partner only).
+  headers.set('x-pathname', pathname)
 
   // ── Step 1: Tenant resolution ──────────────────────────────────────────────
   const hostname =
@@ -81,6 +84,16 @@ export async function proxy(request: NextRequest) {
   }
 
   // ── Step 2: Auth ───────────────────────────────────────────────────────────
+  // PWA manifest routes (/sales/manifest.webmanifest, /partner/manifest.webmanifest)
+  // are fetched by the browser with `credentials: omit` → no cookie → auth below would
+  // 307 them to /auth/login and the install prompt would silently fail. Let them through
+  // WITHOUT auth, but AFTER tenant resolution (Step 1) so the per-tenant manifest still
+  // sees x-tenant-slug. (Can't exclude via the matcher — that would also drop the tenant
+  // header and collapse every manifest to the default tenant.)
+  if (pathname.endsWith('.webmanifest')) {
+    return NextResponse.next({ request: { headers } })
+  }
+
   if (PUBLIC_PATHS.some(p => pathname.startsWith(p))) {
     return NextResponse.next({ request: { headers } })
   }

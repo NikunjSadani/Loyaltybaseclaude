@@ -38,6 +38,7 @@ import { AdminProgramsModule } from './admin-programs/admin-programs.module';
 import { TargetsModule }      from './targets/targets.module';
 import { InvoicesModule }     from './invoices/invoices.module';
 import { TdsModule }          from './tds/tds.module';
+import { PushModule }         from './push/push.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
 // kyc, outlets, sales, wallet, payouts, schemes/campaigns, targets, admin, visibility,
 // leaderboard, notifications) is rebuilt from platform/lib as services in S3/S4.
@@ -87,6 +88,7 @@ import { TdsModule }          from './tds/tds.module';
     TargetsModule,
     InvoicesModule,
     TdsModule,
+    PushModule,
   ],
   controllers: [AppController],
   providers: [

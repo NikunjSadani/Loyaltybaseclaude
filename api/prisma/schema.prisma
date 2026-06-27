@@ -470,6 +470,7 @@ model User {
   reportDeliveryLogs ReportDeliveryLog[]
   schemeEnrollments  SchemeEnrollment[]
   loginLogs          LoginLog[]
+  pushSubscriptions  PushSubscription[]
 
   @@unique([clientId, phone]) // same phone can exist across different clients
   @@unique([clientId, email]) // email scoped per client (nullable handled by Postgres partial index)
@@ -1815,6 +1816,30 @@ model NotificationDeliveryLog {
   @@index([status])
   @@index([createdAt])
   @@map("notification_delivery_log")
+}
+
+/// Web Push (PWA) subscription — one row per browser/device endpoint a user has
+/// granted notification permission on. The push sender (push-sender.service.ts)
+/// loads a user's subscriptions by `userId` (already tenant-bound) and posts
+/// encrypted payloads to each `endpoint` via VAPID. UPSERT is keyed on `endpoint`
+/// (the unique W3C Push endpoint URL); `userId`/`clientId` come from the JWT,
+/// never the request body. Dead endpoints (404/410 on send) are pruned.
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  clientId  String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([clientId])
+  @@map("push_subscription")
 }
 
 // ============================================================
