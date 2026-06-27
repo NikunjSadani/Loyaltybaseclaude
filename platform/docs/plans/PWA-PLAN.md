@@ -8,6 +8,32 @@
 > worker (which must not run over churning UI) is now safe to build. Owner confirmed minor future tweaks are
 > expected — handled by the SW update strategy below (content-hashed assets + versioned precache + update prompt).
 
+## Status — Wave 1 DONE (2026-06-27, `185c548`, gate-green + audited + runtime-verified + pushed)
+Built + integrated + pushed to `develop` (ships DISABLED): **F1** installable shell (per-tenant
+manifests + iOS meta) · **F2** sharp icon pipeline (monogram placeholders for deoleo/clientb/gifsy)
+· **F3** Serwist SW (flag-OFF) · **F5 backend** (PushSubscription + endpoints + sender + drain
+worker OFF + 3 triggers). Gate: api jest **1191** (+5 push) · nest 0 · FE vitest 1624 · tsc 0.
+Three load-bearing learnings baked in:
+1. **Manifest = Route Handler, NOT the metadata-file convention.** `app/sales/manifest.ts` (nested
+   `manifest` metadata file) **404s** — that convention is root-only. Use
+   `app/<scope>/manifest.webmanifest/route.ts` returning `application/manifest+json`. (Caught at
+   runtime; tsc/build would not have.)
+2. **🔴 SW cache must be COOKIE-aware, not just header-aware.** The app authenticates server
+   navigations via the `token` COOKIE, not an `Authorization` header — so SW rules keyed on
+   `/api/*` + the auth header DON'T catch RSC/HTML/`/_next/data`. A naive `defaultCache` would
+   NetworkFirst-cache those tenant-rendered responses → cross-tenant leak on shared devices.
+   Fix (post-audit): ALL server-rendered responses are **NetworkOnly**; cache only content-hashed
+   static + public icons. Re-verify this before EVER flipping the SW flag on.
+3. **Next 16 builds with Turbopack by default; Serwist needs webpack.** The `withSerwist` wrap is
+   gated on `PWA_SW_BUILD=true` so default builds are untouched. To ship the SW post-cutover: build
+   that image with `PWA_SW_BUILD=true` + `next build --webpack` AND set
+   `NEXT_PUBLIC_PWA_SW_ENABLED=true` (the two flags are coupled — registering /sw.js needs a build
+   that emitted it).
+
+Deferred to Wave 2 / cutover: push migration apply-to-staging + VAPID keys + FE subscribe (E) +
+F4 install UX; live push send/receive runtime-verify (needs all of those). Per-tenant manifest on
+real staging hosts: pending the in-flight staging deploy.
+
 ## Grounding (verified infra — see file:line)
 - **Tenant resolution:** `platform/src/proxy.ts:40-81` resolves slug from `x-forwarded-host` (Cloudflare Worker)
   and injects `x-tenant-slug` / `x-tenant-color` / `x-tenant-name`. Registry: `lib/platform/client-registry.ts`

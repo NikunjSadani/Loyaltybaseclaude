@@ -8,30 +8,24 @@ client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch *
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
 `dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-06-27.
 
-🟢 FIRST: **START THE PWA WORK — you are the ORCHESTRATOR, and the execution plan must be followed running MULTIPLE
-WORKSTREAMS SIMULTANEOUSLY.** The owner has approved building the **full per-tenant PWA** (installable sales+partner
-apps + Web Push) per **`platform/docs/plans/PWA-PLAN.md`** (read it first — it has the phases, security rules, and the
-exact orchestration). Kick off **Wave 1 = 4 PARALLEL streams** (one sub-agent each, launched together):
-  • **A — FE shell (F1):** per-tenant manifest routes `app/sales/manifest.ts` + `app/partner/manifest.ts` (read
-    `x-tenant-slug`) + iOS meta; YOU wire the root `app/layout.tsx` + the `proxy.ts` `x-pathname` injection.
-  • **B — icon pipeline (F2):** sharp-based per-tenant icon/splash generator → `public/icons/<slug>/` + onboarding
-    hook + **monogram placeholder** (owner will supply real Deoleo+Gifsy logo art later — swap in via same pipeline).
-  • **C — service worker (F3):** Serwist, **network-first navigations · NEVER cache `/api/*` or any authed/tenant
-    response** · versioned precache · "new version → refresh" prompt; **registered behind a runtime flag, default OFF**
-    (flip ON only AFTER the develop→main cutover).
-  • **D — push backend (F5):** `PushSubscription` model + migration (**joins the cutover migration batch**), **single
-    platform-wide VAPID keypair** (owner-decided; tenant isolation = scoped subscription query, NOT the key), a
-    `web-push` sender consuming `NotificationQueue` (channel `PUSH` already in the enum), triggers at wallet-credit /
-    redeem-confirm / KYC-approve.
-THE 3 SHARED CONTRACTS THE ORCHESTRATOR FIXES UP FRONT so the parallel streams never collide (same discipline that
-made the 3 dashboards conflict-free): (1) icon paths `public/icons/<slug>/icon-{192,512,maskable,180}.png`; (2) the
-root `app/layout.tsx` + `proxy.ts` edits are YOURS to merge (A & C only deliver components/snippets); (3) the
-`POST /v1/push/subscribe` request/response shape (D builds endpoint, E builds client). **Wave 2 (after Wave 1
-integrated + gated):** A→F4 install UX + E push-FE subscription, 2 parallel agents. Per wave: integrate → FULL gate →
-INDEPENDENT adversarial audit (focus: SW never caches authed/tenant data; push sender tenant-scoped) → runtime-verify
-(install on real Android+iOS · Lighthouse PWA · live push send/receive) → push. Scope = `/sales` + `/partner` ONLY
-(admin/gifsy explicitly OUT). **The SW enable-flag + D's migration are CUTOVER-COUPLED — do NOT activate the SW or run
-the push migration to prod during UAT.**
+🟢 PWA — you are the ORCHESTRATOR (multiple workstreams in parallel). **Wave 1 is DONE + PUSHED** (`185c548`,
+gate-green + independently audited + runtime-verified locally) per **`platform/docs/plans/PWA-PLAN.md`** (read its
+"Status — Wave 1 DONE" block first — it has the 3 load-bearing learnings). Wave 1 shipped DISABLED: F1 installable
+shell (per-tenant `app/<scope>/manifest.webmanifest/route.ts` + PwaHead iOS meta) · F2 sharp icon pipeline
+(`public/icons/<slug>/`, monogram placeholders for deoleo/clientb/gifsy) · F3 Serwist SW (flag-OFF) · F5 backend
+(`PushSubscription` + /v1/push/{vapid-public-key,subscribe,unsubscribe} + web-push sender + drain worker OFF + triggers
+at wallet-credit/redeem-confirm/KYC-approve). Integration files (mine): `proxy.ts` (x-pathname inject + `*.webmanifest`
+auth-passthrough), root `app/layout.tsx` (mount PwaHead gated by x-pathname + ServiceWorkerRegister + viewport-fit),
+`next.config.ts` (Serwist wrap gated on `PWA_SW_BUILD`). **Single platform-wide VAPID** (owner-decided).
+
+▶️ **NEXT for the PWA:** (a) confirm the in-flight staging deploy serves `185c548` then curl the per-tenant manifests
+on the real Deoleo + clientb staging hosts (different name/color per tenant); (b) **Wave 2** = F4 install UX (A) + push
+FE subscribe (E), 2 parallel agents on the `POST /v1/push/subscribe` contract; (c) **cutover-coupled** (do NOT do
+during UAT): apply the additive `push_subscription` migration to staging (double-guard) + set VAPID keys + flip
+`PUSH_WORKER_ENABLED=true` to runtime-verify live push send/receive; the SW only ships when built with
+`PWA_SW_BUILD=true` + `next build --webpack` AND `NEXT_PUBLIC_PWA_SW_ENABLED=true` (coupled flags). Scope = `/sales` +
+`/partner` ONLY (admin/gifsy OUT). Per wave: integrate → FULL gate → INDEPENDENT adversarial audit (SW never caches
+authed/tenant data; push sender userId-scoped) → runtime-verify → push.
 
 🔶 STANDING MODE — **YOU ARE THE ORCHESTRATOR (the owner should never have to remind you).** Default to orchestrating,
 not hand-coding everything: decompose; **run independent workstreams as PARALLEL sub-agents** (give each a precise
