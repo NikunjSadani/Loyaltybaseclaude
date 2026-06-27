@@ -779,7 +779,10 @@ export class AdminCoreService {
             clientId,
             deletedAt: null,
             deactivatedAt: null,
-            kycIntent: { not: 'NOT_INTERESTED' },
+            // Prisma's `{ not }` EXCLUDES NULL rows. Almost every outlet has
+            // kycIntent=NULL (only sales-marked ones are NOT_INTERESTED), so an
+            // explicit OR is required to keep them — otherwise addressable → 0.
+            OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
           },
           select: {
             id: true,
@@ -812,7 +815,13 @@ export class AdminCoreService {
         }),
         this.prisma.outlet.count({
           // Genuinely DEACTIVATED (not merely KYC-pending) — deactivatedAt is set.
-          where: { clientId, deletedAt: null, deactivatedAt: { not: null }, kycIntent: { not: 'NOT_INTERESTED' } },
+          // OR keeps kycIntent=NULL rows (Prisma `not` would drop them).
+          where: {
+            clientId,
+            deletedAt: null,
+            deactivatedAt: { not: null },
+            OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
+          },
         }),
 
         // Quality — re-upload rate over ALL submissions in scope (tenant-filtered).

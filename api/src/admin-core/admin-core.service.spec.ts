@@ -659,7 +659,10 @@ describe('AdminCoreService', () => {
       // only genuinely-deactivated/NI/deleted are excluded.
       expect(where.deactivatedAt).toBeNull();
       expect(where.isActive).toBeUndefined();
-      expect(where.kycIntent).toEqual({ not: 'NOT_INTERESTED' });
+      // kycIntent exclusion uses an explicit OR so NULL rows (the vast majority)
+      // are kept — Prisma's bare `{ not }` would drop them.
+      expect(where.kycIntent).toBeUndefined();
+      expect(where.OR).toEqual([{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }]);
     });
 
     it('empty tenant → no NaN / divide-by-zero (coverage 0, compliance 100, rate 0)', async () => {
