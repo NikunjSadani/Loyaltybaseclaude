@@ -151,4 +151,47 @@ self.addEventListener('message', (event) => {
   }
 });
 
+// ── Web Push (F5) — display delivered pushes + route taps ────────────────────
+// Without these, a push delivered by the backend (PushSenderService) reaches the
+// SW but shows nothing. Payload shape comes from PushSenderService.PushPayload
+// ({ title, body, url? }); the body is the JSON we encrypt and send.
+self.addEventListener('push', (event) => {
+  let payload: { title?: string; body?: string; url?: string; icon?: string } = {};
+  try {
+    payload = event.data?.json() ?? {};
+  } catch {
+    payload = { body: event.data?.text() };
+  }
+  const title = payload.title || 'Notification';
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: payload.body,
+      icon: payload.icon,
+      // Stash the deep-link target for the click handler below.
+      data: { url: payload.url || '/' },
+    }),
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetUrl =
+    (event.notification.data as { url?: string } | undefined)?.url || '/';
+  event.waitUntil(
+    (async () => {
+      // Focus an already-open client on that URL if there is one; else open it.
+      const windows = await self.clients.matchAll({
+        type: 'window',
+        includeUncontrolled: true,
+      });
+      const existing = windows.find((c) => c.url.includes(targetUrl));
+      if (existing) {
+        await existing.focus();
+        return;
+      }
+      await self.clients.openWindow(targetUrl);
+    })(),
+  );
+});
+
 serwist.addEventListeners();

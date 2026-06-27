@@ -26,17 +26,40 @@ Three load-bearing learnings baked in:
    NetworkFirst-cache those tenant-rendered responses → cross-tenant leak on shared devices.
    Fix (post-audit): ALL server-rendered responses are **NetworkOnly**; cache only content-hashed
    static + public icons. Re-verify this before EVER flipping the SW flag on.
-3. **Next 16 builds with Turbopack by default; Serwist needs webpack.** The `withSerwist` wrap is
-   gated on `PWA_SW_BUILD=true` so default builds are untouched. To ship the SW post-cutover: build
-   that image with `PWA_SW_BUILD=true` + `next build --webpack` AND set
-   `NEXT_PUBLIC_PWA_SW_ENABLED=true` (the two flags are coupled — registering /sw.js needs a build
-   that emitted it).
+3. **Next 16 builds with Turbopack by default; Serwist's webpack plugin is ignored.** To ship the SW
+   post-cutover, emit `/sw.js` with a **standalone esbuild bundle** (proven in the dry-run below —
+   `npx esbuild src/app/sw.ts --bundle --format=iife --minify --outfile=public/sw.js`, ~100ms), then
+   set `NEXT_PUBLIC_PWA_SW_ENABLED=true`. esbuild sidesteps both the Turbopack/webpack split and a
+   pre-existing `next build --webpack` blocker. (Our SW caches nothing it shouldn't, so it doesn't
+   need Serwist's injected precache manifest — only `/offline.html` is precached, via the explicit
+   `fallbacks` entry, regardless of build path.) The `withSerwist`/`PWA_SW_BUILD` path in
+   `next.config.ts` is left as an inert fallback. **`next build --webpack` is currently BLOCKED** by
+   an unrelated Next strict-page-export violation (`src/app/sales/kyc/[id]/page.tsx` exports a
+   `RejectionModal` component) — Turbopack (staging/prod) ignores it, so it doesn't affect deploys;
+   it would only bite the unused webpack path. Tracked as a hygiene fix.
+
+## Local Web Push dry-run — 2026-06-27 (pre-cutover de-risk; `186` ⇒ next commit)
+Owner asked for a local end-to-end push dry-run before committing to the cutover activation. Results:
+- **✅ Backend send path proven** via `api/scripts/push-dryrun.mjs` (real `web-push` lib → a local
+  HTTPS mock endpoint): the request on the wire is a valid **VAPID-signed** (JWT `aud`=endpoint,
+  `k`=our public key, unexpired), **AES128GCM-encrypted** Web Push POST with a TTL header; a **410
+  Gone surfaces as `statusCode 410`**, driving `PushSenderService`'s dead-subscription prune. So
+  VAPID signing + ECE encryption + transport + 410 handling all work with the real library.
+- **🔴→✅ Found + fixed an SW gap:** `sw.ts` had **no `push` handler** — a delivered push would reach
+  the SW and display NOTHING (Stream C built the SW for caching only). Added `push`
+  (→ `showNotification` from the `{title,body,url}` payload) + `notificationclick` (focus existing
+  client on the URL, else open it) handlers. tsc-clean; present in the esbuild bundle.
+- **✅ SW artifact builds** standalone via esbuild (139kb, contains both handlers).
+- **Only remaining unproven link** = vendor relay (FCM/Mozilla) → real-device notification display +
+  `pushManager.subscribe()` from a live browser. That's standard web-push behaviour (not our code)
+  and is the cutover smoke (install on a real Android/iOS device, send, observe). Push-FE subscribe
+  (E) is still to build, as part of the cutover activation bundle.
 
 Per-tenant manifests **runtime-verified on the live Deoleo staging edge** (`uat.deoleoloyalty.gifsy.in`:
 /sales + /partner manifests 200 with real Deoleo branding + correct scopes; icons 200). **F4 install
 UX DONE** (`1b8d349`). Remaining (cutover-coupled): push FE subscribe (E) + apply `push_subscription`
 migration to staging (double-guard) + VAPID keys + `PUSH_WORKER_ENABLED=true` → live push send/receive
-runtime-verify; the SW ships only when built `PWA_SW_BUILD=true` + `next build --webpack` AND
+runtime-verify; the SW ships by emitting `/sw.js` via esbuild (see learning #3) AND setting
 `NEXT_PUBLIC_PWA_SW_ENABLED=true`. Three runtime enable-flags, all default OFF:
 `NEXT_PUBLIC_PWA_SW_ENABLED` (SW register), `PWA_SW_BUILD` (emit /sw.js), `NEXT_PUBLIC_PWA_INSTALL_ENABLED`
 (install prompt).

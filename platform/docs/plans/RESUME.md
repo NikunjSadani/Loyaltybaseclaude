@@ -23,13 +23,21 @@ auth-passthrough), root `app/layout.tsx` (mount PwaHead gated by x-pathname + Se
 `InstallPrompt`, Android `beforeinstallprompt` + iOS A2HS banner, flag `NEXT_PUBLIC_PWA_INSTALL_ENABLED` default OFF;
 gate FE vitest 1628 · tsc 0).
 
+**✅ LOCAL PUSH DRY-RUN DONE** (de-risk before cutover): backend send path proven with the real `web-push` lib
+(`api/scripts/push-dryrun.mjs` — VAPID-signed + AES128GCM-encrypted POST + 410→prune, all PASS); **found + fixed an SW
+gap** — `sw.ts` had NO `push` handler (a delivered push would show nothing) → added `push`+`notificationclick`
+handlers; SW bundles standalone via esbuild (handlers present). Cutover SW-emit = **esbuild** (`npx esbuild
+src/app/sw.ts --bundle --format=iife --minify --outfile=public/sw.js`), NOT `next build --webpack` (the webpack build
+is blocked by an unrelated stray page export — see PWA-PLAN.md learning #3). Only unproven link = vendor relay →
+real-device display (the cutover smoke).
+
 ▶️ **NEXT for the PWA (all CUTOVER-COUPLED — do NOT do during UAT):** push FE subscribe (E) on the
 `POST /v1/push/subscribe` contract, THEN apply the additive `push_subscription` migration to staging (double-guard) +
 set VAPID keys (`npx web-push generate-vapid-keys`) + flip `PUSH_WORKER_ENABLED=true` → runtime-verify live push
-send/receive. The SW ships only when built `PWA_SW_BUILD=true` + `next build --webpack` AND
-`NEXT_PUBLIC_PWA_SW_ENABLED=true` (coupled). Three enable-flags, all default OFF: `NEXT_PUBLIC_PWA_SW_ENABLED`,
-`PWA_SW_BUILD`, `NEXT_PUBLIC_PWA_INSTALL_ENABLED`. Scope = `/sales` + `/partner` ONLY. Per item: integrate → FULL gate →
-INDEPENDENT adversarial audit (SW never caches authed/tenant data; push sender userId-scoped) → runtime-verify → push.
+send/receive; emit `/sw.js` via esbuild + set `NEXT_PUBLIC_PWA_SW_ENABLED=true`. Three enable-flags, all default OFF:
+`NEXT_PUBLIC_PWA_SW_ENABLED`, `PWA_SW_BUILD` (inert webpack fallback), `NEXT_PUBLIC_PWA_INSTALL_ENABLED`. Scope =
+`/sales` + `/partner` ONLY. Per item: integrate → FULL gate → INDEPENDENT adversarial audit (SW never caches
+authed/tenant data; push sender userId-scoped) → runtime-verify → push.
 
 🔶 STANDING MODE — **YOU ARE THE ORCHESTRATOR (the owner should never have to remind you).** Default to orchestrating,
 not hand-coding everything: decompose; **run independent workstreams as PARALLEL sub-agents** (give each a precise
