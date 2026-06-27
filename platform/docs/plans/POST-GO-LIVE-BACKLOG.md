@@ -95,39 +95,42 @@ the period selector ever allows the current month.
 
 ## F. PWA — installable mobile app for the SALES + OUTLET (partner) apps only
 
-> **🟢 NOW ACTIVE (owner approved 2026-06-27) — promoted out of "deferred".** Full per-tenant PWA incl. Web Push.
-> The canonical, dependency-ordered build + orchestration plan is **[`PWA-PLAN.md`](PWA-PLAN.md)** — read that, not
-> this sketch, for execution. Decisions locked: **per-tenant icon pipeline now** · **single platform-wide VAPID
-> keypair** · owner supplies Deoleo+Gifsy logo art (monogram placeholders meanwhile) · service worker shipped
-> **flag-OFF** + push migration **joins the cutover batch** (both activate AFTER the develop→main cutover). Precondition
-> met: sales/partner UAT is done → screens stable → service worker safe. The phase table below remains accurate context.
+> **✅ LARGELY BUILT — shipping DISABLED (2026-06-27).** F1–F4 + the push BACKEND are done, gate-green,
+> independently audited, runtime-verified, and pushed to `develop` (HEAD `40d0934`). The canonical plan + live
+> status is **[`PWA-PLAN.md`](PWA-PLAN.md)** ("Status — Wave 1 DONE" + the local-push-dry-run sections) — read that,
+> not this sketch. Decisions locked: per-tenant icon pipeline · **single platform-wide VAPID** · owner supplies
+> Deoleo+Gifsy logo art (monogram placeholders meanwhile) · everything behind **runtime flags, all default OFF**
+> (`NEXT_PUBLIC_PWA_SW_ENABLED`, `PWA_SW_BUILD`, `NEXT_PUBLIC_PWA_INSTALL_ENABLED`). **Only the cutover activation
+> remains** (owner-gated, NOT during UAT): push FE subscribe (E) + apply the additive `push_subscription` migration
+> + VAPID keys + flip the flags; emit `/sw.js` via esbuild. The single unproven link is vendor-relay → real-device
+> display (the cutover smoke). The phase table below is annotated with what's done.
 
 **Scope: the `/sales/*` and `/partner/*` shells ONLY** (owner decision 2026-06-26). The `/admin/*` and
 `/gifsy/*` consoles are desktop-operator tools and are explicitly OUT of scope — no PWA/install/icons for them.
 
-**Current state (2026-06-26):** the FE (Next.js 16) is a responsive, mobile-first web app with dedicated
-`partner` + `sales` layouts, a dynamic `theme-color`, and a `Viewport` export — but it is **NOT a PWA**:
-no web manifest, no icon set, no service worker, no install prompt, no push. Per-tenant branding already
-exists (`config.branding`), so a per-tenant manifest/icons fit that pattern cleanly. **Multi-tenant +
-branded domains means every tenant needs its own app name + icon set + (push) config** — adds ~30–50%
-over a single-brand PWA.
+**Current state (2026-06-27):** the FE (Next.js 16) is now an installable per-tenant PWA for /sales + /partner,
+shipping DISABLED: per-tenant `manifest.webmanifest` route handlers + iOS meta (`PwaHead`), a sharp icon pipeline
+(`public/icons/<slug>/`, monogram placeholders), a Serwist service worker (network-first nav, never caches
+`/api`/RSC/HTML/tenant data, with `push`+`notificationclick` handlers), and an install prompt — all gated behind
+runtime flags (default OFF). The Web Push **backend** is built (PushSubscription + endpoints + web-push sender +
+drain worker + triggers) and its send path is proven with the real library. Per-tenant branding rides
+`config.branding`, as designed.
 
-**Why it's safe to defer:** the sales + outlet apps already work in the mobile browser today (incl.
-camera-based KYC capture). A PWA is a distribution/UX/re-engagement enhancement, not a launch blocker.
+**Why it was safe to build during UAT:** everything ships behind default-OFF flags, so none of it runs for UAT
+testers; and the SW (which must not run over a churning UI) was only built once sales/partner UAT confirmed those
+screens stable. The SW + push still ACTIVATE only at the develop→main cutover.
 
-**⚠️ Do NOT build the service worker while the sales/partner screens are still churning** — a SW over a
-rapidly-changing UI creates stale-asset / cache-busting bugs. The SW wants a STABLE front end.
+| Phase | What | Status |
+|---|---|---|
+| **F1 — Installable shell** | Per-tenant `manifest.webmanifest` route handlers (name/short_name/icons 192·512·maskable/colors/`display:standalone`/scope=`/sales`+`/partner`) + iOS meta + apple-touch icons. | **✅ DONE** (`185c548`); runtime-verified on the live Deoleo staging edge |
+| **F2 — Per-tenant icon pipeline** | sharp generator → each tenant's icon set; monogram placeholder until real logos arrive; re-run swaps a logo in. | **✅ DONE** (deoleo/clientb/gifsy generated) |
+| **F3 — Service worker** | Serwist; **network-first nav, never caches `/api`/RSC/HTML/tenant data**, offline fallback, update prompt, `push`+`notificationclick` handlers. Flag-OFF; emitted via esbuild at cutover. | **✅ DONE** (`185c548`+`40d0934`); audit caught a cookie-cache leak, fixed |
+| **F4 — Install UX** | `beforeinstallprompt` custom prompt (Android) + instructional A2HS banner (iOS Safari); dismissal persisted. Flag-OFF. | **✅ DONE** (`1b8d349`) |
+| **F5 — Web Push** | VAPID (single platform-wide) + backend sender + per-tenant subscription storage + drain worker + triggers (points earned / redeem / KYC approved). | **⏳ BACKEND DONE** (send path dry-run-proven); **FE subscribe (E) + activation = cutover** |
+| **F6 — Store presence (optional)** | Android Play Store via TWA/Bubblewrap; iOS App Store via wrapper. | Not started (optional) |
 
-| Phase | What | Trigger | Effort |
-|---|---|---|---|
-| **F1 — Installable shell (low risk, can do anytime)** | Per-tenant `manifest.webmanifest` (name/short_name/icons 192·512·maskable/colors/`display:standalone`/scope=`/sales`+`/partner`) + iOS meta tags + apple-touch icons. **No service worker** (nothing to go stale). Makes it "Add to Home Screen"-able on Android + iOS. | Optional pre-launch quick win, or anytime | **~1–2 days** |
-| **F2 — Per-tenant icon/splash pipeline** | Generate each tenant's icon set (+ iOS static splash images) from their logo, ideally at tenant onboarding. | Before client #2, or with F1 | +2–4 days |
-| **F3 — Service worker** | Serwist (`next-pwa` successor). Precache the app shell, **network-first for `/api/*`, NEVER cache authed/tenant-scoped responses** (multi-tenant + JWT = caching is a security hazard), offline fallback. | After Deoleo live AND sales/partner mobile flows are STABLE (low churn) | ~3–5 days |
-| **F4 — Install UX** | `beforeinstallprompt` custom prompt on Android; instructional banner on iOS (no install API there). | With F3 | ~1–2 days |
-| **F5 — Web Push notifications** (the real ROI) | VAPID + backend push service + **per-tenant** subscription storage + send triggers (points earned / redeem / KYC approved). **iOS: 16.4+ and ONLY for home-screen-installed PWAs.** | When re-engagement is a priority (usually the actual reason to do a PWA for a loyalty app) | +1–2 weeks |
-| **F6 — Store presence (optional)** | Android Play Store via TWA/Bubblewrap (~2–4 days + Play Console review). iOS App Store via a wrapper (Capacitor/PWABuilder) — +1–2 weeks + Apple review risk for "website wrapper". | If an app-store listing is wanted | varies |
-
-**Rollups:** basic installable PWA (F1+F3+F4) ≈ **1–2 weeks**; full PWA with push (F1–F5) ≈ **4–6 weeks**.
+**Remaining effort:** push FE subscribe (E) + cutover activation ≈ **1–2 days** once VAPID keys + migration go-ahead
+are provided. F1–F4 + push backend are already done.
 
 **iOS reality check:** Android PWAs are first-class (install prompt, push, Play Store wrappable). iOS is
 limited — install is Safari "Add to Home Screen" only (no prompt), push needs iOS 16.4+ AND a home-screen
