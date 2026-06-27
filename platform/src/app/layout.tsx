@@ -7,6 +7,7 @@ import { getTenantConfig, getBrandStyle } from '@/lib/platform/server';
 import { ClientConfigProvider } from '@/lib/platform/client-config-context';
 import PwaHead from '@/components/pwa/PwaHead';
 import ServiceWorkerRegister from '@/components/pwa/ServiceWorkerRegister';
+import InstallPrompt from '@/components/pwa/InstallPrompt';
 import type { PwaScope } from '@/lib/pwa/manifest';
 
 const inter = Inter({
@@ -72,6 +73,9 @@ export default async function RootLayout({
         {/* PWA service-worker registrar — self-gates on NEXT_PUBLIC_PWA_SW_ENABLED
             (default OFF) + /sales|/partner path; renders null otherwise. */}
         <ServiceWorkerRegister />
+        {/* PWA install prompt — self-gates on NEXT_PUBLIC_PWA_INSTALL_ENABLED
+            (default OFF) + /sales|/partner + not-already-installed; null otherwise. */}
+        <InstallPrompt />
       </body>
     </html>
   );
