@@ -649,13 +649,16 @@ describe('AdminCoreService', () => {
       expect(res.quality.reUploadRatePct).toBe(25);
     });
 
-    it('the addressable outlet query is tenant-scoped + excludes NOT_INTERESTED & inactive & deleted', async () => {
+    it('the addressable outlet query is tenant-scoped + excludes NOT_INTERESTED/deactivated/deleted but KEEPS pending', async () => {
       wire({ outlets: [] });
       await service.kycDashboard(clientAdmin);
       const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
       expect(where.clientId).toBe('deoleo');
       expect(where.deletedAt).toBeNull();
-      expect(where.isActive).toBe(true);
+      // Pending outlets (isActive=false, deactivatedAt=null) MUST stay in the universe;
+      // only genuinely-deactivated/NI/deleted are excluded.
+      expect(where.deactivatedAt).toBeNull();
+      expect(where.isActive).toBeUndefined();
       expect(where.kycIntent).toEqual({ not: 'NOT_INTERESTED' });
     });
 

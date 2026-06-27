@@ -769,10 +769,16 @@ export class AdminCoreService {
     const [addressableOutlets, notInterested, inactive, reUploadCount, totalSubmissions, rejectionHistory] =
       await Promise.all([
         this.prisma.outlet.findMany({
+          // Addressable = every live outlet we are trying to onboard. New outlets are
+          // created PENDING (isActive=false) and only flip active on KYC approval, so
+          // filtering isActive=true would exclude the entire in-flight KYC population
+          // (the very thing this dashboard tracks). The correct exclusions are deleted,
+          // NOT_INTERESTED, and genuinely DEACTIVATED (deactivatedAt set) — pending
+          // outlets have deactivatedAt=null and stay in the universe.
           where: {
             clientId,
             deletedAt: null,
-            isActive: true,
+            deactivatedAt: null,
             kycIntent: { not: 'NOT_INTERESTED' },
           },
           select: {
@@ -805,7 +811,8 @@ export class AdminCoreService {
           where: { clientId, deletedAt: null, kycIntent: 'NOT_INTERESTED' },
         }),
         this.prisma.outlet.count({
-          where: { clientId, deletedAt: null, isActive: false, kycIntent: { not: 'NOT_INTERESTED' } },
+          // Genuinely DEACTIVATED (not merely KYC-pending) — deactivatedAt is set.
+          where: { clientId, deletedAt: null, deactivatedAt: { not: null }, kycIntent: { not: 'NOT_INTERESTED' } },
         }),
 
         // Quality — re-upload rate over ALL submissions in scope (tenant-filtered).
