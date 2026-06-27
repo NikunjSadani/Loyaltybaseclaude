@@ -8,11 +8,12 @@ import { expectNoFabricatedData } from '../helpers/assert';
  * These specs confirm every page in the read surface renders (not bounced, not
  * 403 on GET) and carries real data (not fabricated, not cross-tenant).
  *
- * Pages covered:
- *   /admin/dashboards/kyc          — KYC Dashboard (static aggregate)
- *   /admin/dashboards/payments     — Payments Dashboard (static aggregate)
- *   /admin/dashboards/redemptions  — Gift Redemption Dashboard (static aggregate)
- *   /admin/dashboards/engagement   — Engagement Dashboard (static aggregate)
+ * Pages covered (post-consolidation — the four REAL dashboards; the old fake
+ * /payments, /redemptions, /engagement pages have been DELETED):
+ *   /admin/dashboards/kyc             — KYC Dashboard (live API: GET /api/admin/dashboard/kyc)
+ *   /admin/dashboards/operations      — Operations Dashboard (live API: GET /api/admin/dashboard/operations)
+ *   /admin/dashboards/program-health  — Program Health (live API: GET /api/admin/dashboard/program-health)
+ *   /admin/dashboards/finance         — Finance Dashboard (live API: GET /api/admin/dashboard/finance)
  *   /admin/kyc                     — KYC submissions list (live API: GET /api/kyc)
  *   /admin/tickets                 — Tickets list (live API: GET /api/tickets)
  *   /admin/reports                 — Reports catalogue (static)
@@ -49,81 +50,74 @@ test.describe('@mis reads — KYC Dashboard', () => {
   test('renders KYC Dashboard heading (not bounced)', async ({ page }) => {
     await page.goto('/admin/dashboards/kyc');
     await expect(page).toHaveURL(/\/admin\/dashboards\/kyc/);
+    // Real page: heading renders after the loading spinner resolves (loaded OR error branch).
     await expect(
       page.locator('main').getByRole('heading', { name: 'KYC Dashboard' }).first()
-    ).toBeVisible();
-  });
-
-  test('stat card "Total Outlets" renders (component mounted)', async ({ page }) => {
-    await page.goto('/admin/dashboards/kyc');
-    await expect(page.getByText('Total Outlets')).toBeVisible();
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   test('no fabricated values + no cross-tenant leak (#40)', async ({ page }) => {
     await page.goto('/admin/dashboards/kyc');
+    await expect(
+      page.locator('main').getByRole('heading', { name: 'KYC Dashboard' }).first()
+    ).toBeVisible({ timeout: 10_000 });
     await expectNoFabricatedData(page);
     await assertNoTenantLeak(page);
   });
 });
 
-test.describe('@mis reads — Payments Dashboard', () => {
-  test('renders Payments Dashboard heading', async ({ page }) => {
-    await page.goto('/admin/dashboards/payments');
-    await expect(page).toHaveURL(/\/admin\/dashboards\/payments/);
+test.describe('@mis reads — Operations Dashboard', () => {
+  test('renders Operations Dashboard heading (not bounced)', async ({ page }) => {
+    await page.goto('/admin/dashboards/operations');
+    await expect(page).toHaveURL(/\/admin\/dashboards\/operations/);
     await expect(
-      page.locator('main').getByRole('heading', { name: 'Payments Dashboard' }).first()
-    ).toBeVisible();
-  });
-
-  test('stat label "Total Points Issued" renders', async ({ page }) => {
-    await page.goto('/admin/dashboards/payments');
-    await expect(page.getByText('Total Points Issued')).toBeVisible();
+      page.locator('main').getByRole('heading', { name: 'Operations Dashboard' }).first()
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   test('no fabricated values + no cross-tenant leak (#40)', async ({ page }) => {
-    test.fixme(true, 'Payments dashboard renders hardcoded mock data ("Kumar General Store") — real #40/data gap, tracked in gap-register #57');
-    await page.goto('/admin/dashboards/payments');
+    await page.goto('/admin/dashboards/operations');
+    await expect(
+      page.locator('main').getByRole('heading', { name: 'Operations Dashboard' }).first()
+    ).toBeVisible({ timeout: 10_000 });
     await expectNoFabricatedData(page);
     await assertNoTenantLeak(page);
   });
 });
 
-test.describe('@mis reads — Redemptions Dashboard', () => {
-  test('renders Gift Redemption Dashboard heading', async ({ page }) => {
-    await page.goto('/admin/dashboards/redemptions');
-    await expect(page).toHaveURL(/\/admin\/dashboards\/redemptions/);
-    await expect(page.getByRole('heading', { name: 'Gift Redemption Dashboard' }).first()).toBeVisible();
-  });
-
-  test('stat label "Total Redemptions" renders', async ({ page }) => {
-    await page.goto('/admin/dashboards/redemptions');
-    await expect(page.getByText('Total Redemptions')).toBeVisible();
+test.describe('@mis reads — Program Health Dashboard', () => {
+  test('renders Program Health heading (not bounced)', async ({ page }) => {
+    await page.goto('/admin/dashboards/program-health');
+    await expect(page).toHaveURL(/\/admin\/dashboards\/program-health/);
+    await expect(
+      page.locator('main').getByRole('heading', { name: 'Program Health' }).first()
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   test('no fabricated values + no cross-tenant leak (#40)', async ({ page }) => {
-    await page.goto('/admin/dashboards/redemptions');
+    await page.goto('/admin/dashboards/program-health');
+    await expect(
+      page.locator('main').getByRole('heading', { name: 'Program Health' }).first()
+    ).toBeVisible({ timeout: 10_000 });
     await expectNoFabricatedData(page);
     await assertNoTenantLeak(page);
   });
 });
 
-test.describe('@mis reads — Engagement Dashboard', () => {
-  test('renders Engagement Dashboard heading', async ({ page }) => {
-    await page.goto('/admin/dashboards/engagement');
-    await expect(page).toHaveURL(/\/admin\/dashboards\/engagement/);
+test.describe('@mis reads — Finance Dashboard', () => {
+  test('renders Finance Dashboard heading (not bounced)', async ({ page }) => {
+    await page.goto('/admin/dashboards/finance');
+    await expect(page).toHaveURL(/\/admin\/dashboards\/finance/);
     await expect(
-      page.locator('main').getByRole('heading', { name: 'Engagement Dashboard' }).first()
-    ).toBeVisible();
+      page.locator('main').getByRole('heading', { name: 'Finance Dashboard' }).first()
+    ).toBeVisible({ timeout: 10_000 });
   });
 
-  test('stat label "Monthly Active Partners" renders', async ({ page }) => {
-    await page.goto('/admin/dashboards/engagement');
-    await expect(page.getByText('Monthly Active Partners')).toBeVisible();
-  });
-
-  test('no fabricated values + no cross-tenant leak (4,821 pinned) (#40)', async ({ page }) => {
-    test.fixme(true, 'Engagement dashboard renders hardcoded mock data ("4,821") — real #40/data gap, tracked in gap-register #57');
-    await page.goto('/admin/dashboards/engagement');
+  test('no fabricated values + no cross-tenant leak (#40)', async ({ page }) => {
+    await page.goto('/admin/dashboards/finance');
+    await expect(
+      page.locator('main').getByRole('heading', { name: 'Finance Dashboard' }).first()
+    ).toBeVisible({ timeout: 10_000 });
     await expectNoFabricatedData(page);
     await assertNoTenantLeak(page);
   });

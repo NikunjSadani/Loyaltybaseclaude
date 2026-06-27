@@ -47,10 +47,10 @@ const ALL_NAV_ITEMS = [
     icon: BarChart2,
     featureFlag: null,
     children: [
-      { href: '/admin/dashboards/kyc',          label: 'KYC Dashboard'             },
-      { href: '/admin/dashboards/payments',     label: 'Payments Dashboard'        },
-      { href: '/admin/dashboards/redemptions',  label: 'Gift Redemption Dashboard' },
-      { href: '/admin/dashboards/engagement',   label: 'Engagement Dashboard'      },
+      { href: '/admin/dashboards/kyc',            label: 'KYC Dashboard'       },
+      { href: '/admin/dashboards/program-health', label: 'Program Health'      },
+      { href: '/admin/dashboards/operations',     label: 'Operations'          },
+      { href: '/admin/dashboards/finance',        label: 'Finance & Liability' },
     ],
   },
   {

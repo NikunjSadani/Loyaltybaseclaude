@@ -11,5 +11,7 @@ import { WalletModule } from '../wallet/wallet.module';
   imports: [PrismaModule, WalletModule],
   controllers: [PayoutsController],
   providers: [PayoutsService],
+  // Exported so the admin Operations/Finance dashboards can reuse the fund summary.
+  exports: [PayoutsService],
 })
 export class PayoutsModule {}

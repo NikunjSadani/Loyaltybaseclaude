@@ -8,6 +8,11 @@ import { AdminForceLogoutAllController } from './force-logout-all.controller';
 import { AdminDashboardController } from './dashboard.controller';
 import { AdminTaskConfigController } from './task-config.controller';
 import { AdminGiftConfigController } from './gift-config.controller';
+import { ProgramHealthDashboardService } from './dashboards/program-health-dashboard.service';
+import { OperationsDashboardService } from './dashboards/operations-dashboard.service';
+import { FinanceDashboardService } from './dashboards/finance-dashboard.service';
+import { PayoutsModule } from '../payouts/payouts.module';
+import { TdsModule } from '../tds/tds.module';
 
 /**
  * AdminCoreModule — the ported admin sub-domains (users, settings,
@@ -18,7 +23,7 @@ import { AdminGiftConfigController } from './gift-config.controller';
  * TenantService (used by admin/settings/config) is @Global and needs no import.
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, PayoutsModule, TdsModule],
   controllers: [
     AdminUsersController,
     AdminSettingsController,
@@ -28,6 +33,11 @@ import { AdminGiftConfigController } from './gift-config.controller';
     AdminTaskConfigController,
     AdminGiftConfigController,
   ],
-  providers: [AdminCoreService],
+  providers: [
+    AdminCoreService,
+    ProgramHealthDashboardService,
+    OperationsDashboardService,
+    FinanceDashboardService,
+  ],
 })
 export class AdminCoreModule {}

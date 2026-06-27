@@ -2,22 +2,31 @@ import { test, expect, type Page } from '@playwright/test';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
- * CLIENT_ADMIN aggregate dashboards — the four pages under /admin/dashboards/*.
+ * CLIENT_ADMIN aggregate dashboards — the four consolidated pages under
+ * /admin/dashboards/*.  Post-consolidation these are:
+ *   /admin/dashboards/kyc             — KYC Dashboard
+ *   /admin/dashboards/program-health  — Program Health
+ *   /admin/dashboards/operations      — Operations Dashboard
+ *   /admin/dashboards/finance         — Finance Dashboard
  *
- * Fabricated-data risk: all four pages contain large blocks of hardcoded constants
- * (statCards, barData, etc.). The highest-risk value is `4,821` (the admin Overview
- * demo partner count) which appears in the engagement page's notification table and
- * login-frequency footnote.  expectNoFabricatedData() must catch it.
+ * The old fake pages (/payments, /redemptions, /engagement) have been DELETED.
  *
- * Real markers to assert:
- *  - KYC Dashboard:          heading renders, stat card "KYC Dashboard" visible
- *  - Payments Dashboard:     heading renders, stat label "Total Points Issued" renders
- *  - Gift Redemption Dashboard: heading renders, stat label "Total Redemptions" renders
- *  - Engagement Dashboard:   heading renders, stat label "Monthly Active Partners" renders
+ * All four dashboards are REAL: each fetches GET /api/admin/dashboard/* and renders a
+ * loading state first, then either the loaded view or an explicit error state — there
+ * are NO hardcoded metric constants or fabricated arrays. Because they're real, the
+ * no-fabricated-data check (#40) runs for real here (no test.fixme skips).
  *
- * These pages are fully static (no API calls) — the fabricated-data check is therefore
- * the most load-bearing assertion: it catches the `4,821` token and any other demo
- * constant that was hardcoded rather than sourced from the real tenant.
+ * Stable real markers (in-page <h1>, scoped to `main` to dodge the layout-shell
+ * heading double-match). The heading renders on BOTH the loaded and error branches
+ * (only the brief loading spinner has no h1), so it's the robust marker to wait on:
+ *   - KYC Dashboard:         heading "KYC Dashboard"
+ *   - Program Health:        heading "Program Health"
+ *   - Operations Dashboard:  heading "Operations Dashboard"
+ *   - Finance Dashboard:     heading "Finance Dashboard"
+ *
+ * Numeric values are intentionally NOT asserted — they depend on live tenant data and
+ * an empty tenant legitimately shows zeros. expectNoFabricatedData() checks for KNOWN
+ * fake tokens, not for zeros.
  */
 
 const OTHER_TENANT = ['Zenith Trading Co', 'CPB001', 'clientb'];
@@ -33,93 +42,75 @@ test.describe('@clientAdmin dashboards — KYC', () => {
   test('renders the KYC Dashboard heading (page mounted, not bounced)', async ({ page }) => {
     await page.goto('/admin/dashboards/kyc');
     await expect(page).toHaveURL(/\/admin\/dashboards\/kyc/);
+    // Scope to <main> to avoid the layout-shell heading double-match. The heading
+    // appears after the loading spinner resolves (loaded OR error branch).
     await expect(
       page.locator('main').getByRole('heading', { name: 'KYC Dashboard' }).first()
-    ).toBeVisible();
-  });
-
-  test('stat card "Total Outlets" renders', async ({ page }) => {
-    await page.goto('/admin/dashboards/kyc');
-    // The stat cards render their label in a <p>. Proves the component mounted past
-    // the loading/error branch (which this page never hits — it's static).
-    await expect(page.getByText('Total Outlets')).toBeVisible();
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   test('no fabricated values + no cross-tenant leak (#40)', async ({ page }) => {
     await page.goto('/admin/dashboards/kyc');
+    await expect(
+      page.locator('main').getByRole('heading', { name: 'KYC Dashboard' }).first()
+    ).toBeVisible({ timeout: 10_000 });
     await expectNoFabricatedData(page);
     await assertNoLeak(page);
   });
 });
 
-test.describe('@clientAdmin dashboards — Payments', () => {
-  test('renders the Payments Dashboard heading', async ({ page }) => {
-    await page.goto('/admin/dashboards/payments');
-    await expect(page).toHaveURL(/\/admin\/dashboards\/payments/);
+test.describe('@clientAdmin dashboards — Program Health', () => {
+  test('renders the Program Health heading (page mounted, not bounced)', async ({ page }) => {
+    await page.goto('/admin/dashboards/program-health');
+    await expect(page).toHaveURL(/\/admin\/dashboards\/program-health/);
     await expect(
-      page.locator('main').getByRole('heading', { name: 'Payments Dashboard' }).first()
-    ).toBeVisible();
-  });
-
-  test('stat label "Total Points Issued" renders', async ({ page }) => {
-    await page.goto('/admin/dashboards/payments');
-    await expect(page.getByText('Total Points Issued')).toBeVisible();
+      page.locator('main').getByRole('heading', { name: 'Program Health' }).first()
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   test('no fabricated values + no cross-tenant leak (#40)', async ({ page }) => {
-    test.fixme(true, 'Payments dashboard renders hardcoded mock data ("Kumar General Store") — real #40/data gap, tracked in gap-register #57');
-    await page.goto('/admin/dashboards/payments');
+    await page.goto('/admin/dashboards/program-health');
+    await expect(
+      page.locator('main').getByRole('heading', { name: 'Program Health' }).first()
+    ).toBeVisible({ timeout: 10_000 });
     await expectNoFabricatedData(page);
     await assertNoLeak(page);
   });
 });
 
-test.describe('@clientAdmin dashboards — Redemptions', () => {
-  test('renders the Gift Redemption Dashboard heading', async ({ page }) => {
-    await page.goto('/admin/dashboards/redemptions');
-    await expect(page).toHaveURL(/\/admin\/dashboards\/redemptions/);
-    // The layout header renders an h1 with the same nav-child label text ("Gift Redemption
-    // Dashboard"), so two h1 elements match — strict mode violation.  Scope to <main> so
-    // we target only the in-page heading, not the layout shell heading.
+test.describe('@clientAdmin dashboards — Operations', () => {
+  test('renders the Operations Dashboard heading (page mounted, not bounced)', async ({ page }) => {
+    await page.goto('/admin/dashboards/operations');
+    await expect(page).toHaveURL(/\/admin\/dashboards\/operations/);
     await expect(
-      page.locator('main').getByRole('heading', { name: 'Gift Redemption Dashboard' }).first()
-    ).toBeVisible();
-  });
-
-  test('stat label "Total Redemptions" renders', async ({ page }) => {
-    await page.goto('/admin/dashboards/redemptions');
-    await expect(page.getByText('Total Redemptions')).toBeVisible();
+      page.locator('main').getByRole('heading', { name: 'Operations Dashboard' }).first()
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   test('no fabricated values + no cross-tenant leak (#40)', async ({ page }) => {
-    await page.goto('/admin/dashboards/redemptions');
+    await page.goto('/admin/dashboards/operations');
+    await expect(
+      page.locator('main').getByRole('heading', { name: 'Operations Dashboard' }).first()
+    ).toBeVisible({ timeout: 10_000 });
     await expectNoFabricatedData(page);
     await assertNoLeak(page);
   });
 });
 
-test.describe('@clientAdmin dashboards — Engagement', () => {
-  test('renders the Engagement Dashboard heading', async ({ page }) => {
-    await page.goto('/admin/dashboards/engagement');
-    await expect(page).toHaveURL(/\/admin\/dashboards\/engagement/);
+test.describe('@clientAdmin dashboards — Finance', () => {
+  test('renders the Finance Dashboard heading (page mounted, not bounced)', async ({ page }) => {
+    await page.goto('/admin/dashboards/finance');
+    await expect(page).toHaveURL(/\/admin\/dashboards\/finance/);
     await expect(
-      page.locator('main').getByRole('heading', { name: 'Engagement Dashboard' }).first()
-    ).toBeVisible();
+      page.locator('main').getByRole('heading', { name: 'Finance Dashboard' }).first()
+    ).toBeVisible({ timeout: 10_000 });
   });
 
-  test('stat label "Monthly Active Partners" renders', async ({ page }) => {
-    await page.goto('/admin/dashboards/engagement');
-    await expect(page.getByText('Monthly Active Partners')).toBeVisible();
-  });
-
-  /**
-   * The engagement page embeds `4,821` in the notification-type table (Scheme Launched row
-   * Sent column) AND in the login-frequency footnote. expectNoFabricatedData() must catch
-   * it — this is the highest fabricated-data risk in the whole dashboard suite.
-   */
-  test('does NOT render the fabricated 4,821 active-partner count (#40)', async ({ page }) => {
-    test.fixme(true, 'Engagement dashboard renders hardcoded mock data ("4,821") — real #40/data gap, tracked in gap-register #57');
-    await page.goto('/admin/dashboards/engagement');
+  test('no fabricated values + no cross-tenant leak (#40)', async ({ page }) => {
+    await page.goto('/admin/dashboards/finance');
+    await expect(
+      page.locator('main').getByRole('heading', { name: 'Finance Dashboard' }).first()
+    ).toBeVisible({ timeout: 10_000 });
     await expectNoFabricatedData(page);
     await assertNoLeak(page);
   });
