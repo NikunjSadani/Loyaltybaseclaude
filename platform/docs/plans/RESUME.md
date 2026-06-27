@@ -18,14 +18,18 @@ at wallet-credit/redeem-confirm/KYC-approve). Integration files (mine): `proxy.t
 auth-passthrough), root `app/layout.tsx` (mount PwaHead gated by x-pathname + ServiceWorkerRegister + viewport-fit),
 `next.config.ts` (Serwist wrap gated on `PWA_SW_BUILD`). **Single platform-wide VAPID** (owner-decided).
 
-▶️ **NEXT for the PWA:** (a) confirm the in-flight staging deploy serves `185c548` then curl the per-tenant manifests
-on the real Deoleo + clientb staging hosts (different name/color per tenant); (b) **Wave 2** = F4 install UX (A) + push
-FE subscribe (E), 2 parallel agents on the `POST /v1/push/subscribe` contract; (c) **cutover-coupled** (do NOT do
-during UAT): apply the additive `push_subscription` migration to staging (double-guard) + set VAPID keys + flip
-`PUSH_WORKER_ENABLED=true` to runtime-verify live push send/receive; the SW only ships when built with
-`PWA_SW_BUILD=true` + `next build --webpack` AND `NEXT_PUBLIC_PWA_SW_ENABLED=true` (coupled flags). Scope = `/sales` +
-`/partner` ONLY (admin/gifsy OUT). Per wave: integrate → FULL gate → INDEPENDENT adversarial audit (SW never caches
-authed/tenant data; push sender userId-scoped) → runtime-verify → push.
+**✅ Per-tenant manifests runtime-verified on the live Deoleo staging edge** (`uat.deoleoloyalty.gifsy.in` — /sales +
+/partner manifests 200 w/ real Deoleo branding + scopes, icons 200). **✅ F4 install UX DONE** (`1b8d349` —
+`InstallPrompt`, Android `beforeinstallprompt` + iOS A2HS banner, flag `NEXT_PUBLIC_PWA_INSTALL_ENABLED` default OFF;
+gate FE vitest 1628 · tsc 0).
+
+▶️ **NEXT for the PWA (all CUTOVER-COUPLED — do NOT do during UAT):** push FE subscribe (E) on the
+`POST /v1/push/subscribe` contract, THEN apply the additive `push_subscription` migration to staging (double-guard) +
+set VAPID keys (`npx web-push generate-vapid-keys`) + flip `PUSH_WORKER_ENABLED=true` → runtime-verify live push
+send/receive. The SW ships only when built `PWA_SW_BUILD=true` + `next build --webpack` AND
+`NEXT_PUBLIC_PWA_SW_ENABLED=true` (coupled). Three enable-flags, all default OFF: `NEXT_PUBLIC_PWA_SW_ENABLED`,
+`PWA_SW_BUILD`, `NEXT_PUBLIC_PWA_INSTALL_ENABLED`. Scope = `/sales` + `/partner` ONLY. Per item: integrate → FULL gate →
+INDEPENDENT adversarial audit (SW never caches authed/tenant data; push sender userId-scoped) → runtime-verify → push.
 
 🔶 STANDING MODE — **YOU ARE THE ORCHESTRATOR (the owner should never have to remind you).** Default to orchestrating,
 not hand-coding everything: decompose; **run independent workstreams as PARALLEL sub-agents** (give each a precise

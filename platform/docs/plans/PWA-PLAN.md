@@ -11,8 +11,10 @@
 ## Status — Wave 1 DONE (2026-06-27, `185c548`, gate-green + audited + runtime-verified + pushed)
 Built + integrated + pushed to `develop` (ships DISABLED): **F1** installable shell (per-tenant
 manifests + iOS meta) · **F2** sharp icon pipeline (monogram placeholders for deoleo/clientb/gifsy)
-· **F3** Serwist SW (flag-OFF) · **F5 backend** (PushSubscription + endpoints + sender + drain
-worker OFF + 3 triggers). Gate: api jest **1191** (+5 push) · nest 0 · FE vitest 1624 · tsc 0.
+· **F3** Serwist SW (flag-OFF) · **F4** install UX (`InstallPrompt`: Android `beforeinstallprompt`
++ iOS A2HS banner, `NEXT_PUBLIC_PWA_INSTALL_ENABLED` default OFF; `1b8d349`) · **F5 backend**
+(PushSubscription + endpoints + sender + drain worker OFF + 3 triggers). Gate: api jest **1191**
+(+5 push) · nest 0 · FE vitest **1628** (+4 install) · tsc 0.
 Three load-bearing learnings baked in:
 1. **Manifest = Route Handler, NOT the metadata-file convention.** `app/sales/manifest.ts` (nested
    `manifest` metadata file) **404s** — that convention is root-only. Use
@@ -30,9 +32,14 @@ Three load-bearing learnings baked in:
    `NEXT_PUBLIC_PWA_SW_ENABLED=true` (the two flags are coupled — registering /sw.js needs a build
    that emitted it).
 
-Deferred to Wave 2 / cutover: push migration apply-to-staging + VAPID keys + FE subscribe (E) +
-F4 install UX; live push send/receive runtime-verify (needs all of those). Per-tenant manifest on
-real staging hosts: pending the in-flight staging deploy.
+Per-tenant manifests **runtime-verified on the live Deoleo staging edge** (`uat.deoleoloyalty.gifsy.in`:
+/sales + /partner manifests 200 with real Deoleo branding + correct scopes; icons 200). **F4 install
+UX DONE** (`1b8d349`). Remaining (cutover-coupled): push FE subscribe (E) + apply `push_subscription`
+migration to staging (double-guard) + VAPID keys + `PUSH_WORKER_ENABLED=true` → live push send/receive
+runtime-verify; the SW ships only when built `PWA_SW_BUILD=true` + `next build --webpack` AND
+`NEXT_PUBLIC_PWA_SW_ENABLED=true`. Three runtime enable-flags, all default OFF:
+`NEXT_PUBLIC_PWA_SW_ENABLED` (SW register), `PWA_SW_BUILD` (emit /sw.js), `NEXT_PUBLIC_PWA_INSTALL_ENABLED`
+(install prompt).
 
 ## Grounding (verified infra — see file:line)
 - **Tenant resolution:** `platform/src/proxy.ts:40-81` resolves slug from `x-forwarded-host` (Cloudflare Worker)
