@@ -36,7 +36,9 @@ const mockPrisma = {
   },
   userSession: { updateMany: jest.fn() },
   salesUser: { findMany: jest.fn(), findFirst: jest.fn() },
-  outlet: { findMany: jest.fn() },
+  outlet: { findMany: jest.fn(), count: jest.fn() },
+  kycSubmission: { count: jest.fn() },
+  kycStatusHistory: { findMany: jest.fn() },
   programSetting: { findMany: jest.fn(), findFirst: jest.fn(), upsert: jest.fn() },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
@@ -442,6 +444,275 @@ describe('AdminCoreService', () => {
       await expect(
         service.setVisibilityCaptureMode(gifsy, { mode: 'AMOUNT_UPLOAD' }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // kycDashboard — GET /v1/admin/dashboard/kyc (KYC program-health aggregation)
+  // ────────────────────────────────────────────────────────────────────────────
+  describe('kycDashboard', () => {
+    const HOUR = 60 * 60 * 1000;
+    const now = Date.now();
+
+    /** Build an addressable-outlet fixture in the shape kycDashboard selects. */
+    type Hist = { toStatus: string; createdAt: Date };
+    const outlet = (opts: {
+      status?: string | null; // null/undefined → NOT_STARTED (no submission)
+      submittedAt?: Date | null;
+      approvedAt?: Date | null;
+      createdAt?: Date;
+      history?: Hist[];
+      state?: string | null;
+      type?: string | null;
+      program?: string | null;
+    }) => {
+      const sub =
+        opts.status == null
+          ? null
+          : {
+              status: opts.status,
+              submittedAt: opts.submittedAt ?? null,
+              approvedAt: opts.approvedAt ?? null,
+              createdAt: opts.createdAt ?? new Date(now),
+              statusHistory: opts.history ?? [],
+            };
+      return {
+        id: Math.random().toString(36).slice(2),
+        // Preserve an explicit null/'' the caller passes (do NOT ?? it away) so the
+        // service's own null-handling (programName ?? 'Unassigned', empty→Unspecified)
+        // is what's under test. Only `undefined` falls back to the default.
+        state: opts.state === undefined ? 'KA' : opts.state,
+        programName: opts.program === undefined ? 'P1' : opts.program,
+        outletType: { code: opts.type === undefined ? 'SSS' : opts.type },
+        partner: opts.status == null && !opts.history ? null : { kycSubmissions: sub ? [sub] : [] },
+      };
+    };
+
+    /** Wire all the count/findMany mocks. Defaults model an empty tenant. */
+    const wire = (opts: {
+      outlets?: ReturnType<typeof outlet>[];
+      notInterested?: number;
+      inactive?: number;
+      reUploadCount?: number;
+      totalSubmissions?: number;
+      rejectionHistory?: { notes: string | null }[];
+    }) => {
+      mockPrisma.outlet.findMany.mockResolvedValue(opts.outlets ?? []);
+      // count is called 3× in order: notInterested, inactive, then NEVER outlet again.
+      mockPrisma.outlet.count
+        .mockResolvedValueOnce(opts.notInterested ?? 0)
+        .mockResolvedValueOnce(opts.inactive ?? 0);
+      mockPrisma.kycSubmission.count
+        .mockResolvedValueOnce(opts.reUploadCount ?? 0) // RE_UPLOAD_REQUIRED
+        .mockResolvedValueOnce(opts.totalSubmissions ?? 0); // total
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValue(opts.rejectionHistory ?? []);
+      mockTenant.resolveClient.mockResolvedValue({ slug: 'deoleo' });
+    };
+
+    it('coverage formula: approved / addressable * 100, excludes NOT_INTERESTED from denom', async () => {
+      wire({
+        outlets: [
+          outlet({ status: 'APPROVED', submittedAt: new Date(now - 10 * HOUR), approvedAt: new Date(now - 2 * HOUR) }),
+          outlet({ status: 'APPROVED', submittedAt: new Date(now - 8 * HOUR), approvedAt: new Date(now - 1 * HOUR) }),
+          outlet({ status: null }), // NOT_STARTED
+          outlet({ status: 'PENDING_GIFSY' }),
+        ],
+        notInterested: 5, // must NOT enter the denominator
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.universe.addressableOutlets).toBe(4);
+      expect(res.universe.notInterested).toBe(5);
+      expect(res.headline.coveragePct).toBe(50); // 2/4
+      expect(res.headline.approved).toBe(2);
+    });
+
+    it('groups the FULL field-approval chain (SO/ASM/RSM) into pendingField + awaitingGifsy separately', async () => {
+      wire({
+        outlets: [
+          outlet({ status: 'SUBMITTED' }),
+          outlet({ status: 'UNDER_REVIEW' }),
+          outlet({ status: 'PENDING_SO_APPROVAL' }),
+          outlet({ status: 'PENDING_ASM_APPROVAL' }),
+          outlet({ status: 'PENDING_RSM_APPROVAL' }),
+          outlet({ status: 'PENDING_PENNY_DROP' }),
+          outlet({ status: 'PENDING_AGREEMENT' }),
+          outlet({ status: 'PENDING_GIFSY' }), // → awaitingGifsy, NOT pendingField
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.headline.pendingField).toBe(7);
+      expect(res.headline.awaitingGifsy).toBe(1);
+      expect(res.headline.inPipeline).toBe(8);
+    });
+
+    it('folds REJECTED/RE_UPLOAD/RESUBMISSION/RE_KYC/SUSPENDED into rejectedOrReupload; DRAFT→inProgress', async () => {
+      wire({
+        outlets: [
+          outlet({ status: 'REJECTED' }),
+          outlet({ status: 'RE_UPLOAD_REQUIRED' }),
+          outlet({ status: 'RESUBMISSION_REQUIRED' }),
+          outlet({ status: 'RE_KYC_REQUIRED' }),
+          outlet({ status: 'SUSPENDED' }),
+          outlet({ status: 'DRAFT' }),
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.headline.rejectedOrReupload).toBe(5);
+      expect(res.funnel.find((s) => s.stage === 'In progress')?.count).toBe(1);
+    });
+
+    it('approvalRatePct uses approved / (approved + currently-REJECTED) — re-upload NOT in denom', async () => {
+      wire({
+        outlets: [
+          outlet({ status: 'APPROVED' }),
+          outlet({ status: 'APPROVED' }),
+          outlet({ status: 'APPROVED' }),
+          outlet({ status: 'REJECTED' }),
+          outlet({ status: 'RE_UPLOAD_REQUIRED' }), // excluded from the rate denom
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      // 3 / (3 + 1) = 75
+      expect(res.headline.approvalRatePct).toBe(75);
+    });
+
+    it('per-stage SLA: a >24h field-pending breaches; a >96h gifsy-pending breaches', async () => {
+      wire({
+        outlets: [
+          // field-pending, submitted 30h ago → breach
+          outlet({ status: 'SUBMITTED', submittedAt: new Date(now - 30 * HOUR) }),
+          // field-pending, submitted 5h ago → within
+          outlet({ status: 'PENDING_SO_APPROVAL', submittedAt: new Date(now - 5 * HOUR) }),
+          // gifsy-pending, entered PENDING_GIFSY 100h ago → breach
+          outlet({
+            status: 'PENDING_GIFSY',
+            history: [{ toStatus: 'PENDING_GIFSY', createdAt: new Date(now - 100 * HOUR) }],
+          }),
+          // gifsy-pending, entered PENDING_GIFSY 10h ago → within
+          outlet({
+            status: 'PENDING_GIFSY',
+            history: [{ toStatus: 'PENDING_GIFSY', createdAt: new Date(now - 10 * HOUR) }],
+          }),
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.buckets.pendingFieldApproval).toMatchObject({ count: 2, withinSla: 1, breached: 1, slaHours: 24 });
+      expect(res.buckets.pendingGifsyApproval).toMatchObject({ count: 2, withinSla: 1, breached: 1, slaHours: 96 });
+    });
+
+    it('sla block computes field/gifsy/end-to-end over APPROVED submissions with history', async () => {
+      const submittedAt = new Date(now - 50 * HOUR);
+      const enteredGifsy = new Date(now - 40 * HOUR); // fieldChain = 10h (<=24 → compliant)
+      const approvedAt = new Date(now - 10 * HOUR); // gifsyReview = 30h (<=96 → compliant); e2e = 40h
+      wire({
+        outlets: [
+          outlet({
+            status: 'APPROVED',
+            submittedAt,
+            approvedAt,
+            history: [{ toStatus: 'PENDING_GIFSY', createdAt: enteredGifsy }],
+          }),
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.sla.fieldChainAvgHours).toBe(10);
+      expect(res.sla.gifsyReviewAvgHours).toBe(30);
+      expect(res.sla.endToEndAvgHours).toBe(40);
+      expect(res.sla.fieldCompliancePct).toBe(100);
+      expect(res.sla.gifsyCompliancePct).toBe(100);
+      expect(res.sla.sampleSize).toBe(1);
+    });
+
+    it('rejection reasons are tenant-filtered in the query and grouped (null→Unspecified, top 8)', async () => {
+      wire({
+        outlets: [],
+        rejectionHistory: [
+          { notes: 'Bad PAN' },
+          { notes: 'Bad PAN' },
+          { notes: 'Blurry cheque' },
+          { notes: null },
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      // The history query MUST be tenant-scoped via kycSubmission → user.clientId
+      const where = mockPrisma.kycStatusHistory.findMany.mock.calls[0][0].where;
+      expect(where.toStatus).toBe('REJECTED');
+      expect(where.kycSubmission).toEqual({ user: { clientId: 'deoleo' } });
+      expect(res.quality.topRejectionReasons[0]).toEqual({ reason: 'Bad PAN', count: 2 });
+      expect(res.quality.topRejectionReasons).toContainEqual({ reason: 'Unspecified', count: 1 });
+      expect(res.quality.topRejectionReasons.length).toBeLessThanOrEqual(8);
+    });
+
+    it('reUploadRatePct = reUpload / totalSubmissions * 100', async () => {
+      wire({ outlets: [], reUploadCount: 3, totalSubmissions: 12 });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.quality.reUploadRatePct).toBe(25);
+    });
+
+    it('the addressable outlet query is tenant-scoped + excludes NOT_INTERESTED & inactive & deleted', async () => {
+      wire({ outlets: [] });
+      await service.kycDashboard(clientAdmin);
+      const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      expect(where.clientId).toBe('deoleo');
+      expect(where.deletedAt).toBeNull();
+      expect(where.isActive).toBe(true);
+      expect(where.kycIntent).toEqual({ not: 'NOT_INTERESTED' });
+    });
+
+    it('empty tenant → no NaN / divide-by-zero (coverage 0, compliance 100, rate 0)', async () => {
+      wire({ outlets: [], notInterested: 0, inactive: 0, reUploadCount: 0, totalSubmissions: 0 });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.universe.addressableOutlets).toBe(0);
+      expect(res.headline.coveragePct).toBe(0);
+      expect(res.headline.approvalRatePct).toBe(100); // denom 0 → 100
+      expect(res.sla.fieldCompliancePct).toBe(100);
+      expect(res.sla.gifsyCompliancePct).toBe(100);
+      expect(res.sla.endToEndAvgHours).toBe(0);
+      expect(res.quality.reUploadRatePct).toBe(0);
+      expect(res.scope.tenant).toBe('deoleo');
+      expect(typeof res.scope.generatedAt).toBe('string');
+      // no NaN anywhere in the headline numbers
+      for (const v of [res.headline.coveragePct, res.headline.approvalRatePct, res.headline.inPipeline]) {
+        expect(Number.isNaN(v)).toBe(false);
+      }
+    });
+
+    it('coverageBy groups by state/type/program with per-group coveragePct, empty key → Unspecified', async () => {
+      wire({
+        outlets: [
+          outlet({ status: 'APPROVED', state: 'KA', type: 'SSS', program: 'P1' }),
+          outlet({ status: 'PENDING_GIFSY', state: 'KA', type: 'SSS', program: 'P1' }),
+          outlet({ status: 'APPROVED', state: '', type: 'WHOLESALER', program: null }),
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      const ka = res.coverageBy.state.find((e) => e.key === 'KA');
+      expect(ka).toEqual({ key: 'KA', addressable: 2, approved: 1, coveragePct: 50 });
+      // empty state string → 'Unspecified'
+      expect(res.coverageBy.state.some((e) => e.key === 'Unspecified')).toBe(true);
+      // null programName falls back to 'Unassigned' on the outlet, which is a non-empty key
+      expect(res.coverageBy.program.some((e) => e.key === 'Unassigned')).toBe(true);
+    });
+
+    it('the funnel array is ordered Not started → In progress → Submitted → Pending Gifsy → Approved', async () => {
+      wire({
+        outlets: [
+          outlet({ status: null }), // not started
+          outlet({ status: 'DRAFT' }), // in progress
+          outlet({ status: 'SUBMITTED' }), // field
+          outlet({ status: 'PENDING_GIFSY' }),
+          outlet({ status: 'APPROVED' }),
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.funnel.map((f) => f.stage)).toEqual([
+        'Not started',
+        'In progress',
+        'Submitted (field approval)',
+        'Pending Gifsy',
+        'Approved',
+      ]);
+      expect(res.funnel.map((f) => f.count)).toEqual([1, 1, 1, 1, 1]);
     });
   });
 });

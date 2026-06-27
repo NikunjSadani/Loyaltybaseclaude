@@ -1,341 +1,545 @@
 'use client';
 
-import React from 'react';
-import {
-  PieChart, Pie, Cell,
-  BarChart, Bar,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer,
-} from 'recharts';
+/* ─── Admin KYC Dashboard (REAL data) ───────────────────────────────────────────
+   100% wired to GET /api/admin/dashboard/kyc (proxy → backend /v1/admin/dashboard/kyc).
+   Every number on this page comes from that endpoint — there are NO hardcoded metric
+   constants or fabricated arrays. If the fetch fails or returns nothing, an explicit
+   error / empty state is shown (never a mock fallback). Auth follows the same
+   authHeader() + fetch + useEffect/useState pattern as /admin/dashboard/page.tsx.
+──────────────────────────────────────────────────────────────────────────────── */
+
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Store, Clock, CheckCircle, XCircle,
   AlertTriangle, AlertCircle, TrendingUp,
+  Eye, Slash, Loader2,
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
-import { FilterBar } from '@/components/admin/filter-bar';
+import { authHeader } from '@/lib/api-client';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-const PRIMARY_GREEN = 'var(--brand-primary)';
-const DARK_NAVY     = '#1A1A2E';
+const DARK_NAVY = '#1A1A2E';
 
-// ── Stat cards ────────────────────────────────────────────────────────────────
-const statCards = [
-  { label: 'Total Outlets',       value: 248, icon: Store,       iconBg: 'bg-gray-100',  iconColor: 'text-gray-600',  valColor: 'text-gray-900'  },
-  { label: 'Pending Review',      value: 14,  icon: Clock,       iconBg: 'bg-amber-100', iconColor: 'text-amber-600', valColor: 'text-amber-700' },
-  { label: 'Approved',            value: 221, icon: CheckCircle, iconBg: 'bg-green-100', iconColor: 'text-green-700', valColor: 'text-green-700' },
-  { label: 'Rejected / Resubmit',value: 13,  icon: XCircle,     iconBg: 'bg-red-100',   iconColor: 'text-red-600',   valColor: 'text-red-700'   },
-];
+/* ─── API response model (precise to the endpoint contract) ─────────────────── */
 
-// ── Status breakdown (donut) ──────────────────────────────────────────────────
-const pieData = [
-  { name: 'Approved', value: 221, color: PRIMARY_GREEN },
-  { name: 'Pending',  value: 14,  color: '#f59e0b'     },
-  { name: 'Rejected', value: 8,   color: '#ef4444'     },
-  { name: 'Resubmit', value: 5,   color: '#f97316'     },
-];
-
-// ── Monthly submissions (bar) ─────────────────────────────────────────────────
-const barData = [
-  { month: 'Oct', Submitted: 18, Approved: 15 },
-  { month: 'Nov', Submitted: 22, Approved: 19 },
-  { month: 'Dec', Submitted: 31, Approved: 26 },
-  { month: 'Jan', Submitted: 28, Approved: 24 },
-  { month: 'Feb', Submitted: 19, Approved: 16 },
-  { month: 'Mar', Submitted: 14, Approved: 11 },
-];
-
-// ── KYC by State ──────────────────────────────────────────────────────────────
-const stateData = [
-  { state: 'Maharashtra', outlets: 82, approved: 76, pending: 4, rate: 92.7 },
-  { state: 'Karnataka',   outlets: 54, approved: 48, pending: 3, rate: 88.9 },
-  { state: 'Tamil Nadu',  outlets: 47, approved: 42, pending: 2, rate: 89.4 },
-  { state: 'Gujarat',     outlets: 38, approved: 34, pending: 3, rate: 89.5 },
-  { state: 'Delhi NCR',   outlets: 27, approved: 21, pending: 2, rate: 77.8 },
-];
-
-// ── Rejection reasons ─────────────────────────────────────────────────────────
-const rejectionReasons = [
-  { reason: 'Blurry / unreadable documents', count: 4, color: '#ef4444' },
-  { reason: 'GST number mismatch',           count: 3, color: '#f97316' },
-  { reason: 'Incomplete address proof',      count: 2, color: '#f59e0b' },
-  { reason: 'Expired documents',             count: 2, color: '#8b5cf6' },
-  { reason: 'Owner identity mismatch',       count: 2, color: '#6366f1' },
-];
-const totalRejections = rejectionReasons.reduce((s, r) => s + r.count, 0);
-
-// ── SLA summary (aggregate, derived from pending-outlet data) ─────────────────
-const SLA_TOTAL     = 14;
-const SLA_BREACHED  = 4;
-const SLA_AT_RISK   = 4;
-const SLA_ON_TRACK  = 6;
-const SLA_AVG_HRS   = 36.1;   // avg hours elapsed across all pending
-const SLA_COMPLIANCE = 85.5;  // % of last-30-day processed KYCs within 48h SLA
-
-// Per-state SLA breakdown (aggregated from outlet data)
-const slaByState = [
-  { state: 'Karnataka',   total: 4, onTrack: 1, atRisk: 1, breached: 2 },
-  { state: 'Gujarat',     total: 2, onTrack: 0, atRisk: 1, breached: 1 },
-  { state: 'Delhi NCR',   total: 2, onTrack: 1, atRisk: 0, breached: 1 },
-  { state: 'Bihar',       total: 1, onTrack: 0, atRisk: 1, breached: 0 },
-  { state: 'Tamil Nadu',  total: 2, onTrack: 1, atRisk: 1, breached: 0 },
-  { state: 'Maharashtra', total: 3, onTrack: 3, atRisk: 0, breached: 0 },
-];
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function rateColor(rate: number) {
-  if (rate >= 90) return 'text-green-700 font-semibold';
-  if (rate >= 80) return 'text-amber-600 font-semibold';
-  return 'text-red-600 font-semibold';
+interface CoverageRow {
+  key: string;
+  addressable: number;
+  approved: number;
+  coveragePct: number;
 }
 
-function PieLegend() {
+interface SlaBucket {
+  count: number;
+  withinSla: number;
+  breached: number;
+  slaHours: number;
+}
+
+interface KycDashboardData {
+  scope: { tenant: string; generatedAt: string };
+  universe: { addressableOutlets: number; notInterested: number; inactive: number };
+  headline: {
+    coveragePct: number;
+    approved: number;
+    inPipeline: number;
+    pendingField: number;
+    awaitingGifsy: number;
+    rejectedOrReupload: number;
+    notStarted: number;
+    approvalRatePct: number;
+  };
+  funnel: { stage: string; count: number }[];
+  buckets: {
+    pendingFieldApproval: SlaBucket;
+    pendingGifsyApproval: SlaBucket;
+  };
+  sla: {
+    endToEndAvgHours: number;
+    fieldChainAvgHours: number;
+    gifsyReviewAvgHours: number;
+    fieldCompliancePct: number;
+    gifsyCompliancePct: number;
+    sampleSize: number;
+  };
+  quality: {
+    topRejectionReasons: { reason: string; count: number }[];
+    reUploadRatePct: number;
+  };
+  coverageBy: {
+    state: CoverageRow[];
+    outletType: CoverageRow[];
+    program: CoverageRow[];
+  };
+}
+
+/* ─── Formatting helpers ─────────────────────────────────────────────────────── */
+
+const fmtInt = (n: number) => n.toLocaleString('en-IN');
+const fmtPct = (n: number) => `${n.toFixed(1)}%`;
+
+function fmtTimestamp(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
+
+// SLA health chip: green if avg <= target, amber if <= 1.5×target, red otherwise.
+function slaChip(avg: number, target: number): { label: string; cls: string } {
+  if (avg <= target) return { label: 'On Track', cls: 'bg-green-100 text-green-700' };
+  if (avg <= target * 1.5) return { label: 'At Risk', cls: 'bg-amber-100 text-amber-700' };
+  return { label: 'Breached', cls: 'bg-red-100 text-red-700' };
+}
+
+/* ─── Small presentational pieces (chrome only, fully prop-driven) ──────────── */
+
+interface StatCardProps {
+  label: string;
+  value: string;
+  sub?: string;
+  icon: React.ElementType;
+  iconBg: string;
+  iconColor: string;
+  valColor: string;
+}
+
+function StatCard({ label, value, sub, icon: Icon, iconBg, iconColor, valColor }: StatCardProps) {
   return (
-    <div className="flex flex-wrap justify-center gap-x-5 gap-y-2 mt-4">
-      {pieData.map((e) => (
-        <div key={e.name} className="flex items-center gap-1.5 text-sm text-gray-600">
-          <span className="inline-block w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: e.color }} />
-          {e.name} ({e.value})
+    <Card className="border border-gray-100 shadow-sm rounded-2xl">
+      <CardContent className="pt-6">
+        <div className="flex items-center justify-between">
+          <div className="min-w-0">
+            <p className="text-sm text-gray-500">{label}</p>
+            <p className={`text-3xl font-bold mt-1 ${valColor}`}>{value}</p>
+            {sub && <p className="text-[11px] text-gray-400 mt-1">{sub}</p>}
+          </div>
+          <div className={`p-3 rounded-xl ${iconBg} shrink-0`}>
+            <Icon className={`w-6 h-6 ${iconColor}`} />
+          </div>
         </div>
-      ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+const REASON_PALETTE = ['#ef4444', '#f97316', '#f59e0b', '#8b5cf6', '#6366f1', '#0891b2'];
+
+const COVERAGE_TABS: { key: keyof KycDashboardData['coverageBy']; label: string }[] = [
+  { key: 'state',      label: 'By State' },
+  { key: 'outletType', label: 'By Outlet Type' },
+  { key: 'program',    label: 'By Program' },
+];
+
+function coverageColor(pct: number): string {
+  if (pct >= 90) return '#16a34a';
+  if (pct >= 70) return '#f59e0b';
+  return '#ef4444';
+}
+
+/* ─── Bottleneck bucket card ─────────────────────────────────────────────────── */
+
+function BucketCard({ title, bucket }: { title: string; bucket: SlaBucket }) {
+  const total = bucket.count || 1;
+  const withinW = (bucket.withinSla / total) * 100;
+  const breachedW = (bucket.breached / total) * 100;
+  return (
+    <div className="rounded-xl border border-gray-100 bg-white px-4 py-4">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-sm font-semibold text-gray-700">{title}</span>
+        <span className="text-[11px] font-semibold text-gray-400">SLA: {bucket.slaHours}h</span>
+      </div>
+      <p className="text-3xl font-bold text-gray-900">{fmtInt(bucket.count)}</p>
+      <p className="text-[11px] text-gray-400 mt-0.5">awaiting action</p>
+
+      {/* stacked bar: within-SLA (green) vs breached (red) */}
+      <div className="h-2.5 w-full bg-gray-100 rounded-full overflow-hidden flex mt-3">
+        <div className="h-full bg-green-500" style={{ width: `${withinW}%` }} />
+        <div className="h-full bg-red-500" style={{ width: `${breachedW}%` }} />
+      </div>
+      <div className="flex items-center justify-between mt-2 text-[11px]">
+        <span className="font-semibold text-green-600">{fmtInt(bucket.withinSla)} within SLA</span>
+        <span className="font-semibold text-red-500">{fmtInt(bucket.breached)} breached</span>
+      </div>
     </div>
   );
 }
 
-// ── Page ──────────────────────────────────────────────────────────────────────
-export default function AdminKycDashboardPage() {
-  return (
-    <div className="space-y-6">
+/* ─── SLA tile ───────────────────────────────────────────────────────────────── */
 
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight" style={{ color: DARK_NAVY }}>
-          KYC Dashboard
-        </h1>
-        <p className="text-sm text-gray-500 mt-1">Track outlet registration and verification status</p>
+function SlaTile({
+  label, avg, target, compliancePct, footer,
+}: {
+  label: string;
+  avg: number;
+  target: number | null;
+  compliancePct: number | null;
+  footer: string;
+}) {
+  const chip = target !== null ? slaChip(avg, target) : null;
+  return (
+    <div className="bg-gray-50 border border-gray-100 rounded-xl px-4 py-4 flex flex-col gap-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-gray-600">{label}</span>
+        {chip && (
+          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${chip.cls}`}>
+            {chip.label}
+          </span>
+        )}
+      </div>
+      <p className="text-3xl font-bold text-gray-900">{avg.toFixed(1)}h</p>
+      {compliancePct !== null && (
+        <p className="text-[11px] text-gray-500">{fmtPct(compliancePct)} within SLA</p>
+      )}
+      <p className="text-[10px] text-gray-400">{footer}</p>
+    </div>
+  );
+}
+
+/* ─── Page ───────────────────────────────────────────────────────────────────── */
+
+export default function AdminKycDashboardPage() {
+  const [data, setData] = useState<KycDashboardData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<keyof KycDashboardData['coverageBy']>('state');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch('/api/admin/dashboard/kyc', { headers: { ...authHeader() } })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`Request failed (${r.status})`);
+        const json: unknown = await r.json();
+        // The endpoint may return the bare shape or wrap it as { success, data }.
+        const payload = (json && typeof json === 'object' && 'data' in json)
+          ? (json as { data: KycDashboardData }).data
+          : (json as KycDashboardData);
+        if (!payload || typeof payload !== 'object' || !('headline' in payload)) {
+          throw new Error('Empty or malformed response');
+        }
+        if (!cancelled) setData(payload);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load KYC dashboard');
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const funnelMax = useMemo(
+    () => (data && data.funnel.length ? Math.max(...data.funnel.map((s) => s.count), 1) : 1),
+    [data],
+  );
+
+  const coverageRows = data ? data.coverageBy[activeTab] : [];
+
+  /* ── Loading state ── */
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-32 text-gray-400" data-testid="kyc-dashboard-loading">
+        <Loader2 className="w-8 h-8 animate-spin mb-3" />
+        <p className="text-sm">Loading KYC dashboard…</p>
+      </div>
+    );
+  }
+
+  /* ── Error / empty state — NEVER fabricated numbers ── */
+  if (error || !data) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight" style={{ color: DARK_NAVY }}>
+            KYC Dashboard
+          </h1>
+        </div>
+        <Card className="border border-red-100 shadow-sm rounded-2xl" data-testid="kyc-dashboard-error">
+          <CardContent className="py-12 flex flex-col items-center text-center gap-2">
+            <AlertCircle className="w-8 h-8 text-red-500" />
+            <p className="text-sm font-semibold text-red-600">Couldn&apos;t load the KYC dashboard</p>
+            <p className="text-xs text-gray-500 max-w-md">
+              {error ?? 'No data was returned by the server.'} Please refresh or try again later.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const { scope, universe, headline, funnel, buckets, sla, quality, coverageBy } = data;
+  const reasonMax = quality.topRejectionReasons.length
+    ? Math.max(...quality.topRejectionReasons.map((r) => r.count), 1)
+    : 1;
+
+  return (
+    <div className="space-y-6" data-testid="kyc-dashboard">
+
+      {/* ── Header ── */}
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight" style={{ color: DARK_NAVY }}>
+            KYC Dashboard
+          </h1>
+          <p className="text-sm text-gray-500 mt-1">
+            {scope.tenant} · Outlet onboarding &amp; verification coverage
+          </p>
+        </div>
+        <p className="text-xs text-gray-400">as of {fmtTimestamp(scope.generatedAt)}</p>
       </div>
 
-      {/* Filters */}
-      <FilterBar />
+      {/* ── Headline stat cards ── */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+        <StatCard
+          label="KYC Coverage"
+          value={fmtPct(headline.coveragePct)}
+          sub={`${fmtInt(headline.approved)} / ${fmtInt(universe.addressableOutlets)} approved`}
+          icon={CheckCircle} iconBg="bg-green-100" iconColor="text-green-700" valColor="text-green-700"
+        />
+        <StatCard
+          label="In Pipeline"
+          value={fmtInt(headline.inPipeline)}
+          sub="submitted, not yet approved"
+          icon={Clock} iconBg="bg-blue-100" iconColor="text-blue-600" valColor="text-blue-700"
+        />
+        <StatCard
+          label="Awaiting Gifsy"
+          value={fmtInt(headline.awaitingGifsy)}
+          sub="pending Gifsy approval"
+          icon={Eye} iconBg="bg-purple-100" iconColor="text-purple-600" valColor="text-purple-700"
+        />
+        <StatCard
+          label="Pending Field"
+          value={fmtInt(headline.pendingField)}
+          sub="pending field approval"
+          icon={AlertTriangle} iconBg="bg-amber-100" iconColor="text-amber-600" valColor="text-amber-700"
+        />
+        <StatCard
+          label="Rejected / Re-upload"
+          value={fmtInt(headline.rejectedOrReupload)}
+          sub="needs correction"
+          icon={XCircle} iconBg="bg-red-100" iconColor="text-red-600" valColor="text-red-700"
+        />
+        <StatCard
+          label="Not Interested"
+          value={fmtInt(universe.notInterested)}
+          sub={`${fmtInt(universe.inactive)} inactive in universe`}
+          icon={Slash} iconBg="bg-gray-100" iconColor="text-gray-500" valColor="text-gray-700"
+        />
+      </div>
 
-      {/* Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {statCards.map((card) => {
-          const Icon = card.icon;
-          return (
-            <Card key={card.label} className="border border-gray-100 shadow-sm rounded-2xl">
-              <CardContent className="pt-6">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-gray-500">{card.label}</p>
-                    <p className={`text-3xl font-bold mt-1 ${card.valColor}`}>{card.value}</p>
-                  </div>
-                  <div className={`p-3 rounded-xl ${card.iconBg}`}>
-                    <Icon className={`w-6 h-6 ${card.iconColor}`} />
+      {/* ── Approval Funnel ── */}
+      <Card className="border border-gray-100 shadow-sm rounded-2xl">
+        <CardHeader>
+          <CardTitle>KYC Pipeline</CardTitle>
+          <p className="text-xs text-gray-400 mt-0.5">
+            Where every addressable outlet stands today (% of {fmtInt(universe.addressableOutlets)} addressable) · {fmtPct(headline.approvalRatePct)} approval rate
+          </p>
+        </CardHeader>
+        <CardContent className="pb-5 space-y-3">
+          {funnel.length === 0 && (
+            <p className="text-xs text-gray-400">No funnel data available.</p>
+          )}
+          {funnel.map((step) => {
+            const barW = (step.count / funnelMax) * 100;
+            const share = universe.addressableOutlets > 0
+              ? (step.count / universe.addressableOutlets) * 100
+              : 0;
+            return (
+              <div key={step.stage} className="flex items-center gap-3">
+                <span className="text-xs font-medium text-gray-600 w-44 shrink-0">{step.stage}</span>
+                <div className="flex-1 h-6 bg-gray-100 rounded-lg overflow-hidden flex items-center">
+                  <div
+                    className="h-full rounded-lg flex items-center justify-end pr-2 transition-all min-w-[2.5rem]"
+                    style={{ width: `${barW}%`, backgroundColor: 'var(--brand-primary)' }}
+                  >
+                    <span className="text-[10px] font-bold text-white whitespace-nowrap">
+                      {fmtInt(step.count)}
+                    </span>
                   </div>
                 </div>
-              </CardContent>
-            </Card>
-          );
-        })}
-      </div>
+                <span className="text-[10px] text-gray-400 w-12 shrink-0 text-right">{fmtPct(share)}</span>
+              </div>
+            );
+          })}
+        </CardContent>
+      </Card>
 
-      {/* Charts row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card className="border border-gray-100 shadow-sm rounded-2xl">
-          <CardHeader><CardTitle>Status Breakdown</CardTitle></CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={220}>
-              <PieChart>
-                <Pie data={pieData} cx="50%" cy="50%" innerRadius={60} outerRadius={95} paddingAngle={3} dataKey="value">
-                  {pieData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
-                </Pie>
-                <Tooltip formatter={(value, name) => [value, name]} />
-              </PieChart>
-            </ResponsiveContainer>
-            <PieLegend />
-          </CardContent>
-        </Card>
-
-        <Card className="border border-gray-100 shadow-sm rounded-2xl">
-          <CardHeader><CardTitle>Monthly Submissions</CardTitle></CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={barData} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                <XAxis dataKey="month" tick={{ fontSize: 12 }} />
-                <YAxis tick={{ fontSize: 12 }} />
-                <Tooltip />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="Submitted" fill="#6366f1" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="Approved"  fill={PRIMARY_GREEN} radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* KYC by State  +  Rejection Reasons */}
+      {/* ── Bottleneck buckets + SLA ── */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
 
-        {/* KYC by State — compact, 2 cols */}
+        {/* Bottlenecks (2 cols) */}
         <Card className="lg:col-span-2 border border-gray-100 shadow-sm rounded-2xl">
-          <CardHeader><CardTitle>KYC by State</CardTitle></CardHeader>
-          <CardContent className="pb-4">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-100">
-                  <th className="text-left py-2 font-semibold text-gray-500 text-xs">State</th>
-                  <th className="text-right py-2 font-semibold text-gray-500 text-xs">Outlets</th>
-                  <th className="text-right py-2 font-semibold text-gray-500 text-xs">Pending</th>
-                  <th className="text-right py-2 font-semibold text-gray-500 text-xs">Rate</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stateData.map((row, i) => (
-                  <tr key={row.state} className={`border-b border-gray-50 ${i % 2 === 0 ? '' : 'bg-gray-50/40'}`}>
-                    <td className="py-2.5 font-medium text-gray-800 text-xs">{row.state}</td>
-                    <td className="py-2.5 text-right text-gray-500 text-xs">{row.outlets}</td>
-                    <td className="py-2.5 text-right text-xs">
-                      <span className={`font-semibold ${row.pending > 2 ? 'text-amber-600' : 'text-gray-600'}`}>
-                        {row.pending}
-                      </span>
-                    </td>
-                    <td className={`py-2.5 text-right text-xs ${rateColor(row.rate)}`}>{row.rate}%</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <CardHeader>
+            <CardTitle>Approval Bottlenecks</CardTitle>
+            <p className="text-xs text-gray-400 mt-0.5">Within-SLA vs breached, per approval stage</p>
+          </CardHeader>
+          <CardContent className="pb-5 space-y-4">
+            <BucketCard title="Pending Field Approval" bucket={buckets.pendingFieldApproval} />
+            <BucketCard title="Pending Gifsy Approval" bucket={buckets.pendingGifsyApproval} />
           </CardContent>
         </Card>
 
-        {/* Rejection Reasons — 3 cols */}
+        {/* SLA panel (3 cols) */}
         <Card className="lg:col-span-3 border border-gray-100 shadow-sm rounded-2xl">
           <CardHeader>
-            <CardTitle>Rejection Reasons</CardTitle>
-            <p className="text-xs text-gray-400 mt-0.5">Reasons for rejection &amp; resubmission requests · last 30 days</p>
+            <CardTitle>Processing SLA</CardTitle>
+            <p className="text-xs text-gray-400 mt-0.5">
+              Average turnaround across {fmtInt(sla.sampleSize)} processed submissions · field target 24h · Gifsy target 96h
+            </p>
+          </CardHeader>
+          <CardContent className="pb-6">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <SlaTile
+                label="End-to-end avg"
+                avg={sla.endToEndAvgHours}
+                target={null}
+                compliancePct={null}
+                footer={`n = ${fmtInt(sla.sampleSize)} processed`}
+              />
+              <SlaTile
+                label="Field-chain avg"
+                avg={sla.fieldChainAvgHours}
+                target={24}
+                compliancePct={sla.fieldCompliancePct}
+                footer="target 24h"
+              />
+              <SlaTile
+                label="Gifsy-review avg"
+                avg={sla.gifsyReviewAvgHours}
+                target={96}
+                compliancePct={sla.gifsyCompliancePct}
+                footer="target 96h"
+              />
+            </div>
+            <div className="flex items-center gap-1.5 mt-4 text-[11px] text-gray-400">
+              <TrendingUp className="w-3.5 h-3.5" />
+              Green ≤ target · amber ≤ 1.5× target · red otherwise
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* ── Quality: rejection reasons + re-upload rate ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+
+        {/* Rejection reasons (3 cols) */}
+        <Card className="lg:col-span-3 border border-gray-100 shadow-sm rounded-2xl">
+          <CardHeader>
+            <CardTitle>Top Rejection Reasons</CardTitle>
+            <p className="text-xs text-gray-400 mt-0.5">Why outlets get rejected or asked to re-upload</p>
           </CardHeader>
           <CardContent className="pb-5 space-y-4">
-            {rejectionReasons.map((r) => {
-              const pct = Math.round((r.count / totalRejections) * 100);
+            {quality.topRejectionReasons.length === 0 && (
+              <p className="text-xs text-gray-400">No rejections recorded.</p>
+            )}
+            {quality.topRejectionReasons.map((r, i) => {
+              const barW = (r.count / reasonMax) * 100;
               return (
                 <div key={r.reason}>
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-medium text-gray-700">{r.reason}</span>
-                    <span className="text-xs font-bold text-gray-500 ml-3 shrink-0">
-                      {r.count} <span className="font-normal text-gray-400">({pct}%)</span>
-                    </span>
+                    <span className="text-xs font-bold text-gray-500 ml-3 shrink-0">{fmtInt(r.count)}</span>
                   </div>
                   <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                     <div
                       className="h-full rounded-full transition-all"
-                      style={{ width: `${pct}%`, backgroundColor: r.color }}
+                      style={{ width: `${barW}%`, backgroundColor: REASON_PALETTE[i % REASON_PALETTE.length] }}
                     />
                   </div>
                 </div>
               );
             })}
-            <p className="text-[11px] text-gray-400 pt-1">
-              Based on {totalRejections} rejection / resubmission actions · May 2026
-            </p>
+          </CardContent>
+        </Card>
+
+        {/* Re-upload rate (2 cols) */}
+        <Card className="lg:col-span-2 border border-gray-100 shadow-sm rounded-2xl">
+          <CardHeader>
+            <CardTitle>Re-upload Rate</CardTitle>
+            <p className="text-xs text-gray-400 mt-0.5">Share of submissions sent back for re-upload</p>
+          </CardHeader>
+          <CardContent className="pb-6 flex flex-col items-center justify-center gap-2 py-6">
+            <Store className="w-7 h-7 text-amber-500" />
+            <p className="text-4xl font-bold text-amber-600">{fmtPct(quality.reUploadRatePct)}</p>
+            <p className="text-xs text-gray-500">of submissions required a re-upload</p>
           </CardContent>
         </Card>
       </div>
 
-      {/* SLA Tracker — aggregate summary */}
+      {/* ── Coverage breakdown (tabbed table) ── */}
       <Card className="border border-gray-100 shadow-sm rounded-2xl">
         <CardHeader>
-          <CardTitle>SLA Tracker</CardTitle>
-          <p className="text-xs text-gray-400 mt-0.5">
-            KYC processing SLA · threshold 48 hrs from submission · {SLA_TOTAL} submissions currently pending
-          </p>
-        </CardHeader>
-        <CardContent className="pb-6 space-y-6">
-
-          {/* Top summary row */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* Compliance rate */}
-            <div className="bg-green-50 border border-green-100 rounded-xl px-4 py-4 flex flex-col gap-1">
-              <div className="flex items-center gap-1.5">
-                <TrendingUp className="w-4 h-4 text-green-600" />
-                <span className="text-xs font-semibold text-green-700">30-day Compliance</span>
-              </div>
-              <p className="text-3xl font-bold text-green-700">{SLA_COMPLIANCE}%</p>
-              <p className="text-[10px] text-green-600">of processed KYCs within 48 hrs</p>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <CardTitle>Coverage Breakdown</CardTitle>
+              <p className="text-xs text-gray-400 mt-0.5">Approved vs addressable outlets, by dimension</p>
             </div>
-
-            {/* Avg processing time */}
-            <div className="bg-blue-50 border border-blue-100 rounded-xl px-4 py-4 flex flex-col gap-1">
-              <div className="flex items-center gap-1.5">
-                <Clock className="w-4 h-4 text-blue-600" />
-                <span className="text-xs font-semibold text-blue-700">Avg Processing Time</span>
-              </div>
-              <p className="text-3xl font-bold text-blue-700">{SLA_AVG_HRS}h</p>
-              <p className="text-[10px] text-blue-600">across pending submissions</p>
-            </div>
-
-            {/* At Risk */}
-            <div className="bg-amber-50 border border-amber-100 rounded-xl px-4 py-4 flex flex-col gap-1">
-              <div className="flex items-center gap-1.5">
-                <AlertTriangle className="w-4 h-4 text-amber-600" />
-                <span className="text-xs font-semibold text-amber-700">At Risk</span>
-              </div>
-              <p className="text-3xl font-bold text-amber-700">{SLA_AT_RISK}</p>
-              <p className="text-[10px] text-amber-600">24–48 hrs elapsed · needs action</p>
-            </div>
-
-            {/* Breached */}
-            <div className="bg-red-50 border border-red-100 rounded-xl px-4 py-4 flex flex-col gap-1">
-              <div className="flex items-center gap-1.5">
-                <AlertCircle className="w-4 h-4 text-red-500" />
-                <span className="text-xs font-semibold text-red-700">SLA Breached</span>
-              </div>
-              <p className="text-3xl font-bold text-red-700">{SLA_BREACHED}</p>
-              <p className="text-[10px] text-red-600">over 48 hrs · escalate immediately</p>
-            </div>
-          </div>
-
-          {/* Distribution bar */}
-          <div>
-            <div className="flex items-center justify-between text-xs text-gray-500 mb-1.5">
-              <span className="font-medium">Pending distribution ({SLA_TOTAL} total)</span>
-              <div className="flex items-center gap-4">
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500 inline-block" />On Track ({SLA_ON_TRACK})</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />At Risk ({SLA_AT_RISK})</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block" />Breached ({SLA_BREACHED})</span>
-              </div>
-            </div>
-            <div className="h-3 w-full bg-gray-100 rounded-full overflow-hidden flex">
-              <div className="h-full bg-green-500 transition-all" style={{ width: `${(SLA_ON_TRACK / SLA_TOTAL) * 100}%` }} />
-              <div className="h-full bg-amber-400 transition-all" style={{ width: `${(SLA_AT_RISK / SLA_TOTAL) * 100}%` }} />
-              <div className="h-full bg-red-500 transition-all" style={{ width: `${(SLA_BREACHED / SLA_TOTAL) * 100}%` }} />
-            </div>
-          </div>
-
-          {/* SLA by State */}
-          <div>
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Breakdown by State</p>
-            <div className="space-y-2.5">
-              {slaByState.map((s) => (
-                <div key={s.state} className="flex items-center gap-3">
-                  <span className="text-xs font-medium text-gray-700 w-28 shrink-0">{s.state}</span>
-                  {/* stacked bar */}
-                  <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden flex">
-                    <div className="h-full bg-green-500" style={{ width: `${(s.onTrack  / s.total) * 100}%` }} />
-                    <div className="h-full bg-amber-400" style={{ width: `${(s.atRisk   / s.total) * 100}%` }} />
-                    <div className="h-full bg-red-500"   style={{ width: `${(s.breached / s.total) * 100}%` }} />
-                  </div>
-                  {/* counts */}
-                  <div className="flex items-center gap-2 shrink-0">
-                    {s.onTrack  > 0 && <span className="text-[10px] font-bold text-green-600">{s.onTrack} ok</span>}
-                    {s.atRisk   > 0 && <span className="text-[10px] font-bold text-amber-500">{s.atRisk} risk</span>}
-                    {s.breached > 0 && <span className="text-[10px] font-bold text-red-500">{s.breached} breached</span>}
-                  </div>
-                  <span className="text-[10px] text-gray-400 w-10 text-right shrink-0">{s.total} total</span>
-                </div>
+            <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1" role="tablist">
+              {COVERAGE_TABS.map((t) => (
+                <button
+                  key={t.key}
+                  role="tab"
+                  aria-selected={activeTab === t.key}
+                  onClick={() => setActiveTab(t.key)}
+                  className={`text-xs font-semibold px-3 py-1.5 rounded-md transition-colors ${
+                    activeTab === t.key ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  {t.label}
+                </button>
               ))}
             </div>
           </div>
-
+        </CardHeader>
+        <CardContent className="pb-5">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-100">
+                  <th className="text-left py-2 font-semibold text-gray-500 text-xs">
+                    {COVERAGE_TABS.find((t) => t.key === activeTab)?.label.replace('By ', '')}
+                  </th>
+                  <th className="text-right py-2 font-semibold text-gray-500 text-xs">Approved / Addressable</th>
+                  <th className="py-2 font-semibold text-gray-500 text-xs w-48">Coverage</th>
+                </tr>
+              </thead>
+              <tbody>
+                {coverageRows.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="py-6 text-center text-xs text-gray-400">
+                      No coverage data for this dimension.
+                    </td>
+                  </tr>
+                )}
+                {coverageRows.map((row, i) => (
+                  <tr key={row.key} className={`border-b border-gray-50 ${i % 2 === 0 ? '' : 'bg-gray-50/40'}`}>
+                    <td className="py-2.5 font-medium text-gray-800 text-xs">{row.key}</td>
+                    <td className="py-2.5 text-right text-gray-500 text-xs">
+                      {fmtInt(row.approved)} / {fmtInt(row.addressable)}
+                    </td>
+                    <td className="py-2.5">
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                          <div
+                            className="h-full rounded-full"
+                            style={{ width: `${Math.min(row.coveragePct, 100)}%`, backgroundColor: coverageColor(row.coveragePct) }}
+                          />
+                        </div>
+                        <span
+                          className="text-xs font-bold w-12 text-right shrink-0"
+                          style={{ color: coverageColor(row.coveragePct) }}
+                        >
+                          {fmtPct(row.coveragePct)}
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </CardContent>
       </Card>
 

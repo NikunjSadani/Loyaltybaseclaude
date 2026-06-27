@@ -704,6 +704,362 @@ export class AdminCoreService {
   }
 
   // ════════════════════════════════════════════════════════════════════════
+  // DASHBOARD — admin/dashboard/kyc (KYC program-health aggregation)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Field-approval pending bucket: an addressable outlet whose latest submission
+   * sits in any of the pre-Gifsy review states (covers the full SO/ASM/RSM chain
+   * that slaMetrics() bug (a) misses).
+   */
+  private static readonly KYC_PENDING_FIELD_STATUSES: ReadonlySet<KycStatus> = new Set<KycStatus>([
+    'SUBMITTED',
+    'UNDER_REVIEW',
+    'PENDING_PENNY_DROP',
+    'PENDING_AGREEMENT',
+    'PENDING_SO_APPROVAL',
+    'PENDING_ASM_APPROVAL',
+    'PENDING_RSM_APPROVAL',
+  ]);
+
+  /** Rejected / re-upload / re-KYC / suspended → "not approved, needs action". */
+  private static readonly KYC_REJECT_REUPLOAD_STATUSES: ReadonlySet<KycStatus> = new Set<KycStatus>([
+    'REJECTED',
+    'RE_UPLOAD_REQUIRED',
+    'RESUBMISSION_REQUIRED',
+    'RE_KYC_REQUIRED',
+    'SUSPENDED',
+  ]);
+
+  private static readonly KYC_SLA_FIELD_HOURS = 24;
+  private static readonly KYC_SLA_GIFSY_HOURS = 96;
+  private static readonly KYC_HOUR_MS = 1000 * 60 * 60;
+
+  /** mean of a numeric array; 0 for an empty array (no NaN). */
+  private static mean(xs: number[]): number {
+    return xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;
+  }
+
+  /** % of samples <= threshold; 100 when there are no samples. */
+  private static compliancePct(xs: number[], thresholdHours: number): number {
+    if (xs.length === 0) return 100;
+    return (xs.filter((h) => h <= thresholdHours).length / xs.length) * 100;
+  }
+
+  private static round1(n: number): number {
+    return Math.round(n * 10) / 10;
+  }
+
+  /**
+   * GET /v1/admin/dashboard/kyc — real KYC-program-health aggregation.
+   *
+   * Tenant scope is resolved identically to dashboardKpis(): strictly by
+   * `user.clientId`. The proxy/JWT layer sets `clientId` to the assumed tenant
+   * for an operator-context GIFSY token and to the operator's own (empty) gifsy
+   * tenant when native — so GIFSY-native / assumed-tenant / CLIENT_ADMIN all
+   * behave exactly like the rest of the admin dashboard. Every query below is
+   * tenant-filtered (no cross-tenant leak — fixes slaMetrics() bug (b)).
+   */
+  async kycDashboard(user: JwtPayload) {
+    const clientId = user.clientId;
+    const now = Date.now();
+
+    // ── Addressable universe + the canonical per-outlet status derivation ──────
+    // ONE findMany with latest-submission include (mirrors buildOutlets): no N+1.
+    const [addressableOutlets, notInterested, inactive, reUploadCount, totalSubmissions, rejectionHistory] =
+      await Promise.all([
+        this.prisma.outlet.findMany({
+          where: {
+            clientId,
+            deletedAt: null,
+            isActive: true,
+            kycIntent: { not: 'NOT_INTERESTED' },
+          },
+          select: {
+            id: true,
+            state: true,
+            programName: true,
+            outletType: { select: { code: true } },
+            partner: {
+              select: {
+                kycSubmissions: {
+                  orderBy: { createdAt: 'desc' },
+                  take: 1,
+                  select: {
+                    status: true,
+                    submittedAt: true,
+                    approvedAt: true,
+                    createdAt: true,
+                    statusHistory: {
+                      select: { toStatus: true, createdAt: true },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        }),
+
+        // Informational counts — NOT part of the coverage denominator.
+        this.prisma.outlet.count({
+          where: { clientId, deletedAt: null, kycIntent: 'NOT_INTERESTED' },
+        }),
+        this.prisma.outlet.count({
+          where: { clientId, deletedAt: null, isActive: false, kycIntent: { not: 'NOT_INTERESTED' } },
+        }),
+
+        // Quality — re-upload rate over ALL submissions in scope (tenant-filtered).
+        this.prisma.kycSubmission.count({
+          where: { user: { clientId }, status: 'RE_UPLOAD_REQUIRED' },
+        }),
+        this.prisma.kycSubmission.count({
+          where: { user: { clientId } },
+        }),
+
+        // Rejection-reason tally — TENANT-FILTERED via kycSubmission → user.clientId
+        // (slaMetrics() bug (b) was the missing tenant filter here).
+        this.prisma.kycStatusHistory.findMany({
+          where: { toStatus: 'REJECTED', kycSubmission: { user: { clientId } } },
+          select: { notes: true },
+        }),
+      ]);
+
+    const addressableCount = addressableOutlets.length;
+
+    // ── Status grouping (buildOutlets derivation, applied per addressable outlet) ──
+    let approved = 0;
+    let awaitingGifsy = 0;
+    let pendingField = 0;
+    let rejectedOrReupload = 0;
+    let rejectedCount = 0; // currently-REJECTED only (for approvalRate denom)
+    let inProgress = 0; // DRAFT
+    let notStarted = 0; // no submission
+
+    // Per-stage SLA bucket detail.
+    let pendingFieldWithin = 0;
+    let pendingFieldBreached = 0;
+    let pendingGifsyWithin = 0;
+    let pendingGifsyBreached = 0;
+
+    // SLA distributions (over APPROVED submissions with submittedAt present).
+    const fieldChainHours: number[] = [];
+    const gifsyReviewHours: number[] = [];
+    const endToEndHours: number[] = [];
+
+    // coverageBy accumulators
+    const byState = new Map<string, { addressable: number; approved: number }>();
+    const byType = new Map<string, { addressable: number; approved: number }>();
+    const byProgram = new Map<string, { addressable: number; approved: number }>();
+
+    const bump = (
+      m: Map<string, { addressable: number; approved: number }>,
+      rawKey: string | null | undefined,
+      isApproved: boolean,
+    ) => {
+      const key = rawKey && rawKey.trim().length > 0 ? rawKey : 'Unspecified';
+      const e = m.get(key) ?? { addressable: 0, approved: 0 };
+      e.addressable += 1;
+      if (isApproved) e.approved += 1;
+      m.set(key, e);
+    };
+
+    // earliest KycStatusHistory.createdAt where toStatus === 'PENDING_GIFSY'
+    const enteredPendingGifsyAt = (
+      history: { toStatus: KycStatus; createdAt: Date }[],
+    ): Date | null => {
+      let earliest: Date | null = null;
+      for (const h of history) {
+        if (h.toStatus !== 'PENDING_GIFSY') continue;
+        if (earliest === null || h.createdAt.getTime() < earliest.getTime()) {
+          earliest = h.createdAt;
+        }
+      }
+      return earliest;
+    };
+
+    for (const o of addressableOutlets) {
+      const sub = o.partner?.kycSubmissions[0] ?? null;
+      const status: KycStatus | 'NOT_STARTED' = sub ? sub.status : 'NOT_STARTED';
+      const isApproved = status === 'APPROVED';
+
+      if (isApproved) {
+        approved += 1;
+      } else if (status === 'PENDING_GIFSY') {
+        awaitingGifsy += 1;
+      } else if (
+        status !== 'NOT_STARTED' &&
+        AdminCoreService.KYC_PENDING_FIELD_STATUSES.has(status)
+      ) {
+        pendingField += 1;
+      } else if (
+        status !== 'NOT_STARTED' &&
+        AdminCoreService.KYC_REJECT_REUPLOAD_STATUSES.has(status)
+      ) {
+        rejectedOrReupload += 1;
+        if (status === 'REJECTED') rejectedCount += 1;
+      } else if (status === 'DRAFT') {
+        inProgress += 1;
+      } else {
+        notStarted += 1; // NOT_STARTED (no submission)
+      }
+
+      bump(byState, o.state, isApproved);
+      bump(byType, o.outletType?.code, isApproved);
+      bump(byProgram, o.programName ?? 'Unassigned', isApproved);
+
+      // ── Per-stage SLA detail ──
+      if (status !== 'NOT_STARTED' && sub) {
+        if (AdminCoreService.KYC_PENDING_FIELD_STATUSES.has(status)) {
+          // age = now - submittedAt (fall back to createdAt if submittedAt null)
+          const startTs = (sub.submittedAt ?? sub.createdAt).getTime();
+          const ageH = (now - startTs) / AdminCoreService.KYC_HOUR_MS;
+          if (ageH <= AdminCoreService.KYC_SLA_FIELD_HOURS) pendingFieldWithin += 1;
+          else pendingFieldBreached += 1;
+        } else if (status === 'PENDING_GIFSY') {
+          // clock = now - (entered PENDING_GIFSY); fall back submittedAt → createdAt
+          const enteredAt = enteredPendingGifsyAt(sub.statusHistory);
+          const startTs = (enteredAt ?? sub.submittedAt ?? sub.createdAt).getTime();
+          const ageH = (now - startTs) / AdminCoreService.KYC_HOUR_MS;
+          if (ageH <= AdminCoreService.KYC_SLA_GIFSY_HOURS) pendingGifsyWithin += 1;
+          else pendingGifsyBreached += 1;
+        }
+      }
+
+      // ── SLA distributions over APPROVED submissions (submittedAt present) ──
+      if (isApproved && sub && sub.submittedAt) {
+        const submittedTs = sub.submittedAt.getTime();
+        const enteredAt = enteredPendingGifsyAt(sub.statusHistory);
+        if (enteredAt) {
+          fieldChainHours.push(
+            (enteredAt.getTime() - submittedTs) / AdminCoreService.KYC_HOUR_MS,
+          );
+          if (sub.approvedAt) {
+            gifsyReviewHours.push(
+              (sub.approvedAt.getTime() - enteredAt.getTime()) / AdminCoreService.KYC_HOUR_MS,
+            );
+          }
+        }
+        if (sub.approvedAt) {
+          endToEndHours.push(
+            (sub.approvedAt.getTime() - submittedTs) / AdminCoreService.KYC_HOUR_MS,
+          );
+        }
+      }
+    }
+
+    const inPipeline = pendingField + awaitingGifsy;
+
+    // ── Headline metrics ──
+    const coveragePct =
+      addressableCount > 0 ? (approved / addressableCount) * 100 : 0;
+    const approvalDenom = approved + rejectedCount;
+    const approvalRatePct =
+      approvalDenom > 0 ? (approved / approvalDenom) * 100 : 100;
+
+    // ── Quality: rejection reasons (tenant-filtered), top 8 by count desc ──
+    const reasonTally: Record<string, number> = {};
+    for (const r of rejectionHistory) {
+      const reason = r.notes && r.notes.trim().length > 0 ? r.notes : 'Unspecified';
+      reasonTally[reason] = (reasonTally[reason] ?? 0) + 1;
+    }
+    const topRejectionReasons = Object.entries(reasonTally)
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8);
+
+    const reUploadRatePct =
+      totalSubmissions > 0 ? (reUploadCount / totalSubmissions) * 100 : 0;
+
+    // ── coverageBy serialiser: {key, addressable, approved, coveragePct}, top 25 ──
+    const serialiseCoverage = (m: Map<string, { addressable: number; approved: number }>) =>
+      Array.from(m.entries())
+        .map(([key, v]) => ({
+          key,
+          addressable: v.addressable,
+          approved: v.approved,
+          coveragePct:
+            v.addressable > 0
+              ? AdminCoreService.round1((v.approved / v.addressable) * 100)
+              : 0,
+        }))
+        .sort((a, b) => b.addressable - a.addressable)
+        .slice(0, 25);
+
+    // ── Resolve the tenant slug for the scope echo (mirrors getTenantConfig). ──
+    let tenantSlug = 'ALL';
+    if (clientId) {
+      try {
+        const cfg = await this.tenant.resolveClient(clientId);
+        tenantSlug = cfg.slug;
+      } catch {
+        // Unknown/unresolvable tenant — fall back to the raw clientId rather than 500.
+        tenantSlug = clientId;
+      }
+    }
+
+    return {
+      scope: { tenant: tenantSlug, generatedAt: new Date().toISOString() },
+      universe: {
+        addressableOutlets: addressableCount,
+        notInterested,
+        inactive,
+      },
+      headline: {
+        coveragePct: AdminCoreService.round1(coveragePct),
+        approved,
+        inPipeline,
+        pendingField,
+        awaitingGifsy,
+        rejectedOrReupload,
+        notStarted,
+        approvalRatePct: AdminCoreService.round1(approvalRatePct),
+      },
+      funnel: [
+        { stage: 'Not started', count: notStarted },
+        { stage: 'In progress', count: inProgress },
+        { stage: 'Submitted (field approval)', count: pendingField },
+        { stage: 'Pending Gifsy', count: awaitingGifsy },
+        { stage: 'Approved', count: approved },
+      ],
+      buckets: {
+        pendingFieldApproval: {
+          count: pendingField,
+          withinSla: pendingFieldWithin,
+          breached: pendingFieldBreached,
+          slaHours: AdminCoreService.KYC_SLA_FIELD_HOURS,
+        },
+        pendingGifsyApproval: {
+          count: awaitingGifsy,
+          withinSla: pendingGifsyWithin,
+          breached: pendingGifsyBreached,
+          slaHours: AdminCoreService.KYC_SLA_GIFSY_HOURS,
+        },
+      },
+      sla: {
+        fieldChainAvgHours: AdminCoreService.round1(AdminCoreService.mean(fieldChainHours)),
+        gifsyReviewAvgHours: AdminCoreService.round1(AdminCoreService.mean(gifsyReviewHours)),
+        endToEndAvgHours: AdminCoreService.round1(AdminCoreService.mean(endToEndHours)),
+        fieldCompliancePct: AdminCoreService.round1(
+          AdminCoreService.compliancePct(fieldChainHours, AdminCoreService.KYC_SLA_FIELD_HOURS),
+        ),
+        gifsyCompliancePct: AdminCoreService.round1(
+          AdminCoreService.compliancePct(gifsyReviewHours, AdminCoreService.KYC_SLA_GIFSY_HOURS),
+        ),
+        sampleSize: endToEndHours.length,
+      },
+      quality: {
+        topRejectionReasons,
+        reUploadRatePct: AdminCoreService.round1(reUploadRatePct),
+      },
+      coverageBy: {
+        state: serialiseCoverage(byState),
+        outletType: serialiseCoverage(byType),
+        program: serialiseCoverage(byProgram),
+      },
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // TASK-CONFIG — admin/task-config
   // ════════════════════════════════════════════════════════════════════════
 
