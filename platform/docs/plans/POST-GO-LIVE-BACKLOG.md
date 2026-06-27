@@ -95,6 +95,13 @@ the period selector ever allows the current month.
 
 ## F. PWA — installable mobile app for the SALES + OUTLET (partner) apps only
 
+> **🟢 NOW ACTIVE (owner approved 2026-06-27) — promoted out of "deferred".** Full per-tenant PWA incl. Web Push.
+> The canonical, dependency-ordered build + orchestration plan is **[`PWA-PLAN.md`](PWA-PLAN.md)** — read that, not
+> this sketch, for execution. Decisions locked: **per-tenant icon pipeline now** · **single platform-wide VAPID
+> keypair** · owner supplies Deoleo+Gifsy logo art (monogram placeholders meanwhile) · service worker shipped
+> **flag-OFF** + push migration **joins the cutover batch** (both activate AFTER the develop→main cutover). Precondition
+> met: sales/partner UAT is done → screens stable → service worker safe. The phase table below remains accurate context.
+
 **Scope: the `/sales/*` and `/partner/*` shells ONLY** (owner decision 2026-06-26). The `/admin/*` and
 `/gifsy/*` consoles are desktop-operator tools and are explicitly OUT of scope — no PWA/install/icons for them.
 
