@@ -106,10 +106,28 @@ describe('TicketsService', () => {
       mockTx.ticketMessage.create.mockResolvedValue({ id: 'm1' });
       const res = await service.addMessage(gifsy, 't1', { message: 'on it' });
       expect(res).toEqual({ message: { id: 'm1' } });
+      // first non-internal admin reply stamps firstResponseAt AND promotes OPEN→IN_PROGRESS
       expect(mockTx.ticket.update).toHaveBeenCalledWith({
         where: { id: 't1' },
-        data: { status: 'IN_PROGRESS', updatedAt: expect.any(Date) },
+        data: { firstResponseAt: expect.any(Date), status: 'IN_PROGRESS', updatedAt: expect.any(Date) },
       });
+    });
+
+    it('does NOT overwrite firstResponseAt on a later admin reply', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue({
+        id: 't1', createdById: 'user1', status: 'IN_PROGRESS', firstResponseAt: new Date('2026-01-01'),
+      });
+      mockTx.ticketMessage.create.mockResolvedValue({ id: 'm9' });
+      await service.addMessage(gifsy, 't1', { message: 'update' });
+      // already responded + no status transition needed → no ticket.update at all
+      expect(mockTx.ticket.update).not.toHaveBeenCalled();
+    });
+
+    it('does NOT stamp firstResponseAt for an internal note', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', createdById: 'user1', status: 'IN_PROGRESS' });
+      mockTx.ticketMessage.create.mockResolvedValue({ id: 'm8' });
+      await service.addMessage(gifsy, 't1', { message: 'note', isInternal: true });
+      expect(mockTx.ticket.update).not.toHaveBeenCalled();
     });
 
     // Close-the-loop: the raiser responding to a RESOLVED ticket reopens it.
@@ -117,9 +135,10 @@ describe('TicketsService', () => {
       mockPrisma.ticket.findFirst.mockResolvedValue({ id: 't1', createdById: 'user1', status: 'RESOLVED' });
       mockTx.ticketMessage.create.mockResolvedValue({ id: 'm2' });
       await service.addMessage(partner, 't1', { message: 'still broken' });
+      // reopen clears resolvedAt so MTTR reflects the eventual real resolution
       expect(mockTx.ticket.update).toHaveBeenCalledWith({
         where: { id: 't1' },
-        data: { status: 'IN_PROGRESS', updatedAt: expect.any(Date) },
+        data: { status: 'IN_PROGRESS', resolvedAt: null, updatedAt: expect.any(Date) },
       });
     });
   });
@@ -153,7 +172,7 @@ describe('TicketsService', () => {
       expect(res).toEqual({ message: 'Ticket status updated' });
       expect(mockTx.ticket.update).toHaveBeenCalledWith({
         where: { id: 't1' },
-        data: { status: 'RESOLVED', updatedAt: expect.any(Date) },
+        data: { status: 'RESOLVED', updatedAt: expect.any(Date), resolvedAt: expect.any(Date), closedAt: null },
       });
       const msgArg = mockTx.ticketMessage.create.mock.calls[0][0].data;
       expect(msgArg.isInternal).toBe(false);
@@ -165,7 +184,7 @@ describe('TicketsService', () => {
       await service.setStatus(clientAdmin, 't1', { status: 'CLOSED' });
       expect(mockTx.ticket.update).toHaveBeenCalledWith({
         where: { id: 't1' },
-        data: { status: 'CLOSED', updatedAt: expect.any(Date) },
+        data: { status: 'CLOSED', updatedAt: expect.any(Date), closedAt: expect.any(Date) },
       });
     });
   });

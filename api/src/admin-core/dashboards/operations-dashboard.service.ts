@@ -32,9 +32,11 @@ import { JwtPayload } from '../../common/decorators/current-user.decorator';
  *   • Ticket             → direct `clientId` column.
  *   • VisibilitySubmission → `partner.clientId` (denormalised on ChannelPartner).
  *
- * NOTHING here is fabricated: where a source field is never populated by the live flow
- * (the ticket service writes neither `firstResponseAt`, `slaBreached`, nor `resolvedAt`),
- * the corresponding metric returns null / a zero-sample object rather than an invented value.
+ * NOTHING here is fabricated: tickets.service now stamps `firstResponseAt` (first support
+ * reply), `resolvedAt`/`closedAt` (status transitions), so MTTR + first-response are real;
+ * SLA compliance is computed on-read from resolution-time vs a priority target. Where a
+ * source field is still empty (no resolution timestamp yet), the metric returns null / a
+ * zero-sample object rather than an invented value.
  */
 @Injectable()
 export class OperationsDashboardService {
@@ -219,6 +221,18 @@ export class OperationsDashboardService {
   // TICKETS
   // ════════════════════════════════════════════════════════════════════════
 
+  /**
+   * Resolution-time SLA targets (hours) by ticket priority — the standard helpdesk model.
+   * A terminal ticket is "breached" when its resolution took longer than this. Adjust here
+   * to change the SLA policy (single source of truth).
+   */
+  private static readonly SLA_TARGET_HOURS: Record<string, number> = {
+    CRITICAL: 4,
+    HIGH: 24,
+    MEDIUM: 48,
+    LOW: 72,
+  };
+
   private async buildTickets(clientId: string) {
     // Tickets carry a direct clientId. Exclude soft-deleted rows for every count.
     const base: Prisma.TicketWhereInput = { clientId, deletedAt: null };
@@ -244,8 +258,8 @@ export class OperationsDashboardService {
       .reduce((sum, s) => sum + s.count, 0);
 
     // MTTR = mean(resolvedAt − createdAt) over RESOLVED tickets WITH resolvedAt set.
-    // ⚠ The live ticket flow (tickets.service.ts setStatus) never writes resolvedAt — so
-    // unless seed data sets it, this sample is empty and mttrHours is null (NOT fabricated).
+    // (tickets.service.setStatus stamps resolvedAt on → RESOLVED.) Empty sample → null,
+    // never fabricated.
     const resolved = await this.prisma.ticket.findMany({
       where: { ...base, status: 'RESOLVED', resolvedAt: { not: null } },
       select: { createdAt: true, resolvedAt: true },
@@ -258,8 +272,8 @@ export class OperationsDashboardService {
       ),
     );
 
-    // First-response = mean(firstResponseAt − createdAt). ⚠ firstResponseAt is NEVER
-    // populated by the live flow → returns null (and the FE renders "—").
+    // First-response = mean(firstResponseAt − createdAt). (tickets.service.addMessage stamps
+    // firstResponseAt on the first non-internal support reply.) Empty sample → null.
     const fr = await this.prisma.ticket.findMany({
       where: { ...base, firstResponseAt: { not: null } },
       select: { createdAt: true, firstResponseAt: true },
@@ -274,15 +288,25 @@ export class OperationsDashboardService {
       ),
     );
 
-    // SLA compliance = !slaBreached ÷ terminal (RESOLVED+CLOSED) ×100, guard /0 → 100.
-    // ⚠ slaBreached is never set true by the live flow (defaults false) → with seed-less
-    // data this reads as 100%. sampleSize surfaces the denominator so the FE can caveat it.
+    // SLA compliance = computed ON-READ from resolution-time vs a priority-based target
+    // (no stored-flag backfill, and the policy lives in ONE place). A terminal ticket is
+    // breached when (resolvedAt ?? closedAt) − createdAt exceeds its priority target.
+    // Tickets with no resolution timestamp aren't assessable and are excluded. Guard /0 → 100.
     const terminalTickets = await this.prisma.ticket.findMany({
       where: { ...base, status: { in: ['RESOLVED', 'CLOSED'] } },
-      select: { slaBreached: true },
+      select: { priority: true, createdAt: true, resolvedAt: true, closedAt: true },
     });
-    const slaSample = terminalTickets.length;
-    const compliant = terminalTickets.filter((t) => !t.slaBreached).length;
+    let slaSample = 0;
+    let compliant = 0;
+    for (const t of terminalTickets) {
+      const resolutionAt = t.resolvedAt ?? t.closedAt;
+      if (!resolutionAt) continue; // not assessable without a resolution timestamp
+      slaSample += 1;
+      const targetH = OperationsDashboardService.SLA_TARGET_HOURS[t.priority] ?? 48;
+      const breached =
+        OperationsDashboardService.hoursBetween(resolutionAt, t.createdAt) > targetH;
+      if (!breached) compliant += 1;
+    }
     const slaCompliancePct = OperationsDashboardService.pct(compliant, slaSample, 100);
 
     // Age buckets over OPEN tickets (TICKET_OPEN set) by now − createdAt.

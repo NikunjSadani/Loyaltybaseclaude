@@ -176,9 +176,20 @@ export class TicketsService {
     }
 
     await this.prisma.$transaction(async (tx) => {
+      const nowTs = new Date();
+      // Stamp resolution timestamps so the Operations dashboard's MTTR + SLA are real.
+      // → RESOLVED records resolvedAt (clears any prior closedAt); → CLOSED records
+      // closedAt; any move back to a non-terminal state (reopen) clears both so MTTR
+      // reflects the eventual real resolution, not a superseded one.
+      const stamp =
+        status === 'RESOLVED'
+          ? { resolvedAt: nowTs, closedAt: null }
+          : status === 'CLOSED'
+            ? { closedAt: nowTs }
+            : { resolvedAt: null, closedAt: null };
       await tx.ticket.update({
         where: { id },
-        data: { status, updatedAt: new Date() },
+        data: { status, updatedAt: nowTs, ...stamp },
       });
       await tx.ticketMessage.create({
         data: {
@@ -220,14 +231,34 @@ export class TicketsService {
           isInternal,
         },
       });
-      // A support admin replying to an OPEN ticket moves it to IN_PROGRESS.
-      if (this.isSupportAdmin(user) && ticket.status === 'OPEN') {
-        await tx.ticket.update({ where: { id }, data: { status: 'IN_PROGRESS', updatedAt: new Date() } });
+      // Stamp first-response (first non-internal reply by support) + drive the status
+      // transitions, in ONE update.
+      const nowTs = new Date();
+      const isAdmin = this.isSupportAdmin(user);
+      const patch: {
+        status?: 'IN_PROGRESS';
+        updatedAt?: Date;
+        firstResponseAt?: Date;
+        resolvedAt?: null;
+      } = {};
+      // First-response = the first non-internal reply from support (real first-response TAT).
+      if (isAdmin && !isInternal && ticket.firstResponseAt == null) {
+        patch.firstResponseAt = nowTs;
       }
-      // The raiser (a non-admin) replying to a RESOLVED ticket reopens it so the
-      // support loop resumes. (A CLOSED ticket is already rejected above.)
-      if (!this.isSupportAdmin(user) && ticket.status === 'RESOLVED') {
-        await tx.ticket.update({ where: { id }, data: { status: 'IN_PROGRESS', updatedAt: new Date() } });
+      // A support admin replying to an OPEN ticket moves it to IN_PROGRESS.
+      if (isAdmin && ticket.status === 'OPEN') {
+        patch.status = 'IN_PROGRESS';
+      }
+      // The raiser (a non-admin) replying to a RESOLVED ticket reopens it so the support
+      // loop resumes — clear resolvedAt so MTTR counts the eventual real resolution.
+      // (A CLOSED ticket is already rejected above.)
+      if (!isAdmin && ticket.status === 'RESOLVED') {
+        patch.status = 'IN_PROGRESS';
+        patch.resolvedAt = null;
+      }
+      if (Object.keys(patch).length > 0) {
+        patch.updatedAt = nowTs;
+        await tx.ticket.update({ where: { id }, data: patch });
       }
       return msg;
     });

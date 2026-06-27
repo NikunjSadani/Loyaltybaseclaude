@@ -128,11 +128,13 @@ function primeDefaults() {
     ])
     .mockResolvedValueOnce([]) // firstResponseAt never populated → null
     .mockResolvedValueOnce([
-      { slaBreached: false },
-      { slaBreached: false },
-      { slaBreached: true },
-      { slaBreached: false }, // 3/4 compliant = 75%
-    ])
+      // SLA computed on-read: breached when resolution-time > priority target
+      // (CRITICAL 4h · HIGH 24h · MEDIUM 48h · LOW 72h).
+      { priority: 'HIGH', createdAt: base, resolvedAt: plusH(10) }, // 10 ≤ 24 → compliant
+      { priority: 'MEDIUM', createdAt: base, resolvedAt: plusH(30) }, // 30 ≤ 48 → compliant
+      { priority: 'LOW', createdAt: base, resolvedAt: plusH(100) }, // 100 > 72 → breached
+      { priority: 'MEDIUM', createdAt: base, closedAt: plusH(12) }, // 12 ≤ 48 → compliant (via closedAt)
+    ]) // 3/4 compliant = 75%
     .mockResolvedValueOnce([
       { createdAt: plusH(0) }, // assert with now far in future → all >7d-ish; we override per test
     ]);
