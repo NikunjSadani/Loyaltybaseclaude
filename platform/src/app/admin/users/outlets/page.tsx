@@ -29,6 +29,7 @@ import {
 } from '@/lib/outlet-upload';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { useGifsySettings } from '@/lib/gifsy-settings';
+import { chunkArray } from '@/lib/chunk';
 import type { HierarchyEmployee } from '@/types';
 import type {
   OutletUploadRow,
@@ -102,6 +103,8 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
   confirmLabel = 'Confirm Upload',
   errorReportFilename,
   errorReport,
+  submitting,
+  submitNote,
 }: {
   testId:        string;
   result:        { headerError: string | null; rows: R[]; hasErrors: boolean; canProceed: boolean; summary: Record<string, number> };
@@ -110,6 +113,10 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
   confirmLabel?: string;
   errorReportFilename: string;
   errorReport?:  UploadErrorReport;
+  /** True while the upload is being submitted (batches in flight) — disables the
+   *  buttons and shows the progress note. */
+  submitting?:   boolean;
+  submitNote?:   string | null;
 }) {
   if (result.headerError) {
     return (
@@ -191,16 +198,19 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
       )}
 
       <div className="flex gap-3">
-        <button onClick={onClear} className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition-colors">
+        <button onClick={onClear} disabled={submitting} className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
           Clear
         </button>
         {result.canProceed && (
           <button
             data-testid="confirm-outlet-upload-btn"
             onClick={onConfirm}
-            className="flex-1 py-2.5 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:bg-[var(--brand-primary-dark)] transition-colors"
+            disabled={submitting}
+            className="flex-1 py-2.5 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
-            {confirmLabel}
+            {submitting
+              ? <><Loader2 className="w-4 h-4 animate-spin" />{submitNote ?? 'Saving…'}</>
+              : confirmLabel}
           </button>
         )}
       </div>
@@ -242,6 +252,8 @@ function UploadSection({
   errorReportFilename,
   errorReport,
   uploadDisabledReason,
+  submitting,
+  submitNote,
 }: {
   testIdInput:       string;
   testIdPanel:       string;
@@ -255,6 +267,9 @@ function UploadSection({
   /** API error surfaced after a failed confirm (e.g. all-invalid 400). */
   submitError?:      string | null;
   errorReport?:      UploadErrorReport;
+  /** Submit-in-flight state (batched upload progress note). */
+  submitting?:       boolean;
+  submitNote?:       string | null;
   /** When set, the upload is blocked (tenant config still loading / failed /
    *  no types enabled) and this reason is shown instead of the dropzone. */
   uploadDisabledReason?: string | null;
@@ -348,6 +363,8 @@ function UploadSection({
             confirmLabel={confirmLabel}
             errorReportFilename={errorReportFilename}
             errorReport={errorReport}
+            submitting={submitting}
+            submitNote={submitNote}
           />
         )
       )}
@@ -401,6 +418,11 @@ export default function OutletsPage() {
   const [outletSubmitError,     setOutletSubmitError]     = useState<string | null>(null);
   const [rekycSubmitError,      setRekycSubmitError]      = useState<string | null>(null);
   const [deactivateSubmitError, setDeactivateSubmitError] = useState<string | null>(null);
+
+  // Upload progress note (non-null while the master upsert is in flight). The backend
+  // caps each request at 500 rows, so a large file is sent in sequential batches and
+  // this note shows "Uploading batch X of Y…" (null = idle).
+  const [outletUploadProgress,  setOutletUploadProgress]  = useState<string | null>(null);
 
   // ── Outlet list loader (also called after a successful upsert to reflect new rows) ──
   const loadOutlets = useCallback(async () => {
@@ -466,7 +488,7 @@ export default function OutletsPage() {
   // ── Tab switch — resets upload state to prevent stale panels ──
   const handleTabSwitch = useCallback((tabId: TabId) => {
     setActiveTab(tabId);
-    setOutletValidation(null);    setOutletParsedRows([]); setOutletUploadState('idle');     setOutletSubmitError(null);
+    setOutletValidation(null);    setOutletParsedRows([]); setOutletUploadState('idle');     setOutletSubmitError(null); setOutletUploadProgress(null);
     setRekycValidation(null);     setRekycParsedRows([]); setRekycUploadState('idle');         setRekycSubmitError(null);
     setDeactivateValidation(null); setDeactivateUploadState('idle');                          setDeactivateSubmitError(null);
   }, []);
@@ -818,42 +840,63 @@ export default function OutletsPage() {
                 const okIds = new Set((outletValidation?.rows ?? []).filter(r => r.status === 'OK').map(r => r.outletId));
                 const rows = outletParsedRows.filter(r => okIds.has(r.outletId));
                 const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
+
+                // The backend caps each /upsert request at 500 rows, so split a large
+                // upload into sequential batches and aggregate the result. One file in,
+                // one combined summary out — no manual file-splitting.
+                const CHUNK = 500;
+                const batches = chunkArray(rows, CHUNK);
+
+                let created = 0, updated = 0, reactivated = 0;
+                const rowErrs: Array<{ rowNum?: number; outletId?: string; errors?: string[] }> = [];
+                setOutletUploadProgress(batches.length > 1 ? `Uploading batch 1 of ${batches.length}…` : 'Saving…');
                 try {
-                  const res = await fetch('/api/admin/outlets/upsert', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                    body: JSON.stringify({ rows }),
-                  });
-                  const j = await res.json().catch(() => null);
-                  if (!res.ok) {
-                    setOutletSubmitError(j?.error ?? j?.message ?? `Upload failed (${res.status})`);
-                    return;
+                  for (let b = 0; b < batches.length; b++) {
+                    if (batches.length > 1) setOutletUploadProgress(`Uploading batch ${b + 1} of ${batches.length}…`);
+                    const res = await fetch('/api/admin/outlets/upsert', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                      body: JSON.stringify({ rows: batches[b] }),
+                    });
+                    const j = await res.json().catch(() => null);
+                    if (!res.ok) {
+                      const saved = created + updated + reactivated;
+                      setOutletSubmitError(
+                        `${batches.length > 1 ? `Batch ${b + 1} of ${batches.length} failed` : 'Upload failed'} (${res.status}): ${j?.error ?? j?.message ?? 'please try again'}.` +
+                        (saved ? ` ${saved} outlet(s) were already saved — re-upload the remaining rows.` : ''),
+                      );
+                      setOutletUploadProgress(null);
+                      return;
+                    }
+                    // A 200 does NOT mean rows were written — the backend validates each row
+                    // and returns created/updated/reactivated counts + a per-row errors[].
+                    const d = j?.data ?? j ?? {};
+                    created     += Number(d.created ?? 0);
+                    updated     += Number(d.updated ?? 0);
+                    reactivated += Number(d.reactivated ?? 0);
+                    if (Array.isArray(d.errors)) rowErrs.push(...d.errors);
                   }
-                  // A 200 does NOT mean rows were written — the backend validates each row
-                  // and returns created/updated counts + a per-row errors[] for any it
-                  // rejected (e.g. "Unknown outlet type"). Treat zero writes as a failure
-                  // and surface the real reason, instead of showing a false "added".
-                  const d = j?.data ?? j ?? {};
-                  const created = Number(d.created ?? 0);
-                  const updated = Number(d.updated ?? 0);
-                  if (created + updated === 0) {
-                    const rowErrs: Array<{ rowNum?: number; outletId?: string; errors?: string[] }> =
-                      Array.isArray(d.errors) ? d.errors : [];
+                  setOutletUploadProgress(null);
+                  // Treat zero writes across ALL batches as a failure and surface the reason.
+                  if (created + updated + reactivated === 0) {
                     const detail = rowErrs.length
                       ? rowErrs.slice(0, 6).map(e => `Row ${e.rowNum} (${e.outletId}): ${(e.errors ?? []).join('; ')}`).join('  |  ')
-                      : (d.message ?? 'The server accepted the request but saved no outlets.');
+                      : 'The server accepted the request but saved no outlets.';
                     setOutletSubmitError(`No outlets were saved. ${detail}`);
                     return;
                   }
                   setOutletUploadState('confirmed');
                   void loadOutlets(); // reflect the new/updated rows without a manual reload
                 } catch {
+                  setOutletUploadProgress(null);
                   setOutletSubmitError('Network error — please try again');
                 }
               }}
-              onClear={() => { setOutletValidation(null); setOutletParsedRows([]); setOutletUploadState('idle'); setOutletSubmitError(null); }}
+              onClear={() => { setOutletValidation(null); setOutletParsedRows([]); setOutletUploadState('idle'); setOutletSubmitError(null); setOutletUploadProgress(null); }}
               confirmLabel="Apply Changes"
               submitError={outletSubmitError}
+              submitting={outletUploadProgress !== null}
+              submitNote={outletUploadProgress}
             />
           </div>
 
