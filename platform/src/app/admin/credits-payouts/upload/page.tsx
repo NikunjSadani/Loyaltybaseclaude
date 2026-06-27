@@ -50,6 +50,13 @@ function isUploadWindowOpen(cutoffDay: number): boolean {
 
 type Step = 'template' | 'upload' | 'preview' | 'done';
 
+interface SkippedRow {
+  outletId:  string;
+  fieldName: string;
+  points:    number;
+  reason:    string;
+}
+
 interface SavedBatch {
   id:               string;
   batchCode:        string;
@@ -57,6 +64,26 @@ interface SavedBatch {
   totalPoints:      number;
   /** totalPayoutPaise from the API — integer paise. */
   totalPayoutPaise: number;
+  // ── confirm-time actuals (what the server actually did) ──
+  /** Number of POINTS rows actually credited. */
+  pointsCreditedRows:  number;
+  /** Sum of points actually credited (may be < uploaded total if rows were skipped). */
+  pointsCreditedTotal: number;
+  payoutEntriesCreated: number;
+  /** Rows the server could NOT credit, with a reason. */
+  skipped: SkippedRow[];
+}
+
+/** Human-readable explanation for a server-side skip reason. */
+function skipReasonLabel(reason: string): string {
+  switch (reason) {
+    case 'OUTLET_NOT_FOUND':
+      return 'Outlet ID not found in this tenant';
+    case 'OUTLET_NOT_LINKED_TO_PARTNER':
+      return 'Outlet is not linked to a partner account (onboard/KYC the outlet first)';
+    default:
+      return reason;
+  }
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -186,6 +213,9 @@ export default function CreditsPayoutsUploadPage() {
         return;
       }
 
+      // The confirm response is the source of truth for what was ACTUALLY credited.
+      // (Previously this was ignored, so silently-skipped points showed as "success".)
+      const cd = confirmJson.data ?? {};
       setSavedBatch({
         id:               saveJson.data.id,
         batchCode:        saveJson.data.batchCode,
@@ -193,6 +223,10 @@ export default function CreditsPayoutsUploadPage() {
         totalPoints:      Number(saveJson.data.totalPoints),
         // BigInt is serialised to number via toJSON patch in api/src/main.ts
         totalPayoutPaise: Number(saveJson.data.totalPayoutPaise),
+        pointsCreditedRows:   Number(cd.pointsCredited ?? 0),
+        pointsCreditedTotal:  Number(cd.pointsCreditedTotal ?? 0),
+        payoutEntriesCreated: Number(cd.payoutEntriesCreated ?? 0),
+        skipped:              Array.isArray(cd.skipped) ? (cd.skipped as SkippedRow[]) : [],
       });
       setSaved(true);
       setStep('done');
@@ -221,6 +255,20 @@ export default function CreditsPayoutsUploadPage() {
       const ws = jsonToSheetSafe(rows);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Upload Report');
+
+      // After a confirm, append the server-side skipped rows (what was NOT credited
+      // and why) so the report actually explains the skips — not just the client parse.
+      if (savedBatch && savedBatch.skipped.length > 0) {
+        const skippedRows = savedBatch.skipped.map((s) => ({
+          'Outlet ID': s.outletId,
+          'Field':     s.fieldName,
+          'Points':    s.points,
+          'Reason':    skipReasonLabel(s.reason),
+        }));
+        const sws = jsonToSheetSafe(skippedRows);
+        XLSX.utils.book_append_sheet(wb, sws, 'Skipped (Not Credited)');
+      }
+
       const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
       downloadBuffer(buf, `credits-payouts-${period}-report.xlsx`);
     });
@@ -447,19 +495,53 @@ export default function CreditsPayoutsUploadPage() {
       {/* Done */}
       {step === 'done' && savedBatch && (
         <div className="bg-white rounded-xl border border-emerald-200 p-6 text-center space-y-3">
-          <CheckCircle className="w-10 h-10 text-emerald-500 mx-auto" />
+          {savedBatch.skipped.length > 0
+            ? <AlertTriangle className="w-10 h-10 text-amber-500 mx-auto" />
+            : <CheckCircle className="w-10 h-10 text-emerald-500 mx-auto" />}
           <div>
-            <p className="font-semibold text-gray-900">Credits confirmed successfully</p>
+            <p className="font-semibold text-gray-900">
+              {savedBatch.skipped.length > 0
+                ? 'Credits confirmed — some rows were skipped'
+                : 'Credits confirmed successfully'}
+            </p>
             <p className="text-xs text-gray-500 mt-1">
               Batch: <code className="font-mono bg-gray-100 px-1 rounded">{savedBatch.batchCode}</code>
             </p>
+            {/* Show what was ACTUALLY credited (from the confirm response), not just the uploaded totals. */}
             <p className="text-xs text-gray-500">
-              {savedBatch.totalOutlets} outlet{savedBatch.totalOutlets !== 1 ? 's' : ''}
-              {savedBatch.totalPoints > 0 && ` · ${savedBatch.totalPoints.toLocaleString('en-IN')} pts`}
-              {/* totalPayoutPaise is integer paise; divide by 100 for human display */}
+              {savedBatch.pointsCreditedRows > 0
+                ? `${savedBatch.pointsCreditedRows} outlet${savedBatch.pointsCreditedRows !== 1 ? 's' : ''} credited · ${savedBatch.pointsCreditedTotal.toLocaleString('en-IN')} pts`
+                : 'No points credited'}
+              {savedBatch.payoutEntriesCreated > 0 && ` · ${savedBatch.payoutEntriesCreated} payout entr${savedBatch.payoutEntriesCreated !== 1 ? 'ies' : 'y'}`}
               {savedBatch.totalPayoutPaise > 0 && ` · ₹${(savedBatch.totalPayoutPaise / 100).toLocaleString('en-IN')} payout`}
             </p>
           </div>
+
+          {savedBatch.skipped.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl text-left overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-amber-100">
+                <p className="text-xs font-semibold text-amber-800 flex items-center gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  {savedBatch.skipped.length} row{savedBatch.skipped.length !== 1 ? 's' : ''} NOT credited
+                </p>
+              </div>
+              <div className="divide-y divide-amber-100 max-h-52 overflow-y-auto">
+                {savedBatch.skipped.slice(0, 12).map((s, i) => (
+                  <div key={i} className="px-4 py-2">
+                    <p className="text-xs font-medium text-gray-800">
+                      {s.outletId} · {s.fieldName} · {s.points.toLocaleString('en-IN')} pts
+                    </p>
+                    <p className="text-xs text-amber-700 mt-0.5">{skipReasonLabel(s.reason)}</p>
+                  </div>
+                ))}
+                {savedBatch.skipped.length > 12 && (
+                  <p className="px-4 py-2 text-xs text-amber-700">
+                    …and {savedBatch.skipped.length - 12} more — see the downloaded report.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
           <div className="flex gap-3 justify-center pt-2">
             <button
               onClick={handleDownloadReport}

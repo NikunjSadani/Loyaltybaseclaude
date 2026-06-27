@@ -162,8 +162,11 @@ Built in parallel (disjoint files); each independently audited; backend gate gre
 **Stream 1 — Credits (#16 HIGH, #7, #6.1):**
 - **`confirmBatch` now credits POINTS** rows → the **partner** wallet (`walletService.creditEarn`, inside the
   confirm tx): resolve `outletCode→partnerId`, outlets roll up to the partner; **race-safe guarded
-  `updateMany` claim** on PENDING_CONFIRM→CONFIRMED prevents concurrent double-credit; outlets with no wallet
-  are **skipped + reported** (`skippedNoWallet`), never abort the batch; 0/negative POINTS rows filtered out
+  `updateMany` claim** on PENDING_CONFIRM→CONFIRMED prevents concurrent double-credit; the partner's wallet is
+  **get-or-created** at credit time (`tx.wallet.upsert` — points accrue pre-KYC; disbursement still gated at
+  payout), so a missing wallet no longer skips the row. Only an unresolvable outlet (no outlet / no partnerId)
+  is **skipped + reported WITH A REASON** (`skipped: {outletId, fieldName, points, reason}[]` —
+  OUTLET_NOT_FOUND / OUTLET_NOT_LINKED_TO_PARTNER), never aborts the batch; 0/negative POINTS rows filtered out
   pre-tx. PAYOUT rows still → `CreditPayoutEntry` (no row double-counted).
 - **Reversal clawback:** approving a POINTS reversal → new `walletService.clawbackAward` — a `DEBIT_ADJUSTMENT`
   reducing **only `redeemablePoints`** (floored at 0). ⚠️ **`earnedPoints` + all `lifetime*` stay MONOTONIC**

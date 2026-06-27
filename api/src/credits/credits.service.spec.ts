@@ -46,7 +46,7 @@ const mockTx = {
     update: jest.fn().mockResolvedValue({}),
   },
   outlet: { findFirst: jest.fn() },
-  wallet: { findFirst: jest.fn() },
+  wallet: { findFirst: jest.fn(), upsert: jest.fn().mockResolvedValue({ id: 'w1' }) },
 };
 
 const mockPrisma = {
@@ -217,14 +217,20 @@ describe('CreditsService', () => {
           { outletId: 'O2', outletName: 'B', fieldId: 'f1', fieldName: 'Sales', amount: 30, narration: '', awardType: 'POINTS', status: 'ERROR' },
         ],
       });
-      // O1 resolves to partner p1 which has a wallet.
+      // O1 resolves to partner p1.
       mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
-      mockTx.wallet.findFirst.mockResolvedValue({ id: 'w1' });
 
       const res = await service.confirmBatch(admin, 'b1');
 
       expect(res.pointsCredited).toBe(1);
-      expect(res.skippedNoWallet).toEqual([]);
+      expect(res.pointsCreditedTotal).toBe(50);
+      expect(res.skipped).toEqual([]);
+      // Wallet is get-or-created (race-safe upsert) before crediting.
+      expect(mockTx.wallet.upsert).toHaveBeenCalledWith({
+        where: { partnerId: 'p1' },
+        create: { partnerId: 'p1' },
+        update: {},
+      });
       expect(mockWalletService.creditEarn).toHaveBeenCalledTimes(1);
       expect(mockWalletService.creditEarn).toHaveBeenCalledWith(
         'p1',
@@ -241,7 +247,7 @@ describe('CreditsService', () => {
       );
     });
 
-    it('skips POINTS rows whose outlet has no wallet and records them in skippedNoWallet', async () => {
+    it('skips a POINTS row whose outlet is not linked to a partner, with a reason', async () => {
       mockPrisma.creditBatch.findFirst.mockResolvedValue({
         id: 'b1',
         status: 'PENDING_CONFIRM',
@@ -254,17 +260,20 @@ describe('CreditsService', () => {
           { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
         ],
       });
-      // Outlet resolves but has no partnerId.
+      // Outlet resolves but has no partnerId → cannot own a wallet.
       mockTx.outlet.findFirst.mockResolvedValue({ partnerId: null });
 
       const res = await service.confirmBatch(admin, 'b1');
 
       expect(res.pointsCredited).toBe(0);
-      expect(res.skippedNoWallet).toEqual(['O1']);
+      expect(res.skipped).toEqual([
+        { outletId: 'O1', fieldName: 'Sales', points: 50, reason: 'OUTLET_NOT_LINKED_TO_PARTNER' },
+      ]);
+      expect(mockTx.wallet.upsert).not.toHaveBeenCalled();
       expect(mockWalletService.creditEarn).not.toHaveBeenCalled();
     });
 
-    it('skips POINTS rows whose outlet is not found and records them in skippedNoWallet', async () => {
+    it('skips a POINTS row whose outlet is not found, with a reason', async () => {
       mockPrisma.creditBatch.findFirst.mockResolvedValue({
         id: 'b1',
         status: 'PENDING_CONFIRM',
@@ -282,11 +291,15 @@ describe('CreditsService', () => {
 
       const res = await service.confirmBatch(admin, 'b1');
 
-      expect(res.skippedNoWallet).toEqual(['O_UNKNOWN']);
+      expect(res.skipped).toEqual([
+        { outletId: 'O_UNKNOWN', fieldName: 'Sales', points: 50, reason: 'OUTLET_NOT_FOUND' },
+      ]);
       expect(mockWalletService.creditEarn).not.toHaveBeenCalled();
     });
 
-    it('skips POINTS rows where the partner has no wallet (wallet check returns null)', async () => {
+    it('🔴 get-or-creates the wallet and CREDITS when the partner has none yet (pre-KYC accrual)', async () => {
+      // Regression for the credit-upload bug: points to a not-yet-KYC-approved
+      // partner were silently skipped because the wallet only existed post-approval.
       mockPrisma.creditBatch.findFirst.mockResolvedValue({
         id: 'b1',
         status: 'PENDING_CONFIRM',
@@ -299,14 +312,20 @@ describe('CreditsService', () => {
           { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
         ],
       });
-      // Outlet found with partnerId but wallet missing.
       mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
-      mockTx.wallet.findFirst.mockResolvedValue(null);
+      // upsert default mock returns a wallet; nothing is "missing" any more.
 
       const res = await service.confirmBatch(admin, 'b1');
 
-      expect(res.skippedNoWallet).toEqual(['O1']);
-      expect(mockWalletService.creditEarn).not.toHaveBeenCalled();
+      expect(res.pointsCredited).toBe(1);
+      expect(res.pointsCreditedTotal).toBe(50);
+      expect(res.skipped).toEqual([]);
+      expect(mockTx.wallet.upsert).toHaveBeenCalledWith({
+        where: { partnerId: 'p1' },
+        create: { partnerId: 'p1' },
+        update: {},
+      });
+      expect(mockWalletService.creditEarn).toHaveBeenCalledTimes(1);
     });
 
     it('throws BadRequestException on a double-confirm (guarded claim returns count=0)', async () => {

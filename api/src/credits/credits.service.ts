@@ -250,8 +250,18 @@ export class CreditsService {
       (r) => r.awardType === 'POINTS' && r.status === 'OK' && r.amount > 0,
     );
 
-    const skippedNoWallet: string[] = [];
-    let pointsCredited = 0;
+    // Rows that genuinely cannot be credited, WITH a reason surfaced to the admin
+    // (never dropped silently). The only remaining skip causes are an unresolvable
+    // outlet code or an outlet not linked to any partner — a missing wallet is no
+    // longer a skip (we create it; see below).
+    const skipped: {
+      outletId: string;
+      fieldName: string;
+      points: number;
+      reason: 'OUTLET_NOT_FOUND' | 'OUTLET_NOT_LINKED_TO_PARTNER';
+    }[] = [];
+    let pointsCredited = 0; // count of credited rows
+    let pointsCreditedTotal = 0; // sum of credited points
     // Collected for the best-effort PUSH "points earned" trigger AFTER commit. We
     // sum per partner so a partner credited under several fields gets one push.
     const creditedByPartner = new Map<string, number>();
@@ -308,26 +318,44 @@ export class CreditsService {
       // We skip rather than throw if no outlet/partner/wallet exists, so a bad row
       // cannot abort the whole confirm.
       for (const r of pointsRows) {
-        // Resolve outletCode → partnerId (tenant-scoped).
+        // Resolve outletCode → partnerId (tenant-scoped). A row that cannot resolve
+        // to a partner is skipped WITH a reason (surfaced to the admin), never dropped
+        // silently.
         const outlet = await tx.outlet.findFirst({
           where: { outletCode: r.outletId, clientId: user.clientId },
           select: { partnerId: true },
         });
-        if (!outlet?.partnerId) {
-          skippedNoWallet.push(r.outletId);
+        if (!outlet) {
+          skipped.push({
+            outletId: r.outletId,
+            fieldName: r.fieldName,
+            points: r.amount,
+            reason: 'OUTLET_NOT_FOUND',
+          });
+          continue;
+        }
+        if (!outlet.partnerId) {
+          skipped.push({
+            outletId: r.outletId,
+            fieldName: r.fieldName,
+            points: r.amount,
+            reason: 'OUTLET_NOT_LINKED_TO_PARTNER',
+          });
           continue;
         }
 
-        // Guard: check wallet existence without letting requireWallet throw (a throw
-        // would abort the whole tx and roll back the PAYOUT entries too).
-        const wallet = await tx.wallet.findFirst({
+        // Get-or-create the wallet. Points ACCRUE even before KYC approval (Deoleo
+        // runs non-KYC campaigns) — but a wallet is otherwise created only at KYC
+        // approval, so pre-KYC credits were being silently skipped. `partnerId` is
+        // @unique, so this upsert is race-safe; an existing wallet is left untouched.
+        // Disbursement is still gated on KYC-APPROVED at payout time
+        // (createPayoutDownload holds non-approved entries), so accruing points to a
+        // not-yet-approved partner's wallet here is correct.
+        await tx.wallet.upsert({
           where: { partnerId: outlet.partnerId },
-          select: { id: true },
+          create: { partnerId: outlet.partnerId },
+          update: {},
         });
-        if (!wallet) {
-          skippedNoWallet.push(r.outletId);
-          continue;
-        }
 
         // r.amount is whole points for POINTS rows.
         await this.walletService.creditEarn(
@@ -344,6 +372,7 @@ export class CreditsService {
           tx,
         );
         pointsCredited += 1;
+        pointsCreditedTotal += r.amount;
         creditedByPartner.set(
           outlet.partnerId,
           (creditedByPartner.get(outlet.partnerId) ?? 0) + r.amount,
@@ -411,7 +440,8 @@ export class CreditsService {
       batch: updated,
       payoutEntriesCreated: payoutRows.length,
       pointsCredited,
-      skippedNoWallet,
+      pointsCreditedTotal,
+      skipped,
     };
   }
 
