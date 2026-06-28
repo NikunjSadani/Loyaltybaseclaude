@@ -11,6 +11,7 @@ import {
 import { PayoutMode, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
+import { generateNumericOtp } from '../common/otp';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -1573,9 +1574,9 @@ export class RewardsService {
     return record.id;
   }
 
-  /** 6-digit OTP (100000–999999), matching auth.generateOtpCode. */
+  /** 6-digit OTP (100000–999999) via CSPRNG — see common/otp.ts (AF-10). */
   private generateOtpCode(): string {
-    return String(Math.floor(100000 + Math.random() * 900000));
+    return generateNumericOtp();
   }
 
   // ───────────────────────────────────────────────────────────────────────────

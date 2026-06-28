@@ -11,6 +11,7 @@ import { Msg91Service } from '../notifications/msg91.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
+import { generateNumericOtp } from '../common/otp';
 import * as crypto from 'crypto';
 
 // ─── Business rule constants — single source of truth ─────────────────────────
@@ -440,8 +441,8 @@ export class AuthService {
   }
 
   private generateOtpCode(): string {
-    // 6-digit OTP: 100000–999999
-    return String(Math.floor(100000 + Math.random() * 900000));
+    // 6-digit OTP (100000–999999) via CSPRNG — see common/otp.ts (AF-10).
+    return generateNumericOtp();
   }
 
   private async sendViaMSG91(phone: string, otp: string, channel: 'SMS' | 'WHATSAPP'): Promise<void> {

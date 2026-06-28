@@ -172,8 +172,10 @@ describe('KycService', () => {
   });
 
   describe('uploadDocument (GCS)', () => {
-    const file = (size: number): Express.Multer.File =>
-      ({ buffer: Buffer.from('x'), originalname: 'pan.jpg', mimetype: 'image/jpeg', size }) as Express.Multer.File;
+    // A minimal but VALID JPEG signature (FF D8 FF ...) so the magic-bytes guard passes.
+    const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
+    const file = (size: number, buffer: Buffer = JPEG): Express.Multer.File =>
+      ({ buffer, originalname: 'pan.jpg', mimetype: 'image/jpeg', size }) as Express.Multer.File;
 
     it('uploads under a tenant folder and returns the object reference', async () => {
       const res = await service.uploadDocument(so, file(1024), { documentType: 'PAN_CARD' });
@@ -199,6 +201,24 @@ describe('KycService', () => {
         service.uploadDocument(so, file(6 * 1024 * 1024), { documentType: 'PAN_CARD' }),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
+
+    it('AF-10: rejects a spoofed file (HTML payload labelled image/jpeg) without uploading', async () => {
+      const html = Buffer.from('<html><script>alert(1)</script></html>', 'utf8');
+      await expect(
+        service.uploadDocument(so, file(html.length, html), { documentType: 'PAN_CARD' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+    });
+
+    it('AF-10: stores the SNIFFED mimetype, not the client-supplied one', async () => {
+      // Client claims image/png but the bytes are a PDF → stored mime must be the real type.
+      const pdf = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]); // %PDF-1.7
+      const spoof = ({ buffer: pdf, originalname: 'doc', mimetype: 'image/png', size: pdf.length }) as Express.Multer.File;
+      const res = await service.uploadDocument(so, spoof, { documentType: 'PAN_CARD' });
+      expect(res.mimeType).toBe('application/pdf');
+      // uploadFile is handed the sniffed mime, never the client's.
+      expect(mockStorage.uploadFile).toHaveBeenCalledWith(pdf, expect.any(String), 'application/pdf');
     });
   });
 

@@ -16,6 +16,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
+import { generateNumericOtp } from '../common/otp';
+import { sniffFileType } from '../common/file-signature';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { KYC_FIELD_KEYS, BridgeResult } from './kyc-verification.helper';
@@ -237,9 +239,9 @@ export class KycService {
     };
   }
 
-  /** 6-digit OTP (100000–999999), matching auth/rewards generateOtpCode. */
+  /** 6-digit OTP (100000–999999) via CSPRNG — see common/otp.ts (AF-10). */
   private generateOtpCode(): string {
-    return String(Math.floor(100000 + Math.random() * 900000));
+    return generateNumericOtp();
   }
 
   /**
@@ -370,19 +372,31 @@ export class KycService {
       throw new BadRequestException('File too large (max 5 MB)');
     }
 
+    // AF-10: the client-supplied mimetype is untrusted (an HTML/SVG payload can be
+    // uploaded as image/jpeg). Validate the REAL type from the file's magic bytes
+    // and reject anything that isn't an allowed KYC document type; store the SNIFFED
+    // mimetype so the view-side render decision (K17/K27 safe-mime allowlist) can
+    // trust it rather than the client's claim.
+    const sniffed = sniffFileType(file.buffer);
+    if (!sniffed) {
+      throw new BadRequestException(
+        'Unsupported or corrupt file. Upload a JPG, PNG, WEBP, GIF, or PDF.',
+      );
+    }
+
     // Tenant-foldered key so objects are partitioned per client.
     const key = this.storage.generateKey(
       `kyc/${user.clientId}`,
-      file.originalname || `${dto.documentType}.bin`,
+      file.originalname || `${dto.documentType}.${sniffed.ext}`,
     );
-    const fileUrl = await this.storage.uploadFile(file.buffer, key, file.mimetype);
+    const fileUrl = await this.storage.uploadFile(file.buffer, key, sniffed.mime);
 
     return {
       documentType: dto.documentType,
       fileKey: key,
       fileUrl,
       fileName: file.originalname ?? null,
-      mimeType: file.mimetype ?? null,
+      mimeType: sniffed.mime, // trusted (sniffed from bytes), not client-supplied
       fileSizeBytes: file.size,
     };
   }
