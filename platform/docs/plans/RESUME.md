@@ -25,7 +25,7 @@ calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1212 · nest 0 · FE vitest 1638 · tsc 0.** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1213 · nest 0 · FE vitest 1638 · tsc 0.** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -72,7 +72,7 @@ context; outlet types `SSS/SSS_TOT/SUB_STOCKIST/WHOLESALER`; XSR-ID column = rea
 session-expiry redirect landed. **AF-6 cookie-only auth migration DONE** (`2f8a343`, 2026-06-28 — token now httpOnly-cookie-only,
 proxy injects Bearer from the cookie, assume/exit/logout = server actions; runtime-proven local echo + independent audit SHIP,
 CSRF-safe; remaining = cosmetic dead-localStorage-read sweep + the separable refresh-on-401). **ALL `AF-*` security items now
-done** (AF-5/7/8/9 done; **AF-10 CSPRNG+upload done** `d91ee1b`, its throttle/TTL deferred) **except AF-12.** **AF-12** RBAC
+done** (AF-5/6/7/8/9 done; **AF-10 fully done** — CSPRNG+upload `d91ee1b` + windowed per-phone OTP throttle `8301e3f`; only the access-TTL remains, coupled to the AF-6 refresh-on-401 follow-up) **except AF-12.** AF-6 dead-localStorage sweep also done (`abc43f6`). **AF-12** RBAC
 fail-open — keep OFF (`RBAC-ENABLEMENT.md`). **PWA push activation** (FE subscribe + migration +
 VAPID + flag flips) is cutover-coupled. The admin sub-dashboard "fake data" pre-UAT blocker is CLOSED.
 
