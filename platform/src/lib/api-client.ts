@@ -15,10 +15,14 @@ export type ApiResponse<T> =
   | { success: true; data: T }
   | { success: false; error: string };
 
+/**
+ * AF-6: auth is the httpOnly `token` cookie, which same-origin fetches send
+ * automatically — the proxy reads it and injects the backend Bearer header. There
+ * is no JS-readable token to attach, so this is now a no-op (kept for call-site
+ * compatibility). Returns no headers.
+ */
 export function authHeader(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = localStorage.getItem('token');
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  return {};
 }
 
 async function request<T>(url: string, init: RequestInit = {}): Promise<ApiResponse<T>> {

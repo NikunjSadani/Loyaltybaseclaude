@@ -23,9 +23,10 @@ describe('authHeader', () => {
     expect(authHeader()).toEqual({});
   });
 
-  it('returns Authorization header when token exists', () => {
+  it('AF-6: returns NO Authorization header even if a stale token sits in localStorage', () => {
+    // Auth is the httpOnly cookie now; authHeader never attaches a JS-readable token.
     localStorage.setItem('token', 'test-jwt-123');
-    expect(authHeader()).toEqual({ Authorization: 'Bearer test-jwt-123' });
+    expect(authHeader()).toEqual({});
   });
 });
 
@@ -41,7 +42,7 @@ describe('api.get', () => {
     expect(result).toEqual(payload);
   });
 
-  it('sends Authorization header when token exists', async () => {
+  it('AF-6: does NOT attach an Authorization header (auth rides the httpOnly cookie)', async () => {
     localStorage.setItem('token', 'my-token');
     const fetchMock = mockFetch({ success: true, data: {} });
     vi.stubGlobal('fetch', fetchMock);
@@ -49,7 +50,7 @@ describe('api.get', () => {
     await api.get('/api/wallet');
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer my-token');
+    expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
   });
 
   it('does NOT send Content-Type on GET', async () => {

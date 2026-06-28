@@ -100,9 +100,9 @@ export async function verifyOTP(
     const token: string = data.data?.accessToken ?? '';
     const user = data.data?.user;
 
-    // Also set an httpOnly cookie (defence-in-depth / future SSR guard); the
-    // client stores the token in localStorage because api-client.ts sends it as
-    // an Authorization: Bearer header and the backend extracts it from there.
+    // AF-6: the access token lives ONLY in this httpOnly cookie — it is NOT readable
+    // by JS and is NOT mirrored to localStorage. The edge proxy reads this cookie and
+    // injects `Authorization: Bearer` for the backend on every `/api/*` request.
     const cookieStore = await cookies();
     cookieStore.set('token', token, {
       httpOnly: true,

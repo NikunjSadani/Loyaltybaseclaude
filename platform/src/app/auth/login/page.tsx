@@ -144,11 +144,11 @@ export default function LoginPage() {
       // outlive its token (the banner/token desync that showed an operator empty tenant data).
       clearAssumedContext();
 
-      // Store the JWT where api-client.ts reads it (localStorage → Authorization: Bearer).
-      if (result.token) {
-        localStorage.setItem('token', result.token);
-        if (result.user) localStorage.setItem('user', JSON.stringify(result.user));
-      }
+      // AF-6: the access token is set ONLY as an httpOnly cookie by the verifyOTP server
+      // action — it is NEVER written to localStorage, so a stored-XSS has no bearer token
+      // to steal. We persist only the NON-sensitive user object (id/name/role/phone) for
+      // client-side display + portal routing; the cookie is the credential.
+      if (result.user) localStorage.setItem('user', JSON.stringify(result.user));
 
       toast.success('Logged in successfully!');
       window.location.href = getRoleDashboard(result.role);

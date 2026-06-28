@@ -8,10 +8,9 @@
 
 export type VisibilityCaptureMode = 'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD';
 
+// AF-6: auth rides the httpOnly cookie (same-origin fetch sends it); no JS token to attach.
 function authHeader(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = localStorage.getItem('token');
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  return {};
 }
 
 /**

@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { ShieldAlert, LogOut } from 'lucide-react';
-import { getAssumedBrand, exitTenant } from '@/lib/auth-client';
+import { getAssumedBrand, clearAssumedContext, exitTenant } from '@/lib/auth-client';
+import { getAssumedContext } from '@/lib/auth-actions';
 
 /**
  * Persistent "Working in <Brand>" banner (A2/#51). Shown across every shell whenever
@@ -14,11 +15,31 @@ export function OperatorBanner() {
   const [brand, setBrand] = useState<string | null>(null);
 
   useEffect(() => {
+    // Optimistic instant render from the localStorage hint…
     setBrand(getAssumedBrand());
-    // React to assume/exit happening in another tab.
+    // …then reconcile against SERVER TRUTH (the actual httpOnly cookie). This is the
+    // AF-6 self-heal: if the real token isn't an assumed-tenant token (expired, exited
+    // in another tab, stale hint), the banner clears — it can never mislead the operator.
+    let alive = true;
+    const reconcile = () => {
+      getAssumedContext()
+        .then(({ brandName }) => {
+          if (!alive) return;
+          setBrand(brandName);
+          if (!brandName) clearAssumedContext();
+        })
+        .catch(() => {});
+    };
+    reconcile();
+    // Re-check on tab focus + cross-tab assume/exit.
     const onStorage = () => setBrand(getAssumedBrand());
     window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
+    window.addEventListener('focus', reconcile);
+    return () => {
+      alive = false;
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', reconcile);
+    };
   }, []);
 
   if (!brand) return null;
@@ -30,8 +51,8 @@ export function OperatorBanner() {
         Gifsy operator — working in <strong>{brand}</strong>
       </span>
       <button
-        onClick={() => {
-          exitTenant();
+        onClick={async () => {
+          await exitTenant();
           window.location.href = '/gifsy';
         }}
         className="inline-flex items-center gap-1 rounded bg-amber-950/10 hover:bg-amber-950/20 px-2 py-0.5 transition-colors"

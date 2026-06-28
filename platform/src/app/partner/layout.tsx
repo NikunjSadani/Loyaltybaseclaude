@@ -52,8 +52,8 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
   const markAllRead = () => setNotifications(prev => prev.map(n => ({ ...n, unread: false })));
 
   const handleLogout = () => {
-    document.cookie = 'token=; Max-Age=0; path=/';
-    logout(); // clears localStorage token + user, redirects to /auth/login
+    // logout() clears the httpOnly cookies server-side + local display state, then redirects.
+    void logout();
   };
 
   /* ── Nav items — gated by feature flags ── */

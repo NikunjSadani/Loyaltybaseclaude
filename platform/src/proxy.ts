@@ -22,6 +22,12 @@ if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
   throw new Error('JWT_SECRET environment variable must be set in production')
 }
 
+// DEMO_MODE skips JWT verification entirely (injects a GIFSY_ADMIN identity) — a full
+// auth bypass that must NEVER be reachable in production. Fail closed at boot.
+if (process.env.NODE_ENV === 'production' && process.env.DEMO_MODE === 'true') {
+  throw new Error('DEMO_MODE must not be enabled in production')
+}
+
 const PUBLIC_PATHS = [
   '/auth/login',
   '/api/auth/send-otp',
@@ -109,9 +115,14 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next({ request: { headers } })
   }
 
-  const token =
-    request.headers.get('authorization')?.replace('Bearer ', '') ||
-    request.cookies.get('token')?.value
+  // AF-6: the access token is read ONLY from the httpOnly `token` cookie — never from a
+  // client-supplied Authorization header. The token is no longer mirrored to localStorage,
+  // so a stored-XSS has nothing to exfiltrate. We strip any inbound Authorization header
+  // (a page may still send a now-empty `Bearer null`) and INJECT our own from the cookie so
+  // the backend's JwtStrategy (which reads `Authorization: Bearer`) keeps working unchanged
+  // — the injected request headers ride the next.config `/api/*`→backend rewrite.
+  headers.delete('authorization')
+  const token = request.cookies.get('token')?.value
 
   if (!token) {
     if (pathname.startsWith('/api/')) {
@@ -134,6 +145,8 @@ export async function proxy(request: NextRequest) {
       }
     }
 
+    // Hand the verified cookie token to the backend as a Bearer header.
+    headers.set('authorization', `Bearer ${token}`)
     headers.set('x-user-id',   payload.sub as string) // JWT user id is the `sub` claim, not `userId`
     headers.set('x-user-role', role)
     if (payload.partnerId) headers.set('x-partner-id', payload.partnerId as string)

@@ -1,27 +1,31 @@
-/* ─── Client-side auth helpers ───────────────────────────────────────────────
-   The session token lives in localStorage (api-client.ts sends it as
-   Authorization: Bearer; the backend extracts it from that header). These
-   helpers centralise reading it and clearing it on logout. Client-only.
+/* ─── Client-side auth helpers (AF-6) ────────────────────────────────────────
+   The access token lives ONLY in an httpOnly `token` cookie — it is NOT readable
+   by JS and is NOT mirrored to localStorage, so a stored-XSS has no bearer token
+   to steal. The edge proxy reads that cookie and injects `Authorization: Bearer`
+   for the backend on every `/api/*` call; same-origin fetches send the cookie
+   automatically, so client code never needs to attach a token.
+
+   localStorage now holds only NON-sensitive display state: the `user` object
+   (id/name/role/phone) for client-side routing, and `assumedBrand` for the
+   operator banner. Mutating the auth cookies (assume/exit/logout) happens via
+   server actions in lib/auth-actions.ts.
+   Client-only.
 ─────────────────────────────────────────────────────────────────────────────── */
 
-const TOKEN_KEY = 'token';
-const USER_KEY = 'user';
+import { assumeTenantAction, exitTenantAction, logoutAction } from './auth-actions';
 
-// ── Operator-context (A2/#51): a GIFSY operator "working in" a tenant ──────────
-// When the operator assumes a tenant, the active token becomes the tenant-scoped
-// assume-tenant token; the original gifsy (home) session is stashed so Exit can
-// restore it without a re-login. `assumedBrand` drives the global banner.
-const HOME_TOKEN_KEY = 'homeToken';
-const HOME_USER_KEY = 'homeUser';
+const USER_KEY = 'user';
 const ASSUMED_BRAND_KEY = 'assumedBrand';
 
+/**
+ * @deprecated The access token is an httpOnly cookie and is intentionally NOT
+ * readable from JS (AF-6). Always returns null. Use `isAuthenticated()` for a
+ * presence check and let same-origin fetches carry the cookie automatically.
+ * Kept only so legacy call sites that built an `Authorization` header compile —
+ * the proxy ignores any client Authorization and injects its own from the cookie.
+ */
 export function getToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  return localStorage.getItem(TOKEN_KEY);
-}
-
-export function isAuthenticated(): boolean {
-  return !!getToken();
+  return null;
 }
 
 export interface StoredUser {
@@ -40,6 +44,16 @@ export function getStoredUser(): StoredUser | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Client-side "is there a session?" check. Based on the NON-sensitive stored user
+ * (the real credential is the httpOnly cookie + backend verification). A guard that
+ * passes here but has no valid cookie still gets a 401 from the backend → the
+ * SessionExpiryGuard bounces it to login.
+ */
+export function isAuthenticated(): boolean {
+  return !!getStoredUser();
 }
 
 /**
@@ -68,13 +82,15 @@ export function getRoleHome(role?: string | null): string {
   return '/auth/login';
 }
 
-/** Clear the local session and return to the login screen. */
-export function logout(): void {
+/** Clear the session (httpOnly cookies server-side + local display state) and return to login. */
+export async function logout(): Promise<void> {
+  try {
+    await logoutAction();
+  } catch {
+    /* even if the cookie-clear call fails, still clear local state + redirect */
+  }
   if (typeof window !== 'undefined') {
-    localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
-    localStorage.removeItem(HOME_TOKEN_KEY);
-    localStorage.removeItem(HOME_USER_KEY);
     localStorage.removeItem(ASSUMED_BRAND_KEY);
     window.location.href = '/auth/login';
   }
@@ -83,95 +99,43 @@ export function logout(): void {
 // ── Operator-context switcher (A2/#51) ───────────────────────────────────────
 
 /**
- * True when the ACTIVE access token is a GIFSY operator's assumed-tenant token (its JWT
- * carries `assumed: true`). Decodes the JWT payload only — this is a UI-context check, not
- * an auth decision (the backend still enforces). Used so the "working in <brand>" banner can
- * never outlive the token it belongs to.
- */
-function isAssumedToken(token: string | null): boolean {
-  if (!token) return false;
-  const part = token.split('.')[1];
-  if (!part) return false;
-  try {
-    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
-    const padded = b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=');
-    const json = decodeURIComponent(
-      atob(padded)
-        .split('')
-        .map((ch) => '%' + ('00' + ch.charCodeAt(0).toString(16)).slice(-2))
-        .join(''),
-    );
-    return (JSON.parse(json) as { assumed?: boolean })?.assumed === true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The brand the GIFSY operator is currently "working in", or null if at platform level.
- * SELF-HEALING: the `assumedBrand` key only means something while the ACTIVE token is an
- * assumed-tenant token. A stale brand (assume token expired, or a fresh login that didn't
- * clear it) is dropped here so the banner ALWAYS follows the real token — preventing the
- * "banner says Deoleo but data is gifsy's" desync.
+ * The brand the GIFSY operator is currently "working in", or null at platform level.
+ * Drives the global banner. Set when the operator assumes a tenant, cleared on exit,
+ * logout, and a fresh login. If the assumed token expires while the banner is up, the
+ * next `/api` call 401s → SessionExpiryGuard → login, which clears this — so the banner
+ * cannot meaningfully outlive its token.
  */
 export function getAssumedBrand(): string | null {
   if (typeof window === 'undefined') return null;
-  const brand = localStorage.getItem(ASSUMED_BRAND_KEY);
-  if (!brand) return null;
-  if (!isAssumedToken(getToken())) {
-    clearAssumedContext();
-    return null;
-  }
-  return brand;
+  return localStorage.getItem(ASSUMED_BRAND_KEY);
 }
 
-/**
- * Clear any GIFSY operator assumed-tenant context (home session + brand). Called on a fresh
- * login so a stale "working in <brand>" banner from a prior session can never outlive its token,
- * and by getAssumedBrand() when it detects the active token is not an assumed-tenant token.
- */
+/** Clear any GIFSY operator assumed-tenant context (called on a fresh login). */
 export function clearAssumedContext(): void {
   if (typeof window === 'undefined') return;
-  localStorage.removeItem(HOME_TOKEN_KEY);
-  localStorage.removeItem(HOME_USER_KEY);
   localStorage.removeItem(ASSUMED_BRAND_KEY);
 }
 
 /**
- * GIFSY operator switches into a tenant's context: exchanges the gifsy session for
- * a tenant-scoped GIFSY_ADMIN token (POST /api/auth/assume-tenant). The home (gifsy)
- * session is stashed once so exitTenant() restores it without a re-login.
+ * GIFSY operator switches into a tenant's context: the server action exchanges the
+ * gifsy session cookie for a tenant-scoped GIFSY_ADMIN token and stashes the home
+ * session so exitTenant() restores it without a re-login. Throws on failure.
  */
 export async function assumeTenant(clientId: string): Promise<{ brandName: string }> {
-  const res = await fetch('/api/auth/assume-tenant', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', Authorization: `Bearer ${getToken() ?? ''}` },
-    body: JSON.stringify({ clientId }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => null);
-    throw new Error(err?.error || 'Could not switch brand context');
+  const res = await assumeTenantAction(clientId);
+  if (!res.success || !res.brandName) {
+    throw new Error(res.error || 'Could not switch brand context');
   }
-  const { data } = await res.json();
-  // Stash the home session ONCE (a second assume keeps the original gifsy home).
-  if (!localStorage.getItem(HOME_TOKEN_KEY)) {
-    localStorage.setItem(HOME_TOKEN_KEY, getToken() ?? '');
-    const u = localStorage.getItem(USER_KEY);
-    if (u) localStorage.setItem(HOME_USER_KEY, u);
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(ASSUMED_BRAND_KEY, res.brandName);
   }
-  localStorage.setItem(TOKEN_KEY, data.accessToken);
-  localStorage.setItem(ASSUMED_BRAND_KEY, data.brandName);
-  return { brandName: data.brandName };
+  return { brandName: res.brandName };
 }
 
 /** Exit the assumed tenant context and restore the gifsy (home) operator session. */
-export function exitTenant(): void {
-  if (typeof window === 'undefined') return;
-  const home = localStorage.getItem(HOME_TOKEN_KEY);
-  if (home) localStorage.setItem(TOKEN_KEY, home);
-  const homeUser = localStorage.getItem(HOME_USER_KEY);
-  if (homeUser) localStorage.setItem(USER_KEY, homeUser);
-  localStorage.removeItem(HOME_TOKEN_KEY);
-  localStorage.removeItem(HOME_USER_KEY);
-  localStorage.removeItem(ASSUMED_BRAND_KEY);
+export async function exitTenant(): Promise<void> {
+  await exitTenantAction();
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem(ASSUMED_BRAND_KEY);
+  }
 }

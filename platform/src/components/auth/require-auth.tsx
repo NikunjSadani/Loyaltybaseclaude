@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { getToken, getStoredUser, getRoleHome } from '@/lib/auth-client';
+import { getStoredUser, getRoleHome } from '@/lib/auth-client';
 
 /**
  * Client-side route guard. Renders its children only when (a) a session token is present and
@@ -11,8 +11,9 @@ import { getToken, getStoredUser, getRoleHome } from '@/lib/auth-client';
  * session, so it's an authz bounce, not a logout). Wrap each portal layout's content with it and
  * pass that portal's roles (gap #41 — a role must not load another portal).
  *
- * Auth is a localStorage Bearer token (the backend reads Authorization: Bearer), so guarding must
- * run client-side — a server middleware cannot see localStorage.
+ * Auth is an httpOnly `token` cookie (AF-6) — not JS-readable — so this guard checks the
+ * NON-sensitive stored `user` for presence/role. The real enforcement is the edge proxy +
+ * backend; a guard that passes here without a valid cookie still gets bounced on the first 401.
  */
 export function RequireAuth({
   children,
@@ -28,12 +29,13 @@ export function RequireAuth({
   const rolesKey = allowedRoles ? allowedRoles.join(',') : '';
 
   useEffect(() => {
-    if (!getToken()) {
+    const user = getStoredUser();
+    if (!user) {
       router.replace('/auth/login');
       return;
     }
     if (rolesKey) {
-      const role = getStoredUser()?.role;
+      const role = user.role;
       if (!role || !rolesKey.split(',').includes(role)) {
         router.replace(getRoleHome(role));
         return;

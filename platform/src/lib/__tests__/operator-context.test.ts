@@ -1,59 +1,34 @@
 /**
- * Operator assume-tenant banner must follow the ACTIVE token, never a stale localStorage key.
- * Regression for the "banner says Deoleo but the data is gifsy's (0 rows)" desync: the operator
- * saw an empty tenant because the fetch used the gifsy token while a leftover `assumedBrand`
- * kept the "working in Deoleo" banner showing. getAssumedBrand() now self-heals.
+ * Operator assume-tenant banner (AF-6 model).
+ *
+ * The access token is now an httpOnly cookie — NOT readable by JS — so the old
+ * "decode the active token's `assumed` claim to self-heal a stale banner" trick is
+ * gone. Staleness is instead prevented at the source: the token swap is atomic and
+ * server-side (assumeTenantAction/exitTenantAction set/clear the `assumedBrand`
+ * companion), a fresh login calls clearAssumedContext(), and if an assumed token
+ * expires the next /api 401 bounces to login (which clears it). getAssumedBrand()
+ * therefore just reflects the non-sensitive `assumedBrand` display key.
  *
  * Run: npx vitest run src/lib/__tests__/operator-context.test.ts
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { getAssumedBrand, clearAssumedContext } from '@/lib/auth-client';
 
-/** Build a minimal JWT (header.payload.sig); only the base64url payload is read. */
-function jwt(payload: Record<string, unknown>): string {
-  const b64 = (s: string) => btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  return `${b64(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))}.${b64(JSON.stringify(payload))}.sig`;
-}
-
-describe('operator assumed-tenant banner — follows the token, self-heals', () => {
+describe('operator assumed-tenant banner (AF-6 cookie model)', () => {
   beforeEach(() => localStorage.clear());
 
-  it('shows the brand when the active token IS an assumed-tenant token', () => {
+  it('returns the brand when assumedBrand is set (operator is in a tenant context)', () => {
     localStorage.setItem('assumedBrand', 'Deoleo (Demo)');
-    localStorage.setItem('token', jwt({ assumed: true, clientId: 'deoleo' }));
     expect(getAssumedBrand()).toBe('Deoleo (Demo)');
   });
 
-  it('drops a STALE brand when the active token is NOT assumed (the reported desync)', () => {
-    localStorage.setItem('assumedBrand', 'Deoleo (Demo)');
-    localStorage.setItem('homeToken', 'x');
-    localStorage.setItem('homeUser', '{}');
-    localStorage.setItem('token', jwt({ assumed: false, clientId: 'gifsy' })); // plain gifsy login
-    expect(getAssumedBrand()).toBeNull();
-    // self-heal cleared the whole stale operator context
-    expect(localStorage.getItem('assumedBrand')).toBeNull();
-    expect(localStorage.getItem('homeToken')).toBeNull();
-    expect(localStorage.getItem('homeUser')).toBeNull();
-  });
-
-  it('treats a token with no `assumed` claim as not-assumed', () => {
-    localStorage.setItem('assumedBrand', 'Deoleo (Demo)');
-    localStorage.setItem('token', jwt({ clientId: 'gifsy' }));
+  it('returns null when no brand is set (platform level — no banner)', () => {
     expect(getAssumedBrand()).toBeNull();
   });
 
-  it('returns null when no brand is set (no banner)', () => {
-    localStorage.setItem('token', jwt({ assumed: true }));
-    expect(getAssumedBrand()).toBeNull();
-  });
-
-  it('clearAssumedContext removes the home + brand keys', () => {
-    localStorage.setItem('homeToken', 'x');
-    localStorage.setItem('homeUser', '{}');
+  it('clearAssumedContext removes the brand key (called on a fresh login)', () => {
     localStorage.setItem('assumedBrand', 'B');
     clearAssumedContext();
-    expect(localStorage.getItem('homeToken')).toBeNull();
-    expect(localStorage.getItem('homeUser')).toBeNull();
     expect(localStorage.getItem('assumedBrand')).toBeNull();
   });
 });

@@ -94,11 +94,10 @@ describe('Enrollment Dashboard — Export Excel', () => {
     await act(async () => { fireEvent.click(exportBtn); });
 
     await waitFor(() => {
+      // AF-6: auth rides the httpOnly cookie (same-origin fetch sends it); no Authorization header.
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/admin/schemes/sch-test/enrollments/export',
-        expect.objectContaining({
-          headers: expect.objectContaining({ Authorization: 'Bearer test-token' }),
-        }),
+        expect.any(Object),
       );
     });
 
