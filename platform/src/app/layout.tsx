@@ -58,7 +58,10 @@ export default async function RootLayout({
   return (
     <html lang="en" className={`${inter.variable} h-full antialiased overflow-x-hidden`}>
       <head>
-        {/* Inject per-tenant CSS variables — drives all brand colours */}
+        {/* Inject per-tenant CSS variables — drives all brand colours.
+            brandStyle is sanitised at the source (buildCssVariables, AF-9): the
+            only raw-interpolated value is the primaryColor, hard-guarded to a
+            6-digit hex, so this sink cannot be broken out of. */}
         <style dangerouslySetInnerHTML={{ __html: brandStyle }} />
         <meta name="theme-color" content={config.branding.primaryColor} />
         {/* PWA install meta (manifest + iOS) — only for the /sales + /partner shells */}

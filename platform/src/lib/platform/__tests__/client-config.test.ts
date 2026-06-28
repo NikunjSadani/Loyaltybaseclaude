@@ -216,4 +216,43 @@ describe('buildCssVariables', () => {
     expect(css).toContain('#2563eb');
     expect(css).not.toContain('#16a34a');
   });
+
+  // ── AF-9: the output feeds a `<style dangerouslySetInnerHTML>` sink, so a
+  //         malformed/attacker-controlled primaryColor must never break out of
+  //         the <style> element. The builder falls back to a safe hex.
+  it('AF-9: never emits a </style> or <script> breakout for a malicious color', () => {
+    const evil: ClientConfig = {
+      ...DEOLEO_CONFIG,
+      branding: {
+        ...DEOLEO_CONFIG.branding,
+        primaryColor: 'red}</style><script>alert(1)</script>',
+      },
+    };
+    const css = buildCssVariables(evil);
+    expect(css).not.toContain('</style>');
+    expect(css).not.toContain('<script>');
+    expect(css).not.toContain('alert(1)');
+    // Falls back to the safe default so the variable still renders.
+    expect(css).toContain('#16a34a');
+  });
+
+  it('AF-9: the raw-interpolated --brand-primary is always a 6-digit hex', () => {
+    for (const bad of ['', 'rgb(0,0,0)', '#xyzxyz', '#fff', 'green', '#12345', '#1234567']) {
+      const css = buildCssVariables({
+        ...DEOLEO_CONFIG,
+        branding: { ...DEOLEO_CONFIG.branding, primaryColor: bad },
+      });
+      const m = /--brand-primary:\s*([^;]+);/.exec(css);
+      expect(m).not.toBeNull();
+      expect(m![1].trim()).toMatch(/^#[0-9a-fA-F]{6}$/);
+    }
+  });
+
+  it('AF-9: a valid custom hex still passes through untouched', () => {
+    const css = buildCssVariables({
+      ...DEOLEO_CONFIG,
+      branding: { ...DEOLEO_CONFIG.branding, primaryColor: '#abcdef' },
+    });
+    expect(css).toContain('--brand-primary: #abcdef;');
+  });
 });

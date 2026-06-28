@@ -561,6 +561,8 @@ describe('InvoicesService', () => {
         clientVersion: '5.0.0',
       });
       mockPrisma.autoInvoice.create.mockRejectedValue(p2002);
+      // The disambiguation read finds THIS outlet's existing row → tuple conflict.
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({ id: 'inv1' });
       mockPrisma.autoInvoice.updateMany.mockResolvedValue({ count: 1 });
 
       const result = await service.generateForPeriod(admin, { period: '2025-01' });
@@ -584,15 +586,75 @@ describe('InvoicesService', () => {
         clientVersion: '5.0.0',
       });
       mockPrisma.autoInvoice.create.mockRejectedValue(p2002);
-      // Row exists but is PAID → the status:'GENERATED' guard matches 0 rows.
+      // The disambiguation read finds the row (tuple conflict); but it is PAID →
+      // the status:'GENERATED' guard matches 0 rows.
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({ id: 'inv1' });
       mockPrisma.autoInvoice.updateMany.mockResolvedValue({ count: 0 });
 
       const result = await service.generateForPeriod(admin, { period: '2025-01' });
       expect(result.generated).toBe(0);
       expect(result.skipped).toHaveLength(1);
-      expect(result.skipped[0].reason).toMatch(/finalized|PAID|collision/i);
+      expect(result.skipped[0].reason).toMatch(/finalized|PAID/i);
       // Proof the refresh was guarded on GENERATED (so a PAID row is never written).
       expect(mockPrisma.autoInvoice.updateMany.mock.calls[0][0].where.status).toBe('GENERATED');
+    });
+
+    it('AF-8: retries with the next sequence on a GLOBAL invoiceNumber collision — never skips the outlet', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        { outletId: 'O1', amountPaise: 100000n },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([kycApprovedWBOutlet]);
+      mockPrisma.autoInvoice.count.mockResolvedValue(0);
+
+      // P2002 on create — the GLOBAL invoiceNumber collided. The disambiguation read
+      // finds NO row for this outlet's tuple → it's a number collision, not a re-run.
+      const numberClash = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+      });
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue(null); // tuple absent
+      // First number (…-001) is taken; the retry (…-002) succeeds.
+      mockPrisma.autoInvoice.create
+        .mockRejectedValueOnce(numberClash)
+        .mockResolvedValueOnce({ id: 'inv-retry' });
+
+      const result = await service.generateForPeriod(admin, { period: '2025-01' });
+
+      expect(result.generated).toBe(1);
+      expect(result.skipped).toHaveLength(0);
+      expect(mockPrisma.autoInvoice.create).toHaveBeenCalledTimes(2);
+      // The retry advanced the sequence rather than skipping the outlet (AF-8).
+      expect(mockPrisma.autoInvoice.create.mock.calls[0][0].data.invoiceNumber).toBe('TGSL-VIS-O1-202501-001');
+      expect(mockPrisma.autoInvoice.create.mock.calls[1][0].data.invoiceNumber).toBe('TGSL-VIS-O1-202501-002');
+      // A number collision must NOT trigger the tuple-refresh path.
+      expect(mockPrisma.autoInvoice.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('AF-8: gives up gracefully (skips, no infinite loop) if every number stays colliding', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        { outletId: 'O1', amountPaise: 100000n },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([kycApprovedWBOutlet]);
+      mockPrisma.autoInvoice.count.mockResolvedValue(0);
+
+      const numberClash = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+      });
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue(null); // tuple never exists → always a number collision
+      mockPrisma.autoInvoice.create.mockRejectedValue(numberClash); // always collides
+
+      const result = await service.generateForPeriod(admin, { period: '2025-01' });
+
+      expect(result.generated).toBe(0);
+      expect(result.skipped).toHaveLength(1);
+      expect(result.skipped[0].reason).toMatch(/unique invoice number/i);
+      // Bounded retry — not an unbounded loop.
+      expect(mockPrisma.autoInvoice.create.mock.calls.length).toBeLessThanOrEqual(60);
+      // updateMany (tuple-refresh) must never fire for a pure number collision.
+      expect(mockPrisma.autoInvoice.updateMany).not.toHaveBeenCalled();
     });
   });
 

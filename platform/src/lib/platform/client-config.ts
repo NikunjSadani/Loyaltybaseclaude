@@ -278,11 +278,32 @@ function lighten(hex: string, amount = 0.92): string {
 }
 
 /**
+ * Strict 6-digit hex guard + safe fallback for the brand primary colour.
+ *
+ * SECURITY (AF-9): the returned CSS is injected into the root layout via
+ * `<style dangerouslySetInnerHTML>` — an HTML/CSS sink. The primaryColor is
+ * interpolated RAW into `--brand-primary`, so a malformed value such as
+ * `red}</style><script>…` would break out of the <style> element and execute.
+ * Today the value is an in-code constant (CLIENT_REGISTRY), so it is inert; but
+ * once per-tenant SSR branding sources it from the DB (POST-GO-LIVE-BACKLOG §A)
+ * the value becomes attacker-influenced. Sanitising HERE — at the serialisation
+ * boundary — makes the sink provably safe regardless of where the colour comes
+ * from: the only raw-interpolated token can ever be `#` + exactly 6 hex digits.
+ * (`darken`/`lighten` already emit through `rgbToHex`, so they are inherently safe.)
+ */
+const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
+const SAFE_PRIMARY = '#16a34a';
+
+function safePrimaryColor(raw: string | null | undefined): string {
+  return raw && HEX6_RE.test(raw) ? raw : SAFE_PRIMARY;
+}
+
+/**
  * Generates a CSS `:root { ... }` block with brand variables derived from
  * the client's primaryColor.  Injected into the HTML <head> by the root layout.
  */
 export function buildCssVariables(config: ClientConfig): string {
-  const primary = config.branding.primaryColor;
+  const primary = safePrimaryColor(config.branding.primaryColor);
   return `:root {
   --brand-primary: ${primary};
   --brand-primary-dark: ${darken(primary)};

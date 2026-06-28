@@ -215,11 +215,6 @@ export class InvoicesService {
         description,
       };
 
-      // ── Assign invoice number (sequential per clientId + period) ──────────
-      existingCount += 1;
-      const seq = existingCount;
-      const invoiceNumber = generateInvoiceNumber(outletCode, period, seq);
-
       // ── Line items (single line: visibility services) ─────────────────────
       const lineItems = [
         {
@@ -229,65 +224,104 @@ export class InvoicesService {
         },
       ];
 
-      // ── Idempotent persist on @@unique([clientId, outletCode, period]) ────
-      // Try create; on conflict, refresh amounts ONLY while still GENERATED. A
-      // re-run must NEVER mutate a PAID (locked) invoice's money/snapshot, and
-      // never change its number or status.
-      try {
-        await this.prisma.autoInvoice.create({
-          data: {
-            clientId,
-            invoiceNumber,
-            partnerId: partner.id,
-            outletCode,
-            period,
-            invoiceDate,
-            status: 'GENERATED',
-            invoiceNumberEdited: false,
-            lineItems: lineItems as unknown as Prisma.InputJsonValue,
-            subtotalPaise: basePaise,
-            gstPaise: gst.gstPaise,
-            gstType: gst.gstType ?? null,
-            totalPaise: gst.totalPaise,
-            snapshot: snapshot as unknown as Prisma.InputJsonValue,
-          },
-        });
-        generated += 1;
-      } catch (err: unknown) {
-        const isP2002 =
-          err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
-        if (!isP2002) throw err;
-        // Disambiguate WHICH unique constraint fired. AutoInvoice has TWO: the
-        // (clientId,outletCode,period) tuple AND a global `invoiceNumber` unique.
-        // Only the tuple means "this outlet's invoice for this period already
-        // exists" → safe to refresh its amounts. A collision on the global
-        // invoiceNumber (e.g. a previously EDITED number equals a freshly-computed
-        // sequence) must NOT trigger the blind updateMany below — that could mutate
-        // a different outlet's row. Report it as a skip instead.
-        const target = (err as Prisma.PrismaClientKnownRequestError).meta?.target;
-        const targetStr = Array.isArray(target) ? target.join(',') : String(target ?? '');
-        if (targetStr.includes('invoiceNumber')) {
-          skipped.push({ outletCode, reason: 'Invoice number collision — not regenerated' });
-          continue;
-        }
-        // Already exists (period tuple) — refresh amounts/snapshot ONLY if still
-        // GENERATED. PAID invoices are immutable; the guarded updateMany skips
-        // them (count 0).
-        const refreshed = await this.prisma.autoInvoice.updateMany({
-          where: { clientId, outletCode, period, status: 'GENERATED' },
-          data: {
-            subtotalPaise: basePaise,
-            gstPaise: gst.gstPaise,
-            gstType: gst.gstType ?? null,
-            totalPaise: gst.totalPaise,
-            lineItems: lineItems as unknown as Prisma.InputJsonValue,
-            snapshot: snapshot as unknown as Prisma.InputJsonValue,
-          },
-        });
-        if (refreshed.count > 0) {
+      // The amount/snapshot fields a tuple-refresh writes (never the number/status).
+      const refreshData = {
+        subtotalPaise: basePaise,
+        gstPaise: gst.gstPaise,
+        gstType: gst.gstType ?? null,
+        totalPaise: gst.totalPaise,
+        lineItems: lineItems as unknown as Prisma.InputJsonValue,
+        snapshot: snapshot as unknown as Prisma.InputJsonValue,
+      };
+
+      // ── Assign number + persist (idempotent + collision-retrying) (AF-8) ──
+      // Uniqueness is DB-enforced by exactly TWO constraints on AutoInvoice: the
+      // (clientId,outletCode,period) TUPLE and a GLOBAL `invoiceNumber`. We don't
+      // wrap the period in one big transaction (it would hold long locks); instead
+      // each create is guarded by those constraints + a bounded retry, which is the
+      // correct concurrency-safe pattern for a gap-tolerant unique sequence.
+      //
+      // On a P2002 we must know WHICH constraint fired. We DELIBERATELY do not parse
+      // Prisma's `err.meta.target` — its shape is connector-specific (on PostgreSQL it
+      // is the constraint NAME string, not a field array), so a substring/shape test is
+      // fragile. Instead we check deterministically whether THIS outlet's invoice for
+      // the period already exists (the only two constraints make this binary):
+      //   • exists  → the TUPLE collided (re-run / concurrent run). Refresh amounts ONLY
+      //     while still GENERATED — a PAID invoice is immutable (guarded updateMany
+      //     matches 0 rows → skip).
+      //   • absent  → the GLOBAL invoiceNumber collided (a MANUALLY-edited number, or a
+      //     concurrent run's number, equals ours). The old code SKIPPED the outlet here →
+      //     no invoice was ever issued (AF-8). We now BUMP the sequence and RETRY so the
+      //     outlet always gets a unique number.
+      // Numbers embed the outletCode (TGSL-VIS-<code>-<yyyymm>-<seq>), so a natural
+      // cross-outlet collision is impossible and the retry is a rare safety net.
+      let persisted = false;
+      let numberCollisions = 0;
+      const MAX_NUMBER_RETRIES = 50;
+
+      while (!persisted) {
+        existingCount += 1;
+        const invoiceNumber = generateInvoiceNumber(outletCode, period, existingCount);
+        try {
+          await this.prisma.autoInvoice.create({
+            data: {
+              clientId,
+              invoiceNumber,
+              partnerId: partner.id,
+              outletCode,
+              period,
+              invoiceDate,
+              status: 'GENERATED',
+              invoiceNumberEdited: false,
+              lineItems: lineItems as unknown as Prisma.InputJsonValue,
+              subtotalPaise: basePaise,
+              gstPaise: gst.gstPaise,
+              gstType: gst.gstType ?? null,
+              totalPaise: gst.totalPaise,
+              snapshot: snapshot as unknown as Prisma.InputJsonValue,
+            },
+          });
           generated += 1;
-        } else {
-          skipped.push({ outletCode, reason: 'Invoice already finalized (PAID) or number collision — not regenerated' });
+          persisted = true;
+        } catch (err: unknown) {
+          const isP2002 =
+            err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+          if (!isP2002) throw err;
+
+          // Which constraint fired? Connector-agnostic: does this outlet's invoice
+          // for the period already exist? (tenant-scoped read).
+          const tupleExists = await this.prisma.autoInvoice.findFirst({
+            where: { clientId, outletCode, period },
+            select: { id: true },
+          });
+
+          if (!tupleExists) {
+            // GLOBAL number collision — bump the sequence and retry; never skip.
+            numberCollisions += 1;
+            if (numberCollisions > MAX_NUMBER_RETRIES) {
+              skipped.push({
+                outletCode,
+                reason: 'Could not assign a unique invoice number after retries',
+              });
+              persisted = true; // give up on THIS outlet, continue the run
+            }
+            continue;
+          }
+
+          // TUPLE conflict — refresh amounts ONLY while still GENERATED.
+          const refreshed = await this.prisma.autoInvoice.updateMany({
+            where: { clientId, outletCode, period, status: 'GENERATED' },
+            data: refreshData,
+          });
+          if (refreshed.count > 0) {
+            generated += 1;
+          } else {
+            skipped.push({
+              outletCode,
+              reason: 'Invoice already finalized (PAID) — not regenerated',
+            });
+          }
+          persisted = true;
         }
       }
     }
