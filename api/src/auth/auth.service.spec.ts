@@ -19,7 +19,7 @@ const mockTenant = { resolveVisibilityCaptureMode: jest.fn(async () => 'PHOTO_AP
 
 const mockPrisma = {
   user:    { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
-  otpCode: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
+  otpCode: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), deleteMany: jest.fn(), count: jest.fn() },
   userSession: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   client:  { findFirst: jest.fn() },
   auditLog: { create: jest.fn() },
@@ -151,6 +151,8 @@ describe('AuthService', () => {
         ok:   true,
         json: async () => ({ type: 'success', message: 'mock-request-id' }),
       } as any);
+      // AF-10 per-phone window cap: default to "well under the cap" so existing tests pass.
+      mockPrisma.otpCode.count.mockResolvedValue(0);
     });
 
     it('should create an OTP record and return success', async () => {
@@ -159,11 +161,21 @@ describe('AuthService', () => {
 
       const result = await service.sendOtp('9876543210', 'SMS');
 
-      expect(mockPrisma.otpCode.deleteMany).toHaveBeenCalledWith({
-        where: { phone: '9876543210', verifiedAt: null },
-      });
+      // AF-10: prunes only OUT-OF-WINDOW rows (in-window rows are retained for the cap count).
+      const delArg = mockPrisma.otpCode.deleteMany.mock.calls[0][0];
+      expect(delArg.where.phone).toBe('9876543210');
+      expect(delArg.where.createdAt.lt).toBeInstanceOf(Date);
       expect(mockPrisma.otpCode.create).toHaveBeenCalled();
       expect(result.success).toBe(true);
+    });
+
+    it('AF-10: rejects (429) when the per-phone window cap is reached', async () => {
+      mockPrisma.otpCode.count.mockResolvedValue(5); // at the cap
+      await expect(service.sendOtp('9876543210', 'SMS')).rejects.toMatchObject({
+        status: 429,
+      });
+      // No OTP created and no SMS sent once capped.
+      expect(mockPrisma.otpCode.create).not.toHaveBeenCalled();
     });
 
     it('A2: OTP code stored is exactly 6 digits', async () => {

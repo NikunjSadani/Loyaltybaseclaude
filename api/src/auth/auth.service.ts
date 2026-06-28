@@ -1,6 +1,7 @@
 import {
   Injectable, UnauthorizedException, BadRequestException,
   Logger, ForbiddenException, NotFoundException,
+  HttpException, HttpStatus,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -127,12 +128,43 @@ export class AuthService {
     }
 
     const cleanPhone = phone.replace(/\D/g, '');
+
+    // AF-10 — per-phone send cap over a rolling window, enforced in the DB so it holds
+    // across ALL Cloud Run instances (the controller's @Throttle is per-IP AND
+    // per-instance, so multi-instance distribution bypasses it). This is the real
+    // anti-SMS-bombing control — a simple cooldown still allows sustained volume; a
+    // windowed COUNT caps the total a victim's number can receive. Skipped only when the
+    // fixed-OTP dev/staging bypass is active so UAT can request freely.
+    const OTP_WINDOW_MS = 60 * 60 * 1000;   // 1 hour
+    const OTP_MAX_PER_WINDOW = 5;
+    const windowStart = new Date(Date.now() - OTP_WINDOW_MS);
+    const fixedOtpActive = isFixedOtpAllowed() && !!this.config.get<string>('FIXED_OTP');
+
+    if (!fixedOtpActive) {
+      const recentSends = await this.prisma.otpCode.count({
+        where: { phone: cleanPhone, createdAt: { gte: windowStart } },
+      });
+      if (recentSends >= OTP_MAX_PER_WINDOW) {
+        this.logger.warn(`OTP send cap hit for ${cleanPhone} (${recentSends} in window)`);
+        throw new HttpException(
+          'Too many OTP requests for this number. Please wait a while before trying again.',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+      // (Small race at the window boundary can let a couple extra through under high
+      // concurrency — acceptable for an anti-abuse cap; the per-IP throttle bounds the
+      // concurrent source and each send still costs an SMS.)
+    }
+
     const otp        = this.generateOtpCode();
     const expiresAt  = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    // Expire any existing unused OTPs for this phone
+    // Prune this phone's OTPs that have aged out of the window. We retain IN-WINDOW rows
+    // (verified or not) so the cap above can count actual sends; a freshly-issued code
+    // supersedes older ones because verifyOtp always reads the NEWEST unverified row, so
+    // older codes are inert (equivalent to the old "delete unverified on resend").
     await this.prisma.otpCode.deleteMany({
-      where: { phone: cleanPhone, verifiedAt: null },
+      where: { phone: cleanPhone, createdAt: { lt: windowStart } },
     });
 
     await this.prisma.otpCode.create({
