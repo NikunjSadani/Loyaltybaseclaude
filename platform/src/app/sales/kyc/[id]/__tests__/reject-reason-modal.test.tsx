@@ -16,7 +16,7 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect } from 'vitest';
 import { KYC_REJECTION_REASONS } from '@/lib/kyc-rejection-reasons';
-import { RejectionModal } from '../page';
+import { RejectionModal } from '../RejectionModal';
 
 const [REASON_A, REASON_B] = KYC_REJECTION_REASONS;
 
