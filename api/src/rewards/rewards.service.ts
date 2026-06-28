@@ -565,30 +565,33 @@ export class RewardsService {
       throw new BadRequestException('Order is not awaiting confirmation');
     }
 
-    // GLB-1b — CASH-MODE ELIGIBILITY GATE for the OUTLET (pre-transaction, fast path).
-    // For UPI and BANK_TRANSFER modes, the outlet must be KYC-APPROVED, active,
-    // and not soft-deleted. Uses the canonical resolver for a deterministic tiebreak.
-    // A second check INSIDE the transaction (TOCTOU guard) ensures no suspension
-    // between here and the claim/debit can produce a debit for an ineligible partner.
+    // ELIGIBILITY GATE for the OUTLET (pre-transaction, fast path). KYC-APPROVED +
+    // active + not-soft-deleted is required for ALL redemption modes (owner decision,
+    // 2026-06-27): no value or goods may go to an unverified outlet — vouchers /
+    // physical gifts are gated identically to cash. (Previously only cash modes were
+    // gated; a pre-KYC outlet that had been credited points could redeem a voucher.)
+    // Uses the canonical resolver for a deterministic tiebreak. A second check INSIDE
+    // the transaction (TOCTOU guard) ensures no suspension between here and the
+    // claim/debit can produce a debit for an ineligible partner.
     const isCashModeForOutlet =
       order.redemptionMode === 'UPI' || order.redemptionMode === 'BANK_TRANSFER';
+    const p = order.partner;
+    if (!p || p.isActive === false || p.deletedAt != null) {
+      throw new BadRequestException(
+        'Outlet partner account is inactive or deleted; redemption cannot be confirmed',
+      );
+    }
+    const kycStatus = resolveEffectiveKycStatus(p.kycSubmissions ?? []);
+    if (kycStatus !== 'APPROVED') {
+      throw new BadRequestException(
+        `Outlet partner KYC is not approved (current status: ${kycStatus ?? 'NO_SUBMISSION'}); redemption cannot be confirmed`,
+      );
+    }
     if (isCashModeForOutlet) {
-      const p = order.partner;
-      if (!p || p.isActive === false || p.deletedAt != null) {
-        throw new BadRequestException(
-          'Outlet partner account is inactive or deleted; cash redemption cannot be confirmed',
-        );
-      }
-      const kycStatus = resolveEffectiveKycStatus(p.kycSubmissions ?? []);
-      if (kycStatus !== 'APPROVED') {
-        throw new BadRequestException(
-          `Outlet partner KYC is not approved (current status: ${kycStatus ?? 'NO_SUBMISSION'}); cash redemption cannot be confirmed`,
-        );
-      }
-      // BENEFICIARY-PRESENCE GUARD (pre-debit). The outlet needs at least one
-      // COMPLETE rail to be payable; otherwise the order becomes an unpayable,
-      // UNCANCELLABLE PayoutTransaction. Reject BEFORE any points debit /
-      // valuePaise freeze / PayoutTransaction create.
+      // BENEFICIARY-PRESENCE GUARD (pre-debit, CASH only). The outlet needs at least
+      // one COMPLETE rail to be payable; otherwise the order becomes an unpayable,
+      // UNCANCELLABLE PayoutTransaction. Reject BEFORE any points debit / valuePaise
+      // freeze / PayoutTransaction create.
       const hasBank = !!(p.bankAccountNumber && p.ifscCode);
       const hasUpi = !!p.upiId;
       if (!hasBank && !hasUpi) {
@@ -621,12 +624,13 @@ export class RewardsService {
         );
       }
 
-      // TOCTOU in-tx eligibility re-check (cash modes only).
-      // The pre-tx gate above is the fast path (fail early, clean 400). But a partner
-      // can be suspended between the pre-tx read and this transaction's start. Re-asserting
-      // here ensures the wallet debit never happens for an ineligible partner: a throw
-      // inside $transaction triggers a full rollback (no debit, claim reverts).
-      if (isCashModeForOutlet) {
+      // TOCTOU in-tx eligibility re-check (ALL modes). The pre-tx gate above is the
+      // fast path (fail early, clean 400). But a partner can be suspended / un-approved
+      // between the pre-tx read and this transaction's start. Re-asserting here ensures
+      // the wallet debit never happens for an ineligible partner: a throw inside
+      // $transaction triggers a full rollback (no debit, claim reverts). isPartnerPayable
+      // = active + not-deleted + KYC-APPROVED, which is exactly the all-mode gate.
+      {
         const freshPartner = await tx.channelPartner.findFirst({
           where: { id: order.partnerId },
           select: {
@@ -641,7 +645,7 @@ export class RewardsService {
         const freshKyc = resolveEffectiveKycStatus(freshPartner?.kycSubmissions ?? []);
         if (!isPartnerPayable({ isActive: freshPartner?.isActive, deletedAt: freshPartner?.deletedAt, effectiveKyc: freshKyc })) {
           throw new BadRequestException(
-            `Outlet partner is no longer eligible for cash redemption (status changed after pre-tx check; KYC: ${freshKyc ?? 'NO_SUBMISSION'})`,
+            `Outlet partner is no longer eligible for redemption (status changed after pre-tx check; KYC: ${freshKyc ?? 'NO_SUBMISSION'})`,
           );
         }
       }
@@ -968,30 +972,32 @@ export class RewardsService {
       throw new BadRequestException('Order is not awaiting confirmation');
     }
 
-    // GLB-1b — CASH-MODE ELIGIBILITY GATE (pre-transaction, fast path).
-    // For UPI and BANK_TRANSFER redemptions, the owning partner must be KYC-APPROVED,
-    // active (isActive=true), and not soft-deleted (deletedAt=null). Uses the canonical
-    // resolver for a deterministic tiebreak. A second check INSIDE the transaction
-    // (TOCTOU guard) ensures a suspension between here and the claim/debit is caught.
+    // ELIGIBILITY GATE (pre-transaction, fast path). KYC-APPROVED + active +
+    // not-soft-deleted is required for ALL redemption modes (owner decision,
+    // 2026-06-27): no value or goods to an unverified outlet — vouchers / physical
+    // gifts are gated identically to cash. (Previously only cash was gated; a pre-KYC
+    // partner credited points could redeem a voucher.) Canonical resolver for a
+    // deterministic tiebreak. A second check INSIDE the transaction (TOCTOU guard)
+    // ensures a suspension between here and the claim/debit is caught.
     const isCashModeConfirm =
       order.redemptionMode === 'UPI' || order.redemptionMode === 'BANK_TRANSFER';
+    const p = order.partner;
+    if (!p || p.isActive === false || p.deletedAt != null) {
+      throw new BadRequestException(
+        'Partner account is inactive or deleted; redemption cannot be confirmed',
+      );
+    }
+    const kycStatus = resolveEffectiveKycStatus(p.kycSubmissions ?? []);
+    if (kycStatus !== 'APPROVED') {
+      throw new BadRequestException(
+        `Partner KYC is not approved (current status: ${kycStatus ?? 'NO_SUBMISSION'}); redemption cannot be confirmed`,
+      );
+    }
     if (isCashModeConfirm) {
-      const p = order.partner;
-      if (!p || p.isActive === false || p.deletedAt != null) {
-        throw new BadRequestException(
-          'Partner account is inactive or deleted; cash redemption cannot be confirmed',
-        );
-      }
-      const kycStatus = resolveEffectiveKycStatus(p.kycSubmissions ?? []);
-      if (kycStatus !== 'APPROVED') {
-        throw new BadRequestException(
-          `Partner KYC is not approved (current status: ${kycStatus ?? 'NO_SUBMISSION'}); cash redemption cannot be confirmed`,
-        );
-      }
-      // BENEFICIARY-PRESENCE GUARD (pre-debit). A cash payout needs at least one
-      // COMPLETE rail to be payable. Without it the order becomes an unpayable,
-      // UNCANCELLABLE PayoutTransaction — so reject BEFORE any points debit /
-      // valuePaise freeze / PayoutTransaction create.
+      // BENEFICIARY-PRESENCE GUARD (pre-debit, CASH only). A cash payout needs at least
+      // one COMPLETE rail to be payable. Without it the order becomes an unpayable,
+      // UNCANCELLABLE PayoutTransaction — so reject BEFORE any points debit / valuePaise
+      // freeze / PayoutTransaction create.
       const hasBank = !!(p.bankAccountNumber && p.ifscCode);
       const hasUpi = !!p.upiId;
       if (!hasBank && !hasUpi) {
@@ -1036,12 +1042,13 @@ export class RewardsService {
         );
       }
 
-      // TOCTOU in-tx eligibility re-check (cash modes only).
+      // TOCTOU in-tx eligibility re-check (ALL modes).
       // The pre-tx gate above is the fast path (fail early, clean 400). But a partner
-      // can be suspended between the pre-tx read and this transaction's start. Re-reading
-      // partner state here ensures the wallet debit never happens for an ineligible
-      // partner: a throw inside $transaction triggers a full rollback (claim reverts).
-      if (isCashModeConfirm) {
+      // can be suspended / un-approved between the pre-tx read and this transaction's
+      // start. Re-reading partner state here ensures the wallet debit never happens for
+      // an ineligible partner: a throw inside $transaction triggers a full rollback
+      // (claim reverts). isPartnerPayable = active + not-deleted + KYC-APPROVED.
+      {
         const freshPartner = await tx.channelPartner.findFirst({
           where: { id: order.partnerId },
           select: {
@@ -1056,7 +1063,7 @@ export class RewardsService {
         const freshKyc = resolveEffectiveKycStatus(freshPartner?.kycSubmissions ?? []);
         if (!isPartnerPayable({ isActive: freshPartner?.isActive, deletedAt: freshPartner?.deletedAt, effectiveKyc: freshKyc })) {
           throw new BadRequestException(
-            `Partner is no longer eligible for cash redemption (status changed after pre-tx check; KYC: ${freshKyc ?? 'NO_SUBMISSION'})`,
+            `Partner is no longer eligible for redemption (status changed after pre-tx check; KYC: ${freshKyc ?? 'NO_SUBMISSION'})`,
           );
         }
       }

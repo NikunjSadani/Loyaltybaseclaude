@@ -86,6 +86,26 @@ const mockTenantSettings = {
   getConversionRate: jest.fn(async () => mockSettings.conversionRate),
 };
 
+// Default for the in-tx TOCTOU eligibility re-check (`tx.channelPartner.findFirst`).
+// All redemption modes now require KYC-APPROVED + active, so a sensible "eligible"
+// default lets the legacy confirm tests reach their real assertions; ineligibility
+// tests override it per-case.
+const ELIGIBLE_FRESH_PARTNER = {
+  id: 'cp1',
+  userId: 'user1',
+  isActive: true,
+  deletedAt: null,
+  kycSubmissions: [
+    { id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') },
+  ],
+  bankAccountNumber: '0011223344',
+  ifscCode: 'HDFC0001234',
+  upiId: 'eligible@upi',
+  bankAccountHolder: 'Holder',
+  ownerName: 'Owner',
+  bankName: 'HDFC',
+};
+
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '9990001111', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '9991112222', name: '' };
 const sales: JwtPayload = { sub: 'salesUser1', role: 'SALES_SO', clientId: 'deoleo', phone: '9993334444', name: '' };
@@ -114,6 +134,8 @@ describe('RewardsService', () => {
     mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
     mockPrisma.auditLog.create.mockResolvedValue({ id: 'audit1' });
     mockPrisma.outlet.findMany.mockResolvedValue([]); // default: no extra outlet-keyed assignments
+    // Default eligible partner for the in-tx TOCTOU re-check (all modes now gated).
+    mockPrisma.channelPartner.findFirst.mockResolvedValue(ELIGIBLE_FRESH_PARTNER);
   });
 
   describe('listCatalog', () => {
@@ -417,7 +439,11 @@ describe('RewardsService', () => {
     const pendingOrder = {
       id: 'o1', status: 'PENDING', partnerId: 'cp1', orderNumber: 'RDM-x',
       totalPointsCost: 1000, quantity: 1,
-      partner: { id: 'cp1', userId: 'user1' },
+      // KYC-APPROVED + active: required for ALL redemption modes (all-mode gate).
+      partner: {
+        id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+        kycSubmissions: [{ status: 'APPROVED' }],
+      },
       reward: { name: 'Amazon ₹500', stockQuantity: null },
     };
 
@@ -497,7 +523,7 @@ describe('RewardsService', () => {
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 
-    // ── GLB-1b: CASH-MODE ELIGIBILITY GATE ────────────────────────────────────
+    // ── ELIGIBILITY GATE — all modes require KYC-APPROVED + active ─────────────
 
     it('GLB-1b: rejects a UPI redemption when the partner KYC is not APPROVED', async () => {
       // Partner KYC status is PENDING_RSM_APPROVAL — not APPROVED.
@@ -649,8 +675,9 @@ describe('RewardsService', () => {
       expect(mockWallet.debitRedeem).toHaveBeenCalled();
     });
 
-    it('GLB-1b: DOES NOT apply the KYC gate to non-cash (GIFT_CARD) redemptions', async () => {
-      // A GIFT_CARD order with a non-APPROVED partner still goes through (gate is cash-only).
+    it('APPLIES the KYC gate to non-cash (GIFT_CARD) redemptions too (owner decision 2026-06-27)', async () => {
+      // A GIFT_CARD order with a non-APPROVED partner is now REJECTED — no value or
+      // goods to an unverified outlet. (Previously the gate was cash-only.)
       const nonCashOrder = {
         ...pendingOrder,
         redemptionMode: 'GIFT_CARD',
@@ -664,10 +691,11 @@ describe('RewardsService', () => {
         id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
         expiresAt: new Date(Date.now() + 60000),
       });
-      // Confirm proceeds (debitRedeem called) — no BadRequest from eligibility gate.
       await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
-        .resolves.toMatchObject({ status: 'CONFIRMED' });
-      expect(mockWallet.debitRedeem).toHaveBeenCalled();
+        .rejects.toBeInstanceOf(BadRequestException);
+      // Gate fires before the OTP is verified and before any debit.
+      expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 
     // ── GLB-2: ZERO-VALUE HARD FAIL (cash modes) ──────────────────────────────
@@ -871,11 +899,19 @@ describe('RewardsService', () => {
   describe('confirmRedeemForOutlet', () => {
     const outletPartner = {
       id: 'cp-out', userId: 'outletUser1', user: { id: 'outletUser1', phone: '9000000000' },
+      // Eligibility fields: this object also doubles as the in-tx TOCTOU freshPartner
+      // (wireConfirm sets channelPartner.findFirst = outletPartner). All modes gated.
+      isActive: true, deletedAt: null,
+      kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
     };
     const pendingOrder = {
       id: 'o-out', status: 'PENDING', partnerId: 'cp-out', orderNumber: 'RDM-OUT',
       totalPointsCost: 1000, quantity: 1, redemptionMode: 'GIFT_CARD',
-      partner: { id: 'cp-out', userId: 'outletUser1' },
+      // KYC-APPROVED + active: required for ALL redemption modes (all-mode gate).
+      partner: {
+        id: 'cp-out', userId: 'outletUser1', isActive: true, deletedAt: null,
+        kycSubmissions: [{ status: 'APPROVED' }],
+      },
       reward: { name: 'Amazon ₹500', stockQuantity: null },
     };
     const goodOtp = {
@@ -974,7 +1010,7 @@ describe('RewardsService', () => {
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 
-    // ── GLB-1b: CASH-MODE ELIGIBILITY GATE for the OUTLET ────────────────────
+    // ── ELIGIBILITY GATE for the OUTLET — all modes require KYC-APPROVED ───────
 
     it('GLB-1b: rejects a UPI outlet redemption when the outlet KYC is not APPROVED', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
@@ -1017,8 +1053,9 @@ describe('RewardsService', () => {
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 
-    it('GLB-1b: DOES NOT apply the KYC gate to non-cash outlet redemptions', async () => {
-      // GIFT_CARD outlet order — the KYC gate is CASH-only.
+    it('APPLIES the KYC gate to non-cash outlet redemptions too (owner decision 2026-06-27)', async () => {
+      // GIFT_CARD outlet order with a non-APPROVED partner is now REJECTED — no value
+      // or goods to an unverified outlet via the sales-assisted path.
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
       mockPrisma.channelPartner.findFirst.mockResolvedValue(outletPartner);
       mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
@@ -1031,16 +1068,13 @@ describe('RewardsService', () => {
         },
       });
       mockPrisma.otpCode.findFirst.mockResolvedValue(goodOtp);
-      mockPrisma.otpCode.update.mockResolvedValue({});
-      mockWallet.debitRedeem.mockResolvedValue({});
-      mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
 
       await expect(
         service.confirmRedeemForOutlet(sales, {
           orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
         }),
-      ).resolves.toMatchObject({ status: 'CONFIRMED' });
-      expect(mockWallet.debitRedeem).toHaveBeenCalled();
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 
     // ── GLB-2: ZERO-VALUE HARD FAIL for outlet cash redemptions ──────────────
@@ -1743,7 +1777,11 @@ describe('RewardsService', () => {
       totalPointsCost: 500,
       pointsDeducted: 0,
       reward: { id: 'r1', name: 'VCH', stockQuantity: null },
-      partner: { id: 'cp1', userId: 'user1' },
+      // KYC-APPROVED + active: required for ALL redemption modes (all-mode gate).
+      partner: {
+        id: 'cp1', userId: 'user1', isActive: true, deletedAt: null,
+        kycSubmissions: [{ status: 'APPROVED' }],
+      },
     };
 
     it('sets valuePaise = points * 100 / conversionRate, rounded to rupee, in the claim update', async () => {
