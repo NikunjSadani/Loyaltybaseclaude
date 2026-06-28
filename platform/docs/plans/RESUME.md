@@ -25,7 +25,7 @@ calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1191 · nest 0 · FE vitest 1634 · tsc 0.** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1193 · nest 0 · FE vitest 1637 · tsc 0.** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -70,7 +70,8 @@ OPEN GO-LIVE THREADS (see GO-LIVE-READINESS §3): **#76** load real Deoleo maste
 context; outlet types `SSS/SSS_TOT/SUB_STOCKIST/WHOLESALER`; XSR-ID column = real `XSR-*` IDs). **#74** owner ops
 (monitoring alert · backups/PITR · secret rotation · real prod MSG91). **AF-6** JWT-in-localStorage 🔴 — the
 session-expiry redirect landed; the proper fix (httpOnly-cookie refresh token + refresh-on-401, single-flight) is still
-open. **AF-12** RBAC fail-open — keep OFF (`RBAC-ENABLEMENT.md`). **PWA push activation** (FE subscribe + migration +
+open — this is now the **lone open AF item** (AF-7 GSTIN, **AF-8 invoice-number retry**, **AF-9 brand-CSS sink** all DONE;
+AF-8/AF-9 = `8a96808`, 2026-06-28, both independently audited SHIP). **AF-12** RBAC fail-open — keep OFF (`RBAC-ENABLEMENT.md`). **PWA push activation** (FE subscribe + migration +
 VAPID + flag flips) is cutover-coupled. The admin sub-dashboard "fake data" pre-UAT blocker is CLOSED.
 
 CONSTRAINTS: work on `develop`; **NEVER `prisma migrate dev`**; any prod/staging DB op = double-guard
