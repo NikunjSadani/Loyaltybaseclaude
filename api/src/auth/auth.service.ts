@@ -167,6 +167,13 @@ export class AuthService {
       where: { phone: cleanPhone, createdAt: { lt: windowStart } },
     });
 
+    // Opportunistic global cleanup so the table stays bounded without a scheduler:
+    // OTP rows are 10-min-expiry, so anything >1 day past expiry is dead for every phone.
+    // Cheap at launch volume (small table); graduate to an indexed scheduled job at scale.
+    await this.prisma.otpCode.deleteMany({
+      where: { expiresAt: { lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+    });
+
     await this.prisma.otpCode.create({
       data: {
         phone:      cleanPhone,
