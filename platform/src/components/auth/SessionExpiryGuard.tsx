@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { refreshSession } from '@/lib/auth-actions';
 
 /**
  * Pure decision: should an API response trigger a re-login redirect?
@@ -37,14 +38,31 @@ function extractUrl(input: RequestInfo | URL): string {
 let installed = false;
 let redirecting = false;
 
+// Single-flight refresh: several /api calls expiring together share ONE refresh so the
+// single-use refresh token is rotated exactly once (concurrent refreshes would revoke
+// each other and spuriously log the user out — the classic trap this guards against).
+let refreshing: Promise<boolean> | null = null;
+function refreshOnce(): Promise<boolean> {
+  if (!refreshing) {
+    refreshing = refreshSession()
+      .then((r) => r.ok)
+      .catch(() => false)
+      .finally(() => {
+        refreshing = null;
+      });
+  }
+  return refreshing;
+}
+
 /**
  * SessionExpiryGuard — graceful recovery from an expired / invalid token.
  *
- * Tokens here are bearer JWTs with no silent refresh, so when one expires the proxy
- * answers `/api/*` calls with 401 `{ error: 'Invalid token' }`. Without this, a write
- * surfaces the cryptic "Invalid token" and reads silently blank out. This patches
- * window.fetch to detect any qualifying 401 (see shouldRedirectOnAuth) and bounce the
- * user to /auth/login to re-authenticate. Mounted once, app-wide, in the root layout.
+ * When an access token expires the proxy answers `/api/*` calls with 401. This patches
+ * window.fetch to detect any qualifying 401 (see shouldRedirectOnAuth) and FIRST attempt
+ * a silent refresh using the httpOnly refresh-token cookie (AF-6) — on success the
+ * original request is retried transparently and the user never notices. Only if the
+ * refresh is unavailable/fails (refresh token expired or revoked) does it bounce the
+ * user to /auth/login. Mounted once, app-wide, in the root layout.
  */
 export default function SessionExpiryGuard() {
   useEffect(() => {
@@ -59,14 +77,25 @@ export default function SessionExpiryGuard() {
           !redirecting &&
           shouldRedirectOnAuth(res.status, extractUrl(input), window.location.pathname)
         ) {
-          redirecting = true;
-          try {
-            localStorage.removeItem('token');
-            localStorage.removeItem('user');
-          } catch {
-            /* storage blocked — proceed to login anyway */
+          // Try a silent refresh before giving up (single-flight across concurrent 401s).
+          const refreshed = await refreshOnce();
+          if (refreshed && !redirecting) {
+            // New cookie is set — retry the original request once (unpatched, so a
+            // second 401 can't recurse into another refresh).
+            const retry = await originalFetch(input, init);
+            if (retry.status !== 401) return retry;
           }
-          window.location.assign('/auth/login?expired=1');
+          // Refresh unavailable/failed, or the retry still 401s → the session is dead.
+          if (!redirecting) {
+            redirecting = true;
+            try {
+              localStorage.removeItem('token');
+              localStorage.removeItem('user');
+            } catch {
+              /* storage blocked — proceed to login anyway */
+            }
+            window.location.assign('/auth/login?expired=1');
+          }
         }
       } catch {
         /* the guard must NEVER break a fetch */

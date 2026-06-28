@@ -98,19 +98,27 @@ export async function verifyOTP(
 
     // Backend returns { success, data: { accessToken, refreshToken, user } }.
     const token: string = data.data?.accessToken ?? '';
+    const refreshToken: string = data.data?.refreshToken ?? '';
     const user = data.data?.user;
 
     // AF-6: the access token lives ONLY in this httpOnly cookie — it is NOT readable
     // by JS and is NOT mirrored to localStorage. The edge proxy reads this cookie and
     // injects `Authorization: Bearer` for the backend on every `/api/*` request.
     const cookieStore = await cookies();
-    cookieStore.set('token', token, {
-      httpOnly: true,
+    const cookieBase = {
+      httpOnly: true as const,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 60 * 60 * 24 * 7, // 7 days
+      sameSite: 'lax' as const,
       path: '/',
-    });
+    };
+    cookieStore.set('token', token, { ...cookieBase, maxAge: 60 * 60 * 24 * 7 }); // 7 days
+    // AF-6 refresh: the (single-use, rotating) refresh token also lives ONLY in an
+    // httpOnly cookie (NOT localStorage — that would re-open the XSS exposure AF-6 closed).
+    // SessionExpiryGuard uses it to silently refresh an expired access token before
+    // bouncing to login. TTL matches the backend refresh-token lifetime (30 days).
+    if (refreshToken) {
+      cookieStore.set('refresh_token', refreshToken, { ...cookieBase, maxAge: 60 * 60 * 24 * 30 });
+    }
 
     return { success: true, role: user?.role, token, user };
   } catch {

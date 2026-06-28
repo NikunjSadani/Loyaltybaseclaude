@@ -20,6 +20,7 @@ import { resolveClientConfig } from '@/lib/platform/tenant-resolution';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 const WEEK = 60 * 60 * 24 * 7;
+const MONTH = 60 * 60 * 24 * 30;
 
 const cookieOptions = (maxAge: number) => ({
   httpOnly: true as const,
@@ -53,29 +54,71 @@ export async function assumeTenantAction(
       return { success: false, error: body?.error ?? 'Could not switch brand context' };
     }
     const newToken: string | undefined = body?.data?.accessToken;
+    const newRefresh: string | undefined = body?.data?.refreshToken;
     const brandName: string = body?.data?.brandName ?? '';
     if (!newToken) return { success: false, error: 'Could not switch brand context' };
 
-    // Stash the home (operator) session ONCE so Exit can restore it.
+    // Stash the home (operator) session ONCE — both token AND refresh token — so Exit
+    // restores the exact home session and refresh works in either context.
     if (!cookieStore.get('home_token')) {
       cookieStore.set('home_token', token, cookieOptions(WEEK));
+      const homeRefresh = cookieStore.get('refresh_token')?.value;
+      if (homeRefresh) cookieStore.set('home_refresh_token', homeRefresh, cookieOptions(MONTH));
     }
     cookieStore.set('token', newToken, cookieOptions(WEEK));
+    if (newRefresh) cookieStore.set('refresh_token', newRefresh, cookieOptions(MONTH));
     return { success: true, brandName };
   } catch {
     return { success: false, error: 'Network error switching brand context' };
   }
 }
 
-/** Exit the assumed-tenant context: restore the stashed home token, drop the stash. */
+/** Exit the assumed-tenant context: restore the stashed home session, drop the stash. */
 export async function exitTenantAction(): Promise<{ success: boolean }> {
   const cookieStore = await cookies();
   const home = cookieStore.get('home_token')?.value;
   if (home) {
     cookieStore.set('token', home, cookieOptions(WEEK));
+    const homeRefresh = cookieStore.get('home_refresh_token')?.value;
+    if (homeRefresh) cookieStore.set('refresh_token', homeRefresh, cookieOptions(MONTH));
     cookieStore.delete('home_token');
+    cookieStore.delete('home_refresh_token');
   }
   return { success: true };
+}
+
+/**
+ * Silently refresh an expired access token using the (single-use, rotating) httpOnly
+ * refresh-token cookie. Called by SessionExpiryGuard on a 401 BEFORE bouncing to login,
+ * so a normal session-expiry doesn't interrupt the user. On success the new access +
+ * refresh cookies are set and `{ ok: true }` is returned; the caller retries the request.
+ * On any failure the refresh cookie is cleared so the next 401 goes straight to login.
+ */
+export async function refreshSession(): Promise<{ ok: boolean }> {
+  const cookieStore = await cookies();
+  const refreshToken = cookieStore.get('refresh_token')?.value;
+  if (!refreshToken) return { ok: false };
+
+  try {
+    const res = await fetch(`${API_URL}/v1/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+      signal: AbortSignal.timeout(12_000),
+    });
+    const body = await res.json().catch(() => null);
+    const newToken: string | undefined = body?.data?.accessToken;
+    const newRefresh: string | undefined = body?.data?.refreshToken;
+    if (!res.ok || !newToken) {
+      cookieStore.delete('refresh_token');
+      return { ok: false };
+    }
+    cookieStore.set('token', newToken, cookieOptions(WEEK));
+    if (newRefresh) cookieStore.set('refresh_token', newRefresh, cookieOptions(MONTH));
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
 }
 
 /**
@@ -105,6 +148,8 @@ export async function getAssumedContext(): Promise<{ brandName: string | null }>
 export async function logoutAction(): Promise<{ success: boolean }> {
   const cookieStore = await cookies();
   cookieStore.delete('token');
+  cookieStore.delete('refresh_token');
   cookieStore.delete('home_token');
+  cookieStore.delete('home_refresh_token');
   return { success: true };
 }
