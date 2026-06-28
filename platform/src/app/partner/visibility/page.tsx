@@ -79,8 +79,7 @@ export default function VisibilityPage() {
       formData.append('programId', selectedProgram)
       formData.append('geoLat', geoLocation.lat.toString())
       formData.append('geoLng', geoLocation.lng.toString())
-      const token = localStorage.getItem('token')
-      const res = await fetch('/api/visibility/submit', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: formData })
+      const res = await fetch('/api/visibility/submit', { method: 'POST', body: formData })
       const data = await res.json()
       if (data.success) {
         setUploadResult({ success: true, message: 'Visibility submitted successfully! It will be reviewed within 3 working days.' })

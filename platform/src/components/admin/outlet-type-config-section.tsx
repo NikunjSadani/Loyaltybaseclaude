@@ -51,9 +51,7 @@ export function OutletTypeConfigSection({ clientId, initialConfigs = [] }: Props
     let cancelled = false;
     async function load() {
       try {
-        const res = await fetch(`/api/gifsy/clients/${clientId}/outlet-type-configs`, {
-          headers: { 'Authorization': `Bearer ${getToken()}` },
-        });
+        const res = await fetch(`/api/gifsy/clients/${clientId}/outlet-type-configs`);
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           if (!cancelled) setLoadError(body.error ?? `HTTP ${res.status}`);
@@ -106,7 +104,7 @@ export function OutletTypeConfigSection({ clientId, initialConfigs = [] }: Props
     try {
       const res = await fetch(`/api/gifsy/clients/${clientId}/outlet-type-configs/${code}`, {
         method:  'PUT',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getToken()}` },
+        headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ [flag]: value }),
       });
       if (!res.ok) {
@@ -133,7 +131,7 @@ export function OutletTypeConfigSection({ clientId, initialConfigs = [] }: Props
     try {
       const res = await fetch(`/api/gifsy/clients/${clientId}/outlet-type-configs/${code}`, {
         method:  'PUT',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getToken()}` },
+        headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ displayName: displayName || null }),
       });
       if (!res.ok) {
@@ -193,15 +191,6 @@ export function OutletTypeConfigSection({ clientId, initialConfigs = [] }: Props
       </p>
     </div>
   );
-}
-
-// ── Token helper (reads from session cookie / localStorage) ───────────────────
-
-function getToken(): string {
-  // Platform uses cookie-based auth. The JWT is stored under 'token' in localStorage
-  // (set by the verify-otp action). Falls back to empty string if unavailable.
-  if (typeof window === 'undefined') return '';
-  return localStorage.getItem('token') ?? '';
 }
 
 // ── Card ──────────────────────────────────────────────────────────────────────

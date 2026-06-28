@@ -172,9 +172,6 @@ function KYCListContent() {
   }, [statusParam]);
 
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    const authHeaders = { Authorization: `Bearer ${token}` };
-
     interface ApiSubmission {
       id: string; status: string; createdAt: string; updatedAt: string; userId: string;
       reviewerNotes?: string | null;
@@ -195,7 +192,7 @@ function KYCListContent() {
       } | null;
     }
 
-    const kycFetch: Promise<KYCEntry[]> = fetch('/api/kyc', { headers: authHeaders })
+    const kycFetch: Promise<KYCEntry[]> = fetch('/api/kyc')
       .then((r) => r.json())
       .then((result) => {
         if (!result.success) return [];
@@ -229,7 +226,7 @@ function KYCListContent() {
     //  - NOT_INTERESTED → shown DISTINCTLY and NON-actionable for ALL roles (only an
     //    admin can re-open such an outlet for enrollment).
     const canEnrollNow = role === 'XSR' || role === 'SO';
-    const outletsFetch: Promise<KYCEntry[]> = fetch('/api/sales/outlets', { headers: authHeaders })
+    const outletsFetch: Promise<KYCEntry[]> = fetch('/api/sales/outlets')
       .then((r) => r.json())
       .then((body): KYCEntry[] => {
         if (!body.success) return [];
@@ -278,7 +275,7 @@ function KYCListContent() {
       .catch(() => [] as KYCEntry[]);
 
     const teamFetch = hasTeamView(role)
-      ? fetch('/api/sales/team', { headers: authHeaders })
+      ? fetch('/api/sales/team')
           .then((r) => r.json())
           .then((body) => {
             if (body.success) {

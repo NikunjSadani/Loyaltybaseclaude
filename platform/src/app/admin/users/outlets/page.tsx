@@ -426,9 +426,8 @@ export default function OutletsPage() {
 
   // ── Outlet list loader (also called after a successful upsert to reflect new rows) ──
   const loadOutlets = useCallback(async () => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
     try {
-      const j = await fetch('/api/admin/outlets', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json());
+      const j = await fetch('/api/admin/outlets').then(r => r.json());
       if (j.success) {
         if (Array.isArray(j.data.outlets)) setOutlets(j.data.outlets);
         // Enabled outlet types come from the backend (tenant's OutletTypeClientConfig).
@@ -446,10 +445,8 @@ export default function OutletsPage() {
 
   // ── API fetch on mount ──
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    const headers = { Authorization: `Bearer ${token}` };
     void loadOutlets();
-    fetch('/api/admin/hierarchy-config', { headers })
+    fetch('/api/admin/hierarchy-config')
       .then(r => r.json())
       .then(j => { if (j.success && Array.isArray(j.data.employees)) setEmployees(j.data.employees); })
       .catch(() => {})
@@ -743,10 +740,7 @@ export default function OutletsPage() {
               data-testid="download-outlet-master"
               onClick={async () => {
                 try {
-                  const token = localStorage.getItem('token');
-                  const res = await fetch('/api/admin/reports/outlet-master', {
-                    headers: { Authorization: `Bearer ${token}` },
-                  });
+                  const res = await fetch('/api/admin/reports/outlet-master');
                   if (!res.ok) return;
                   const blob = await res.blob();
                   const url  = URL.createObjectURL(blob);
@@ -839,7 +833,6 @@ export default function OutletsPage() {
                 // gutted validation results — the route needs name/type/xsr/etc to persist.
                 const okIds = new Set((outletValidation?.rows ?? []).filter(r => r.status === 'OK').map(r => r.outletId));
                 const rows = outletParsedRows.filter(r => okIds.has(r.outletId));
-                const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
 
                 // The backend caps each /upsert request at 500 rows, so split a large
                 // upload into sequential batches and aggregate the result. One file in,
@@ -855,7 +848,7 @@ export default function OutletsPage() {
                     if (batches.length > 1) setOutletUploadProgress(`Uploading batch ${b + 1} of ${batches.length}…`);
                     const res = await fetch('/api/admin/outlets/upsert', {
                       method: 'POST',
-                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                      headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ rows: batches[b] }),
                     });
                     const j = await res.json().catch(() => null);
@@ -1076,11 +1069,10 @@ export default function OutletsPage() {
                   (rekycValidation?.rows ?? []).filter(r => r.status === 'OK').map(r => r.outletId),
                 );
                 const rows = rekycParsedRows.filter(r => okOutletIds.has(r.outletId));
-                const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
                 try {
                   const res = await fetch('/api/admin/outlets/rekyc-flag', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ rows }),
                   });
                   if (!res.ok) {
@@ -1177,11 +1169,10 @@ export default function OutletsPage() {
               onConfirm={async () => {
                 setDeactivateSubmitError(null);
                 const codes = deactivateValidation?.rows.filter(r => r.status === 'OK').map(r => r.outletId) ?? [];
-                const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
                 try {
                   const res = await fetch('/api/admin/outlets/deactivate', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ outletCodes: codes }),
                   });
                   if (!res.ok) {

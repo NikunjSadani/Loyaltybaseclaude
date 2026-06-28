@@ -60,10 +60,7 @@ function ReportCard({ report }: { report: ReportConfig }) {
       const params = new URLSearchParams({ format: 'xlsx' })
       if (dateFrom) params.append('dateFrom', dateFrom)
       if (dateTo) params.append('dateTo', dateTo)
-      const token = localStorage.getItem('token')
-      const res = await fetch(`${report.endpoint}?${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
+      const res = await fetch(`${report.endpoint}?${params}`)
       if (!res.ok) throw new Error('Export failed')
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)

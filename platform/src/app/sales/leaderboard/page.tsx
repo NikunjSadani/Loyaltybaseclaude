@@ -64,10 +64,7 @@ export default function SalesLeaderboardPage() {
 
   useEffect(() => {
     setLoading(true);
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch(`/api/sales/leaderboard?scope=${scope}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    fetch(`/api/sales/leaderboard?scope=${scope}`)
       .then((r) => r.json())
       .then((body) => { if (body.success) setEntries(body.data.entries ?? []); })
       .catch(() => {})

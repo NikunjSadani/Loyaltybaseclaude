@@ -226,11 +226,9 @@ export default function SalesSupportPage() {
     const onStorage = () => setRoleState(getRole());
     window.addEventListener('storage', onStorage);
 
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    const headers = { Authorization: `Bearer ${token}` };
     Promise.all([
-      fetch('/api/tickets', { headers }).then((r) => r.json()),
-      fetch('/api/sales/outlets', { headers }).then((r) => r.json()),
+      fetch('/api/tickets').then((r) => r.json()),
+      fetch('/api/sales/outlets').then((r) => r.json()),
     ]).then(([tBody, oBody]) => {
       if (tBody.success) setTickets((tBody.data.tickets ?? []).map(mapDbTicket));
       if (oBody.success) setOutlets((oBody.data.outlets ?? []).map((o: any) => ({ id: o.id, name: o.name, mobile: o.mobile ?? '' })));
@@ -249,13 +247,12 @@ export default function SalesSupportPage() {
   const handleSubmit = async () => {
     if (!canSubmit) return;
     setSubmitting(true);
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
     const outletPrefix = !isSelf && form.outlet ? `[${form.outlet.name}] ` : '';
     const outletDesc   = !isSelf && form.outlet ? `Outlet: ${form.outlet.name} (${form.outlet.mobile})\n\n` : '';
     try {
       const res = await fetch('/api/tickets', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           category:    CAT_TO_DB[form.category as TicketCategory],
           subject:     `${outletPrefix}${form.title.trim()}`,
@@ -274,21 +271,19 @@ export default function SalesSupportPage() {
 
   const handleSelectTicket = async (ticket: Ticket) => {
     setSelected(ticket);
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    const res = await fetch(`/api/tickets/${ticket.id}`, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await fetch(`/api/tickets/${ticket.id}`);
     const body = await res.json();
     if (body.success) setSelected(mapDbTicket(body.data.ticket));
   };
 
   const handleReply = async (ticketId: string, text: string) => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
     try {
       await fetch(`/api/tickets/${ticketId}/messages`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text }),
       });
-      const res = await fetch(`/api/tickets/${ticketId}`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(`/api/tickets/${ticketId}`);
       const body = await res.json();
       if (body.success) {
         const updated = mapDbTicket(body.data.ticket);

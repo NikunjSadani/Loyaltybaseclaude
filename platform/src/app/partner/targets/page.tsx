@@ -200,10 +200,7 @@ export default function PartnerTargetsPage() {
     setData(null);
     const controller = new AbortController();
 
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-
     fetch(`/api/partner/targets?period=${period}`, {
-      headers: { Authorization: `Bearer ${token}` },
       signal:  controller.signal,
     })
       .then(r => r.json())

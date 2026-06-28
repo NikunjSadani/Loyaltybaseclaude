@@ -127,8 +127,6 @@ export default function PayoutDownloadPage() {
 
 function PayoutPageInner() {
   const session = useAdminSession();
-  const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-  const authHeaders = { Authorization: `Bearer ${token}` };
 
   const [period,    setPeriod]    = useState(getPreviousMonth());
   const [groupType, setGroupType] = useState<'STANDARD' | 'SEPARATE'>('STANDARD');
@@ -163,16 +161,16 @@ function PayoutPageInner() {
 
   const loadAll = useCallback(async () => {
     const [fieldsRes, downloadsRes, reversalsRes, processedRes] = await Promise.all([
-      fetch('/api/admin/credits/fields?active=true', { headers: authHeaders }).then((r) => r.json()),
-      fetch(`/api/admin/credits/payout-downloads?period=${period}`, { headers: authHeaders }).then((r) => r.json()),
-      fetch('/api/admin/credits/reversals?status=PENDING_GIFSY', { headers: authHeaders }).then((r) => r.json()),
-      fetch('/api/admin/credits/reversals?status=APPROVED', { headers: authHeaders }).then((r) => r.json()),
+      fetch('/api/admin/credits/fields?active=true').then((r) => r.json()),
+      fetch(`/api/admin/credits/payout-downloads?period=${period}`).then((r) => r.json()),
+      fetch('/api/admin/credits/reversals?status=PENDING_GIFSY').then((r) => r.json()),
+      fetch('/api/admin/credits/reversals?status=APPROVED').then((r) => r.json()),
     ]);
     if (fieldsRes.success)    setFields(fieldsRes.data);
     if (downloadsRes.success) setDownloads(downloadsRes.data);
     if (reversalsRes.success) setReversals(reversalsRes.data);
     if (processedRes.success) setProcessedReversals(processedRes.data);
-  }, [period, token]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [period]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
@@ -193,7 +191,7 @@ function PayoutPageInner() {
 
       const res = await fetch('/api/admin/credits/payout-downloads', {
         method:  'POST',
-        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify(body),
       });
 
@@ -236,7 +234,7 @@ function PayoutPageInner() {
 
     const res = await fetch(
       `/api/admin/credits/payout-downloads/${utrDownloadId}/utr`,
-      { method: 'POST', headers: authHeaders, body: fd },
+      { method: 'POST', body: fd },
     );
     const json = await res.json();
     setUtrParsing(false);
@@ -258,7 +256,7 @@ function PayoutPageInner() {
 
     const res  = await fetch(
       `/api/admin/credits/payout-downloads/${utrDownloadId}/utr`,
-      { method: 'POST', headers: authHeaders, body: fd },
+      { method: 'POST', body: fd },
     );
     const json = await res.json();
     setUtrApplying(false);
@@ -301,7 +299,7 @@ function PayoutPageInner() {
 
     const res  = await fetch(`/api/admin/credits/reversals/${revAction.id}`, {
       method:  'PATCH',
-      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(body),
     });
     const json = await res.json();

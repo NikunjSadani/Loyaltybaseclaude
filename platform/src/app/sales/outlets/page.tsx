@@ -156,8 +156,7 @@ export default function SalesOutletsPage() {
   // Roster (real /api/sales/outlets)
   useEffect(() => {
     setRoleState(getRole());
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch('/api/sales/outlets', { headers: { Authorization: `Bearer ${token}` } })
+    fetch('/api/sales/outlets')
       .then((r) => r.json())
       .then((body) => { if (body.success) setOutlets(body.data.outlets ?? []); })
       .catch(() => {});
@@ -172,10 +171,7 @@ export default function SalesOutletsPage() {
   // Real per-outlet KPI target vs achievement for the selected month.
   useEffect(() => {
     setLoading(true);
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch(`/api/sales/outlet-targets?period=${encodeURIComponent(period)}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    fetch(`/api/sales/outlet-targets?period=${encodeURIComponent(period)}`)
       .then((r) => r.json())
       .then((body) => {
         if (body.success) {

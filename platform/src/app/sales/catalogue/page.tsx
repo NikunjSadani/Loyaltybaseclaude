@@ -108,8 +108,7 @@ function CatalogueInner() {
 
   // Fetch outlets from API
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch('/api/sales/outlets', { headers: { Authorization: `Bearer ${token}` } })
+    fetch('/api/sales/outlets')
       .then((r) => r.json())
       .then((body) => {
         if (body.success) {

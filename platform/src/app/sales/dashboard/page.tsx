@@ -210,15 +210,12 @@ export default function SalesDashboard() {
     // Real backend schemes (no localStorage demo data on this live surface).
     void fetchAllSchemes().then(setPendingSchemes).catch(() => setPendingSchemes([]));
 
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    const authHeaders = { Authorization: `Bearer ${token}` };
-
     Promise.all([
       fetchTaskConfig(),
       fetchBanners(),
-      fetch('/api/sales/outlets', { headers: authHeaders }).then((r) => r.json()),
-      fetch('/api/sales/targets', { headers: authHeaders }).then((r) => r.json()).catch(() => null),
-      fetch('/api/kyc', { headers: authHeaders }).then((r) => r.json()).catch(() => null),
+      fetch('/api/sales/outlets').then((r) => r.json()),
+      fetch('/api/sales/targets').then((r) => r.json()).catch(() => null),
+      fetch('/api/kyc').then((r) => r.json()).catch(() => null),
     ]).then(([config, { banners }, outletResult, targetResult, kycResult]) => {
       setTaskConfig(config);
       setSalesBanners(getActiveSalesBanners(banners));

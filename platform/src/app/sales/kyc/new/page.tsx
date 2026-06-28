@@ -169,7 +169,6 @@ async function uploadDocToGCS(
   blob: Blob,
   fileName: string,
   docKey: DocKey,
-  token: string,
 ): Promise<GcsUploadResult> {
   const formData = new FormData();
   formData.append('file', blob, fileName);
@@ -177,7 +176,6 @@ async function uploadDocToGCS(
 
   const res = await fetch('/api/kyc/documents', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
     body: formData,
   });
 
@@ -298,8 +296,7 @@ export default function NewKYCPage() {
 
   /* ── Load assigned outlets from API ── */
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch('/api/sales/outlets', { headers: { Authorization: `Bearer ${token}` } })
+    fetch('/api/sales/outlets')
       .then((r) => r.json())
       .then((body) => {
         if (body.success) {
@@ -427,10 +424,9 @@ export default function NewKYCPage() {
     if (prefilledKycRef.current === kycId) return; // fill a given submission only once
     prefilledKycRef.current = kycId;
 
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
     (async () => {
       try {
-        const res = await fetch(`/api/kyc/${kycId}`, { headers: { Authorization: `Bearer ${token}` } });
+        const res = await fetch(`/api/kyc/${kycId}`);
         const body = await res.json().catch(() => ({ success: false }));
         if (!body?.success || !body.data?.submission) return;
         const sub = body.data.submission as {
@@ -610,10 +606,7 @@ export default function NewKYCPage() {
       // only { available, conflictType }). Fail OPEN on any network/parse error so
       // a transient failure never hard-blocks submit nor shows a false conflict.
       try {
-        const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-        const res = await fetch(`/api/kyc/phone-available?phone=${val}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const res = await fetch(`/api/kyc/phone-available?phone=${val}`);
         const body = await res.json().catch(() => ({}));
         if (res.ok && body.success && body.data?.available === false && body.data?.conflictType === 'EMPLOYEE') {
           setMobileCheck('employee_conflict');
@@ -657,11 +650,10 @@ export default function NewKYCPage() {
       captureBoardPhotoGeo();
     }
     // Upload to GCS
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
     // Convert dataUrl to Blob for upload
     fetch(dataUrl)
       .then((r) => r.blob())
-      .then((blob) => uploadDocToGCS(blob, fileName, key, token))
+      .then((blob) => uploadDocToGCS(blob, fileName, key))
       .then((result) => {
         setDocs((d) => {
           const existing = d[key];
@@ -707,7 +699,6 @@ export default function NewKYCPage() {
       capturePaymentGeo();
     }
     // Upload to GCS
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
     // Build a Blob from the compressed result to send (use original file for non-images, compressed jpeg for images)
     let uploadBlob: Blob;
     let uploadName: string;
@@ -720,7 +711,7 @@ export default function NewKYCPage() {
       uploadBlob = file;
       uploadName = file.name;
     }
-    uploadDocToGCS(uploadBlob, uploadName, docKey as DocKey, token)
+    uploadDocToGCS(uploadBlob, uploadName, docKey as DocKey)
       .then((gcsResult) => {
         setDocs((d) => {
           const existing = d[docKey];
@@ -932,10 +923,9 @@ export default function NewKYCPage() {
   const sendConsentOtp = async (subId: string | null): Promise<{ ok: boolean; error?: string }> => {
     if (!subId) return { ok: false, error: 'Could not start OTP — please retry the submission.' };
     try {
-      const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
       const res = await fetch('/api/kyc/consent-otp', {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ submissionId: subId, mobile: form.mobile }),
       });
       if (res.ok) return { ok: true };
@@ -1010,12 +1000,10 @@ export default function NewKYCPage() {
         }
       }
 
-      const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
       const res = await fetch('/api/kyc', {
         method:  'POST',
         headers: {
           'Content-Type':  'application/json',
-          'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify({
           outletId:         selectedOutlet?.outletId,
@@ -1080,12 +1068,10 @@ export default function NewKYCPage() {
     }
     setSubmitOtpVerifying(true);
     try {
-      const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
       const res = await fetch('/api/kyc/consent', {
         method:  'POST',
         headers: {
           'Content-Type':  'application/json',
-          'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify({
           submissionId: submissionId ?? 'unknown',
@@ -1144,12 +1130,10 @@ export default function NewKYCPage() {
     const outletName = assignedOutlets.find((o) => o.outletId === confirmNotInterestedId)?.name ?? confirmNotInterestedId;
     setNotInterestedLoading(true);
     try {
-      const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
       await fetch('/api/kyc/not-interested', {
         method:  'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body:    JSON.stringify({ outletId: confirmNotInterestedId }),
       });

@@ -79,17 +79,13 @@ export default function PointsLedgerPage() {
   })()
   const actionsDisabled = !!validationError || !from || !to
 
-  // ── Auth token ────────────────────────────────────────────────────────────
-  const token = () =>
-    typeof localStorage !== 'undefined' ? (localStorage.getItem('token') ?? '') : ''
-
   // ── Generate preview ──────────────────────────────────────────────────────
   const handlePreview = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
       const url = `/api/admin/reports/points-ledger?from=${from}&to=${to}&format=json`
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token()}` } })
+      const res = await fetch(url)
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
         throw new Error((body as { error?: string }).error ?? `Request failed (${res.status})`)
@@ -110,7 +106,7 @@ export default function PointsLedgerPage() {
     setError(null)
     try {
       const url = `/api/admin/reports/points-ledger?from=${from}&to=${to}&format=xlsx`
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token()}` } })
+      const res = await fetch(url)
       if (!res.ok) throw new Error(`Export failed (${res.status})`)
       const blob = await res.blob()
       const href = URL.createObjectURL(blob)

@@ -54,10 +54,6 @@ const KYC_FIELD_LABELS: Record<KycFieldKey, string> = {
   OWNER_PHOTO: 'Owner Photo',
 };
 
-function authToken(): string {
-  return typeof localStorage !== 'undefined' ? (localStorage.getItem('token') ?? '') : '';
-}
-
 /** Unwrap the backend { success, data } envelope. Throws on success=false. */
 async function unwrapJson<T>(res: Response): Promise<T> {
   const body = await res.json().catch(() => ({ success: false, error: `HTTP ${res.status}` })) as
@@ -260,7 +256,6 @@ function KycFieldVerificationPanel({
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken()}`,
           },
           body: JSON.stringify({ fieldKey: key, decision, remark: remark ?? undefined }),
         });
@@ -414,9 +409,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
   const [taxFieldsSaved, setTaxFieldsSaved] = useState(false);
 
   const loadKyc = useCallback(async () => {
-    const res = await fetch(`/api/kyc/${id}`, {
-      headers: { Authorization: `Bearer ${authToken()}` },
-    });
+    const res = await fetch(`/api/kyc/${id}`);
     const json = (await res.json().catch(() => ({ success: false }))) as {
       success: boolean; data?: { submission: ApiKycDetail }; error?: string;
     };
@@ -466,7 +459,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
     try {
       const res = await fetch(path, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken()}` },
+        headers: { 'Content-Type': 'application/json' },
         body: body ? JSON.stringify(body) : undefined,
       });
       const json = (await res.json().catch(() => ({ success: false }))) as {

@@ -136,9 +136,7 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
 
   useEffect(() => {
     setLoading(true);
-    fetch(`/api/kyc/${id}/ledger`, {
-      headers: { Authorization: `Bearer ${typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : ''}` },
-    })
+    fetch(`/api/kyc/${id}/ledger`)
       .then((r) => r.json())
       .then((body) => {
         if (!body.success) { setFetchError(body.error ?? 'Failed to load'); return; }

@@ -418,9 +418,8 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
    *    authoritative persisted status + history, never an optimistic local guess) ── */
   const loadKyc = useCallback(async () => {
     setLoadingKyc(true);
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
     try {
-      const r = await fetch(`/api/kyc/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch(`/api/kyc/${id}`);
       const json = await r.json();
       if (json.success && json.data?.submission) {
         const s = json.data.submission;
@@ -515,10 +514,9 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
     setApproving(true);
     setActionError(null);
     try {
-      const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
       const res = await fetch(`/api/kyc/${id}/first-approve`, {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({}),
       });
       const json = await res.json().catch(() => ({}));
@@ -539,10 +537,9 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
     setApproving(true);
     setActionError(null);
     try {
-      const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
       const res = await fetch(`/api/kyc/${id}/reject`, {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ reason: remarks }),
       });
       const json = await res.json().catch(() => ({}));

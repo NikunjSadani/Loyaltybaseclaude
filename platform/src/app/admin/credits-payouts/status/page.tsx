@@ -86,7 +86,6 @@ interface ReversalTarget {
 
 export default function PayoutStatusPage() {
   const session = useAdminSession();
-  const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
 
   const [batches,      setBatches]      = useState<BatchSummary[]>([]);
   const [batchDetails, setBatchDetails] = useState<Record<string, BatchDetail>>({});
@@ -101,17 +100,15 @@ export default function PayoutStatusPage() {
   const [revMsg,     setRevMsg]     = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [revLoading, setRevLoading] = useState(false);
 
-  const headers = { Authorization: `Bearer ${token}` };
-
   const fetchBatches = useCallback(async () => {
     try {
-      const res  = await fetch('/api/admin/credits/batches', { headers });
+      const res  = await fetch('/api/admin/credits/batches');
       const json = await res.json();
       if (json.success) setBatches(json.data);
     } finally {
       setLoading(false);
     }
-  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => { fetchBatches(); }, [fetchBatches]);
 
@@ -119,7 +116,7 @@ export default function PayoutStatusPage() {
     if (expanded === id) { setExpanded(null); return; }
     setExpanded(id);
     if (batchDetails[id]) return;
-    const res  = await fetch(`/api/admin/credits/batches/${id}`, { headers });
+    const res  = await fetch(`/api/admin/credits/batches/${id}`);
     const json = await res.json();
     if (json.success) {
       setBatchDetails((prev) => ({ ...prev, [id]: json.data as BatchDetail }));
@@ -211,7 +208,7 @@ export default function PayoutStatusPage() {
     try {
       const res = await fetch(`/api/admin/credits/batches/${revTarget.batchId}/reversals`, {
         method:  'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           outletId:       revTarget.outletId,
           outletName:     revTarget.outletName,

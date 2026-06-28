@@ -185,10 +185,8 @@ export default function SalesTeamPage() {
   useEffect(() => {
     setRoleState(getRole());
     const controller = new AbortController();
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
     fetch('/api/sales/team', {
       signal:  controller.signal,
-      headers: { Authorization: `Bearer ${token}` },
     })
       .then((r) => r.json())
       .then((body) => {

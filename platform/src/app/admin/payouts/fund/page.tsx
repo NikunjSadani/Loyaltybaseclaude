@@ -38,9 +38,8 @@ export default function FundPage() {
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
-    const token = localStorage.getItem('token')
     Promise.all([
-      fetch('/api/payouts/fund', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
+      fetch('/api/payouts/fund').then(r => r.json()),
     ]).then(([fundData]) => {
       if (fundData.success) setLedger(fundData.data.ledger)
       setLoading(false)
@@ -50,10 +49,9 @@ export default function FundPage() {
   const handleRecordPayment = async () => {
     setSubmitting(true)
     try {
-      const token = localStorage.getItem('token')
       const res = await fetch('/api/payouts/fund/receive', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...form, amount: Math.round(parseFloat(form.amount) * 100) }),
       })
       const data = await res.json()
@@ -68,8 +66,7 @@ export default function FundPage() {
   }
 
   const handleExport = async () => {
-    const token = localStorage.getItem('token')
-    const res = await fetch('/api/payouts/reconciliation?format=xlsx', { headers: { Authorization: `Bearer ${token}` } })
+    const res = await fetch('/api/payouts/reconciliation?format=xlsx')
     if (!res.ok) return
     const blob = await res.blob()
     const url = URL.createObjectURL(blob)

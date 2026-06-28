@@ -37,8 +37,7 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
 
   useEffect(() => {
     setRoleState(getRole());
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch('/api/sales/me', { headers: { Authorization: `Bearer ${token}` } })
+    fetch('/api/sales/me')
       .then((r) => r.json())
       .then((res) => {
         if (res?.success) {

@@ -35,10 +35,8 @@ describe('Sales Leaderboard — API wiring', () => {
     vi.stubGlobal('fetch', mockFetch);
     render(<SalesLeaderboardPage />);
     await waitFor(() => expect(mockFetch).toHaveBeenCalled());
-    expect(mockFetch).toHaveBeenCalledWith(
-      '/api/sales/leaderboard?scope=rm',
-      expect.objectContaining({ headers: expect.objectContaining({ Authorization: expect.any(String) }) }),
-    );
+    // AF-6: auth rides the httpOnly cookie (same-origin fetch sends it); no Authorization header.
+    expect(mockFetch).toHaveBeenCalledWith('/api/sales/leaderboard?scope=rm');
   });
 
   it('SLB2: renders the API rows once fetch resolves', async () => {

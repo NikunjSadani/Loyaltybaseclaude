@@ -78,8 +78,7 @@ export default function MemberDetailPage() {
 
   useEffect(() => {
     if (!memberId) return;
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch(`/api/sales/team/${memberId}`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch(`/api/sales/team/${memberId}`)
       .then((r) => r.json())
       .then((body) => {
         if (body.success) setMember(body.data.member);

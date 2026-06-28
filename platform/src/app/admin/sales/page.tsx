@@ -100,12 +100,6 @@ function formatDate(iso: string) {
   });
 }
 
-function authHeader(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = localStorage.getItem('token');
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 // ── Upload History Component ──────────────────────────────────────────────────
 
 function UploadHistory({ refreshKey }: { refreshKey: number }) {
@@ -120,7 +114,7 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
     setLoading(true);
     setFetchError(false);
     // ↳ Repointed: /api/admin/sales/batches → /api/admin/achievements/batches
-    fetch('/api/admin/achievements/batches', { headers: authHeader() })
+    fetch('/api/admin/achievements/batches')
       .then(r => r.json())
       .then(body => {
         if (body.success) setBatches(body.data);
@@ -139,7 +133,6 @@ function UploadHistory({ refreshKey }: { refreshKey: number }) {
       // never existed post platform-Prisma-retirement; this is the real endpoint.)
       const res  = await fetch(`/api/admin/achievements/batches/${batchId}`, {
         method: 'DELETE',
-        headers: authHeader(),
       });
       const body = await res.json().catch(() => ({ success: false }));
       if (res.ok && body.success) {
@@ -252,9 +245,7 @@ function PaceView({ month }: { month: string }) {
     setFetchError(null);
     setPaceData(null);
     // ↳ New endpoint: /api/admin/achievements/pace?month=YYYY-MM
-    fetch(`/api/admin/achievements/pace?month=${encodeURIComponent(month)}`, {
-      headers: authHeader(),
-    })
+    fetch(`/api/admin/achievements/pace?month=${encodeURIComponent(month)}`)
       .then(r => r.json())
       .then(body => {
         if (body.success) setPaceData(body.data as PaceData);
@@ -378,7 +369,7 @@ export default function SalesUploadPage() {
 
   // Fetch the tenant's KPI definitions from the backend.
   useEffect(() => {
-    fetch('/api/admin/kpis', { headers: authHeader() })
+    fetch('/api/admin/kpis')
       .then(r => r.json())
       .then(j => {
         if (j.success && Array.isArray(j.data) && j.data.length > 0) {
@@ -416,7 +407,6 @@ export default function SalesUploadPage() {
       // roster + enabled KpiDef columns), so template → fill → upload round-trips.
       const res = await fetch(
         `/api/admin/achievements/template?month=${encodeURIComponent(salesMonth)}`,
-        { headers: authHeader() },
       );
       if (!res.ok) {
         let msg = `HTTP ${res.status}`;
@@ -450,7 +440,6 @@ export default function SalesUploadPage() {
 
       const res  = await fetch('/api/admin/achievements/upload', {
         method:  'POST',
-        headers: authHeader(),   // NO Content-Type — browser sets multipart boundary
         body:    formData,
       });
       const body = await res.json();

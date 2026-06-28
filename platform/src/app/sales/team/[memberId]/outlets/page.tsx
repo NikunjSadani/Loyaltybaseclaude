@@ -121,11 +121,9 @@ export default function MemberOutletsPage() {
   // Fetch member info + outlets from API
   useEffect(() => {
     if (!memberId) return;
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    const headers = { Authorization: `Bearer ${token}` };
     Promise.all([
-      fetch(`/api/sales/team/${memberId}`, { headers }).then((r) => r.json()),
-      fetch(`/api/sales/team/${memberId}/outlets`, { headers }).then((r) => r.json()),
+      fetch(`/api/sales/team/${memberId}`).then((r) => r.json()),
+      fetch(`/api/sales/team/${memberId}/outlets`).then((r) => r.json()),
     ]).then(([mBody, oBody]) => {
       if (mBody.success) {
         const md = mBody.data.member;
@@ -140,10 +138,7 @@ export default function MemberOutletsPage() {
   // Real per-outlet KPI target vs achievement for the selected month, scoped to this member.
   useEffect(() => {
     if (!memberId) return;
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch(`/api/sales/team/${memberId}/outlet-targets?period=${encodeURIComponent(period)}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    fetch(`/api/sales/team/${memberId}/outlet-targets?period=${encodeURIComponent(period)}`)
       .then((r) => r.json())
       .then((body) => {
         if (body.success) {

@@ -148,13 +148,6 @@ const VIS_TYPE_COLORS: Record<string, string> = {
   'Floor Stand': 'bg-amber-100 text-amber-700',
 };
 
-// ─── Auth header helper ───────────────────────────────────────────────────────
-function adminAuthHeader(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = localStorage.getItem('token');
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 // ─── Upload result type ───────────────────────────────────────────────────────
 interface UploadResult {
   batchId:        string;
@@ -197,7 +190,7 @@ export default function VisibilityPage() {
   const [queueError, setQueueError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/visibility/submissions?status=SUBMITTED', { headers: adminAuthHeader() })
+    fetch('/api/visibility/submissions?status=SUBMITTED')
       .then(r => r.json())
       .then((json: { success: boolean; data?: { submissions: ApiVisibilityItem[] }; error?: string }) => {
         if (json.success && json.data) {
@@ -238,7 +231,6 @@ export default function VisibilityPage() {
       // Fetch all records for the month (high limit — data stays out of React state)
       const res  = await fetch(
         `/api/admin/visibility/records?month=${recMonth}&limit=10000`,
-        { headers: adminAuthHeader() },
       );
       if (!res.ok) return;
       const json    = await res.json();
@@ -309,7 +301,6 @@ export default function VisibilityPage() {
       fd.append('file', uploadFile);
       const res = await fetch('/api/admin/visibility/bulk-upload', {
         method:  'POST',
-        headers: adminAuthHeader(),
         body:    fd,
       });
       const json = await res.json();

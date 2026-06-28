@@ -258,8 +258,7 @@ export default function HierarchyPage() {
 
   // ── Load from API ──────────────────────────────────────────────────────────
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-    fetch('/api/admin/hierarchy-config', { headers: { Authorization: `Bearer ${token}` } })
+    fetch('/api/admin/hierarchy-config')
       .then((r) => r.json())
       .then((j) => { if (j.success) setEmployees(j.data.employees ?? []); })
       .catch(() => {});
@@ -272,12 +271,11 @@ export default function HierarchyPage() {
   const persistEmployees = useCallback(async (list: HierarchyEmployee[]) => {
     const prev = employees;
     setEmployees(list); // optimistic
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
     let res: Response;
     try {
       res = await fetch('/api/admin/hierarchy-config', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ employees: list }),
       });
     } catch (err) {

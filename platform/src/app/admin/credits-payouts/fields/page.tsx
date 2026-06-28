@@ -33,13 +33,9 @@ export default function FieldConfigPage() {
   const [error,    setError]    = useState('');
   const [loading,  setLoading]  = useState(true);
 
-  const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
-
   const fetchFields = useCallback(async () => {
     try {
-      const res = await fetch('/api/admin/credits/fields', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch('/api/admin/credits/fields');
       const json = await res.json();
       if (json.success) setFields(json.data);
     } catch {
@@ -47,7 +43,7 @@ export default function FieldConfigPage() {
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, []);
 
   useEffect(() => { fetchFields(); }, [fetchFields]);
 
@@ -57,7 +53,7 @@ export default function FieldConfigPage() {
     try {
       const res = await fetch('/api/admin/credits/fields', {
         method:  'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: newName.trim(), isSeparatePayout: newSep }),
       });
       const json = await res.json();
@@ -76,7 +72,7 @@ export default function FieldConfigPage() {
     try {
       await fetch(`/api/admin/credits/fields/${f.id}`, {
         method:  'PATCH',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
       });
       fetchFields();

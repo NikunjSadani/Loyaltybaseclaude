@@ -115,18 +115,16 @@ export default function CreditsPayoutsUploadPage() {
   const [confirmError, setConfirmError] = useState('');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const token = typeof window !== 'undefined' ? localStorage.getItem('token') ?? '' : '';
 
   useEffect(() => {
-    const headers = { Authorization: `Bearer ${token}` };
     Promise.all([
-      fetch('/api/admin/credits/fields?active=true', { headers }).then((r) => r.json()),
-      fetch('/api/admin/credits/eligible-outlets',   { headers }).then((r) => r.json()),
+      fetch('/api/admin/credits/fields?active=true').then((r) => r.json()),
+      fetch('/api/admin/credits/eligible-outlets').then((r) => r.json()),
     ]).then(([fieldsRes, outletsRes]) => {
       if (fieldsRes.success)  setFields(fieldsRes.data);
       if (outletsRes.success) setOutlets(outletsRes.data);
     }).catch(() => {});
-  }, [token]);
+  }, []);
 
   // ─── Step 1: Download template ──────────────────────────────────────────────
 
@@ -175,7 +173,7 @@ export default function CreditsPayoutsUploadPage() {
     setConfirming(true);
     setConfirmError('');
 
-    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const headers = { 'Content-Type': 'application/json' };
 
     try {
       // Save batch
@@ -204,7 +202,7 @@ export default function CreditsPayoutsUploadPage() {
 
       // Confirm (creates payout entries + notifies Gifsy)
       const confirmRes = await fetch(`/api/admin/credits/batches/${batchId}/confirm`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` },
+        method: 'POST',
       });
       const confirmJson = await confirmRes.json();
       if (!confirmJson.success) {

@@ -151,10 +151,6 @@ const FIELD_LABELS: Record<KycFieldKey, string> = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function authToken(): string {
-  return typeof localStorage !== 'undefined' ? (localStorage.getItem('token') ?? '') : ''
-}
-
 function isTerminal(d: KycFieldDecision): boolean {
   return d === 'APPROVED' || d === 'REJECTED'
 }
@@ -274,9 +270,7 @@ export default function KycApprovalsPage() {
       setListLoading(true)
       setListError(null)
       try {
-        const res = await fetch('/api/kyc/review-queue', {
-          headers: { Authorization: `Bearer ${authToken()}` },
-        })
+        const res = await fetch('/api/kyc/review-queue')
         // Unwrap { success, data: { entries } }
         const data = await unwrapJson<{ entries: KycApprovalEntry[] }>(res)
         // Ensure every entry has all 7 fields initialised
@@ -300,9 +294,7 @@ export default function KycApprovalsPage() {
     setExportLoading(true)
     setExportError(null)
     try {
-      const res = await fetch('/api/kyc/review-dump', {
-        headers: { Authorization: `Bearer ${authToken()}` },
-      })
+      const res = await fetch('/api/kyc/review-dump')
       if (!res.ok) throw new Error(`Export failed (${res.status})`)
       const blob = await res.blob()
       const href = URL.createObjectURL(blob)
@@ -330,7 +322,6 @@ export default function KycApprovalsPage() {
       fd.append('file', uploadFile)
       const res = await fetch('/api/kyc/bulk-verify?apply=false', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${authToken()}` },
         body: fd,
       })
       // Unwrap { success, data: { committed, updates, errors, summary } }
@@ -371,7 +362,6 @@ export default function KycApprovalsPage() {
       fd.append('file', uploadFile)
       const res = await fetch('/api/kyc/bulk-verify?apply=true', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${authToken()}` },
         body: fd,
       })
       // Unwrap { success, data: { committed, results, errors, summary } }
@@ -395,7 +385,6 @@ export default function KycApprovalsPage() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken()}`,
           },
           body: JSON.stringify({ fieldKey: key, decision, remark: remark ?? undefined }),
         })
