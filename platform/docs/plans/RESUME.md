@@ -69,10 +69,11 @@ main during UAT.**
 OPEN GO-LIVE THREADS (see GO-LIVE-READINESS §3): **#76** load real Deoleo master data into empty prod (Deoleo tenant
 context; outlet types `SSS/SSS_TOT/SUB_STOCKIST/WHOLESALER`; XSR-ID column = real `XSR-*` IDs). **#74** owner ops
 (monitoring alert · backups/PITR · secret rotation · real prod MSG91). **AF-6** JWT-in-localStorage 🔴 — the
-session-expiry redirect landed. **AF-6 cookie-only auth migration DONE** (`2f8a343`, 2026-06-28 — token now httpOnly-cookie-only,
-proxy injects Bearer from the cookie, assume/exit/logout = server actions; runtime-proven local echo + independent audit SHIP,
-CSRF-safe; remaining = cosmetic dead-localStorage-read sweep + the separable refresh-on-401). **ALL `AF-*` security items now
-done** (AF-5/6/7/8/9 done; **AF-10 fully done** — CSPRNG+upload `d91ee1b` + windowed per-phone OTP throttle `8301e3f`; only the access-TTL remains, coupled to the AF-6 refresh-on-401 follow-up) **except AF-12.** AF-6 dead-localStorage sweep also done (`abc43f6`). **AF-12** RBAC
+session-expiry redirect landed. **AF-6 FULLY DONE** (`2f8a343`+`abc43f6`+`35ddaf9`, 2026-06-28 — token httpOnly-cookie-only, proxy
+injects Bearer from cookie, assume/exit/logout server actions, ~80 dead-localStorage reads swept, **refresh-on-401 silent
+single-flight refresh**; runtime-verified local echo + real staging edge; audits SHIP, CSRF-safe). **EVERY `AF-*` security item is
+DONE except AF-12** (AF-5/6/7/8/9 + **AF-10 fully done** — CSPRNG+upload `d91ee1b`, windowed per-phone OTP throttle `8301e3f`,
+otp_codes cleanup `58f5f55`; access-TTL kept 7d deliberately). **AF-12** RBAC
 fail-open — keep OFF (`RBAC-ENABLEMENT.md`). **PWA push activation** (FE subscribe + migration +
 VAPID + flag flips) is cutover-coupled. The admin sub-dashboard "fake data" pre-UAT blocker is CLOSED.
 
