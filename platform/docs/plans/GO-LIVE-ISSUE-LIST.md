@@ -8,7 +8,7 @@
 
 ## 🟢 2026-06-28 SESSION — UAT FIXES (credit upload · redemption KYC gate · token expiry) + PWA (Wave 1/F4/dry-run)
 
-> Owner-driven UAT, fix-as-found. Each: diagnose → fix → INDEPENDENT adversarial audit → FULL gate → runtime-verify → push. Gate as of session end: api jest **1193** · nest 0 · FE vitest **1637** · tsc 0. HEAD `8a96808`. **Cutover: `main` 168 behind `develop` — do NOT merge during UAT.**
+> Owner-driven UAT, fix-as-found. Each: diagnose → fix → INDEPENDENT adversarial audit → FULL gate → runtime-verify → push. Gate as of session end: api jest **1215** · nest 0 · FE vitest **1638** · tsc 0. HEAD `a5de6f0`. **Cutover: `main` 168+ behind `develop` — do NOT merge during UAT.** **ALL `AF-*` security items DONE except AF-12** (AF-6 cookie-only + sweep + refresh-on-401; AF-7/8/9; AF-10 CSPRNG+upload+OTP-throttle+otp-cleanup — see the AF table below). **+ partner login-phone-change → session-revoke** (see row).
 
 | # | Found | Fix | Status |
 |---|---|---|---|
@@ -19,6 +19,7 @@
 | **RejectionModal** (hygiene) | `next build --webpack` fails on a stray component export from `sales/kyc/[id]/page.tsx` (`RejectionModal`). | Turbopack (staging/prod) ignores it, so deploys are fine; only the unused webpack path trips. Moved the component to its own file `sales/kyc/[id]/RejectionModal.tsx` (pure move, no behaviour change); `next build --webpack` now exits 0. | ✅ pushed `d176559` |
 | **AF-8** (security/money) | Invoice numbering: on a global-`invoiceNumber` unique collision the outlet was silently SKIPPED (no invoice issued); the constraint disambiguation parsed `err.meta.target` (connector-fragile). | `generateForPeriod` now bumps the sequence + retries (bounded 50), disambiguating the two AutoInvoice unique constraints by a deterministic tenant-scoped existence check (no `meta.target` parsing). PAID immutability preserved. **Independently re-audited after rewrite → prior HIGH resolved, SHIP.** | ✅ pushed `8a96808` |
 | **AF-9** (security/XSS) | `dangerouslySetInnerHTML` brand-CSS sink interpolated `primaryColor` raw (inert today = in-code constant, live once SSR branding sources it from the DB). | `buildCssVariables` hard-guards the colour to a strict 6-digit hex + safe fallback so the sink can only emit `#`+6 hex. **Independent security audit: SHIP** (no breakout for `</style><script>`/newline/null-byte/unicode). | ✅ pushed `8a96808` |
+| **PARTNER-PHONE-REVOKE** (security/session) | A partner's LOGIN phone (`User.phone`) was set once at onboarding and NEVER changed — re-KYC only updated the CONTACT phone (`ChannelPartner.phone`), so the two could diverge and the old number stayed a valid login forever (unlike sales/admin users, whose admin-edit revokes on phone change). Owner-asked to add the same guarantee. | **Owner chose: at Gifsy approval.** `kyc.service applyBridgeOutcome` (shared PORTAL+EXCEL) — on approval, if the partner's contact phone ≠ owner `User.phone`, sync the login phone + **revoke the owner's sessions** (in the approval tx). Resolves the OWNER not the rep; clash-guard skips if another tenant user holds the new number; first-approval + unchanged = no-op. **Independent audit: SHIP, no HIGH/MED.** KYC mobiles are `^[6-9]\d{9}$` (exact 10-digit) so the compare is reliable. | ✅ pushed `a5de6f0` |
 
 ## 🟢 2026-06-27 SESSION — ADMIN DASHBOARD CONSOLIDATION (analysis + first build: KYC)
 

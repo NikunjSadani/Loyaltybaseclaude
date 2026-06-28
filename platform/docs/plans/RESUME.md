@@ -25,7 +25,7 @@ calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1213 · nest 0 · FE vitest 1638 · tsc 0.** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1215 · nest 0 · FE vitest 1638 · tsc 0.** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -76,6 +76,19 @@ DONE except AF-12** (AF-5/6/7/8/9 + **AF-10 fully done** — CSPRNG+upload `d91e
 otp_codes cleanup `58f5f55`; access-TTL kept 7d deliberately). **AF-12** RBAC
 fail-open — keep OFF (`RBAC-ENABLEMENT.md`). **PWA push activation** (FE subscribe + migration +
 VAPID + flag flips) is cutover-coupled. The admin sub-dashboard "fake data" pre-UAT blocker is CLOSED.
+
+SESSION/AUTH MODEL (post-AF-6, the owner asked — answer precisely if asked again): access token = httpOnly `token` cookie,
+**7-day** JWT (configurable `JWT_EXPIRES_IN`; operator assume-tenant = **8h**); refresh token = httpOnly `refresh_token` cookie,
+**30-day** single-use rotating; the edge proxy reads the cookie + injects the backend Bearer; SessionExpiryGuard does single-flight
+**refresh-on-401** + retry. PRACTICAL re-login rule: a user stays logged in as long as they open the app **at least once every ~7
+days** (the access token silently refreshes mid-session); a **cold return after >7 days** lands on the login screen (a page
+navigation is redirected at the edge BEFORE the client-side refresh can run — the 30d refresh only saves an actively-open session,
+not a cold return). Optional enhancement if "30-day inactivity" is wanted: have the proxy refresh on page-nav too. **Phone-change →
+logout:** sessions are tied to the USER account (revocable row), not the phone string. SALES/admin users — admin user-edit revokes
+all sessions on login-phone change (existing). PARTNERS — **now** (`a5de6f0`): at **Gifsy approval**, if a re-KYC changed the
+contact phone, the LOGIN `User.phone` is synced + the owner's sessions revoked (clash-guarded; first-approval/unchanged = no-op;
+revokes the OWNER not the rep). All KYC mobiles are validated `^[6-9]\d{9}$` (exactly 10 digits) so the exact-compare is reliable —
+the `endsWith` in `assertPhoneAvailable` is only belt-and-suspenders for legacy/non-KYC rows.
 
 CONSTRAINTS: work on `develop`; **NEVER `prisma migrate dev`**; any prod/staging DB op = double-guard
 `current_database()` + backup + show SQL + WAIT (staging+prod share the private-IP `gifsy-db`); never expose secrets;
