@@ -83,7 +83,9 @@ const mockTx = {
   kycVerificationItem: { upsert: jest.fn(), findMany: jest.fn() },
   kycStatusHistory: { create: jest.fn() },
   auditLog: { create: jest.fn() },
-  user: { update: jest.fn() },
+  user: { findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+  channelPartner: { findUnique: jest.fn() },
+  userSession: { updateMany: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
   outlet: { update: jest.fn(), updateMany: jest.fn() },
 };

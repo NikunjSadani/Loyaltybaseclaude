@@ -37,8 +37,9 @@ const mockTx = {
   },
   kycStatusHistory: { create: jest.fn() },
   auditLog: { create: jest.fn() },
-  user: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
-  channelPartner: { update: jest.fn(), create: jest.fn() },
+  user: { findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
+  channelPartner: { findUnique: jest.fn(), update: jest.fn(), create: jest.fn() },
+  userSession: { updateMany: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
   outlet: { update: jest.fn(), updateMany: jest.fn() },
 };
@@ -1253,6 +1254,43 @@ describe('KycService', () => {
       expect(mockTx.wallet.create).toHaveBeenCalledWith({ data: { partnerId: 'p1' } });
       // B1: notification enqueued via service.notify, not inside the tx
       expect(mockNotifications.enqueue).toHaveBeenCalled();
+    });
+
+    it('login-phone change on approval: syncs User.phone to the re-KYC number AND revokes the partner sessions', async () => {
+      seedApproveHappyPath();
+      // Re-KYC changed the partner's contact phone; the owner's login phone is still the old one.
+      mockTx.channelPartner.findUnique.mockResolvedValueOnce({ phone: '9000088888' });
+      mockTx.user.findUnique.mockResolvedValueOnce({ phone: '9000011111', clientId: 'deoleo' });
+      mockTx.user.findFirst.mockResolvedValueOnce(null); // no other user holds the new number
+      mockTx.userSession.updateMany.mockResolvedValueOnce({ count: 2 });
+
+      await service.approve(gifsy, 's1');
+
+      // Login identity moved to the new number on the SAME owner row.
+      expect(mockTx.user.update).toHaveBeenCalledWith({
+        where: { id: 'owner-9' },
+        data: { status: 'ACTIVE', phone: '9000088888' },
+      });
+      // Old sessions revoked → forced re-login on the new number.
+      const revokeArg = mockTx.userSession.updateMany.mock.calls[0][0];
+      expect(revokeArg.where).toMatchObject({ userId: 'owner-9', revokedAt: null });
+      expect(revokeArg.data.revokedAt).toBeInstanceOf(Date);
+    });
+
+    it('login-phone change skipped (no revoke) when the new number is already used by another account', async () => {
+      seedApproveHappyPath();
+      mockTx.channelPartner.findUnique.mockResolvedValueOnce({ phone: '9000088888' });
+      mockTx.user.findUnique.mockResolvedValueOnce({ phone: '9000011111', clientId: 'deoleo' });
+      mockTx.user.findFirst.mockResolvedValueOnce({ id: 'someone-else' }); // CLASH
+
+      await service.approve(gifsy, 's1');
+
+      // Login phone NOT changed (kept old), and sessions NOT revoked.
+      expect(mockTx.user.update).toHaveBeenCalledWith({
+        where: { id: 'owner-9' },
+        data: { status: 'ACTIVE' },
+      });
+      expect(mockTx.userSession.updateMany).not.toHaveBeenCalled();
     });
 
     it('item #2: on APPROVED, activates the partner\'s outlet(s) in the tx (isActive=true)', async () => {

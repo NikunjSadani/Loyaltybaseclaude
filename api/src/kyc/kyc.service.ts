@@ -2311,10 +2311,55 @@ export class KycService {
       // behavior is unchanged. Legacy rows with no partner fall back to the
       // submitter (no regression).
       const ownerUserId = submission.partner?.userId ?? submission.userId;
+
+      // Login-identity change on approval: a re-KYC may have updated the partner's
+      // number on the ChannelPartner (the contact phone). On approval the LOGIN phone
+      // officially moves to that number — sync User.phone (the OTP login identity) and
+      // REVOKE the partner's existing sessions so the old number can no longer log in
+      // and they must re-authenticate on the new one (owner decision). A first-time
+      // approval is a no-op here (the owner User was created with the same number, and
+      // it has no sessions yet). Mirrors the admin user-edit "force re-login on phone
+      // change" guarantee, which partners previously lacked.
+      const ownerRow = await tx.user.findUnique({
+        where: { id: ownerUserId },
+        select: { phone: true, clientId: true },
+      });
+      const partnerRow = submission.partnerId
+        ? await tx.channelPartner.findUnique({
+            where: { id: submission.partnerId },
+            select: { phone: true },
+          })
+        : null;
+      const newPhone = partnerRow?.phone;
+      let loginPhoneChanged = false;
+      if (newPhone && ownerRow && newPhone !== ownerRow.phone) {
+        // Never create two users sharing one login number in a tenant (the small
+        // submit→approval window could let another account claim it). If taken, keep
+        // the existing login and log it — the contact number still updated.
+        const clash = await tx.user.findFirst({
+          where: { clientId: ownerRow.clientId, phone: newPhone, deletedAt: null, id: { not: ownerUserId } },
+          select: { id: true },
+        });
+        if (clash) {
+          this.logger.warn(
+            `KYC approval: login-phone sync skipped for user ${ownerUserId} — ${newPhone} already in use in tenant ${ownerRow.clientId}`,
+          );
+        } else {
+          loginPhoneChanged = true;
+        }
+      }
+
       await tx.user.update({
         where: { id: ownerUserId },
-        data: { status: 'ACTIVE' },
+        data: { status: 'ACTIVE', ...(loginPhoneChanged ? { phone: newPhone } : {}) },
       });
+      if (loginPhoneChanged) {
+        await tx.userSession.updateMany({
+          where: { userId: ownerUserId, revokedAt: null },
+          data: { revokedAt: now },
+        });
+        this.logger.log(`KYC approval: login phone changed for user ${ownerUserId} → sessions revoked`);
+      }
 
       // Create wallet if not exists.
       if (submission.partnerId) {
