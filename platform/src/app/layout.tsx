@@ -8,6 +8,7 @@ import { ClientConfigProvider } from '@/lib/platform/client-config-context';
 import PwaHead from '@/components/pwa/PwaHead';
 import ServiceWorkerRegister from '@/components/pwa/ServiceWorkerRegister';
 import InstallPrompt from '@/components/pwa/InstallPrompt';
+import SessionExpiryGuard from '@/components/auth/SessionExpiryGuard';
 import type { PwaScope } from '@/lib/pwa/manifest';
 
 const inter = Inter({
@@ -70,6 +71,9 @@ export default async function RootLayout({
         <ClientConfigProvider config={config}>
           <ToastProvider>{children}</ToastProvider>
         </ClientConfigProvider>
+        {/* Bounce to /auth/login on any /api 401 (expired/invalid token) instead of
+            surfacing a cryptic "Invalid token" / blank data. App-wide. */}
+        <SessionExpiryGuard />
         {/* PWA service-worker registrar — self-gates on NEXT_PUBLIC_PWA_SW_ENABLED
             (default OFF) + /sales|/partner path; renders null otherwise. */}
         <ServiceWorkerRegister />

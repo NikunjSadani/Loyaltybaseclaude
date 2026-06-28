@@ -48,6 +48,18 @@ export default function LoginPage() {
     return () => clearTimeout(id);
   }, [countdown]);
 
+  // SessionExpiryGuard bounces here with ?expired=1 when a token expires mid-session.
+  // Surface a clear notice so the redirect isn't confusing.
+  useEffect(() => {
+    if (
+      typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).get('expired') === '1'
+    ) {
+      toast.info('Session expired', 'Please sign in again.');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const validateMobile = (value: string) => {
     if (!value) return 'Mobile number is required';
     if (!/^[6-9]\d{9}$/.test(value)) return 'Enter a valid 10-digit Indian mobile number';
