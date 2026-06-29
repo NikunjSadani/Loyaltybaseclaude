@@ -8,6 +8,16 @@
 > worker (which must not run over churning UI) is now safe to build. Owner confirmed minor future tweaks are
 > expected — handled by the SW update strategy below (content-hashed assets + versioned precache + update prompt).
 
+## Status — FULLY ACTIVATED ON STAGING (2026-06-29) · device-test mid-flight
+**2026-06-29:** push FE-subscribe (E) built (`c1b70dd`) + the **whole PWA activated on `gifsy_staging` only** (`d6f91de`→`ce95a83`):
+VAPID keypair → `VAPID_{PUBLIC,PRIVATE}_KEY_STAGING` secrets + `PUSH_WORKER_ENABLED=true` + `VAPID_SUBJECT`; `build:sw` emits `/sw.js`
+via **esbuild** (devDep); the 3 `NEXT_PUBLIC_PWA_*` flags = `true` in the **staging FE build only** (prod `deploy.yml` untouched = OFF).
+Runtime-verified on the live Deoleo edge: `/sw.js` 200 (push+notificationclick), vapid-public-key served, manifests 200, push-worker
+dispatched a real test push. Two bugs caught+fixed at runtime: `/sw.js` 307'd by the auth middleware (added `sw.js|offline.html` to the
+`proxy.ts` matcher); manifest `start_url=/{portal}` 404'd (set to `/{portal}/dashboard`). **MID-FLIGHT:** owner device-testing (awaiting
+phone-arrival confirm + OS; iOS needs the installed app); owner asked to **change the PWA icon** (awaiting source logo → regenerate
+`/icons/deoleo/*`). **PROD activation = cutover-coupled:** replicate the staging wiring on `deploy.yml` at/after cutover.
+
 ## Status — Wave 1 DONE (2026-06-27, `185c548`, gate-green + audited + runtime-verified + pushed)
 Built + integrated + pushed to `develop` (ships DISABLED): **F1** installable shell (per-tenant
 manifests + iOS meta) · **F2** sharp icon pipeline (monogram placeholders for deoleo/clientb/gifsy)

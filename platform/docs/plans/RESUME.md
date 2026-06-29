@@ -6,7 +6,7 @@ Paste the block below to restart the orchestrator on point. The on-disk docs + m
 You're the orchestrator for Loyaltybase — a multi-tenant FMCG trade-loyalty platform (operator: Gifsy, launching
 client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch **develop**). Frontend: `platform/`
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
-`dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-06-28.
+`dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-06-29.
 
 🟢 CURRENT MODE — **OWNER-DRIVEN UAT on staging: fix-as-the-owner-finds.** The owner reports a bug (often a screenshot);
 you diagnose → fix (delegate substantial builds to sub-agents) → INDEPENDENT adversarial audit → FULL gate →
@@ -25,7 +25,7 @@ calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1220 · nest 0 · FE vitest 1644 · tsc 0.** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1220 · nest 0 · FE vitest 1664 · tsc 0.** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -40,6 +40,31 @@ NO refresh + NO revocation**, and the proxy prefers the `Authorization` header (
 stale localStorage token fails even if a valid cookie exists (assume-tenant 8h vs login 7d desync).
 
 DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`; runtime-verified where an API/edge check was possible):
+- **🆕 2026-06-29 — GO-LIVE PREP + PWA ACTIVATION (this session):**
+  · **Phase-0 runbooks** (`c998267`) — `docs/plans/runbooks/{OWNER-OPS,CUTOVER,PROD-DATA-LOAD,DEOLEO-GO-LIVE-CONFIG-CHECKLIST}.md`;
+    live gcloud recon CORRECTED stale facts (prod live · backups/PITR ON · deploy.yml auto-migrates behind a `production` gate).
+  · **PROD BOOTSTRAP SCRIPT BUILT** (`262027a`) — `api/prisma/bootstrap.ts` (first GIFSY_ADMIN = **Nikunj/9830011252** + 4 OutletType rows;
+    idempotent, double-guard `BOOTSTRAP_CONFIRM===current_database()`, compiles to `prisma/bootstrap.js` in the prod image). Audit SHIP;
+    **dry-run-verified on real infra** (ran as a Cloud Run Job vs `gifsy_staging` → clean idempotent no-op). Closes the bootstrap blocker.
+  · **Lane-4 minors** (`62e3b8e`) — GLm-3 tenant-scope the slaMetrics rejection histogram; S3 logger.warn before RE_UPLOAD 409;
+    GLm-2 was already fixed (#86). 
+  · **MONITORING LIVE** (`b75b630`) — 2 email channels (`nikunj.sadani@gifsy.in` + `nikita@gifsy.in`) + 5xx + uptime alert policies on
+    prod `gifsy-api` (alert→resolve email confirmed end-to-end). #74 monitoring DONE; **backups/PITR already ON**; secret rotation = optional.
+  · **PWA PUSH FE-SUBSCRIBE (E)** (`c1b70dd`) — `lib/pwa/push.ts` + `PushSubscriptionManager` (gated `NEXT_PUBLIC_PWA_PUSH_ENABLED`,
+    permission only on user gesture) + logout best-effort unsubscribe (raced 1.5s timeout). Audit caught a HIGH (unsubscribe must use
+    `getRegistration()` NOT `serviceWorker.ready` — `.ready` never resolves with no SW → would hang logout); fixed + regression test; re-audit SHIP.
+  · **PWA ACTIVATED ON STAGING** (`d6f91de`+`0027a34`+`ce95a83`) — VAPID keypair → secrets `VAPID_{PUBLIC,PRIVATE}_KEY_STAGING`
+    (+`PUSH_WORKER_ENABLED=true`,`VAPID_SUBJECT`); `build:sw` emits `/sw.js` via **esbuild** (added as devDep); the 3 `NEXT_PUBLIC_PWA_*`
+    flags = `true` **on the staging build ONLY** (prod deploy.yml untouched = OFF). Two runtime bugs caught+fixed: `/sw.js` was 307'd by the
+    auth middleware (added `sw.js|offline.html` to the `proxy.ts` matcher); manifest `start_url=/partner` 404'd (no bare-route page → set to
+    `/{portal}/dashboard`). **Runtime-verified on the live Deoleo edge:** `/sw.js` 200 (37kb, push+notificationclick handlers) · vapid-public-key
+    served · manifests 200 · push-worker drained + dispatched a real test push (`[push-worker] processed 1 PUSH row(s)`). VAPID public key
+    (safe to show): `BIMw2jJrSRKraaCqcjyBWuUEFwhKA-wG3SpLzniRHnNCeXtV1ySZsMn5ptmQzLkQOZbLV7A2-ZDWSw-AD_jVgDI`.
+    **🔶 MID-FLIGHT:** owner is device-testing — push dispatched server-side; AWAITING owner confirm it arrived on their phone + **which OS**
+    (Android in-browser sub works; **iOS needs the installed-to-home-screen app** which the now-fixed 404 was blocking). Owner also asked to
+    **change the PWA icon** → AWAITING their source logo (≥512² PNG) to regenerate `/icons/deoleo/icon-{192,512,maskable-512}.png`. To fire a
+    fresh test push: credit O001 (WHOLESALER→POINTS) → confirm (enqueues PUSH) → reverse. Confirm POST needs `-H 'Content-Length: 0'` (edge 411).
+    The earlier 500-pt test credit was already reversed (wallet clean).
 - **PWA WAVE 1 + F4 + LOCAL PUSH DRY-RUN ✅** (`185c548`→`40d0934`) — installable per-tenant shell (manifest Route
   Handlers + iOS meta), sharp icon pipeline, Serwist SW (flag-OFF, with `push`+`notificationclick` handlers), install
   prompt, full Web Push backend; ships DISABLED behind 3 flags (all default OFF). Per-tenant manifests runtime-verified
@@ -90,19 +115,22 @@ smoke. Full step-by-step = **`docs/plans/runbooks/CUTOVER-RUNBOOK.md`**. **DO NO
 🔴 **NEW BLOCKER (Phase-0 recon, 2026-06-29) — PROD BOOTSTRAP GAP:** prod has **zero users + zero OutletType master rows**, and
 there is **NO app/API path** to create the first GIFSY_ADMIN (`assertRoleAssignable` needs an existing GIFSY_ADMIN → chicken-egg)
 OR the 4 OutletType rows (`createClient` only upserts per-type *config* for already-existing types; the seed is prod-firewalled).
-→ **#76 cannot start until a one-time in-VPC bootstrap load-script (first GIFSY_ADMIN + 4 OutletType rows, extracted from the seed)
-runs.** Not yet built. Everything else (client, CLIENT_ADMIN, hierarchy, outlets) then flows via the app.
+→ **#76 cannot start until a one-time in-VPC bootstrap script (first GIFSY_ADMIN + 4 OutletType rows) runs — ✅ NOW BUILT +
+staging-dry-run-verified** (`api/prisma/bootstrap.ts`, `262027a`; run it post-cutover via a Cloud Run Job using the new prod `api` image —
+exact command in `runbooks/PROD-DATA-LOAD.md`). Everything else (client, CLIENT_ADMIN, hierarchy, outlets) then flows via the app.
 
-OPEN GO-LIVE THREADS (see GO-LIVE-READINESS §3): **#76** load real Deoleo master data into empty prod (Deoleo tenant
-context; outlet types `SSS/SSS_TOT/SUB_STOCKIST/WHOLESALER`; XSR-ID column = real `XSR-*` IDs). **#74** owner ops
-(monitoring alert · backups/PITR · secret rotation · real prod MSG91). **AF-6** JWT-in-localStorage 🔴 — the
+OPEN GO-LIVE THREADS (see GO-LIVE-READINESS §3): **#76** load real Deoleo master data into empty prod (after bootstrap; Deoleo tenant
+context; outlet types `SSS/SSS_TOT/SUB_STOCKIST/WHOLESALER`; XSR-ID column = real `XSR-*` IDs). **#74 owner ops — monitoring ✅ DONE +
+backups/PITR ✅ already ON**; only **secret rotation (optional)** + **real prod MSG91** remain. **AF-6** JWT-in-localStorage 🔴 — the
 session-expiry redirect landed. **AF-6 FULLY DONE** (`2f8a343`+`abc43f6`+`35ddaf9`, 2026-06-28 — token httpOnly-cookie-only, proxy
 injects Bearer from cookie, assume/exit/logout server actions, ~80 dead-localStorage reads swept, **refresh-on-401 silent
 single-flight refresh**; runtime-verified local echo + real staging edge; audits SHIP, CSRF-safe). **EVERY `AF-*` security item is
 DONE except AF-12** (AF-5/6/7/8/9 + **AF-10 fully done** — CSPRNG+upload `d91ee1b`, windowed per-phone OTP throttle `8301e3f`,
 otp_codes cleanup `58f5f55`; access-TTL kept 7d deliberately). **AF-12** RBAC
-fail-open — keep OFF (`RBAC-ENABLEMENT.md`). **PWA push activation** (FE subscribe + migration +
-VAPID + flag flips) is cutover-coupled. The admin sub-dashboard "fake data" pre-UAT blocker is CLOSED.
+fail-open — keep OFF (`RBAC-ENABLEMENT.md`). **PWA: FE-subscribe (E) BUILT + FULLY ACTIVATED ON STAGING** (SW+install+push live, device-test
+mid-flight — see the 2026-06-29 block); **PROD PWA activation is cutover-coupled** — replicate the staging wiring on `deploy.yml` (the 3
+`NEXT_PUBLIC_PWA_*` build-args + the VAPID/`PUSH_WORKER_ENABLED` env/secrets) so prod lights up at/after cutover. The admin sub-dashboard
+"fake data" pre-UAT blocker is CLOSED.
 
 SESSION/AUTH MODEL (post-AF-6, the owner asked — answer precisely if asked again): access token = httpOnly `token` cookie,
 **7-day** JWT (configurable `JWT_EXPIRES_IN`; operator assume-tenant = **8h**); refresh token = httpOnly `refresh_token` cookie,
@@ -131,7 +159,11 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 [[admin-dashboard-consolidation]] [[default-to-orchestration]] [[global-settings-wiring]] [[sales-hierarchy-scoping]]
 [[migration-model]] [[staging-deploy-gate]] [[audit-every-build-item]].
 
-Now: greet the owner and wait for the next UAT finding (or instruction). When one arrives, diagnose →
-fix/delegate → audit → gate → runtime-verify → push. Do NOT auto-start tangential work; PWA is built (cutover-coupled
-remainder only) and no build is mid-flight.
+Now: greet the owner and pick up the **PWA staging device-test (mid-flight)**: ask whether the test push arrived on their phone + **which OS**
+(Android should work from the in-browser sub; iOS needs the installed app, which the just-fixed `start_url` 404 was blocking → owner should
+delete the old home-screen icon, re-open `uat.deoleoloyalty.gifsy.in`, re-install, re-allow notifications, then say "subscribed" → fire a fresh
+test push). Also pending from the owner: the **PWA icon source image** (to regenerate `/icons/deoleo/*`). Standing context: UAT ~90% done (minor
+changes likely); **cutover held until UAT signs off** (then: merge→approve `production` gate→pipeline migrates+deploys→run bootstrap job→load #76
+data→set Deoleo config→smoke; prod PWA activation rides this). Otherwise resume OWNER-DRIVEN UAT fix-as-found: diagnose → fix/delegate → audit →
+gate → runtime-verify → push.
 ```
