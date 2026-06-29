@@ -44,7 +44,11 @@ export function buildManifest(
     id: base,
     name,
     short_name: name,
-    start_url: base,
+    // The installed app opens at start_url. There is NO page at the bare `/sales`
+    // or `/partner` (the portal home is `…/dashboard`), so start_url must point at
+    // the real landing page or the launched PWA 404s. scope stays `/sales|/partner`
+    // (it covers all sub-routes incl. /dashboard).
+    start_url: `${base}/dashboard`,
     scope: base,
     display: 'standalone',
     theme_color: color,
