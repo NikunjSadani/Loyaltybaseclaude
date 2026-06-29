@@ -1487,6 +1487,11 @@ export class KycService {
 
       // ── (d) Conflict check: any already-REJECTED field blocks a blanket approve ─
       if (bridgeResult.next === 'RE_UPLOAD_REQUIRED') {
+        // S3 nit: surface the blocked blanket-approve server-side (the client only
+        // sees the 409) so the conflict is traceable in logs.
+        this.logger.warn(
+          `Blanket approve blocked for submission ${id}: rejected fields [${bridgeResult.rejectedFields.join(', ')}] → RE_UPLOAD_REQUIRED.`,
+        );
         throw new ConflictException(
           `Cannot approve: fields [${bridgeResult.rejectedFields.join(', ')}] are rejected — resolve them first`,
         );
@@ -1914,8 +1919,17 @@ export class KycService {
       else pendingAging['72h+']++;
     }
 
+    // Defense-in-depth (GLm-3): scope to the caller's tenant via the related
+    // submission, like every other query in this method. Today slaMetrics is
+    // GIFSY-only (kycTenantFilter → {} = all tenants, by design), so this is a
+    // no-op for the live caller; it prevents a cross-tenant rejection-reason leak
+    // if this metric is ever opened to a CLIENT_ADMIN.
     const rejectionHistory = await this.prisma.kycStatusHistory.findMany({
-      where: { toStatus: 'REJECTED', notes: { not: null } },
+      where: {
+        toStatus: 'REJECTED',
+        notes: { not: null },
+        kycSubmission: { ...this.kycTenantFilter(user) },
+      },
       select: { notes: true },
     });
 

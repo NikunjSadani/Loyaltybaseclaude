@@ -300,8 +300,8 @@ money rails compile + serve with the canonical KYC resolver + `REVERSED` state l
 | ID | Status | Issue |
 |---|---|---|
 | GLm-1 | ✅ FIXED (`c40a420`) | FIXED_OTP send-side (`msg91`) + rate-limit `skipIf` (`app.module`) + DEMO_MODE (`admin-core.bulkEditUsers`) now all require `NODE_ENV!=='production'`. |
-| GLm-2 | OPEN | `tickets.escalate` assigns `dto.escalateTo` without validating the assignee is in-tenant (`tickets.service.ts:114`). |
-| GLm-3 | OPEN | `kyc.slaMetrics` has one un-tenant-scoped histogram (`:1205`) — GIFSY-only, defense-in-depth tighten to `kycTenantFilter`. |
+| GLm-2 | ✅ DONE (in #86) | `tickets.escalate` already validates the assignee is in-tenant (`tickets.service.ts:128` — `findFirst {id, clientId}` → "not found in this tenant"). The "OPEN" was stale; landed with the GL-RBAC work. |
+| GLm-3 | ✅ DONE (Lane 4, 2026-06-29) | `kyc.slaMetrics` rejection-reason histogram now scopes via the related submission (`kycSubmission: { ...kycTenantFilter(user) }`) like every other query in the method. No-op for the live GIFSY-only caller; defense-in-depth vs a future CLIENT_ADMIN. |
 | GLm-4 | OPEN (post-launch) | Legacy `sid`-less JWTs match on `(userId,clientId)` until they expire — do a hard cutover (reject `sid`-less) post-launch once old tokens age out. |
 | GLm-5 | TRACK | In-memory per-instance throttler (limits scale with Cloud Run instances); dead `REDIS_URL` bound but unused. |
 | GLm-6 | VERIFY | Confirm prod env has `DEMO_MODE` unset (proxy injects a GIFSY_ADMIN header when set); the proxy `DEMO_MODE` path must be off in prod. |
@@ -310,7 +310,7 @@ money rails compile + serve with the canonical KYC resolver + `REVERSED` state l
 ## ⏭️ Deferred follow-ups / feature gaps (NOT launch blockers)
 - **Schemes enrollments list/stats endpoint** doesn't exist → `/admin/schemes/:id/enrollments` is honestly empty-stated (only the xlsx export is real). Build the backend list/stats endpoint (separate from GLB-5 which wires the *write*).
 - **S6 dead code:** `admin/visibility` `VISIBILITY_QUEUE` dead const; wire the real fraud-log (`GET /v1/visibility/fraud-log`).
-- **S3 NIT:** RE_UPLOAD `ConflictException` logs nothing server-side — add a `logger.warn` with the submission id before throwing.
+- ~~**S3 NIT:** RE_UPLOAD `ConflictException` logs nothing server-side~~ ✅ DONE (Lane 4, 2026-06-29) — `logger.warn` with the submission id + rejected fields before the blanket-approve 409 (`kyc.service.ts` applyBridgeOutcome path).
 - **scheme-builder** `KYC_OUTLET_IDS = new Set() // TODO` (`scheme-builder.tsx:171`) — targeting-preview only.
 - **lib sample data** (`lib/invoice.ts MOCK_VISIBILITY_INVOICES`, `lib/points-ledger-export.ts DEMO_OUTLETS`, `lib/campaign.ts MOCK_*`) — confirm not imported by a live page (the core-loop audit traced them as not on live surfaces).
 - **#76 prod data load** must create the first GIFSY_ADMIN + the OutletType master rows via API/load-script (the seed is prod-firewalled).
