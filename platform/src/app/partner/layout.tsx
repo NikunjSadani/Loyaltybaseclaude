@@ -90,6 +90,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
         userName={identity.businessName}
         userRole={identity.ownerName}
         logoLabel={clientConfig.branding.displayName}
+        wordmarkWhiteUrl={clientConfig.branding.wordmarkWhiteUrl}
       />
 
       <div className="flex-1 flex flex-col min-h-screen min-w-0">

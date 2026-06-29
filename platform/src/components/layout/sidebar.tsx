@@ -24,6 +24,8 @@ interface SidebarProps {
   userName?: string;
   userRole?: string;
   logoLabel?: string;
+  /** Optional white wordmark (per-tenant) shown on the dark sidebar instead of the hex + label. */
+  wordmarkWhiteUrl?: string;
 }
 
 export function Sidebar({
@@ -32,6 +34,7 @@ export function Sidebar({
   userName,
   userRole,
   logoLabel = 'Deoleo Loyalty',
+  wordmarkWhiteUrl,
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const pathname = usePathname();
@@ -43,15 +46,22 @@ export function Sidebar({
         collapsed ? 'w-16' : 'w-60',
       )}
     >
-      {/* Logo */}
+      {/* Logo — per-tenant white wordmark when expanded + provided; else hex mark + label. */}
       <div className="flex items-center gap-3 px-4 py-5 border-b border-white/10">
-        <div className="w-8 h-8 bg-[var(--brand-primary)] rounded-lg flex items-center justify-center shrink-0">
-          <svg viewBox="0 0 40 40" className="w-5 h-5 fill-white">
-            <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
-          </svg>
-        </div>
-        {!collapsed && (
-          <span className="font-bold text-sm leading-tight truncate">{logoLabel}</span>
+        {wordmarkWhiteUrl && !collapsed ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={wordmarkWhiteUrl} alt={logoLabel} className="h-7 w-auto" />
+        ) : (
+          <>
+            <div className="w-8 h-8 bg-[var(--brand-primary)] rounded-lg flex items-center justify-center shrink-0">
+              <svg viewBox="0 0 40 40" className="w-5 h-5 fill-white">
+                <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
+              </svg>
+            </div>
+            {!collapsed && (
+              <span className="font-bold text-sm leading-tight truncate">{logoLabel}</span>
+            )}
+          </>
         )}
       </div>
 

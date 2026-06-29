@@ -49,6 +49,14 @@ export interface BrandingConfig {
   displayName: string;         // "Deoleo India" — shown in partner app header
   primaryColor: string;        // hex e.g. "#16a34a"
   logoUrl: string;             // absolute or relative path
+  /**
+   * Optional WHITE/light wordmark for DARK brand surfaces (sales navy header,
+   * desktop sidebar). When set, the dark headers render this image instead of the
+   * hexagon mark + display-name text. Omit → fall back to the hexagon + text (so
+   * tenants without art are unaffected). A colour wordmark for the WHITE partner
+   * header is a separate field, added when that art is supplied.
+   */
+  wordmarkWhiteUrl?: string;
   faviconUrl: string;
   supportEmail: string;
   supportPhone: string;

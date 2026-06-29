@@ -14,6 +14,7 @@ import {
 } from '@/lib/sales-role';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
+import { useClientConfig } from '@/lib/platform/client-config-context';
 
 const BASE_NAV: NavItem[] = [
   { href: '/sales/dashboard',   label: 'Dashboard', icon: LayoutDashboard },
@@ -29,6 +30,7 @@ const TEAM_NAV: NavItem = { href: '/sales/team', label: 'Team', icon: Users };
 
 export default function SalesLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  const clientConfig = useClientConfig();
   const [role, setRoleState] = useState<SalesRole>('SO');
   // REAL identity from the backend sales record (name + employee ID) — the demo
   // personas and role switcher have been retired.
@@ -62,13 +64,22 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
       <header className="sticky top-0 z-30 bg-[#1A1A2E] text-white px-4 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-[var(--brand-primary)] rounded-lg flex items-center justify-center">
-              <svg viewBox="0 0 40 40" className="w-5 h-5 fill-white">
-                <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
-              </svg>
-            </div>
-            <div>
-              <p className="text-white font-semibold text-sm leading-tight">{userName}</p>
+            {clientConfig.branding.wordmarkWhiteUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={clientConfig.branding.wordmarkWhiteUrl}
+                alt={clientConfig.branding.displayName}
+                className="h-7 w-auto shrink-0"
+              />
+            ) : (
+              <div className="w-8 h-8 bg-[var(--brand-primary)] rounded-lg flex items-center justify-center shrink-0">
+                <svg viewBox="0 0 40 40" className="w-5 h-5 fill-white">
+                  <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
+                </svg>
+              </div>
+            )}
+            <div className="min-w-0">
+              <p className="text-white font-semibold text-sm leading-tight truncate">{userName}</p>
               <p className="text-white/50 text-xs">{empId || ' '}</p>
             </div>
           </div>
