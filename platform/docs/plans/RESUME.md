@@ -25,7 +25,7 @@ calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1220 · nest 0 · FE vitest 1664 · tsc 0.** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1246 · nest 0 · FE vitest 1694 · tsc 0.** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -37,7 +37,11 @@ approval — use `deletedAt:null AND deactivatedAt:null`); **(2)** Prisma `{ not
 OR-wrap `OR:[{col:null},{col:{not:X}}]`; **(3)** a partner's **Wallet row is created ONLY at KYC approval** — any
 pre-KYC points path must `wallet.upsert` (get-or-create); **(4)** tokens are **bearer JWTs verified at the proxy with
 NO refresh + NO revocation**, and the proxy prefers the `Authorization` header (localStorage) over the cookie — a
-stale localStorage token fails even if a valid cookie exists (assume-tenant 8h vs login 7d desync).
+stale localStorage token fails even if a valid cookie exists (assume-tenant 8h vs login 7d desync);
+**(5)** Cloud Run **throttles CPU between requests** (`cpu-throttling=true`), so a NestJS `@Interval`/`@Cron`
+background worker does NOT tick reliably while the service is idle — `min-instances=1` alone does NOT fix it (the
+instance is alive but CPU-starved). Drive such workers via **Cloud Scheduler → an internal HTTP endpoint** (the
+request un-throttles the CPU), or set cpu-always-allocated (~$50/mo). This is why the push drain runs on a scheduler.
 
 DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`; runtime-verified where an API/edge check was possible):
 - **🆕 2026-06-29 — GO-LIVE PREP + PWA ACTIVATION (this session):**
@@ -60,11 +64,30 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
     `/{portal}/dashboard`). **Runtime-verified on the live Deoleo edge:** `/sw.js` 200 (37kb, push+notificationclick handlers) · vapid-public-key
     served · manifests 200 · push-worker drained + dispatched a real test push (`[push-worker] processed 1 PUSH row(s)`). VAPID public key
     (safe to show): `BIMw2jJrSRKraaCqcjyBWuUEFwhKA-wG3SpLzniRHnNCeXtV1ySZsMn5ptmQzLkQOZbLV7A2-ZDWSw-AD_jVgDI`.
-    **🔶 MID-FLIGHT:** owner is device-testing — push dispatched server-side; AWAITING owner confirm it arrived on their phone + **which OS**
-    (Android in-browser sub works; **iOS needs the installed-to-home-screen app** which the now-fixed 404 was blocking). Owner also asked to
-    **change the PWA icon** → AWAITING their source logo (≥512² PNG) to regenerate `/icons/deoleo/icon-{192,512,maskable-512}.png`. To fire a
-    fresh test push: credit O001 (WHOLESALER→POINTS) → confirm (enqueues PUSH) → reverse. Confirm POST needs `-H 'Content-Length: 0'` (edge 411).
-    The earlier 500-pt test credit was already reversed (wallet clean).
+    **✅ DEVICE-TEST RESOLVED:** owner on **Android**, subscribed as SALES_ISR; a scheduler-driven push was **delivered** (queue row SENT,
+    `endpointsSent:2`). To fire a test push: enqueue a `NotificationQueue` PUSH row for a subscribed user via the `gifsy-oneoff-staging` job,
+    then `gcloud scheduler jobs run push-drain-staging` (or wait ≤60s). Confirm POST to the edge needs `-H 'Content-Length: 0'` (411).
+  · **SALES PUSH NOTIFICATIONS** (`f11d5d1`, audit SHIP) — new global `SalesNotificationsService` enqueues PUSH to the SALES team on 4 triggers,
+    wired POST-COMMIT (fire-and-forget; tenant-scoped recipient resolution = the cross-tenant-leak guard): **new KYC assigned** → the assigned
+    rep (aggregated one-push-per-rep: admin-outlets CREATE rows + admin-core reassign) + the routed approver on submit; **rejected / RE_UPLOAD**
+    → the responsible rep (`kyc.reject`; clientId sourced from `submission.user.clientId` so a non-assume GIFSY reject still reaches the rep);
+    **targets uploaded** → the assigned XSR + their first active manager (SO) per outlet, de-duplicated. Recipients via `SalesUserAssignment` +
+    `firstActiveApproverId`. (Owner decision: KYC=BOTH rep+approver; targets=XSR+SO.)
+  · **RELIABLE DELIVERY — CLOUD SCHEDULER (Option A, ~free)** (`f11d5d1`) — see TRAP #5. Added `@Public POST /v1/push/drain` (FAIL-CLOSED,
+    `PUSH_DRAIN_SECRET` header, constant-time compare) pinged every 60s by Cloud Scheduler job **`push-drain-staging`**. Secret =
+    `PUSH_DRAIN_SECRET_STAGING` (Secret Manager, granted to `gifsy-api-sa`, wired into `deploy-staging.yml`). Runtime-verified end-to-end
+    (403 without secret / 201 with; scheduler run delivered a real push). **Prod = CUTOVER-COUPLED** (see CUTOVER-RUNBOOK PWA section).
+  · **PWA ADOPTION TRACKING** (`c6dd001` BE + `cf14992` FE) — new **`pwa_install`** table (additive migration `20260629120000`, auto-applies on
+    deploy); `POST /v1/push/installed` beacon (`InstallBeacon` fires when the app runs standalone, platform Android/iOS/Desktop); `GET
+    /v1/push/adoption` (tenant-scoped: notifications-enabled by role/OS + installed by platform). New admin **"App Adoption"** page, visible to
+    **CLIENT_ADMIN + GIFSY_ADMIN**. Runtime-verified on staging (install write→read confirmed; deoleo shows 2 subscribed sales users).
+  · **REAL DEOLEO ICON** (`a468b93`) — owner's white wordmark composited on the `#16a34a` brand-green tile via `scripts/generate-pwa-icons.ts`
+    (source `public/logos/deoleo.png`, gitignored — only generated `/icons/deoleo/*` are committed). Replaces the "D" monogram; white-on-solid =
+    visible on any home screen + avoids iOS transparent→black. To SEE it, re-install the home-screen icon (cached at install time).
+  · **PWA PROMPT SNOOZE + PROFILE ENTRY POINT** (`449d510`) — install/notification banners now **snooze 3 days** instead of permanent dismissal
+    (a one-time "Not now" no longer locks the user out forever); shared `lib/pwa/install-prompt-store.ts` + new **`PwaAppSettings`** card in the
+    partner+sales Profile pages (Install button / iOS instructions + Notifications enable/on+turn-off/"blocked → re-enable in browser settings").
+    KEY UX FACT: after a browser **hard-block** of notifications we can NEVER re-prompt programmatically — only the settings path recovers it.
 - **PWA WAVE 1 + F4 + LOCAL PUSH DRY-RUN ✅** (`185c548`→`40d0934`) — installable per-tenant shell (manifest Route
   Handlers + iOS meta), sharp icon pipeline, Serwist SW (flag-OFF, with `push`+`notificationclick` handlers), install
   prompt, full Web Push backend; ships DISABLED behind 3 flags (all default OFF). Per-tenant manifests runtime-verified
@@ -127,9 +150,12 @@ injects Bearer from cookie, assume/exit/logout server actions, ~80 dead-localSto
 single-flight refresh**; runtime-verified local echo + real staging edge; audits SHIP, CSRF-safe). **EVERY `AF-*` security item is
 DONE except AF-12** (AF-5/6/7/8/9 + **AF-10 fully done** — CSPRNG+upload `d91ee1b`, windowed per-phone OTP throttle `8301e3f`,
 otp_codes cleanup `58f5f55`; access-TTL kept 7d deliberately). **AF-12** RBAC
-fail-open — keep OFF (`RBAC-ENABLEMENT.md`). **PWA: FE-subscribe (E) BUILT + FULLY ACTIVATED ON STAGING** (SW+install+push live, device-test
-mid-flight — see the 2026-06-29 block); **PROD PWA activation is cutover-coupled** — replicate the staging wiring on `deploy.yml` (the 3
-`NEXT_PUBLIC_PWA_*` build-args + the VAPID/`PUSH_WORKER_ENABLED` env/secrets) so prod lights up at/after cutover. The admin sub-dashboard
+fail-open — keep OFF (`RBAC-ENABLEMENT.md`). **PWA: FULLY ACTIVATED + DEVICE-VERIFIED ON STAGING** (SW+install+push live; Android push delivered
+via scheduler — see the 2026-06-29 block; real Deoleo icon shipped; sales notifications + adoption tracking + prompt-snooze/Profile-entry all
+live). **PROD PWA activation is cutover-coupled** — on `deploy.yml` replicate: (a) the 3 `NEXT_PUBLIC_PWA_*` build-args + VAPID/`PUSH_WORKER_ENABLED`
+env/secrets; (b) **`PUSH_DRAIN_SECRET=PUSH_DRAIN_SECRET_PROD:latest`** (create the prod secret + grant `gifsy-api-sa`); (c) create Cloud Scheduler
+job **`push-drain-prod`** (every 60s → prod `/v1/push/drain` with the secret header) — WITHOUT it sales/partner notifications sit undelivered;
+(d) the `pwa_install` migration auto-applies via the prod migrate step (no extra action). Full steps in CUTOVER-RUNBOOK. The admin sub-dashboard
 "fake data" pre-UAT blocker is CLOSED.
 
 SESSION/AUTH MODEL (post-AF-6, the owner asked — answer precisely if asked again): access token = httpOnly `token` cookie,
@@ -159,11 +185,10 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 [[admin-dashboard-consolidation]] [[default-to-orchestration]] [[global-settings-wiring]] [[sales-hierarchy-scoping]]
 [[migration-model]] [[staging-deploy-gate]] [[audit-every-build-item]].
 
-Now: greet the owner and pick up the **PWA staging device-test (mid-flight)**: ask whether the test push arrived on their phone + **which OS**
-(Android should work from the in-browser sub; iOS needs the installed app, which the just-fixed `start_url` 404 was blocking → owner should
-delete the old home-screen icon, re-open `uat.deoleoloyalty.gifsy.in`, re-install, re-allow notifications, then say "subscribed" → fire a fresh
-test push). Also pending from the owner: the **PWA icon source image** (to regenerate `/icons/deoleo/*`). Standing context: UAT ~90% done (minor
-changes likely); **cutover held until UAT signs off** (then: merge→approve `production` gate→pipeline migrates+deploys→run bootstrap job→load #76
-data→set Deoleo config→smoke; prod PWA activation rides this). Otherwise resume OWNER-DRIVEN UAT fix-as-found: diagnose → fix/delegate → audit →
-gate → runtime-verify → push.
+Now: greet the owner and resume **OWNER-DRIVEN UAT fix-as-found** (diagnose → fix/delegate → audit → gate → runtime-verify → push). The PWA
+round is COMPLETE on staging (device-verified push, real icon, sales notifications, adoption tracking, prompt-snooze/Profile-entry — all the
+2026-06-29 block). No owner inputs are outstanding. Standing context: UAT ~90% done (minor changes likely); **cutover held until UAT signs off**
+(then per CUTOVER-RUNBOOK: merge→approve `production` gate→pipeline migrates+deploys→run bootstrap job→load #76 data→set Deoleo config→**+ the PWA
+prod steps: PUSH_DRAIN_SECRET_PROD secret + push-drain-prod scheduler job + NEXT_PUBLIC_PWA_* / VAPID env on deploy.yml**→smoke). If the owner asks
+to enable notifications for a NEW sales event, the pattern is an `enqueue` PUSH in the relevant service post-commit via `SalesNotificationsService`.
 ```

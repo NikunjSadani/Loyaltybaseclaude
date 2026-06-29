@@ -317,6 +317,57 @@ works; `_prisma_migrations` reflects the intended state.
 
 ---
 
+## PWA / Notifications — prod activation (cutover-coupled)
+
+> The full PWA round (sales push notifications, scheduler-driven delivery, adoption tracking, install UX) is
+> DONE + device-verified on **staging only**. Prod activation replicates the staging wiring. **If this section
+> is skipped, sales/partner notifications sit undelivered in prod** (the worker won't tick on idle Cloud Run).
+> Do this at/after cutover. Canonical build detail: [`../PWA-PLAN.md`](../PWA-PLAN.md).
+
+**(a) Mirror the staging PWA wiring onto the prod pipeline** — in `.github/workflows/deploy.yml`, copy
+`deploy-staging.yml`'s PWA wiring:
+- Frontend build-args: `NEXT_PUBLIC_PWA_SW_ENABLED=true`, `NEXT_PUBLIC_PWA_INSTALL_ENABLED=true`,
+  `NEXT_PUBLIC_PWA_PUSH_ENABLED=true`.
+- On the api deploy, add env `PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in` and secrets
+  `VAPID_PUBLIC_KEY=VAPID_PUBLIC_KEY_PROD:latest,VAPID_PRIVATE_KEY=VAPID_PRIVATE_KEY_PROD:latest,PUSH_DRAIN_SECRET=PUSH_DRAIN_SECRET_PROD:latest`.
+
+**(b) Create the prod secrets first (one-time):**
+- Generate a VAPID prod keypair → store as `VAPID_PUBLIC_KEY_PROD` / `VAPID_PRIVATE_KEY_PROD` (generate
+  without printing the private key).
+- Drain secret:
+  ```bash
+  SECRET=$(openssl rand -hex 32); printf '%s' "$SECRET" | gcloud secrets create PUSH_DRAIN_SECRET_PROD \
+    --project gifsy-platform --replication-policy=automatic --data-file=-
+  ```
+- Grant the api SA access to each (repeat for the two VAPID prod secrets):
+  ```bash
+  gcloud secrets add-iam-policy-binding PUSH_DRAIN_SECRET_PROD --project gifsy-platform \
+    --member="serviceAccount:gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com" \
+    --role=roles/secretmanager.secretAccessor
+  ```
+
+**(c) After the prod api is serving the new image, create the prod scheduler job:**
+```bash
+API_PROD=<prod gifsy-api URL>
+SECRET=$(gcloud secrets versions access latest --secret=PUSH_DRAIN_SECRET_PROD --project gifsy-platform)
+gcloud scheduler jobs create http push-drain-prod \
+  --location asia-south1 --project gifsy-platform \
+  --schedule "* * * * *" \
+  --uri "$API_PROD/v1/push/drain" --http-method POST \
+  --headers "x-drain-secret=$SECRET" --message-body '{}' --attempt-deadline 30s
+```
+
+**(d) Migration** — the `pwa_install` migration (`20260629120000`) auto-applies via the prod migrate step
+(Step 2 / `deploy-api`). No extra action.
+
+**(e) Smoke:** `curl -X POST $API_PROD/v1/push/drain` with **no** header → expect **403** (fail-closed); with
+the secret header → **201**.
+
+> 🔑 **TRAP:** Cloud Run `min-instances=1` alone does **NOT** keep background `@Interval` workers ticking — CPU
+> is throttled between requests. The **scheduler** (step c) is what drives delivery.
+
+---
+
 ## Done-criteria (all must be true)
 - [ ] Step 0: 4 suites green · staging SHA == `develop` HEAD · `develop` frozen.
 - [ ] Step 1: `current_database()='gifsy_prod'` confirmed · backup id + UTC timestamp logged.

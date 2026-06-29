@@ -8,15 +8,25 @@
 > worker (which must not run over churning UI) is now safe to build. Owner confirmed minor future tweaks are
 > expected — handled by the SW update strategy below (content-hashed assets + versioned precache + update prompt).
 
-## Status — FULLY ACTIVATED ON STAGING (2026-06-29) · device-test mid-flight
+## Status — PWA ROUND COMPLETE + DEVICE-VERIFIED ON STAGING (2026-06-29)
+**2026-06-29:** the PWA round is **DONE on staging** (gate-green api jest 1246 / FE vitest 1694 / tsc 0; audited where security-relevant; runtime-verified incl. a real push delivered to the owner's Android):
+1. **Sales push notifications** (`f11d5d1`, audit SHIP) — global `SalesNotificationsService` enqueues PUSH to the sales team on 4 POST-COMMIT, fire-and-forget, tenant-scoped triggers: new KYC assigned → assigned rep (aggregated per-rep across bulk upload + on reassign) + routed approver up-chain; KYC rejected/RE_UPLOAD → responsible rep (via active SalesUserAssignment); targets uploaded → assigned XSR + first active manager (SO) per outlet, de-duped. Owner: KYC=rep+approver, targets=XSR+SO.
+2. **Reliable delivery via Cloud Scheduler** (`f11d5d1`) — Cloud Run CPU-throttles between requests so the `@Interval(30s)` worker idles; added `@Public POST /v1/push/drain` (FAIL-CLOSED, `PUSH_DRAIN_SECRET` header, constant-time compare) pinged every 60s by Cloud Scheduler job `push-drain-staging` (secret `PUSH_DRAIN_SECRET_STAGING` in Secret Manager → gifsy-api-sa, wired into `deploy-staging.yml`). Runtime-verified end-to-end.
+3. **PWA adoption tracking** (`c6dd001` BE + `cf14992` FE) — new `pwa_install` table (additive migration `20260629120000_add_pwa_install`); `POST /v1/push/installed` beacon (fires when standalone; platform Android/iOS/Desktop) + tenant-scoped `GET /v1/push/adoption`; new admin **App Adoption** page (`/admin/app-adoption`, nav-visible to CLIENT_ADMIN + GIFSY_ADMIN).
+4. **Real Deoleo icon** (`a468b93`) — owner's white wordmark composited on the #16a34a brand-green tile via `scripts/generate-pwa-icons.ts` (source `public/logos/deoleo.png` gitignored; only generated `/icons/deoleo/*` committed). Replaces the "D" monogram.
+5. **Install-prompt snooze + Profile entry point** (`449d510`) — install/notification banners snooze **3 days** instead of permanent dismissal (shared `lib/pwa/install-prompt-store.ts`); new `PwaAppSettings` card in partner+sales Profile (Install / iOS instructions + Notifications enable/turn-off/"blocked → re-enable in browser settings"). After a browser hard-block we can never re-prompt programmatically — only the settings path recovers.
+
+**PROD activation remains CUTOVER-COUPLED** — replicate the staging wiring (FE flags, api env/secrets, scheduler job, migration) on prod at/after cutover; exact steps in [`runbooks/CUTOVER-RUNBOOK.md`](runbooks/CUTOVER-RUNBOOK.md) § "PWA / Notifications — prod activation".
+
+## Status — STAGING ACTIVATION DETAIL (2026-06-29) · device-test RESOLVED, icon swapped
 **2026-06-29:** push FE-subscribe (E) built (`c1b70dd`) + the **whole PWA activated on `gifsy_staging` only** (`d6f91de`→`ce95a83`):
 VAPID keypair → `VAPID_{PUBLIC,PRIVATE}_KEY_STAGING` secrets + `PUSH_WORKER_ENABLED=true` + `VAPID_SUBJECT`; `build:sw` emits `/sw.js`
 via **esbuild** (devDep); the 3 `NEXT_PUBLIC_PWA_*` flags = `true` in the **staging FE build only** (prod `deploy.yml` untouched = OFF).
 Runtime-verified on the live Deoleo edge: `/sw.js` 200 (push+notificationclick), vapid-public-key served, manifests 200, push-worker
 dispatched a real test push. Two bugs caught+fixed at runtime: `/sw.js` 307'd by the auth middleware (added `sw.js|offline.html` to the
-`proxy.ts` matcher); manifest `start_url=/{portal}` 404'd (set to `/{portal}/dashboard`). **MID-FLIGHT:** owner device-testing (awaiting
-phone-arrival confirm + OS; iOS needs the installed app); owner asked to **change the PWA icon** (awaiting source logo → regenerate
-`/icons/deoleo/*`). **PROD activation = cutover-coupled:** replicate the staging wiring on `deploy.yml` at/after cutover.
+`proxy.ts` matcher); manifest `start_url=/{portal}` 404'd (set to `/{portal}/dashboard`). **✅ RESOLVED (see the COMPLETE block above):**
+device-verified on the owner's **Android** (scheduler-driven push delivered, queue SENT); the PWA icon was swapped to the real Deoleo
+art (`a468b93`). **PROD activation = cutover-coupled:** replicate the staging wiring on `deploy.yml` at/after cutover.
 
 ## Status — Wave 1 DONE (2026-06-27, `185c548`, gate-green + audited + runtime-verified + pushed)
 Built + integrated + pushed to `develop` (ships DISABLED): **F1** installable shell (per-tenant
@@ -97,8 +107,8 @@ backend `PUSH_WORKER_ENABLED`.
   partner notification panel.
 
 ## Hard dependencies (need from owner)
-1. **Source logos** — Deoleo (and Gifsy) logo art (SVG/high-res PNG) to generate icon sets. Until provided,
-   the pipeline produces a **monogram placeholder** (initials on `primaryColor`) so the app is installable now.
+1. **Source logos** — ✅ **Deoleo provided** (white 512² PNG → real icons, `a468b93`). Gifsy + clientb still use the
+   **monogram placeholder** (initials on `primaryColor`); drop their art at `public/logos/<slug>.png` + re-run the pipeline.
 2. **VAPID key scope** — single **platform-wide** VAPID keypair (recommended; per-tenant branding lives in the
    payload, not the key) vs per-tenant keypairs. Drives push subscription + sender design.
 3. **Push trigger events + copy** — default set: **points earned · redemption confirmed · KYC approved**
