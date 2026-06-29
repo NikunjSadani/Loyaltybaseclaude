@@ -14,6 +14,12 @@ RUN ls dist/main.js
 RUN ./node_modules/.bin/tsc prisma/seed.ts --module commonjs --target es2021 \
       --esModuleInterop --skipLibCheck --moduleResolution node
 RUN ls prisma/seed.js
+# Compile the one-time prod bootstrap (first GIFSY_ADMIN + OutletType master rows)
+# the same way, so it ships in the prod image; run via a Cloud Run Job:
+# `node prisma/bootstrap.js` with BOOTSTRAP_CONFIRM=<db> (see CUTOVER-RUNBOOK).
+RUN ./node_modules/.bin/tsc prisma/bootstrap.ts --module commonjs --target es2021 \
+      --esModuleInterop --skipLibCheck --moduleResolution node
+RUN ls prisma/bootstrap.js
 
 # ── Stage 2: Production ───────────────────────────────────────────────────────
 FROM node:24-alpine AS runner

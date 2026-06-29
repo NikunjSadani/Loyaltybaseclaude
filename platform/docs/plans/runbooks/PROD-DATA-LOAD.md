@@ -34,11 +34,31 @@
 > | **First `GIFSY_ADMIN` user** | No "create platform super-admin" endpoint exists. The admin users endpoint (`POST /v1/admin/users`) requires an *already-authenticated* admin, and `assertRoleAssignable` lets **only a GIFSY_ADMIN mint another GIFSY_ADMIN or a CLIENT_ADMIN** (`api/src/admin-core/admin-core.service.ts:53-78`). So you cannot bootstrap the first admin through the app. | `api/prisma/seed.ts:132-160` — `clientId='gifsy'`, `role=GIFSY_ADMIN`, `status=ACTIVE`, phone from `GIFSY_ADMIN_PHONE` (seed default `9830011252`). |
 > | **`OutletType` master rows** (`WHOLESALER`, `SSS`, `SSS_TOT`, `SUB_STOCKIST`) | No OutletType-create endpoint anywhere (`api/src/kyc`, `api/src/gifsy`, `api/src/admin-*` checked). `GifsyService.createClient` only **iterates existing** `OutletType` rows to provision per-tenant configs (`api/src/gifsy/gifsy.service.ts:74-90`); it does not create the master rows. | `api/prisma/seed.ts` `OUTLET_TYPES` (the 4 codes above) — these are **global**, not per-tenant. |
 >
-> **Action:** before Step 1, run a bootstrap that inserts (a) the GIFSY_ADMIN user under the
-> `gifsy` client and (b) the 4 OutletType master rows, by extracting just those inserts from
-> `seed.ts` into a prod-safe load-script run inside the VPC (the DB is private-IP, like the
-> migrate job). Verify GIFSY_ADMIN can OTP-login to prod and that `GET /v1/admin/credits/outlet-types`
-> (once a tenant exists) returns the 4 codes.
+> **✅ BUILT (2026-06-29):** the bootstrap script is `api/prisma/bootstrap.ts` — idempotent, additive-only,
+> double-guarded (`BOOTSTRAP_CONFIRM === current_database()`), audited SHIP. The Dockerfile compiles it to
+> `prisma/bootstrap.js` into the prod image (mirroring `seed.js`), so it runs via an in-VPC Cloud Run Job
+> exactly like `gifsy-migrate`. Defaults bake in the agreed admin (Nikunj / 9830011252).
+>
+> **⚠️ Sequencing:** `prisma/bootstrap.js` only exists in images built from this commit onward, so the
+> bootstrap can only run **AFTER** the develop→main cutover deploy builds the new prod `api` image. Order:
+> cutover (migrate+deploy, see CUTOVER-RUNBOOK) → **run the bootstrap job** → then Step 1 onward.
+>
+> **Run command** (mirrors the `gifsy-migrate` job in `.github/workflows/deploy.yml`; `<SHA>` = the deployed main SHA):
+> ```bash
+> gcloud run jobs deploy gifsy-bootstrap \
+>   --image=asia-south1-docker.pkg.dev/gifsy-platform/gifsy-images/api:<SHA> \
+>   --region=asia-south1 \
+>   --command=node --args=prisma/bootstrap.js \
+>   --set-secrets=DATABASE_URL=DATABASE_URL:latest \
+>   --set-env-vars=BOOTSTRAP_CONFIRM=gifsy_prod,GIFSY_ADMIN_NAME=Nikunj,GIFSY_ADMIN_PHONE=9830011252 \
+>   --vpc-connector=gifsy-connector \
+>   --set-cloudsql-instances=<SQL_INSTANCE> \
+>   --service-account=gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com \
+>   --execute-now --wait
+> ```
+> The job logs `current_database()` and refuses unless `BOOTSTRAP_CONFIRM` matches it (the instance is
+> shared with `gifsy_staging`). Re-running is a safe no-op. **Verify:** GIFSY_ADMIN can OTP-login to prod
+> (clientId `gifsy`) and, once the Deoleo tenant exists, `GET /v1/admin/credits/outlet-types` returns the 4 codes.
 
 ---
 
