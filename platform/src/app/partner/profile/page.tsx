@@ -16,6 +16,7 @@ import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { KYCStatus, ChannelPartnerClass } from '@/types';
 import { usePartnerSession, type OutletType } from '@/lib/partner-session';
 import { api } from '@/lib/api-client';
+import PwaAppSettings from '@/components/pwa/PwaAppSettings';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -346,6 +347,9 @@ export default function ProfilePage() {
           <ChevronRight className="h-4 w-4 text-gray-400" />
         </a>
       ))}
+
+      {/* ── App & Notifications (PWA install / push) ── */}
+      <PwaAppSettings />
 
       {/* ── Sign out ── */}
       <Button

@@ -7,6 +7,9 @@ vi.mock('@/lib/pwa/push', () => ({
   subscribeToPush: () => subscribeToPush(),
 }));
 
+const SNOOZE_KEY = 'pwa-push-snooze';
+const DAY = 24 * 60 * 60 * 1000;
+
 import PushSubscriptionManager from '../PushSubscriptionManager';
 
 function setPath(p: string) {
@@ -68,12 +71,21 @@ describe('PushSubscriptionManager', () => {
     expect(screen.getByRole('button', { name: 'Not now' })).toBeTruthy();
   });
 
-  it('does not show the prompt once dismissed (persisted)', () => {
+  it('does not show the prompt while snoozed within the last 3 days', () => {
     vi.stubEnv('NEXT_PUBLIC_PWA_PUSH_ENABLED', 'true');
-    localStorage.setItem('pwa-push-dismissed', '1');
+    localStorage.setItem(SNOOZE_KEY, String(Date.now() - 1 * DAY));
     stubNotification('default');
     const { container } = render(<PushSubscriptionManager />);
     expect(container.firstChild).toBeNull();
+  });
+
+  it('shows the prompt again once the 3-day snooze has expired', () => {
+    vi.stubEnv('NEXT_PUBLIC_PWA_PUSH_ENABLED', 'true');
+    localStorage.setItem(SNOOZE_KEY, String(Date.now() - 4 * DAY));
+    stubNotification('default');
+    render(<PushSubscriptionManager />);
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Enable' })).toBeTruthy();
   });
 
   it('Enable -> requests permission and subscribes when granted', async () => {
@@ -106,12 +118,14 @@ describe('PushSubscriptionManager', () => {
     expect(subscribeToPush).not.toHaveBeenCalled();
   });
 
-  it('Not now -> persists the dismiss flag and hides', () => {
+  it('Not now -> writes a fresh snooze timestamp (not permanent) and hides', () => {
     vi.stubEnv('NEXT_PUBLIC_PWA_PUSH_ENABLED', 'true');
     stubNotification('default');
     render(<PushSubscriptionManager />);
     fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
-    expect(localStorage.getItem('pwa-push-dismissed')).toBe('1');
+    const stored = Number(localStorage.getItem(SNOOZE_KEY));
+    expect(Number.isFinite(stored)).toBe(true);
+    expect(Date.now() - stored).toBeLessThan(5000);
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 

@@ -10,6 +10,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
 import { ROLE_LABELS, type SalesRole } from '@/lib/sales-role';
 import { authHeader } from '@/lib/api-client';
+import PwaAppSettings from '@/components/pwa/PwaAppSettings';
 
 interface SalesProfile {
   name: string;
@@ -227,6 +228,9 @@ export default function SalesProfilePage() {
           />
         </CardContent>
       </Card>
+
+      {/* App & Notifications (PWA install / push) */}
+      <PwaAppSettings />
 
       {/* Logout */}
       <Card>

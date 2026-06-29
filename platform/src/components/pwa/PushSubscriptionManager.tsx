@@ -14,9 +14,10 @@
 //   • Notification.permission === 'granted' => silently re-sync the subscription
 //     once (subscribeToPush is idempotent; the backend upserts). Renders null.
 //   • 'denied' => render null (never re-prompt).
-//   • 'default' and not previously dismissed => show a small non-intrusive
+//   • 'default' and not recently snoozed => show a small non-intrusive
 //     "Enable notifications" prompt. Enable => requestPermission() (gesture) then
-//     subscribe on grant. Not now => persist a dismiss flag.
+//     subscribe on grant. Not now => SNOOZE for 3 days (not permanent), and the
+//     Profile page (PwaAppSettings) offers a persistent entry point.
 //
 // Self-contained: no toast/context dependency, matching ServiceWorkerRegister /
 // InstallPrompt. Uses the global --brand-primary CSS var for the Enable button so
@@ -26,10 +27,24 @@ import { useEffect, useState } from 'react';
 import { subscribeToPush } from '@/lib/pwa/push';
 
 const SCOPED_PREFIXES = ['/sales', '/partner'];
-const DISMISS_KEY = 'pwa-push-dismissed';
+const SNOOZE_KEY = 'pwa-push-snooze';
+const SNOOZE_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 
 function inScope(pathname: string): boolean {
   return SCOPED_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+}
+
+/** True when a snooze timestamp exists and is still within the snooze window. */
+function isSnoozed(): boolean {
+  try {
+    const raw = localStorage.getItem(SNOOZE_KEY);
+    if (!raw) return false;
+    const ts = Number(raw);
+    if (!Number.isFinite(ts)) return false;
+    return Date.now() - ts < SNOOZE_MS;
+  } catch {
+    return false;
+  }
 }
 
 function pushSupported(): boolean {
@@ -67,18 +82,14 @@ export default function PushSubscriptionManager() {
       return;
     }
 
-    // permission === 'default': offer the opt-in unless already dismissed.
-    try {
-      if (localStorage.getItem(DISMISS_KEY) === '1') return;
-    } catch {
-      /* storage blocked — proceed without persistence */
-    }
+    // permission === 'default': offer the opt-in unless recently snoozed.
+    if (isSnoozed()) return;
     setShowPrompt(true);
   }, []);
 
-  const persistDismissal = () => {
+  const persistSnooze = () => {
     try {
-      localStorage.setItem(DISMISS_KEY, '1');
+      localStorage.setItem(SNOOZE_KEY, String(Date.now()));
     } catch {
       /* ignore */
     }
@@ -100,7 +111,7 @@ export default function PushSubscriptionManager() {
 
   const dismiss = () => {
     setShowPrompt(false);
-    persistDismissal();
+    persistSnooze();
   };
 
   if (!showPrompt) return null;

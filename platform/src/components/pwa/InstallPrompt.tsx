@@ -8,54 +8,49 @@
 //      can't surprise UAT testers; flip ON once mobile flows are stable)
 //   2. the current path starts with /sales or /partner (install scope)
 //   3. the app is NOT already installed (display-mode: standalone / iOS standalone)
-//   4. the user hasn't dismissed/installed before (persisted in localStorage)
+//   4. the user hasn't SNOOZED the banner within the last 3 days
 //
-//   • Android / Chromium: captures `beforeinstallprompt`, defers it, and offers a
-//     custom "Install" affordance that calls prompt() on tap.
+//   • Android / Chromium: consumes the app-wide install-prompt store (single
+//     source of truth) and offers a custom "Install" affordance.
 //   • iOS Safari: no install API exists — shows an instructional "Share → Add to
 //     Home Screen" banner (only on iOS Safari, where A2HS is actually possible).
+//
+// Declining is a SNOOZE, not a permanent dismissal: the banner re-appears after
+// 3 days, and the Profile page (PwaAppSettings) offers a persistent entry point
+// so users can always install.
 //
 // Self-contained: no toast/context dependency. Uses the global --brand-primary CSS
 // var (set by the root layout) so the Install button picks up the tenant colour.
 // -----------------------------------------------------------------------------
 import { useEffect, useState } from 'react';
+import { isIosSafari } from '@/lib/pwa/platform-detect';
+import { useInstallPrompt } from '@/lib/pwa/install-prompt-store';
 
 const SCOPED_PREFIXES = ['/sales', '/partner'];
-const DISMISS_KEY = 'pwa-install-dismissed';
-
-interface BeforeInstallPromptEvent extends Event {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
-}
+const SNOOZE_KEY = 'pwa-install-snooze';
+const SNOOZE_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 
 function inScope(pathname: string): boolean {
   return SCOPED_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 }
 
-function isStandalone(): boolean {
-  if (typeof window === 'undefined') return false;
-  const mm = window.matchMedia?.('(display-mode: standalone)')?.matches;
-  const iosStandalone =
-    (window.navigator as unknown as { standalone?: boolean }).standalone === true;
-  return Boolean(mm) || iosStandalone;
-}
-
-// iOS "Add to Home Screen" only works in Safari (Chrome/Firefox/Edge on iOS can't
-// install). Detect an iOS device AND Safari (exclude the in-app browsers via their
-// UA tokens). iPadOS 13+ reports as "Macintosh", so also treat a touch-capable Mac
-// as iOS.
-function isIosSafari(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  const ua = navigator.userAgent;
-  const iOS =
-    /iphone|ipad|ipod/i.test(ua) ||
-    (/macintosh/i.test(ua) && typeof document !== 'undefined' && 'ontouchend' in document);
-  const safari = /safari/i.test(ua) && !/crios|fxios|edgios|opios/i.test(ua);
-  return iOS && safari;
+/** True when a snooze timestamp exists and is still within the snooze window. */
+function isSnoozed(): boolean {
+  try {
+    const raw = localStorage.getItem(SNOOZE_KEY);
+    if (!raw) return false;
+    const ts = Number(raw);
+    if (!Number.isFinite(ts)) return false;
+    return Date.now() - ts < SNOOZE_MS;
+  } catch {
+    return false;
+  }
 }
 
 export default function InstallPrompt() {
-  const [deferred, setDeferred] = useState<BeforeInstallPromptEvent | null>(null);
+  const { canInstall, installed, promptInstall } = useInstallPrompt();
+  // 'mode' is set once the mount-time gates pass; it also picks the banner copy
+  // (android = custom install button, ios = manual Share instructions).
   const [mode, setMode] = useState<'android' | 'ios' | null>(null);
 
   useEffect(() => {
@@ -64,69 +59,36 @@ export default function InstallPrompt() {
     if (typeof window === 'undefined') return;
     // Gate 2: only inside the /sales + /partner shells.
     if (!inScope(window.location.pathname)) return;
-    // Gate 3: already installed => nothing to prompt.
-    if (isStandalone()) return;
-    // Gate 4: respect a prior dismissal/install.
-    try {
-      if (localStorage.getItem(DISMISS_KEY) === '1') return;
-    } catch {
-      /* storage blocked — proceed without persistence */
-    }
-
-    const onBeforeInstallPrompt = (e: Event) => {
-      // Stop Chrome's mini-infobar; we present our own affordance instead.
-      e.preventDefault();
-      setDeferred(e as BeforeInstallPromptEvent);
-      setMode('android');
-    };
-    window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt);
+    // Gate 3: already installed => the store's `installed` already suppresses.
+    if (installed) return;
+    // Gate 4: respect an active snooze.
+    if (isSnoozed()) return;
 
     // iOS Safari never fires beforeinstallprompt — offer the manual instruction.
-    if (isIosSafari()) setMode('ios');
+    setMode(isIosSafari() ? 'ios' : 'android');
+  }, [installed]);
 
-    const onInstalled = () => {
-      setMode(null);
-      try {
-        localStorage.setItem(DISMISS_KEY, '1');
-      } catch {
-        /* ignore */
-      }
-    };
-    window.addEventListener('appinstalled', onInstalled);
-
-    return () => {
-      window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt);
-      window.removeEventListener('appinstalled', onInstalled);
-    };
-  }, []);
-
-  const persistDismissal = () => {
+  const snooze = () => {
     try {
-      localStorage.setItem(DISMISS_KEY, '1');
+      localStorage.setItem(SNOOZE_KEY, String(Date.now()));
     } catch {
-      /* ignore */
+      /* storage blocked — proceed without persistence */
     }
   };
 
   const dismiss = () => {
     setMode(null);
-    persistDismissal();
+    snooze();
   };
 
   const install = async () => {
-    if (!deferred) return;
-    try {
-      await deferred.prompt();
-      await deferred.userChoice;
-    } catch {
-      /* not a user gesture / unsupported — fail silently */
-    }
-    setDeferred(null);
+    await promptInstall();
     setMode(null);
-    persistDismissal();
   };
 
   if (!mode) return null;
+  // Android banner only makes sense when the store actually has a deferred prompt.
+  if (mode === 'android' && !canInstall) return null;
 
   return (
     <div
