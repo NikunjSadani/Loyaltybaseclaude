@@ -85,10 +85,12 @@ differences — the harness must not assume `FIXED_OTP`/`localhost` semantics.)
 - [~] **Observability** baseline (logs/metrics/alerts) (#27 → P8.4) — at least error visibility before prod. *(Structured logging → Cloud Logging + `/health` 200 done; **≥1 Cloud Monitoring alert still OPEN** — needs owner alert email.)*
 - [~] **The E2E matrix is covered + GREEN** (every `DATA-VISIBILITY.md` row, Waves 0–4 — 291 passed / 0 failed / 11 skipped). ✅ Built + runtime-verified ([`E2E-COVERAGE-PLAN.md`](E2E-COVERAGE-PLAN.md)). The 11 skips are the **gap #57** pages (`test.fixme`'d — admin sub-dashboards / Outlet Master / hierarchy / sales notifications render mock/empty data) + a few precondition skips. **The #57 cells re-assert real data the moment those pages are wired — that wiring is the PRE-UAT blocker above.** Staging E2E still needs the OTP read-back endpoint or temp `FIXED_OTP`.
 
-### 3.1 Owner-ops before launch (owner-only — I prepare the exact steps; not blockers to UAT, needed before real customers)
-- [ ] **Cloud Monitoring alert email** — an automated alert on error-rate / uptime so a prod problem pages the owner (today: logs exist, but nothing actively notifies). Needs the owner's GCP account + email.
-- [ ] **Automated backups + PITR** on the shared `gifsy-db` instance — a one-off backup was taken at the cutover, but **ongoing** daily-backup + point-in-time-recovery is OFF. Turn it on before real data lands.
-- [ ] **Rotate prod-only secrets** — generate fresh production-only values (DB password, `JWT_SECRET`, MSG91 keys) so nothing dev-era is reused. (Involves real credential values → owner runs it; I give the exact `gcloud` commands.) Task #74.
+### 3.1 Owner-ops before launch (exact steps in `runbooks/OWNER-OPS-RUNBOOK.md`; CORRECTED 2026-06-29 by live recon)
+- [ ] **Cloud Monitoring alert email** — STILL OPEN (verified: **zero** notification channels exist). Add an email channel + Cloud Run 5xx + uptime alert. Needs the owner's email.
+- [x] **Automated backups + PITR** on `gifsy-db` — **ALREADY ON** (verified 2026-06-29: backups enabled, 14 retained, `pointInTimeRecoveryEnabled=true`, 7-day txn-log, daily 20:30). Earlier "PITR is OFF" was stale → VERIFY-ONLY now (optional ZONAL→regional HA).
+- [ ] **Rotate prod-only secrets** — prod secrets already EXIST in Secret Manager (`DATABASE_URL`/`JWT_SECRET`/`MSG91_*`); rotation = publish new VERSIONS (owner's call). Steps in the runbook. Task #74.
+- 🔴 **PROD BOOTSTRAP GAP (NEW, blocks #76):** no app/API path to create the first GIFSY_ADMIN or the 4 OutletType master rows (seed prod-firewalled) → a one-time in-VPC bootstrap load-script is required before any prod data load. Not yet built.
+- ℹ️ **Prod is already live** (`gifsy-api`/`gifsy-frontend` on `b3ab2e0`); `deploy.yml` auto-migrates via the in-VPC job behind a `production` approval gate. Cutover = update, not first deploy. See `runbooks/CUTOVER-RUNBOOK.md`.
 
 ### 3.2 Other known gaps (track; mostly non-blocking)
 - **Staging E2E can't run there now** — `FIXED_OTP` was removed from staging (real MSG91), so a staging harness run needs the test-only OTP read-back endpoint (unbuilt, → P8) **or** temporarily re-adding `FIXED_OTP`. Local runs are unaffected.

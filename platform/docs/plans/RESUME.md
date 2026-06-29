@@ -25,7 +25,7 @@ calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1219 · nest 0 · FE vitest 1644 · tsc 0.** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1220 · nest 0 · FE vitest 1644 · tsc 0.** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -59,7 +59,10 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
   (Ravi Kumar/O001 50000→**51234**) while the SSS row created a PAYOUT entry, `skipped: []`. ⚠️ **Deoleo's staging award
   maps are now SET (all 3 fields)** — a re-upload now credits. **GO-LIVE: prod fields are created with an empty map, so the
   Monthly/Visibility/Consistency award maps MUST be set once on prod (via the editor) before the first credit upload, or
-  prod repeats this exact silent-skip.**
+  prod repeats this exact silent-skip.** **Follow-up `6c563ca`: the editor's outlet-type list is now DYNAMIC** — new
+  `GET /admin/credits/outlet-types` (tenant-scoped, keyed on `OutletType.code` = the parser's resolution key) replaces the
+  hardcoded four, so adding a new outlet type to a tenant needs no code change (adding a new *field* never did); save
+  MERGES the map so a since-disabled type's award is preserved. Audit SHIP; gate api jest 1220.
 - **CREDIT-UPLOAD FIX ✅** (`2e1b5be`) — points were silently skipped for pre-KYC partners (no Wallet) and the FE
   ignored the confirm response (showed "success", nothing credited, blank report). Fix: `wallet.upsert` at credit time
   (points accrue pre-KYC; payout still gated); unresolvable rows now skip WITH a reason; FE surfaces actual-credited +
@@ -74,12 +77,21 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE (develop→main = prod, verified 2026-06-28): `main` is **168 commits behind** `develop` (main last
-`2026-06-21` `b3ab2e0`), incl. **5 Prisma migrations** prod lacks (the PWA `push_subscription` migration will be a 6th,
-still UNAPPLIED anywhere); no `gifsy-*-prod` Cloud Run services in asia-south1 → first `main` merge ≈ first prod app
-deploy. Promoting to `main` is a DELIBERATE cutover: freeze develop → **backup prod DB** → apply migrations via the
-in-VPC Cloud Run Job ([[migration-model]]) → merge=deploy → load #76 data → #74 ops → smoke test. **DO NOT merge to
-main during UAT.**
+🚀 CUTOVER STATE (develop→main = prod; **CORRECTED 2026-06-29 by live gcloud recon — prior "no prod services / first deploy"
+framing was STALE/WRONG**): `main` is **185 commits behind** `develop` (main last `2026-06-21` `b3ab2e0`), incl. **6 Prisma
+migrations** prod's DB lacks (5 + `add_push_subscription`). **PROD IS ALREADY LIVE** — Cloud Run services `gifsy-api` +
+`gifsy-frontend` (NOT `-prod`-suffixed; that's why the old check missed them) serve image `b3ab2e0`, `NODE_ENV=production`,
+prod DB/JWT/MSG91 from Secret Manager. So the cutover is an **UPDATE of running prod, not a first deploy**. **`deploy.yml`
+(main→prod) AUTO-RUNS the 6 migrations** via the in-VPC `gifsy-migrate` Cloud Run Job (`migrate deploy --execute-now --wait`;
+`--wait` fails the deploy on migration error) AFTER a **`production` manual-approval gate**; `deploy-staging.yml` = develop→staging.
+**Backups + PITR are ALREADY ON** for `gifsy-db` (enabled, 14 retained, PITR + 7-day txn-log). So promoting = freeze develop →
+(optional pre-backup; PITR already covers it) → **merge develop→main → approve the prod gate → pipeline migrates+deploys** →
+smoke. Full step-by-step = **`docs/plans/runbooks/CUTOVER-RUNBOOK.md`**. **DO NOT merge to main during UAT.**
+🔴 **NEW BLOCKER (Phase-0 recon, 2026-06-29) — PROD BOOTSTRAP GAP:** prod has **zero users + zero OutletType master rows**, and
+there is **NO app/API path** to create the first GIFSY_ADMIN (`assertRoleAssignable` needs an existing GIFSY_ADMIN → chicken-egg)
+OR the 4 OutletType rows (`createClient` only upserts per-type *config* for already-existing types; the seed is prod-firewalled).
+→ **#76 cannot start until a one-time in-VPC bootstrap load-script (first GIFSY_ADMIN + 4 OutletType rows, extracted from the seed)
+runs.** Not yet built. Everything else (client, CLIENT_ADMIN, hierarchy, outlets) then flows via the app.
 
 OPEN GO-LIVE THREADS (see GO-LIVE-READINESS §3): **#76** load real Deoleo master data into empty prod (Deoleo tenant
 context; outlet types `SSS/SSS_TOT/SUB_STOCKIST/WHOLESALER`; XSR-ID column = real `XSR-*` IDs). **#74** owner ops
