@@ -471,6 +471,7 @@ model User {
   schemeEnrollments  SchemeEnrollment[]
   loginLogs          LoginLog[]
   pushSubscriptions  PushSubscription[]
+  pwaInstalls        PwaInstall[]
 
   @@unique([clientId, phone]) // same phone can exist across different clients
   @@unique([clientId, email]) // email scoped per client (nullable handled by Postgres partial index)
@@ -1840,6 +1841,28 @@ model PushSubscription {
   @@index([userId])
   @@index([clientId])
   @@map("push_subscription")
+}
+
+/// Records that a user launched the app as an INSTALLED PWA (home-screen / standalone),
+/// reported by a client beacon. One row per (user, platform); upserted, with lastSeenAt
+/// refreshed on each standalone launch. Distinct from PushSubscription (notifications
+/// enabled) — a user can install without subscribing, or vice-versa.
+model PwaInstall {
+  id          String   @id @default(cuid())
+  userId      String
+  clientId    String
+  platform    String   // ANDROID | IOS | DESKTOP | OTHER
+  userAgent   String?
+  installedAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, platform])
+  @@index([clientId])
+  @@index([userId])
+  @@map("pwa_install")
 }
 
 // ============================================================

@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  IsIn,
   IsObject,
   IsOptional,
   IsString,
@@ -7,6 +8,21 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+
+/** Platforms an installed-PWA beacon may report. */
+export const PWA_PLATFORMS = ['ANDROID', 'IOS', 'DESKTOP', 'OTHER'] as const;
+export type PwaPlatform = (typeof PWA_PLATFORMS)[number];
+
+/** POST /v1/push/installed body. userId/clientId are taken from the JWT, NEVER here. */
+export class ReportInstallDto {
+  @IsIn(PWA_PLATFORMS)
+  platform!: PwaPlatform;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  userAgent?: string;
+}
 
 /** The encryption keys a browser hands back from PushManager.subscribe(). */
 export class PushKeysDto {

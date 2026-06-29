@@ -8,11 +8,12 @@ import {
 } from '@nestjs/common';
 import { timingSafeEqual } from 'crypto';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
-import { Public } from '../common/decorators/roles.decorator';
+import { Public, Roles } from '../common/decorators/roles.decorator';
 import { PushSubscriptionService } from './push-subscription.service';
 import { PushSenderService } from './push-sender.service';
 import { PushDeliveryWorker } from './push-delivery.worker';
-import { SubscribeDto, UnsubscribeDto } from './dto/push.dto';
+import { PwaAdoptionService, AdoptionReport } from './pwa-adoption.service';
+import { SubscribeDto, UnsubscribeDto, ReportInstallDto } from './dto/push.dto';
 
 /**
  * Web Push (PWA) API — re-homed onto /v1/push. Auth (JWT) + tenant scope come from
@@ -28,7 +29,37 @@ export class PushController {
     private readonly subscriptions: PushSubscriptionService,
     private readonly sender: PushSenderService,
     private readonly worker: PushDeliveryWorker,
+    private readonly adoption: PwaAdoptionService,
   ) {}
+
+  /**
+   * POST /v1/push/installed — installed-PWA beacon. The client fires this when it
+   * detects the app is running standalone (home-screen install). Records who has
+   * installed, per platform; userId/clientId come from the JWT, never the body.
+   */
+  @Post('installed')
+  reportInstall(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: ReportInstallDto,
+  ): Promise<{ ok: true }> {
+    return this.adoption.recordInstall(
+      user.sub,
+      user.clientId,
+      dto.platform,
+      dto.userAgent ?? null,
+    );
+  }
+
+  /**
+   * GET /v1/push/adoption — PWA adoption stats for the admin "App Adoption" page.
+   * Tenant-scoped to the caller's clientId (CLIENT_ADMIN → own tenant; GIFSY_ADMIN →
+   * the tenant they've assumed). MIS_USER may read too.
+   */
+  @Get('adoption')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER')
+  getAdoption(@CurrentUser() user: JwtPayload): Promise<AdoptionReport> {
+    return this.adoption.adoption(user.clientId);
+  }
 
   /**
    * POST /v1/push/drain — Cloud-Scheduler-triggered queue drain.

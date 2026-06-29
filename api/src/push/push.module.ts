@@ -4,6 +4,7 @@ import { PushController } from './push.controller';
 import { PushSubscriptionService } from './push-subscription.service';
 import { PushSenderService } from './push-sender.service';
 import { PushDeliveryWorker } from './push-delivery.worker';
+import { PwaAdoptionService } from './pwa-adoption.service';
 
 /**
  * Web Push (PWA) module — subscribe/unsubscribe + VAPID key endpoint, the sender
@@ -17,7 +18,7 @@ import { PushDeliveryWorker } from './push-delivery.worker';
 @Module({
   imports: [PrismaModule],
   controllers: [PushController],
-  providers: [PushSubscriptionService, PushSenderService, PushDeliveryWorker],
+  providers: [PushSubscriptionService, PushSenderService, PushDeliveryWorker, PwaAdoptionService],
   exports: [PushSenderService],
 })
 export class PushModule {}
