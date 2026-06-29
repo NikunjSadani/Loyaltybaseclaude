@@ -248,7 +248,7 @@ export default function CreditsPayoutsUploadPage() {
         'Award Type':  r.awardType,
         'Status':      r.status,
         'Narration':   r.narration,
-        'Errors':      r.errors.join('; '),
+        'Errors':      r.errors.length > 0 ? r.errors.join('; ') : (r.skipReason ?? ''),
       }));
       const ws = jsonToSheetSafe(rows);
       const wb = XLSX.utils.book_new();
@@ -455,6 +455,32 @@ export default function CreditsPayoutsUploadPage() {
                       {r.errors.map((e, j) => (
                         <p key={j} className="text-xs text-red-600 mt-0.5">• {e}</p>
                       ))}
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          {parseResult.summary.skipped > 0 && (
+            <div className="bg-white rounded-xl border border-amber-200 overflow-hidden">
+              <div className="px-4 py-3 bg-amber-50 border-b border-amber-100">
+                <p className="text-xs font-semibold text-amber-800 flex items-center gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  {parseResult.summary.skipped} row{parseResult.summary.skipped !== 1 ? 's' : ''} skipped — nothing credited
+                </p>
+              </div>
+              <div className="divide-y divide-gray-100 max-h-52 overflow-y-auto">
+                {parseResult.rows
+                  .filter((r) => r.status === 'SKIP')
+                  .slice(0, 10)
+                  .map((r, i) => (
+                    <div key={i} className="px-4 py-2.5">
+                      <p className="text-xs font-medium text-gray-800">
+                        Row {r.rowNum} · {r.outletId} · {r.fieldName}
+                      </p>
+                      {r.skipReason && (
+                        <p className="text-xs text-amber-700 mt-0.5">• {r.skipReason}</p>
+                      )}
                     </div>
                   ))}
               </div>

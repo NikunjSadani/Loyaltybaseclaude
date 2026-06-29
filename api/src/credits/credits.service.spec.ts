@@ -671,6 +671,37 @@ describe('CreditsService', () => {
       await service.patchField(admin, 'f1', { action: FieldAction.deactivate });
       expect(mockPrisma.creditField.update.mock.calls[0][0].data.isActive).toBe(false);
     });
+
+    it('persists a valid outletTypeAwards map', async () => {
+      mockPrisma.creditField.findFirst.mockResolvedValue({ id: 'f1' });
+      mockPrisma.creditField.update.mockResolvedValue({ id: 'f1' });
+      const map = { WHOLESALER: 'POINTS', SSS: 'PAYOUT', SUB_STOCKIST: 'NA' };
+      await service.patchField(admin, 'f1', { outletTypeAwards: map });
+      expect(mockPrisma.creditField.update.mock.calls[0][0].data.outletTypeAwards).toEqual(map);
+      // action not supplied → isActive must NOT be touched
+      expect(mockPrisma.creditField.update.mock.calls[0][0].data.isActive).toBeUndefined();
+    });
+
+    it('rejects an invalid award value (cannot misroute money)', async () => {
+      mockPrisma.creditField.findFirst.mockResolvedValue({ id: 'f1' });
+      await expect(
+        service.patchField(admin, 'f1', { outletTypeAwards: { WHOLESALER: 'CASH' } }),
+      ).rejects.toThrow(/POINTS, PAYOUT, or NA/);
+      expect(mockPrisma.creditField.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects an empty body (no action and no award map)', async () => {
+      mockPrisma.creditField.findFirst.mockResolvedValue({ id: 'f1' });
+      await expect(service.patchField(admin, 'f1', {})).rejects.toThrow(/Nothing to update/);
+      expect(mockPrisma.creditField.update).not.toHaveBeenCalled();
+    });
+
+    it('404s when the field does not belong to the tenant', async () => {
+      mockPrisma.creditField.findFirst.mockResolvedValue(null);
+      await expect(
+        service.patchField(admin, 'nope', { outletTypeAwards: { WHOLESALER: 'POINTS' } }),
+      ).rejects.toThrow('Field not found');
+    });
   });
 
   describe('createPayoutDownload', () => {

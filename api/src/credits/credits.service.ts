@@ -16,6 +16,7 @@ import {
   CreatePayoutDownloadDto,
   CreateReversalDto,
   FieldAction,
+  FieldAwardValue,
   ListFieldsQueryDto,
   ListPayoutDownloadsQueryDto,
   ListReversalsQueryDto,
@@ -587,16 +588,50 @@ export class CreditsService {
   }
 
   // ─── PATCH /v1/admin/credits/fields/:id ────────────────────────────────────
+  // Two independent mutations, either (or both) may be supplied:
+  //   • `action`           → flip isActive (activate/deactivate)
+  //   • `outletTypeAwards`  → set the per-outlet-type award map (POINTS/PAYOUT/NA)
+  // The award map decides whether an uploaded row becomes wallet POINTS or a bank
+  // PAYOUT, so each value is strictly validated against the POINTS/PAYOUT/NA set —
+  // a malformed map must never silently misroute money.
   async patchField(user: JwtPayload, id: string, dto: PatchFieldDto) {
     const field = await this.prisma.creditField.findFirst({
       where: { id, clientId: user.clientId },
     });
     if (!field) throw new NotFoundException('Field not found');
 
-    return this.prisma.creditField.update({
-      where: { id },
-      data: { isActive: dto.action === FieldAction.activate },
-    });
+    const data: Prisma.CreditFieldUpdateInput = {};
+
+    if (dto.action !== undefined) {
+      data.isActive = dto.action === FieldAction.activate;
+    }
+
+    if (dto.outletTypeAwards !== undefined) {
+      const VALID = new Set<string>([
+        FieldAwardValue.POINTS,
+        FieldAwardValue.PAYOUT,
+        FieldAwardValue.NA,
+      ]);
+      for (const [outletType, award] of Object.entries(dto.outletTypeAwards)) {
+        if (!outletType || outletType.trim() === '') {
+          throw new BadRequestException('Award map contains a blank outlet-type key.');
+        }
+        if (!VALID.has(award)) {
+          throw new BadRequestException(
+            `Invalid award "${award}" for outlet type "${outletType}". Must be POINTS, PAYOUT, or NA.`,
+          );
+        }
+      }
+      data.outletTypeAwards = dto.outletTypeAwards as Prisma.InputJsonValue;
+    }
+
+    if (Object.keys(data).length === 0) {
+      throw new BadRequestException(
+        'Nothing to update — provide an action (activate/deactivate) or an outletTypeAwards map.',
+      );
+    }
+
+    return this.prisma.creditField.update({ where: { id }, data });
   }
 
   // ─── GET /v1/admin/credits/payout-downloads ────────────────────────────────

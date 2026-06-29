@@ -71,6 +71,15 @@ export class UploadRowDto {
   @IsArray()
   @IsString({ each: true })
   errors: string[] = [];
+
+  /**
+   * Human-readable reason a row was SKIP'd (e.g. NA for its outlet type, or a
+   * blank/zero value). Optional, display-only — carried through to the upload
+   * report; not used by any money-path logic.
+   */
+  @IsOptional()
+  @IsString()
+  skipReason?: string;
 }
 
 /** POST /admin/credits/batches — create a new batch. */
@@ -126,10 +135,36 @@ export enum FieldAction {
   deactivate = 'deactivate',
 }
 
-/** PATCH /admin/credits/fields/:id — activate/deactivate. */
+/**
+ * Award value for a field's per-outlet-type map. POINTS → credited to the
+ * partner wallet; PAYOUT → routed to the bank payout file; NA → row is skipped
+ * for that outlet type. (NA is NOT a Prisma CreditAwardType — it is a "skip"
+ * sentinel that lives only in the field's outletTypeAwards map.)
+ */
+export enum FieldAwardValue {
+  POINTS = 'POINTS',
+  PAYOUT = 'PAYOUT',
+  NA = 'NA',
+}
+
+/**
+ * PATCH /admin/credits/fields/:id — either flip active state (`action`) OR set
+ * the per-outlet-type award map (`outletTypeAwards`). Both are optional; the
+ * service rejects an empty body and validates each award value.
+ */
 export class PatchFieldDto {
+  @IsOptional()
   @IsEnum(FieldAction)
-  action!: FieldAction;
+  action?: FieldAction;
+
+  /**
+   * Maps outlet type code → award value (POINTS | PAYOUT | NA). A missing key is
+   * treated as NA by the parser. Values are validated against FieldAwardValue in
+   * the service so a malformed map can never misroute money.
+   */
+  @IsOptional()
+  @IsObject()
+  outletTypeAwards?: Record<string, string>;
 }
 
 /** GET /admin/credits/payout-downloads — optional ?period filter. */

@@ -885,6 +885,8 @@ export interface CreditUploadRow {
   awardType: 'POINTS' | 'PAYOUT';
   status:    'OK' | 'ERROR' | 'SKIP';
   errors:    string[];
+  /** Human-readable reason a row was SKIP'd (NA for its outlet type, or blank/zero). Display-only. */
+  skipReason?: string;
 }
 
 /** Full result from parsing a Credits & Payouts upload file */

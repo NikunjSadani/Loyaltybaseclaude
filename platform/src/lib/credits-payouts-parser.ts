@@ -169,6 +169,7 @@ export function parseCreditUpload(
           awardType: 'POINTS',
           status:    'SKIP',
           errors:    [],
+          skipReason: 'Value is blank or zero — nothing to credit for this row.',
         });
         continue;
       }
@@ -197,6 +198,7 @@ export function parseCreditUpload(
           awardType: 'POINTS',
           status:    'SKIP',
           errors:    [],
+          skipReason: `Field "${field.name}" is set to Not Applicable (NA) for outlet type "${outlet.type}". Configure its award type in Field Configuration to credit this outlet.`,
         });
         continue;
       }

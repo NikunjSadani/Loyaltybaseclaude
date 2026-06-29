@@ -303,6 +303,32 @@ describe('E — Skip conditions (zero/blank/NA → SKIP, not error)', () => {
     expect(skipRow?.status).toBe('SKIP');
   });
 
+  it('E3a: NA field SKIP row carries skipReason naming the field and outlet type', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_NA]),
+      [['WS-001', 'Anand Wholesale', 500, '']],
+    );
+    const result = parseCreditUpload(buf, { ...DEFAULT_OPTS, fields: [FIELD_NA] });
+    const skipRow = result.rows.find((r) => r.outletId === 'WS-001');
+    expect(skipRow?.status).toBe('SKIP');
+    expect(skipRow?.skipReason).toMatch(/NA Field/);          // field name
+    expect(skipRow?.skipReason).toMatch(/WHOLESALER/);        // outlet type
+    expect(skipRow?.skipReason).toMatch(/Not Applicable/i);
+  });
+
+  it('E2a: blank/zero SKIP row carries the blank/zero skipReason', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL]),
+      [['WS-001', 'Anand Wholesale', 0, '']],
+    );
+    const result = parseCreditUpload(buf, DEFAULT_OPTS);
+    const skipRow = result.rows.find((r) => r.outletId === 'WS-001' && r.fieldId === 'f_vol');
+    expect(skipRow?.status).toBe('SKIP');
+    expect(skipRow?.skipReason).toBe('Value is blank or zero — nothing to credit for this row.');
+  });
+
   it('E4: SKIP rows do not contribute to totals', async () => {
     const { parseCreditUpload } = await import('../credits-payouts-parser');
     const buf = buildXlsx(
