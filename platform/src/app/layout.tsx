@@ -8,6 +8,7 @@ import { ClientConfigProvider } from '@/lib/platform/client-config-context';
 import PwaHead from '@/components/pwa/PwaHead';
 import ServiceWorkerRegister from '@/components/pwa/ServiceWorkerRegister';
 import InstallPrompt from '@/components/pwa/InstallPrompt';
+import PushSubscriptionManager from '@/components/pwa/PushSubscriptionManager';
 import SessionExpiryGuard from '@/components/auth/SessionExpiryGuard';
 import type { PwaScope } from '@/lib/pwa/manifest';
 
@@ -83,6 +84,9 @@ export default async function RootLayout({
         {/* PWA install prompt — self-gates on NEXT_PUBLIC_PWA_INSTALL_ENABLED
             (default OFF) + /sales|/partner + not-already-installed; null otherwise. */}
         <InstallPrompt />
+        {/* PWA push opt-in — self-gates on NEXT_PUBLIC_PWA_PUSH_ENABLED (default OFF)
+            + /sales|/partner + push support; only requests permission on a user gesture. */}
+        <PushSubscriptionManager />
       </body>
     </html>
   );

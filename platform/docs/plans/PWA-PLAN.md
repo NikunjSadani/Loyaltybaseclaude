@@ -57,12 +57,19 @@ Owner asked for a local end-to-end push dry-run before committing to the cutover
 
 Per-tenant manifests **runtime-verified on the live Deoleo staging edge** (`uat.deoleoloyalty.gifsy.in`:
 /sales + /partner manifests 200 with real Deoleo branding + correct scopes; icons 200). **F4 install
-UX DONE** (`1b8d349`). Remaining (cutover-coupled): push FE subscribe (E) + apply `push_subscription`
-migration to staging (double-guard) + VAPID keys + `PUSH_WORKER_ENABLED=true` → live push send/receive
-runtime-verify; the SW ships by emitting `/sw.js` via esbuild (see learning #3) AND setting
-`NEXT_PUBLIC_PWA_SW_ENABLED=true`. Three runtime enable-flags, all default OFF:
-`NEXT_PUBLIC_PWA_SW_ENABLED` (SW register), `PWA_SW_BUILD` (emit /sw.js), `NEXT_PUBLIC_PWA_INSTALL_ENABLED`
-(install prompt).
+UX DONE** (`1b8d349`). **Push FE subscribe (E) DONE (2026-06-29)** — `lib/pwa/push.ts`
+(`subscribeToPush`/`unsubscribeFromPush`/`getVapidPublicKey`/`urlBase64ToUint8Array`) + gated
+`PushSubscriptionManager` (permission only on a user gesture; granted→idempotent re-sync), mounted in the
+root layout; `logout()` best-effort unsubscribes (raced against a 1.5s timeout) so the next user on a shared
+device can't inherit the subscription. Independent audit caught + fixed a HIGH (unsubscribe must use
+`getRegistration()`, NOT `serviceWorker.ready` which never resolves with no SW → would hang logout); re-audit
+SHIP; gate FE vitest 1664 / tsc 0. Remaining (cutover-coupled): apply `push_subscription` migration (auto at
+cutover) + generate VAPID keypair + `PUSH_WORKER_ENABLED=true` + flip the FE flags → live push send/receive
+runtime-verify (on STAGING first — real-device install + push, then replicate on prod). The SW ships by emitting
+`/sw.js` via esbuild (see learning #3) AND `NEXT_PUBLIC_PWA_SW_ENABLED=true`. **Four** runtime enable-flags, all
+default OFF: `NEXT_PUBLIC_PWA_SW_ENABLED` (SW register), `PWA_SW_BUILD` (emit /sw.js),
+`NEXT_PUBLIC_PWA_INSTALL_ENABLED` (install prompt), `NEXT_PUBLIC_PWA_PUSH_ENABLED` (push opt-in) — plus the
+backend `PUSH_WORKER_ENABLED`.
 
 ## Grounding (verified infra — see file:line)
 - **Tenant resolution:** `platform/src/proxy.ts:40-81` resolves slug from `x-forwarded-host` (Cloudflare Worker)

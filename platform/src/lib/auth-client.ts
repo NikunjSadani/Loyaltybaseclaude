@@ -13,6 +13,7 @@
 ─────────────────────────────────────────────────────────────────────────────── */
 
 import { assumeTenantAction, exitTenantAction, logoutAction } from './auth-actions';
+import { unsubscribeFromPush } from './pwa/push';
 
 const USER_KEY = 'user';
 const ASSUMED_BRAND_KEY = 'assumedBrand';
@@ -84,6 +85,19 @@ export function getRoleHome(role?: string | null): string {
 
 /** Clear the session (httpOnly cookies server-side + local display state) and return to login. */
 export async function logout(): Promise<void> {
+  // Best-effort: drop this browser's push subscription BEFORE clearing the session
+  // (the /api/push/unsubscribe call still carries the cookie here), so the next user
+  // on this device never inherits the previous user's push notifications. No-ops if
+  // there's no subscription. Raced against a hard timeout so it can NEVER block logout
+  // — even if a browser stalls the SW/push APIs, logout still proceeds.
+  try {
+    await Promise.race([
+      unsubscribeFromPush(),
+      new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+    ]);
+  } catch {
+    /* push unsubscribe is best-effort; never block logout */
+  }
   try {
     await logoutAction();
   } catch {
