@@ -122,7 +122,7 @@ jobs:
             --cpu-throttling \
             --add-cloudsql-instances=${{ env.SQL_INSTANCE }} \
             --vpc-connector=gifsy-connector \
-            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=7d,JWT_REFRESH_EXPIRES_IN=30d,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,FIXED_OTP=123456,ALLOW_FIXED_OTP=true" \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=7d,JWT_REFRESH_EXPIRES_IN=30d,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,FIXED_OTP=123456,ALLOW_FIXED_OTP=true,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in" \
             --set-secrets="\
               DATABASE_URL=DATABASE_URL_STAGING:latest,\
               JWT_SECRET=JWT_SECRET_STAGING:latest,\
@@ -132,6 +132,8 @@ jobs:
               MSG91_SMS_TEMPLATE_ID=MSG91_SMS_TEMPLATE_ID:latest,\
               GCS_BUCKET=GCS_BUCKET:latest,\
               GCP_PROJECT_ID=GCP_PROJECT_ID:latest,\
+              VAPID_PUBLIC_KEY=VAPID_PUBLIC_KEY_STAGING:latest,\
+              VAPID_PRIVATE_KEY=VAPID_PRIVATE_KEY_STAGING:latest,\
               CORS_ORIGINS=CORS_ORIGINS_STAGING:latest"
 
   # ── Build & Deploy Frontend (staging) ────────────────────────────────────────
@@ -160,6 +162,9 @@ jobs:
         run: |
           docker build \
             --build-arg NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL_STAGING }} \
+            --build-arg NEXT_PUBLIC_PWA_SW_ENABLED=true \
+            --build-arg NEXT_PUBLIC_PWA_INSTALL_ENABLED=true \
+            --build-arg NEXT_PUBLIC_PWA_PUSH_ENABLED=true \
             -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:staging-${{ github.sha }} \
             -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:staging \
             ./platform
