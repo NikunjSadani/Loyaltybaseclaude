@@ -34,8 +34,11 @@
 > | **First `GIFSY_ADMIN` user** | No "create platform super-admin" endpoint exists. The admin users endpoint (`POST /v1/admin/users`) requires an *already-authenticated* admin, and `assertRoleAssignable` lets **only a GIFSY_ADMIN mint another GIFSY_ADMIN or a CLIENT_ADMIN** (`api/src/admin-core/admin-core.service.ts:53-78`). So you cannot bootstrap the first admin through the app. | `api/prisma/seed.ts:132-160` — `clientId='gifsy'`, `role=GIFSY_ADMIN`, `status=ACTIVE`, phone from `GIFSY_ADMIN_PHONE` (seed default `9830011252`). |
 > | **`OutletType` master rows** (`WHOLESALER`, `SSS`, `SSS_TOT`, `SUB_STOCKIST`) | No OutletType-create endpoint anywhere (`api/src/kyc`, `api/src/gifsy`, `api/src/admin-*` checked). `GifsyService.createClient` only **iterates existing** `OutletType` rows to provision per-tenant configs (`api/src/gifsy/gifsy.service.ts:74-90`); it does not create the master rows. | `api/prisma/seed.ts` `OUTLET_TYPES` (the 4 codes above) — these are **global**, not per-tenant. |
 >
-> **✅ BUILT (2026-06-29):** the bootstrap script is `api/prisma/bootstrap.ts` — idempotent, additive-only,
-> double-guarded (`BOOTSTRAP_CONFIRM === current_database()`), audited SHIP. The Dockerfile compiles it to
+> **✅ BUILT + DRY-RUN-VERIFIED (2026-06-29):** the bootstrap script is `api/prisma/bootstrap.ts` — idempotent,
+> additive-only, double-guarded (`BOOTSTRAP_CONFIRM === current_database()`), audited SHIP. **Runtime-verified on
+> real infra:** ran as a one-off Cloud Run Job against `gifsy_staging` (exit 0) — the guard matched, all 4 OutletTypes
+> + the GIFSY_ADMIN were correctly skipped as already-present (idempotent no-op), proving the exact prod mechanism.
+> The Dockerfile compiles it to
 > `prisma/bootstrap.js` into the prod image (mirroring `seed.js`), so it runs via an in-VPC Cloud Run Job
 > exactly like `gifsy-migrate`. Defaults bake in the agreed admin (Nikunj / 9830011252).
 >
