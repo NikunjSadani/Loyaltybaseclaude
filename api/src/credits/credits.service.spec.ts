@@ -56,6 +56,7 @@ const mockPrisma = {
   creditPayoutDownload: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn() },
   creditReversal: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
   outlet: { findMany: jest.fn() },
+  outletTypeClientConfig: { findMany: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
@@ -661,6 +662,26 @@ describe('CreditsService', () => {
       mockPrisma.creditField.create.mockResolvedValue({ id: 'f2' });
       await service.createField(admin, { name: 'New', isSeparatePayout: true, outletTypeAwards: {} });
       expect(mockPrisma.creditField.create.mock.calls[0][0].data.order).toBe(5);
+    });
+  });
+
+  describe('listOutletTypes', () => {
+    it('returns the tenant ENABLED+active outlet types as {code,label}, sorted, displayName preferred', async () => {
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { displayName: null, outletType: { code: 'WHOLESALER', name: 'Wholesaler' } },
+        { displayName: 'Super Stockist', outletType: { code: 'SSS', name: 'SSS' } },
+      ]);
+      const res = await service.listOutletTypes(admin);
+      // sorted by code: SSS before WHOLESALER; displayName preferred when present
+      expect(res).toEqual([
+        { code: 'SSS', label: 'Super Stockist' },
+        { code: 'WHOLESALER', label: 'Wholesaler' },
+      ]);
+      // tenant-scoped + enabled/active filter
+      const where = mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0].where;
+      expect(where.clientId).toBe(admin.clientId);
+      expect(where.isEnabled).toBe(true);
+      expect(where.outletType).toEqual({ isActive: true });
     });
   });
 

@@ -41,11 +41,22 @@ function jsonOk(data: unknown) {
   return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data }) });
 }
 
+/** The tenant's enabled outlet types now come from the backend (dynamic, not hardcoded). */
+const OUTLET_TYPES = [
+  { code: 'SSS',          label: 'SSS' },
+  { code: 'SSS_TOT',      label: 'SSS TOT' },
+  { code: 'SUB_STOCKIST', label: 'Sub-Stockist' },
+  { code: 'WHOLESALER',   label: 'Wholesaler' },
+];
+
 /** Route fetch by URL + method, recording every call for assertions. */
 function installFetch() {
   const calls: { url: string; init?: RequestInit }[] = [];
   const fn = vi.fn((url: string, init?: RequestInit) => {
     calls.push({ url, init });
+    if (url.startsWith('/api/admin/credits/outlet-types')) {
+      return jsonOk(OUTLET_TYPES);
+    }
     if (url.startsWith('/api/admin/credits/fields') && (!init?.method || init.method === 'GET')) {
       return jsonOk(FIELDS);
     }

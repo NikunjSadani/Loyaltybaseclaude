@@ -103,6 +103,15 @@ export class CreditsController {
     return this.credits.eligibleOutlets(user);
   }
 
+  // ─── Outlet types (for the field award editor) ─────────────────────────────
+
+  @Get('outlet-types')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  listOutletTypes(@CurrentUser() user: JwtPayload) {
+    return this.credits.listOutletTypes(user);
+  }
+
   // ─── Fields ────────────────────────────────────────────────────────────────
 
   @Get('fields')

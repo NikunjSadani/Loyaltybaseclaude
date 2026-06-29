@@ -549,6 +549,26 @@ export class CreditsService {
     }));
   }
 
+  // ─── GET /v1/admin/credits/outlet-types ────────────────────────────────────
+  // The award editor needs the tenant's ENABLED outlet types so an admin can set
+  // POINTS/PAYOUT/NA per type without a hardcoded list. Keyed on OutletType.code —
+  // the SAME value the upload parser resolves against (`outletTypeAwards[outlet.type]`,
+  // where outlet.type is the OutletType.code) — so the configured map keys always
+  // match the codes stored on outlets. Tenant-scoped; enabled + active only.
+  async listOutletTypes(user: JwtPayload): Promise<{ code: string; label: string }[]> {
+    const configs = await this.prisma.outletTypeClientConfig.findMany({
+      where: {
+        clientId: user.clientId,
+        isEnabled: true,
+        outletType: { isActive: true },
+      },
+      include: { outletType: { select: { code: true, name: true } } },
+    });
+    return configs
+      .map((c) => ({ code: c.outletType.code, label: c.displayName ?? c.outletType.name }))
+      .sort((a, b) => a.code.localeCompare(b.code));
+  }
+
   // ─── GET /v1/admin/credits/fields ──────────────────────────────────────────
   async listFields(user: JwtPayload, q: ListFieldsQueryDto) {
     const activeOnly = q.active === 'true';

@@ -15,14 +15,19 @@ import {
 import { useAdminSession } from '@/lib/admin-session';
 import type { CreditField, FieldAwardType } from '@/types';
 
-const OUTLET_TYPES = ['WHOLESALER', 'SSS', 'SUB_STOCKIST', 'SSS_TOT'] as const;
 const AWARD_OPTIONS: readonly FieldAwardType[] = ['POINTS', 'PAYOUT', 'NA'];
-const OUTLET_TYPE_LABELS: Record<string, string> = {
-  WHOLESALER:   'Wholesaler',
-  SSS:          'SSS',
-  SUB_STOCKIST: 'Sub-Stockist',
-  SSS_TOT:      'SSS TOT',
-};
+
+/**
+ * A tenant outlet type the award editor can target.
+ *  - `code`  = the OutletType.code the upload parser resolves on
+ *              (`field.outletTypeAwards[outlet.type]`), so award-map keys always
+ *              match the codes stored on outlets;
+ *  - `label` = display name.
+ * Fetched from GET /api/admin/credits/outlet-types — NOT hardcoded — so adding a
+ * new outlet type to the tenant needs no code change.
+ */
+type OutletTypeOption = { code: string; label: string };
+
 const AWARD_COLORS: Record<FieldAwardType, string> = {
   POINTS: 'bg-blue-100 text-blue-700',
   PAYOUT: 'bg-emerald-100 text-emerald-700',
@@ -54,10 +59,12 @@ function isMoneyPathFlip(prev: FieldAwardType, next: FieldAwardType): boolean {
  */
 function FieldRow({
   field,
+  outletTypes,
   onToggleActive,
   onSaved,
 }: {
   field: CreditField;
+  outletTypes: OutletTypeOption[];
   onToggleActive: (f: CreditField) => void;
   onSaved: () => void | Promise<void>;
 }) {
@@ -67,15 +74,15 @@ function FieldRow({
   const [errMsg, setErrMsg] = useState('');
 
   // Outlet types whose award changes between POINTS and PAYOUT vs the saved value.
-  const flippedTypes = OUTLET_TYPES.filter((ot) =>
-    isMoneyPathFlip(awardFor(field, ot), draft[ot] ?? awardFor(field, ot)),
+  const flippedTypes = outletTypes.filter((t) =>
+    isMoneyPathFlip(awardFor(field, t.code), draft[t.code] ?? awardFor(field, t.code)),
   );
 
   function expand() {
     if (!open) {
       // Initialise the draft from the saved map every time we open.
       const init: Record<string, FieldAwardType> = {};
-      for (const ot of OUTLET_TYPES) init[ot] = awardFor(field, ot);
+      for (const t of outletTypes) init[t.code] = awardFor(field, t.code);
       setDraft(init);
       setState('idle');
       setErrMsg('');
@@ -92,9 +99,13 @@ function FieldRow({
   async function persist() {
     setState('saving');
     setErrMsg('');
-    // Send the full map for all outlet types.
-    const outletTypeAwards: Record<string, FieldAwardType> = {};
-    for (const ot of OUTLET_TYPES) outletTypeAwards[ot] = draft[ot] ?? awardFor(field, ot);
+    // Send the full map: start from the field's saved map (so an award for a type
+    // not currently shown — e.g. a since-disabled type — is preserved, never wiped),
+    // then overlay the displayed types' draft values.
+    const outletTypeAwards: Record<string, FieldAwardType> = {
+      ...(field.outletTypeAwards as Record<string, FieldAwardType>),
+    };
+    for (const t of outletTypes) outletTypeAwards[t.code] = draft[t.code] ?? awardFor(field, t.code);
     try {
       const res = await fetch(`/api/admin/credits/fields/${field.id}`, {
         method:  'PATCH',
@@ -147,14 +158,14 @@ function FieldRow({
           </div>
           {/* Read-only badges (always visible) */}
           <div className="flex gap-1.5 mt-1.5 flex-wrap">
-            {OUTLET_TYPES.map((ot) => {
-              const award = awardFor(field, ot);
+            {outletTypes.map((t) => {
+              const award = awardFor(field, t.code);
               return (
                 <span
-                  key={ot}
+                  key={t.code}
                   className={`text-xs rounded-full px-2 py-0.5 ${AWARD_COLORS[award]}`}
                 >
-                  {OUTLET_TYPE_LABELS[ot]}: {award}
+                  {t.label}: {award}
                 </span>
               );
             })}
@@ -191,13 +202,19 @@ function FieldRow({
         <div className="px-5 pb-4 -mt-1">
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 space-y-3">
             <p className="text-xs font-semibold text-gray-700">Award per outlet type</p>
+            {outletTypes.length === 0 ? (
+              <p className="text-xs text-gray-500">
+                No outlet types are enabled for this client yet, so awards can't be set.
+                Enable outlet types first, then return here.
+              </p>
+            ) : (
             <div className="space-y-2">
-              {OUTLET_TYPES.map((ot) => {
-                const value = draft[ot] ?? awardFor(field, ot);
+              {outletTypes.map((t) => {
+                const value = draft[t.code] ?? awardFor(field, t.code);
                 return (
-                  <div key={ot} className="flex items-center justify-between gap-3">
+                  <div key={t.code} className="flex items-center justify-between gap-3">
                     <span className="text-xs text-gray-600 w-28 flex-shrink-0">
-                      {OUTLET_TYPE_LABELS[ot]}
+                      {t.label}
                     </span>
                     <div className="inline-flex rounded-lg border border-gray-300 overflow-hidden bg-white">
                       {AWARD_OPTIONS.map((opt) => {
@@ -207,7 +224,7 @@ function FieldRow({
                             key={opt}
                             type="button"
                             aria-pressed={active}
-                            onClick={() => setAward(ot, opt)}
+                            onClick={() => setAward(t.code, opt)}
                             className={`px-3 py-1.5 text-xs font-medium transition-colors ${
                               active
                                 ? 'bg-[var(--brand-primary)] text-white'
@@ -223,15 +240,16 @@ function FieldRow({
                 );
               })}
             </div>
+            )}
 
             {/* Money-path confirm */}
             {state === 'confirm' && (
               <div className="flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
                 <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
                 <div className="text-xs text-amber-800">
-                  {flippedTypes.map((ot) => (
-                    <p key={ot}>
-                      This changes whether <strong>{OUTLET_TYPE_LABELS[ot]}</strong> amounts
+                  {flippedTypes.map((t) => (
+                    <p key={t.code}>
+                      This changes whether <strong>{t.label}</strong> amounts
                       become wallet points or bank payouts. Save?
                     </p>
                   ))}
@@ -279,6 +297,7 @@ function FieldRow({
 export default function FieldConfigPage() {
   const session = useAdminSession();
   const [fields,   setFields]   = useState<CreditField[]>([]);
+  const [outletTypes, setOutletTypes] = useState<OutletTypeOption[]>([]);
   const [newName,  setNewName]  = useState('');
   const [newSep,   setNewSep]   = useState(false);
   const [creating, setCreating] = useState(false);
@@ -297,7 +316,19 @@ export default function FieldConfigPage() {
     }
   }, []);
 
-  useEffect(() => { fetchFields(); }, [fetchFields]);
+  // The tenant's ENABLED outlet types drive the award editor (no hardcoded list),
+  // so adding a new outlet type to the client needs no code change here.
+  const fetchOutletTypes = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/credits/outlet-types');
+      const json = await res.json();
+      if (json.success && Array.isArray(json.data)) setOutletTypes(json.data);
+    } catch {
+      // silently fail — the editor will show its "no outlet types" empty state
+    }
+  }, []);
+
+  useEffect(() => { fetchFields(); fetchOutletTypes(); }, [fetchFields, fetchOutletTypes]);
 
   async function handleCreate() {
     setError('');
@@ -413,6 +444,7 @@ export default function FieldConfigPage() {
             <FieldRow
               key={f.id}
               field={f}
+              outletTypes={outletTypes}
               onToggleActive={handleToggleActive}
               onSaved={fetchFields}
             />
