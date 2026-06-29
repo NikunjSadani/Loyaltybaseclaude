@@ -29,6 +29,7 @@ import {
   TrendingUp,
   Coins,
   Landmark,
+  Smartphone,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useGifsySettings } from '@/lib/gifsy-settings';
@@ -119,6 +120,7 @@ const ALL_NAV_ITEMS = [
   { href: '/admin/tickets',  label: 'Tickets',          icon: TicketCheck,   featureFlag: null },
   { href: '/admin/banners',  label: 'Banners',          icon: Megaphone,     featureFlag: null },
   { href: '/admin/reports',  label: 'Reports',          icon: FileBarChart2, featureFlag: null },
+  { href: '/admin/app-adoption', label: 'App Adoption', icon: Smartphone,    featureFlag: null },
   { href: '/admin/settings', label: 'Settings',         icon: Settings,      featureFlag: null },
 ];
 

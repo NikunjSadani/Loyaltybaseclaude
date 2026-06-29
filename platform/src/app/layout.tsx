@@ -9,6 +9,7 @@ import PwaHead from '@/components/pwa/PwaHead';
 import ServiceWorkerRegister from '@/components/pwa/ServiceWorkerRegister';
 import InstallPrompt from '@/components/pwa/InstallPrompt';
 import PushSubscriptionManager from '@/components/pwa/PushSubscriptionManager';
+import InstallBeacon from '@/components/pwa/InstallBeacon';
 import SessionExpiryGuard from '@/components/auth/SessionExpiryGuard';
 import type { PwaScope } from '@/lib/pwa/manifest';
 
@@ -87,6 +88,9 @@ export default async function RootLayout({
         {/* PWA push opt-in — self-gates on NEXT_PUBLIC_PWA_PUSH_ENABLED (default OFF)
             + /sales|/partner + push support; only requests permission on a user gesture. */}
         <PushSubscriptionManager />
+        {/* PWA install telemetry — self-gates on NEXT_PUBLIC_PWA_INSTALL_ENABLED
+            (default OFF); reports a home-screen install once per session, no UI. */}
+        <InstallBeacon />
       </body>
     </html>
   );
