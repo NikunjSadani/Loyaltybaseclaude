@@ -162,6 +162,9 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|logos/|favicons/|icons/|images/).*)',
+    // sw.js + offline.html are static PUBLIC PWA assets — they MUST be fetchable
+    // without auth (the browser fetches /sw.js to register the service worker), so
+    // they are excluded from the auth middleware like the other static prefixes.
+    '/((?!_next/static|_next/image|favicon.ico|logos/|favicons/|icons/|images/|sw.js|offline.html).*)',
   ],
 }
