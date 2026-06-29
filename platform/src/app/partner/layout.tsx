@@ -12,9 +12,7 @@ import { Sidebar } from '@/components/layout/sidebar';
 import { SiteFooter } from '@/components/layout/site-footer';
 import type { NavItem } from '@/components/layout/nav-bottom';
 import type { SidebarSection } from '@/components/layout/sidebar';
-import {
-  usePartnerSession, OUTLET_TYPE_LABELS, OUTLET_TYPE_COLORS,
-} from '@/lib/partner-session';
+import { usePartnerSession } from '@/lib/partner-session';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { RequireAuth } from '@/components/auth/require-auth';
@@ -84,8 +82,6 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
     },
   ];
 
-  const typeColors = OUTLET_TYPE_COLORS[session.outletType];
-
   return (
     <div className="min-h-screen flex">
       <Sidebar
@@ -109,12 +105,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
                 </div>
               </Link>
               <div className="min-w-0">
-                <div className="flex items-center gap-2 min-w-0">
-                  <p className="text-sm font-bold text-gray-900 leading-tight truncate">{identity.businessName}</p>
-                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${typeColors.bg} ${typeColors.text}`}>
-                    {OUTLET_TYPE_LABELS[session.outletType]}
-                  </span>
-                </div>
+                <p className="text-sm font-bold text-gray-900 leading-tight truncate">{identity.businessName}</p>
                 <p className="text-xs text-gray-400 leading-tight truncate">
                   {identity.ownerName}
                 </p>
