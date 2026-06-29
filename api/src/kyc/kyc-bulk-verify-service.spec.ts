@@ -12,6 +12,7 @@ import * as XLSX from 'xlsx';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { KycService } from './kyc.service';
+import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
@@ -128,6 +129,15 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
         KycService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: NotificationsService, useValue: mockNotifications },
+        {
+          provide: SalesNotificationsService,
+          useValue: {
+            outletsAssigned: jest.fn(),
+            kycSubmittedForApproval: jest.fn(),
+            kycBounced: jest.fn(),
+            targetsUploaded: jest.fn(),
+          },
+        },
         { provide: Msg91Service, useValue: { sendOtp: jest.fn() } },
         { provide: StorageService, useValue: mockStorage },
         { provide: JwtService, useValue: { sign: jest.fn(), verify: jest.fn() } },

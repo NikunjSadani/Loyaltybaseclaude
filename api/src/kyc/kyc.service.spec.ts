@@ -15,6 +15,7 @@ import { ConfigService } from '@nestjs/config';
 import { KycService } from './kyc.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -163,6 +164,15 @@ describe('KycService', () => {
         KycService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: NotificationsService, useValue: mockNotifications },
+        {
+          provide: SalesNotificationsService,
+          useValue: {
+            outletsAssigned: jest.fn(),
+            kycSubmittedForApproval: jest.fn(),
+            kycBounced: jest.fn(),
+            targetsUploaded: jest.fn(),
+          },
+        },
         { provide: Msg91Service, useValue: mockMsg91 },
         { provide: StorageService, useValue: mockStorage },
         { provide: JwtService, useValue: mockJwt },

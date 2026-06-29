@@ -14,6 +14,7 @@ import { AdminCoreService } from './admin-core.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockTx = {
@@ -65,6 +66,15 @@ describe('AdminCoreService', () => {
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TenantService, useValue: mockTenant },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
+        {
+          provide: SalesNotificationsService,
+          useValue: {
+            outletsAssigned: jest.fn(),
+            kycSubmittedForApproval: jest.fn(),
+            kycBounced: jest.fn(),
+            targetsUploaded: jest.fn(),
+          },
+        },
       ],
     }).compile();
     service = module.get(AdminCoreService);

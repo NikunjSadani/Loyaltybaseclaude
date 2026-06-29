@@ -14,6 +14,7 @@ import { ConfigService } from '@nestjs/config';
 import * as XLSX from 'xlsx';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
@@ -139,6 +140,7 @@ export class KycService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly salesNotifications: SalesNotificationsService,
     private readonly msg91: Msg91Service,
     private readonly storage: StorageService,
     private readonly jwt: JwtService,
@@ -1063,6 +1065,10 @@ export class KycService {
 
     await Promise.all(docPromises);
 
+    // Notify the routed approver (sales) that a KYC is pending their approval.
+    // Fire-and-forget + tenant-scoped recipient resolution; never blocks/fails submit.
+    await this.salesNotifications.kycSubmittedForApproval(user.clientId, user.sub, outlet.name);
+
     return { submissionId: submission.id, status, escalatedFrom };
   }
 
@@ -1691,6 +1697,18 @@ export class KycService {
       `Your KYC was rejected. Reason: ${reason}`,
       { reason, requiredAction: requiredAction ?? '' },
       submission.user.phone ?? undefined,
+    );
+
+    // Also notify the responsible SALES rep that their KYC was bounced back.
+    // Use the SUBMISSION's own tenant (not user.clientId): a GIFSY_ADMIN rejecting
+    // without an assume-token carries the GIFSY home clientId, which would resolve no
+    // outlet and silently skip the rep's push. submission.user.clientId is the outlet
+    // owner's real tenant — the rep lives there too.
+    await this.salesNotifications.kycBounced(
+      submission.user.clientId,
+      submission.partnerId,
+      status === 'RE_UPLOAD_REQUIRED' ? 'RE_UPLOAD_REQUIRED' : 'REJECTED',
+      reason ?? null,
     );
 
     return {

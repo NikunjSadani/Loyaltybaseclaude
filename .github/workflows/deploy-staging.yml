@@ -134,6 +134,7 @@ jobs:
               GCP_PROJECT_ID=GCP_PROJECT_ID:latest,\
               VAPID_PUBLIC_KEY=VAPID_PUBLIC_KEY_STAGING:latest,\
               VAPID_PRIVATE_KEY=VAPID_PRIVATE_KEY_STAGING:latest,\
+              PUSH_DRAIN_SECRET=PUSH_DRAIN_SECRET_STAGING:latest,\
               CORS_ORIGINS=CORS_ORIGINS_STAGING:latest"
 
   # ── Build & Deploy Frontend (staging) ────────────────────────────────────────

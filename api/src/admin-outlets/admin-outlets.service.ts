@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { KycStatus, OutletKycIntent, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   BulkDeleteOutletsDto,
@@ -169,7 +170,10 @@ export interface ReKycRowResult {
 export class AdminOutletsService {
   private readonly logger = new Logger(AdminOutletsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly salesNotifications: SalesNotificationsService,
+  ) {}
 
   /** GET /v1/admin/outlets — tenant-scoped outlet list with the active XSR and real KYC status. */
   async list(user: JwtPayload) {
@@ -350,6 +354,9 @@ export class AdminOutletsService {
     let updated = 0;
     let reactivated = 0;
     const now = new Date();
+    // Per-rep tally of NEWLY CREATED outlets — notify each rep once after the loop
+    // (a bulk upload assigning many outlets → one "N new outlets" push per rep, not N).
+    const newlyAssigned = new Map<string, number>();
 
     for (const row of dto.rows) {
       const errors: string[] = [];
@@ -431,7 +438,16 @@ export class AdminOutletsService {
       if (action === 'CREATE') created++;
       else if (action === 'REACTIVATE') reactivated++;
       else updated++;
+      // A brand-new outlet assigned to a rep = a new KYC for them to do.
+      if (action === 'CREATE' && salesUserId) {
+        newlyAssigned.set(salesUserId, (newlyAssigned.get(salesUserId) ?? 0) + 1);
+      }
       rowResults.push({ rowNum: row.rowNum, outletId: outletCode, status: 'OK', action, errors: [] });
+    }
+
+    // Notify each rep of the new outlet(s) assigned to them for KYC (one push per rep).
+    for (const [salesUserId, count] of newlyAssigned) {
+      await this.salesNotifications.outletsAssigned(clientId, salesUserId, count);
     }
 
     const errorRows = rowResults.filter((r) => r.status === 'ERROR');

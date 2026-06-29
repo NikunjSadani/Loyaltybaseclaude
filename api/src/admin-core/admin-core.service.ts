@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Prisma, KycStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -42,6 +43,7 @@ export class AdminCoreService {
     private readonly prisma: PrismaService,
     private readonly tenant: TenantService,
     private readonly tenantSettings: TenantSettingsService,
+    private readonly salesNotifications: SalesNotificationsService,
   ) {}
 
   // ─── Role assignment allow-list (GLB-4) ─────────────────────────────────────
@@ -423,6 +425,9 @@ export class AdminCoreService {
           },
         });
       });
+
+      // Notify the new XSR of the outlet(s) reassigned to them for KYC.
+      await this.salesNotifications.outletsAssigned(clientId, newXsr.id, outlets.length);
 
       return { reassigned: outlets.length, notFound: outletIds.length - outlets.length };
     }

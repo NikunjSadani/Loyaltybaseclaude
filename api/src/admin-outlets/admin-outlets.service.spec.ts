@@ -9,6 +9,7 @@ import { Prisma } from '@prisma/client';
 import { AdminOutletsService } from './admin-outlets.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockTx = {
@@ -59,6 +60,15 @@ describe('AdminOutletsService', () => {
         AdminOutletsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: StorageService, useValue: mockStorage },
+        {
+          provide: SalesNotificationsService,
+          useValue: {
+            outletsAssigned: jest.fn(),
+            kycSubmittedForApproval: jest.fn(),
+            kycBounced: jest.fn(),
+            targetsUploaded: jest.fn(),
+          },
+        },
       ],
     }).compile();
     service = module.get(AdminOutletsService);

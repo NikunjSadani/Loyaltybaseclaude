@@ -25,6 +25,7 @@ import { Prisma } from '@prisma/client';
 import * as XLSX from 'xlsx';
 import { TargetsService } from './targets.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   UpsertKpiDefDto,
@@ -137,6 +138,15 @@ describe('TargetsService', () => {
       providers: [
         TargetsService,
         { provide: PrismaService, useValue: mockPrisma },
+        {
+          provide: SalesNotificationsService,
+          useValue: {
+            outletsAssigned: jest.fn(),
+            kycSubmittedForApproval: jest.fn(),
+            kycBounced: jest.fn(),
+            targetsUploaded: jest.fn(),
+          },
+        },
       ],
     }).compile();
     service = module.get(TargetsService);

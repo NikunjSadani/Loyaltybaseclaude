@@ -21,6 +21,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   ListKpisQueryDto,
@@ -86,7 +87,10 @@ const DEOLEO_DEFAULT_KPIS: Array<{
 
 @Injectable()
 export class TargetsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly salesNotifications: SalesNotificationsService,
+  ) {}
 
   // ─── KpiDef: list ──────────────────────────────────────────────────────────
 
@@ -476,6 +480,18 @@ export class TargetsService {
 
       return batchRecord;
     });
+
+    // Notify the assigned rep (XSR) + their manager (SO) for every outlet that got a
+    // target this upload. Fire-and-forget + tenant-scoped; never blocks the upload.
+    const notifiedCodes = new Set<string>();
+    for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
+      if (isMonthLocked(month, currentMonth)) continue;
+      for (const [outletCode, kpiMap] of Object.entries(outletMap)) {
+        if (Object.keys(kpiMap).length === 0) continue;
+        notifiedCodes.add(outletCode);
+      }
+    }
+    await this.salesNotifications.targetsUploaded(user.clientId, [...notifiedCodes]);
 
     return {
       batchId:       batch.id,
