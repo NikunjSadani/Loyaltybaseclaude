@@ -364,6 +364,12 @@ present; visibility shows OFF.
 
 **Goal:** confirm prod is healthy and real users can log in and complete an end-to-end flow on the branded domain.
 
+> **✅ OTP SMOKE DONE (2026-06-30).** The owner logged into the prod operator console **`https://app.gifsy.in`** as
+> **GIFSY_ADMIN (9830011252)** with a **real SMS OTP** — proving **MSG91 prod is live** and real users can authenticate
+> against the migrated prod schema (items 1, 2, 5 below covered for the GIFSY operator). What remains in Step 6 is the
+> **per-role matrix on the Deoleo domain + the end-to-end money path**, which depend on **Step 5** (Deoleo data load).
+> So the only outstanding go-live item is **Step 5**.
+
 **Do / Verify:**
 1. **API health = 200:**
    ```bash
@@ -390,13 +396,16 @@ the Rollback note below.
 
 ---
 
-## Step 7 — Activate / verify prod PWA  **[claude]**
+## Step 7 — Activate / verify prod PWA + points-expiry sweep  **[claude]**
 
-**Goal:** confirm push delivery works in prod (the staging wiring is already device-verified; this replicates it).
-Canonical build detail: [`../PWA-PLAN.md`](../PWA-PLAN.md).
+**Goal:** confirm push delivery works in prod (the staging wiring is already device-verified; this replicates it)
+**and** stand up the daily points-expiry sweep job. Canonical build detail: [`../PWA-PLAN.md`](../PWA-PLAN.md).
 
 **Pre-reqs already done:** Step 1 created the 3 prod secrets; `prep/prod-pwa-activation` brought the prod
-build-args + api env/secret refs to `main` at Step 3; the `pwa_install` migration applied at Step 3.
+build-args + api env/secret refs to `main` at Step 3; the `pwa_install` migration applied at Step 3. **For the
+expiry sweep:** the prod secret `EXPIRE_SWEEP_SECRET` **already exists** and `deploy.yml` **already references it**,
+and the `20260630130000_point_expiry_default_unique` migration **auto-applies at Step 3** via the pipeline migrate
+step — so no extra secret/deploy work is needed here; only the scheduler job below.
 
 **Do:**
 1. **Create the prod scheduler job** (drives delivery — see the TRAP below):
@@ -412,14 +421,31 @@ build-args + api env/secret refs to `main` at Step 3; the `pwa_install` migratio
 2. **Drain endpoint smoke:** `POST $API_PROD/v1/push/drain` with **no** header → **403** (fail-closed); with the
    secret header → **201**.
 3. **One real push reaches a device** — confirm `push-drain-prod` ticks and a notification is delivered.
+4. **Create the prod points-expiry sweep job** (mirrors the `push-drain-prod` block above — daily 00:30 IST):
+   ```bash
+   API_PROD=https://api.gifsy.in
+   SWEEP_SECRET=$(gcloud secrets versions access latest --secret=EXPIRE_SWEEP_SECRET --project gifsy-platform)
+   gcloud scheduler jobs create http expire-sweep-prod \
+     --location asia-south1 --project gifsy-platform \
+     --schedule "30 0 * * *" --time-zone "Asia/Kolkata" \
+     --uri "$API_PROD/v1/wallet/expire-sweep" --http-method POST \
+     --headers "x-expire-secret=$SWEEP_SECRET" --message-body '{}' --attempt-deadline 60s
+   ```
+   > `30 0 * * *` Asia/Kolkata = **00:30 IST**, matching `expire-sweep-staging`. ⚠️ Header is **`x-expire-secret`**
+   > (the sweep endpoint's header), NOT push-drain's `x-drain-secret`. (Both this and the prod secret
+   > `EXPIRE_SWEEP_SECRET` + its `deploy.yml` ref already exist; the `20260630130000_point_expiry_default_unique`
+   > migration applied at Step 3.) Not urgent — prod has no earned points yet, so nothing is due to expire at launch.
+5. **Sweep endpoint smoke:** `POST $API_PROD/v1/wallet/expire-sweep` with **no** header → **403** (fail-closed);
+   with the secret header → **201**.
 
 > 🔑 **TRAP:** Cloud Run `min-instances=1` alone does **NOT** keep background `@Interval` workers ticking — CPU is
-> throttled between requests. The **scheduler** (step 1) is what drives delivery.
+> throttled between requests. The **scheduler** (steps 1 & 4) is what drives delivery / the sweep.
 
-**Verify:** scheduler job exists + ticking; 403/201 behaviour correct; a device received a real push.
+**Verify:** both scheduler jobs (`push-drain-prod`, `expire-sweep-prod`) exist + ticking; 403/201 behaviour correct
+for both `/v1/push/drain` and `/v1/wallet/expire-sweep`; a device received a real push.
 
-**Rollback:** delete the scheduler job (`gcloud scheduler jobs delete push-drain-prod --location asia-south1`);
-PWA is additive and flag-gated.
+**Rollback:** delete the scheduler job(s) (`gcloud scheduler jobs delete push-drain-prod --location asia-south1`;
+`gcloud scheduler jobs delete expire-sweep-prod --location asia-south1`); PWA + sweep are additive / fail-closed.
 
 ---
 
@@ -456,6 +482,6 @@ almost never needed:
 - [x] **Step 3 [owner]:** `main` updated (**`b3ab2e0` → `2fa020c`**) · `production` gate approved by owner · both deploy jobs green · 8 migrations applied · serving SHA == `main` HEAD (both services `2fa020c`).
 - [x] **Step 4 [owner-go/claude]:** bootstrap job exit 0 · GIFSY_ADMIN (Nikunj/9830011252) created · 4 OutletTypes present (SSS/WHOLESALER/SUB_STOCKIST/SSS_TOT).
 - [ ] **Step 5 [owner/operator] (owner-gated — pending client data):** Deoleo client (`slug=deoleo`) + CLIENT_ADMIN created · launch config set (visibility OFF) · outlet/hierarchy/catalog/schemes loaded.
-- [ ] **Step 6 [owner+claude] (owner-gated — pending OTP):** `/health` 200 *(done)* · real-OTP role-matrix login on branded domain · end-to-end KYC→redemption · real OTP delivered (MSG91 proven) · monitoring fires · no fabricated data · SHA matches.
-- [x] **Step 7 [claude]:** `push-drain-prod` scheduler ENABLED · 403/201 drain behaviour verified · (one real push to a device covered with Step 6 real-user smoke).
+- [ ] **Step 6 [owner+claude] (owner-gated — remaining items pend Step 5):** `/health` 200 *(done)* · **GIFSY_ADMIN (9830011252) real-OTP login on `app.gifsy.in` = DONE (2026-06-30) — MSG91 prod proven, real OTP delivered, auth against migrated prod schema verified** · *(remaining)* full real-OTP role-matrix on the Deoleo domain + end-to-end KYC→redemption (depend on Step 5 data load) · monitoring fires · no fabricated data · SHA matches.
+- [x] **Step 7 [claude]:** `push-drain-prod` scheduler ENABLED · 403/201 drain behaviour verified · (one real push to a device covered with Step 6 real-user smoke). *(Forward note: the points-expiry sweep — built post-cutover, rides the NEXT cutover — adds an `expire-sweep-prod` scheduler job at Step 7; its prod secret + `deploy.yml` ref + the `20260630130000_point_expiry_default_unique` migration are already in place, so only the scheduler job is created then.)*
 - [x] Rollback path understood (prior revision redeploy; additive migrations → no down-migration on empty DB).
