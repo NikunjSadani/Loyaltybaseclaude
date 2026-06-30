@@ -188,6 +188,10 @@ wiring on `main` at cutover — otherwise the deploy's secret refs fail.
 > `VAPID_PUBLIC_KEY:latest` etc. — plain prod names, **not** `*_STAGING`). The names you create here must match
 > the refs on that branch exactly.
 
+> Note (WhatsApp KYC): the prod api env should also set **`MSG91_WHATSAPP_NUMBER=917003202293`** for the Deoleo
+> WhatsApp KYC notifications. This **defaults to that value in code**, so it's belt-and-suspenders / explicit-is-better,
+> not strictly required.
+
 **Verify:** the 3 secrets list (Step 0.4) · the api SA has accessor on each · `prep/prod-pwa-activation` is in
 `develop`.
 

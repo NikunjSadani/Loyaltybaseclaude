@@ -6,12 +6,17 @@ Paste the block below to restart the orchestrator on point. The on-disk docs + m
 You're the orchestrator for Loyaltybase — a multi-tenant FMCG trade-loyalty platform (operator: Gifsy, launching
 client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch **develop**). Frontend: `platform/`
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
-`dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-06-29.
+`dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-06-30.
 
-🟢 CURRENT MODE — **OWNER-DRIVEN UAT on staging: fix-as-the-owner-finds.** The owner reports a bug (often a screenshot);
-you diagnose → fix (delegate substantial builds to sub-agents) → INDEPENDENT adversarial audit → FULL gate →
-runtime-verify (prefer live Deoleo staging) → push to `develop` (auto-deploys staging). Each push deploys; advise the
-owner to re-test with their real UAT data. **DO NOT merge to main during UAT** (cutover is deliberate — see below).
+🟢 CURRENT MODE — **GO-LIVE EXECUTION (owner says UAT is done).** Every before-go-live BUILD is complete; what remains is
+owner-gated + the deliberate cutover. Keep the fix-as-found loop available (owner reports a bug → diagnose → fix/delegate →
+INDEPENDENT audit → FULL gate → runtime-verify → push to `develop`). **HYBRID cutover exec model (owner-set, after challenging
+"are you sure I should execute it"): I do ALL reversible prep/verification/dry-runs; the OWNER pulls EVERY irreversible prod
+trigger** — merge develop→main, approve the `production` gate, the data-load go; I run the in-VPC jobs only on the owner's
+explicit per-step go and verify each. **DO NOT merge to main until the owner triggers the cutover.**
+**Remaining owner-gated:** Deoleo master-data files (owner loads via the tested UIs when the client sends them) · OTP live-enable
++ 1 real test OTP · click the 2 GCP alert-email verification links · the cutover triggers · WhatsApp `deoleo_kyc_approval`
+template verify (task #143). Everything else is built, gated, audited, and runtime-verified.
 
 🔶 STANDING MODE — **YOU ARE THE ORCHESTRATOR (the owner should never have to remind you).** Default to orchestrating
 substantial work, not hand-coding everything: decompose; **run independent workstreams as PARALLEL sub-agents** (give
@@ -25,7 +30,7 @@ calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1246 · nest 0 · FE vitest 1694 · tsc 0.** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1271 · nest 0 · FE vitest 1692 · tsc 0 (HEAD `3900af3`; + staged branch `prep/prod-pwa-activation`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -44,7 +49,33 @@ instance is alive but CPU-starved). Drive such workers via **Cloud Scheduler →
 request un-throttles the CPU), or set cpu-always-allocated (~$50/mo). This is why the push drain runs on a scheduler.
 
 DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`; runtime-verified where an API/edge check was possible):
-- **🆕 2026-06-29 — GO-LIVE PREP + PWA ACTIVATION (this session):**
+- **🆕 2026-06-30 — go-live builds + execution prep (newest first):**
+  · **WHATSAPP KYC NOTIFICATIONS** (`3900af3`, audit SHIP) — WhatsApp to the **outlet owner** on KYC submit + approve via MSG91 (Deoleo).
+    `Msg91Service.sendWhatsappTemplate` (v5 bulk `…/whatsapp-outbound-message/bulk/`, integrated # **917003202293**, lang `en`, 10-digit recipient
+    guard) + `kyc.service.sendKycWhatsapp` **fire-and-forget POST-COMMIT** (fully try/catch — can NEVER throw into/block/rollback the KYC tx) wired
+    at SUBMIT (`deoleo_kyc_submission`: owner·date·program) + the single canonical `KYC_APPROVED` hook in `notify()` (`deoleo_kyc_approval`:
+    owner·program). Recipient = `ChannelPartner.phone` (KYC contact), NOT the rep. Per-tenant config-gated via `notifications/whatsapp-kyc.config.ts`
+    (only `deoleo`). **SUBMIT trigger RUNTIME-VERIFIED — a real WhatsApp was delivered to a test phone (9830011252) on staging.** APPROVAL trigger
+    runtime-verify DEFERRED (the `deoleo_kyc_approval` MSG91 template isn't owner-verified yet — task #143). `MSG91_WHATSAPP_NUMBER` defaults to the
+    number in code; add explicitly to prod env at cutover. **Pattern for a NEW transactional WhatsApp/SMS: add to `whatsapp-kyc.config.ts` + call
+    `sendWhatsappTemplate` fire-and-forget post-commit; success logs nothing → confirm on a real phone.**
+  · **ADMIN-CREATION UI** (`d306129`, audit SHIP) — closed an owner-found gap: there was NO UI to create admins (backend `POST /v1/admin/users`
+    existed + secured, but the only FE consumer was a read-only "Phase 2" stub). New **`/admin/users`** (list + role-gated Create + deactivate),
+    FE-only (`createUser` scopes to the JWT clientId, **assumed-tenant-aware**; `assertRoleAssignable` is the real gate). A GIFSY operator ASSUMES
+    Deoleo → creates the Deoleo CLIENT_ADMIN; platform-context → more GIFSY_ADMINs; CLIENT_ADMIN → MIS_USER. **Runtime-verified end-to-end on
+    staging** (assume-deoleo → create CLIENT_ADMIN(clientId=deoleo) → it logs in → escalation BLOCKED). Outlet types: the 4 are bootstrap-defined
+    (no owner input); master list not portal-editable by design; per-tenant enable/rename + POINTS/PAYOUT award maps ARE wired.
+  · **SESSION REPORT** (`7021c58`, audit SHIP-with-fixes) — per-user portal-usage report `/admin/reports/session`: last-login + active-days/month
+    for 13 months (IST). "Active day" = ≥1 authenticated request that day (NOT a login), stamped fire-and-forget from `JwtStrategy.validate` into
+    new `UserActivityDay` (additive migration `20260630120000`, no backfill). Replaced 3 fake engagement cards. Runtime-verified (607 users).
+  · **AF-3 FABRICATED-BANK FIX** (`e843b0b`) + **STALE-DOC RECONCILIATION** (`f7c30c2`) — partner Profile rendered a hardcoded fake bank
+    (`HDFC/…3456`) even on `/auth/me` success → fixed to the real beneficiary or an honest empty state. The owner challenged my go-live gap list
+    ("did you analyze ALL docs") → I'd skipped the master tracker; reconciled the stale in-repo go-live docs to reality. **LESSON: the master
+    tracker + this memory are the go-live source of truth; verify any "open" item in CODE.**
+  · **GO-LIVE EXEC PREP** (`e0b8655` + branch `762251e`) — prod env verified CLEAN (NODE_ENV=production, no FIXED_OTP/DEMO_MODE); CUTOVER-RUNBOOK
+    REWRITTEN to the hybrid 0–7 sequence; **prod-PWA staged on `prep/prod-pwa-activation` (UNMERGED — merge into develop only AFTER creating the 3
+    prod secrets; cmds in `runbooks/prod-pwa-activation.sh`)**; bootstrap-in-image verified.
+- **🗄️ 2026-06-29 — GO-LIVE PREP + PWA ACTIVATION (prior session — historical):**
   · **Phase-0 runbooks** (`c998267`) — `docs/plans/runbooks/{OWNER-OPS,CUTOVER,PROD-DATA-LOAD,DEOLEO-GO-LIVE-CONFIG-CHECKLIST}.md`;
     live gcloud recon CORRECTED stale facts (prod live · backups/PITR ON · deploy.yml auto-migrates behind a `production` gate).
   · **PROD BOOTSTRAP SCRIPT BUILT** (`262027a`) — `api/prisma/bootstrap.ts` (first GIFSY_ADMIN = **Nikunj/9830011252** + 4 OutletType rows;
@@ -133,8 +164,9 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
 🚀 CUTOVER STATE (develop→main = prod; **CORRECTED 2026-06-29 by live gcloud recon — prior "no prod services / first deploy"
-framing was STALE/WRONG**): `main` is **185 commits behind** `develop` (main last `2026-06-21` `b3ab2e0`), incl. **6 Prisma
-migrations** prod's DB lacks (5 + `add_push_subscription`). **PROD IS ALREADY LIVE** — Cloud Run services `gifsy-api` +
+framing was STALE/WRONG**): `main` is **~209 commits behind** `develop` (verify live: `git fetch origin main; git rev-list --count origin/main..develop`),
+incl. **8 additive Prisma migrations** prod's DB lacks (constraints + new status enum value + `add_push_subscription` +
+`add_pwa_install` + `add_user_activity_day`) — all additive → zero-risk on the empty prod DB. **PROD IS ALREADY LIVE** — Cloud Run services `gifsy-api` +
 `gifsy-frontend` (NOT `-prod`-suffixed; that's why the old check missed them) serve image `b3ab2e0`, `NODE_ENV=production`,
 prod DB/JWT/MSG91 from Secret Manager. So the cutover is an **UPDATE of running prod, not a first deploy**. **`deploy.yml`
 (main→prod) AUTO-RUNS the 6 migrations** via the in-VPC `gifsy-migrate` Cloud Run Job (`migrate deploy --execute-now --wait`;
@@ -192,10 +224,14 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 [[admin-dashboard-consolidation]] [[default-to-orchestration]] [[global-settings-wiring]] [[sales-hierarchy-scoping]]
 [[migration-model]] [[staging-deploy-gate]] [[audit-every-build-item]].
 
-Now: greet the owner and resume **OWNER-DRIVEN UAT fix-as-found** (diagnose → fix/delegate → audit → gate → runtime-verify → push). The PWA
-round is COMPLETE on staging (device-verified push, real icon, sales notifications, adoption tracking, prompt-snooze/Profile-entry — all the
-2026-06-29 block). No owner inputs are outstanding. Standing context: UAT ~90% done (minor changes likely); **cutover held until UAT signs off**
-(then per CUTOVER-RUNBOOK: merge→approve `production` gate→pipeline migrates+deploys→run bootstrap job→load #76 data→set Deoleo config→**+ the PWA
-prod steps: PUSH_DRAIN_SECRET_PROD secret + push-drain-prod scheduler job + NEXT_PUBLIC_PWA_* / VAPID env on deploy.yml**→smoke). If the owner asks
-to enable notifications for a NEW sales event, the pattern is an `enqueue` PUSH in the relevant service post-commit via `SalesNotificationsService`.
+Now: greet the owner. **Every before-go-live BUILD is done** (Session Report · AF-3 fix · admin-creation UI · WhatsApp KYC submit-verified · PWA ·
+4 real dashboards · all AF-* except AF-12). Owner says UAT is done. **Remaining is owner-gated:** Deoleo master-data files (owner loads via the
+tested UIs when the client sends them) · OTP live-enable + 1 real test OTP · click the 2 GCP alert-email links · the **cutover** · the WhatsApp
+`deoleo_kyc_approval` template runtime-verify (task #143). **Cutover (HYBRID — owner pulls every irreversible prod trigger):** I create the 3 prod
+PWA secrets (`runbooks/prod-pwa-activation.sh` Step 1) → owner merges `prep/prod-pwa-activation`→develop → owner merges develop→main + approves the
+`production` gate (pipeline runs the 8 migrations + deploys) → I run the in-VPC **bootstrap** job (first GIFSY_ADMIN Nikunj/9830011252 + 4
+OutletTypes) on the owner's go → owner/operator creates the Deoleo client (**slug `deoleo`**) + loads master data via the UIs + sets conversion-
+rate/programs/visibility-OFF → I create `push-drain-prod` + add `MSG91_WHATSAPP_NUMBER` + smoke (real-OTP login per role + one end-to-end
+KYC→redemption). Full steps = **`runbooks/CUTOVER-RUNBOOK.md`**. If a NEW transactional notification is requested: PUSH → enqueue post-commit via
+`SalesNotificationsService`; WhatsApp/SMS → `whatsapp-kyc.config.ts` + `Msg91Service.sendWhatsappTemplate` fire-and-forget post-commit.
 ```
