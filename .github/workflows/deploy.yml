@@ -146,7 +146,7 @@ jobs:
             --cpu-throttling \
             --add-cloudsql-instances=${{ env.SQL_INSTANCE }} \
             --vpc-connector=gifsy-connector \
-            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=7d,JWT_REFRESH_EXPIRES_IN=30d,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2" \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=7d,JWT_REFRESH_EXPIRES_IN=30d,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in" \
             --set-secrets="\
               DATABASE_URL=DATABASE_URL:latest,\
               JWT_SECRET=JWT_SECRET:latest,\
@@ -157,7 +157,10 @@ jobs:
               GCS_BUCKET=GCS_BUCKET:latest,\
               GCP_PROJECT_ID=GCP_PROJECT_ID:latest,\
               CORS_ORIGINS=CORS_ORIGINS:latest,\
-              REDIS_URL=REDIS_URL:latest"
+              REDIS_URL=REDIS_URL:latest,\
+              VAPID_PUBLIC_KEY=VAPID_PUBLIC_KEY:latest,\
+              VAPID_PRIVATE_KEY=VAPID_PRIVATE_KEY:latest,\
+              PUSH_DRAIN_SECRET=PUSH_DRAIN_SECRET:latest"
 
   # ── Build & Deploy Frontend ──────────────────────────────────────────────────
   deploy-frontend:
@@ -185,6 +188,9 @@ jobs:
         run: |
           docker build \
             --build-arg NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }} \
+            --build-arg NEXT_PUBLIC_PWA_SW_ENABLED=true \
+            --build-arg NEXT_PUBLIC_PWA_INSTALL_ENABLED=true \
+            --build-arg NEXT_PUBLIC_PWA_PUSH_ENABLED=true \
             -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:${{ github.sha }} \
             -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/frontend:latest \
             ./platform
