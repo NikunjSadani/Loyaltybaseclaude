@@ -88,6 +88,13 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
     (a one-time "Not now" no longer locks the user out forever); shared `lib/pwa/install-prompt-store.ts` + new **`PwaAppSettings`** card in the
     partner+sales Profile pages (Install button / iOS instructions + Notifications enable/on+turn-off/"blocked → re-enable in browser settings").
     KEY UX FACT: after a browser **hard-block** of notifications we can NEVER re-prompt programmatically — only the settings path recovers it.
+  · **REAL DEOLEO LOGO IN THE APP HEADERS** (`24f8673` + `488fc31`) — replaced the hex brand mark with the real Deoleo wordmark, PER-TENANT +
+    non-breaking via two new optional `BrandingConfig` fields (set for deoleo only; clientb/gifsy keep the hex + display-name): **`wordmarkWhiteUrl`**
+    (`/brand/deoleo-wordmark-white.png`) on the DARK surfaces — sales navy header (`#1A1A2E`) + desktop `Sidebar`; **`wordmarkColorUrl`**
+    (`/brand/deoleo-wordmark-color.png`) on the LIGHT surface — the white partner/outlet header (mobile, `lg:hidden` so desktop uses the sidebar
+    logo, no double-logo). Both = the owner's logo auto-cropped (`sharp .trim()` → ~2.95:1) to a tight wordmark; **committed art lives in `public/brand/`
+    (NOT gitignored), source art in `public/logos/` (gitignored)**. Layout: `[logo] [name]` on both portals (sales = rep name/empId; partner = outlet
+    name/owner name). Verified good via faithful header mocks (white-on-navy + colour-on-white). Gate FE vitest 1694 / tsc 0.
 - **PWA WAVE 1 + F4 + LOCAL PUSH DRY-RUN ✅** (`185c548`→`40d0934`) — installable per-tenant shell (manifest Route
   Handlers + iOS meta), sharp icon pipeline, Serwist SW (flag-OFF, with `push`+`notificationclick` handlers), install
   prompt, full Web Push backend; ships DISABLED behind 3 flags (all default OFF). Per-tenant manifests runtime-verified
