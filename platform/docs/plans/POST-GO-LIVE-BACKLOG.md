@@ -95,30 +95,34 @@ the period selector ever allows the current month.
 
 ## F. PWA — installable mobile app for the SALES + OUTLET (partner) apps only
 
-> **✅ LARGELY BUILT — shipping DISABLED (2026-06-27).** F1–F4 + the push BACKEND are done, gate-green,
-> independently audited, runtime-verified, and pushed to `develop` (HEAD `40d0934`). The canonical plan + live
-> status is **[`PWA-PLAN.md`](PWA-PLAN.md)** ("Status — Wave 1 DONE" + the local-push-dry-run sections) — read that,
-> not this sketch. Decisions locked: per-tenant icon pipeline · **single platform-wide VAPID** · owner supplies
-> Deoleo+Gifsy logo art (monogram placeholders meanwhile) · everything behind **runtime flags, all default OFF**
-> (`NEXT_PUBLIC_PWA_SW_ENABLED`, `PWA_SW_BUILD`, `NEXT_PUBLIC_PWA_INSTALL_ENABLED`). **Only the cutover activation
-> remains** (owner-gated, NOT during UAT): push FE subscribe (E) + apply the additive `push_subscription` migration
-> + VAPID keys + flip the flags; emit `/sw.js` via esbuild. The single unproven link is vendor-relay → real-device
-> display (the cutover smoke). The phase table below is annotated with what's done.
+> **✅ FULLY ACTIVATED ON STAGING + Android-device-VERIFIED (RECONCILED 2026-06-30).** F1–F5 (install shell + icons +
+> service worker + install UX + Web Push, FE subscribe included) are done, gate-green, independently audited, and **running
+> live on staging**: sales push notifications (KYC assign → rep + approver / reject → rep / targets → XSR + SO, tenant-scoped)
+> + **Cloud-Scheduler delivery** (`push-drain-staging`; the Cloud-Run-idle-worker-throttle trap is handled by a scheduler-pinged
+> drain endpoint) + adoption tracking (`pwa_install` table + admin "App Adoption" page) + the real Deoleo icon + a 3-day
+> install-prompt snooze + a Profile install/notification entry point. **The earlier "shipping DISABLED / all flags OFF"
+> framing is STALE** — on staging the flags are ON and push delivers to real Android devices. The canonical plan + live
+> status is **[`PWA-PLAN.md`](PWA-PLAN.md)** — read that, not this sketch. Decisions locked: per-tenant icon pipeline ·
+> **single platform-wide VAPID**.
+>
+> **What REMAINS = prod PWA activation, which is CUTOVER-COUPLED** (owner-gated, NOT a separate post-launch project): add
+> the `PUSH_DRAIN_SECRET_PROD` secret + a `push-drain-prod` Cloud Scheduler job + VAPID/PWA env on `deploy.yml`, apply the
+> additive `push_subscription` migration, and flip the prod flags at the develop→main cutover. The phase table below is annotated.
 
 **Scope: the `/sales/*` and `/partner/*` shells ONLY** (owner decision 2026-06-26). The `/admin/*` and
 `/gifsy/*` consoles are desktop-operator tools and are explicitly OUT of scope — no PWA/install/icons for them.
 
-**Current state (2026-06-27):** the FE (Next.js 16) is now an installable per-tenant PWA for /sales + /partner,
-shipping DISABLED: per-tenant `manifest.webmanifest` route handlers + iOS meta (`PwaHead`), a sharp icon pipeline
-(`public/icons/<slug>/`, monogram placeholders), a Serwist service worker (network-first nav, never caches
-`/api`/RSC/HTML/tenant data, with `push`+`notificationclick` handlers), and an install prompt — all gated behind
-runtime flags (default OFF). The Web Push **backend** is built (PushSubscription + endpoints + web-push sender +
-drain worker + triggers) and its send path is proven with the real library. Per-tenant branding rides
-`config.branding`, as designed.
+**Current state (RECONCILED 2026-06-30):** the FE (Next.js 16) is an installable per-tenant PWA for /sales + /partner,
+**ACTIVATED + Android-verified on STAGING** (no longer "shipping DISABLED"): per-tenant `manifest.webmanifest` route
+handlers + iOS meta (`PwaHead`), a sharp icon pipeline (`public/icons/<slug>/`, now with the real Deoleo icon), a Serwist
+service worker (network-first nav, never caches `/api`/RSC/HTML/tenant data, with `push`+`notificationclick` handlers), an
+install prompt with a 3-day snooze, and a Profile install/notification entry point. The Web Push **backend + FE subscribe**
+are built and **delivering live on staging** via the `push-drain-staging` Cloud Scheduler job, with adoption tracking
+(`pwa_install` table + admin "App Adoption" page). Per-tenant branding rides `config.branding`, as designed.
 
-**Why it was safe to build during UAT:** everything ships behind default-OFF flags, so none of it runs for UAT
-testers; and the SW (which must not run over a churning UI) was only built once sales/partner UAT confirmed those
-screens stable. The SW + push still ACTIVATE only at the develop→main cutover.
+**Why it was safe to build during UAT:** the SW (which must not run over a churning UI) was only built once sales/partner
+UAT confirmed those screens stable. **On staging the PWA flags are now ON; on PROD they stay OFF until the develop→main
+cutover** — prod SW + push ACTIVATE only at cutover (the cutover-coupled steps above).
 
 | Phase | What | Status |
 |---|---|---|
@@ -126,17 +130,18 @@ screens stable. The SW + push still ACTIVATE only at the develop→main cutover.
 | **F2 — Per-tenant icon pipeline** | sharp generator → each tenant's icon set; monogram placeholder until real logos arrive; re-run swaps a logo in. | **✅ DONE** (deoleo/clientb/gifsy generated) |
 | **F3 — Service worker** | Serwist; **network-first nav, never caches `/api`/RSC/HTML/tenant data**, offline fallback, update prompt, `push`+`notificationclick` handlers. Flag-OFF; emitted via esbuild at cutover. | **✅ DONE** (`185c548`+`40d0934`); audit caught a cookie-cache leak, fixed |
 | **F4 — Install UX** | `beforeinstallprompt` custom prompt (Android) + instructional A2HS banner (iOS Safari); dismissal persisted. Flag-OFF. | **✅ DONE** (`1b8d349`) |
-| **F5 — Web Push** | VAPID (single platform-wide) + backend sender + per-tenant subscription storage + drain worker + triggers (points earned / redeem / KYC approved). | **⏳ BACKEND DONE** (send path dry-run-proven); **FE subscribe (E) + activation = cutover** |
+| **F5 — Web Push** | VAPID (single platform-wide) + backend sender + per-tenant subscription storage + drain worker + triggers (KYC assign/reject, targets) + **FE subscribe + Cloud-Scheduler delivery + adoption tracking**. | **✅ DONE + ACTIVATED ON STAGING** (Android-device-verified, `push-drain-staging`); **prod activation = cutover** |
 | **F6 — Store presence (optional)** | Android Play Store via TWA/Bubblewrap; iOS App Store via wrapper. | Not started (optional) |
 
-**Remaining effort:** push FE subscribe (E) + cutover activation ≈ **1–2 days** once VAPID keys + migration go-ahead
-are provided. F1–F4 + push backend are already done.
+**Remaining effort (RECONCILED 2026-06-30):** F1–F5 are DONE and activated on staging. **Only the prod-activation cutover
+steps remain** (cutover-coupled, owner-gated): `PUSH_DRAIN_SECRET_PROD` secret + a `push-drain-prod` Cloud Scheduler job +
+VAPID/PWA env on `deploy.yml` + the additive `push_subscription` migration + flip the prod flags. ≈ part of the cutover, not a separate project.
 
 **iOS reality check:** Android PWAs are first-class (install prompt, push, Play Store wrappable). iOS is
 limited — install is Safari "Add to Home Screen" only (no prompt), push needs iOS 16.4+ AND a home-screen
 install, plus storage-eviction / no-background-sync constraints.
 
-**Recommended sequencing:** F1 (+optionally F2) is a cheap, low-risk win that can slot in anytime; F3–F5
-(the heavy part) is a focused **post-go-live** project once the sales/partner mobile UI has settled and
-re-engagement (push) becomes a priority. **Right trigger = Deoleo live + mobile flows stable + a concrete
-push-notification need.**
+**Recommended sequencing (RECONCILED 2026-06-30):** SUPERSEDED — F1–F5 are already built and **activated on staging**
+(Android-verified). The only remaining work is the **prod-activation cutover steps** listed above, which run at the
+develop→main cutover (not a separate post-go-live project). The original "F3–F5 is a focused post-go-live project" framing
+no longer applies. (F6 store presence stays optional.)

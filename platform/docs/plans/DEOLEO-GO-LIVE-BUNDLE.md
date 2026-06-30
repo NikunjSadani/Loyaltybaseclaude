@@ -1,5 +1,29 @@
 # Deoleo Go-Live Bundle — the launch critical path (plan)
 
+> ## 🔄 RECONCILED 2026-06-30 — this plan is largely SUPERSEDED; read the live sources of truth first
+> This Rev 3 doc predates the last ~10 days of work and many of its "blockers" / estimates below are stale. **The live
+> source of truth is now [`GO-LIVE-ISSUE-LIST.md`](GO-LIVE-ISSUE-LIST.md)** (the master tracker) **+ the auto-memory
+> go-live bundle** (`deoleo-go-live-bundle.md`). What changed since this doc was written:
+> - **Gate is GREEN** (api jest **1259** · nest 0 · FE vitest **1694** · tsc 0). The §1 "deploy pipeline blocked / Vitest
+>   red-by-design / ~813 jest" finding is OLD — A-1 fixed it; the gate is green and has been for weeks.
+> - **Prod is ALREADY LIVE** (`gifsy-api`/`gifsy-frontend`) and cutover/migration is DONE (§A.2). Cutover now = a routine
+>   **UPDATE of an empty prod** (0 users / 0 data), auto-migrated by `deploy.yml` behind a `production` approval gate — **low-risk**.
+> - **Backups + PITR are ON**; **Cloud Monitoring is LIVE** (2 channels + 2 alert policies). The §A.2/§2 "no alerts /
+>   backups-PITR before dry-run" framing is RESOLVED (see GO-LIVE-READINESS §3.1).
+> - **Cutover runbook EXISTS**: [`runbooks/CUTOVER-RUNBOOK.md`](runbooks/CUTOVER-RUNBOOK.md) (B10/A-9).
+> - **Sales leaderboard BUILT** (`a525739`+`a272dca`); **all AF-\* security items DONE except AF-12** (deliberately OFF
+>   for launch); **PWA fully ACTIVATED + Android-verified on staging** (prod PWA = a cutover step).
+> - **Prod bootstrap script BUILT** (`api/prisma/bootstrap.ts`, `262027a`): first GIFSY_ADMIN + 4 OutletType rows — **run it at cutover**.
+> - **Greenfield reality:** prod is empty, so the pre-cutover backup is a formality, rollback risk is minimal (no in-flight
+>   user data), restore-rehearsal + realistic-volume perf testing are post-launch, and points-expiry has a long runway.
+>
+> **GENUINELY-OPEN at 2026-06-30** (the real remaining launch path — see §A.2 "REMAINING GO-LIVE BLOCKERS" for the live list):
+> #76 real Deoleo master-data load into empty prod (run bootstrap first) · AF-3 partner hardcoded-bank fix (in progress
+> 2026-06-30) · prod env-hygiene sweep (NODE_ENV=production, NO FIXED_OTP/DEMO_MODE, no debug routes) · MSG91 prod DLT
+> templates + real creds + one real test OTP · owner UAT sign-off (redemption + KYC) on staging · click the 2 GCP
+> alert-email verification links · points-expiry scheduler wiring (post-launch) · AF-12 RBAC (post-launch, keep OFF).
+> History below is **preserved** — superseded items are annotated, not deleted.
+
 > Created 2026-06-20. **Rev 3 (2026-06-20)** after 4 adversarial audit rounds (§9) **and owner decisions** (§A). **Owner-requested
 > plan change:** instead of building all of P7→P8→P9 before launch, pull *only the launch-blocking slice* of each forward
 > and ship Deoleo on the complete core loop ASAP; the rest of P7 + P8 become **post-launch fast-follows**
@@ -86,8 +110,9 @@ the MSG91 template application (a 404 link won't get DLT-approved), the worker n
   with failure-cleanup (cancel order + clear OTP + 503); auth delegates to it; **+ 10s MSG91 fetch timeout**; F5 fixed.
   api jest **836/836**, tsc 0.
 - **A-3 login `x-forwarded-host`** ✅ done. **Footer** "Powered by Gifsy" ✅ on tenant-facing pages (login/admin/partner/sales).
-- **A-4 observability** ✅ **code already satisfied** (`AllExceptionsFilter`→Cloud Logging; `/health`). Residual = a Cloud
-  Monitoring alert (needs owner alert email). **A-6 hardening** ✅ **code already satisfied** (helmet/CORS/validation/
+- **A-4 observability** ✅ **DONE.** Code satisfied (`AllExceptionsFilter`→Cloud Logging; `/health`) **+ Cloud Monitoring
+  LIVE (2026-06-29): 2 email channels + 2 alert policies (5xx-rate + uptime).** Residual = owner clicks the 2 GCP
+  verification emails. **A-6 hardening** ✅ **code already satisfied** (helmet/CORS/validation/
   `ThrottlerGuard`/guard-stack; prod omits `FIXED_OTP`/`DEMO_MODE`). Residual = owner (cred rotation, prod `CORS_ORIGINS`).
   Prod `CORS_ORIGINS` now includes `https://deoleoloyalty.gifsy.in` (secret v3, set at cutover).
 - **A-5 prod migration** ✅ **DONE (cutover, 2026-06-20).** `gifsy_prod` recreated empty + migrated to the squashed
@@ -117,12 +142,21 @@ the MSG91 template application (a 404 link won't get DLT-approved), the worker n
 **✅ CUTOVER DONE (2026-06-20).** Prod migrated + deployed (`b3ab2e0`) on `deoleoloyalty.gifsy.in`, host-alias removed,
 `CORS_ORIGINS` set, verified (login/health/routing). See `runbooks/PROD-CUTOVER-RECORD.md`. **A-5/A-8/A-9/D1/D2 = DONE.**
 
-**▶ REMAINING GO-LIVE BLOCKERS** (these are the known final steps, not missed work):
-1. **Load real Deoleo master data into the empty prod** — client config, admins, sales team, partners/outlets, reward
-   catalog, schemes. **THE big one — no real user can log in until this lands** (prod is intentionally 0-users/0-clients).
-2. **Owner UAT of the core loop on staging** with real OTP — login DONE; redemption + KYC pending (phones above).
-3. **Owner ops:** Cloud Monitoring alert email; ongoing backups/PITR; prod credential rotation.
-4. ~~Sales-team leaderboard = explicitly DEFERRED (fast-follow, nav hidden)~~ — **✅ BUILT 2026-06-26 (`a525739`+`a272dca`)**, live-computed, nav visible. (Was never a blocker.)
+**▶ REMAINING GO-LIVE BLOCKERS** (refreshed 2026-06-30; the live list is [`GO-LIVE-ISSUE-LIST.md`](GO-LIVE-ISSUE-LIST.md)):
+1. **Run the prod bootstrap, then load real Deoleo master data into the empty prod** — `api/prisma/bootstrap.ts`
+   (`262027a`, first GIFSY_ADMIN Nikunj/9830011252 + 4 OutletType rows) MUST run first; then client config, admins, sales
+   team, partners/outlets, reward catalog, schemes (#76). **THE big one — no real user can log in until this lands** (prod
+   is intentionally 0-users/0-clients). "No duplicates" = within-file dedup only (no pre-existing prod data to clash with).
+2. **Owner UAT of the core loop on staging** with real OTP — login DONE; redemption + KYC sign-off pending.
+3. **Prod env-hygiene sweep** (GLm-6 / UAT §17.1): NODE_ENV=production, **NO `FIXED_OTP`, NO `DEMO_MODE`**, no debug routes.
+4. **MSG91 prod:** DLT templates + real creds + one real test OTP send (owner).
+5. **AF-3** — partner profile renders a hardcoded fake bank → **in progress 2026-06-30** (being fixed separately).
+6. **Owner ops residual:** click the **2 GCP alert-email verification links** (the channels + policies are already wired).
+   ~~Cloud Monitoring alert email; ongoing backups/PITR~~ — **✅ DONE 2026-06-29** (2 channels + 2 alert policies LIVE;
+   backups + PITR verified ON, 14 backups, `pointInTimeRecoveryEnabled=true`). Prod credential rotation = owner's call (versions exist).
+7. **Post-launch (not launch blockers):** points-expiry scheduler wiring (`expireDuePoints()` exists but nothing schedules
+   it — same Cloud-Run @Cron-doesn't-tick trap as the push worker; long runway, no points exist yet); AF-12 RBAC enablement (keep OFF for now).
+8. ~~Sales-team leaderboard = explicitly DEFERRED (fast-follow, nav hidden)~~ — **✅ BUILT 2026-06-26 (`a525739`+`a272dca`)**, live-computed, nav visible. (Was never a blocker.)
 
 ## 0. The reframe
 Core platform is built (P0–P6 + P0.6 A–D). Launch needs a small specific set, several items inside P7/P8/P9, sequenced here.
@@ -131,12 +165,16 @@ paced by owner/external items** (the Cloudflare domain, MSG91 templates, GCP/Sec
 
 ---
 
-## 1. ⛔ The critical finding — the deploy pipeline is currently blocked
-Verified (2026-06-20): both deploy workflows gate on a `test` job running raw `npm test`. api Jest is green (~813/813);
+## 1. ⛔ The critical finding — ~~the deploy pipeline is currently blocked~~ ✅ RESOLVED (A-1)
+> **✅ RESOLVED — the gate is GREEN (as of 2026-06-30: api jest 1259 · nest 0 · FE vitest 1694 · tsc 0).** The
+> red-by-design Vitest baseline was quarantined-to-green per D-b (A-1), `develop` push deploys staging, and prod is
+> already live. The text below is the original 2026-06-20 finding, **kept for history**.
+
+~~Verified (2026-06-20): both deploy workflows gate on a `test` job running raw `npm test`. api Jest is green (~813/813);
 **platform Vitest is red-by-design — 22 files / ~92 failing tests** (TDD baselines, [`reconcile/baseline-red-snapshot.txt`](reconcile/baseline-red-snapshot.txt)).
 ∴ `npm test` fails → the `test` job fails → **staging AND prod deploys don't proceed via push.** "Push deploys staging"
 is false today; the D2/domain push most likely didn't deploy (`gh` not installed here → can't confirm; small gap, A-1).
-**Master-plan 9.1 is the true #1 — nothing ships until the gate goes green (via D-b quarantine).**
+**Master-plan 9.1 is the true #1 — nothing ships until the gate goes green (via D-b quarantine).**~~
 
 ---
 
@@ -151,10 +189,10 @@ is false today; the D2/domain push most likely didn't deploy (`gh` not installed
 | B4 | **Prod secrets/env correct** | 9.4 | confirm values in Secret Manager; **NO `FIXED_OTP`, NO `DEMO_MODE`**; `POINTS_TO_INR_RATE` matches Deoleo | Owner |
 | B5 | **Prod DB migrated + backups/PITR** | 9.5 | no pipeline migration step; ⚠️ **staging+prod share the `gifsy_db` instance** | Me(runbook)+Owner |
 | B6 | **Custom domain (Cloudflare Worker, NOT a GCP LB)** | 9.10 | code maps domain→`deoleo`; ⛔ Worker doesn't route the host → 502; ⛔ login reads raw `host` not `x-forwarded-host` | Owner(Cloudflare)+Me(code) |
-| B7 | **Minimum observability/alerting** | 8.4/9.6 | `/health` exists (`main.ts:20`) but deploy health-check is advisory; no alerts | Me + Owner |
+| B7 ✅ | **Minimum observability/alerting** — **✅ DONE 2026-06-29** | 8.4/9.6 | `/health` exists (`main.ts:20`); ~~no alerts~~ → **2 Cloud Monitoring alert policies (5xx + uptime) on 2 email channels are LIVE**; residual = owner clicks the GCP verification emails | Me + Owner |
 | B8 | **Security hardening minimum** | 9.7 | throttle exists; confirm rate-limit/headers/CORS, rotate dev-shared creds | Me |
 | B9 | **Staging green + a REAL-MSG91 dress rehearsal** | C2/8.7 | harness shipped; staging is `FIXED_OTP` → doesn't exercise real MSG91; needs B1 to deploy | Me |
-| B10 | **Cutover runbook + tested rollback** | 9.9 | not written; rollback manual | Me + Owner |
+| B10 ✅ | **Cutover runbook + tested rollback** — **✅ DONE** | 9.9 | ~~not written; rollback manual~~ → `runbooks/CUTOVER-RUNBOOK.md` (4 steps + PWA activation) + `PROD-CUTOVER-RECORD.md`; rollback = pre-cutover backup (a greenfield formality — prod is empty) | Me + Owner |
 | B11 | **Prod data lifecycle (seed→UAT→clean→real)** | 9.9 | n/a | Owner + Me |
 | B12 | **Prod-only infra check (Redis/VPC)** | 9.x | prod uses `--vpc-connector` + `REDIS_URL`; **current code stores OTP in the DB, not Redis → verify Redis is actually needed; if unused, the secret just needs to exist** | Me(verify)+Owner |
 | **B13** ✅ | **Sales-team leaderboard** (D-c) — **✅ DONE 2026-06-26 (`a525739`+`a272dca`)** | 7.3 | ~~greenfield, new `SalesLeaderboard*` models + generator~~ → shipped **live-computed** `GET /v1/sales/leaderboard` (same-level peers, ZNM territory, rm/state/national scopes) reusing the `getTargets` join — **no new models, no generator, no snapshot**; FE wired (was dead-wired); audited + runtime-verified on staging | Me |
@@ -265,8 +303,8 @@ actions; Cloudflare/MSG91/GCP = your accounts. I can't authenticate to those, an
 - [x] **Login on `https://deoleoloyalty.gifsy.in`**: Worker routes the host; login reads `x-forwarded-host` → resolves `deoleo`. **(A-9; native resolution, alias removed; login 200.)**
 - [x] Prod: no `FIXED_OTP`, no `DEMO_MODE`; `RBAC_ENFORCEMENT` unset/false. **(A-6.)**
 - [x] **Sales-team leaderboard renders** — **✅ BUILT 2026-06-26 (`a525739`+`a272dca`)**: live-computed `GET /v1/sales/leaderboard`, same-level peers, ZNM territory; FE wired, nav visible. (D-c; runtime-verified on staging.)
-- [ ] Error visibility: ≥1 error-rate + uptime alert; a real post-deploy `/health` gate. *(`/health` 200; Cloud Monitoring alert = owner, needs alert email — OPEN.)*
-- [x] Cutover runbook + a tested rollback exist. **(`runbooks/PROD-CUTOVER-RECORD.md` as-run; rollback = pre-cutover backup. A tested rollback drill is still recommended.)**
+- [x] Error visibility: ≥1 error-rate + uptime alert; a real post-deploy `/health` gate. **(✅ DONE 2026-06-29 — `/health` 200 + 2 Cloud Monitoring alert policies [5xx + uptime] on 2 channels; residual = owner clicks the GCP verification emails.)**
+- [x] Cutover runbook + a tested rollback exist. **(`runbooks/CUTOVER-RUNBOOK.md` [4 steps + PWA activation] + `runbooks/PROD-CUTOVER-RECORD.md` as-run; rollback = pre-cutover backup, which is a greenfield formality since prod is empty.)**
 - [ ] Data lifecycle done: UAT on staging → prod cleaned **via the guarded A-10 runbook** (DB-asserted, FK-ordered, scoped,
       backups-first) → real Deoleo data loaded → a real prod smoke (login → earn/view → redeem → OTP → confirm) passes.
       **(Prod is greenfield-empty; real Deoleo data load + real-OTP UAT are the remaining open work.)**

@@ -1,5 +1,26 @@
 # Go-Live Readiness — the enforcement mechanism + the gate
 
+> ## 🔄 RECONCILED 2026-06-30 — live source of truth = `GO-LIVE-ISSUE-LIST.md` + the memory bundle
+> Several status notes below predate the last few days. Net-current state (verified 2026-06-30):
+> - **Gate is GREEN**: api jest **1259** · nest 0 · FE vitest **1694** · tsc 0. (Older notes saying jest 921 / vitest 1459 are point-in-time snapshots.)
+> - **Cloud Monitoring is LIVE + backups/PITR are ON** (2026-06-29). The "≥1 alert still OPEN / PITR OFF" notes are RESOLVED — see §3.1.
+> - **Admin sub-dashboards consolidated** to 4 REAL pages (KYC + Program-Health + Operations + Finance); the 3 fake
+>   sub-dashboards were **DELETED** (2026-06-27). **Gap #57(a) "sub-dashboards render mock" is RESOLVED** — the
+>   pre-UAT-blocker notes about `/admin/dashboards/{payments,engagement,redemptions,kyc}` showing "4,821"/"Kumar General Store" are stale.
+> - **Sales leaderboard BUILT** (`a525739`+`a272dca`); **AF-6 cookie-only auth + refresh-on-401, AF-5 xlsx, AF-7/8/9/10 DONE**;
+>   **AF-12 RBAC deliberately OFF for launch** (`@Roles`+service are the real gates — `RBAC-ENABLEMENT.md`).
+> - **Prod is ALREADY LIVE**; cutover = a low-risk UPDATE of an empty prod (0 users/0 data), auto-migrated behind a
+>   `production` gate; runbook = [`runbooks/CUTOVER-RUNBOOK.md`](runbooks/CUTOVER-RUNBOOK.md). **Prod bootstrap script BUILT**
+>   (`api/prisma/bootstrap.ts`, `262027a`) — run it before #76.
+> - **Custom domain LIVE** via Cloudflare **Worker** (the GCP load balancer was archived 2026-06-13 — any "GCP LB + Google SSL" text is stale).
+> - **PWA fully ACTIVATED + Android-verified on staging**; prod PWA activation is a cutover step (see POST-GO-LIVE-BACKLOG §F).
+> - **Session Report shipped 2026-06-30** (`7021c58`): per-user active-days usage report.
+>
+> **Genuinely OPEN at 2026-06-30:** #76 real Deoleo data load into empty prod (+ run bootstrap) · AF-3 partner hardcoded-bank
+> (in progress 2026-06-30) · prod env-hygiene sweep (NODE_ENV=production / NO FIXED_OTP / NO DEMO_MODE / no debug routes) ·
+> MSG91 prod DLT templates + creds + 1 real test OTP · owner UAT sign-off (redemption + KYC) on staging · click the 2 GCP
+> alert-email verification links · points-expiry scheduler wiring (post-launch) · AF-12 RBAC (post-launch). History below is preserved.
+
 > ## 🟢 2026-06-26 update — UAT fast-follows shipped (all gate-green + independently audited + runtime-verified on staging):
 > **sales leaderboard BUILT** (`GET /v1/sales/leaderboard`, live-computed, same-level peers, ZNM territory — `a525739`+`a272dca`);
 > **per-tenant Visibility ON/OFF** master toggle shipped (`visibilityEnabled`, default OFF — **Deoleo launches OFF** — `d5d175e`);
@@ -18,8 +39,10 @@
 > from re-bankable bank failures. **GATE GREEN:** api jest **921/921**, FE vitest **1459**, Playwright E2E green, doc-consistency;
 > **GLB-3 runtime-proven** on `gifsy_dev` (2 same-file-hash TDS rows persist, dup rejected); backend boots clean. Per-item table =
 > [`GO-LIVE-ISSUE-LIST.md`](GO-LIVE-ISSUE-LIST.md). **➡️ The exhaustive UAT script is now [`UAT-CHECKLIST.md`](UAT-CHECKLIST.md).**
-> **REMAINING BEFORE GO-LIVE (not fix-wave):** (a) gap #57(a) admin sub-dashboards still render mock — hide-or-wire before UAT;
-> (b) real Deoleo master-data load into empty prod (#76); (c) owner ops — monitoring alert + backups/PITR + secret rotation (#74).
+> **REMAINING BEFORE GO-LIVE (not fix-wave; RECONCILED 2026-06-30):** ~~(a) gap #57(a) admin sub-dashboards still render mock~~
+> → **✅ RESOLVED — consolidated to 4 REAL dashboards, 3 fakes DELETED (2026-06-27);** (b) real Deoleo master-data load into
+> empty prod (#76, + run the bootstrap script first); ~~(c) owner ops — monitoring alert + backups/PITR~~ → **✅ DONE 2026-06-29**
+> (alerts LIVE + backups/PITR verified ON); residual owner ops = click the 2 GCP alert-email verification links + optional secret rotation (#74).
 
 > Created 2026-06-19. Documentation alone is **passive** and gets shortcut (proven repeatedly this session).
 > "Done / ready to ship" must be **enforced by something executable**, not trusted to a checklist. This doc
@@ -69,9 +92,11 @@ differences — the harness must not assume `FIXED_OTP`/`localhost` semantics.)
 > writes the `employee_hierarchy` snapshot — the read is snapshot-fed by P2.1 design, so this was a seed-fixture gap not a code
 > gap); notification bells hidden (P7). **#78 ✅ RESOLVED** — `createClient`/`provisionOutletTypeConfigs` chokepoint auto-creates
 > outlet-type configs on tenant creation (`POST /v1/gifsy/clients` + wizard + seed share it); **so #76 is NO LONGER gated by #78.**
-> **🔴 REMAINING before UAT:** (a) **gap #57(a) sub-dashboards** `/admin/dashboards/{payments,engagement,redemptions,kyc}` STILL
-> render mock ("4,821"/"Kumar General Store") — owner deferred wiring; **decide hide-the-nav-vs-wire before UAT** or testers hit
-> fake data. (b) **real Deoleo master-data load** into empty prod (#76, owner provides file). (c) **observability alerts** (#74, owner).
+> **🔴 REMAINING before UAT (RECONCILED 2026-06-30):** ~~(a) **gap #57(a) sub-dashboards** `/admin/dashboards/{payments,engagement,redemptions,kyc}` STILL
+> render mock ("4,821"/"Kumar General Store")~~ → **✅ RESOLVED — admin dashboards consolidated to 4 REAL pages
+> (KYC + Program-Health + Operations + Finance); the 3 mock sub-dashboards were DELETED (2026-06-27).** (b) **real Deoleo
+> master-data load** into empty prod (#76, owner provides file; run the bootstrap script first). ~~(c) **observability alerts**
+> (#74, owner)~~ → **✅ DONE 2026-06-29** (residual = owner clicks the 2 GCP verification emails).
 > (d) gap #57(d) tenant-settings write + (f) MIS KPI-read RBAC — lower, roles not in Deoleo's first UAT.
 
 - [ ] **Auth:** login works for **all roles** (real flow), route-by-role correct, logout clears session. *(GIFSY broken #39 → fixed; staging real-OTP login DONE; full role matrix on prod pending real-data load.)*
@@ -82,8 +107,8 @@ differences — the harness must not assume `FIXED_OTP`/`localhost` semantics.)
 - [x] **Environments configured + seeded:** staging has a known seeded dataset + the current schema; secrets set; `staging` E2E green. *(Staging auto-migrates on `develop`; 3 staging-infra bugs fixed; real-MSG91 staging login works. **Prod is intentionally NOT seeded yet** — real-data load is the remaining step.)*
 - [x] **Custom domain (Deoleo = `deoleoloyalty.gifsy.in`): ✅ LIVE (2026-06-20).** ⚠️ **The edge is a Cloudflare Worker, NOT a GCP load balancer** — `terraform/load-balancer.tf` was **archived 2026-06-13** (LB destroyed; all traffic routes through `cloudflare-worker/`). Done: a Cloudflare **Worker Custom Domain** (managed DNS + SSL) + the branded-domain→slug map (`5de8aa9`, `CLIENT_REGISTRY.domains`) + the login `x-forwarded-host` fix (`37e54f9`). The Worker sets `x-forwarded-host` (it rewrites `Host` to the `.run.app` origin) and the proxy/login read that — so there is **no "preserve Host" requirement** (that earlier note was wrong). **As of the 2026-06-20 cutover the temporary host-alias was REMOVED — prod runs current code and resolves the branded domain natively** (login 200; see [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md)).
 - [ ] **Excel round-trips** work (download→fill→upload) where applicable (#44). *(Small fast-follow — confirm Deoleo doesn't need final-target re-upload at launch.)*
-- [~] **Observability** baseline (logs/metrics/alerts) (#27 → P8.4) — at least error visibility before prod. *(Structured logging → Cloud Logging + `/health` 200 done; **≥1 Cloud Monitoring alert still OPEN** — needs owner alert email.)*
-- [~] **The E2E matrix is covered + GREEN** (every `DATA-VISIBILITY.md` row, Waves 0–4 — 291 passed / 0 failed / 11 skipped). ✅ Built + runtime-verified ([`E2E-COVERAGE-PLAN.md`](E2E-COVERAGE-PLAN.md)). The 11 skips are the **gap #57** pages (`test.fixme`'d — admin sub-dashboards / Outlet Master / hierarchy / sales notifications render mock/empty data) + a few precondition skips. **The #57 cells re-assert real data the moment those pages are wired — that wiring is the PRE-UAT blocker above.** Staging E2E still needs the OTP read-back endpoint or temp `FIXED_OTP`.
+- [x] **Observability** baseline (logs/metrics/alerts) (#27 → P8.4) — at least error visibility before prod. *(Structured logging → Cloud Logging + `/health` 200 + **2 Cloud Monitoring alert policies [5xx + uptime] on 2 channels are LIVE — DONE 2026-06-29**; residual = owner clicks the GCP verification emails.)*
+- [~] **The E2E matrix is covered + GREEN** (every `DATA-VISIBILITY.md` row, Waves 0–4 — 291 passed / 0 failed / 11 skipped). ✅ Built + runtime-verified ([`E2E-COVERAGE-PLAN.md`](E2E-COVERAGE-PLAN.md)). The 11 skips were the **gap #57** pages (`test.fixme`'d — admin sub-dashboards / Outlet Master / hierarchy / sales notifications render mock/empty data) + a few precondition skips. **RECONCILED 2026-06-30: the admin sub-dashboards were consolidated to 4 REAL pages (3 fakes DELETED, 2026-06-27), so that #57 sub-dashboard pre-UAT blocker is RESOLVED** — point any remaining `test.fixme` cells at the new real dashboards. Staging E2E still needs the OTP read-back endpoint or temp `FIXED_OTP`.
 
 ### 3.1 Owner-ops before launch (exact steps in `runbooks/OWNER-OPS-RUNBOOK.md`; CORRECTED 2026-06-29 by live recon)
 - [x] **Cloud Monitoring alert email** — **DONE 2026-06-29.** Two email channels (`nikunj.sadani@gifsy.in`, `nikita@gifsy.in`) + two enabled alert policies wired to both: "Prod API — 5xx error rate (gifsy-api)" (>5 5xx/5min) and "Prod API — uptime check failing (gifsy-api /health)". ⚠️ Each address gets a one-time GCP verification email — click it so alerts deliver.
