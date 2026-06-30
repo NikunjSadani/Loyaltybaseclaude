@@ -3,13 +3,15 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
+import { ActivityTrackingService } from '../../activity/activity-tracking.service';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor(
-    private config:  ConfigService,
-    private prisma:  PrismaService,
+    private config:   ConfigService,
+    private prisma:   PrismaService,
+    private activity: ActivityTrackingService,
   ) {
     const secret = config.get<string>('JWT_SECRET');
     if (!secret) {
@@ -46,6 +48,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     if (!session) {
       throw new UnauthorizedException('Session expired or revoked — please log in again.');
     }
+
+    // Stamp this user active for today (IST) — fire-and-forget, deduped in memory,
+    // never blocks or fails the request. Feeds the Session Report's active-days metric.
+    this.activity.markActive(payload.sub, payload.clientId);
 
     return payload; // Becomes req.user
   }

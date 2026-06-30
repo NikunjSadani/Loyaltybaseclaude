@@ -16,8 +16,8 @@ const mockPrisma = {
   scheme: { findMany: jest.fn() },
   tdsRecord: { findMany: jest.fn() },
   payoutTransaction: { findMany: jest.fn() },
-  loginLog: { findMany: jest.fn() },
-  user: { count: jest.fn() },
+  user: { count: jest.fn(), findMany: jest.fn() },
+  userActivityDay: { findMany: jest.fn() },
   kycSubmission: { findMany: jest.fn() },
 };
 
@@ -157,15 +157,102 @@ describe('ReportsService', () => {
     });
   });
 
-  describe('engagement', () => {
-    it('scopes login logs and user count to the caller clientId', async () => {
-      mockPrisma.loginLog.findMany.mockResolvedValue([]);
-      mockPrisma.user.count.mockResolvedValue(0);
-      await service.engagement(gifsy, {});
-      const logWhere = mockPrisma.loginLog.findMany.mock.calls[0][0].where;
-      expect(logWhere.user).toEqual({ clientId: 'deoleo' });
-      const countWhere = mockPrisma.user.count.mock.calls[0][0].where;
-      expect(countWhere).toEqual({ status: 'ACTIVE', clientId: 'deoleo' });
+  describe('sessionReport', () => {
+    /** Current IST month as 'YYYY-MM' (fixed UTC+5:30), computed the same way as the service. */
+    const currentIstYm = (): string => {
+      const d = new Date(Date.now() + (5 * 60 + 30) * 60 * 1000);
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    };
+
+    it('scopes the user query to the caller clientId and excludes soft-deleted', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([]);
+      // No tenant users → activity query must be skipped entirely.
+      await service.sessionReport(gifsy, {});
+      const where = mockPrisma.user.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ clientId: 'deoleo', deletedAt: null });
+      expect(mockPrisma.userActivityDay.findMany).not.toHaveBeenCalled();
+    });
+
+    it('produces a 13-month window oldest→newest with the current IST month last', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([]);
+      const res = await service.sessionReport(gifsy, {});
+      expect(res.kind).toBe('json');
+      if (res.kind === 'json') {
+        const data = res.data as { months: { ym: string; label: string }[]; timezone: string };
+        expect(data.timezone).toBe('Asia/Kolkata');
+        expect(data.months).toHaveLength(13);
+        // Strictly increasing 'YYYY-MM' ⇒ oldest→newest ordering.
+        const yms = data.months.map((m) => m.ym);
+        const sorted = [...yms].sort();
+        expect(yms).toEqual(sorted);
+        // Last bucket = current IST month; label uses the hardcoded 3-letter month.
+        expect(yms[yms.length - 1]).toBe(currentIstYm());
+        expect(data.months[12].label).toMatch(/^[A-Z][a-z]{2} \d{4}$/);
+      }
+    });
+
+    it('scopes activity by tenant userIds (not clientId) and counts active days per month', async () => {
+      const cur = currentIstYm();
+      mockPrisma.user.findMany.mockResolvedValue([
+        { id: 'u1', name: 'Alice', phone: '900', role: 'XSR', lastLoginAt: new Date('2026-06-20T08:30:00.000Z') },
+      ]);
+      // Two days in the current month + one day in the prior month.
+      const [y, m] = cur.split('-').map(Number);
+      const prev = m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+      mockPrisma.userActivityDay.findMany.mockResolvedValue([
+        { userId: 'u1', activityDate: new Date(`${cur}-01T00:00:00.000Z`) },
+        { userId: 'u1', activityDate: new Date(`${cur}-02T00:00:00.000Z`) },
+        { userId: 'u1', activityDate: new Date(`${prev}-15T00:00:00.000Z`) },
+      ]);
+      const res = await service.sessionReport(gifsy, {});
+      // Activity scoped by userId IN, NOT by clientId.
+      const actWhere = mockPrisma.userActivityDay.findMany.mock.calls[0][0].where;
+      expect(actWhere.userId).toEqual({ in: ['u1'] });
+      expect(actWhere.clientId).toBeUndefined();
+      expect(actWhere.activityDate.gte).toBeInstanceOf(Date);
+      if (res.kind === 'json') {
+        const data = res.data as { rows: { activeDays: Record<string, number> }[] };
+        expect(data.rows[0].activeDays[cur]).toBe(2);
+        expect(data.rows[0].activeDays[prev]).toBe(1);
+      }
+    });
+
+    it('shows an empty activeDays map for a user with no activity, and surfaces lastLoginAt', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([
+        { id: 'u2', name: 'Bob', phone: '901', role: 'SO', lastLoginAt: new Date('2026-06-21T10:15:00.000Z') },
+      ]);
+      mockPrisma.userActivityDay.findMany.mockResolvedValue([]);
+      const res = await service.sessionReport(gifsy, {});
+      if (res.kind === 'json') {
+        const data = res.data as { rows: { lastLoginAt: string | null; activeDays: Record<string, number> }[] };
+        expect(data.rows[0].activeDays).toEqual({});
+        expect(data.rows[0].lastLoginAt).toBe('2026-06-21T10:15:00.000Z');
+      }
+    });
+
+    it('null lastLoginAt surfaces as null in JSON', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([
+        { id: 'u3', name: 'Cara', phone: '902', role: 'ISR', lastLoginAt: null },
+      ]);
+      mockPrisma.userActivityDay.findMany.mockResolvedValue([]);
+      const res = await service.sessionReport(gifsy, {});
+      if (res.kind === 'json') {
+        const data = res.data as { rows: { lastLoginAt: string | null }[] };
+        expect(data.rows[0].lastLoginAt).toBeNull();
+      }
+    });
+
+    it('returns an xlsx buffer with one month column per bucket when format=xlsx', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([
+        { id: 'u4', name: 'Dan', phone: '903', role: 'XSR', lastLoginAt: null },
+      ]);
+      mockPrisma.userActivityDay.findMany.mockResolvedValue([]);
+      const res = await service.sessionReport(gifsy, { format: ReportFormat.XLSX });
+      expect(res.kind).toBe('xlsx');
+      if (res.kind === 'xlsx') {
+        expect(res.filename).toBe('session-report.xlsx');
+        expect(Buffer.isBuffer(res.buffer)).toBe(true);
+      }
     });
   });
 

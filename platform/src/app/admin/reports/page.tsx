@@ -37,9 +37,7 @@ const reports: ReportConfig[] = [
   { id: 'invoices', name: 'Invoice Report', description: 'Auto-generated invoices with TDS details, digital signature status, and download links', category: 'finance', endpoint: '/api/reports/invoices', filters: ['dateFrom', 'dateTo', 'partnerId'] },
   { id: 'reconciliation', name: 'Fund Reconciliation Report', description: 'Opening balance, funds received, utilised by payout mode, closing balance, and variance', category: 'finance', endpoint: '/api/reports/reconciliation', filters: ['period', 'payoutMode'] },
   // Engagement
-  { id: 'login-activity', name: 'Login Activity Report', description: 'Daily active users, login frequency, and session counts by user type', category: 'engagement', endpoint: '/api/reports/engagement', filters: ['dateFrom', 'dateTo', 'userRole'] },
-  { id: 'whatsapp-delivery', name: 'WhatsApp Delivery Report', description: 'Message delivery rates, read rates, and failed notifications by event type', category: 'engagement', endpoint: '/api/reports/engagement', filters: ['dateFrom', 'dateTo', 'eventType'] },
-  { id: 'active-users', name: 'Active Users Report', description: 'Monthly active partners by class and tier with trend analysis', category: 'engagement', endpoint: '/api/reports/engagement', filters: ['month', 'partnerClass'] },
+  { id: 'session-report', name: 'Session Report', description: 'Per-user portal usage: last login plus active-day counts for each of the last 12 months and the current month. "Active" = a day the user actually used the app (not a login).', category: 'engagement', endpoint: '/api/reports/session-report', href: '/admin/reports/session', filters: [] },
 ]
 
 const categoryLabels = {

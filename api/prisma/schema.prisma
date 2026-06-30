@@ -472,6 +472,7 @@ model User {
   loginLogs          LoginLog[]
   pushSubscriptions  PushSubscription[]
   pwaInstalls        PwaInstall[]
+  activityDays       UserActivityDay[]
 
   @@unique([clientId, phone]) // same phone can exist across different clients
   @@unique([clientId, email]) // email scoped per client (nullable handled by Postgres partial index)
@@ -1863,6 +1864,32 @@ model PwaInstall {
   @@index([clientId])
   @@index([userId])
   @@map("pwa_install")
+}
+
+/// One row per (user, IST-calendar-day) on which the user made >=1 authenticated
+/// request. Written fire-and-forget from JwtStrategy.validate with an in-memory
+/// once-per-day dedupe (~1 insert per active user per IST day per instance; the
+/// unique (userId, activityDate) makes cross-instance repeats no-ops). This is the
+/// activity signal behind the Session Report's active-days metric — DISTINCT from a
+/// login: a 7-day access token means one login spans many active days. `activityDate`
+/// is a DATE in Asia/Kolkata, so grouping by its year-month yields IST months directly.
+/// No backfill — counting begins the day this ships (greenfield).
+model UserActivityDay {
+  id           String   @id @default(cuid())
+  userId       String
+  clientId     String   // active-context clientId from the JWT (tenant index; report scopes by User.clientId)
+  activityDate DateTime @db.Date // IST calendar day (no time component)
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, activityDate])
+  @@index([clientId, activityDate])
+  @@index([activityDate])
+  @@map("user_activity_day")
 }
 
 // ============================================================

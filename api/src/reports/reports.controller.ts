@@ -61,11 +61,11 @@ export class ReportsController {
     return this.respond(await this.reports.payoutLiability(user, query));
   }
 
-  @Get('engagement')
-  @Roles('GIFSY_ADMIN', 'MIS_USER')
+  @Get('session-report')
+  @Roles('GIFSY_ADMIN', 'MIS_USER', 'CLIENT_ADMIN')
   @RequirePermission('reports:read')
-  async engagement(@CurrentUser() user: JwtPayload, @Query() query: ReportRangeQueryDto) {
-    return this.respond(await this.reports.engagement(user, query));
+  async sessionReport(@CurrentUser() user: JwtPayload, @Query() query: ReportRangeQueryDto) {
+    return this.respond(await this.reports.sessionReport(user, query));
   }
 
   @Get('kyc-status')
