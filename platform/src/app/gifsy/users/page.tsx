@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Users, Search, ShieldCheck, UserCog, Building2, Activity } from 'lucide-react';
+import Link from 'next/link';
+import { Users, Search, ShieldCheck, UserCog, Building2, Activity, ArrowRight } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
 
@@ -147,9 +148,13 @@ export default function GifsyUsersPage() {
       </div>
       )}
 
-      <p className="text-xs text-white/30 text-center">
-        Platform user management (invite, role change, deactivate) coming in Phase 2 — DB integration required.
-      </p>
+      <Link
+        href="/admin/users"
+        className="flex items-center justify-center gap-1.5 text-xs text-white/50 hover:text-white/80 transition-colors"
+      >
+        To create or manage admin accounts, go to User Accounts
+        <ArrowRight className="w-3.5 h-3.5" />
+      </Link>
     </div>
   );
 }

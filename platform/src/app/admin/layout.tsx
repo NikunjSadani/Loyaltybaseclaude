@@ -72,8 +72,13 @@ const ALL_NAV_ITEMS = [
     icon: Users,
     featureFlag: null,
     children: [
+      // NOTE: list the more-specific child paths FIRST. The header-title resolver below
+      // matches a child via `startsWith(child.href + '/')`, and '/admin/users' is a prefix
+      // of '/admin/users/outlets' — putting User Accounts last keeps the outlets page's
+      // title correct while still exact-matching '/admin/users' for itself.
       { href: '/admin/users/outlets', label: 'Outlet Management'   },
       { href: '/admin/hierarchy',     label: 'Employee Hierarchy'  },
+      { href: '/admin/users',         label: 'User Accounts'       },
     ],
   },
   { href: '/admin/schemes',  label: 'Scheme Management',icon: Tag,          featureFlag: null, gifsyOnly: true  },
