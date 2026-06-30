@@ -16,6 +16,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
 import { sniffFileType } from '../common/file-signature';
@@ -703,7 +704,87 @@ export class KycService {
         .catch(() => {
           // Non-critical: push enqueue failures must not fail the request.
         });
+
+      // Owner WhatsApp on approval — this is the single canonical approval hook (every
+      // approval path routes through notify() with event='KYC_APPROVED'). The owner
+      // identity rides in `variables` (set by applyBridgeOutcome). sendKycWhatsapp is
+      // tenant-gated + fire-and-forget and never throws, so a missing clientId/phone
+      // (e.g. a legacy partner-less row) simply no-ops.
+      const whatsappClientId = variables.whatsappClientId as string | undefined;
+      if (whatsappClientId) {
+        await this.sendKycWhatsapp(whatsappClientId, 'APPROVED', {
+          ownerName: variables.whatsappOwnerName as string | null | undefined,
+          ownerPhone: variables.whatsappOwnerPhone as string | null | undefined,
+          programName: variables.whatsappProgramName as string | null | undefined,
+        });
+      }
     }
+  }
+
+  /**
+   * Send the outlet-OWNER a WhatsApp template message on a KYC lifecycle event.
+   *
+   * Fire-and-forget + post-commit: this MUST NEVER throw into — or block — the KYC
+   * request/tx. Every send path is wrapped in try/catch (mirrors notify() /
+   * SalesNotificationsService semantics); a delivery failure is logged and swallowed.
+   *
+   * Tenant gate (config-driven): the per-tenant template names live in WHATSAPP_KYC
+   * (notifications/whatsapp-kyc.config.ts). A clientId with no entry is simply
+   * UNCONFIGURED → no-op, so only configured tenants (currently Deoleo) send.
+   *
+   * Recipient = the OUTLET OWNER (ChannelPartner.ownerName / ChannelPartner.phone =
+   * the KYC contact mobile captured at submit), NOT the submitting rep.
+   *   SUBMITTED → [ownerName, "DD MMM YYYY" submission date, programName]
+   *   APPROVED  → [ownerName, programName]
+   */
+  private async sendKycWhatsapp(
+    clientId: string,
+    event: 'SUBMITTED' | 'APPROVED',
+    data: {
+      ownerName?: string | null;
+      ownerPhone?: string | null;
+      programName?: string | null;
+      submittedAt?: Date | null;
+    },
+  ): Promise<void> {
+    try {
+      const templates = WHATSAPP_KYC[clientId];
+      if (!templates) return; // tenant not configured for WhatsApp KYC → no-op
+
+      const ownerPhone = data.ownerPhone?.trim();
+      if (!ownerPhone) {
+        // No owner contact mobile → nothing to send to. Log, don't throw.
+        this.logger.warn(`[kyc-whatsapp] ${event} skipped — no owner phone (client ${clientId})`);
+        return;
+      }
+
+      const ownerName = data.ownerName?.trim() || 'Partner';
+      const programName = data.programName?.trim() || '';
+
+      if (event === 'SUBMITTED') {
+        const date = this.formatKycDate(data.submittedAt ?? new Date());
+        await this.msg91.sendWhatsappTemplate(ownerPhone, templates.submissionTemplate, [
+          ownerName,
+          date,
+          programName,
+        ]);
+      } else {
+        await this.msg91.sendWhatsappTemplate(ownerPhone, templates.approvalTemplate, [
+          ownerName,
+          programName,
+        ]);
+      }
+    } catch (e) {
+      // Non-critical: a WhatsApp delivery failure must NEVER fail the KYC operation.
+      this.logger.warn(`[kyc-whatsapp] ${event} send failed (client ${clientId}): ${e}`);
+    }
+  }
+
+  /** Format a date as a readable "DD MMM YYYY" (e.g. "30 Jun 2026") for WhatsApp bodies. */
+  private formatKycDate(d: Date): string {
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${day} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
   }
 
   /**
@@ -1068,6 +1149,17 @@ export class KycService {
     // Notify the routed approver (sales) that a KYC is pending their approval.
     // Fire-and-forget + tenant-scoped recipient resolution; never blocks/fails submit.
     await this.salesNotifications.kycSubmittedForApproval(user.clientId, user.sub, outlet.name);
+
+    // Notify the OUTLET OWNER (not the rep) via WhatsApp that their KYC was submitted.
+    // Additive + post-commit + fire-and-forget; no-op unless the tenant is configured
+    // in WHATSAPP_KYC. Owner name/phone = the KYC contact captured in dto; program = the
+    // outlet's programName.
+    await this.sendKycWhatsapp(user.clientId, 'SUBMITTED', {
+      ownerName: dto.partnerName,
+      ownerPhone: dto.mobile,
+      programName: outlet.programName,
+      submittedAt: submission.submittedAt ?? new Date(),
+    });
 
     return { submissionId: submission.id, status, escalatedFrom };
   }
@@ -2314,7 +2406,16 @@ export class KycService {
       user: { name: string | null; phone: string | null };
       partner: {
         userId: string;
-        outlets: Array<{ id: string; reKycFlags: Prisma.JsonValue | null }>;
+        clientId: string;
+        // The OUTLET OWNER's KYC contact identity (set from dto at submit) — the
+        // WhatsApp recipient on approval. Distinct from `user` (the submitting rep).
+        ownerName: string | null;
+        phone: string | null;
+        outlets: Array<{
+          id: string;
+          reKycFlags: Prisma.JsonValue | null;
+          programName?: string | null;
+        }>;
       } | null;
     },
     bridgeResult: BridgeResult,
@@ -2461,7 +2562,17 @@ export class KycService {
           userId: submission.userId,
           event: 'KYC_APPROVED',
           body: 'Your KYC has been approved.',
-          variables: { name: submission.user.name ?? submission.user.phone },
+          // The owner-WhatsApp fields ride along in `variables` so the single
+          // canonical notify() KYC_APPROVED hook can fire the WhatsApp send. The
+          // recipient is the OUTLET OWNER (partner.ownerName/phone = KYC contact),
+          // NOT the submitting rep. programName = the partner's primary outlet.
+          variables: {
+            name: submission.user.name ?? submission.user.phone,
+            whatsappClientId: submission.partner?.clientId,
+            whatsappOwnerName: submission.partner?.ownerName,
+            whatsappOwnerPhone: submission.partner?.phone,
+            whatsappProgramName: submission.partner?.outlets[0]?.programName ?? null,
+          },
           phone: submission.user.phone ?? undefined,
         },
       };

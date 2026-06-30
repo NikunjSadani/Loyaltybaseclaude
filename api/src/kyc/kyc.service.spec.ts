@@ -71,7 +71,10 @@ const mockPrisma = {
 
 const mockNotifications = { enqueue: jest.fn().mockResolvedValue({ id: 'n1' }) };
 
-const mockMsg91 = { sendOtp: jest.fn().mockResolvedValue(undefined) };
+const mockMsg91 = {
+  sendOtp: jest.fn().mockResolvedValue(undefined),
+  sendWhatsappTemplate: jest.fn().mockResolvedValue(undefined),
+};
 
 const mockStorage = {
   generateKey: jest.fn((folder: string, name: string) => `${folder}/2026-06/uuid-${name}`),
@@ -801,6 +804,126 @@ describe('KycService', () => {
       // Submission filed BY the rep but ABOUT the outlet's partner.
       expect(mockTx.kycSubmission.create.mock.calls[0][0].data.userId).toBe('so1');
       expect(mockTx.kycSubmission.create.mock.calls[0][0].data.partnerId).toBe('cp-new');
+    });
+  });
+
+  describe('KYC WhatsApp notifications (owner, tenant-gated)', () => {
+    const isr: JwtPayload = { sub: 'isr1', role: 'SALES_ISR', clientId: 'deoleo', phone: '', name: '' };
+
+    const baseDto = {
+      outletId: 'outlet-1',
+      partnerName: 'Acme Owner',
+      mobile: '9000000001',
+      address: '1 Main St',
+      city: 'Mumbai',
+      state: 'Maharashtra',
+      pincode: '400001',
+    };
+
+    /** Fully prime a partner-less create() that resolves to SUBMITTED, for `clientId`. */
+    const primeSubmit = (clientId: string) => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1',
+        clientId,
+        partnerId: null,
+        outletCode: 'OUT-1',
+        outletType: { code: 'SSS' },
+        programName: 'Olive Oil',
+      });
+      // assertPhoneAvailable: partner-clash null, employee-clash null → available.
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // employee-clash
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // routing → SUBMITTED
+      mockTx.user.findFirst.mockResolvedValueOnce(null);
+      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-1' });
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-new' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({
+        id: 'sub1',
+        submittedAt: new Date('2026-06-30T00:00:00Z'),
+      });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+    };
+
+    it('SUBMIT (deoleo): sends deoleo_kyc_submission to the owner mobile with [ownerName, date, program]', async () => {
+      primeSubmit('deoleo');
+      await service.create(isr, baseDto as never);
+
+      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
+      const [phone, template, values] = mockMsg91.sendWhatsappTemplate.mock.calls[0];
+      // Recipient = the OUTLET OWNER's KYC contact mobile (dto.mobile), NOT the rep.
+      expect(phone).toBe('9000000001');
+      expect(template).toBe('deoleo_kyc_submission');
+      // [ownerName, submission date (DD MMM YYYY), programName]
+      expect(values[0]).toBe('Acme Owner');
+      expect(values[1]).toMatch(/^\d{2} [A-Z][a-z]{2} \d{4}$/);
+      expect(values[2]).toBe('Olive Oil');
+    });
+
+    it('SUBMIT (unconfigured tenant clientb): does NOT send a WhatsApp', async () => {
+      const isrB: JwtPayload = { sub: 'isrB', role: 'SALES_ISR', clientId: 'clientb', phone: '', name: '' };
+      primeSubmit('clientb');
+      await service.create(isrB, baseDto as never);
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+    });
+
+    it('SUBMIT: a thrown sendWhatsappTemplate never fails the KYC submit', async () => {
+      primeSubmit('deoleo');
+      mockMsg91.sendWhatsappTemplate.mockRejectedValueOnce(new Error('MSG91 down'));
+      const res = await service.create(isr, baseDto as never);
+      expect(res).toMatchObject({ submissionId: 'sub1', status: 'SUBMITTED' });
+    });
+
+    /** Seed an approve() happy path whose partner carries the WhatsApp owner fields. */
+    const seedApproveWithOwner = () => {
+      const partnerWithOwner = {
+        userId: 'owner-9',
+        clientId: 'deoleo',
+        ownerName: 'Acme Owner',
+        phone: '9000000001',
+        outlets: [
+          { id: 'outlet-1', isPrimary: true, deletedAt: null, reKycFlags: null, programName: 'Olive Oil' },
+        ],
+      };
+      const row = {
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        partnerId: 'p1',
+        user: { name: 'n', phone: 'p' },
+        partner: partnerWithOwner,
+      };
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(row);
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(row);
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
+      mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({ id: 'w1' });
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+    };
+
+    it('APPROVE (deoleo): sends deoleo_kyc_approval to the owner mobile with [ownerName, program]', async () => {
+      seedApproveWithOwner();
+      await service.approve(gifsy, 's1');
+
+      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
+      const [phone, template, values] = mockMsg91.sendWhatsappTemplate.mock.calls[0];
+      expect(phone).toBe('9000000001');
+      expect(template).toBe('deoleo_kyc_approval');
+      expect(values).toEqual(['Acme Owner', 'Olive Oil']);
+    });
+
+    it('APPROVE: a thrown sendWhatsappTemplate never fails the KYC approval', async () => {
+      seedApproveWithOwner();
+      mockMsg91.sendWhatsappTemplate.mockRejectedValueOnce(new Error('MSG91 down'));
+      const res = await service.approve(gifsy, 's1');
+      expect(res).toEqual({ message: 'KYC approved successfully' });
     });
   });
 

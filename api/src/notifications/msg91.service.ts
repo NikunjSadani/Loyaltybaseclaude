@@ -69,4 +69,112 @@ export class Msg91Service {
       throw new Error(`Failed to send OTP via ${channel}: ${reason}`);
     }
   }
+
+  /**
+   * Send a WhatsApp TEMPLATE message via the MSG91 v5 bulk WhatsApp API.
+   *
+   * Mirrors sendOtp's conventions exactly:
+   *   - authkey from MSG91_AUTH_KEY (.trim() — defends against a BOM/whitespace
+   *     that would make `fetch` throw a ByteString error on the header).
+   *   - DEV bypass: when no authKey is configured (non-prod without MSG91) we LOG
+   *     and RETURN so a tenant without MSG91 wiring never errors. (Unlike sendOtp
+   *     there is no FIXED_OTP analogue — a template message has no code to fake —
+   *     so the only bypass is the missing-authKey one.)
+   *   - 10s AbortSignal timeout → fail fast with a clear error, never an endless hang.
+   *   - "HTTP 200 + {type:'error'}" body check → throw on the MSG91-reported failure.
+   *
+   * @param phone        the recipient's 10-digit mobile (country code is prepended → `91<phone>`)
+   * @param templateName the MSG91-registered template name (e.g. 'deoleo_kyc_approval')
+   * @param bodyValues   ordered body variables → mapped to body_1, body_2, … in template order
+   */
+  async sendWhatsappTemplate(
+    phone: string,
+    templateName: string,
+    bodyValues: string[],
+  ): Promise<void> {
+    const authKey = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
+    // The integrated WhatsApp number registered with MSG91 for this platform.
+    // Configurable via MSG91_WHATSAPP_NUMBER; defaults to the Deoleo-integrated number.
+    const integratedNumber =
+      this.config.get<string>('MSG91_WHATSAPP_NUMBER')?.trim() || '917003202293';
+
+    // DEV bypass — same shape as sendOtp's missing-authKey path: a non-prod env
+    // without MSG91 configured logs and returns instead of throwing.
+    if (!authKey) {
+      this.logger.warn(
+        `[DEV] MSG91 not configured — WhatsApp template "${templateName}" for ${phone} not sent (values: ${JSON.stringify(bodyValues)})`,
+      );
+      return;
+    }
+
+    // Recipient sanity guard: the body prepends `91` (country code), so the caller
+    // must pass a bare 10-digit mobile. A malformed value (already-prefixed, +91…,
+    // non-numeric, legacy import) would double-prefix into an invalid WhatsApp number
+    // — drop it with a log rather than send to a bad address. No-op, never throws.
+    if (!/^\d{10}$/.test(phone)) {
+      this.logger.warn(
+        `WhatsApp template "${templateName}" skipped — recipient is not a bare 10-digit mobile.`,
+      );
+      return;
+    }
+
+    // MSG91 v5 bulk WhatsApp outbound — template message. The payload is built in
+    // ONE place (below) for readability; field names mirror the MSG91 docs so the
+    // orchestrator can runtime-verify / tweak against the real API in one spot.
+    const url =
+      'https://control.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/';
+    const body = {
+      integrated_number: integratedNumber,
+      content_type: 'template',
+      payload: {
+        messaging_product: 'whatsapp',
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: 'en', policy: 'deterministic' },
+          to_and_components: [
+            {
+              to: [`91${phone}`],
+              components: Object.fromEntries(
+                bodyValues.map((value, i) => [
+                  `body_${i + 1}`,
+                  { type: 'text', value },
+                ]),
+              ),
+            },
+          ],
+        },
+      },
+    };
+
+    // Never hang the request on an unresponsive MSG91 — 10s timeout, then fail fast.
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { authkey: authKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (e) {
+      const reason =
+        (e as Error)?.name === 'TimeoutError'
+          ? 'MSG91 did not respond within 10s (timeout — check MSG91 IP whitelisting / egress)'
+          : String(e);
+      this.logger.error(
+        `MSG91 WhatsApp template "${templateName}" request failed for ${phone}: ${reason}`,
+      );
+      throw new Error(`Failed to send WhatsApp template ${templateName}: ${reason}`);
+    }
+
+    // MSG91 can return HTTP 200 with {"type":"error"} — check the body too.
+    const json = (await res.json()) as { type?: string; message?: string };
+    if (!res.ok || json?.type === 'error') {
+      const reason = json?.message ?? `HTTP ${res.status}`;
+      this.logger.error(
+        `MSG91 WhatsApp template "${templateName}" failed for ${phone}: ${reason}`,
+      );
+      throw new Error(`Failed to send WhatsApp template ${templateName}: ${reason}`);
+    }
+  }
 }
