@@ -1,11 +1,12 @@
 ﻿'use client'
 
 import { useState, useEffect } from 'react'
-import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone } from 'lucide-react'
+import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings'
+import { fetchPointsExpiry, savePointsExpiry } from '@/lib/points-expiry'
 import {
   fetchVisibilityCaptureMode,
   saveVisibilityCaptureMode,
@@ -38,9 +39,9 @@ interface TierConfig {
   upgradeThreshold: number
 }
 
-function SettingRow({ label, description, value, onChange, type = 'number', min, max, step, disabled = false }: {
+function SettingRow({ label, description, value, onChange, type = 'number', min, max, step, disabled = false, testId }: {
   label: string, description: string, value: number | string, onChange: (v: string) => void,
-  type?: string, min?: number, max?: number, step?: number, disabled?: boolean
+  type?: string, min?: number, max?: number, step?: number, disabled?: boolean, testId?: string
 }) {
   return (
     <div className="flex items-start justify-between gap-4 py-4 border-b border-gray-100 last:border-0">
@@ -48,7 +49,7 @@ function SettingRow({ label, description, value, onChange, type = 'number', min,
         <p className="text-sm font-medium text-gray-900">{label}</p>
         <p className="text-xs text-gray-500 mt-0.5">{description}</p>
       </div>
-      <input type={type} value={value} onChange={e => onChange(e.target.value)}
+      <input data-testid={testId} type={type} value={value} onChange={e => onChange(e.target.value)}
         min={min} max={max} step={step} disabled={disabled}
         className="w-28 text-sm border border-gray-200 rounded px-2 py-1.5 text-right focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed" />
     </div>
@@ -100,6 +101,46 @@ export default function SettingsPage() {
     }
     setPaceThresholdSaved(true)
     setTimeout(() => setPaceThresholdSaved(false), 3000)
+  }
+
+  // ── Points expiry (per-tenant default; PointExpiryConfig single source of truth) ──
+  // The WRITE (PUT /api/admin/settings/points-expiry) is GIFSY_ADMIN-only, so the input +
+  // save are editable only for GIFSY_ADMIN. CLIENT_ADMIN/MIS_USER may VIEW the current value
+  // (the GET is tenancy:read) but the control is disabled and the save is hidden for them.
+  // Blank input = null = never expire. The field holds a STRING so blank ≠ 0.
+  const [pointsExpiry,        setPointsExpiry]        = useState<string>('')
+  const [pointsExpiryLoaded,  setPointsExpiryLoaded]  = useState(false)
+  const [pointsExpirySaved,   setPointsExpirySaved]   = useState(false)
+  const [pointsExpiryError,   setPointsExpiryError]   = useState<string | null>(null)
+
+  useEffect(() => {
+    fetchPointsExpiry()
+      .then(({ pointsExpiryDays }) => setPointsExpiry(pointsExpiryDays == null ? '' : String(pointsExpiryDays)))
+      .finally(() => setPointsExpiryLoaded(true))
+  }, [])
+
+  async function handlePointsExpirySave() {
+    setPointsExpiryError(null)
+    const trimmed = pointsExpiry.trim()
+    // Blank → never expire (null). Otherwise require a positive integer.
+    let value: number | null
+    if (trimmed === '') {
+      value = null
+    } else {
+      const n = Number(trimmed)
+      if (!Number.isInteger(n) || n < 1) {
+        setPointsExpiryError('Enter a whole number of days ≥ 1, or leave blank for never.')
+        return
+      }
+      value = n
+    }
+    const ok = await savePointsExpiry(value)
+    if (!ok) {
+      setPointsExpiryError('Could not save — points expiry can only be changed by a Gifsy Admin.')
+      return
+    }
+    setPointsExpirySaved(true)
+    setTimeout(() => setPointsExpirySaved(false), 3000)
   }
 
   // ── Visibility module master switch (per-tenant; saved via GifsySettings) ──
@@ -609,6 +650,58 @@ export default function SettingsPage() {
           )}
           {paceThresholdError && (
             <p className="text-xs text-red-600 mt-2">{paceThresholdError}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Points Expiry (per-tenant default) ── */}
+      <Card data-testid="points-expiry-card">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Clock className="h-4 w-4 text-[var(--brand-primary)]" /> Points Expiry
+              </CardTitle>
+              <CardDescription className="mt-1">
+                Number of days after which earned points expire for this tenant. Leave blank for
+                <strong> never expire</strong>. Applies as the tenant-wide default (scheme-specific
+                overrides are managed per scheme). This is a Gifsy-operated setting — only a Gifsy
+                Admin can change it.
+              </CardDescription>
+            </div>
+            {isGifsyAdmin && (
+              <button
+                data-testid="points-expiry-save"
+                onClick={handlePointsExpirySave}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 ${
+                  pointsExpirySaved
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-[var(--brand-primary)] text-white hover:bg-[var(--brand-primary-dark)]'
+                }`}
+              >
+                {pointsExpirySaved ? '✓ Saved' : <><Save className="h-3.5 w-3.5" /> Save</>}
+              </button>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <SettingRow
+            label="Points expiry (days, blank = never)"
+            description="Whole number of days from when points are earned until they expire. Leave blank so points never expire."
+            type="number"
+            value={pointsExpiry}
+            onChange={(v) => setPointsExpiry(v)}
+            min={1}
+            disabled={!isGifsyAdmin || !pointsExpiryLoaded}
+            testId="points-expiry-input"
+          />
+          {!isGifsyAdmin && (
+            <p className="text-xs text-gray-400 mt-2">
+              Points expiry is a Gifsy-operated setting — only a Gifsy Admin can change it.
+            </p>
+          )}
+          {pointsExpiryError && (
+            <p className="text-xs text-red-600 mt-2">{pointsExpiryError}</p>
           )}
         </CardContent>
       </Card>

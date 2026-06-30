@@ -1,4 +1,4 @@
-import { Allow, IsEnum, IsOptional, IsString, MinLength } from 'class-validator';
+import { Allow, IsEnum, IsInt, IsOptional, IsString, Max, Min, MinLength, ValidateIf } from 'class-validator';
 import type { VisibilityCaptureMode } from '../../tenant/tenant.service';
 
 /**
@@ -35,4 +35,22 @@ export class SetVisibilityCaptureModeDto {
     message: 'mode must be PHOTO_APPROVAL or AMOUNT_UPLOAD',
   })
   mode!: VisibilityCaptureMode;
+}
+
+/**
+ * DTO for PUT /v1/admin/settings/points-expiry.
+ *
+ * `pointsExpiryDays`:
+ *   - `null`            → never expire (the tenant's default config is deactivated).
+ *   - positive integer  → earned points expire that many days after they're granted.
+ *
+ * `@ValidateIf` skips the @IsInt/@Min constraints when the value is exactly `null`,
+ * so an explicit null passes; any non-null value must be an integer >= 1.
+ */
+export class SetPointsExpiryDto {
+  @ValidateIf((o) => o.pointsExpiryDays !== null)
+  @IsInt()
+  @Min(1)
+  @Max(36500) // ~100 years; guards against Int4 overflow / absurd values
+  pointsExpiryDays!: number | null;
 }

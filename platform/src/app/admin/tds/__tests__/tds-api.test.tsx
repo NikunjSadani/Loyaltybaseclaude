@@ -151,6 +151,7 @@ afterEach(() => {
     role:             'CLIENT_ADMIN',
     clientId:         'deoleo',
     name:             'Test Admin',
+    userId:           '',
     canManageSchemes: false,
   });
 });
@@ -223,6 +224,7 @@ describe('TDS — Admin TDS page API wiring', () => {
       role:             'CLIENT_ADMIN',
       clientId:         'deoleo',
       name:             'Test Admin',
+      userId:           '',
       canManageSchemes: false,
     });
     vi.stubGlobal('fetch', make194RFetch());
@@ -237,6 +239,7 @@ describe('TDS — Admin TDS page API wiring', () => {
       role:             'GIFSY_ADMIN',
       clientId:         'gifsy',
       name:             'Gifsy Platform Admin',
+      userId:           '',
       canManageSchemes: true,
     });
     vi.stubGlobal('fetch', makeGifsyFetch());

@@ -7,6 +7,7 @@ import {
   IsOptional,
   IsString,
   Matches,
+  Max,
   Min,
   MinLength,
 } from 'class-validator';
@@ -79,6 +80,7 @@ export class ListUsersQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(100) // cap page size — prevents ?limit=99999999 fetching a whole tenant
   limit?: number = 20;
 }
 

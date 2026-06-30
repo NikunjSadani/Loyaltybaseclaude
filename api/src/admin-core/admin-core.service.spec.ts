@@ -41,6 +41,12 @@ const mockPrisma = {
   kycSubmission: { count: jest.fn() },
   kycStatusHistory: { findMany: jest.fn() },
   programSetting: { findMany: jest.fn(), findFirst: jest.fn(), upsert: jest.fn() },
+  pointExpiryConfig: {
+    findFirst: jest.fn(),
+    update: jest.fn(),
+    create: jest.fn(),
+    updateMany: jest.fn(),
+  },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
@@ -262,6 +268,87 @@ describe('AdminCoreService', () => {
       expect(result).toBeDefined();
       expect(mockPrisma.user.updateMany).toHaveBeenCalled();
     });
+
+    // ── Self-deactivate + last-active-admin guards ────────────────────────────
+    it('DEACT-1: deactivating your OWN account throws BadRequest (before any write)', async () => {
+      // target is the caller themselves (id === user.sub)
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'ca1', phone: '1111111111', role: 'CLIENT_ADMIN' });
+      await expect(
+        service.updateUser(clientAdmin, 'ca1', { status: 'INACTIVE' as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('DEACT-2: deactivating the LAST active admin (count <= 1) throws BadRequest', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'u2', phone: '1111111111', role: 'CLIENT_ADMIN' });
+      mockPrisma.user.count.mockResolvedValueOnce(1); // only one active admin remains
+      await expect(
+        service.updateUser(clientAdmin, 'u2', { status: 'INACTIVE' as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      // the count must be tenant-scoped over admin roles
+      const where = mockPrisma.user.count.mock.calls[0][0].where;
+      expect(where).toEqual({
+        clientId: 'deoleo',
+        status: 'ACTIVE',
+        role: { in: ['GIFSY_ADMIN', 'CLIENT_ADMIN'] },
+      });
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('DEACT-3: deactivating a NON-last admin (count > 1) succeeds', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u2', phone: '1111111111', role: 'CLIENT_ADMIN' }) // target
+        .mockResolvedValueOnce({ id: 'u2', status: 'INACTIVE' });                        // re-fetch
+      mockPrisma.user.count.mockResolvedValueOnce(2); // more than one active admin
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      await expect(
+        service.updateUser(clientAdmin, 'u2', { status: 'INACTIVE' as never }),
+      ).resolves.toBeDefined();
+      expect(mockPrisma.user.updateMany).toHaveBeenCalled();
+    });
+
+    it('DEACT-4: deactivating a NON-admin (MIS_USER) succeeds and skips the admin count', async () => {
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'u3', phone: '1111111111', role: 'MIS_USER' }) // target
+        .mockResolvedValueOnce({ id: 'u3', status: 'INACTIVE' });                    // re-fetch
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      await expect(
+        service.updateUser(clientAdmin, 'u3', { status: 'INACTIVE' as never }),
+      ).resolves.toBeDefined();
+      // the last-admin count must NOT run for a non-admin target
+      expect(mockPrisma.user.count).not.toHaveBeenCalled();
+      expect(mockPrisma.user.updateMany).toHaveBeenCalled();
+    });
+
+    it('DEACT-5: reactivating (status ACTIVE) is never blocked by the deactivation guards', async () => {
+      // target is the caller AND the only admin — but status is ACTIVE, so no guard fires.
+      mockPrisma.user.findFirst
+        .mockResolvedValueOnce({ id: 'ca1', phone: '1111111111', role: 'CLIENT_ADMIN' }) // target (self)
+        .mockResolvedValueOnce({ id: 'ca1', status: 'ACTIVE' });                          // re-fetch
+      mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
+      await expect(
+        service.updateUser(clientAdmin, 'ca1', { status: 'ACTIVE' as never }),
+      ).resolves.toBeDefined();
+      expect(mockPrisma.user.count).not.toHaveBeenCalled();
+      expect(mockPrisma.user.updateMany).toHaveBeenCalled();
+    });
+
+    it('DEACT-6: SUSPEND-ing your OWN account is ALSO blocked (guard covers non-ACTIVE, not just INACTIVE)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'ca1', phone: '1111111111', role: 'CLIENT_ADMIN' });
+      await expect(
+        service.updateUser(clientAdmin, 'ca1', { status: 'SUSPENDED' as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('DEACT-7: SUSPEND-ing the LAST active admin is ALSO blocked (no bypass via SUSPENDED)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'u2', phone: '1111111111', role: 'CLIENT_ADMIN' });
+      mockPrisma.user.count.mockResolvedValueOnce(1);
+      await expect(
+        service.updateUser(clientAdmin, 'u2', { status: 'SUSPENDED' as never }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
+    });
   });
 
   describe('deleteUser', () => {
@@ -454,6 +541,102 @@ describe('AdminCoreService', () => {
       await expect(
         service.setVisibilityCaptureMode(gifsy, { mode: 'AMOUNT_UPLOAD' }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // getPointsExpiry / setPointsExpiry — per-tenant default points-expiry config
+  // ────────────────────────────────────────────────────────────────────────────
+  describe('getPointsExpiry', () => {
+    it('returns the active default config expiryDays, tenant-scoped', async () => {
+      mockPrisma.pointExpiryConfig.findFirst.mockResolvedValue({ id: 'pe1', expiryDays: 90 });
+      const res = await service.getPointsExpiry(clientAdmin);
+      expect(mockPrisma.pointExpiryConfig.findFirst.mock.calls[0][0].where).toEqual({
+        clientId: 'deoleo',
+        isDefault: true,
+        isActive: true,
+      });
+      expect(res).toEqual({ pointsExpiryDays: 90 });
+    });
+
+    it('returns null when there is no active default config (never expire)', async () => {
+      mockPrisma.pointExpiryConfig.findFirst.mockResolvedValue(null);
+      const res = await service.getPointsExpiry(clientAdmin);
+      expect(res).toEqual({ pointsExpiryDays: null });
+    });
+  });
+
+  describe('setPointsExpiry', () => {
+    it('positive N + existing default → UPDATE that row to { expiryDays, isActive:true }', async () => {
+      mockPrisma.pointExpiryConfig.findFirst.mockResolvedValue({ id: 'pe1', isDefault: true });
+      mockPrisma.pointExpiryConfig.update.mockResolvedValue({ id: 'pe1' });
+      const res = await service.setPointsExpiry(gifsy, { pointsExpiryDays: 120 });
+
+      // find-then-update scoped to the tenant's default row (no upsert)
+      expect(mockPrisma.pointExpiryConfig.findFirst.mock.calls[0][0].where).toEqual({
+        clientId: 'deoleo',
+        isDefault: true,
+      });
+      expect(mockPrisma.pointExpiryConfig.update).toHaveBeenCalledWith({
+        where: { id: 'pe1' },
+        data: { expiryDays: 120, isActive: true },
+      });
+      expect(mockPrisma.pointExpiryConfig.create).not.toHaveBeenCalled();
+      expect(res).toEqual({ pointsExpiryDays: 120 });
+    });
+
+    it('positive N + no existing default → CREATE a default row', async () => {
+      mockPrisma.pointExpiryConfig.findFirst.mockResolvedValue(null);
+      mockPrisma.pointExpiryConfig.create.mockResolvedValue({ id: 'pe2' });
+      const res = await service.setPointsExpiry(gifsy, { pointsExpiryDays: 30 });
+
+      const data = mockPrisma.pointExpiryConfig.create.mock.calls[0][0].data;
+      expect(data).toEqual({
+        clientId: 'deoleo',
+        schemeId: null,
+        isDefault: true,
+        isActive: true,
+        expiryDays: 30,
+        warningDaysBefore: 7,
+      });
+      expect(mockPrisma.pointExpiryConfig.update).not.toHaveBeenCalled();
+      expect(res).toEqual({ pointsExpiryDays: 30 });
+    });
+
+    it('null → DEACTIVATE the default via updateMany (never expire; not deleted)', async () => {
+      mockPrisma.pointExpiryConfig.updateMany.mockResolvedValue({ count: 1 });
+      const res = await service.setPointsExpiry(gifsy, { pointsExpiryDays: null });
+
+      expect(mockPrisma.pointExpiryConfig.updateMany).toHaveBeenCalledWith({
+        where: { clientId: 'deoleo', isDefault: true },
+        data: { isActive: false },
+      });
+      // No find/update/create on the null path
+      expect(mockPrisma.pointExpiryConfig.update).not.toHaveBeenCalled();
+      expect(mockPrisma.pointExpiryConfig.create).not.toHaveBeenCalled();
+      expect(res).toEqual({ pointsExpiryDays: null });
+    });
+
+    it('writes a POINT_EXPIRY_CONFIG audit log entry with the new value', async () => {
+      mockPrisma.pointExpiryConfig.findFirst.mockResolvedValue(null);
+      mockPrisma.pointExpiryConfig.create.mockResolvedValue({ id: 'pe2' });
+      await service.setPointsExpiry(gifsy, { pointsExpiryDays: 60 });
+      const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
+      expect(audit.action).toBe('UPDATE');
+      expect(audit.entityType).toBe('POINT_EXPIRY_CONFIG');
+      expect(audit.actorId).toBe('admin1');
+      expect(audit.metadata).toMatchObject({ pointsExpiryDays: 60 });
+    });
+
+    it('rejects in the operator (gifsy) context — must assume a real tenant first', async () => {
+      const gifsyHome = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'gifsy' } as never;
+      await expect(
+        service.setPointsExpiry(gifsyHome, { pointsExpiryDays: 90 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      // no config write attempted for the pseudo-tenant
+      expect(mockPrisma.pointExpiryConfig.findFirst).not.toHaveBeenCalled();
+      expect(mockPrisma.pointExpiryConfig.create).not.toHaveBeenCalled();
+      expect(mockPrisma.pointExpiryConfig.updateMany).not.toHaveBeenCalled();
     });
   });
 

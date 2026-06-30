@@ -160,7 +160,8 @@ jobs:
               REDIS_URL=REDIS_URL:latest,\
               VAPID_PUBLIC_KEY=VAPID_PUBLIC_KEY:latest,\
               VAPID_PRIVATE_KEY=VAPID_PRIVATE_KEY:latest,\
-              PUSH_DRAIN_SECRET=PUSH_DRAIN_SECRET:latest"
+              PUSH_DRAIN_SECRET=PUSH_DRAIN_SECRET:latest,\
+              EXPIRE_SWEEP_SECRET=EXPIRE_SWEEP_SECRET:latest"
 
   # ── Build & Deploy Frontend ──────────────────────────────────────────────────
   deploy-frontend:

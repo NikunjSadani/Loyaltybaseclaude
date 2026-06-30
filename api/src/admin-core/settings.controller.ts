@@ -3,7 +3,7 @@ import { AdminCoreService } from './admin-core.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { SetVisibilityCaptureModeDto, UpsertSettingDto } from './dto/settings.dto';
+import { SetPointsExpiryDto, SetVisibilityCaptureModeDto, UpsertSettingDto } from './dto/settings.dto';
 
 /**
  * Tenant program settings + non-secret tenant config — re-homed from
@@ -63,5 +63,32 @@ export class AdminSettingsController {
     @Body() dto: SetVisibilityCaptureModeDto,
   ) {
     return this.svc.setVisibilityCaptureMode(user, dto);
+  }
+
+  /**
+   * GET /v1/admin/settings/points-expiry — read the tenant's default points-expiry.
+   *
+   * GIFSY_ADMIN or CLIENT_ADMIN may read (tenancy:read). Returns
+   * { pointsExpiryDays: number | null } where null = points never expire.
+   */
+  @Get('points-expiry')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('tenancy:read')
+  getPointsExpiry(@CurrentUser() user: JwtPayload) {
+    return this.svc.getPointsExpiry(user);
+  }
+
+  /**
+   * PUT /v1/admin/settings/points-expiry — set the tenant's default points-expiry.
+   *
+   * GIFSY_ADMIN only (mirrors the settings PUT role policy — points expiry is a
+   * Gifsy-operated program config). Body: { pointsExpiryDays: number | null }
+   * (null = never expire; a positive integer = days).
+   */
+  @Put('points-expiry')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('tenancy:write')
+  setPointsExpiry(@CurrentUser() user: JwtPayload, @Body() dto: SetPointsExpiryDto) {
+    return this.svc.setPointsExpiry(user, dto);
   }
 }

@@ -16,7 +16,9 @@ import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 // ── Mock the role source (admin session) — the page gates the form by session.role ──
-const mockSession = { role: 'GIFSY_ADMIN', clientId: 'gifsy', name: 'Op', canManageSchemes: true };
+// userId defaults to a value that matches NO row in USERS, so the Deactivate button
+// renders for every row in the existing assertions. Individual tests override userId.
+const mockSession = { role: 'GIFSY_ADMIN', clientId: 'gifsy', name: 'Op', userId: 'self-op', canManageSchemes: true };
 vi.mock('@/lib/admin-session', () => ({
   useAdminSession: () => mockSession,
 }));
@@ -48,7 +50,13 @@ function installFetch(over?: (url: string, init?: RequestInit) => unknown) {
     if (custom !== undefined) return custom as Promise<unknown>;
 
     if (url.startsWith('/api/admin/users') && (!init || init.method === 'GET' || !init.method)) {
-      return jsonRes(true, 200, { success: true, data: { users: USERS } });
+      return jsonRes(true, 200, {
+        success: true,
+        data: {
+          users: USERS,
+          pagination: { page: 1, limit: 20, total: USERS.length, pages: 1, hasNextPage: false, hasPrevPage: false },
+        },
+      });
     }
     if (url.startsWith('/api/admin/users') && init?.method === 'POST') {
       return jsonRes(true, 200, { success: true, data: { user: { id: 'u3' } } });
@@ -59,7 +67,7 @@ function installFetch(over?: (url: string, init?: RequestInit) => unknown) {
   return { fn, calls };
 }
 
-beforeEach(() => { mockSession.role = 'GIFSY_ADMIN'; });
+beforeEach(() => { mockSession.role = 'GIFSY_ADMIN'; mockSession.userId = 'self-op'; });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('Admin User Accounts page', () => {
@@ -125,6 +133,23 @@ describe('Admin User Accounts page', () => {
     const select = await within(await screen.findByRole('dialog')).findByLabelText('Role');
     const options = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value);
     expect(options).toEqual(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER']);
+  });
+
+  it('AU5: the Deactivate/Reactivate button is NOT rendered for the signed-in user own row', async () => {
+    // The current operator IS u1 (Priya, ACTIVE) — their own row must not offer self-deactivation.
+    mockSession.userId = 'u1';
+    installFetch();
+    render(<AdminUsersPage />);
+    await screen.findByText('Priya Sharma');
+
+    // u1 (self) row: no Deactivate button, a muted dash instead.
+    const selfRow = screen.getByText('Priya Sharma').closest('tr')!;
+    expect(within(selfRow).queryByRole('button', { name: /deactivate/i })).not.toBeInTheDocument();
+    expect(within(selfRow).getByText('—')).toBeInTheDocument();
+
+    // u2 (someone else, INACTIVE) row: the Reactivate button is still present.
+    const otherRow = screen.getByText('Ravi Kumar').closest('tr')!;
+    expect(within(otherRow).getByRole('button', { name: /reactivate/i })).toBeInTheDocument();
   });
 
   it('AU4: a backend 400/403 surfaces the error message inline (not swallowed)', async () => {

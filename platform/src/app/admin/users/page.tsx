@@ -20,6 +20,17 @@ interface AdminUser {
   createdAt?: string;
 }
 
+interface Pagination {
+  page:        number;
+  limit:       number;
+  total:       number;
+  pages:       number;
+  hasNextPage: boolean;
+  hasPrevPage: boolean;
+}
+
+const PAGE_SIZE = 20;
+
 // ── Role display + assignable matrix (UX gate only — backend is the real gate) ──
 
 const ROLE_META: Record<string, { label: string; color: string }> = {
@@ -212,6 +223,8 @@ export default function AdminUsersPage() {
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
   const [search,  setSearch]  = useState('');
+  const [page,    setPage]    = useState(1);
+  const [pagination, setPagination] = useState<Pagination | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [toast,   setToast]   = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
@@ -230,22 +243,33 @@ export default function AdminUsersPage() {
   const loadUsers = useCallback(() => {
     setLoading(true);
     setError(null);
-    const qs = search.trim() ? `?search=${encodeURIComponent(search.trim())}` : '';
-    fetch(`/api/admin/users${qs}`)
+    const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) });
+    if (search.trim()) params.set('search', search.trim());
+    fetch(`/api/admin/users?${params.toString()}`)
       .then((r) => r.json())
-      .then((json: { success: boolean; data?: { users: AdminUser[] }; error?: string }) => {
-        if (json.success && json.data) setUsers(json.data.users);
-        else setError(json.error ?? 'Failed to load users');
+      .then((json: { success: boolean; data?: { users: AdminUser[]; pagination?: Pagination }; error?: string }) => {
+        if (json.success && json.data) {
+          setUsers(json.data.users);
+          setPagination(json.data.pagination ?? null);
+        } else {
+          setError(json.error ?? 'Failed to load users');
+        }
       })
       .catch(() => setError('Failed to load users'))
       .finally(() => setLoading(false));
-  }, [search]);
+  }, [search, page]);
 
-  // Initial + search-debounced load. Re-runs when the search term changes.
+  // Initial + search-debounced load. Re-runs when the search term or page changes.
   useEffect(() => {
     const t = setTimeout(loadUsers, 250);
     return () => clearTimeout(t);
   }, [loadUsers]);
+
+  // A new search starts from page 1 (the previous page index is meaningless for a
+  // different result set). loadUsers re-fires via its `page` dep.
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
 
   function showToast(msg: string) {
     setToast(msg);
@@ -375,7 +399,11 @@ export default function AdminUsersPage() {
                     )}
                   </td>
                   <td className="px-5 py-3 text-right">
-                    {canCreate && (
+                    {/* Never offer self-deactivation in the UI (the backend also guards it).
+                        For the signed-in user's own row, show a muted dash instead. */}
+                    {session.userId && u.id === session.userId ? (
+                      <span className="text-xs text-gray-300">—</span>
+                    ) : canCreate ? (
                       <button
                         onClick={() => toggleStatus(u)}
                         disabled={updatingId === u.id}
@@ -385,7 +413,7 @@ export default function AdminUsersPage() {
                           ? '…'
                           : u.status === 'ACTIVE' ? 'Deactivate' : 'Reactivate'}
                       </button>
-                    )}
+                    ) : null}
                   </td>
                 </tr>
               ))}
@@ -393,6 +421,33 @@ export default function AdminUsersPage() {
           </table>
         )}
       </div>
+
+      {/* Pagination controls */}
+      {!loading && !error && pagination && pagination.pages > 0 && (
+        <div className="flex items-center justify-between gap-3 flex-wrap text-sm text-gray-500">
+          <span>
+            Page <strong className="text-gray-900">{pagination.page}</strong> of{' '}
+            <strong className="text-gray-900">{pagination.pages}</strong> ·{' '}
+            <strong className="text-gray-900">{pagination.total}</strong> total
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={!pagination.hasPrevPage}
+              className="px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => setPage((p) => p + 1)}
+              disabled={!pagination.hasNextPage}
+              className="px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
 
       {showCreate && canCreate && (
         <CreateUserModal

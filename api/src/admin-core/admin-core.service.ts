@@ -17,7 +17,7 @@ import {
   ListUsersQueryDto,
   UpdateUserDto,
 } from './dto/users.dto';
-import { SetVisibilityCaptureModeDto, UpsertSettingDto } from './dto/settings.dto';
+import { SetPointsExpiryDto, SetVisibilityCaptureModeDto, UpsertSettingDto } from './dto/settings.dto';
 import { HierarchyConfigDto, TaskConfigDto } from './dto/config.dto';
 import {
   DEOLEO_HIERARCHY,
@@ -150,7 +150,18 @@ export class AdminCoreService {
       this.prisma.user.count({ where }),
     ]);
 
-    return { users, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+    const pages = Math.ceil(total / limit);
+    return {
+      users,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages,
+        hasNextPage: page < pages,
+        hasPrevPage: page > 1,
+      },
+    };
   }
 
   async createUser(user: JwtPayload, dto: CreateUserDto) {
@@ -200,6 +211,31 @@ export class AdminCoreService {
 
     const target = await this.prisma.user.findFirst({ where: { id, clientId } });
     if (!target) throw new NotFoundException('User not found');
+
+    // Deactivation guards — fire when the status is set to anything other than
+    // ACTIVE (INACTIVE / SUSPENDED / PENDING_VERIFICATION), so a SUSPEND can't
+    // bypass the self-lockout / last-admin protections. Never fire on
+    // reactivation (→ ACTIVE) or other field edits (status undefined).
+    const deactivating = dto.status !== undefined && dto.status !== 'ACTIVE';
+    if (deactivating) {
+      // Self-deactivate guard: an admin cannot lock themselves out.
+      if (id === user.sub) {
+        throw new BadRequestException('You cannot deactivate your own account');
+      }
+      // Last-active-admin guard: never leave a tenant with zero active admins.
+      if (target.role === 'GIFSY_ADMIN' || target.role === 'CLIENT_ADMIN') {
+        const activeAdmins = await this.prisma.user.count({
+          where: {
+            clientId,
+            status: 'ACTIVE',
+            role: { in: ['GIFSY_ADMIN', 'CLIENT_ADMIN'] },
+          },
+        });
+        if (activeAdmins <= 1) {
+          throw new BadRequestException('Cannot deactivate the last active admin of this tenant');
+        }
+      }
+    }
 
     // Phone-uniqueness guard: check BEFORE update to avoid Prisma P2002
     if (dto.phone && dto.phone !== target.phone) {
@@ -561,6 +597,107 @@ export class AdminCoreService {
     });
 
     return { mode: dto.mode };
+  }
+
+  /**
+   * GET /v1/admin/settings/points-expiry — read the tenant's default points-expiry.
+   *
+   * The single source of truth is the ACTIVE DEFAULT PointExpiryConfig row
+   * ({ clientId, isDefault: true, isActive: true }) — the same row resolveExpiresAt()
+   * falls back to when a lot has no scheme-specific config. Scheme-specific configs are
+   * intentionally NOT consulted here; this surface only manages the tenant-wide default.
+   *
+   * Returns `{ pointsExpiryDays: null }` when there is no active default row (never expire).
+   */
+  async getPointsExpiry(user: JwtPayload): Promise<{ pointsExpiryDays: number | null }> {
+    const config = await this.prisma.pointExpiryConfig.findFirst({
+      where: { clientId: user.clientId, isDefault: true, isActive: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    return { pointsExpiryDays: config?.expiryDays ?? null };
+  }
+
+  /**
+   * PUT /v1/admin/settings/points-expiry — set the tenant's default points-expiry.
+   *
+   * There is NO unique constraint on (clientId, isDefault), so we find-then-update the
+   * default row rather than using prisma.upsert. Only the `isDefault: true` row is
+   * touched — scheme-specific configs are never modified.
+   *
+   *   - positive N → upsert the default row to { expiryDays: N, isActive: true }.
+   *   - null       → deactivate the default (isActive: false). "Never expire" means the
+   *                  default row no longer matches resolveExpiresAt()'s active-default
+   *                  fallback; we deactivate (not delete) so a prior value can be restored.
+   */
+  async setPointsExpiry(
+    user: JwtPayload,
+    dto: SetPointsExpiryDto,
+  ): Promise<{ pointsExpiryDays: number | null }> {
+    const clientId = user.clientId;
+    // The operator tenant ('gifsy') has no wallets/points — expiry is a loyalty-tenant
+    // setting. Require an assumed-tenant context so we never write an orphan config.
+    if (clientId === 'gifsy') {
+      throw new BadRequestException(
+        'Points expiry applies to a loyalty tenant — assume a client before setting it.',
+      );
+    }
+
+    if (dto.pointsExpiryDays !== null) {
+      const days = dto.pointsExpiryDays;
+      // Find-then-update the single default row. A partial unique index
+      // (clientId WHERE isDefault) guarantees at most one default per tenant, so a
+      // concurrent first-write races to P2002 — catch it and retry as an update.
+      const upsertDefault = async (): Promise<void> => {
+        const existing = await this.prisma.pointExpiryConfig.findFirst({
+          where: { clientId, isDefault: true },
+          orderBy: { createdAt: 'asc' },
+        });
+        if (existing) {
+          await this.prisma.pointExpiryConfig.update({
+            where: { id: existing.id },
+            data: { expiryDays: days, isActive: true },
+          });
+        } else {
+          await this.prisma.pointExpiryConfig.create({
+            data: {
+              clientId,
+              schemeId: null,
+              isDefault: true,
+              isActive: true,
+              expiryDays: days,
+              warningDaysBefore: 7,
+            },
+          });
+        }
+      };
+      try {
+        await upsertDefault();
+      } catch (e) {
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+          await upsertDefault(); // row now exists → update path
+        } else {
+          throw e;
+        }
+      }
+    } else {
+      // Never expire — deactivate the default row(s) for this tenant (do NOT delete).
+      await this.prisma.pointExpiryConfig.updateMany({
+        where: { clientId, isDefault: true },
+        data: { isActive: false },
+      });
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'UPDATE',
+        entityType: 'POINT_EXPIRY_CONFIG',
+        entityId: clientId,
+        actorId: user.sub,
+        metadata: { pointsExpiryDays: dto.pointsExpiryDays },
+      },
+    });
+
+    return { pointsExpiryDays: dto.pointsExpiryDays };
   }
 
   // ════════════════════════════════════════════════════════════════════════

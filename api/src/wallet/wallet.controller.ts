@@ -1,7 +1,16 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Headers,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { timingSafeEqual } from 'crypto';
 import { WalletService } from './wallet.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Public, Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { AdjustWalletDto, ListTransactionsQueryDto } from './dto/wallet.dto';
 
@@ -46,5 +55,30 @@ export class WalletController {
   @RequirePermission('wallet:adjust')
   expireDuePoints() {
     return this.wallet.expireDuePoints();
+  }
+
+  /**
+   * POST /v1/wallet/expire-sweep — Cloud-Scheduler-triggered points-expiry sweep.
+   *
+   * Mirrors POST /v1/push/drain: @Public (Cloud Scheduler carries no JWT) but gated by
+   * a shared secret in the `x-expire-secret` header matched against EXPIRE_SWEEP_SECRET.
+   * FAIL-CLOSED: if the env secret is unset the endpoint refuses, so it is never an open
+   * trigger. expireDuePoints() is concurrency-safe + idempotent, so the worst case of a
+   * leaked secret is an early sweep (identical to the GIFSY manual trigger) — no data
+   * exposure (the body has no user input; the sweep only expires already-due EARN lots).
+   */
+  @Public()
+  @Post('expire-sweep')
+  async expireSweep(@Headers('x-expire-secret') secret?: string) {
+    const expected = process.env.EXPIRE_SWEEP_SECRET;
+    // Fail-closed: no configured secret → never an open trigger. Constant-time compare.
+    if (!expected) throw new ForbiddenException('Expire sweep disabled');
+    const got = Buffer.from(secret ?? '');
+    const want = Buffer.from(expected);
+    if (got.length !== want.length || !timingSafeEqual(got, want)) {
+      throw new ForbiddenException('Invalid expire secret');
+    }
+    const result = await this.wallet.expireDuePoints();
+    return { ok: true, ...result };
   }
 }

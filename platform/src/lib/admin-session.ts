@@ -34,6 +34,10 @@ export interface AdminSession {
   /** The tenant this admin belongs to. GIFSY_ADMIN has clientId = 'gifsy'. */
   clientId:          string;
   name:              string;
+  /** The signed-in user's own id (from the stored JWT user). Empty before hydration
+   *  or when no real user is present. Drives self-deactivate button-hiding only —
+   *  the backend guard is the real protection. */
+  userId:            string;
   /** Derived: true only for GIFSY_ADMIN. */
   canManageSchemes:  boolean;
 }
@@ -56,18 +60,21 @@ const DEMO_SESSIONS: Record<AdminRole, AdminSession> = {
     role:             'GIFSY_ADMIN',
     clientId:         'gifsy',
     name:             'Gifsy Platform Admin',
+    userId:           '',
     canManageSchemes: true,
   },
   CLIENT_ADMIN: {
     role:             'CLIENT_ADMIN',
     clientId:         'deoleo',
     name:             'Rahul Agarwal',
+    userId:           '',
     canManageSchemes: false,
   },
   MIS_USER: {
     role:             'MIS_USER',
     clientId:         'deoleo',
     name:             'MIS User',
+    userId:           '',
     canManageSchemes: false,
   },
 };
@@ -81,6 +88,7 @@ const LOADING_SESSION: AdminSession = {
   role:             'CLIENT_ADMIN',
   clientId:         'deoleo',
   name:             '',
+  userId:           '',
   canManageSchemes: false,
 };
 
@@ -102,6 +110,9 @@ export function getAdminSession(): AdminSession {
       // client-config/brand context, not from here). Display uses name + role.
       clientId: role === 'GIFSY_ADMIN' ? 'gifsy' : DEMO_SESSIONS[role].clientId,
       name: user.name,
+      // The stored JWT user carries a real `id` (StoredUser.id from auth-client);
+      // fall back to `sub` then '' so the field is never a fabricated value.
+      userId: (user as { id?: string; sub?: string }).id ?? (user as { sub?: string }).sub ?? '',
       canManageSchemes: canManageSchemes(role),
     };
   }
