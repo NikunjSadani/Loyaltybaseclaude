@@ -98,13 +98,26 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
         <header className="sticky top-0 z-30 bg-white border-b border-gray-200 px-4 py-3">
           <div className="flex items-center justify-between gap-2 min-w-0">
             <div className="flex items-center gap-3 min-w-0">
-              <Link href="/partner/dashboard" className="flex items-center gap-2 lg:hidden shrink-0">
-                <div className="w-8 h-8 bg-[var(--brand-primary)] rounded-lg flex items-center justify-center">
-                  <svg viewBox="0 0 40 40" className="w-5 h-5 fill-white">
-                    <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
-                  </svg>
-                </div>
-              </Link>
+              {/* Brand mark (mobile only — desktop shows it in the sidebar). The colour
+                  wordmark sits on the white header; falls back to the hex mark per tenant. */}
+              {clientConfig.branding.wordmarkColorUrl ? (
+                <Link href="/partner/dashboard" className="lg:hidden shrink-0">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={clientConfig.branding.wordmarkColorUrl}
+                    alt={clientConfig.branding.displayName}
+                    className="h-7 w-auto"
+                  />
+                </Link>
+              ) : (
+                <Link href="/partner/dashboard" className="flex items-center gap-2 lg:hidden shrink-0">
+                  <div className="w-8 h-8 bg-[var(--brand-primary)] rounded-lg flex items-center justify-center">
+                    <svg viewBox="0 0 40 40" className="w-5 h-5 fill-white">
+                      <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
+                    </svg>
+                  </div>
+                </Link>
+              )}
               <div className="min-w-0">
                 <p className="text-sm font-bold text-gray-900 leading-tight truncate">{identity.businessName}</p>
                 <p className="text-xs text-gray-400 leading-tight truncate">

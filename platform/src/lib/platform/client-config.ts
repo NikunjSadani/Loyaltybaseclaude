@@ -57,6 +57,8 @@ export interface BrandingConfig {
    * header is a separate field, added when that art is supplied.
    */
   wordmarkWhiteUrl?: string;
+  /** Optional COLOUR/dark wordmark for LIGHT surfaces (the white partner/outlet header). */
+  wordmarkColorUrl?: string;
   faviconUrl: string;
   supportEmail: string;
   supportPhone: string;

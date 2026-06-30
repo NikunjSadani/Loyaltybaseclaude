@@ -29,6 +29,7 @@ export const DEOLEO_CONFIG: ClientConfig = {
     primaryColor: '#16a34a',
     logoUrl: '/logos/deoleo.svg',
     wordmarkWhiteUrl: '/brand/deoleo-wordmark-white.png', // white wordmark for the navy sales header + desktop sidebar
+    wordmarkColorUrl: '/brand/deoleo-wordmark-color.png', // colour wordmark for the white partner/outlet header
     faviconUrl: '/favicons/deoleo.ico',
     supportEmail: 'support@deoleo.gifsy.in',
     supportPhone: '+91-1800-000-0001',
