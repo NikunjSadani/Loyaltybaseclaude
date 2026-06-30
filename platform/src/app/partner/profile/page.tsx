@@ -1,11 +1,10 @@
-﻿'use client';
+'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   User, CreditCard, Shield, Coins,
-  LogOut, ChevronRight, CheckCircle, Clock, AlertTriangle,
-  ImageIcon, ChevronLeft, X as XIcon,
+  LogOut, ChevronRight, CheckCircle, Clock, AlertTriangle, RefreshCw,
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -13,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { Modal } from '@/components/ui/modal';
 import { formatPoints, maskAccountNumber } from '@/lib/utils';
-import { KYCStatus, ChannelPartnerClass } from '@/types';
+import { KYCStatus } from '@/types';
 import { usePartnerSession, type OutletType } from '@/lib/partner-session';
 import { api } from '@/lib/api-client';
 import PwaAppSettings from '@/components/pwa/PwaAppSettings';
@@ -24,16 +23,19 @@ interface ProfileData {
   user: { name: string; mobile: string };
   partner: {
     firmName: string;
-    partnerClass: ChannelPartnerClass;
-    kycStatus: KYCStatus;
-    tier: string;
+    kycStatus?: KYCStatus;        // shown only when the API supplies a real status
     outletCode: string;
     gstNumber: string;
     panNumber: string;
-    kycPhotos: string[];
   };
-  wallet: { available: number; locked: number; redeemable: number };
-  bank: { accountNumber: string; ifscCode: string; bankName: string };
+  wallet: { redeemable: number; locked: number };
+  /** Beneficiary on file (from /auth/me). Any field may be null when not captured yet. */
+  bank: {
+    bankName: string | null;
+    accountNumber: string | null;
+    ifscCode: string | null;
+    upiId: string | null;
+  };
 }
 
 /* ─── Config ─────────────────────────────────────────────────────────────────── */
@@ -54,39 +56,14 @@ const kycConfig: Record<KYCStatus, { icon: React.ReactNode; label: string; varia
   [KYCStatus.NOT_INTERESTED]:       { icon: <Clock className="h-4 w-4" />,         label: 'Not Interested',     variant: 'default' },
 };
 
-const tierColors: Record<string, string> = {
-  GOLD:     'text-amber-700 bg-amber-50 border-amber-200',
-  SILVER:   'text-gray-600 bg-gray-100 border-gray-300',
-  PLATINUM: 'text-purple-700 bg-purple-50 border-purple-200',
-  BRONZE:   'text-orange-700 bg-orange-50 border-orange-200',
-};
-
 /** Outlet types that can see Visibility Invoices */
 const VISIBILITY_INVOICE_TYPES = new Set<OutletType>(['SSS', 'SSS_TOT']);
 
 /** Outlet types that earn and can see Points Summary (Deoleo: Wholesalers only) */
 const POINTS_OUTLET_TYPES = new Set<OutletType>(['WHOLESALER']);
 
-/* ─── Mock data ──────────────────────────────────────────────────────────────── */
-
-const MOCK_PROFILE: ProfileData = {
-  user: { name: 'Rajesh Kumar', mobile: '+91 98765 43210' },
-  partner: {
-    firmName:    'Kumar General Store',
-    partnerClass: ChannelPartnerClass.GOLD,
-    kycStatus:   KYCStatus.APPROVED,
-    tier:        'GOLD',
-    outletCode:  'KGS-001',
-    gstNumber:   '27AABCU9603R1ZX',
-    panNumber:   'AABCU9603R',
-    kycPhotos: [
-      'https://placehold.co/800x600?text=Outlet+Front+Photo',
-      'https://placehold.co/800x600?text=Outlet+Interior+Photo',
-    ],
-  },
-  wallet: { available: 4_250, locked: 0, redeemable: 4_250 },
-  bank: { accountNumber: '1234567890123456', ifscCode: 'HDFC0001234', bankName: 'HDFC Bank' },
-};
+/** Display helper — show a real value, else an em-dash (never a fabricated placeholder). */
+const orDash = (v?: string | null): string => (v && v.trim() ? v : '—');
 
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
@@ -94,62 +71,72 @@ export default function ProfilePage() {
   const router  = useRouter();
   const session = usePartnerSession();
 
-  const [profile,      setProfile]      = useState<ProfileData | null>(null);
-  const [loading,      setLoading]      = useState(true);
-  const [logoutModal,  setLogoutModal]  = useState(false);
-  const [photoGallery, setPhotoGallery] = useState(false);
-  const [photoIndex,   setPhotoIndex]   = useState(0);
+  const [profile,     setProfile]     = useState<ProfileData | null>(null);
+  const [loading,     setLoading]     = useState(true);
+  const [error,       setError]       = useState<string | null>(null);
+  const [logoutModal, setLogoutModal] = useState(false);
 
-  useEffect(() => {
-    // Fetch full user+partner profile from API; fall back to mock if not available
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    // The partner's OWN profile from /auth/me — real identity, wallet, and the
+    // beneficiary (bank/UPI) the server holds. No mock fallback: a missing field
+    // renders as "—" and a failed load shows an honest error, never fabricated data.
     api.get<{
       user: {
         name?:  string;
         phone?: string;
         channelPartner?: {
-          businessName?: string;
-          partnerCode?:  string;
-          gstNumber?:    string;
-          panNumber?:    string;
-          kycStatus?:    string;
+          businessName?:      string;
+          partnerCode?:       string;
+          gstNumber?:         string;
+          panNumber?:         string;
+          kycStatus?:         string;
+          bankName?:          string | null;
+          bankAccountNumber?: string | null;
+          ifscCode?:          string | null;
+          upiId?:             string | null;
           wallets?: Array<{ redeemablePoints?: number; lockedPoints?: number }>;
         } | null;
       };
     }>('/api/auth/me')
       .then((result) => {
         if (result.success && result.data?.user) {
-          const u = result.data.user;
+          const u  = result.data.user;
           const cp = u.channelPartner;
-          const wallet0 = cp?.wallets?.[0];
+          const w  = cp?.wallets?.[0];
           setProfile({
             user: {
-              name:   u.name  ?? MOCK_PROFILE.user.name,
-              mobile: u.phone ?? MOCK_PROFILE.user.mobile,
+              name:   u.name  ?? '',
+              mobile: u.phone ?? '',
             },
             partner: {
-              firmName:     cp?.businessName ?? MOCK_PROFILE.partner.firmName,
-              partnerClass: MOCK_PROFILE.partner.partnerClass,
-              kycStatus:    (cp?.kycStatus as KYCStatus) ?? MOCK_PROFILE.partner.kycStatus,
-              tier:         MOCK_PROFILE.partner.tier,
-              outletCode:   cp?.partnerCode ?? MOCK_PROFILE.partner.outletCode,
-              gstNumber:    cp?.gstNumber   ?? MOCK_PROFILE.partner.gstNumber,
-              panNumber:    cp?.panNumber   ?? MOCK_PROFILE.partner.panNumber,
-              kycPhotos:    MOCK_PROFILE.partner.kycPhotos,
+              firmName:   cp?.businessName ?? '',
+              kycStatus:  (cp?.kycStatus as KYCStatus | undefined) ?? undefined,
+              outletCode: cp?.partnerCode ?? '',
+              gstNumber:  cp?.gstNumber ?? '',
+              panNumber:  cp?.panNumber ?? '',
             },
             wallet: {
-              available:  wallet0?.redeemablePoints ?? MOCK_PROFILE.wallet.available,
-              locked:     wallet0?.lockedPoints     ?? MOCK_PROFILE.wallet.locked,
-              redeemable: wallet0?.redeemablePoints ?? MOCK_PROFILE.wallet.redeemable,
+              redeemable: w?.redeemablePoints ?? 0,
+              locked:     w?.lockedPoints     ?? 0,
             },
-            bank: MOCK_PROFILE.bank,
+            bank: {
+              bankName:      cp?.bankName          ?? null,
+              accountNumber: cp?.bankAccountNumber ?? null,
+              ifscCode:      cp?.ifscCode          ?? null,
+              upiId:         cp?.upiId             ?? null,
+            },
           });
         } else {
-          setProfile(MOCK_PROFILE);
+          setError('Could not load your profile. Please try again.');
         }
       })
-      .catch(() => setProfile(MOCK_PROFILE))
+      .catch(() => setError('Could not load your profile. Please try again.'))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   const handleLogout = () => {
     document.cookie = 'token=; Max-Age=0; path=/';
@@ -164,12 +151,24 @@ export default function ProfilePage() {
     );
   }
 
-  if (!profile) return null;
+  if (error || !profile) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-64 gap-3 text-center px-6">
+        <p className="text-sm text-gray-600">{error ?? 'Profile unavailable.'}</p>
+        <Button variant="outline" size="sm" onClick={load}>
+          <RefreshCw className="h-4 w-4" /> Retry
+        </Button>
+      </div>
+    );
+  }
 
-  const kycCfg   = kycConfig[profile.partner.kycStatus];
-  const tierClass = tierColors[profile.partner.tier] ?? 'text-gray-700 bg-gray-50 border-gray-200';
+  const kycCfg = profile.partner.kycStatus ? kycConfig[profile.partner.kycStatus] : null;
   const showVisibilityInvoices = VISIBILITY_INVOICE_TYPES.has(session.outletType);
   const showPointsSummary      = POINTS_OUTLET_TYPES.has(session.outletType);
+
+  const { bankName, accountNumber, ifscCode, upiId } = profile.bank;
+  const hasBank = Boolean(bankName || accountNumber || ifscCode);
+  const hasPaymentDetails = hasBank || Boolean(upiId);
 
   return (
     <div className="space-y-5 fade-in">
@@ -181,47 +180,43 @@ export default function ProfilePage() {
       >
         <div className="flex items-center gap-4">
           <div className="w-16 h-16 bg-[var(--brand-primary)] rounded-2xl flex items-center justify-center text-white text-2xl font-bold shrink-0">
-            {profile.user.name.charAt(0)}
+            {(profile.user.name || profile.partner.firmName || '?').charAt(0)}
           </div>
           <div className="flex-1 min-w-0">
-            <h2 className="text-lg font-bold text-white">{profile.user.name}</h2>
-            <p className="text-white/60 text-sm">{profile.partner.firmName}</p>
-            <div className="flex items-center gap-2 mt-2">
-              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${tierClass}`}>
-                {profile.partner.tier} Tier
-              </span>
-              <span className="text-xs text-white/50">{profile.partner.partnerClass}</span>
-            </div>
+            <h2 className="text-lg font-bold text-white">{orDash(profile.user.name)}</h2>
+            <p className="text-white/60 text-sm">{orDash(profile.partner.firmName)}</p>
             <div className="flex items-center gap-1.5 mt-2">
               <span className="text-[10px] text-white/40 uppercase tracking-wide">Outlet Code</span>
               <span
                 data-testid="outlet-code-value"
                 className="text-[11px] font-mono font-semibold text-white/80 bg-white/10 px-2 py-0.5 rounded"
               >
-                {profile.partner.outletCode}
+                {orDash(profile.partner.outletCode)}
               </span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* ── KYC status ── */}
-      <Card>
-        <CardContent className="px-4 py-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-gray-50 rounded-lg">
-              <Shield className="h-5 w-5 text-gray-500" />
+      {/* ── KYC status (only when the server supplies a real status) ── */}
+      {kycCfg && (
+        <Card>
+          <CardContent className="px-4 py-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-gray-50 rounded-lg">
+                <Shield className="h-5 w-5 text-gray-500" />
+              </div>
+              <div className="flex-1">
+                <p className="text-sm font-medium text-gray-900">KYC Status</p>
+                <p className="text-xs text-gray-500">Identity verification</p>
+              </div>
+              <Badge variant={kycCfg.variant}>{kycCfg.label}</Badge>
             </div>
-            <div className="flex-1">
-              <p className="text-sm font-medium text-gray-900">KYC Status</p>
-              <p className="text-xs text-gray-500">Identity verification</p>
-            </div>
-            <Badge variant={kycCfg.variant}>{kycCfg.label}</Badge>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
-      {/* ── Business Details (GST, PAN, KYC photo) ── */}
+      {/* ── Business Details (GST, PAN) ── */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
@@ -231,8 +226,8 @@ export default function ProfilePage() {
         <CardContent>
           <div className="space-y-3">
             {[
-              { label: 'GST Number', value: profile.partner.gstNumber, testId: 'gst-number-value', mono: true },
-              { label: 'PAN Number', value: profile.partner.panNumber, testId: 'pan-number-value', mono: true },
+              { label: 'GST Number', value: orDash(profile.partner.gstNumber), testId: 'gst-number-value' },
+              { label: 'PAN Number', value: orDash(profile.partner.panNumber), testId: 'pan-number-value' },
             ].map((row) => (
               <div key={row.label} className="flex items-center justify-between py-1">
                 <span className="text-sm text-gray-500">{row.label}</span>
@@ -244,22 +239,6 @@ export default function ProfilePage() {
                 </span>
               </div>
             ))}
-
-            {/* KYC outlet photos */}
-            <div className="flex items-center justify-between py-1">
-              <span className="text-sm text-gray-500">Outlet Photos</span>
-              <button
-                data-testid="kyc-photo-btn"
-                onClick={() => { setPhotoIndex(0); setPhotoGallery(true); }}
-                className="flex items-center gap-1.5 text-sm font-medium text-[var(--brand-primary)] hover:underline"
-              >
-                <ImageIcon className="h-3.5 w-3.5" />
-                View Photos
-                <span className="text-[10px] text-gray-400 font-normal">
-                  ({profile.partner.kycPhotos.length})
-                </span>
-              </button>
-            </div>
           </div>
         </CardContent>
       </Card>
@@ -274,8 +253,8 @@ export default function ProfilePage() {
         <CardContent>
           <div className="space-y-3">
             {[
-              { label: 'Full Name', value: profile.user.name },
-              { label: 'Mobile',    value: profile.user.mobile },
+              { label: 'Full Name', value: orDash(profile.user.name) },
+              { label: 'Mobile',    value: orDash(profile.user.mobile) },
             ].map((row) => (
               <div key={row.label} className="flex items-center justify-between py-1">
                 <span className="text-sm text-gray-500">{row.label}</span>
@@ -307,7 +286,7 @@ export default function ProfilePage() {
         </Card>
       )}
 
-      {/* ── Payment details ── */}
+      {/* ── Payment details (real beneficiary, or an honest empty state) ── */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
@@ -315,18 +294,36 @@ export default function ProfilePage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="space-y-2">
-            {[
-              { label: 'Bank',    value: profile.bank.bankName },
-              { label: 'Account', value: maskAccountNumber(profile.bank.accountNumber) },
-              { label: 'IFSC',    value: profile.bank.ifscCode },
-            ].map((row) => (
-              <div key={row.label} className="flex items-center justify-between py-1">
-                <span className="text-sm text-gray-500">{row.label}</span>
-                <span className="text-sm font-medium text-gray-900 font-mono">{row.value}</span>
-              </div>
-            ))}
-          </div>
+          {hasPaymentDetails ? (
+            <div className="space-y-2">
+              {hasBank && (
+                <>
+                  <div className="flex items-center justify-between py-1">
+                    <span className="text-sm text-gray-500">Bank</span>
+                    <span className="text-sm font-medium text-gray-900 font-mono">{orDash(bankName)}</span>
+                  </div>
+                  <div className="flex items-center justify-between py-1">
+                    <span className="text-sm text-gray-500">Account</span>
+                    <span data-testid="bank-account-value" className="text-sm font-medium text-gray-900 font-mono">
+                      {accountNumber ? maskAccountNumber(accountNumber) : '—'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between py-1">
+                    <span className="text-sm text-gray-500">IFSC</span>
+                    <span className="text-sm font-medium text-gray-900 font-mono">{orDash(ifscCode)}</span>
+                  </div>
+                </>
+              )}
+              {upiId && (
+                <div className="flex items-center justify-between py-1">
+                  <span className="text-sm text-gray-500">UPI</span>
+                  <span className="text-sm font-medium text-gray-900 font-mono">{upiId}</span>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500 py-1">No payment details on file yet.</p>
+          )}
         </CardContent>
       </Card>
 
@@ -360,82 +357,6 @@ export default function ProfilePage() {
         <LogOut className="h-4 w-4" />
         Sign Out
       </Button>
-
-      {/* ── KYC Photo Gallery modal ── */}
-      {photoGallery && (
-        <div
-          data-testid="kyc-photo-gallery"
-          className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center"
-          onClick={() => setPhotoGallery(false)}
-        >
-          {/* Stop propagation on inner content */}
-          <div
-            className="relative w-full max-w-lg px-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Close + counter */}
-            <div className="flex items-center justify-between mb-3">
-              <span
-                data-testid="photo-counter"
-                className="text-white text-sm font-semibold"
-              >
-                {photoIndex + 1} / {profile.partner.kycPhotos.length}
-              </span>
-              <button
-                onClick={() => setPhotoGallery(false)}
-                className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
-              >
-                <XIcon className="h-4 w-4" />
-              </button>
-            </div>
-
-            {/* Photos — all rendered; only active one visible */}
-            {profile.partner.kycPhotos.map((url, i) => (
-              <img
-                key={i}
-                src={url}
-                alt={`KYC photo ${i + 1}`}
-                className={`w-full rounded-2xl object-cover ${i === photoIndex ? 'block' : 'hidden'}`}
-              />
-            ))}
-
-            {/* Nav buttons */}
-            <div className="flex items-center justify-between mt-4 gap-3">
-              <button
-                data-testid="photo-prev"
-                onClick={() => setPhotoIndex((i) => Math.max(0, i - 1))}
-                disabled={photoIndex === 0}
-                className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-sm font-semibold transition-colors disabled:opacity-30"
-              >
-                <ChevronLeft className="h-4 w-4" />
-                Previous
-              </button>
-              <button
-                data-testid="photo-next"
-                onClick={() => setPhotoIndex((i) => Math.min(profile.partner.kycPhotos.length - 1, i + 1))}
-                disabled={photoIndex === profile.partner.kycPhotos.length - 1}
-                className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-sm font-semibold transition-colors disabled:opacity-30"
-              >
-                Next
-                <ChevronRight className="h-4 w-4" />
-              </button>
-            </div>
-
-            {/* Dot indicators */}
-            <div className="flex justify-center gap-1.5 mt-4">
-              {profile.partner.kycPhotos.map((_, i) => (
-                <button
-                  key={i}
-                  onClick={() => setPhotoIndex(i)}
-                  className={`w-2 h-2 rounded-full transition-all ${
-                    i === photoIndex ? 'bg-white scale-125' : 'bg-white/30'
-                  }`}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ── Logout confirmation modal ── */}
       <Modal

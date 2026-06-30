@@ -21,10 +21,28 @@ vi.mock('next/link', () => ({
   default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
     <a href={href} {...props}>{children}</a>,
 }));
+vi.mock('@/components/pwa/PwaAppSettings', () => ({ default: () => null }));
+vi.mock('@/lib/api-client', () => ({ api: { get: vi.fn() } }));
 
 const SESSION_KEY = 'partner_outlet_type_demo';
 
+import { api } from '@/lib/api-client';
 import ProfilePage from '../page';
+
+const ME = {
+  success: true,
+  data: {
+    user: {
+      name: 'Anil Traders Owner', phone: '9900000041',
+      channelPartner: {
+        businessName: 'Anil Traders', partnerCode: 'OUT-2026-000123',
+        gstNumber: '27AABCU9603R1ZX', panNumber: 'AABCU9603R', kycStatus: 'APPROVED',
+        bankName: 'State Bank of India', bankAccountNumber: '111122223333', ifscCode: 'SBIN0001234', upiId: null,
+        wallets: [{ redeemablePoints: 1200, lockedPoints: 0 }],
+      },
+    },
+  },
+};
 
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
@@ -45,11 +63,7 @@ async function renderAndLoad() {
 describe('U — Points Summary rules (Deoleo tenant)', () => {
   beforeEach(() => {
     localStorage.clear();
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
+    (api.get as ReturnType<typeof vi.fn>).mockResolvedValue(ME);
   });
 
   // ── Visibility by outlet type ──

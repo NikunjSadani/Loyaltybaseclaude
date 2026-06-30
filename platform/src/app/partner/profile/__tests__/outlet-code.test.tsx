@@ -1,12 +1,14 @@
 /// <reference types="vitest/globals" />
 /**
- * TDD — Outlet code in partner profile
+ * Partner profile — renders REAL identity + beneficiary from /auth/me (no mock fallback).
  *
- * P1: outlet code label is present in the rendered profile
- * P2: outlet code value is rendered (the actual code)
- * P3: outlet code appears in the profile header card (dark gradient section)
- * P4: outlet code has monospace styling (font-mono)
- * P5: ProfileData.partner carries an outletCode field (type-level check via runtime)
+ * P1: "Outlet Code" label is present
+ * P2: the real outlet code value is rendered (from the API, not a placeholder)
+ * P3: outlet code appears in the profile header card
+ * P4: outlet code has monospace styling
+ * AF3-1: the REAL bank (from /auth/me) is shown — and the old hardcoded fake bank is NOT
+ * AF3-2: the account number is masked (raw number never rendered)
+ * AF3-3: none of the retired MOCK_PROFILE fabricated values leak onto the page
  */
 
 import React from 'react';
@@ -16,65 +18,92 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
 }));
-vi.mock('next/link', () => ({
-  default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
-    <a href={href} {...props}>{children}</a>,
+vi.mock('@/components/pwa/PwaAppSettings', () => ({ default: () => null }));
+vi.mock('@/lib/partner-session', () => ({
+  usePartnerSession: () => ({ outletType: 'WHOLESALER' }),
 }));
+vi.mock('@/lib/api-client', () => ({ api: { get: vi.fn() } }));
 
+import { api } from '@/lib/api-client';
 import ProfilePage from '../page';
 
-/* ─── Helpers ────────────────────────────────────────────────────────────────── */
+/* ─── Fixture: a real /auth/me payload (the { success, data } envelope) ───────── */
+
+const ME = {
+  success: true,
+  data: {
+    user: {
+      name:  'Anil Traders Owner',
+      phone: '9900000041',
+      channelPartner: {
+        businessName:      'Anil Traders',
+        partnerCode:       'OUT-2026-000123',
+        gstNumber:         '27AABCU9603R1ZX',
+        panNumber:         'AABCU9603R',
+        kycStatus:         'APPROVED',
+        bankName:          'State Bank of India',
+        bankAccountNumber: '111122223333',
+        ifscCode:          'SBIN0001234',
+        upiId:             null,
+        wallets: [{ redeemablePoints: 1200, lockedPoints: 0 }],
+      },
+    },
+  },
+};
 
 async function renderAndLoad() {
   render(<ProfilePage />);
-  // Wait for the mock data to load (500 ms setTimeout inside the component)
   await waitFor(
-    () => expect(screen.getByText('Kumar General Store')).toBeInTheDocument(),
+    () => expect(screen.getByText('Anil Traders')).toBeInTheDocument(),
     { timeout: 2000 },
   );
 }
 
 /* ─── Tests ──────────────────────────────────────────────────────────────────── */
 
-describe('P — Outlet Code in Partner Profile', () => {
+describe('Partner Profile — real data, no fabrication', () => {
   beforeEach(() => {
-    localStorage.clear();
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    (api.get as ReturnType<typeof vi.fn>).mockResolvedValue(ME);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('P1: "Outlet Code" label is visible in the profile', async () => {
+  it('P1: "Outlet Code" label is visible', async () => {
     await renderAndLoad();
     expect(screen.getByText(/outlet code/i)).toBeInTheDocument();
   });
 
-  it('P2: the outlet code value is rendered on screen', async () => {
+  it('P2: the REAL outlet code value is rendered', async () => {
     await renderAndLoad();
-    // The mock profile should expose an outlet code string
     const el = screen.getByTestId('outlet-code-value');
-    expect(el).toBeInTheDocument();
-    expect(el.textContent).toBeTruthy();
+    expect(el.textContent).toBe('OUT-2026-000123');
   });
 
-  it('P3: outlet code is rendered inside the dark profile header card', async () => {
+  it('P3: outlet code is inside the dark profile header card', async () => {
     await renderAndLoad();
-    const header = screen.getByTestId('profile-header');
-    expect(header).toContainElement(screen.getByTestId('outlet-code-value'));
+    expect(screen.getByTestId('profile-header')).toContainElement(screen.getByTestId('outlet-code-value'));
   });
 
   it('P4: outlet code element has font-mono class', async () => {
     await renderAndLoad();
-    const el = screen.getByTestId('outlet-code-value');
-    expect(el.className).toMatch(/font-mono/);
+    expect(screen.getByTestId('outlet-code-value').className).toMatch(/font-mono/);
   });
 
-  it('P5: MOCK_PROFILE partner object has outletCode field', async () => {
+  it('AF3-1: shows the REAL bank and NOT the old hardcoded fake bank', async () => {
     await renderAndLoad();
-    // If outletCode exists in mock data and is rendered, the testid will have a non-empty value
-    const el = screen.getByTestId('outlet-code-value');
-    expect(el.textContent?.length).toBeGreaterThan(0);
+    expect(screen.getByText('State Bank of India')).toBeInTheDocument();
+    expect(screen.queryByText('HDFC Bank')).not.toBeInTheDocument();
+  });
+
+  it('AF3-2: the account number is masked (raw number never rendered)', async () => {
+    await renderAndLoad();
+    const acct = screen.getByTestId('bank-account-value');
+    expect(acct.textContent).toContain('3333');           // last 4 visible
+    expect(screen.queryByText('111122223333')).not.toBeInTheDocument(); // raw never shown
+  });
+
+  it('AF3-3: no retired MOCK_PROFILE fabricated values leak onto the page', async () => {
+    await renderAndLoad();
+    for (const fake of ['Rajesh Kumar', 'Kumar General Store', 'HDFC0001234', '1234567890123456']) {
+      expect(screen.queryByText(fake)).not.toBeInTheDocument();
+    }
   });
 });
