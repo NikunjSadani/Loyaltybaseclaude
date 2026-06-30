@@ -8,15 +8,15 @@ client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch *
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
 `dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-06-30.
 
-🟢 CURRENT MODE — **GO-LIVE EXECUTION (owner says UAT is done).** Every before-go-live BUILD is complete; what remains is
-owner-gated + the deliberate cutover. Keep the fix-as-found loop available (owner reports a bug → diagnose → fix/delegate →
-INDEPENDENT audit → FULL gate → runtime-verify → push to `develop`). **HYBRID cutover exec model (owner-set, after challenging
-"are you sure I should execute it"): I do ALL reversible prep/verification/dry-runs; the OWNER pulls EVERY irreversible prod
-trigger** — merge develop→main, approve the `production` gate, the data-load go; I run the in-VPC jobs only on the owner's
-explicit per-step go and verify each. **DO NOT merge to main until the owner triggers the cutover.**
-**Remaining owner-gated:** Deoleo master-data files (owner loads via the tested UIs when the client sends them) · OTP live-enable
-+ 1 real test OTP · click the 2 GCP alert-email verification links · the cutover triggers · WhatsApp `deoleo_kyc_approval`
-template verify (task #143). Everything else is built, gated, audited, and runtime-verified.
+🟢 CURRENT MODE — **GO-LIVE: CUTOVER COMPLETE — prod live on `2fa020c`.** The `develop`→`main` cutover was EXECUTED
+2026-06-30 (owner-driven HYBRID; owner approved the `production` gate, I ran the reversible prep + in-VPC jobs on the owner's
+per-step go). `main` == `develop`; both prod services serve `2fa020c`; prod `/health` = 200. Keep the fix-as-found loop
+available (owner reports a bug → diagnose → fix/delegate → INDEPENDENT audit → FULL gate → runtime-verify → push to `develop`;
+prod follows on the next `main` deploy). **Remaining is owner-gated:** Step 5 — load real Deoleo master data via the tested
+UIs (prod is bootstrapped + ready; the GIFSY_ADMIN can provision the `deoleo` tenant; waits only on the client's files) ·
+Step 6 — real-OTP login smoke per role (admin **9830011252** exists; prod uses real MSG91, no FIXED_OTP) · WhatsApp
+`deoleo_kyc_approval` template verify (task #143). The GCP alert-email prereq is **struck** — plain-email channels need no
+click-to-verify (both enabled + delivery confirmed 2026-06-29).
 
 🔶 STANDING MODE — **YOU ARE THE ORCHESTRATOR (the owner should never have to remind you).** Default to orchestrating
 substantial work, not hand-coding everything: decompose; **run independent workstreams as PARALLEL sub-agents** (give
@@ -163,27 +163,29 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE (develop→main = prod; **CORRECTED 2026-06-29 by live gcloud recon — prior "no prod services / first deploy"
-framing was STALE/WRONG**): `main` is **~209 commits behind** `develop` (verify live: `git fetch origin main; git rev-list --count origin/main..develop`),
-incl. **8 additive Prisma migrations** prod's DB lacks (constraints + new status enum value + `add_push_subscription` +
-`add_pwa_install` + `add_user_activity_day`) — all additive → zero-risk on the empty prod DB. **PROD IS ALREADY LIVE** — Cloud Run services `gifsy-api` +
-`gifsy-frontend` (NOT `-prod`-suffixed; that's why the old check missed them) serve image `b3ab2e0`, `NODE_ENV=production`,
-prod DB/JWT/MSG91 from Secret Manager. So the cutover is an **UPDATE of running prod, not a first deploy**. **`deploy.yml`
-(main→prod) AUTO-RUNS the 6 migrations** via the in-VPC `gifsy-migrate` Cloud Run Job (`migrate deploy --execute-now --wait`;
-`--wait` fails the deploy on migration error) AFTER a **`production` manual-approval gate**; `deploy-staging.yml` = develop→staging.
-**Backups + PITR are ALREADY ON** for `gifsy-db` (enabled, 14 retained, PITR + 7-day txn-log). So promoting = freeze develop →
-(optional pre-backup; PITR already covers it) → **merge develop→main → approve the prod gate → pipeline migrates+deploys** →
-smoke. Full step-by-step = **`docs/plans/runbooks/CUTOVER-RUNBOOK.md`**. **DO NOT merge to main during UAT.**
-🔴 **NEW BLOCKER (Phase-0 recon, 2026-06-29) — PROD BOOTSTRAP GAP:** prod has **zero users + zero OutletType master rows**, and
-there is **NO app/API path** to create the first GIFSY_ADMIN (`assertRoleAssignable` needs an existing GIFSY_ADMIN → chicken-egg)
-OR the 4 OutletType rows (`createClient` only upserts per-type *config* for already-existing types; the seed is prod-firewalled).
-→ **#76 cannot start until a one-time in-VPC bootstrap script (first GIFSY_ADMIN + 4 OutletType rows) runs — ✅ NOW BUILT +
-staging-dry-run-verified** (`api/prisma/bootstrap.ts`, `262027a`; run it post-cutover via a Cloud Run Job using the new prod `api` image —
-exact command in `runbooks/PROD-DATA-LOAD.md`). Everything else (client, CLIENT_ADMIN, hierarchy, outlets) then flows via the app.
+🚀 CUTOVER STATE — **✅ EXECUTED 2026-06-30 (develop→main go-live).** Prod `main` HEAD moved **`b3ab2e0` → `2fa020c`**
+(213-commit + 8-migration jump); `main` == `develop`; both prod services (`gifsy-api`, `gifsy-frontend`) serve **`2fa020c`**;
+prod `/health` = 200. As-run summary:
+- **8 additive migrations APPLIED** via the in-VPC `gifsy-migrate` job (`migrate deploy --wait`) before the new revision
+  served (constraints + new status enum value + `add_push_subscription` + `add_pwa_install` + `add_user_activity_day`) —
+  proven by the healthy roll + bootstrap writes to the new tables.
+- **BOOTSTRAP DONE** — `gifsy-bootstrap` job (double-guarded `BOOTSTRAP_CONFIRM=gifsy_prod`) created the **first GIFSY_ADMIN
+  (Nikunj/9830011252)** + **4 OutletTypes** (SSS/WHOLESALER/SUB_STOCKIST/SSS_TOT). The bootstrap chicken-egg gap is CLOSED.
+- **PROD PWA LIVE** — 3 prod secrets created (`VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY`/`PUSH_DRAIN_SECRET`; prod VAPID public
+  key `BDa-41v-qzwle4dHG0PEF046WVanmr-Wr5-Ff-ChDBJZLHD2OSipmyGt-1cmhSSA5v3sNNiaWj3TadmIkNuaWzY`); the `deploy.yml` prod-PWA
+  wiring landed on `develop` via a **cherry-pick of `762251e` (→`dd04570`)**, NOT a merge (the stale `prep/prod-pwa-activation`
+  branch was 213 commits behind → merging would have *appeared to delete* recent work; the branch was then DELETED).
+  `MSG91_WHATSAPP_NUMBER=917003202293` baked into prod env. **`push-drain-prod` Cloud Scheduler ENABLED** (every-minute,
+  `x-drain-secret`); drain smoke verified (no-secret → 403, with-secret → 201).
+- **Pre-cutover backup** id **`1782824807740`** (2026-06-30T13:06:47Z, SUCCESSFUL); PITR ON.
+- **Gate at cutover:** api jest 1271 · nest 0 · FE vitest 1692 · tsc 0.
+Full as-run record = **`docs/plans/runbooks/PROD-CUTOVER-RECORD.md`** (§ 2026-06-30); runbook (now banner-marked COMPLETE) =
+**`docs/plans/runbooks/CUTOVER-RUNBOOK.md`**.
 
-OPEN GO-LIVE THREADS (see GO-LIVE-READINESS §3): **#76** load real Deoleo master data into empty prod (after bootstrap; Deoleo tenant
-context; outlet types `SSS/SSS_TOT/SUB_STOCKIST/WHOLESALER`; XSR-ID column = real `XSR-*` IDs). **#74 owner ops — monitoring ✅ DONE +
-backups/PITR ✅ already ON**; only **secret rotation (optional)** + **real prod MSG91** remain. **AF-6** JWT-in-localStorage 🔴 — the
+OPEN GO-LIVE THREADS (see GO-LIVE-READINESS §3): **#76** load real Deoleo master data into prod — **UNBLOCKED** (bootstrap DONE
+at cutover; prod is bootstrapped + ready; Deoleo tenant context; outlet types `SSS/SSS_TOT/SUB_STOCKIST/WHOLESALER`; XSR-ID
+column = real `XSR-*` IDs). **Waits only on the client's files.** **#74 owner ops — monitoring ✅ DONE (2 email channels live, no
+click-to-verify needed) + backups/PITR ✅ ON**; only **secret rotation (optional)** + **real prod MSG91** remain. **AF-6** JWT-in-localStorage 🔴 — the
 session-expiry redirect landed. **AF-6 FULLY DONE** (`2f8a343`+`abc43f6`+`35ddaf9`, 2026-06-28 — token httpOnly-cookie-only, proxy
 injects Bearer from cookie, assume/exit/logout server actions, ~80 dead-localStorage reads swept, **refresh-on-401 silent
 single-flight refresh**; runtime-verified local echo + real staging edge; audits SHIP, CSRF-safe). **EVERY `AF-*` security item is
@@ -191,11 +193,9 @@ DONE except AF-12** (AF-5/6/7/8/9 + **AF-10 fully done** — CSPRNG+upload `d91e
 otp_codes cleanup `58f5f55`; access-TTL kept 7d deliberately). **AF-12** RBAC
 fail-open — keep OFF (`RBAC-ENABLEMENT.md`). **PWA: FULLY ACTIVATED + DEVICE-VERIFIED ON STAGING** (SW+install+push live; Android push delivered
 via scheduler — see the 2026-06-29 block; real Deoleo icon shipped; sales notifications + adoption tracking + prompt-snooze/Profile-entry all
-live). **PROD PWA activation is cutover-coupled** — on `deploy.yml` replicate: (a) the 3 `NEXT_PUBLIC_PWA_*` build-args + VAPID/`PUSH_WORKER_ENABLED`
-env/secrets; (b) **`PUSH_DRAIN_SECRET=PUSH_DRAIN_SECRET_PROD:latest`** (create the prod secret + grant `gifsy-api-sa`); (c) create Cloud Scheduler
-job **`push-drain-prod`** (every 60s → prod `/v1/push/drain` with the secret header) — WITHOUT it sales/partner notifications sit undelivered;
-(d) the `pwa_install` migration auto-applies via the prod migrate step (no extra action). Full steps in CUTOVER-RUNBOOK. The admin sub-dashboard
-"fake data" pre-UAT blocker is CLOSED.
+live). **PROD PWA activation ✅ DONE at the 2026-06-30 cutover** — 3 prod secrets created + accessor granted, `deploy.yml` prod-PWA
+wiring on `main` (via the cherry-pick), `pwa_install`/other migrations applied, and **`push-drain-prod` Cloud Scheduler ENABLED**
+(every-minute → prod `/v1/push/drain`; drain 403/201 verified). The admin sub-dashboard "fake data" pre-UAT blocker is CLOSED.
 
 SESSION/AUTH MODEL (post-AF-6, the owner asked — answer precisely if asked again): access token = httpOnly `token` cookie,
 **7-day** JWT (configurable `JWT_EXPIRES_IN`; operator assume-tenant = **8h**); refresh token = httpOnly `refresh_token` cookie,
@@ -224,14 +224,14 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 [[admin-dashboard-consolidation]] [[default-to-orchestration]] [[global-settings-wiring]] [[sales-hierarchy-scoping]]
 [[migration-model]] [[staging-deploy-gate]] [[audit-every-build-item]].
 
-Now: greet the owner. **Every before-go-live BUILD is done** (Session Report · AF-3 fix · admin-creation UI · WhatsApp KYC submit-verified · PWA ·
-4 real dashboards · all AF-* except AF-12). Owner says UAT is done. **Remaining is owner-gated:** Deoleo master-data files (owner loads via the
-tested UIs when the client sends them) · OTP live-enable + 1 real test OTP · click the 2 GCP alert-email links · the **cutover** · the WhatsApp
-`deoleo_kyc_approval` template runtime-verify (task #143). **Cutover (HYBRID — owner pulls every irreversible prod trigger):** I create the 3 prod
-PWA secrets (`runbooks/prod-pwa-activation.sh` Step 1) → owner merges `prep/prod-pwa-activation`→develop → owner merges develop→main + approves the
-`production` gate (pipeline runs the 8 migrations + deploys) → I run the in-VPC **bootstrap** job (first GIFSY_ADMIN Nikunj/9830011252 + 4
-OutletTypes) on the owner's go → owner/operator creates the Deoleo client (**slug `deoleo`**) + loads master data via the UIs + sets conversion-
-rate/programs/visibility-OFF → I create `push-drain-prod` + add `MSG91_WHATSAPP_NUMBER` + smoke (real-OTP login per role + one end-to-end
-KYC→redemption). Full steps = **`runbooks/CUTOVER-RUNBOOK.md`**. If a NEW transactional notification is requested: PUSH → enqueue post-commit via
+Now: greet the owner. **🚀 THE PRODUCTION CUTOVER IS DONE (2026-06-30) — prod is live on `2fa020c`.** Steps 0–4 + 7 executed: 8
+migrations applied, bootstrap done (first GIFSY_ADMIN **Nikunj/9830011252** + 4 OutletTypes), `push-drain-prod` live, pre-cutover
+backup **`1782824807740`** taken. **Only owner-gated items remain:** **(Step 5)** load real Deoleo master data via the tested app
+UIs — prod is bootstrapped + ready; the GIFSY_ADMIN can log in & create the Deoleo client (**slug `deoleo`**) → upload
+outlet/hierarchy/catalog/schemes → set conversion-rate/programs/visibility-OFF; **waits only on the client's files**; **(Step 6)**
+real-OTP login smoke per role (admin **9830011252** exists; prod uses real MSG91, no FIXED_OTP); **(#143)** WhatsApp
+`deoleo_kyc_approval` template runtime-verify. Keep the fix-as-found loop available (fixes push to `develop` → reach prod on the
+next `main` deploy). Full as-run record = **`runbooks/PROD-CUTOVER-RECORD.md`** (§ 2026-06-30); runbook (banner-marked COMPLETE)
+= **`runbooks/CUTOVER-RUNBOOK.md`**. If a NEW transactional notification is requested: PUSH → enqueue post-commit via
 `SalesNotificationsService`; WhatsApp/SMS → `whatsapp-kyc.config.ts` + `Msg91Service.sendWhatsappTemplate` fire-and-forget post-commit.
 ```

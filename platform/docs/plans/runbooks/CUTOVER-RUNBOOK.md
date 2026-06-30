@@ -1,5 +1,14 @@
 # Runbook — Production Cutover (`develop` → `main` = prod deploy)
 
+> # ✅ EXECUTED & COMPLETE — 2026-06-30
+> **This cutover was executed and is COMPLETE on 2026-06-30.** Prod `main` HEAD moved `b3ab2e0` → **`2fa020c`**;
+> both prod services (`gifsy-api`, `gifsy-frontend`) serve `2fa020c`; prod `/health` = 200. The 8 additive migrations
+> applied via the in-VPC `gifsy-migrate` job; bootstrap created the first GIFSY_ADMIN (Nikunj/9830011252) + 4
+> OutletTypes; `push-drain-prod` scheduler is live. **Pre-cutover backup id `1782824807740`** (2026-06-30T13:06:47Z,
+> PITR ON). Only **Step 5 (Deoleo master-data load)** and **Step 6 (real-OTP login smoke)** remain — both **owner-gated**.
+> Full as-run record: [`PROD-CUTOVER-RECORD.md`](PROD-CUTOVER-RECORD.md) (§ 2026-06-30). The step text below is kept as
+> the executed procedure of record.
+
 > **Strictly sequential.** Each step gates the next — cutover is **not parallelizable**. Do not start
 > a step until the prior step's verification passed. For each step: **Owner · Goal · Command(s) · Verify · Rollback.**
 >
@@ -439,14 +448,14 @@ almost never needed:
 
 ---
 
-## Done-criteria (all must be true)
-- [ ] **Owner prereqs:** MSG91 done · data files ready · 2 GCP alert-email links verified · owner ready to approve the gate.
-- [ ] **Step 0 [claude]:** 4 suites green (1259/0/1687/0) · staging SHA == `develop` HEAD · 8-migration + 209-commit delta confirmed · prod PWA secrets exist · `develop` frozen.
-- [ ] **Step 1 [owner-go/claude]:** 3 prod PWA secrets created + SA accessor granted · `prep/prod-pwa-activation` in `develop`.
-- [ ] **Step 2 [owner-go/claude]:** `current_database()='gifsy_prod'` confirmed · backup id + UTC timestamp logged.
-- [ ] **Step 3 [owner]:** `main` updated · `production` gate approved by owner · both deploy jobs green · 8 migrations applied · serving SHA == `main` HEAD.
-- [ ] **Step 4 [owner-go/claude]:** bootstrap job exit 0 · GIFSY_ADMIN logs in · 4 OutletTypes present.
-- [ ] **Step 5 [owner/operator]:** Deoleo client (`slug=deoleo`) + CLIENT_ADMIN created · launch config set (visibility OFF) · outlet/hierarchy/catalog/schemes loaded.
-- [ ] **Step 6 [owner+claude]:** `/health` 200 · real-OTP role-matrix login on branded domain · end-to-end KYC→redemption · real OTP delivered (MSG91 proven) · monitoring fires · no fabricated data · SHA matches.
-- [ ] **Step 7 [claude]:** `push-drain-prod` scheduler ticking · 403/201 drain behaviour · one real push to a device.
-- [ ] Rollback path understood (prior revision redeploy; additive migrations → no down-migration on empty DB).
+## Done-criteria (executed 2026-06-30 — boxes reflect the as-run result)
+- [x] **Owner prereqs:** MSG91 done · 2 GCP alert-email links = **no action needed** (plain-email channels need no click-to-verify; both enabled + wired + delivery confirmed 2026-06-29) · owner approved the gate. *(Data files still pending for Step 5.)*
+- [x] **Step 0 [claude]:** 4 suites green (**1271/0/1692/0**) · staging SHA == `develop` HEAD · 8-migration + 213-commit delta confirmed · prod PWA secrets exist · `develop` frozen.
+- [x] **Step 1 [owner-go/claude]:** 3 prod PWA secrets created + SA accessor granted · prod-PWA `deploy.yml` wiring on `develop` via **cherry-pick of `762251e` (→`dd04570`)** (the stale `prep/prod-pwa-activation` branch was deleted, not merged) · `MSG91_WHATSAPP_NUMBER=917003202293` baked into prod env.
+- [x] **Step 2 [owner-go/claude]:** `current_database()='gifsy_prod'` confirmed · backup id **`1782824807740`** (2026-06-30T13:06:47Z) logged · PITR ON.
+- [x] **Step 3 [owner]:** `main` updated (**`b3ab2e0` → `2fa020c`**) · `production` gate approved by owner · both deploy jobs green · 8 migrations applied · serving SHA == `main` HEAD (both services `2fa020c`).
+- [x] **Step 4 [owner-go/claude]:** bootstrap job exit 0 · GIFSY_ADMIN (Nikunj/9830011252) created · 4 OutletTypes present (SSS/WHOLESALER/SUB_STOCKIST/SSS_TOT).
+- [ ] **Step 5 [owner/operator] (owner-gated — pending client data):** Deoleo client (`slug=deoleo`) + CLIENT_ADMIN created · launch config set (visibility OFF) · outlet/hierarchy/catalog/schemes loaded.
+- [ ] **Step 6 [owner+claude] (owner-gated — pending OTP):** `/health` 200 *(done)* · real-OTP role-matrix login on branded domain · end-to-end KYC→redemption · real OTP delivered (MSG91 proven) · monitoring fires · no fabricated data · SHA matches.
+- [x] **Step 7 [claude]:** `push-drain-prod` scheduler ENABLED · 403/201 drain behaviour verified · (one real push to a device covered with Step 6 real-user smoke).
+- [x] Rollback path understood (prior revision redeploy; additive migrations → no down-migration on empty DB).

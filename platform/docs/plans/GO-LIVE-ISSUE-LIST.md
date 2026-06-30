@@ -1,10 +1,39 @@
-# Go-Live Issue List — authoritative master tracker (updated 2026-06-22)
+# Go-Live Issue List — authoritative master tracker (updated 2026-06-30)
 
-> **STATUS: FIX WAVE COMPLETE + pushed. NOW = OWNER-DRIVEN UAT on staging — fix-as-you-find (see the UAT-FOUND block below).**
+> **STATUS: 🚀 PRODUCTION CUTOVER EXECUTED & COMPLETE (2026-06-30).** Prod live on **`2fa020c`** (`main` == `develop`);
+> remaining = owner-gated Step 5 (Deoleo data load) + Step 6 (real-OTP smoke) + WhatsApp `deoleo_kyc_approval` verify (#143).
+> See the **🚀 2026-06-30 PRODUCTION CUTOVER** block below. *(History: FIX WAVE COMPLETE → owner-driven UAT → cutover.)*
 > Originally NOT go-live ready (6 blockers + 4 majors). The GO-LIVE FIX WAVE (2026-06-21→22) closed them via disjoint streams
 > (GLM · GL-Money · GL-RBAC · GL-FE-enroll · GL-FE-settle), each executor → INDEPENDENT adversarial audit → Opus gate →
 > runtime-verify. The money re-audit caught a real BLOCKER the first pass missed (GLM-2 never implemented = lost awards) plus
 > a payouts-rail resolver gap — both then fixed and re-verified. See the FIX WAVE RESULTS block below.
+
+## 🚀 2026-06-30 — PRODUCTION CUTOVER EXECUTED (`develop` → `main` go-live) — DONE
+
+> **The `develop`→`main` cutover was EXECUTED and is COMPLETE (2026-06-30).** Owner-driven HYBRID (owner approved the
+> GitHub `production` gate; orchestrator ran the reversible prep + in-VPC jobs on the owner's per-step go).
+> **Current prod HEAD `2fa020c`** (`main` == `develop` now); both prod services (`gifsy-api`, `gifsy-frontend`) serve
+> `2fa020c`; prod `/health` = 200. Gate at cutover: **api jest 1271 · nest 0 · FE vitest 1692 · tsc 0.** Full as-run
+> record: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md) (§ 2026-06-30).
+
+| Step | What ran | Result |
+|---|---|---|
+| **0 Pre-flight** | 4 suites + staging-SHA + delta checks | ✅ green (1271/0/1692/0); 213-commit + 8-migration delta confirmed; `develop` frozen |
+| **1 Prod PWA secrets + wiring** | Created `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `PUSH_DRAIN_SECRET` (+ SA accessor). Prod-PWA `deploy.yml` wiring landed on `develop` via **cherry-pick of `762251e` (→`dd04570`)**, NOT a merge — the stale `prep/prod-pwa-activation` branch was 213 commits behind (merging would have *appeared to delete* recent work); cherry-pick was byte-identical-safe. `MSG91_WHATSAPP_NUMBER=917003202293` baked into prod env. **Stale branch DELETED** (validated safe). | ✅ done |
+| **2 Pre-cutover backup** | On-demand `gifsy-db` backup, double-guarded | ✅ id **`1782824807740`**, 2026-06-30T13:06:47Z, SUCCESSFUL; PITR ON |
+| **3 Merge `develop`→`main`** | Owner approved the `production` gate; pipeline ran the **8 additive migrations** (in-VPC `gifsy-migrate`, `migrate deploy --wait`) before the new revision served, then deployed | ✅ prod HEAD **`b3ab2e0` → `2fa020c`**; both services serve `2fa020c`; `/health` 200 |
+| **4 Bootstrap** | `gifsy-bootstrap` job vs `gifsy_prod` (double-guarded) | ✅ created **first GIFSY_ADMIN (Nikunj/9830011252)** + **4 OutletTypes** (SSS/WHOLESALER/SUB_STOCKIST/SSS_TOT) |
+| **7 Prod PWA scheduler** | `push-drain-prod` Cloud Scheduler (ENABLED, every-minute, `x-drain-secret`) + drain smoke | ✅ no-secret → 403 (fail-closed); with-secret → 201 |
+
+**Owner-prereq resolution — GCP alert-email verification (was point 3): ~~RESOLVED / no action needed~~.** GCP
+**plain-email** notification channels have **no click-to-verify gate** (only SMS/voice do); both channels
+(`nikunj.sadani@gifsy.in`, `nikita@gifsy.in`) are enabled + wired to both alert policies, and delivery was already
+confirmed end-to-end on 2026-06-29. **Struck from prereqs.**
+
+**Remaining (owner-gated — NOT done):** **Step 5** load real Deoleo master data via the app UIs (prod is bootstrapped +
+ready — GIFSY_ADMIN can log in & provision the `deoleo` tenant; waits only on the client's files); **Step 6** real-OTP
+login smoke per role (admin exists, can run anytime; prod uses real MSG91, no FIXED_OTP); **WhatsApp `deoleo_kyc_approval`
+template runtime-verify (#143)**.
 
 ## 🟢 2026-06-30 SESSION — Session Report · AF-3 fix · admin-creation UI · WhatsApp KYC
 
@@ -343,8 +372,8 @@ money rails compile + serve with the canonical KYC resolver + `REVERSED` state l
 - ~~**S3 NIT:** RE_UPLOAD `ConflictException` logs nothing server-side~~ ✅ DONE (Lane 4, 2026-06-29) — `logger.warn` with the submission id + rejected fields before the blanket-approve 409 (`kyc.service.ts` applyBridgeOutcome path).
 - **scheme-builder** `KYC_OUTLET_IDS = new Set() // TODO` (`scheme-builder.tsx:171`) — targeting-preview only.
 - **lib sample data** (`lib/invoice.ts MOCK_VISIBILITY_INVOICES`, `lib/points-ledger-export.ts DEMO_OUTLETS`, `lib/campaign.ts MOCK_*`) — confirm not imported by a live page (the core-loop audit traced them as not on live surfaces).
-- **#76 prod data load** must create the first GIFSY_ADMIN + the OutletType master rows via API/load-script (the seed is prod-firewalled).
-- **#74 owner ops:** Cloud Monitoring alert, automated backups + PITR on `gifsy-db`, prod secret rotation.
+- **#76 prod data load** — **UNBLOCKED (2026-06-30):** the cutover's bootstrap created the first GIFSY_ADMIN + the 4 OutletType master rows, so prod is bootstrapped + ready. **Awaits only the client's files** — then load the `deoleo` tenant + outlet/hierarchy/catalog/schemes via the tested app UIs (Step 5).
+- **#74 owner ops:** Cloud Monitoring alerts ✅ (2 email channels live, no click-to-verify needed); automated backups + PITR ✅ ON on `gifsy-db`; prod secret rotation = optional.
 
 ## ✅ What the audits CONFIRMED SOUND (do not re-audit)
 Money atomic-claims + reversal idempotency (S0/S1 — "could not break it"); tenant data-isolation (no unscoped query across 33

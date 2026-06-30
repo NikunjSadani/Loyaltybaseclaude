@@ -45,3 +45,74 @@ data-load step, tracked in [`GO-LIVE-READINESS.md`](../GO-LIVE-READINESS.md) / `
 ## Rollback
 The pre-cutover backup (step 1) is the restore point. Prod had no real data, so rollback ≈ restore the empty
 instance; in practice forward-fix (another `main` deploy) is the path.
+
+---
+
+# Production Cutover — Record (2026-06-30 `develop` → `main` go-live)
+
+> **Executed 2026-06-30. As-run record of the SECOND cutover** — the `develop`→`main` go-live that promoted the
+> full UAT'd candidate (213-commit + 8-migration jump) onto the already-live-but-empty prod. Owner-driven **HYBRID**
+> model: the owner approved the GitHub `production` gate personally; the orchestrator ran the reversible prep + the
+> in-VPC jobs on the owner's explicit per-step go. The 2026-06-20 record above is the earlier baseline-reconcile
+> cutover; this section is the actual go-live. Runbook followed: [`CUTOVER-RUNBOOK.md`](CUTOVER-RUNBOOK.md).
+
+## Pre-state (verified)
+`gifsy_prod`: reconciled-to-baseline at the 2026-06-20 cutover (`_prisma_migrations` = baseline only), **0 users /
+0 clients** (greenfield). Both prod Cloud Run services (`gifsy-api`, `gifsy-frontend`) already live, serving
+`main` HEAD **`b3ab2e0`** (the 2026-06-20 code). `main` was **213 commits + 8 additive migrations** behind `develop`.
+Gate green at cutover: **api jest 1271 · nest 0 · FE vitest 1692 · tsc 0**.
+
+## Steps executed (in order)
+1. **Step 1 — Prod PWA secrets + wiring.** Created the **3 prod PWA secrets** + granted the api SA accessor on each:
+   `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `PUSH_DRAIN_SECRET`. The prod VAPID **public** key (safe to record):
+   `BDa-41v-qzwle4dHG0PEF046WVanmr-Wr5-Ff-ChDBJZLHD2OSipmyGt-1cmhSSA5v3sNNiaWj3TadmIkNuaWzY`.
+   **Deviation — cherry-pick, not the stale-branch merge:** the prod-PWA `deploy.yml` wiring landed on `develop` via a
+   **cherry-pick of commit `762251e` (new SHA `dd04570`)**, NOT by merging `prep/prod-pwa-activation`. The branch was
+   **213 commits behind `develop`**, so merging it would have *appeared to delete* recent work (`msg91.service.ts`,
+   `whatsapp-kyc.config.ts`, `admin/users/page.tsx`, etc.). The cherry-pick was provably safe because `develop`'s
+   `deploy.yml` was **byte-identical** to the branch point. Also baked **`MSG91_WHATSAPP_NUMBER=917003202293`** into the
+   prod api env (in the cutover commit) so it's explicit rather than a manual post-step. The stale branch
+   `prep/prod-pwa-activation` was then **DELETED** (validated safe: its only unique change is now on `develop`, no
+   workflow references it, it is not an ancestor of `develop`/`main`).
+2. **Step 2 — Pre-cutover backup (double-guarded).** On-demand backup of the shared `gifsy-db` instance:
+   **id `1782824807740`**, **2026-06-30T13:06:47Z**, `ON_DEMAND`, **SUCCESSFUL**, description
+   `"pre-cutover … develop->main (2fa020c)"`. **PITR remained ON.**
+3. **Step 3 — Merge `develop`→`main` (owner-triggered).** Prod `main` HEAD moved **`b3ab2e0` → `2fa020c`** (the
+   213-commit + 8-migration jump). The owner approved the GitHub `production` environment gate; the pipeline ran the
+   **8 additive migrations automatically** via the in-VPC `gifsy-migrate` job (`migrate deploy --wait`) **before** the
+   new revision served, then deployed. **Both `gifsy-api` and `gifsy-frontend` now serve `2fa020c`; prod `/health` =
+   200.** The 8 migrations were proven applied by the healthy roll + by the Step-4 bootstrap job successfully writing to
+   the new tables.
+4. **Step 4 — Bootstrap (first GIFSY_ADMIN + OutletType master rows).** The `gifsy-bootstrap` Cloud Run job ran against
+   **`gifsy_prod`** (double-guard `BOOTSTRAP_CONFIRM=gifsy_prod` matched `current_database()`). It created the **4
+   OutletType master rows** (`SSS`, `WHOLESALER`, `SUB_STOCKIST`, `SSS_TOT`) and the **first GIFSY_ADMIN** (name
+   **Nikunj**, phone **9830011252**, clientId `gifsy`, OTP login). Idempotent + additive.
+5. **Step 7 — Prod PWA scheduler + drain smoke.** Created the `push-drain-prod` Cloud Scheduler job (state **ENABLED**,
+   schedule `"* * * * *"`, POST prod `/v1/push/drain` with the `x-drain-secret` header). **Drain smoke verified:**
+   no-secret → **403** (fail-closed); with-secret → **201**.
+
+## Owner-prerequisite resolution
+- **GCP alert-email verification (was a prereq) — RESOLVED / struck.** GCP **plain-email** notification channels have
+  **no click-to-verify gate** (only SMS/voice do). Both channels (`nikunj.sadani@gifsy.in`, `nikita@gifsy.in`) are
+  **enabled** and wired to **both** alert policies, and delivery was already **confirmed end-to-end on 2026-06-29**. No
+  owner action needed — this item is struck from the prereqs.
+
+## Post-state (verified)
+- Both prod services (`gifsy-api`, `gifsy-frontend`) serve **`2fa020c`**; prod **`/health` = 200**.
+- 8 additive migrations applied (proven by the healthy roll + bootstrap writes to the new tables).
+- Pre-cutover backup **`1782824807740`** taken; PITR ON.
+- Bootstrap done: **first GIFSY_ADMIN (Nikunj/9830011252)** + **4 OutletTypes** present.
+- `push-drain-prod` scheduler ENABLED + drain 403/201 behaviour correct.
+
+## What remains (owner-gated — NOT done)
+- **Step 5 — Load real Deoleo master data via the app UIs.** Waits for the client's files. Prod is bootstrapped +
+  ready; the GIFSY_ADMIN can log in and provision the `deoleo` tenant (slug **MUST** be `deoleo`) → upload
+  outlet/hierarchy/catalog/schemes → set conversion-rate / programs / visibility-OFF.
+- **Step 6 — Real-OTP login smoke per role.** The admin exists, so it can be done anytime; prod uses **real MSG91** (no
+  `FIXED_OTP`).
+- **WhatsApp `deoleo_kyc_approval` template runtime-verify (#143).** The MSG91 template is not yet owner-verified.
+
+## Rollback (unchanged path)
+Code rollback = redeploy both services to the prior Cloud Run revision (the additive migrations are harmless to older
+code); DB restore (rarely) via the Step-2 backup / PITR-clone (never a blind in-place restore — `gifsy-db` is shared
+with staging). See the Rollback note in [`CUTOVER-RUNBOOK.md`](CUTOVER-RUNBOOK.md).
