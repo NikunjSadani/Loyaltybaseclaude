@@ -49,14 +49,18 @@ afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 function stubFetch(deactivateResponse: Partial<Response> & { json?: () => Promise<unknown> }) {
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
-    if (url === '/api/admin/outlets') {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { outlets: [ACTIVE_OUTLET] } }) });
+    // The list endpoint is now query-parameterised (?page&limit[&search&kycStatus]);
+    // match the deactivate path FIRST, then the (possibly-queried) list path.
+    if (url === '/api/admin/outlets/deactivate') {
+      return Promise.resolve(deactivateResponse);
+    }
+    if (url.startsWith('/api/admin/outlets')) {
+      // Single page containing the active outlet, with a matching pagination envelope
+      // so the page's full-list loader stops after page 1.
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { outlets: [ACTIVE_OUTLET], pagination: { page: 1, limit: 50, total: 1, pages: 1 } } }) });
     }
     if (url === '/api/admin/hierarchy-config') {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { employees: [] } }) });
-    }
-    if (url === '/api/admin/outlets/deactivate') {
-      return Promise.resolve(deactivateResponse);
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
   }));

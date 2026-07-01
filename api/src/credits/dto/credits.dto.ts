@@ -10,6 +10,7 @@ import {
   IsPositive,
   IsString,
   Matches,
+  Max,
   Min,
   MinLength,
   ValidateNested,
@@ -107,6 +108,32 @@ export class CreateBatchDto {
   rows!: UploadRowDto[];
 }
 
+/**
+ * GET /admin/credits/batches — server-side period filter + pagination.
+ * `period` (YYYY-MM) was previously filtered CLIENT-SIDE in
+ * platform/.../credits-payouts/status/page.tsx; it is now applied in the service
+ * `where` (still tenant-scoped). page/limit mirror the canonical
+ * channel-partners pagination pattern.
+ */
+export class ListBatchesQueryDto {
+  @IsOptional()
+  @Matches(PERIOD_RE, { message: 'Period must be YYYY-MM' })
+  period?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100) // cap page size — prevents ?limit=99999999 fetching a whole tenant
+  limit?: number = 50;
+}
+
 /** GET /admin/credits/fields — optional ?active=true filter. */
 export class ListFieldsQueryDto {
   @IsOptional()
@@ -197,7 +224,7 @@ export class CreatePayoutDownloadDto {
   fieldName?: string;
 }
 
-/** GET /admin/credits/reversals — optional ?status / ?period filters. */
+/** GET /admin/credits/reversals — optional ?status / ?period filters + pagination. */
 export class ListReversalsQueryDto {
   @IsOptional()
   @IsString()
@@ -206,6 +233,19 @@ export class ListReversalsQueryDto {
   @IsOptional()
   @IsString()
   period?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100) // cap page size — prevents ?limit=99999999 fetching a whole tenant
+  limit?: number = 50;
 }
 
 /** POST /admin/credits/batches/:id/reversals — initiate a reversal request. */

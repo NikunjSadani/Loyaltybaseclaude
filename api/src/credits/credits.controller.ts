@@ -22,6 +22,7 @@ import {
   CreateFieldDto,
   CreatePayoutDownloadDto,
   CreateReversalDto,
+  ListBatchesQueryDto,
   ListFieldsQueryDto,
   ListPayoutDownloadsQueryDto,
   ListReversalsQueryDto,
@@ -51,8 +52,8 @@ export class CreditsController {
   @Get('batches')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   @RequirePermission('credits:read')
-  listBatches(@CurrentUser() user: JwtPayload) {
-    return this.credits.listBatches(user);
+  listBatches(@CurrentUser() user: JwtPayload, @Query() query: ListBatchesQueryDto) {
+    return this.credits.listBatches(user, query);
   }
 
   @Post('batches')

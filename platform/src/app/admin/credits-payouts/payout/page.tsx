@@ -105,6 +105,15 @@ interface Reversal {
   remarks?:       string;
 }
 
+interface Pagination {
+  page:  number;
+  limit: number;
+  total: number;
+  pages: number;
+}
+
+const REV_PAGE_SIZE = 50;
+
 // ─── Gate wrapper ─────────────────────────────────────────────────────────────
 
 export default function PayoutDownloadPage() {
@@ -155,22 +164,46 @@ function PayoutPageInner() {
   const [revLoading,         setRevLoading]         = useState(false);
   const [processedReversals, setProcessedReversals] = useState<Reversal[]>([]);
 
+  // Pagination for the two REVERSALS lists (pending + processed). The downloads/fields
+  // fetches are left un-paginated per scope.
+  const [pendingPage,   setPendingPage]   = useState(1);
+  const [pendingPg,     setPendingPg]     = useState<Pagination | null>(null);
+  const [processedPage, setProcessedPage] = useState(1);
+  const [processedPg,   setProcessedPg]   = useState<Pagination | null>(null);
+
   const utrFileRef = useRef<HTMLInputElement>(null);
 
   // ─── Load data ───────────────────────────────────────────────────────────────
 
   const loadAll = useCallback(async () => {
+    const pendingParams = new URLSearchParams({
+      status: 'PENDING_GIFSY',
+      page:   String(pendingPage),
+      limit:  String(REV_PAGE_SIZE),
+    });
+    const processedParams = new URLSearchParams({
+      status: 'APPROVED',
+      page:   String(processedPage),
+      limit:  String(REV_PAGE_SIZE),
+    });
     const [fieldsRes, downloadsRes, reversalsRes, processedRes] = await Promise.all([
       fetch('/api/admin/credits/fields?active=true').then((r) => r.json()),
       fetch(`/api/admin/credits/payout-downloads?period=${period}`).then((r) => r.json()),
-      fetch('/api/admin/credits/reversals?status=PENDING_GIFSY').then((r) => r.json()),
-      fetch('/api/admin/credits/reversals?status=APPROVED').then((r) => r.json()),
+      fetch(`/api/admin/credits/reversals?${pendingParams.toString()}`).then((r) => r.json()),
+      fetch(`/api/admin/credits/reversals?${processedParams.toString()}`).then((r) => r.json()),
     ]);
     if (fieldsRes.success)    setFields(fieldsRes.data);
     if (downloadsRes.success) setDownloads(downloadsRes.data);
-    if (reversalsRes.success) setReversals(reversalsRes.data);
-    if (processedRes.success) setProcessedReversals(processedRes.data);
-  }, [period]);
+    // Reversals now come back as { reversals, pagination }.
+    if (reversalsRes.success && reversalsRes.data) {
+      setReversals(reversalsRes.data.reversals ?? []);
+      setPendingPg(reversalsRes.data.pagination ?? null);
+    }
+    if (processedRes.success && processedRes.data) {
+      setProcessedReversals(processedRes.data.reversals ?? []);
+      setProcessedPg(processedRes.data.pagination ?? null);
+    }
+  }, [period, pendingPage, processedPage]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
@@ -598,9 +631,9 @@ function PayoutPageInner() {
         <h3 className="font-semibold text-gray-900 text-sm flex items-center gap-2">
           <RotateCcw className="w-4 h-4 text-gray-400" />
           Pending Reversal Requests
-          {reversals.length > 0 && (
+          {(pendingPg?.total ?? reversals.length) > 0 && (
             <span className="ml-auto bg-amber-100 text-amber-700 text-xs px-2 py-0.5 rounded-full font-medium">
-              {reversals.length}
+              {pendingPg?.total ?? reversals.length}
             </span>
           )}
         </h3>
@@ -715,6 +748,33 @@ function PayoutPageInner() {
             ))}
           </div>
         )}
+
+        {/* Pending reversals pagination */}
+        {pendingPg && pendingPg.pages > 1 && (
+          <div className="flex items-center justify-between gap-3 flex-wrap text-xs text-gray-500 pt-1">
+            <span>
+              Page <strong className="text-gray-800">{pendingPg.page}</strong> of{' '}
+              <strong className="text-gray-800">{pendingPg.pages}</strong> ·{' '}
+              <strong className="text-gray-800">{pendingPg.total}</strong> total
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPendingPage((p) => Math.max(1, p - 1))}
+                disabled={pendingPg.page <= 1}
+                className="px-3 py-1.5 font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Previous
+              </button>
+              <button
+                onClick={() => setPendingPage((p) => p + 1)}
+                disabled={pendingPg.page >= pendingPg.pages}
+                className="px-3 py-1.5 font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Section 4: Reversal Report — processed (supposed / reversed / pending) ── */}
@@ -722,9 +782,9 @@ function PayoutPageInner() {
         <h3 className="font-semibold text-gray-900 text-sm flex items-center gap-2">
           <RotateCcw className="w-4 h-4 text-gray-400" />
           Reversal Report
-          {processedReversals.length > 0 && (
+          {(processedPg?.total ?? processedReversals.length) > 0 && (
             <span className="ml-auto bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded-full font-medium">
-              {processedReversals.length}
+              {processedPg?.total ?? processedReversals.length}
             </span>
           )}
         </h3>
@@ -785,6 +845,33 @@ function PayoutPageInner() {
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* Processed reversals pagination */}
+        {processedPg && processedPg.pages > 1 && (
+          <div className="flex items-center justify-between gap-3 flex-wrap text-xs text-gray-500 pt-1">
+            <span>
+              Page <strong className="text-gray-800">{processedPg.page}</strong> of{' '}
+              <strong className="text-gray-800">{processedPg.pages}</strong> ·{' '}
+              <strong className="text-gray-800">{processedPg.total}</strong> total
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setProcessedPage((p) => Math.max(1, p - 1))}
+                disabled={processedPg.page <= 1}
+                className="px-3 py-1.5 font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Previous
+              </button>
+              <button
+                onClick={() => setProcessedPage((p) => p + 1)}
+                disabled={processedPg.page >= processedPg.pages}
+                className="px-3 py-1.5 font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Next
+              </button>
+            </div>
           </div>
         )}
       </div>

@@ -17,6 +17,7 @@ import {
   CreateReversalDto,
   FieldAction,
   FieldAwardValue,
+  ListBatchesQueryDto,
   ListFieldsQueryDto,
   ListPayoutDownloadsQueryDto,
   ListReversalsQueryDto,
@@ -149,24 +150,40 @@ export class CreditsService {
   }
 
   // ─── GET /v1/admin/credits/batches ─────────────────────────────────────────
-  async listBatches(user: JwtPayload) {
-    return this.prisma.creditBatch.findMany({
-      where: { clientId: user.clientId },
-      orderBy: { uploadedAt: 'desc' },
-      select: {
-        id: true,
-        batchCode: true,
-        period: true,
-        status: true,
-        uploadedBy: true,
-        uploadedAt: true,
-        confirmedBy: true,
-        confirmedAt: true,
-        totalOutlets: true,
-        totalPoints: true,
-        totalPayoutPaise: true,
-      },
-    });
+  // Server-side period filter (was client-side in the status page) + pagination.
+  async listBatches(user: JwtPayload, q: ListBatchesQueryDto) {
+    const page = q.page ?? 1;
+    const limit = q.limit ?? 50;
+    const skip = (page - 1) * limit;
+
+    // Tenant scope is never widened; the optional YYYY-MM period filter is applied here.
+    const where: Prisma.CreditBatchWhereInput = { clientId: user.clientId };
+    if (q.period) where.period = q.period;
+
+    const [batches, total] = await Promise.all([
+      this.prisma.creditBatch.findMany({
+        where,
+        orderBy: { uploadedAt: 'desc' },
+        skip,
+        take: limit,
+        select: {
+          id: true,
+          batchCode: true,
+          period: true,
+          status: true,
+          uploadedBy: true,
+          uploadedAt: true,
+          confirmedBy: true,
+          confirmedAt: true,
+          totalOutlets: true,
+          totalPoints: true,
+          totalPayoutPaise: true,
+        },
+      }),
+      this.prisma.creditBatch.count({ where }),
+    ]);
+
+    return { batches, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
   }
 
   // ─── POST /v1/admin/credits/batches ────────────────────────────────────────
@@ -1086,15 +1103,27 @@ export class CreditsService {
   }
 
   // ─── GET /v1/admin/credits/reversals ───────────────────────────────────────
+  // Existing status/period filters preserved; adds skip/take + count pagination.
   async listReversals(user: JwtPayload, q: ListReversalsQueryDto) {
+    const page = q.page ?? 1;
+    const limit = q.limit ?? 50;
+    const skip = (page - 1) * limit;
+
     const where: Prisma.CreditReversalWhereInput = { clientId: user.clientId };
     if (q.status) where.status = q.status as Prisma.CreditReversalWhereInput['status'];
     if (q.period) where.period = q.period;
 
-    return this.prisma.creditReversal.findMany({
-      where,
-      orderBy: { requestedAt: 'desc' },
-    });
+    const [reversals, total] = await Promise.all([
+      this.prisma.creditReversal.findMany({
+        where,
+        orderBy: { requestedAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.creditReversal.count({ where }),
+    ]);
+
+    return { reversals, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
   }
 
   // ─── PATCH /v1/admin/credits/reversals/:id ─────────────────────────────────

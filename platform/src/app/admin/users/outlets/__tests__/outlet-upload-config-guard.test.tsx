@@ -53,9 +53,13 @@ describe('Outlet Master upload — tenant-config load guard', () => {
   it('blocks the upload with a tenant-workspace hint when zero outlet types are enabled (no false rejection)', async () => {
     mockConfig([]);
     render(<OutletsPage />);
-    await waitFor(() => expect(screen.getByTestId('upload-disabled')).toBeInTheDocument());
-    // The corrected message points at tenant context, not "ask Gifsy to enable".
-    expect(screen.getByTestId('upload-disabled')).toHaveTextContent(/correct tenant workspace/i);
+    // The list loader is debounced (250ms), so upload-disabled first shows a transient
+    // "Loading outlet configuration…" before it settles to the tenant-workspace hint once
+    // the (empty) outlet-type list has loaded. Wait for the SETTLED reason, not just the
+    // element's presence, so we assert the corrected message rather than the loading state.
+    await waitFor(() =>
+      expect(screen.getByTestId('upload-disabled')).toHaveTextContent(/correct tenant workspace/i),
+    );
     // The active dropzone is hidden so a file can't be validated against an empty list.
     expect(screen.queryByText(/Drop your XLSX file/i)).not.toBeInTheDocument();
   });

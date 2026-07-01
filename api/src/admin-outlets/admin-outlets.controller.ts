@@ -1,10 +1,11 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query } from '@nestjs/common';
 import { AdminOutletsService } from './admin-outlets.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import {
   BulkDeleteOutletsDto,
+  ListOutletsQueryDto,
   OutletCodesDto,
   ReKycFlagDto,
   UpsertOutletsDto,
@@ -22,11 +23,11 @@ import {
 export class AdminOutletsController {
   constructor(private readonly outlets: AdminOutletsService) {}
 
-  /** GET / — list the tenant's outlets (source: partners:manage_outlets). */
+  /** GET / — server-paginated + filtered tenant outlet list (source: partners:manage_outlets). */
   @Get()
   @RequirePermission('partners:manage_outlets')
-  list(@CurrentUser() user: JwtPayload) {
-    return this.outlets.list(user);
+  list(@CurrentUser() user: JwtPayload, @Query() query: ListOutletsQueryDto) {
+    return this.outlets.list(user, query);
   }
 
   /** POST /upsert — persist the Outlet Master upload (source: partners:manage_outlets). */

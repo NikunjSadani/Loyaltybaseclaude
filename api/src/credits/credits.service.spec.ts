@@ -6,6 +6,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import * as XLSX from 'xlsx';
 import { CreditsService } from './credits.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -17,6 +19,8 @@ import {
   CreateBatchDto,
   CreateReversalDto,
   FieldAction,
+  ListBatchesQueryDto,
+  ListReversalsQueryDto,
   PayoutGroupType,
   ReversalAction,
 } from './dto/credits.dto';
@@ -54,7 +58,7 @@ const mockPrisma = {
   creditField: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
   creditPayoutEntry: { findMany: jest.fn() },
   creditPayoutDownload: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn() },
-  creditReversal: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
+  creditReversal: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn(), count: jest.fn() },
   outlet: { findMany: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
@@ -131,12 +135,63 @@ describe('CreditsService', () => {
   });
 
   describe('listBatches', () => {
-    it('scopes the query to the caller tenant, newest first', async () => {
+    it('scopes the query to the caller tenant, newest first, with default pagination', async () => {
       mockPrisma.creditBatch.findMany.mockResolvedValue([]);
-      await service.listBatches(admin);
+      mockPrisma.creditBatch.count.mockResolvedValue(0);
+      await service.listBatches(admin, {});
       const arg = mockPrisma.creditBatch.findMany.mock.calls[0][0];
       expect(arg.where).toEqual({ clientId: 'deoleo' });
       expect(arg.orderBy).toEqual({ uploadedAt: 'desc' });
+      // Default page=1 / limit=50 → skip 0, take 50.
+      expect(arg.skip).toBe(0);
+      expect(arg.take).toBe(50);
+    });
+
+    it('applies the period filter SERVER-SIDE in the where (still tenant-scoped)', async () => {
+      mockPrisma.creditBatch.findMany.mockResolvedValue([]);
+      mockPrisma.creditBatch.count.mockResolvedValue(0);
+      await service.listBatches(admin, { period: '2026-05' });
+      const arg = mockPrisma.creditBatch.findMany.mock.calls[0][0];
+      expect(arg.where).toEqual({ clientId: 'deoleo', period: '2026-05' });
+      // The count uses the SAME where (so pages reflect the filtered set).
+      expect(mockPrisma.creditBatch.count.mock.calls[0][0].where).toEqual({
+        clientId: 'deoleo',
+        period: '2026-05',
+      });
+    });
+
+    it('computes skip/take from page & limit and returns the pagination envelope', async () => {
+      mockPrisma.creditBatch.findMany.mockResolvedValue([{ id: 'b1' }]);
+      mockPrisma.creditBatch.count.mockResolvedValue(7);
+      const res = await service.listBatches(admin, { page: 3, limit: 2 });
+      const arg = mockPrisma.creditBatch.findMany.mock.calls[0][0];
+      // page 3, limit 2 → skip (3-1)*2 = 4, take 2.
+      expect(arg.skip).toBe(4);
+      expect(arg.take).toBe(2);
+      expect(res).toEqual({
+        batches: [{ id: 'b1' }],
+        pagination: { page: 3, limit: 2, total: 7, pages: 4 }, // ceil(7/2)=4
+      });
+    });
+
+    // The @Max(100) cap on `limit` is enforced by class-validator on the query DTO
+    // (a ?limit=99999999 is rejected at the ValidationPipe before the service runs,
+    // so the service can never fetch a whole tenant). Assert the DTO constraints so
+    // the cap + defaults are locked in.
+    it('ListBatchesQueryDto rejects limit > 100 and defaults page=1/limit=50', async () => {
+      const dflt = plainToInstance(ListBatchesQueryDto, {});
+      expect(dflt.page).toBe(1);
+      expect(dflt.limit).toBe(50);
+      expect(await validate(dflt)).toHaveLength(0);
+
+      const over = plainToInstance(ListBatchesQueryDto, { limit: 99999999 });
+      const errors = await validate(over);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].property).toBe('limit');
+      expect(errors[0].constraints).toHaveProperty('max');
+
+      // A valid limit at the cap passes.
+      expect(await validate(plainToInstance(ListBatchesQueryDto, { limit: 100 }))).toHaveLength(0);
     });
   });
 
@@ -1030,11 +1085,53 @@ describe('CreditsService', () => {
   });
 
   describe('listReversals', () => {
-    it('scopes by tenant and applies status/period filters', async () => {
+    it('scopes by tenant and applies status/period filters with default pagination', async () => {
       mockPrisma.creditReversal.findMany.mockResolvedValue([]);
+      mockPrisma.creditReversal.count.mockResolvedValue(0);
       await service.listReversals(gifsy, { status: 'PENDING_GIFSY', period: '2026-05' });
-      const where = mockPrisma.creditReversal.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ clientId: 'deoleo', status: 'PENDING_GIFSY', period: '2026-05' });
+      const arg = mockPrisma.creditReversal.findMany.mock.calls[0][0];
+      expect(arg.where).toEqual({ clientId: 'deoleo', status: 'PENDING_GIFSY', period: '2026-05' });
+      expect(arg.orderBy).toEqual({ requestedAt: 'desc' });
+      // Default page=1 / limit=50 → skip 0, take 50.
+      expect(arg.skip).toBe(0);
+      expect(arg.take).toBe(50);
+      // The count uses the SAME where so pages reflect the filtered set.
+      expect(mockPrisma.creditReversal.count.mock.calls[0][0].where).toEqual({
+        clientId: 'deoleo',
+        status: 'PENDING_GIFSY',
+        period: '2026-05',
+      });
+    });
+
+    it('computes skip/take from page & limit and returns the pagination envelope', async () => {
+      mockPrisma.creditReversal.findMany.mockResolvedValue([{ id: 'r1' }]);
+      mockPrisma.creditReversal.count.mockResolvedValue(5);
+      const res = await service.listReversals(gifsy, { page: 2, limit: 2 });
+      const arg = mockPrisma.creditReversal.findMany.mock.calls[0][0];
+      // page 2, limit 2 → skip (2-1)*2 = 2, take 2.
+      expect(arg.skip).toBe(2);
+      expect(arg.take).toBe(2);
+      // No status/period → where is tenant-only.
+      expect(arg.where).toEqual({ clientId: 'deoleo' });
+      expect(res).toEqual({
+        reversals: [{ id: 'r1' }],
+        pagination: { page: 2, limit: 2, total: 5, pages: 3 }, // ceil(5/2)=3
+      });
+    });
+
+    it('ListReversalsQueryDto rejects limit > 100 and defaults page=1/limit=50', async () => {
+      const dflt = plainToInstance(ListReversalsQueryDto, {});
+      expect(dflt.page).toBe(1);
+      expect(dflt.limit).toBe(50);
+      expect(await validate(dflt)).toHaveLength(0);
+
+      const over = plainToInstance(ListReversalsQueryDto, { limit: 99999999 });
+      const errors = await validate(over);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].property).toBe('limit');
+      expect(errors[0].constraints).toHaveProperty('max');
+
+      expect(await validate(plainToInstance(ListReversalsQueryDto, { limit: 100 }))).toHaveLength(0);
     });
   });
 

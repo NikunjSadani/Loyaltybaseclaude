@@ -5,12 +5,40 @@ import { SalesNotificationsService } from '../notifications/sales-notifications.
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   BulkDeleteOutletsDto,
+  ListOutletsQueryDto,
   OutletCodesDto,
   OutletUploadRowDto,
+  OutletKycFilter,
   ReKycFlagDto,
   ReKycFlagRowDto,
   UpsertOutletsDto,
 } from './dto/admin-outlets.dto';
+
+// The raw KycStatus values that each DERIVED display bucket maps to (mirrors the
+// switch in deriveKycStatus). RE_KYC_REQUIRED / NOT_STARTED are handled specially
+// (they also depend on reKycFlags / kycIntent / the absence of a submission), so
+// only the "latest submission is exactly one of these" buckets live here.
+const KYC_STATUS_BY_BUCKET: Record<OutletKycFilter, KycStatus[]> = {
+  APPROVED: [KycStatus.APPROVED],
+  REJECTED: [KycStatus.REJECTED],
+  SUBMITTED: [KycStatus.SUBMITTED],
+  IN_PROGRESS: [
+    KycStatus.UNDER_REVIEW,
+    KycStatus.PENDING_PENNY_DROP,
+    KycStatus.PENDING_AGREEMENT,
+    KycStatus.PENDING_SO_APPROVAL,
+    KycStatus.PENDING_ASM_APPROVAL,
+    KycStatus.PENDING_RSM_APPROVAL,
+    KycStatus.PENDING_GIFSY,
+    KycStatus.RE_UPLOAD_REQUIRED,
+    KycStatus.RESUBMISSION_REQUIRED,
+    KycStatus.DRAFT,
+  ],
+  // These two are derived (not a direct submission-status match) — never read from
+  // this table directly; buildKycStatusWhere handles them via partnerId sets.
+  RE_KYC_REQUIRED: [KycStatus.RE_KYC_REQUIRED],
+  NOT_STARTED: [],
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Ported pure logic — outlet-persist.ts + the Re-KYC helpers of outlet-upload.ts.
@@ -175,40 +203,249 @@ export class AdminOutletsService {
     private readonly salesNotifications: SalesNotificationsService,
   ) {}
 
-  /** GET /v1/admin/outlets — tenant-scoped outlet list with the active XSR and real KYC status. */
-  async list(user: JwtPayload) {
-    const outlets = await this.prisma.outlet.findMany({
-      where: { deletedAt: null, clientId: user.clientId },
-      select: {
-        outletCode: true,
-        name: true,
-        outletTypeId: true,
-        city: true,
-        state: true,
-        isActive: true,
-        createdAt: true,
-        distributorCode: true,
-        beat: true,
-        metro: true,
-        programName: true,
-        programCategory: true,
-        // Fields needed for real KYC-status derivation
-        partnerId: true,
-        reKycFlags: true,
-        kycIntent: true,
-        salesAssignments: {
-          where: { unassignedAt: null },
-          take: 1,
-          orderBy: { assignedAt: 'desc' },
-          select: {
-            salesUser: {
-              select: { employeeCode: true, user: { select: { name: true } } },
+  /**
+   * Translate a DERIVED KYC display bucket into a Prisma OutletWhereInput that,
+   * combined with the tenant scope, selects exactly the outlets that
+   * deriveKycStatus would classify into that bucket. This keeps server-side
+   * pagination correct — filtering only the current page would silently drop
+   * matches on other pages.
+   *
+   * The derivation priority (see deriveKycStatus) is honoured:
+   *   1. non-empty reKycFlags  ⇒ RE_KYC_REQUIRED   (wins over everything)
+   *   2. kycIntent NOT_INTERESTED ⇒ NOT_STARTED
+   *   3. partnerId null           ⇒ NOT_STARTED
+   *   4. latest submission status ⇒ mapped bucket
+   *   5. no submission            ⇒ NOT_STARTED
+   *
+   * reKycFlags is a JSON column; we can express "has a non-empty object" only
+   * approximately in Prisma, so the reKycFlags-driven RE_KYC_REQUIRED members
+   * are resolved from a pre-computed id set (`reKycOutletIds`) instead. The
+   * latest-status-per-partner buckets are resolved from `latestStatusByPartnerId`.
+   */
+  private buildKycStatusWhere(
+    bucket: OutletKycFilter,
+    latestStatusByPartnerId: Map<string, KycStatus>,
+    reKycOutletIds: string[],
+  ): Prisma.OutletWhereInput {
+    // Null-safe "kycIntent is not NOT_INTERESTED" — priority 2 in deriveKycStatus makes a
+    // NOT_INTERESTED outlet always NOT_STARTED, ahead of any latest-submission bucket. The
+    // submission-driven branches AND this in so those outlets aren't mis-bucketed. Using
+    // `{ not: NOT_INTERESTED }` alone would DROP NULL-kycIntent rows (Prisma NULL semantics),
+    // so we OR in the null case.
+    const NOT_NOT_INTERESTED: Prisma.OutletWhereInput = {
+      OR: [
+        { kycIntent: null },
+        { kycIntent: { not: OutletKycIntent.NOT_INTERESTED } },
+      ],
+    };
+
+    // Partner ids whose LATEST submission maps to the requested bucket.
+    const wantedStatuses = new Set(KYC_STATUS_BY_BUCKET[bucket]);
+    const partnerIdsInBucket: string[] = [];
+    for (const [partnerId, status] of latestStatusByPartnerId) {
+      if (wantedStatuses.has(status)) partnerIdsInBucket.push(partnerId);
+    }
+
+    if (bucket === 'RE_KYC_REQUIRED') {
+      // A member iff: reKycFlags non-empty (id set) OR latest submission is
+      // RE_KYC_REQUIRED. (An outlet with re-KYC flags is caught by the id set
+      // regardless of partner/submission state.)
+      const or: Prisma.OutletWhereInput[] = [];
+      if (reKycOutletIds.length > 0) or.push({ id: { in: reKycOutletIds } });
+      if (partnerIdsInBucket.length > 0) {
+        // Latest-submission RE_KYC_REQUIRED only counts when reKycFlags is NOT
+        // set (priority 1 already covered those). Exclude the flagged ids so a
+        // flagged outlet isn't double-required — harmless for membership, but
+        // keeps the semantics clean. Also exclude NOT_INTERESTED outlets:
+        // deriveKycStatus priority 2 (kycIntent NOT_INTERESTED ⇒ NOT_STARTED)
+        // wins over a latest-submission bucket (priority 4). Null-safe so a NULL
+        // kycIntent is still included ({not} would drop NULLs).
+        or.push({
+          partnerId: { in: partnerIdsInBucket },
+          id: { notIn: reKycOutletIds },
+          AND: [NOT_NOT_INTERESTED],
+        });
+      }
+      // No members at all → an impossible predicate (id: null won't match).
+      return or.length > 0 ? { OR: or } : { id: { in: [] } };
+    }
+
+    if (bucket === 'NOT_STARTED') {
+      // NOT_STARTED = NOT any other bucket. Concretely, an outlet is NOT_STARTED
+      // when it is NOT re-KYC-flagged AND (kycIntent NOT_INTERESTED OR no partner
+      // OR the partner has no submission OR the latest maps to NOT_STARTED —
+      // SUSPENDED / NOT_INTERESTED). Everything with a partner whose latest maps
+      // to another bucket is excluded.
+      const partnerIdsNotStarted: string[] = [];
+      for (const [partnerId, status] of latestStatusByPartnerId) {
+        if (status === KycStatus.SUSPENDED || status === KycStatus.NOT_INTERESTED) {
+          partnerIdsNotStarted.push(partnerId);
+        }
+      }
+      // Partner ids that have ANY submission mapping to a NON-NOT_STARTED bucket.
+      const partnerIdsElsewhere: string[] = [];
+      for (const [partnerId, status] of latestStatusByPartnerId) {
+        if (status !== KycStatus.SUSPENDED && status !== KycStatus.NOT_INTERESTED) {
+          partnerIdsElsewhere.push(partnerId);
+        }
+      }
+      return {
+        // Never re-KYC-flagged (those are RE_KYC_REQUIRED by priority 1).
+        id: { notIn: reKycOutletIds },
+        OR: [
+          { kycIntent: OutletKycIntent.NOT_INTERESTED },
+          { partnerId: null },
+          { partnerId: { in: partnerIdsNotStarted } },
+          // Has a partner, but NOT one whose latest maps elsewhere ⇒ no submission.
+          { partnerId: { notIn: partnerIdsElsewhere } },
+        ],
+      };
+    }
+
+    // APPROVED / REJECTED / SUBMITTED / IN_PROGRESS: latest submission maps to the
+    // bucket AND the outlet is not re-KYC-flagged (priority 1 pulls flagged ones out)
+    // AND the outlet isn't NOT_INTERESTED (priority 2 makes those NOT_STARTED, ahead of
+    // the submission bucket — else a Not-Interested outlet whose partner still has an
+    // APPROVED/REJECTED submission would show under the wrong tab + double-count).
+    if (partnerIdsInBucket.length === 0) return { id: { in: [] } };
+    return {
+      partnerId: { in: partnerIdsInBucket },
+      id: { notIn: reKycOutletIds },
+      AND: [NOT_NOT_INTERESTED],
+    };
+  }
+
+  /**
+   * GET /v1/admin/outlets — tenant-scoped, server-paginated + server-filtered
+   * outlet list with the active XSR and real KYC status.
+   *
+   * `search` spans outlet code / name / ISR name / beat / city (the same fields
+   * the FE filtered client-side); `kycStatus` filters on the DERIVED display
+   * bucket. Envelope mirrors channel-partners:
+   *   { outlets, pagination: { page, limit, total, pages }, outletTypes }
+   */
+  async list(user: JwtPayload, q: ListOutletsQueryDto = {}) {
+    const page = q.page ?? 1;
+    const limit = q.limit ?? 50;
+    const skip = (page - 1) * limit;
+
+    // ── Base tenant scope (unchanged: the outlet's OWN clientId, never a partner join). ──
+    const baseWhere: Prisma.OutletWhereInput = { deletedAt: null, clientId: user.clientId };
+
+    // ── Text search across the same fields the FE searched (case-insensitive). ──
+    // ISR name lives on the active SalesUserAssignment → salesUser → user.name;
+    // it is expressed as a relation filter so search still spans it server-side.
+    if (q.search && q.search.trim()) {
+      const s = q.search.trim();
+      baseWhere.OR = [
+        { outletCode: { contains: s, mode: 'insensitive' } },
+        { name: { contains: s, mode: 'insensitive' } },
+        { beat: { contains: s, mode: 'insensitive' } },
+        { city: { contains: s, mode: 'insensitive' } },
+        {
+          salesAssignments: {
+            some: {
+              unassignedAt: null,
+              salesUser: { user: { name: { contains: s, mode: 'insensitive' } } },
             },
           },
         },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+      ];
+    }
+
+    // ── KYC display-status filter (derived) ──────────────────────────────────
+    // The bucket predicate depends on per-partner latest submission status and on
+    // which outlets carry non-empty reKycFlags, both of which must be resolved
+    // BEFORE the paginated query so the page/count are computed over the filtered
+    // set. We resolve them tenant-wide (bounded by the tenant's own outlets).
+    let where: Prisma.OutletWhereInput = baseWhere;
+    if (q.kycStatus) {
+      // (a) Outlets in this tenant that carry a NON-EMPTY reKycFlags object.
+      //     reKycFlags is a nullable Json; `{ not: DbNull }` excludes SQL NULL but
+      //     NOT an empty {} — deriveKycStatus treats an empty object as "not
+      //     flagged", so we post-filter for a non-empty object in JS.
+      const flagCandidates = await this.prisma.outlet.findMany({
+        where: { ...baseWhere, reKycFlags: { not: Prisma.DbNull } },
+        select: { id: true, reKycFlags: true },
+      });
+      const reKycOutletIds = flagCandidates
+        .filter(
+          (o) =>
+            o.reKycFlags !== null &&
+            typeof o.reKycFlags === 'object' &&
+            Object.keys(o.reKycFlags as Record<string, unknown>).length > 0,
+        )
+        .map((o) => o.id);
+
+      // (b) Latest KycStatus per partner, for the tenant's outlets with an owner.
+      const partnerRows = await this.prisma.outlet.findMany({
+        where: { ...baseWhere, partnerId: { not: null } },
+        select: { partnerId: true },
+        distinct: ['partnerId'],
+      });
+      const partnerIds = partnerRows
+        .map((o) => o.partnerId)
+        .filter((id): id is string => id !== null);
+      const latestStatusByPartnerId = new Map<string, KycStatus>();
+      if (partnerIds.length > 0) {
+        const subs = await this.prisma.kycSubmission.findMany({
+          where: { partnerId: { in: partnerIds } },
+          select: { partnerId: true, status: true },
+          orderBy: { createdAt: 'desc' },
+        });
+        for (const sub of subs) {
+          if (sub.partnerId && !latestStatusByPartnerId.has(sub.partnerId)) {
+            latestStatusByPartnerId.set(sub.partnerId, sub.status);
+          }
+        }
+      }
+
+      const kycWhere = this.buildKycStatusWhere(
+        q.kycStatus,
+        latestStatusByPartnerId,
+        reKycOutletIds,
+      );
+      // AND the base scope (incl. search) with the bucket predicate.
+      where = { AND: [baseWhere, kycWhere] };
+    }
+
+    const [outlets, total] = await Promise.all([
+      this.prisma.outlet.findMany({
+        where,
+        skip,
+        take: limit,
+        select: {
+          outletCode: true,
+          name: true,
+          outletTypeId: true,
+          city: true,
+          state: true,
+          isActive: true,
+          createdAt: true,
+          distributorCode: true,
+          beat: true,
+          metro: true,
+          programName: true,
+          programCategory: true,
+          // Fields needed for real KYC-status derivation
+          partnerId: true,
+          reKycFlags: true,
+          kycIntent: true,
+          salesAssignments: {
+            where: { unassignedAt: null },
+            take: 1,
+            orderBy: { assignedAt: 'desc' },
+            select: {
+              salesUser: {
+                select: { employeeCode: true, user: { select: { name: true } } },
+              },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.outlet.count({ where }),
+    ]);
 
     // ── Batched KYC-status lookup (no N+1) ───────────────────────────────────────
     // Collect all distinct partnerIds for outlets that have an owner (post-KYC-start).
@@ -326,7 +563,12 @@ export class AdminOutletsService {
     });
     const outletTypes = typeConfigs.map((c) => c.outletType.code).sort();
 
-    return { outlets: mapped, outletTypes };
+    return {
+      outlets: mapped,
+      // Envelope mirrors channel-partners: { page, limit, total, pages }.
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+      outletTypes,
+    };
   }
 
   /**

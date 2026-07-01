@@ -70,6 +70,15 @@ interface BatchDetail extends BatchSummary {
   rows: BatchRow[];
 }
 
+interface Pagination {
+  page:  number;
+  limit: number;
+  total: number;
+  pages: number;
+}
+
+const PAGE_SIZE = 50;
+
 interface ReversalTarget {
   batchId:      string;
   outletId:     string;
@@ -91,6 +100,8 @@ export default function PayoutStatusPage() {
   const [batchDetails, setBatchDetails] = useState<Record<string, BatchDetail>>({});
   const [expanded,     setExpanded]     = useState<string | null>(null);
   const [filterPeriod, setFilterPeriod] = useState('');
+  const [page,         setPage]         = useState(1);
+  const [pagination,   setPagination]   = useState<Pagination | null>(null);
   const [loading,      setLoading]      = useState(true);
 
   // Reversal state
@@ -100,17 +111,40 @@ export default function PayoutStatusPage() {
   const [revMsg,     setRevMsg]     = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [revLoading, setRevLoading] = useState(false);
 
+  // Period options for the filter dropdown. Derived from the UNFILTERED first page so
+  // selecting a period does not collapse the dropdown to that single option. Grows as
+  // pages are seen; never shrinks.
+  const [allPeriods, setAllPeriods] = useState<string[]>([]);
+
   const fetchBatches = useCallback(async () => {
+    setLoading(true);
     try {
-      const res  = await fetch('/api/admin/credits/batches');
+      const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) });
+      if (filterPeriod) params.set('period', filterPeriod);
+      const res  = await fetch(`/api/admin/credits/batches?${params.toString()}`);
       const json = await res.json();
-      if (json.success) setBatches(json.data);
+      if (json.success && json.data) {
+        setBatches(json.data.batches ?? []);
+        setPagination(json.data.pagination ?? null);
+        // Only merge period options from an UNFILTERED response (full set for this page).
+        if (!filterPeriod) {
+          setAllPeriods((prev) =>
+            [...new Set([...prev, ...(json.data.batches ?? []).map((b: BatchSummary) => b.period)])]
+              .sort()
+              .reverse(),
+          );
+        }
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [page, filterPeriod]);
 
   useEffect(() => { fetchBatches(); }, [fetchBatches]);
+
+  // Changing the period filter restarts from page 1 (a stale page index is meaningless
+  // for a different result set). fetchBatches re-fires via its `page` dependency.
+  useEffect(() => { setPage(1); }, [filterPeriod]);
 
   async function expandBatch(id: string) {
     if (expanded === id) { setExpanded(null); return; }
@@ -123,8 +157,9 @@ export default function PayoutStatusPage() {
     }
   }
 
-  const periods = [...new Set(batches.map((b) => b.period))].sort().reverse();
-  const visible  = filterPeriod ? batches.filter((b) => b.period === filterPeriod) : batches;
+  // Period filtering is now SERVER-SIDE (?period=YYYY-MM); the returned `batches` are
+  // already the current page of the filtered+paginated set.
+  const periods = allPeriods;
 
   // ─── Report download ────────────────────────────────────────────────────────
 
@@ -271,7 +306,7 @@ export default function PayoutStatusPage() {
       )}
 
       {/* No batches */}
-      {!loading && visible.length === 0 && (
+      {!loading && batches.length === 0 && (
         <div className="bg-gray-50 border border-dashed border-gray-300 rounded-xl p-10 text-center">
           <BarChart2 className="w-8 h-8 text-gray-300 mx-auto mb-3" />
           <p className="text-sm text-gray-500">No upload batches found.</p>
@@ -280,9 +315,9 @@ export default function PayoutStatusPage() {
       )}
 
       {/* Batch list */}
-      {!loading && visible.length > 0 && (
+      {!loading && batches.length > 0 && (
         <div className="space-y-3">
-          {visible.map((batch) => {
+          {batches.map((batch) => {
             const style      = STATUS_STYLES[batch.status] ?? STATUS_STYLES['PENDING_CONFIRM'];
             const isOpen     = expanded === batch.id;
             const isConfirmed = batch.status === 'CONFIRMED' || batch.status === 'PARTIALLY_REVERSED';
@@ -403,6 +438,33 @@ export default function PayoutStatusPage() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Pagination controls */}
+      {!loading && pagination && pagination.pages > 1 && (
+        <div className="flex items-center justify-between gap-3 flex-wrap text-sm text-gray-500">
+          <span>
+            Page <strong className="text-gray-900">{pagination.page}</strong> of{' '}
+            <strong className="text-gray-900">{pagination.pages}</strong> ·{' '}
+            <strong className="text-gray-900">{pagination.total}</strong> total
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={pagination.page <= 1}
+              className="px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => setPage((p) => p + 1)}
+              disabled={pagination.page >= pagination.pages}
+              className="px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Next
+            </button>
+          </div>
         </div>
       )}
 

@@ -3,12 +3,31 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
+  Max,
   Min,
   ValidateNested,
 } from 'class-validator';
+
+/**
+ * The DERIVED KYC display statuses the outlet list surfaces (see
+ * AdminOutletsService.deriveKycStatus). These are NOT the raw KycStatus enum —
+ * they are the six buckets the FE renders + filters on. The server maps each
+ * bucket back to a Prisma `where` so pagination stays correct (filtering the
+ * current page only would be wrong).
+ */
+export const OUTLET_KYC_FILTER_VALUES = [
+  'NOT_STARTED',
+  'IN_PROGRESS',
+  'SUBMITTED',
+  'APPROVED',
+  'REJECTED',
+  'RE_KYC_REQUIRED',
+] as const;
+export type OutletKycFilter = (typeof OUTLET_KYC_FILTER_VALUES)[number];
 
 /**
  * One parsed Outlet Master upload row — mirrors platform `OutletUploadRow`
@@ -148,17 +167,32 @@ export class OutletCodesDto {
   outletCodes!: string[];
 }
 
-/** GET / — no query params today; kept for parity with the template list shape. */
+/**
+ * GET / — server-side pagination + filtering for the admin outlet list.
+ * Mirrors ListChannelPartnersQueryDto (page/limit/search) and adds the KYC
+ * display-status filter. `search` spans the same fields the FE searched
+ * client-side (outlet code, name, ISR name, beat, city); `kycStatus` is one of
+ * the six DERIVED buckets (OUTLET_KYC_FILTER_VALUES). limit is capped at 100.
+ */
 export class ListOutletsQueryDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  page?: number;
+  page?: number = 1;
 
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  limit?: number;
+  @Max(100)
+  limit?: number = 50;
+
+  @IsOptional()
+  @IsString()
+  search?: string;
+
+  @IsOptional()
+  @IsIn(OUTLET_KYC_FILTER_VALUES)
+  kycStatus?: OutletKycFilter;
 }

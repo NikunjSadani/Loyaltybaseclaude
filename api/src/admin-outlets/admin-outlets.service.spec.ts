@@ -21,7 +21,7 @@ const mockTx = {
 };
 
 const mockPrisma = {
-  outlet: { findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+  outlet: { findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), count: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn() },
   salesUser: { findUnique: jest.fn() },
   salesUserAssignment: { updateMany: jest.fn() },
@@ -50,6 +50,8 @@ describe('AdminOutletsService', () => {
     // list() now also reads the tenant's enabled outlet types; default to none so the
     // pre-existing list tests don't have to mock it (upsert tests override as needed).
     mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
+    // list() now paginates: outlet.count runs in parallel with findMany. Default 0.
+    mockPrisma.outlet.count.mockResolvedValue(0);
     // deactivate()'s session-revoke step queries these inside the tx; default to
     // "no partners stranded" so the pre-existing deactivate tests don't have to mock it.
     mockTx.outlet.findMany.mockResolvedValue([]);
@@ -125,6 +127,113 @@ describe('AdminOutletsService', () => {
       // tenant-scoped + only enabled + only active types
       const where = mockPrisma.outletTypeClientConfig.findMany.mock.calls[0][0].where;
       expect(where).toMatchObject({ clientId: TENANT_A, isEnabled: true });
+    });
+  });
+
+  describe('list — pagination + filtering (mirrors channel-partners)', () => {
+    it('defaults page=1 limit=50 → skip 0 take 50, and returns the pagination envelope', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.outlet.count.mockResolvedValue(137);
+      const res = await service.list(admin, {});
+      const args = mockPrisma.outlet.findMany.mock.calls[0][0];
+      expect(args.skip).toBe(0);
+      expect(args.take).toBe(50);
+      // Envelope shape matches channel-partners { page, limit, total, pages }.
+      expect(res.pagination).toEqual({ page: 1, limit: 50, total: 137, pages: 3 });
+    });
+
+    it('computes skip=(page-1)*limit and take=limit for a non-default page', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.outlet.count.mockResolvedValue(0);
+      await service.list(admin, { page: 3, limit: 20 });
+      const args = mockPrisma.outlet.findMany.mock.calls[0][0];
+      expect(args.skip).toBe(40); // (3-1)*20
+      expect(args.take).toBe(20);
+    });
+
+    it('counts over the SAME where used by findMany (so pagination is over the filtered set)', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.outlet.count.mockResolvedValue(0);
+      await service.list(admin, { search: 'Verma' });
+      const findWhere = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      const countWhere = mockPrisma.outlet.count.mock.calls[0][0].where;
+      expect(countWhere).toEqual(findWhere);
+    });
+
+    it('builds a search OR across code/name/beat/city + ISR name, keeping tenant scope', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      await service.list(admin, { search: 'Andheri' });
+      const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      // tenant scope intact
+      expect(where.clientId).toBe(TENANT_A);
+      expect(where.deletedAt).toBeNull();
+      // OR spans the searched fields
+      const fields = where.OR.flatMap((c: Record<string, unknown>) => Object.keys(c));
+      expect(fields).toEqual(
+        expect.arrayContaining(['outletCode', 'name', 'beat', 'city', 'salesAssignments']),
+      );
+    });
+
+    it('kycStatus=APPROVED filters on partnerIds whose LATEST submission is APPROVED (AND tenant scope)', async () => {
+      // Two owned outlets; cp1's latest is APPROVED, cp2's latest is REJECTED.
+      mockPrisma.outlet.findMany
+        // (a) reKycFlags candidates — none flagged
+        .mockResolvedValueOnce([])
+        // (b) distinct partnerIds for the tenant's owned outlets
+        .mockResolvedValueOnce([{ partnerId: 'cp1' }, { partnerId: 'cp2' }])
+        // the paginated page fetch
+        .mockResolvedValueOnce([]);
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([
+        { partnerId: 'cp1', status: 'APPROVED' },
+        { partnerId: 'cp2', status: 'REJECTED' },
+      ]);
+      await service.list(admin, { kycStatus: 'APPROVED' });
+
+      // The paginated fetch is the THIRD outlet.findMany call.
+      const where = mockPrisma.outlet.findMany.mock.calls[2][0].where;
+      // AND[baseScope, kycBucket]
+      expect(where.AND[0]).toMatchObject({ clientId: TENANT_A, deletedAt: null });
+      expect(where.AND[1]).toMatchObject({ partnerId: { in: ['cp1'] } });
+    });
+
+    it('kycStatus=RE_KYC_REQUIRED includes outlets carrying a non-empty reKycFlags object', async () => {
+      mockPrisma.outlet.findMany
+        // (a) reKycFlags candidates: one non-empty, one empty {} (must be excluded)
+        .mockResolvedValueOnce([
+          { id: 'o-flagged', reKycFlags: { ownerPhoto: true } },
+          { id: 'o-empty', reKycFlags: {} },
+        ])
+        // (b) no owned partners
+        .mockResolvedValueOnce([])
+        // paginated fetch
+        .mockResolvedValueOnce([]);
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+      await service.list(admin, { kycStatus: 'RE_KYC_REQUIRED' });
+
+      const where = mockPrisma.outlet.findMany.mock.calls[2][0].where;
+      // The bucket predicate ORs on the flagged id set — only the non-empty one.
+      expect(JSON.stringify(where)).toContain('o-flagged');
+      expect(JSON.stringify(where)).not.toContain('o-empty');
+    });
+
+    it('kycStatus=APPROVED excludes NOT_INTERESTED outlets (priority 2) but keeps NULL kycIntent', async () => {
+      // Regression: an outlet marked NOT_INTERESTED still carries its partner + submission.
+      // deriveKycStatus priority 2 makes it NOT_STARTED (ahead of the APPROVED submission
+      // bucket, priority 4), so the APPROVED filter must NOT include it — else it shows under
+      // the wrong tab AND double-counts the paginated total. The guard must be NULL-safe.
+      mockPrisma.outlet.findMany
+        .mockResolvedValueOnce([]) // (a) none reKyc-flagged
+        .mockResolvedValueOnce([{ partnerId: 'cp1' }]) // (b) owned partners
+        .mockResolvedValueOnce([]); // paginated page
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([{ partnerId: 'cp1', status: 'APPROVED' }]);
+      await service.list(admin, { kycStatus: 'APPROVED' });
+
+      const bucket = mockPrisma.outlet.findMany.mock.calls[2][0].where.AND[1];
+      expect(bucket.AND).toEqual(
+        expect.arrayContaining([
+          { OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }] },
+        ]),
+      );
     });
   });
 

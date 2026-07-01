@@ -48,9 +48,19 @@ const LEAF_ROLE_CODE    = 'XSR';     // Deoleo config
 const DEFAULT_PROGRAMS   = ['Trade Loyalty', 'Gold Programme'];
 const DEFAULT_CATEGORIES = ['Premium', 'Standard', 'Economy'];
 
-// ─── Mock outlet master data ───────────────────────────────────────────────────
+// ─── Outlet master data ──────────────────────────────────────────────────────────
 
 type KYCStatusLocal = 'NOT_STARTED' | 'IN_PROGRESS' | 'SUBMITTED' | 'APPROVED' | 'REJECTED' | 'RE_KYC_REQUIRED';
+
+// Server pagination envelope (mirrors channel-partners / admin users).
+interface Pagination {
+  page:  number;
+  limit: number;
+  total: number;
+  pages: number;
+}
+
+const PAGE_SIZE = 50;
 
 interface MockOutlet {
   outletId:        string;
@@ -385,12 +395,22 @@ export default function OutletsPage() {
   const validPrograms   = settings.outletPrograms?.length   ? settings.outletPrograms   : DEFAULT_PROGRAMS;
   const validCategories = settings.outletCategories?.length ? settings.outletCategories : DEFAULT_CATEGORIES;
 
-  // Outlet list state
+  // ── Outlet list state ──
+  // `outlets` = the CURRENT server page (drives the table). Server-paginated +
+  // server-filtered (search + KYC status), so it is NOT the full tenant list.
   const [outlets, setOutlets]         = useState<MockOutlet[]>([]);
+  const [pagination, setPagination]   = useState<Pagination | null>(null);
+  const [page,          setPage]      = useState(1);
   const [outletTypes, setOutletTypes] = useState<string[]>([]);
   const [employees, setEmployees]     = useState<HierarchyEmployee[]>([]);
   const [search,        setSearch]    = useState('');
   const [kycFilter,     setKycFilter] = useState<KYCStatusLocal | 'ALL'>('ALL');
+
+  // `allOutlets` = the FULL tenant outlet list, fetched separately (all pages) and
+  // used ONLY by the upload validators (create-vs-update-vs-reactivate detection,
+  // Outlet-ID existence checks for Re-KYC / Deactivate, and the header stat counts).
+  // It is refreshed on mount and after a successful upsert — never on search/paging.
+  const [allOutlets, setAllOutlets]   = useState<MockOutlet[]>([]);
 
   // Outlet master (upsert) upload state
   const [outletValidation, setOutletValidation] = useState<OutletUploadValidationResult | null>(null);
@@ -424,12 +444,18 @@ export default function OutletsPage() {
   // this note shows "Uploading batch X of Y…" (null = idle).
   const [outletUploadProgress,  setOutletUploadProgress]  = useState<string | null>(null);
 
-  // ── Outlet list loader (also called after a successful upsert to reflect new rows) ──
+  // ── Current-page loader (server-paginated + server-filtered) ──
+  // Sends ?page&limit&search&kycStatus; the server filters + paginates so the table
+  // shows only the matching page. Re-runs on page / search / kyc-filter change.
   const loadOutlets = useCallback(async () => {
     try {
-      const j = await fetch('/api/admin/outlets').then(r => r.json());
+      const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) });
+      if (search.trim())        params.set('search', search.trim());
+      if (kycFilter !== 'ALL')  params.set('kycStatus', kycFilter);
+      const j = await fetch(`/api/admin/outlets?${params.toString()}`).then(r => r.json());
       if (j.success) {
         if (Array.isArray(j.data.outlets)) setOutlets(j.data.outlets);
+        if (j.data.pagination) setPagination(j.data.pagination as Pagination);
         // Enabled outlet types come from the backend (tenant's OutletTypeClientConfig).
         if (Array.isArray(j.data.outletTypes)) setOutletTypes(j.data.outletTypes);
         setOutletsLoadStatus('ready');
@@ -441,17 +467,54 @@ export default function OutletsPage() {
       // Leave prior state on transient error, but mark error if we never loaded.
       setOutletsLoadStatus((s) => (s === 'ready' ? s : 'error'));
     }
+  }, [page, search, kycFilter]);
+
+  // ── Full-list loader (validation only) ──
+  // The upload validators need the WHOLE tenant outlet list (not one page): the
+  // Outlet-Master validator classifies each row create/update/reactivate from the
+  // existing set, and Re-KYC / Deactivate check Outlet-ID existence. Page through
+  // the same endpoint (unfiltered) and accumulate. Called on mount + after upsert.
+  const loadAllOutlets = useCallback(async () => {
+    try {
+      const acc: MockOutlet[] = [];
+      let p = 1;
+      // Hard cap the loop so a pathological total can never spin forever.
+      for (let guard = 0; guard < 1000; guard++) {
+        const params = new URLSearchParams({ page: String(p), limit: String(PAGE_SIZE) });
+        const j = await fetch(`/api/admin/outlets?${params.toString()}`).then(r => r.json());
+        if (!j.success || !Array.isArray(j.data.outlets)) break;
+        acc.push(...(j.data.outlets as MockOutlet[]));
+        const pag = j.data.pagination as Pagination | undefined;
+        if (!pag || p >= pag.pages || pag.pages === 0) break;
+        p += 1;
+      }
+      setAllOutlets(acc);
+    } catch {
+      /* leave prior good validation list on transient error */
+    }
   }, []);
 
   // ── API fetch on mount ──
   useEffect(() => {
-    void loadOutlets();
+    void loadAllOutlets();
     fetch('/api/admin/hierarchy-config')
       .then(r => r.json())
       .then(j => { if (j.success && Array.isArray(j.data.employees)) setEmployees(j.data.employees); })
       .catch(() => {})
       .finally(() => setEmployeesLoaded(true));
+  }, [loadAllOutlets]);
+
+  // ── Debounced page load on search / filter / page change ──
+  useEffect(() => {
+    const t = setTimeout(() => { void loadOutlets(); }, 250);
+    return () => clearTimeout(t);
   }, [loadOutlets]);
+
+  // A new search or KYC filter resets to page 1 (the old page index is meaningless
+  // for a different result set). loadOutlets then re-fires via its `page` dep.
+  useEffect(() => {
+    setPage(1);
+  }, [search, kycFilter]);
 
   // Why the Outlet Master upload is blocked, if it is (null = ready). The validator
   // checks each row's Outlet Type against the tenant's enabled types and the XSR ID
@@ -472,15 +535,15 @@ export default function OutletsPage() {
     : outletsLoadStatus === 'error' ? 'Could not load the outlet list. Refresh the page and try again.'
     : null;
 
-  // ── Derived stats ──
+  // ── Derived stats (over the FULL tenant list, not the current page) ──
   const stats = useMemo(() => ({
-    total:       outlets.length,
-    notStarted:  outlets.filter(o => o.kycStatus === 'NOT_STARTED').length,
-    inProgress:  outlets.filter(o => o.kycStatus === 'IN_PROGRESS' || o.kycStatus === 'SUBMITTED').length,
-    approved:    outlets.filter(o => o.kycStatus === 'APPROVED').length,
-    rejected:    outlets.filter(o => o.kycStatus === 'REJECTED').length,
-    rekyc:       outlets.filter(o => o.kycStatus === 'RE_KYC_REQUIRED').length,
-  }), [outlets]);
+    total:       allOutlets.length,
+    notStarted:  allOutlets.filter(o => o.kycStatus === 'NOT_STARTED').length,
+    inProgress:  allOutlets.filter(o => o.kycStatus === 'IN_PROGRESS' || o.kycStatus === 'SUBMITTED').length,
+    approved:    allOutlets.filter(o => o.kycStatus === 'APPROVED').length,
+    rejected:    allOutlets.filter(o => o.kycStatus === 'REJECTED').length,
+    rekyc:       allOutlets.filter(o => o.kycStatus === 'RE_KYC_REQUIRED').length,
+  }), [allOutlets]);
 
   // ── Tab switch — resets upload state to prevent stale panels ──
   const handleTabSwitch = useCallback((tabId: TabId) => {
@@ -490,20 +553,8 @@ export default function OutletsPage() {
     setDeactivateValidation(null); setDeactivateUploadState('idle');                          setDeactivateSubmitError(null);
   }, []);
 
-  // ── Filtered list ──
-  const filtered = useMemo(() => {
-    const q = search.toLowerCase();
-    return outlets.filter(o => {
-      const matchSearch = !search ||
-        o.outletId.toLowerCase().includes(q) ||
-        o.outletName.toLowerCase().includes(q) ||
-        o.xsrName.toLowerCase().includes(q) ||
-        o.city.toLowerCase().includes(q) ||
-        o.beat.toLowerCase().includes(q);
-      const matchKyc = kycFilter === 'ALL' || o.kycStatus === kycFilter;
-      return matchSearch && matchKyc;
-    });
-  }, [outlets, search, kycFilter]);
+  // The server now applies search + KYC filter + pagination, so the table renders
+  // the current page (`outlets`) directly — no client-side filtering.
 
   // ── File parsers ──
   const parseXlsx = useCallback((file: File): Promise<Record<string, string>[]> => {
@@ -556,7 +607,8 @@ export default function OutletsPage() {
         return;
       }
       const parsed   = parseOutletUploadRows(rows as Record<string, string>[]);
-      const existing = outlets.map(o => ({ outletId: o.outletId, isActive: o.isActive }));
+      // Validate against the FULL tenant list (not the current page).
+      const existing = allOutlets.map(o => ({ outletId: o.outletId, isActive: o.isActive }));
       const result   = validateOutletUpload(parsed, existing, validPrograms, validCategories, outletTypes, employees, LEAF_ROLE_CODE);
       setOutletParsedRows(parsed);
       setOutletValidation(result);
@@ -565,7 +617,7 @@ export default function OutletsPage() {
       setOutletValidation({ headerError: 'Failed to read file — please ensure it is a valid XLSX file', rows: [], hasErrors: true, canProceed: false, summary: { total: 0, creates: 0, updates: 0, reactivates: 0, errors: 0 } });
       setOutletUploadState('parsed');
     }
-  }, [outlets, outletTypes, employees, parseXlsx, validPrograms, validCategories, outletUploadDisabledReason]);
+  }, [allOutlets, outletTypes, employees, parseXlsx, validPrograms, validCategories, outletUploadDisabledReason]);
 
   // ── Handle re-KYC upload ──
   const handleReKYCFile = useCallback(async (file: File) => {
@@ -579,7 +631,7 @@ export default function OutletsPage() {
         return;
       }
       const parsed          = parseReKYCFlagRows(rows as Record<string, string>[]);
-      const existingOutlets = outlets.map(o => ({ outletId: o.outletId, kycStatus: o.kycStatus as unknown as KYCStatus }));
+      const existingOutlets = allOutlets.map(o => ({ outletId: o.outletId, kycStatus: o.kycStatus as unknown as KYCStatus }));
       const result          = validateReKYCFlagUpload(parsed, existingOutlets);
       setRekycParsedRows(parsed);
       setRekycValidation(result);
@@ -588,7 +640,7 @@ export default function OutletsPage() {
       setRekycValidation({ headerError: 'Failed to read file — please ensure it is a valid XLSX file', rows: [], hasErrors: true, canProceed: false, summary: { total: 0, flagged: 0, errors: 0 } });
       setRekycUploadState('parsed');
     }
-  }, [outlets, parseXlsx]);
+  }, [allOutlets, parseXlsx]);
 
   // ── Handle deactivate upload ──
   const handleDeactivateFile = useCallback(async (file: File) => {
@@ -602,7 +654,7 @@ export default function OutletsPage() {
         return;
       }
       const parsed   = parseDeactivateRows(rows as Record<string, string>[]);
-      const existing = outlets.map(o => ({ outletId: o.outletId, isActive: o.isActive }));
+      const existing = allOutlets.map(o => ({ outletId: o.outletId, isActive: o.isActive }));
       const result   = validateDeactivateUpload(parsed, existing);
       setDeactivateValidation(result);
       setDeactivateUploadState('parsed');
@@ -610,7 +662,7 @@ export default function OutletsPage() {
       setDeactivateValidation({ headerError: 'Failed to read file — please ensure it is a valid XLSX file', rows: [], hasErrors: true, canProceed: false, summary: { total: 0, deactivates: 0, errors: 0 } });
       setDeactivateUploadState('parsed');
     }
-  }, [outlets, parseXlsx]);
+  }, [allOutlets, parseXlsx]);
 
   // ── Download helpers ──
   function downloadXlsx(wb: XLSX.WorkBook, filename: string) {
@@ -675,7 +727,7 @@ export default function OutletsPage() {
 
   // ── Tab config ──
   const tabs: { id: TabId; label: string; icon: React.ReactNode; count?: number }[] = [
-    { id: 'master',     label: 'Outlet Master',      icon: <Store className="w-4 h-4" />,    count: outlets.length },
+    { id: 'master',     label: 'Outlet Master',      icon: <Store className="w-4 h-4" />,    count: stats.total },
     { id: 'rekyc',      label: 'Re-KYC Flagging',    icon: <RefreshCw className="w-4 h-4" /> },
     { id: 'deactivate', label: 'Deactivate Outlets', icon: <XCircle className="w-4 h-4" />   },
   ];
@@ -879,7 +931,10 @@ export default function OutletsPage() {
                     return;
                   }
                   setOutletUploadState('confirmed');
-                  void loadOutlets(); // reflect the new/updated rows without a manual reload
+                  // Reflect the new/updated rows: refresh the current page AND the
+                  // full validation list (stats + create/update detection).
+                  void loadOutlets();
+                  void loadAllOutlets();
                 } catch {
                   setOutletUploadProgress(null);
                   setOutletSubmitError('Network error — please try again');
@@ -939,14 +994,14 @@ export default function OutletsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {filtered.length === 0 ? (
+                  {outlets.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="px-4 py-16 text-center">
                         <Store className="w-8 h-8 text-gray-200 mx-auto mb-2" />
                         <p className="text-sm text-gray-400">No outlets match your filters</p>
                       </td>
                     </tr>
-                  ) : filtered.map(o => {
+                  ) : outlets.map(o => {
                     const sc = KYC_STATUS_CONFIG[o.kycStatus];
                     return (
                       <tr key={o.outletId} data-testid="outlet-row" className="hover:bg-gray-50 transition-colors">
@@ -1007,11 +1062,35 @@ export default function OutletsPage() {
                 </tbody>
               </table>
             </div>
-            <div className="px-4 py-3 border-t border-gray-100 bg-gray-50">
+            <div className="px-4 py-3 border-t border-gray-100 bg-gray-50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <p className="text-xs text-gray-500">
-                Showing {filtered.length} of {outlets.length} outlets ·{' '}
-                {stats.approved} active · {stats.notStarted} awaiting KYC · {stats.rekyc} re-KYC pending
+                {pagination
+                  ? <>Showing {outlets.length} of {pagination.total} matching · Page{' '}
+                      <strong className="text-gray-700">{pagination.page}</strong> of{' '}
+                      <strong className="text-gray-700">{Math.max(1, pagination.pages)}</strong></>
+                  : <>Showing {outlets.length} outlets</>}
+                {' · '}{stats.approved} active · {stats.notStarted} awaiting KYC · {stats.rekyc} re-KYC pending
               </p>
+              {pagination && pagination.pages > 1 && (
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    data-testid="outlets-prev-page"
+                    onClick={() => setPage(p => Math.max(1, p - 1))}
+                    disabled={pagination.page <= 1}
+                    className="px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    data-testid="outlets-next-page"
+                    onClick={() => setPage(p => p + 1)}
+                    disabled={pagination.page >= pagination.pages}
+                    className="px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1092,17 +1171,17 @@ export default function OutletsPage() {
             />
           </div>
 
-          {/* Outlets currently flagged for re-KYC */}
-          {outlets.some(o => o.kycStatus === 'RE_KYC_REQUIRED') && (
+          {/* Outlets currently flagged for re-KYC (full tenant list) */}
+          {allOutlets.some(o => o.kycStatus === 'RE_KYC_REQUIRED') && (
             <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-4 py-3 border-b border-gray-100 bg-amber-50">
                 <p className="text-xs font-semibold text-amber-700 flex items-center gap-2">
                   <RefreshCw className="w-3.5 h-3.5" />
-                  Currently flagged for re-KYC ({outlets.filter(o => o.kycStatus === 'RE_KYC_REQUIRED').length})
+                  Currently flagged for re-KYC ({allOutlets.filter(o => o.kycStatus === 'RE_KYC_REQUIRED').length})
                 </p>
               </div>
               <div className="divide-y divide-gray-50">
-                {outlets.filter(o => o.kycStatus === 'RE_KYC_REQUIRED').map(o => (
+                {allOutlets.filter(o => o.kycStatus === 'RE_KYC_REQUIRED').map(o => (
                   <div key={o.outletId} className="px-4 py-3 flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
                       <div className="w-7 h-7 bg-amber-100 rounded-full flex items-center justify-center shrink-0">
@@ -1199,11 +1278,11 @@ export default function OutletsPage() {
             <div className="px-4 py-3 border-b border-gray-100 bg-gray-50">
               <p className="text-xs font-semibold text-gray-600 flex items-center gap-2">
                 <Eye className="w-3.5 h-3.5" />
-                Active outlets ({outlets.filter(o => o.isActive).length}) — these can be deactivated
+                Active outlets ({allOutlets.filter(o => o.isActive).length}) — these can be deactivated
               </p>
             </div>
             <div className="divide-y divide-gray-50 max-h-64 overflow-y-auto">
-              {outlets.filter(o => o.isActive).map(o => (
+              {allOutlets.filter(o => o.isActive).map(o => (
                 <div key={o.outletId} className="px-4 py-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
                     <div className="w-7 h-7 bg-green-100 rounded-full flex items-center justify-center shrink-0">
