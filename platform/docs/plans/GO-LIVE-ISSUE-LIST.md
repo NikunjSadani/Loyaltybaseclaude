@@ -1,12 +1,40 @@
-# Go-Live Issue List — authoritative master tracker (updated 2026-06-30)
+# Go-Live Issue List — authoritative master tracker (updated 2026-07-01)
 
-> **STATUS: 🚀 PRODUCTION CUTOVER EXECUTED & COMPLETE (2026-06-30).** Prod live on **`2fa020c`** (`main` == `develop`);
-> remaining = owner-gated Step 5 (Deoleo data load) + Step 6 (real-OTP smoke) + WhatsApp `deoleo_kyc_approval` verify (#143).
-> See the **🚀 2026-06-30 PRODUCTION CUTOVER** block below. *(History: FIX WAVE COMPLETE → owner-driven UAT → cutover.)*
+> **STATUS: 🚀 CUTOVER #2 EXECUTED & COMPLETE (2026-07-01) — prod live on `a2f5929` (develop `0055221`); DEOLEO TENANT CREATED + ACTIVE.**
+> Cutover #2 shipped the onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate (migration +
+> `expire-sweep-prod` scheduler); Deoleo onboarded (slug=`deoleo`) + flipped `ONBOARDING→ACTIVE`. Remaining = owner-gated: confirm
+> Deoleo Settings (conversion=1) + create first Deoleo CLIENT_ADMIN + load real master data (#76) + WhatsApp `deoleo_kyc_approval`
+> verify (#143). See the **🚀 2026-07-01 CUTOVER #2** block below. *(History: FIX WAVE COMPLETE → owner-driven UAT → cutover #1 → cutover #2.)*
 > Originally NOT go-live ready (6 blockers + 4 majors). The GO-LIVE FIX WAVE (2026-06-21→22) closed them via disjoint streams
 > (GLM · GL-Money · GL-RBAC · GL-FE-enroll · GL-FE-settle), each executor → INDEPENDENT adversarial audit → Opus gate →
 > runtime-verify. The money re-audit caught a real BLOCKER the first pass missed (GLM-2 never implemented = lost awards) plus
 > a payouts-rail resolver gap — both then fixed and re-verified. See the FIX WAVE RESULTS block below.
+
+## 🚀 2026-07-01 — CUTOVER #2 EXECUTED (`develop` → `main`) + DEOLEO TENANT CREATED + ACTIVE — DONE
+
+> **CUTOVER #2 was EXECUTED and is COMPLETE (2026-07-01).** Owner-driven HYBRID (owner approved the `production` gate; orchestrator
+> ran the reversible prep + in-VPC jobs on the owner's per-step go). **Current prod HEAD `a2f5929`** (`main` == `develop` at cutover;
+> **develop HEAD `0055221`**); both prod services healthy `/health` 200. Gate at cutover #2: **api jest 1289 · nest 0 · FE vitest 1698 · tsc 0.**
+
+| Step | What ran | Result |
+|---|---|---|
+| **Cutover #2 payload** | Merged `develop`→`main`: **onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate** | ✅ prod HEAD → **`a2f5929`**; both services healthy `/health` 200 |
+| **Migration** | `20260630130000_point_expiry_default_unique` applied via the in-VPC migrate job (`--wait`) before the new revision served | ✅ applied |
+| **Pre-cutover backup** | On-demand `gifsy-db` backup, double-guarded | ✅ id **`1782886598428`**; PITR ON |
+| **`expire-sweep-prod` scheduler** | Created + ENABLED the Cloud Scheduler job (daily 00:30 IST) → prod `/v1/wallet/expire-sweep` + smoke | ✅ no-secret → 403; with-secret → 201 |
+| **Deoleo tenant CREATE** | Onboarded via the fixed wizard: slug=`deoleo`, internalName "Deoleo India", primaryColor #16a34a, invoicePrefix TGSL-DEO-, features 7/10 (RBAC OFF) | ✅ created (`ONBOARDING`) |
+| **Deoleo ACTIVATE** | One-off guarded in-VPC job `gifsy-activate-deoleo` (`current_database()` guard) flipped `ONBOARDING → ACTIVE` | ✅ ACTIVE (workaround for the missing activate endpoint — §A-ONBOARDING in POST-GO-LIVE-BACKLOG) |
+
+**Deoleo config = platform defaults:** conversion rate **1:1 → value `1`**, points-expiry **NEVER → null** (default, nothing to set),
+visibility **OFF** (default).
+
+**Remaining (owner-gated — Deoleo go-live):** owner assumes Deoleo (now in "Work in brand") → **confirm conversion rate=1** +
+**create the first Deoleo CLIENT_ADMIN** (`/admin/users`, role **CLIENT_ADMIN — NOT Gifsy Admin**) → **load real master data** via
+the app UIs when the client sends files (**#76**); plus **WhatsApp `deoleo_kyc_approval` template runtime-verify (#143)**. After Deoleo
+onboarding the recon'd-and-ready scale/ops plan starts (pagination · observability · notifications/P7 — events built but flag-OFF, 3
+streams in parallel, email provider TBD leaning ZeptoMail/SES). **New gap logged** (POST-GO-LIVE-BACKLOG §A-ONBOARDING): creating a
+GIFSY_ADMIN while assumed into a tenant is an operator footgun (stamps `clientId=<tenant>`) — fix = FE offers GIFSY_ADMIN only in
+platform context + backend `assertRoleAssignable` rejects GIFSY_ADMIN when `caller.clientId !== 'gifsy'`.
 
 ## 🚀 2026-06-30 — PRODUCTION CUTOVER EXECUTED (`develop` → `main` go-live) — DONE
 

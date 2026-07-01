@@ -6,17 +6,27 @@ Paste the block below to restart the orchestrator on point. The on-disk docs + m
 You're the orchestrator for Loyaltybase — a multi-tenant FMCG trade-loyalty platform (operator: Gifsy, launching
 client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch **develop**). Frontend: `platform/`
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
-`dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-06-30.
+`dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-01.
 
-🟢 CURRENT MODE — **GO-LIVE: CUTOVER COMPLETE — prod live on `2fa020c`.** The `develop`→`main` cutover was EXECUTED
-2026-06-30 (owner-driven HYBRID; owner approved the `production` gate, I ran the reversible prep + in-VPC jobs on the owner's
-per-step go). `main` == `develop`; both prod services serve `2fa020c`; prod `/health` = 200. Keep the fix-as-found loop
-available (owner reports a bug → diagnose → fix/delegate → INDEPENDENT audit → FULL gate → runtime-verify → push to `develop`;
-prod follows on the next `main` deploy). **Remaining is owner-gated:** Step 5 — load real Deoleo master data via the tested
-UIs (prod is bootstrapped + ready; the GIFSY_ADMIN can provision the `deoleo` tenant; waits only on the client's files) ·
-Step 6 — real-OTP login smoke per role (admin **9830011252** exists; prod uses real MSG91, no FIXED_OTP) · WhatsApp
-`deoleo_kyc_approval` template verify (task #143). The GCP alert-email prereq is **struck** — plain-email channels need no
-click-to-verify (both enabled + delivery confirmed 2026-06-29).
+🟢 CURRENT MODE — **GO-LIVE: prod live on `a2f5929`, DEOLEO TENANT CREATED + ACTIVE.** CUTOVER #2 was EXECUTED 2026-07-01
+(owner-driven HYBRID; owner approved the `production` gate, I ran the reversible prep + in-VPC jobs on the owner's per-step go).
+`main` == `develop` at cutover; both prod services serve `a2f5929`; prod `/health` = 200. Cutover #2 shipped the **onboard-slug
+fix + per-tenant points-expiry + admin-users pagination/self-deactivate**; applied migration `20260630130000_point_expiry_default_unique`
+(via `--wait`); pre-cutover backup **`1782886598428`**; created + ENABLED the **`expire-sweep-prod`** Cloud Scheduler (daily
+00:30 IST; sweep smoke 403/201). **Deoleo is now CREATED + ACTIVE in prod** — onboarded via the fixed wizard (slug=`deoleo`,
+internalName "Deoleo India", primaryColor #16a34a, invoicePrefix TGSL-DEO-, features 7/10 RBAC-OFF), then flipped `ONBOARDING→ACTIVE`
+via a one-off guarded in-VPC job `gifsy-activate-deoleo` (`current_database()` guard). **Deoleo config = platform defaults:**
+conversion rate **1:1 → value `1`**, points-expiry **NEVER → null** (default, nothing to set), visibility **OFF** (default). Keep
+the fix-as-found loop available (owner reports a bug → diagnose → fix/delegate → INDEPENDENT audit → FULL gate → runtime-verify →
+push to `develop`; prod follows on the next `main` deploy). **Remaining is owner-gated (Deoleo go-live):** owner assumes Deoleo (now
+in "Work in brand") → **confirm conversion rate=1** + **create the first Deoleo CLIENT_ADMIN** (`/admin/users`, role **CLIENT_ADMIN
+— NOT Gifsy Admin**) → **load real master data** via the app UIs when the client sends files (**#76**). Plus **#143** — WhatsApp
+`deoleo_kyc_approval` template runtime-verify (MSG91 template not yet owner-verified). **After Deoleo onboarding**, the recon'd-and-ready
+**scale/ops plan** starts (pagination · observability · notifications/P7): decisions locked — build all notification events but ship
+them **flag-OFF**; run all **three streams in parallel**; **email provider still open** (owner reviewing costs, leaning ZeptoMail or
+SES). **Required onboarding-flow builds** are logged in POST-GO-LIVE-BACKLOG §A: **§A-DOMAIN** (decouple domain from slug) and
+**§A-ONBOARDING** (client activate/edit endpoint — Deoleo was flipped via the one-off job — **plus the GIFSY_ADMIN-in-tenant-context
+fix**: FE offers GIFSY_ADMIN only in platform context, backend `assertRoleAssignable` rejects GIFSY_ADMIN when `caller.clientId !== 'gifsy'`).
 
 🔶 STANDING MODE — **YOU ARE THE ORCHESTRATOR (the owner should never have to remind you).** Default to orchestrating
 substantial work, not hand-coding everything: decompose; **run independent workstreams as PARALLEL sub-agents** (give
@@ -30,7 +40,7 @@ calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1271 · nest 0 · FE vitest 1692 · tsc 0 (HEAD `3900af3`; + staged branch `prep/prod-pwa-activation`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1289 · nest 0 · FE vitest 1698 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `0055221`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -163,8 +173,16 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE — **✅ EXECUTED 2026-06-30 (develop→main go-live).** Prod `main` HEAD moved **`b3ab2e0` → `2fa020c`**
-(213-commit + 8-migration jump); `main` == `develop`; both prod services (`gifsy-api`, `gifsy-frontend`) serve **`2fa020c`**;
+🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929`; develop HEAD `0055221`.** Cutover #2 shipped
+the **onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate**; applied migration
+`20260630130000_point_expiry_default_unique` (via `--wait`); pre-cutover backup **`1782886598428`**; created + ENABLED the
+**`expire-sweep-prod`** Cloud Scheduler (daily 00:30 IST; sweep smoke 403/201). Both prod services healthy `/health` 200.
+**Deoleo tenant is now CREATED + ACTIVE in prod** (onboarded via the fixed wizard slug=`deoleo`; flipped `ONBOARDING→ACTIVE`
+via one-off job `gifsy-activate-deoleo`; config = platform defaults: conversion `1`, expiry null, visibility OFF). Gate at
+cutover #2: api jest 1289 · nest 0 · FE vitest 1698 · tsc 0.
+
+**CUTOVER #1 (2026-06-30) — historical:** prod `main` moved **`b3ab2e0` → `2fa020c`**
+(213-commit + 8-migration jump); both prod services (`gifsy-api`, `gifsy-frontend`) served **`2fa020c`**;
 prod `/health` = 200. As-run summary:
 - **8 additive migrations APPLIED** via the in-VPC `gifsy-migrate` job (`migrate deploy --wait`) before the new revision
   served (constraints + new status enum value + `add_push_subscription` + `add_pwa_install` + `add_user_activity_day`) —
@@ -224,14 +242,18 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 [[admin-dashboard-consolidation]] [[default-to-orchestration]] [[global-settings-wiring]] [[sales-hierarchy-scoping]]
 [[migration-model]] [[staging-deploy-gate]] [[audit-every-build-item]].
 
-Now: greet the owner. **🚀 THE PRODUCTION CUTOVER IS DONE (2026-06-30) — prod is live on `2fa020c`.** Steps 0–4 + 7 executed: 8
-migrations applied, bootstrap done (first GIFSY_ADMIN **Nikunj/9830011252** + 4 OutletTypes), `push-drain-prod` live, pre-cutover
-backup **`1782824807740`** taken. **Only owner-gated items remain:** **(Step 5)** load real Deoleo master data via the tested app
-UIs — prod is bootstrapped + ready; the GIFSY_ADMIN can log in & create the Deoleo client (**slug `deoleo`**) → upload
-outlet/hierarchy/catalog/schemes → set conversion-rate/programs/visibility-OFF; **waits only on the client's files**; **(Step 6)**
-real-OTP login smoke per role (admin **9830011252** exists; prod uses real MSG91, no FIXED_OTP); **(#143)** WhatsApp
-`deoleo_kyc_approval` template runtime-verify. Keep the fix-as-found loop available (fixes push to `develop` → reach prod on the
-next `main` deploy). Full as-run record = **`runbooks/PROD-CUTOVER-RECORD.md`** (§ 2026-06-30); runbook (banner-marked COMPLETE)
-= **`runbooks/CUTOVER-RUNBOOK.md`**. If a NEW transactional notification is requested: PUSH → enqueue post-commit via
+Now: greet the owner. **🚀 CUTOVER #2 IS DONE (2026-07-01) — prod is live on `a2f5929`, and the DEOLEO TENANT is CREATED + ACTIVE.**
+Cutover #2 shipped the onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate; applied migration
+`20260630130000_point_expiry_default_unique`; pre-cutover backup **`1782886598428`**; `expire-sweep-prod` scheduler ENABLED. Deoleo
+was onboarded via the fixed wizard (slug=`deoleo`) then flipped `ONBOARDING→ACTIVE` via the one-off job `gifsy-activate-deoleo`;
+its config = platform defaults (conversion `1`, expiry null, visibility OFF). **Only owner-gated Deoleo go-live items remain:** owner
+assumes Deoleo (now in "Work in brand") → **confirm conversion rate=1** + **create the first Deoleo CLIENT_ADMIN** (`/admin/users`,
+role **CLIENT_ADMIN — NOT Gifsy Admin**) → **load real master data** via the app UIs when the client sends files (**#76**); plus
+**(#143)** WhatsApp `deoleo_kyc_approval` template runtime-verify. **After Deoleo onboarding**, the recon'd-and-ready scale/ops plan
+starts (pagination · observability · notifications/P7 — events built but flag-OFF; 3 streams in parallel; email provider TBD, leaning
+ZeptoMail/SES). Required onboarding-flow builds logged in POST-GO-LIVE-BACKLOG §A-DOMAIN + §A-ONBOARDING (incl. the GIFSY_ADMIN-in-tenant-context
+fix). Keep the fix-as-found loop available (fixes push to `develop` → reach prod on the next `main` deploy). Full as-run record =
+**`runbooks/PROD-CUTOVER-RECORD.md`**; runbook (banner-marked COMPLETE) = **`runbooks/CUTOVER-RUNBOOK.md`**. If a NEW transactional
+notification is requested: PUSH → enqueue post-commit via
 `SalesNotificationsService`; WhatsApp/SMS → `whatsapp-kyc.config.ts` + `Msg91Service.sendWhatsappTemplate` fire-and-forget post-commit.
 ```
