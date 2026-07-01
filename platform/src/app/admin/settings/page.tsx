@@ -1,7 +1,7 @@
 ﻿'use client'
 
 import { useState, useEffect } from 'react'
-import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock } from 'lucide-react'
+import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
@@ -141,6 +141,43 @@ export default function SettingsPage() {
     }
     setPointsExpirySaved(true)
     setTimeout(() => setPointsExpirySaved(false), 3000)
+  }
+
+  // ── Conversion rate (per-tenant; Points→₹). saveGifsySettings PUTs /v1/admin/settings
+  // (GIFSY_ADMIN-only), so editable only for GIFSY_ADMIN. Held as a STRING so decimal typing
+  // works; parsed + validated on save. The backend read-layer floor is MIN_RATE = 0.005 — a
+  // value below that is silently ignored server-side, so the UI blocks it. ──
+  const [conversionRate,      setConversionRate]      = useState<string>(() => String(getGifsySettings().pointsConversionRate ?? 1))
+  const [conversionRateSaved, setConversionRateSaved] = useState(false)
+  const [conversionRateError, setConversionRateError] = useState<string | null>(null)
+
+  // Keep the displayed value in sync once server settings hydrate (/me → cache).
+  useEffect(() => {
+    setConversionRate(String(getGifsySettings().pointsConversionRate ?? 1))
+  }, [])
+
+  async function handleConversionRateSave() {
+    setConversionRateError(null)
+    const raw = Number(conversionRate.trim())
+    // Floor: reject anything below MIN_RATE (0.005) — the backend read-layer silently ignores
+    // a smaller rate and keeps the default, which would make a "save" look successful yet do
+    // nothing. Ceiling: reject absurd values (fat-finger / pasted phone number).
+    if (!Number.isFinite(raw) || raw < 0.005 || raw > 100000) {
+      setConversionRateError('Enter a conversion rate between 0.005 and 100000 (e.g. 1 means 1 point = ₹1).')
+      return
+    }
+    // Snap to the centi grid the money path actually enforces (it snapshots the rate as
+    // Math.round(rate*100) centi-units). Persisting + displaying the snapped value keeps the
+    // shown rate identical to the rate redemptions will use — no silent display/enforce drift.
+    const n = Math.round(raw * 100) / 100
+    setConversionRate(String(n))
+    const ok = await saveGifsySettings({ pointsConversionRate: n })
+    if (!ok) {
+      setConversionRateError('Could not save — the conversion rate can only be changed by a Gifsy Admin.')
+      return
+    }
+    setConversionRateSaved(true)
+    setTimeout(() => setConversionRateSaved(false), 3000)
   }
 
   // ── Visibility module master switch (per-tenant; saved via GifsySettings) ──
@@ -702,6 +739,60 @@ export default function SettingsPage() {
           )}
           {pointsExpiryError && (
             <p className="text-xs text-red-600 mt-2">{pointsExpiryError}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Points → ₹ Conversion Rate (per-tenant) ── */}
+      <Card data-testid="conversion-rate-card">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Coins className="h-4 w-4 text-[var(--brand-primary)]" /> Points → ₹ Conversion Rate
+              </CardTitle>
+              <CardDescription className="mt-1">
+                Value of one point in rupees for cash redemptions. <strong>1 = 1 point → ₹1.</strong>{' '}
+                A higher rate means points are worth less (e.g. 2 → 500 points = ₹250). This is a
+                Gifsy-operated setting — only a Gifsy Admin can change it. Changes apply to NEW
+                redemptions; orders already placed keep the rate frozen at order time.
+              </CardDescription>
+            </div>
+            {isGifsyAdmin && (
+              <button
+                data-testid="conversion-rate-save"
+                onClick={handleConversionRateSave}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 ${
+                  conversionRateSaved
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-[var(--brand-primary)] text-white hover:bg-[var(--brand-primary-dark)]'
+                }`}
+              >
+                {conversionRateSaved ? '✓ Saved' : <><Save className="h-3.5 w-3.5" /> Save</>}
+              </button>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <SettingRow
+            label="Conversion rate (points per ₹1)"
+            description="Number of points that equal ₹1 on redemption. Minimum 0.005. Example: 1 = 1 point → ₹1; 2 = 2 points → ₹1 (points worth half as much)."
+            type="number"
+            value={conversionRate}
+            onChange={(v) => setConversionRate(v)}
+            min={0.005}
+            max={100000}
+            step={0.005}
+            disabled={!isGifsyAdmin}
+            testId="conversion-rate-input"
+          />
+          {!isGifsyAdmin && (
+            <p className="text-xs text-gray-400 mt-2">
+              The conversion rate is a Gifsy-operated setting — only a Gifsy Admin can change it.
+            </p>
+          )}
+          {conversionRateError && (
+            <p className="text-xs text-red-600 mt-2">{conversionRateError}</p>
           )}
         </CardContent>
       </Card>
