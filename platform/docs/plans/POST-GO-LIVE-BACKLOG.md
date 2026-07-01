@@ -20,6 +20,29 @@ These are invisible while Deoleo is the only real tenant; they matter when a sec
 | **Configurable RBAC + custom sub-roles + provisioning chain** — admin portal where heads define custom sub-roles; bootstrap super-admin → tenant admins → sub-users. RBAC engine exists but is OFF; roles are a fixed enum today. | Current client needs none; launch uses fixed `@Roles` + the coverage audit (A4). | When a tenant needs custom roles, OR at client #2 onboarding (provisioning flow) | medium | #47; `RBAC-ENABLEMENT.md` |
 | **WhatsApp KYC generalization** — the KYC submit/approve WhatsApp notifications are currently **per-tenant config-gated to deoleo** via `whatsapp-kyc.config.ts` (hardcoded template names + integrated number). **DECISION (owner, 2026-06-30): generalize by driving it from TENANT SETTINGS** (template names, recipient rules, on/off persisted per-tenant) rather than the hardcoded `whatsapp-kyc.config.ts` — the chosen approach. | Built deoleo-only by config (WHATSAPP-KYC, `3900af3`); no other tenant needs it at launch. | When a **2nd client** needs WhatsApp KYC notifications | small–medium | 2026-06-30; `3900af3` |
 
+### A-DOMAIN — Decouple the tenant DOMAIN from the slug (user-entered + DB-driven routing) — folds into "Multi-tenant SSR branding"
+
+**Owner-raised 2026-06-30 during Deoleo onboarding:** the onboarding wizard **derives the domain from the slug** (`<slug>.gifsy.in`), which conflates two different things and confused the operator (they typed `deoleoloyalty` as the slug to get the right domain). The ask: let the operator **enter the domain directly**, and make that entered domain **actually route** (be "linked right"), not just a cosmetic field.
+
+**Current state (verified in code, 2026-06-30):**
+- The `Client` table has **NO `domain`/`domains` column** — a tenant is identified purely by `id` (= the slug).
+- Domain→tenant routing is **hardcoded in `CLIENT_REGISTRY`** (`platform/src/lib/platform/client-registry.ts`) and consumed across **two layers / 5+ sites**: the Cloudflare **edge worker** (`cloudflare-worker/`), the Next **proxy** (`proxy.ts`), `lib/platform/server.ts`, and `auth/login/actions.ts` + `lib/auth-actions.ts`. `tenant-resolution.ts` is deliberately a **pure, no-I/O** function.
+- **Branding, logo/wordmark assets, WhatsApp template names, and the domain list all live in that same code registry keyed by slug** — not the DB. (Code comment confirms DB-sourced branding is this very §A item.)
+- The wizard's derived `domain` is therefore **cosmetic/unused** — the real customer domain resolves via the registry.
+
+**Sizing (two scopes):**
+- **Scope 1 — wizard domain becomes a user-entered field, stored in DB: ~1–1.5 days.** Add `domains` to `CreateClientDto` + persist + a migration adding the column + FE input (replaces the 4 slug-derived display spots). ⚠️ **Half-measure** — the domain is *stored* but **still doesn't route** (registry stays authoritative), and it risks a new confusion (DB domain vs registry domain). Not recommended alone.
+- **Scope 2 — "linked right": DB-driven domain routing + branding, fully decoupled from slug: ~4–7 days, medium-high risk.** Make the domain→slug resolver DB-backed (cached, invalidated) and propagate to the **edge worker** (KV/pushed map or coarse-edge + resolve-in-Next); move branding + logo assets + WhatsApp template names from the registry to the DB. This IS the "Multi-tenant SSR branding" row above (previously ~3–5 days; +domain-routing → ~4–7). **Natural trigger: before client #2.**
+
+**🔒 HOW WE'RE MOVING AHEAD WITH DEOLEO NOW (so the future transition does NOT impact it):**
+- Deoleo launches with **slug / clientId = `deoleo`** (the permanent identity — it is the PK across every table). The customer domain **`deoleoloyalty.gifsy.in`** resolves to `deoleo` via the **code registry** (`CLIENT_REGISTRY.deoleo.domains = ['deoleoloyalty.gifsy.in']`), which is deployed in prod and DNS-live (verified 200). The DB `Client.domain` cosmetic field (whatever the wizard stored) is **ignored by routing** — harmless.
+- **The invariant that protects Deoleo through the transition: the slug/clientId `deoleo` NEVER changes.** Scope 2 only moves *where the `deoleoloyalty.gifsy.in → deoleo` mapping is read from* (code → DB); it does not touch Deoleo's identity, so no clientId/PK migration is ever needed.
+- **Transition steps that keep Deoleo zero-impact (bake these into the Scope-2 build):**
+  1. **Backfill the DB from the registry** as the migration's first step: for `deoleo`, seed the new `clients.domains = ['deoleoloyalty.gifsy.in']` + the branding/asset/template config — the *exact* values the registry holds today. The DB becomes a faithful copy before any switch.
+  2. **Keep `CLIENT_REGISTRY` as a runtime FALLBACK during rollout** (resolver tries DB first, falls back to registry) so there is never a resolution gap; retire the registry only after the DB path is authoritative **and** verified.
+  3. **Verify on staging first** — `deoleoloyalty.gifsy.in → deoleo` must still resolve + Deoleo branding must still render after the switch, before prod.
+  - Result: Deoleo keeps slug `deoleo`, keeps domain `deoleoloyalty.gifsy.in`, keeps its branding — only the lookup *source* moves, behind a fallback, verified on staging. **No Deoleo disruption.**
+
 ## B. First weeks post-launch (security / correctness fast-follows)
 
 | Item | Why deferred / current state | Trigger | Effort | Ref |
