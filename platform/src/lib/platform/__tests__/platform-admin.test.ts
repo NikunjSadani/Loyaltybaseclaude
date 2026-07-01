@@ -21,39 +21,51 @@ import type { ClientConfig } from '../client-config';
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('validateNewClientSlug', () => {
+  // Uniqueness is checked against the ACTUAL existing tenant slugs (from the DB),
+  // NOT the code registry — registry entries (deoleo, clientb) are onboardable
+  // templates and must be creatable when no such DB tenant exists yet.
+  const EXISTING = Object.keys(CLIENT_REGISTRY); // e.g. ['deoleo', 'clientb']
+
   it('accepts a valid new slug', () => {
-    const errs = validateNewClientSlug('newclient', CLIENT_REGISTRY);
+    const errs = validateNewClientSlug('newclient', EXISTING);
     expect(errs).toEqual([]);
   });
 
-  it('rejects an already-taken slug', () => {
-    const errs = validateNewClientSlug('deoleo', CLIENT_REGISTRY);
+  it('rejects a slug that already exists in the DB', () => {
+    const errs = validateNewClientSlug('deoleo', ['deoleo', 'clientb']);
     expect(errs.some((e) => /taken|exist/i.test(e))).toBe(true);
   });
 
+  it('ACCEPTS a registry-configured slug that is NOT yet a DB tenant (empty DB — the prod onboarding case)', () => {
+    // Regression guard for the fix: the old check validated against the code
+    // registry, which wrongly blocked onboarding `deoleo` into an empty prod DB.
+    const errs = validateNewClientSlug('deoleo', []);
+    expect(errs).toEqual([]);
+  });
+
   it('rejects slugs with uppercase letters', () => {
-    const errs = validateNewClientSlug('ClientA', CLIENT_REGISTRY);
+    const errs = validateNewClientSlug('ClientA', EXISTING);
     expect(errs.some((e) => /lowercase/i.test(e))).toBe(true);
   });
 
   it('rejects slugs with spaces', () => {
-    const errs = validateNewClientSlug('my client', CLIENT_REGISTRY);
+    const errs = validateNewClientSlug('my client', EXISTING);
     expect(errs.length).toBeGreaterThan(0);
   });
 
   it('rejects slugs shorter than 3 characters', () => {
-    const errs = validateNewClientSlug('ab', CLIENT_REGISTRY);
+    const errs = validateNewClientSlug('ab', EXISTING);
     expect(errs.some((e) => /short|length|character/i.test(e))).toBe(true);
   });
 
   it('rejects slugs longer than 30 characters', () => {
-    const errs = validateNewClientSlug('a'.repeat(31), CLIENT_REGISTRY);
+    const errs = validateNewClientSlug('a'.repeat(31), EXISTING);
     expect(errs.some((e) => /long|length|character/i.test(e))).toBe(true);
   });
 
   it('rejects reserved platform slugs', () => {
     for (const reserved of ['www', 'app', 'api', 'admin']) {
-      const errs = validateNewClientSlug(reserved, CLIENT_REGISTRY);
+      const errs = validateNewClientSlug(reserved, EXISTING);
       expect(errs.some((e) => /reserved/i.test(e))).toBe(true);
     }
   });

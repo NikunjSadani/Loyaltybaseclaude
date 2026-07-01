@@ -1,9 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, ArrowRight, Check, AlertCircle, Building2 } from 'lucide-react';
-import { CLIENT_REGISTRY } from '@/lib/platform/client-registry';
 import { validateNewClientSlug } from '@/lib/platform/platform-admin';
 import type { FeatureKey } from '@/lib/platform/client-config';
 import { getToken } from '@/lib/auth-client';
@@ -90,6 +89,28 @@ export default function OnboardClientPage() {
   const [slugErrors, setSlugErrors] = useState<string[]>([]);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Existing tenant slugs from the DB — the authoritative uniqueness source for
+  // step-1 validation (NOT the code registry, whose entries are onboardable
+  // templates). The backend create 409 is the final guard; if this fetch fails we
+  // degrade to format-only checks and rely on that 409.
+  const [existingSlugs, setExistingSlugs] = useState<string[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/gifsy/clients', { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
+      .then((r) => r.json())
+      .then((j: { success?: boolean; data?: { clients?: { slug: string }[] } }) => {
+        if (alive && j?.success) {
+          setExistingSlugs((j.data?.clients ?? []).map((c) => c.slug));
+        }
+      })
+      .catch(() => {
+        /* degrade gracefully: the backend create 409 remains authoritative */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const updateForm = (patch: Partial<OnboardingForm>) =>
     setForm((p) => ({ ...p, ...patch }));
@@ -98,7 +119,7 @@ export default function OnboardClientPage() {
 
   const goNext = () => {
     if (step === 'identity') {
-      const errs = validateNewClientSlug(form.slug, CLIENT_REGISTRY);
+      const errs = validateNewClientSlug(form.slug, existingSlugs);
       setSlugErrors(errs);
       if (errs.length > 0) return;
     }

@@ -29,7 +29,7 @@ const RESERVED_SLUGS = new Set([
  */
 export function validateNewClientSlug(
   slug: string,
-  registry: Record<string, ClientConfig>,
+  existingSlugs: readonly string[],
 ): string[] {
   const errors: string[] = [];
 
@@ -49,7 +49,7 @@ export function validateNewClientSlug(
     errors.push(`"${slug}" is a reserved platform slug and cannot be used.`);
   }
 
-  if (registry[slug]) {
+  if (existingSlugs.includes(slug)) {
     errors.push(`Slug "${slug}" already exists. Choose a unique identifier.`);
   }
 
