@@ -23,8 +23,9 @@ in "Work in brand") → **confirm conversion rate=1** + **create the first Deole
 — NOT Gifsy Admin**) → **load real master data** via the app UIs when the client sends files (**#76**). Plus **#143** — WhatsApp
 `deoleo_kyc_approval` template runtime-verify (MSG91 template not yet owner-verified). The recon'd **scale/ops plan** is now
 **IN PROGRESS** (see the 🟡 SCALE/OPS paragraph below): pagination stream COMPLETE (W1+W2), observability O1+O2 done, security
-log-leak fixed, KYC-submit-500 RESOLVED, ASM enrollment done; **NEXT = KYC "Rejected / Re-upload" consolidation** (owner decision +
-live bug); notifications/P7 still PAUSED (build all events flag-OFF; **email provider still open** — ZeptoMail vs SES). **Required
+log-leak fixed, KYC-submit-500 RESOLVED, ASM enrollment done, **KYC "Rejected / Re-upload" consolidation SHIPPED (`e970213`)**;
+**NEXT = staging runtime-verify of the KYC consolidation + resume the owner-gated Deoleo go-live items** (nothing else queued on the
+scale/ops stream); notifications/P7 still PAUSED (build all events flag-OFF; **email provider still open** — ZeptoMail vs SES). **Required
 onboarding-flow builds** are logged in POST-GO-LIVE-BACKLOG §A: **§A-DOMAIN** (decouple domain from slug) and
 **§A-ONBOARDING** (client activate/edit endpoint — Deoleo was flipped via the one-off job — **plus the GIFSY_ADMIN-in-tenant-context
 fix**: FE offers GIFSY_ADMIN only in platform context, backend `assertRoleAssignable` rejects GIFSY_ADMIN when `caller.clientId !== 'gifsy'`).
@@ -55,18 +56,22 @@ pre-pick a free `partnerCode`, non-retrying P2002 safety net; applied on both cr
 test; deployed to staging. NOT an open blocker — final live confirm = owner re-tries the exact submit, but it's fixed); **(5)** ✅
 **ASM enrollment** (`4bea680` — ASM now gets the "New Enrollment" button + KYC to-do tasks alongside XSR/SO; FE-only `canEnroll()`
 helper `ENROLL_ROLES=['XSR','SO','ASM']`, backend needed nothing — `resolveInitialRouting` routes an ASM-initiated KYC to the ASM's
-manager; blanket all tenants; audit CLEAN). **🔜 NEXT ACTION (first thing to pick up): KYC "Rejected / Re-upload" consolidation** —
-owner decision: all reviewer feedback (incl. per-doc "re-upload") surfaces under **"Rejected"**, no separate "Re-upload" tab; also a
-LIVE latent bug (backend writes `RE_UPLOAD_REQUIRED` but the FE enum only has the dead alias `RESUBMISSION_REQUIRED` → a Gifsy
-re-upload matches neither filter, blank-badges/crashes `kycBadge[status]`, and the rep can't resubmit it). Size M, FE-only, no
-migration. **⏳ one-line owner decision pending: keep the reviewer "Request Re-upload" action vs collapse reviewers to a single
-"Reject" button.** **STILL PAUSED for owner:** Notifications Core go/no-go (drainer is PUSH-only so enqueued SMS/WhatsApp/email never
+manager; blanket all tenants; audit CLEAN). **(6)** ✅ **KYC "Rejected / Re-upload" consolidation** (`e970213`) — owner resolved the
+open decision with "the gifsy admin approval/rejection dashboard remains as is" → reviewer KEEPS all 3 actions (Approve/Reject/Request
+Re-upload, still writes `RE_UPLOAD_REQUIRED`); the change is rep-facing + FE-enum only. Fixed the LIVE latent bug (backend writes
+`RE_UPLOAD_REQUIRED` but the FE enum only had the dead alias `RESUBMISSION_REQUIRED` → re-upload rows crashed `kycBadge[status]`,
+matched no filter, weren't resubmittable): added `RE_UPLOAD_REQUIRED` to the FE enum + every exhaustive `Record<KYCStatus>` badge map
+(tsc caught partner/profile), single "Rejected" filter now covers `{REJECTED,RE_UPLOAD_REQUIRED,RESUBMISSION_REQUIRED}` (dropped the
+separate Re-upload tab; filter/border/deep-link/tiles), RE_ENTRY sets (FE + backend `sales.service.ts:1009`) include it so re-uploads
+resubmit. Backend submit already allowed it (`RE_UPLOAD_REQUIRED` ∉ `IN_FLIGHT_STATUSES`). Independent audit CLEAN; regression test
+`reupload-consolidation.test.tsx`. **Staging runtime-verify PENDING deploy** (reviewer requests re-upload → rep sees it under Rejected
++ can resubmit; needs owner login for the rep session). **STILL PAUSED for owner:** Notifications Core go/no-go (drainer is PUSH-only so enqueued SMS/WhatsApp/email never
 deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLOCKED on missing upstream) · email provider (ZeptoMail
 ~$0.25/1k vs SES ~$0.10/1k). See POST-GO-LIVE-BACKLOG §B/§C + GO-LIVE-ISSUE-LIST 🔜 NEXT + 🟡 SCALE/OPS sections.
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1324 · nest 0 · FE vitest 1722 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `9e79e49`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1324 · nest 0 · FE vitest 1726 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `e970213`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -199,7 +204,7 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929` (unchanged since); develop has SINCE advanced to `9e79e49` with this session's scale/ops + KYC + ASM work (rides the NEXT cutover).** Cutover #2 shipped
+🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929` (unchanged since); develop has SINCE advanced to `e970213` with this session's scale/ops + KYC + ASM + Rejected/Re-upload consolidation work (rides the NEXT cutover).** Cutover #2 shipped
 the **onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate**; applied migration
 `20260630130000_point_expiry_default_unique` (via `--wait`); pre-cutover backup **`1782886598428`**; created + ENABLED the
 **`expire-sweep-prod`** Cloud Scheduler (daily 00:30 IST; sweep smoke 403/201). Both prod services healthy `/health` 200.
@@ -276,8 +281,9 @@ its config = platform defaults (conversion `1`, expiry null, visibility OFF). **
 assumes Deoleo (now in "Work in brand") → **confirm conversion rate=1** + **create the first Deoleo CLIENT_ADMIN** (`/admin/users`,
 role **CLIENT_ADMIN — NOT Gifsy Admin**) → **load real master data** via the app UIs when the client sends files (**#76**); plus
 **(#143)** WhatsApp `deoleo_kyc_approval` template runtime-verify. The recon'd scale/ops plan is now **IN PROGRESS** on `develop`
-(HEAD `9e79e49`): pagination stream COMPLETE (W1+W2), observability O1+O2 done, security log-leak fixed, KYC-submit-500 RESOLVED, ASM
-enrollment done; **NEXT = KYC "Rejected / Re-upload" consolidation** (owner decision + live bug, one-line owner confirm pending);
+(HEAD `e970213`): pagination stream COMPLETE (W1+W2), observability O1+O2 done, security log-leak fixed, KYC-submit-500 RESOLVED, ASM
+enrollment done, **KYC "Rejected / Re-upload" consolidation SHIPPED (`e970213`, admin reviewer untouched, staging runtime-verify
+pending deploy)**; **NEXT = staging runtime-verify of that consolidation + owner-gated Deoleo go-live items** (nothing else queued);
 notifications/P7 still PAUSED (events flag-OFF; email provider TBD, ZeptoMail vs SES). Required onboarding-flow builds logged in
 POST-GO-LIVE-BACKLOG §A-DOMAIN + §A-ONBOARDING (incl. the GIFSY_ADMIN-in-tenant-context
 fix). Keep the fix-as-found loop available (fixes push to `develop` → reach prod on the next `main` deploy). Full as-run record =

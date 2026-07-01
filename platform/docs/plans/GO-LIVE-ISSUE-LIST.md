@@ -1,9 +1,9 @@
 # Go-Live Issue List — authoritative master tracker (updated 2026-07-01)
 
 > **STATUS: 🚀 CUTOVER #2 EXECUTED & COMPLETE (2026-07-01) — prod live on `a2f5929`; DEOLEO TENANT CREATED + ACTIVE.**
-> **`develop` is now AHEAD of prod (HEAD `9e79e49`) with the post-Deoleo SCALE/OPS build** — security log-leak fix + observability O1/O2 + pagination Wave 1+2 (stream COMPLETE) + the KYC-submit-500 fix + ASM enrollment — riding the NEXT cutover; **prod stays on `a2f5929`, unchanged.** Gate: **api jest 1324 · nest 0 · FE vitest 1722 · tsc 0.** See the **🟡 2026-07-01 — SCALE/OPS BUILD** section below.
+> **`develop` is now AHEAD of prod (HEAD `e970213`) with the post-Deoleo SCALE/OPS build** — security log-leak fix + observability O1/O2 + pagination Wave 1+2 (stream COMPLETE) + the KYC-submit-500 fix + ASM enrollment + **the KYC "Rejected / Re-upload" consolidation** — riding the NEXT cutover; **prod stays on `a2f5929`, unchanged.** Gate: **api jest 1324 · nest 0 · FE vitest 1726 · tsc 0.** See the **🟡 2026-07-01 — SCALE/OPS BUILD** section below.
 > **✅ RESOLVED: staging KYC-submit 500** (`POST /v1/kyc` → GST-uniqueness abort) — fixed + pushed `2419ab6`, independent audit CLEAN, deployed to staging; NOT an open blocker anymore (final live confirm = owner re-tries the exact submit, but it's fixed). See the **✅ KYC-submit 500** entry below.
-> **🔜 NEXT (first thing picked up next): KYC "Rejected / Re-upload" consolidation** — a LIVE latent FE bug + owner decision (surface all reviewer feedback under "Rejected", no separate "Re-upload" tab). See the **🔜 2026-07-01 — NEXT** section below.
+> **✅ SHIPPED (`e970213`): KYC "Rejected / Re-upload" consolidation** — the LIVE latent FE bug (`RE_UPLOAD_REQUIRED` unhandled → crash/no-filter/no-resubmit) is fixed; single rep-facing "Rejected" section covers all reviewer feedback; **admin reviewer dashboard untouched** (owner: "remains as is"). Independent audit CLEAN, regression test added; staging runtime-verify pending deploy. See the **🔜→✅ 2026-07-01** section below.
 > Cutover #2 shipped the onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate (migration +
 > `expire-sweep-prod` scheduler); Deoleo onboarded (slug=`deoleo`) + flipped `ONBOARDING→ACTIVE`. Remaining = owner-gated: confirm
 > Deoleo Settings (conversion=1) + create first Deoleo CLIENT_ADMIN + load real master data (#76) + WhatsApp `deoleo_kyc_approval`
@@ -34,7 +34,16 @@
   2. **Pre-pick a free `partnerCode`** by querying existing codes first → no collision, no retry on an aborted tx.
 - **Reproducible:** any owner with multiple outlets under one GST, or any re-submit of an existing GST in the tenant.
 
-## 🔜 2026-07-01 — NEXT (first thing picked up next) — KYC "Rejected / Re-upload" consolidation (LIVE bug + owner decision)
+## ✅ 2026-07-01 — SHIPPED (`e970213`) — KYC "Rejected / Re-upload" consolidation (LIVE bug + owner decision)
+
+> **✅ SHIPPED `e970213` — gate api jest 1324 · nest 0 · FE vitest 1726 · tsc 0; independent audit CLEAN; regression test
+> `reupload-consolidation.test.tsx`; staging runtime-verify pending deploy.** Owner resolved D2 with "the gifsy admin
+> approval/rejection dashboard remains as is" → the reviewer KEEPS all 3 actions (Approve / Reject / **Request Re-upload**, still
+> writes `RE_UPLOAD_REQUIRED`); the change is **rep-facing + FE-enum only, admin reviewer UNTOUCHED**. Built exactly per D0/D1 + the
+> D2-keep path (11 files + 1 test): FE enum + all exhaustive `Record<KYCStatus>` badge maps (tsc caught partner/profile), single
+> "Rejected" filter via shared `REJECTED_STATUSES` set (predicate + border + deep-link + tiles), RE_ENTRY sets FE + backend
+> `sales.service.ts:1009`. Verified the backend submit path already allowed resubmission (`RE_UPLOAD_REQUIRED` ∉ `IN_FLIGHT_STATUSES`
+> at `kyc.service.ts:988`). Original investigation ↓ retained for context.
 
 > **Owner decision:** ALL reviewer-led feedback — including "re-upload this specific document" — must surface to the rep under the
 > **"Rejected"** section, NOT a separate "Re-upload" tab. Investigation found this is also a **LIVE latent bug**.
@@ -61,8 +70,8 @@
 > "11 endpoints" was an OVERCOUNT (most already paginated or tiny user-scoped); **notifications is mostly dead scaffold** — the
 > drainer is **PUSH-only** so enqueued SMS/WhatsApp/email never deliver; NotificationTemplate / LeaderboardSnapshot.isPublished /
 > Ticket.slaBreached / in-app-inbox are unwired; **2 of 3 events (leaderboard-published, ticket-SLA) are BLOCKED on missing upstream.**
-> **On `develop` HEAD `9e79e49` (prod still `a2f5929`). Gate: api jest 1324 · nest 0 · FE vitest 1722 · tsc 0.**
-> **Pagination stream is now COMPLETE (Wave 1 + Wave 2); ASM enrollment done.** Notifications Core + email provider remain PAUSED for owner decisions.
+> **On `develop` HEAD `e970213` (prod still `a2f5929`). Gate: api jest 1324 · nest 0 · FE vitest 1726 · tsc 0.**
+> **Pagination stream is now COMPLETE (Wave 1 + Wave 2); ASM enrollment done; KYC "Rejected / Re-upload" consolidation SHIPPED (`e970213`).** Notifications Core + email provider remain PAUSED for owner decisions.
 
 **SHIPPED (pushed to `develop`, gate-green, each independently audited):**
 
