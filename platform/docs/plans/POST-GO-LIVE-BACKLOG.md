@@ -43,6 +43,22 @@ These are invisible while Deoleo is the only real tenant; they matter when a sec
   3. **Verify on staging first** — `deoleoloyalty.gifsy.in → deoleo` must still resolve + Deoleo branding must still render after the switch, before prod.
   - Result: Deoleo keeps slug `deoleo`, keeps domain `deoleoloyalty.gifsy.in`, keeps its branding — only the lookup *source* moves, behind a fallback, verified on staging. **No Deoleo disruption.**
 
+### A-ONBOARDING — client ACTIVATE + EDIT path (no update endpoint today) — REQUIRED BUILD
+
+**Surfaced 2026-07-01 during Deoleo prod onboarding.** The Gifsy console can **create** a client (`POST /v1/gifsy/clients`) but **cannot update one** — there is **no status/activate/edit endpoint at all**. This makes a client onboarded as **`ONBOARDING` a dead-end**:
+- the **"Work in brand" switcher** filters to `status === 'ACTIVE'` (`components/operator/brand-switcher.tsx:32`), so an ONBOARDING tenant never appears; and
+- **`assumeTenant` requires `status: 'ACTIVE'`** (`auth.service.ts:368`, throws "Tenant not found or not active"),
+
+so the operator can neither see nor assume the tenant → **cannot configure it** (Settings, CLIENT_ADMIN, uploads all need the assumed context). The `gifsy/clients/[slug]` detail page's edit (WalletSection) is dead in-memory scaffold ("DB persistence comes in Platform Phase 2"), so it can't help either.
+
+**Deoleo workaround applied (2026-07-01):** onboarded as `ONBOARDING`, then flipped `→ ACTIVE` via a **one-off guarded in-VPC Cloud Run job `gifsy-activate-deoleo`** (double-guarded `current_database()='gifsy_prod'`, single-row `client.update`, backup `1782886598428`; BEFORE `ONBOARDING` → AFTER `ACTIVE`). A DB write, not a supported operation — hence this build.
+
+**REQUIRED BUILD (batch into the next cutover):**
+1. **`PATCH /v1/gifsy/clients/:slug`** (GIFSY_ADMIN) — update `status` (ONBOARDING↔ACTIVE↔INACTIVE) at minimum; ideally also `internalName`/`displayName`/`primaryColor`/`supportEmail`/`invoicePrefix`/`features`. Backed by a real `updateClient` service method (replacing the dead WalletSection scaffold).
+2. **Gifsy console control** — an "Activate / Set status" action on the client list + a real edit form on the client-detail page.
+3. **UX decision** — pick one to remove the dead-end: (a) wizard **defaults status to ACTIVE**, and/or (b) the switcher + `assumeTenant` **allow ONBOARDING** so an operator can configure-before-activate. (Recommend allowing ONBOARDING to be assumed by the GIFSY operator, while partner/public access stays gated by visibility + data + KYC — so "ONBOARDING" is a real staging state, not a dead-end.)
+- **Effort:** small–medium (one endpoint + service + a Gifsy-console form + tests). **Related already-fixed gap:** the onboarding **slug uniqueness** now checks the DB not the code registry (`a2f5929`).
+
 ## B. First weeks post-launch (security / correctness fast-follows)
 
 | Item | Why deferred / current state | Trigger | Effort | Ref |
