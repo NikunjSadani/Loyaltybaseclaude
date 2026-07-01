@@ -489,8 +489,9 @@ export class RewardsService {
       })
       .catch((e) => this.logger.error(`[redeemForOutlet] audit log failed: ${e}`));
 
-    // Send OTP delivery to the OUTLET's phone synchronously (consent). Debug-log only in dev.
-    this.logger.debug(`[redeemForOutlet] OTP for order ${order.id}: ${otp}`);
+    // Send OTP delivery to the OUTLET's phone synchronously (consent). NEVER log the live OTP
+    // (the default Nest logger emits debug in prod → it would land in Cloud Logging).
+    this.logger.debug(`[redeemForOutlet] OTP generated for order ${order.id}`);
     try {
       await this.msg91.sendOtp(otpPhone, otp, 'SMS');
     } catch (e) {
@@ -907,8 +908,9 @@ export class RewardsService {
       return created;
     });
 
-    // Send OTP delivery (SMS) synchronously. Never log the live OTP in prod; debug only.
-    this.logger.debug(`[redeem] OTP for order ${order.id}: ${otp}`);
+    // Send OTP delivery (SMS) synchronously. NEVER log the live OTP (the default Nest logger
+    // emits debug in prod → it would land in Cloud Logging).
+    this.logger.debug(`[redeem] OTP generated for order ${order.id}`);
     try {
       await this.msg91.sendOtp(user.phone, otp, 'SMS');
     } catch (e) {

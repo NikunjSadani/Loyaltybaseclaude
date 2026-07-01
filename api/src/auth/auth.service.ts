@@ -187,7 +187,8 @@ export class AuthService {
     // Send via MSG91
     await this.sendViaMSG91(cleanPhone, otp, channel);
 
-    this.logger.log(`OTP sent to ${cleanPhone} via ${channel}`);
+    // Mask the phone in logs (PII) — last 4 digits only. cleanPhone is the 10-digit number.
+    this.logger.log(`OTP sent to ****${cleanPhone.slice(-4)} via ${channel}`);
     return { success: true, expiresIn: 600 };
   }
 
