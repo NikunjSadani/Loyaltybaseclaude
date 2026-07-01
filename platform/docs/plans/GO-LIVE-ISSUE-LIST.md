@@ -1,8 +1,8 @@
 # Go-Live Issue List — authoritative master tracker (updated 2026-07-01)
 
 > **STATUS: 🚀 CUTOVER #2 EXECUTED & COMPLETE (2026-07-01) — prod live on `a2f5929`; DEOLEO TENANT CREATED + ACTIVE.**
-> **`develop` is now AHEAD of prod (HEAD `2d1a50e`) with the post-Deoleo SCALE/OPS build** — security log-leak fix + observability O1/O2 + pagination Wave 1 — riding the NEXT cutover; **prod stays on `a2f5929`, unchanged.** Gate: **api jest 1316 · nest 0 · FE vitest 1708 · tsc 0.** See the **🟡 2026-07-01 — SCALE/OPS BUILD** section below.
-> **🔴 OPEN HIGH GO-LIVE BLOCKER: staging KYC-submit 500** (`POST /v1/kyc` → GST-uniqueness abort) — root cause found, fix scoped, **NOT yet applied**; see the **🔴 OPEN HIGH** entry below.
+> **`develop` is now AHEAD of prod (HEAD `2419ab6`) with the post-Deoleo SCALE/OPS build** — security log-leak fix + observability O1/O2 + pagination Wave 1 + the KYC-submit-500 fix — riding the NEXT cutover; **prod stays on `a2f5929`, unchanged.** Gate: **api jest 1317 · nest 0 · FE vitest 1708 · tsc 0.** See the **🟡 2026-07-01 — SCALE/OPS BUILD** section below.
+> **✅ RESOLVED: staging KYC-submit 500** (`POST /v1/kyc` → GST-uniqueness abort) — fixed + pushed `2419ab6`, independent audit CLEAN, deployed to staging; owner re-tries the exact submit for the final live confirm. See the **✅ KYC-submit 500** entry below.
 > Cutover #2 shipped the onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate (migration +
 > `expire-sweep-prod` scheduler); Deoleo onboarded (slug=`deoleo`) + flipped `ONBOARDING→ACTIVE`. Remaining = owner-gated: confirm
 > Deoleo Settings (conversion=1) + create first Deoleo CLIENT_ADMIN + load real master data (#76) + WhatsApp `deoleo_kyc_approval`
@@ -12,10 +12,14 @@
 > runtime-verify. The money re-audit caught a real BLOCKER the first pass missed (GLM-2 never implemented = lost awards) plus
 > a payouts-rail resolver gap — both then fixed and re-verified. See the FIX WAVE RESULTS block below.
 
-## 🔴 2026-07-01 — OPEN HIGH GO-LIVE BLOCKER — staging KYC-submit 500 (NOT yet fixed)
+## ✅ 2026-07-01 — RESOLVED — staging KYC-submit 500 (fixed `2419ab6`, audit CLEAN, deployed)
 
-> Found 2026-07-01 on staging. **Root cause identified, fix scoped — NOT applied.** A HIGH go-live blocker: a real owner with
-> multiple outlets under one GST, or any re-submit, will hit it.
+> Found 2026-07-01 on staging (the new pino logs surfaced the root cause). **Fixed + pushed `2419ab6`; independent audit CLEAN
+> (no HIGH/MED — tenant scope intact, no retry-on-aborted-tx, non-P2002 preserved; only a benign LOW re soft-delete which has no
+> code path today); regression test added; deployed to staging.** Final live confirm = owner re-tries the exact failing submit →
+> now a clean "This GST number is already registered to another partner" 400 instead of a 500. NOTE the crash meant the entered GST
+> already belongs to ANOTHER partner in the tenant (on staging = seed data); blocking is correct. If same-owner-multi-outlet-one-GST
+> should AUTO-LINK to the existing partner rather than block, that's a separate product decision.
 
 - **Symptom:** `POST /v1/kyc` (KYC submit) returns a generic **500** ("Internal server error").
 - **Root cause:** `channelPartner.create()` violates the `@@unique([clientId, gstNumber])` constraint when a partner with that GST
