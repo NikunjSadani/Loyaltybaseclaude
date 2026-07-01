@@ -815,48 +815,63 @@ export class KycService {
       };
     },
   ): Promise<string> {
-    const base = `CP-${args.outletCode}`;
-    const MAX_ATTEMPTS = 20;
+    // PRE-RESOLVE every unique BEFORE the insert. A create that P2002s INSIDE a
+    // $transaction aborts the WHOLE tx, so the old "retry on the next suffix" loop
+    // could not work — the retry hit "current transaction is aborted" and surfaced
+    // as a 500. We also must NOT branch on `e.meta.target` (empty/unreliable under
+    // the Prisma pg driver adapter — that's why gst collisions became 500s). So we
+    // resolve a collision-free code + reject a duplicate GST up front instead.
 
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      const partnerCode = attempt === 0 ? base : `${base}-${attempt}`;
-      try {
-        const created = await tx.channelPartner.create({
-          data: {
-            clientId: args.clientId,
-            userId: args.userId,
-            partnerCode,
-            isActive: true,
-            ...args.details,
-          },
-          select: { id: true },
-        });
-        return created.id;
-      } catch (e) {
-        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-          // Identify which unique collided. Prisma exposes the target fields.
-          const target = (e.meta?.target ?? []) as string[] | string;
-          const fields = Array.isArray(target) ? target : [target];
-          if (fields.some((f) => f.toLowerCase().includes('gst'))) {
-            throw new BadRequestException(
-              `This GST number is already registered to another partner in this tenant.`,
-            );
-          }
-          if (fields.some((f) => f.toLowerCase().includes('userid'))) {
-            // The owner User already owns a partner — a logic race; do not loop.
-            throw new BadRequestException(
-              `This owner already has a registered partner profile.`,
-            );
-          }
-          // partnerCode collision → retry with the next suffix.
-          continue;
-        }
-        throw e;
+    // (clientId, gstNumber) unique → clean 400 rather than a tx-aborting insert.
+    if (args.details.gstNumber) {
+      const gstOwner = await tx.channelPartner.findFirst({
+        where: { clientId: args.clientId, gstNumber: args.details.gstNumber },
+        select: { id: true },
+      });
+      if (gstOwner) {
+        throw new BadRequestException(
+          'This GST number is already registered to another partner in this tenant.',
+        );
       }
     }
-    throw new BadRequestException(
-      `Could not generate a unique partner code for outlet ${args.outletCode}.`,
+
+    // (clientId, partnerCode) unique → pick the first free CP-<outletCode>[-N].
+    const base = `CP-${args.outletCode}`;
+    const taken = new Set(
+      (
+        await tx.channelPartner.findMany({
+          where: { clientId: args.clientId, partnerCode: { startsWith: base } },
+          select: { partnerCode: true },
+        })
+      ).map((r) => r.partnerCode),
     );
+    let partnerCode = base;
+    for (let i = 1; taken.has(partnerCode) && i < 1000; i++) partnerCode = `${base}-${i}`;
+
+    try {
+      const created = await tx.channelPartner.create({
+        data: {
+          clientId: args.clientId,
+          userId: args.userId,
+          partnerCode,
+          isActive: true,
+          ...args.details,
+        },
+        select: { id: true },
+      });
+      return created.id;
+    } catch (e) {
+      // Safety net for a race (a concurrent tx inserting the same gst/code/owner
+      // between the pre-checks and this insert). Do NOT retry — the tx is already
+      // aborted; a retried statement throws "current transaction is aborted".
+      // Surface a clean 400 instead of a 500.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new BadRequestException(
+          'This owner or GST number is already registered to another partner in this tenant.',
+        );
+      }
+      throw e;
+    }
   }
 
   /**
@@ -988,6 +1003,25 @@ export class KycService {
 
       if (outlet.partnerId) {
         // Re-KYC / already-owned outlet → update the existing partner's details.
+        // PRE-CHECK the (clientId, gstNumber) unique against OTHER partners so a
+        // collision returns a clean 400 instead of aborting the tx (a P2002 inside
+        // the tx would abort it, and `e.meta.target` is unreliable under the pg
+        // driver adapter, so we must not depend on it).
+        if (partnerDetails.gstNumber) {
+          const gstOwner = await tx.channelPartner.findFirst({
+            where: {
+              clientId: user.clientId,
+              gstNumber: partnerDetails.gstNumber,
+              id: { not: outlet.partnerId },
+            },
+            select: { id: true },
+          });
+          if (gstOwner) {
+            throw new BadRequestException(
+              'This GST number is already registered to another partner in this tenant.',
+            );
+          }
+        }
         try {
           const updated = await tx.channelPartner.update({
             where: { id: outlet.partnerId },
@@ -996,14 +1030,12 @@ export class KycService {
           });
           partnerId = updated.id;
         } catch (e) {
-          // A GST collision on @@unique([clientId,gstNumber]) → clean 400, not a 500 (M1).
+          // Race safety net — surface any residual unique collision as a clean 400,
+          // never a 500. Do NOT retry (the tx is aborted after a failed statement).
           if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-            const fields = ([] as string[]).concat((e.meta?.target ?? []) as string[]);
-            if (fields.some((f) => String(f).toLowerCase().includes('gst'))) {
-              throw new BadRequestException(
-                'This GST number is already registered to another partner in this tenant.',
-              );
-            }
+            throw new BadRequestException(
+              'This GST number is already registered to another partner in this tenant.',
+            );
           }
           throw e;
         }

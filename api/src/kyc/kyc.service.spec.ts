@@ -39,7 +39,7 @@ const mockTx = {
   kycStatusHistory: { create: jest.fn() },
   auditLog: { create: jest.fn() },
   user: { findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
-  channelPartner: { findUnique: jest.fn(), update: jest.fn(), create: jest.fn() },
+  channelPartner: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), create: jest.fn() },
   userSession: { updateMany: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
   outlet: { update: jest.fn(), updateMany: jest.fn() },
@@ -162,6 +162,11 @@ describe('KycService', () => {
         (fn as jest.Mock).mockReset();
       }
     }
+    // Defaults for the create()-path partner uniqueness PRE-CHECKS (createPartnerWithUniqueCode):
+    // no existing GST owner, and no existing partnerCode for the outlet base → first code is free.
+    // Tests that assert a collision override these with mockResolvedValueOnce.
+    mockTx.channelPartner.findFirst.mockResolvedValue(null);
+    mockTx.channelPartner.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         KycService,
@@ -311,6 +316,25 @@ describe('KycService', () => {
       // partnerDetails.gstNumber must be undefined (→ stored NULL), never '' (which
       // would make a SECOND no-GST outlet collide on the unique index → P2002).
       expect(mockTx.channelPartner.create.mock.calls[0][0].data.gstNumber).toBeUndefined();
+    });
+
+    it('rejects a duplicate GST with a clean 400 (not a tx-aborting 500) on the create path', async () => {
+      // Regression for the staging KYC-submit 500: a partner-less outlet whose GST
+      // already belongs to another partner in the tenant must return a clean
+      // BadRequest. The old code let channelPartner.create() P2002 → the tx aborted →
+      // "current transaction is aborted" → generic 500. We now PRE-CHECK the GST.
+      primeCreateMocks();
+      // The GST pre-check (tx.channelPartner.findFirst) finds an existing owner.
+      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ id: 'other-partner' });
+      await expect(
+        service.create(so, {
+          ...baseDto,
+          gstNumber: '29ABCDE1234F1Z5',
+          documents: [{ type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/uuid.pdf' }],
+        } as never),
+      ).rejects.toThrow(/GST number is already registered/i);
+      // The insert is never attempted → the transaction is never poisoned.
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
     });
   });
 
