@@ -199,7 +199,7 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929`; develop HEAD `0055221`.** Cutover #2 shipped
+🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929` (unchanged since); develop has SINCE advanced to `9e79e49` with this session's scale/ops + KYC + ASM work (rides the NEXT cutover).** Cutover #2 shipped
 the **onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate**; applied migration
 `20260630130000_point_expiry_default_unique` (via `--wait`); pre-cutover backup **`1782886598428`**; created + ENABLED the
 **`expire-sweep-prod`** Cloud Scheduler (daily 00:30 IST; sweep smoke 403/201). Both prod services healthy `/health` 200.
