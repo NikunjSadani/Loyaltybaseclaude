@@ -4,6 +4,8 @@ import { isFixedOtpAllowed }        from './common/fixed-otp';
 import { APP_GUARD, APP_INTERCEPTOR, APP_FILTER } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ScheduleModule }           from '@nestjs/schedule';
+import { LoggerModule }             from 'nestjs-pino';
+import { buildLoggerParams }        from './common/logging/logger.config';
 
 import { AppController }  from './app.controller';
 import { AppService }     from './app.service';
@@ -46,6 +48,10 @@ import { PushModule }         from './push/push.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    // Structured logging (Chunk O1) — nestjs-pino. JSON to stdout in prod
+    // (Cloud Logging), pretty single-line in dev. Registered near the top so
+    // the pino logger is available to feature modules below.
+    LoggerModule.forRootAsync({ useFactory: buildLoggerParams }),
     // Background-jobs scaffold — domain cron jobs (notifications worker, points
     // expiry) are re-added as the real domain is ported from platform/lib (S3/S4).
     ScheduleModule.forRoot(),

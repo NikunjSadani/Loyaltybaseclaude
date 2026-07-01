@@ -3,6 +3,7 @@ import { ValidationPipe, Logger, VersioningType } from '@nestjs/common';
 import { ConfigService }          from '@nestjs/config';
 import helmet                     from 'helmet';
 import { json, urlencoded }       from 'express';
+import { Logger as PinoLogger }   from 'nestjs-pino';
 import { AppModule }              from './app.module';
 
 // Money is stored as BigInt paise. JSON.stringify throws on BigInt by default;
@@ -22,6 +23,13 @@ async function bootstrap() {
   // the request at 32 MB, so 25 MB is a safe ceiling. Multipart file uploads are
   // unaffected (multer parses those independently).
   const app    = await NestFactory.create(AppModule, { bodyParser: false });
+
+  // Structured logging (Chunk O1) — route all Nest logs through nestjs-pino so
+  // framework + application logs share one JSON stream. flushLogs() drains any
+  // buffered logs emitted during bootstrap before the app starts serving.
+  app.useLogger(app.get(PinoLogger));
+  app.flushLogs();
+
   app.use(json({ limit: '25mb' }));
   app.use(urlencoded({ extended: true, limit: '25mb' }));
 
