@@ -34,7 +34,7 @@ interface AssignedOutlet {
   programName?: string;
   programCategory?: string;
   /** Present for re-entry outlets (rejected/resubmission/re-KYC) and approved */
-  kycStatus?:    'APPROVED' | 'RE_KYC_REQUIRED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
+  kycStatus?:    'APPROVED' | 'RE_KYC_REQUIRED' | 'REJECTED' | 'RE_UPLOAD_REQUIRED' | 'RESUBMISSION_REQUIRED';
   /** The REAL latest KYC status from the API (NOT_STARTED / SUBMITTED / PENDING_GIFSY /
    *  APPROVED / …). Drives the picker filter: only never-submitted outlets are
    *  manually selectable for a NEW KYC. (Re-entry of rejected/re-KYC outlets comes via
@@ -153,7 +153,7 @@ const DOC_TYPE_TO_KEY: Record<string, DocKey> = Object.fromEntries(
 ) as Record<string, DocKey>;
 
 /** Statuses for which the SAME outlet's KYC is re-opened pre-filled. */
-const RE_ENTRY_STATUSES = new Set(['REJECTED', 'RESUBMISSION_REQUIRED', 'RE_KYC_REQUIRED']);
+const RE_ENTRY_STATUSES = new Set(['REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED', 'RE_KYC_REQUIRED']);
 
 /* ─── GCS upload helper ───────────────────────────────────────────────────────── */
 
@@ -300,7 +300,7 @@ export default function NewKYCPage() {
       .then((r) => r.json())
       .then((body) => {
         if (body.success) {
-          const RE_ENTRY = ['RE_KYC_REQUIRED', 'REJECTED', 'RESUBMISSION_REQUIRED'];
+          const RE_ENTRY = ['RE_KYC_REQUIRED', 'REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED'];
           const outlets: AssignedOutlet[] = (body.data.outlets ?? []).map((o: any) => ({
             outletId:   o.id,
             outletCode: o.outletCode ?? o.id, // human code for display; fall back to id if ever absent
@@ -360,7 +360,7 @@ export default function NewKYCPage() {
   }, [submitOtpCountdown]);
 
   /* Derived: is this a re-entry (re-KYC / rejected / resubmission) flow? */
-  const isReKYC = !!selectedOutlet && ['RE_KYC_REQUIRED', 'REJECTED', 'RESUBMISSION_REQUIRED'].includes(selectedOutlet.kycStatus as string);
+  const isReKYC = !!selectedOutlet && ['RE_KYC_REQUIRED', 'REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED'].includes(selectedOutlet.kycStatus as string);
 
   /** Returns true when a form field or doc key is flagged for re-capture */
   const isReKYCFlagged = (key: string) => !!(isReKYC && selectedOutlet?.reKycFlags?.[key]);

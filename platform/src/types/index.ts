@@ -62,7 +62,8 @@ export enum KYCStatus {
   PENDING_GIFSY          = 'PENDING_GIFSY',          // First approved → awaiting Gifsy
   APPROVED               = 'APPROVED',
   REJECTED               = 'REJECTED',
-  RESUBMISSION_REQUIRED  = 'RESUBMISSION_REQUIRED',
+  RE_UPLOAD_REQUIRED     = 'RE_UPLOAD_REQUIRED',    // reviewer asked for a specific doc re-upload (backend-written)
+  RESUBMISSION_REQUIRED  = 'RESUBMISSION_REQUIRED', // legacy alias, never written by backend; kept so old rows still render
   RE_KYC_REQUIRED        = 'RE_KYC_REQUIRED',
 }
 

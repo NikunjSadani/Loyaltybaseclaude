@@ -76,6 +76,16 @@ const APPROVAL_REQUIRED_STATUSES = new Set<KYCStatus>([
   KYCStatus.PENDING_RSM_APPROVAL,
 ]);
 
+/** "Rejected" family — every reviewer-led feedback state the rep must act on lives
+ *  under the single "Rejected" filter/section (owner decision): a full rejection, a
+ *  specific-document re-upload request (RE_UPLOAD_REQUIRED, the value the backend
+ *  actually writes), and the legacy RESUBMISSION_REQUIRED alias. */
+const REJECTED_STATUSES = new Set<KYCStatus>([
+  KYCStatus.REJECTED,
+  KYCStatus.RE_UPLOAD_REQUIRED,
+  KYCStatus.RESUBMISSION_REQUIRED,
+]);
+
 const STATUS_FILTERS: { key: FilterKey; label: string }[] = [
   { key: 'ALL',                  label: 'All'               },
   { key: PENDING_KYC_KEY,        label: 'Pending KYC'       },
@@ -83,7 +93,6 @@ const STATUS_FILTERS: { key: FilterKey; label: string }[] = [
   { key: UNDER_REVIEW_KEY,       label: 'Under Review'      },
   { key: KYCStatus.APPROVED,     label: 'Approved'          },
   { key: KYCStatus.REJECTED,     label: 'Rejected'          },
-  { key: KYCStatus.RESUBMISSION_REQUIRED, label: 'Re-upload'       },
   { key: KYCStatus.RE_KYC_REQUIRED,       label: 'Re-KYC Required' },
   { key: KYCStatus.NOT_INTERESTED,        label: 'Not Interested'  },
 ];
@@ -98,6 +107,7 @@ const kycBadge: Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 
   [KYCStatus.PENDING_RSM_APPROVAL]:  { variant: 'warning', label: 'Awaiting RSM'     },
   [KYCStatus.PENDING_GIFSY]:         { variant: 'info',    label: 'Awaiting Gifsy'   },
   [KYCStatus.REJECTED]:              { variant: 'danger',  label: 'Rejected'         },
+  [KYCStatus.RE_UPLOAD_REQUIRED]:    { variant: 'danger',  label: 'Re-upload'        },
   [KYCStatus.RESUBMISSION_REQUIRED]: { variant: 'danger',  label: 'Re-upload'        },
   [KYCStatus.RE_KYC_REQUIRED]:       { variant: 'warning', label: 'Re-KYC Required'  },
   [KYCStatus.NOT_STARTED]:           { variant: 'default', label: 'KYC Pending'       },
@@ -135,7 +145,7 @@ function dedupeByOutlet(entries: KYCEntry[]): KYCEntry[] {
 /* ─── Row border by status ───────────────────────────────────────────────────── */
 function rowBorder(status: KYCStatus, approvalStatus: KYCStatus | null): string {
   if (approvalStatus && status === approvalStatus) return 'border-l-4 border-l-blue-400';
-  if (status === KYCStatus.REJECTED || status === KYCStatus.RESUBMISSION_REQUIRED) return 'border-l-4 border-l-red-400';
+  if (REJECTED_STATUSES.has(status)) return 'border-l-4 border-l-red-400';
   if (status === KYCStatus.RE_KYC_REQUIRED) return 'border-l-4 border-l-purple-400';
   return '';
 }
@@ -154,7 +164,9 @@ function KYCListContent() {
         ? UNDER_REVIEW_KEY
         : rawStatus === PENDING_KYC_KEY || PENDING_KYC_STATUSES.has(rawStatus as KYCStatus)
           ? PENDING_KYC_KEY
-          : (rawStatus as FilterKey)
+          : REJECTED_STATUSES.has(rawStatus as KYCStatus)
+            ? KYCStatus.REJECTED
+            : (rawStatus as FilterKey)
     : null;
 
   const [entries,      setEntries]      = useState<KYCEntry[]>([]);
@@ -308,6 +320,7 @@ function KYCListContent() {
         filter === PENDING_KYC_KEY       ? PENDING_KYC_STATUSES.has(e.status) :
         filter === APPROVAL_REQUIRED_KEY ? (approvalStatus ? e.status === approvalStatus : false) :
         filter === UNDER_REVIEW_KEY      ? (UNDER_REVIEW_STATUSES.has(e.status) && e.status !== approvalStatus) :
+        filter === KYCStatus.REJECTED    ? REJECTED_STATUSES.has(e.status) :
         e.status === filter;
       const matchesSearch =
         e.partnerName.toLowerCase().includes(search.toLowerCase()) ||

@@ -251,6 +251,7 @@ const statusConfig: Partial<Record<KYCStatus, { variant: 'success' | 'warning' |
   [KYCStatus.PENDING_ASM_APPROVAL]:  { variant: 'warning', label: 'Awaiting ASM'       },
   [KYCStatus.PENDING_GIFSY]:         { variant: 'info',    label: 'Awaiting Gifsy'     },
   [KYCStatus.REJECTED]:              { variant: 'danger',  label: 'Rejected'           },
+  [KYCStatus.RE_UPLOAD_REQUIRED]:    { variant: 'danger',  label: 'Re-upload Required' },
   [KYCStatus.RESUBMISSION_REQUIRED]: { variant: 'danger',  label: 'Re-upload Required' },
   [KYCStatus.RE_KYC_REQUIRED]:       { variant: 'warning', label: 'Re-KYC Required'   },
 };
@@ -558,6 +559,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   /* Re-entry: route the junior into the pre-filled new-KYC wizard (selects by outlet). */
   const isReEntry =
     kyc.status === KYCStatus.REJECTED ||
+    kyc.status === KYCStatus.RE_UPLOAD_REQUIRED ||
     kyc.status === KYCStatus.RESUBMISSION_REQUIRED ||
     kyc.status === KYCStatus.RE_KYC_REQUIRED;
 

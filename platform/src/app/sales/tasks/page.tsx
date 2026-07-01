@@ -729,7 +729,9 @@ export default function TasksPage() {
     if (isFieldRole) {
       // From SUBMISSIONS (shared buildKycSubRows) — matches the dashboard + KYC list.
       const rejectedSubs = kycSubs.filter((s) =>
-        s.status === KYCStatus.REJECTED || s.status === KYCStatus.RESUBMISSION_REQUIRED,
+        s.status === KYCStatus.REJECTED ||
+        s.status === KYCStatus.RE_UPLOAD_REQUIRED ||
+        s.status === KYCStatus.RESUBMISSION_REQUIRED,
       );
       if (rejectedSubs.length > 0) {
         groups.push({

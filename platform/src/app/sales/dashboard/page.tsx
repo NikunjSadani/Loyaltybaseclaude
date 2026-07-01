@@ -398,7 +398,9 @@ export default function SalesDashboard() {
       // Rejected KYC — from SUBMISSIONS (same source as the KYC list), so no-outlet
       // rejected submissions are counted too and the href is the submission id.
       const rejectedSubs = kycSubs.filter((s) =>
-        s.status === KYCStatus.REJECTED || s.status === KYCStatus.RESUBMISSION_REQUIRED,
+        s.status === KYCStatus.REJECTED ||
+        s.status === KYCStatus.RE_UPLOAD_REQUIRED ||
+        s.status === KYCStatus.RESUBMISSION_REQUIRED,
       );
       if (rejectedSubs.length > 0) {
         groups.push({

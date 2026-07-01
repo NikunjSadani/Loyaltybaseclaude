@@ -63,6 +63,7 @@ const kycBadge: Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 
   [KYCStatus.PENDING_RSM_APPROVAL]:  { variant: 'warning', label: 'Awaiting RSM'  },
   [KYCStatus.PENDING_GIFSY]:         { variant: 'info',    label: 'Gifsy Review'  },
   [KYCStatus.REJECTED]:              { variant: 'danger',  label: 'Rejected'      },
+  [KYCStatus.RE_UPLOAD_REQUIRED]:    { variant: 'danger',  label: 'Re-upload'     },
   [KYCStatus.RESUBMISSION_REQUIRED]: { variant: 'danger',  label: 'Re-upload'     },
   [KYCStatus.RE_KYC_REQUIRED]:       { variant: 'warning', label: 'Re-KYC'        },
   [KYCStatus.NOT_STARTED]:           { variant: 'default', label: 'KYC Pending'   },

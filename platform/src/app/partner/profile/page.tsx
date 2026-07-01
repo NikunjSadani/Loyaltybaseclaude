@@ -50,6 +50,7 @@ const kycConfig: Record<KYCStatus, { icon: React.ReactNode; label: string; varia
   [KYCStatus.PENDING_RSM_APPROVAL]: { icon: <Clock className="h-4 w-4" />, label: 'Awaiting RSM',   variant: 'warning' },
   [KYCStatus.PENDING_GIFSY]:        { icon: <Clock className="h-4 w-4" />, label: 'Awaiting Gifsy', variant: 'info'    },
   [KYCStatus.REJECTED]: { icon: <AlertTriangle className="h-4 w-4" />, label: 'KYC Rejected', variant: 'danger' },
+  [KYCStatus.RE_UPLOAD_REQUIRED]: { icon: <AlertTriangle className="h-4 w-4" />, label: 'Re-upload Required', variant: 'danger' },
   [KYCStatus.RESUBMISSION_REQUIRED]: { icon: <AlertTriangle className="h-4 w-4" />, label: 'Re-upload Required', variant: 'danger' },
   [KYCStatus.RE_KYC_REQUIRED]:      { icon: <AlertTriangle className="h-4 w-4" />, label: 'Re-KYC Required',    variant: 'warning' },
   [KYCStatus.NOT_STARTED]:          { icon: <Clock className="h-4 w-4" />,         label: 'KYC Pending',        variant: 'default' },

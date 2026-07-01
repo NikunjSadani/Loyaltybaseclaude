@@ -61,6 +61,11 @@ const config: Record<
     label: 'Rejected',
     variant: 'danger',
   },
+  [KYCStatus.RE_UPLOAD_REQUIRED]: {
+    icon: <RotateCcw className="h-3.5 w-3.5" />,
+    label: 'Re-upload Required',
+    variant: 'danger',
+  },
   [KYCStatus.RESUBMISSION_REQUIRED]: {
     icon: <RotateCcw className="h-3.5 w-3.5" />,
     label: 'Re-upload Required',
