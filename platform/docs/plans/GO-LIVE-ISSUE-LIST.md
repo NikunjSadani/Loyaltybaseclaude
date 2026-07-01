@@ -1,8 +1,9 @@
 # Go-Live Issue List — authoritative master tracker (updated 2026-07-01)
 
 > **STATUS: 🚀 CUTOVER #2 EXECUTED & COMPLETE (2026-07-01) — prod live on `a2f5929`; DEOLEO TENANT CREATED + ACTIVE.**
-> **`develop` is now AHEAD of prod (HEAD `2419ab6`) with the post-Deoleo SCALE/OPS build** — security log-leak fix + observability O1/O2 + pagination Wave 1 + the KYC-submit-500 fix — riding the NEXT cutover; **prod stays on `a2f5929`, unchanged.** Gate: **api jest 1317 · nest 0 · FE vitest 1708 · tsc 0.** See the **🟡 2026-07-01 — SCALE/OPS BUILD** section below.
-> **✅ RESOLVED: staging KYC-submit 500** (`POST /v1/kyc` → GST-uniqueness abort) — fixed + pushed `2419ab6`, independent audit CLEAN, deployed to staging; owner re-tries the exact submit for the final live confirm. See the **✅ KYC-submit 500** entry below.
+> **`develop` is now AHEAD of prod (HEAD `9e79e49`) with the post-Deoleo SCALE/OPS build** — security log-leak fix + observability O1/O2 + pagination Wave 1+2 (stream COMPLETE) + the KYC-submit-500 fix + ASM enrollment — riding the NEXT cutover; **prod stays on `a2f5929`, unchanged.** Gate: **api jest 1324 · nest 0 · FE vitest 1722 · tsc 0.** See the **🟡 2026-07-01 — SCALE/OPS BUILD** section below.
+> **✅ RESOLVED: staging KYC-submit 500** (`POST /v1/kyc` → GST-uniqueness abort) — fixed + pushed `2419ab6`, independent audit CLEAN, deployed to staging; NOT an open blocker anymore (final live confirm = owner re-tries the exact submit, but it's fixed). See the **✅ KYC-submit 500** entry below.
+> **🔜 NEXT (first thing picked up next): KYC "Rejected / Re-upload" consolidation** — a LIVE latent FE bug + owner decision (surface all reviewer feedback under "Rejected", no separate "Re-upload" tab). See the **🔜 2026-07-01 — NEXT** section below.
 > Cutover #2 shipped the onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate (migration +
 > `expire-sweep-prod` scheduler); Deoleo onboarded (slug=`deoleo`) + flipped `ONBOARDING→ACTIVE`. Remaining = owner-gated: confirm
 > Deoleo Settings (conversion=1) + create first Deoleo CLIENT_ADMIN + load real master data (#76) + WhatsApp `deoleo_kyc_approval`
@@ -33,13 +34,35 @@
   2. **Pre-pick a free `partnerCode`** by querying existing codes first → no collision, no retry on an aborted tx.
 - **Reproducible:** any owner with multiple outlets under one GST, or any re-submit of an existing GST in the tenant.
 
-## 🟡 2026-07-01 — SCALE/OPS BUILD (post-Deoleo, in progress) — on `develop`, rides NEXT cutover
+## 🔜 2026-07-01 — NEXT (first thing picked up next) — KYC "Rejected / Re-upload" consolidation (LIVE bug + owner decision)
+
+> **Owner decision:** ALL reviewer-led feedback — including "re-upload this specific document" — must surface to the rep under the
+> **"Rejected"** section, NOT a separate "Re-upload" tab. Investigation found this is also a **LIVE latent bug**.
+>
+> **The live bug:** the backend writes status **`RE_UPLOAD_REQUIRED`** (Gifsy "Request Re-upload" button / PATCH / field-verify
+> bridge), but the FE `KYCStatus` enum only has **`RESUBMISSION_REQUIRED`** (a dead alias the backend never writes). So a real Gifsy
+> re-upload matches NEITHER the "Rejected" NOR the "Re-upload" filter (slips both), hits the unguarded `kycBadge[status]` → blank
+> badge/crash (sales kyc list, outlets, shared `KYCStatusBadge`), AND is NOT re-entry-eligible → **the rep literally cannot resubmit
+> a Gifsy-re-upload outlet.**
+>
+> **Change plan (Size M, FE-only, NO migration — all 3 statuses already exist in the Prisma `KycStatus` enum):**
+> - **D0** — add `RE_UPLOAD_REQUIRED` to the FE enum + every badge map.
+> - **D1** — remove the separate "Re-upload" filter; make **"Rejected"** match `REJECTED` + `RESUBMISSION_REQUIRED` +
+>   `RE_UPLOAD_REQUIRED` (filters/badges/dashboard-tiles/rowBorder), and add `RE_UPLOAD_REQUIRED` to the RE_ENTRY sets
+>   (`sales/kyc/[id]`, `sales/kyc/new`, and backend `sales.service.ts:1009` for prefill parity) so re-uploads become resubmittable.
+> - **D2** — KEEP the reviewer "Request Re-upload" action + distinct status (preserves the per-doc reason via `reKycFlags`, the
+>   distinct push, the field-verify bridge, the admin approval-rate denom) and just surface it under Rejected (RECOMMENDED).
+>   **⏳ PENDING owner confirm: keep the re-upload action vs collapse reviewers to a single "Reject" button.**
+> - **Backend logic unchanged.**
+
+## 🟡 2026-07-01 — SCALE/OPS BUILD (post-Deoleo) — on `develop`, rides NEXT cutover
 
 > Post-Deoleo, owner-driven, orchestrated. **Three streams approved.** Recon (3 parallel agents) reshaped scope: pagination's
 > "11 endpoints" was an OVERCOUNT (most already paginated or tiny user-scoped); **notifications is mostly dead scaffold** — the
 > drainer is **PUSH-only** so enqueued SMS/WhatsApp/email never deliver; NotificationTemplate / LeaderboardSnapshot.isPublished /
 > Ticket.slaBreached / in-app-inbox are unwired; **2 of 3 events (leaderboard-published, ticket-SLA) are BLOCKED on missing upstream.**
-> **On `develop` HEAD `2d1a50e` (prod still `a2f5929`). Gate: api jest 1316 · nest 0 · FE vitest 1708 · tsc 0.** Build is PAUSED for owner decisions.
+> **On `develop` HEAD `9e79e49` (prod still `a2f5929`). Gate: api jest 1324 · nest 0 · FE vitest 1722 · tsc 0.**
+> **Pagination stream is now COMPLETE (Wave 1 + Wave 2); ASM enrollment done.** Notifications Core + email provider remain PAUSED for owner decisions.
 
 **SHIPPED (pushed to `develop`, gate-green, each independently audited):**
 
@@ -48,10 +71,10 @@
 | **SEC-LOG-LEAK** 🔴 | **Security log-leak fix** — prod was logging live redemption **OTPs** (`rewards.service.ts:493,911` — debug emits active in prod) + full **phone numbers** (`auth.service.ts:190`, info). | Removed / masked the leaked OTPs and phone numbers. | ✅ pushed `df47baf` |
 | **OBS-O1+O2** | **Observability O1+O2** — `nestjs-pino` structured JSON logs (Cloud Logging severity, per-request correlation id, tenantId/userId/role) + a real **`/health/ready`** DB-ping probe (liveness `/health` unchanged). | **Independent audit CAUGHT a real HIGH leak** (pino-http logs `req.url` + query/params by default → a `?token=<KYC-docview-JWT>` would be logged); fixed with a custom req serializer (method + PATH-only, drops query/params/headers) + proved at runtime + regression test. `/health/ready` verified live on staging. **O3 (OpenTelemetry) DEFERRED** — needs monitoring-IAM + a `deploy.yml` probe/env edit (owner-gated). | ✅ pushed `33543ec` |
 | **PAG-W1** | **Pagination Wave 1** — `/admin/outlets` (server-side search + KYC-status filter + pagination) and `/admin/credits/batches` + `/reversals`. Envelope `{ <items>, pagination:{page,limit,total,pages} }`, limit `@Max(100)`. | **Independent audit CAUGHT a real HIGH KYC-parity bug** (the SQL reproduction of the derived KYC-status bucket didn't honor priority-2 `kycIntent=NOT_INTERESTED` → wrong-tab + double-count); fixed with a NULL-safe guard + regression test. FE outlets page still loads the full list on mount for upload-validation (fine at launch scale; a lightweight all-ids endpoint is a noted follow-up → POST-GO-LIVE-BACKLOG). | ✅ pushed `2d1a50e` |
+| **PAG-W2** | **Pagination Wave 2 — the pagination stream is now COMPLETE** — `/admin/invoices` + `/admin/schemes` server-paginated (same envelope + `@Max(100)`). The **tiny KPI / banner / partner-sales user-scoped lists were deliberately SKIPPED** (low value, owner-agreed — a `@Max` cap suffices). | **Independent audit CAUGHT + fixed a real MEDIUM scheme-visibility defect** — the `?status` filter wasn't admin-gated, so a non-admin could `?status=DRAFT` to enumerate unpublished schemes; fixed (non-admins forced to `ACTIVE`); runtime-verified on staging. | ✅ pushed `9e79e49` |
+| **ASM-ENROLL** | **ASM enrollment** — ASM (Area Sales Manager) now gets the "New Enrollment" button + KYC to-do tasks (in addition to XSR/SO). | FE-only via a `canEnroll()` helper (`ENROLL_ROLES=['XSR','SO','ASM']`); backend needed nothing (no sub-role gate on `POST /v1/kyc`; `resolveInitialRouting` routes an ASM-initiated KYC to the ASM's manager). Blanket (all tenants). Audit CLEAN. | ✅ pushed `4bea680` |
 
-**PENDING owner decisions (build paused here — owner said "document status, continue later"):**
-- **Pagination Wave 2 scope:** recommendation = **invoices + schemes-FE-adoption only**; skip paginating the tiny KPI / banner /
-  partner-sales user-scoped lists (low value — add a `@Max` cap instead).
+**PENDING owner decisions (pagination + ASM are DONE; these two remain PAUSED):**
 - **Notifications Core go/no-go:** multi-channel drainer (so enqueued SMS/WhatsApp/email actually send) + in-app inbox (needs a
   small `InAppNotification` migration) + banner event; **all new events OFF by default**; email behind a **Noop adapter**. Running
   cost ≈ **$0 infra** excl. per-message provider charges.
