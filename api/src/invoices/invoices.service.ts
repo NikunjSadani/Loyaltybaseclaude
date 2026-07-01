@@ -376,6 +376,18 @@ export class InvoicesService {
     if (q.status) where.status = q.status as 'GENERATED' | 'PAID';
     if (q.outletCode) where.outletCode = q.outletCode;
 
+    // Free-text search over the real invoice columns (invoiceNumber + outletCode),
+    // case-insensitive. Combined with the scope/filter clauses above via AND (the
+    // top-level `where` keys), so search NARROWS within the tenant scope — it can
+    // never widen it. snapshot-only fields (firmName/outletName) are not queryable.
+    const search = q.search?.trim();
+    if (search) {
+      where.OR = [
+        { invoiceNumber: { contains: search, mode: 'insensitive' } },
+        { outletCode: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
     if (this.isPartnerRole(user.role)) {
       const partner = await this.resolveCallerPartner(user);
       if (!partner) return null;

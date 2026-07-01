@@ -53,6 +53,18 @@ export class ListInvoicesQueryDto {
   @IsString()
   outletCode?: string;
 
+  /**
+   * Free-text search moved SERVER-side (Wave 2 pagination). Matches, case-
+   * insensitively, the real AutoInvoice columns the list UI searched:
+   * invoiceNumber + outletCode. (outletName / firmName / partnerName live only
+   * inside the frozen `snapshot` JSON — Prisma cannot reliably filter arbitrary
+   * JSON string fields across connectors, so they are intentionally not part of
+   * the server search.)
+   */
+  @IsOptional()
+  @IsString()
+  search?: string;
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -63,7 +75,7 @@ export class ListInvoicesQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(200)
+  @Max(100)
   limit?: number;
 }
 

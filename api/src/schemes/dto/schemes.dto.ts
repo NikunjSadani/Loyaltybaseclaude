@@ -8,6 +8,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  Max,
   Min,
   MinLength,
   registerDecorator,
@@ -105,6 +106,28 @@ export class UpdateSchemeDto {
 }
 
 export class ListSchemesQueryDto {
+  /**
+   * Free-text search (Wave 2 pagination) — matches scheme name OR code,
+   * case-insensitively. Moved from the FE client-side `.filter()`.
+   */
+  @IsOptional()
+  @IsString()
+  search?: string;
+
+  /**
+   * Status filter. When omitted the list returns ALL non-deleted statuses
+   * (so the FE "All" pill works); when provided, restricts to that status.
+   * Validated against the Prisma SchemeStatus enum.
+   */
+  @IsOptional()
+  @IsEnum(SchemeStatus)
+  status?: SchemeStatus;
+
+  /** Scheme-type filter, validated against the Prisma SchemeType enum. */
+  @IsOptional()
+  @IsEnum(SchemeType)
+  type?: SchemeType;
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -115,6 +138,7 @@ export class ListSchemesQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(100)
   limit?: number = 20;
 }
 

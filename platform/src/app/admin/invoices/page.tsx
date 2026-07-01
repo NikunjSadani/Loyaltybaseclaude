@@ -5,7 +5,8 @@
  * Full invoice list with filters, "Generate invoices" action, Mark Paid, and CSV export.
  *
  * Backend:
- *   GET  /api/admin/invoices?period=&status=&outletCode=
+ *   GET  /api/admin/invoices?page=&limit=&search=&period=&status=&outletCode=
+ *        → { invoices, pagination: { page, limit, total, pages } }
  *   POST /api/admin/invoices/generate   body { period: "YYYY-MM" }
  *   PATCH /api/admin/invoices/:id/mark-paid
  *   PATCH /api/admin/invoices/:id/invoice-number  body { invoiceNumber }
@@ -14,7 +15,7 @@
  * CGST_SGST split: CGST = SGST = gstPaise / 2.
  */
 
-import { useState, useMemo, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import {
   Search,
@@ -91,6 +92,16 @@ interface BackendInvoice {
   };
 }
 
+// ── Server pagination envelope (canonical: { page, limit, total, pages }) ──────
+interface Pagination {
+  page:  number;
+  limit: number;
+  total: number;
+  pages: number;
+}
+
+const PAGE_SIZE = 50;
+
 // ── Generate API response ─────────────────────────────────────────────────────
 interface SkippedOutlet {
   outletCode: string;
@@ -151,10 +162,15 @@ export default function AdminInvoiceListPage() {
   const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState<string | null>(null);
+  const [pagination, setPagination] = useState<Pagination | null>(null);
+  const [page, setPage]         = useState(1);
 
   const [search, setSearch]             = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'GENERATED' | 'PAID'>('ALL');
   const [periodFilter, setPeriodFilter] = useState('ALL');
+  // Available periods for the dropdown — fetched ONCE (unpaginated, all statuses)
+  // so the option list is complete regardless of the current page/filters.
+  const [allPeriods, setAllPeriods] = useState<string[]>([]);
 
   // ── Generate invoices state ──────────────────────────────────────────────
   const [showGenerate, setShowGenerate]         = useState(false);
@@ -171,26 +187,61 @@ export default function AdminInvoiceListPage() {
   const [exporting, setExporting]     = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
 
-  // ── Fetch ────────────────────────────────────────────────────────────────
-  const fetchInvoices = useCallback(async (period?: string, status?: string) => {
+  // ── Fetch (server-filtered + server-paginated) ────────────────────────────
+  // Sends ?page&limit&search&period&status&outletCode; the backend builds the
+  // `where` (tenant-scoped) + skip/take + count and returns { invoices, pagination }.
+  const fetchInvoices = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const params = new URLSearchParams();
-    if (period && period !== 'ALL') params.set('period', period);
-    if (status && status !== 'ALL') params.set('status', status);
-    const qs = params.toString() ? `?${params.toString()}` : '';
+    const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) });
+    if (search.trim())            params.set('search', search.trim());
+    if (statusFilter !== 'ALL')   params.set('status', statusFilter);
+    if (periodFilter !== 'ALL')   params.set('period', periodFilter);
 
-    // Backend list() returns { invoices, pagination } — read the array off it.
-    const res = await api.get<{ invoices: BackendInvoice[] }>(`/api/admin/invoices${qs}`);
+    const res = await api.get<{ invoices: BackendInvoice[]; pagination?: Pagination }>(
+      `/api/admin/invoices?${params.toString()}`,
+    );
     if (res.success) {
       setInvoices((res.data.invoices ?? []).map(mapBackend));
+      setPagination(res.data.pagination ?? null);
     } else {
       setError('Failed to load invoices');
     }
     setLoading(false);
-  }, []);
+  }, [page, search, statusFilter, periodFilter]);
 
-  useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
+  // Debounced load — re-runs on page / search / status / period change.
+  useEffect(() => {
+    const t = setTimeout(() => { void fetchInvoices(); }, 250);
+    return () => clearTimeout(t);
+  }, [fetchInvoices]);
+
+  // Any filter change resets to page 1 (the old page index is meaningless for a
+  // different result set). fetchInvoices then re-fires via its `page` dep.
+  useEffect(() => {
+    setPage(1);
+  }, [search, statusFilter, periodFilter]);
+
+  // Period dropdown options — loaded once (all periods, unpaginated) so the list
+  // is complete no matter which page/filter is active. Uses a large limit; the
+  // backend caps at 100, so page through until exhausted.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const periods = new Set<string>();
+      for (let p = 1; p <= 50; p++) {
+        const res = await api.get<{ invoices: BackendInvoice[]; pagination?: Pagination }>(
+          `/api/admin/invoices?page=${p}&limit=100`,
+        );
+        if (!res.success) break;
+        for (const inv of res.data.invoices ?? []) periods.add(inv.period);
+        const pg = res.data.pagination;
+        if (!pg || p >= pg.pages || pg.pages === 0) break;
+      }
+      if (!cancelled) setAllPeriods(Array.from(periods).sort().reverse());
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // ── Generate invoices ────────────────────────────────────────────────────
   const handleGenerate = async () => {
@@ -209,8 +260,9 @@ export default function AdminInvoiceListPage() {
 
     if (res.success) {
       setGenerateResult(res.data);
-      // Refresh list
-      fetchInvoices(generatePeriod, undefined);
+      // Refresh the list to the generated period (server re-filters + re-paginates).
+      setPeriodFilter(generatePeriod);
+      setPage(1);
     } else {
       setGenerateError(res.error ?? 'Generation failed');
     }
@@ -239,7 +291,11 @@ export default function AdminInvoiceListPage() {
   const handleExport = async () => {
     setExporting(true);
     setExportError(null);
+    // Export stays UNPAGINATED (exports ALL matching rows) — deliberately never
+    // sends page/limit. It DOES honour the active filters so the file matches what
+    // the operator is looking at.
     const params = new URLSearchParams();
+    if (search.trim())          params.set('search', search.trim());
     if (statusFilter !== 'ALL') params.set('status', statusFilter);
     if (periodFilter !== 'ALL') params.set('period', periodFilter);
     const qs = params.toString() ? `?${params.toString()}` : '';
@@ -249,31 +305,12 @@ export default function AdminInvoiceListPage() {
   };
 
   // ── Computed ─────────────────────────────────────────────────────────────
-  const allPeriods = useMemo(() => {
-    const s = new Set(invoices.map((i) => i.period));
-    return Array.from(s).sort().reverse();
-  }, [invoices]);
-
-  const filtered = useMemo(() => {
-    return invoices.filter((inv) => {
-      if (statusFilter !== 'ALL' && inv.status !== statusFilter) return false;
-      if (periodFilter !== 'ALL' && inv.period !== periodFilter) return false;
-      if (search) {
-        const q = search.toLowerCase();
-        return (
-          inv.invoiceNumber.toLowerCase().includes(q) ||
-          inv.outletName.toLowerCase().includes(q) ||
-          inv.firmName.toLowerCase().includes(q) ||
-          inv.outletCode.toLowerCase().includes(q)
-        );
-      }
-      return true;
-    });
-  }, [invoices, search, statusFilter, periodFilter]);
-
-  const totalSubtotalPaise = filtered.reduce((s, i) => s + i.subtotalPaise, 0);
-  const totalGstPaise      = filtered.reduce((s, i) => s + i.gstPaise, 0);
-  const totalPaise         = filtered.reduce((s, i) => s + i.totalPaise, 0);
+  // Filtering + pagination now happen SERVER-side; `invoices` already holds the
+  // current, filtered page. The summary strip sums that page (totals are labelled
+  // "this page" below); the invoice count uses pagination.total for the full set.
+  const totalSubtotalPaise = invoices.reduce((s, i) => s + i.subtotalPaise, 0);
+  const totalGstPaise      = invoices.reduce((s, i) => s + i.gstPaise, 0);
+  const totalPaise         = invoices.reduce((s, i) => s + i.totalPaise, 0);
 
   if (loading) {
     return (
@@ -414,9 +451,9 @@ export default function AdminInvoiceListPage() {
       {/* Summary strip */}
       <div className="grid grid-cols-3 gap-3">
         {[
-          { label: 'Base Payout',   value: formatINR(totalSubtotalPaise), sub: `${filtered.length} invoices` },
-          { label: 'Total GST',     value: formatINR(totalGstPaise),      sub: 'GST applicable only' },
-          { label: 'Invoice Total', value: formatINR(totalPaise),          sub: 'Base + GST' },
+          { label: 'Base Payout',   value: formatINR(totalSubtotalPaise), sub: `${invoices.length} invoices · this page` },
+          { label: 'Total GST',     value: formatINR(totalGstPaise),      sub: 'this page · GST applicable only' },
+          { label: 'Invoice Total', value: formatINR(totalPaise),          sub: 'this page · Base + GST' },
         ].map((s) => (
           <div key={s.label} className="bg-white border border-gray-200 rounded-xl px-4 py-3">
             <p className="text-[10px] text-gray-400 uppercase tracking-wide">{s.label}</p>
@@ -464,7 +501,7 @@ export default function AdminInvoiceListPage() {
 
       {/* Table */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-        {filtered.length === 0 ? (
+        {invoices.length === 0 ? (
           <div className="py-16 flex flex-col items-center gap-2 text-gray-400">
             <FileText className="w-8 h-8" />
             <p className="text-sm">No invoices match your filters</p>
@@ -485,7 +522,7 @@ export default function AdminInvoiceListPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {filtered.map((inv) => (
+                {invoices.map((inv) => (
                   <tr key={inv.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-4 py-3 font-mono text-gray-700 text-[11px]">{inv.invoiceNumber}</td>
                     <td className="px-4 py-3">
@@ -544,6 +581,33 @@ export default function AdminInvoiceListPage() {
           </div>
         )}
       </div>
+
+      {/* Pagination controls (canonical { page, limit, total, pages } envelope) */}
+      {pagination && pagination.pages > 1 && (
+        <div className="flex items-center justify-between gap-3 flex-wrap text-xs text-gray-500">
+          <span>
+            Page <strong className="text-gray-700">{pagination.page}</strong> of{' '}
+            <strong className="text-gray-700">{pagination.pages}</strong> ·{' '}
+            <strong className="text-gray-700">{pagination.total}</strong> total
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={pagination.page <= 1}
+              className="px-3 py-1.5 font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => setPage((p) => p + 1)}
+              disabled={pagination.page >= pagination.pages}
+              className="px-3 py-1.5 font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -837,6 +837,45 @@ describe('InvoicesService', () => {
       expect(where.status).toBe('PAID');
       expect(where.outletCode).toBe('O1');
     });
+
+    it('applies the server-side search OR (invoiceNumber + outletCode) on BOTH find and count', async () => {
+      mockPrisma.autoInvoice.findMany.mockResolvedValue([]);
+      mockPrisma.autoInvoice.count.mockResolvedValue(0);
+
+      await service.list(admin, { search: 'TGSL-VIS' });
+
+      const findWhere = mockPrisma.autoInvoice.findMany.mock.calls[0][0].where;
+      const countWhere = mockPrisma.autoInvoice.count.mock.calls[0][0].where;
+      const expectedOr = [
+        { invoiceNumber: { contains: 'TGSL-VIS', mode: 'insensitive' } },
+        { outletCode: { contains: 'TGSL-VIS', mode: 'insensitive' } },
+      ];
+      expect(findWhere.OR).toEqual(expectedOr);
+      // The count MUST use the SAME where (incl. the search OR) or the page count lies.
+      expect(countWhere.OR).toEqual(expectedOr);
+      // Search NARROWS within tenant scope — clientId is still pinned.
+      expect(findWhere.clientId).toBe('deoleo');
+    });
+
+    it('search is trimmed and omitted when blank (no OR clause)', async () => {
+      mockPrisma.autoInvoice.findMany.mockResolvedValue([]);
+      mockPrisma.autoInvoice.count.mockResolvedValue(0);
+
+      await service.list(admin, { search: '   ' });
+      const where = mockPrisma.autoInvoice.findMany.mock.calls[0][0].where;
+      expect(where.OR).toBeUndefined();
+    });
+
+    it('paginates: skip/take derive from page/limit', async () => {
+      mockPrisma.autoInvoice.findMany.mockResolvedValue([]);
+      mockPrisma.autoInvoice.count.mockResolvedValue(0);
+
+      const res = await service.list(admin, { page: 3, limit: 10 });
+      const args = mockPrisma.autoInvoice.findMany.mock.calls[0][0];
+      expect(args.skip).toBe(20); // (3 - 1) * 10
+      expect(args.take).toBe(10);
+      expect(res.pagination).toEqual({ page: 3, limit: 10, total: 0, pages: 0 });
+    });
   });
 
   // ── getById ───────────────────────────────────────────────────────────────────

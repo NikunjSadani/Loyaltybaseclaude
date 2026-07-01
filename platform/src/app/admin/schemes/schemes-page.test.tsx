@@ -56,14 +56,17 @@ function makeScheme(id: string, name: string) {
   };
 }
 
-function mockListSuccess(schemes: ReturnType<typeof makeScheme>[]) {
+function mockListSuccess(
+  schemes: ReturnType<typeof makeScheme>[],
+  pagination?: { page: number; limit: number; total: number; pages: number },
+) {
   mockFetch.mockResolvedValueOnce({
     ok: true,
     json: async () => ({
       success: true,
       data: {
         schemes,
-        pagination: { page: 1, limit: 20, total: schemes.length, pages: 1 },
+        pagination: pagination ?? { page: 1, limit: 20, total: schemes.length, pages: 1 },
       },
     }),
   } as Response);
@@ -152,6 +155,40 @@ describe('Admin Schemes page', () => {
     await waitFor(() => {
       expect(screen.queryByText('Scheme To Delete')).not.toBeInTheDocument();
     });
+  });
+
+  it('sends ?page&limit on the list request (server pagination)', async () => {
+    mockListSuccess([makeScheme('sch-1', 'Summer Push')]);
+
+    await act(async () => { await renderPage(); });
+
+    await waitFor(() => {
+      expect(screen.getByText('Summer Push')).toBeInTheDocument();
+    });
+
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toMatch(/\/api\/schemes\?/);
+    expect(url).toMatch(/page=1/);
+    expect(url).toMatch(/limit=20/);
+  });
+
+  it('renders Prev/Next for multi-page results and Next advances the page (server refetch)', async () => {
+    // Page 1 of 2, then page 2 on Next click.
+    mockListSuccess([makeScheme('sch-1', 'Summer Push')], { page: 1, limit: 20, total: 40, pages: 2 });
+    mockListSuccess([makeScheme('sch-2', 'Monsoon Drive')], { page: 2, limit: 20, total: 40, pages: 2 });
+
+    await act(async () => { await renderPage(); });
+
+    await waitFor(() => { expect(screen.getByText('Summer Push')).toBeInTheDocument(); });
+
+    const nextBtn = screen.getByText('Next');
+    expect(nextBtn).toBeInTheDocument();
+    await act(async () => { fireEvent.click(nextBtn); });
+
+    await waitFor(() => { expect(screen.getByText('Monsoon Drive')).toBeInTheDocument(); });
+    // The second request carried page=2.
+    const url2 = mockFetch.mock.calls[1][0] as string;
+    expect(url2).toMatch(/page=2/);
   });
 
   it('does NOT call DELETE when the user cancels the confirm dialog', async () => {

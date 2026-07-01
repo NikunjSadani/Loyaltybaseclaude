@@ -11,6 +11,8 @@
  * ADMI7: "Mark Paid" button is shown for GENERATED invoices
  * ADMI8: "Mark Paid" button is absent for PAID invoices
  * ADMI9: "Generate Invoices" button is present in the header
+ * ADMI12: list request sends ?page&limit (server pagination)
+ * ADMI13: Prev/Next controls render + Next advances the page (server refetch)
  */
 
 import React from 'react';
@@ -190,6 +192,63 @@ describe('ADMI — Admin Invoice list API wiring', () => {
     render(<AdminInvoiceListPage />);
     await screen.findByText(/no invoices match your filters/i);
     expect(screen.getByText(/generate invoices/i)).toBeInTheDocument();
+  });
+
+  it('ADMI12: list request sends ?page&limit (server pagination)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: wrap([]) }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<AdminInvoiceListPage />);
+    await screen.findByText(/no invoices match your filters/i);
+    // The main list call carries page + limit query params.
+    const listCall = fetchMock.mock.calls
+      .map((c) => c[0] as string)
+      .find((u) => typeof u === 'string' && /\/api\/admin\/invoices\?/.test(u) && u.includes('limit=50'));
+    expect(listCall).toBeDefined();
+    expect(listCall).toMatch(/page=1/);
+    expect(listCall).toMatch(/limit=50/);
+  });
+
+  it('ADMI13: Prev/Next render for multi-page results and Next advances the page', async () => {
+    // page 1 of 2 → Next enabled, Prev disabled. Clicking Next refetches page 2.
+    const page1 = {
+      invoices: [MOCK_BACKEND_INVOICES[0]],
+      pagination: { page: 1, limit: 50, total: 60, pages: 2 },
+    };
+    const page2 = {
+      invoices: [MOCK_BACKEND_INVOICES[1]],
+      pagination: { page: 2, limit: 50, total: 60, pages: 2 },
+    };
+    let listCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      // The period-options loader uses limit=100; main list uses limit=50.
+      if (typeof url === 'string' && url.includes('limit=50')) {
+        listCalls += 1;
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ success: true, data: listCalls === 1 ? page1 : page2 }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ success: true, data: wrap([]) }),
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<AdminInvoiceListPage />);
+    // Page-1 invoice visible + Next control present.
+    await screen.findByText('TGSL-VIS-OUT001-202604-001');
+    const nextBtn = screen.getByText('Next');
+    expect(nextBtn).toBeInTheDocument();
+
+    fireEvent.click(nextBtn);
+
+    // Server refetch swaps to page-2 content.
+    await screen.findByText('TGSL-VIS-OUT002-202604-001');
+    expect(listCalls).toBeGreaterThanOrEqual(2);
   });
 
   it('ADMI10: Generate panel is shown when "Generate Invoices" is clicked', async () => {

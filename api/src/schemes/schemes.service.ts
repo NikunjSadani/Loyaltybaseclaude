@@ -35,14 +35,43 @@ export class SchemesService {
     const limit = q.limit ?? 20;
     const skip = (page - 1) * limit;
 
+    const isAdmin = this.isAdmin(user);
+
     const where: Prisma.SchemeWhereInput = {
       clientId: user.clientId,
-      status: 'ACTIVE',
       deletedAt: null,
     };
 
+    // Status handling (Wave 2 pagination).
+    //   • ADMINS: an explicit `?status` wins (validated against SchemeStatus); with no
+    //     status they get ALL non-deleted statuses so the admin list's "All" pill +
+    //     DRAFT/PAUSED/EXPIRED/CANCELLED filters work (previously hard-pinned to ACTIVE).
+    //   • NON-ADMINS (partner / sales enrollment views): ALWAYS forced to ACTIVE-only,
+    //     IGNORING any client-supplied `?status`. They must never see DRAFT/EXPIRED/etc.
+    //     — so the status filter is admin-gated: a non-admin hand-crafting
+    //     `?status=DRAFT` cannot bypass the ACTIVE-only default (their eligibility rows
+    //     could otherwise expose an unpublished scheme's name/code/dates).
+    if (isAdmin) {
+      if (q.status) where.status = q.status;
+    } else {
+      where.status = 'ACTIVE';
+    }
+
+    // Scheme-type filter (validated against the SchemeType enum at the DTO).
+    if (q.type) where.schemeType = q.type;
+
+    // Free-text search over name + code, case-insensitive. AND-combined with the
+    // scope clauses above (never widens tenant scope).
+    const search = q.search?.trim();
+    if (search) {
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { code: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
     // Non-admins only see schemes they are explicitly eligible for.
-    if (!this.isAdmin(user)) {
+    if (!isAdmin) {
       const eligibilities = await this.prisma.schemeEligibility.findMany({
         where: { specificPartnerId: user.sub },
         select: { schemeId: true },
