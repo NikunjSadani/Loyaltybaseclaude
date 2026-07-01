@@ -10,6 +10,27 @@
 > runtime-verify. The money re-audit caught a real BLOCKER the first pass missed (GLM-2 never implemented = lost awards) plus
 > a payouts-rail resolver gap — both then fixed and re-verified. See the FIX WAVE RESULTS block below.
 
+## 🟢 2026-07-01 — PER-TENANT CONVERSION-RATE EDITOR (post-cutover, rides NEXT cutover) — BUILT + STAGING-VERIFIED
+
+> Owner assumed Deoleo, saw no conversion-rate field in Settings (EXPECTED — there was never a UI field; Deoleo is 1:1 by
+> default since prod has no `POINTS_CONVERSION_RATE`, confirmed via `gcloud run services describe`). Built the editor.
+> **On develop `e63e5c3`→`e1257f7` — NOT yet in prod.**
+
+- **Where:** a new "Points → ₹ Conversion Rate" card on **`/admin/settings`** (tenant-admin page; while assumed into a tenant,
+  `user.clientId` = that tenant via `assumeTenant`'s `clientIdOverride`, so the save targets the right tenant) — NOT `/gifsy/settings`.
+  Mirrors the Points-Expiry card: GIFSY_ADMIN edits, CLIENT_ADMIN read-only. Pure FE — the `saveGifsySettings({pointsConversionRate})`
+  → `PUT /v1/admin/settings {key:'conversionRate'}` (GIFSY-only) plumbing already existed.
+- **Money guards:** floor **0.005** (=MIN_RATE; the read-layer silently ignores a smaller rate + keeps the default →
+  a below-floor save would falsely look successful); ceiling 100000 (fat-finger); **snap to the centi grid `Math.round(rate*100)/100`
+  on save + reflect it** so the displayed rate always equals the rate redemptions enforce (no silent display/enforce drift).
+- **Audit:** independent adversarial pass — M1 "writes to gifsy not the tenant" = FALSE POSITIVE (didn't model the assume-tenant
+  token override; proven at `auth.service.ts:392`). Real fixes applied: centi-snap desync (M2), in-band `0.004` floor test (was only `0`),
+  ceiling (L1).
+- **Gate:** FE vitest **1705** (7 new cases) · tsc 0 (api/nest untouched). **Runtime-verified on staging:** assume deoleo →
+  PUT rate=2 → effective `/v1/settings`=2 → reset to 1 → CLIENT_ADMIN PUT = **403**.
+- **Deoleo impact:** none — launches at the 1:1 default. This enables future non-1:1 tenants + supersedes the earlier
+  "no conversion-rate UI" backlog chip.
+
 ## 🚀 2026-07-01 — CUTOVER #2 EXECUTED (`develop` → `main`) + DEOLEO TENANT CREATED + ACTIVE — DONE
 
 > **CUTOVER #2 was EXECUTED and is COMPLETE (2026-07-01).** Owner-driven HYBRID (owner approved the `production` gate; orchestrator
