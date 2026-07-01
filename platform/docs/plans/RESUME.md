@@ -38,9 +38,22 @@ a recommendation ("are you sure?"), genuinely reconsider — don't defend (it fl
 calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep EVERY doc + memory in the same pass.
 [[default-to-orchestration]] [[own-consistency-no-micromanage]] [[audit-every-build-item]] [[verify-flows-at-runtime]]
 
+🟡 SCALE/OPS BUILD IN PROGRESS (post-Deoleo, owner-driven, orchestrated — rides the NEXT cutover; **prod stays on `a2f5929`,
+develop is now AHEAD at HEAD `2d1a50e`**). SHIPPED to `develop` + gate-green + each independently audited: **(1)** security
+log-leak fix (`df47baf` — prod was logging live redemption OTPs + full phone numbers; removed/masked); **(2)** observability O1+O2
+(`33543ec` — `nestjs-pino` structured JSON logs + a real `/health/ready` DB-ping probe; audit CAUGHT a HIGH `?token=` query-log leak
+→ custom PATH-only req serializer; O3/OpenTelemetry DEFERRED — needs monitoring-IAM + `deploy.yml` edit); **(3)** pagination Wave 1
+(`2d1a50e` — `/admin/outlets` + `/admin/credits/batches`/`/reversals`, `@Max(100)`; audit CAUGHT a HIGH KYC-status-parity double-count
+bug → fixed). **🔴 OPEN HIGH — staging KYC-submit 500** (`POST /v1/kyc` → `channelPartner.create()` aborts the tx on
+`@@unique([clientId,gstNumber])`; the P2002 guard fails — retries on an aborted tx + `e.meta.target` unreliable under the Prisma-7 pg
+adapter). Fix scoped, NOT applied: pre-check `(clientId,gstNumber)` → clean 400, and pre-pick a free `partnerCode`. **PENDING owner:**
+pagination Wave 2 scope (rec = invoices + schemes-FE-adoption only) · Notifications Core go/no-go (drainer is PUSH-only so enqueued
+SMS/WhatsApp/email never deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLOCKED on missing upstream) ·
+email provider (ZeptoMail ~$0.25/1k vs SES ~$0.10/1k). See POST-GO-LIVE-BACKLOG §C + GO-LIVE-ISSUE-LIST 🟡 SCALE/OPS section.
+
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1289 · nest 0 · FE vitest 1698 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `0055221`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1316 · nest 0 · FE vitest 1708 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `2d1a50e`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project

@@ -1,6 +1,8 @@
 # Go-Live Issue List — authoritative master tracker (updated 2026-07-01)
 
-> **STATUS: 🚀 CUTOVER #2 EXECUTED & COMPLETE (2026-07-01) — prod live on `a2f5929` (develop `0055221`); DEOLEO TENANT CREATED + ACTIVE.**
+> **STATUS: 🚀 CUTOVER #2 EXECUTED & COMPLETE (2026-07-01) — prod live on `a2f5929`; DEOLEO TENANT CREATED + ACTIVE.**
+> **`develop` is now AHEAD of prod (HEAD `2d1a50e`) with the post-Deoleo SCALE/OPS build** — security log-leak fix + observability O1/O2 + pagination Wave 1 — riding the NEXT cutover; **prod stays on `a2f5929`, unchanged.** Gate: **api jest 1316 · nest 0 · FE vitest 1708 · tsc 0.** See the **🟡 2026-07-01 — SCALE/OPS BUILD** section below.
+> **🔴 OPEN HIGH GO-LIVE BLOCKER: staging KYC-submit 500** (`POST /v1/kyc` → GST-uniqueness abort) — root cause found, fix scoped, **NOT yet applied**; see the **🔴 OPEN HIGH** entry below.
 > Cutover #2 shipped the onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate (migration +
 > `expire-sweep-prod` scheduler); Deoleo onboarded (slug=`deoleo`) + flipped `ONBOARDING→ACTIVE`. Remaining = owner-gated: confirm
 > Deoleo Settings (conversion=1) + create first Deoleo CLIENT_ADMIN + load real master data (#76) + WhatsApp `deoleo_kyc_approval`
@@ -9,6 +11,47 @@
 > (GLM · GL-Money · GL-RBAC · GL-FE-enroll · GL-FE-settle), each executor → INDEPENDENT adversarial audit → Opus gate →
 > runtime-verify. The money re-audit caught a real BLOCKER the first pass missed (GLM-2 never implemented = lost awards) plus
 > a payouts-rail resolver gap — both then fixed and re-verified. See the FIX WAVE RESULTS block below.
+
+## 🔴 2026-07-01 — OPEN HIGH GO-LIVE BLOCKER — staging KYC-submit 500 (NOT yet fixed)
+
+> Found 2026-07-01 on staging. **Root cause identified, fix scoped — NOT applied.** A HIGH go-live blocker: a real owner with
+> multiple outlets under one GST, or any re-submit, will hit it.
+
+- **Symptom:** `POST /v1/kyc` (KYC submit) returns a generic **500** ("Internal server error").
+- **Root cause:** `channelPartner.create()` violates the `@@unique([clientId, gstNumber])` constraint when a partner with that GST
+  already exists in the tenant → **Postgres aborts the whole transaction** → generic 500. The existing P2002 guard in
+  `createPartnerWithUniqueCode` (`kyc.service.ts:797`) does **not** save it, because: **(a)** on a partnerCode collision it retries
+  `create()` on the **SAME already-aborted transaction** (invalid — Postgres won't accept further statements after the abort), and
+  **(b)** it discriminates gst-vs-code collisions via `e.meta.target`, which is **unreliable/empty under the Prisma 7 pg driver
+  adapter**.
+- **FIX (scoped, not applied) — pre-resolve uniqueness BEFORE the insert:**
+  1. **Pre-check `(clientId, gstNumber)`** → return a clean **400 "GST already registered"** instead of aborting the tx.
+  2. **Pre-pick a free `partnerCode`** by querying existing codes first → no collision, no retry on an aborted tx.
+- **Reproducible:** any owner with multiple outlets under one GST, or any re-submit of an existing GST in the tenant.
+
+## 🟡 2026-07-01 — SCALE/OPS BUILD (post-Deoleo, in progress) — on `develop`, rides NEXT cutover
+
+> Post-Deoleo, owner-driven, orchestrated. **Three streams approved.** Recon (3 parallel agents) reshaped scope: pagination's
+> "11 endpoints" was an OVERCOUNT (most already paginated or tiny user-scoped); **notifications is mostly dead scaffold** — the
+> drainer is **PUSH-only** so enqueued SMS/WhatsApp/email never deliver; NotificationTemplate / LeaderboardSnapshot.isPublished /
+> Ticket.slaBreached / in-app-inbox are unwired; **2 of 3 events (leaderboard-published, ticket-SLA) are BLOCKED on missing upstream.**
+> **On `develop` HEAD `2d1a50e` (prod still `a2f5929`). Gate: api jest 1316 · nest 0 · FE vitest 1708 · tsc 0.** Build is PAUSED for owner decisions.
+
+**SHIPPED (pushed to `develop`, gate-green, each independently audited):**
+
+| # | Item | Detail | Status |
+|---|---|---|---|
+| **SEC-LOG-LEAK** 🔴 | **Security log-leak fix** — prod was logging live redemption **OTPs** (`rewards.service.ts:493,911` — debug emits active in prod) + full **phone numbers** (`auth.service.ts:190`, info). | Removed / masked the leaked OTPs and phone numbers. | ✅ pushed `df47baf` |
+| **OBS-O1+O2** | **Observability O1+O2** — `nestjs-pino` structured JSON logs (Cloud Logging severity, per-request correlation id, tenantId/userId/role) + a real **`/health/ready`** DB-ping probe (liveness `/health` unchanged). | **Independent audit CAUGHT a real HIGH leak** (pino-http logs `req.url` + query/params by default → a `?token=<KYC-docview-JWT>` would be logged); fixed with a custom req serializer (method + PATH-only, drops query/params/headers) + proved at runtime + regression test. `/health/ready` verified live on staging. **O3 (OpenTelemetry) DEFERRED** — needs monitoring-IAM + a `deploy.yml` probe/env edit (owner-gated). | ✅ pushed `33543ec` |
+| **PAG-W1** | **Pagination Wave 1** — `/admin/outlets` (server-side search + KYC-status filter + pagination) and `/admin/credits/batches` + `/reversals`. Envelope `{ <items>, pagination:{page,limit,total,pages} }`, limit `@Max(100)`. | **Independent audit CAUGHT a real HIGH KYC-parity bug** (the SQL reproduction of the derived KYC-status bucket didn't honor priority-2 `kycIntent=NOT_INTERESTED` → wrong-tab + double-count); fixed with a NULL-safe guard + regression test. FE outlets page still loads the full list on mount for upload-validation (fine at launch scale; a lightweight all-ids endpoint is a noted follow-up → POST-GO-LIVE-BACKLOG). | ✅ pushed `2d1a50e` |
+
+**PENDING owner decisions (build paused here — owner said "document status, continue later"):**
+- **Pagination Wave 2 scope:** recommendation = **invoices + schemes-FE-adoption only**; skip paginating the tiny KPI / banner /
+  partner-sales user-scoped lists (low value — add a `@Max` cap instead).
+- **Notifications Core go/no-go:** multi-channel drainer (so enqueued SMS/WhatsApp/email actually send) + in-app inbox (needs a
+  small `InAppNotification` migration) + banner event; **all new events OFF by default**; email behind a **Noop adapter**. Running
+  cost ≈ **$0 infra** excl. per-message provider charges.
+- **Email provider:** **ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k)** — parked until email is switched on.
 
 ## 🟢 2026-07-01 — PER-TENANT CONVERSION-RATE EDITOR (post-cutover, rides NEXT cutover) — BUILT + STAGING-VERIFIED
 
