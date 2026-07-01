@@ -75,4 +75,22 @@ describe('KYC list — NOT_STARTED outlets surface as actionable entries', () =>
     const select = screen.getByTestId('kyc-status-filter') as HTMLSelectElement;
     expect(select.value).toBe('PENDING_KYC');
   });
+
+  it('ASM (now an enroll role) sees the New Enrollment button + NOT_STARTED rows', async () => {
+    localStorage.setItem('loyaltybase_sales_role', 'ASM');
+    render(<KYCListPage />);
+    await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
+    expect(screen.getByText('New Enrollment')).toBeInTheDocument();
+    // NOT_STARTED rows are actionable (link to enrollment) for ASM too.
+    expect(screen.getAllByText('Tap to start enrollment').length).toBeGreaterThan(0);
+  });
+
+  it('a non-enroll manager (RSM) sees neither the New Enrollment button nor NOT_STARTED rows', async () => {
+    localStorage.setItem('loyaltybase_sales_role', 'RSM');
+    render(<KYCListPage />);
+    // No submissions + RSM does not enroll → no NOT_STARTED synthesis → empty list.
+    await waitFor(() => expect(screen.getByText('No KYC submissions')).toBeInTheDocument());
+    expect(screen.queryByText('New Enrollment')).not.toBeInTheDocument();
+    expect(screen.queryByText('Verma Traders')).not.toBeInTheDocument();
+  });
 });

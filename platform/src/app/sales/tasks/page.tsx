@@ -15,7 +15,7 @@ import {
   VISIBILITY_ELIGIBLE_OUTLET_TYPES,
   type VisibilityStatusMap,
 } from '@/lib/visibility-upload';
-import { getRole, type SalesRole } from '@/lib/sales-role';
+import { getRole, canEnroll, type SalesRole } from '@/lib/sales-role';
 import {
   fetchAllSchemes,
   saveSalesEnrollment,
@@ -626,7 +626,7 @@ export default function TasksPage() {
   const taskGroups: TaskGroup[] = useMemo(() => {
     if (!taskConfig) return [];
 
-    const isFieldRole  = role === 'XSR' || role === 'SO';
+    const isFieldRole  = canEnroll(role);
     const approvalStatus =
       role === 'SO'  ? KYCStatus.PENDING_SO_APPROVAL  :
       role === 'ASM' ? KYCStatus.PENDING_ASM_APPROVAL :
@@ -780,7 +780,7 @@ export default function TasksPage() {
     return groups;
   }, [outlets, kycSubs, taskConfig, role, visibilityItems]);
 
-  const isFieldRole  = role === 'XSR' || role === 'SO';
+  const isFieldRole  = canEnroll(role);
   const schemeCount  = pendingSchemes.length;
   const totalTasks   = taskGroups.reduce((s, g) => s + g.items.length, 0) + (isFieldRole ? schemeCount : 0);
 

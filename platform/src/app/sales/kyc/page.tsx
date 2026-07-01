@@ -11,7 +11,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
 import { KYCStatus } from '@/types';
 import { cn } from '@/lib/utils';
-import { type SalesRole, getRole, hasTeamView } from '@/lib/sales-role';
+import { type SalesRole, getRole, hasTeamView, canEnroll } from '@/lib/sales-role';
 import { api } from '@/lib/api-client';
 
 interface KYCEntry {
@@ -145,7 +145,7 @@ function KYCListContent() {
   const rawStatus = searchParams.get('status');
   const approvalStatus = getApprovalStatus();
   const role = getRole();
-  const canEnroll = role === 'XSR' || role === 'SO';
+  const canEnrollRole = canEnroll(role);
 
   const statusParam: FilterKey | null = rawStatus
     ? rawStatus === APPROVAL_REQUIRED_KEY
@@ -222,10 +222,10 @@ function KYCListContent() {
     // no submission, so they never appear in /api/kyc. Pull them from the roster and
     // surface them here. Fetched for ALL sales roles (rep + downline) so that:
     //  - NOT_STARTED → actionable "Pending KYC" entries that link to enrollment, but
-    //    ONLY for the field roles who enroll (XSR / SO);
+    //    ONLY for the roles who enroll (canEnroll — XSR / SO / ASM);
     //  - NOT_INTERESTED → shown DISTINCTLY and NON-actionable for ALL roles (only an
     //    admin can re-open such an outlet for enrollment).
-    const canEnrollNow = role === 'XSR' || role === 'SO';
+    const canEnrollNow = canEnroll(role);
     const outletsFetch: Promise<KYCEntry[]> = fetch('/api/sales/outlets')
       .then((r) => r.json())
       .then((body): KYCEntry[] => {
@@ -328,7 +328,7 @@ function KYCListContent() {
     <div className="space-y-5 fade-in">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-900">KYC Submissions</h1>
-        {canEnroll && (
+        {canEnrollRole && (
           <Link href="/sales/kyc/new">
             <Button variant="primary" size="sm">
               <Plus className="h-4 w-4" />New Enrollment

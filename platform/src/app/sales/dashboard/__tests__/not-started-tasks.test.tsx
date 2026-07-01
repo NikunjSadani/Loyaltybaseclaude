@@ -37,17 +37,21 @@ const NOT_STARTED_OUTLETS = {
   ] },
 };
 
-beforeEach(() => {
+function mockOutlets(role: string) {
   vi.clearAllMocks();
   localStorage.clear();
-  // Field role (XSR) so the field-task groups are evaluated.
-  localStorage.setItem('loyaltybase_sales_role', 'XSR');
+  localStorage.setItem('loyaltybase_sales_role', role);
   fetchMock.mockImplementation((url: string) => {
     if (typeof url === 'string' && url.includes('/api/sales/outlets')) {
       return Promise.resolve({ json: () => Promise.resolve(NOT_STARTED_OUTLETS) });
     }
     return Promise.resolve({ json: () => Promise.resolve({ success: true, data: { period: null, outletCount: 2, kpis: [], trend: [] } }) });
   });
+}
+
+beforeEach(() => {
+  // Enroll role (XSR) so the field-task groups are evaluated.
+  mockOutlets('XSR');
 });
 
 describe('Sales dashboard — NOT_STARTED outlets surface a KYC task', () => {
@@ -56,6 +60,24 @@ describe('Sales dashboard — NOT_STARTED outlets surface a KYC task', () => {
     await waitFor(() => expect(screen.getByText('KYC to be done')).toBeInTheDocument());
     // No "no pending tasks" empty state when there ARE un-KYC'd outlets.
     expect(screen.queryByText(/No pending tasks/i)).not.toBeInTheDocument();
+  });
+
+  it('shows the "KYC to be done" group + New Enrollment for ASM (now an enroll role)', async () => {
+    mockOutlets('ASM');
+    render(<SalesDashboardPage />);
+    await waitFor(() => expect(screen.getByText('KYC to be done')).toBeInTheDocument());
+    // ASM sees the enroll CTA, mirroring XSR/SO.
+    expect(screen.getByText('New Enrollment')).toBeInTheDocument();
+    expect(screen.queryByText(/No pending tasks/i)).not.toBeInTheDocument();
+  });
+
+  it('does NOT show the "KYC to be done" group or New Enrollment for a non-enroll manager (RSM)', async () => {
+    mockOutlets('RSM');
+    render(<SalesDashboardPage />);
+    // RSM is not in ENROLL_ROLES → no field/KYC-to-do tasks, no enroll CTA.
+    await waitFor(() => expect(screen.getByText(/No pending tasks/i)).toBeInTheDocument());
+    expect(screen.queryByText('KYC to be done')).not.toBeInTheDocument();
+    expect(screen.queryByText('New Enrollment')).not.toBeInTheDocument();
   });
 
   it('does not show the task when all outlets are already APPROVED', async () => {

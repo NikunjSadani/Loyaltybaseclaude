@@ -7,7 +7,8 @@
  * Run: npx vitest run src/lib/__tests__/sales-role-from-jwt.test.ts
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { getRole, setRole, roleFromBackend } from '@/lib/sales-role';
+import { getRole, setRole, roleFromBackend, canEnroll, ENROLL_ROLES } from '@/lib/sales-role';
+import type { SalesRole } from '@/lib/sales-role';
 
 function setUser(role: string) {
   localStorage.setItem('user', JSON.stringify({ id: 'u1', name: 'X', role, phone: '9' }));
@@ -59,5 +60,28 @@ describe('getRole — derives from the JWT user when no demo override', () => {
   it('legacy stored code is still migrated when set as an override', () => {
     localStorage.setItem('loyaltybase_sales_role', 'STATE_HEAD');
     expect(getRole()).toBe('RSM');
+  });
+});
+
+describe('canEnroll — roles that can INITIATE a KYC enrollment', () => {
+  it('the two field reps can enroll', () => {
+    expect(canEnroll('XSR')).toBe(true);
+    expect(canEnroll('SO')).toBe(true);
+  });
+
+  it('ASM can now enroll (Deoleo, 2026-07-01)', () => {
+    expect(canEnroll('ASM')).toBe(true);
+  });
+
+  it('managers above ASM cannot enroll', () => {
+    expect(canEnroll('RSM')).toBe(false);
+    expect(canEnroll('ZNM')).toBe(false);
+    expect(canEnroll('NSM')).toBe(false);
+  });
+
+  it('ENROLL_ROLES is exactly XSR, SO, ASM — the gate is not open to all roles', () => {
+    const roles: SalesRole[] = ['XSR', 'SO', 'ASM', 'RSM', 'ZNM', 'NSM'];
+    expect(roles.filter(canEnroll)).toEqual(['XSR', 'SO', 'ASM']);
+    expect(ENROLL_ROLES).toEqual(['XSR', 'SO', 'ASM']);
   });
 });

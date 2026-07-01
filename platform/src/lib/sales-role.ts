@@ -15,6 +15,9 @@ export const ROLE_LABELS: Record<SalesRole, string> = {
 // Roles that can see a team below them (all except XSR)
 export const HAS_TEAM: SalesRole[] = ['SO', 'ASM', 'RSM', 'ZNM', 'NSM'];
 
+// Roles that can INITIATE a new KYC enrollment (field reps + ASM per Deoleo, 2026-07-01).
+export const ENROLL_ROLES: SalesRole[] = ['XSR', 'SO', 'ASM'];
+
 const STORAGE_KEY = 'loyaltybase_sales_role';
 
 /**
@@ -62,4 +65,8 @@ export function setRole(role: SalesRole): void {
 
 export function hasTeamView(role: SalesRole): boolean {
   return HAS_TEAM.includes(role);
+}
+
+export function canEnroll(role: SalesRole): boolean {
+  return ENROLL_ROLES.includes(role);
 }

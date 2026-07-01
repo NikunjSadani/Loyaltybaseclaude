@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { KYCStatus } from '@/types';
 import { pct, pctBarColor } from '@/lib/targets';
-import { type SalesRole, getRole } from '@/lib/sales-role';
+import { type SalesRole, getRole, canEnroll } from '@/lib/sales-role';
 import { classifyPaceGap, buildCasesToGoMsg } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
@@ -250,9 +250,9 @@ export default function SalesDashboard() {
   }, []);
 
   /* ── Visibility tasks — same source + shape as the Tasks page (buildVisibilityTaskItems)
-       so the dashboard's "Visibility" count matches /sales/tasks. Field roles only. ── */
+       so the dashboard's "Visibility" count matches /sales/tasks. Enroll roles only. ── */
   useEffect(() => {
-    const isFieldRole = role === 'XSR' || role === 'SO';
+    const isFieldRole = canEnroll(role);
     const visibilityEnabled = getGifsySettings().visibilityEnabled === true;
     const eligible = outlets.filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type));
     const codes = eligible.map((o) => o.outletCode).filter(Boolean);
@@ -293,14 +293,14 @@ export default function SalesDashboard() {
     const groups: TaskGroup[] = [];
 
     // Role gates
-    const isFieldRole = role === 'XSR' || role === 'SO';
+    const isFieldRole = canEnroll(role);
     const approvalStatus =
       role === 'SO'  ? KYCStatus.PENDING_SO_APPROVAL  :
       role === 'ASM' ? KYCStatus.PENDING_ASM_APPROVAL :
       null;
     const approverLabel = role === 'SO' ? 'XSR' : role === 'ASM' ? 'SO' : null;
 
-    // ── Field-only tasks (XSR & SO) ───────────────────────────────────────────
+    // ── Enroll-role tasks (XSR / SO / ASM) ─────────────────────────────────────
 
     if (isFieldRole) {
       // To-enroll: outlets that exist (master-loaded) but KYC was never started.
@@ -452,7 +452,7 @@ export default function SalesDashboard() {
     return groups;
   }, [outlets, kycSubs, visibilityItems, taskConfig, role]);
 
-  const isFieldRole = role === 'XSR' || role === 'SO';
+  const isFieldRole = canEnroll(role);
   const schemeCount = isFieldRole ? pendingSchemes.length : 0;
   const totalTasks  = taskGroups.reduce((s, g) => s + g.items.length, 0) + schemeCount;
 
@@ -463,7 +463,7 @@ export default function SalesDashboard() {
           <h1 className="text-xl font-bold text-gray-900">Dashboard</h1>
           <p className="text-sm text-gray-500">Your daily task overview</p>
         </div>
-        {(role === 'XSR' || role === 'SO') && (
+        {canEnroll(role) && (
           <Link href="/sales/kyc/new">
             <Button variant="primary" size="sm">
               <Plus className="h-4 w-4" /> New Enrollment

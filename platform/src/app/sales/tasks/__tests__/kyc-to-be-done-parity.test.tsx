@@ -14,7 +14,12 @@ vi.mock('next/link', () => ({
   default: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) =>
     <a href={href} {...props}>{children}</a>,
 }));
-vi.mock('@/lib/sales-role', () => ({ getRole: () => 'XSR' }));
+let mockRole = 'XSR';
+vi.mock('@/lib/sales-role', () => ({
+  getRole: () => mockRole,
+  // Real gate: XSR / SO / ASM can enroll.
+  canEnroll: (r: string) => ['XSR', 'SO', 'ASM'].includes(r),
+}));
 vi.mock('@/lib/gifsy-settings', () => ({ getGifsySettings: () => ({ visibilityEnabled: false }) }));
 vi.mock('@/lib/schemes', () => ({
   fetchAllSchemes: () => Promise.resolve([]),
@@ -52,6 +57,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   localStorage.setItem('token', 't');
+  mockRole = 'XSR';
   fetchMock.mockImplementation((url: string) => {
     if (typeof url === 'string' && url.includes('/api/sales/outlets')) {
       return Promise.resolve({ json: () => Promise.resolve(OUTLETS) });
@@ -68,5 +74,21 @@ describe('Sales Tasks — KYC-to-be-done parity with the dashboard', () => {
     const row = label.closest('a');
     expect(row).not.toBeNull();
     expect(row).toHaveAttribute('href', '/sales/kyc?status=NOT_STARTED');
+  });
+
+  it('renders the "KYC to be done" group for ASM too (now an enroll role)', async () => {
+    mockRole = 'ASM';
+    render(<TasksPage />);
+    const label = await screen.findByText('KYC to be done');
+    expect(label.closest('a')).toHaveAttribute('href', '/sales/kyc?status=NOT_STARTED');
+  });
+
+  it('does NOT render the "KYC to be done" group for a non-enroll manager (RSM)', async () => {
+    mockRole = 'RSM';
+    render(<TasksPage />);
+    // RSM is not in ENROLL_ROLES → the field/KYC-to-do group is omitted; the page
+    // settles into the "All clear!" empty state (no schemes, no field tasks).
+    await screen.findByText('All clear!');
+    expect(screen.queryByText('KYC to be done')).not.toBeInTheDocument();
   });
 });
