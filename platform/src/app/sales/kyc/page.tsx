@@ -427,7 +427,7 @@ function KYCListContent() {
                 typeFilter ? 'border-[var(--brand-primary)] text-[var(--brand-primary)] font-semibold' : '',
               )}
             >
-              <option value="">All Types</option>
+              <option value="">Outlet Types</option>
               {typeOptions.map((t) => (
                 <option key={t} value={t}>{t}</option>
               ))}
@@ -468,8 +468,10 @@ function KYCListContent() {
               {filtered.map((entry) => {
                 const { variant, label } = kycBadge[entry.status];
                 const borderClass = rowBorder(entry.status, approvalStatus);
-                // Un-enrolled outlets have no submission to open → start enrollment instead.
-                const href = entry.isNotStarted ? '/sales/kyc/new' : `/sales/kyc/${entry.id}`;
+                // Un-enrolled outlets have no submission to open → start enrollment instead,
+                // deep-linking the outlet so the new-KYC wizard pre-selects it (entry.id is the
+                // Outlet CUID for synthesised NOT_STARTED rows; the wizard reads ?outletId).
+                const href = entry.isNotStarted ? `/sales/kyc/new?outletId=${entry.id}` : `/sales/kyc/${entry.id}`;
 
                 const rowBody = (
                   <>

@@ -59,11 +59,13 @@ describe('KYC list — NOT_STARTED outlets surface as actionable entries', () =>
     expect(screen.getByText('OUT-2026-001')).toBeInTheDocument();
   });
 
-  it('links a NOT_STARTED entry to enrollment, not a (nonexistent) submission', async () => {
+  it('links a NOT_STARTED entry to enrollment, deep-linking the outlet so the wizard pre-selects it', async () => {
     render(<KYCListPage />);
     const row = await screen.findByText('Verma Traders');
     const link = row.closest('a');
-    expect(link).toHaveAttribute('href', '/sales/kyc/new');
+    // Deep-links ?outletId=<Outlet CUID> — the new-KYC wizard reads it and auto-selects
+    // the outlet, so the rep doesn't have to pick it again on the next page.
+    expect(link).toHaveAttribute('href', '/sales/kyc/new?outletId=o1');
     expect(screen.getAllByText('Tap to start enrollment').length).toBeGreaterThan(0);
   });
 
