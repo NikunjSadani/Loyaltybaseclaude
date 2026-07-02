@@ -382,6 +382,50 @@ describe('TargetsService', () => {
     });
   });
 
+  // ─── getTemplateBuffer ───────────────────────────────────────────────────────
+
+  describe('getTemplateBuffer', () => {
+    const readAoa = (buf: Buffer): (string | number)[][] => {
+      const wb = XLSX.read(buf, { type: 'buffer' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      return XLSX.utils.sheet_to_json(ws, { header: 1 }) as (string | number)[][];
+    };
+
+    beforeEach(() => {
+      mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2]);
+    });
+
+    it('ROSTER: fetches ALL non-deleted outlets — no isActive filter (any KYC/active state)', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O001', name: 'Outlet One', outletType: { code: 'RETAIL' } },
+      ]);
+
+      await service.getTemplateBuffer(admin, { months: '2026-07' } as TemplateQueryDto);
+
+      const arg = mockPrisma.outlet.findMany.mock.calls[0][0];
+      // Tenant-scoped + only soft-deleted excluded; NO isActive (approval) gate.
+      expect(arg.where).toEqual({ clientId: 'deoleo', deletedAt: null });
+      expect('isActive' in arg.where).toBe(false);
+    });
+
+    it('REGRESSION: a pending-KYC (isActive:false) outlet appears in the target template roster', async () => {
+      // The DB query no longer filters on isActive, so a pending-approval outlet
+      // is returned by prisma and MUST show up as a template row.
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'PENDING1', name: 'Pending Outlet', outletType: { code: 'RETAIL' } },
+      ]);
+
+      const buf = await service.getTemplateBuffer(admin, {
+        months: '2026-07',
+      } as TemplateQueryDto);
+
+      const rows = readAoa(buf);
+      // Row 0 = month-group header, row 1 = column labels, row 2+ = outlet rows.
+      const outletCodes = rows.slice(2).map((r) => r[0]);
+      expect(outletCodes).toContain('PENDING1');
+    });
+  });
+
   // ─── uploadTargets ─────────────────────────────────────────────────────────
 
   describe('uploadTargets', () => {
@@ -486,6 +530,37 @@ describe('TargetsService', () => {
       expect(batchCreate.data.clientId).toBe('deoleo');
       expect(batchCreate.data.rejectedCount).toBe(1);
       expect(batchCreate.data.acceptedCount).toBe(1);
+    });
+
+    it('REGRESSION: a target row for a pending-KYC (isActive:false) outlet is ACCEPTED, not rejected_outlet', async () => {
+      // The roster query no longer filters isActive, so a pending outlet is in
+      // knownOutletCodes → its uploaded row must be accepted and upserted.
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'PENDING1', name: 'Pending Outlet', outletType: { code: 'RETAIL' } },
+      ]);
+      mockTx.targetUploadBatch.create.mockResolvedValue({
+        id: 'batch-pending',
+        clientId: 'deoleo',
+        month: '2026-07',
+        totalRows: 1,
+        acceptedCount: 1,
+        rejectedCount: 0,
+        status: 'COMPLETED',
+      });
+
+      const file = {
+        buffer: buildTestXlsx([['PENDING1', 'Pending Outlet', 'RETAIL', 100, 50]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+
+      const result = await service.uploadTargets(admin, file);
+
+      const pendingRow = result.rows.find((r) => r.outletCode === 'PENDING1')!;
+      expect(pendingRow.status).toBe('accepted');
+      expect(pendingRow.status).not.toBe('rejected_outlet');
+      // And the target is actually written for the pending outlet.
+      expect(mockTx.outletTarget.upsert).toHaveBeenCalledTimes(1);
     });
 
     it('LOCK: a PAST month is skipped (no upsert) and reported in skippedLockedMonths', async () => {
@@ -714,6 +789,40 @@ describe('TargetsService', () => {
       await service.uploadAchievements(admin, file);
 
       expect(mockTx.outletSalesRecord.upsert).not.toHaveBeenCalled();
+    });
+
+    it('REGRESSION: an achievement row for a pending-KYC (isActive:false) outlet is ACCEPTED, not rejected_outlet', async () => {
+      // Achievement roster query no longer filters isActive → pending outlet is known.
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'PENDING1', name: 'Pending Outlet', outletType: { code: 'RETAIL' } },
+      ]);
+
+      const file = {
+        buffer: buildTestXlsx([['PENDING1', 'Pending Outlet', 'RETAIL', 100, 50]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+
+      const result = await service.uploadAchievements(admin, file);
+
+      const pendingRow = result.rows.find((r) => r.outletCode === 'PENDING1')!;
+      expect(pendingRow.status).toBe('accepted');
+      expect(pendingRow.status).not.toBe('rejected_outlet');
+      expect(mockTx.outletSalesRecord.upsert).toHaveBeenCalledTimes(1);
+    });
+
+    it('ROSTER: fetches ALL non-deleted outlets — no isActive filter', async () => {
+      const file = {
+        buffer: buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 20]]),
+        originalname: 'test.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+
+      await service.uploadAchievements(admin, file);
+
+      const arg = mockPrisma.outlet.findMany.mock.calls[0][0];
+      expect(arg.where).toEqual({ clientId: 'deoleo', deletedAt: null });
+      expect('isActive' in arg.where).toBe(false);
     });
 
     it('tenant-scopes SalesUploadBatch.create with clientId', async () => {

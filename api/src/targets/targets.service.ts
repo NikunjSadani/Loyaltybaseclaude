@@ -255,7 +255,8 @@ export class TargetsService {
 
   /**
    * Build and return an xlsx template buffer.
-   * Columns = enabled KpiDefs × months; rows = active outlet roster.
+   * Columns = enabled KpiDefs × months; rows = all non-deleted outlets
+   * (targets can be set for any outlet regardless of KYC/active state).
    */
   async getTemplateBuffer(user: JwtPayload, q: TemplateQueryDto): Promise<Buffer> {
     // Parse months
@@ -282,11 +283,11 @@ export class TargetsService {
       );
     }
 
-    // Fetch active outlet roster
+    // Fetch all non-deleted outlets — targets/achievements can be set for any
+    // outlet regardless of KYC/active state (only soft-deleted are excluded).
     const outlets = await this.prisma.outlet.findMany({
       where: {
         clientId: user.clientId,
-        isActive: true,
         deletedAt: null,
       },
       include: { outletType: { select: { code: true } } },
@@ -378,9 +379,11 @@ export class TargetsService {
       );
     }
 
-    // ── Fetch active outlet codes ─────────────────────────────────────────────
+    // ── Fetch all non-deleted outlet codes ────────────────────────────────────
+    // Targets can be uploaded for any outlet regardless of KYC/active state
+    // (only soft-deleted are excluded).
     const outlets = await this.prisma.outlet.findMany({
-      where: { clientId: user.clientId, isActive: true, deletedAt: null },
+      where: { clientId: user.clientId, deletedAt: null },
       select: { outletCode: true, name: true, outletType: { select: { code: true } } },
     });
 
@@ -539,11 +542,12 @@ export class TargetsService {
       );
     }
 
-    // REAL active outlet roster — identical query to getTemplateBuffer (no mocks).
+    // All non-deleted outlets — identical query to getTemplateBuffer (no mocks).
+    // Achievements can be set for any outlet regardless of KYC/active state
+    // (only soft-deleted are excluded).
     const outlets = await this.prisma.outlet.findMany({
       where: {
         clientId: user.clientId,
-        isActive: true,
         deletedAt: null,
       },
       include: { outletType: { select: { code: true } } },
@@ -602,9 +606,11 @@ export class TargetsService {
       );
     }
 
-    // ── Fetch active outlet codes ─────────────────────────────────────────────
+    // ── Fetch all non-deleted outlet codes ────────────────────────────────────
+    // Achievements can be uploaded for any outlet regardless of KYC/active state
+    // (only soft-deleted are excluded).
     const outlets = await this.prisma.outlet.findMany({
-      where: { clientId: user.clientId, isActive: true, deletedAt: null },
+      where: { clientId: user.clientId, deletedAt: null },
       select: { outletCode: true, name: true, outletType: { select: { code: true } } },
     });
 

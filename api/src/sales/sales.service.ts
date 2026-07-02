@@ -135,7 +135,11 @@ export class SalesService {
    *                partner-less). EXACT same definitions as getMember.
    *  • targetValue/targetPct — the subtree's PRIMARY-KPI current-month target sum
    *                and round(100 * achieved / target) (0 when target is 0), using
-   *                the SAME period/primary-KPI selection as getLeaderboard.
+   *                the SAME period/primary-KPI selection as getLeaderboard. Restricted
+   *                to APPROVED + ACTIVE outlets (outlet.isActive:true) — non-approved
+   *                outlets now carry target/achievement rows but must not inflate the
+   *                headline %. NOTE: only the target-% aggregation is active-only; the
+   *                outlets/kycDone/kycPending counts above stay all-inclusive.
    *
    * Tenant-scoped throughout (edges + assignments + targets all filter clientId).
    */
@@ -181,6 +185,11 @@ export class SalesService {
           select: {
             id: true,
             outletCode: true,
+            // isActive drives ONLY the target-% aggregation (approved+active outlets).
+            // The outlet COUNTS + KYC done/pending classification below deliberately
+            // include ALL assigned outlets (see the where-clause comment) — do NOT let
+            // isActive leak into those.
+            isActive: true,
             partner: {
               select: {
                 kycSubmissions: {
@@ -195,15 +204,17 @@ export class SalesService {
       },
     });
 
-    // salesUserId → list of its assigned active outlets (id, code, latest status).
-    // A partner-less outlet has no KYC submission → NOT_STARTED (pending action).
-    type OutletInfo = { id: string; outletCode: string | null; status: string };
+    // salesUserId → list of its assigned active outlets (id, code, isActive, latest
+    // status). A partner-less outlet has no KYC submission → NOT_STARTED (pending
+    // action). `isActive` is carried so the target-% aggregation can restrict to
+    // approved+active outlets WITHOUT disturbing the all-inclusive counts.
+    type OutletInfo = { id: string; outletCode: string | null; isActive: boolean; status: string };
     const outletsByUser = new Map<string, OutletInfo[]>();
     for (const a of assignments) {
       if (!a.outlet) continue;
       const status = a.outlet.partner?.kycSubmissions[0]?.status ?? 'NOT_STARTED';
       const arr = outletsByUser.get(a.salesUserId) ?? [];
-      arr.push({ id: a.outlet.id, outletCode: a.outlet.outletCode, status });
+      arr.push({ id: a.outlet.id, outletCode: a.outlet.outletCode, isActive: !!a.outlet.isActive, status });
       outletsByUser.set(a.salesUserId, arr);
     }
 
@@ -223,25 +234,30 @@ export class SalesService {
     const TERMINAL = ['APPROVED', 'REJECTED', 'NOT_INTERESTED'];
     const result = new Map<string, { outlets: number; kycDone: number; kycPending: number; targetValue: number; targetPct: number }>();
     for (const [memberId, subtree] of memberSubtrees) {
-      // Distinct active outlets across the member's subtree.
+      // Distinct outlets across the member's subtree. COUNTS + KYC classification
+      // include ALL assigned outlets (incl. PENDING / un-KYC'd) — same scoping as
+      // /sales/outlets. Only the target-% code set (`activeCodes`) restricts to
+      // approved+active outlets so the % excludes non-approved outlets, which now
+      // carry target/achievement rows (sibling upload-relaxation).
       const outletIds = new Set<string>();
-      const outletCodes = new Set<string>();
+      const activeCodes = new Set<string>();
       let kycDone = 0;
       let kycPending = 0;
       for (const sid of subtree) {
         for (const o of outletsByUser.get(sid) ?? []) {
           if (outletIds.has(o.id)) continue; // dedupe across multiple assignees
           outletIds.add(o.id);
-          if (o.outletCode) outletCodes.add(o.outletCode);
+          if (o.isActive && o.outletCode) activeCodes.add(o.outletCode); // KPI set only
           if (o.status === 'APPROVED') kycDone++;
           if (!TERMINAL.includes(o.status)) kycPending++;
         }
       }
 
-      // Primary-KPI target/achieved summed over the subtree's outlet codes.
+      // Primary-KPI target/achieved summed over the subtree's APPROVED+ACTIVE outlet
+      // codes (the counts above stay all-inclusive).
       let targetValue = 0;
       let achieved = 0;
-      for (const code of outletCodes) {
+      for (const code of activeCodes) {
         targetValue += targetMap.get(code) ?? 0;
         achieved += achMap.get(code) ?? 0;
       }
@@ -455,16 +471,26 @@ export class SalesService {
   /**
    * Outlet codes assigned to the caller AND their whole reporting downline (Q4 +
    * owner 2026-06-24: a manager's targets/achievements roll up the team). A leaf rep
-   * gets just their own. Returns [] when the caller is not a sales user. Tenant-scoped.
-   * Shared by the dashboard (getTargets) and outlets-list (getOutletTargets) reads so
-   * managers see their team's numbers, not an empty page.
+   * gets just their own. Returns { all, active } (both []) when the caller is not a
+   * sales user. Tenant-scoped. Shared by the dashboard (getTargets) and outlets-list
+   * (getOutletTargets) reads so managers see their team's numbers, not an empty page.
+   *
+   * Returns BOTH sets so callers can pick the right one:
+   *  • all    — every assigned outlet's code (incl. PENDING / not-interested). Used by
+   *             the per-outlet DETAIL views (getOutletTargets) which must list all
+   *             assigned outlets, even non-approved ones.
+   *  • active — codes of outlets with `isActive === true` only (approved + active:
+   *             isActive flips true only on KYC approval). Used by the KPI surfaces
+   *             (getTargets hero card + trend) so the headline % excludes non-approved
+   *             outlets, which now carry target/achievement rows after the sibling
+   *             upload-relaxation change.
    */
-  private async subtreeOutletCodes(user: JwtPayload): Promise<string[]> {
+  private async subtreeOutletCodes(user: JwtPayload): Promise<{ all: string[]; active: string[] }> {
     const su = await this.prisma.salesUser.findFirst({
       where: { userId: user.sub, user: { clientId: user.clientId }, deletedAt: null },
       select: { id: true },
     });
-    if (!su) return [];
+    if (!su) return { all: [], active: [] };
     const edges = await this.prisma.salesUser.findMany({
       where: { user: { clientId: user.clientId }, deletedAt: null },
       select: { id: true, reportingToId: true },
@@ -472,11 +498,17 @@ export class SalesService {
     const subtreeIds = [...descendantSalesUserIds(su.id, edges)];
     const assignments = await this.prisma.salesUserAssignment.findMany({
       where: { salesUserId: { in: subtreeIds }, unassignedAt: null, outletId: { not: null } },
-      select: { outlet: { select: { outletCode: true } } },
+      select: { outlet: { select: { outletCode: true, isActive: true } } },
     });
-    return [...new Set(
-      assignments.map((a) => a.outlet?.outletCode).filter((c): c is string => !!c),
-    )];
+    const all = new Set<string>();
+    const active = new Set<string>();
+    for (const a of assignments) {
+      const code = a.outlet?.outletCode;
+      if (!code) continue;
+      all.add(code);
+      if (a.outlet?.isActive) active.add(code);
+    }
+    return { all: [...all], active: [...active] };
   }
 
   /**
@@ -488,7 +520,11 @@ export class SalesService {
    * ownership. Also returns a 6-month trend on the PRIMARY KPI for the dashboard chart.
    */
   async getTargets(user: JwtPayload, period?: string) {
-    const outletCodes = await this.subtreeOutletCodes(user);
+    // Hero-card KPI = APPROVED + ACTIVE outlets only (isActive:true). Non-approved
+    // outlets now carry target/achievement rows (sibling upload-relaxation), but the
+    // headline achievement % must reflect only the outlets that have actually come
+    // live — so aggregate + count over the ACTIVE set, not every assigned outlet.
+    const { active: outletCodes } = await this.subtreeOutletCodes(user);
     if (outletCodes.length === 0) return { period: null, outletCount: 0, kpis: [], trend: [] };
 
     // Month to report: the caller's period, else the CURRENT calendar month (owner
@@ -552,7 +588,10 @@ export class SalesService {
    * a per-outlet map keyed by outletCode. Downline- + tenant-scoped.
    */
   async getOutletTargets(user: JwtPayload, period?: string) {
-    const outletCodes = await this.subtreeOutletCodes(user);
+    // DETAIL view — must list ALL assigned outlets (incl. PENDING / not-interested),
+    // not just approved+active. Use the `all` code set (contrast getTargets, which
+    // aggregates the hero-card KPI over the `active` set only).
+    const { all: outletCodes } = await this.subtreeOutletCodes(user);
     return this.readOutletTargets(user.clientId, outletCodes, period);
   }
 
@@ -761,18 +800,24 @@ export class SalesService {
     if (population.length === 0) return { entries: [] };
 
     // ── 4. Load active assignments once → salesUserId → [outletCode]. ─────────
+    // KPI ranking counts APPROVED + ACTIVE outlets only (outlet.isActive:true —
+    // flips true on KYC approval). Non-approved outlets now carry target/achievement
+    // rows (sibling upload-relaxation), but the leaderboard's achievementPct / rank /
+    // activeOutlets must exclude them, so DROP non-active outlets from the per-user
+    // code map that feeds sumSubtree / pctFor / subtreeOutletCount.
     const assignments = await this.prisma.salesUserAssignment.findMany({
       where: {
         salesUserId: { in: allUsers.map((u) => u.id) },
         unassignedAt: null,
         outletId: { not: null },
       },
-      select: { salesUserId: true, outlet: { select: { outletCode: true } } },
+      select: { salesUserId: true, outlet: { select: { outletCode: true, isActive: true } } },
     });
     const outletCodesByUser = new Map<string, string[]>();
     for (const a of assignments) {
       const code = a.outlet?.outletCode;
       if (!code) continue;
+      if (!a.outlet?.isActive) continue; // KPI set = approved+active only
       const arr = outletCodesByUser.get(a.salesUserId) ?? [];
       arr.push(code);
       outletCodesByUser.set(a.salesUserId, arr);

@@ -425,10 +425,11 @@ export default function SalesOutletsPage() {
                             </div>
                           </td>
 
+                          {/* Show every outlet's real target/achieved numbers — not just
+                              approved. AchCell already renders a "–" for a genuinely empty
+                              value; we no longer gate the whole cell on kycStatus. */}
                           {params.map((p) => (
-                            isKycApproved
-                              ? <AchCell key={p.code} achieved={kpis[p.code]?.achieved ?? null} target={kpis[p.code]?.target ?? null} />
-                              : <td key={p.code} className="px-3 py-2.5 text-center"><span className="text-[10px] text-gray-300">–</span></td>
+                            <AchCell key={p.code} achieved={kpis[p.code]?.achieved ?? null} target={kpis[p.code]?.target ?? null} />
                           ))}
 
                           <td className="pl-3 pr-4 py-2.5">
@@ -469,6 +470,12 @@ export default function SalesOutletsPage() {
                   </tbody>
                 </table>
               </div>
+
+              {teamSummary && (
+                <p className="px-4 py-2 text-[10px] text-gray-400 border-t border-gray-100">
+                  Team Total reflects approved &amp; active outlets only.
+                </p>
+              )}
             </div>
           )}
 

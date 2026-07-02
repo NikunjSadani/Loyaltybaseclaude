@@ -135,6 +135,7 @@ describe('SalesService', () => {
           salesUserId: 'sub1',
           outlet: {
             id: 'o1', outletCode: 'O1',
+            isActive: true, // APPROVED → active → in the target-% set
             partner: { kycSubmissions: [{ status: 'APPROVED' }] },
           },
         },
@@ -142,12 +143,15 @@ describe('SalesService', () => {
           salesUserId: 'sub2',
           outlet: {
             id: 'o2', outletCode: 'O2',
+            isActive: false, // PENDING/partner-less → NOT active → EXCLUDED from target-%
             partner: null, // partner-less → NOT_STARTED → pending
           },
         },
       ]);
       mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'SALES', isPrimary: true }]);
-      // primaryMapsForMonth: target then achievement reads.
+      // primaryMapsForMonth: target then achievement reads. Both O1 AND O2 carry
+      // target/achievement rows (sibling upload-relaxation now uploads non-approved
+      // outlets too) — but only the ACTIVE outlet (O1) may count toward the target %.
       mockPrisma.outletTarget.findMany.mockResolvedValue([
         { outletCode: 'O1', targetValues: { SALES: 100 } },
         { outletCode: 'O2', targetValues: { SALES: 100 } },
@@ -160,11 +164,13 @@ describe('SalesService', () => {
       const res = await service.getTeam(caller);
       const sub1 = res.members.find((m: { id: string }) => m.id === 'sub1')!;
       expect(sub1).toMatchObject({
+        // COUNTS stay all-inclusive (approved + pending outlets both count).
         outlets: 2,        // O1 + O2 across the subtree {sub1, sub2}
         kycDone: 1,        // O1 APPROVED
         kycPending: 1,     // O2 NOT_STARTED (partner-less)
-        targetValue: 200,  // 100 + 100
-        targetPct: 60,     // round(100 * (80+40) / 200)
+        // Target % is APPROVED+ACTIVE only → O1 alone (O2's target/ach are dropped).
+        targetValue: 100,  // O1 only (O2 inactive → excluded)
+        targetPct: 80,     // round(100 * 80 / 100)
       });
 
       // The assignment query is bounded by the viewer's whole subtree (no N+1
@@ -576,7 +582,7 @@ describe('SalesService', () => {
     it('sums target + achieved per KPI across the rep\'s outlets, primary first, with pace', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
-        { outlet: { outletCode: 'O1' } }, { outlet: { outletCode: 'O2' } },
+        { outlet: { outletCode: 'O1', isActive: true } }, { outlet: { outletCode: 'O2', isActive: true } },
       ]);
       mockPrisma.outletTarget.findFirst.mockResolvedValue({ month: '2026-05' });
       // current-month targets: two outlets
@@ -619,7 +625,7 @@ describe('SalesService', () => {
       // for the current month; picking the latest TARGET month showed 0 achievement.
       const cm = currentMonthKey();
       mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
-      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outlet: { outletCode: 'O1' } }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outlet: { outletCode: 'O1', isActive: true } }]);
       mockPrisma.outletTarget.findMany
         .mockResolvedValueOnce([{ targetValues: { MONTH: 100 } }]) // target for the current month
         .mockResolvedValueOnce([]);                                // trend
@@ -721,6 +727,137 @@ describe('SalesService', () => {
       );
       const ox = res.rows.find((r: { outletCode: string }) => r.outletCode === 'OX')!;
       expect(ox.kpis.CONSISTENCY).toEqual({ target: 300, achieved: 120, pace: 0.4 });
+    });
+  });
+
+  // ─── WS3: KPI surfaces count APPROVED+ACTIVE outlets only; DETAIL views keep all ──
+  // The sibling upload-relaxation now creates OutletTarget/OutletSalesRecord rows for
+  // NON-approved outlets (isActive:false). The primary-performance KPI of a sales member
+  // must exclude those; the per-outlet detail list must still show them.
+  describe('WS3 approved+active KPI vs all-assigned detail', () => {
+    // One APPROVED (isActive:true) outlet OA and one PENDING (isActive:false) outlet OP,
+    // each with a target + achievement row for the current month.
+    const APPROVED_AND_PENDING_ASSIGNMENTS = [
+      { outlet: { outletCode: 'OA', isActive: true } },  // approved + active
+      { outlet: { outletCode: 'OP', isActive: false } }, // pending → excluded from KPI
+    ];
+    const KPIS = [{ code: 'SALES', label: 'Sales', unit: 'Litre', isPrimary: true }];
+    const PRIMARY = [{ code: 'SALES', isPrimary: true }];
+    const TARGETS = [
+      { outletCode: 'OA', targetValues: { SALES: 100 } },
+      { outletCode: 'OP', targetValues: { SALES: 100 } },
+    ];
+    const ACH = [
+      { outletCode: 'OA', kpiValues: { SALES: 70 } },
+      { outletCode: 'OP', kpiValues: { SALES: 10 } },
+    ];
+
+    it('(a) getTargets hero card counts ONLY the approved+active outlet', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'su1', reportingToId: null }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue(APPROVED_AND_PENDING_ASSIGNMENTS);
+      mockPrisma.kpiDef.findMany.mockResolvedValue(KPIS);
+      // getTargets sums whatever findMany returns; the DB honours the `outletCode in
+      // [active]` scope, so a faithful mock returns ONLY the active outlet's row (OA).
+      // (The scoping itself is asserted below via toHaveBeenCalledWith.)
+      mockPrisma.outletTarget.findMany
+        .mockResolvedValueOnce([{ outletCode: 'OA', targetValues: { SALES: 100 } }]) // hero-card aggregation (active-scoped)
+        .mockResolvedValueOnce([]);     // trend
+      mockPrisma.outletSalesRecord.findMany
+        .mockResolvedValueOnce([{ outletCode: 'OA', kpiValues: { SALES: 70 } }])
+        .mockResolvedValueOnce([]);
+
+      const res = await service.getTargets(caller, '2026-05');
+
+      // outletCount + the SALES target/achieved must reflect OA ALONE (OP excluded).
+      expect(res.outletCount).toBe(1);
+      expect(res.kpis[0]).toMatchObject({ code: 'SALES', target: 100, achieved: 70 });
+      // The aggregation query is scoped to the ACTIVE code set only (OA, not OP).
+      expect(mockPrisma.outletTarget.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ outletCode: { in: ['OA'] } }) }),
+      );
+    });
+
+    it('(a) getLeaderboard achievementPct/activeOutlets count ONLY the approved+active outlet', async () => {
+      // Inline wiring (the getLeaderboard describe's `wire` helper is out of scope here):
+      // caller lookup → population/edges → ZNM level → assignments → kpiDef → curr/prev reads.
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
+      ]);
+      mockPrisma.salesHierarchyLevel.findFirst.mockResolvedValue(null);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { salesUserId: 'su-me', outlet: { outletCode: 'OA', isActive: true } },
+        { salesUserId: 'su-me', outlet: { outletCode: 'OP', isActive: false } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue(PRIMARY);
+      mockPrisma.outletTarget.findMany
+        .mockResolvedValueOnce(TARGETS) // current month
+        .mockResolvedValueOnce([]);     // previous month
+      mockPrisma.outletSalesRecord.findMany
+        .mockResolvedValueOnce(ACH)
+        .mockResolvedValueOnce([]);
+      const res = await service.getLeaderboard(caller, 'rm', '2026-06');
+      expect(res.entries).toHaveLength(1);
+      // pct = 70/100 (OA only); OP's 100 target + 10 ach are excluded.
+      expect(res.entries[0].achievementPct).toBe(70);
+      // activeOutlets counts distinct APPROVED+ACTIVE codes only → 1.
+      expect(res.entries[0].activeOutlets).toBe(1);
+    });
+
+    it('(a) getTeam per-member target % counts ONLY the approved+active outlet (counts stay all)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'mgr1', employeeCode: 'E1', region: 'North', zone: null,
+        hierarchyLevel: { code: 'ASM', name: 'Area Sales Manager', level: 2 },
+        subordinates: [
+          {
+            id: 'sub1', employeeCode: 'E2', region: 'NCR', zone: null,
+            joinedAt: new Date('2024-01-01T00:00:00.000Z'),
+            user: { name: 'Sub One', phone: '9900000041' },
+            hierarchyLevel: { code: 'SO', name: 'Sales Officer', level: 1 },
+            _count: { subordinates: 0 },
+          },
+        ],
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'mgr1', reportingToId: null },
+        { id: 'sub1', reportingToId: 'mgr1' },
+      ]);
+      // sub1 assigned OA (APPROVED/active) + OP (PENDING/inactive), both with rows.
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        { salesUserId: 'sub1', outlet: { id: 'oa', outletCode: 'OA', isActive: true, partner: { kycSubmissions: [{ status: 'APPROVED' }] } } },
+        { salesUserId: 'sub1', outlet: { id: 'op', outletCode: 'OP', isActive: false, partner: null } },
+      ]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([{ code: 'SALES', isPrimary: true }]);
+      mockPrisma.outletTarget.findMany.mockResolvedValue(TARGETS);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue(ACH);
+
+      const res = await service.getTeam(caller);
+      const sub1 = res.members.find((m: { id: string }) => m.id === 'sub1')!;
+      // COUNTS include BOTH outlets (all-assigned); the target % is OA only.
+      expect(sub1.outlets).toBe(2);       // OA + OP
+      expect(sub1.kycDone).toBe(1);       // OA APPROVED
+      expect(sub1.kycPending).toBe(1);    // OP NOT_STARTED (partner-less)
+      expect(sub1.targetValue).toBe(100); // OA only (OP inactive → excluded)
+      expect(sub1.targetPct).toBe(70);    // round(100 * 70 / 100)
+    });
+
+    it('(b) getOutletTargets DETAIL list returns BOTH the approved AND the pending outlet', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'su1', reportingToId: null }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue(APPROVED_AND_PENDING_ASSIGNMENTS);
+      mockPrisma.outletTarget.findMany.mockResolvedValue(TARGETS);
+      mockPrisma.outletSalesRecord.findMany.mockResolvedValue(ACH);
+      mockPrisma.kpiDef.findMany.mockResolvedValue(KPIS);
+
+      const res = await service.getOutletTargets(caller, '2026-05');
+      // BOTH outlets appear (detail view is all-assigned, incl. the pending one).
+      expect(res.rows.map((r: { outletCode: string }) => r.outletCode).sort()).toEqual(['OA', 'OP']);
+      // The per-outlet read is scoped to the ALL code set (both OA and OP).
+      const call = mockPrisma.outletTarget.findMany.mock.calls[0][0];
+      expect(call.where.outletCode.in.sort()).toEqual(['OA', 'OP']);
+      const op = res.rows.find((r: { outletCode: string }) => r.outletCode === 'OP')!;
+      expect(op.kpis.SALES).toEqual({ target: 100, achieved: 10, pace: 0.1 });
     });
   });
 
@@ -839,9 +976,9 @@ describe('SalesService', () => {
           { id: 'su-c',  userId: 'user-c',   reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Charlie' } },
         ],
         assignments: [
-          { salesUserId: 'su-me', outlet: { outletCode: 'OM' } },
-          { salesUserId: 'su-b',  outlet: { outletCode: 'OB' } },
-          { salesUserId: 'su-c',  outlet: { outletCode: 'OC' } },
+          { salesUserId: 'su-me', outlet: { outletCode: 'OM', isActive: true } },
+          { salesUserId: 'su-b',  outlet: { outletCode: 'OB', isActive: true } },
+          { salesUserId: 'su-c',  outlet: { outletCode: 'OC', isActive: true } },
         ],
         kpis: PRIMARY,
         currTargets: [
@@ -908,7 +1045,7 @@ describe('SalesService', () => {
         users: [
           { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
         ],
-        assignments: [{ salesUserId: 'su-me', outlet: { outletCode: 'OM' } }],
+        assignments: [{ salesUserId: 'su-me', outlet: { outletCode: 'OM', isActive: true } }],
         kpis: PRIMARY,
         currTargets: [], // no target rows → target sum 0
         currAch: [{ outletCode: 'OM', kpiValues: { SALES: 500 } }],
@@ -931,8 +1068,8 @@ describe('SalesService', () => {
           { id: 'su-peer', userId: 'user-p',   reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Peer' } },
         ],
         assignments: [
-          { salesUserId: 'su-me',   outlet: { outletCode: 'OM' } },
-          { salesUserId: 'su-peer', outlet: { outletCode: 'OP' } },
+          { salesUserId: 'su-me',   outlet: { outletCode: 'OM', isActive: true } },
+          { salesUserId: 'su-peer', outlet: { outletCode: 'OP', isActive: true } },
         ],
         kpis: PRIMARY,
         currTargets: [
@@ -964,7 +1101,7 @@ describe('SalesService', () => {
         users: [
           { id: 'su-me', userId: 'user-mgr', reportingToId: 'rm1', hierarchyLevelId: 'L1', region: 'North', zone: null, isActive: true, user: { name: 'Me' } },
         ],
-        assignments: [{ salesUserId: 'su-me', outlet: { outletCode: 'OM' } }],
+        assignments: [{ salesUserId: 'su-me', outlet: { outletCode: 'OM', isActive: true } }],
         kpis: PRIMARY,
         currTargets: [{ outletCode: 'OM', targetValues: { SALES: 100 } }],
         currAch: [{ outletCode: 'OM', kpiValues: { SALES: 50 } }],
@@ -986,8 +1123,8 @@ describe('SalesService', () => {
           { id: 'su-sub', userId: 'user-s',   reportingToId: 'su-me', hierarchyLevelId: 'L2', region: 'North', zone: null, isActive: true, user: { name: 'Sub' } },
         ],
         assignments: [
-          { salesUserId: 'su-me',  outlet: { outletCode: 'OM' } },
-          { salesUserId: 'su-sub', outlet: { outletCode: 'OS' } },
+          { salesUserId: 'su-me',  outlet: { outletCode: 'OM', isActive: true } },
+          { salesUserId: 'su-sub', outlet: { outletCode: 'OS', isActive: true } },
         ],
         kpis: PRIMARY,
         currTargets: [

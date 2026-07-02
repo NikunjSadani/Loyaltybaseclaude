@@ -381,11 +381,14 @@ export default function MemberOutletsPage() {
                               </div>
                             </div>
                           </td>
+                          {/* Show every outlet's real target/achieved numbers — not just
+                              approved. A genuinely empty value still renders "–"; we no
+                              longer gate the cell on kycStatus. */}
                           {params2.map((p) => {
                             const k = kpis[p.code];
-                            const achieved = isApproved ? (k?.achieved ?? null) : null;
-                            const target   = isApproved ? (k?.target ?? null) : null;
-                            if (!isApproved || (achieved === null && target === null)) {
+                            const achieved = k?.achieved ?? null;
+                            const target   = k?.target ?? null;
+                            if (achieved === null && target === null) {
                               return (
                                 <td key={p.code} className="px-3 py-2.5 text-center">
                                   <span className="text-[10px] text-gray-300">–</span>
