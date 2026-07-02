@@ -71,7 +71,7 @@ deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLO
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1324 · nest 0 · FE vitest 1726 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `bf5df38`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1324 · nest 0 · FE vitest 1728 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `01c253f`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
