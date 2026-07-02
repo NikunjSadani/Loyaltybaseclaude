@@ -71,7 +71,7 @@ deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLO
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1324 · nest 0 · FE vitest 1726 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `e970213`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1324 · nest 0 · FE vitest 1726 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `bf5df38`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -204,7 +204,7 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929` (unchanged since); develop has SINCE advanced to `e970213` with this session's scale/ops + KYC + ASM + Rejected/Re-upload consolidation work (rides the NEXT cutover).** Cutover #2 shipped
+🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929` (unchanged since); develop has SINCE advanced to `bf5df38` with this session's scale/ops + KYC + ASM + Rejected/Re-upload consolidation work (rides the NEXT cutover).** Cutover #2 shipped
 the **onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate**; applied migration
 `20260630130000_point_expiry_default_unique` (via `--wait`); pre-cutover backup **`1782886598428`**; created + ENABLED the
 **`expire-sweep-prod`** Cloud Scheduler (daily 00:30 IST; sweep smoke 403/201). Both prod services healthy `/health` 200.
@@ -281,7 +281,7 @@ its config = platform defaults (conversion `1`, expiry null, visibility OFF). **
 assumes Deoleo (now in "Work in brand") → **confirm conversion rate=1** + **create the first Deoleo CLIENT_ADMIN** (`/admin/users`,
 role **CLIENT_ADMIN — NOT Gifsy Admin**) → **load real master data** via the app UIs when the client sends files (**#76**); plus
 **(#143)** WhatsApp `deoleo_kyc_approval` template runtime-verify. The recon'd scale/ops plan is now **IN PROGRESS** on `develop`
-(HEAD `e970213`): pagination stream COMPLETE (W1+W2), observability O1+O2 done, security log-leak fixed, KYC-submit-500 RESOLVED, ASM
+(HEAD `bf5df38`): pagination stream COMPLETE (W1+W2), observability O1+O2 done, security log-leak fixed, KYC-submit-500 RESOLVED, ASM
 enrollment done, **KYC "Rejected / Re-upload" consolidation SHIPPED (`e970213`, admin reviewer untouched, staging runtime-verify
 pending deploy)**; **NEXT = staging runtime-verify of that consolidation + owner-gated Deoleo go-live items** (nothing else queued);
 notifications/P7 still PAUSED (events flag-OFF; email provider TBD, ZeptoMail vs SES). Required onboarding-flow builds logged in
