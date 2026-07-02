@@ -2027,9 +2027,13 @@ export class KycService {
   async notInterested(user: JwtPayload, dto: NotInterestedKycDto) {
     const { outletId } = dto;
 
-    // Look up the outlet by its per-tenant (clientId, outletCode) key.
-    const outlet = await this.prisma.outlet.findUnique({
-      where: { clientId_outletCode: { clientId: user.clientId, outletCode: outletId } },
+    // dto.outletId is the Outlet `id` (CUID) — the SAME identifier the FE sends to
+    // create() (sales/kyc/new sets outletId = outlet.id, NOT outletCode). Look it up by
+    // id, tenant-scoped. (The old clientId_outletCode lookup 404'd on EVERY call because
+    // the FE never sends the outlet CODE — so "Not Interested" never persisted and the
+    // KYC list's Not-Interested filter stayed empty.)
+    const outlet = await this.prisma.outlet.findFirst({
+      where: { id: outletId, clientId: user.clientId },
     });
 
     if (!outlet) throw new NotFoundException(`Outlet "${outletId}" not found`);
@@ -2039,7 +2043,7 @@ export class KycService {
     }
 
     await this.prisma.outlet.update({
-      where: { clientId_outletCode: { clientId: user.clientId, outletCode: outletId } },
+      where: { id: outlet.id },
       data: {
         kycIntent: 'NOT_INTERESTED',
         kycIntentBy: user.sub,

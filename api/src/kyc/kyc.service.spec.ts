@@ -2279,22 +2279,36 @@ describe('KycService', () => {
 
   describe('notInterested', () => {
     it('is idempotent when the outlet is already marked', async () => {
-      mockPrisma.outlet.findUnique.mockResolvedValue({
+      mockPrisma.outlet.findFirst.mockResolvedValue({
+        id: 'outlet-cuid-1',
         isActive: false,
         kycIntent: 'NOT_INTERESTED',
       });
-      const res = await service.notInterested(partner, { outletId: 'OUT1' });
-      expect(res).toEqual({ outletId: 'OUT1', alreadyMarked: true });
+      const res = await service.notInterested(partner, { outletId: 'outlet-cuid-1' });
+      expect(res).toEqual({ outletId: 'outlet-cuid-1', alreadyMarked: true });
       expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
     });
 
-    it('marks an active outlet as NOT_INTERESTED scoped by tenant', async () => {
-      mockPrisma.outlet.findUnique.mockResolvedValue({ isActive: true, kycIntent: null });
+    it('looks the outlet up by id + tenant (matches the FE contract), marks it NOT_INTERESTED', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue({ id: 'outlet-cuid-1', isActive: true, kycIntent: null });
       mockPrisma.outlet.update.mockResolvedValue({});
-      await service.notInterested(partner, { outletId: 'OUT1' });
+      await service.notInterested(partner, { outletId: 'outlet-cuid-1' });
+      // The FE sends the Outlet CUID (o.id), so the lookup must be by id, tenant-scoped —
+      // NOT clientId_outletCode (that 404'd on every call).
+      const findArg = mockPrisma.outlet.findFirst.mock.calls[0][0];
+      expect(findArg.where).toEqual({ id: 'outlet-cuid-1', clientId: 'deoleo' });
       const arg = mockPrisma.outlet.update.mock.calls[0][0];
-      expect(arg.where).toEqual({ clientId_outletCode: { clientId: 'deoleo', outletCode: 'OUT1' } });
+      expect(arg.where).toEqual({ id: 'outlet-cuid-1' });
       expect(arg.data.isActive).toBe(false);
+      expect(arg.data.kycIntent).toBe('NOT_INTERESTED');
+    });
+
+    it('404s when the outlet id is not in this tenant', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue(null);
+      await expect(
+        service.notInterested(partner, { outletId: 'nope' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockPrisma.outlet.update).not.toHaveBeenCalled();
     });
   });
 
