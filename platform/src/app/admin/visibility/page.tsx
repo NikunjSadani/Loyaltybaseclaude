@@ -22,6 +22,7 @@ import { generateVisibilityTemplate } from '@/lib/visibility-upload';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { fetchVisibilityCaptureMode, type VisibilityCaptureMode } from '@/lib/visibility-capture-mode';
+import { downloadBlob } from '@/lib/download';
 import { Spinner } from '@/components/ui/spinner';
 
 type VisTab = 'queue' | 'fraud' | 'upload';
@@ -259,12 +260,7 @@ export default function VisibilityPage() {
       const blob = new Blob([buf], {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       });
-      const url  = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href     = url;
-      link.download = `visibility_records_${recMonth}.xlsx`;
-      link.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, `visibility_records_${recMonth}.xlsx`);
     } finally {
       setDownloadingReport(false);
     }
@@ -276,12 +272,7 @@ export default function VisibilityPage() {
     const blob     = new Blob([raw as any], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
-    const url  = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href     = url;
-    link.download = 'visibility_upload_template.xlsx';
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, 'visibility_upload_template.xlsx');
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -321,12 +312,7 @@ export default function VisibilityPage() {
     const blob  = new Blob([bytes], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
-    const url  = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href     = url;
-    link.download = 'visibility_upload_errors.xlsx';
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, 'visibility_upload_errors.xlsx');
   };
 
   const STATUS_CHIP: Record<string, string> = {

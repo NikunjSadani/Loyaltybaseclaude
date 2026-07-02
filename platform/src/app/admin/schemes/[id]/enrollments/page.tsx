@@ -10,6 +10,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { authHeader } from '@/lib/api-client';
+import { downloadBlob } from '@/lib/download';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Enrollment Dashboard
@@ -54,12 +55,7 @@ export default function EnrollmentDashboardPage({ params }: { params: Promise<{ 
 
       // Backend returns RAW xlsx — stream into blob → trigger anchor download
       const blob = await res.blob();
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href     = url;
-      a.download = `enrollments_${schemeId}_${new Date().toISOString().split('T')[0]}.xlsx`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, `enrollments_${schemeId}_${new Date().toISOString().split('T')[0]}.xlsx`);
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Network error during export');
     } finally {

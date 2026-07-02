@@ -29,6 +29,7 @@ import {
 } from '@/lib/outlet-upload';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { useGifsySettings } from '@/lib/gifsy-settings';
+import { downloadBlob } from '@/lib/download';
 import { chunkArray } from '@/lib/chunk';
 import type { HierarchyEmployee } from '@/types';
 import type {
@@ -669,32 +670,10 @@ export default function OutletsPage() {
   }, [allOutlets, parseXlsx]);
 
   // ── Download helpers ──
-  // Robustly trigger a browser "Save file" for a blob. Two things matter and were
-  // previously wrong (a fetched download silently did nothing):
-  //   1. the <a> MUST be in the DOM before .click() — a detached anchor's download
-  //      is ignored/cancelled by some browsers, especially when .click() runs AFTER
-  //      an `await` (i.e. outside the original user-gesture call stack).
-  //   2. the object URL must NOT be revoked synchronously after .click() — that
-  //      races the browser and cancels the save. Defer the revoke.
-  function triggerBlobDownload(blob: Blob, filename: string) {
-    const url = URL.createObjectURL(blob);
-    const a   = document.createElement('a');
-    a.href    = url;
-    a.download = filename;
-    a.rel     = 'noopener';
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 1000);
-  }
-
   function downloadXlsx(wb: XLSX.WorkBook, filename: string) {
     const buf   = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
     const blob  = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    triggerBlobDownload(blob, filename);
+    downloadBlob(blob, filename);
   }
 
   function downloadOutletTemplate() {
@@ -823,7 +802,7 @@ export default function OutletsPage() {
                   const res = await fetch('/api/admin/reports/outlet-master');
                   if (!res.ok) { setMasterDownloadState('error'); return; }
                   const blob = await res.blob();
-                  triggerBlobDownload(blob, `outlet-master-${new Date().toISOString().split('T')[0]}.xlsx`);
+                  downloadBlob(blob, `outlet-master-${new Date().toISOString().split('T')[0]}.xlsx`);
                   setMasterDownloadState('idle');
                 } catch { setMasterDownloadState('error'); }
               }}

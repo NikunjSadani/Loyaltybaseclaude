@@ -19,6 +19,7 @@ import { useState, useCallback } from 'react'
 import { Download, RefreshCw, TableIcon, AlertTriangle } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { downloadBlob } from '@/lib/download'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -142,12 +143,7 @@ export default function TicketAgingPage() {
       const res = await fetch(url)
       if (!res.ok) throw new Error(`Export failed (${res.status})`)
       const blob = await res.blob()
-      const href = URL.createObjectURL(blob)
-      const a    = document.createElement('a')
-      a.href     = href
-      a.download = `ticket-aging-${new Date().toISOString().slice(0, 10)}.xlsx`
-      a.click()
-      URL.revokeObjectURL(href)
+      downloadBlob(blob, `ticket-aging-${new Date().toISOString().slice(0, 10)}.xlsx`)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Export failed.')
     } finally {

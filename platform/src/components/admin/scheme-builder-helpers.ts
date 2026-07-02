@@ -7,6 +7,7 @@
 
 import * as XLSX from 'xlsx';
 import { cellSafe } from '@/lib/xlsx-safe';
+import { downloadBlob } from '@/lib/download';
 import { parseOutletExcelRow, type OutletRecord } from '@/lib/campaign';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -268,10 +269,5 @@ export function downloadEnhancedTemplate(customFieldLabels: string[]): void {
   const blob = new Blob([buf.buffer as ArrayBuffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'outlet_targeting_template.xlsx';
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, 'outlet_targeting_template.xlsx');
 }

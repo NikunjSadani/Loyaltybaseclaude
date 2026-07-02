@@ -21,6 +21,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Download, RefreshCw, TableIcon, Info } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { downloadBlob } from '@/lib/download'
 
 // ─── Types (mirrors GET /v1/reports/session-report) ───────────────────────────
 
@@ -101,12 +102,7 @@ export default function SessionReportPage() {
       const res = await fetch('/api/reports/session-report?format=xlsx')
       if (!res.ok) throw new Error(`Export failed (${res.status})`)
       const blob = await res.blob()
-      const href = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = href
-      a.download = `session-report-${new Date().toISOString().slice(0, 10)}.xlsx`
-      a.click()
-      URL.revokeObjectURL(href)
+      downloadBlob(blob, `session-report-${new Date().toISOString().slice(0, 10)}.xlsx`)
     } catch {
       alert('Export failed. Please try again.')
     } finally {

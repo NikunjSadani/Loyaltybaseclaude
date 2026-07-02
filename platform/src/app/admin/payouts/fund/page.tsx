@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { TrendingUp, TrendingDown, AlertTriangle, PlusCircle, Download, RefreshCw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { downloadBlob } from '@/lib/download'
 
 interface FundLedger {
   openingBalance: number
@@ -69,12 +70,7 @@ export default function FundPage() {
     const res = await fetch('/api/payouts/reconciliation?format=xlsx')
     if (!res.ok) return
     const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `fund-reconciliation-${new Date().toISOString().split('T')[0]}.xlsx`
-    a.click()
-    URL.revokeObjectURL(url)
+    downloadBlob(blob, `fund-reconciliation-${new Date().toISOString().split('T')[0]}.xlsx`)
   }
 
   if (loading) return <div className="p-6 flex items-center justify-center"><RefreshCw className="animate-spin h-6 w-6 text-[var(--brand-primary)]" /></div>

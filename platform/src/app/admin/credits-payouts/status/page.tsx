@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useAdminSession } from '@/lib/admin-session';
 import { jsonToSheetSafe } from '@/lib/xlsx-safe';
+import { downloadBlob } from '@/lib/download';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -185,12 +186,7 @@ export default function PayoutStatusPage() {
       XLSX.utils.book_append_sheet(wb, ws, 'Payout Status');
       const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
       const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href     = url;
-      a.download = `payout-status-${batch.period}-${batch.batchCode}.xlsx`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, `payout-status-${batch.period}-${batch.batchCode}.xlsx`);
     });
   }
 

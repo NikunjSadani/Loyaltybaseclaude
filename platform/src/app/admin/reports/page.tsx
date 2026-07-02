@@ -6,6 +6,7 @@ import { FileSpreadsheet, Download, RefreshCw, ExternalLink } from 'lucide-react
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { downloadBlob } from '@/lib/download'
 
 interface ReportConfig {
   id: string
@@ -61,12 +62,7 @@ function ReportCard({ report }: { report: ReportConfig }) {
       const res = await fetch(`${report.endpoint}?${params}`)
       if (!res.ok) throw new Error('Export failed')
       const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${report.id}-${new Date().toISOString().split('T')[0]}.xlsx`
-      a.click()
-      URL.revokeObjectURL(url)
+      downloadBlob(blob, `${report.id}-${new Date().toISOString().split('T')[0]}.xlsx`)
     } catch {
       alert('Export failed. Please try again.')
     } finally {

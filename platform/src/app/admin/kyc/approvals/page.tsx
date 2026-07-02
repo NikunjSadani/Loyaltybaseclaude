@@ -33,6 +33,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton'
+import { downloadBlob } from '@/lib/download'
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -297,12 +298,7 @@ export default function KycApprovalsPage() {
       const res = await fetch('/api/kyc/review-dump')
       if (!res.ok) throw new Error(`Export failed (${res.status})`)
       const blob = await res.blob()
-      const href = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = href
-      a.download = `kyc-review-dump-${new Date().toISOString().slice(0, 10)}.xlsx`
-      a.click()
-      URL.revokeObjectURL(href)
+      downloadBlob(blob, `kyc-review-dump-${new Date().toISOString().slice(0, 10)}.xlsx`)
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Export failed.')
     } finally {

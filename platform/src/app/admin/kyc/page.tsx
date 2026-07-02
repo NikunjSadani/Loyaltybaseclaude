@@ -16,6 +16,7 @@ import Link from 'next/link';
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
 import { useAdminSession } from '@/lib/admin-session';
+import { downloadBlob } from '@/lib/download';
 
 type KYCStatusType = 'PENDING' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
 
@@ -160,12 +161,7 @@ export default function KYCPage() {
       });
       if (!res.ok) throw new Error(`Export failed (${res.status})`);
       const blob = await res.blob();
-      const href = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = href;
-      a.download = `${filePrefix}-${new Date().toISOString().slice(0, 10)}.xlsx`;
-      a.click();
-      URL.revokeObjectURL(href);
+      downloadBlob(blob, `${filePrefix}-${new Date().toISOString().slice(0, 10)}.xlsx`);
     } catch (err) {
       setExportError(err instanceof Error ? err.message : 'Export failed.');
     } finally {

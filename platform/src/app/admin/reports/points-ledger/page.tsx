@@ -18,6 +18,7 @@ import { useState, useCallback, Fragment } from 'react'
 import { Download, RefreshCw, TableIcon } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { downloadBlob } from '@/lib/download'
 
 // ─── Types (mirrors PointsLedgerReportRow from @/types) ───────────────────────
 
@@ -109,12 +110,7 @@ export default function PointsLedgerPage() {
       const res = await fetch(url)
       if (!res.ok) throw new Error(`Export failed (${res.status})`)
       const blob = await res.blob()
-      const href = URL.createObjectURL(blob)
-      const a    = document.createElement('a')
-      a.href     = href
-      a.download = `points-ledger-${from}-to-${to}.xlsx`
-      a.click()
-      URL.revokeObjectURL(href)
+      downloadBlob(blob, `points-ledger-${from}-to-${to}.xlsx`)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Export failed.')
     } finally {

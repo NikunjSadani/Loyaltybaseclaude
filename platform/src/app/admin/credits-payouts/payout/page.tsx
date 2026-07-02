@@ -34,6 +34,7 @@ import {
 } from 'lucide-react';
 import { useAdminSession } from '@/lib/admin-session';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
+import { downloadBlob } from '@/lib/download';
 import type { UtrParseResult } from '@/types';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -236,12 +237,7 @@ function PayoutPageInner() {
 
       // Binary response — trigger download
       const blob     = await res.blob();
-      const url      = URL.createObjectURL(blob);
-      const a        = document.createElement('a');
-      a.href         = url;
-      a.download     = `payout-${period}-${groupType.toLowerCase()}.xlsx`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, `payout-${period}-${groupType.toLowerCase()}.xlsx`);
 
       loadAll();
     } catch (e) {

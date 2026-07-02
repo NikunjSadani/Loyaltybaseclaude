@@ -17,6 +17,7 @@ import { generateCreditTemplate } from '@/lib/credits-payouts-template';
 import { parseCreditUpload }      from '@/lib/credits-payouts-parser';
 import { getGifsySettings }       from '@/lib/gifsy-settings';
 import { jsonToSheetSafe }        from '@/lib/xlsx-safe';
+import { downloadBlob }           from '@/lib/download';
 import type { CreditField, CreditParseResult } from '@/types';
 import type { TemplateOutlet } from '@/lib/credits-payouts-template';
 
@@ -36,12 +37,7 @@ function monthLabel(yyyyMm: string): string {
 
 function downloadBuffer(buf: ArrayBuffer, fileName: string) {
   const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadBlob(blob, fileName);
 }
 
 function isUploadWindowOpen(cutoffDay: number): boolean {
