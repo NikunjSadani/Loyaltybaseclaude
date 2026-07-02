@@ -426,6 +426,10 @@ export default function OutletsPage() {
   const [deactivateValidation, setDeactivateValidation] = useState<OutletDeactivateValidationResult | null>(null);
   const [deactivateUploadState, setDeactivateUploadState] = useState<UploadState>('idle');
 
+  // "Download Outlet Master" (server export) state — surfaced so a failure is
+  // visible instead of the button silently doing nothing.
+  const [masterDownloadState, setMasterDownloadState] = useState<'idle' | 'loading' | 'error'>('idle');
+
   // Tenant-config load status. The upload validators key on outletTypes (+ the
   // employee hierarchy); validating BEFORE these load — or when the config fetch
   // failed — produced false "no outlet types are enabled" rejections for every
@@ -665,15 +669,32 @@ export default function OutletsPage() {
   }, [allOutlets, parseXlsx]);
 
   // ── Download helpers ──
+  // Robustly trigger a browser "Save file" for a blob. Two things matter and were
+  // previously wrong (a fetched download silently did nothing):
+  //   1. the <a> MUST be in the DOM before .click() — a detached anchor's download
+  //      is ignored/cancelled by some browsers, especially when .click() runs AFTER
+  //      an `await` (i.e. outside the original user-gesture call stack).
+  //   2. the object URL must NOT be revoked synchronously after .click() — that
+  //      races the browser and cancels the save. Defer the revoke.
+  function triggerBlobDownload(blob: Blob, filename: string) {
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href    = url;
+    a.download = filename;
+    a.rel     = 'noopener';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 1000);
+  }
+
   function downloadXlsx(wb: XLSX.WorkBook, filename: string) {
     const buf   = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
     const blob  = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    const url   = URL.createObjectURL(blob);
-    const a     = document.createElement('a');
-    a.href      = url;
-    a.download  = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerBlobDownload(blob, filename);
   }
 
   function downloadOutletTemplate() {
@@ -787,25 +808,28 @@ export default function OutletsPage() {
             <div>
               <h2 className="text-sm font-semibold text-gray-700">Outlet Master</h2>
               <p className="text-xs text-gray-400 mt-0.5">Complete outlet dump with KYC, banking, hierarchy, and lifecycle data</p>
+              {masterDownloadState === 'error' && (
+                <p data-testid="download-outlet-master-error" className="text-xs text-red-600 mt-1 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5" /> Could not download the outlet master. Please try again.
+                </p>
+              )}
             </div>
             <button
               data-testid="download-outlet-master"
+              disabled={masterDownloadState === 'loading'}
               onClick={async () => {
+                setMasterDownloadState('loading');
                 try {
                   const res = await fetch('/api/admin/reports/outlet-master');
-                  if (!res.ok) return;
+                  if (!res.ok) { setMasterDownloadState('error'); return; }
                   const blob = await res.blob();
-                  const url  = URL.createObjectURL(blob);
-                  const a    = document.createElement('a');
-                  a.href     = url;
-                  a.download = `outlet-master-${new Date().toISOString().split('T')[0]}.xlsx`;
-                  a.click();
-                  URL.revokeObjectURL(url);
-                } catch { /* ignore */ }
+                  triggerBlobDownload(blob, `outlet-master-${new Date().toISOString().split('T')[0]}.xlsx`);
+                  setMasterDownloadState('idle');
+                } catch { setMasterDownloadState('error'); }
               }}
-              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm font-semibold rounded-lg hover:bg-emerald-700 transition-colors shrink-0"
+              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm font-semibold rounded-lg hover:bg-emerald-700 disabled:opacity-60 transition-colors shrink-0"
             >
-              <Download className="w-4 h-4" /> Download Outlet Master
+              <Download className="w-4 h-4" /> {masterDownloadState === 'loading' ? 'Preparing…' : 'Download Outlet Master'}
             </button>
           </div>
 
