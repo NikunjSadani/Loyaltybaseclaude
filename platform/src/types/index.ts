@@ -54,6 +54,7 @@ export enum KYCStatus {
   NOT_STARTED            = 'NOT_STARTED',   // outlet exists; KYC not yet initiated
   NOT_INTERESTED         = 'NOT_INTERESTED', // sales agent marked outlet as not interested; outlet deactivated
   PENDING                = 'PENDING',
+  DRAFT                  = 'DRAFT',          // rep submitted; awaiting outlet-owner consent-OTP before it routes to an approver
   SUBMITTED              = 'SUBMITTED',
   UNDER_REVIEW           = 'UNDER_REVIEW',
   PENDING_SO_APPROVAL    = 'PENDING_SO_APPROVAL',   // XSR submitted → awaiting SO

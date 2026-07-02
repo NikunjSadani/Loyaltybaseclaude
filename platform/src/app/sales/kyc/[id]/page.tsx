@@ -245,6 +245,7 @@ function mapStatusHistory(history: ApiStatusHistory[]): ApprovalEvent[] {
 const statusConfig: Partial<Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 'info' | 'default'; label: string }>> = {
   [KYCStatus.APPROVED]:              { variant: 'success', label: 'Approved'           },
   [KYCStatus.PENDING]:               { variant: 'warning', label: 'Draft'              },
+  [KYCStatus.DRAFT]:                 { variant: 'warning', label: 'Pending'            },
   [KYCStatus.SUBMITTED]:             { variant: 'info',    label: 'Submitted'          },
   [KYCStatus.UNDER_REVIEW]:          { variant: 'info',    label: 'Under Review'       },
   [KYCStatus.PENDING_SO_APPROVAL]:   { variant: 'warning', label: 'Awaiting SO'        },
@@ -558,6 +559,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
 
   /* Re-entry: route the junior into the pre-filled new-KYC wizard (selects by outlet). */
   const isReEntry =
+    kyc.status === KYCStatus.DRAFT ||
     kyc.status === KYCStatus.REJECTED ||
     kyc.status === KYCStatus.RE_UPLOAD_REQUIRED ||
     kyc.status === KYCStatus.RESUBMISSION_REQUIRED ||

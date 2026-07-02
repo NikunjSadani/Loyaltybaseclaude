@@ -52,6 +52,7 @@ interface MemberDetail {
 const kycBadge: Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 'info' | 'default'; label: string }> = {
   [KYCStatus.APPROVED]:              { variant: 'success', label: 'Approved'       },
   [KYCStatus.PENDING]:               { variant: 'warning', label: 'Pending'        },
+  [KYCStatus.DRAFT]:                 { variant: 'warning', label: 'Pending'        },
   [KYCStatus.SUBMITTED]:             { variant: 'info',    label: 'Submitted'      },
   [KYCStatus.UNDER_REVIEW]:          { variant: 'info',    label: 'In Review'      },
   [KYCStatus.PENDING_SO_APPROVAL]:   { variant: 'warning', label: 'Awaiting SO'   },

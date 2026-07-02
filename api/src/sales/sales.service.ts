@@ -1005,8 +1005,10 @@ export class SalesService {
           const partner = outlet.partner; // null until the outlet is KYC'd
           const latestKyc = partner?.kycSubmissions[0] ?? null;
           // Re-entry statuses: the rep re-opens the SAME outlet's KYC wizard
-          // pre-filled. Only build existingKyc for these (else null).
-          const RE_ENTRY = ['REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED', 'RE_KYC_REQUIRED'];
+          // pre-filled. Only build existingKyc for these (else null). DRAFT = an
+          // un-confirmed KYC (saved at submit, awaiting the outlet-owner OTP) — the rep
+          // re-opens it pre-filled to re-send the OTP + submit (or edit first).
+          const RE_ENTRY = ['DRAFT', 'REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED', 'RE_KYC_REQUIRED'];
           const isReEntry = !!latestKyc && RE_ENTRY.includes(latestKyc.status);
           // Address lives on the Outlet (ChannelPartner has no address columns).
           // These are the canonical "last submitted" values: on every KYC submission

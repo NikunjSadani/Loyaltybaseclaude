@@ -26,6 +26,11 @@ const config: Record<
     label: 'Pending',
     variant: 'warning',
   },
+  [KYCStatus.DRAFT]: {
+    icon: <Clock className="h-3.5 w-3.5" />,
+    label: 'Pending',
+    variant: 'warning',
+  },
   [KYCStatus.SUBMITTED]: {
     icon: <Clock className="h-3.5 w-3.5" />,
     label: 'Submitted',

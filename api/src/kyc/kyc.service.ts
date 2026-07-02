@@ -981,12 +981,19 @@ export class KycService {
       paymentMode: dto.paymentMode ?? undefined,
     };
 
-    // 2. Escalation routing — DB-backed via the real SalesUser reporting tree.
-    //    Read-only; computed before the write transaction.
-    const { status, escalatedFrom } = await this.resolveInitialRouting(user);
+    // 2. The submission is SAVED as DRAFT here and NOT yet routed to an approver.
+    //    Routing (→ the approver bucket) is deferred to consent(), AFTER the outlet
+    //    owner verifies the consent OTP — the OTP sent to the outlet's own phone is the
+    //    outlet's confirmation of the KYC, so it must not reach the approver's queue
+    //    before that. resolveInitialRouting() now runs at consent time instead.
+    const status = 'DRAFT';
+    const escalatedFrom: string | null = null;
 
+    // Statuses that mean "a live submission already exists for this partner" → block a
+    // duplicate create. DRAFT is intentionally NOT included: an un-confirmed KYC can be
+    // re-opened + resubmitted (a fresh DRAFT supersedes the old one, mirroring the
+    // rejected re-entry flow). Once consent routes it, the routed status blocks dups.
     const IN_FLIGHT_STATUSES = [
-      'DRAFT',
       'SUBMITTED',
       'UNDER_REVIEW',
       'PENDING_SO_APPROVAL',
@@ -1102,15 +1109,14 @@ export class KycService {
       });
     });
 
-    // 6. Log initial status history.
+    // 6. Log initial status history (DRAFT — not yet routed; consent() records the
+    //    transition to the approver bucket once the outlet-owner OTP is verified).
     await this.prisma.kycStatusHistory.create({
       data: {
         kycSubmissionId: submission.id,
         toStatus: status as never,
         changedByUserId: user.sub,
-        notes: escalatedFrom
-          ? `Escalated — ${escalatedFrom} has resigned`
-          : 'Submitted for review',
+        notes: 'Saved — awaiting outlet consent (OTP) before routing to the approver',
       },
     });
 
@@ -1178,9 +1184,9 @@ export class KycService {
 
     await Promise.all(docPromises);
 
-    // Notify the routed approver (sales) that a KYC is pending their approval.
-    // Fire-and-forget + tenant-scoped recipient resolution; never blocks/fails submit.
-    await this.salesNotifications.kycSubmittedForApproval(user.clientId, user.sub, outlet.name);
+    // NOTE: the approver is NOT notified here. Routing + the approver notification are
+    // deferred to consent() (after the outlet-owner OTP verifies) so the KYC only reaches
+    // the approver's queue once the outlet has confirmed it.
 
     // NOTE: the outlet-owner "KYC submitted" WhatsApp is intentionally NOT sent here.
     // It fires from consent() AFTER the outlet owner verifies the consent OTP — the OTP
@@ -1947,8 +1953,8 @@ export class KycService {
     const submission = await this.prisma.kycSubmission.findFirst({
       where: { id: submissionId, userId: user.sub, user: { clientId: user.clientId } },
       include: {
-        // For the post-consent WhatsApp (owner name + the outlet's program).
-        partner: { select: { ownerName: true, outlets: { select: { programName: true }, take: 1 } } },
+        // For post-consent routing + notifications (owner name, outlet name, program).
+        partner: { select: { ownerName: true, outlets: { select: { name: true, programName: true }, take: 1 } } },
       },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
@@ -1970,17 +1976,49 @@ export class KycService {
       },
     });
 
-    // Notify the OUTLET OWNER via WhatsApp that their KYC was submitted — fired HERE,
-    // AFTER the consent OTP is verified (NOT at create()). The OTP goes to the outlet's
-    // own phone, so verifying it is the outlet's confirmation of the KYC; the "submitted"
-    // message must follow that. Recipient = the just-verified consent `mobile`. Additive
-    // + fire-and-forget; no-op unless the tenant is configured in WHATSAPP_KYC.
-    await this.sendKycWhatsapp(user.clientId, 'SUBMITTED', {
-      ownerName: submission.partner?.ownerName ?? null,
-      ownerPhone: mobile,
-      programName: submission.partner?.outlets?.[0]?.programName ?? null,
-      submittedAt: submission.submittedAt ?? verifiedAt,
-    });
+    // ── OTP GATES ROUTING ──────────────────────────────────────────────────────
+    // The submission was saved as DRAFT at create() and NOT routed to any approver.
+    // NOW that the outlet owner has verified the consent OTP (the outlet's confirmation
+    // of the KYC), route it to the approver bucket + notify the approver + WhatsApp the
+    // owner. Guarded on DRAFT so a repeat consent (OTP re-verify) is idempotent — no
+    // double-routing, double-notify, or duplicate "submitted" WhatsApp.
+    if (submission.status === 'DRAFT') {
+      const { status: routedStatus, escalatedFrom } = await this.resolveInitialRouting(user);
+      await this.prisma.kycSubmission.update({
+        where: { id: submissionId },
+        // submittedAt = the consent moment: the KYC only truly reaches the approver now,
+        // so approver SLA/aging starts here.
+        data: { status: routedStatus as never, escalatedFrom, submittedAt: verifiedAt },
+      });
+      await this.prisma.kycStatusHistory.create({
+        data: {
+          kycSubmissionId: submissionId,
+          fromStatus: 'DRAFT' as never,
+          toStatus: routedStatus as never,
+          changedByUserId: user.sub,
+          notes: escalatedFrom
+            ? `Outlet consent verified (OTP) — routed for review (escalated: ${escalatedFrom} resigned)`
+            : 'Outlet consent verified (OTP) — routed to the approver for review',
+        },
+      });
+
+      // Notify the routed approver (sales) — fire-and-forget, tenant-scoped, never blocks.
+      await this.salesNotifications.kycSubmittedForApproval(
+        user.clientId,
+        submission.userId,
+        submission.partner?.outlets?.[0]?.name ?? '',
+      );
+
+      // Notify the OUTLET OWNER via WhatsApp that their KYC was submitted — fired HERE,
+      // AFTER the OTP verifies (the outlet's own confirmation). Recipient = the verified
+      // consent `mobile`. Fire-and-forget; no-op unless the tenant is in WHATSAPP_KYC.
+      await this.sendKycWhatsapp(user.clientId, 'SUBMITTED', {
+        ownerName: submission.partner?.ownerName ?? null,
+        ownerPhone: mobile,
+        programName: submission.partner?.outlets?.[0]?.programName ?? null,
+        submittedAt: verifiedAt,
+      });
+    }
 
     return { verified: true, submissionId };
   }

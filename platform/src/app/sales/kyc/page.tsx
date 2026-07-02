@@ -53,6 +53,7 @@ type SortOrder = 'newest' | 'oldest';
 const PENDING_KYC_STATUSES = new Set<KYCStatus>([
   KYCStatus.NOT_STARTED,
   KYCStatus.PENDING,
+  KYCStatus.DRAFT,
 ]);
 
 function getApprovalStatus(): KYCStatus | null {
@@ -100,6 +101,7 @@ const STATUS_FILTERS: { key: FilterKey; label: string }[] = [
 const kycBadge: Record<KYCStatus, { variant: 'success' | 'warning' | 'danger' | 'info' | 'default'; label: string }> = {
   [KYCStatus.APPROVED]:              { variant: 'success', label: 'Approved'         },
   [KYCStatus.PENDING]:               { variant: 'warning', label: 'Draft'            },
+  [KYCStatus.DRAFT]:                 { variant: 'warning', label: 'Pending'          },
   [KYCStatus.SUBMITTED]:             { variant: 'info',    label: 'Submitted'        },
   [KYCStatus.UNDER_REVIEW]:          { variant: 'info',    label: 'In Review'        },
   [KYCStatus.PENDING_SO_APPROVAL]:   { variant: 'warning', label: 'Awaiting SO'      },

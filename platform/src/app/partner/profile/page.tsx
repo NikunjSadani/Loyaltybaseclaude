@@ -43,6 +43,7 @@ interface ProfileData {
 const kycConfig: Record<KYCStatus, { icon: React.ReactNode; label: string; variant: 'success' | 'warning' | 'danger' | 'info' | 'default' }> = {
   [KYCStatus.APPROVED]: { icon: <CheckCircle className="h-4 w-4" />, label: 'KYC Approved', variant: 'success' },
   [KYCStatus.PENDING]: { icon: <Clock className="h-4 w-4" />, label: 'KYC Pending', variant: 'warning' },
+  [KYCStatus.DRAFT]: { icon: <Clock className="h-4 w-4" />, label: 'Pending', variant: 'warning' },
   [KYCStatus.SUBMITTED]: { icon: <Clock className="h-4 w-4" />, label: 'KYC Submitted', variant: 'info' },
   [KYCStatus.UNDER_REVIEW]: { icon: <Clock className="h-4 w-4" />, label: 'Under Review', variant: 'info' },
   [KYCStatus.PENDING_SO_APPROVAL]:  { icon: <Clock className="h-4 w-4" />, label: 'Awaiting SO',    variant: 'warning' },

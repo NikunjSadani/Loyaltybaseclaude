@@ -53,6 +53,7 @@ const mockPrisma = {
     findFirst: jest.fn(),
     findMany: jest.fn(),
     create: jest.fn(),
+    update: jest.fn(),
     count: jest.fn(),
     groupBy: jest.fn(),
   },
@@ -535,86 +536,64 @@ describe('KycService', () => {
   // salesUser.findFirst call is the employee-clash probe, not the routing submitter.
   // primePhoneAvailable() handles that; routingCalls() selects the routing reads.
 
-  describe('resolveInitialRouting (via create)', () => {
+  describe('resolveInitialRouting (via consent — routing happens after the outlet OTP)', () => {
     /** Build a minimal SO-role submitter */
     const isr: JwtPayload = { sub: 'isr1', role: 'SALES_ISR', clientId: 'deoleo', phone: '', name: '' };
 
-    const baseDto = {
-      outletId: 'outlet-1',
-      partnerName: 'Test Store',
-      mobile: '9000000001',
-      address: '1 Main St',
-      city: 'Mumbai',
-      state: 'Maharashtra',
-      pincode: '400001',
-    };
-
     /**
-     * Prime the create() pipeline AFTER resolveInitialRouting.
+     * Prime the consent() pipeline UP TO resolveInitialRouting.
      *
-     * IMPORTANT call-order note. The order of reads on mockPrisma inside create() is:
-     *   1. outlet.findFirst                       (outlet load)
-     *   2. channelPartner.findFirst               (assertPhoneAvailable partner-clash)
-     *   3. salesUser.findFirst (nested where.user) (assertPhoneAvailable employee-clash)
-     *   4. salesUser.findFirst (flat where.clientId+userId) (resolveInitialRouting submitter)
-     *   5+. salesUser.findFirst                    (resolveInitialRouting walk)
-     * So the FIRST salesUser.findFirst.mockResolvedValueOnce a test queues is consumed
-     * by the employee-clash probe, NOT the routing submitter. Each routing test must
-     * therefore queue an employee-clash `null` FIRST (via primePhoneAvailable) so the
-     * phone is "available", then its routing values. primeCreate() handles the outlet
-     * load + channelPartner-clash null + the in-tx writes.
+     * IMPORTANT call-order note. consent() does NOT run assertPhoneAvailable, so
+     * unlike create() there is NO leading employee-clash probe. The FIRST
+     * salesUser.findFirst call inside consent() IS the resolveInitialRouting
+     * submitter lookup. This helper queues the OTP verify + ConsentRecord write +
+     * the DRAFT-path submission load, plus the routing update + status-history
+     * writes that follow resolveInitialRouting — but NOT the salesUser.findFirst
+     * routing chain (each test supplies that itself).
      */
-    const primePhoneAvailable = () => {
-      // assertPhoneAvailable: partner-clash null, then employee-clash null → available.
-      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
-      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
-    };
-    const primeCreate = () => {
-      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
-        id: 'outlet-1',
-        clientId: 'deoleo',
-        partnerId: null,
-        outletCode: 'OUT-1',
-        outletType: { code: 'SSS' },
+    const primeConsentUpToRouting = () => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o1', code: '123456', attempts: 0, maxAttempts: 3 });
+      mockPrisma.otpCode.update.mockResolvedValueOnce({});
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 'sub-rt-1',
+        status: 'DRAFT',
+        userId: 'isr1',
+        submittedAt: new Date('2026-06-30T00:00:00Z'),
+        partner: { ownerName: 'Owner', outlets: [{ name: 'Store', programName: 'Olive Oil' }] },
       });
-      mockTx.user.findFirst.mockResolvedValueOnce(null);
-      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-rt-1' });
-      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-rt-1' });
-      mockTx.outlet.update.mockResolvedValueOnce({});
-      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
-      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-rt-1' });
+      mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr1' });
+      mockPrisma.kycSubmission.update.mockResolvedValueOnce({});
       mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
     };
     /**
-     * After a create() that primed phone-availability, the routing-relevant
-     * salesUser.findFirst calls are every call EXCEPT the first (the employee-clash
-     * probe). This returns those calls' `where` clauses in order so assertions can
-     * target resolveInitialRouting without coupling to the absolute call index.
+     * The routing-relevant salesUser.findFirst calls. consent() has no
+     * employee-clash probe, so every salesUser.findFirst call here is a routing
+     * read; this filter (clientId set, no nested `user`) still selects them and
+     * returns their `where` clauses in order.
      */
     const routingCalls = () =>
       mockPrisma.salesUser.findFirst.mock.calls
         .map((c) => c[0].where)
         .filter((w: Record<string, unknown>) => w.clientId !== undefined && w.user === undefined);
+    /** The data written by the routing kycSubmission.update: { status, escalatedFrom, submittedAt }. */
+    const routedUpdate = () => mockPrisma.kycSubmission.update.mock.calls[0][0].data;
 
     it('submitter with no SalesUser record → status SUBMITTED, escalatedFrom null', async () => {
-      primePhoneAvailable();
       // resolveInitialRouting: no SalesUser → SUBMITTED
       mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
-      primeCreate();
-      const res = await service.create(
+      primeConsentUpToRouting();
+      await service.consent(
         { sub: 'retail1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' },
-        baseDto as never,
+        { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' },
       );
-      expect(res).toMatchObject({ status: 'SUBMITTED', escalatedFrom: null });
-      // Confirm the resolveInitialRouting submitter query was tenant-scoped (the
-      // routing call, not the assertPhoneAvailable employee-clash probe).
+      expect(routedUpdate()).toMatchObject({ status: 'SUBMITTED', escalatedFrom: null });
+      // Confirm the resolveInitialRouting submitter query was tenant-scoped.
       const suWhere = routingCalls()[0];
       expect(suWhere.clientId).toBe('deoleo');
       expect(suWhere.deletedAt).toBe(null);
     });
 
     it("direct manager active -- routes to that manager's level status", async () => {
-      primePhoneAvailable();
       // Submitter SalesUser → reportingToId = 'so-id'
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' }) // submitter
@@ -625,9 +604,9 @@ describe('KycService', () => {
           reportingToId: 'asm-su',
           hierarchyLevel: { code: 'SO' },
         });
-      primeCreate();
-      const res = await service.create(isr, baseDto as never);
-      expect(res).toMatchObject({ status: 'PENDING_SO_APPROVAL', escalatedFrom: null });
+      primeConsentUpToRouting();
+      await service.consent(isr, { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' });
+      expect(routedUpdate()).toMatchObject({ status: 'PENDING_SO_APPROVAL', escalatedFrom: null });
       // audit NIT-1: the per-hop manager lookup must ALSO be tenant-scoped, not just
       // the submitter lookup — guard the highest-value invariant of this change.
       // routingCalls()[1] = the first manager-walk lookup (after the submitter lookup).
@@ -635,7 +614,6 @@ describe('KycService', () => {
     });
 
     it('direct manager resigned (inactive) → escalates to next active manager, escalatedFrom set', async () => {
-      primePhoneAvailable();
       // Submitter → SO (inactive) → ASM (active)
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' })   // submitter
@@ -653,13 +631,12 @@ describe('KycService', () => {
           reportingToId: null,
           hierarchyLevel: { code: 'ASM' },
         });
-      primeCreate();
-      const res = await service.create(isr, baseDto as never);
-      expect(res).toMatchObject({ status: 'PENDING_ASM_APPROVAL', escalatedFrom: 'SO' });
+      primeConsentUpToRouting();
+      await service.consent(isr, { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' });
+      expect(routedUpdate()).toMatchObject({ status: 'PENDING_ASM_APPROVAL', escalatedFrom: 'SO' });
     });
 
     it('direct manager soft-deleted → treated as inactive and skipped', async () => {
-      primePhoneAvailable();
       // Submitter → SO (deletedAt set) → ASM (active)
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' })
@@ -677,13 +654,12 @@ describe('KycService', () => {
           reportingToId: null,
           hierarchyLevel: { code: 'ASM' },
         });
-      primeCreate();
-      const res = await service.create(isr, baseDto as never);
-      expect(res).toMatchObject({ status: 'PENDING_ASM_APPROVAL', escalatedFrom: 'SO' });
+      primeConsentUpToRouting();
+      await service.consent(isr, { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' });
+      expect(routedUpdate()).toMatchObject({ status: 'PENDING_ASM_APPROVAL', escalatedFrom: 'SO' });
     });
 
     it('no active manager anywhere up the chain → fallback PENDING_RSM_APPROVAL', async () => {
-      primePhoneAvailable();
       // Submitter → SO (inactive) → no further manager
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'so-su' })
@@ -694,18 +670,16 @@ describe('KycService', () => {
           reportingToId: null,
           hierarchyLevel: { code: 'SO' },
         });
-      primeCreate();
-      const res = await service.create(isr, baseDto as never);
-      expect(res).toMatchObject({ status: 'PENDING_RSM_APPROVAL', escalatedFrom: 'SO' });
+      primeConsentUpToRouting();
+      await service.consent(isr, { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' });
+      expect(routedUpdate()).toMatchObject({ status: 'PENDING_RSM_APPROVAL', escalatedFrom: 'SO' });
     });
 
     it('lookup is tenant-scoped (clientId in salesUser where clause)', async () => {
-      primePhoneAvailable();
       mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
-      primeCreate();
-      await service.create(isr, baseDto as never);
-      // The resolveInitialRouting submitter lookup (routingCalls()[0]), not the
-      // assertPhoneAvailable employee-clash probe.
+      primeConsentUpToRouting();
+      await service.consent(isr, { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' });
+      // The resolveInitialRouting submitter lookup (routingCalls()[0]).
       const suWhere = routingCalls()[0];
       expect(suWhere.clientId).toBe('deoleo');
       expect(suWhere.userId).toBe('isr1');
@@ -716,15 +690,14 @@ describe('KycService', () => {
       // The walk makes exactly 3 salesUser.findFirst calls:
       //   1. submitter lookup  2. a-su  3. b-su  → then a-su is already in visitedIds → break.
       // Fallback: no active manager found → PENDING_RSM_APPROVAL.
-      primePhoneAvailable();
       mockPrisma.salesUser.findFirst
         .mockResolvedValueOnce({ id: 'isr-su', reportingToId: 'a-su' })
         .mockResolvedValueOnce({ id: 'a-su', isActive: false, deletedAt: null, reportingToId: 'b-su', hierarchyLevel: { code: 'SO' } })
         .mockResolvedValueOnce({ id: 'b-su', isActive: false, deletedAt: null, reportingToId: 'a-su', hierarchyLevel: { code: 'SO' } });
       // After those 3, the visited-set guard fires (a-su already seen) → break.
-      primeCreate();
-      const res = await service.create(isr, baseDto as never);
-      expect(res.status).toBe('PENDING_RSM_APPROVAL');
+      primeConsentUpToRouting();
+      await service.consent(isr, { submissionId: 'sub-rt-1', mobile: '9000000001', otp: '123456' });
+      expect(routedUpdate().status).toBe('PENDING_RSM_APPROVAL');
     }, 5000);
   });
 
@@ -812,7 +785,7 @@ describe('KycService', () => {
         state: 'Y',
         pincode: '110011',
       } as never);
-      expect(res).toEqual({ submissionId: 'sub1', status: 'PENDING_ASM_APPROVAL', escalatedFrom: null });
+      expect(res).toEqual({ submissionId: 'sub1', status: 'DRAFT', escalatedFrom: null });
       // Owner created in PENDING_VERIFICATION with the outletType-mapped role.
       expect(mockTx.user.create.mock.calls[0][0].data).toMatchObject({
         status: 'PENDING_VERIFICATION',
@@ -883,10 +856,17 @@ describe('KycService', () => {
       mockPrisma.otpCode.update.mockResolvedValueOnce({});
       mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
         id: 'sub1',
+        status: 'DRAFT',
+        userId: 'owner1',
         submittedAt: new Date('2026-06-30T00:00:00Z'),
-        partner: { ownerName: 'Acme Owner', outlets: [{ programName: 'Olive Oil' }] },
+        partner: { ownerName: 'Acme Owner', outlets: [{ name: 'Acme Store', programName: 'Olive Oil' }] },
       });
       mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr1' });
+      // The DRAFT path now routes after the OTP: resolveInitialRouting (→ SUBMITTED),
+      // then the routing update + status-history writes.
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // resolveInitialRouting → SUBMITTED
+      mockPrisma.kycSubmission.update.mockResolvedValueOnce({});
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
       return { sub: 'owner1', role: 'SALES_ISR', clientId, phone: '', name: '' };
     };
 
