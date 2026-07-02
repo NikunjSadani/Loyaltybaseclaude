@@ -1182,16 +1182,10 @@ export class KycService {
     // Fire-and-forget + tenant-scoped recipient resolution; never blocks/fails submit.
     await this.salesNotifications.kycSubmittedForApproval(user.clientId, user.sub, outlet.name);
 
-    // Notify the OUTLET OWNER (not the rep) via WhatsApp that their KYC was submitted.
-    // Additive + post-commit + fire-and-forget; no-op unless the tenant is configured
-    // in WHATSAPP_KYC. Owner name/phone = the KYC contact captured in dto; program = the
-    // outlet's programName.
-    await this.sendKycWhatsapp(user.clientId, 'SUBMITTED', {
-      ownerName: dto.partnerName,
-      ownerPhone: dto.mobile,
-      programName: outlet.programName,
-      submittedAt: submission.submittedAt ?? new Date(),
-    });
+    // NOTE: the outlet-owner "KYC submitted" WhatsApp is intentionally NOT sent here.
+    // It fires from consent() AFTER the outlet owner verifies the consent OTP — the OTP
+    // sent to the outlet's own phone is the outlet's confirmation of the KYC, so the
+    // "submitted" message must follow that confirmation, not this (pre-consent) create.
 
     return { submissionId: submission.id, status, escalatedFrom };
   }
@@ -1952,6 +1946,10 @@ export class KycService {
     // with the rest of the service — userId alone is already single-tenant).
     const submission = await this.prisma.kycSubmission.findFirst({
       where: { id: submissionId, userId: user.sub, user: { clientId: user.clientId } },
+      include: {
+        // For the post-consent WhatsApp (owner name + the outlet's program).
+        partner: { select: { ownerName: true, outlets: { select: { programName: true }, take: 1 } } },
+      },
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
 
@@ -1970,6 +1968,18 @@ export class KycService {
         consentedAt: verifiedAt,
         // ipAddress / deviceInfo: not available on this path — left null (DPDP §3.2)
       },
+    });
+
+    // Notify the OUTLET OWNER via WhatsApp that their KYC was submitted — fired HERE,
+    // AFTER the consent OTP is verified (NOT at create()). The OTP goes to the outlet's
+    // own phone, so verifying it is the outlet's confirmation of the KYC; the "submitted"
+    // message must follow that. Recipient = the just-verified consent `mobile`. Additive
+    // + fire-and-forget; no-op unless the tenant is configured in WHATSAPP_KYC.
+    await this.sendKycWhatsapp(user.clientId, 'SUBMITTED', {
+      ownerName: submission.partner?.ownerName ?? null,
+      ownerPhone: mobile,
+      programName: submission.partner?.outlets?.[0]?.programName ?? null,
+      submittedAt: submission.submittedAt ?? verifiedAt,
     });
 
     return { verified: true, submissionId };

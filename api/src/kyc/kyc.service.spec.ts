@@ -870,13 +870,33 @@ describe('KycService', () => {
       mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
     };
 
-    it('SUBMIT (deoleo): sends deoleo_kyc_submission to the owner mobile with [ownerName, date, program]', async () => {
+    it('SUBMIT create() does NOT send the WhatsApp — it is deferred to consent (post-OTP)', async () => {
       primeSubmit('deoleo');
       await service.create(isr, baseDto as never);
+      // The "KYC submitted" WhatsApp must NOT fire before the outlet-owner OTP is verified.
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+    });
+
+    /** Prime a consent() happy path whose submission carries the WhatsApp owner + program. */
+    const primeConsent = (clientId: string): JwtPayload => {
+      mockPrisma.otpCode.findFirst.mockResolvedValueOnce({ id: 'o1', code: '123456', attempts: 0, maxAttempts: 3 });
+      mockPrisma.otpCode.update.mockResolvedValueOnce({});
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 'sub1',
+        submittedAt: new Date('2026-06-30T00:00:00Z'),
+        partner: { ownerName: 'Acme Owner', outlets: [{ programName: 'Olive Oil' }] },
+      });
+      mockPrisma.consentRecord.create.mockResolvedValueOnce({ id: 'cr1' });
+      return { sub: 'owner1', role: 'SALES_ISR', clientId, phone: '', name: '' };
+    };
+
+    it('CONSENT (deoleo): sends deoleo_kyc_submission to the owner mobile with [ownerName, date, program] AFTER the OTP verifies', async () => {
+      const owner = primeConsent('deoleo');
+      await service.consent(owner, { submissionId: 'sub1', mobile: '9000000001', otp: '123456' });
 
       expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
       const [phone, template, values] = mockMsg91.sendWhatsappTemplate.mock.calls[0];
-      // Recipient = the OUTLET OWNER's KYC contact mobile (dto.mobile), NOT the rep.
+      // Recipient = the just-verified consent mobile (the outlet owner's phone).
       expect(phone).toBe('9000000001');
       expect(template).toBe('deoleo_kyc_submission');
       // [ownerName, submission date (DD MMM YYYY), programName]
@@ -885,18 +905,17 @@ describe('KycService', () => {
       expect(values[2]).toBe('Olive Oil');
     });
 
-    it('SUBMIT (unconfigured tenant clientb): does NOT send a WhatsApp', async () => {
-      const isrB: JwtPayload = { sub: 'isrB', role: 'SALES_ISR', clientId: 'clientb', phone: '', name: '' };
-      primeSubmit('clientb');
-      await service.create(isrB, baseDto as never);
+    it('CONSENT (unconfigured tenant clientb): does NOT send a WhatsApp', async () => {
+      const owner = primeConsent('clientb');
+      await service.consent(owner, { submissionId: 'sub1', mobile: '9000000001', otp: '123456' });
       expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
     });
 
-    it('SUBMIT: a thrown sendWhatsappTemplate never fails the KYC submit', async () => {
-      primeSubmit('deoleo');
+    it('CONSENT: a thrown sendWhatsappTemplate never fails the consent verification', async () => {
+      const owner = primeConsent('deoleo');
       mockMsg91.sendWhatsappTemplate.mockRejectedValueOnce(new Error('MSG91 down'));
-      const res = await service.create(isr, baseDto as never);
-      expect(res).toMatchObject({ submissionId: 'sub1', status: 'SUBMITTED' });
+      const res = await service.consent(owner, { submissionId: 'sub1', mobile: '9000000001', otp: '123456' });
+      expect(res).toMatchObject({ verified: true, submissionId: 'sub1' });
     });
 
     /** Seed an approve() happy path whose partner carries the WhatsApp owner fields. */
