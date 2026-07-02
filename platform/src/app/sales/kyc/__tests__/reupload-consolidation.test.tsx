@@ -66,13 +66,16 @@ beforeEach(() => {
 });
 
 describe('KYC list — Rejected / Re-upload consolidation', () => {
-  it('renders a RE_UPLOAD_REQUIRED row without crashing, with a Re-upload badge', async () => {
+  it('renders a RE_UPLOAD_REQUIRED row without crashing, badged simply as "Rejected"', async () => {
     render(<KYCListPage />);
     await waitFor(() => expect(screen.getByText('Reupload Mart')).toBeInTheDocument());
-    // Badge label for RE_UPLOAD_REQUIRED is "Re-upload" — proves the enum/badge-map fix
-    // (previously undefined → crash). Filter out any <option> so we assert on the row badge.
-    const reuploadBadges = screen.queryAllByText('Re-upload').filter((n) => n.tagName !== 'OPTION');
-    expect(reuploadBadges.length).toBeGreaterThan(0);
+    // Owner decision: keep it simple for the rep — a re-upload row badges as "Rejected"
+    // (not "Re-upload"). Proves the enum/badge-map fix (previously undefined → crash) AND
+    // the simplified label. Filter out any <option> so we assert on the row badges.
+    const rejectedBadges = screen.queryAllByText('Rejected').filter((n) => n.tagName !== 'OPTION');
+    expect(rejectedBadges.length).toBeGreaterThan(0);
+    // And no rep-facing "Re-upload" wording survives anywhere on the list.
+    expect(screen.queryByText(/Re-upload/i)).toBeNull();
   });
 
   it('the "Re-upload" filter tab was removed (no standalone Re-upload option)', async () => {

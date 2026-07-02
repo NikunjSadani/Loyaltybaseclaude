@@ -251,8 +251,8 @@ const statusConfig: Partial<Record<KYCStatus, { variant: 'success' | 'warning' |
   [KYCStatus.PENDING_ASM_APPROVAL]:  { variant: 'warning', label: 'Awaiting ASM'       },
   [KYCStatus.PENDING_GIFSY]:         { variant: 'info',    label: 'Awaiting Gifsy'     },
   [KYCStatus.REJECTED]:              { variant: 'danger',  label: 'Rejected'           },
-  [KYCStatus.RE_UPLOAD_REQUIRED]:    { variant: 'danger',  label: 'Re-upload Required' },
-  [KYCStatus.RESUBMISSION_REQUIRED]: { variant: 'danger',  label: 'Re-upload Required' },
+  [KYCStatus.RE_UPLOAD_REQUIRED]:    { variant: 'danger',  label: 'Rejected'           },
+  [KYCStatus.RESUBMISSION_REQUIRED]: { variant: 'danger',  label: 'Rejected'           },
   [KYCStatus.RE_KYC_REQUIRED]:       { variant: 'warning', label: 'Re-KYC Required'   },
 };
 
