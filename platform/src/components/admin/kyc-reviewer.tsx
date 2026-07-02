@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   CheckCircle,
   XCircle,
@@ -35,6 +35,36 @@ interface KYCReviewerProps {
 // its single-select behaviour; the same option set is preserved verbatim).
 const REJECTION_REASONS = [...KYC_REJECTION_REASONS, KYC_REJECTION_OTHER_OPTION];
 
+/** A document is a PDF (GST cert, shop-establishment, cancelled cheque, …) when its
+ *  inlined data URL is application/pdf. PDFs cannot render in an <img> — they need an
+ *  <iframe>/<embed> — which is why they previously showed a blank placeholder. */
+function isPdfUrl(url: string): boolean {
+  return url.startsWith('data:application/pdf') || url.toLowerCase().split(/[?#]/)[0].endsWith('.pdf');
+}
+
+/** Chrome blocks `data:` URLs both in <iframe> and as top-level navigations, so a PDF
+ *  inlined as a data URL renders blank in an iframe AND won't open in a new tab.
+ *  Convert any `data:` URL to a short-lived `blob:` URL (revoked on change) — blob URLs
+ *  render in <iframe>, open in a new tab, and still work in <img>. Non-data URLs pass
+ *  through unchanged. */
+function useDisplayUrl(url?: string): string | undefined {
+  const [blobUrl, setBlobUrl] = useState<string | undefined>();
+  useEffect(() => {
+    if (!url || !url.startsWith('data:')) { setBlobUrl(undefined); return; }
+    try {
+      const comma = url.indexOf(',');
+      const mime = url.slice(5, url.indexOf(';'));
+      const bin = atob(url.slice(comma + 1));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const b = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      setBlobUrl(b);
+      return () => URL.revokeObjectURL(b);
+    } catch { setBlobUrl(undefined); }
+  }, [url]);
+  return url && url.startsWith('data:') ? blobUrl : url;
+}
+
 export function KYCReviewer({
   partnerId,
   partnerName,
@@ -49,6 +79,13 @@ export function KYCReviewer({
   const [selectedReason, setSelectedReason] = useState('');
   const [customReason, setCustomReason] = useState('');
   const [approveConfirm, setApproveConfirm] = useState(false);
+
+  // PDF docs need an <iframe>; and `data:` URLs must become `blob:` URLs to render in
+  // an iframe / open in a new tab (see useDisplayUrl). Photos (JPEG/PNG) keep <img>.
+  const selectedUrl = useDisplayUrl(selectedDoc?.url);
+  const zoomedUrl = useDisplayUrl(zoomedDoc?.url);
+  const selectedIsPdf = !!selectedDoc && isPdfUrl(selectedDoc.url);
+  const zoomedIsPdf = !!zoomedDoc && isPdfUrl(zoomedDoc.url);
 
   const finalReason = selectedReason === 'Other (specify below)' ? customReason : selectedReason;
 
@@ -113,24 +150,40 @@ export function KYCReviewer({
           <div className={`relative flex-1 rounded-xl overflow-hidden min-h-[400px] flex items-center justify-center ${
             selectedDoc.type === 'signature' ? 'bg-white' : 'bg-gray-900'
           }`}>
-            <img
-              src={selectedDoc.url}
-              alt={selectedDoc.label}
-              className="max-w-full max-h-[400px] object-contain"
-              onError={(e) => {
-                (e.target as HTMLImageElement).src = `https://placehold.co/600x400/1a1a2e/ffffff?text=${encodeURIComponent(selectedDoc.label)}`;
-              }}
-            />
+            {selectedIsPdf ? (
+              selectedUrl ? (
+                <iframe
+                  src={selectedUrl}
+                  title={selectedDoc.label}
+                  className="w-full h-[400px] bg-white"
+                />
+              ) : (
+                <div className="flex items-center gap-2 text-white text-xs">
+                  <RefreshCw className="w-4 h-4 animate-spin" /> Loading document…
+                </div>
+              )
+            ) : (
+              <img
+                src={selectedUrl ?? selectedDoc.url}
+                alt={selectedDoc.label}
+                className="max-w-full max-h-[400px] object-contain"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).src = `https://placehold.co/600x400/1a1a2e/ffffff?text=${encodeURIComponent(selectedDoc.label)}`;
+                }}
+              />
+            )}
             <div className="absolute top-3 right-3 flex gap-2">
-              <button
-                onClick={() => setZoomedDoc(selectedDoc)}
-                className="p-2 bg-white/10 hover:bg-white/20 rounded-lg text-white transition-colors"
-                title="Zoom in"
-              >
-                <ZoomIn className="w-4 h-4" />
-              </button>
+              {!selectedIsPdf && (
+                <button
+                  onClick={() => setZoomedDoc(selectedDoc)}
+                  className="p-2 bg-white/10 hover:bg-white/20 rounded-lg text-white transition-colors"
+                  title="Zoom in"
+                >
+                  <ZoomIn className="w-4 h-4" />
+                </button>
+              )}
               <a
-                href={selectedDoc.url}
+                href={selectedUrl ?? selectedDoc.url}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="p-2 bg-white/10 hover:bg-white/20 rounded-lg text-white transition-colors"
@@ -230,16 +283,24 @@ export function KYCReviewer({
             >
               <X className="w-6 h-6" />
             </button>
-            <img
-              src={zoomedDoc.url}
-              alt={zoomedDoc.label}
-              // Signatures are transparent PNGs → a white backing makes the strokes visible
-              // against the dark modal overlay. Photo docs are opaque so it's a no-op for them.
-              className={`w-full rounded-xl ${zoomedDoc.type === 'signature' ? 'bg-white' : ''}`}
-              onError={(e) => {
-                (e.target as HTMLImageElement).src = `https://placehold.co/800x600/1a1a2e/ffffff?text=${encodeURIComponent(zoomedDoc.label)}`;
-              }}
-            />
+            {zoomedIsPdf ? (
+              <iframe
+                src={zoomedUrl}
+                title={zoomedDoc.label}
+                className="w-full h-[80vh] rounded-xl bg-white"
+              />
+            ) : (
+              <img
+                src={zoomedUrl ?? zoomedDoc.url}
+                alt={zoomedDoc.label}
+                // Signatures are transparent PNGs → a white backing makes the strokes visible
+                // against the dark modal overlay. Photo docs are opaque so it's a no-op for them.
+                className={`w-full rounded-xl ${zoomedDoc.type === 'signature' ? 'bg-white' : ''}`}
+                onError={(e) => {
+                  (e.target as HTMLImageElement).src = `https://placehold.co/800x600/1a1a2e/ffffff?text=${encodeURIComponent(zoomedDoc.label)}`;
+                }}
+              />
+            )}
             <p className="text-white text-center mt-3 text-sm">{zoomedDoc.label}</p>
           </div>
         </div>
