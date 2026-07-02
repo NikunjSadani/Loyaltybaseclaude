@@ -163,6 +163,25 @@ function openDocument(viewUrl: string): void {
   if (/^https?:\/\//i.test(viewUrl)) window.open(viewUrl, '_blank', 'noopener,noreferrer');
 }
 
+/** Convert a KYC document's inlined `data:` URL to a `blob:` URL for in-page preview.
+ *  PDFs need an <iframe> and Chrome blocks `data:` URLs there; images work in <img>
+ *  either way but blob keeps it uniform. Returns the blob URL + resolved (safe) mime,
+ *  or null for a non-data / undecodable URL. The caller must revoke the blob URL. */
+function dataUrlToBlob(viewUrl: string): { url: string; mime: string } | null {
+  if (!viewUrl.startsWith('data:')) return null;
+  try {
+    const comma = viewUrl.indexOf(',');
+    const rawMime = viewUrl.slice(5, viewUrl.indexOf(';')).toLowerCase();
+    const mime = SAFE_RENDER_MIMES.has(rawMime) ? rawMime : 'application/octet-stream';
+    const bin = atob(viewUrl.slice(comma + 1));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return { url: URL.createObjectURL(new Blob([bytes], { type: mime })), mime };
+  } catch {
+    return null;
+  }
+}
+
 /** Coerce a KYC-captured lat/lng pair (Prisma Decimal → JSON string) into numbers.
  *  Returns null unless BOTH are present and finite (a half-captured geo is not a point). */
 function parseGeo(lat: unknown, lng: unknown): { lat: number; lng: number } | null {
@@ -405,6 +424,21 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   const [role,              setRoleState]         = useState<string>('SO');
   const [detailsOpen,       setDetailsOpen]       = useState(false);
   const [photoLightboxIndex, setPhotoLightboxIndex] = useState<number | null>(null);
+  // Inline document preview (PDF → iframe, image → img) via a blob URL — mirrors the
+  // Gifsy reviewer so a rep can preview any doc in-page, not only in a new tab.
+  const [docPreview, setDocPreview] = useState<{ blobUrl: string; label: string; isPdf: boolean } | null>(null);
+  const closeDocPreview = () =>
+    setDocPreview((p) => { if (p) URL.revokeObjectURL(p.blobUrl); return null; });
+  const previewDoc = (doc: KYCDoc) => {
+    if (!doc.viewUrl) return;
+    const b = dataUrlToBlob(doc.viewUrl);
+    if (b && (b.mime === 'application/pdf' || b.mime.startsWith('image/'))) {
+      setDocPreview({ blobUrl: b.url, label: doc.label, isPdf: b.mime === 'application/pdf' });
+      return;
+    }
+    if (b) URL.revokeObjectURL(b.url); // non-previewable → fall back to a new tab
+    openDocument(doc.viewUrl);
+  };
   // Settings are SERVER-sourced and reactive — reflects the tenant after /me hydrates.
   const settings = useGifsySettings();
   // Authoritative DB flag for the visibility workflow (TenantService.resolveVisibilityCaptureMode),
@@ -806,7 +840,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                       {doc.viewUrl && (
                         <button
                           type="button"
-                          onClick={() => openDocument(doc.viewUrl as string)}
+                          onClick={() => previewDoc(doc)}
                           data-testid="kyc-doc-view-link"
                           className="text-xs text-blue-600 hover:underline"
                         >
@@ -825,6 +859,34 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                 })()}
               </div>
             </div>
+
+            {/* Inline document preview (PDF → iframe, image → img; both via a blob URL). */}
+            {docPreview && (
+              <div
+                data-testid="kyc-doc-preview"
+                className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4"
+                onClick={closeDocPreview}
+              >
+                <div
+                  className="bg-white rounded-lg w-full max-w-3xl max-h-[88vh] overflow-hidden flex flex-col"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
+                    <span className="text-sm font-medium text-gray-800 truncate">{docPreview.label}</span>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <a href={docPreview.blobUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline">Open in new tab</a>
+                      <button type="button" className="text-xs text-gray-500 underline" onClick={closeDocPreview}>Close</button>
+                    </div>
+                  </div>
+                  {docPreview.isPdf ? (
+                    <iframe src={docPreview.blobUrl} title={docPreview.label} className="w-full h-[78vh] bg-white" />
+                  ) : (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={docPreview.blobUrl} alt={docPreview.label} className="w-full max-h-[78vh] object-contain bg-gray-50" />
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Payment Details — the KYC form captures bank OR UPI; show whichever was given. */}
             {(kyc.bankName || kyc.upiId) && (

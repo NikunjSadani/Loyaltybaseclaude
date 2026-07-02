@@ -89,18 +89,32 @@ describe('SKDP — Sales KYC detail documents + photos', () => {
     expect(viewLinks[0].tagName).toBe('BUTTON');
   });
 
-  it('SKDP2b: clicking View on a data: doc opens it via a blob: URL (data: nav is blocked → blank page)', async () => {
+  it('SKDP2b: clicking View on a data: image doc opens an INLINE preview via a blob: URL (not a new tab)', async () => {
     const createObjectURL = vi.fn((_b: Blob) => 'blob:fake');
     (URL as unknown as { createObjectURL: unknown }).createObjectURL = createObjectURL;
     (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = vi.fn();
-    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
     stubFetch([{ documentType: 'PAN_CARD', status: 'PENDING', viewUrl: 'data:image/jpeg;base64,/9j/4AAQ' }]);
     await renderAndExpand();
     fireEvent.click(await screen.findByTestId('kyc-doc-view-link'));
     expect(createObjectURL).toHaveBeenCalled();                 // converted to a blob
     expect((createObjectURL.mock.calls[0][0] as Blob).type).toBe('image/jpeg'); // safe → rendered as-is
-    expect(openSpy).toHaveBeenCalledWith('blob:fake', '_blank', expect.any(String));
-    openSpy.mockRestore();
+    // Rendered INLINE — the preview modal shows the image via the blob URL (no new tab).
+    const modal = await screen.findByTestId('kyc-doc-preview');
+    expect(modal.querySelector('img')?.getAttribute('src')).toBe('blob:fake');
+    delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+  });
+
+  it('SKDP2d: clicking View on a data: PDF doc renders it in an <iframe> (not a blank <img>)', async () => {
+    const createObjectURL = vi.fn((_b: Blob) => 'blob:pdf');
+    (URL as unknown as { createObjectURL: unknown }).createObjectURL = createObjectURL;
+    (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = vi.fn();
+    stubFetch([{ documentType: 'GST_CERTIFICATE', status: 'PENDING', viewUrl: 'data:application/pdf;base64,JVBERi0xLjQ=' }]);
+    await renderAndExpand();
+    fireEvent.click(await screen.findByTestId('kyc-doc-view-link'));
+    expect((createObjectURL.mock.calls[0][0] as Blob).type).toBe('application/pdf');
+    const modal = await screen.findByTestId('kyc-doc-preview');
+    expect(modal.querySelector('iframe')?.getAttribute('src')).toBe('blob:pdf');
+    expect(modal.querySelector('img')).toBeNull(); // a PDF is never rendered as an <img>
     delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
   });
 
