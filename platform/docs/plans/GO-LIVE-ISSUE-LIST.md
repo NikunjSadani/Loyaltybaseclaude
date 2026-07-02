@@ -1,7 +1,7 @@
 # Go-Live Issue List — authoritative master tracker (updated 2026-07-01)
 
 > **STATUS: 🚀 CUTOVER #2 EXECUTED & COMPLETE (2026-07-01) — prod live on `a2f5929`; DEOLEO TENANT CREATED + ACTIVE.**
-> **`develop` is now AHEAD of prod (HEAD `bf5df38`) with the post-Deoleo SCALE/OPS build** — security log-leak fix + observability O1/O2 + pagination Wave 1+2 (stream COMPLETE) + the KYC-submit-500 fix + ASM enrollment + **the KYC "Rejected / Re-upload" consolidation** — riding the NEXT cutover; **prod stays on `a2f5929`, unchanged.** Gate: **api jest 1324 · nest 0 · FE vitest 1726 · tsc 0.** See the **🟡 2026-07-01 — SCALE/OPS BUILD** section below.
+> **`develop` is now AHEAD of prod (HEAD `db5f5ab`, 26 commits) with the post-Deoleo SCALE/OPS + UAT fix-as-found build** — log-leak fix · observability O1/O2 · pagination W1+W2 (COMPLETE) · KYC-submit-500 fix · ASM enrollment · conversion-rate editor · KYC "Rejected/Re-upload" consolidation (+ "Rejected" label) · download-helper sweep · WhatsApp-post-OTP · **OTP-gates-routing (reuses DRAFT, no migration)** · **KYC-PDF-doc-render (admin + sales)** · **not-interested-404 fix** — riding the NEXT cutover; **prod stays on `a2f5929`, unchanged.** Gate: **api jest 1326 · nest 0 · FE vitest 1731 · tsc 0.** See the **🟡 2026-07-01 — SCALE/OPS BUILD** section below.
 > **✅ RESOLVED: staging KYC-submit 500** (`POST /v1/kyc` → GST-uniqueness abort) — fixed + pushed `2419ab6`, independent audit CLEAN, deployed to staging; NOT an open blocker anymore (final live confirm = owner re-tries the exact submit, but it's fixed). See the **✅ KYC-submit 500** entry below.
 > **✅ SHIPPED (`e970213`): KYC "Rejected / Re-upload" consolidation** — the LIVE latent FE bug (`RE_UPLOAD_REQUIRED` unhandled → crash/no-filter/no-resubmit) is fixed; single rep-facing "Rejected" section covers all reviewer feedback; **admin reviewer dashboard untouched** (owner: "remains as is"). Independent audit CLEAN, regression test added; staging runtime-verify pending deploy. See the **🔜→✅ 2026-07-01** section below.
 > Cutover #2 shipped the onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate (migration +
@@ -70,7 +70,7 @@
 > "11 endpoints" was an OVERCOUNT (most already paginated or tiny user-scoped); **notifications is mostly dead scaffold** — the
 > drainer is **PUSH-only** so enqueued SMS/WhatsApp/email never deliver; NotificationTemplate / LeaderboardSnapshot.isPublished /
 > Ticket.slaBreached / in-app-inbox are unwired; **2 of 3 events (leaderboard-published, ticket-SLA) are BLOCKED on missing upstream.**
-> **On `develop` HEAD `bf5df38` (prod still `a2f5929`). Gate: api jest 1324 · nest 0 · FE vitest 1726 · tsc 0.**
+> **On `develop` HEAD `db5f5ab` (prod still `a2f5929`). Gate: api jest 1326 · nest 0 · FE vitest 1731 · tsc 0.**
 > **Pagination stream is now COMPLETE (Wave 1 + Wave 2); ASM enrollment done; KYC "Rejected / Re-upload" consolidation SHIPPED (`e970213`).** Notifications Core + email provider remain PAUSED for owner decisions.
 
 **SHIPPED (pushed to `develop`, gate-green, each independently audited):**

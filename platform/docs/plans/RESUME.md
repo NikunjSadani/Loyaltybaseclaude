@@ -24,7 +24,7 @@ in "Work in brand") → **confirm conversion rate=1** + **create the first Deole
 `deoleo_kyc_approval` template runtime-verify (MSG91 template not yet owner-verified). The recon'd **scale/ops plan** is now
 **IN PROGRESS** (see the 🟡 SCALE/OPS paragraph below): pagination stream COMPLETE (W1+W2), observability O1+O2 done, security
 log-leak fixed, KYC-submit-500 RESOLVED, ASM enrollment done, **KYC "Rejected / Re-upload" consolidation SHIPPED (`e970213`)**;
-**NEXT = staging runtime-verify of the KYC consolidation + resume the owner-gated Deoleo go-live items** (nothing else queued on the
+**NEXT = staging runtime-verify of this session's UAT fixes (Rejected/Re-upload, OTP-gates-routing, KYC-PDF-doc-view, not-interested) + resume the owner-gated Deoleo go-live items** (nothing else queued on the
 scale/ops stream); notifications/P7 still PAUSED (build all events flag-OFF; **email provider still open** — ZeptoMail vs SES). **Required
 onboarding-flow builds** are logged in POST-GO-LIVE-BACKLOG §A: **§A-DOMAIN** (decouple domain from slug) and
 **§A-ONBOARDING** (client activate/edit endpoint — Deoleo was flipped via the one-off job — **plus the GIFSY_ADMIN-in-tenant-context
@@ -40,8 +40,8 @@ a recommendation ("are you sure?"), genuinely reconsider — don't defend (it fl
 calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep EVERY doc + memory in the same pass.
 [[default-to-orchestration]] [[own-consistency-no-micromanage]] [[audit-every-build-item]] [[verify-flows-at-runtime]]
 
-🟡 SCALE/OPS BUILD (post-Deoleo, owner-driven, orchestrated — rides the NEXT cutover; **prod stays on `a2f5929`,
-develop is now AHEAD at HEAD `9e79e49`**). SHIPPED to `develop` + gate-green + each independently audited: **(1)** security
+🟡 SCALE/OPS + UAT-FIX BUILD (post-Deoleo, owner-driven, orchestrated — rides the NEXT cutover; **prod stays on `a2f5929`,
+develop is now AHEAD at HEAD `db5f5ab`** — 26 commits). SHIPPED to `develop` + gate-green + each independently audited: **(1)** security
 log-leak fix (`df47baf` — prod was logging live redemption OTPs + full phone numbers; removed/masked); **(2)** observability O1+O2
 (`33543ec` — `nestjs-pino` structured JSON logs + a real `/health/ready` DB-ping probe, verified live; audit CAUGHT a HIGH `?token=`
 query-log leak → custom PATH-only req serializer; O3/OpenTelemetry DEFERRED — needs monitoring-IAM + `deploy.yml` edit); **(3)** ✅
@@ -64,14 +64,28 @@ matched no filter, weren't resubmittable): added `RE_UPLOAD_REQUIRED` to the FE 
 (tsc caught partner/profile), single "Rejected" filter now covers `{REJECTED,RE_UPLOAD_REQUIRED,RESUBMISSION_REQUIRED}` (dropped the
 separate Re-upload tab; filter/border/deep-link/tiles), RE_ENTRY sets (FE + backend `sales.service.ts:1009`) include it so re-uploads
 resubmit. Backend submit already allowed it (`RE_UPLOAD_REQUIRED` ∉ `IN_FLIGHT_STATUSES`). Independent audit CLEAN; regression test
-`reupload-consolidation.test.tsx`. **Staging runtime-verify PENDING deploy** (reviewer requests re-upload → rep sees it under Rejected
-+ can resubmit; needs owner login for the rep session). **STILL PAUSED for owner:** Notifications Core go/no-go (drainer is PUSH-only so enqueued SMS/WhatsApp/email never
+`reupload-consolidation.test.tsx`. **(6b)** owner follow-up (`bf5df38`): re-upload rows badge simply as **"Rejected"** (keep it simple)
+across all rep + partner surfaces; admin reviewer untouched. **(7)** ✅ **PER-TENANT CONVERSION-RATE EDITOR** (`e1257f7`) on
+`/admin/settings` (GIFSY-edit/CLIENT_ADMIN-read; floor 0.005 + centi-snap; staging-verified). **(8)** ✅ **DOWNLOAD-HELPER SWEEP**
+(`01c253f` outlet-master + `d7b3952` class-wide) — every blob download (all 4 reports exports, KYC list/review-dump, payout/fund/credit
+-status, enrollments, visibility, error-report) routed through one `src/lib/download.ts` `downloadBlob()` (DOM-append + deferred revoke);
+a detached-anchor + sync-revoke after a `fetch` silently no-op'd the save. **(9)** ✅ **WHATSAPP POST-OTP** (`f8d5d22`) — the outlet
+"KYC submitted" WhatsApp now fires at `consent()` (after the owner OTP verifies), not at `create()`. **(10)** ✅ **OTP GATES ROUTING**
+(`eead7b9`) — the KYC reaches the approver ONLY after the outlet-owner consent OTP; reuses the unused `KycStatus.DRAFT` as the pre-OTP
+state (NO new status/migration; `deriveKycStatus` already buckets DRAFT→IN_PROGRESS); create()→DRAFT+no-notify, consent()→route+notify
++WhatsApp (idempotent, gated on DRAFT); FE teaches DRAFT (label "Pending", PENDING_KYC filter, re-entry). **(11)** ✅ **KYC PDF DOC
+RENDER** — admin reviewer (`b749f55`) + sales rep detail (`c1cbae6`): PDFs (GST cert/cheque/shop-est are application/pdf) rendered blank
+in `<img>` → now render in `<iframe>` via a blob URL (Chrome blocks data: in iframes/new-tabs); photos keep `<img>`; XSS guard intact
+(only image/* + pdf inline). Confirmed NOT a regression via a staging DB read (docs stored + inlined fine). **(12)** ✅ **NOT-INTERESTED
+404 FIX** (`db5f5ab`) — `POST /v1/kyc/not-interested` looked the outlet up by `clientId_outletCode` but the FE sends the Outlet CUID
+(`outletId=outlet.id`) → EVERY call 404'd (staging logs 4×) → 0 outlets ever marked → empty "Not Interested" filter; now `findFirst({id,
+clientId})` like create(). **STILL PAUSED for owner:** Notifications Core go/no-go (drainer is PUSH-only so enqueued SMS/WhatsApp/email never
 deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLOCKED on missing upstream) · email provider (ZeptoMail
 ~$0.25/1k vs SES ~$0.10/1k). See POST-GO-LIVE-BACKLOG §B/§C + GO-LIVE-ISSUE-LIST 🔜 NEXT + 🟡 SCALE/OPS sections.
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1324 · nest 0 · FE vitest 1728 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `01c253f`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1326 · nest 0 · FE vitest 1731 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `db5f5ab`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -204,7 +218,7 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929` (unchanged since); develop has SINCE advanced to `bf5df38` with this session's scale/ops + KYC + ASM + Rejected/Re-upload consolidation work (rides the NEXT cutover).** Cutover #2 shipped
+🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929` (unchanged since); develop has SINCE advanced to `db5f5ab` with 26 commits of scale/ops + KYC + UAT fix-as-found work (rides the NEXT cutover).** Cutover #2 shipped
 the **onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate**; applied migration
 `20260630130000_point_expiry_default_unique` (via `--wait`); pre-cutover backup **`1782886598428`**; created + ENABLED the
 **`expire-sweep-prod`** Cloud Scheduler (daily 00:30 IST; sweep smoke 403/201). Both prod services healthy `/health` 200.
@@ -281,9 +295,10 @@ its config = platform defaults (conversion `1`, expiry null, visibility OFF). **
 assumes Deoleo (now in "Work in brand") → **confirm conversion rate=1** + **create the first Deoleo CLIENT_ADMIN** (`/admin/users`,
 role **CLIENT_ADMIN — NOT Gifsy Admin**) → **load real master data** via the app UIs when the client sends files (**#76**); plus
 **(#143)** WhatsApp `deoleo_kyc_approval` template runtime-verify. The recon'd scale/ops plan is now **IN PROGRESS** on `develop`
-(HEAD `bf5df38`): pagination stream COMPLETE (W1+W2), observability O1+O2 done, security log-leak fixed, KYC-submit-500 RESOLVED, ASM
-enrollment done, **KYC "Rejected / Re-upload" consolidation SHIPPED (`e970213`, admin reviewer untouched, staging runtime-verify
-pending deploy)**; **NEXT = staging runtime-verify of that consolidation + owner-gated Deoleo go-live items** (nothing else queued);
+(HEAD `db5f5ab`, 26 commits): pagination COMPLETE, observability O1+O2, log-leak fix, KYC-submit-500, ASM enrollment, conversion-rate
+editor, **KYC Rejected/Re-upload consolidation (+"Rejected" label), download-helper sweep, WhatsApp-post-OTP, OTP-gates-routing (reuses
+DRAFT, no migration), KYC-PDF-doc-render (admin+sales), not-interested-404 fix** — all SHIPPED, staging runtime-verify pending deploy;
+**NEXT = staging runtime-verify of those + owner-gated Deoleo go-live items** (nothing else queued);
 notifications/P7 still PAUSED (events flag-OFF; email provider TBD, ZeptoMail vs SES). Required onboarding-flow builds logged in
 POST-GO-LIVE-BACKLOG §A-DOMAIN + §A-ONBOARDING (incl. the GIFSY_ADMIN-in-tenant-context
 fix). Keep the fix-as-found loop available (fixes push to `develop` → reach prod on the next `main` deploy). Full as-run record =
