@@ -60,8 +60,14 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-50">
-      {/* Top header */}
-      <header className="sticky top-0 z-30 bg-[#1A1A2E] text-white px-4 py-3">
+      {/* Top header — pad the top by the iOS safe-area inset so the content clears
+          the translucent status bar on an installed PWA (viewport-fit=cover +
+          apple-mobile-web-app-status-bar-style=black-translucent). The navy bg fills
+          the inset. Mirrors the bottom nav's safe-area-inset-bottom handling. */}
+      <header
+        className="sticky top-0 z-30 bg-[#1A1A2E] text-white px-4 pb-3"
+        style={{ paddingTop: 'calc(env(safe-area-inset-top) + 0.75rem)' }}
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             {clientConfig.branding.wordmarkWhiteUrl ? (
