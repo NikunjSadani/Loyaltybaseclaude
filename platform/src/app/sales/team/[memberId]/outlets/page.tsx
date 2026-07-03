@@ -473,11 +473,11 @@ export default function MemberOutletsPage() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <p className="text-base font-bold text-gray-900 truncate">{outlet.name}</p>
-                          {outlet.kycStatus !== KYCStatus.APPROVED && (
-                            <Badge variant={kycBadge[outlet.kycStatus].variant} className="shrink-0 text-[9px]">
-                              {kycBadge[outlet.kycStatus].label}
-                            </Badge>
-                          )}
+                          {/* Show the KYC-status badge for EVERY outlet, incl. Approved
+                              (owner 2026-07-03) — matches the table view. */}
+                          <Badge variant={kycBadge[outlet.kycStatus].variant} className="shrink-0 text-[9px]">
+                            {kycBadge[outlet.kycStatus].label}
+                          </Badge>
                         </div>
                         <p className="text-[11px] text-gray-400 mt-0.5">{outlet.location} · {outlet.beat}</p>
                       </div>
