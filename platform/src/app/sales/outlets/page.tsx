@@ -4,11 +4,12 @@ import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
-  ChevronRight, Users, AlertTriangle, Lock, LayoutList, LayoutGrid, Eye,
+  ChevronRight, Users, AlertTriangle, LayoutList, LayoutGrid, Eye,
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { Badge } from '@/components/ui/badge';
 import { PERIODS, CURRENT_MONTH, pct, pctBg, pctBarColor, getPrimaryParam } from '@/lib/targets';
+import { kycOrderRank } from '@/lib/kyc-order';
 import { KYCStatus } from '@/types';
 import { getRole, type SalesRole } from '@/lib/sales-role';
 import { classifyPaceGap } from '@/lib/pace';
@@ -222,13 +223,17 @@ export default function SalesOutletsPage() {
     return matchesType && matchesBeat;
   }), [outlets, typeFilter, beatFilter]);
 
-  // Worst-performing approved outlets first (actionable), non-KYC at the bottom
+  // Owner-specified outlet order (2026-07-03): Approved → Re-KYC → Rejected →
+  // Pending → Not Interested (see kycOrderRank). Within Approved, worst performer
+  // first (actionable); within every other bucket, alphabetical by name.
   const sortedVisibleOutlets = useMemo(() => {
-    const approved = visibleOutlets
-      .filter((o) => o.kycStatus === KYCStatus.APPROVED)
-      .sort((a, b) => outletOverallPct(kpisFor(a), primaryCode) - outletOverallPct(kpisFor(b), primaryCode));
-    const others = visibleOutlets.filter((o) => o.kycStatus !== KYCStatus.APPROVED);
-    return [...approved, ...others];
+    return [...visibleOutlets].sort((a, b) => {
+      const ra = kycOrderRank(a.kycStatus);
+      const rb = kycOrderRank(b.kycStatus);
+      if (ra !== rb) return ra - rb;
+      if (ra === 0) return outletOverallPct(kpisFor(a), primaryCode) - outletOverallPct(kpisFor(b), primaryCode);
+      return a.name.localeCompare(b.name);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleOutlets, targetsByOutlet, primaryCode]);
 
@@ -497,14 +502,14 @@ export default function SalesOutletsPage() {
           {view === 'cards' && visibleOutlets.length > 0 && (
             <div className="space-y-3">
               {sortedVisibleOutlets.map((outlet) => {
-                const isKycApproved = outlet.kycStatus === KYCStatus.APPROVED;
                 const kpis      = kpisFor(outlet);
                 const svParam   = getPrimaryParam(params);
                 const kpiParams = params.filter((p) => !p.isPrimary);
 
                 const svK    = svParam ? kpis[svParam.code] : undefined;
                 const svPct  = svParam && svK?.target ? pct(svK.achieved ?? 0, svK.target) : 0;
-                const stripClass = isKycApproved ? paceStrip(svPct, period) : 'bg-gray-100';
+                // Colored pace strip whenever this outlet has a primary target (any KYC status); gray otherwise.
+                const stripClass = svK?.target ? paceStrip(svPct, period) : 'bg-gray-100';
 
                 return (
                   <Link
@@ -535,57 +540,53 @@ export default function SalesOutletsPage() {
                       <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />
                     </div>
 
-                    {isKycApproved ? (
-                      Object.keys(kpis).length === 0 ? (
-                        <div className="border-t border-gray-50 px-4 py-1.5 flex items-center gap-1.5">
-                          <p className="text-[11px] text-gray-400">No targets uploaded for this outlet this month</p>
-                        </div>
-                      ) : (
-                        <>
-                          {svParam && svK && (
-                            <div className="px-4 pt-2 pb-2.5 border-t border-gray-200">
-                              <div className="flex items-center justify-between mb-1">
-                                <span className="text-[11px] font-semibold text-gray-600">{svParam.name}</span>
-                                <div className="flex items-center gap-1.5">
-                                  <span className="text-[14px] font-bold text-gray-800">
-                                    {fmtNum(svK.achieved)}<span className="text-[12px] text-gray-400 font-normal"> /{fmtNum(svK.target)}{svParam.unit ? ` ${svParam.unit}` : ''}</span>
-                                  </span>
-                                  <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(svPct)}`}>{svPct}%</span>
-                                </div>
-                              </div>
-                              <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                <div className={`h-full rounded-full ${pctBarColor(svPct)}`} style={{ width: `${Math.min(svPct, 100)}%` }} />
-                              </div>
-                            </div>
-                          )}
-
-                          {kpiParams.length > 0 && (
-                            <div className="border-t border-gray-200 px-4 pt-2.5 pb-3 grid grid-cols-2 gap-x-3 gap-y-3">
-                              {kpiParams.map((p) => {
-                                const k = kpis[p.code];
-                                const pp = k?.target ? pct(k.achieved ?? 0, k.target) : 0;
-                                return (
-                                  <div key={p.code} className="border-l-[3px] border-gray-200 pl-2">
-                                    <p className="text-[11px] font-semibold text-gray-600 truncate leading-tight">{p.name}</p>
-                                    <div className="flex items-center justify-between mt-0.5">
-                                      <p className="text-[15px] font-bold text-gray-900 leading-tight">
-                                        {fmtNum(k?.achieved ?? null)}
-                                        <span className="text-[12px] font-semibold text-gray-500"> /{fmtNum(k?.target ?? null)}</span>
-                                      </p>
-                                      <span className={`text-[12px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(pp)}`}>{pp}%</span>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </>
-                      )
-                    ) : (
+                    {/* Targets/achievements are shown for EVERY outlet regardless of KYC
+                        status (owner 2026-07-03); an outlet with no uploaded target shows
+                        the neutral no-target note instead of a KYC lock. */}
+                    {Object.keys(kpis).length === 0 ? (
                       <div className="border-t border-gray-50 px-4 py-1.5 flex items-center gap-1.5">
-                        <Lock className="h-3 w-3 text-gray-300" />
-                        <p className="text-[11px] text-gray-400">Complete KYC to track targets</p>
+                        <p className="text-[11px] text-gray-400">No targets uploaded for this outlet this month</p>
                       </div>
+                    ) : (
+                      <>
+                        {svParam && svK && (
+                          <div className="px-4 pt-2 pb-2.5 border-t border-gray-200">
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-[11px] font-semibold text-gray-600">{svParam.name}</span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[14px] font-bold text-gray-800">
+                                  {fmtNum(svK.achieved)}<span className="text-[12px] text-gray-400 font-normal"> /{fmtNum(svK.target)}{svParam.unit ? ` ${svParam.unit}` : ''}</span>
+                                </span>
+                                <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(svPct)}`}>{svPct}%</span>
+                              </div>
+                            </div>
+                            <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                              <div className={`h-full rounded-full ${pctBarColor(svPct)}`} style={{ width: `${Math.min(svPct, 100)}%` }} />
+                            </div>
+                          </div>
+                        )}
+
+                        {kpiParams.length > 0 && (
+                          <div className="border-t border-gray-200 px-4 pt-2.5 pb-3 grid grid-cols-2 gap-x-3 gap-y-3">
+                            {kpiParams.map((p) => {
+                              const k = kpis[p.code];
+                              const pp = k?.target ? pct(k.achieved ?? 0, k.target) : 0;
+                              return (
+                                <div key={p.code} className="border-l-[3px] border-gray-200 pl-2">
+                                  <p className="text-[11px] font-semibold text-gray-600 truncate leading-tight">{p.name}</p>
+                                  <div className="flex items-center justify-between mt-0.5">
+                                    <p className="text-[15px] font-bold text-gray-900 leading-tight">
+                                      {fmtNum(k?.achieved ?? null)}
+                                      <span className="text-[12px] font-semibold text-gray-500"> /{fmtNum(k?.target ?? null)}</span>
+                                    </p>
+                                    <span className={`text-[12px] font-bold px-1.5 py-0.5 rounded-full ${pctBg(pp)}`}>{pp}%</span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </>
                     )}
 
                     {VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(outlet.type) && visibilityMap[outlet.outletCode] && (
