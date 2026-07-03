@@ -6,7 +6,7 @@ Paste the block below to restart the orchestrator on point. The on-disk docs + m
 You're the orchestrator for Loyaltybase — a multi-tenant FMCG trade-loyalty platform (operator: Gifsy, launching
 client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch **develop**). Frontend: `platform/`
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
-`dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-01.
+`dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-03.
 
 🟢 CURRENT MODE — **GO-LIVE: prod live on `a2f5929`, DEOLEO TENANT CREATED + ACTIVE.** CUTOVER #2 was EXECUTED 2026-07-01
 (owner-driven HYBRID; owner approved the `production` gate, I ran the reversible prep + in-VPC jobs on the owner's per-step go).
@@ -41,7 +41,7 @@ calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep
 [[default-to-orchestration]] [[own-consistency-no-micromanage]] [[audit-every-build-item]] [[verify-flows-at-runtime]]
 
 🟡 SCALE/OPS + UAT-FIX BUILD (post-Deoleo, owner-driven, orchestrated — rides the NEXT cutover; **prod stays on `a2f5929`,
-develop is now AHEAD at HEAD `db5f5ab`** — 26 commits). SHIPPED to `develop` + gate-green + each independently audited: **(1)** security
+develop is now AHEAD at HEAD `97c5089`** — 34 commits). SHIPPED to `develop` + gate-green + each independently audited: **(1)** security
 log-leak fix (`df47baf` — prod was logging live redemption OTPs + full phone numbers; removed/masked); **(2)** observability O1+O2
 (`33543ec` — `nestjs-pino` structured JSON logs + a real `/health/ready` DB-ping probe, verified live; audit CAUGHT a HIGH `?token=`
 query-log leak → custom PATH-only req serializer; O3/OpenTelemetry DEFERRED — needs monitoring-IAM + `deploy.yml` edit); **(3)** ✅
@@ -77,7 +77,7 @@ state (NO new status/migration; `deriveKycStatus` already buckets DRAFT→IN_PRO
 RENDER** — admin reviewer (`b749f55`) + sales rep detail (`c1cbae6`): PDFs (GST cert/cheque/shop-est are application/pdf) rendered blank
 in `<img>` → now render in `<iframe>` via a blob URL (Chrome blocks data: in iframes/new-tabs); photos keep `<img>`; XSS guard intact
 (only image/* + pdf inline). Confirmed NOT a regression via a staging DB read (docs stored + inlined fine). **(12)** ✅ **NOT-INTERESTED
-404 FIX** (`db5f5ab`) — `POST /v1/kyc/not-interested` looked the outlet up by `clientId_outletCode` but the FE sends the Outlet CUID
+404 FIX** (`97c5089`) — `POST /v1/kyc/not-interested` looked the outlet up by `clientId_outletCode` but the FE sends the Outlet CUID
 (`outletId=outlet.id`) → EVERY call 404'd (staging logs 4×) → 0 outlets ever marked → empty "Not Interested" filter; now `findFirst({id,
 clientId})` like create(). **STILL PAUSED for owner:** Notifications Core go/no-go (drainer is PUSH-only so enqueued SMS/WhatsApp/email never
 deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLOCKED on missing upstream) · email provider (ZeptoMail
@@ -85,7 +85,7 @@ deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLO
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1326 · nest 0 · FE vitest 1731 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `db5f5ab`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1359 · nest 0 · FE vitest 1748 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `97c5089`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -102,8 +102,67 @@ stale localStorage token fails even if a valid cookie exists (assume-tenant 8h v
 background worker does NOT tick reliably while the service is idle — `min-instances=1` alone does NOT fix it (the
 instance is alive but CPU-starved). Drive such workers via **Cloud Scheduler → an internal HTTP endpoint** (the
 request un-throttles the CPU), or set cpu-always-allocated (~$50/mo). This is why the push drain runs on a scheduler.
+**(6)** THE FE's `outletId` EVERYWHERE = the **Outlet CUID** (`o.id`), NOT `outletCode` — any endpoint keyed on
+`clientId_outletCode` from an FE-sent outletId is WRONG; use `findFirst({id, clientId})` (bit not-interested-404 + KPI/target
+paths). **(7)** the sales **KYC LIST `/api/kyc` is SUBMITTER-scoped** (approval-queue: a rep sees only KYCs he/his-downline
+FILED), but outlet **OWNERSHIP is ASSIGNMENT-scoped** (`buildOutlets`/`/api/sales/outlets`). So ALL rep-actionable re-entry
+states (NOT_STARTED / NOT_INTERESTED / RE_KYC_REQUIRED / REJECTED / RE_UPLOAD_REQUIRED / RESUBMISSION_REQUIRED) MUST be
+synthesised from `/api/sales/outlets` (assignment) and merged with the submitter-scoped submissions **deduped by outletCode,
+synth-wins** — else a REASSIGNED outlet whose original KYC was filed by another rep is invisible in list/dashboard/tasks.
+(`kyc.service.list()` stays submitter-scoped by design; `getOne` is assignee-aware via `partnerId`.) **(8)** any
+**bulk-upload loop of awaited writes inside ONE interactive `$transaction` 500s at tenant scale** — default timeout 5s,
+Deoleo ~2,261 outlets (`PrismaClientKnownRequestError: query cannot be executed on an expired transaction`). Fix = **chunk**
+into `$transaction([...])` batches of ~100 for idempotent paths (targets/achievements upserts), or **raise
+`{ timeout: 180_000, maxWait: 20_000 }`** for MONEY paths that must stay atomic (credits confirm/UTR, payouts process/UTR —
+chunking them risks partial/double credit). **(9)** **re-KYC has TWO entry paths** — the in-app admin action flips the
+submission status → `RE_KYC_REQUIRED`, but the **bulk re-KYC-flag upload sets ONLY `Outlet.reKycFlags`** (submission stays
+APPROVED). `reKycFlags` (a non-empty object) is the source of truth: any surface showing KYC status MUST check it via
+`isReKycPending()` (`common/kyc-rekyc.helper.ts`, shared by admin `deriveKycStatus` + sales `buildOutlets` +
+`kyc.service.list`), or a bulk-re-KYC'd outlet reads as Approved. **(10)** `isActive:true` is the platform's denormalised
+**"approved + active" predicate** (no `kycStatus` column on Outlet; created `isActive:false`, only KYC approval sets it
+true) — the targets/KPI change keys the primary-performance KPI on it (upload accepts ALL outlets; KPI counts only
+`isActive`). **(11)** a FE **response-merge must match the service's ACTUAL projection shape** — the Gifsy client editor read
+`updated.branding.x` (nested) while the service returns it FLAT, so branding edits silently REVERTED after "Saved" (DB was
+correct). **(12)** a spec's `$transaction` mock typed `(cb) => cb(tx)` (1 param) makes `.mock.calls[0][1]` (the options arg)
+a TS compile error — widen to `(cb, _opts?) => cb(tx)` when asserting the timeout option.
+
+**META-LESSON (the owner had to remind me — bake it in): a fix is DONE only when EVERY consumer + alternate data path +
+scale case is traced, not just the visible one.** The re-KYC fix took THREE rounds (derivation → the submitter-scoped list
+path → the whole REJECTED family + dashboard/tasks) because I fixed the obvious path and shipped. Before calling any fix
+done: (a) grep EVERY consumer of the changed data/endpoint (the KYC list reads a DIFFERENT endpoint than the dashboard);
+(b) check the SCALE case (correct at 10 rows, 500s at 2,261); (c) check the ALTERNATE entry path (bulk upload vs in-app
+action produce different DB states). When the owner reports a UAT bug, spend the extra pass to verify the WHOLE class
+end-to-end — it's cheaper than the re-report. NEWEST-40 ran 3 parallel adversarial verifications over the session's work +
+found 3 real gaps (rejected-family visibility, 4 money-path scale bugs, onboarding-save revert).
 
 DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`; runtime-verified where an API/edge check was possible):
+- **🆕 2026-07-02/03 — owner-driven UAT fix-as-found + a full completeness verification (NEWEST-36→40; develop `a8a8efa`→`97c5089`, 7 commits):**
+  · **(NEWEST-36 `a8a8efa`)** Sales KYC list: "Outlet Types" filter label + tapping a NOT_STARTED row deep-links
+    `/sales/kyc/new?outletId=<CUID>` so the wizard's existing `?outletId` auto-select pre-fills the outlet. Diagnosed
+    DAMD0638 "not-interested reappeared" as the PRE-`db5f5ab`-404 artifact (now persists; fix live), not a new bug.
+  · **(NEWEST-37 `7dba419`)** TARGETS/ACHIEVEMENTS: admin can upload against **ALL** outlets (dropped `isActive:true` from the
+    4 roster queries), sales SEE all outlets' numbers, but every primary-performance KPI (hero/leaderboard/pace/team%) counts
+    **approved+active only** (`subtreeOutletCodes()`→`{all,active}`; buildTeamRollups keeps counts over all, % over active).
+    Owner decisions: "approved+active"==`isActive:true`; Team-Total footnote; include not-interested. Audit CLEAN.
+  · **(NEWEST-38 `e03e2ac`)** TARGETS-UPLOAD 500 FIX — the WS1 all-outlets roster (~2,261) blew the 5s interactive-tx limit;
+    chunked the upserts into `$transaction([...])` batches of 100 (trap #8). **+ (`cb8f15d`) §A-ONBOARDING**: `PATCH
+    /v1/gifsy/clients/:slug` + `updateClient` (branding+nested-partnerApp deep-merge) + assume-ONBOARDING + Gifsy-console
+    activate/edit; **closed the GIFSY_ADMIN-in-tenant footgun** (`assertRoleAssignable` gates GIFSY_ADMIN to `clientId==='gifsy'`
+    on create+update; FE `assignableRoles` hides it in a tenant). Audit found+fixed F1 (nested features merge) + F2 (reserve
+    the `gifsy` slug). Prod CLIENT_ADMIN verified clean (Khushi Agarwal=CLIENT_ADMIN/deoleo; 0 mis-scoped GIFSY_ADMINs).
+  · **(NEWEST-39 `c3859f4`+`e434bca`)** RE-KYC INVISIBLE-TO-SALES — a bulk re-KYC'd outlet (reKycFlags set, submission APPROVED)
+    didn't show under the rep's Re-KYC filter/tasks. Shared `isReKycPending()` helper (trap #9) surfaces it in buildOutlets +
+    kyc.list; then the follow-up added the assignment-scoped synth to the KYC LIST because `/api/kyc` is submitter-scoped and
+    the outlet's original KYC was filed by the rep's SO (trap #7). Diagnosed via staging DB reads (submitter=Praveen SO, assignee=Lalit ISR).
+  · **(NEWEST-40 `97c5089`)** END-TO-END COMPLETENESS PASS (owner: "this should have been one shot — check the session's other
+    work is correct"). 3 parallel adversarial verifications → 3 REAL gaps FIXED: **(a)** the re-KYC fix was incomplete for the
+    REJECTED family — generalised the sales/kyc synth bucket to the whole re-entry set + fixed the dashboard + tasks "Rejected
+    KYC" groups (assignment-scoped + no-outlet-sub merge, deduped); **(b)** 4 latent money-path scale bugs (credits confirm/UTR,
+    payouts process/UTR) = same class as the targets 500 → raised the tx timeout, kept atomic (trap #8); **(c)** §A-ONBOARDING
+    Save silently reverted branding edits — FE read nested, service returns flat → fixed FE + updateClient/create/list return
+    supportPhone+invoicePrefix (trap #11). Verified CLEAN: targets chunking, the synth/subs merge, deep-link auto-select,
+    §A-ONBOARDING proxy/assume/brand-switcher, all single-entity KYC/wallet/TDS/reward txns.
+- **🆕 2026-06-30 — go-live builds + execution prep (newest first):**
 - **🆕 2026-06-30 — go-live builds + execution prep (newest first):**
   · **WHATSAPP KYC NOTIFICATIONS** (`3900af3`, audit SHIP) — WhatsApp to the **outlet owner** on KYC submit + approve via MSG91 (Deoleo).
     `Msg91Service.sendWhatsappTemplate` (v5 bulk `…/whatsapp-outbound-message/bulk/`, integrated # **917003202293**, lang `en`, 10-digit recipient
@@ -218,7 +277,7 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929` (unchanged since); develop has SINCE advanced to `db5f5ab` with 26 commits of scale/ops + KYC + UAT fix-as-found work (rides the NEXT cutover).** Cutover #2 shipped
+🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929` (unchanged since); develop has SINCE advanced to `97c5089` with 34 commits of scale/ops + KYC + UAT fix-as-found work (rides the NEXT cutover).** Cutover #2 shipped
 the **onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate**; applied migration
 `20260630130000_point_expiry_default_unique` (via `--wait`); pre-cutover backup **`1782886598428`**; created + ENABLED the
 **`expire-sweep-prod`** Cloud Scheduler (daily 00:30 IST; sweep smoke 403/201). Both prod services healthy `/health` 200.
@@ -291,14 +350,18 @@ Now: greet the owner. **🚀 CUTOVER #2 IS DONE (2026-07-01) — prod is live on
 Cutover #2 shipped the onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate; applied migration
 `20260630130000_point_expiry_default_unique`; pre-cutover backup **`1782886598428`**; `expire-sweep-prod` scheduler ENABLED. Deoleo
 was onboarded via the fixed wizard (slug=`deoleo`) then flipped `ONBOARDING→ACTIVE` via the one-off job `gifsy-activate-deoleo`;
-its config = platform defaults (conversion `1`, expiry null, visibility OFF). **Only owner-gated Deoleo go-live items remain:** owner
-assumes Deoleo (now in "Work in brand") → **confirm conversion rate=1** + **create the first Deoleo CLIENT_ADMIN** (`/admin/users`,
-role **CLIENT_ADMIN — NOT Gifsy Admin**) → **load real master data** via the app UIs when the client sends files (**#76**); plus
-**(#143)** WhatsApp `deoleo_kyc_approval` template runtime-verify. The recon'd scale/ops plan is now **IN PROGRESS** on `develop`
-(HEAD `db5f5ab`, 26 commits): pagination COMPLETE, observability O1+O2, log-leak fix, KYC-submit-500, ASM enrollment, conversion-rate
-editor, **KYC Rejected/Re-upload consolidation (+"Rejected" label), download-helper sweep, WhatsApp-post-OTP, OTP-gates-routing (reuses
-DRAFT, no migration), KYC-PDF-doc-render (admin+sales), not-interested-404 fix** — all SHIPPED, staging runtime-verify pending deploy;
-**NEXT = staging runtime-verify of those + owner-gated Deoleo go-live items** (nothing else queued);
+its config = platform defaults (conversion `1`, expiry null, visibility OFF). **Owner-gated Deoleo go-live: ✅ conversion rate=1
+(verified backend) · ✅ first CLIENT_ADMIN created (Khushi Agarwal, prod-verified CLIENT_ADMIN/deoleo) · ⏳ load real master data
+(#76 — the LAST hard blocker, waits on the client's files) · ⏳ #143 WhatsApp `deoleo_kyc_approval` runtime-verify (code-ready,
+template APPROVED — needs a real approval+phone).** **develop is AHEAD at `97c5089` (34 commits, ALL on staging now — both
+`gifsy-api-staging` + `gifsy-frontend-staging` serve `staging-97c5089`), riding the NEXT owner-triggered cutover; prod unchanged at
+`a2f5929`.** Scale/ops COMPLETE on develop (pagination, observability O1+O2, log-leak fix, KYC-submit-500, ASM enrollment,
+conversion-rate editor, Rejected/Re-upload, download-helper sweep, WhatsApp-post-OTP, OTP-gates-routing, KYC-PDF render,
+not-interested-404). **This session (NEWEST-36→40, see DONE-THIS-SESSION):** Outlet-Types+deep-link, targets-all-outlets+KPI-gate,
+targets-500 chunk fix, §A-ONBOARDING client activate/edit+footgun, re-KYC visibility (derivation+list+dashboard+tasks for the whole
+re-entry family), 4 money-path scale-bug fixes, onboarding-save-revert fix — all gate-green + adversarially verified. **The
+re-KYC/rejected-family + onboarding-save fixes are FE — a frontend staging redeploy already landed (`staging-97c5089`).**
+**NEXT = owner UAT-tests this batch on staging, then triggers the cutover; + master data #76 when files arrive** (nothing else queued);
 notifications/P7 still PAUSED (events flag-OFF; email provider TBD, ZeptoMail vs SES). Required onboarding-flow builds logged in
 POST-GO-LIVE-BACKLOG §A-DOMAIN + §A-ONBOARDING (incl. the GIFSY_ADMIN-in-tenant-context
 fix). Keep the fix-as-found loop available (fixes push to `develop` → reach prod on the next `main` deploy). Full as-run record =
