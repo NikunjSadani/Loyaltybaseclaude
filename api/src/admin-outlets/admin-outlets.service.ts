@@ -3,6 +3,7 @@ import { KycStatus, OutletKycIntent, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { isReKycPending } from '../common/kyc-rekyc.helper';
 import {
   BulkDeleteOutletsDto,
   ListOutletsQueryDto,
@@ -486,12 +487,9 @@ export class AdminOutletsService {
       partnerId: string | null,
     ): string {
       // Only a NON-EMPTY reKycFlags object means re-KYC is pending; an empty {}
-      // (or null) must not falsely flag the outlet.
-      if (
-        reKycFlags !== null &&
-        typeof reKycFlags === 'object' &&
-        Object.keys(reKycFlags as Record<string, unknown>).length > 0
-      ) {
+      // (or null) must not falsely flag the outlet. Shared predicate so admin + sales
+      // agree on what "re-KYC pending" means.
+      if (isReKycPending(reKycFlags)) {
         return 'RE_KYC_REQUIRED';
       }
       if (kycIntent === OutletKycIntent.NOT_INTERESTED) {

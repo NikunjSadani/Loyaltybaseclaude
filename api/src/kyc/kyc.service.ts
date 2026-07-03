@@ -20,6 +20,7 @@ import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
 import { sniffFileType } from '../common/file-signature';
+import { isReKycPending } from '../common/kyc-rekyc.helper';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { KYC_FIELD_KEYS, BridgeResult } from './kyc-verification.helper';
@@ -1243,6 +1244,9 @@ export class KycService {
                   programName: true,
                   programCategory: true,
                   outletType: { select: { code: true } },
+                  // Drives the RE_KYC_REQUIRED display override below — an admin re-KYC
+                  // upload sets reKycFlags without flipping the (APPROVED) submission.
+                  reKycFlags: true,
                 },
               },
             },
@@ -1264,8 +1268,18 @@ export class KycService {
       _count: { status: true },
     });
 
+    // Display override: an admin re-KYC upload sets Outlet.reKycFlags but leaves the
+    // latest submission APPROVED. Surface such rows as RE_KYC_REQUIRED so they appear
+    // under the rep's Re-KYC filter/tasks (mirrors the admin deriveKycStatus + the sales
+    // buildOutlets derivation — reKycFlags is the single source of truth for re-KYC).
+    const mapped = submissions.map((s) =>
+      s.partner?.outlets?.some((o) => isReKycPending(o.reKycFlags))
+        ? { ...s, status: 'RE_KYC_REQUIRED' as (typeof s)['status'] }
+        : s,
+    );
+
     return {
-      submissions,
+      submissions: mapped,
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
       statusCounts: statusCounts.reduce<Record<string, number>>((acc, s) => {
         acc[s.status] = s._count.status;

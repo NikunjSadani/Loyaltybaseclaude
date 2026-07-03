@@ -994,6 +994,21 @@ describe('KycService', () => {
       expect(where).toEqual({ user: { clientId: 'deoleo' } }); // no userId scoping
       expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled(); // never resolves a subtree
     });
+
+    it('surfaces an APPROVED submission whose outlet has reKycFlags as RE_KYC_REQUIRED (re-KYC upload)', async () => {
+      // The admin re-KYC upload sets Outlet.reKycFlags but leaves the submission APPROVED
+      // → the list must display RE_KYC_REQUIRED so it appears under the rep's Re-KYC filter.
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null); // partner → own only
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([
+        { id: 's1', status: 'APPROVED', partner: { outlets: [{ id: 'o1', reKycFlags: { mobileNumber: true } }] } },
+        { id: 's2', status: 'APPROVED', partner: { outlets: [{ id: 'o2', reKycFlags: null }] } },
+      ]);
+      mockPrisma.kycSubmission.count.mockResolvedValue(2);
+      mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+      const res = await service.list(partner, {});
+      expect(res.submissions[0].status).toBe('RE_KYC_REQUIRED'); // reKycFlags → override
+      expect(res.submissions[1].status).toBe('APPROVED');        // no flags → unchanged
+    });
   });
 
   describe('getOne', () => {

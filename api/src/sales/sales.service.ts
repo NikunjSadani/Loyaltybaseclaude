@@ -1,6 +1,7 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { isReKycPending } from '../common/kyc-rekyc.helper';
 import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-access.helper';
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 
@@ -1054,7 +1055,11 @@ export class SalesService {
           // un-confirmed KYC (saved at submit, awaiting the outlet-owner OTP) — the rep
           // re-opens it pre-filled to re-send the OTP + submit (or edit first).
           const RE_ENTRY = ['DRAFT', 'REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED', 'RE_KYC_REQUIRED'];
-          const isReEntry = !!latestKyc && RE_ENTRY.includes(latestKyc.status);
+          // An admin re-KYC upload sets Outlet.reKycFlags WITHOUT flipping the (APPROVED)
+          // submission status, so re-entry must also trigger on pending re-KYC flags —
+          // else the rep can't re-open the pre-filled wizard for a re-KYC'd outlet.
+          const reKycPending = isReKycPending(outlet.reKycFlags);
+          const isReEntry = reKycPending || (!!latestKyc && RE_ENTRY.includes(latestKyc.status));
           // Address lives on the Outlet (ChannelPartner has no address columns).
           // These are the canonical "last submitted" values: on every KYC submission
           // kyc.service writes dto.address→outlet.addressLine1, dto.pincode→outlet.pincode
@@ -1098,9 +1103,14 @@ export class SalesService {
             type: outlet.outletType.code,
             programName: outlet.programName ?? '',
             programCategory: outlet.programCategory ?? '',
-            kycStatus: outlet.kycIntent === 'NOT_INTERESTED'
-              ? 'NOT_INTERESTED'
-              : (latestKyc?.status ?? 'NOT_STARTED'),
+            // Re-KYC (admin-flagged fields to re-capture) takes priority — mirror the
+            // admin deriveKycStatus so a re-KYC'd outlet reads RE_KYC_REQUIRED (under the
+            // rep's Re-KYC filter/tasks), not Approved.
+            kycStatus: reKycPending
+              ? 'RE_KYC_REQUIRED'
+              : outlet.kycIntent === 'NOT_INTERESTED'
+                ? 'NOT_INTERESTED'
+                : (latestKyc?.status ?? 'NOT_STARTED'),
             kycSubmittedAt: latestKyc?.createdAt?.toISOString().split('T')[0],
             kycRejectionReason: latestKyc?.rejectionReason ?? null,
             reKycFlags: outlet.reKycFlags ?? null,

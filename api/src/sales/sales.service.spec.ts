@@ -426,6 +426,31 @@ describe('SalesService', () => {
       });
     });
 
+    it('an APPROVED outlet flagged for re-KYC (reKycFlags set) derives RE_KYC_REQUIRED, not APPROVED', async () => {
+      // Admin re-KYC upload sets Outlet.reKycFlags but leaves the submission APPROVED —
+      // the rep must see the outlet under Re-KYC (mirrors admin deriveKycStatus).
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        {
+          outlet: {
+            id: 'o1', outletCode: 'OC1', name: 'Outlet 1', phone: '999',
+            city: 'Delhi', district: 'Central', state: 'DL',
+            outletType: { code: 'RETAIL' },
+            reKycFlags: { mobileNumber: true, remarks: '' }, // flagged for re-KYC
+            partner: {
+              id: 'cp1', phone: '888', wallets: [{ redeemablePoints: 0 }],
+              kycSubmissions: [{ id: 'k1', status: 'APPROVED', createdAt: new Date('2024-05-01T00:00:00.000Z') }],
+            },
+          },
+        },
+      ]);
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0]).toMatchObject({ id: 'o1', kycId: 'k1', kycStatus: 'RE_KYC_REQUIRED' });
+      // reKycFlags surfaced so the wizard can pre-fill the fields to re-capture.
+      expect(res.outlets[0].reKycFlags).toEqual({ mobileNumber: true, remarks: '' });
+    });
+
     it("re-KYC prefill (REJECTED): existingKyc carries address/pincode from the outlet columns AND the NEW accountHolderName from partner.bankAccountHolder", async () => {
       // Re-KYC bug fix (Task E): Street Address, Pincode and Account Holder Name must
       // prefill from the last-submitted values. KycSubmission stores no address/bank
