@@ -8,6 +8,22 @@
 > `expire-sweep-prod` scheduler); Deoleo onboarded (slug=`deoleo`) + flipped `ONBOARDING→ACTIVE`. Remaining = owner-gated: confirm
 > Deoleo Settings (conversion=1) + create first Deoleo CLIENT_ADMIN + load real master data (#76) + WhatsApp `deoleo_kyc_approval`
 > verify (#143). See the **🚀 2026-07-01 CUTOVER #2** block below. *(History: FIX WAVE COMPLETE → owner-driven UAT → cutover #1 → cutover #2.)*
+
+## ▶ THINGS TO BE DONE — START HERE (present this first; ask the owner which to pick up)
+
+All of `develop` (`97c5089`, 34 commits) is on staging (`staging-97c5089`) and rides the NEXT owner-triggered cutover; **prod unchanged at `a2f5929`.** No new migrations this session (all FE + no-migration backend) → the cutover is code-only.
+
+**A. Owner-gated Deoleo go-live (owner action / client files):**
+1. **Owner UAT-tests this session's batch on staging** — re-KYC + REJECTED-family visibility as a rep (KYC list Re-KYC/Rejected filters + dashboard/tasks); targets upload-to-all-outlets + approved-active KPI; §A-ONBOARDING client edit/activate; onboarding-Save persists (no revert); Outlet-Types label + deep-link outlet.
+2. **#76 — load real Deoleo master data** (outlets/hierarchy/catalog/schemes via the app UIs) — **THE LAST HARD BLOCKER**; waits on the client's files.
+3. **#143 — WhatsApp `deoleo_kyc_approval` runtime-verify** (template APPROVED; needs a real approval to a real phone).
+4. **Trigger the develop→main CUTOVER** when owner is ready (34 commits; code-only — backup → merge → in-VPC `migrate deploy` no-op → verify serving SHA).
+
+**B. Blocked on an owner DECISION:** 5. **Notifications Core** go/no-go (drainer push-only; in-app inbox needs a migration; 2/3 events blocked upstream). 6. **Email provider** — ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
+
+**C. Buildable now (no owner input; ride next cutover):** 7. **`/admin/outlets` all-ids endpoint** (§C — outlets page mount-fetches the full ~2,261-row list). 8. **§A-DOMAIN** (decouple domain from slug) — before client #2. 9. **GIFSY settings read-only sections** (#101 — enforceable subset: OTP expiry / max-OTP / JWT expiry). 10. small §B (force-logout-all FE; per-user backend logout).
+
+**D. LATER (POST-GO-LIVE-BACKLOG):** multi-tenant SSR branding, configurable RBAC (AF-12 OFF), WhatsApp per-tenant generalization, OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics/trends, D1 tech-debt residuals.
 > Originally NOT go-live ready (6 blockers + 4 majors). The GO-LIVE FIX WAVE (2026-06-21→22) closed them via disjoint streams
 > (GLM · GL-Money · GL-RBAC · GL-FE-enroll · GL-FE-settle), each executor → INDEPENDENT adversarial audit → Opus gate →
 > runtime-verify. The money re-audit caught a real BLOCKER the first pass missed (GLM-2 never implemented = lost awards) plus

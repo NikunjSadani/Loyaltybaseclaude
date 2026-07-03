@@ -346,6 +346,27 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 [[admin-dashboard-consolidation]] [[default-to-orchestration]] [[global-settings-wiring]] [[sales-hierarchy-scoping]]
 [[migration-model]] [[staging-deploy-gate]] [[audit-every-build-item]].
 
+▶ **THINGS TO BE DONE — START HERE (present this list first; ask the owner which to pick up).** All of develop (`97c5089`,
+34 commits) is on staging and rides the NEXT owner-triggered cutover; **prod is unchanged at `a2f5929`.**
+**A. Owner-gated Deoleo go-live (owner or client-files):**
+  1. **Owner UAT-tests this session's batch on staging** (`staging-97c5089`): re-KYC + REJECTED-family visibility as a rep
+     (KYC list Re-KYC/Rejected filters + dashboard/tasks); targets upload-to-all-outlets + approved-active KPI; §A-ONBOARDING
+     client edit/activate; the onboarding-Save-persists (no revert); the Outlet-Types label + deep-link-outlet.
+  2. **#76 — load real Deoleo master data** (outlets/hierarchy/catalog/schemes via the app UIs) — **THE LAST HARD BLOCKER**, waits on the client's files.
+  3. **#143 — WhatsApp `deoleo_kyc_approval` runtime-verify** (template APPROVED; needs a real approval to a real phone).
+  4. **Trigger the develop→main CUTOVER when owner is ready** — 34 commits ride it; **NO new migrations this session** (all FE +
+     no-migration backend), so the cutover is code-only (backup → merge → in-VPC `migrate deploy` no-op → verify serving SHA).
+**B. Blocked on an owner DECISION:** 5. **Notifications Core** go/no-go (drainer is push-only; in-app inbox needs a migration; 2/3
+  events blocked upstream). 6. **Email provider** — ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
+**C. Buildable now (no owner input; ride next cutover):** 7. **`/admin/outlets` all-ids endpoint** (§C — the outlets page
+  mount-fetches the full ~2,261-row list for upload validation). 8. **§A-DOMAIN** (decouple tenant domain from slug) — before
+  client #2. 9. **GIFSY settings read-only sections** (#101 — enforceable subset: OTP expiry / max-OTP-attempts / JWT expiry).
+  10. small §B (force-logout-all FE; per-user backend logout).
+**D. LATER (POST-GO-LIVE-BACKLOG):** multi-tenant SSR branding, configurable RBAC (AF-12 OFF), WhatsApp per-tenant generalization,
+  OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics/trends, D1 tech-debt residuals.
+**HOUSEKEEPING:** task-list #90–95 ("UAT Agent 1–5") are a STALE pre-UAT plan superseded by the owner-driven loop — prune them;
+  #74 (owner ops) is mostly DONE (monitoring + backups/PITR ON; only optional cred-rotation left).
+
 Now: greet the owner. **🚀 CUTOVER #2 IS DONE (2026-07-01) — prod is live on `a2f5929`, and the DEOLEO TENANT is CREATED + ACTIVE.**
 Cutover #2 shipped the onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate; applied migration
 `20260630130000_point_expiry_default_unique`; pre-cutover backup **`1782886598428`**; `expire-sweep-prod` scheduler ENABLED. Deoleo
@@ -368,4 +389,9 @@ fix). Keep the fix-as-found loop available (fixes push to `develop` → reach pr
 **`runbooks/PROD-CUTOVER-RECORD.md`**; runbook (banner-marked COMPLETE) = **`runbooks/CUTOVER-RUNBOOK.md`**. If a NEW transactional
 notification is requested: PUSH → enqueue post-commit via
 `SalesNotificationsService`; WhatsApp/SMS → `whatsapp-kyc.config.ts` + `Msg91Service.sendWhatsappTemplate` fire-and-forget post-commit.
+
+**START THE SESSION by presenting the ▶ THINGS TO BE DONE list above** (A owner-gated go-live · B owner-decision · C
+buildable-now · D later) and **ask the owner which to pick up** — do NOT silently begin work. Default recommendation if the
+owner is open-ended: since the batch is on staging, offer to (i) help verify this session's fixes on staging, or (ii) pick a
+buildable-now item (C) while master data (#76) and the cutover remain owner-gated.
 ```
