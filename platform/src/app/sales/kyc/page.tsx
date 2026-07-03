@@ -284,7 +284,30 @@ function KYCListContent() {
             outletType:      o.type ?? '',
           }));
 
-        return [...notStarted, ...notInterested];
+        // Re-KYC (admin-flagged fields to re-capture) is ASSIGNMENT-scoped — the outlet's
+        // submission may have been filed by a DIFFERENT rep (e.g. the assignee's manager),
+        // so it never comes back from the submitter-scoped /api/kyc for a leaf rep. Surface
+        // it from the assignment-scoped /api/sales/outlets (buildOutlets returns kycStatus
+        // RE_KYC_REQUIRED via reKycFlags). Deep-link to the submission detail (kycId) — its
+        // getOne is assignee-aware; fall back to the outlet id only if there's no submission.
+        const reKyc: KYCEntry[] = outlets
+          .filter((o) => o.kycStatus === 'RE_KYC_REQUIRED')
+          .map((o): KYCEntry => ({
+            id:          o.kycId || o.id,
+            partnerName: o.name,
+            ownerName:   '',
+            firmName:    o.name,
+            outletCode:  o.outletCode ?? '',
+            mobile:      o.mobile ?? '',
+            status:      KYCStatus.RE_KYC_REQUIRED,
+            submittedAt: '',
+            updatedAt:   '',
+            programName:     o.programName ?? '',
+            programCategory: o.programCategory ?? '',
+            outletType:      o.type ?? '',
+          }));
+
+        return [...notStarted, ...notInterested, ...reKyc];
       })
       .catch(() => [] as KYCEntry[]);
 
@@ -301,10 +324,15 @@ function KYCListContent() {
 
     Promise.all([kycFetch, outletsFetch, teamFetch])
       .then(([subs, synthesised]) => {
-        // Collapse repeat submissions for the same outlet to its latest (current) status.
-        // Synthesised NOT_STARTED / NOT_INTERESTED outlets have no submission → disjoint,
-        // appended as-is (NOT run through dedupeByOutlet, which is for submissions).
-        setEntries([...(synthesised ?? []), ...dedupeByOutlet(subs ?? [])]);
+        // Synthesised entries come from the ASSIGNMENT-scoped /api/sales/outlets and carry
+        // the authoritative derived status (NOT_STARTED / NOT_INTERESTED / RE_KYC_REQUIRED —
+        // kycIntent + reKycFlags aware). On an outletCode collision they WIN over the
+        // submitter-scoped /api/kyc submission (which only knows the raw stored status), so a
+        // re-KYC'd or not-interested outlet reads correctly and never duplicates.
+        const synth = synthesised ?? [];
+        const synthCodes = new Set(synth.map((e) => e.outletCode).filter(Boolean));
+        const subsNoCollision = (subs ?? []).filter((s) => !s.outletCode || !synthCodes.has(s.outletCode));
+        setEntries([...synth, ...dedupeByOutlet(subsNoCollision)]);
       })
       .finally(() => setLoading(false));
   }, [role]);
