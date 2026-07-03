@@ -45,7 +45,7 @@ const mockPrisma = {
   fundLedger: { findFirst: jest.fn() },
   tdsRecord: { create: jest.fn() },
   auditLog: { create: jest.fn() },
-  $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
+  $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
 };
 
 const mockWallet = {
@@ -543,6 +543,28 @@ describe('PayoutsService', () => {
       // ks-a (APPROVED, updated same timestamp) → partner excluded.
       expect(res.steps.validation.errors[0]).toMatch(/KYC.*not approved/i);
       expect(res.steps.disbursement.flagged).toBe(0);
+    });
+
+    it('raises the interactive-tx timeout so a full-tenant disbursement survives (no 5s expiry)', async () => {
+      // The disbursement loop over validTransactions runs inside ONE atomic tx; at
+      // Deoleo scale it must not hit the default 5000ms interactive-tx budget.
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'DRAFT' });
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1', partnerId: 'p1', amountPaise: 100000,
+          payoutMode: 'UPI', upiId: 'partner@upi', bankAccountNumber: null, ifscCode: null,
+          partner: {
+            panNumber: 'ABCDE1234F', isActive: true, deletedAt: null,
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+
+      await service.processBatch(gifsy, 'b1');
+
+      // The disbursement $transaction receives an options 2nd arg with the raised timeout.
+      const opts = mockPrisma.$transaction.mock.calls[0][1];
+      expect(opts).toMatchObject({ timeout: 180000, maxWait: 20000 });
     });
   });
 

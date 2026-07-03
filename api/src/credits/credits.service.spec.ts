@@ -61,7 +61,7 @@ const mockPrisma = {
   creditReversal: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn(), count: jest.fn() },
   outlet: { findMany: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn() },
-  $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
+  $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
 };
 
 const mockNotifications = { enqueue: jest.fn().mockResolvedValue({ id: 'n1' }) };
@@ -425,6 +425,28 @@ describe('CreditsService', () => {
       );
       // The old un-guarded tx.creditBatch.update must NOT be called.
       expect(mockTx.creditBatch.update).not.toHaveBeenCalled();
+    });
+
+    it('raises the interactive-tx timeout so a full-tenant batch survives (no 5s expiry)', async () => {
+      // At Deoleo scale the awaited-write loop over uploaded rows exceeds the default
+      // 5000ms interactive-transaction budget → "expired transaction" 500. The bulk
+      // money mutation must pass a larger timeout while staying ONE atomic tx.
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'PENDING_CONFIRM',
+        period: '2026-05',
+        uploadedBy: 'admin1',
+        totalOutlets: 0,
+        totalPoints: 0,
+        totalPayoutPaise: BigInt(0),
+        rows: [],
+      });
+
+      await service.confirmBatch(admin, 'b1');
+
+      // The bulk $transaction receives an options 2nd arg with the raised timeout.
+      const opts = mockPrisma.$transaction.mock.calls[0][1];
+      expect(opts).toMatchObject({ timeout: 180000, maxWait: 20000 });
     });
   });
 

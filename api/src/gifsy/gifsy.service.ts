@@ -170,6 +170,8 @@ export class GifsyService {
       primaryColor: branding.primaryColor,
       logoUrl: branding.logoUrl,
       supportEmail: branding.supportEmail,
+      supportPhone: branding.supportPhone,
+      invoicePrefix: branding.invoicePrefix,
       productBrands: branding.productBrands,
       features: {
         visibilityInvoiceModule: features.visibilityInvoiceModule,
@@ -256,6 +258,8 @@ export class GifsyService {
       primaryColor: branding.primaryColor,
       logoUrl: branding.logoUrl,
       supportEmail: branding.supportEmail,
+      supportPhone: branding.supportPhone,
+      invoicePrefix: branding.invoicePrefix,
       productBrands: branding.productBrands,
       features: {
         visibilityInvoiceModule: features.visibilityInvoiceModule,
@@ -288,6 +292,8 @@ export class GifsyService {
         primaryColor: branding.primaryColor,
         logoUrl: branding.logoUrl,
         supportEmail: branding.supportEmail,
+        supportPhone: branding.supportPhone,
+        invoicePrefix: branding.invoicePrefix,
         productBrands: branding.productBrands,
         features: {
           visibilityInvoiceModule: features.visibilityInvoiceModule,

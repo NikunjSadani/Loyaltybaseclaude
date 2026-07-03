@@ -122,6 +122,37 @@ describe('GifsyService', () => {
       expect(res.productBrands).toEqual(['Figaro']);
     });
 
+    it('projects supportPhone + invoicePrefix from the merged branding (edit form can reflect them)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'deoleo',
+        internalName: 'Deoleo India',
+        status: 'ACTIVE',
+        onboardedAt: new Date('2025-01-01'),
+        branding: {
+          displayName: 'Deoleo',
+          supportEmail: 'help@deoleo.in',
+          supportPhone: '9900000000',
+          invoicePrefix: 'DEO',
+        },
+        features: {},
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'deoleo',
+        internalName: 'Deoleo India',
+        status: 'ACTIVE',
+        onboardedAt: new Date('2025-01-01'),
+        branding: data.branding,
+        features: {},
+      }));
+
+      const res = await service.updateClient(gifsy, 'deoleo', { supportPhone: '9900000001' });
+
+      // Both flat fields are surfaced so the Gifsy console edit form reflects them after save.
+      expect(res.supportPhone).toBe('9900000001');
+      expect(res.invoicePrefix).toBe('DEO');
+      expect(res.supportEmail).toBe('help@deoleo.in');
+    });
+
     it('writes status top-level without touching the branding blob', async () => {
       mockPrisma.client.findFirst.mockResolvedValue({
         id: 'deoleo',

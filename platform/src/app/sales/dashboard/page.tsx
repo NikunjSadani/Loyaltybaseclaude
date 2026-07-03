@@ -395,23 +395,38 @@ export default function SalesDashboard() {
     // ── More field-only tasks ─────────────────────────────────────────────────
 
     if (isFieldRole) {
-      // Rejected KYC — from SUBMISSIONS (same source as the KYC list), so no-outlet
-      // rejected submissions are counted too and the href is the submission id.
-      const rejectedSubs = kycSubs.filter((s) =>
-        s.status === KYCStatus.REJECTED ||
-        s.status === KYCStatus.RE_UPLOAD_REQUIRED ||
-        s.status === KYCStatus.RESUBMISSION_REQUIRED,
+      // Rejected KYC — the rejected family is ASSIGNMENT-scoped work: a rejected outlet
+      // REASSIGNED to this rep whose original KYC was filed by ANOTHER rep never appears in
+      // the submitter-scoped kycSubs (/api/kyc). So derive from the assignment-scoped
+      // `outlets` (/api/sales/outlets), and merge in submitter-scoped submissions that have
+      // NO linked outlet (kycSubs can't be derived from outlets), deduped by outletCode with
+      // the outlet-derived row winning. Mirrors the KYC list's synth/subs merge.
+      const REJECTED_FAMILY = [KYCStatus.REJECTED, KYCStatus.RE_UPLOAD_REQUIRED, KYCStatus.RESUBMISSION_REQUIRED];
+      const rejectedOutlets = outlets.filter((o) => REJECTED_FAMILY.includes(o.kycStatus));
+      const rejectedOutletCodes = new Set(rejectedOutlets.map((o) => o.outletCode).filter(Boolean));
+      const rejectedNoOutletSubs = kycSubs.filter((s) =>
+        REJECTED_FAMILY.includes(s.status) && (!s.outletCode || !rejectedOutletCodes.has(s.outletCode)),
       );
-      if (rejectedSubs.length > 0) {
+      const rejectedItems = [
+        ...rejectedOutlets.map((o) => ({
+          id: o.kycId || o.id, title: o.name,
+          subtitle: 'Resubmission required',
+          href: o.kycId ? `/sales/kyc/${o.kycId}` : `/sales/kyc/new?outletId=${o.id}`,
+          priority: 'high' as const,
+          ageDays: ageInDays(o.kycSubmittedAt),
+        })),
+        ...rejectedNoOutletSubs.map((s) => ({
+          id: s.id, title: s.title,
+          subtitle: 'Resubmission required',
+          href: `/sales/kyc/${s.id}`, priority: 'high' as const,
+          ageDays: ageInDays(s.updatedAt),
+        })),
+      ];
+      if (rejectedItems.length > 0) {
         groups.push({
           id: 'rejected_kyc', label: 'Rejected KYC',
           icon: <XCircle className="h-4 w-4 text-red-600" />,
-          items: rejectedSubs.map((s) => ({
-            id: s.id, title: s.title,
-            subtitle: 'Resubmission required',
-            href: `/sales/kyc/${s.id}`, priority: 'high' as const,
-            ageDays: ageInDays(s.updatedAt),
-          })),
+          items: rejectedItems,
           accentBg: 'bg-red-50', accentBorder: 'border-red-200',
           accentText: 'text-red-700', badgeBg: 'bg-red-100',
           href: '/sales/kyc?status=REJECTED',

@@ -284,14 +284,20 @@ function KYCListContent() {
             outletType:      o.type ?? '',
           }));
 
-        // Re-KYC (admin-flagged fields to re-capture) is ASSIGNMENT-scoped — the outlet's
-        // submission may have been filed by a DIFFERENT rep (e.g. the assignee's manager),
-        // so it never comes back from the submitter-scoped /api/kyc for a leaf rep. Surface
-        // it from the assignment-scoped /api/sales/outlets (buildOutlets returns kycStatus
-        // RE_KYC_REQUIRED via reKycFlags). Deep-link to the submission detail (kycId) — its
-        // getOne is assignee-aware; fall back to the outlet id only if there's no submission.
-        const reKyc: KYCEntry[] = outlets
-          .filter((o) => o.kycStatus === 'RE_KYC_REQUIRED')
+        // Re-entry states — RE_KYC_REQUIRED + the rejected family (REJECTED /
+        // RE_UPLOAD_REQUIRED / RESUBMISSION_REQUIRED) — are ASSIGNMENT-scoped: the outlet's
+        // submission may have been filed by a DIFFERENT rep (e.g. the assignee's manager or a
+        // prior owner before reassignment), so it never comes back from the submitter-scoped
+        // /api/kyc for the current assignee. Surface them from the assignment-scoped
+        // /api/sales/outlets (buildOutlets returns the derived kycStatus + kycId + prefill).
+        // Deep-link to the submission detail (kycId) — its getOne is assignee-aware; fall back
+        // to the outlet id only if there is genuinely no submission.
+        const ASSIGNMENT_REENTRY = new Set([
+          KYCStatus.RE_KYC_REQUIRED, KYCStatus.REJECTED,
+          KYCStatus.RE_UPLOAD_REQUIRED, KYCStatus.RESUBMISSION_REQUIRED,
+        ] as string[]);
+        const reEntry: KYCEntry[] = outlets
+          .filter((o) => ASSIGNMENT_REENTRY.has(o.kycStatus))
           .map((o): KYCEntry => ({
             id:          o.kycId || o.id,
             partnerName: o.name,
@@ -299,7 +305,7 @@ function KYCListContent() {
             firmName:    o.name,
             outletCode:  o.outletCode ?? '',
             mobile:      o.mobile ?? '',
-            status:      KYCStatus.RE_KYC_REQUIRED,
+            status:      o.kycStatus as KYCStatus,
             submittedAt: '',
             updatedAt:   '',
             programName:     o.programName ?? '',
@@ -307,7 +313,7 @@ function KYCListContent() {
             outletType:      o.type ?? '',
           }));
 
-        return [...notStarted, ...notInterested, ...reKyc];
+        return [...notStarted, ...notInterested, ...reEntry];
       })
       .catch(() => [] as KYCEntry[]);
 

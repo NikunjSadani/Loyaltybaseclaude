@@ -101,7 +101,9 @@ describe('Client settings editor (real PATCH persistence)', () => {
         status: 200, ok: true,
         json: async () => ({
           success: true,
-          data: { id: '1', internalName: CONFIG.internalName, status: 'ONBOARDING', branding: { displayName: 'Renamed Co', primaryColor: '#16a34a', supportEmail: 'help@onb.co', supportPhone: '9000000000', invoicePrefix: 'TGSL-ONB' } },
+          // FLAT projection — the service returns displayName at the top level, NOT nested
+          // under `branding` (reading it nested is the bug this shape guards against).
+          data: { id: '1', internalName: CONFIG.internalName, status: 'ONBOARDING', displayName: 'Renamed Co', primaryColor: '#16a34a', supportEmail: 'help@onb.co', supportPhone: '9000000000', invoicePrefix: 'TGSL-ONB' },
         }),
       };
     }));

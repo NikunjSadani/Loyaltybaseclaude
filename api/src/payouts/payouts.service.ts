@@ -466,6 +466,7 @@ export class PayoutsService {
       let flagged = 0;
       finalStatus = 'SUBMITTED';
 
+      // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
       await this.prisma.$transaction(async (tx) => {
         for (const vt of validTransactions) {
           await tx.payoutTransaction.update({
@@ -479,7 +480,7 @@ export class PayoutsService {
           where: { id },
           data: { status: finalStatus, processedAt: new Date() },
         });
-      });
+      }, { timeout: 180_000, maxWait: 20_000 });
       steps.disbursement.flagged = flagged;
       steps.disbursement.status = flagged > 0 ? 'FLAGGED' : 'SKIPPED';
     } catch (err) {
@@ -686,6 +687,7 @@ export class PayoutsService {
     let failedCount = 0;
     let reversedCount = 0;
 
+    // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
     await this.prisma.$transaction(async (tx) => {
       for (const row of parseResult.rows) {
         if (row.status !== 'OK' || !row.outcome) continue;
@@ -770,7 +772,7 @@ export class PayoutsService {
           }
         }
       }
-    });
+    }, { timeout: 180_000, maxWait: 20_000 });
 
     return { applied: true, paidCount, failedCount, reversedCount };
   }

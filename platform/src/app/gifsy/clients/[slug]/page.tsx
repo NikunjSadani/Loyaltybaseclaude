@@ -118,18 +118,18 @@ interface ClientPatchBody {
   invoicePrefix?: string;
 }
 
-/** Shape returned by the PATCH endpoint (subset we merge back into local config). */
+/** Shape returned by the PATCH endpoint (subset we merge back into local config).
+ *  The service returns a FLAT projection (displayName/primaryColor/... at the top level,
+ *  NOT nested under `branding`) — matching createClient/listClients. */
 interface ClientPatchResponse {
   id: string;
   internalName: string;
   status: ClientConfig['status'];
-  branding: {
-    displayName?: string;
-    primaryColor?: string;
-    supportEmail?: string;
-    supportPhone?: string;
-    invoicePrefix?: string;
-  };
+  displayName?: string;
+  primaryColor?: string;
+  supportEmail?: string;
+  supportPhone?: string;
+  invoicePrefix?: string;
   features?: Record<string, boolean>;
 }
 
@@ -168,21 +168,24 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
         throw new Error(j?.error || 'Save failed');
       }
       const updated = j.data as ClientPatchResponse;
-      // Merge the authoritative server response back into local state.
+      // Merge the authoritative server response back into local state. The response is
+      // FLAT (updated.displayName, not updated.branding.displayName) — reading it nested
+      // made every branding/invoicing edit fall back to the OLD value + visually revert
+      // after "Saved". Fall back to the submitted `patch` when the server omits a field.
       setConfig((prev) => ({
         ...prev,
         internalName: updated.internalName ?? prev.internalName,
         status: updated.status ?? prev.status,
         branding: {
           ...prev.branding,
-          displayName:  updated.branding?.displayName  ?? prev.branding.displayName,
-          primaryColor: updated.branding?.primaryColor ?? prev.branding.primaryColor,
-          supportEmail: updated.branding?.supportEmail ?? prev.branding.supportEmail,
-          supportPhone: updated.branding?.supportPhone ?? prev.branding.supportPhone,
+          displayName:  updated.displayName  ?? patch.displayName  ?? prev.branding.displayName,
+          primaryColor: updated.primaryColor ?? patch.primaryColor ?? prev.branding.primaryColor,
+          supportEmail: updated.supportEmail ?? patch.supportEmail ?? prev.branding.supportEmail,
+          supportPhone: updated.supportPhone ?? patch.supportPhone ?? prev.branding.supportPhone,
         },
         invoicing: {
           ...prev.invoicing,
-          invoicePrefix: updated.branding?.invoicePrefix ?? prev.invoicing.invoicePrefix,
+          invoicePrefix: updated.invoicePrefix ?? patch.invoicePrefix ?? prev.invoicing.invoicePrefix,
         },
       }));
       flashSaved();

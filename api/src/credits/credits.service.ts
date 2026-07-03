@@ -284,6 +284,7 @@ export class CreditsService {
     // sum per partner so a partner credited under several fields gets one push.
     const creditedByPartner = new Map<string, number>();
 
+    // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
     const updated = await this.prisma.$transaction(async (tx) => {
       // ── Concurrency guard ──────────────────────────────────────────────────
       // Replace the plain update with a conditional updateMany. Only the first
@@ -398,7 +399,7 @@ export class CreditsService {
       }
 
       return confirmed;
-    });
+    }, { timeout: 180_000, maxWait: 20_000 });
 
     // Best-effort PUSH "points earned" trigger (PWA F5). Resolve each credited
     // partner's userId AFTER commit and enqueue a PUSH row. Wrapped so push can
@@ -1032,6 +1033,7 @@ export class CreditsService {
     }
 
     const now = new Date();
+    // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
     await this.prisma.$transaction(async (tx) => {
       for (const row of parseResult.rows) {
         if (row.status !== 'OK') continue;
@@ -1057,7 +1059,7 @@ export class CreditsService {
         where: { id: download.id },
         data: { status: stillPending ? 'PARTIALLY_PAID' : 'PAID' },
       });
-    });
+    }, { timeout: 180_000, maxWait: 20_000 });
 
     // Notify paid outlets (fire-and-forget; needs phone from outlet).
     const paidOutletIds = parseResult.rows

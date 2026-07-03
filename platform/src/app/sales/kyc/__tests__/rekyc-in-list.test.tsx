@@ -68,4 +68,23 @@ describe('KYC list — re-KYC outlets surface (assignment-scoped)', () => {
     render(<KYCListPage />);
     await waitFor(() => expect(screen.getByText('Verma Traders')).toBeInTheDocument());
   });
+
+  it('also surfaces a REJECTED reassigned outlet (whole re-entry family, not just RE_KYC)', async () => {
+    // A rejected outlet reassigned to this rep, whose original KYC was filed by another rep,
+    // must appear from the assignment-scoped /api/sales/outlets — same gap class as RE_KYC.
+    fetchMock.mockImplementation((url: string) => {
+      if (typeof url === 'string' && url.includes('/api/sales/outlets')) {
+        return Promise.resolve({ json: () => Promise.resolve({ success: true, data: { outlets: [
+          { id: 'o2', kycId: 'kyc-2', name: 'Patel Kirana', outletCode: 'DAMD0600', mobile: '9000000002', kycStatus: 'REJECTED', type: 'SSS' },
+        ] } }) });
+      }
+      if (typeof url === 'string' && url.includes('/api/kyc')) {
+        return Promise.resolve({ json: () => Promise.resolve({ success: true, data: { submissions: [] } }) });
+      }
+      return Promise.resolve({ json: () => Promise.resolve({ success: true, data: {} }) });
+    });
+    render(<KYCListPage />);
+    await waitFor(() => expect(screen.getByText('Patel Kirana')).toBeInTheDocument());
+    expect(screen.getByText('Patel Kirana').closest('a')).toHaveAttribute('href', '/sales/kyc/kyc-2');
+  });
 });
