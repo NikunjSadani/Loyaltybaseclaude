@@ -87,6 +87,10 @@ const DEOLEO_DEFAULT_KPIS: Array<{
 
 @Injectable()
 export class TargetsService {
+  /** Batch size for chunked upload persistence — keeps each $transaction([...]) well
+   *  under the 5s interactive-transaction timeout even for thousands of outlet rows. */
+  private static readonly UPLOAD_CHUNK = 100;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly salesNotifications: SalesNotificationsService,
@@ -435,29 +439,38 @@ export class TargetsService {
     const acceptedCount  = parseResult.summary.accepted;
     const rejectedCount  = parseResult.summary.rejected;
 
-    // ── Persist inside a transaction ──────────────────────────────────────────
-    const batch = await this.prisma.$transaction(async (tx) => {
-      const batchRecord = await tx.targetUploadBatch.create({
-        data: {
-          clientId:     user.clientId,
-          uploadedById: user.sub,
-          month:        batchMonth,
-          totalRows,
-          acceptedCount,
-          rejectedCount,
-          status: 'COMPLETED',
-        },
-      });
+    // ── Persist ────────────────────────────────────────────────────────────────
+    // The outlet roster is now EVERY non-deleted outlet (not just active), so an
+    // upload can carry thousands of rows. A single interactive $transaction with one
+    // awaited upsert per row blows the 5s interactive-transaction timeout at that
+    // scale (Prisma: "query cannot be executed on an expired transaction"). Instead
+    // create the batch row, then run the per-row upserts in CHUNKED batched
+    // transactions ($transaction([...])) so each round-trip stays well under the
+    // timeout and the write scales to thousands of outlets. Re-upload stays
+    // idempotent (upsert semantics preserved).
+    const batch = await this.prisma.targetUploadBatch.create({
+      data: {
+        clientId:     user.clientId,
+        uploadedById: user.sub,
+        month:        batchMonth,
+        totalRows,
+        acceptedCount,
+        rejectedCount,
+        status: 'COMPLETED',
+      },
+    });
 
-      // Write one OutletTarget per (outletCode, month) with non-blank values
-      for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
-        if (isMonthLocked(month, currentMonth)) continue; // past month — not editable
-        for (const [outletCode, kpiMap] of Object.entries(outletMap)) {
-          if (Object.keys(kpiMap).length === 0) continue; // safety: skip fully-blank
+    // Build one OutletTarget upsert per (outletCode, month) with non-blank values.
+    const targetOps: Prisma.PrismaPromise<unknown>[] = [];
+    for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
+      if (isMonthLocked(month, currentMonth)) continue; // past month — not editable
+      for (const [outletCode, kpiMap] of Object.entries(outletMap)) {
+        if (Object.keys(kpiMap).length === 0) continue; // safety: skip fully-blank
 
-          const meta = outletMeta.get(outletCode);
+        const meta = outletMeta.get(outletCode);
 
-          await tx.outletTarget.upsert({
+        targetOps.push(
+          this.prisma.outletTarget.upsert({
             where: {
               clientId_outletCode_month: { clientId: user.clientId, outletCode, month },
             },
@@ -468,21 +481,23 @@ export class TargetsService {
               outletType:   meta?.type ?? '',
               month,
               targetValues: kpiMap as unknown as Prisma.InputJsonValue,
-              batchId:      batchRecord.id,
+              batchId:      batch.id,
             },
             update: {
               targetValues: kpiMap as unknown as Prisma.InputJsonValue,
               outletName:   meta?.name ?? outletCode,
               outletType:   meta?.type ?? '',
-              batchId:      batchRecord.id,
+              batchId:      batch.id,
               updatedAt:    new Date(),
             },
-          });
-        }
+          }),
+        );
       }
+    }
 
-      return batchRecord;
-    });
+    for (let i = 0; i < targetOps.length; i += TargetsService.UPLOAD_CHUNK) {
+      await this.prisma.$transaction(targetOps.slice(i, i + TargetsService.UPLOAD_CHUNK));
+    }
 
     // Notify the assigned rep (XSR) + their manager (SO) for every outlet that got a
     // target this upload. Fire-and-forget + tenant-scoped; never blocks the upload.
@@ -650,34 +665,39 @@ export class TargetsService {
     const acceptedCount = parseResult.summary.accepted;
     const rejectedCount = parseResult.summary.rejected;
 
-    // ── Persist inside a transaction ──────────────────────────────────────────
-    const batch = await this.prisma.$transaction(async (tx) => {
-      const batchRecord = await tx.salesUploadBatch.create({
-        data: {
-          clientId:     user.clientId,
-          uploadedById: user.sub,
-          month:        batchMonth,
-          totalRows,
-          acceptedCount,
-          rejectedCount,
-          status: 'COMPLETED',
-        },
-      });
+    // ── Persist ────────────────────────────────────────────────────────────────
+    // Same scale concern as uploadTargets: the roster is now every non-deleted
+    // outlet, so one interactive $transaction with an await-per-row upsert blows the
+    // 5s timeout. Create the batch row, then run the upserts in CHUNKED batched
+    // transactions. Re-upload stays idempotent.
+    const batch = await this.prisma.salesUploadBatch.create({
+      data: {
+        clientId:     user.clientId,
+        uploadedById: user.sub,
+        month:        batchMonth,
+        totalRows,
+        acceptedCount,
+        rejectedCount,
+        status: 'COMPLETED',
+      },
+    });
 
-      // Write one OutletSalesRecord per (outletCode, month) with non-blank values
-      for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
-        for (const [outletCode, kpiMapRaw] of Object.entries(outletMap)) {
-          // Achievements have no per-outlet display-name concept. The shared target
-          // parser may have collected an override-name column into `__names`; strip it
-          // here so it never persists as inert dead data in kpiValues (audit O-1).
-          const kpiMap = Object.fromEntries(
-            kpiCodeKeys(kpiMapRaw).map((k) => [k, kpiMapRaw[k]]),
-          );
-          if (Object.keys(kpiMap).length === 0) continue; // skip fully-blank rows
+    // Build one OutletSalesRecord upsert per (outletCode, month) with non-blank values.
+    const salesOps: Prisma.PrismaPromise<unknown>[] = [];
+    for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
+      for (const [outletCode, kpiMapRaw] of Object.entries(outletMap)) {
+        // Achievements have no per-outlet display-name concept. The shared target
+        // parser may have collected an override-name column into `__names`; strip it
+        // here so it never persists as inert dead data in kpiValues (audit O-1).
+        const kpiMap = Object.fromEntries(
+          kpiCodeKeys(kpiMapRaw).map((k) => [k, kpiMapRaw[k]]),
+        );
+        if (Object.keys(kpiMap).length === 0) continue; // skip fully-blank rows
 
-          const meta = outletMeta.get(outletCode);
+        const meta = outletMeta.get(outletCode);
 
-          await tx.outletSalesRecord.upsert({
+        salesOps.push(
+          this.prisma.outletSalesRecord.upsert({
             where: {
               clientId_outletCode_month: { clientId: user.clientId, outletCode, month },
             },
@@ -688,21 +708,23 @@ export class TargetsService {
               outletType: meta?.type ?? '',
               month,
               kpiValues:  kpiMap as unknown as Prisma.InputJsonValue,
-              batchId:    batchRecord.id,
+              batchId:    batch.id,
             },
             update: {
               kpiValues:  kpiMap as unknown as Prisma.InputJsonValue,
               outletName: meta?.name ?? outletCode,
               outletType: meta?.type ?? '',
-              batchId:    batchRecord.id,
+              batchId:    batch.id,
               updatedAt:  new Date(),
             },
-          });
-        }
+          }),
+        );
       }
+    }
 
-      return batchRecord;
-    });
+    for (let i = 0; i < salesOps.length; i += TargetsService.UPLOAD_CHUNK) {
+      await this.prisma.$transaction(salesOps.slice(i, i + TargetsService.UPLOAD_CHUNK));
+    }
 
     return {
       batchId:       batch.id,

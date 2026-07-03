@@ -60,19 +60,33 @@ const mockPrisma = {
   outlet: {
     findMany: jest.fn(),
   },
+  // The upload persistence now calls prisma.* DIRECTLY (batch create + chunked
+  // $transaction([...upserts])), not tx.* inside an interactive callback — so these
+  // reuse the SAME jest.fns as mockTx, letting existing `mockTx.*` assertions and the
+  // new direct calls resolve to one mock.
   outletTarget: {
     findMany: jest.fn(),
+    upsert: mockTx.outletTarget.upsert,
   },
   outletSalesRecord: {
     findMany: jest.fn(),
+    upsert: mockTx.outletSalesRecord.upsert,
   },
   targetUploadBatch: {
     findMany: jest.fn(),
+    create: mockTx.targetUploadBatch.create,
   },
   salesUploadBatch: {
     findMany: jest.fn(),
+    create: mockTx.salesUploadBatch.create,
   },
-  $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
+  // Handles BOTH forms: the array form ($transaction([...ops])) used by the chunked
+  // upload persistence, and the interactive callback form used by upsertKpi.
+  $transaction: jest.fn((arg: unknown) =>
+    Array.isArray(arg)
+      ? Promise.all(arg)
+      : (arg as (tx: typeof mockTx) => unknown)(mockTx),
+  ),
 };
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -584,6 +598,39 @@ describe('TargetsService', () => {
       expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
       expect(result.skippedLockedMonths).toContain('2020-01');
       expect(result.writableMonths).not.toContain('2020-01');
+    });
+
+    it('SCALE REGRESSION: a large upload persists via CHUNKED batched $transactions (not one 5s interactive tx)', async () => {
+      // The roster is now every non-deleted outlet (~2.3k on Deoleo). The old code
+      // awaited one upsert per row inside a SINGLE interactive $transaction → blew the
+      // 5s timeout → 500. Now the upserts run in chunks of 100 batched transactions.
+      const N = 250;
+      const roster = Array.from({ length: N }, (_, i) => ({
+        outletCode: `O${String(i).padStart(4, '0')}`,
+        name: `Outlet ${i}`,
+        outletType: { code: 'RETAIL' },
+      }));
+      mockPrisma.outlet.findMany.mockResolvedValue(roster);
+      mockPrisma.targetUploadBatch.create.mockResolvedValue({
+        id: 'batch-big', clientId: 'deoleo', month: '2026-07',
+        totalRows: N, acceptedCount: N, rejectedCount: 0, status: 'COMPLETED',
+      });
+      const file = {
+        buffer: buildTestXlsx(roster.map((o, i) => [o.outletCode, o.name, 'RETAIL', 100 + i, 50 + i])),
+        originalname: 'big.xlsx',
+        mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      } as Express.Multer.File;
+
+      const result = await service.uploadTargets(admin, file);
+
+      expect(result.acceptedCount).toBe(N);
+      // Every row is upserted...
+      expect(mockPrisma.outletTarget.upsert).toHaveBeenCalledTimes(N);
+      // ...across CHUNKED array-form transactions: ceil(250/100) = 3, sized 100/100/50.
+      const txArrayCalls = mockPrisma.$transaction.mock.calls.filter((c) => Array.isArray(c[0]));
+      expect(txArrayCalls).toHaveLength(3);
+      expect((txArrayCalls[0][0] as unknown[]).length).toBe(100);
+      expect((txArrayCalls[2][0] as unknown[]).length).toBe(50);
     });
   });
 
