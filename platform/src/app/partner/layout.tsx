@@ -95,8 +95,12 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
 
       <div className="flex-1 flex flex-col min-h-screen min-w-0">
         {/* Top header */}
-        <header className="sticky top-0 z-30 bg-white border-b border-gray-200 px-4 py-3">
-          <div className="flex items-center justify-between gap-2 min-w-0">
+        <header className="sticky top-0 z-30">
+          {/* iOS safe-area strip — brand-tinted so the WHITE status-bar icons stay
+              readable behind it on an installed PWA (Option C). Zero height off-iOS
+              (env(safe-area-inset-top)=0), so the header is unchanged in a browser. */}
+          <div aria-hidden="true" style={{ height: 'env(safe-area-inset-top)', backgroundColor: 'var(--brand-primary)' }} />
+          <div className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between gap-2 min-w-0">
             <div className="flex items-center gap-3 min-w-0">
               {/* Brand mark (mobile only — desktop shows it in the sidebar). The colour
                   wordmark sits on the white header; falls back to the hex mark per tenant. */}
