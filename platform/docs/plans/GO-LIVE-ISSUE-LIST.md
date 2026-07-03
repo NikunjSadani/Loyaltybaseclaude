@@ -21,7 +21,7 @@ All of `develop` (`97c5089`, 34 commits) is on staging (`staging-97c5089`) and r
 
 **B. Blocked on an owner DECISION:** 5. **Notifications Core** go/no-go (drainer push-only; in-app inbox needs a migration; 2/3 events blocked upstream). 6. **Email provider** — ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
 
-**C. Buildable now (no owner input; ride next cutover):** 7. **`/admin/outlets` all-ids endpoint** (§C — outlets page mount-fetches the full ~2,261-row list). 8. **§A-DOMAIN** (decouple domain from slug) — before client #2. 9. **GIFSY settings read-only sections** (#101 — enforceable subset: OTP expiry / max-OTP / JWT expiry). 10. small §B (force-logout-all FE; per-user backend logout).
+**C. Buildable now — SHIPPED 2026-07-03 (`873a2ec`, gate-green + audit-clean, on develop; owner UAT + staging-verify pending deploy):** ✅ 7. `/admin/outlets/ids` lite endpoint (replaces the ~23-request page-through). ✅ 9. GIFSY read-only "Security & Platform Config" (#101, GIFSY_ADMIN-only; `auth.constants.ts` single-source-of-truth). ✅ 10. force-logout (self `POST /v1/auth/logout-all` + admin per-user `POST /admin/users/:id/revoke-sessions`, tenant-scoped, no migration). **8. §A-DOMAIN PULLED** — needs a `Client.domains` migration + resolver rewrite (4–7 days / Medium), doesn't fit a code-only cutover; owner to schedule as its own migration-bearing build before client #2.
 
 **D. LATER (POST-GO-LIVE-BACKLOG):** multi-tenant SSR branding, configurable RBAC (AF-12 OFF), WhatsApp per-tenant generalization, OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics/trends, D1 tech-debt residuals.
 > Originally NOT go-live ready (6 blockers + 4 majors). The GO-LIVE FIX WAVE (2026-06-21→22) closed them via disjoint streams

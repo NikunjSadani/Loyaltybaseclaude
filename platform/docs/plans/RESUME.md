@@ -358,10 +358,16 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
      no-migration backend), so the cutover is code-only (backup → merge → in-VPC `migrate deploy` no-op → verify serving SHA).
 **B. Blocked on an owner DECISION:** 5. **Notifications Core** go/no-go (drainer is push-only; in-app inbox needs a migration; 2/3
   events blocked upstream). 6. **Email provider** — ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
-**C. Buildable now (no owner input; ride next cutover):** 7. **`/admin/outlets` all-ids endpoint** (§C — the outlets page
-  mount-fetches the full ~2,261-row list for upload validation). 8. **§A-DOMAIN** (decouple tenant domain from slug) — before
-  client #2. 9. **GIFSY settings read-only sections** (#101 — enforceable subset: OTP expiry / max-OTP-attempts / JWT expiry).
-  10. small §B (force-logout-all FE; per-user backend logout).
+**C. Buildable now — batch SHIPPED 2026-07-03 (`873a2ec`, gate-green + audit-clean, on develop):** ✅ 7. **`/admin/outlets/ids`
+  lite endpoint** (one unpaginated 3-field projection replaces the ~23-request FE page-through; deriveKycStatus shared so list/ids
+  can't drift). ✅ 9. **GIFSY settings read-only "Security & Platform Config"** (#101, GIFSY_ADMIN-only — OTP expiry/attempts/resend
+  window, JWT access TTL, refresh + assumed TTLs; new `auth.constants.ts` = single source of truth, auth enforces + getSettings
+  displays from it, no drift). ✅ 10. **force-logout** (self `POST /v1/auth/logout-all` + profile button; admin per-user
+  `POST /admin/users/:id/revoke-sessions` (tenant-scoped) + /admin/users row action; reuse `revokeAllSessionsForUser`, no migration;
+  not-instant caveat encoded per trap #4). **⏳ owner UAT + staging runtime-verify pending the staging deploy of `873a2ec`.**
+  **8. §A-DOMAIN PULLED** (needs a `Client.domains` Prisma migration + tenant-resolver rewrite from pure-map to cached DB lookup;
+  backlog rates it 4–7 days / Medium risk → does NOT fit a code-only cutover; it's a "before client #2" item, owner decision to
+  schedule it as its own migration-bearing build).
 **D. LATER (POST-GO-LIVE-BACKLOG):** multi-tenant SSR branding, configurable RBAC (AF-12 OFF), WhatsApp per-tenant generalization,
   OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics/trends, D1 tech-debt residuals.
 **HOUSEKEEPING:** task-list #90–95 ("UAT Agent 1–5") are a STALE pre-UAT plan superseded by the owner-driven loop — prune them;
