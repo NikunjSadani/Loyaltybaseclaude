@@ -9,7 +9,8 @@ import {
 import { Card, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
 import { ROLE_LABELS, type SalesRole } from '@/lib/sales-role';
-import { authHeader } from '@/lib/api-client';
+import { api, authHeader } from '@/lib/api-client';
+import { logoutAction } from '@/lib/auth-actions';
 import PwaAppSettings from '@/components/pwa/PwaAppSettings';
 
 interface SalesProfile {
@@ -103,6 +104,9 @@ export default function SalesProfilePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showManager, setShowManager] = useState(false);
+  // "Log out from all devices" — confirm modal state.
+  const [showLogoutAll, setShowLogoutAll] = useState(false);
+  const [loggingOutAll, setLoggingOutAll] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -131,6 +135,19 @@ export default function SalesProfilePage() {
   const handleLogout = () => {
     document.cookie = 'token=; Max-Age=0; path=/';
     router.push('/auth/login');
+  };
+
+  // Revoke every session server-side (all devices), then clear THIS device's cookies
+  // and bounce to login. Other devices are signed out within the session window / on
+  // their next refresh — not instantly (access tokens live until they expire).
+  const handleLogoutAllDevices = async () => {
+    setLoggingOutAll(true);
+    try {
+      await api.post('/api/auth/logout-all', {});
+    } finally {
+      await logoutAction();
+      router.push('/auth/login');
+    }
   };
 
   if (loading) {
@@ -234,11 +251,17 @@ export default function SalesProfilePage() {
 
       {/* Logout */}
       <Card>
-        <CardContent className="px-0 py-1">
+        <CardContent className="px-0 py-1 divide-y divide-gray-50">
           <MenuItem
             icon={<LogOut className="h-4 w-4" />}
             label="Logout"
             onClick={handleLogout}
+            danger
+          />
+          <MenuItem
+            icon={<LogOut className="h-4 w-4" />}
+            label="Log out from all devices"
+            onClick={() => setShowLogoutAll(true)}
             danger
           />
         </CardContent>
@@ -280,6 +303,53 @@ export default function SalesProfilePage() {
                 <span className="text-sm font-medium text-gray-800">+91 {profile.reportingPhone}</span>
               </a>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Log out from all devices — confirm modal */}
+      {showLogoutAll && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-4"
+          onClick={() => { if (!loggingOutAll) setShowLogoutAll(false); }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Log out from all devices"
+            className="bg-white rounded-2xl w-full max-w-sm p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-bold text-gray-900">Log out from all devices</h3>
+              <button
+                onClick={() => { if (!loggingOutAll) setShowLogoutAll(false); }}
+                className="p-1 rounded-lg hover:bg-gray-100"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4 text-gray-400" />
+              </button>
+            </div>
+            <p className="text-sm text-gray-600 mb-4">
+              This signs you out on all your devices. Other devices are signed out within
+              the session window (on their next refresh), not instantly.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowLogoutAll(false)}
+                disabled={loggingOutAll}
+                className="flex-1 px-4 py-2.5 text-sm font-medium border border-gray-200 text-gray-600 rounded-xl hover:bg-gray-50 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleLogoutAllDevices}
+                disabled={loggingOutAll}
+                className="flex-1 px-4 py-2.5 text-sm font-semibold bg-red-600 text-white rounded-xl hover:bg-red-700 transition-colors disabled:opacity-50"
+              >
+                {loggingOutAll ? 'Signing out…' : 'Log out everywhere'}
+              </button>
+            </div>
           </div>
         </div>
       )}

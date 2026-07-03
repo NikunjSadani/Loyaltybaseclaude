@@ -477,23 +477,18 @@ export default function OutletsPage() {
   // ── Full-list loader (validation only) ──
   // The upload validators need the WHOLE tenant outlet list (not one page): the
   // Outlet-Master validator classifies each row create/update/reactivate from the
-  // existing set, and Re-KYC / Deactivate check Outlet-ID existence. Page through
-  // the same endpoint (unfiltered) and accumulate. Called on mount + after upsert.
+  // existing set, and Re-KYC / Deactivate check Outlet-ID existence; the header
+  // stats also count by KYC status over ALL outlets. One lightweight call to
+  // GET /api/admin/outlets/ids returns the whole tenant list projected to just the
+  // 3 fields consumed here ({ outletId, isActive, kycStatus }) — replacing the old
+  // ~23-request page-through of the paginated list endpoint. Called on mount + after upsert.
   const loadAllOutlets = useCallback(async () => {
     try {
-      const acc: MockOutlet[] = [];
-      let p = 1;
-      // Hard cap the loop so a pathological total can never spin forever.
-      for (let guard = 0; guard < 1000; guard++) {
-        const params = new URLSearchParams({ page: String(p), limit: String(PAGE_SIZE) });
-        const j = await fetch(`/api/admin/outlets?${params.toString()}`).then(r => r.json());
-        if (!j.success || !Array.isArray(j.data.outlets)) break;
-        acc.push(...(j.data.outlets as MockOutlet[]));
-        const pag = j.data.pagination as Pagination | undefined;
-        if (!pag || p >= pag.pages || pag.pages === 0) break;
-        p += 1;
+      const j = await fetch('/api/admin/outlets/ids').then(r => r.json());
+      if (j.success && Array.isArray(j.data.outlets)) {
+        setAllOutlets(j.data.outlets as MockOutlet[]);
       }
-      setAllOutlets(acc);
+      // On a non-success payload, leave the prior good validation list in place.
     } catch {
       /* leave prior good validation list on transient error */
     }

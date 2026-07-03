@@ -350,6 +350,37 @@ describe('AuthService', () => {
     });
   });
 
+  // ── logoutAllSessions (self "log out everywhere", #101 / Feature 10-i) ───────
+  describe('logoutAllSessions', () => {
+    const caller = { sub: 'me1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'Me' } as any;
+
+    it('revokes ONLY the caller (user.sub) non-revoked sessions and returns the count', async () => {
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 3 });
+      mockPrisma.auditLog.create.mockResolvedValue({ id: 'al1' });
+
+      const res = await service.logoutAllSessions(caller);
+
+      // Strictly scoped to the caller's own userId + non-revoked rows
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'me1', revokedAt: null },
+        data:  { revokedAt: expect.any(Date) },
+      });
+      expect(res).toEqual({ revoked: 3 });
+    });
+
+    it('writes a LOGOUT audit log attributed to the caller with the logout_all_sessions event', async () => {
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+      mockPrisma.auditLog.create.mockResolvedValue({ id: 'al2' });
+
+      await service.logoutAllSessions(caller);
+
+      const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
+      expect(audit.action).toBe('LOGOUT');
+      expect(audit.actorId).toBe('me1');
+      expect(audit.metadata).toMatchObject({ event: 'logout_all_sessions', revoked: 1 });
+    });
+  });
+
   // ── refreshToken preserves the assumed operator-context (A2 audit fix) ───────
   describe('refreshToken (operator-context)', () => {
     it('a refreshed ASSUMED session keeps the tenant scope + assumed flag (not reverted to gifsy)', async () => {

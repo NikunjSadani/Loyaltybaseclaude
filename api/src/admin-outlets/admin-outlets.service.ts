@@ -15,6 +15,66 @@ import {
   UpsertOutletsDto,
 } from './dto/admin-outlets.dto';
 
+/**
+ * Derive the display KYC status for a single outlet from its reKycFlags / kycIntent /
+ * partner + the latest KycSubmission status for that partner. SINGLE source of truth
+ * for the derivation, shared by list() (paginated page) and listIds() (unpaginated
+ * validation projection) so both agree with buildKycStatusWhere.
+ *
+ * Priority:
+ *   1. non-empty reKycFlags     ⇒ RE_KYC_REQUIRED  (wins over everything)
+ *   2. kycIntent NOT_INTERESTED ⇒ NOT_STARTED      (outlet declined)
+ *   3. no partner               ⇒ NOT_STARTED
+ *   4. latest submission status ⇒ mapped bucket
+ *   5. no submission            ⇒ NOT_STARTED
+ */
+function deriveKycStatus(
+  reKycFlags: unknown,
+  kycIntent: OutletKycIntent | null,
+  partnerId: string | null,
+  latestStatusByPartnerId: Map<string, KycStatus>,
+): string {
+  if (isReKycPending(reKycFlags)) {
+    return 'RE_KYC_REQUIRED';
+  }
+  if (kycIntent === OutletKycIntent.NOT_INTERESTED) {
+    return 'NOT_STARTED';
+  }
+  if (!partnerId) {
+    return 'NOT_STARTED';
+  }
+  const latest = latestStatusByPartnerId.get(partnerId);
+  if (!latest) {
+    return 'NOT_STARTED';
+  }
+  switch (latest) {
+    case KycStatus.APPROVED:
+      return 'APPROVED';
+    case KycStatus.REJECTED:
+      return 'REJECTED';
+    case KycStatus.SUBMITTED:
+      return 'SUBMITTED';
+    case KycStatus.RE_KYC_REQUIRED:
+      return 'RE_KYC_REQUIRED';
+    case KycStatus.UNDER_REVIEW:
+    case KycStatus.PENDING_PENNY_DROP:
+    case KycStatus.PENDING_AGREEMENT:
+    case KycStatus.PENDING_SO_APPROVAL:
+    case KycStatus.PENDING_ASM_APPROVAL:
+    case KycStatus.PENDING_RSM_APPROVAL:
+    case KycStatus.PENDING_GIFSY:
+    case KycStatus.RE_UPLOAD_REQUIRED:
+    case KycStatus.RESUBMISSION_REQUIRED:
+    case KycStatus.DRAFT:
+      return 'IN_PROGRESS';
+    case KycStatus.SUSPENDED:
+    case KycStatus.NOT_INTERESTED:
+      return 'NOT_STARTED';
+    default:
+      return 'NOT_STARTED';
+  }
+}
+
 // The raw KycStatus values that each DERIVED display bucket maps to (mirrors the
 // switch in deriveKycStatus). RE_KYC_REQUIRED / NOT_STARTED are handled specially
 // (they also depend on reKycFlags / kycIntent / the absence of a submission), so
@@ -473,63 +533,6 @@ export class AdminOutletsService {
       }
     }
 
-    /**
-     * Derive the display KYC status for a single outlet.
-     * Priority:
-     *   1. reKycFlags non-null ⇒ RE_KYC_REQUIRED
-     *   2. kycIntent === NOT_INTERESTED ⇒ NOT_STARTED (outlet declined)
-     *   3. Latest submission status mapped to the UI enum
-     *   4. No submission ⇒ NOT_STARTED
-     */
-    function deriveKycStatus(
-      reKycFlags: unknown,
-      kycIntent: OutletKycIntent | null,
-      partnerId: string | null,
-    ): string {
-      // Only a NON-EMPTY reKycFlags object means re-KYC is pending; an empty {}
-      // (or null) must not falsely flag the outlet. Shared predicate so admin + sales
-      // agree on what "re-KYC pending" means.
-      if (isReKycPending(reKycFlags)) {
-        return 'RE_KYC_REQUIRED';
-      }
-      if (kycIntent === OutletKycIntent.NOT_INTERESTED) {
-        return 'NOT_STARTED';
-      }
-      if (!partnerId) {
-        return 'NOT_STARTED';
-      }
-      const latest = latestStatusByPartnerId.get(partnerId);
-      if (!latest) {
-        return 'NOT_STARTED';
-      }
-      switch (latest) {
-        case KycStatus.APPROVED:
-          return 'APPROVED';
-        case KycStatus.REJECTED:
-          return 'REJECTED';
-        case KycStatus.SUBMITTED:
-          return 'SUBMITTED';
-        case KycStatus.RE_KYC_REQUIRED:
-          return 'RE_KYC_REQUIRED';
-        case KycStatus.UNDER_REVIEW:
-        case KycStatus.PENDING_PENNY_DROP:
-        case KycStatus.PENDING_AGREEMENT:
-        case KycStatus.PENDING_SO_APPROVAL:
-        case KycStatus.PENDING_ASM_APPROVAL:
-        case KycStatus.PENDING_RSM_APPROVAL:
-        case KycStatus.PENDING_GIFSY:
-        case KycStatus.RE_UPLOAD_REQUIRED:
-        case KycStatus.RESUBMISSION_REQUIRED:
-        case KycStatus.DRAFT:
-          return 'IN_PROGRESS';
-        case KycStatus.SUSPENDED:
-        case KycStatus.NOT_INTERESTED:
-          return 'NOT_STARTED';
-        default:
-          return 'NOT_STARTED';
-      }
-    }
-
     const mapped = outlets.map((o) => {
       const xsr = o.salesAssignments[0]?.salesUser;
       return {
@@ -545,7 +548,7 @@ export class AdminOutletsService {
         metro: !!(o.metro && o.metro.trim()),
         xsrId: xsr?.employeeCode ?? '',
         xsrName: xsr?.user?.name ?? '',
-        kycStatus: deriveKycStatus(o.reKycFlags, o.kycIntent, o.partnerId),
+        kycStatus: deriveKycStatus(o.reKycFlags, o.kycIntent, o.partnerId, latestStatusByPartnerId),
         isActive: o.isActive,
         addedDate: o.createdAt.toISOString().slice(0, 10),
       };
@@ -566,6 +569,60 @@ export class AdminOutletsService {
       // Envelope mirrors channel-partners: { page, limit, total, pages }.
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
       outletTypes,
+    };
+  }
+
+  /**
+   * GET /v1/admin/outlets/ids — the FULL tenant outlet list, UNPAGINATED, projected
+   * to only the 3 fields the FE upload validators + header stats need
+   * (outletId, isActive, kycStatus). Replaces the FE's ~23-request page-through of
+   * GET /admin/outlets (capped at limit=100) that existed purely to build the
+   * client-side validation list.
+   *
+   * kycStatus is derived with the SAME deriveKycStatus used by list() (shared
+   * module-scope fn + isReKycPending helper), so the two never diverge.
+   * Envelope is applied globally by TransformInterceptor: { success, data:{ outlets } }.
+   */
+  async listIds(user: JwtPayload) {
+    const baseWhere: Prisma.OutletWhereInput = { deletedAt: null, clientId: user.clientId };
+
+    const outlets = await this.prisma.outlet.findMany({
+      where: baseWhere,
+      select: {
+        outletCode: true,
+        isActive: true,
+        // Fields needed for real KYC-status derivation (mirrors list()).
+        partnerId: true,
+        reKycFlags: true,
+        kycIntent: true,
+      },
+    });
+
+    // Batched latest-submission lookup (no N+1) — mirrors list().
+    const partnerIds = [
+      ...new Set(outlets.map((o) => o.partnerId).filter((id): id is string => id !== null)),
+    ];
+    const latestSubmissions =
+      partnerIds.length > 0
+        ? await this.prisma.kycSubmission.findMany({
+            where: { partnerId: { in: partnerIds } },
+            select: { partnerId: true, status: true },
+            orderBy: { createdAt: 'desc' },
+          })
+        : [];
+    const latestStatusByPartnerId = new Map<string, KycStatus>();
+    for (const sub of latestSubmissions) {
+      if (sub.partnerId && !latestStatusByPartnerId.has(sub.partnerId)) {
+        latestStatusByPartnerId.set(sub.partnerId, sub.status);
+      }
+    }
+
+    return {
+      outlets: outlets.map((o) => ({
+        outletId: o.outletCode,
+        isActive: o.isActive,
+        kycStatus: deriveKycStatus(o.reKycFlags, o.kycIntent, o.partnerId, latestStatusByPartnerId),
+      })),
     };
   }
 

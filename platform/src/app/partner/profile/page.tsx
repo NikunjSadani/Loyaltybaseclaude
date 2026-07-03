@@ -15,6 +15,7 @@ import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { KYCStatus } from '@/types';
 import { usePartnerSession, type OutletType } from '@/lib/partner-session';
 import { api } from '@/lib/api-client';
+import { logoutAction } from '@/lib/auth-actions';
 import PwaAppSettings from '@/components/pwa/PwaAppSettings';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -77,6 +78,9 @@ export default function ProfilePage() {
   const [loading,     setLoading]     = useState(true);
   const [error,       setError]       = useState<string | null>(null);
   const [logoutModal, setLogoutModal] = useState(false);
+  // "Log out from all devices" — two-step confirm inside the same modal.
+  const [confirmAllDevices, setConfirmAllDevices] = useState(false);
+  const [loggingOutAll,     setLoggingOutAll]     = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -143,6 +147,19 @@ export default function ProfilePage() {
   const handleLogout = () => {
     document.cookie = 'token=; Max-Age=0; path=/';
     router.push('/auth/login');
+  };
+
+  // Revoke every session server-side (all devices), then clear THIS device's cookies
+  // and bounce to login. Other devices are signed out within the session window / on
+  // their next refresh — not instantly (access tokens live until they expire).
+  const handleLogoutAllDevices = async () => {
+    setLoggingOutAll(true);
+    try {
+      await api.post('/api/auth/logout-all', {});
+    } finally {
+      await logoutAction();
+      router.push('/auth/login');
+    }
   };
 
   if (loading) {
@@ -363,18 +380,52 @@ export default function ProfilePage() {
       {/* ── Logout confirmation modal ── */}
       <Modal
         open={logoutModal}
-        onOpenChange={setLogoutModal}
+        onOpenChange={(open) => { setLogoutModal(open); if (!open) setConfirmAllDevices(false); }}
         title="Sign Out"
-        description="Are you sure you want to sign out of your account?"
+        description={
+          confirmAllDevices
+            ? 'This signs you out on all your devices. Other devices are signed out within the session window (on their next refresh), not instantly.'
+            : 'Are you sure you want to sign out of your account?'
+        }
       >
-        <div className="flex gap-3 mt-2">
-          <Button variant="outline" className="flex-1" onClick={() => setLogoutModal(false)}>
-            Cancel
-          </Button>
-          <Button variant="destructive" className="flex-1" onClick={handleLogout}>
-            Sign Out
-          </Button>
-        </div>
+        {confirmAllDevices ? (
+          <div className="flex gap-3 mt-2">
+            <Button
+              variant="outline"
+              className="flex-1"
+              disabled={loggingOutAll}
+              onClick={() => setConfirmAllDevices(false)}
+            >
+              Back
+            </Button>
+            <Button
+              variant="destructive"
+              className="flex-1"
+              disabled={loggingOutAll}
+              onClick={handleLogoutAllDevices}
+            >
+              {loggingOutAll ? 'Signing out…' : 'Log out everywhere'}
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-2 mt-2">
+            <div className="flex gap-3">
+              <Button variant="outline" className="flex-1" onClick={() => setLogoutModal(false)}>
+                Cancel
+              </Button>
+              <Button variant="destructive" className="flex-1" onClick={handleLogout}>
+                Sign Out
+              </Button>
+            </div>
+            <Button
+              variant="ghost"
+              className="w-full text-red-600 hover:bg-red-50"
+              onClick={() => setConfirmAllDevices(true)}
+            >
+              Log out from all devices
+            </Button>
+          </div>
+        )}
       </Modal>
     </div>
   );

@@ -50,6 +50,18 @@ export class AuthController {
   }
 
   /**
+   * POST /v1/auth/logout-all — self-service "log out from all devices" (Feature 10-i).
+   * Revokes every non-revoked session for the authenticated user. Authenticated route
+   * (any logged-in role); the service scopes strictly to the caller's own user id.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Post('logout-all')
+  @HttpCode(HttpStatus.OK)
+  logoutAll(@CurrentUser() user: JwtPayload) {
+    return this.authService.logoutAllSessions(user);
+  }
+
+  /**
    * POST /v1/auth/assume-tenant — A2 operator-context switcher (#51).
    * A GIFSY operator exchanges their session for one scoped to a tenant's context.
    * GIFSY_ADMIN-only (global RolesGuard); the service re-checks + audit-logs.

@@ -13,6 +13,14 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
+import {
+  OTP_EXPIRY_MINUTES,
+  OTP_MAX_ATTEMPTS,
+  OTP_RESEND_WINDOW_HOURS,
+  OTP_MAX_RESENDS_PER_WINDOW,
+  REFRESH_TTL_DAYS,
+  ASSUMED_SESSION_TTL_HOURS,
+} from './auth.constants';
 import * as crypto from 'crypto';
 
 // ─── Business rule constants — single source of truth ─────────────────────────
@@ -135,8 +143,8 @@ export class AuthService {
     // anti-SMS-bombing control — a simple cooldown still allows sustained volume; a
     // windowed COUNT caps the total a victim's number can receive. Skipped only when the
     // fixed-OTP dev/staging bypass is active so UAT can request freely.
-    const OTP_WINDOW_MS = 60 * 60 * 1000;   // 1 hour
-    const OTP_MAX_PER_WINDOW = 5;
+    const OTP_WINDOW_MS = OTP_RESEND_WINDOW_HOURS * 60 * 60 * 1000;   // 1 hour
+    const OTP_MAX_PER_WINDOW = OTP_MAX_RESENDS_PER_WINDOW;
     const windowStart = new Date(Date.now() - OTP_WINDOW_MS);
     const fixedOtpActive = isFixedOtpAllowed() && !!this.config.get<string>('FIXED_OTP');
 
@@ -157,7 +165,7 @@ export class AuthService {
     }
 
     const otp        = this.generateOtpCode();
-    const expiresAt  = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const expiresAt  = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000); // 10 minutes
 
     // Prune this phone's OTPs that have aged out of the window. We retain IN-WINDOW rows
     // (verified or not) so the cap above can count actual sends; a freshly-issued code
@@ -180,7 +188,7 @@ export class AuthService {
         code:       otp,
         purpose:    'LOGIN',
         expiresAt,
-        maxAttempts: 3,
+        maxAttempts: OTP_MAX_ATTEMPTS,
       },
     });
 
@@ -189,7 +197,7 @@ export class AuthService {
 
     // Mask the phone in logs (PII) — last 4 digits only. cleanPhone is the 10-digit number.
     this.logger.log(`OTP sent to ****${cleanPhone.slice(-4)} via ${channel}`);
-    return { success: true, expiresIn: 600 };
+    return { success: true, expiresIn: OTP_EXPIRY_MINUTES * 60 };
   }
 
   // ── Verify OTP + issue tokens ────────────────────────────────────────────────
@@ -322,8 +330,8 @@ export class AuthService {
 
     const refreshToken = crypto.randomBytes(40).toString('hex');
     const ttlMs        = opts?.assumed
-      ? 8 * 60 * 60 * 1000              // assumed sessions: 8h
-      : 30 * 24 * 60 * 60 * 1000;       // normal: 30 days
+      ? ASSUMED_SESSION_TTL_HOURS * 60 * 60 * 1000       // assumed sessions: 8h
+      : REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000;          // normal: 30 days
     const expiresAt    = new Date(Date.now() + ttlMs);
 
     await this.prisma.userSession.create({
@@ -454,6 +462,41 @@ export class AuthService {
       session.user,
       isAssumed ? { clientIdOverride: session.clientId, assumed: true, expiresIn: '8h' } : undefined,
     );
+  }
+
+  // ── Self-service "log out everywhere" (#101 / Feature 10-i) ──────────────────
+
+  /**
+   * POST /v1/auth/logout-all — revoke ALL of the CURRENT user's non-revoked sessions
+   * so every other signed-in device is logged out. Scoped strictly to `user.sub`
+   * (never another user's rows). The caller's own cookies are cleared separately by
+   * the FE logout action after this returns.
+   *
+   * HONESTY CAVEAT: access-token JWTs are verified at the proxy with NO per-request
+   * session-revocation check, so revoking sessions kills the REFRESH path (other
+   * devices can no longer renew, so they're bounded by the access-token TTL) but does
+   * NOT instantly invalidate an already-issued, still-valid access token. Other
+   * devices are therefore signed out within the session window / on their next
+   * refresh — not immediately. UI copy must reflect this.
+   */
+  async logoutAllSessions(user: JwtPayload): Promise<{ revoked: number }> {
+    const result = await this.prisma.userSession.updateMany({
+      where: { userId: user.sub, revokedAt: null },
+      data:  { revokedAt: new Date() },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'LOGOUT',
+        entityType: 'SESSION',
+        entityId: user.sub,
+        actorId: user.sub,
+        metadata: { event: 'logout_all_sessions', revoked: result.count },
+      },
+    });
+
+    this.logger.log(`User ${user.sub} logged out of all sessions (${result.count} revoked)`);
+    return { revoked: result.count };
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────────

@@ -51,6 +51,18 @@ export class AdminUsersController {
     return this.svc.updateUser(user, id, dto);
   }
 
+  /**
+   * POST /admin/users/:id/revoke-sessions — admin per-user "log this user out of all
+   * devices" (Feature 10-ii). Same roles + permission as updateUser; the service
+   * enforces the tenant scope. Signs the user out within the session window / on next
+   * refresh (not instantly — see the service caveat).
+   */
+  @Post(':id/revoke-sessions')
+  @RequirePermission('users:write')
+  revokeSessions(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.svc.revokeUserSessions(user, id);
+  }
+
   @Delete(':id')
   @Roles('GIFSY_ADMIN') // DELETE is Gifsy-Admin-only in the source route
   @RequirePermission('users:delete')

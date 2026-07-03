@@ -237,6 +237,67 @@ describe('AdminOutletsService', () => {
     });
   });
 
+  describe('listIds', () => {
+    it('returns the FULL tenant list UNPAGINATED, scoped by clientId + deletedAt null, projected to the 3 FE fields', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'OUT-1', isActive: true, partnerId: null, reKycFlags: null, kycIntent: null },
+        { outletCode: 'OUT-2', isActive: false, partnerId: null, reKycFlags: null, kycIntent: null },
+      ]);
+      const res = await service.listIds(admin);
+
+      // (a) only the caller's clientId rows + deletedAt null, no skip/take (unpaginated).
+      const args = mockPrisma.outlet.findMany.mock.calls[0][0];
+      expect(args.where).toEqual({ deletedAt: null, clientId: TENANT_A });
+      expect(args.skip).toBeUndefined();
+      expect(args.take).toBeUndefined();
+      // (b) projection is ONLY the fields the derivation + FE need.
+      expect(args.select).toEqual({
+        outletCode: true,
+        isActive: true,
+        partnerId: true,
+        reKycFlags: true,
+        kycIntent: true,
+      });
+      // Response maps outletCode→outletId and carries only the 3 consumed fields.
+      expect(res.outlets).toEqual([
+        { outletId: 'OUT-1', isActive: true, kycStatus: 'NOT_STARTED' },
+        { outletId: 'OUT-2', isActive: false, kycStatus: 'NOT_STARTED' },
+      ]);
+    });
+
+    it('derives RE_KYC_REQUIRED for a bulk-reKyc\'d outlet (reKycFlags set even though the submission is APPROVED)', async () => {
+      // The admin re-KYC upload writes a non-empty reKycFlags WITHOUT flipping the
+      // latest submission (still APPROVED). deriveKycStatus priority 1 must win.
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'OUT-RE', isActive: true, partnerId: 'cp1', reKycFlags: { ownerPhoto: true }, kycIntent: null },
+      ]);
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([{ partnerId: 'cp1', status: 'APPROVED' }]);
+
+      const res = await service.listIds(admin);
+      expect(res.outlets[0]).toEqual({ outletId: 'OUT-RE', isActive: true, kycStatus: 'RE_KYC_REQUIRED' });
+      // Latest-submission lookup is scoped to the owned partnerIds only.
+      expect(mockPrisma.kycSubmission.findMany.mock.calls[0][0].where).toEqual({ partnerId: { in: ['cp1'] } });
+    });
+
+    it('derives APPROVED from the latest submission when no reKycFlags are set', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'OUT-OK', isActive: true, partnerId: 'cp2', reKycFlags: null, kycIntent: null },
+      ]);
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([{ partnerId: 'cp2', status: 'APPROVED' }]);
+
+      const res = await service.listIds(admin);
+      expect(res.outlets[0].kycStatus).toBe('APPROVED');
+    });
+
+    it('skips the submission lookup entirely when no outlet has a partner', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'OUT-1', isActive: true, partnerId: null, reKycFlags: null, kycIntent: null },
+      ]);
+      await service.listIds(admin);
+      expect(mockPrisma.kycSubmission.findMany).not.toHaveBeenCalled();
+    });
+  });
+
   describe('upsert', () => {
     it('marks a row ERROR when the outlet type is not enabled for the tenant', async () => {
       mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]); // no enabled types

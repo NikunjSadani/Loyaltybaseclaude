@@ -425,6 +425,44 @@ describe('AdminCoreService', () => {
     });
   });
 
+  // ── revokeUserSessions — admin per-user "log out of all devices" (#101 / 10-ii) ──
+  describe('revokeUserSessions', () => {
+    it('throws NotFound for a CROSS-TENANT target (never revokes another tenant\'s user)', async () => {
+      // The tenant-scoped findFirst returns null → the target isn't in the caller's tenant.
+      mockPrisma.user.findFirst.mockResolvedValue(null);
+      await expect(service.revokeUserSessions(clientAdmin, 'other-tenant-user')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      // The lookup MUST be scoped to the caller's clientId
+      expect(mockPrisma.user.findFirst.mock.calls[0][0].where).toEqual({
+        id: 'other-tenant-user',
+        clientId: 'deoleo',
+      });
+      // No revoke on the failure path
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('revokes all sessions for a SAME-TENANT target and audits the admin_revoke_sessions event', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'u9' }); // target in-tenant
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 4 });
+
+      const res = await service.revokeUserSessions(clientAdmin, 'u9');
+
+      // Revoke goes through the shared helper: user-scoped + non-revoked only
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'u9', revokedAt: null },
+        data:  { revokedAt: expect.any(Date) },
+      });
+      expect(res).toEqual({ revoked: 4 });
+
+      const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
+      expect(audit.action).toBe('LOGOUT');
+      expect(audit.entityId).toBe('u9');
+      expect(audit.actorId).toBe('ca1');
+      expect(audit.metadata).toMatchObject({ event: 'admin_revoke_sessions', targetUserId: 'u9', by: 'ca1' });
+    });
+  });
+
   describe('bulkEditUsers (resign)', () => {
     it('rejects an empty employeeCodes list', async () => {
       await expect(
@@ -487,6 +525,31 @@ describe('AdminCoreService', () => {
       expect(mockPrisma.programSetting.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
       expect(res.settings.conversionRate).toBe(5);
       expect(res.settings.programName).toBe('Loyalty Program'); // default preserved
+    });
+
+    it('surfaces the read-only Security & Platform Config from the enforced auth constants (#101)', async () => {
+      mockPrisma.programSetting.findMany.mockResolvedValue([]);
+      const res = await service.getSettings(clientAdmin);
+      // Values come from auth.constants (single source of truth) + env JWT TTL.
+      expect(res.settings).toMatchObject({
+        refreshTtlDays: 30,
+        assumedSessionTtlHours: 8,
+        otpExpiryMinutes: 10,
+        maxOtpAttempts: 3,
+        otpResendWindowHours: 1,
+        otpMaxResendsPerWindow: 5,
+      });
+      // jwtAccessTtl falls back to '7d' when JWT_EXPIRES_IN is unset.
+      expect(typeof res.settings.jwtAccessTtl).toBe('string');
+    });
+
+    it('a stray programSetting row can NOT override the enforced otpExpiryMinutes display value', async () => {
+      // A rogue/stale row must not make the DISPLAYED security value drift from what's enforced.
+      mockPrisma.programSetting.findMany.mockResolvedValue([
+        { settingKey: 'otpExpiryMinutes', settingValue: 999 },
+      ]);
+      const res = await service.getSettings(clientAdmin);
+      expect(res.settings.otpExpiryMinutes).toBe(10); // constant wins (set after the DB loop)
     });
   });
 

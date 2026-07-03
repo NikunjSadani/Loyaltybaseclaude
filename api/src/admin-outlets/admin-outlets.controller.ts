@@ -23,6 +23,18 @@ import {
 export class AdminOutletsController {
   constructor(private readonly outlets: AdminOutletsService) {}
 
+  /**
+   * GET /ids — the FULL tenant outlet list, UNPAGINATED, projected to only
+   * { outletId, isActive, kycStatus } for the FE upload validators + header stats.
+   * Registered BEFORE @Get() so the static 'ids' segment can never be shadowed.
+   * (source: partners:manage_outlets — same read gate as the list.)
+   */
+  @Get('ids')
+  @RequirePermission('partners:manage_outlets')
+  listIds(@CurrentUser() user: JwtPayload) {
+    return this.outlets.listIds(user);
+  }
+
   /** GET / — server-paginated + filtered tenant outlet list (source: partners:manage_outlets). */
   @Get()
   @RequirePermission('partners:manage_outlets')

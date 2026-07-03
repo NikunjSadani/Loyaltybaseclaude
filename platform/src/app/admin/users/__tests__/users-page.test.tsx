@@ -176,6 +176,35 @@ describe('Admin User Accounts page', () => {
     expect(within(otherRow).getByRole('button', { name: /reactivate/i })).toBeInTheDocument();
   });
 
+  it('AU6: "Revoke sessions" opens a confirm modal and POSTs /api/admin/users/:id/revoke-sessions', async () => {
+    // Operator is not any listed user → both rows show the Revoke sessions action.
+    mockSession.userId = 'self-op';
+    const { calls } = installFetch((url, init) => {
+      if (url.includes('/revoke-sessions') && init?.method === 'POST') {
+        return jsonRes(true, 200, { success: true, data: { revoked: 2 } });
+      }
+      return undefined;
+    });
+    render(<AdminUsersPage />);
+    await screen.findByText('Priya Sharma');
+
+    // Open the confirm modal from Ravi Kumar's (u2) row.
+    const row = screen.getByText('Ravi Kumar').closest('tr')!;
+    await userEvent.click(within(row).getByRole('button', { name: /revoke sessions/i }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/log this user out of all devices/i)).toBeInTheDocument();
+
+    await userEvent.click(within(dialog).getByRole('button', { name: /^revoke sessions$/i }));
+
+    await waitFor(() => {
+      const post = calls.find((c) => c.url === '/api/admin/users/u2/revoke-sessions' && c.init?.method === 'POST');
+      expect(post).toBeTruthy();
+    });
+    // Modal closes after success.
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
   it('AU4: a backend 400/403 surfaces the error message inline (not swallowed)', async () => {
     installFetch((url, init) => {
       if (url.startsWith('/api/admin/users') && init?.method === 'POST') {

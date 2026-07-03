@@ -1,7 +1,7 @@
 ﻿'use client'
 
 import { useState, useEffect } from 'react'
-import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins } from 'lucide-react'
+import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins, Lock } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
@@ -39,6 +39,21 @@ interface TierConfig {
   upgradeThreshold: number
 }
 
+/**
+ * Read-only platform-global security config (#101). These come from GET
+ * /api/admin/settings, sourced backend-side from the enforced auth constants + env —
+ * they are DISPLAY-ONLY here (managed via deployment/env, never edited in this panel).
+ */
+interface SecurityConfig {
+  jwtAccessTtl?: string
+  refreshTtlDays?: number
+  assumedSessionTtlHours?: number
+  otpExpiryMinutes?: number
+  maxOtpAttempts?: number
+  otpResendWindowHours?: number
+  otpMaxResendsPerWindow?: number
+}
+
 function SettingRow({ label, description, value, onChange, type = 'number', min, max, step, disabled = false, testId }: {
   label: string, description: string, value: number | string, onChange: (v: string) => void,
   type?: string, min?: number, max?: number, step?: number, disabled?: boolean, testId?: string
@@ -60,6 +75,20 @@ export default function SettingsPage() {
   // ── Role gate — visibility capture mode toggle is GIFSY_ADMIN-only ──
   const adminSession = useAdminSession()
   const isGifsyAdmin = adminSession.role === 'GIFSY_ADMIN'
+
+  // ── Read-only Security & Platform Config (#101; GIFSY_ADMIN only) ──
+  // Sourced from GET /api/admin/settings (backend reads the enforced auth constants +
+  // env). Display-only — no editing here. Only fetched for a Gifsy Admin.
+  const [securityConfig, setSecurityConfig] = useState<SecurityConfig | null>(null)
+  useEffect(() => {
+    if (!isGifsyAdmin) return
+    fetch('/api/admin/settings')
+      .then((r) => r.json())
+      .then((json: { success?: boolean; data?: { settings?: SecurityConfig } }) => {
+        if (json?.success && json.data?.settings) setSecurityConfig(json.data.settings)
+      })
+      .catch(() => { /* non-fatal — the card simply won't render */ })
+  }, [isGifsyAdmin])
 
   const [settings, setSettings] = useState<Settings>({
     holdingPeriodDays: 30, otpValidityHours: 6, kycSlaHours: 48,
@@ -422,6 +451,47 @@ export default function SettingsPage() {
           <SettingRow label="OTP Validity (hours)" description="How long an OTP remains valid after being sent." value={settings.otpValidityHours} onChange={set('otpValidityHours')} min={1} max={24} />
         </CardContent>
       </Card>
+
+      {/* ── Security & Platform Config (read-only; GIFSY_ADMIN only) ── */}
+      {isGifsyAdmin && securityConfig && (
+        <Card data-testid="security-config-card">
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Lock className="h-4 w-4 text-[var(--brand-primary)]" /> Security &amp; Platform Config
+            </CardTitle>
+            <CardDescription className="mt-1">
+              Platform-global security parameters enforced by the backend. These are
+              managed via deployment/env and are <strong>not editable here</strong>.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="divide-y divide-gray-100">
+              {[
+                { label: 'Access token lifetime',        value: securityConfig.jwtAccessTtl,                            testId: 'sec-jwt-ttl' },
+                { label: 'Refresh token lifetime (days)', value: securityConfig.refreshTtlDays,                          testId: 'sec-refresh-ttl' },
+                { label: 'Assumed session lifetime (hours)', value: securityConfig.assumedSessionTtlHours,               testId: 'sec-assumed-ttl' },
+                { label: 'OTP validity (minutes)',       value: securityConfig.otpExpiryMinutes,                        testId: 'sec-otp-expiry' },
+                { label: 'Max OTP attempts',             value: securityConfig.maxOtpAttempts,                          testId: 'sec-otp-attempts' },
+                { label: 'OTP resend window (hours)',    value: securityConfig.otpResendWindowHours,                    testId: 'sec-otp-window' },
+                { label: 'Max OTP resends per window',   value: securityConfig.otpMaxResendsPerWindow,                  testId: 'sec-otp-max-resends' },
+              ].map((row) => (
+                <div key={row.label} className="flex items-center justify-between gap-4 py-3">
+                  <span className="text-sm text-gray-600">{row.label}</span>
+                  <span
+                    data-testid={row.testId}
+                    className="text-sm font-mono font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded px-2 py-1"
+                  >
+                    {row.value ?? '—'}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-gray-400 mt-3">
+              Platform-global — managed via deployment/env, not editable here.
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       {/* KYC SLA */}
       <Card>

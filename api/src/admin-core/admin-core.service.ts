@@ -24,6 +24,14 @@ import {
   HierarchyEmployee,
   persistHierarchy,
 } from './hierarchy-persistence';
+import {
+  OTP_EXPIRY_MINUTES,
+  OTP_MAX_ATTEMPTS,
+  OTP_RESEND_WINDOW_HOURS,
+  OTP_MAX_RESENDS_PER_WINDOW,
+  REFRESH_TTL_DAYS,
+  ASSUMED_SESSION_TTL_HOURS,
+} from '../auth/auth.constants';
 
 /**
  * AdminCoreService — business logic for the ported admin sub-domains
@@ -116,6 +124,48 @@ export class AdminCoreService {
       data: { revokedAt: new Date() },
     });
     return result.count;
+  }
+
+  /**
+   * POST /v1/admin/users/:id/revoke-sessions — admin per-user "log out of all
+   * devices" (#101 / Feature 10-ii). Verifies the target user exists AND belongs
+   * to the caller's tenant (mirrors updateUser's tenant scoping — the caller's
+   * clientId is the assumed tenant for a GIFSY operator context), then revokes all
+   * of that user's non-revoked sessions. Throws NotFound for an unknown/cross-tenant
+   * target so an admin can never revoke a user in another tenant.
+   *
+   * HONESTY CAVEAT: access-token JWTs are verified at the proxy with NO per-request
+   * session-revocation check, so revoking sessions kills the REFRESH path (the user's
+   * other devices can no longer renew, so they're bounded by the access-token TTL) but
+   * does NOT instantly invalidate an already-issued, still-valid access token. The
+   * target is therefore signed out within the session window / on their next refresh —
+   * not immediately. UI copy must reflect this.
+   */
+  async revokeUserSessions(
+    caller: JwtPayload,
+    targetUserId: string,
+  ): Promise<{ revoked: number }> {
+    const clientId = caller.clientId;
+
+    const target = await this.prisma.user.findFirst({
+      where: { id: targetUserId, clientId },
+      select: { id: true },
+    });
+    if (!target) throw new NotFoundException('User not found');
+
+    const revoked = await this.revokeAllSessionsForUser(targetUserId);
+
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'LOGOUT',
+        entityType: 'SESSION',
+        entityId: targetUserId,
+        actorId: caller.sub,
+        metadata: { event: 'admin_revoke_sessions', targetUserId, by: caller.sub, revoked },
+      },
+    });
+
+    return { revoked };
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -489,8 +539,10 @@ export class AdminCoreService {
     holdingPeriodDays: 30,
     conversionRate: 1,
     slaTargetHours: 48,
-    maxOtpAttempts: 3,
-    otpExpiryMinutes: 10,
+    // OTP knobs are sourced from the enforced auth constants (single source of truth)
+    // so this default can never drift from what auth.service.ts actually enforces.
+    maxOtpAttempts: OTP_MAX_ATTEMPTS,
+    otpExpiryMinutes: OTP_EXPIRY_MINUTES,
     minRedemptionPoints: 100,
     maxDailyVisibilitySubmissions: 10,
     tdsRate: 0.1,
@@ -513,6 +565,23 @@ export class AdminCoreService {
     for (const row of rows) {
       settings[row.settingKey] = row.settingValue;
     }
+
+    // ── Read-only "Security & Platform Config" (#101 / Feature 9) ──────────────
+    // Platform-global security parameters, surfaced for DISPLAY ONLY. These are the
+    // EXACT values auth.service.ts enforces (imported from the shared auth.constants
+    // single source of truth) plus the env-driven JWT access-token TTL. They are set
+    // AFTER the DB-override loop so a stray programSetting row can never make the
+    // displayed value diverge from the enforced one — these fields are not editable
+    // via the settings API (managed via deployment/env).
+    Object.assign(settings, {
+      jwtAccessTtl: process.env.JWT_EXPIRES_IN ?? '7d',
+      refreshTtlDays: REFRESH_TTL_DAYS,
+      assumedSessionTtlHours: ASSUMED_SESSION_TTL_HOURS,
+      otpExpiryMinutes: OTP_EXPIRY_MINUTES,
+      maxOtpAttempts: OTP_MAX_ATTEMPTS,
+      otpResendWindowHours: OTP_RESEND_WINDOW_HOURS,
+      otpMaxResendsPerWindow: OTP_MAX_RESENDS_PER_WINDOW,
+    });
 
     return { settings };
   }

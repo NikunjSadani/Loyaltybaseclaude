@@ -238,6 +238,10 @@ export default function AdminUsersPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [toast,   setToast]   = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
+  // "Revoke sessions" — the user whose sessions are being revoked (confirm modal),
+  // plus an in-flight flag so the confirm button can't double-fire.
+  const [revokeTarget, setRevokeTarget] = useState<AdminUser | null>(null);
+  const [revoking, setRevoking] = useState(false);
 
   // Tenant context shown near the Create button. A GIFSY operator who has assumed a
   // brand sees that brand's name (the same source the operator banner uses); otherwise
@@ -297,6 +301,31 @@ export default function AdminUsersPage() {
   function showToast(msg: string) {
     setToast(msg);
     setTimeout(() => setToast(null), 3000);
+  }
+
+  // Revoke every session for the target user. The backend kills the REFRESH path, so
+  // the user is signed out within the session window / on their next refresh — not
+  // instantly (a live access token stays valid until its TTL). Copy reflects that.
+  async function confirmRevokeSessions() {
+    if (!revokeTarget) return;
+    setRevoking(true);
+    try {
+      const res = await fetch(`/api/admin/users/${revokeTarget.id}/revoke-sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const body = await res.json().catch(() => ({ success: false }));
+      if (res.ok && body.success) {
+        showToast('Sessions revoked — the user is signed out within the session window.');
+      } else {
+        showToast(body?.error ?? 'Could not revoke sessions.');
+      }
+    } catch {
+      showToast('Network error revoking sessions.');
+    } finally {
+      setRevoking(false);
+      setRevokeTarget(null);
+    }
   }
 
   async function toggleStatus(u: AdminUser) {
@@ -427,15 +456,23 @@ export default function AdminUsersPage() {
                     {session.userId && u.id === session.userId ? (
                       <span className="text-xs text-gray-300">—</span>
                     ) : canCreate ? (
-                      <button
-                        onClick={() => toggleStatus(u)}
-                        disabled={updatingId === u.id}
-                        className="text-xs font-medium text-gray-500 hover:text-[var(--brand-primary)] transition-colors disabled:opacity-50"
-                      >
-                        {updatingId === u.id
-                          ? '…'
-                          : u.status === 'ACTIVE' ? 'Deactivate' : 'Reactivate'}
-                      </button>
+                      <div className="flex items-center justify-end gap-3">
+                        <button
+                          onClick={() => setRevokeTarget(u)}
+                          className="text-xs font-medium text-gray-500 hover:text-[var(--brand-primary)] transition-colors"
+                        >
+                          Revoke sessions
+                        </button>
+                        <button
+                          onClick={() => toggleStatus(u)}
+                          disabled={updatingId === u.id}
+                          className="text-xs font-medium text-gray-500 hover:text-[var(--brand-primary)] transition-colors disabled:opacity-50"
+                        >
+                          {updatingId === u.id
+                            ? '…'
+                            : u.status === 'ACTIVE' ? 'Deactivate' : 'Reactivate'}
+                        </button>
+                      </div>
                     ) : null}
                   </td>
                 </tr>
@@ -479,6 +516,53 @@ export default function AdminUsersPage() {
           onClose={() => setShowCreate(false)}
           onCreated={() => { showToast('User created.'); loadUsers(); }}
         />
+      )}
+
+      {/* Revoke-sessions confirm modal */}
+      {revokeTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => { if (!revoking) setRevokeTarget(null); }}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-base font-semibold text-gray-900">Log this user out of all devices?</h2>
+              <button
+                onClick={() => { if (!revoking) setRevokeTarget(null); }}
+                className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+                aria-label="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              <p className="text-sm text-gray-600">
+                This revokes all active sessions for{' '}
+                <strong className="text-gray-900">{revokeTarget.name}</strong>. They are signed out
+                within the session window (on their next refresh) — not instantly, as a currently
+                valid access token stays usable until it expires.
+              </p>
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setRevokeTarget(null)}
+                  disabled={revoking}
+                  className="px-4 py-2 text-sm font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmRevokeSessions}
+                  disabled={revoking}
+                  className="px-4 py-2 text-sm font-semibold bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
+                >
+                  {revoking ? 'Revoking…' : 'Revoke sessions'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Success toast */}

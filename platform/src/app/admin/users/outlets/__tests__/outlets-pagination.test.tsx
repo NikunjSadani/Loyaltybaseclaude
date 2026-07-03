@@ -5,7 +5,8 @@
  * which does not scale. It now sends ?page&limit&search&kycStatus and renders the
  * server-returned page + a pagination control. This test asserts the FE wires those
  * query params (mirrors the admin USERS list pagination pattern) and that the
- * separate full-list fetch (validation/stats) still runs.
+ * separate full-list validation loader runs as ONE lightweight GET /api/admin/outlets/ids
+ * call (the old ~23-request page-through of the paginated endpoint is gone).
  *
  * Run: npx vitest run src/app/admin/users/outlets/__tests__/outlets-pagination.test.tsx
  */
@@ -32,16 +33,29 @@ function outletRow(id: string) {
   };
 }
 
-// Capture every /api/admin/outlets list URL the page requests.
+// Capture every paginated /api/admin/outlets?... list URL, and every hit to the
+// lightweight full-list /api/admin/outlets/ids validation loader.
 const listUrls: string[] = [];
+const idsUrls: string[] = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
   listUrls.length = 0;
+  idsUrls.length = 0;
   localStorage.clear();
   localStorage.setItem('token', 't');
 
   fetchMock.mockImplementation((url: string) => {
+    // Lightweight full-list loader — ONE call, projected to { outletId, isActive, kycStatus }.
+    if (typeof url === 'string' && url.includes('/api/admin/outlets/ids')) {
+      idsUrls.push(url);
+      return Promise.resolve({
+        json: () => Promise.resolve({
+          success: true,
+          data: { outlets: [{ outletId: 'OUT-1', isActive: true, kycStatus: 'APPROVED' }] },
+        }),
+      });
+    }
     if (typeof url === 'string' && url.includes('/api/admin/outlets?')) {
       listUrls.push(url);
       const u = new URL(url, 'http://localhost');
@@ -72,10 +86,12 @@ describe('Outlets list — server pagination + filtering', () => {
     await waitFor(() => expect(listUrls.some((u) => u.includes('page=1') && u.includes('limit=50'))).toBe(true));
   });
 
-  it('runs the separate full-list loader (pages through until the last page)', async () => {
+  it('loads the full validation list via ONE /api/admin/outlets/ids call (no page-through)', async () => {
     render(<OutletsPage />);
-    // The full-list loader must request page 2 as well (page 1's pagination said pages=2).
-    await waitFor(() => expect(listUrls.some((u) => u.includes('page=2'))).toBe(true));
+    // The lightweight loader fires exactly once against /ids …
+    await waitFor(() => expect(idsUrls.length).toBe(1));
+    // … and the old page-through of the paginated endpoint is gone (no page=2 fetch).
+    expect(listUrls.some((u) => u.includes('page=2'))).toBe(false);
   });
 
   it('renders the current server page and a Next control when more pages exist', async () => {
