@@ -58,6 +58,8 @@ const mockTenantSettings = {
 };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
+// A GIFSY_ADMIN operating from the platform (gifsy) context — NOT assumed into a tenant.
+const gifsyHome: JwtPayload = { sub: 'admin0', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: '' };
 const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const misUser: JwtPayload  = { sub: 'mis1',  role: 'MIS_USER',     clientId: 'deoleo', phone: '', name: '' };
 
@@ -162,6 +164,32 @@ describe('AdminCoreService', () => {
         service.createUser(clientAdmin, { phone: '9000000005', name: 'Field', role: 'SALES_SO' as never }),
       ).resolves.toBeDefined();
     });
+
+    // ── GIFSY-operator-in-tenant footgun: a GIFSY_ADMIN may only be MINTED from the
+    //    platform (gifsy) context, never from an assumed tenant context ────────────
+    it('platform GIFSY_ADMIN (clientId gifsy) CAN create a GIFSY_ADMIN', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null);
+      mockPrisma.user.create.mockResolvedValue({ id: 'u4' });
+      await expect(
+        service.createUser(gifsyHome, { phone: '9000000006', name: 'PlatformAdmin', role: 'GIFSY_ADMIN' as never }),
+      ).resolves.toBeDefined();
+    });
+
+    it('GIFSY_ADMIN assumed into a tenant CANNOT create a GIFSY_ADMIN (mis-scoped-operator footgun)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null); // no duplicate
+      await expect(
+        service.createUser(gifsy, { phone: '9000000007', name: 'MisScoped', role: 'GIFSY_ADMIN' as never }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.user.create).not.toHaveBeenCalled();
+    });
+
+    it('GIFSY_ADMIN assumed into a tenant CAN still create a CLIENT_ADMIN (legit tenant-admin minting)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null);
+      mockPrisma.user.create.mockResolvedValue({ id: 'u5' });
+      await expect(
+        service.createUser(gifsy, { phone: '9000000008', name: 'TenantAdmin', role: 'CLIENT_ADMIN' as never }),
+      ).resolves.toBeDefined();
+    });
   });
 
   describe('getUser', () => {
@@ -237,15 +265,25 @@ describe('AdminCoreService', () => {
       expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
     });
 
-    it('GLB-4: GIFSY_ADMIN CAN set role to GIFSY_ADMIN via updateUser', async () => {
+    it('GLB-4: a PLATFORM-context GIFSY_ADMIN CAN set role to GIFSY_ADMIN via updateUser', async () => {
       mockPrisma.user.findFirst
         .mockResolvedValueOnce({ id: 'u1', phone: '1111111111' })  // target
         .mockResolvedValueOnce({ id: 'u1', role: 'GIFSY_ADMIN' }); // re-fetch
       mockPrisma.user.updateMany.mockResolvedValue({ count: 1 });
       await expect(
-        service.updateUser(gifsy, 'u1', { role: 'GIFSY_ADMIN' as never }),
+        service.updateUser(gifsyHome, 'u1', { role: 'GIFSY_ADMIN' as never }),
       ).resolves.toBeDefined();
       expect(mockPrisma.user.updateMany).toHaveBeenCalled();
+    });
+
+    it('footgun: a TENANT-assumed GIFSY_ADMIN CANNOT promote a user to GIFSY_ADMIN via updateUser', async () => {
+      // gifsy fixture has clientId:'deoleo' (assumed into a tenant) → the mis-scoped-operator
+      // guard blocks GIFSY_ADMIN role assignment on the update path too, before any write.
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'u1', phone: '1111111111' });
+      await expect(
+        service.updateUser(gifsy, 'u1', { role: 'GIFSY_ADMIN' as never }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.user.updateMany).not.toHaveBeenCalled();
     });
 
     it('GLB-4: GIFSY_ADMIN CAN set role to CLIENT_ADMIN via updateUser', async () => {

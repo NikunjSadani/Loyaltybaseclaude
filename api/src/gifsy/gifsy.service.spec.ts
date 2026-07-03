@@ -5,13 +5,13 @@
 // Run: npx jest src/gifsy/gifsy.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException, ConflictException } from '@nestjs/common';
 import { GifsyService } from './gifsy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
-  client: { findMany: jest.fn(), findUnique: jest.fn() },
+  client: { findMany: jest.fn(), findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn(), create: jest.fn() },
   outletType: { findMany: jest.fn(), findFirst: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn(), upsert: jest.fn() },
 };
@@ -58,6 +58,148 @@ describe('GifsyService', () => {
         walletModule: true,
         salesTeamApp: true,
         referralModule: false,
+      });
+    });
+  });
+
+  describe('createClient', () => {
+    it('F2: rejects the reserved platform slug "gifsy" (would enable GIFSY_ADMIN minting)', async () => {
+      await expect(
+        service.createClient(gifsy, { slug: 'gifsy', internalName: 'Rogue' } as never),
+      ).rejects.toBeInstanceOf(ConflictException);
+      // Rejected before any DB write.
+      expect(mockPrisma.client.findUnique).not.toHaveBeenCalled();
+      expect(mockPrisma.client.create).not.toHaveBeenCalled();
+    });
+
+    it('F2: rejects reserved slugs case-insensitively (e.g. "API")', async () => {
+      await expect(
+        service.createClient(gifsy, { slug: 'API', internalName: 'X' } as never),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+  });
+
+  describe('updateClient', () => {
+    it('throws NotFound when the slug has no client row', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(null);
+      await expect(
+        service.updateClient(gifsy, 'nope', { primaryColor: '#fff' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('merges branding, preserving logoUrl + productBrands on a partial PATCH', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'deoleo',
+        internalName: 'Deoleo India',
+        status: 'ACTIVE',
+        onboardedAt: new Date('2025-01-01'),
+        branding: { displayName: 'Deoleo', primaryColor: '#000', logoUrl: 'https://cdn/logo.png', productBrands: ['Figaro'] },
+        features: {},
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'deoleo',
+        internalName: 'Deoleo India',
+        status: 'ACTIVE',
+        onboardedAt: new Date('2025-01-01'),
+        branding: data.branding,
+        features: {},
+      }));
+
+      const res = await service.updateClient(gifsy, 'deoleo', { primaryColor: '#16a34a' });
+
+      const written = mockPrisma.client.update.mock.calls[0][0].data.branding;
+      // Only primaryColor changed; logoUrl + productBrands + displayName survive.
+      expect(written).toEqual({
+        displayName: 'Deoleo',
+        primaryColor: '#16a34a',
+        logoUrl: 'https://cdn/logo.png',
+        productBrands: ['Figaro'],
+      });
+      // Projection mirrors createClient/listClients.
+      expect(res.slug).toBe('deoleo');
+      expect(res.primaryColor).toBe('#16a34a');
+      expect(res.logoUrl).toBe('https://cdn/logo.png');
+      expect(res.productBrands).toEqual(['Figaro']);
+    });
+
+    it('writes status top-level without touching the branding blob', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'deoleo',
+        internalName: 'Deoleo India',
+        status: 'ONBOARDING',
+        onboardedAt: new Date('2025-01-01'),
+        branding: { displayName: 'Deoleo' },
+        features: {},
+      });
+      mockPrisma.client.update.mockResolvedValue({
+        id: 'deoleo',
+        internalName: 'Deoleo India',
+        status: 'ACTIVE',
+        onboardedAt: new Date('2025-01-01'),
+        branding: { displayName: 'Deoleo' },
+        features: {},
+      });
+
+      const res = await service.updateClient(gifsy, 'deoleo', { status: 'ACTIVE' });
+
+      const data = mockPrisma.client.update.mock.calls[0][0].data;
+      expect(data.status).toBe('ACTIVE');
+      expect(data.branding).toBeUndefined(); // no branding field supplied → blob untouched
+      expect(res.status).toBe('ACTIVE');
+    });
+
+    it('merges features without dropping existing keys', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'deoleo',
+        internalName: 'Deoleo India',
+        status: 'ACTIVE',
+        onboardedAt: new Date('2025-01-01'),
+        branding: {},
+        features: { walletModule: true, kycApprovalFlow: true },
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'deoleo',
+        internalName: 'Deoleo India',
+        status: 'ACTIVE',
+        onboardedAt: new Date('2025-01-01'),
+        branding: {},
+        features: data.features,
+      }));
+
+      await service.updateClient(gifsy, 'deoleo', { features: { salesTeamApp: true } });
+
+      const written = mockPrisma.client.update.mock.calls[0][0].data.features;
+      // New key added; existing keys preserved.
+      expect(written).toEqual({ walletModule: true, kycApprovalFlow: true, salesTeamApp: true });
+    });
+
+    it('F1: deep-merges the nested features.partnerApp so a partial PATCH keeps sibling flags', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({
+        id: 'deoleo',
+        internalName: 'Deoleo India',
+        status: 'ACTIVE',
+        onboardedAt: new Date('2025-01-01'),
+        branding: {},
+        features: { walletModule: true, partnerApp: { showSchemes: true, showInvoices: true, showWallet: true } },
+      });
+      mockPrisma.client.update.mockImplementation(async ({ data }) => ({
+        id: 'deoleo',
+        internalName: 'Deoleo India',
+        status: 'ACTIVE',
+        onboardedAt: new Date('2025-01-01'),
+        branding: {},
+        features: data.features,
+      }));
+
+      await service.updateClient(gifsy, 'deoleo', {
+        features: { partnerApp: { showSchemes: false } } as never,
+      });
+
+      const written = mockPrisma.client.update.mock.calls[0][0].data.features;
+      // Only showSchemes flips; the sibling partnerApp flags + walletModule survive.
+      expect(written).toEqual({
+        walletModule: true,
+        partnerApp: { showSchemes: false, showInvoices: true, showWallet: true },
       });
     });
   });

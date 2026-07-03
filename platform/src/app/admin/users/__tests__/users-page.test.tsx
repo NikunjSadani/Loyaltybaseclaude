@@ -4,9 +4,10 @@
  *
  * AU1: the list renders from the real {success,data:{users}} envelope
  * AU2: the Create modal POSTs the right body (name/phone/role[/email]) and refreshes the list
- * AU3: role options are gated by the CALLER role
+ * AU3: role options are gated by the CALLER role AND context
  *        - a CLIENT_ADMIN caller sees ONLY MIS_USER
- *        - a GIFSY_ADMIN caller sees all three (GIFSY_ADMIN, CLIENT_ADMIN, MIS_USER)
+ *        - a GIFSY_ADMIN caller in PLATFORM (gifsy) context sees all three (GIFSY_ADMIN, CLIENT_ADMIN, MIS_USER)
+ *        - a GIFSY_ADMIN caller ASSUMED INTO A TENANT does NOT see GIFSY_ADMIN (footgun guard)
  * AU4: a 400 (phone exists) and a 403 (disallowed role) surface the backend error verbatim
  */
 
@@ -27,8 +28,11 @@ vi.mock('@/lib/admin-session', () => ({
 vi.mock('@/lib/platform/client-config-context', () => ({
   useClientConfig: () => ({ branding: { displayName: 'Deoleo India' } }),
 }));
+// getAssumedBrand is controllable per-test: null = platform (gifsy) context,
+// a brand string = the GIFSY operator has assumed that tenant.
+const mockGetAssumedBrand = vi.fn((): string | null => null);
 vi.mock('@/lib/auth-client', () => ({
-  getAssumedBrand: () => null,
+  getAssumedBrand: () => mockGetAssumedBrand(),
 }));
 
 import AdminUsersPage from '../page';
@@ -67,7 +71,11 @@ function installFetch(over?: (url: string, init?: RequestInit) => unknown) {
   return { fn, calls };
 }
 
-beforeEach(() => { mockSession.role = 'GIFSY_ADMIN'; mockSession.userId = 'self-op'; });
+beforeEach(() => {
+  mockSession.role = 'GIFSY_ADMIN';
+  mockSession.userId = 'self-op';
+  mockGetAssumedBrand.mockReturnValue(null); // default: platform (gifsy) context
+});
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('Admin User Accounts page', () => {
@@ -123,8 +131,9 @@ describe('Admin User Accounts page', () => {
     expect(options).toEqual(['MIS_USER']);
   });
 
-  it('AU3b: a GIFSY_ADMIN caller sees all three admin roles', async () => {
+  it('AU3b: a GIFSY_ADMIN caller in PLATFORM (gifsy) context sees all three admin roles', async () => {
     mockSession.role = 'GIFSY_ADMIN';
+    mockGetAssumedBrand.mockReturnValue(null); // platform context
     installFetch();
     render(<AdminUsersPage />);
     await screen.findByText('Priya Sharma');
@@ -133,6 +142,21 @@ describe('Admin User Accounts page', () => {
     const select = await within(await screen.findByRole('dialog')).findByLabelText('Role');
     const options = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value);
     expect(options).toEqual(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER']);
+  });
+
+  it('AU3c: a GIFSY_ADMIN caller ASSUMED INTO A TENANT does NOT see the GIFSY_ADMIN option', async () => {
+    mockSession.role = 'GIFSY_ADMIN';
+    mockGetAssumedBrand.mockReturnValue('Deoleo India'); // assumed into a tenant
+    installFetch();
+    render(<AdminUsersPage />);
+    await screen.findByText('Priya Sharma');
+
+    await userEvent.click(screen.getByRole('button', { name: /create user/i }));
+    const select = await within(await screen.findByRole('dialog')).findByLabelText('Role');
+    const options = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value);
+    // GIFSY_ADMIN is withheld in a tenant context — the footgun guard.
+    expect(options).toEqual(['CLIENT_ADMIN', 'MIS_USER']);
+    expect(options).not.toContain('GIFSY_ADMIN');
   });
 
   it('AU5: the Deactivate/Reactivate button is NOT rendered for the signed-in user own row', async () => {

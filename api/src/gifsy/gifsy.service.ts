@@ -7,7 +7,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { CreateClientDto, UpdateOutletTypeConfigDto } from './dto/gifsy.dto';
+import { CreateClientDto, UpdateClientDto, UpdateOutletTypeConfigDto } from './dto/gifsy.dto';
 
 /**
  * GIFSY platform-operator domain — ported from
@@ -58,6 +58,14 @@ const MODULE_FEATURE_KEYS = [
   'referralModule',
 ] as const;
 
+/**
+ * Slugs a new tenant may NOT claim. `gifsy` is the platform sentinel (a tenant with
+ * that slug would let its CLIENT_ADMIN mint GIFSY_ADMIN operators via the
+ * platform-context role gate, and collides with the proxy's `gifsy` host handling);
+ * the rest are infrastructure hostnames.
+ */
+const RESERVED_CLIENT_SLUGS = new Set(['gifsy', 'admin', 'api', 'platform', 'www', 'app']);
+
 @Injectable()
 export class GifsyService {
   constructor(private readonly prisma: PrismaService) {}
@@ -96,6 +104,15 @@ export class GifsyService {
    */
   async createClient(user: JwtPayload, dto: CreateClientDto) {
     this.assertGifsy(user);
+
+    // Reserved slugs: `gifsy` is the PLATFORM sentinel — a tenant with that slug would
+    // give its CLIENT_ADMIN a `clientId==='gifsy'`, satisfying the platform-context gate
+    // that lets a user mint GIFSY_ADMIN operators (privilege escalation); it also
+    // collides with the proxy's special-casing of the `gifsy` host. Block it + a few
+    // other infrastructure slugs.
+    if (RESERVED_CLIENT_SLUGS.has(dto.slug.toLowerCase())) {
+      throw new ConflictException(`Slug "${dto.slug}" is reserved and cannot be used.`);
+    }
 
     const existing = await this.prisma.client.findUnique({ where: { id: dto.slug } });
     if (existing) {
@@ -140,6 +157,92 @@ export class GifsyService {
       }
       throw e;
     }
+
+    const branding = (client.branding ?? {}) as Record<string, unknown>;
+    const features = (client.features ?? {}) as Record<string, unknown>;
+    return {
+      id: client.id,
+      slug: client.id,
+      internalName: client.internalName,
+      status: client.status,
+      onboardedAt: client.onboardedAt,
+      displayName: branding.displayName,
+      primaryColor: branding.primaryColor,
+      logoUrl: branding.logoUrl,
+      supportEmail: branding.supportEmail,
+      productBrands: branding.productBrands,
+      features: {
+        visibilityInvoiceModule: features.visibilityInvoiceModule,
+        kycApprovalFlow: features.kycApprovalFlow,
+        walletModule: features.walletModule,
+        salesTeamApp: features.salesTeamApp,
+        referralModule: features.referralModule,
+      },
+    };
+  }
+
+  /**
+   * PATCH /v1/gifsy/clients/:slug — edit an existing tenant. GIFSY_ADMIN only.
+   * A partial update: only fields present in the DTO are written. Branding and
+   * feature fields are MERGED into the existing JSON blobs (never overwritten
+   * wholesale — that would wipe logoUrl/faviconUrl/productBrands and unlisted
+   * flags). Returns the same projection as createClient/listClients. 404 if the
+   * slug has no client row.
+   */
+  async updateClient(user: JwtPayload, slug: string, dto: UpdateClientDto) {
+    this.assertGifsy(user);
+
+    const existing = await this.prisma.client.findFirst({ where: { id: slug } });
+    if (!existing) {
+      throw new NotFoundException('Client not found');
+    }
+
+    const data: Prisma.ClientUpdateInput = {};
+
+    // Top-level scalar columns — only written when explicitly provided.
+    if (dto.status !== undefined) data.status = dto.status;
+    if (dto.internalName !== undefined) data.internalName = dto.internalName;
+
+    // Branding: merge only the provided fields over the existing blob so
+    // logoUrl/faviconUrl/productBrands and any other keys survive the PATCH.
+    const brandingKeys = [
+      'displayName',
+      'primaryColor',
+      'supportEmail',
+      'supportPhone',
+      'invoicePrefix',
+    ] as const;
+    if (brandingKeys.some((k) => dto[k] !== undefined)) {
+      const branding = { ...((existing.branding ?? {}) as Record<string, unknown>) };
+      for (const k of brandingKeys) {
+        if (dto[k] !== undefined) branding[k] = dto[k];
+      }
+      data.branding = branding as Prisma.InputJsonValue;
+    }
+
+    // Features: merge the provided keys over the existing blob (never drop
+    // unlisted flags). `features.partnerApp` is a NESTED object (showSchemes/
+    // showInvoices/showWallet/showTeam/showLeaderboard), so a shallow spread of a
+    // partial `partnerApp` would wipe its sibling flags — deep-merge it explicitly.
+    if (dto.features !== undefined) {
+      const existingFeatures = (existing.features ?? {}) as Record<string, unknown>;
+      const incoming = dto.features as Record<string, unknown>;
+      const features: Record<string, unknown> = { ...existingFeatures, ...incoming };
+      const incomingPartnerApp = incoming.partnerApp;
+      if (
+        incomingPartnerApp &&
+        typeof incomingPartnerApp === 'object' &&
+        !Array.isArray(incomingPartnerApp)
+      ) {
+        features.partnerApp = {
+          ...((existingFeatures.partnerApp as Record<string, unknown>) ?? {}),
+          ...(incomingPartnerApp as Record<string, unknown>),
+        };
+      }
+      data.features = features as Prisma.InputJsonValue;
+    }
+
+    const client = await this.prisma.client.update({ where: { id: slug }, data });
 
     const branding = (client.branding ?? {}) as Record<string, unknown>;
     const features = (client.features ?? {}) as Record<string, unknown>;

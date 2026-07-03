@@ -55,6 +55,52 @@ export class CreateClientDto {
 }
 
 /**
+ * Body for PATCH /v1/gifsy/clients/:slug — edit an existing tenant.
+ *
+ * Every field is OPTIONAL (this is a PATCH): the service only writes fields
+ * explicitly present in the body. `slug` is intentionally absent — it is the
+ * Client PK and immutable. Branding/feature fields are MERGED into the existing
+ * JSON blobs, never wholesale-replaced.
+ */
+export class UpdateClientDto {
+  @IsOptional()
+  @IsIn(['ACTIVE', 'ONBOARDING', 'INACTIVE'])
+  status?: 'ACTIVE' | 'ONBOARDING' | 'INACTIVE';
+
+  @IsOptional()
+  @IsString()
+  internalName?: string;
+
+  // ── Branding fields (merged into the existing branding blob) ──────────────
+
+  @IsOptional()
+  @IsString()
+  displayName?: string;
+
+  @IsOptional()
+  @IsString()
+  primaryColor?: string;
+
+  @IsOptional()
+  @IsString()
+  supportEmail?: string;
+
+  @IsOptional()
+  @IsString()
+  supportPhone?: string;
+
+  @IsOptional()
+  @IsString()
+  invoicePrefix?: string;
+
+  // ── Feature flags (merged into the existing features blob) ────────────────
+
+  @IsOptional()
+  @IsObject()
+  features?: Record<string, boolean>;
+}
+
+/**
  * Body for PUT /v1/gifsy/clients/:slug/outlet-type-configs/:code.
  *
  * Every field is optional: the service only writes fields that are explicitly

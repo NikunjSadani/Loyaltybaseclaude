@@ -71,7 +71,15 @@ export class AdminCoreService {
    * GIFSY_ADMIN or CLIENT_ADMIN throws ForbiddenException.
    */
   private assertRoleAssignable(caller: JwtPayload, role: UserRole): void {
-    if (caller.role === 'GIFSY_ADMIN') return; // unrestricted
+    // A GIFSY_ADMIN may only be MINTED from the platform (gifsy) context. A GIFSY_ADMIN
+    // assumed into a tenant creates users stamped with that tenant's clientId, so minting a
+    // GIFSY_ADMIN there would produce a mis-scoped operator — block it.
+    if (role === 'GIFSY_ADMIN' && !(caller.role === 'GIFSY_ADMIN' && caller.clientId === 'gifsy')) {
+      throw new ForbiddenException(
+        'A GIFSY_ADMIN can only be created from the platform (gifsy) context',
+      );
+    }
+    if (caller.role === 'GIFSY_ADMIN') return; // otherwise unrestricted (CLIENT_ADMIN in a tenant, tenant/sales roles)
     if (!AdminCoreService.TENANT_ASSIGNABLE_ROLES.has(role)) {
       throw new ForbiddenException(
         `Role '${role}' can only be assigned by a GIFSY_ADMIN`,

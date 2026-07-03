@@ -29,7 +29,15 @@ export function BrandSwitcher() {
     setLoading(true);
     fetch('/api/gifsy/clients', { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
       .then((r) => r.json())
-      .then((j) => setBrands((j.data?.clients ?? []).filter((c: Brand) => c.status === 'ACTIVE')))
+      .then((j) => setBrands(
+        // Operator can assume ACTIVE and ONBOARDING tenants (backend now allows
+        // assuming ONBOARDING — this is what un-dead-ends a freshly onboarded tenant).
+        // INACTIVE stays hidden. ACTIVE first, then ONBOARDING, so live brands read primary.
+        (j.data?.clients ?? [])
+          .filter((c: Brand) => c.status === 'ACTIVE' || c.status === 'ONBOARDING')
+          .sort((a: Brand, b: Brand) =>
+            (a.status === 'ACTIVE' ? 0 : 1) - (b.status === 'ACTIVE' ? 0 : 1)),
+      ))
       .catch(() => setError('Could not load brands'))
       .finally(() => setLoading(false));
   }, [open, brands.length]);
@@ -75,7 +83,7 @@ export function BrandSwitcher() {
           )}
           {error && <div className="px-3 py-2 text-xs text-red-400">{error}</div>}
           {!loading && !error && brands.length === 0 && (
-            <div className="px-3 py-2 text-xs text-white/40">No active brands.</div>
+            <div className="px-3 py-2 text-xs text-white/40">No brands available.</div>
           )}
           {brands.map((b) => (
             <button
@@ -84,7 +92,14 @@ export function BrandSwitcher() {
               disabled={!!switching}
               className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-left text-white/80 hover:bg-white/10 disabled:opacity-50"
             >
-              <span className="truncate">{b.internalName}</span>
+              <span className="flex items-center gap-1.5 min-w-0">
+                <span className="truncate">{b.internalName}</span>
+                {b.status === 'ONBOARDING' && (
+                  <span className="shrink-0 text-[9px] uppercase tracking-wide text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded px-1 py-px">
+                    Onboarding
+                  </span>
+                )}
+              </span>
               {switching === b.slug
                 ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
                 : <span className="text-[10px] text-white/30 font-mono shrink-0">{b.slug}</span>}

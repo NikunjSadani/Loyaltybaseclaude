@@ -40,14 +40,24 @@ const ROLE_META: Record<string, { label: string; color: string }> = {
 };
 
 /**
- * Which roles the create form offers, by the CURRENT caller's role. This mirrors the
- * backend `assertRoleAssignable` allow-list (admin-core.service.ts): only a GIFSY_ADMIN
- * may mint a GIFSY_ADMIN or CLIENT_ADMIN. This is UX gating ONLY — the backend re-checks
- * and 403s a disallowed role regardless of what the form sends. Sales/partner roles are
- * intentionally excluded here; they have their own flows (/admin/sales + KYC).
+ * Which roles the create form offers, by the CURRENT caller's role AND context. This
+ * mirrors the backend `assertRoleAssignable` allow-list (admin-core.service.ts): only a
+ * GIFSY_ADMIN in the PLATFORM (gifsy) context may mint a GIFSY_ADMIN. A GIFSY_ADMIN who
+ * has assumed a tenant creates users stamped with that tenant's clientId, so minting a
+ * GIFSY_ADMIN there would produce a mis-scoped operator — the backend blocks it, and we
+ * hide the option to match. This is UX gating ONLY — the backend re-checks and 403s a
+ * disallowed role regardless of what the form sends. Sales/partner roles are intentionally
+ * excluded here; they have their own flows (/admin/sales + KYC).
+ *
+ * `clientId` is the caller's effective context: 'gifsy' at the platform level, or the
+ * tenant slug when a GIFSY operator has assumed a brand.
  */
-function assignableRoles(callerRole: AdminRole | string): string[] {
-  if (callerRole === 'GIFSY_ADMIN') return ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'];
+function assignableRoles(callerRole: AdminRole | string, clientId: string): string[] {
+  if (callerRole === 'GIFSY_ADMIN') {
+    return clientId === 'gifsy'
+      ? ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'] // platform context
+      : ['CLIENT_ADMIN', 'MIS_USER'];               // assumed into a tenant — no GIFSY_ADMIN
+  }
   if (callerRole === 'CLIENT_ADMIN') return ['MIS_USER'];
   return []; // MIS_USER and any other admin role cannot create users
 }
@@ -237,7 +247,20 @@ export default function AdminUsersPage() {
   useEffect(() => { setAssumedBrand(getAssumedBrand()); }, []);
   const tenantLabel = assumedBrand ?? clientConfig.branding.displayName;
 
-  const roles = useMemo(() => assignableRoles(session.role), [session.role]);
+  // The caller's EFFECTIVE clientId for role-gating. session.clientId is 'gifsy' for any
+  // GIFSY_ADMIN regardless of assumed brand, so it can't distinguish platform vs assumed-
+  // tenant context on its own. A GIFSY operator who has assumed a brand (assumedBrand set)
+  // is in a TENANT context — mirror the backend JWT clientId (the tenant slug) so the
+  // GIFSY_ADMIN option is hidden there. Non-GIFSY admins are always tenant-scoped.
+  const effectiveClientId =
+    session.role === 'GIFSY_ADMIN'
+      ? (assumedBrand ? 'tenant' : 'gifsy')
+      : session.clientId;
+
+  const roles = useMemo(
+    () => assignableRoles(session.role, effectiveClientId),
+    [session.role, effectiveClientId],
+  );
   const canCreate = roles.length > 0;
 
   const loadUsers = useCallback(() => {

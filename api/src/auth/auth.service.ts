@@ -365,12 +365,15 @@ export class AuthService {
       throw new BadRequestException('Already in this context');
     }
 
+    // ONBOARDING tenants are assumable so a GIFSY operator can configure the
+    // brand (branding/features/outlet-type configs) before flipping it ACTIVE.
+    // INACTIVE tenants stay blocked — they are intentionally disabled.
     const target = await this.prisma.client.findFirst({
-      where: { id: targetClientId, status: 'ACTIVE' },
+      where: { id: targetClientId, status: { in: ['ACTIVE', 'ONBOARDING'] } },
       select: { id: true, internalName: true },
     });
     if (!target) {
-      throw new NotFoundException('Tenant not found or not active');
+      throw new NotFoundException('Tenant not found or not assumable');
     }
 
     // The real operator user (their identity rides the assumed token).

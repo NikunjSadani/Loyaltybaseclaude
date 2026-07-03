@@ -462,6 +462,29 @@ describe('AuthService', () => {
       expect(payload).toMatchObject({ sub: 'op1', role: 'GIFSY_ADMIN', clientId: 'deoleo', assumed: true });
       // the session row is bound to the assumed tenant
       expect(mockPrisma.userSession.create.mock.calls[0][0].data.clientId).toBe('deoleo');
+      // the tenant lookup admits ACTIVE + ONBOARDING (configure-before-activate),
+      // but excludes INACTIVE.
+      expect(mockPrisma.client.findFirst.mock.calls[0][0].where).toEqual({
+        id: 'deoleo',
+        status: { in: ['ACTIVE', 'ONBOARDING'] },
+      });
+    });
+
+    it('lets an operator assume an ONBOARDING tenant (configure before activating)', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue({ id: 'clientb', internalName: 'Client B' });
+      const res = await service.assumeTenant(gifsyOp, 'clientb');
+      expect(res.clientId).toBe('clientb');
+      // The where admits ONBOARDING, so the (mocked) row is returned and assume succeeds.
+      expect(mockPrisma.client.findFirst.mock.calls[0][0].where.status).toEqual({
+        in: ['ACTIVE', 'ONBOARDING'],
+      });
+    });
+
+    it('cannot assume an INACTIVE tenant (excluded by the status filter → 404)', async () => {
+      // An INACTIVE tenant never matches `status IN (ACTIVE, ONBOARDING)`, so the
+      // findFirst resolves null exactly as it would for a disabled tenant.
+      mockPrisma.client.findFirst.mockResolvedValue(null);
+      await expect(service.assumeTenant(gifsyOp, 'old-inactive')).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('audit-logs the assume, attributed to the real operator', async () => {

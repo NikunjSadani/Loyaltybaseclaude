@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
-  CheckCircle, Clock, AlertCircle, Search, ChevronRight, Plus, Loader2,
+  CheckCircle, Clock, AlertCircle, Search, ChevronRight, Plus, Loader2, Power,
 } from 'lucide-react';
 import { getToken } from '@/lib/auth-client';
 
@@ -30,6 +30,30 @@ export default function GifsyClientsPage() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
+  const [activating, setActivating] = useState<string | null>(null);
+  const [rowError, setRowError] = useState<string | null>(null);
+
+  // Quick "Activate" from the list — flips an ONBOARDING tenant to ACTIVE without
+  // opening detail. Same real PATCH /api/gifsy/clients/:slug the detail page uses.
+  async function activate(slug: string) {
+    setActivating(slug);
+    setRowError(null);
+    try {
+      const res = await fetch(`/api/gifsy/clients/${slug}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken() ?? ''}` },
+        body: JSON.stringify({ status: 'ACTIVE' }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) throw new Error(j?.error || 'Activation failed');
+      const newStatus = (j.data?.status ?? 'ACTIVE') as ClientRow['status'];
+      setClients((prev) => prev.map((c) => (c.slug === slug ? { ...c, status: newStatus } : c)));
+    } catch (e) {
+      setRowError(e instanceof Error ? e.message : 'Activation failed');
+    } finally {
+      setActivating(null);
+    }
+  }
 
   useEffect(() => {
     fetch('/api/gifsy/clients', { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
@@ -107,6 +131,12 @@ export default function GifsyClientsPage() {
         </div>
       </div>
 
+      {rowError && (
+        <div data-testid="row-error" className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+          {rowError}
+        </div>
+      )}
+
       {/* Table */}
       <div className="border border-white/10 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
@@ -149,12 +179,27 @@ export default function GifsyClientsPage() {
                   {s.onboardedAt ? new Date(s.onboardedAt).toISOString().slice(0, 10) : '—'}
                 </td>
                 <td className="px-4 py-3 text-right">
-                  <Link
-                    href={`/gifsy/clients/${s.slug}`}
-                    className="inline-flex items-center gap-1 text-xs text-white/30 group-hover:text-white/70 transition-colors"
-                  >
-                    Manage<ChevronRight className="w-3.5 h-3.5" />
-                  </Link>
+                  <div className="inline-flex items-center gap-3 justify-end">
+                    {s.status === 'ONBOARDING' && (
+                      <button
+                        data-testid={`activate-${s.slug}`}
+                        onClick={() => activate(s.slug)}
+                        disabled={activating === s.slug}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-green-500/15 border border-green-500/30 text-green-400 text-xs font-medium hover:bg-green-500/25 transition-colors disabled:opacity-50"
+                      >
+                        {activating === s.slug
+                          ? <Loader2 className="w-3 h-3 animate-spin" />
+                          : <Power className="w-3 h-3" />}
+                        Activate
+                      </button>
+                    )}
+                    <Link
+                      href={`/gifsy/clients/${s.slug}`}
+                      className="inline-flex items-center gap-1 text-xs text-white/30 group-hover:text-white/70 transition-colors"
+                    >
+                      Manage<ChevronRight className="w-3.5 h-3.5" />
+                    </Link>
+                  </div>
                 </td>
               </tr>
             ))}

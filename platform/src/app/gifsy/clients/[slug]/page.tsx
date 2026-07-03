@@ -6,6 +6,7 @@ import {
   ArrowLeft, CheckCircle, Clock, AlertCircle,
   Pencil, Save, X, ChevronDown, ChevronUp,
   Palette, Shield, Users, Bell, FileText, Wallet, Building2, ShoppingBag, Loader2,
+  Settings, Power,
 } from 'lucide-react';
 import { applyFeatureFlagUpdate } from '@/lib/platform/platform-admin';
 import type { ClientConfig, FeatureKey } from '@/lib/platform/client-config';
@@ -103,25 +104,100 @@ export default function ClientConfigPage({ params }: { params: Promise<{ slug: s
 // Editor — full client component
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The subset of fields the real PATCH /api/gifsy/clients/:slug endpoint accepts.
+ * Any subset may be sent; only the edited fields are included in a save.
+ */
+interface ClientPatchBody {
+  status?: ClientConfig['status'];
+  internalName?: string;
+  displayName?: string;
+  primaryColor?: string;
+  supportEmail?: string;
+  supportPhone?: string;
+  invoicePrefix?: string;
+}
+
+/** Shape returned by the PATCH endpoint (subset we merge back into local config). */
+interface ClientPatchResponse {
+  id: string;
+  internalName: string;
+  status: ClientConfig['status'];
+  branding: {
+    displayName?: string;
+    primaryColor?: string;
+    supportEmail?: string;
+    supportPhone?: string;
+    invoicePrefix?: string;
+  };
+  features?: Record<string, boolean>;
+}
+
 function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) {
   const [config, setConfig] = useState<ClientConfig>(initialConfig);
   const [saved, setSaved]   = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  /** Flash a "Saved" indicator briefly */
+  /** Flash a "Saved" indicator briefly (used by the in-memory-only sections) */
   const flashSaved = useCallback(() => {
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
   }, []);
 
+  /**
+   * REAL persistence: PATCH /api/gifsy/clients/:slug (proxied to the backend
+   * /v1/gifsy/clients/:slug, GIFSY_ADMIN). Sends only the passed (changed) fields,
+   * then merges the returned client back into local state. Unlike the in-memory
+   * sections below, this is durable.
+   */
+  const saveClient = useCallback(async (patch: ClientPatchBody): Promise<boolean> => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const res = await fetch(`/api/gifsy/clients/${config.slug}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getToken() ?? ''}`,
+        },
+        body: JSON.stringify(patch),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) {
+        throw new Error(j?.error || 'Save failed');
+      }
+      const updated = j.data as ClientPatchResponse;
+      // Merge the authoritative server response back into local state.
+      setConfig((prev) => ({
+        ...prev,
+        internalName: updated.internalName ?? prev.internalName,
+        status: updated.status ?? prev.status,
+        branding: {
+          ...prev.branding,
+          displayName:  updated.branding?.displayName  ?? prev.branding.displayName,
+          primaryColor: updated.branding?.primaryColor ?? prev.branding.primaryColor,
+          supportEmail: updated.branding?.supportEmail ?? prev.branding.supportEmail,
+          supportPhone: updated.branding?.supportPhone ?? prev.branding.supportPhone,
+        },
+        invoicing: {
+          ...prev.invoicing,
+          invoicePrefix: updated.branding?.invoicePrefix ?? prev.invoicing.invoicePrefix,
+        },
+      }));
+      flashSaved();
+      return true;
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : 'Save failed');
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }, [config.slug, flashSaved]);
+
   /** Toggle a single feature flag using the platform rule (GIFSY_ADMIN only) */
   const toggleFeature = useCallback((key: FeatureKey, value: boolean) => {
     setConfig((prev) => applyFeatureFlagUpdate(prev, key, value, 'GIFSY_ADMIN'));
-    flashSaved();
-  }, [flashSaved]);
-
-  /** Update the client status */
-  const setStatus = useCallback((status: ClientConfig['status']) => {
-    setConfig((prev) => ({ ...prev, status }));
     flashSaved();
   }, [flashSaved]);
 
@@ -151,22 +227,27 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
           </div>
         </div>
 
-        {/* Status + saved indicator */}
+        {/* Status pill + saved indicator */}
         <div className="flex items-center gap-2 shrink-0">
           {saved && (
             <span className="flex items-center gap-1.5 text-xs text-green-400 bg-green-500/10 border border-green-500/20 px-3 py-1.5 rounded-lg">
               <CheckCircle className="w-3.5 h-3.5" />
-              Saved (memory)
+              Saved
             </span>
           )}
-          <StatusSelect status={config.status} onChange={setStatus} />
+          <StatusPill status={config.status} />
         </div>
       </div>
 
-      {/* Note banner */}
-      <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3 text-xs text-amber-300">
-        <strong>Dev mode:</strong> Changes update in-memory only. DB persistence comes in Platform Phase 2.
-      </div>
+      {/* REAL client-settings editor (status + branding/invoicing → PATCH) */}
+      <Section icon={Settings} title="Client settings" defaultOpen>
+        <ClientSettingsSection
+          config={config}
+          saving={saving}
+          error={saveError}
+          onSave={saveClient}
+        />
+      </Section>
 
       {/* Sections */}
       <Section icon={Palette} title="Branding" defaultOpen>
@@ -194,6 +275,9 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
       </Section>
 
       <Section icon={Wallet} title="Wallet Defaults">
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-300 mb-3">
+          <strong>Dev mode:</strong> Wallet defaults update in-memory only. DB persistence comes in Platform Phase 2.
+        </div>
         <WalletSection config={config} onChange={(w) => { setConfig((p) => ({ ...p, wallet: { ...p.wallet, ...w } })); flashSaved(); }} />
       </Section>
 
@@ -242,34 +326,168 @@ function Section({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Status select
+// Status pill (read-only header badge; the editable control lives in Client settings)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function StatusSelect({
-  status, onChange,
-}: {
-  status: ClientConfig['status'];
-  onChange: (s: ClientConfig['status']) => void;
-}) {
+const STATUS_LABEL: Record<ClientConfig['status'], string> = {
+  ACTIVE: 'Active', ONBOARDING: 'Onboarding', INACTIVE: 'Inactive',
+};
+
+function StatusPill({ status }: { status: ClientConfig['status'] }) {
   const Icon = status === 'ACTIVE' ? CheckCircle : status === 'ONBOARDING' ? Clock : AlertCircle;
   const color = status === 'ACTIVE' ? 'text-green-400 bg-green-500/20 border-green-500/30'
     : status === 'ONBOARDING' ? 'text-amber-400 bg-amber-500/20 border-amber-500/30'
     : 'text-red-400 bg-red-500/20 border-red-500/30';
 
   return (
-    <div className="relative">
-      <select
-        value={status}
-        onChange={(e) => onChange(e.target.value as ClientConfig['status'])}
-        className={`appearance-none flex items-center gap-1.5 pl-8 pr-6 py-1.5 rounded-lg text-xs font-medium border cursor-pointer ${color} bg-transparent focus:outline-none`}
-      >
-        <option value="ACTIVE">Active</option>
-        <option value="ONBOARDING">Onboarding</option>
-        <option value="INACTIVE">Inactive</option>
-      </select>
-      <Icon className={`absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none ${
-        status === 'ACTIVE' ? 'text-green-400' : status === 'ONBOARDING' ? 'text-amber-400' : 'text-red-400'
-      }`} />
+    <span
+      data-testid="client-status-pill"
+      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border ${color}`}
+    >
+      <Icon className="w-3.5 h-3.5" />
+      {STATUS_LABEL[status]}
+    </span>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Client settings section — REAL persistence (status + core branding) via PATCH
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ClientSettingsSection({
+  config, saving, error, onSave,
+}: {
+  config: ClientConfig;
+  saving: boolean;
+  error: string | null;
+  onSave: (patch: ClientPatchBody) => Promise<boolean>;
+}) {
+  const [draft, setDraft] = useState<Required<ClientPatchBody>>({
+    status:        config.status,
+    internalName:  config.internalName,
+    displayName:   config.branding.displayName,
+    primaryColor:  config.branding.primaryColor,
+    supportEmail:  config.branding.supportEmail,
+    supportPhone:  config.branding.supportPhone,
+    invoicePrefix: config.invoicing.invoicePrefix,
+  });
+
+  // Keep the draft in sync when the config changes underneath us (e.g. after a save
+  // merges the server response, or the one-click Activate flips the status).
+  useEffect(() => {
+    setDraft({
+      status:        config.status,
+      internalName:  config.internalName,
+      displayName:   config.branding.displayName,
+      primaryColor:  config.branding.primaryColor,
+      supportEmail:  config.branding.supportEmail,
+      supportPhone:  config.branding.supportPhone,
+      invoicePrefix: config.invoicing.invoicePrefix,
+    });
+  }, [config]);
+
+  /** Only the fields that actually changed from the current saved config. */
+  const buildChangedPatch = (): ClientPatchBody => {
+    const patch: ClientPatchBody = {};
+    if (draft.status        !== config.status)                 patch.status        = draft.status;
+    if (draft.internalName  !== config.internalName)           patch.internalName  = draft.internalName;
+    if (draft.displayName   !== config.branding.displayName)   patch.displayName   = draft.displayName;
+    if (draft.primaryColor  !== config.branding.primaryColor)  patch.primaryColor  = draft.primaryColor;
+    if (draft.supportEmail  !== config.branding.supportEmail)  patch.supportEmail  = draft.supportEmail;
+    if (draft.supportPhone  !== config.branding.supportPhone)  patch.supportPhone  = draft.supportPhone;
+    if (draft.invoicePrefix !== config.invoicing.invoicePrefix) patch.invoicePrefix = draft.invoicePrefix;
+    return patch;
+  };
+
+  const dirty = Object.keys(buildChangedPatch()).length > 0;
+
+  return (
+    <div className="space-y-4 pt-2">
+      {/* One-click Activate — removes the ONBOARDING dead-end */}
+      {config.status === 'ONBOARDING' && (
+        <div className="flex items-center gap-3 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3">
+          <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+          <p className="text-xs text-amber-200 flex-1">
+            This client is still onboarding and is not live for its users yet.
+          </p>
+          <button
+            data-testid="activate-client"
+            disabled={saving}
+            onClick={() => onSave({ status: 'ACTIVE' })}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-green-500 text-white text-xs font-semibold rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 shrink-0"
+          >
+            <Power className="w-3.5 h-3.5" />
+            Activate
+          </button>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Status">
+          <select
+            data-testid="status-select"
+            value={draft.status}
+            onChange={(e) => setDraft((p) => ({ ...p, status: e.target.value as ClientConfig['status'] }))}
+            className={INPUT_CLS + ' cursor-pointer'}
+          >
+            <option value="ONBOARDING">Onboarding</option>
+            <option value="ACTIVE">Active</option>
+            <option value="INACTIVE">Inactive</option>
+          </select>
+        </Field>
+        <Field label="Internal name">
+          <input data-testid="internal-name-input" value={draft.internalName}
+            onChange={(e) => setDraft((p) => ({ ...p, internalName: e.target.value }))}
+            className={INPUT_CLS} />
+        </Field>
+        <Field label="Display name">
+          <input data-testid="display-name-input" value={draft.displayName}
+            onChange={(e) => setDraft((p) => ({ ...p, displayName: e.target.value }))}
+            className={INPUT_CLS} />
+        </Field>
+        <Field label="Primary colour">
+          <div className="flex items-center gap-2">
+            <input type="color" value={draft.primaryColor}
+              onChange={(e) => setDraft((p) => ({ ...p, primaryColor: e.target.value }))}
+              className="w-9 h-9 rounded-lg border border-white/20 bg-transparent cursor-pointer p-0.5" />
+            <input value={draft.primaryColor}
+              onChange={(e) => setDraft((p) => ({ ...p, primaryColor: e.target.value }))}
+              className={INPUT_CLS + ' flex-1 font-mono'} />
+          </div>
+        </Field>
+        <Field label="Support email">
+          <input data-testid="support-email-input" value={draft.supportEmail}
+            onChange={(e) => setDraft((p) => ({ ...p, supportEmail: e.target.value }))}
+            className={INPUT_CLS} />
+        </Field>
+        <Field label="Support phone">
+          <input data-testid="support-phone-input" value={draft.supportPhone}
+            onChange={(e) => setDraft((p) => ({ ...p, supportPhone: e.target.value }))}
+            className={INPUT_CLS} />
+        </Field>
+        <Field label="Invoice prefix">
+          <input data-testid="invoice-prefix-input" value={draft.invoicePrefix}
+            onChange={(e) => setDraft((p) => ({ ...p, invoicePrefix: e.target.value }))}
+            className={INPUT_CLS + ' font-mono'} />
+        </Field>
+      </div>
+
+      {error && (
+        <p data-testid="client-save-error" className="text-xs text-red-400">{error}</p>
+      )}
+
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          data-testid="client-settings-save"
+          disabled={saving || !dirty}
+          onClick={() => onSave(buildChangedPatch())}
+          className="flex items-center gap-1.5 px-3 py-2 bg-[var(--brand-primary)] text-white text-xs font-medium rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+        >
+          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+          Save changes
+        </button>
+        {!dirty && <span className="text-xs text-white/30">No unsaved changes</span>}
+      </div>
     </div>
   );
 }
