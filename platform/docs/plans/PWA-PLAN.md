@@ -204,5 +204,40 @@ enforced by the scoped subscription query, not the key. Recommend **single platf
 (simpler rotation; per-tenant keys force full re-subscribe on rotation, for no payload-security gain). The real
 scale concern is send fan-out (worker concurrency, batching, 410-pruning), handled in F5 independent of keys.
 
+## Status bar & safe area — iOS vs Android (2026-07-03)
+
+**The installed-PWA top-bar behavior differs by OS, and only iOS needs per-header handling.**
+
+**Config in play:**
+- `viewport-fit=cover` (`src/app/layout.tsx`) — content extends into the notch/safe areas.
+- `apple-mobile-web-app-status-bar-style: black-translucent` (`src/components/pwa/PwaHead.tsx`) — **iOS only.**
+- Manifest `display: 'standalone'` + `theme_color = branding.primaryColor` (`src/lib/pwa/manifest.ts`).
+
+**iOS (installed PWA) — the app must reserve the inset.** `black-translucent` makes the iOS status bar
+(clock/wifi/battery, rendered in **white**) overlay the web content, which starts at y=0. Any sticky top header
+therefore MUST pad its top by `env(safe-area-inset-top)` or it collides with the status bar (the original bug).
+Per surface:
+- **Sales header** (navy `#1A1A2E`): `padding-top: calc(env(safe-area-inset-top) + 0.75rem)` — the navy fills the
+  inset; white iOS glyphs read fine on it (immersive). `src/app/sales/layout.tsx`.
+- **Partner header** (white): a brand-tinted strip sized to `env(safe-area-inset-top)` sits **behind** the status
+  bar so the white iOS glyphs stay readable, with the white header below (owner **Option C**, immersive + tinted).
+  `src/app/partner/layout.tsx`.
+- **Bottom nav** already used `env(safe-area-inset-bottom)` (`components/layout/nav-bottom.tsx`) — the pattern the
+  top headers now mirror. Rule of thumb: any new sticky/fixed top bar on a mobile shell needs the top inset.
+
+**Android (installed PWA) — no overlap, nothing to do.** The Apple meta is ignored. In `display: standalone`
+Chrome draws a **native opaque status bar** colored by `theme_color` (the brand color) and the web content starts
+**below** it — the OS reserves the strip, so headers never slide under the clock/battery. Chrome auto-picks
+readable status-bar icon contrast from the `theme_color` luminance. `env(safe-area-inset-*)` is `0` in standard
+Android standalone, so the iOS padding + partner strip are **inert** there (no visual change). If Google's newer
+edge-to-edge Android ever exposes insets, the same safe-area code handles it automatically. Cosmetic note: on
+Android both portals get a brand-green status bar (from `theme_color`); on iOS sales is navy-immersive and partner
+is white + green strip — all readable, just branded per OS.
+
+**Favicon (browser tab).** Per-tenant `favicon.ico` (16/32/48, PNG-in-ICO of the brand mark) is emitted by
+`scripts/generate-pwa-icons.ts` → `public/icons/<slug>/favicon.ico`; the root `src/app/favicon.ico` is the Deoleo
+default (replaced the old Next.js scaffold icon). The root layout wires per-tenant `<link rel="icon">` so each
+tenant's tab shows its own mark. App/home-screen icons remain the per-tenant `/icons/<slug>/icon-*.png`.
+
 ## What we are NOT doing (out of scope this effort)
 - No PWA for `/admin` or `/gifsy`. No app-store wrappers (F6 TWA/Capacitor) unless separately requested.

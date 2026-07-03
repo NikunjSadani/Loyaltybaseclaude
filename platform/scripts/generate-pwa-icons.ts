@@ -25,7 +25,7 @@
  *   /public path is also honored.)  See scripts/README-pwa-icons.md.
  */
 
-import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
@@ -229,6 +229,65 @@ async function renderFromMonogram(
   await sharp(Buffer.from(svg)).png().toFile(outPath);
 }
 
+/**
+ * Compose ONE small square favicon frame (brand tile + logo/monogram) as a PNG
+ * buffer. Square (not rounded) so it fills the browser-tab / OS favicon slot; the
+ * browser applies its own corner treatment. Reuses the same art the app icons use.
+ */
+async function faviconFrame(
+  t: IconTenant,
+  source: string | null,
+  size: number,
+): Promise<Buffer> {
+  const bgSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}"><rect width="${size}" height="${size}" fill="${t.primaryColor}"/></svg>`;
+  if (source) {
+    const inner = Math.round(size * 0.84);
+    const logoBuf = await sharp(readFileSync(source))
+      .resize(inner, inner, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .png()
+      .toBuffer();
+    return sharp(Buffer.from(bgSvg)).composite([{ input: logoBuf, gravity: 'center' }]).png().toBuffer();
+  }
+  const svg = monogramSvg({
+    size,
+    brand: t.primaryColor,
+    glyph: contrastColor(t.primaryColor),
+    text: initials(t.displayName),
+    maskable: false,
+    rounded: false,
+  });
+  return sharp(Buffer.from(svg)).png().toBuffer();
+}
+
+/**
+ * Assemble a multi-resolution favicon.ico from PNG frames. Uses the modern
+ * PNG-compressed ICO entry format (each directory entry points at a full PNG),
+ * which every current browser + Windows accepts. Header: ICONDIR(6) +
+ * ICONDIRENTRY(16)×N + the PNG payloads.
+ */
+function pngFramesToIco(frames: { size: number; png: Buffer }[]): Buffer {
+  const header = Buffer.alloc(6);
+  header.writeUInt16LE(0, 0);            // reserved
+  header.writeUInt16LE(1, 2);            // type = icon
+  header.writeUInt16LE(frames.length, 4);
+  const entries: Buffer[] = [];
+  let offset = 6 + frames.length * 16;
+  for (const { size, png } of frames) {
+    const e = Buffer.alloc(16);
+    e.writeUInt8(size >= 256 ? 0 : size, 0);  // width  (0 ⇒ 256)
+    e.writeUInt8(size >= 256 ? 0 : size, 1);  // height
+    e.writeUInt8(0, 2);                       // palette
+    e.writeUInt8(0, 3);                       // reserved
+    e.writeUInt16LE(1, 4);                    // colour planes
+    e.writeUInt16LE(32, 6);                   // bits per pixel
+    e.writeUInt32LE(png.length, 8);           // payload size
+    e.writeUInt32LE(offset, 12);              // payload offset
+    entries.push(e);
+    offset += png.length;
+  }
+  return Buffer.concat([header, ...entries, ...frames.map((f) => f.png)]);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main
 // ─────────────────────────────────────────────────────────────────────────────
@@ -252,6 +311,20 @@ async function generateForTenant(t: IconTenant): Promise<void> {
       await renderFromMonogram(t, glyph, text, spec, outPath);
     }
     console.log(`   ✓ ${join('public', 'icons', t.slug, spec.file)}  (${spec.size}x${spec.size}${spec.maskable ? ', maskable' : ''})`);
+  }
+
+  // Browser-tab favicon.ico (16/32/48) — the same brand mark as the app icons.
+  const frames = await Promise.all([16, 32, 48].map(async (size) => ({ size, png: await faviconFrame(t, source, size) })));
+  const ico = pngFramesToIco(frames);
+  writeFileSync(join(outDir, 'favicon.ico'), ico);
+  console.log(`   ✓ ${join('public', 'icons', t.slug, 'favicon.ico')}  (16/32/48)`);
+
+  // The launching tenant's favicon is also the app-wide default (served at
+  // /favicon.ico for any request that doesn't carry a per-tenant <link>).
+  if (t.slug === 'deoleo') {
+    const rootFav = join(PLATFORM_ROOT, 'src', 'app', 'favicon.ico');
+    writeFileSync(rootFav, ico);
+    console.log(`   ✓ ${join('src', 'app', 'favicon.ico')}  (default, from deoleo)`);
   }
 }
 

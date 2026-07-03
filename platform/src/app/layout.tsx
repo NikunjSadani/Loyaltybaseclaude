@@ -66,6 +66,11 @@ export default async function RootLayout({
             6-digit hex, so this sink cannot be broken out of. */}
         <style dangerouslySetInnerHTML={{ __html: brandStyle }} />
         <meta name="theme-color" content={config.branding.primaryColor} />
+        {/* Per-tenant browser-tab favicon — the tenant's brand mark (same art as
+            the installed-app icons). The root /favicon.ico (Deoleo) is the fallback
+            for any request without this per-tenant <link>. */}
+        <link rel="icon" href={`/icons/${config.slug}/favicon.ico`} sizes="any" />
+        <link rel="icon" type="image/png" sizes="192x192" href={`/icons/${config.slug}/icon-192.png`} />
         {/* PWA install meta (manifest + iOS) — only for the /sales + /partner shells */}
         {pwaScope && <PwaHead scope={pwaScope} />}
       </head>
