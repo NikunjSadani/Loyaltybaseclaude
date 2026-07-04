@@ -1749,18 +1749,13 @@ export class RewardsService {
 
     this.assertRedemptionRange(dto.minRedemptionPoints, dto.maxRedemptionPoints);
 
-    // M3 — a FREE_AMOUNT voucher (pointsCost 0 + a min/max range) must have a
-    // positive lower bound, so a variable-amount redeem can never round to 0 points.
-    if (
-      dto.pointsCost === 0 &&
-      dto.minRedemptionPoints != null &&
-      dto.maxRedemptionPoints != null &&
-      dto.minRedemptionPoints < 1
-    ) {
-      throw new BadRequestException(
-        'A variable-amount (FREE_AMOUNT) voucher must have minRedemptionPoints >= 1',
-      );
-    }
+    // A pointsCost-0 item is only ever a FREE_AMOUNT voucher, and it MUST carry a
+    // complete [min, max] range — reject a half-configured one (see the helper).
+    this.assertFreeAmountComplete(
+      dto.pointsCost,
+      dto.minRedemptionPoints,
+      dto.maxRedemptionPoints,
+    );
 
     // Code unique within the tenant (among non-deleted items).
     const clash = await this.prisma.rewardCatalog.findFirst({
@@ -1810,10 +1805,17 @@ export class RewardsService {
       if (!category) throw new BadRequestException('Category not found in this tenant');
     }
 
-    // Validate the EFFECTIVE min/max (post-merge with the stored values).
-    const effMin = dto.minRedemptionPoints ?? existing.minRedemptionPoints ?? undefined;
-    const effMax = dto.maxRedemptionPoints ?? existing.maxRedemptionPoints ?? undefined;
+    // Validate the EFFECTIVE values Prisma will actually persist. `undefined` in the
+    // DTO means "leave unchanged" (Prisma skips it); an explicit null/value is written —
+    // so mirror that here (a bare `??` would collapse an explicit null into the stored
+    // value and let a max-clearing PATCH slip a free-amount voucher into a broken state).
+    const effPoints = dto.pointsCost !== undefined ? dto.pointsCost : existing.pointsCost;
+    const effMin =
+      dto.minRedemptionPoints !== undefined ? dto.minRedemptionPoints : existing.minRedemptionPoints;
+    const effMax =
+      dto.maxRedemptionPoints !== undefined ? dto.maxRedemptionPoints : existing.maxRedemptionPoints;
     this.assertRedemptionRange(effMin, effMax);
+    this.assertFreeAmountComplete(effPoints, effMin, effMax);
 
     if (dto.code !== undefined && dto.code !== existing.code) {
       const clash = await this.prisma.rewardCatalog.findFirst({
@@ -1846,8 +1848,12 @@ export class RewardsService {
         mrpPaise: dto.mrpPaise,
         redemptionMode: dto.redemptionMode,
         status,
-        minRedemptionPoints: dto.minRedemptionPoints,
-        maxRedemptionPoints: dto.maxRedemptionPoints,
+        // Bounds are meaningful ONLY for a FREE_AMOUNT item (effPoints === 0). On a
+        // FIXED item (or a FREE→FIXED transition) force them null so a direct-API PATCH
+        // can't leave stale [min,max] on the row; for a FREE item write the DTO value
+        // (undefined = keep existing, which the guard has already validated as complete).
+        minRedemptionPoints: effPoints === 0 ? dto.minRedemptionPoints : null,
+        maxRedemptionPoints: effPoints === 0 ? dto.maxRedemptionPoints : null,
         stockQuantity: dto.stockQuantity,
         termsAndConditions: dto.termsAndConditions,
         sortOrder: dto.sortOrder,
@@ -1879,6 +1885,32 @@ export class RewardsService {
     if (min != null && max != null && min > max) {
       throw new BadRequestException(
         'minRedemptionPoints must be <= maxRedemptionPoints',
+      );
+    }
+  }
+
+  /**
+   * A `pointsCost === 0` catalog item is only ever a FREE_AMOUNT (variable-amount)
+   * voucher, and isFreeAmount() treats an item as free-amount ONLY when BOTH bounds
+   * are set. A half-configured one (a min but no max, or neither) silently degrades
+   * to a "fixed, cost 0" item that every redeem rejects with "Redemption must cost a
+   * positive number of points" — an un-redeemable voucher that still looks fine in the
+   * catalogue. Reject it at write time so a broken voucher can never be saved.
+   */
+  private assertFreeAmountComplete(
+    pointsCost: number | null | undefined,
+    min?: number | null,
+    max?: number | null,
+  ) {
+    if (pointsCost !== 0) return;
+    if (min == null || max == null) {
+      throw new BadRequestException(
+        'A variable-amount (FREE_AMOUNT) voucher requires both minRedemptionPoints and maxRedemptionPoints.',
+      );
+    }
+    if (min < 1) {
+      throw new BadRequestException(
+        'A variable-amount (FREE_AMOUNT) voucher must have minRedemptionPoints >= 1',
       );
     }
   }

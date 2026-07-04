@@ -419,7 +419,7 @@ export class CreateRewardCatalogDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
-  @Min(0)
+  @Min(1)
   minRedemptionPoints?: number;
 
   @IsOptional()
@@ -495,7 +495,7 @@ export class UpdateRewardCatalogDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
-  @Min(0)
+  @Min(1)
   minRedemptionPoints?: number;
 
   @IsOptional()

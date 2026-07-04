@@ -137,6 +137,61 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
     });
   });
 
+  it('GIF5: a free-amount voucher with a blank Max is blocked (no POST)', async () => {
+    const { calls } = installFetch();
+    render(<AdminGiftsPage />);
+    const addButtons = await screen.findAllByRole('button', { name: /add reward/i });
+    await userEvent.click(addButtons[addButtons.length - 1]);
+
+    const dialog = await screen.findByText('Add Reward', { selector: 'h2' });
+    const modal = dialog.closest('div.relative') as HTMLElement;
+    const scope = within(modal);
+
+    await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'FA-1');
+    await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Free Amount Voucher');
+    // Switch to Free Amount, fill the min only, leave Max blank.
+    await userEvent.click(scope.getByRole('button', { name: /free amount/i }));
+    await userEvent.type(scope.getByPlaceholderText('100'), '250');
+
+    await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
+
+    // Validation blocks the save; no catalog POST is fired.
+    expect(await scope.findByText(/Max is required/i)).toBeInTheDocument();
+    expect(
+      calls.find((c) => c.url.startsWith('/api/admin/rewards/catalog') && c.init?.method === 'POST'),
+    ).toBeFalsy();
+  });
+
+  it('GIF6: a free-amount voucher WITH a Max POSTs pointsCost 0 + both bounds', async () => {
+    const { calls } = installFetch();
+    render(<AdminGiftsPage />);
+    const addButtons = await screen.findAllByRole('button', { name: /add reward/i });
+    await userEvent.click(addButtons[addButtons.length - 1]);
+
+    const dialog = await screen.findByText('Add Reward', { selector: 'h2' });
+    const modal = dialog.closest('div.relative') as HTMLElement;
+    const scope = within(modal);
+
+    await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'FA-2');
+    await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Free Amount Voucher');
+    await userEvent.click(scope.getByRole('button', { name: /free amount/i }));
+    await userEvent.type(scope.getByPlaceholderText('100'), '250');
+    await userEvent.type(scope.getByPlaceholderText('e.g. 5000'), '5000');
+
+    await userEvent.click(scope.getByRole('button', { name: /add reward/i }));
+
+    await waitFor(() => {
+      const post = calls.find(
+        (c) => c.url.startsWith('/api/admin/rewards/catalog') && c.init?.method === 'POST',
+      );
+      expect(post).toBeTruthy();
+      const body = JSON.parse(String(post!.init!.body));
+      expect(body.pointsCost).toBe(0);
+      expect(body.minRedemptionPoints).toBe(250);
+      expect(body.maxRedemptionPoints).toBe(5000);
+    });
+  });
+
   it('GIF4: fulfilment upload POSTs the file and renders the per-row error list', async () => {
     let uploadBody: unknown;
     const { fn } = installFetch((url, init) => {

@@ -507,7 +507,11 @@ function ItemModal({
       const min = parseInt(form.minRedemptionPoints);
       const max = parseInt(form.maxRedemptionPoints);
       if (!min || min < 1) e.minRedemptionPoints = 'Min must be ≥ 1 for a free-amount item';
-      if (max && min && max < min) e.maxRedemptionPoints = 'Max must be ≥ min';
+      // Max is REQUIRED for a free-amount voucher: the backend treats an item as
+      // free-amount only when BOTH bounds are set, so a blank max saves an
+      // un-redeemable voucher ("must cost a positive number of points" at redeem).
+      if (!max || max < 1) e.maxRedemptionPoints = 'Max is required (≥ 1) for a free-amount item';
+      else if (min && max < min) e.maxRedemptionPoints = 'Max must be ≥ min';
     } else {
       if (form.pointsCost <= 0) e.pointsCost = 'Points cost must be > 0';
     }
@@ -682,12 +686,12 @@ function ItemModal({
                     {errors.minRedemptionPoints && <p className="text-xs text-red-500">{errors.minRedemptionPoints}</p>}
                   </div>
                   <div className="space-y-1">
-                    <label className="text-xs font-medium text-gray-700">Max points</label>
+                    <label className="text-xs font-medium text-gray-700">Max points *</label>
                     <input
                       type="number"
                       value={form.maxRedemptionPoints}
                       onChange={(e) => set('maxRedemptionPoints', e.target.value)}
-                      placeholder="(optional)"
+                      placeholder="e.g. 5000"
                       className={inputCls('maxRedemptionPoints')}
                     />
                     {errors.maxRedemptionPoints && <p className="text-xs text-red-500">{errors.maxRedemptionPoints}</p>}

@@ -215,6 +215,101 @@ describe('RewardsService', () => {
     });
   });
 
+  describe('createCatalogItem — FREE_AMOUNT completeness guard', () => {
+    const baseDto = {
+      categoryId: 'cat1',
+      code: 'FA-1',
+      name: 'Free Amount Voucher',
+      redemptionMode: 'GIFT_CARD' as const,
+    };
+    beforeEach(() => {
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'cat1', clientId: 'deoleo' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null); // no code clash
+      mockPrisma.rewardCatalog.create.mockResolvedValue({ id: 'r-new' });
+    });
+
+    it('rejects a pointsCost-0 item with a min but NO max (the un-redeemable-voucher bug)', async () => {
+      await expect(
+        service.createCatalogItem(gifsy, {
+          ...baseDto,
+          pointsCost: 0,
+          minRedemptionPoints: 250,
+          // maxRedemptionPoints omitted
+        } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.rewardCatalog.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects a pointsCost-0 item with neither bound', async () => {
+      await expect(
+        service.createCatalogItem(gifsy, { ...baseDto, pointsCost: 0 } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.rewardCatalog.create).not.toHaveBeenCalled();
+    });
+
+    it('accepts a pointsCost-0 item with a complete [min,max] range', async () => {
+      await expect(
+        service.createCatalogItem(gifsy, {
+          ...baseDto,
+          pointsCost: 0,
+          minRedemptionPoints: 250,
+          maxRedemptionPoints: 5000,
+        } as never),
+      ).resolves.toEqual({ item: { id: 'r-new' } });
+      expect(mockPrisma.rewardCatalog.create).toHaveBeenCalled();
+    });
+
+    it('accepts a FIXED (pointsCost > 0) item with no bounds', async () => {
+      await expect(
+        service.createCatalogItem(gifsy, { ...baseDto, pointsCost: 500 } as never),
+      ).resolves.toEqual({ item: { id: 'r-new' } });
+      expect(mockPrisma.rewardCatalog.create).toHaveBeenCalled();
+    });
+  });
+
+  describe('updateCatalogItem — FREE_AMOUNT completeness guard', () => {
+    it('rejects clearing max on an existing free-amount voucher (effective max becomes null)', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', clientId: 'deoleo', deletedAt: null,
+        pointsCost: 0, minRedemptionPoints: 250, maxRedemptionPoints: 5000, stockQuantity: null,
+      });
+      await expect(
+        service.updateCatalogItem(gifsy, 'r1', { maxRedemptionPoints: null } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.rewardCatalog.update).not.toHaveBeenCalled();
+    });
+
+    it('allows a benign edit that keeps the range intact', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', clientId: 'deoleo', deletedAt: null,
+        pointsCost: 0, minRedemptionPoints: 250, maxRedemptionPoints: 5000, stockQuantity: null,
+      });
+      mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r1', name: 'Renamed' });
+      await expect(
+        service.updateCatalogItem(gifsy, 'r1', { name: 'Renamed' } as never),
+      ).resolves.toEqual({ item: { id: 'r1', name: 'Renamed' } });
+      expect(mockPrisma.rewardCatalog.update).toHaveBeenCalled();
+    });
+
+    it('clears stale min/max when converting a free-amount voucher to FIXED', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', clientId: 'deoleo', deletedAt: null,
+        pointsCost: 0, minRedemptionPoints: 250, maxRedemptionPoints: 5000, stockQuantity: null,
+      });
+      mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r1' });
+      await service.updateCatalogItem(gifsy, 'r1', { pointsCost: 500 } as never);
+      expect(mockPrisma.rewardCatalog.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            pointsCost: 500,
+            minRedemptionPoints: null,
+            maxRedemptionPoints: null,
+          }),
+        }),
+      );
+    });
+  });
+
   describe('listOrders', () => {
     it('scopes a non-admin to their own partner orders', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
