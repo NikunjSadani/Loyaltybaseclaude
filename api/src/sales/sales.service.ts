@@ -1020,6 +1020,10 @@ export class SalesService {
         unassignedAt: null,
       },
       include: {
+        // The assigned rep's login-User id — lets the FE KYC-list member filter match
+        // a NOT-STARTED / not-interested outlet (which has no submission, so no submitter)
+        // to the rep it belongs to, so "filter by member" returns ALL their outlets.
+        salesUser: { select: { userId: true } },
         outlet: {
           include: {
             outletType: { select: { code: true } },
@@ -1107,6 +1111,9 @@ export class SalesService {
           return {
             id: outlet.id,
             partnerId: partner?.id ?? null,
+            // The rep this outlet is assigned to (login-User id) — the KYC-list member
+            // filter keys on this for outlets with no submission yet.
+            assignedUserId: a.salesUser?.userId ?? null,
             balance: partner?.wallets[0]?.redeemablePoints ?? 0,
             kycId: latestKyc?.id ?? '',
             outletCode: outlet.outletCode,

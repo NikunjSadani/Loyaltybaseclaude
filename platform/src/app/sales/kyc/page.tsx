@@ -29,6 +29,10 @@ interface KYCEntry {
   rejectionReason?: string;
   /** ID of the team member (XSR / SO / etc.) who submitted this KYC */
   submittedById?: string;
+  /** The rep this outlet is ASSIGNED to (login-User id). Member-filter key for
+   *  not-started / not-interested / re-entry outlets that have no submission (so no
+   *  submitter) — so filtering by a member returns ALL their outlets, not just submitted. */
+  assignedUserId?: string;
   /** True for an assigned outlet that has NOT been enrolled yet (no submission) —
    *  synthesised from /api/sales/outlets so the rep's to-do outlets appear here. */
   isNotStarted?: boolean;
@@ -260,6 +264,7 @@ function KYCListContent() {
                 submittedAt: '',
                 updatedAt:   '',
                 isNotStarted: true,
+                assignedUserId: o.assignedUserId ?? undefined,
                 programName:     o.programName ?? '',
                 programCategory: o.programCategory ?? '',
                 outletType:      o.type ?? '',
@@ -279,6 +284,7 @@ function KYCListContent() {
             submittedAt: '',
             updatedAt:   '',
             isNotInterested: true,
+            assignedUserId: o.assignedUserId ?? undefined,
             programName:     o.programName ?? '',
             programCategory: o.programCategory ?? '',
             outletType:      o.type ?? '',
@@ -308,6 +314,7 @@ function KYCListContent() {
             status:      o.kycStatus as KYCStatus,
             submittedAt: '',
             updatedAt:   '',
+            assignedUserId: o.assignedUserId ?? undefined,
             programName:     o.programName ?? '',
             programCategory: o.programCategory ?? '',
             outletType:      o.type ?? '',
@@ -365,7 +372,12 @@ function KYCListContent() {
 
   const filtered = entries
     .filter((e) => {
-      const matchesMember = !selectedMemberUserIds || (!!e.submittedById && selectedMemberUserIds.has(e.submittedById));
+      // A member matches when the entry was SUBMITTED by someone in their branch, OR the
+      // outlet is ASSIGNED to someone in their branch (covers not-started/re-entry outlets
+      // that have no submission) — so "filter by member" returns ALL their outlets.
+      const matchesMember = !selectedMemberUserIds
+        || (!!e.submittedById && selectedMemberUserIds.has(e.submittedById))
+        || (!!e.assignedUserId && selectedMemberUserIds.has(e.assignedUserId));
       const matchesType = !typeFilter || e.outletType === typeFilter;
       const matchesProgram = !programFilter || e.programName === programFilter;
       const matchesStatus =
