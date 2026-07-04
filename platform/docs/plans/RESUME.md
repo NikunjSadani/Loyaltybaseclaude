@@ -41,7 +41,7 @@ calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep
 [[default-to-orchestration]] [[own-consistency-no-micromanage]] [[audit-every-build-item]] [[verify-flows-at-runtime]]
 
 🟡 SCALE/OPS + UAT-FIX BUILD (post-Deoleo, owner-driven, orchestrated — rides the NEXT cutover; **prod stays on `a2f5929`,
-develop is now AHEAD at HEAD `97c5089`** — 34 commits). SHIPPED to `develop` + gate-green + each independently audited: **(1)** security
+develop is now AHEAD (this scale/ops wave landed by `97c5089`; the develop tip has since advanced to `a4c6def`).** SHIPPED to `develop` + gate-green + each independently audited: **(1)** security
 log-leak fix (`df47baf` — prod was logging live redemption OTPs + full phone numbers; removed/masked); **(2)** observability O1+O2
 (`33543ec` — `nestjs-pino` structured JSON logs + a real `/health/ready` DB-ping probe, verified live; audit CAUGHT a HIGH `?token=`
 query-log leak → custom PATH-only req serializer; O3/OpenTelemetry DEFERRED — needs monitoring-IAM + `deploy.yml` edit); **(3)** ✅
@@ -291,7 +291,7 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929` (unchanged since); develop has SINCE advanced to `97c5089` with 34 commits of scale/ops + KYC + UAT fix-as-found work (rides the NEXT cutover).** Cutover #2 shipped
+🚀 CUTOVER STATE — **✅ CUTOVER #2 EXECUTED 2026-07-01. Prod `main` HEAD = `a2f5929` (unchanged since); develop has SINCE advanced to `a4c6def` (scale/ops + KYC + UAT fix-as-found + C-batch + sales-KYC/UX work; rides the NEXT cutover).** Cutover #2 shipped
 the **onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate**; applied migration
 `20260630130000_point_expiry_default_unique` (via `--wait`); pre-cutover backup **`1782886598428`**; created + ENABLED the
 **`expire-sweep-prod`** Cloud Scheduler (daily 00:30 IST; sweep smoke 403/201). Both prod services healthy `/health` 200.
