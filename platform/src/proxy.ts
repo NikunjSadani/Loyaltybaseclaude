@@ -165,6 +165,9 @@ export const config = {
     // sw.js + offline.html are static PUBLIC PWA assets — they MUST be fetchable
     // without auth (the browser fetches /sw.js to register the service worker), so
     // they are excluded from the auth middleware like the other static prefixes.
-    '/((?!_next/static|_next/image|favicon.ico|logos/|favicons/|icons/|images/|sw.js|offline.html).*)',
+    // `brand/` holds the per-tenant wordmarks (public/brand/*.png) — the LOGIN page (no
+    // token) renders them, so without this exclusion each wordmark 307s to /auth/login →
+    // broken image on the sign-in screen.
+    '/((?!_next/static|_next/image|favicon.ico|logos/|favicons/|icons/|images/|brand/|sw.js|offline.html).*)',
   ],
 }
