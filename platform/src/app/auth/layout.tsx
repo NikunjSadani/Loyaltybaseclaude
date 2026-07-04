@@ -15,17 +15,11 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         <div className="absolute -bottom-32 -right-16 w-80 h-80 rounded-full bg-[var(--brand-primary)]/5" />
 
         <div className="relative z-10 text-center max-w-sm">
-          {/* Logo placeholder */}
-          <div className="flex items-center justify-center gap-3 mb-8">
-            <div className="w-14 h-14 bg-[var(--brand-primary)] rounded-2xl flex items-center justify-center shadow-lg">
-              <svg viewBox="0 0 40 40" className="w-8 h-8 fill-white">
-                <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
-              </svg>
-            </div>
-            <div className="text-left">
-              <p className="text-white font-bold text-xl leading-tight">Deoleo</p>
-              <p className="text-white/60 text-sm">Trade Loyalty</p>
-            </div>
+          {/* Deoleo wordmark — white variant on the dark brand panel */}
+          <div className="flex flex-col items-center gap-2 mb-8">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/brand/deoleo-wordmark-white.png" alt="Deoleo" className="h-10 w-auto" />
+            <p className="text-white/60 text-sm">Trade Loyalty</p>
           </div>
 
           <h1 className="text-3xl font-bold text-white mb-4 leading-snug">
@@ -50,15 +44,12 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         </div>
       </div>
 
-      {/* Mobile top strip */}
+      {/* Mobile top strip — Deoleo wordmark (white on dark) */}
       <div className="lg:hidden bg-[#1A1A2E] px-6 pt-10 pb-8 flex items-center gap-3">
-        <div className="w-10 h-10 bg-[var(--brand-primary)] rounded-xl flex items-center justify-center">
-          <svg viewBox="0 0 40 40" className="w-6 h-6 fill-white">
-            <path d="M20 4L36 12v16L20 36 4 28V12L20 4z" />
-          </svg>
-        </div>
-        <div>
-          <p className="text-white font-bold text-base">Deoleo Trade Loyalty</p>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src="/brand/deoleo-wordmark-white.png" alt="Deoleo" className="h-7 w-auto" />
+        <div className="border-l border-white/20 pl-3">
+          <p className="text-white/70 text-xs font-medium">Trade Loyalty</p>
           <p className="text-white/50 text-xs">Sign in to continue</p>
         </div>
       </div>
