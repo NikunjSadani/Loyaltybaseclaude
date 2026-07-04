@@ -273,10 +273,8 @@ export function validateOutletUpload(
         errors.push(`Program Name "${row.programName}" is not in the configured list. Valid values: ${validPrograms.join(', ')}`);
       }
 
-      // 6. Program Category must be in configured list
-      if (!row.programCategory) {
-        errors.push('Program Category is required');
-      } else if (!validCategories.includes(row.programCategory)) {
+      // 6. Program Category is OPTIONAL (owner 2026-07-03); if provided it must be a configured value.
+      if (row.programCategory && !validCategories.includes(row.programCategory)) {
         errors.push(`Program Category "${row.programCategory}" is not in the configured list. Valid values: ${validCategories.join(', ')}`);
       }
 

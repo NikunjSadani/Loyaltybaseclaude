@@ -282,6 +282,12 @@ describe('outlet master row validation — errors (CREATE)', () => {
     expect(result.rows[0].errors.some(e => /program category/i.test(e))).toBe(true);
   });
 
+  it('O22b — blank program category is VALID (Program Category is OPTIONAL, owner 2026-07-03)', () => {
+    const result = validateOutletUpload([makeRow({ programCategory: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].status).toBe('OK');
+    expect(result.rows[0].errors.some(e => /program category/i.test(e))).toBe(false);
+  });
+
   it('O23 — metro value not Yes/No is an error', () => {
     const result = validateOutletUpload([makeRow({ metro: 'Maybe' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('ERROR');
