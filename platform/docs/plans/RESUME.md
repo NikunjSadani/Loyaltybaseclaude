@@ -85,7 +85,7 @@ deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLO
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1359 · nest 0 · FE vitest 1748 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `97c5089`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1369 · nest 0 · FE vitest 1763 · tsc 0 (prod `main` HEAD `a2f5929`; develop HEAD `a4c6def`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -140,6 +140,14 @@ done: (a) grep EVERY consumer of the changed data/endpoint (the KYC list reads a
 action produce different DB states). When the owner reports a UAT bug, spend the extra pass to verify the WHOLE class
 end-to-end — it's cheaper than the re-report. NEWEST-40 ran 3 parallel adversarial verifications over the session's work +
 found 3 real gaps (rejected-family visibility, 4 money-path scale bugs, onboarding-save revert).
+
+**META-LESSON 2 — CLARIFY BEFORE AN IMPERFECT BUILD ([[clarify-before-imperfect-build]], owner had to remind me 2026-07-03):**
+if I recognize an approach is NOT the ideal/complete solution, ASK & clarify BEFORE building — do NOT ship a caveated partial and
+iterate. The sales KYC page took THREE turns (branch member-filter → assigned-rep match → fully assignment-driven list) because
+each turn I shipped a knowingly-incomplete fix flagged with an "honest caveat" instead of naming the real design question up
+front. The tell: about to write "one honest caveat remains…" / "rare edge…" / "good enough for the common case" about a gap I
+already understand → STOP, present the ideal vs the shortcut, and let the owner choose. Caveats are for TRULY rare/unknowable
+edges (and even then, say why closing them isn't worth it), never for a gap I could design correctly now.
 
 DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`; runtime-verified where an API/edge check was possible):
 - **🆕 2026-07-02/03 — owner-driven UAT fix-as-found + a full completeness verification (NEWEST-36→40; develop `a8a8efa`→`97c5089`, 7 commits):**
@@ -352,32 +360,37 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 [[admin-dashboard-consolidation]] [[default-to-orchestration]] [[global-settings-wiring]] [[sales-hierarchy-scoping]]
 [[migration-model]] [[staging-deploy-gate]] [[audit-every-build-item]].
 
-▶ **THINGS TO BE DONE — START HERE (present this list first; ask the owner which to pick up).** All of develop (`97c5089`,
-34 commits) is on staging and rides the NEXT owner-triggered cutover; **prod is unchanged at `a2f5929`.**
+▶ **THINGS TO BE DONE — START HERE (present this list first; ask the owner which to pick up).** All of develop (`a4c6def`,
+code) is on staging and rides the NEXT owner-triggered cutover; **prod is unchanged at `a2f5929`.** Gate: api jest 1369 · nest 0 ·
+FE vitest 1763 · tsc 0. **NO new migrations across this whole develop batch → the next cutover is CODE-ONLY.**
 **A. Owner-gated Deoleo go-live (owner or client-files):**
-  1. **Owner UAT-tests this session's batch on staging** (`staging-97c5089`): re-KYC + REJECTED-family visibility as a rep
-     (KYC list Re-KYC/Rejected filters + dashboard/tasks); targets upload-to-all-outlets + approved-active KPI; §A-ONBOARDING
-     client edit/activate; the onboarding-Save-persists (no revert); the Outlet-Types label + deep-link-outlet.
+  1. **Owner UAT-tests the accumulated staging batch** (`staging-a4c6def`) — the big new area is the **sales-KYC/UX** work (see
+     the closing summary): assignment-driven KYC list, branch member-filter (emp-code·name labels + "All XSR/SO" placeholder),
+     KYC-list order Re-KYC→Rejected→Pending→Approved→Not-Interested, Outlets targets-for-all + Approved badge, XSR-no-Approval-Pending,
+     profile Visibility-tile removed, Program-Category-optional upload; plus the PWA status-bar/favicon and the C-batch.
   2. **#76 — load real Deoleo master data** (outlets/hierarchy/catalog/schemes via the app UIs) — **THE LAST HARD BLOCKER**, waits on the client's files.
   3. **#143 — WhatsApp `deoleo_kyc_approval` runtime-verify** (template APPROVED; needs a real approval to a real phone).
-  4. **Trigger the develop→main CUTOVER when owner is ready** — 34 commits ride it; **NO new migrations this session** (all FE +
-     no-migration backend), so the cutover is code-only (backup → merge → in-VPC `migrate deploy` no-op → verify serving SHA).
+  4. **Trigger the develop→main CUTOVER when owner is ready** — CODE-ONLY (backup → merge → in-VPC `migrate deploy` no-op → verify serving SHA).
 **B. Blocked on an owner DECISION:** 5. **Notifications Core** go/no-go (drainer is push-only; in-app inbox needs a migration; 2/3
   events blocked upstream). 6. **Email provider** — ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
-**C. Buildable now — batch SHIPPED 2026-07-03 (`873a2ec`, gate-green + audit-clean, on develop):** ✅ 7. **`/admin/outlets/ids`
-  lite endpoint** (one unpaginated 3-field projection replaces the ~23-request FE page-through; deriveKycStatus shared so list/ids
-  can't drift). ✅ 9. **GIFSY settings read-only "Security & Platform Config"** (#101, GIFSY_ADMIN-only — OTP expiry/attempts/resend
-  window, JWT access TTL, refresh + assumed TTLs; new `auth.constants.ts` = single source of truth, auth enforces + getSettings
-  displays from it, no drift). ✅ 10. **force-logout** (self `POST /v1/auth/logout-all` + profile button; admin per-user
-  `POST /admin/users/:id/revoke-sessions` (tenant-scoped) + /admin/users row action; reuse `revokeAllSessionsForUser`, no migration;
-  not-instant caveat encoded per trap #4). **⏳ owner UAT + staging runtime-verify pending the staging deploy of `873a2ec`.**
-  **8. §A-DOMAIN PULLED** (needs a `Client.domains` Prisma migration + tenant-resolver rewrite from pure-map to cached DB lookup;
-  backlog rates it 4–7 days / Medium risk → does NOT fit a code-only cutover; it's a "before client #2" item, owner decision to
-  schedule it as its own migration-bearing build).
+**C. Buildable now — C-batch SHIPPED** (`873a2ec`): ✅ C7 `/admin/outlets/ids` lite endpoint · ✅ C9 GIFSY read-only "Security &
+  Platform Config" (#101, `auth.constants.ts` single-source-of-truth) · ✅ C10 force-logout (self `/v1/auth/logout-all` + admin
+  per-user `/admin/users/:id/revoke-sessions`). **8. §A-DOMAIN still PULLED** — needs a `Client.domains` Prisma migration +
+  tenant-resolver rewrite (pure-map→cached DB lookup; 4–7 days/Medium) → does NOT fit a code-only cutover; owner to schedule as its
+  own migration-bearing build **before client #2**.
 **D. LATER (POST-GO-LIVE-BACKLOG):** multi-tenant SSR branding, configurable RBAC (AF-12 OFF), WhatsApp per-tenant generalization,
   OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics/trends, D1 tech-debt residuals.
-**HOUSEKEEPING:** task-list #90–95 ("UAT Agent 1–5") are a STALE pre-UAT plan superseded by the owner-driven loop — prune them;
-  #74 (owner ops) is mostly DONE (monitoring + backups/PITR ON; only optional cred-rotation left).
+**KNOWN OPEN POINTS / GAPS (small, non-blocking — SURFACE to the owner if relevant; per [[clarify-before-imperfect-build]] don't
+  silently patch, ask):**
+  - **Sales KYC list is now a COMPLETE per-rep outlet view** (all states incl. long-approved). If a big manager finds it noisy, an
+    option is to hide fully-approved by default (revealed via the Approved filter) — NOT built; owner may want it as-is.
+  - **Member filter edge:** an APPROVED outlet submitted by someone OUTSIDE the selected member's branch still matches only by
+    submitter (not assignee), because `/api/kyc` carries no assignment. Rare for field-rep self-enrollment; only fully closes if
+    `/api/kyc` returns the outlet's assignment.
+  - **"Vacant" hierarchy seats** appear in the member filter (now labelled with their emp-code). Could hide them entirely — NOT
+    built; owner to decide.
+  - **§A-DOMAIN** (tenant domain hard-coded from slug) — needed before client #2 (migration; see C-8).
+**HOUSEKEEPING:** #90–95 already pruned; #74 (owner ops) mostly done (monitoring + backups/PITR ON; only optional cred-rotation left).
 
 Now: greet the owner. **🚀 CUTOVER #2 IS DONE (2026-07-01) — prod is live on `a2f5929`, and the DEOLEO TENANT is CREATED + ACTIVE.**
 Cutover #2 shipped the onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate; applied migration
@@ -386,14 +399,24 @@ was onboarded via the fixed wizard (slug=`deoleo`) then flipped `ONBOARDING→AC
 its config = platform defaults (conversion `1`, expiry null, visibility OFF). **Owner-gated Deoleo go-live: ✅ conversion rate=1
 (verified backend) · ✅ first CLIENT_ADMIN created (Khushi Agarwal, prod-verified CLIENT_ADMIN/deoleo) · ⏳ load real master data
 (#76 — the LAST hard blocker, waits on the client's files) · ⏳ #143 WhatsApp `deoleo_kyc_approval` runtime-verify (code-ready,
-template APPROVED — needs a real approval+phone).** **develop is AHEAD at `97c5089` (34 commits, ALL on staging now — both
-`gifsy-api-staging` + `gifsy-frontend-staging` serve `staging-97c5089`), riding the NEXT owner-triggered cutover; prod unchanged at
+template APPROVED — needs a real approval+phone).** **develop is AHEAD at `a4c6def` (code, ALL on staging now — both
+`gifsy-api-staging` + `gifsy-frontend-staging` serve `staging-a4c6def`), riding the NEXT owner-triggered cutover; prod unchanged at
 `a2f5929`.** Scale/ops COMPLETE on develop (pagination, observability O1+O2, log-leak fix, KYC-submit-500, ASM enrollment,
 conversion-rate editor, Rejected/Re-upload, download-helper sweep, WhatsApp-post-OTP, OTP-gates-routing, KYC-PDF render,
 not-interested-404). **This session (NEWEST-36→40, see DONE-THIS-SESSION):** Outlet-Types+deep-link, targets-all-outlets+KPI-gate,
 targets-500 chunk fix, §A-ONBOARDING client activate/edit+footgun, re-KYC visibility (derivation+list+dashboard+tasks for the whole
 re-entry family), 4 money-path scale-bug fixes, onboarding-save-revert fix — all gate-green + adversarially verified. **The
-re-KYC/rejected-family + onboarding-save fixes are FE — a frontend staging redeploy already landed (`staging-97c5089`).**
+re-KYC/rejected-family + onboarding-save fixes are FE — a frontend staging redeploy already landed (that batch = `97c5089`).**
+**PLUS the LATER 2026-07-03 batch (`873a2ec`→`a4c6def`, on `staging-a4c6def`, gate 1369/1763 + independently audited):** the
+buildable-now **C-batch** (C7 `/admin/outlets/ids` · C9 GIFSY security-config #101 via `auth.constants.ts` · C10 force-logout) +
+the **sales-KYC/UX batch** — the KYC list is now **ASSIGNMENT-DRIVEN** (an outlet shows to its assignee XSR + SO + ASM regardless
+of who filed it; supersedes the "submitter-scoped list" model, RESUME trap #7 UPDATE); branch member-filter (getTeam
+`submitterUserIds` + buildOutlets `assignedUserId`) with emp-code·name labels + role-contextual "All XSR/SO" placeholder
+(`childRole`); KYC-list order Re-KYC→Rejected→Pending→Approved→Not-Interested (`kycSubmissionOrderRank`, ≠ Outlets `kycOrderRank`);
+Outlets targets-for-ALL + Approved badge; XSR-no-Approval-Pending; profile Visibility-tile removed; Program-Category-OPTIONAL on
+outlet upload — **plus** iOS PWA status-bar safe-area (sales navy-immersive / partner brand-tinted strip = Option C; Android needs
+none) + per-tenant browser favicon. **Learning baked in: META-LESSON 2 ([[clarify-before-imperfect-build]]) — ask before shipping
+a knowingly-imperfect fix.**
 **NEXT = owner UAT-tests this batch on staging, then triggers the cutover; + master data #76 when files arrive** (nothing else queued);
 notifications/P7 still PAUSED (events flag-OFF; email provider TBD, ZeptoMail vs SES). Required onboarding-flow builds logged in
 POST-GO-LIVE-BACKLOG §A-DOMAIN + §A-ONBOARDING (incl. the GIFSY_ADMIN-in-tenant-context
