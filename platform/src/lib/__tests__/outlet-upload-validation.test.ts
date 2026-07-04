@@ -165,6 +165,21 @@ describe('outlet master row validation — happy paths (CREATE)', () => {
     expect(r2.rows[0].status).toBe('OK');
   });
 
+  it('O11b — Program Name & Category are case-INSENSITIVE and canonicalised to the configured spelling', () => {
+    const row = makeRow({ programName: 'trade loyalty', programCategory: 'PREMIUM' });
+    const result = validateOutletUpload([row], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].status).toBe('OK');
+    // The row object is what gets POSTed + stored — it's rewritten to the configured casing.
+    expect(row.programName).toBe('Trade Loyalty');
+    expect(row.programCategory).toBe('Premium');
+  });
+
+  it('O11c — a program genuinely not in the list is still rejected (not just wrong case)', () => {
+    const result = validateOutletUpload([makeRow({ programName: 'No Such Program' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].status).toBe('ERROR');
+    expect(result.rows[0].errors.join(' ')).toContain('not in the configured list');
+  });
+
   it('O12 — distributor ID and name are optional (empty accepted)', () => {
     const result = validateOutletUpload([makeRow({ distributorId: '', distributorName: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].status).toBe('OK');

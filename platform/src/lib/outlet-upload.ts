@@ -202,6 +202,18 @@ export function parseReKYCFlagRows(rawRows: Record<string, unknown>[]): ReKYCFla
   }));
 }
 
+/**
+ * Case-INSENSITIVE lookup that returns the CONFIGURED (canonical) spelling, or undefined
+ * if there's no match. Program Name / Program Category are matched this way so an upload of
+ * "trade loyalty" resolves to the configured "Trade Loyalty" — and the caller rewrites the
+ * cell to the canonical value so what's stored (and later filtered on) has consistent casing.
+ * (Outlet Type is already case-insensitive via its own uppercased set.)
+ */
+function canonicalValue(value: string, list: string[]): string | undefined {
+  const needle = value.trim().toLowerCase();
+  return list.find((v) => v.trim().toLowerCase() === needle);
+}
+
 // ─── Outlet Addition Validation ───────────────────────────────────────────────
 
 export function validateOutletUpload(
@@ -266,16 +278,27 @@ export function validateOutletUpload(
         errors.push('Outlet Name is required');
       }
 
-      // 5. Program Name must be in configured list
+      // 5. Program Name must be in the configured list (case-insensitive; canonicalised).
       if (!row.programName) {
         errors.push('Program Name is required');
-      } else if (!validPrograms.includes(row.programName)) {
-        errors.push(`Program Name "${row.programName}" is not in the configured list. Valid values: ${validPrograms.join(', ')}`);
+      } else {
+        const canon = canonicalValue(row.programName, validPrograms);
+        if (!canon) {
+          errors.push(`Program Name "${row.programName}" is not in the configured list. Valid values: ${validPrograms.join(', ')}`);
+        } else {
+          row.programName = canon; // store the configured spelling regardless of the cell's case
+        }
       }
 
-      // 6. Program Category is OPTIONAL (owner 2026-07-03); if provided it must be a configured value.
-      if (row.programCategory && !validCategories.includes(row.programCategory)) {
-        errors.push(`Program Category "${row.programCategory}" is not in the configured list. Valid values: ${validCategories.join(', ')}`);
+      // 6. Program Category is OPTIONAL (owner 2026-07-03); if provided it must be a configured value
+      //    (case-insensitive; canonicalised).
+      if (row.programCategory) {
+        const canon = canonicalValue(row.programCategory, validCategories);
+        if (!canon) {
+          errors.push(`Program Category "${row.programCategory}" is not in the configured list. Valid values: ${validCategories.join(', ')}`);
+        } else {
+          row.programCategory = canon;
+        }
       }
 
       // 7. Outlet Type must be valid enum
@@ -332,13 +355,23 @@ export function validateOutletUpload(
         }
       }
 
-      // Validate any provided fields
-      if (row.programName && !validPrograms.includes(row.programName)) {
-        errors.push(`Program Name "${row.programName}" is not in the configured list. Valid values: ${validPrograms.join(', ')}`);
+      // Validate any provided fields (Program Name / Category: case-insensitive; canonicalised).
+      if (row.programName) {
+        const canon = canonicalValue(row.programName, validPrograms);
+        if (!canon) {
+          errors.push(`Program Name "${row.programName}" is not in the configured list. Valid values: ${validPrograms.join(', ')}`);
+        } else {
+          row.programName = canon;
+        }
       }
 
-      if (row.programCategory && !validCategories.includes(row.programCategory)) {
-        errors.push(`Program Category "${row.programCategory}" is not in the configured list. Valid values: ${validCategories.join(', ')}`);
+      if (row.programCategory) {
+        const canon = canonicalValue(row.programCategory, validCategories);
+        if (!canon) {
+          errors.push(`Program Category "${row.programCategory}" is not in the configured list. Valid values: ${validCategories.join(', ')}`);
+        } else {
+          row.programCategory = canon;
+        }
       }
 
       if (row.outletType && !validTypeSet.has(row.outletType.toUpperCase())) {
