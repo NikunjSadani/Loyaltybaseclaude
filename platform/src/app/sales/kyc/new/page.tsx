@@ -17,6 +17,10 @@ import { SearchableSelect } from '@/components/ui/searchable-select';
 import { isValidUpiId } from '@/lib/upi-utils';
 import { INDIAN_STATES } from '@/lib/indian-states';
 import { isValidGstin, panFromGstin, GSTIN_LENGTH } from '@/lib/gstin';
+import {
+  hasReKycFlags, reKycRemarks, flaggedLabels,
+  isWizardFieldFlagged, isWizardFieldEditable,
+} from '@/lib/rekyc-fields';
 import type { GeoCapture } from '@/types';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -359,11 +363,24 @@ export default function NewKYCPage() {
     return () => clearInterval(t);
   }, [submitOtpCountdown]);
 
-  /* Derived: is this a re-entry (re-KYC / rejected / resubmission) flow? */
-  const isReKYC = !!selectedOutlet && ['RE_KYC_REQUIRED', 'REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED', 'DRAFT'].includes(selectedOutlet.kycStatus as string);
+  /* Derived: is this a re-entry (re-KYC / rejected / resubmission) flow?
+   * Also fires when the outlet carries admin re-KYC FIELD FLAGS even if its
+   * submission status is APPROVED (a bulk / field-level re-KYC request on a live
+   * outlet) — so such an outlet enters the locked-edit mode below. */
+  const isReKYC = !!selectedOutlet && (
+    ['RE_KYC_REQUIRED', 'REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED', 'DRAFT'].includes(selectedOutlet.kycStatus as string) ||
+    hasReKycFlags(selectedOutlet.reKycFlags)
+  );
 
-  /** Returns true when a form field or doc key is flagged for re-capture */
-  const isReKYCFlagged = (key: string) => !!(isReKYC && selectedOutlet?.reKycFlags?.[key]);
+  /** True when a wizard field/doc slot (by its wizard key) is flagged for re-capture.
+   *  Delegates to the canonical map so the amber highlight uses the RIGHT reKycFlags
+   *  keys (fixes the old mobile/GST-cert/shop-doc mismatches). */
+  const isReKYCFlagged = (wizardKey: string) => isWizardFieldFlagged(selectedOutlet?.reKycFlags, wizardKey);
+
+  /** On re-entry with specific field flags, every NON-flagged mapped field/doc is
+   *  LOCKED (disabled but pre-filled). A blanket re-KYC (no field flags) or a
+   *  first-time KYC keeps everything editable. */
+  const isFieldLocked = (wizardKey: string) => !isWizardFieldEditable(selectedOutlet?.reKycFlags, wizardKey);
 
   /* ── Pre-fill partner class from outlet ── */
   useEffect(() => {
@@ -1111,7 +1128,11 @@ export default function NewKYCPage() {
    * KYC list's "Edit & Resubmit" deep-link (?outletId=), which pre-selects from the
    * full roster and bypasses this filter. */
   const STARTABLE_KYC = new Set(['NOT_STARTED', 'PENDING', 'DRAFT']);
-  const isStartable = (o: AssignedOutlet) => !o.rawStatus || STARTABLE_KYC.has(o.rawStatus);
+  const isStartable = (o: AssignedOutlet) =>
+    !o.rawStatus || STARTABLE_KYC.has(o.rawStatus) ||
+    // A bulk / field-level re-KYC request makes even an APPROVED outlet selectable
+    // (it enters locked-edit mode) — otherwise the rep couldn't correct it here.
+    hasReKycFlags(o.reKycFlags);
   const startableOutlets = assignedOutlets.filter(
     (o) => isStartable(o) && !dismissedOutlets.has(o.outletId),
   );
@@ -1155,17 +1176,24 @@ export default function NewKYCPage() {
   const inputCls = 'w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)] bg-white';
   const labelCls = 'text-xs font-medium text-gray-600 block mb-1';
 
-  /** Extra classes for a field flagged for re-entry in Re-KYC mode */
-  const flagCls = (key: string) =>
-    isReKYCFlagged(key)
+  /** Extra classes for a mapped field, by its wizard key: amber when flagged for
+   *  re-entry; a muted/greyed look when LOCKED (non-flagged on a field-level re-KYC). */
+  const flagCls = (wizardKey: string) =>
+    isReKYCFlagged(wizardKey)
       ? 'border-amber-400 bg-amber-50 focus:border-amber-500 focus:ring-amber-200/40'
-      : '';
+      : isFieldLocked(wizardKey)
+        ? 'bg-gray-50 text-gray-500 cursor-not-allowed'
+        : '';
 
   /** Small badge shown next to a flagged field's label */
   const FlagBadge = ({ field }: { field: string }) =>
     isReKYCFlagged(field) ? (
       <span className="ml-1.5 text-[10px] font-semibold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-full border border-amber-200 align-middle">
         Re-enter required
+      </span>
+    ) : isFieldLocked(field) ? (
+      <span className="ml-1.5 text-[10px] font-semibold text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded-full border border-gray-200 align-middle">
+        Locked
       </span>
     ) : null;
 
@@ -1178,13 +1206,16 @@ export default function NewKYCPage() {
     hint: string; inputRef: React.RefObject<HTMLInputElement | null>; accept?: string;
   }) => {
     const file = docs[docKey];
+    // On a field-level re-KYC, a non-flagged doc slot is LOCKED: it stays visible /
+    // pre-filled but the upload + remove/replace controls are disabled.
+    const locked = isFieldLocked(docKey);
     return (
       <div>
         <label className={labelCls}>{label} {required && <span className="text-[var(--brand-primary)]">*</span>}</label>
-        <input ref={inputRef} type="file" accept={accept} className="hidden" onChange={(e) => handleFileSelect(docKey, e)} />
+        <input ref={inputRef} type="file" accept={accept} className="hidden" disabled={locked} onChange={(e) => handleFileSelect(docKey, e)} />
         {!file ? (
-          <button type="button" onClick={() => inputRef.current?.click()}
-            className="w-full border-2 border-dashed border-gray-200 rounded-xl p-4 flex flex-col items-center gap-2 hover:border-[var(--brand-primary)]/40 hover:bg-green-50/30 transition-colors active:scale-[0.98]">
+          <button type="button" disabled={locked} onClick={() => inputRef.current?.click()}
+            className="w-full border-2 border-dashed border-gray-200 rounded-xl p-4 flex flex-col items-center gap-2 hover:border-[var(--brand-primary)]/40 hover:bg-green-50/30 transition-colors active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-gray-200 disabled:hover:bg-transparent disabled:active:scale-100">
             <div className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center">
               <Upload className="h-5 w-5 text-gray-400" />
             </div>
@@ -1192,7 +1223,7 @@ export default function NewKYCPage() {
             <p className="text-[11px] text-gray-400">{hint}</p>
           </button>
         ) : (
-          <FilePreview file={file} onRemove={() => removeDoc(docKey)} onReplace={() => inputRef.current?.click()} />
+          <FilePreview file={file} locked={locked} onRemove={() => removeDoc(docKey)} onReplace={() => inputRef.current?.click()} />
         )}
       </div>
     );
@@ -1206,12 +1237,14 @@ export default function NewKYCPage() {
     required?: boolean; hint: string; facing?: 'user' | 'environment';
   }) => {
     const file = docs[docKey];
+    // Non-flagged photo slot on a field-level re-KYC → locked (visible, no re-capture).
+    const locked = isFieldLocked(docKey);
     return (
       <div>
         <label className={labelCls}>{label} {required && <span className="text-[var(--brand-primary)]">*</span>}</label>
         {!file ? (
-          <button type="button" onClick={() => openCamera(docKey, facing)}
-            className="w-full border-2 border-dashed border-[var(--brand-primary)]/30 rounded-xl p-4 flex flex-col items-center gap-2 hover:border-[var(--brand-primary)]/60 hover:bg-green-50/30 transition-colors active:scale-[0.98] bg-green-50/10">
+          <button type="button" disabled={locked} onClick={() => openCamera(docKey, facing)}
+            className="w-full border-2 border-dashed border-[var(--brand-primary)]/30 rounded-xl p-4 flex flex-col items-center gap-2 hover:border-[var(--brand-primary)]/60 hover:bg-green-50/30 transition-colors active:scale-[0.98] bg-green-50/10 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-[var(--brand-primary)]/30 disabled:hover:bg-green-50/10 disabled:active:scale-100">
             <div className="w-10 h-10 bg-[var(--brand-primary)]/10 rounded-full flex items-center justify-center">
               <Camera className="h-5 w-5 text-[var(--brand-primary)]" />
             </div>
@@ -1219,7 +1252,7 @@ export default function NewKYCPage() {
             <p className="text-[11px] text-gray-400">{hint}</p>
           </button>
         ) : (
-          <FilePreview file={file} onRemove={() => removeDoc(docKey)} onReplace={() => openCamera(docKey, facing)} replaceLabel="Retake" />
+          <FilePreview file={file} locked={locked} onRemove={() => removeDoc(docKey)} onReplace={() => openCamera(docKey, facing)} replaceLabel="Retake" />
         )}
       </div>
     );
@@ -1227,9 +1260,9 @@ export default function NewKYCPage() {
 
   /* ── FilePreview ── */
   const FilePreview = ({
-    file, onRemove, onReplace, replaceLabel = 'Change',
+    file, onRemove, onReplace, replaceLabel = 'Change', locked = false,
   }: {
-    file: UploadedFile; onRemove: () => void; onReplace: () => void; replaceLabel?: string;
+    file: UploadedFile; onRemove: () => void; onReplace: () => void; replaceLabel?: string; locked?: boolean;
   }) => (
     <div className={`border rounded-xl overflow-hidden ${
       file.uploadState === 'error' ? 'border-red-300' : 'border-gray-200'
@@ -1289,9 +1322,9 @@ export default function NewKYCPage() {
           )}
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
-          <button type="button" onClick={onReplace} disabled={file.uploadState === 'uploading'}
+          <button type="button" onClick={onReplace} disabled={locked || file.uploadState === 'uploading'}
             className="text-[11px] text-[var(--brand-primary)] font-medium hover:underline disabled:opacity-40 disabled:cursor-not-allowed">{replaceLabel}</button>
-          <button type="button" onClick={onRemove} disabled={file.uploadState === 'uploading'}
+          <button type="button" onClick={onRemove} disabled={locked || file.uploadState === 'uploading'}
             className="p-0.5 rounded-full hover:bg-gray-100 text-gray-400 disabled:opacity-40 disabled:cursor-not-allowed"><X className="h-3.5 w-3.5" /></button>
         </div>
       </div>
@@ -1468,12 +1501,14 @@ export default function NewKYCPage() {
         <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
           <RefreshCw className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
-            {Object.values(selectedOutlet?.reKycFlags ?? {}).some(Boolean) ? (
+            {hasReKycFlags(selectedOutlet?.reKycFlags) ? (
               <>
-                <p className="text-xs font-semibold text-amber-800">Re-KYC mode — some fields need re-entering</p>
+                <p className="text-xs font-semibold text-amber-800" data-testid="rekyc-summary-banner">
+                  Re-KYC requested for: {flaggedLabels(selectedOutlet?.reKycFlags).join(', ')}.
+                </p>
                 <p className="text-xs text-amber-700 mt-0.5">
-                  Other fields are pre-filled from the existing KYC.{' '}
-                  <span className="font-semibold">Fields highlighted in amber must be re-entered.</span>
+                  Every other field is pre-filled and locked for reference —{' '}
+                  <span className="font-semibold">only the fields highlighted in amber are editable.</span>
                 </p>
               </>
             ) : (
@@ -1485,12 +1520,15 @@ export default function NewKYCPage() {
                 </p>
               </>
             )}
-            {selectedOutlet?.reKycRemarks && (
-              <div className="mt-2 rounded-lg bg-amber-100/70 border border-amber-300 px-2.5 py-1.5">
-                <p className="text-[11px] font-semibold text-amber-800">Reviewer remark — fix this:</p>
-                <p className="text-xs text-amber-900 mt-0.5">{selectedOutlet.reKycRemarks}</p>
-              </div>
-            )}
+            {(() => {
+              const remark = reKycRemarks(selectedOutlet?.reKycFlags) || selectedOutlet?.reKycRemarks || '';
+              return remark ? (
+                <div className="mt-2 rounded-lg bg-amber-100/70 border border-amber-300 px-2.5 py-1.5">
+                  <p className="text-[11px] font-semibold text-amber-800">Reviewer remark — fix this:</p>
+                  <p className="text-xs text-amber-900 mt-0.5">{remark}</p>
+                </div>
+              ) : null;
+            })()}
           </div>
         </div>
       )}
@@ -1699,23 +1737,25 @@ export default function NewKYCPage() {
 
             {/* Owner name */}
             <div>
-              <label className={labelCls}>Owner / Contact Name *<FlagBadge field="ownerName" /></label>
-              <input className={`${inputCls} ${flagCls('ownerName')}`} placeholder="Full name" value={form.partnerName} onChange={set('partnerName')} />
+              <label className={labelCls}>Owner / Contact Name *<FlagBadge field="partnerName" /></label>
+              <input className={`${inputCls} ${flagCls('partnerName')}`} placeholder="Full name" value={form.partnerName} onChange={set('partnerName')}
+                disabled={isFieldLocked('partnerName')} readOnly={isFieldLocked('partnerName')} />
             </div>
 
             {/* Mobile — conflict check only, OTP happens after final submit */}
             <div>
-              <label className={labelCls}>Mobile Number *<FlagBadge field="mobileNumber" /></label>
+              <label className={labelCls}>Mobile Number *<FlagBadge field="mobile" /></label>
               <div className="flex gap-2">
                 <span className="px-3 py-2.5 bg-gray-50 border border-r-0 border-gray-200 rounded-l-xl text-sm text-gray-500 shrink-0">+91</span>
                 <input
-                  className={`${inputCls} rounded-l-none flex-1 ${
+                  className={`${inputCls} rounded-l-none flex-1 ${flagCls('mobile')} ${
                     mobileCheck === 'ok' ? 'bg-emerald-50 border-emerald-200' :
                     mobileCheck === 'outlet_conflict' || mobileCheck === 'employee_conflict' ? 'border-red-400 bg-red-50 focus:border-red-400 focus:ring-red-200/40' : ''
                   }`}
                   placeholder="9876543210" maxLength={10} value={form.mobile}
                   onChange={handleMobileChange} inputMode="numeric"
-                  readOnly={mobileCheck === 'outlet_conflict' || mobileCheck === 'employee_conflict'}
+                  disabled={isFieldLocked('mobile')}
+                  readOnly={isFieldLocked('mobile') || mobileCheck === 'outlet_conflict' || mobileCheck === 'employee_conflict'}
                 />
                 {mobileCheck === 'checking' && (
                   <div className="flex items-center px-3 shrink-0 text-gray-400">
@@ -1780,6 +1820,8 @@ export default function NewKYCPage() {
                 maxLength={GSTIN_LENGTH}
                 value={form.gstNumber}
                 onChange={handleGSTChange}
+                disabled={isFieldLocked('gstNumber')}
+                readOnly={isFieldLocked('gstNumber')}
               />
               {form.gstNumber.length > 0 && form.gstNumber.length < GSTIN_LENGTH && (
                 <p className="text-[11px] text-amber-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> {GSTIN_LENGTH - form.gstNumber.length} more characters needed</p>
@@ -1800,7 +1842,9 @@ export default function NewKYCPage() {
                 <FlagBadge field="panNumber" />
               </label>
               <input className={`${inputCls} ${form.gstNumber.length >= 12 ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : ''} ${flagCls('panNumber')}`}
-                placeholder="AAPFU0939F" value={form.panNumber} onChange={set('panNumber')} readOnly={form.gstNumber.length >= 12} />
+                placeholder="AAPFU0939F" value={form.panNumber} onChange={set('panNumber')}
+                disabled={isFieldLocked('panNumber')}
+                readOnly={isFieldLocked('panNumber') || form.gstNumber.length >= 12} />
             </div>
 
             {/* KYC Documents */}
@@ -1860,17 +1904,20 @@ export default function NewKYCPage() {
           <CardContent className="space-y-4">
 
             <div>
-              <label className={labelCls}>Street Address *<FlagBadge field="streetAddress" /></label>
-              <input className={`${inputCls} ${flagCls('streetAddress')}`} placeholder="Shop no., street name" value={form.address} onChange={set('address')} />
+              <label className={labelCls}>Street Address *<FlagBadge field="address" /></label>
+              <input className={`${inputCls} ${flagCls('address')}`} placeholder="Shop no., street name" value={form.address} onChange={set('address')}
+                disabled={isFieldLocked('address')} readOnly={isFieldLocked('address')} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className={labelCls}>City *<FlagBadge field="city" /></label>
-                <input className={`${inputCls} ${flagCls('city')}`} placeholder="City" value={form.city} onChange={set('city')} />
+                <input className={`${inputCls} ${flagCls('city')}`} placeholder="City" value={form.city} onChange={set('city')}
+                  disabled={isFieldLocked('city')} readOnly={isFieldLocked('city')} />
               </div>
               <div>
                 <label className={labelCls}>Pincode *<FlagBadge field="pincode" /></label>
-                <input className={`${inputCls} ${flagCls('pincode')}`} placeholder="400001" maxLength={6} value={form.pincode} onChange={set('pincode')} inputMode="numeric" />
+                <input className={`${inputCls} ${flagCls('pincode')}`} placeholder="400001" maxLength={6} value={form.pincode} onChange={set('pincode')} inputMode="numeric"
+                  disabled={isFieldLocked('pincode')} readOnly={isFieldLocked('pincode')} />
               </div>
             </div>
             <div>
@@ -1881,6 +1928,7 @@ export default function NewKYCPage() {
                 onChange={(v) => setForm((f) => ({ ...f, state: v }))}
                 placeholder="Maharashtra"
                 className={`${inputCls} ${flagCls('state')}`}
+                disabled={isFieldLocked('state')}
                 testIdPrefix="state-select"
                 aria-label="State"
               />
@@ -2068,7 +2116,7 @@ export default function NewKYCPage() {
           <CardContent className="space-y-4">
 
             {/* Re-KYC bank flag notice */}
-            {(isReKYCFlagged('bankName') || isReKYCFlagged('accountNumber') || isReKYCFlagged('ifscCode') || isReKYCFlagged('upiId') || isReKYCFlagged('cancelledCheque')) && (
+            {(isReKYCFlagged('bankName') || isReKYCFlagged('accountHolderName') || isReKYCFlagged('accountNumber') || isReKYCFlagged('ifscCode') || isReKYCFlagged('upiId') || isReKYCFlagged('cheque')) && (
               <div className="flex items-start gap-2 p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-700">
                 <RefreshCw className="h-3.5 w-3.5 shrink-0 mt-0.5" />
                 <span>Bank details have been flagged for re-entry. Please re-fill the highlighted fields and re-upload the cancelled cheque.</span>
@@ -2084,6 +2132,13 @@ export default function NewKYCPage() {
               accountNumber={form.accountNumber}
               ifscCode={form.ifscCode}
               onFieldChange={(field) => set(field as keyof typeof form)}
+              disabledFields={{
+                bankName:          isFieldLocked('bankName'),
+                accountHolderName: isFieldLocked('accountHolderName'),
+                accountNumber:     isFieldLocked('accountNumber'),
+                ifscCode:          isFieldLocked('ifscCode'),
+                upiId:             isFieldLocked('upiId'),
+              }}
               upiId={form.upiId}
               onUpiChange={(val) => {
                 setForm((f) => ({ ...f, upiId: val }));
@@ -2095,8 +2150,8 @@ export default function NewKYCPage() {
               onPaymentGeoTrigger={capturePaymentGeo}
             >
               {/* Cheque upload — shown inside bank mode */}
-              <div className={isReKYCFlagged('cancelledCheque') ? 'rounded-xl border border-amber-300 p-2 bg-amber-50/40' : ''}>
-                {isReKYCFlagged('cancelledCheque') && (
+              <div className={isReKYCFlagged('cheque') ? 'rounded-xl border border-amber-300 p-2 bg-amber-50/40' : ''}>
+                {isReKYCFlagged('cheque') && (
                   <p className="text-[10px] font-semibold text-amber-700 mb-1.5 flex items-center gap-1">
                     <RefreshCw className="h-2.5 w-2.5" /> Re-upload required
                   </p>

@@ -13,6 +13,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { KycService } from './kyc.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
@@ -280,7 +281,7 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
           // null-intent (common case) OR not-declined — bare `{not}` excludes NULL rows.
           OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
         },
-        data: { isActive: true, reactivatedAt: expect.any(Date) },
+        data: { isActive: true, reactivatedAt: expect.any(Date), reKycFlags: Prisma.DbNull },
       });
     });
 

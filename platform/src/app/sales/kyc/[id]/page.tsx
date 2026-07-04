@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button';
 import { KYCStatus, type ApprovalEvent, type KYCSubmitterRole } from '@/types';
 import { getRole } from '@/lib/sales-role';
 import { useGifsySettings } from '@/lib/gifsy-settings';
+import { hasReKycFlags, reKycRemarks, flaggedLabels, type ReKycFlags } from '@/lib/rekyc-fields';
 import { RejectionModal } from './RejectionModal';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -45,6 +46,9 @@ interface KYCDetail {
   submittedByName: string;
   lastOrderDate?: string;
   rejectionReason?: string;
+  // Admin's per-field re-KYC request (bulk-upload or reviewer flagged). Drives the
+  // amber re-KYC banner + re-entry even when status stays APPROVED.
+  reKycFlags?: ReKycFlags;
   gstNumber?: string;
   panNumber?: string;
   bankName?: string;
@@ -107,6 +111,7 @@ interface ApiSalesKYC {
   status: string;
   submittedAt: string;
   rejectionReason?: string | null;
+  reKycFlags?: ReKycFlags;
   user: { id: string; name: string; phone: string; role: string };
   partner: {
     id: string;
@@ -212,6 +217,7 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
     submittedByRole: (s.user.role as KYCSubmitterRole) ?? 'SO',
     submittedByName: s.user.name,
     rejectionReason: s.rejectionReason ?? undefined,
+    reKycFlags: s.reKycFlags ?? undefined,
     gstNumber: s.partner.gstNumber,
     panNumber: s.partner.panNumber,
     bankName: s.partner.bankName,
@@ -493,6 +499,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           submittedByRole: (s.user?.role as KYCSubmitterRole) ?? 'SO',
           submittedByName: s.user?.name                       ?? '',
           rejectionReason: s.rejectionReason                  ?? undefined,
+          reKycFlags:      s.reKycFlags                        ?? undefined,
           gstNumber:       s.partner?.gstNumber,
           panNumber:       s.partner?.panNumber,
           bankName:        s.partner?.bankName,
@@ -591,13 +598,17 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
     }
   };
 
-  /* Re-entry: route the junior into the pre-filled new-KYC wizard (selects by outlet). */
+  /* Re-entry: route the junior into the pre-filled new-KYC wizard (selects by outlet).
+     Also fires on admin per-field re-KYC flags — a bulk-upload flag leaves the status
+     APPROVED (so none of the status checks catch it), but the outlet still needs
+     re-capture, so an APPROVED-but-flagged outlet must show "Edit & Resubmit". */
   const isReEntry =
     kyc.status === KYCStatus.DRAFT ||
     kyc.status === KYCStatus.REJECTED ||
     kyc.status === KYCStatus.RE_UPLOAD_REQUIRED ||
     kyc.status === KYCStatus.RESUBMISSION_REQUIRED ||
-    kyc.status === KYCStatus.RE_KYC_REQUIRED;
+    kyc.status === KYCStatus.RE_KYC_REQUIRED ||
+    hasReKycFlags(kyc.reKycFlags);
 
   /* ── "Redeem for Outlet" gate ──────────────────────────────────────────────
      Owner decision: the redeem-on-behalf action lives on the OUTLET DETAIL view
@@ -642,11 +653,33 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
         {statusCfg && <Badge variant={statusCfg.variant} className="shrink-0">{statusCfg.label}</Badge>}
       </div>
 
-      {/* Rejection / Re-KYC banner */}
+      {/* Rejection banner */}
       {kyc.rejectionReason && (
         <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 flex items-start gap-2">
           <XCircle className="h-4 w-4 text-red-500 shrink-0 mt-0.5" />
           <p className="text-sm text-red-700">{kyc.rejectionReason}</p>
+        </div>
+      )}
+
+      {/* Re-KYC requested — the admin flagged specific fields for re-capture (bulk upload
+          or reviewer). Distinct amber banner (vs the red rejection above); serves both the
+          rep who must resubmit and the sales-senior approver reviewing this outlet. */}
+      {hasReKycFlags(kyc.reKycFlags) && (
+        <div
+          data-testid="rekyc-banner"
+          className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-2"
+        >
+          <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-amber-800">Re-KYC requested</p>
+            <p className="text-xs text-amber-700 mt-0.5">
+              The following {flaggedLabels(kyc.reKycFlags).length === 1 ? 'field needs' : 'fields need'} re-capture:{' '}
+              <span className="font-medium">{flaggedLabels(kyc.reKycFlags).join(', ')}</span>
+            </p>
+            {reKycRemarks(kyc.reKycFlags) && (
+              <p className="text-xs text-amber-700 mt-1 italic">{reKycRemarks(kyc.reKycFlags)}</p>
+            )}
+          </div>
         </div>
       )}
 

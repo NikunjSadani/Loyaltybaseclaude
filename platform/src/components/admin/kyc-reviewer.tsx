@@ -29,6 +29,15 @@ interface KYCReviewerProps {
   onApprove: (id: string) => void;
   onReject: (id: string, reason: string) => void;
   onRequestReupload: (id: string, reason: string) => void;
+  /** Prisma document types the admin flagged for re-KYC (e.g. STORE_BOARD_PHOTO). Optional
+   *  — when set, the matching document tab + checklist row are amber-highlighted so the
+   *  Gifsy reviewer sees what was requested. Matched case-insensitively against doc.type. */
+  flaggedDocTypes?: string[];
+  /** Human labels of ALL flagged fields (incl. text-only fields with no document), for
+   *  the top re-KYC banner. Optional. */
+  flaggedLabels?: string[];
+  /** The admin's free-text re-KYC remark, shown in the banner. Optional. */
+  reKycRemarks?: string;
 }
 
 // Single source of truth shared with the sales senior-reject modal (the admin keeps
@@ -72,7 +81,15 @@ export function KYCReviewer({
   onApprove,
   onReject,
   onRequestReupload,
+  flaggedDocTypes,
+  flaggedLabels,
+  reKycRemarks,
 }: KYCReviewerProps) {
+  // doc.type is the lower-cased Prisma documentType (see admin/kyc/[id] mapping); the
+  // flagged list carries Prisma types (e.g. STORE_BOARD_PHOTO) — compare case-insensitively.
+  const flaggedSet = new Set((flaggedDocTypes ?? []).map((t) => t.toLowerCase()));
+  const isDocFlagged = (doc: KYCDocument) => flaggedSet.has(doc.type.toLowerCase());
+  const hasReKyc = (flaggedLabels?.length ?? 0) > 0 || flaggedSet.size > 0;
   const [selectedDoc, setSelectedDoc] = useState<KYCDocument | null>(documents[0] ?? null);
   const [zoomedDoc, setZoomedDoc] = useState<KYCDocument | null>(null);
   const [actionModal, setActionModal] = useState<'reject' | 'reupload' | null>(null);
@@ -121,25 +138,54 @@ export function KYCReviewer({
   };
 
   return (
+    <div className="flex flex-col gap-4 h-full">
+      {/* Re-KYC requested — admin flagged specific fields for re-capture. Lists the flagged
+          labels (incl. text-only fields) + remark; the matching doc tabs/checklist rows below
+          are amber-highlighted. Rendered only when flags were passed in. */}
+      {hasReKyc && (
+        <div
+          data-testid="rekyc-reviewer-banner"
+          className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-2"
+        >
+          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-amber-800">Re-KYC requested</p>
+            {(flaggedLabels?.length ?? 0) > 0 && (
+              <p className="text-xs text-amber-700 mt-0.5">
+                Flagged for re-capture: <span className="font-medium">{flaggedLabels!.join(', ')}</span>
+              </p>
+            )}
+            {reKycRemarks && <p className="text-xs text-amber-700 mt-1 italic">{reKycRemarks}</p>}
+          </div>
+        </div>
+      )}
+
     <div className="flex gap-4 h-full">
       {/* Left: Document list + viewer */}
       <div className="flex-1 flex flex-col gap-3">
         {/* Document tabs */}
         <div className="flex flex-wrap gap-2">
-          {documents.map((doc) => (
+          {documents.map((doc) => {
+            const flagged = isDocFlagged(doc);
+            return (
             <button
               key={doc.id}
               onClick={() => setSelectedDoc(doc)}
+              data-testid={flagged ? 'rekyc-flagged-doc-tab' : undefined}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
                 selectedDoc?.id === doc.id
                   ? 'border-[var(--brand-primary)] bg-red-50 text-[var(--brand-primary)]'
-                  : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+                  : flagged
+                    ? 'border-amber-300 bg-amber-50 text-amber-800'
+                    : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
               }`}
             >
               {docStatusIcon(doc.status)}
               {doc.label}
+              {flagged && <span className="text-[10px] font-semibold text-amber-700">Re-KYC</span>}
             </button>
-          ))}
+            );
+          })}
         </div>
 
         {/* Document viewer.
@@ -207,15 +253,24 @@ export function KYCReviewer({
             Document Checklist
           </h3>
           <div className="space-y-2">
-            {documents.map((doc) => (
-              <div key={doc.id} className="flex items-center gap-2">
+            {documents.map((doc) => {
+              const flagged = isDocFlagged(doc);
+              return (
+              <div
+                key={doc.id}
+                data-testid={flagged ? 'rekyc-flagged-checklist-row' : undefined}
+                className={`flex items-center gap-2 ${flagged ? 'bg-amber-50 -mx-1 px-1 py-0.5 rounded' : ''}`}
+              >
                 {docStatusIcon(doc.status)}
-                <span className="text-xs text-gray-700 flex-1">{doc.label}</span>
-                {doc.status === 'pending' && (
+                <span className={`text-xs flex-1 ${flagged ? 'text-amber-800 font-medium' : 'text-gray-700'}`}>{doc.label}</span>
+                {flagged ? (
+                  <span className="text-xs text-amber-700 font-semibold">Re-KYC</span>
+                ) : doc.status === 'pending' && (
                   <span className="text-xs text-amber-600 font-medium">Review</span>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
 
@@ -272,6 +327,7 @@ export function KYCReviewer({
           </div>
         </div>
       </div>
+    </div>
 
       {/* Zoom modal */}
       {zoomedDoc && (

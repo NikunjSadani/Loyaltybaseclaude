@@ -18,6 +18,9 @@ import {
 import Link from 'next/link';
 import { Spinner } from '@/components/ui/spinner';
 import { KYCReviewer } from '@/components/admin/kyc-reviewer';
+import {
+  hasReKycFlags, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags,
+} from '@/lib/rekyc-fields';
 import type { EntityType, GSTRegistrationType } from '@/lib/invoice';
 
 // ─── 7-field verification types (shared with approvals page) ─────────────────
@@ -89,6 +92,7 @@ interface ApiKycDetail {
   createdAt?: string;
   rejectionReason?: string | null;
   reviewerNotes?: string | null;
+  reKycFlags?: ReKycFlags;
   // KYC-captured geo (Prisma Decimal → JSON string on the wire).
   boardPhotoLat?: string | number | null; boardPhotoLng?: string | number | null;
   paymentLat?: string | number | null; paymentLng?: string | number | null;
@@ -123,6 +127,7 @@ type KycDetailShape = {
   auditLog: Array<{ action: string; user: string; timestamp: string; detail: string }>;
   documents: Array<{ id: string; type: string; label: string; url: string; status: 'pending' | 'verified' | 'rejected' }>;
   verificationItems: Array<{ fieldKey: string; decision: string; remark?: string | null; source?: string | null }>;
+  reKycFlags: ReKycFlags;
 };
 
 /** Coerce a KYC-captured lat/lng pair (Prisma Decimal → JSON string) into numbers.
@@ -144,6 +149,7 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
   };
   return {
     id:               s.id,
+    reKycFlags:       s.reKycFlags ?? null,
     verificationItems: s.verificationItems ?? [],
     // Human outlet ID for the header (KYC is partner-keyed → the enrolled outlet's code).
     // Prefer the real Outlet code; fall back to the partner code if no outlet is linked yet.
@@ -731,6 +737,9 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
               onApprove={handleApprove}
               onReject={handleReject}
               onRequestReupload={handleReupload}
+              flaggedDocTypes={hasReKycFlags(kyc.reKycFlags) ? flaggedDocTypes(kyc.reKycFlags) : undefined}
+              flaggedLabels={hasReKycFlags(kyc.reKycFlags) ? flaggedLabels(kyc.reKycFlags) : undefined}
+              reKycRemarks={reKycRemarks(kyc.reKycFlags) || undefined}
             />
           </div>
 

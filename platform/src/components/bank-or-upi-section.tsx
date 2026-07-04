@@ -31,6 +31,13 @@ export interface BankOrUpiSectionProps {
   onUpiChange: (value: string) => void;
 
   /**
+   * Per-field lock set (re-KYC locked-edit mode): any bank field whose key is
+   * present is rendered disabled + read-only. Pre-filled values stay visible.
+   * Omitted / empty → all editable (the normal case).
+   */
+  disabledFields?: Partial<Record<'bankName' | 'accountHolderName' | 'accountNumber' | 'ifscCode' | 'upiId', boolean>>;
+
+  /**
    * Called when a payment geo capture should be triggered in the parent.
    * Fires after a successful QR scan (the scan = the presence-at-outlet moment).
    * For cheque upload the parent triggers geo directly in handleFileSelect.
@@ -66,6 +73,7 @@ export function BankOrUpiSection({
   upiId,
   onUpiChange,
   onPaymentGeoTrigger,
+  disabledFields,
   children,
 }: BankOrUpiSectionProps) {
   const [qrScanning, setQrScanning] = useState(false);
@@ -161,6 +169,13 @@ export function BankOrUpiSection({
   // controlled prop, which the force-bank effect above is converging to 'bank').
   const effectiveMode: PaymentMode = upiEnabled ? paymentMode : 'bank';
 
+  // Locked (re-KYC non-flagged) bank field → muted, non-editable, but value stays shown.
+  const lockedInputCls = inputCls + ' disabled:bg-gray-50 disabled:text-gray-500 disabled:cursor-not-allowed';
+
+  // UPI locked on a re-KYC (upiId not flagged) → the scanned value stays visible but the
+  // rep cannot clear or re-scan it. (The backend also pins upiId; this is the UI half.)
+  const upiLocked = !!disabledFields?.upiId;
+
   return (
     <div className="space-y-4">
       {/* ── Mode toggle (hidden entirely when UPI is disabled for the tenant) ── */}
@@ -206,40 +221,48 @@ export function BankOrUpiSection({
           <div>
             <label className={labelCls}>Bank Name *</label>
             <input
-              className={inputCls}
+              className={lockedInputCls}
               placeholder="HDFC Bank"
               value={bankName}
               onChange={onFieldChange('bankName')}
+              disabled={!!disabledFields?.bankName}
+              readOnly={!!disabledFields?.bankName}
             />
           </div>
           <div>
             <label className={labelCls}>Account Holder Name *</label>
             <input
               data-testid="account-holder-name-input"
-              className={inputCls}
+              className={lockedInputCls}
               placeholder="As printed on the passbook"
               value={accountHolderName}
               onChange={onFieldChange('accountHolderName')}
               autoComplete="off"
+              disabled={!!disabledFields?.accountHolderName}
+              readOnly={!!disabledFields?.accountHolderName}
             />
           </div>
           <div>
             <label className={labelCls}>Account Number *</label>
             <input
-              className={inputCls}
+              className={lockedInputCls}
               placeholder="Account number"
               value={accountNumber}
               onChange={onFieldChange('accountNumber')}
               inputMode="numeric"
+              disabled={!!disabledFields?.accountNumber}
+              readOnly={!!disabledFields?.accountNumber}
             />
           </div>
           <div>
             <label className={labelCls}>IFSC Code *</label>
             <input
-              className={inputCls}
+              className={lockedInputCls}
               placeholder="HDFC0001234"
               value={ifscCode}
               onChange={onFieldChange('ifscCode')}
+              disabled={!!disabledFields?.ifscCode}
+              readOnly={!!disabledFields?.ifscCode}
             />
           </div>
           {/* Cheque upload slot — provided by parent */}
@@ -262,20 +285,22 @@ export function BankOrUpiSection({
                 <p className="text-xs font-semibold text-emerald-700">UPI ID Scanned</p>
                 <p className="text-xs font-mono text-emerald-800 truncate">{upiId}</p>
               </div>
-              <button
-                type="button"
-                data-testid="clear-scanned-upi"
-                onClick={() => onUpiChange('')}
-                className="shrink-0 p-1 rounded-full text-emerald-500 hover:bg-emerald-100 hover:text-emerald-700 transition-colors"
-                title="Clear and re-scan"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
+              {!upiLocked && (
+                <button
+                  type="button"
+                  data-testid="clear-scanned-upi"
+                  onClick={() => onUpiChange('')}
+                  className="shrink-0 p-1 rounded-full text-emerald-500 hover:bg-emerald-100 hover:text-emerald-700 transition-colors"
+                  title="Clear and re-scan"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
             </div>
           ) : null}
 
-          {/* Scan QR / Stop buttons */}
-          {!qrScanning ? (
+          {/* Scan QR / Stop buttons — suppressed entirely when upiId is re-KYC locked */}
+          {upiLocked ? null : !qrScanning ? (
             <button
               type="button"
               onClick={() => setQrScanning(true)}

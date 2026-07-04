@@ -13,6 +13,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { KycService } from './kyc.service';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
@@ -46,7 +47,7 @@ const mockTx = {
 };
 
 const mockPrisma = {
-  channelPartner: { findFirst: jest.fn(), update: jest.fn() },
+  channelPartner: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
   // rejectedExport resolves the rejecter's display name in one round-trip.
   user: { findMany: jest.fn() },
   kycSubmission: {
@@ -804,6 +805,218 @@ describe('KycService', () => {
     });
   });
 
+  // ─── create() re-KYC LOCK (backend-enforced field/doc lock on resubmit) ───────
+  describe('create() re-KYC lock', () => {
+    const baseDto = {
+      outletId: 'outlet-1',
+      partnerName: 'Kumar Store',
+      mobile: '9820100001',
+      gstNumber: '27ABCDE1234F1ZK',
+      panNumber: 'ABCDE1234F',
+      address: '12 SV Road',
+      city: 'Mumbai',
+      state: 'Maharashtra',
+      pincode: '400058',
+      bankName: 'HDFC',
+      accountHolderName: 'Suresh',
+      accountNumber: '50100',
+      ifscCode: 'HDFC0001',
+      upiId: 'suresh@upi',
+    };
+
+    /** The CURRENTLY-stored partner values (keyed by DB column names). */
+    const STORED_PARTNER = {
+      ownerName: 'Kumar Store',
+      phone: '9820100001',
+      gstNumber: '27ABCDE1234F1ZK',
+      panNumber: 'ABCDE1234F',
+      bankName: 'HDFC',
+      bankAccountHolder: 'Suresh',
+      bankAccountNumber: '50100',
+      ifscCode: 'HDFC0001',
+      upiId: 'suresh@upi',
+    };
+
+    /**
+     * Prime a re-entry (existing-partner) create() to a happy DRAFT.
+     * `reKycFlags` = the Outlet's admin re-KYC request (null = none). Stored partner +
+     * outlet address values are the baseline the lock pins non-flagged fields back to.
+     */
+    const primeReentry = (
+      reKycFlags: Record<string, unknown> | null,
+      priorDocs: Array<Record<string, unknown>> | null = null,
+    ) => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1',
+        clientId: 'deoleo',
+        partnerId: 'cp-existing',
+        outletCode: 'OUT-1',
+        outletType: { code: 'SSS' },
+        reKycFlags,
+        // stored address on the outlet (the lock pins non-flagged address fields to these)
+        addressLine1: '12 SV Road',
+        city: 'Mumbai',
+        state: 'Maharashtra',
+        pincode: '400058',
+      });
+      // assertPhoneAvailable: partner-clash null + employee-clash null → available.
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // employee-clash
+      // The re-KYC lock loads the currently-stored partner (only when flags present).
+      mockPrisma.channelPartner.findUnique.mockResolvedValueOnce(STORED_PARTNER);
+      // The doc lock loads the PRIOR submission to carry forward non-flagged docs (only when
+      // flags present). Default: no prior → nothing carried.
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(
+        priorDocs ? { id: 'prev-sub', documents: priorDocs } : null,
+      );
+      // tx: GST pre-check (null → free) is defaulted in beforeEach; the partner update + dup guard + create.
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'cp-existing' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null); // no in-flight dup
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-1' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockPrisma.kycDocument.create.mockResolvedValue({});
+    };
+
+    /** The data written to the partner update (post-lock). */
+    const partnerUpdateData = () => mockTx.channelPartner.update.mock.calls[0][0].data;
+    /** The data written to the outlet update (post-lock). */
+    const outletUpdateData = () => mockTx.outlet.update.mock.calls[0][0].data;
+    /** The documentTypes actually persisted. */
+    const persistedDocTypes = () =>
+      mockPrisma.kycDocument.create.mock.calls.map((c) => c[0].data.documentType);
+
+    it('no flags → the full form is editable (lock does NOT load stored, passes through)', async () => {
+      primeReentry(null);
+      await service.create(so, { ...baseDto, partnerName: 'Changed Name' } as never);
+      // hasReKycFlags(null) === false → the stored-partner load is skipped entirely.
+      expect(mockPrisma.channelPartner.findUnique).not.toHaveBeenCalled();
+      // The DTO change flows straight through.
+      expect(partnerUpdateData().ownerName).toBe('Changed Name');
+    });
+
+    it('blanket re-KYC (all-false flags) → treated as no-flags, full form editable', async () => {
+      primeReentry({ mobileNumber: false, remarks: '' });
+      await service.create(so, { ...baseDto, mobile: '9111111111' } as never);
+      expect(mockPrisma.channelPartner.findUnique).not.toHaveBeenCalled();
+      expect(partnerUpdateData().phone).toBe('9111111111');
+    });
+
+    it('flagged text field → the change is ACCEPTED', async () => {
+      primeReentry({ mobileNumber: true });
+      await service.create(so, { ...baseDto, mobile: '9111111111' } as never);
+      expect(partnerUpdateData().phone).toBe('9111111111'); // flagged → accepted
+    });
+
+    it('NON-flagged text change → PINNED back to the stored value (not persisted)', async () => {
+      // Only mobileNumber flagged; the payload also tampers partnerName + gstNumber (non-flagged).
+      primeReentry({ mobileNumber: true });
+      await service.create(so, {
+        ...baseDto,
+        mobile: '9111111111',
+        partnerName: 'Tampered Name',
+        gstNumber: '99ZZZZZ9999Z9Z9',
+      } as never);
+      const data = partnerUpdateData();
+      expect(data.phone).toBe('9111111111');       // flagged → accepted
+      expect(data.ownerName).toBe('Kumar Store');  // non-flagged → pinned to stored
+      expect(data.businessName).toBe('Kumar Store');
+      expect(data.gstNumber).toBe('27ABCDE1234F1ZK'); // non-flagged → pinned to stored
+    });
+
+    it('NON-flagged address change → PINNED to the stored outlet address', async () => {
+      primeReentry({ mobileNumber: true });
+      await service.create(so, {
+        ...baseDto,
+        mobile: '9111111111',
+        address: 'Tampered Address',
+        city: 'Delhi',
+      } as never);
+      const data = outletUpdateData();
+      expect(data.addressLine1).toBe('12 SV Road'); // non-flagged → pinned
+      expect(data.city).toBe('Mumbai');             // non-flagged → pinned
+    });
+
+    it('flagged address field → the change is accepted', async () => {
+      primeReentry({ streetAddress: true });
+      await service.create(so, { ...baseDto, address: 'New Address 99' } as never);
+      expect(outletUpdateData().addressLine1).toBe('New Address 99');
+    });
+
+    it('a document of a FLAGGED type is processed', async () => {
+      primeReentry({ gstCertificate: true });
+      await service.create(so, {
+        ...baseDto,
+        documents: [{ type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/uuid.pdf' }],
+      } as never);
+      expect(persistedDocTypes()).toContain('GST_CERTIFICATE');
+    });
+
+    it('an INCOMING document of a NON-flagged type is IGNORED (not trusted from the payload)', async () => {
+      // Only the mobile number is flagged (a text field) → NO document type is allowed, and
+      // no prior submission is mocked → nothing to carry forward → no doc persisted.
+      primeReentry({ mobileNumber: true });
+      await service.create(so, {
+        ...baseDto,
+        documents: [{ type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/uuid.pdf' }],
+      } as never);
+      expect(persistedDocTypes()).not.toContain('GST_CERTIFICATE');
+      expect(mockPrisma.kycDocument.create).not.toHaveBeenCalled();
+    });
+
+    it('F2: NON-flagged docs are CARRIED FORWARD from the prior submission (not dropped, not trusted)', async () => {
+      // Flag GST cert only; the prior submission holds a cheque + a store board photo. The rep's
+      // payload tampers the cheque with a NEW fileKey → the crafted upload must be ignored and the
+      // PRIOR cheque carried forward instead; the new GST cert (flagged) is accepted.
+      primeReentry({ gstCertificate: true }, [
+        { documentType: 'CANCELLED_CHEQUE', fileUrl: 'u1', fileKey: 'kyc/deoleo/PRIOR/cheque.pdf', fileName: 'c.pdf', mimeType: 'application/pdf', fileSizeBytes: 10 },
+        { documentType: 'STORE_BOARD_PHOTO', fileUrl: 'u2', fileKey: 'kyc/deoleo/PRIOR/board.jpg', fileName: 'b.jpg', mimeType: 'image/jpeg', fileSizeBytes: 20 },
+        { documentType: 'SIGNATURE', fileUrl: 'sig', fileKey: 'kyc/deoleo/PRIOR/sig.png', fileName: 's.png', mimeType: 'image/png', fileSizeBytes: 5 },
+      ]);
+      await service.create(so, {
+        ...baseDto,
+        documents: [
+          { type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/gst-new.pdf' },
+          { type: 'CANCELLED_CHEQUE', fileKey: 'kyc/deoleo/2026-06/cheque-TAMPERED.pdf' },
+        ],
+      } as never);
+      const calls = mockPrisma.kycDocument.create.mock.calls.map((c) => c[0].data);
+      const byType = Object.fromEntries(calls.map((d) => [d.documentType, d.fileKey]));
+      expect(byType['GST_CERTIFICATE']).toBe('kyc/deoleo/2026-06/gst-new.pdf'); // flagged → new accepted
+      expect(byType['CANCELLED_CHEQUE']).toBe('kyc/deoleo/PRIOR/cheque.pdf');    // non-flagged → PRIOR carried, tamper ignored
+      expect(byType['STORE_BOARD_PHOTO']).toBe('kyc/deoleo/PRIOR/board.jpg');    // non-flagged → PRIOR carried
+      expect(byType['SIGNATURE']).toBeUndefined();                              // signature is re-collected, never carried
+    });
+
+    it('mixed docs with NO prior: flagged type kept, non-flagged incoming ignored', async () => {
+      primeReentry({ gstCertificate: true });
+      await service.create(so, {
+        ...baseDto,
+        documents: [
+          { type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/gst.pdf' },
+          { type: 'CANCELLED_CHEQUE', fileKey: 'kyc/deoleo/2026-06/cheque.pdf' },
+        ],
+      } as never);
+      const types = persistedDocTypes();
+      expect(types).toContain('GST_CERTIFICATE');       // flagged → kept
+      expect(types).not.toContain('CANCELLED_CHEQUE');  // non-flagged, no prior → nothing
+    });
+
+    it('no flags → all documents processed as today', async () => {
+      primeReentry(null);
+      await service.create(so, {
+        ...baseDto,
+        documents: [
+          { type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/gst.pdf' },
+          { type: 'CANCELLED_CHEQUE', fileKey: 'kyc/deoleo/2026-06/cheque.pdf' },
+        ],
+      } as never);
+      const types = persistedDocTypes();
+      expect(types).toContain('GST_CERTIFICATE');
+      expect(types).toContain('CANCELLED_CHEQUE');
+    });
+  });
+
   describe('KYC WhatsApp notifications (owner, tenant-gated)', () => {
     const isr: JwtPayload = { sub: 'isr1', role: 'SALES_ISR', clientId: 'deoleo', phone: '', name: '' };
 
@@ -1108,6 +1321,36 @@ describe('KycService', () => {
       const res = await service.getOne(mis, 's1');
       expect(res.submission.id).toBe('s1');
       expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('surfaces the primary outlet reKycFlags (20 booleans + remarks) on the detail payload', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', documents: [], statusHistory: [],
+        partner: { outlets: [
+          { id: 'o-sec', isPrimary: false, reKycFlags: null },
+          { id: 'o-pri', isPrimary: true, reKycFlags: { mobileNumber: true, remarks: 'redo phone' } },
+        ] },
+      });
+      const res = await service.getOne(mis, 's1');
+      // Detail contract: detail.reKycFlags = the primary outlet's raw stored object.
+      expect(res.submission.reKycFlags).toEqual({ mobileNumber: true, remarks: 'redo phone' });
+    });
+
+    it('reKycFlags is null when no outlet has a re-KYC request', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', documents: [], statusHistory: [],
+        partner: { outlets: [{ id: 'o1', isPrimary: true, reKycFlags: null }] },
+      });
+      const res = await service.getOne(mis, 's1');
+      expect(res.submission.reKycFlags).toBeNull();
+    });
+
+    it('reKycFlags is null when the submission has no partner/outlets', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', partner: null, documents: [], statusHistory: [],
+      });
+      const res = await service.getOne(mis, 's1');
+      expect(res.submission.reKycFlags).toBeNull();
     });
 
     it('inlines a private GCS document as a data URL (read, not signed) so the reviewer can open it', async () => {
@@ -1464,11 +1707,12 @@ describe('KycService', () => {
       expect(mockTx.userSession.updateMany).not.toHaveBeenCalled();
     });
 
-    it('item #2: on APPROVED, activates the partner\'s outlet(s) in the tx (isActive=true)', async () => {
+    it('item #2: on APPROVED, activates the partner\'s outlet(s) AND clears reKycFlags in the tx', async () => {
       seedApproveHappyPath();
       await service.approve(gifsy, 's1');
       // The outlet activation is a partner-scoped updateMany that excludes
-      // soft-deleted and NOT_INTERESTED outlets.
+      // soft-deleted and NOT_INTERESTED outlets, and CLEARS any re-KYC request
+      // (F1 — else a re-KYC'd outlet stays RE_KYC_REQUIRED + locked forever post-approval).
       expect(mockTx.outlet.updateMany).toHaveBeenCalledWith({
         where: {
           partnerId: 'p1',
@@ -1477,7 +1721,7 @@ describe('KycService', () => {
           // `{not}` would exclude NULL rows (the approval no-op BLOCKER).
           OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
         },
-        data: { isActive: true, reactivatedAt: expect.any(Date) },
+        data: { isActive: true, reactivatedAt: expect.any(Date), reKycFlags: Prisma.DbNull },
       });
     });
 

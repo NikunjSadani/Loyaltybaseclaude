@@ -21,6 +21,12 @@ import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
 import { sniffFileType } from '../common/file-signature';
 import { isReKycPending } from '../common/kyc-rekyc.helper';
+import {
+  hasReKycFlags,
+  allowedDocTypes,
+  applyReKycTextLock,
+  type ReKycFlags,
+} from '../common/rekyc-fields';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { KYC_FIELD_KEYS, BridgeResult } from './kyc-verification.helper';
@@ -963,22 +969,90 @@ export class KycService {
     };
     const ownerRole = OUTLET_TYPE_TO_ROLE[outlet.outletType?.code ?? ''] ?? 'SSS';
 
-    // Common ChannelPartner detail patch (bank + identity) from the dto.
+    // ── RE-KYC LOCK (text fields) ──────────────────────────────────────────────
+    // When the admin flagged specific fields for re-capture (Outlet.reKycFlags), a
+    // resubmission may only change THOSE fields. We pin every non-flagged text field
+    // back to its currently-stored value (fail-safe: a tampered payload cannot edit a
+    // field the admin did not flag). Only meaningful on the re-entry branch (the outlet
+    // already has a partner); first-time/blanket re-KYC (no field flags) → full form
+    // editable, `text` passes through unchanged (guard rails a/b/c).
+    const reKycFlags = outlet.reKycFlags as unknown as ReKycFlags;
+    // Text fields keyed by their CreateKycDto dtoField names (the SAME keys REKYC_FIELDS
+    // uses), so applyReKycTextLock can compare incoming↔stored per field.
+    const incomingText: Record<string, unknown> = {
+      partnerName: dto.partnerName,
+      mobile: dto.mobile,
+      gstNumber: dto.gstNumber,
+      panNumber: dto.panNumber,
+      address: dto.address,
+      city: dto.city,
+      pincode: dto.pincode,
+      state: dto.state,
+      bankName: dto.bankName,
+      accountHolderName: dto.accountHolderName,
+      accountNumber: dto.accountNumber,
+      ifscCode: dto.ifscCode,
+      upiId: dto.upiId,
+    };
+    let text = incomingText;
+    if (outlet.partnerId && hasReKycFlags(reKycFlags)) {
+      // Load the CURRENTLY-PERSISTED values, keyed by the SAME dtoField names. Stored
+      // columns VERIFIED against the Prisma models (schema.prisma):
+      //   ChannelPartner: ownerName←partnerName, phone←mobile, gstNumber, panNumber,
+      //     bankName, bankAccountHolder←accountHolderName, bankAccountNumber←accountNumber,
+      //     ifscCode, upiId
+      //   Outlet: addressLine1←address, city, state, pincode
+      const storedPartner = await this.prisma.channelPartner.findUnique({
+        where: { id: outlet.partnerId },
+        select: {
+          ownerName: true, phone: true, gstNumber: true, panNumber: true,
+          bankName: true, bankAccountHolder: true, bankAccountNumber: true,
+          ifscCode: true, upiId: true,
+        },
+      });
+      const stored: Record<string, unknown> = {
+        partnerName: storedPartner?.ownerName,
+        mobile: storedPartner?.phone,
+        gstNumber: storedPartner?.gstNumber,
+        panNumber: storedPartner?.panNumber,
+        address: outlet.addressLine1,
+        city: outlet.city,
+        pincode: outlet.pincode,
+        state: outlet.state,
+        bankName: storedPartner?.bankName,
+        accountHolderName: storedPartner?.bankAccountHolder,
+        accountNumber: storedPartner?.bankAccountNumber,
+        ifscCode: storedPartner?.ifscCode,
+        upiId: storedPartner?.upiId,
+      };
+      const lock = applyReKycTextLock(reKycFlags, incomingText, stored);
+      text = lock.effective;
+      if (lock.blocked.length) {
+        // Pin (not 400) — avoids false positives from formatting drift; the FE pre-fills
+        // non-flagged fields from `stored`, so a changed value here is a tamper/observability signal.
+        this.logger.warn(
+          `re-KYC lock: ignored changes to non-flagged fields [${lock.blocked.join(', ')}] on outlet ${outlet.outletCode}`,
+        );
+      }
+    }
+
+    // Common ChannelPartner detail patch (bank + identity) from the LOCKED text.
     const partnerDetails = {
-      businessName: dto.partnerName,
-      ownerName: dto.partnerName,
-      phone: dto.mobile,
+      businessName: text.partnerName as string,
+      ownerName: text.partnerName as string,
+      phone: text.mobile as string,
       // Normalise a blank/whitespace GST to undefined → stored as NULL, never ''.
       // The column is `@@unique([clientId, gstNumber])`; an empty string is a real
       // value that collides, so a SECOND outlet with no GST would hit P2002. NULLs
       // do not collide. (undefined also avoids clobbering an existing GST on update.)
-      gstNumber: dto.gstNumber?.trim() || undefined,
-      panNumber: dto.panNumber ?? undefined,
-      bankName: dto.bankName ?? undefined,
-      bankAccountNumber: dto.accountNumber ?? undefined,
-      bankAccountHolder: dto.accountHolderName ?? undefined,
-      ifscCode: dto.ifscCode ?? undefined,
-      upiId: dto.upiId ?? undefined,
+      gstNumber: (text.gstNumber as string | undefined)?.trim() || undefined,
+      panNumber: (text.panNumber as string | undefined) ?? undefined,
+      bankName: (text.bankName as string | undefined) ?? undefined,
+      bankAccountNumber: (text.accountNumber as string | undefined) ?? undefined,
+      bankAccountHolder: (text.accountHolderName as string | undefined) ?? undefined,
+      ifscCode: (text.ifscCode as string | undefined) ?? undefined,
+      upiId: (text.upiId as string | undefined) ?? undefined,
+      // paymentMode is not a re-KYC-flagged field → always taken from the DTO.
       paymentMode: dto.paymentMode ?? undefined,
     };
 
@@ -1092,10 +1166,11 @@ export class KycService {
         where: { id: outlet.id },
         data: {
           ...(outlet.partnerId !== partnerId ? { partnerId } : {}),
-          addressLine1: dto.address,
-          city: dto.city,
-          state: dto.state,
-          pincode: dto.pincode,
+          // Address fields come from the LOCKED text (pinned to stored when not re-KYC-flagged).
+          addressLine1: text.address as string,
+          city: text.city as string,
+          state: text.state as string,
+          pincode: text.pincode as string,
         },
       });
 
@@ -1124,9 +1199,59 @@ export class KycService {
     // 7. Create KycDocument records for each submitted document.
     const docPromises: Promise<unknown>[] = [];
 
+    // RE-KYC LOCK (documents): when the admin flagged specific fields, the rep may only
+    // change documents whose `type` is a flagged doc type. A non-flagged incoming doc is
+    // NOT trusted from the payload; instead the prior submission's document of that type is
+    // CARRIED FORWARD server-side below. null = no field flags → process all docs.
+    const allowedDocs = allowedDocTypes(reKycFlags);
+
+    // Carry forward non-flagged documents from the PRIOR submission. A re-KYC resubmit
+    // creates a NEW KycSubmission and KycDocument rows are keyed to it, so simply skipping
+    // the non-flagged incoming docs would leave the new submission with NO document of that
+    // type (the reviewer would see an empty panel — data loss). Copy the prior submission's
+    // rows for every non-flagged, non-signature type (server-authoritative: a locked doc can
+    // neither be dropped nor swapped for a crafted fileKey).
+    if (allowedDocs && outlet.partnerId) {
+      const prior = await this.prisma.kycSubmission.findFirst({
+        where: { partnerId: outlet.partnerId, id: { not: submission.id } },
+        orderBy: { createdAt: 'desc' },
+        include: { documents: true },
+      });
+      const carried = new Set<string>();
+      for (const d of prior?.documents ?? []) {
+        if (d.documentType === 'SIGNATURE') continue; // signature is always re-collected below
+        if (allowedDocs.has(d.documentType)) continue; // flagged → the rep provides a new one
+        if (carried.has(d.documentType)) continue; // one (latest) per type
+        carried.add(d.documentType);
+        docPromises.push(
+          this.prisma.kycDocument.create({
+            data: {
+              kycSubmissionId: submission.id,
+              documentType: d.documentType,
+              fileUrl: d.fileUrl,
+              fileKey: d.fileKey,
+              fileName: d.fileName,
+              mimeType: d.mimeType,
+              fileSizeBytes: d.fileSizeBytes,
+              status: 'PENDING',
+            },
+          }),
+        );
+      }
+    }
+
     if (dto.documents?.length) {
       for (const doc of dto.documents) {
         if (!doc.type) continue;
+
+        // Non-flagged types are carried forward from the prior submission above — ignore any
+        // incoming (untrusted) doc of that type on a re-KYC resubmit.
+        if (allowedDocs && !allowedDocs.has(doc.type)) {
+          this.logger.warn(
+            `re-KYC lock: ignored non-flagged document type ${doc.type} on outlet ${outlet.outletCode} (prior carried forward)`,
+          );
+          continue;
+        }
 
         let fileUrl: string;
         let fileKey: string;
@@ -1312,6 +1437,12 @@ export class KycService {
           // sees outletType=undefined and the wholesaler-only gate hides redeem for
           // EVERY outlet — including genuine wholesalers.
           outletType: { select: { code: true } },
+          // isPrimary picks the primary outlet for the detail-level reKycFlags below.
+          isPrimary: true,
+          // The admin's per-field re-KYC request (20 booleans + remarks). Surfaced on
+          // the detail payload (below) so the sales/admin KYC detail page can restrict
+          // the resubmission form to the flagged fields — mirrors the backend lock in create().
+          reKycFlags: true,
         } } } },
         // 3.4d: the detail-page field panel seeds its current state from these.
         verificationItems: {
@@ -1362,7 +1493,25 @@ export class KycService {
       documents.push({ ...d, viewUrl });
     }
 
-    return { submission: { ...submission, partner, documents } };
+    // Surface the outlet's re-KYC request (20 booleans + remarks, or null) at the
+    // detail level so the FE can restrict the resubmission form to the flagged fields
+    // (FE contract: detail.reKycFlags: Record<string,boolean> & {remarks?:string} | null).
+    // Prefer the primary outlet; fall back to the first outlet carrying flags, then the
+    // first outlet. Reads the RAW stored object (masking never touches reKycFlags).
+    const detailOutlets = submission.partner?.outlets ?? [];
+    // Prefer the FLAGGED outlet over the primary — a secondary outlet can be the one the
+    // admin re-KYC'd, and list()/deriveKycStatus use "any outlet with flags", so getOne must
+    // agree or the detail page would hide the re-KYC banner/lock for that case.
+    const reKycOutlet =
+      detailOutlets.find((o) => isReKycPending(o.reKycFlags)) ??
+      detailOutlets.find((o) => o.isPrimary) ??
+      detailOutlets[0];
+    const reKycFlags =
+      (reKycOutlet?.reKycFlags as unknown as
+        | (Record<string, boolean> & { remarks?: string })
+        | null) ?? null;
+
+    return { submission: { ...submission, partner, documents, reKycFlags } };
   }
 
   /** A browser-renderable read URL for a single KYC document. Fails CLOSED:
@@ -2621,7 +2770,12 @@ export class KycService {
             // outlets (approval no-op). Match null OR not-declined explicitly.
             OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
           },
-          data: { isActive: true, reactivatedAt: now },
+          // reKycFlags: DbNull — CLEAR any re-KYC request on approval. A re-KYC (bulk-flag
+          // upload, field rejection, or manual trigger) sets Outlet.reKycFlags; approval is
+          // the event that RESOLVES it. Without this, isReKycPending() stays true forever, so
+          // the outlet would read as RE_KYC_REQUIRED post-approval and the wizard would stay
+          // locked to the flagged fields permanently.
+          data: { isActive: true, reactivatedAt: now, reKycFlags: Prisma.DbNull },
         });
       }
 
