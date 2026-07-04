@@ -250,61 +250,22 @@ function KYCListContent() {
         if (!body.success) return [];
         const outlets = (body.data.outlets ?? []) as any[];
 
-        const notStarted: KYCEntry[] = canEnrollNow
-          ? outlets
-              .filter((o) => o.kycStatus === 'NOT_STARTED')
-              .map((o): KYCEntry => ({
-                id:          o.id,
-                partnerName: o.name,
-                ownerName:   '',
-                firmName:    o.name,
-                outletCode:  o.outletCode ?? '',
-                mobile:      o.mobile ?? '',
-                status:      KYCStatus.NOT_STARTED,
-                submittedAt: '',
-                updatedAt:   '',
-                isNotStarted: true,
-                assignedUserId: o.assignedUserId ?? undefined,
-                programName:     o.programName ?? '',
-                programCategory: o.programCategory ?? '',
-                outletType:      o.type ?? '',
-              }))
-          : [];
-
-        const notInterested: KYCEntry[] = outlets
-          .filter((o) => o.kycStatus === 'NOT_INTERESTED')
+        // ASSIGNMENT-scoped view of EVERY outlet in the caller's subtree, tagged with its
+        // derived KYC status — the source of truth for "which outlets are mine". An outlet
+        // shows to its assignee XSR AND everyone up the chain (SO/ASM/…), in ANY state,
+        // regardless of WHO filed the KYC. (The submitter-scoped /api/kyc only returns KYCs
+        // the caller or their downline FILED, so an outlet an UPLINE submitted on the
+        // assignee's behalf — e.g. an ASM enrolling an XSR's outlet — would otherwise be
+        // invisible to the SO/XSR it's tagged to. Owner 2026-07-03.) buildOutlets returns the
+        // derived kycStatus + kycId + assigned rep, so we synthesise every state here; the
+        // submitter-scoped list then only adds outlets NOT in this subtree (reassignment edge).
+        const synth: KYCEntry[] = outlets
+          // NOT_STARTED only surfaces for roles that can start enrollment (the CTA); other
+          // roles can't act on an un-started outlet, so keep it out of their queue.
+          .filter((o) => canEnrollNow || o.kycStatus !== 'NOT_STARTED')
           .map((o): KYCEntry => ({
-            id:          o.id,
-            partnerName: o.name,
-            ownerName:   '',
-            firmName:    o.name,
-            outletCode:  o.outletCode ?? '',
-            mobile:      o.mobile ?? '',
-            status:      KYCStatus.NOT_INTERESTED,
-            submittedAt: '',
-            updatedAt:   '',
-            isNotInterested: true,
-            assignedUserId: o.assignedUserId ?? undefined,
-            programName:     o.programName ?? '',
-            programCategory: o.programCategory ?? '',
-            outletType:      o.type ?? '',
-          }));
-
-        // Re-entry states — RE_KYC_REQUIRED + the rejected family (REJECTED /
-        // RE_UPLOAD_REQUIRED / RESUBMISSION_REQUIRED) — are ASSIGNMENT-scoped: the outlet's
-        // submission may have been filed by a DIFFERENT rep (e.g. the assignee's manager or a
-        // prior owner before reassignment), so it never comes back from the submitter-scoped
-        // /api/kyc for the current assignee. Surface them from the assignment-scoped
-        // /api/sales/outlets (buildOutlets returns the derived kycStatus + kycId + prefill).
-        // Deep-link to the submission detail (kycId) — its getOne is assignee-aware; fall back
-        // to the outlet id only if there is genuinely no submission.
-        const ASSIGNMENT_REENTRY = new Set([
-          KYCStatus.RE_KYC_REQUIRED, KYCStatus.REJECTED,
-          KYCStatus.RE_UPLOAD_REQUIRED, KYCStatus.RESUBMISSION_REQUIRED,
-        ] as string[]);
-        const reEntry: KYCEntry[] = outlets
-          .filter((o) => ASSIGNMENT_REENTRY.has(o.kycStatus))
-          .map((o): KYCEntry => ({
+            // Deep-link to the (assignee-aware getOne) submission detail via kycId; fall back
+            // to the outlet CUID for NOT_STARTED (no submission → the new-KYC wizard).
             id:          o.kycId || o.id,
             partnerName: o.name,
             ownerName:   '',
@@ -312,15 +273,17 @@ function KYCListContent() {
             outletCode:  o.outletCode ?? '',
             mobile:      o.mobile ?? '',
             status:      o.kycStatus as KYCStatus,
-            submittedAt: '',
-            updatedAt:   '',
-            assignedUserId: o.assignedUserId ?? undefined,
+            submittedAt: o.kycSubmittedAt ?? '',
+            updatedAt:   o.kycSubmittedAt ?? '',
+            isNotStarted:    o.kycStatus === 'NOT_STARTED',
+            isNotInterested: o.kycStatus === 'NOT_INTERESTED',
+            assignedUserId:  o.assignedUserId ?? undefined,
             programName:     o.programName ?? '',
             programCategory: o.programCategory ?? '',
             outletType:      o.type ?? '',
           }));
 
-        return [...notStarted, ...notInterested, ...reEntry];
+        return synth;
       })
       .catch(() => [] as KYCEntry[]);
 
