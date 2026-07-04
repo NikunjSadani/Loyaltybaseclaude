@@ -618,13 +618,17 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
      (this page, reached by tapping an outlet), surfaced prominently — NOT on the
      outlet list and NOT as a bottom-nav tab.
 
-     showRedeem hides redeem only when the tenant restricts it to wholesalers
+     Redeem is offered ONLY for an APPROVED outlet — a submitted-but-unapproved outlet
+     has no access yet (the backend also gates redemption on KYC-APPROVED, so this just
+     stops the button looking active before approval / during a pending re-KYC).
+     showRedeem then hides redeem when the tenant restricts it to wholesalers
      (settings.salesApp.redeemGiftWholesalerOnly === true) AND this outlet is not a
      wholesaler. A normal redeemable outlet (wholesaler, OR any outlet when the
      restriction is off) shows the button. outletType now comes from the API (the
      detail endpoint selects outletType.code) so the gate no longer collapses to
      "always hidden" from an undefined type. */
   const showRedeem =
+    isApproved &&
     !(settings.salesApp?.redeemGiftWholesalerOnly && kyc.outletType !== 'WHOLESALER');
 
   return (
