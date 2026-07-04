@@ -109,7 +109,13 @@ FILED), but outlet **OWNERSHIP is ASSIGNMENT-scoped** (`buildOutlets`/`/api/sale
 states (NOT_STARTED / NOT_INTERESTED / RE_KYC_REQUIRED / REJECTED / RE_UPLOAD_REQUIRED / RESUBMISSION_REQUIRED) MUST be
 synthesised from `/api/sales/outlets` (assignment) and merged with the submitter-scoped submissions **deduped by outletCode,
 synth-wins** — else a REASSIGNED outlet whose original KYC was filed by another rep is invisible in list/dashboard/tasks.
-(`kyc.service.list()` stays submitter-scoped by design; `getOne` is assignee-aware via `partnerId`.) **(8)** any
+(`kyc.service.list()` stays submitter-scoped by design; `getOne` is assignee-aware via `partnerId`.) **UPDATE 2026-07-03
+(`e9b3a21`): the sales /sales/kyc LIST is now fully ASSIGNMENT-DRIVEN** — the FE synthesises EVERY subtree outlet's derived KYC
+state from `/api/sales/outlets` (ALL states, not just re-entry), so an UPLINE-submitted outlet (e.g. an ASM enrolling an XSR's
+outlet) shows to the assignee XSR + SO too; the submitter-scoped `/api/kyc` now only supplements outlets NOT in the caller's
+subtree (reassignment edge). buildOutlets returns `assignedUserId` (assigned rep) so the branch member-filter matches
+not-started/approved outlets. So "the LIST is submitter-scoped" above is HISTORICAL — the raw endpoint still is, the rendered
+list is not. **(8)** any
 **bulk-upload loop of awaited writes inside ONE interactive `$transaction` 500s at tenant scale** — default timeout 5s,
 Deoleo ~2,261 outlets (`PrismaClientKnownRequestError: query cannot be executed on an expired transaction`). Fix = **chunk**
 into `$transaction([...])` batches of ~100 for idempotent paths (targets/achievements upserts), or **raise
