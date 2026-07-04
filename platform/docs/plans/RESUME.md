@@ -380,16 +380,13 @@ FE vitest 1763 · tsc 0. **NO new migrations across this whole develop batch →
   own migration-bearing build **before client #2**.
 **D. LATER (POST-GO-LIVE-BACKLOG):** multi-tenant SSR branding, configurable RBAC (AF-12 OFF), WhatsApp per-tenant generalization,
   OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics/trends, D1 tech-debt residuals.
-**KNOWN OPEN POINTS / GAPS (small, non-blocking — SURFACE to the owner if relevant; per [[clarify-before-imperfect-build]] don't
-  silently patch, ask):**
-  - **Sales KYC list is now a COMPLETE per-rep outlet view** (all states incl. long-approved). If a big manager finds it noisy, an
-    option is to hide fully-approved by default (revealed via the Approved filter) — NOT built; owner may want it as-is.
-  - **Member filter edge:** an APPROVED outlet submitted by someone OUTSIDE the selected member's branch still matches only by
-    submitter (not assignee), because `/api/kyc` carries no assignment. Rare for field-rep self-enrollment; only fully closes if
-    `/api/kyc` returns the outlet's assignment.
-  - **"Vacant" hierarchy seats** appear in the member filter (now labelled with their emp-code). Could hide them entirely — NOT
-    built; owner to decide.
-  - **§A-DOMAIN** (tenant domain hard-coded from slug) — needed before client #2 (migration; see C-8).
+**RESOLVED OWNER DECISIONS (2026-07-03 — do NOT re-raise):** (a) the Sales KYC list showing ALL states incl. approved is CORRECT —
+  keep as-is, do NOT hide approved. (b) "Vacant" hierarchy seats SHOULD be SHOWN in the member filter (with emp-code) — keep them.
+  (c) the earlier "member-filter edge" is CLOSED — an upline-submitted approved outlet DOES match its member, via the assigned-rep
+  (the assignment-driven synth carries `assignedUserId` on every subtree outlet); that caveat was stale (pre-`e9b3a21`) and is dropped.
+**KNOWN OPEN POINTS / GAPS:**
+  - **§A-DOMAIN** (tenant domain hard-coded from slug) — needs a `Client.domains` migration before client #2 (see C-8). This is the
+    only real open item; the rest of the sales-KYC/UX batch is owner-approved as shipped.
 **HOUSEKEEPING:** #90–95 already pruned; #74 (owner ops) mostly done (monitoring + backups/PITR ON; only optional cred-rotation left).
 
 Now: greet the owner. **🚀 CUTOVER #2 IS DONE (2026-07-01) — prod is live on `a2f5929`, and the DEOLEO TENANT is CREATED + ACTIVE.**
