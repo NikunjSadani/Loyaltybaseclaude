@@ -33,3 +33,35 @@ export function kycOrderRank(status: KYCStatus): number {
       return 3;
   }
 }
+
+/**
+ * Priority rank for the sales "KYC Submissions" list (`/sales/kyc`).
+ *
+ * DIFFERENT order from the Outlets-page `kycOrderRank` above — the owner asked
+ * for the submissions list to LEAD with the actionable re-KYC / rejected states
+ * (2026-07-03):
+ *
+ *   Re-KYC → Rejected → KYC Pending → Approved → Not Interested
+ *
+ * The "Rejected" family (REJECTED / RE_UPLOAD_REQUIRED / RESUBMISSION_REQUIRED)
+ * all badge as "Rejected" to reps, so they share rank 1. Every in-flight or
+ * not-yet-started state folds into the "KYC Pending" bucket (rank 2) via the
+ * `default` arm.
+ */
+export function kycSubmissionOrderRank(status: KYCStatus): number {
+  switch (status) {
+    case KYCStatus.RE_KYC_REQUIRED:
+      return 0;
+    case KYCStatus.REJECTED:
+    case KYCStatus.RE_UPLOAD_REQUIRED:
+    case KYCStatus.RESUBMISSION_REQUIRED:
+      return 1;
+    case KYCStatus.APPROVED:
+      return 3;
+    case KYCStatus.NOT_INTERESTED:
+      return 4;
+    // NOT_STARTED / PENDING / DRAFT / SUBMITTED / UNDER_REVIEW / PENDING_* → KYC Pending
+    default:
+      return 2;
+  }
+}

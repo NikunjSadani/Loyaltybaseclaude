@@ -12,6 +12,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { KYCStatus } from '@/types';
 import { cn } from '@/lib/utils';
 import { type SalesRole, getRole, hasTeamView, canEnroll, childRole } from '@/lib/sales-role';
+import { kycSubmissionOrderRank } from '@/lib/kyc-order';
 import { api } from '@/lib/api-client';
 
 interface KYCEntry {
@@ -359,8 +360,12 @@ function KYCListContent() {
       return matchesMember && matchesStatus && matchesSearch && matchesType && matchesProgram;
     })
     .sort((a, b) => {
-      // Un-enrolled outlets are the most actionable → always pinned to the top.
-      if (!!a.isNotStarted !== !!b.isNotStarted) return a.isNotStarted ? -1 : 1;
+      // Primary: owner-specified status order for the KYC-Submissions list
+      // (Re-KYC → Rejected → Pending → Approved → Not Interested).
+      const ra = kycSubmissionOrderRank(a.status);
+      const rb = kycSubmissionOrderRank(b.status);
+      if (ra !== rb) return ra - rb;
+      // Secondary tiebreak within a status bucket: date, respecting the toggle.
       const da = new Date(a.updatedAt).getTime() || 0;
       const db = new Date(b.updatedAt).getTime() || 0;
       return sortOrder === 'newest' ? db - da : da - db;
