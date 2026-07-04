@@ -1336,6 +1336,22 @@ describe('KycService', () => {
       expect(res.submission.reKycFlags).toEqual({ mobileNumber: true, remarks: 'redo phone' });
     });
 
+    it('F3: prefers the FLAGGED outlet over the primary when a SECONDARY is the one re-KYC\'d', async () => {
+      // The primary has NO flags; a SECONDARY outlet carries the admin re-KYC request. getOne
+      // must return the FLAGGED outlet's flags (agreeing with list()/deriveKycStatus, which use
+      // "any outlet with flags"), NOT the primary's null — else the detail page would hide the
+      // re-KYC banner/lock for a multi-outlet partner whose flagged outlet isn't the primary.
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'other', documents: [], statusHistory: [],
+        partner: { outlets: [
+          { id: 'o-pri', isPrimary: true, reKycFlags: null },
+          { id: 'o-sec', isPrimary: false, reKycFlags: { gstCertificate: true, remarks: 'reupload GST' } },
+        ] },
+      });
+      const res = await service.getOne(mis, 's1');
+      expect(res.submission.reKycFlags).toEqual({ gstCertificate: true, remarks: 'reupload GST' });
+    });
+
     it('reKycFlags is null when no outlet has a re-KYC request', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue({
         id: 's1', userId: 'other', documents: [], statusHistory: [],
