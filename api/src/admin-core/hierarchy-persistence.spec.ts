@@ -17,18 +17,31 @@ import {
 
 type ExistingUser = { phone: string; salesUser: { employeeCode: string } | null };
 
-/** Minimal Prisma.TransactionClient mock that records the user.upsert phones. */
-function makeTx(existingUsers: ExistingUser[] = []) {
+/**
+ * Minimal Prisma.TransactionClient mock that records the user.upsert phones.
+ *
+ * `existingSalesUsersByCode` maps an employeeCode → its existing SalesUser row (the userId the
+ * persist loop resolves via salesUser.findUnique). Codes absent from the map are treated as
+ * brand-new employees (findUnique → null → the create-branch phone-keyed upsert runs).
+ */
+function makeTx(
+  existingUsers: ExistingUser[] = [],
+  existingSalesUsersByCode: Record<string, { userId: string }> = {},
+) {
   const upsertedUserPhones: string[] = [];
   let userSeq = 0;
   let salesSeq = 0;
   const tx = {
     user: {
       findMany: jest.fn().mockResolvedValue(existingUsers),
+      findUnique: jest.fn().mockResolvedValue(null),
       upsert: jest.fn().mockImplementation((args: any) => {
         upsertedUserPhones.push(args.where.clientId_phone.phone);
         return Promise.resolve({ id: `user-${userSeq++}` });
       }),
+      update: jest
+        .fn()
+        .mockImplementation((args: any) => Promise.resolve({ id: args.where.id })),
     },
     salesHierarchyLevel: {
       updateMany: jest.fn().mockResolvedValue({ count: 0 }),
@@ -39,6 +52,10 @@ function makeTx(existingUsers: ExistingUser[] = []) {
         ),
     },
     salesUser: {
+      findUnique: jest.fn().mockImplementation((args: any) => {
+        const code = args.where.clientId_employeeCode.employeeCode;
+        return Promise.resolve(existingSalesUsersByCode[code] ?? null);
+      }),
       upsert: jest.fn().mockImplementation(() => Promise.resolve({ id: `su-${salesSeq++}` })),
       update: jest.fn().mockResolvedValue({}),
     },
@@ -115,6 +132,45 @@ describe('persistHierarchy — phone ↔ employeeCode guard', () => {
     await expect(
       persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx),
     ).rejects.toThrow(/appears more than once/i);
+  });
+
+  it('updates the SAME User row in place when an existing employee’s phone is corrected (no orphan)', async () => {
+    // XSR-1 already exists: SalesUser(employeeCode=XSR-1) → User(id=user-existing) at phone P1.
+    // Re-upload the SAME code with a NEW phone P2. The fix must UPDATE user-existing to P2
+    // (freeing P1 on the same row), NOT create a second User and orphan the old one.
+    const employees = [emp({ id: 'XSR-1', mobile: '9900000002' })]; // P2
+    const { tx, upsertedUserPhones } = makeTx(
+      // §0b guard: P2 is not yet owned by anyone → no conflict.
+      [],
+      // §2: XSR-1 already has a canonical User.
+      { 'XSR-1': { userId: 'user-existing' } },
+    );
+
+    await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+
+    // (a) the existing User row was updated in place to the new phone P2…
+    expect(tx.user.update).toHaveBeenCalledWith({
+      where: { id: 'user-existing' },
+      data: expect.objectContaining({ phone: '9900000002' }),
+    });
+    // (b) …and NO new User was created for this existing employee (no orphan left behind).
+    expect(tx.user.upsert).not.toHaveBeenCalled();
+    expect(upsertedUserPhones).toEqual([]);
+    // the SalesUser is re-pointed at the SAME resolved user id, not a fresh one.
+    expect(tx.salesUser.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ userId: 'user-existing' }),
+      }),
+    );
+  });
+
+  it('creates a fresh User via the phone-keyed upsert for a BRAND-NEW employee', async () => {
+    // No existing SalesUser for XSR-NEW → findUnique returns null → the create branch runs.
+    const employees = [emp({ id: 'XSR-NEW', mobile: '9900000009' })];
+    const { tx, upsertedUserPhones } = makeTx([], {}); // no existing salesUser
+    await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+    expect(tx.user.update).not.toHaveBeenCalled();
+    expect(upsertedUserPhones).toEqual(['9900000009']);
   });
 
   it('gives each blank-phone employee a UNIQUE synthetic phone (no empty-string collapse)', async () => {

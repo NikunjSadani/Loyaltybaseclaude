@@ -271,11 +271,29 @@ export async function persistHierarchy(
     const userRole = mapRoleCodeToUserRole(emp.roleCode);
     const userStatus = isPlaceholder ? 'INACTIVE' : 'ACTIVE';
 
-    const user = await tx.user.upsert({
-      where: { clientId_phone: { clientId, phone } },
-      update: { name, role: userRole, status: userStatus },
-      create: { clientId, phone, name, role: userRole, status: userStatus },
+    // Resolve the employee's EXISTING canonical User by the stable business key
+    // (clientId, employeeCode). If this employee already has a SalesUser, UPDATE that same
+    // User row in place — so a phone correction moves the phone on the SAME row and frees the
+    // old number, instead of a phone-keyed upsert CREATING a fresh User and orphaning the old
+    // one (its old phone stays reserved in the (clientId, phone) unique, invisible in the UI).
+    // The pre-persist guard (§0b) already rejected any upload whose phone belongs to a
+    // DIFFERENT code or a non-sales account, so this in-place update never steals a phone.
+    // Brand-new employees (no existing SalesUser) keep the phone-keyed upsert, which also
+    // correctly reclaims a pre-existing user that happens to already hold that phone.
+    const existingSU = await tx.salesUser.findUnique({
+      where: { clientId_employeeCode: { clientId, employeeCode: emp.id } },
+      select: { userId: true },
     });
+    const user = existingSU
+      ? await tx.user.update({
+          where: { id: existingSU.userId },
+          data: { phone, name, role: userRole, status: userStatus },
+        })
+      : await tx.user.upsert({
+          where: { clientId_phone: { clientId, phone } },
+          update: { name, role: userRole, status: userStatus },
+          create: { clientId, phone, name, role: userRole, status: userStatus },
+        });
     usersUpserted++;
 
     const salesUser = await tx.salesUser.upsert({
