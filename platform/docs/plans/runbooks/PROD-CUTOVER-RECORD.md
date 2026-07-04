@@ -116,3 +116,63 @@ Gate green at cutover: **api jest 1271 · nest 0 · FE vitest 1692 · tsc 0**.
 Code rollback = redeploy both services to the prior Cloud Run revision (the additive migrations are harmless to older
 code); DB restore (rarely) via the Step-2 backup / PITR-clone (never a blind in-place restore — `gifsy-db` is shared
 with staging). See the Rollback note in [`CUTOVER-RUNBOOK.md`](CUTOVER-RUNBOOK.md).
+
+---
+
+# Production Cutover — Record (2026-07-04 `develop` → `main` — CODE-ONLY, re-KYC batch)
+
+> **Executed 2026-07-04. As-run record of the THIRD cutover** — the `develop`→`main` promotion of the re-KYC batch onto
+> the already-live prod. Owner-driven: the owner approved the GitHub `production` gate personally. **This was a CODE-ONLY
+> cutover — 0 migrations**, so the in-VPC `gifsy-migrate` step was a **no-op / not required**. The 2026-06-30 record is the
+> go-live cutover; the 2026-07-01 record (cutover #2) added the onboard-slug fix + points-expiry + admin-users work and
+> created + activated the Deoleo tenant; this section is the re-KYC batch promotion. Runbook: [`CUTOVER-RUNBOOK.md`](CUTOVER-RUNBOOK.md).
+
+## Pre-state (verified)
+`gifsy_prod`: live, serving `main` HEAD **`a2f5929`** (the cutover-#2 code), Deoleo tenant CREATED + ACTIVE (platform
+defaults: conversion `1`, expiry null, visibility OFF). `main` was **60 commits behind `develop` with 0 pending migrations**.
+Gate green at cutover: **api jest 1419 · nest 0 · FE vitest 1769 · tsc 0**.
+
+## Steps executed (in order)
+1. **Step 1 — Pre-cutover backup (double-guarded).** On-demand backup of the shared `gifsy-db` instance:
+   **id `1783158625082`**, `ON_DEMAND`, **SUCCESSFUL**, description `"pre-cutover3-develop-9d366f9"`. **PITR remained ON.**
+   Rollback point = redeploy `a2f5929`.
+2. **Step 2 — Merge `develop`→`main` (owner-triggered).** Prod `main` HEAD moved **`a2f5929` → `9d366f9`** (the 60-commit,
+   **CODE-ONLY** jump). The owner approved the GitHub `production` environment gate. **0 migrations** in this batch → the
+   in-VPC `gifsy-migrate` step was a **no-op (not required)**; the pipeline deployed the new revision directly. **Both
+   `gifsy-api` and `gifsy-frontend` now serve `9d366f9`; prod `/health` = 200.**
+3. **Step 3 — Live verification on the real domain.** `https://deoleoloyalty.gifsy.in/auth/login` → **200**; tenant branding
+   resolving; `https://api.gifsy.in/health` → **200**; both prod Cloud Run services confirmed on the `9d366f9` image.
+   *(The raw `*.run.app` frontend URL 404s on routes — that is host-based tenant routing via Cloudflare, NOT a fault; the
+   real domain is authoritative.)*
+4. **Step 4 — Login-logo follow-up (ARMED, NOT yet deployed).** After the cutover fired, the Deoleo login-logo commit
+   **`0780d1f`** was **fast-forwarded onto `main` + pushed**, so `main` == `develop` == `0780d1f`. Its prod deploy is a
+   **separate pending run awaiting the owner's `production` gate approval** — **prod serves `9d366f9` until approved.**
+
+## What was in this cutover (payload)
+- **Field-level re-KYC** (`267da65`, `e1e4ba5`) — non-flagged fields LOCKED + backend-enforced; flagged fields pre-filled +
+  editable; approver highlight + admin remark on the sales-senior detail AND Gifsy reviewer; F1–F4 audit fixes.
+- **Re-KYC in-flight DISPLAY fix** (`2b7f44b`) — a resubmitted re-KYC shows "Under Review" not "Re-KYC Required", via the new
+  `isReKycActionable(flags, latestStatus)` helper (flags AND latest-not-in-flight).
+- **Program Name/Category upload case-insensitive + canonicalised** (`1be7119`).
+- **Hierarchy phone-correction orphan FIX** (`e83e63d`) — User keyed by `(clientId,phone)` but SalesUser by
+  `(clientId,employeeCode)` → a phone correction stranded the old User + locked the old number; fix resolves the existing User
+  via `SalesUser.userId` + updates in place (8 staging orphans cleaned, freed numbers incl. 9113145451).
+- **Redeem-button KYC gate** — the sales "Redeem for Outlet" button shows only when the outlet's KYC `isApproved`.
+- **Deoleo login logo** (`0780d1f`) — ARMED, awaiting the owner's gate (see Step 4).
+
+## Post-state (verified)
+- Both prod services (`gifsy-api`, `gifsy-frontend`) serve **`9d366f9`**; prod **`/health` = 200**.
+- **0 migrations applied** (code-only cutover; the in-VPC migrate step was a no-op).
+- Pre-cutover backup **`1783158625082`** taken; PITR ON.
+- Live-verified on `deoleoloyalty.gifsy.in` (login 200, branding resolving, API health 200).
+- `main` == `develop` == `0780d1f`; the login-logo deploy (`0780d1f`) is ARMED, prod serves `9d366f9` until the owner approves.
+
+## What remains (owner-gated — NOT done)
+- **Approve the `production` gate for the login-logo run (`0780d1f`)** → prod shows the Deoleo wordmark.
+- **Load real Deoleo master data via the app UIs (#76)** — THE last hard go-live blocker; waits on the client's files.
+- **WhatsApp `deoleo_kyc_approval` template runtime-verify (#143)** — template APPROVED 2026-07-02; needs a real approval + phone.
+
+## Rollback (unchanged path)
+Code rollback = **redeploy both services to `a2f5929`** (the prior prod revision); this cutover added no migrations so there is
+nothing to reverse in the DB. DB restore (only if ever needed) via the Step-1 backup `1783158625082` / PITR-clone (never a blind
+in-place restore — `gifsy-db` is shared with staging).
