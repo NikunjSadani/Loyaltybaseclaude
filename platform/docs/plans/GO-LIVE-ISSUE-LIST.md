@@ -1,24 +1,23 @@
 # Go-Live Issue List — authoritative master tracker (updated 2026-07-04)
 
-> **STATUS: 🚀 CUTOVER #3 EXECUTED & COMPLETE (2026-07-04) — prod now serving `9d366f9`; DEOLEO TENANT CREATED + ACTIVE + VERIFIED LIVE on `deoleoloyalty.gifsy.in`.**
-> Cutover #3 moved prod `main` **`a2f5929` → `9d366f9`** (60-commit jump, **CODE-ONLY — 0 migrations**, so the in-VPC `migrate deploy` was a no-op). Owner approved the `production` gate; both prod Cloud Run services (`gifsy-api` + `gifsy-frontend`) serve `9d366f9`; pre-cutover backup **`1783158625082`** (ON_DEMAND, SUCCESSFUL, "pre-cutover3-develop-9d366f9"; rollback = redeploy `a2f5929`). **Verified LIVE on the real domain `deoleoloyalty.gifsy.in`** (`/auth/login` 200, tenant branding resolving, API `/health` 200, both services on `9d366f9`; the raw `*.run.app` frontend URL 404s on routes = host-based tenant routing via Cloudflare, NOT a fault). **develop HEAD `0780d1f` == main HEAD `0780d1f`** — the login-logo commit `0780d1f` was fast-forwarded onto main AFTER cutover #3 fired → **ARMED, prod serves `9d366f9` until the owner approves its `production` gate.** Gate: **api jest 1419 · nest 0 · FE vitest 1769 · tsc 0.**
-> **Cutover #3 shipped (this session's re-KYC batch):** **field-level re-KYC** (`267da65`/`e1e4ba5` — non-flagged fields LOCKED + backend-enforced; flagged fields pre-filled + editable; approver highlight; F1–F4 audit fixes) · **re-KYC in-flight DISPLAY fix** (`2b7f44b` — a resubmitted re-KYC shows "Under Review" not "Re-KYC Required" via a new `isReKycActionable(flags, latestStatus)` helper = flags AND latest-not-in-flight; approver highlight keeps the raw flags) · **program-name/category upload case-insensitive + canonicalised** (`1be7119`) · **hierarchy phone-correction orphan FIX** (`e83e63d` — User keyed by `(clientId,phone)` but SalesUser by `(clientId,employeeCode)` → a phone correction stranded the old User + locked the old number; fix resolves the existing User via `SalesUser.userId` + updates in place; 8 staging orphans cleaned) · **redeem-button KYC gate** (shows only when `isApproved`). Plus the prior SCALE/OPS + UAT fix-as-found build (log-leak · observability O1/O2 · pagination W1+W2 · KYC-submit-500 · ASM enrollment · conversion-rate editor · Rejected/Re-upload consolidation · download-helper sweep · WhatsApp-post-OTP · OTP-gates-routing · KYC-PDF-render · not-interested-404 · NEWEST-36→40 · C-batch · sales-KYC/UX) — **all now in prod via `9d366f9`.**
+> **STATUS: 🚀 CUTOVER #3 EXECUTED & COMPLETE (2026-07-04) + LOGIN-LOGO/BRAND-FIX DEPLOYED — prod now serving `eb841e9`; DEOLEO TENANT CREATED + ACTIVE + VERIFIED LIVE on `deoleoloyalty.gifsy.in`.**
+> Cutover #3 moved prod `main` **`a2f5929` → `9d366f9`** (60-commit jump, **CODE-ONLY — 0 migrations**, so the in-VPC `migrate deploy` was a no-op). Owner approved the `production` gate; both prod Cloud Run services (`gifsy-api` + `gifsy-frontend`) served `9d366f9`; pre-cutover backup **`1783158625082`** (ON_DEMAND, SUCCESSFUL, "pre-cutover3-develop-9d366f9"; rollback = redeploy `a2f5929`). **Then (later 2026-07-04) the owner approved the `production` gate for the login-logo + `/brand/*` middleware fix run → prod moved `9d366f9` → `eb841e9`** (= 9d366f9 + the Deoleo login logo `0780d1f` + the `/brand/*` matcher fix `eb841e9`); both prod services now serve `eb841e9`. **Verified LIVE on the real domain `deoleoloyalty.gifsy.in`** (`/brand/deoleo-wordmark-white.png` → 200 image/png + the Deoleo wordmark renders on the login page/placeholder gone, `/auth/login` 200, tenant branding resolving, API `/health` 200, both services on `eb841e9`; the raw `*.run.app` frontend URL 404s on routes = host-based tenant routing via Cloudflare, NOT a fault). **develop HEAD `eb841e9` == main HEAD `eb841e9`** — the login logo (`0780d1f`) is now **LIVE** (was ARMED), and the follow-up **`/brand/*` middleware fix (`eb841e9`)** shipped in the SAME prod deploy (the login wordmark first rendered as a BROKEN IMAGE because `/brand/*.png` was 307-redirected to `/auth/login` — the `platform/src/proxy.ts` auth-middleware `config.matcher` didn't exclude `brand/`; fix added `brand/` to the exclusion). Gate: **api jest 1419 · nest 0 · FE vitest 1769 · tsc 0** (the `/brand/*` fix gate: FE vitest 1769 · tsc 0).
+> **Cutover #3 shipped (this session's re-KYC batch):** **field-level re-KYC** (`267da65`/`e1e4ba5` — non-flagged fields LOCKED + backend-enforced; flagged fields pre-filled + editable; approver highlight; F1–F4 audit fixes) · **re-KYC in-flight DISPLAY fix** (`2b7f44b` — a resubmitted re-KYC shows "Under Review" not "Re-KYC Required" via a new `isReKycActionable(flags, latestStatus)` helper = flags AND latest-not-in-flight; approver highlight keeps the raw flags) · **program-name/category upload case-insensitive + canonicalised** (`1be7119`) · **hierarchy phone-correction orphan FIX** (`e83e63d` — User keyed by `(clientId,phone)` but SalesUser by `(clientId,employeeCode)` → a phone correction stranded the old User + locked the old number; fix resolves the existing User via `SalesUser.userId` + updates in place; 8 staging orphans cleaned) · **redeem-button KYC gate** (shows only when `isApproved`). Plus the prior SCALE/OPS + UAT fix-as-found build (log-leak · observability O1/O2 · pagination W1+W2 · KYC-submit-500 · ASM enrollment · conversion-rate editor · Rejected/Re-upload consolidation · download-helper sweep · WhatsApp-post-OTP · OTP-gates-routing · KYC-PDF-render · not-interested-404 · NEWEST-36→40 · C-batch · sales-KYC/UX) — **all now in prod (via `9d366f9`, an ancestor of the current prod image `eb841e9`).**
 > **INVESTIGATION RESOLVED (record — NOT a bug):** "outlet logged in before KYC approval" — the reported outlet (Charan Trading / prakhar / 8977097868) was genuinely APPROVED 2026-07-02 (full `kyc_status_history` chain), logged in 07-03 (AFTER approval), and is now mid-re-KYC (a 2nd submission), which by design KEEPS the access it already earned. Login correctly blocks `PENDING_VERIFICATION` (`auth.service.ts`). Optional future design choice (NOT scheduled): whether a re-KYC should SUSPEND access until re-approval.
-> **🔑 NEW LEARNINGS THIS SESSION (also in RESUME.md traps 13–16):** the Employee Hierarchy upload keys User by phone but SalesUser by employeeCode → a phone correction orphans the old User; the `users` `@@unique([clientId, phone])` index is the phone-uniqueness blocker across ALL roles AND soft-deleted rows (debug a stuck number by querying `users`, not sales/outlets); **reKycFlags PERSIST until approval clears them** so display/actionability must gate on `isReKycActionable` (flags AND not-in-flight), NOT bare `isReKycPending`; guarded staging/prod one-off DB ops run via the `gifsy-oneoff-staging` Cloud Run Job (base64'd node script guarding `current_database()` first). **🔑 PRIOR LEARNINGS (RESUME.md traps 6–12 + META-LESSON):** the sales KYC LIST `/api/kyc` is SUBMITTER-scoped but ownership is ASSIGNMENT-scoped → re-entry states synthesised from `/api/sales/outlets`; any bulk-upload write-loop in one interactive `$transaction` 500s at ~2,261-outlet scale; `isActive:true`==approved+active; a FE response-merge must match the service's flat-vs-nested shape; **a fix is DONE only when every consumer + alternate path + scale case is traced.** See the **🚀 2026-07-04 CUTOVER #3** + **🟡 2026-07-01 SCALE/OPS BUILD** sections below.
+> **🔑 NEW LEARNINGS THIS SESSION (also in RESUME.md traps 13–16):** the Employee Hierarchy upload keys User by phone but SalesUser by employeeCode → a phone correction orphans the old User; the `users` `@@unique([clientId, phone])` index is the phone-uniqueness blocker across ALL roles AND soft-deleted rows (debug a stuck number by querying `users`, not sales/outlets); **reKycFlags PERSIST until approval clears them** so display/actionability must gate on `isReKycActionable` (flags AND not-in-flight), NOT bare `isReKycPending`; guarded staging/prod one-off DB ops run via the `gifsy-oneoff-staging` Cloud Run Job (base64'd node script guarding `current_database()` first); **a static asset under a NEW `public/` subdir needs the `platform/src/proxy.ts` auth-middleware `config.matcher` exclusion** — else on a no-token page (e.g. `/auth/login`) the asset request gets the auth **307 → `/auth/login`** and renders as a BROKEN IMAGE (the login-wordmark `/brand/*.png` broke this way; fix `eb841e9` added `brand/` to the exclusion), and **local `npm run dev` does NOT reproduce the edge 307 → curl the asset on the REAL staging edge** (same class as the earlier `sw.js` 307). **🔑 PRIOR LEARNINGS (RESUME.md traps 6–12 + META-LESSON):** the sales KYC LIST `/api/kyc` is SUBMITTER-scoped but ownership is ASSIGNMENT-scoped → re-entry states synthesised from `/api/sales/outlets`; any bulk-upload write-loop in one interactive `$transaction` 500s at ~2,261-outlet scale; `isActive:true`==approved+active; a FE response-merge must match the service's flat-vs-nested shape; **a fix is DONE only when every consumer + alternate path + scale case is traced.** See the **🚀 2026-07-04 CUTOVER #3** + **🟡 2026-07-01 SCALE/OPS BUILD** sections below.
 > **✅ RESOLVED: staging KYC-submit 500** (`POST /v1/kyc` → GST-uniqueness abort) — fixed + pushed `2419ab6`, independent audit CLEAN, deployed to staging; NOT an open blocker anymore (final live confirm = owner re-tries the exact submit, but it's fixed). See the **✅ KYC-submit 500** entry below.
 > **✅ SHIPPED (`e970213`): KYC "Rejected / Re-upload" consolidation** — the LIVE latent FE bug (`RE_UPLOAD_REQUIRED` unhandled → crash/no-filter/no-resubmit) is fixed; single rep-facing "Rejected" section covers all reviewer feedback; **admin reviewer dashboard untouched** (owner: "remains as is"). Independent audit CLEAN, regression test added; staging runtime-verify pending deploy. See the **🔜→✅ 2026-07-01** section below.
-> Remaining = owner-gated: **approve the `production` gate for the login-logo run (`0780d1f`)** → prod shows the Deoleo wordmark
-> (currently ARMED; prod serves `9d366f9`) + load real master data (#76) + WhatsApp `deoleo_kyc_approval` verify (#143). See the
-> **🚀 2026-07-04 CUTOVER #3** block below. *(History: FIX WAVE COMPLETE → owner-driven UAT → cutover #1 → cutover #2 → cutover #3.)*
+> Remaining = owner-gated: **load real master data (#76)** + **WhatsApp `deoleo_kyc_approval` verify (#143)**. (✅ the login logo +
+> `/brand/*` fix are LIVE in prod `eb841e9` — no longer a remaining item.) See the **🚀 2026-07-04 CUTOVER #3** block below.
+> *(History: FIX WAVE COMPLETE → owner-driven UAT → cutover #1 → cutover #2 → cutover #3 → login-logo/`/brand/*` deploy.)*
 
 ## ▶ THINGS TO BE DONE — START HERE (present this first; ask the owner which to pick up)
 
-✅ Cutover #3 is DONE — prod serves `9d366f9`; **develop == main == `0780d1f`.** Gate: api jest 1419 · nest 0 · FE vitest 1769 · tsc 0.
+✅ Cutover #3 is DONE + the login logo & `/brand/*` fix are LIVE — prod serves `eb841e9`; **develop == main == `eb841e9`.** Gate: api jest 1419 · nest 0 · FE vitest 1769 · tsc 0.
 
 **A. Owner-gated Deoleo go-live (owner action / client files):**
-1. **Approve the `production` gate for the login-logo run (`0780d1f`)** → then prod shows the Deoleo wordmark (currently ARMED; prod serves `9d366f9` until approved).
-2. **#76 — load real Deoleo master data** (outlets/hierarchy/catalog/schemes via the app UIs) — **THE LAST HARD BLOCKER**; waits on the client's files.
-3. **#143 — WhatsApp `deoleo_kyc_approval` runtime-verify** (template APPROVED; needs a real approval to a real phone).
+1. **#76 — load real Deoleo master data** (outlets/hierarchy/catalog/schemes via the app UIs) — **THE LAST HARD BLOCKER**; waits on the client's files.
+2. **#143 — WhatsApp `deoleo_kyc_approval` runtime-verify** (template APPROVED; needs a real approval to a real phone).
 
 **B. Blocked on an owner DECISION:** 5. **Notifications Core** go/no-go (drainer push-only; in-app inbox needs a migration; 2/3 events blocked upstream). 6. **Email provider** — ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
 
@@ -131,8 +130,11 @@
 
 > **CUTOVER #3 was EXECUTED and is COMPLETE (2026-07-04).** Owner approved the `production` gate; prod `main` moved
 > **`a2f5929` → `9d366f9`** (60-commit jump, **CODE-ONLY — 0 migrations**, so the in-VPC `migrate deploy` was a no-op). Both prod
-> Cloud Run services (`gifsy-api` + `gifsy-frontend`) serve `9d366f9`; **VERIFIED LIVE on the real domain `deoleoloyalty.gifsy.in`**
-> (`/auth/login` 200, tenant branding resolving, API `/health` 200). Gate at cutover #3: **api jest 1419 · nest 0 · FE vitest 1769 · tsc 0.**
+> Cloud Run services (`gifsy-api` + `gifsy-frontend`) served `9d366f9`; **VERIFIED LIVE on the real domain `deoleoloyalty.gifsy.in`**
+> (`/auth/login` 200, tenant branding resolving, API `/health` 200). **Then (later 2026-07-04) the owner approved the `production` gate
+> for the login-logo + `/brand/*` middleware fix run → prod moved `9d366f9` → `eb841e9`** (= 9d366f9 + login logo `0780d1f` + the
+> `/brand/*` matcher fix `eb841e9`); both prod services now serve `eb841e9` (the Deoleo wordmark renders on the login page). Gate at
+> cutover #3: **api jest 1419 · nest 0 · FE vitest 1769 · tsc 0** (the `/brand/*` fix gate: FE vitest 1769 · tsc 0).
 > Full as-run record: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md) (§ 2026-07-04).
 
 | Step | What ran | Result |
@@ -140,9 +142,9 @@
 | **Pre-cutover backup** | On-demand `gifsy-db` backup, double-guarded | ✅ id **`1783158625082`**, ON_DEMAND, SUCCESSFUL, "pre-cutover3-develop-9d366f9"; PITR ON |
 | **Merge `develop`→`main`** | Owner approved the `production` gate; **0 migrations** (in-VPC `migrate deploy` = no-op) → deploy | ✅ prod HEAD **`a2f5929` → `9d366f9`**; both services serve `9d366f9`; `/health` 200 |
 | **Live verify** | Real domain `deoleoloyalty.gifsy.in` | ✅ `/auth/login` 200, branding resolving, API `/health` 200, both services on `9d366f9` |
-| **Login-logo follow-up** | Commit `0780d1f` (Deoleo login wordmark) fast-forwarded onto main + pushed AFTER cutover #3 fired | ⏳ ARMED — separate pending prod deploy, awaiting the owner's `production` gate; **prod serves `9d366f9` until approved** |
+| **Login-logo follow-up + `/brand/*` fix** | Commit `0780d1f` (Deoleo login wordmark) fast-forwarded onto main; then the `/brand/*` matcher fix (`eb841e9`); owner approved the `production` gate | ✅ DEPLOYED — prod moved **`9d366f9` → `eb841e9`**; both services serve `eb841e9`; `/brand/deoleo-wordmark-white.png` 200 image/png + the wordmark renders on the login page |
 
-**Cutover #3 payload (this session's re-KYC batch — all now in prod except the login logo):**
+**Cutover #3 payload (this session's re-KYC batch — all now in prod; the login logo + `/brand/*` fix followed in `eb841e9`):**
 - **Field-level re-KYC** (`267da65`, `e1e4ba5`) — the resubmit reuses the 4-step wizard with NON-flagged fields **LOCKED** (flagged
   fields pre-filled + editable); **BACKEND-ENFORCED** (non-flagged text pinned to stored values; non-flagged documents carried forward
   from the PRIOR submission); approver **HIGHLIGHT** of flagged fields + admin remark on the sales-senior detail AND the Gifsy reviewer.
@@ -159,21 +161,28 @@
   index). Fix resolves the existing User via `SalesUser(clientId,employeeCode).userId` + updates the phone in place; 8 staging orphans
   cleaned (freed numbers incl. 9113145451).
 - **Redeem-button KYC gate** (in `9d366f9`) — the sales "Redeem for Outlet" button now shows only when the outlet's KYC `isApproved`.
-- **Deoleo login logo** (`0780d1f`, **ARMED**) — the real Deoleo white wordmark on the login brand panel + mobile strip.
+- **Deoleo login logo** (`0780d1f`, **✅ LIVE in `eb841e9`**) — the real Deoleo white wordmark on the login brand panel + mobile strip
+  (replaced the generic placeholder); deployed after the owner approved the `production` gate.
+- **`/brand/*` middleware fix** (`eb841e9`, **✅ LIVE**) — the login wordmark first rendered as a BROKEN IMAGE because `/brand/*.png` was
+  **307-redirected to `/auth/login`**: the `platform/src/proxy.ts` auth-middleware `config.matcher` excluded `logos/`/`favicons/`/`icons/`/
+  `images/`/`sw.js`/`offline.html` but **not `brand/`** (the login page has no token → the asset request got the auth redirect). Fix added
+  `brand/` to the matcher exclusion; bundled into the SAME prod deploy as the logo (`eb841e9`). Verified `/brand/deoleo-wordmark-white.png`
+  → 200 image/png + the wordmark renders. Gate FE vitest 1769 · tsc 0. (See the NEW LEARNINGS note: a new `public/` subdir needs the
+  matcher exclusion; local `npm run dev` does NOT reproduce the edge 307 → curl the real staging edge.)
 
 **INVESTIGATION RESOLVED (record — NOT a bug):** "outlet logged in before KYC approval" — the reported outlet (Charan Trading /
 prakhar / 8977097868) was genuinely APPROVED 2026-07-02, logged in 07-03 (AFTER approval), and is now mid-re-KYC (keeps earned access
 by design). Login correctly blocks `PENDING_VERIFICATION` (`auth.service.ts`). Optional future design choice (NOT scheduled): whether
 a re-KYC should SUSPEND access until re-approval.
 
-**Remaining (owner-gated — Deoleo go-live):** approve the `production` gate for the login-logo run (`0780d1f`) → prod shows the wordmark;
-load real master data (#76 — the LAST hard blocker, waits on the client's files); WhatsApp `deoleo_kyc_approval` runtime-verify (#143).
+**Remaining (owner-gated — Deoleo go-live):** load real master data (#76 — the LAST hard blocker, waits on the client's files); WhatsApp
+`deoleo_kyc_approval` runtime-verify (#143). (✅ the login logo + `/brand/*` fix are LIVE in prod `eb841e9` — no longer a remaining item.)
 
 ## 🚀 2026-07-01 — CUTOVER #2 EXECUTED (`develop` → `main`) + DEOLEO TENANT CREATED + ACTIVE — DONE
 
 > **CUTOVER #2 was EXECUTED and is COMPLETE (2026-07-01).** Owner-driven HYBRID (owner approved the `production` gate; orchestrator
 > ran the reversible prep + in-VPC jobs on the owner's per-step go). **Prod HEAD at cutover #2 = `a2f5929`** (`main` == `develop` at
-> cutover; superseded by cutover #3 → prod now `9d366f9`); both prod services healthy `/health` 200. Gate at cutover #2: **api jest 1289 · nest 0 · FE vitest 1698 · tsc 0.**
+> cutover; superseded by cutover #3 then the login-logo/`/brand/*` deploy → prod now `eb841e9`); both prod services healthy `/health` 200. Gate at cutover #2: **api jest 1289 · nest 0 · FE vitest 1698 · tsc 0.**
 
 | Step | What ran | Result |
 |---|---|---|

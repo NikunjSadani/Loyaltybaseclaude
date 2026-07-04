@@ -8,20 +8,24 @@ client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch *
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
 `dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-04.
 
-🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #3 EXECUTED 2026-07-04 — prod now serving `9d366f9`; DEOLEO TENANT CREATED + ACTIVE + LIVE
-on the real domain.** Cutover #3 moved prod `main` **a2f5929 → 9d366f9** (60-commit jump, **CODE-ONLY — 0 migrations**, so the in-VPC
-migrate step was a no-op). Owner approved the `production` gate; both prod Cloud Run services (`gifsy-api` + `gifsy-frontend`) now serve
-`9d366f9`; pre-cutover backup **`1783158625082`** (ON_DEMAND, SUCCESSFUL, "pre-cutover3-develop-9d366f9"). **VERIFIED LIVE on the real
-domain `deoleoloyalty.gifsy.in`:** `/auth/login` = 200, tenant branding resolving, API `/health` = 200, both services on the `9d366f9`
-image. (The raw `*.run.app` frontend URL 404s on routes — that's host-based tenant routing via Cloudflare, NOT a fault; the real domain
-is authoritative.) **develop HEAD = `0780d1f` == main HEAD = `0780d1f`** — the one commit main is ahead (the Deoleo login logo, `0780d1f`)
-was fast-forwarded onto main + pushed AFTER cutover #3 fired, so it is **ARMED but its prod deploy is PENDING the owner's `production`
-gate approval → prod serves `9d366f9` until approved.** Cutover #3 shipped the **field-level re-KYC + re-KYC in-flight display fix +
-program-name/category case-insensitive upload + hierarchy phone-correction orphan fix + redeem-button KYC gate** (details in DONE-THIS-SESSION).
+🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #3 EXECUTED 2026-07-04 + LOGIN-LOGO/BRAND-FIX DEPLOYED — prod now serving `eb841e9`; DEOLEO TENANT
+CREATED + ACTIVE + LIVE on the real domain.** Cutover #3 moved prod `main` **a2f5929 → 9d366f9** (60-commit jump, **CODE-ONLY — 0 migrations**,
+so the in-VPC migrate step was a no-op). **Then (later 2026-07-04) the owner approved the `production` gate for the login-logo + `/brand/*`
+middleware fix run → prod moved `9d366f9` → `eb841e9` (= 9d366f9 + the Deoleo login logo `0780d1f` + the `/brand/*` matcher fix `eb841e9`).**
+Both prod Cloud Run services (`gifsy-api` + `gifsy-frontend`) now serve `eb841e9`; pre-cutover backup **`1783158625082`** (ON_DEMAND,
+SUCCESSFUL, "pre-cutover3-develop-9d366f9"). **VERIFIED LIVE on the real domain `deoleoloyalty.gifsy.in`:** `/brand/deoleo-wordmark-white.png`
+= 200 image/png (the Deoleo wordmark renders on the login page, placeholder gone), `/auth/login` = 200, tenant branding resolving, API
+`/health` = 200, both services on the `eb841e9` image. (The raw `*.run.app` frontend URL 404s on routes — that's host-based tenant routing
+via Cloudflare, NOT a fault; the real domain is authoritative.) **develop HEAD = `eb841e9` == main HEAD = `eb841e9`** — the Deoleo login logo
+(`0780d1f`) is now **LIVE** (was ARMED), and the follow-up **`/brand/*` middleware fix (`eb841e9`)** shipped in the SAME prod deploy: the
+login wordmark first rendered as a BROKEN IMAGE because `/brand/*.png` was 307-redirected to `/auth/login` (the `platform/src/proxy.ts`
+auth-middleware `config.matcher` excluded `logos/`/`favicons/`/`icons/`/`images/`/`sw.js`/`offline.html` but **not `brand/`**); the fix added
+`brand/` to the matcher exclusion. Cutover #3 shipped the **field-level re-KYC + re-KYC in-flight display fix + program-name/category
+case-insensitive upload + hierarchy phone-correction orphan fix + redeem-button KYC gate** (details in DONE-THIS-SESSION).
 Keep the fix-as-found loop available (owner reports a bug → diagnose → fix/delegate → INDEPENDENT audit → FULL gate → runtime-verify →
 push to `develop`; prod follows on the next `main` deploy). **Remaining is owner-gated (Deoleo go-live):** ✅ conversion rate=1 (verified
-backend) · ✅ first Deoleo CLIENT_ADMIN created (2026-07-02) → **approve the `production` gate for the login-logo run (`0780d1f`)** so prod
-shows the wordmark → **load real master data** via the app UIs when the client sends files (**#76 — THE LAST HARD BLOCKER**). Plus **#143**
+backend) · ✅ first Deoleo CLIENT_ADMIN created (2026-07-02) · ✅ login logo + `/brand/*` fix LIVE (prod `eb841e9`) → **load real master data**
+via the app UIs when the client sends files (**#76 — THE LAST HARD BLOCKER**). Plus **#143**
 — WhatsApp `deoleo_kyc_approval` template runtime-verify (template APPROVED 2026-07-02; needs a real approval to a real phone). The recon'd
 **scale/ops plan** is COMPLETE on develop (now all in prod via `9d366f9`): pagination stream (W1+W2), observability O1+O2, security
 log-leak fixed, KYC-submit-500 RESOLVED, ASM enrollment, KYC "Rejected/Re-upload" consolidation; notifications/P7 still PAUSED (build all
@@ -41,7 +45,7 @@ calls this session). Also OWN doc/memory CONSISTENCY: when a fact changes, sweep
 [[default-to-orchestration]] [[own-consistency-no-micromanage]] [[audit-every-build-item]] [[verify-flows-at-runtime]]
 
 🟡 SCALE/OPS + UAT-FIX BUILD (post-Deoleo, owner-driven, orchestrated — **✅ ALL now in prod via cutover #3 `9d366f9`.** develop == main
-== `0780d1f`.) SHIPPED to `develop` + gate-green + each independently audited: **(1)** security
+== `eb841e9`.) SHIPPED to `develop` + gate-green + each independently audited: **(1)** security
 log-leak fix (`df47baf` — prod was logging live redemption OTPs + full phone numbers; removed/masked); **(2)** observability O1+O2
 (`33543ec` — `nestjs-pino` structured JSON logs + a real `/health/ready` DB-ping probe, verified live; audit CAUGHT a HIGH `?token=`
 query-log leak → custom PATH-only req serializer; O3/OpenTelemetry DEFERRED — needs monitoring-IAM + `deploy.yml` edit); **(3)** ✅
@@ -85,7 +89,7 @@ deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLO
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1419 · nest 0 · FE vitest 1769 · tsc 0 (prod serving `9d366f9`; main HEAD `0780d1f` == develop HEAD `0780d1f`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1419 · nest 0 · FE vitest 1769 · tsc 0 (prod serving `eb841e9`; main HEAD `eb841e9` == develop HEAD `eb841e9`; the `/brand/*` fix gate was FE vitest 1769 · tsc 0).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -147,7 +151,12 @@ using the RAW flags so it still shows during review. A re-KYC of an already-appr
 (login only blocks `PENDING_VERIFICATION`). **(16)** guarded staging/prod one-off DB reads/writes run via the
 **`gifsy-oneoff-staging` Cloud Run Job** — override its `--args` with a base64'd node script
 (`node -e eval(Buffer.from('<b64>','base64').toString())`) that guards `current_database()==='gifsy_staging'` FIRST; reset the
-args to a no-op afterward (used to find + free the orphaned phone numbers).
+args to a no-op afterward (used to find + free the orphaned phone numbers). **(17)** a **static asset under a NEW `public/`
+subdir needs the `platform/src/proxy.ts` auth-middleware `config.matcher` exclusion** — else on a no-token page (e.g. `/auth/login`)
+the asset request gets the auth **307 → `/auth/login`** and renders as a BROKEN IMAGE. The login-wordmark `/brand/*.png` first broke this
+way (`brand/` wasn't in the matcher exclusion alongside `logos/`/`favicons/`/`icons/`/`images/`/`sw.js`/`offline.html`); fix = add the new
+subdir to the exclusion (`eb841e9`). **Local `npm run dev` does NOT reproduce the edge 307 — curl the asset on the REAL staging edge**
+(same class as the earlier `sw.js` 307).
 
 **META-LESSON (the owner had to remind me — bake it in): a fix is DONE only when EVERY consumer + alternate data path +
 scale case is traced, not just the visible one.** The re-KYC fix took THREE rounds (derivation → the submitter-scoped list
@@ -167,11 +176,19 @@ already understand → STOP, present the ideal vs the shortcut, and let the owne
 edges (and even then, say why closing them isn't worth it), never for a gap I could design correctly now.
 
 DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`; runtime-verified where an API/edge check was possible):
-- **🆕 2026-07-04 — CUTOVER #3 + re-KYC UAT batch (all now in prod via `9d366f9`, except the login logo `0780d1f` which is ARMED):**
+- **🆕 2026-07-04 — CUTOVER #3 + re-KYC UAT batch + LOGIN-LOGO/BRAND-FIX DEPLOY (all now in prod; prod moved `9d366f9` → `eb841e9`):**
   · **CUTOVER #3 EXECUTED** — prod `main` **a2f5929 → 9d366f9** (60-commit, **CODE-ONLY — 0 migrations**, in-VPC migrate = no-op);
     owner approved the `production` gate; both prod services serve `9d366f9`; pre-cutover backup **`1783158625082`** (rollback =
-    redeploy a2f5929). **Verified LIVE on `deoleoloyalty.gifsy.in`** (login 200, branding resolving, API /health 200). The login-logo
-    commit `0780d1f` was fast-forwarded onto main AFTER the cutover → separate pending prod deploy (armed, awaiting the owner's gate).
+    redeploy a2f5929). **Verified LIVE on `deoleoloyalty.gifsy.in`** (login 200, branding resolving, API /health 200).
+  · **LOGIN-LOGO + `/brand/*` FIX DEPLOYED (later 2026-07-04)** — the owner approved the `production` gate for the login-logo run →
+    prod moved **`9d366f9` → `eb841e9`** (= 9d366f9 + login logo `0780d1f` + the `/brand/*` matcher fix `eb841e9`); both prod services
+    now serve `eb841e9`. The login wordmark first rendered as a BROKEN IMAGE because `/brand/*.png` was **307-redirected to
+    `/auth/login`** — the `platform/src/proxy.ts` auth-middleware `config.matcher` excluded `logos/`/`favicons/`/`icons/`/`images/`/
+    `sw.js`/`offline.html` but **not `brand/`** (the login page has no token → the asset request got the auth redirect). Fix: added
+    `brand/` to the matcher exclusion; bundled into the SAME prod deploy as the logo (`eb841e9`). **VERIFIED LIVE:**
+    `/brand/deoleo-wordmark-white.png` → 200 image/png, the Deoleo wordmark renders on the login page (placeholder gone), `/auth/login`
+    200, API `/health` 200. Gate FE vitest 1769 · tsc 0. (Trap #17 — a new `public/` subdir needs the matcher exclusion; local
+    `npm run dev` does NOT reproduce the edge 307 → curl the real staging edge.)
   · **FIELD-LEVEL RE-KYC** (`267da65`, `e1e4ba5`) — the re-KYC resubmit reuses the 4-step wizard with NON-flagged fields **LOCKED**
     (flagged fields pre-filled + editable); **BACKEND-ENFORCED lock** (non-flagged text pinned to stored values; non-flagged documents
     carried forward from the PRIOR submission — server-authoritative); approver **HIGHLIGHT** of the flagged fields + admin remark on
@@ -195,8 +212,9 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
     (freed numbers incl. 9113145451) via the `gifsy-oneoff-staging` job. (Traps #13/#14/#16.)
   · **REDEEM-BUTTON GATE** (in `9d366f9`) — the sales "Redeem for Outlet" button now shows only when the outlet's KYC `isApproved`
     (was showing for submitted-but-unapproved outlets; the backend already blocked the actual redeem).
-  · **DEOLEO LOGIN LOGO** (`0780d1f`, **ARMED — prod serves `9d366f9` until the owner approves the `production` gate**) — the real
-    Deoleo white wordmark on the login brand panel + mobile strip (replaced the generic placeholder).
+  · **DEOLEO LOGIN LOGO** (`0780d1f`, **✅ LIVE — deployed to prod in `eb841e9` after the owner approved the `production` gate**) — the
+    real Deoleo white wordmark on the login brand panel + mobile strip (replaced the generic placeholder); rendering fixed by the
+    `/brand/*` matcher fix bundled into the same `eb841e9` deploy (see the LOGIN-LOGO + `/brand/*` FIX entry above).
   · **INVESTIGATION RESOLVED (NOT a bug):** "outlet logged in before KYC approval" — traced live: the reported outlet (Charan Trading /
     prakhar / 8977097868) was genuinely APPROVED 2026-07-02 (full `kyc_status_history` chain), logged in 07-03 (AFTER approval), and is
     now mid-re-KYC (a 2nd submission), which by design KEEPS the access it already earned. Login correctly blocks `PENDING_VERIFICATION`
@@ -343,15 +361,18 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE — **✅ CUTOVER #3 EXECUTED 2026-07-04. Prod now serving `9d366f9`; main HEAD `0780d1f` == develop HEAD `0780d1f`.**
+🚀 CUTOVER STATE — **✅ CUTOVER #3 EXECUTED 2026-07-04 + LOGIN-LOGO/BRAND-FIX DEPLOYED. Prod now serving `eb841e9`; main HEAD `eb841e9` == develop HEAD `eb841e9`.**
 Cutover #3 moved prod `main` **`a2f5929` → `9d366f9`** (60-commit jump, **CODE-ONLY — 0 migrations**, so the in-VPC `migrate deploy`
-was a no-op). Owner approved the `production` gate; both prod Cloud Run services (`gifsy-api` + `gifsy-frontend`) serve `9d366f9`;
+was a no-op). Owner approved the `production` gate; both prod Cloud Run services (`gifsy-api` + `gifsy-frontend`) served `9d366f9`;
 pre-cutover backup **`1783158625082`** (ON_DEMAND, SUCCESSFUL, "pre-cutover3-develop-9d366f9"; rollback = redeploy `a2f5929`).
-**VERIFIED LIVE on the real domain `deoleoloyalty.gifsy.in`** (`/auth/login` 200, tenant branding resolving, API `/health` 200,
-both services on `9d366f9`). The login-logo commit **`0780d1f`** was fast-forwarded onto main + pushed AFTER cutover #3 fired →
-**ARMED but its prod deploy is PENDING the owner's `production` gate; prod serves `9d366f9` until approved.** Cutover #3 shipped
-field-level re-KYC + re-KYC in-flight display fix + program-name/category case-insensitive upload + hierarchy phone-orphan fix +
-redeem-button KYC gate. Gate at cutover #3: api jest 1419 · nest 0 · FE vitest 1769 · tsc 0.
+**Then (later 2026-07-04) the owner approved the `production` gate for the login-logo + `/brand/*` middleware fix run → prod moved
+`9d366f9` → `eb841e9`** (= 9d366f9 + the Deoleo login logo `0780d1f` + the `/brand/*` matcher fix `eb841e9`); both prod services now
+serve `eb841e9`. **VERIFIED LIVE on the real domain `deoleoloyalty.gifsy.in`** (`/brand/deoleo-wordmark-white.png` 200 image/png +
+the wordmark renders on the login page, `/auth/login` 200, tenant branding resolving, API `/health` 200, both services on `eb841e9`).
+The login logo (`0780d1f`) is now **LIVE**; the `/brand/*` fix (`eb841e9`) resolved a 307-redirect that first broke the wordmark image
+(the auth-middleware `config.matcher` in `platform/src/proxy.ts` didn't exclude `brand/` → the no-token login page 307'd the asset to
+`/auth/login`). Cutover #3 shipped field-level re-KYC + re-KYC in-flight display fix + program-name/category case-insensitive upload +
+hierarchy phone-orphan fix + redeem-button KYC gate. Gate at cutover #3: api jest 1419 · nest 0 · FE vitest 1769 · tsc 0; `/brand/*` fix gate FE vitest 1769 · tsc 0.
 
 **CUTOVER #2 (2026-07-01) — historical:** prod `main` HEAD moved to `a2f5929`. Cutover #2 shipped
 the **onboard-slug fix + per-tenant points-expiry + admin-users pagination/self-deactivate**; applied migration
@@ -422,13 +443,11 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 [[admin-dashboard-consolidation]] [[default-to-orchestration]] [[global-settings-wiring]] [[sales-hierarchy-scoping]]
 [[migration-model]] [[staging-deploy-gate]] [[audit-every-build-item]].
 
-▶ **THINGS TO BE DONE — START HERE (present this list first; ask the owner which to pick up).** ✅ Cutover #3 is DONE — prod serves
-`9d366f9`; **develop == main == `0780d1f`.** Gate: api jest 1419 · nest 0 · FE vitest 1769 · tsc 0.
+▶ **THINGS TO BE DONE — START HERE (present this list first; ask the owner which to pick up).** ✅ Cutover #3 is DONE + the login logo
++ `/brand/*` fix are LIVE — prod serves `eb841e9`; **develop == main == `eb841e9`.** Gate: api jest 1419 · nest 0 · FE vitest 1769 · tsc 0.
 **A. Owner-gated Deoleo go-live (owner or client-files):**
-  1. **Approve the `production` gate for the login-logo run (`0780d1f`)** → then prod shows the Deoleo wordmark (currently ARMED; prod
-     serves `9d366f9` until approved).
-  2. **#76 — load real Deoleo master data** (outlets/hierarchy/catalog/schemes via the app UIs) — **THE LAST HARD BLOCKER**, waits on the client's files.
-  3. **#143 — WhatsApp `deoleo_kyc_approval` runtime-verify** (template APPROVED; needs a real approval to a real phone).
+  1. **#76 — load real Deoleo master data** (outlets/hierarchy/catalog/schemes via the app UIs) — **THE LAST HARD BLOCKER**, waits on the client's files.
+  2. **#143 — WhatsApp `deoleo_kyc_approval` runtime-verify** (template APPROVED; needs a real approval to a real phone).
 **B. Blocked on an owner DECISION:** 5. **Notifications Core** go/no-go (drainer is push-only; in-app inbox needs a migration; 2/3
   events blocked upstream). 6. **Email provider** — ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
 **C. Buildable now — C-batch SHIPPED** (`873a2ec`): ✅ C7 `/admin/outlets/ids` lite endpoint · ✅ C9 GIFSY read-only "Security &
@@ -447,15 +466,17 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
     only real open item; the rest of the sales-KYC/UX batch is owner-approved as shipped.
 **HOUSEKEEPING:** #90–95 already pruned; #74 (owner ops) mostly done (monitoring + backups/PITR ON; only optional cred-rotation left).
 
-Now: greet the owner. **🚀 CUTOVER #3 IS DONE (2026-07-04) — prod now serves `9d366f9`, and the DEOLEO TENANT is CREATED + ACTIVE +
-VERIFIED LIVE on `deoleoloyalty.gifsy.in`.** Cutover #3 moved prod `main` **`a2f5929` → `9d366f9`** (60-commit, CODE-ONLY — 0 migrations,
-in-VPC migrate = no-op); owner approved the `production` gate; both prod services serve `9d366f9`; pre-cutover backup **`1783158625082`**
-(rollback = redeploy `a2f5929`). **develop == main == `0780d1f`** — the login-logo commit `0780d1f` was fast-forwarded onto main AFTER the
-cutover → **ARMED, prod serves `9d366f9` until the owner approves its `production` gate.** Cutover #3 shipped the re-KYC batch (see
-DONE-THIS-SESSION): **field-level re-KYC** (non-flagged fields locked, backend-enforced; approver highlight), **re-KYC in-flight display
-fix** (`isReKycActionable`), **program-name/category case-insensitive upload**, **hierarchy phone-correction orphan fix** (+ 8 staging
-orphans cleaned), **redeem-button KYC gate**. **Owner-gated Deoleo go-live: ✅ conversion rate=1 (verified backend) · ✅ first CLIENT_ADMIN
-created (2026-07-02) · ⏳ approve the `production` gate for the login-logo run (`0780d1f`) → prod shows the wordmark · ⏳ load real master
+Now: greet the owner. **🚀 CUTOVER #3 IS DONE (2026-07-04) + the LOGIN LOGO & `/brand/*` FIX are LIVE — prod now serves `eb841e9`, and the
+DEOLEO TENANT is CREATED + ACTIVE + VERIFIED LIVE on `deoleoloyalty.gifsy.in`** (the Deoleo wordmark renders on the login page).
+Cutover #3 moved prod `main` **`a2f5929` → `9d366f9`** (60-commit, CODE-ONLY — 0 migrations, in-VPC migrate = no-op); owner approved the
+`production` gate; then (later 2026-07-04) the owner approved the login-logo gate → **prod moved `9d366f9` → `eb841e9`** (= 9d366f9 + login
+logo `0780d1f` + the `/brand/*` matcher fix `eb841e9`). Both prod services serve `eb841e9`; pre-cutover backup **`1783158625082`** (rollback
+= redeploy `a2f5929`). **develop == main == `eb841e9`.** The login logo (`0780d1f`) is now LIVE (was ARMED); the `/brand/*` fix (`eb841e9`)
+resolved a 307 that first rendered the wordmark as a broken image (the auth-middleware matcher in `platform/src/proxy.ts` didn't exclude
+`brand/`). Cutover #3 shipped the re-KYC batch (see DONE-THIS-SESSION): **field-level re-KYC** (non-flagged fields locked, backend-enforced;
+approver highlight), **re-KYC in-flight display fix** (`isReKycActionable`), **program-name/category case-insensitive upload**, **hierarchy
+phone-correction orphan fix** (+ 8 staging orphans cleaned), **redeem-button KYC gate**. **Owner-gated Deoleo go-live: ✅ conversion rate=1
+(verified backend) · ✅ first CLIENT_ADMIN created (2026-07-02) · ✅ login logo + `/brand/*` fix LIVE (prod `eb841e9`) · ⏳ load real master
 data (#76 — the LAST hard blocker, waits on the client's files) · ⏳ #143 WhatsApp `deoleo_kyc_approval` runtime-verify (code-ready,
 template APPROVED — needs a real approval+phone).** Scale/ops COMPLETE + now in prod (pagination, observability O1+O2, log-leak fix,
 KYC-submit-500, ASM enrollment, conversion-rate editor, Rejected/Re-upload, download-helper sweep, WhatsApp-post-OTP, OTP-gates-routing,
@@ -463,7 +484,7 @@ KYC-PDF render, not-interested-404), as is the earlier C-batch (C7 `/admin/outle
 `auth.constants.ts` · C10 force-logout) and the sales-KYC/UX batch (assignment-driven KYC list, branch member-filter, etc.).
 **INVESTIGATION RESOLVED (record, not a bug):** "outlet logged in before KYC approval" — the reported outlet was genuinely APPROVED
 2026-07-02, logged in AFTER approval, and is now mid-re-KYC (keeps earned access by design); login correctly blocks
-`PENDING_VERIFICATION`. **NEXT = approve the login-logo gate + master data #76 when files arrive** (nothing else queued);
+`PENDING_VERIFICATION`. **NEXT = master data #76 when files arrive** (nothing else queued);
 notifications/P7 still PAUSED (events flag-OFF; email provider TBD, ZeptoMail vs SES). Required onboarding-flow builds logged in
 POST-GO-LIVE-BACKLOG §A-DOMAIN (needs a `Client.domains` migration — schedule before client #2) + §A-ONBOARDING (incl. the
 GIFSY_ADMIN-in-tenant-context fix, SHIPPED). Keep the fix-as-found loop available (fixes push to `develop` → reach prod on the next
@@ -473,6 +494,6 @@ GIFSY_ADMIN-in-tenant-context fix, SHIPPED). Keep the fix-as-found loop availabl
 
 **START THE SESSION by presenting the ▶ THINGS TO BE DONE list above** (A owner-gated go-live · B owner-decision · C
 buildable-now · D later) and **ask the owner which to pick up** — do NOT silently begin work. Default recommendation if the
-owner is open-ended: since cutover #3 is done and prod is live, offer to (i) walk the owner through approving the login-logo `production`
-gate, or (ii) pick a buildable-now item while master data (#76) remains owner-gated.
+owner is open-ended: since cutover #3 is done and the login logo + `/brand/*` fix are live (prod `eb841e9`), offer to pick a buildable-now
+item while master data (#76) remains owner-gated (waiting on the client's files).
 ```
