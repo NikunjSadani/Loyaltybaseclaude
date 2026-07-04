@@ -131,6 +131,15 @@ describe('TenantSettingsService', () => {
     expect(s.creditsPayouts.notifyEmails).toEqual([]);
   });
 
+  it('floors the safety caps at 1 so a stored 0 cannot freeze all credit uploads', async () => {
+    const svc = new TenantSettingsService(makePrisma([
+      { settingKey: 'creditsPayouts', settingValue: { safetyCapPoints: 0, safetyCapInr: 0 } },
+    ]));
+    const s = await svc.getEffectiveSettings('deoleo');
+    expect(s.creditsPayouts.safetyCapPoints).toBe(1);
+    expect(s.creditsPayouts.safetyCapInr).toBe(1);
+  });
+
   it('coerces a numeric string and filters non-string notifyEmails', async () => {
     const svc = new TenantSettingsService(makePrisma([
       { settingKey: 'minVoucherFreeAmount', settingValue: '300' },

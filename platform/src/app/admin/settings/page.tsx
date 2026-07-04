@@ -54,6 +54,19 @@ interface SecurityConfig {
   otpMaxResendsPerWindow?: number
 }
 
+/**
+ * Credits & Payouts config (per-tenant). Editable by GIFSY_ADMIN only. NOTE: this
+ * block is stripped from the tenant `/me` settings (operator-only), so it can only
+ * be seeded from GET /api/admin/settings — never from the getGifsySettings() cache.
+ */
+interface CreditsPayoutsConfig {
+  monthCutoffDay: number
+  safetyCapPoints: number
+  safetyCapInr: number
+  fourEyesEnabled?: boolean
+  notifyEmails: string[]
+}
+
 function SettingRow({ label, description, value, onChange, type = 'number', min, max, step, disabled = false, testId }: {
   label: string, description: string, value: number | string, onChange: (v: string) => void,
   type?: string, min?: number, max?: number, step?: number, disabled?: boolean, testId?: string
@@ -80,15 +93,81 @@ export default function SettingsPage() {
   // Sourced from GET /api/admin/settings (backend reads the enforced auth constants +
   // env). Display-only — no editing here. Only fetched for a Gifsy Admin.
   const [securityConfig, setSecurityConfig] = useState<SecurityConfig | null>(null)
+
+  // ── Credits & Payouts config (per-tenant; caps / month-cutoff / notify emails).
+  // Editable by GIFSY_ADMIN only (saveGifsySettings PUTs /v1/admin/settings). Seeded from
+  // the same GET /api/admin/settings fetch below, since the operator-only creditsPayouts
+  // block is stripped from /me (getGifsySettings() can't provide it). `cpLoaded` gates the
+  // Save button so we can never persist the placeholder defaults over the real stored values
+  // before the fetch resolves. `cpFourEyes` is round-tripped (no UI — maker-checker is a
+  // deferred, not-yet-enforced flag) so a save can't silently flip it. ──
+  const [cpCutoffDay,    setCpCutoffDay]    = useState<string>('28')
+  const [cpCapPoints,    setCpCapPoints]    = useState<string>('50000')
+  const [cpCapInr,       setCpCapInr]       = useState<string>('100000')
+  const [cpNotifyEmails, setCpNotifyEmails] = useState<string>('')
+  const [cpFourEyes,     setCpFourEyes]     = useState<boolean>(false)
+  const [cpLoaded,       setCpLoaded]       = useState(false)
+  const [cpSaved,        setCpSaved]        = useState(false)
+  const [cpError,        setCpError]        = useState<string | null>(null)
+
   useEffect(() => {
     if (!isGifsyAdmin) return
     fetch('/api/admin/settings')
       .then((r) => r.json())
-      .then((json: { success?: boolean; data?: { settings?: SecurityConfig } }) => {
-        if (json?.success && json.data?.settings) setSecurityConfig(json.data.settings)
+      .then((json: { success?: boolean; data?: { settings?: SecurityConfig & { creditsPayouts?: CreditsPayoutsConfig } } }) => {
+        if (json?.success && json.data?.settings) {
+          setSecurityConfig(json.data.settings)
+          // creditsPayouts has no SETTINGS_DEFAULTS entry, so it is ABSENT until first saved.
+          // Seed from the stored object when present; otherwise keep the on-screen defaults so
+          // the card is usable from scratch. Either way the fetch resolved → unlock Save.
+          const cp = json.data.settings.creditsPayouts
+          if (cp) {
+            setCpCutoffDay(String(cp.monthCutoffDay ?? 28))
+            setCpCapPoints(String(cp.safetyCapPoints ?? 50000))
+            setCpCapInr(String(cp.safetyCapInr ?? 100000))
+            setCpNotifyEmails((cp.notifyEmails ?? []).join(', '))
+            setCpFourEyes(cp.fourEyesEnabled ?? false)
+          }
+          setCpLoaded(true)
+        }
       })
       .catch(() => { /* non-fatal — the card simply won't render */ })
   }, [isGifsyAdmin])
+
+  async function handleCreditsPayoutsSave() {
+    setCpError(null)
+    const cutoff = parseInt(cpCutoffDay, 10)
+    const capPts = parseInt(cpCapPoints, 10)
+    const capInr = parseInt(cpCapInr, 10)
+    if (!Number.isInteger(cutoff) || cutoff < 1 || cutoff > 31) {
+      setCpError('Month cutoff day must be a whole number between 1 and 31.'); return
+    }
+    if (!Number.isInteger(capPts) || capPts < 1) {
+      setCpError('Safety cap (points) must be a positive whole number — it is the max a SINGLE outlet row may award.'); return
+    }
+    if (!Number.isInteger(capInr) || capInr < 1) {
+      setCpError('Safety cap (₹) must be a positive whole number — it is the max a SINGLE outlet row may award.'); return
+    }
+    // Accept a comma / semicolon / whitespace / newline separated list; validate each.
+    const emails = cpNotifyEmails.split(/[\s,;]+/).map((e) => e.trim()).filter(Boolean)
+    const bad = emails.find((e) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e))
+    if (bad) { setCpError(`"${bad}" is not a valid email address.`); return }
+    // creditsPayouts is a REPLACE-WHOLE nested key — send every field (incl. the
+    // round-tripped fourEyesEnabled) so none are dropped.
+    const ok = await saveGifsySettings({
+      creditsPayouts: {
+        monthCutoffDay:  cutoff,
+        safetyCapPoints: capPts,
+        safetyCapInr:    capInr,
+        fourEyesEnabled: cpFourEyes,
+        notifyEmails:    emails,
+      },
+    })
+    if (!ok) { setCpError('Could not save — credit settings can only be changed by a Gifsy Admin.'); return }
+    setCpNotifyEmails(emails.join(', ')) // reflect the normalised list
+    setCpSaved(true)
+    setTimeout(() => setCpSaved(false), 3000)
+  }
 
   const [settings, setSettings] = useState<Settings>({
     holdingPeriodDays: 30, otpValidityHours: 6, kycSlaHours: 48,
@@ -866,6 +945,92 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* ── Credits & Payouts config (per-tenant; GIFSY_ADMIN only) ── */}
+      {isGifsyAdmin && (
+        <Card data-testid="credits-payouts-card">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Coins className="h-4 w-4 text-[var(--brand-primary)]" /> Credits &amp; Payouts Config
+                </CardTitle>
+                <CardDescription className="mt-1">
+                  Controls the monthly credit-upload window and the per-row safety caps. This is a
+                  Gifsy-operated setting — only a Gifsy Admin can change it. <strong>The safety caps
+                  apply PER OUTLET ROW</strong> (the largest award any single outlet may receive in one
+                  upload), not the batch total — a fat-finger guard, not a budget ceiling.
+                </CardDescription>
+              </div>
+              {cpSaved && (
+                <span className="text-xs font-semibold text-emerald-600 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg shrink-0">
+                  ✓ Saved
+                </span>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <SettingRow
+              label="Month cutoff day"
+              description="Day of the month after which credit uploads for the PRIOR month are closed (1–31). E.g. 28 = last month's uploads must be done by the 28th of this month."
+              type="number"
+              value={cpCutoffDay}
+              onChange={setCpCutoffDay}
+              min={1}
+              max={31}
+              testId="cp-cutoff-input"
+            />
+            <SettingRow
+              label="Safety cap — points (per row)"
+              description="Max whole points a SINGLE outlet row may award in one upload. A row above this is rejected (fat-finger guard). Does not cap the batch total."
+              type="number"
+              value={cpCapPoints}
+              onChange={setCpCapPoints}
+              min={1}
+              testId="cp-cap-points-input"
+            />
+            <SettingRow
+              label="Safety cap — ₹ (per row)"
+              description="Max rupee value a SINGLE outlet row may award in one upload (PAYOUT-type awards). A row above this is rejected. Does not cap the batch total."
+              type="number"
+              value={cpCapInr}
+              onChange={setCpCapInr}
+              min={1}
+              testId="cp-cap-inr-input"
+            />
+            <div className="space-y-1">
+              <label className="text-sm font-medium text-gray-700">Notify emails</label>
+              <p className="text-xs text-gray-500">
+                Recipients for credit-batch notifications (comma-separated). Leave blank to fall back
+                to the Gifsy ops default.
+              </p>
+              <textarea
+                data-testid="cp-notify-emails-input"
+                value={cpNotifyEmails}
+                onChange={(e) => setCpNotifyEmails(e.target.value)}
+                placeholder="ops@deoleo.com, finance@deoleo.com"
+                rows={2}
+                className="w-full mt-1 rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30"
+              />
+            </div>
+            {cpError && <p className="text-xs text-red-600">{cpError}</p>}
+            <div className="flex justify-end">
+              <button
+                data-testid="cp-save"
+                onClick={handleCreditsPayoutsSave}
+                disabled={!cpLoaded}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 ${
+                  cpSaved
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-[var(--brand-primary)] text-white hover:bg-[var(--brand-primary-dark)] disabled:opacity-50 disabled:cursor-not-allowed'
+                }`}
+              >
+                {cpSaved ? '✓ Saved' : <><Save className="h-3.5 w-3.5" /> Save</>}
+              </button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* ── Outlet Programs & Categories (per-tenant allow-lists) ── */}
       <Card data-testid="outlet-programs-card">

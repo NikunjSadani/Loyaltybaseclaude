@@ -298,8 +298,11 @@ export class TenantSettingsService {
             const d = base.creditsPayouts;
             out.creditsPayouts = {
               monthCutoffDay:  this.dayOr(v.monthCutoffDay,  d.monthCutoffDay),
-              safetyCapPoints: this.numOr(v.safetyCapPoints, d.safetyCapPoints),
-              safetyCapInr:    this.numOr(v.safetyCapInr,    d.safetyCapInr),
+              // Floor the caps at 1: a stored 0 (only reachable via a raw settings PUT that
+              // bypasses the admin card's FE validation) would make `amount > cap` reject EVERY
+              // credited row → silently freeze all credit uploads for the tenant. Never < 1.
+              safetyCapPoints: Math.max(1, this.numOr(v.safetyCapPoints, d.safetyCapPoints)),
+              safetyCapInr:    Math.max(1, this.numOr(v.safetyCapInr,    d.safetyCapInr)),
               fourEyesEnabled: this.bool(v.fourEyesEnabled,  d.fourEyesEnabled),
               notifyEmails:    Array.isArray(v.notifyEmails)
                 // Drop empties/whitespace so a `[""]` can't silently swallow the batch-confirm
