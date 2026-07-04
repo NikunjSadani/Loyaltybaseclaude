@@ -44,7 +44,7 @@ interface KYCEntry {
   outletType?: string;
 }
 
-interface TeamMember { id: string; name: string; submitterUserIds: string[]; }
+interface TeamMember { id: string; name: string; employeeCode: string; submitterUserIds: string[]; }
 
 const APPROVAL_REQUIRED_KEY = 'APPROVAL_REQUIRED' as const;
 const UNDER_REVIEW_KEY      = 'UNDER_REVIEW'      as const;
@@ -332,6 +332,7 @@ function KYCListContent() {
               setTeamMembers((body.data.members ?? []).map((m: any) => ({
                 id: m.id,
                 name: m.name,
+                employeeCode: (m.employeeCode ?? '') as string,
                 submitterUserIds: (m.submitterUserIds ?? []) as string[],
               })));
             }
@@ -443,7 +444,9 @@ function KYCListContent() {
           >
             <option value="">{`All ${childRole(role) ?? 'Members'}`}</option>
             {teamMembers.map((m) => (
-              <option key={m.id} value={m.id}>{m.name}</option>
+              <option key={m.id} value={m.id}>
+                {m.employeeCode ? `${m.employeeCode} · ${m.name}` : m.name}
+              </option>
             ))}
           </select>
         </div>

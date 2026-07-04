@@ -26,7 +26,6 @@ interface SalesProfile {
   joinedDate: string;
   totalOutlets: number;
   kycCompleted: number;
-  visibilitySubmissions: number;
 }
 
 
@@ -94,7 +93,6 @@ function mapUserToProfile(user: {
     joinedDate,
     totalOutlets:         0,
     kycCompleted:         0,
-    visibilitySubmissions: 0,
   };
 }
 
@@ -187,18 +185,14 @@ export default function SalesProfilePage() {
           </div>
 
           {/* Stats */}
-          <div className="grid grid-cols-3 gap-3 mt-5 pt-5 border-t border-gray-100">
+          <div className="grid grid-cols-2 gap-3 mt-5 pt-5 border-t border-gray-100">
             <div className="text-center">
               <p className="text-xl font-bold text-gray-900">{profile.totalOutlets}</p>
               <p className="text-[10px] text-gray-400 mt-0.5">Outlets</p>
             </div>
-            <div className="text-center border-x border-gray-100">
+            <div className="text-center border-l border-gray-100">
               <p className="text-xl font-bold text-emerald-600">{profile.kycCompleted}</p>
               <p className="text-[10px] text-gray-400 mt-0.5">KYC Done</p>
-            </div>
-            <div className="text-center">
-              <p className="text-xl font-bold text-[var(--brand-primary)]">{profile.visibilitySubmissions}</p>
-              <p className="text-[10px] text-gray-400 mt-0.5">Visibility</p>
             </div>
           </div>
         </CardContent>
