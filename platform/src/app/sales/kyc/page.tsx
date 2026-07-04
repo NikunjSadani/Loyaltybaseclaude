@@ -11,7 +11,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { EmptyState } from '@/components/ui/empty-state';
 import { KYCStatus } from '@/types';
 import { cn } from '@/lib/utils';
-import { type SalesRole, getRole, hasTeamView, canEnroll } from '@/lib/sales-role';
+import { type SalesRole, getRole, hasTeamView, canEnroll, childRole } from '@/lib/sales-role';
 import { api } from '@/lib/api-client';
 
 interface KYCEntry {
@@ -40,7 +40,7 @@ interface KYCEntry {
   outletType?: string;
 }
 
-interface TeamMember { id: string; name: string; }
+interface TeamMember { id: string; name: string; submitterUserIds: string[]; }
 
 const APPROVAL_REQUIRED_KEY = 'APPROVAL_REQUIRED' as const;
 const UNDER_REVIEW_KEY      = 'UNDER_REVIEW'      as const;
@@ -322,7 +322,11 @@ function KYCListContent() {
           .then((r) => r.json())
           .then((body) => {
             if (body.success) {
-              setTeamMembers((body.data.members ?? []).map((m: any) => ({ id: m.id, name: m.name })));
+              setTeamMembers((body.data.members ?? []).map((m: any) => ({
+                id: m.id,
+                name: m.name,
+                submitterUserIds: (m.submitterUserIds ?? []) as string[],
+              })));
             }
           })
           .catch(() => {})
@@ -346,9 +350,22 @@ function KYCListContent() {
   const typeOptions    = Array.from(new Set(entries.map((e) => e.outletType).filter(Boolean))) as string[];
   const programOptions = Array.from(new Set(entries.map((e) => e.programName).filter(Boolean))) as string[];
 
+  // Member filter = the selected direct report's WHOLE branch: an entry matches when
+  // its submitter is anywhere in that member's sub-tree (self + downline), resolved
+  // server-side into submitterUserIds (owner 2026-07-03).
+  const selectedMemberUserIds = memberFilter
+    ? new Set(teamMembers.find((m) => m.id === memberFilter)?.submitterUserIds ?? [])
+    : null;
+
+  // XSRs are field reps who don't approve KYCs — the "Approval Pending" (pending-my-
+  // approval) filter is meaningless for them, so drop it from the XSR status dropdown.
+  const statusFilters = role === 'XSR'
+    ? STATUS_FILTERS.filter((f) => f.key !== APPROVAL_REQUIRED_KEY)
+    : STATUS_FILTERS;
+
   const filtered = entries
     .filter((e) => {
-      const matchesMember = !memberFilter || e.submittedById === memberFilter;
+      const matchesMember = !selectedMemberUserIds || (!!e.submittedById && selectedMemberUserIds.has(e.submittedById));
       const matchesType = !typeFilter || e.outletType === typeFilter;
       const matchesProgram = !programFilter || e.programName === programFilter;
       const matchesStatus =
@@ -412,7 +429,7 @@ function KYCListContent() {
               memberFilter ? 'border-[var(--brand-primary)] text-[var(--brand-primary)] font-semibold' : '',
             )}
           >
-            <option value="">All Members</option>
+            <option value="">{`All ${childRole(role) ?? 'Members'}`}</option>
             {teamMembers.map((m) => (
               <option key={m.id} value={m.id}>{m.name}</option>
             ))}
@@ -432,7 +449,7 @@ function KYCListContent() {
             filter !== 'ALL' ? 'border-[var(--brand-primary)] text-[var(--brand-primary)] font-semibold' : '',
           )}
         >
-          {STATUS_FILTERS.map((f) => (
+          {statusFilters.map((f) => (
             <option key={f.key} value={f.key}>{f.label}</option>
           ))}
         </select>

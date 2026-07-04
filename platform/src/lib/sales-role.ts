@@ -70,3 +70,20 @@ export function hasTeamView(role: SalesRole): boolean {
 export function canEnroll(role: SalesRole): boolean {
   return ENROLL_ROLES.includes(role);
 }
+
+// Immediate child level one step down the hierarchy (XSR → SO → ASM → RSM → ZNM → NSM).
+// Drives the KYC-list member-filter label: "All XSR" for an SO, "All SO" for an ASM,
+// etc. XSR is a leaf (no reports), so it has no child.
+const CHILD_ROLE: Record<SalesRole, SalesRole | null> = {
+  XSR: null,
+  SO:  'XSR',
+  ASM: 'SO',
+  RSM: 'ASM',
+  ZNM: 'RSM',
+  NSM: 'ZNM',
+};
+
+/** The immediate subordinate role one level below `role`, or null for XSR (a leaf). */
+export function childRole(role: SalesRole): SalesRole | null {
+  return CHILD_ROLE[role];
+}

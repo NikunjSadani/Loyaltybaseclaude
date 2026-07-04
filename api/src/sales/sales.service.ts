@@ -78,8 +78,22 @@ export class SalesService {
       salesUser.subordinates.map((s) => s.id),
     );
 
+    // Branch submitters: for each DIRECT report, the login-User ids of that report
+    // PLUS their entire downline. The FE KYC-list member filter keys on a submission's
+    // submitter userId, so filtering by a manager must return the whole branch (owner
+    // 2026-07-03), not just that person's own submissions. Reuses the hierarchy walk.
+    const allSalesUsers = await this.prisma.salesUser.findMany({
+      where: { user: { clientId: user.clientId }, deletedAt: null },
+      select: { id: true, reportingToId: true, userId: true },
+    });
+    const edges = allSalesUsers.map((s) => ({ id: s.id, reportingToId: s.reportingToId }));
+    const userIdBySalesUserId = new Map(allSalesUsers.map((s) => [s.id, s.userId]));
+
     const members = salesUser.subordinates.map((sub) => {
       const roll = rollups.get(sub.id) ?? { outlets: 0, kycDone: 0, kycPending: 0, targetValue: 0, targetPct: 0 };
+      const submitterUserIds = [...descendantSalesUserIds(sub.id, edges)]
+        .map((id) => userIdBySalesUserId.get(id))
+        .filter((v): v is string => !!v);
       return {
         id: sub.id,
         employeeCode: sub.employeeCode,
@@ -89,6 +103,8 @@ export class SalesService {
         roleLabel: sub.hierarchyLevel.name,
         territory: sub.region ?? sub.zone ?? '',
         teamSize: sub._count.subordinates,
+        // Login-User ids of this report + their whole downline (KYC-list branch filter).
+        submitterUserIds,
         joinedAt: sub.joinedAt.toISOString(),
         // Whole-subtree rollup (self + downline) — drives the FE My-Team tiles.
         outlets: roll.outlets,

@@ -69,8 +69,8 @@ describe('SalesService', () => {
       });
       // buildTeamRollups: edges → assignments → kpiDef → primary maps.
       mockPrisma.salesUser.findMany.mockResolvedValue([
-        { id: 'mgr1', reportingToId: null },
-        { id: 'sub1', reportingToId: 'mgr1' },
+        { id: 'mgr1', reportingToId: null, userId: 'u-mgr1' },
+        { id: 'sub1', reportingToId: 'mgr1', userId: 'u-sub1' },
       ]);
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]); // no outlets
       mockPrisma.kpiDef.findMany.mockResolvedValue([]);              // no KPIs
@@ -88,6 +88,8 @@ describe('SalesService', () => {
           roleLabel: 'Sales Officer',
           territory: 'NCR',
           teamSize: 3,
+          // sub1 has no downline of its own → its branch is just itself.
+          submitterUserIds: ['u-sub1'],
           joinedAt: '2024-01-01T00:00:00.000Z',
           // No outlets/targets → rollup is all-zero (but the FIELDS are present).
           outlets: 0,
@@ -126,9 +128,9 @@ describe('SalesService', () => {
       });
       // edges: mgr1 → sub1 → sub2 (sub2 is sub1's downline, NOT a direct member).
       mockPrisma.salesUser.findMany.mockResolvedValue([
-        { id: 'mgr1', reportingToId: null },
-        { id: 'sub1', reportingToId: 'mgr1' },
-        { id: 'sub2', reportingToId: 'sub1' },
+        { id: 'mgr1', reportingToId: null, userId: 'u-mgr1' },
+        { id: 'sub1', reportingToId: 'mgr1', userId: 'u-sub1' },
+        { id: 'sub2', reportingToId: 'sub1', userId: 'u-sub2' },
       ]);
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
         {
@@ -164,6 +166,9 @@ describe('SalesService', () => {
       const res = await service.getTeam(caller);
       const sub1 = res.members.find((m: { id: string }) => m.id === 'sub1')!;
       expect(sub1).toMatchObject({
+        // Branch submitter set = the member + its WHOLE downline (sub1 + sub2) — drives
+        // the KYC-list "pick a manager → see their whole branch" filter.
+        submitterUserIds: expect.arrayContaining(['u-sub1', 'u-sub2']),
         // COUNTS stay all-inclusive (approved + pending outlets both count).
         outlets: 2,        // O1 + O2 across the subtree {sub1, sub2}
         kycDone: 1,        // O1 APPROVED
