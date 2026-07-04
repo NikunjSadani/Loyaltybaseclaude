@@ -1,7 +1,7 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { isReKycPending } from '../common/kyc-rekyc.helper';
+import { isReKycActionable } from '../common/kyc-rekyc.helper';
 import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-access.helper';
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 
@@ -1078,8 +1078,12 @@ export class SalesService {
           // An admin re-KYC upload sets Outlet.reKycFlags WITHOUT flipping the (APPROVED)
           // submission status, so re-entry must also trigger on pending re-KYC flags —
           // else the rep can't re-open the pre-filled wizard for a re-KYC'd outlet.
-          const reKycPending = isReKycPending(outlet.reKycFlags);
-          const isReEntry = reKycPending || (!!latestKyc && RE_ENTRY.includes(latestKyc.status));
+          // Re-KYC is "actionable" (rep re-opens the wizard / shows RE_KYC_REQUIRED) only
+          // when the admin flags are set AND no fresh submission is under review — else a
+          // just-resubmitted outlet (flags still set, new submission routed) would wrongly
+          // read as Re-KYC Required instead of Under Review.
+          const reKycActionable = isReKycActionable(outlet.reKycFlags, latestKyc?.status);
+          const isReEntry = reKycActionable || (!!latestKyc && RE_ENTRY.includes(latestKyc.status));
           // Address lives on the Outlet (ChannelPartner has no address columns).
           // These are the canonical "last submitted" values: on every KYC submission
           // kyc.service writes dto.address→outlet.addressLine1, dto.pincode→outlet.pincode
@@ -1128,8 +1132,9 @@ export class SalesService {
             programCategory: outlet.programCategory ?? '',
             // Re-KYC (admin-flagged fields to re-capture) takes priority — mirror the
             // admin deriveKycStatus so a re-KYC'd outlet reads RE_KYC_REQUIRED (under the
-            // rep's Re-KYC filter/tasks), not Approved.
-            kycStatus: reKycPending
+            // rep's Re-KYC filter/tasks), not Approved — UNLESS a fresh resubmission is now
+            // under review, in which case the in-flight status shows through (reKycActionable).
+            kycStatus: reKycActionable
               ? 'RE_KYC_REQUIRED'
               : outlet.kycIntent === 'NOT_INTERESTED'
                 ? 'NOT_INTERESTED'

@@ -177,10 +177,10 @@ describe('AdminOutletsService', () => {
     it('kycStatus=APPROVED filters on partnerIds whose LATEST submission is APPROVED (AND tenant scope)', async () => {
       // Two owned outlets; cp1's latest is APPROVED, cp2's latest is REJECTED.
       mockPrisma.outlet.findMany
-        // (a) reKycFlags candidates — none flagged
-        .mockResolvedValueOnce([])
-        // (b) distinct partnerIds for the tenant's owned outlets
+        // (a) distinct partnerIds for the tenant's owned outlets (resolved FIRST now)
         .mockResolvedValueOnce([{ partnerId: 'cp1' }, { partnerId: 'cp2' }])
+        // (b) reKycFlags candidates — none flagged
+        .mockResolvedValueOnce([])
         // the paginated page fetch
         .mockResolvedValueOnce([]);
       mockPrisma.kycSubmission.findMany.mockResolvedValue([
@@ -198,13 +198,13 @@ describe('AdminOutletsService', () => {
 
     it('kycStatus=RE_KYC_REQUIRED includes outlets carrying a non-empty reKycFlags object', async () => {
       mockPrisma.outlet.findMany
-        // (a) reKycFlags candidates: one non-empty, one empty {} (must be excluded)
-        .mockResolvedValueOnce([
-          { id: 'o-flagged', reKycFlags: { ownerPhoto: true } },
-          { id: 'o-empty', reKycFlags: {} },
-        ])
-        // (b) no owned partners
+        // (a) no owned partners (resolved FIRST now)
         .mockResolvedValueOnce([])
+        // (b) reKycFlags candidates: one non-empty, one empty {} (must be excluded)
+        .mockResolvedValueOnce([
+          { id: 'o-flagged', partnerId: null, reKycFlags: { ownerPhoto: true } },
+          { id: 'o-empty', partnerId: null, reKycFlags: {} },
+        ])
         // paginated fetch
         .mockResolvedValueOnce([]);
       mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
@@ -216,14 +216,29 @@ describe('AdminOutletsService', () => {
       expect(JSON.stringify(where)).not.toContain('o-empty');
     });
 
+    it('kycStatus=RE_KYC_REQUIRED EXCLUDES a flagged outlet whose resubmission is UNDER REVIEW', async () => {
+      // The flags persist until approval, but once the rep resubmits (latest = PENDING_SO)
+      // the outlet buckets by its in-flight status, NOT Re-KYC — so it must drop out of the
+      // reKycOutletIds set that drives the RE_KYC_REQUIRED filter.
+      mockPrisma.outlet.findMany
+        .mockResolvedValueOnce([{ partnerId: 'cp1' }]) // (a) owned partners
+        .mockResolvedValueOnce([{ id: 'o-review', partnerId: 'cp1', reKycFlags: { mobileNumber: true } }]) // (b) flagged
+        .mockResolvedValueOnce([]); // paginated
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([{ partnerId: 'cp1', status: 'PENDING_SO_APPROVAL' }]);
+      await service.list(admin, { kycStatus: 'RE_KYC_REQUIRED' });
+
+      const where = mockPrisma.outlet.findMany.mock.calls[2][0].where;
+      expect(JSON.stringify(where)).not.toContain('o-review');
+    });
+
     it('kycStatus=APPROVED excludes NOT_INTERESTED outlets (priority 2) but keeps NULL kycIntent', async () => {
       // Regression: an outlet marked NOT_INTERESTED still carries its partner + submission.
       // deriveKycStatus priority 2 makes it NOT_STARTED (ahead of the APPROVED submission
       // bucket, priority 4), so the APPROVED filter must NOT include it — else it shows under
       // the wrong tab AND double-counts the paginated total. The guard must be NULL-safe.
       mockPrisma.outlet.findMany
-        .mockResolvedValueOnce([]) // (a) none reKyc-flagged
-        .mockResolvedValueOnce([{ partnerId: 'cp1' }]) // (b) owned partners
+        .mockResolvedValueOnce([{ partnerId: 'cp1' }]) // (a) owned partners (resolved FIRST now)
+        .mockResolvedValueOnce([]) // (b) none reKyc-flagged
         .mockResolvedValueOnce([]); // paginated page
       mockPrisma.kycSubmission.findMany.mockResolvedValue([{ partnerId: 'cp1', status: 'APPROVED' }]);
       await service.list(admin, { kycStatus: 'APPROVED' });

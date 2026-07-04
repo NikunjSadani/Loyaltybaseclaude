@@ -18,7 +18,7 @@ import { isValidUpiId } from '@/lib/upi-utils';
 import { INDIAN_STATES } from '@/lib/indian-states';
 import { isValidGstin, panFromGstin, GSTIN_LENGTH } from '@/lib/gstin';
 import {
-  hasReKycFlags, reKycRemarks, flaggedLabels,
+  hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels,
   isWizardFieldFlagged, isWizardFieldEditable,
 } from '@/lib/rekyc-fields';
 import type { GeoCapture } from '@/types';
@@ -369,7 +369,9 @@ export default function NewKYCPage() {
    * outlet) — so such an outlet enters the locked-edit mode below. */
   const isReKYC = !!selectedOutlet && (
     ['RE_KYC_REQUIRED', 'REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED', 'DRAFT'].includes(selectedOutlet.kycStatus as string) ||
-    hasReKycFlags(selectedOutlet.reKycFlags)
+    // Flags persist through review, so gate on "actionable" (not under review) — else a
+    // resubmitted outlet would re-enter locked-edit mode while its submission is in flight.
+    isReKycActionable(selectedOutlet.reKycFlags, selectedOutlet.rawStatus)
   );
 
   /** True when a wizard field/doc slot (by its wizard key) is flagged for re-capture.
@@ -1131,8 +1133,9 @@ export default function NewKYCPage() {
   const isStartable = (o: AssignedOutlet) =>
     !o.rawStatus || STARTABLE_KYC.has(o.rawStatus) ||
     // A bulk / field-level re-KYC request makes even an APPROVED outlet selectable
-    // (it enters locked-edit mode) — otherwise the rep couldn't correct it here.
-    hasReKycFlags(o.reKycFlags);
+    // (it enters locked-edit mode) — otherwise the rep couldn't correct it here. But NOT
+    // while a fresh resubmission is under review (the backend blocks a duplicate submit).
+    isReKycActionable(o.reKycFlags, o.rawStatus);
   const startableOutlets = assignedOutlets.filter(
     (o) => isStartable(o) && !dismissedOutlets.has(o.outletId),
   );

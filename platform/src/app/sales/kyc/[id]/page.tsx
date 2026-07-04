@@ -15,7 +15,7 @@ import { Button } from '@/components/ui/button';
 import { KYCStatus, type ApprovalEvent, type KYCSubmitterRole } from '@/types';
 import { getRole } from '@/lib/sales-role';
 import { useGifsySettings } from '@/lib/gifsy-settings';
-import { hasReKycFlags, reKycRemarks, flaggedLabels, type ReKycFlags } from '@/lib/rekyc-fields';
+import { hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels, type ReKycFlags } from '@/lib/rekyc-fields';
 import { RejectionModal } from './RejectionModal';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -601,14 +601,17 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   /* Re-entry: route the junior into the pre-filled new-KYC wizard (selects by outlet).
      Also fires on admin per-field re-KYC flags — a bulk-upload flag leaves the status
      APPROVED (so none of the status checks catch it), but the outlet still needs
-     re-capture, so an APPROVED-but-flagged outlet must show "Edit & Resubmit". */
+     re-capture, so an APPROVED-but-flagged outlet must show "Edit & Resubmit".
+     BUT once a fresh submission is under review (in-flight), the resubmit path is hidden —
+     the flags persist for the approver highlight, so gate on isReKycActionable, not the raw
+     flags. (The re-KYC banner below intentionally keeps showing during review.) */
   const isReEntry =
     kyc.status === KYCStatus.DRAFT ||
     kyc.status === KYCStatus.REJECTED ||
     kyc.status === KYCStatus.RE_UPLOAD_REQUIRED ||
     kyc.status === KYCStatus.RESUBMISSION_REQUIRED ||
     kyc.status === KYCStatus.RE_KYC_REQUIRED ||
-    hasReKycFlags(kyc.reKycFlags);
+    isReKycActionable(kyc.reKycFlags, kyc.status);
 
   /* ── "Redeem for Outlet" gate ──────────────────────────────────────────────
      Owner decision: the redeem-on-behalf action lives on the OUTLET DETAIL view

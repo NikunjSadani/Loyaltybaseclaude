@@ -456,6 +456,33 @@ describe('SalesService', () => {
       expect(res.outlets[0].reKycFlags).toEqual({ mobileNumber: true, remarks: '' });
     });
 
+    it('a flagged outlet whose resubmission is UNDER REVIEW shows the in-flight status, not RE_KYC_REQUIRED', async () => {
+      // After the rep resubmits, the new submission is routed (PENDING_SO_APPROVAL) but the
+      // flags STAY SET until approval. The list must show the under-review status, not keep
+      // reading as "Re-KYC Required" — while still surfacing the flags for the approver.
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        {
+          outlet: {
+            id: 'o1', outletCode: 'OC1', name: 'Outlet 1', phone: '999',
+            city: 'Delhi', district: 'Central', state: 'DL',
+            outletType: { code: 'RETAIL' },
+            reKycFlags: { mobileNumber: true, remarks: '' }, // still flagged
+            partner: {
+              id: 'cp1', phone: '888', wallets: [{ redeemablePoints: 0 }],
+              // latest submission = the resubmit, now under review
+              kycSubmissions: [{ id: 'k2', status: 'PENDING_SO_APPROVAL', createdAt: new Date('2024-06-01T00:00:00.000Z') }],
+            },
+          },
+        },
+      ]);
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0]).toMatchObject({ id: 'o1', kycId: 'k2', kycStatus: 'PENDING_SO_APPROVAL' });
+      // Flags still surfaced (the approver highlight persists through review).
+      expect(res.outlets[0].reKycFlags).toEqual({ mobileNumber: true, remarks: '' });
+    });
+
     it("re-KYC prefill (REJECTED): existingKyc carries address/pincode from the outlet columns AND the NEW accountHolderName from partner.bankAccountHolder", async () => {
       // Re-KYC bug fix (Task E): Street Address, Pincode and Account Holder Name must
       // prefill from the last-submitted values. KycSubmission stores no address/bank

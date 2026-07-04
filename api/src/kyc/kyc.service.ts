@@ -20,7 +20,7 @@ import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
 import { sniffFileType } from '../common/file-signature';
-import { isReKycPending } from '../common/kyc-rekyc.helper';
+import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
 import {
   hasReKycFlags,
   allowedDocTypes,
@@ -1397,8 +1397,11 @@ export class KycService {
     // latest submission APPROVED. Surface such rows as RE_KYC_REQUIRED so they appear
     // under the rep's Re-KYC filter/tasks (mirrors the admin deriveKycStatus + the sales
     // buildOutlets derivation — reKycFlags is the single source of truth for re-KYC).
+    // BUT once the rep has RESUBMITTED (this submission is in-flight / under review), the
+    // in-flight status must show through — else a just-resubmitted re-KYC keeps reading as
+    // "Re-KYC Required" instead of "Under Review" (the flags stay set until approval).
     const mapped = submissions.map((s) =>
-      s.partner?.outlets?.some((o) => isReKycPending(o.reKycFlags))
+      !isKycInFlight(s.status) && s.partner?.outlets?.some((o) => isReKycPending(o.reKycFlags))
         ? { ...s, status: 'RE_KYC_REQUIRED' as (typeof s)['status'] }
         : s,
     );

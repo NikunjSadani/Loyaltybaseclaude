@@ -132,6 +132,33 @@ export function hasReKycFlags(flags: ReKycFlags): boolean {
   return REKYC_FIELD_KEYS.some((k) => flags[k] === true);
 }
 
+/** Submission statuses where a (re-)submission is under review in the approval pipeline.
+ *  Mirrors the backend KYC_IN_FLIGHT_STATUSES. */
+export const KYC_IN_FLIGHT_STATUSES = [
+  'SUBMITTED',
+  'UNDER_REVIEW',
+  'PENDING_SO_APPROVAL',
+  'PENDING_ASM_APPROVAL',
+  'PENDING_RSM_APPROVAL',
+  'PENDING_GIFSY',
+] as const;
+
+/** True when the submission status is an under-review pipeline state. */
+export function isKycInFlight(status: string | null | undefined): boolean {
+  return !!status && (KYC_IN_FLIGHT_STATUSES as readonly string[]).includes(status);
+}
+
+/**
+ * Re-KYC is ACTIONABLE (show "Re-KYC Required" / offer resubmit) only when the flags are
+ * set AND no fresh submission is under review — the flags persist until approval, so a
+ * just-resubmitted outlet still carries them while its new submission is in the pipeline.
+ * Mirrors the backend isReKycActionable. (The approver highlight keeps using hasReKycFlags,
+ * so it still shows during review.)
+ */
+export function isReKycActionable(flags: ReKycFlags, latestStatus: string | null | undefined): boolean {
+  return hasReKycFlags(flags) && !isKycInFlight(latestStatus);
+}
+
 /** The admin's free-text re-KYC remark, or '' if none. */
 export function reKycRemarks(flags: ReKycFlags): string {
   return flags && typeof flags.remarks === 'string' ? flags.remarks : '';

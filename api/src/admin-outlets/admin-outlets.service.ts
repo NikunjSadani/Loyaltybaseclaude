@@ -3,7 +3,7 @@ import { KycStatus, OutletKycIntent, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { isReKycPending } from '../common/kyc-rekyc.helper';
+import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
 import {
   BulkDeleteOutletsDto,
   ListOutletsQueryDto,
@@ -22,11 +22,17 @@ import {
  * validation projection) so both agree with buildKycStatusWhere.
  *
  * Priority:
- *   1. non-empty reKycFlags     ⇒ RE_KYC_REQUIRED  (wins over everything)
+ *   1. non-empty reKycFlags AND latest submission NOT in-flight ⇒ RE_KYC_REQUIRED
  *   2. kycIntent NOT_INTERESTED ⇒ NOT_STARTED      (outlet declined)
  *   3. no partner               ⇒ NOT_STARTED
  *   4. latest submission status ⇒ mapped bucket
  *   5. no submission            ⇒ NOT_STARTED
+ *
+ * reKycFlags stay set from the admin request until Gifsy approval clears them, so a
+ * just-resubmitted re-KYC still carries flags WHILE its new submission is under review.
+ * Priority 1 therefore yields to an in-flight latest submission — the under-review status
+ * shows through, not RE_KYC_REQUIRED. (The approver highlight reads the flags directly,
+ * so it still shows what was flagged during review.)
  */
 function deriveKycStatus(
   reKycFlags: unknown,
@@ -34,7 +40,8 @@ function deriveKycStatus(
   partnerId: string | null,
   latestStatusByPartnerId: Map<string, KycStatus>,
 ): string {
-  if (isReKycPending(reKycFlags)) {
+  const latestForReKyc = partnerId ? latestStatusByPartnerId.get(partnerId) : undefined;
+  if (isReKycPending(reKycFlags) && !isKycInFlight(latestForReKyc)) {
     return 'RE_KYC_REQUIRED';
   }
   if (kycIntent === OutletKycIntent.NOT_INTERESTED) {
@@ -421,24 +428,9 @@ export class AdminOutletsService {
     // set. We resolve them tenant-wide (bounded by the tenant's own outlets).
     let where: Prisma.OutletWhereInput = baseWhere;
     if (q.kycStatus) {
-      // (a) Outlets in this tenant that carry a NON-EMPTY reKycFlags object.
-      //     reKycFlags is a nullable Json; `{ not: DbNull }` excludes SQL NULL but
-      //     NOT an empty {} — deriveKycStatus treats an empty object as "not
-      //     flagged", so we post-filter for a non-empty object in JS.
-      const flagCandidates = await this.prisma.outlet.findMany({
-        where: { ...baseWhere, reKycFlags: { not: Prisma.DbNull } },
-        select: { id: true, reKycFlags: true },
-      });
-      const reKycOutletIds = flagCandidates
-        .filter(
-          (o) =>
-            o.reKycFlags !== null &&
-            typeof o.reKycFlags === 'object' &&
-            Object.keys(o.reKycFlags as Record<string, unknown>).length > 0,
-        )
-        .map((o) => o.id);
-
-      // (b) Latest KycStatus per partner, for the tenant's outlets with an owner.
+      // (a) Latest KycStatus per partner, for the tenant's outlets with an owner. Resolved
+      //     FIRST because a flagged outlet whose latest submission is under review must NOT
+      //     count as RE_KYC_REQUIRED (the flags persist until approval).
       const partnerRows = await this.prisma.outlet.findMany({
         where: { ...baseWhere, partnerId: { not: null } },
         select: { partnerId: true },
@@ -460,6 +452,25 @@ export class AdminOutletsService {
           }
         }
       }
+
+      // (b) Outlets carrying a NON-EMPTY reKycFlags object whose latest submission is NOT
+      //     in-flight. reKycFlags is a nullable Json; `{ not: DbNull }` excludes SQL NULL but
+      //     NOT an empty {} — post-filter for a non-empty object in JS. A resubmitted (under
+      //     review) re-KYC keeps its flags but buckets by its in-flight status, so it is
+      //     excluded here (deriveKycStatus applies the identical guard for the display).
+      const flagCandidates = await this.prisma.outlet.findMany({
+        where: { ...baseWhere, reKycFlags: { not: Prisma.DbNull } },
+        select: { id: true, partnerId: true, reKycFlags: true },
+      });
+      const reKycOutletIds = flagCandidates
+        .filter(
+          (o) =>
+            o.reKycFlags !== null &&
+            typeof o.reKycFlags === 'object' &&
+            Object.keys(o.reKycFlags as Record<string, unknown>).length > 0 &&
+            !(o.partnerId && isKycInFlight(latestStatusByPartnerId.get(o.partnerId))),
+        )
+        .map((o) => o.id);
 
       const kycWhere = this.buildKycStatusWhere(
         q.kycStatus,
