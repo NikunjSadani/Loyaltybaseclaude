@@ -65,7 +65,6 @@ interface KYCDoc {
   id: string;
   documentType: string;
   label: string;
-  status: 'pending' | 'verified' | 'rejected';
   viewUrl: string | null;
 }
 
@@ -92,14 +91,16 @@ function docLabel(type: string): string {
 /** The document types that are store/owner PHOTOS (rendered as images, not list rows). */
 const PHOTO_DOC_TYPES = new Set(['STORE_BOARD_PHOTO', 'SELFIE']);
 
-/** Map a raw KycDocument row (id + documentType + status + viewUrl) into the view shape. */
-function mapDoc(d: { id?: string; documentType: string; status?: string; viewUrl?: string | null }): KYCDoc {
-  const raw = (d.status ?? 'PENDING').toUpperCase();
+/** Map a raw KycDocument row (id + documentType + viewUrl) into the view shape.
+ *  NOTE: the per-document `status` is intentionally dropped — no workflow ever advances
+ *  KycDocument.status off its PENDING default, so a status tag ("Pending") on an
+ *  already-approved outlet was misleading noise. Approval is tracked at the submission
+ *  level (KYC status), not per document. */
+function mapDoc(d: { id?: string; documentType: string; viewUrl?: string | null }): KYCDoc {
   return {
     id: d.id ?? d.documentType,
     documentType: d.documentType,
     label: docLabel(d.documentType),
-    status: raw === 'VERIFIED' ? 'verified' : raw === 'REJECTED' ? 'rejected' : 'pending',
     viewUrl: d.viewUrl ?? null,
   };
 }
@@ -280,12 +281,6 @@ const statusConfig: Partial<Record<KYCStatus, { variant: 'success' | 'warning' |
   [KYCStatus.RE_UPLOAD_REQUIRED]:    { variant: 'danger',  label: 'Rejected'           },
   [KYCStatus.RESUBMISSION_REQUIRED]: { variant: 'danger',  label: 'Rejected'           },
   [KYCStatus.RE_KYC_REQUIRED]:       { variant: 'warning', label: 'Re-KYC Required'   },
-};
-
-const docStatusColor: Record<string, string> = {
-  verified: 'text-emerald-600',
-  pending:  'text-amber-600',
-  rejected: 'text-red-500',
 };
 
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
@@ -877,7 +872,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                   <div key={doc.id} className="flex items-center justify-between py-0.5 gap-2">
                     <span className="text-sm text-gray-700 truncate">{doc.label}</span>
                     <div className="flex items-center gap-2 shrink-0">
-                      {doc.viewUrl && (
+                      {doc.viewUrl ? (
                         <button
                           type="button"
                           onClick={() => previewDoc(doc)}
@@ -886,13 +881,9 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                         >
                           View
                         </button>
+                      ) : (
+                        <span className="text-xs text-gray-400">Not uploaded</span>
                       )}
-                      <span className={`text-xs font-medium capitalize ${docStatusColor[doc.status]}`}>
-                        {doc.status === 'verified' && <CheckCircle className="h-3.5 w-3.5 inline mr-1" />}
-                        {doc.status === 'pending'  && <Clock       className="h-3.5 w-3.5 inline mr-1" />}
-                        {doc.status === 'rejected' && <XCircle     className="h-3.5 w-3.5 inline mr-1" />}
-                        {doc.status}
-                      </span>
                     </div>
                   </div>
                   ));
