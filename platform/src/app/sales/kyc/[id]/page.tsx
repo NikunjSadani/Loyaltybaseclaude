@@ -326,6 +326,44 @@ function latestForStage(kyc: KYCDetail, stage: ApprovalEvent['stage']): Approval
   return kyc.approvalHistory.findLast((e) => e.stage === stage);
 }
 
+/** Map a backend UserRole string (or an already-short label) to the short reviewer
+ *  label shown in the stepper. SALES_ISR (XSR) never approves, so it is not a first
+ *  approver — the map covers the roles that CAN be the first approver. */
+const APPROVER_ROLE_LABEL: Record<string, string> = {
+  SALES_SO: 'SO', SO: 'SO',
+  SALES_ASM: 'ASM', ASM: 'ASM',
+  SALES_STATE_HEAD: 'RSM', RSM: 'RSM',
+  SALES_HO: 'HO', HO: 'HO',
+};
+
+/** Map a `PENDING_*_APPROVAL` first-approver status to the short reviewer label. */
+const PENDING_STATUS_LABEL: Partial<Record<KYCStatus, string>> = {
+  [KYCStatus.PENDING_SO_APPROVAL]:  'SO',
+  [KYCStatus.PENDING_ASM_APPROVAL]: 'ASM',
+  [KYCStatus.PENDING_RSM_APPROVAL]: 'RSM',
+};
+
+/**
+ * Resolve the first-approver step label from the ACTUAL reviewer level, not the
+ * submitter (the submitter cast to KYCSubmitterRole never equals the literal 'XSR',
+ * and a binary XSR→SO/else→ASM split can't express the 6-level hierarchy with
+ * vacant-level skipping). Resolution order:
+ *   1. Awaiting first approval → derive from the PENDING_*_APPROVAL status, which is
+ *      authoritative for WHO reviews now (also makes vacant-level skipping correct — a
+ *      vacant SO routes to ASM → PENDING_ASM_APPROVAL → "ASM Review", and it can't be
+ *      thrown off by a stale prior-cycle event after a vacancy change).
+ *   2. Acted (PENDING_GIFSY / APPROVED / REJECTED — not in PENDING_STATUS_LABEL) → map
+ *      the acted FIRST_APPROVER event's persisted approverRole.
+ *   3. Fallback → "SO Review" (never renders a blank label).
+ */
+function firstApproverLabel(kyc: KYCDetail): string {
+  const short =
+    PENDING_STATUS_LABEL[kyc.status] ??
+    APPROVER_ROLE_LABEL[latestForStage(kyc, 'FIRST_APPROVER')?.role ?? ''] ??
+    'SO';
+  return `${short} Review`;
+}
+
 /**
  * Build the 3-step Approval Status stepper (Submitted → first-approver → Gifsy).
  *
@@ -349,7 +387,7 @@ function latestForStage(kyc: KYCDetail, stage: ApprovalEvent['stage']): Approval
  *   Gifsy rejection          → step2 complete,  step3 rejected
  */
 function buildTimeline(kyc: KYCDetail): TimelineStep[] {
-  const firstApproverLabel = kyc.submittedByRole === 'XSR' ? 'SO Review' : 'ASM Review';
+  const stepFirstLabel     = firstApproverLabel(kyc);
   const firstApproverEvent = latestForStage(kyc, 'FIRST_APPROVER');
   const gifsyEvent         = latestForStage(kyc, 'GIFSY');
 
@@ -434,7 +472,7 @@ function buildTimeline(kyc: KYCDetail): TimelineStep[] {
 
   return [
     step1,
-    { label: firstApproverLabel, sublabel: step2Sub, state: step2State, testid: 'timeline-step-first-approver' },
+    { label: stepFirstLabel, sublabel: step2Sub, state: step2State, testid: 'timeline-step-first-approver' },
     { label: 'Gifsy Validation',  sublabel: step3Sub, state: step3State, testid: 'timeline-step-gifsy' },
   ];
 }

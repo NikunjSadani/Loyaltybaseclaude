@@ -124,6 +124,31 @@ describe('TIMELINE — Approval Status stepper', () => {
     expect(gifsy).not.toHaveTextContent(/under gifsy review/i);
   });
 
+  // ── First-approver LABEL — derived from the actual reviewer level, not the
+  //    submitter (which was mis-cast so `=== 'XSR'` never matched → always "ASM Review").
+  it('L1 (bug): XSR-submitted, PENDING_SO_APPROVAL, no approval events → label = "SO Review"', async () => {
+    await renderWith(submission('PENDING_SO_APPROVAL', []));
+    const firstApprover = await screen.findByTestId('timeline-step-first-approver');
+    // The status badge already read "Awaiting SO"; the stepper label must match, not "ASM Review".
+    expect(within(firstApprover).getByText('SO Review')).toBeInTheDocument();
+    expect(firstApprover).not.toHaveTextContent(/asm review/i);
+  });
+
+  it('L2: PENDING_ASM_APPROVAL (SO submitted / vacant-SO escalation) → label = "ASM Review"', async () => {
+    await renderWith(submission('PENDING_ASM_APPROVAL', []));
+    const firstApprover = await screen.findByTestId('timeline-step-first-approver');
+    expect(within(firstApprover).getByText('ASM Review')).toBeInTheDocument();
+  });
+
+  it('L3: acted FIRST_APPROVER event with role SALES_SO → label = "SO Review"', async () => {
+    await renderWith(submission('PENDING_GIFSY', [
+      { toStatus: 'PENDING_GIFSY', createdAt: '2026-06-02T00:00:00Z', notes: 'Approved by SO', metadata: { stage: 'FIRST_APPROVER', approverRole: 'SALES_SO' } },
+    ]));
+    const firstApprover = await screen.findByTestId('timeline-step-first-approver');
+    expect(within(firstApprover).getByText('SO Review')).toBeInTheDocument();
+    expect(firstApprover).not.toHaveTextContent(/asm review/i);
+  });
+
   it('T4: Gifsy rejection → first-approver complete, Gifsy rejected (with remark)', async () => {
     await renderWith(submission('REJECTED', [
       { toStatus: 'REJECTED',      createdAt: '2026-06-05T00:00:00Z', notes: 'Docs mismatch', metadata: { stage: 'GIFSY', approverRole: 'GIFSY_ADMIN' } },
