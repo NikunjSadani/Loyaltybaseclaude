@@ -242,9 +242,15 @@ interface ApiStatusHistory {
   notes?: string | null;
   metadata?: { stage?: string; approverRole?: string } | null;
 }
-const REJECT_TO_STATUSES = new Set(['REJECTED', 'RESUBMISSION_REQUIRED', 'RE_UPLOAD_REQUIRED']);
+// A rejection-like transition (a bounce back to the rep). RE_KYC_REQUIRED is the
+// admin re-KYC of an already-APPROVED outlet — it is NOT a fresh-cycle first-approver
+// rejection, so it is classified separately below (stage GIFSY, action REJECTED) and
+// must never mark the FIRST_APPROVER step as rejected.
+const REJECT_TO_STATUSES = new Set([
+  'REJECTED', 'RESUBMISSION_REQUIRED', 'RE_UPLOAD_REQUIRED', 'RE_KYC_REQUIRED',
+]);
 const APPROVAL_TO_STATUSES = new Set([
-  'REJECTED', 'RESUBMISSION_REQUIRED', 'RE_UPLOAD_REQUIRED',
+  'REJECTED', 'RESUBMISSION_REQUIRED', 'RE_UPLOAD_REQUIRED', 'RE_KYC_REQUIRED',
   'PENDING_ASM_APPROVAL', 'PENDING_GIFSY', 'APPROVED',
 ]);
 function mapStatusHistory(history: ApiStatusHistory[]): ApprovalEvent[] {
@@ -252,8 +258,15 @@ function mapStatusHistory(history: ApiStatusHistory[]): ApprovalEvent[] {
     .filter((h) => APPROVAL_TO_STATUSES.has(h.toStatus))
     .map((h) => {
       const rejected = REJECT_TO_STATUSES.has(h.toStatus);
+      // Stage source of truth is the persisted metadata.stage; fall back to the
+      // toStatus (an APPROVED / RE_KYC_REQUIRED transition is always a GIFSY-stage
+      // event) when a legacy row has no metadata.
       const stage: ApprovalEvent['stage'] =
-        h.metadata?.stage === 'GIFSY' || h.toStatus === 'APPROVED' ? 'GIFSY' : 'FIRST_APPROVER';
+        h.metadata?.stage === 'GIFSY' || h.metadata?.stage === 'FIRST_APPROVER'
+          ? (h.metadata.stage as ApprovalEvent['stage'])
+          : h.toStatus === 'APPROVED' || h.toStatus === 'RE_KYC_REQUIRED'
+            ? 'GIFSY'
+            : 'FIRST_APPROVER';
       return {
         stage,
         action: (rejected ? 'REJECTED' : 'APPROVED') as ApprovalEvent['action'],
@@ -302,50 +315,127 @@ interface TimelineStep {
   label:    string;
   sublabel: string;
   state:    StepState;
+  testid:   string;
 }
 
+/** Return the LATEST (newest) event for a stage. approvalHistory is chronological
+ *  (oldest → newest, see mapStatusHistory), so a stale prior-cycle event (e.g. an
+ *  original FIRST_APPROVER APPROVED that was later re-KYC'd and rejected) can never
+ *  win over the current cycle's outcome — `findLast` returns the most recent. */
+function latestForStage(kyc: KYCDetail, stage: ApprovalEvent['stage']): ApprovalEvent | undefined {
+  return kyc.approvalHistory.findLast((e) => e.stage === stage);
+}
+
+/**
+ * Build the 3-step Approval Status stepper (Submitted → first-approver → Gifsy).
+ *
+ * The stepper must reflect the CURRENT submission's true state, not a stale prior
+ * cycle. Two guards make that hold:
+ *   1. Use the LATEST event per stage (findLast), never the first — a re-KYC'd
+ *      outlet has an old FIRST_APPROVER APPROVED before the current REJECTED.
+ *   2. Key the Gifsy step off `kyc.status`. A first-approver rejection means the
+ *      current cycle never reached Gifsy, so Gifsy stays PENDING regardless of any
+ *      prior-cycle Gifsy event; only a live PENDING_GIFSY status (active) or an
+ *      actual Gifsy-stage rejection/approval on the current record advances it.
+ *
+ * Per-case outcome (step2 = first-approver, step3 = Gifsy):
+ *   PENDING_SO/ASM_APPROVAL  → step2 active,   step3 pending
+ *   PENDING_GIFSY            → step2 complete,  step3 active
+ *   APPROVED                 → step2 complete,  step3 complete
+ *   first-approver rejection → step2 rejected,  step3 pending  (the bug case)
+ *     (REJECTED / RE_UPLOAD_REQUIRED / RESUBMISSION_REQUIRED / RE_KYC_REQUIRED
+ *      with the latest event's stage = FIRST_APPROVER, or no first-approver
+ *      approval yet on the current cycle)
+ *   Gifsy rejection          → step2 complete,  step3 rejected
+ */
 function buildTimeline(kyc: KYCDetail): TimelineStep[] {
   const firstApproverLabel = kyc.submittedByRole === 'XSR' ? 'SO Review' : 'ASM Review';
-  const firstApproverEvent = kyc.approvalHistory.find((e) => e.stage === 'FIRST_APPROVER');
-  const gifsyEvent         = kyc.approvalHistory.find((e) => e.stage === 'GIFSY');
+  const firstApproverEvent = latestForStage(kyc, 'FIRST_APPROVER');
+  const gifsyEvent         = latestForStage(kyc, 'GIFSY');
+
+  // Is the current record in a rejected/bounced-back state, and by which stage?
+  // The LATEST recorded event's stage disambiguates who rejected (first approver vs
+  // Gifsy) — a fresh first-approver rejection has firstApproverEvent.action REJECTED
+  // as the newest event; a Gifsy rejection has a GIFSY-stage REJECTED newest.
+  const isRejectedStatus =
+    kyc.status === KYCStatus.REJECTED ||
+    kyc.status === KYCStatus.RE_UPLOAD_REQUIRED ||
+    kyc.status === KYCStatus.RESUBMISSION_REQUIRED ||
+    kyc.status === KYCStatus.RE_KYC_REQUIRED;
+  const latestEvent = kyc.approvalHistory.at(-1);
+  const gifsyRejected =
+    isRejectedStatus && latestEvent?.stage === 'GIFSY' && latestEvent.action === 'REJECTED';
+  // A first-approver rejection: rejected status AND the current cycle did NOT clear
+  // the first approver as its latest outcome (the newest event is a first-approver
+  // rejection, or there is no first-approver approval standing for this cycle).
+  const firstApproverRejected = isRejectedStatus && !gifsyRejected;
 
   const step1: TimelineStep = {
     label: 'Submitted',
     sublabel: `${kyc.submittedByName} · ${new Date(kyc.submittedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`,
     state: 'complete',
+    testid: 'timeline-step-submitted',
   };
 
+  // ── Step 2 — first approver (SO / ASM) ──────────────────────────────────────
   let step2State: StepState = 'pending';
   let step2Sub   = 'Pending review';
-  if (firstApproverEvent) {
-    step2State = firstApproverEvent.action === 'APPROVED' ? 'complete' : 'rejected';
-    step2Sub   = firstApproverEvent.action === 'APPROVED'
+  if (firstApproverRejected) {
+    step2State = 'rejected';
+    step2Sub   = firstApproverEvent?.action === 'REJECTED' && firstApproverEvent.by
+      ? `Rejected by ${firstApproverEvent.by}`
+      : 'Rejected';
+    // Prefer the current rejection remark (matches the page's rejection banner) over a
+    // stale event note.
+    const remark = kyc.rejectionReason ?? firstApproverEvent?.remarks;
+    if (remark) step2Sub = `${step2Sub} — ${remark}`;
+  } else if (gifsyRejected || kyc.status === KYCStatus.PENDING_GIFSY || kyc.status === KYCStatus.APPROVED) {
+    // The current cycle cleared the first approver (it advanced to Gifsy / approved /
+    // Gifsy-rejected), so the first-approver step is complete regardless of history gaps.
+    step2State = 'complete';
+    step2Sub   = firstApproverEvent?.action === 'APPROVED' && firstApproverEvent.by
       ? `Approved by ${firstApproverEvent.by}`
-      : `Rejected by ${firstApproverEvent.by}`;
+      : 'Approved';
   } else if (
     kyc.status === KYCStatus.PENDING_SO_APPROVAL ||
     kyc.status === KYCStatus.PENDING_ASM_APPROVAL
   ) {
     step2State = 'active';
     step2Sub   = 'Awaiting review';
+  } else if (firstApproverEvent?.action === 'APPROVED') {
+    // Defensive: an approved first-approver event with a non-standard status.
+    step2State = 'complete';
+    step2Sub   = firstApproverEvent.by ? `Approved by ${firstApproverEvent.by}` : 'Approved';
   }
 
+  // ── Step 3 — Gifsy validation ───────────────────────────────────────────────
+  // Keyed off kyc.status so a stale prior-cycle Gifsy event can never light this up
+  // when the current cycle was bounced by the first approver.
   let step3State: StepState = 'pending';
   let step3Sub   = 'Pending first approval';
-  if (gifsyEvent) {
-    step3State = gifsyEvent.action === 'APPROVED' ? 'complete' : 'rejected';
-    step3Sub   = gifsyEvent.action === 'APPROVED' ? 'Approved' : `Rejected — ${gifsyEvent.remarks ?? ''}`;
+  if (firstApproverRejected) {
+    // Current cycle never reached Gifsy — stays pending, never "Queued"/"Approved".
+    step3State = 'pending';
+    step3Sub   = 'Not yet reached';
+  } else if (gifsyRejected) {
+    step3State = 'rejected';
+    const remark = kyc.rejectionReason ?? gifsyEvent?.remarks;
+    step3Sub   = remark ? `Rejected — ${remark}` : 'Rejected';
+  } else if (kyc.status === KYCStatus.APPROVED) {
+    step3State = 'complete';
+    step3Sub   = 'Approved';
   } else if (kyc.status === KYCStatus.PENDING_GIFSY) {
     step3State = 'active';
     step3Sub   = 'Under Gifsy review';
-  } else if (firstApproverEvent?.action === 'APPROVED') {
+  } else if (step2State === 'complete') {
+    // First approver cleared but not yet at Gifsy (transient) — queued.
     step3Sub = 'Queued for Gifsy';
   }
 
   return [
     step1,
-    { label: firstApproverLabel, sublabel: step2Sub, state: step2State },
-    { label: 'Gifsy Validation',  sublabel: step3Sub, state: step3State },
+    { label: firstApproverLabel, sublabel: step2Sub, state: step2State, testid: 'timeline-step-first-approver' },
+    { label: 'Gifsy Validation',  sublabel: step3Sub, state: step3State, testid: 'timeline-step-gifsy' },
   ];
 }
 
@@ -383,7 +473,7 @@ function ApprovalTimeline({ kyc }: { kyc: KYCDetail }) {
       </CardHeader>
       <CardContent className="pt-0 pb-3">
         {steps.map((step, i) => (
-          <div key={step.label} className="flex gap-3">
+          <div key={step.label} data-testid={step.testid} className="flex gap-3">
             {/* Left: dot + connector */}
             <div className="flex flex-col items-center">
               <StepDot state={step.state} />
