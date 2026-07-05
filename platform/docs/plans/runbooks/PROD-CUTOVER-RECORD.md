@@ -247,3 +247,59 @@ ACTIVE + LIVE on the real domain (platform defaults: conversion `1`, expiry null
 Code rollback = **redeploy both services to the prior prod revision `eb841e9`** (unwinds the whole cutover #4); this cutover added
 no migrations, so there is nothing to reverse in the DB. DB restore (only if ever needed) via the Step-1 backup
 `pre-cutover4-develop-824eac0` / PITR-clone (never a blind in-place restore — `gifsy-db` is shared with staging).
+
+---
+
+# Production Cutover — Record (2026-07-05 `develop` → `main` — CODE-ONLY — CUTOVER #5: sales-KYC UAT fixes — status-tag, re-KYC amber badges, approval-stepper)
+
+> **Executed 2026-07-05. As-run record of the FIFTH cutover** — the `develop`→`main` promotion of the sales-KYC UAT fixes (per-document
+> "Pending" tag removal + re-KYC amber doc/photo badges + the Approval-Status stepper current-submission fixes) onto the already-live prod
+> (`824eac0` → `5c2bb65`, **5 commits**). Owner-driven: the owner approved the GitHub `production` gate personally. **CODE-ONLY — 0
+> migrations**, so the in-VPC `gifsy-migrate` step was a **no-op / not required**. The 2026-07-04/05 record above (cutover #4) is the rewards
+> FREE_AMOUNT fix + the Credits/Payouts Config card; this section is the sales-KYC UAT batch promotion. Runbook: [`CUTOVER-RUNBOOK.md`](CUTOVER-RUNBOOK.md).
+
+## Pre-state (verified)
+`gifsy_prod`: live, serving `main` HEAD **`824eac0`** (the cutover-#4 code), Deoleo tenant CREATED + ACTIVE + LIVE on the real domain
+(platform defaults: conversion `1`, expiry null, visibility OFF). `main` was **5 commits behind `develop` with 0 pending migrations**.
+Gate green at cutover: **api jest 1427 · nest 0 · FE vitest 1784 · tsc 0**.
+
+## Steps executed (in order)
+1. **Step 1 — Pre-cutover backup (double-guarded).** On-demand backup of the shared `gifsy-db` instance:
+   description `"pre-cutover5-develop-5c2bb65"`, `ON_DEMAND`, **SUCCESSFUL**. **PITR remained ON.** Rollback point = redeploy `824eac0`.
+2. **Step 2 — Merge `develop`→`main` (owner-triggered).** Prod `main` HEAD moved **`824eac0` → `5c2bb65`** (the 5-commit,
+   **CODE-ONLY** jump). The owner approved the GitHub `production` environment gate. **0 migrations** in this batch → the
+   in-VPC `gifsy-migrate` step was a **no-op (not required)**; the pipeline deployed the new revision directly.
+3. **Step 3 — Live verification on the real domain.** Both prod Cloud Run services confirmed serving the `5c2bb65` image.
+
+## What was in this cutover (payload — 5 items)
+1. **Per-document "Pending" status-tag removed** (`6ad4d62`) — the misleading per-document "Pending" status tag was removed from the sales
+   KYC store-info view: the `KycDocument.status` field is **never advanced off PENDING**, so it read as a false hold on already-approved outlets.
+2. **Cutover #4 doc updates** (`0028a07`) — already recorded (the cutover #4 as-run doc updates); part of this batch reaching prod.
+3. **Re-KYC flagged doc/photo amber badges** (`6e96d5b`) — re-KYC flagged documents + photos now show an **amber badge ("Needs re-capture")**
+   on the sales-senior KYC detail, at **parity with the Gifsy reviewer** (driven by `flaggedDocTypes`).
+4. **Approval-Status stepper reflects the CURRENT submission** (`12d781f`) — a re-KYC **rejected by the ASM** now shows first-approver =
+   **Rejected** + Gifsy = **pending** (was showing a stale "Approved" + "Queued for Gifsy"). Uses **latest-event-per-stage** and keys the
+   Gifsy step off `kyc.status`.
+5. **First-approver step LABEL reflects the real reviewer level** (`5c2bb65`) — the first-approver label was hardcoded from a bad
+   `submittedByRole==='XSR'` cast → **always "ASM Review"**. Now derived from the **PENDING_*_APPROVAL** status (awaiting) or the
+   **approver's role** (acted), so it is correct under vacant-level skipping.
+
+## Post-state (verified)
+- **Cutover #5 rolled prod `824eac0` → `5c2bb65`.** Both prod services (`gifsy-api`, `gifsy-frontend`) serve **`5c2bb65`**.
+- **0 migrations applied** (code-only cutover; the in-VPC migrate step was a no-op).
+- Pre-cutover backup **`pre-cutover5-develop-5c2bb65`** taken (ON_DEMAND, gifsy-db); PITR ON.
+- **prod == develop == main == `5c2bb65`**.
+
+## What remains (owner-gated — NOT done)
+- **Load real Deoleo master data via the app UIs (#76)** — THE last hard go-live blocker; waits on the client's files.
+- **WhatsApp `deoleo_kyc_approval` template runtime-verify (#143)** — template APPROVED 2026-07-02; needs a real approval + phone.
+- **⚠️ Two broken reward catalog items in prod** — **Amazon Voucher** + **To Bank** are free-amount vouchers persisted with a **missing
+  min/max** → currently **un-redeemable**. The owner must fix them in the prod **Gift Catalogue** — re-saving each through the now-live
+  FREE_AMOUNT guard (shipped in cutover #4) enforces the required bounds.
+- **`creditsPayouts.notifyEmails` empty in prod** — credit-batch emails fall back to Gifsy ops; the owner can set the Deoleo recipients via
+  the new **Credits & Payouts** config card (live in prod since cutover #4).
+
+## Rollback (unchanged path)
+Code rollback = **redeploy both services to the prior prod revision `824eac0`** (unwinds the whole cutover #5); this cutover added
+no migrations, so there is nothing to reverse in the DB. DB restore (only if ever needed) via the Step-1 backup
+`pre-cutover5-develop-5c2bb65` / PITR-clone (never a blind in-place restore — `gifsy-db` is shared with staging).

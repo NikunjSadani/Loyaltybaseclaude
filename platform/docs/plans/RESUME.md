@@ -8,21 +8,32 @@ client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch *
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
 `dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-05.
 
-🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #4 EXECUTED 2026-07-04→05 — prod now serving `824eac0`; DEOLEO TENANT CREATED + ACTIVE + LIVE on the
-real domain.** Cutover #4 moved prod `main` **eb841e9 → 824eac0** (3 commits, **CODE-ONLY — 0 migrations**, so the in-VPC migrate step was a
-no-op). Owner approved the `production` gate; both prod Cloud Run services are **Ready=True @ 100% traffic** on `824eac0` (`gifsy-api` rev
-`gifsy-api-00017-sd5`, `gifsy-frontend` rev `gifsy-frontend-00013-kr2`); pre-cutover backup **`pre-cutover4-develop-824eac0`** (ON_DEMAND,
-gifsy-db; rollback = redeploy `eb841e9`). **VERIFIED LIVE on `deoleoloyalty.gifsy.in`:** `/auth/login` = 200; `/brand/deoleo-wordmark-white.png`
-= 200 image/png (no regression — the wordmark still renders on the login page). **Cutover #4 payload (2 items):** **(1)** rewards
-**FREE_AMOUNT blank-Max fix** (`5dbf641`) — a free-amount voucher (`pointsCost 0`) saved with the "Max points" field blank persisted
-`maxRedemptionPoints=null` → treated as a FIXED cost-0 reward → every redeem threw "must cost a positive number of points" (un-redeemable);
-backend `assertFreeAmountComplete` guard on create+update + DTO `@Min(1)` on `minRedemptionPoints` + FREE→FIXED clears the stale bounds; the
-FE makes "Max points" required; independently audited (no live money defect). **(2)** **Credits & Payouts Config settings card** (`824eac0`) —
-a GIFSY_ADMIN-only card on `/admin/settings` (month cutoff / per-row safety caps / notify emails); seeds from `GET /api/admin/settings` (the
+🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #5 EXECUTED 2026-07-05 — prod now serving `5c2bb65`; DEOLEO TENANT CREATED + ACTIVE + LIVE on the
+real domain.** Cutover #5 moved prod `main` **824eac0 → 5c2bb65** (5 commits, **CODE-ONLY — 0 migrations**, so the in-VPC migrate step was a
+no-op). Owner approved the `production` gate; both prod Cloud Run services serve `5c2bb65`; pre-cutover backup **`pre-cutover5-develop-5c2bb65`**
+(ON_DEMAND, gifsy-db; rollback = redeploy `824eac0`). **Cutover #5 payload (5 items — the sales-KYC UAT fixes + follow-ups):** **(1)** the
+misleading per-document **"Pending" status tag REMOVED** from the sales KYC store-info (`6ad4d62` — `KycDocument.status` is never advanced off
+PENDING, so it read as a false hold on approved outlets); **(2)** `0028a07` — cutover #4 doc updates (part of this batch reaching prod); **(3)**
+re-KYC flagged docs + photos now **amber-badged ("Needs re-capture")** on the sales-senior KYC detail (`6e96d5b`), parity with the Gifsy
+reviewer (driven by `flaggedDocTypes`); **(4)** the **Approval-Status stepper reflects the CURRENT submission** (`12d781f`) — a re-KYC rejected
+by the ASM shows first-approver = Rejected + Gifsy = pending (was a stale "Approved" + "Queued for Gifsy"); uses latest-event-per-stage + keys
+the Gifsy step off `kyc.status`; **(5)** the **first-approver step LABEL reflects the real reviewer level** (`5c2bb65`) — was hardcoded from a
+bad `submittedByRole==='XSR'` cast → always "ASM Review"; now derived from the PENDING_*_APPROVAL status (awaiting) or the approver's role
+(acted), correct under vacant-level skipping. Gate at cutover #5: **api jest 1427 · nest 0 · FE vitest 1784 · tsc 0**. **prod == develop ==
+main == `5c2bb65`.**
+
+**PRIOR — CUTOVER #4 (2026-07-04→05) — prod was serving `824eac0`.** Cutover #4 moved prod `main` **eb841e9 → 824eac0** (3 commits,
+**CODE-ONLY — 0 migrations**, so the in-VPC migrate step was a no-op). Owner approved the `production` gate; both prod Cloud Run services were
+**Ready=True @ 100% traffic** on `824eac0` (`gifsy-api` rev `gifsy-api-00017-sd5`, `gifsy-frontend` rev `gifsy-frontend-00013-kr2`);
+pre-cutover backup **`pre-cutover4-develop-824eac0`** (ON_DEMAND, gifsy-db). **VERIFIED LIVE on `deoleoloyalty.gifsy.in`:** `/auth/login` = 200;
+`/brand/deoleo-wordmark-white.png` = 200 image/png (no regression). **Cutover #4 payload (2 items):** **(1)** rewards **FREE_AMOUNT blank-Max
+fix** (`5dbf641`) — a free-amount voucher (`pointsCost 0`) saved with the "Max points" field blank persisted `maxRedemptionPoints=null` →
+treated as a FIXED cost-0 reward → every redeem threw "must cost a positive number of points" (un-redeemable); backend
+`assertFreeAmountComplete` guard on create+update + DTO `@Min(1)` on `minRedemptionPoints` + FREE→FIXED clears the stale bounds; the FE makes
+"Max points" required; independently audited (no live money defect). **(2)** **Credits & Payouts Config settings card** (`824eac0`) — a
+GIFSY_ADMIN-only card on `/admin/settings` (month cutoff / per-row safety caps / notify emails); seeds from `GET /api/admin/settings` (the
 `/me` endpoint strips `creditsPayouts`); whole-object save; backend floors the caps at ≥1 so a stored `0` can't freeze credit uploads;
-independently audited. Gate at cutover #4: **api jest 1427 · nest 0 · FE vitest 1776 · tsc 0**. **At cutover `prod == develop == main ==
-824eac0`.** *(After the cutover, `develop` advances with a follow-up KYC change — the per-document "Pending" status tag removed from the sales
-KYC store-information view — which is NOT yet in prod, so develop may be ahead of prod by post-cutover follow-ups.)*
+independently audited. Gate at cutover #4: **api jest 1427 · nest 0 · FE vitest 1776 · tsc 0**.
 
 **PRIOR — CUTOVER #3 (2026-07-04) + LOGIN-LOGO/BRAND-FIX — prod was serving `eb841e9`; DEOLEO TENANT CREATED + ACTIVE + LIVE on the real
 domain.** Cutover #3 moved prod `main` **a2f5929 → 9d366f9** (60-commit jump, **CODE-ONLY — 0 migrations**,
@@ -105,7 +116,7 @@ deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLO
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1427 · nest 0 · FE vitest 1776 · tsc 0 (prod serving `824eac0` after cutover #4; at cutover main HEAD `824eac0` == develop HEAD `824eac0`, though develop may now be ahead by post-cutover follow-ups; prior cutover-#3 gate was api jest 1419 · nest 0 · FE vitest 1769 · tsc 0 at `eb841e9`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1427 · nest 0 · FE vitest 1784 · tsc 0 (prod serving `5c2bb65` after cutover #5; prod == develop == main == `5c2bb65`; prior cutover-#4 gate was api jest 1427 · nest 0 · FE vitest 1776 · tsc 0 at `824eac0`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -192,6 +203,19 @@ already understand → STOP, present the ideal vs the shortcut, and let the owne
 edges (and even then, say why closing them isn't worth it), never for a gap I could design correctly now.
 
 DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`; runtime-verified where an API/edge check was possible):
+- **🆕 2026-07-05 — CUTOVER #5 EXECUTED (prod moved `824eac0` → `5c2bb65`; CODE-ONLY, 0 migrations — sales-KYC UAT fixes):**
+  · **CUTOVER #5 EXECUTED** — prod `main` **824eac0 → 5c2bb65** (5 commits, **CODE-ONLY — 0 migrations**, in-VPC migrate = no-op);
+    owner approved the `production` gate; both prod services serve `5c2bb65`; pre-cutover backup **`pre-cutover5-develop-5c2bb65`**
+    (ON_DEMAND, gifsy-db; rollback = redeploy `824eac0`). Gate: api jest 1427 · nest 0 · FE vitest 1784 · tsc 0. **prod == develop == main == 5c2bb65.**
+  · **PER-DOC "PENDING" STATUS TAG REMOVED** (`6ad4d62`) — the misleading per-document "Pending" status tag was removed from the sales
+    KYC store-info view; `KycDocument.status` is never advanced off PENDING, so it read as a false hold on already-approved outlets.
+  · **RE-KYC AMBER DOC/PHOTO BADGES** (`6e96d5b`) — re-KYC flagged documents + photos now show an amber badge ("Needs re-capture") on the
+    sales-senior KYC detail, parity with the Gifsy reviewer (driven by `flaggedDocTypes`).
+  · **APPROVAL-STATUS STEPPER — CURRENT SUBMISSION** (`12d781f`) — a re-KYC rejected by the ASM now shows first-approver = Rejected +
+    Gifsy = pending (was a stale "Approved" + "Queued for Gifsy"); uses latest-event-per-stage + keys the Gifsy step off `kyc.status`.
+  · **FIRST-APPROVER STEP LABEL — REAL REVIEWER LEVEL** (`5c2bb65`) — the label was hardcoded from a bad `submittedByRole==='XSR'` cast →
+    always "ASM Review"; now derived from the PENDING_*_APPROVAL status (awaiting) or the approver's role (acted), correct under vacant-level skipping.
+  · **(`0028a07`)** cutover #4 doc updates (already recorded; part of this 5-commit batch reaching prod).
 - **🆕 2026-07-04→05 — CUTOVER #4 EXECUTED (prod moved `eb841e9` → `824eac0`; CODE-ONLY, 0 migrations):**
   · **CUTOVER #4 EXECUTED** — prod `main` **eb841e9 → 824eac0** (3 commits, **CODE-ONLY — 0 migrations**, in-VPC migrate = no-op);
     owner approved the `production` gate; both prod services **Ready=True @ 100% traffic** on `824eac0` (`gifsy-api` rev `gifsy-api-00017-sd5`,
@@ -392,9 +416,21 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE — **✅ CUTOVER #4 EXECUTED 2026-07-04→05. Prod now serving `824eac0`; at cutover main HEAD `824eac0` == develop HEAD `824eac0` (develop may now be ahead by post-cutover follow-ups).**
+🚀 CUTOVER STATE — **✅ CUTOVER #5 EXECUTED 2026-07-05. Prod now serving `5c2bb65`; prod == develop == main == `5c2bb65`.**
+Cutover #5 moved prod `main` **`824eac0` → `5c2bb65`** (5 commits, **CODE-ONLY — 0 migrations**, so the in-VPC `migrate deploy` was a no-op).
+Owner approved the `production` gate; both prod Cloud Run services serve `5c2bb65`; pre-cutover backup **`pre-cutover5-develop-5c2bb65`**
+(ON_DEMAND, gifsy-db; rollback = redeploy `824eac0`). **Payload (5 items — the sales-KYC UAT fixes + follow-ups):** per-doc **"Pending" status
+tag removed** from the sales KYC store-info (`6ad4d62` — `KycDocument.status` never advances off PENDING, false hold on approved outlets) ·
+`0028a07` cutover #4 doc updates · re-KYC flagged docs + photos **amber-badged ("Needs re-capture")** on the sales-senior KYC detail (`6e96d5b`,
+parity with the Gifsy reviewer, driven by `flaggedDocTypes`) · **Approval-Status stepper reflects the CURRENT submission** (`12d781f` — a re-KYC
+rejected by the ASM shows first-approver = Rejected + Gifsy = pending; latest-event-per-stage + keys the Gifsy step off `kyc.status`) ·
+**first-approver step LABEL reflects the real reviewer level** (`5c2bb65` — was hardcoded "ASM Review" from a bad `submittedByRole==='XSR'`
+cast; now derived from PENDING_*_APPROVAL / the approver's role, correct under vacant-level skipping). Gate at cutover #5:
+api jest 1427 · nest 0 · FE vitest 1784 · tsc 0.
+
+**PRIOR — CUTOVER #4 (2026-07-04→05) — prod was serving `824eac0`.**
 Cutover #4 moved prod `main` **`eb841e9` → `824eac0`** (3 commits, **CODE-ONLY — 0 migrations**, so the in-VPC `migrate deploy` was a no-op).
-Owner approved the `production` gate; both prod Cloud Run services are **Ready=True @ 100% traffic** on `824eac0` (`gifsy-api` rev
+Owner approved the `production` gate; both prod Cloud Run services were **Ready=True @ 100% traffic** on `824eac0` (`gifsy-api` rev
 `gifsy-api-00017-sd5`, `gifsy-frontend` rev `gifsy-frontend-00013-kr2`); pre-cutover backup **`pre-cutover4-develop-824eac0`** (ON_DEMAND,
 gifsy-db; rollback = redeploy `eb841e9`). **VERIFIED LIVE on `deoleoloyalty.gifsy.in`** (`/auth/login` 200; `/brand/deoleo-wordmark-white.png`
 200 image/png — no regression). **Payload (2 items):** rewards **FREE_AMOUNT blank-Max fix** (`5dbf641` — a free-amount voucher saved with Max
@@ -403,8 +439,7 @@ blank persisted `maxRedemptionPoints=null` → treated as FIXED cost-0 → every
 required; independently audited) · **Credits & Payouts Config settings card** (`824eac0` — GIFSY_ADMIN-only card on `/admin/settings`: month
 cutoff / per-row safety caps / notify emails; seeds from `GET /api/admin/settings` since the `/me` endpoint strips `creditsPayouts`;
 whole-object save; backend floors the caps at ≥1 so a stored `0` can't freeze credit uploads; independently audited). Gate at cutover #4:
-api jest 1427 · nest 0 · FE vitest 1776 · tsc 0. *(After the cutover, `develop` advances with a follow-up KYC change — the per-doc "Pending"
-status tag removed from the sales KYC store-information view — which is NOT yet in prod.)*
+api jest 1427 · nest 0 · FE vitest 1776 · tsc 0.
 
 **CUTOVER #3 (2026-07-04) + LOGIN-LOGO/BRAND-FIX — historical:** prod served `eb841e9`; main HEAD `eb841e9` == develop HEAD `eb841e9`.
 Cutover #3 moved prod `main` **`a2f5929` → `9d366f9`** (60-commit jump, **CODE-ONLY — 0 migrations**, so the in-VPC `migrate deploy`
@@ -488,12 +523,14 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 [[admin-dashboard-consolidation]] [[default-to-orchestration]] [[global-settings-wiring]] [[sales-hierarchy-scoping]]
 [[migration-model]] [[staging-deploy-gate]] [[audit-every-build-item]].
 
-▶ **THINGS TO BE DONE — START HERE (present this list first; ask the owner which to pick up).** ✅ Cutover #4 is DONE — prod serves
-`824eac0` (rewards FREE_AMOUNT fix + Credits/Payouts Config card); at cutover **develop == main == `824eac0`** (develop may now be ahead by
-post-cutover follow-ups). Gate: api jest 1427 · nest 0 · FE vitest 1776 · tsc 0. *(Prior: cutover #3 + login-logo/`/brand/*` fix at `eb841e9`.)*
+▶ **THINGS TO BE DONE — START HERE (present this list first; ask the owner which to pick up).** ✅ Cutover #5 is DONE — prod serves
+`5c2bb65` (sales-KYC UAT fixes — status-tag removal, re-KYC amber badges, approval-stepper current-submission + reviewer-level label);
+**prod == develop == main == `5c2bb65`**. Gate: api jest 1427 · nest 0 · FE vitest 1784 · tsc 0. *(Prior: cutover #4 at `824eac0` — rewards FREE_AMOUNT fix + Credits/Payouts Config card.)*
 **A. Owner-gated Deoleo go-live (owner or client-files):**
   1. **#76 — load real Deoleo master data** (outlets/hierarchy/catalog/schemes via the app UIs) — **THE LAST HARD BLOCKER**, waits on the client's files.
   2. **#143 — WhatsApp `deoleo_kyc_approval` runtime-verify** (template APPROVED; needs a real approval to a real phone).
+  3. **⚠️ Fix two broken reward catalog items in prod** — **Amazon Voucher** + **To Bank** are free-amount vouchers with a missing min/max → **un-redeemable**; owner re-saves each in the prod **Gift Catalogue** (the now-live FREE_AMOUNT guard from cutover #4 enforces the bounds on save).
+  4. **Set `creditsPayouts.notifyEmails` in prod** — currently empty → credit-batch emails fall back to Gifsy ops; owner can set the Deoleo recipients via the new **Credits & Payouts** config card (live in prod since cutover #4).
 **B. Blocked on an owner DECISION:** 5. **Notifications Core** go/no-go (drainer is push-only; in-app inbox needs a migration; 2/3
   events blocked upstream). 6. **Email provider** — ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
 **C. Buildable now — C-batch SHIPPED** (`873a2ec`): ✅ C7 `/admin/outlets/ids` lite endpoint · ✅ C9 GIFSY read-only "Security &
@@ -512,16 +549,21 @@ post-cutover follow-ups). Gate: api jest 1427 · nest 0 · FE vitest 1776 · tsc
     only real open item; the rest of the sales-KYC/UX batch is owner-approved as shipped.
 **HOUSEKEEPING:** #90–95 already pruned; #74 (owner ops) mostly done (monitoring + backups/PITR ON; only optional cred-rotation left).
 
-Now: greet the owner. **🚀 CUTOVER #4 IS DONE (2026-07-04→05) — prod now serves `824eac0`, and the DEOLEO TENANT is CREATED + ACTIVE +
-VERIFIED LIVE on `deoleoloyalty.gifsy.in`.** Cutover #4 moved prod `main` **`eb841e9` → `824eac0`** (3 commits, CODE-ONLY — 0 migrations,
-in-VPC migrate = no-op); owner approved the `production` gate; both prod services are Ready=True @ 100% traffic on `824eac0`
-(`gifsy-api` rev `gifsy-api-00017-sd5`, `gifsy-frontend` rev `gifsy-frontend-00013-kr2`); pre-cutover backup **`pre-cutover4-develop-824eac0`**
-(rollback = redeploy `eb841e9`). **Verified LIVE** (`/auth/login` 200; `/brand/deoleo-wordmark-white.png` 200 image/png — no regression).
-Cutover #4 payload: **rewards FREE_AMOUNT blank-Max fix** (`5dbf641` — a free-amount voucher saved with Max blank → un-redeemable; backend
-`assertFreeAmountComplete` guard + DTO `@Min(1)`; FE makes Max required) + **Credits & Payouts Config settings card** (`824eac0` —
-GIFSY_ADMIN-only on `/admin/settings`; seeds from `GET /api/admin/settings`; whole-object save; caps floored at ≥1). Gate: api jest 1427 ·
-nest 0 · FE vitest 1776 · tsc 0. At cutover **develop == main == `824eac0`** (develop may now be ahead by a post-cutover follow-up — the
-per-doc "Pending" tag removed from the sales KYC store-information view, NOT yet in prod).
+Now: greet the owner. **🚀 CUTOVER #5 IS DONE (2026-07-05) — prod now serves `5c2bb65`, and the DEOLEO TENANT is CREATED + ACTIVE +
+LIVE on `deoleoloyalty.gifsy.in`.** Cutover #5 moved prod `main` **`824eac0` → `5c2bb65`** (5 commits, CODE-ONLY — 0 migrations,
+in-VPC migrate = no-op); owner approved the `production` gate; both prod services serve `5c2bb65`; pre-cutover backup
+**`pre-cutover5-develop-5c2bb65`** (rollback = redeploy `824eac0`). Cutover #5 payload (5 items — the sales-KYC UAT fixes + follow-ups):
+per-doc **"Pending" status tag removed** from the sales KYC store-info (`6ad4d62`) + `0028a07` cutover #4 doc updates + re-KYC flagged docs
++ photos **amber-badged ("Needs re-capture")** on the sales-senior KYC detail (`6e96d5b`, parity with the Gifsy reviewer) + the
+**Approval-Status stepper reflects the CURRENT submission** (`12d781f` — a re-KYC rejected by the ASM shows first-approver = Rejected + Gifsy
+= pending; latest-event-per-stage + keys the Gifsy step off `kyc.status`) + the **first-approver step LABEL reflects the real reviewer level**
+(`5c2bb65` — was hardcoded "ASM Review"; now derived from PENDING_*_APPROVAL / the approver's role, correct under vacant-level skipping).
+Gate: api jest 1427 · nest 0 · FE vitest 1784 · tsc 0. **prod == develop == main == `5c2bb65`.**
+**PRIOR — CUTOVER #4 (2026-07-04→05) — prod was serving `824eac0`.** Cutover #4 moved prod `main` **`eb841e9` → `824eac0`** (3 commits,
+CODE-ONLY — 0 migrations, in-VPC migrate = no-op); both prod services were Ready=True @ 100% traffic on `824eac0` (`gifsy-api` rev
+`gifsy-api-00017-sd5`, `gifsy-frontend` rev `gifsy-frontend-00013-kr2`); pre-cutover backup **`pre-cutover4-develop-824eac0`** (rollback =
+redeploy `eb841e9`). Payload: **rewards FREE_AMOUNT blank-Max fix** (`5dbf641`) + **Credits & Payouts Config settings card** (`824eac0`).
+Gate: api jest 1427 · nest 0 · FE vitest 1776 · tsc 0.
 **PRIOR — CUTOVER #3 (2026-07-04) + LOGIN LOGO & `/brand/*` FIX — prod was serving `eb841e9`.**
 Cutover #3 moved prod `main` **`a2f5929` → `9d366f9`** (60-commit, CODE-ONLY — 0 migrations, in-VPC migrate = no-op); owner approved the
 `production` gate; then (later 2026-07-04) the owner approved the login-logo gate → **prod moved `9d366f9` → `eb841e9`** (= 9d366f9 + login
@@ -542,13 +584,17 @@ KYC-PDF render, not-interested-404), as is the earlier C-batch (C7 `/admin/outle
 `PENDING_VERIFICATION`. **NEXT = master data #76 when files arrive** (nothing else queued);
 notifications/P7 still PAUSED (events flag-OFF; email provider TBD, ZeptoMail vs SES). Required onboarding-flow builds logged in
 POST-GO-LIVE-BACKLOG §A-DOMAIN (needs a `Client.domains` migration — schedule before client #2) + §A-ONBOARDING (incl. the
-GIFSY_ADMIN-in-tenant-context fix, SHIPPED). Keep the fix-as-found loop available (fixes push to `develop` → reach prod on the next
-`main` deploy). Full as-run record = **`runbooks/PROD-CUTOVER-RECORD.md`** (§ 2026-07-04); runbook (banner-marked COMPLETE) =
+GIFSY_ADMIN-in-tenant-context fix, SHIPPED). **⚠️ TWO OPEN OWNER-ACTION ITEMS (from this session — don't lose):** **(a)** **two broken
+reward catalog items in prod** — **Amazon Voucher** + **To Bank** are free-amount vouchers with a **missing min/max** → currently
+**un-redeemable**; the owner must fix them in the prod **Gift Catalogue** (re-saving each through the now-live FREE_AMOUNT guard enforces
+the bounds). **(b)** **`creditsPayouts.notifyEmails` is empty in prod** — credit-batch emails fall back to Gifsy ops; the owner can set the
+Deoleo recipients via the new **Credits & Payouts** config card (live in prod). Keep the fix-as-found loop available (fixes push to `develop`
+→ reach prod on the next `main` deploy). Full as-run record = **`runbooks/PROD-CUTOVER-RECORD.md`** (§ 2026-07-05 — CUTOVER #5); runbook (banner-marked COMPLETE) =
 **`runbooks/CUTOVER-RUNBOOK.md`**. If a NEW transactional notification is requested: PUSH → enqueue post-commit via
 `SalesNotificationsService`; WhatsApp/SMS → `whatsapp-kyc.config.ts` + `Msg91Service.sendWhatsappTemplate` fire-and-forget post-commit.
 
 **START THE SESSION by presenting the ▶ THINGS TO BE DONE list above** (A owner-gated go-live · B owner-decision · C
 buildable-now · D later) and **ask the owner which to pick up** — do NOT silently begin work. Default recommendation if the
-owner is open-ended: since cutover #4 is done (prod `824eac0`; rewards FREE_AMOUNT fix + Credits/Payouts Config card), offer to pick a
+owner is open-ended: since cutover #5 is done (prod `5c2bb65`; sales-KYC UAT fixes — status-tag, re-KYC amber badges, approval-stepper), offer to pick a
 buildable-now item while master data (#76) remains owner-gated (waiting on the client's files).
 ```
