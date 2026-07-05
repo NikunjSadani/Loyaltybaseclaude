@@ -190,3 +190,60 @@ Code rollback = **redeploy both services to the prior prod revision** (`9d366f9`
 `a2f5929` to unwind the whole cutover); neither this cutover nor the login-logo/`/brand/*` deploy added migrations, so there is
 nothing to reverse in the DB. DB restore (only if ever needed) via the Step-1 backup `1783158625082` / PITR-clone (never a blind
 in-place restore — `gifsy-db` is shared with staging).
+
+---
+
+# Production Cutover — Record (2026-07-04/05 `develop` → `main` — CODE-ONLY — CUTOVER #4: rewards FREE_AMOUNT fix + Credits/Payouts config card)
+
+> **Executed 2026-07-04→05. As-run record of the FOURTH cutover** — the `develop`→`main` promotion of the rewards FREE_AMOUNT
+> blank-Max fix + the Credits & Payouts Config settings card onto the already-live prod (`eb841e9` → `824eac0`, **3 commits**).
+> Owner-driven: the owner approved the GitHub `production` gate personally. **CODE-ONLY — 0 migrations**, so the in-VPC
+> `gifsy-migrate` step was a **no-op / not required**. The 2026-07-04 record above (cutover #3) is the re-KYC batch + the
+> login-logo/`/brand/*` fix; this section is the rewards-fix + credits/payouts-config promotion. Runbook: [`CUTOVER-RUNBOOK.md`](CUTOVER-RUNBOOK.md).
+
+## Pre-state (verified)
+`gifsy_prod`: live, serving `main` HEAD **`eb841e9`** (the cutover-#3 code + login-logo/`/brand/*` fix), Deoleo tenant CREATED +
+ACTIVE + LIVE on the real domain (platform defaults: conversion `1`, expiry null, visibility OFF). `main` was **3 commits behind
+`develop` with 0 pending migrations**. Gate green at cutover: **api jest 1427 · nest 0 · FE vitest 1776 · tsc 0**.
+
+## Steps executed (in order)
+1. **Step 1 — Pre-cutover backup (double-guarded).** On-demand backup of the shared `gifsy-db` instance:
+   description `"pre-cutover4-develop-824eac0"`, `ON_DEMAND`, **SUCCESSFUL**. **PITR remained ON.** Rollback point = redeploy `eb841e9`.
+2. **Step 2 — Merge `develop`→`main` (owner-triggered).** Prod `main` HEAD moved **`eb841e9` → `824eac0`** (the 3-commit,
+   **CODE-ONLY** jump). The owner approved the GitHub `production` environment gate. **0 migrations** in this batch → the
+   in-VPC `gifsy-migrate` step was a **no-op (not required)**; the pipeline deployed the new revision directly. **Both
+   `gifsy-api` (rev `gifsy-api-00017-sd5`) and `gifsy-frontend` (rev `gifsy-frontend-00013-kr2`) are Ready=True @ 100% traffic on
+   `824eac0`.**
+3. **Step 3 — Live verification on the real domain.** `https://deoleoloyalty.gifsy.in/auth/login` → **200**;
+   `/brand/deoleo-wordmark-white.png` → **200 image/png** (no regression — the wordmark still renders on the login page);
+   both prod Cloud Run services confirmed Ready=True @ 100% traffic on the `824eac0` image.
+
+## What was in this cutover (payload — 2 items)
+- **Rewards FREE_AMOUNT blank-Max fix** (`5dbf641`) — a free-amount voucher (`pointsCost 0`) saved with the "Max points" field
+  **blank** persisted `maxRedemptionPoints = null` → the reward was treated as a **FIXED cost-0** reward → every redeem threw
+  **"must cost a positive number of points"** (the voucher was un-redeemable). Fix: backend `assertFreeAmountComplete` guard on
+  create + update + a DTO `@Min(1)` on `minRedemptionPoints`, and a FREE→FIXED switch clears the stale bounds; the FE makes "Max
+  points" required for a free-amount reward. Independently audited (no live money defect — the guard fails closed).
+- **Credits & Payouts Config settings card** (`824eac0`) — a **GIFSY_ADMIN-only** card on `/admin/settings` (month cutoff /
+  per-row safety caps / notify emails). It seeds from `GET /api/admin/settings` (the `/me` endpoint **strips `creditsPayouts`**),
+  saves the **whole object**, and the backend **floors the caps at ≥1** so a stored `0` can't freeze credit uploads.
+  Independently audited (ship it).
+
+## Post-state (verified)
+- **Cutover #4 rolled prod `eb841e9` → `824eac0`.** Both prod services — `gifsy-api` (rev `gifsy-api-00017-sd5`) and
+  `gifsy-frontend` (rev `gifsy-frontend-00013-kr2`) — are **Ready=True @ 100% traffic** on **`824eac0`**.
+- **0 migrations applied** (code-only cutover; the in-VPC migrate step was a no-op).
+- Pre-cutover backup **`pre-cutover4-develop-824eac0`** taken (ON_DEMAND, gifsy-db); PITR ON.
+- Live-verified on `deoleoloyalty.gifsy.in` (`/auth/login` 200; `/brand/deoleo-wordmark-white.png` 200 image/png — no regression).
+- At cutover, **prod == develop == main == `824eac0`**. *(After the cutover, `develop` advances with a follow-up KYC change — the
+  per-document "Pending" status tag removed from the sales KYC store-information view — which is NOT yet in prod, so `develop` may
+  be ahead of prod by post-cutover follow-ups.)*
+
+## What remains (owner-gated — NOT done)
+- **Load real Deoleo master data via the app UIs (#76)** — THE last hard go-live blocker; waits on the client's files.
+- **WhatsApp `deoleo_kyc_approval` template runtime-verify (#143)** — template APPROVED 2026-07-02; needs a real approval + phone.
+
+## Rollback (unchanged path)
+Code rollback = **redeploy both services to the prior prod revision `eb841e9`** (unwinds the whole cutover #4); this cutover added
+no migrations, so there is nothing to reverse in the DB. DB restore (only if ever needed) via the Step-1 backup
+`pre-cutover4-develop-824eac0` / PITR-clone (never a blind in-place restore — `gifsy-db` is shared with staging).
