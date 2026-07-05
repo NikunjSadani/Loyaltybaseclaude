@@ -13,7 +13,7 @@
  */
 
 import React, { Suspense, act } from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach, beforeEach } from 'vitest';
 
 vi.mock('next/link', () => ({
@@ -73,6 +73,41 @@ describe('REKYC-SALES — sales KYC detail re-KYC banner + re-entry', () => {
     const resubmit = await screen.findByRole('button', { name: /edit & resubmit kyc/i });
     expect(resubmit).toBeInTheDocument();
     expect(resubmit.closest('a')).toHaveAttribute('href', '/sales/kyc/new?outletId=o1');
+
+    // Parity tweak: expand the collapsible Store Information section, then the flagged
+    // store-board PHOTO thumbnail is amber-badged for the approver.
+    fireEvent.click(screen.getByText(/store information/i));
+    expect(await screen.findByTestId('rekyc-flagged-photo-thumb')).toBeInTheDocument();
+  });
+
+  it('amber-badges a flagged non-photo document row ("Needs re-capture") for the approver', async () => {
+    const sub = {
+      ...REKYC_SUBMISSION,
+      reKycFlags: { gstCertificate: true, remarks: 'GST certificate unreadable' },
+      documents: [
+        { id: 'd2', documentType: 'GST_CERTIFICATE', status: 'SUBMITTED', viewUrl: 'data:application/pdf;base64,JVBERi0=' },
+      ],
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: { submission: sub } }),
+    }));
+
+    const params = Promise.resolve({ id: 'kyc-1' });
+    await act(async () => {
+      render(
+        <Suspense fallback={<div>Loading…</div>}>
+          <SalesKYCDetailPage params={params} />
+        </Suspense>,
+      );
+      await params;
+    });
+
+    // Expand the collapsible Store Information section to reveal the document checklist.
+    fireEvent.click(screen.getByText(/store information/i));
+    const row = await screen.findByTestId('rekyc-flagged-doc-row');
+    expect(row).toHaveTextContent('GST Certificate');
+    expect(row).toHaveTextContent(/needs re-capture/i);
   });
 });
 

@@ -15,7 +15,7 @@ import { Button } from '@/components/ui/button';
 import { KYCStatus, type ApprovalEvent, type KYCSubmitterRole } from '@/types';
 import { getRole } from '@/lib/sales-role';
 import { useGifsySettings } from '@/lib/gifsy-settings';
-import { hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels, type ReKycFlags } from '@/lib/rekyc-fields';
+import { hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags } from '@/lib/rekyc-fields';
 import { RejectionModal } from './RejectionModal';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -56,7 +56,7 @@ interface KYCDetail {
   ifscCode?: string;
   upiId?: string;
   documents: KYCDoc[];
-  photos: { label: string; url: string }[];
+  photos: { label: string; url: string; documentType: string }[];
   approvalHistory: ApprovalEvent[];
 }
 
@@ -228,7 +228,7 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
     documents: (s.documents ?? []).map(mapDoc),
     photos: (s.documents ?? [])
       .filter(d => PHOTO_DOC_TYPES.has(d.documentType) && d.viewUrl)
-      .map(d => ({ label: docLabel(d.documentType), url: d.viewUrl as string })),
+      .map(d => ({ label: docLabel(d.documentType), url: d.viewUrl as string, documentType: d.documentType })),
     approvalHistory: [],
   };
 }
@@ -509,6 +509,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
             .map((d: { documentType: string; viewUrl?: string | null }) => ({
               label: docLabel(d.documentType),
               url:   d.viewUrl as string,
+              documentType: d.documentType,
             })),
           approvalHistory: mapStatusHistory(s.statusHistory ?? []),
         });
@@ -607,6 +608,15 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
     kyc.status === KYCStatus.RESUBMISSION_REQUIRED ||
     kyc.status === KYCStatus.RE_KYC_REQUIRED ||
     isReKycActionable(kyc.reKycFlags, kyc.status);
+
+  /* Re-KYC document highlight (parity with the Gifsy reviewer): amber-badge the flagged
+     documents + photos so the sales-senior approver sees exactly what was flagged for
+     re-capture. Uses the RAW flags (hasReKycFlags) so the highlight stays visible while a
+     resubmission is under review — mirroring the reviewer's flaggedDocTypes badge. */
+  const flaggedDocSet = new Set(
+    (hasReKycFlags(kyc.reKycFlags) ? flaggedDocTypes(kyc.reKycFlags) : []).map((t) => t.toLowerCase()),
+  );
+  const isDocFlagged = (documentType: string) => flaggedDocSet.has(documentType.toLowerCase());
 
   /* ── "Redeem for Outlet" gate ──────────────────────────────────────────────
      Owner decision: the redeem-on-behalf action lives on the OUTLET DETAIL view
@@ -828,18 +838,28 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
               {kyc.photos.length > 0 ? (
                 <>
                   <div className="grid grid-cols-2 gap-2">
-                    {kyc.photos.map((photo, i) => (
+                    {kyc.photos.map((photo, i) => {
+                      const flagged = isDocFlagged(photo.documentType);
+                      return (
                       <button
                         key={photo.url}
-                        data-testid="outlet-photo-thumb"
+                        data-testid={flagged ? 'rekyc-flagged-photo-thumb' : 'outlet-photo-thumb'}
                         onClick={() => setPhotoLightboxIndex(i)}
-                        className="relative aspect-video rounded-lg overflow-hidden border border-gray-200 bg-gray-50 group"
+                        className={`relative aspect-video rounded-lg overflow-hidden bg-gray-50 group ${
+                          flagged ? 'border-2 border-amber-300' : 'border border-gray-200'
+                        }`}
                       >
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img src={photo.url} alt={photo.label} className="w-full h-full object-cover group-hover:opacity-90 transition-opacity" />
+                        {flagged && (
+                          <span className="absolute top-1 right-1 text-[9px] font-semibold text-amber-800 bg-amber-100 border border-amber-200 rounded px-1 py-0.5">
+                            Re-capture
+                          </span>
+                        )}
                         <span className="absolute bottom-0 inset-x-0 bg-black/55 text-white text-[10px] font-medium px-1.5 py-0.5 text-left truncate">{photo.label}</span>
                       </button>
-                    ))}
+                      );
+                    })}
                   </div>
                   {photoLightboxIndex !== null && kyc.photos[photoLightboxIndex] && (
                     <div data-testid="outlet-photo-lightbox" className="fixed inset-0 z-50 bg-black/80 flex flex-col items-center justify-center p-4" onClick={() => setPhotoLightboxIndex(null)}>
@@ -868,25 +888,39 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                   // Photos are rendered above as images; the checklist lists the rest.
                   const docRows = kyc.documents.filter(d => !PHOTO_DOC_TYPES.has(d.documentType));
                   if (docRows.length === 0) return <p className="text-xs text-gray-400">No documents uploaded</p>;
-                  return docRows.map(doc => (
-                  <div key={doc.id} className="flex items-center justify-between py-0.5 gap-2">
-                    <span className="text-sm text-gray-700 truncate">{doc.label}</span>
-                    <div className="flex items-center gap-2 shrink-0">
-                      {doc.viewUrl ? (
-                        <button
-                          type="button"
-                          onClick={() => previewDoc(doc)}
-                          data-testid="kyc-doc-view-link"
-                          className="text-xs text-blue-600 hover:underline"
-                        >
-                          View
-                        </button>
-                      ) : (
-                        <span className="text-xs text-gray-400">Not uploaded</span>
-                      )}
+                  return docRows.map(doc => {
+                    const flagged = isDocFlagged(doc.documentType);
+                    return (
+                    <div
+                      key={doc.id}
+                      data-testid={flagged ? 'rekyc-flagged-doc-row' : undefined}
+                      className={`flex items-center justify-between gap-2 ${
+                        flagged ? 'rounded-md border border-amber-200 bg-amber-50 px-2 py-1' : 'py-0.5'
+                      }`}
+                    >
+                      <span className={`text-sm truncate ${flagged ? 'text-amber-800 font-medium' : 'text-gray-700'}`}>{doc.label}</span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {flagged && (
+                          <span className="text-[10px] font-semibold text-amber-700 bg-amber-100 rounded px-1.5 py-0.5 whitespace-nowrap">
+                            Needs re-capture
+                          </span>
+                        )}
+                        {doc.viewUrl ? (
+                          <button
+                            type="button"
+                            onClick={() => previewDoc(doc)}
+                            data-testid="kyc-doc-view-link"
+                            className="text-xs text-blue-600 hover:underline"
+                          >
+                            View
+                          </button>
+                        ) : (
+                          <span className="text-xs text-gray-400">Not uploaded</span>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                  ));
+                    );
+                  });
                 })()}
               </div>
             </div>
