@@ -344,7 +344,14 @@ export default function NewKYCPage() {
     const outletId = new URLSearchParams(window.location.search).get('outletId');
     if (!outletId) return;
     const match = assignedOutlets.find((o) => o.outletId === outletId);
-    if (match) setSelectedOutlet(match);
+    if (!match) return;
+    setSelectedOutlet(match);
+    // Re-KYC deep-link: the outlet is already chosen AND 'Not Interested' is hidden
+    // for a RE_KYC_REQUIRED outlet (see the outlet step), so Step 1 (Select Outlet)
+    // has no decision left to make — skip straight to Details and mark outlet-select
+    // done. Rejected / resubmission deep-links KEEP Step 1 because the rep can still
+    // mark those Not Interested there.
+    if (match.kycStatus === 'RE_KYC_REQUIRED') setStep('basic');
   }, [assignedOutlets, selectedOutlet]);
 
   /* ── Outside-click: outlet dropdown ── */

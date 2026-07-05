@@ -78,8 +78,8 @@ describe('Re-KYC field-level lock', () => {
       expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.some((c) => String(c[0]).includes('/api/kyc/K1'))).toBe(true),
     );
 
-    // Outlet → Details step (GST field lives here)
-    fireEvent.click(screen.getByRole('button', { name: /continue|begin re-kyc/i }));
+    // A RE_KYC_REQUIRED deep-link auto-skips Step 1 (Select Outlet) → the wizard
+    // lands directly on Details, where the GST field + summary banner live. No click.
 
     // Summary banner names the flagged field.
     const banner = await screen.findByTestId('rekyc-summary-banner');
