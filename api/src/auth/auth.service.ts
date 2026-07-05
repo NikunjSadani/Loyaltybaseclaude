@@ -330,7 +330,7 @@ export class AuthService {
 
     const refreshToken = crypto.randomBytes(40).toString('hex');
     const ttlMs        = opts?.assumed
-      ? ASSUMED_SESSION_TTL_HOURS * 60 * 60 * 1000       // assumed sessions: 8h
+      ? ASSUMED_SESSION_TTL_HOURS * 60 * 60 * 1000       // assumed sessions: ASSUMED_SESSION_TTL_HOURS
       : REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000;          // normal: 30 days
     const expiresAt    = new Date(Date.now() + ttlMs);
 
@@ -360,7 +360,7 @@ export class AuthService {
    *   - target must be a REAL, ACTIVE tenant (never `gifsy` itself);
    *   - `sub` stays the real operator → audit logs attribute actions to them;
    *   - every assume is audit-logged (action LOGIN + metadata.event=ASSUME_TENANT);
-   *   - the token is short-lived (8h) and flagged `assumed:true` (FE banner).
+   *   - the token is short-lived (ASSUMED_SESSION_TTL_HOURS) and flagged `assumed:true` (FE banner).
    */
   async assumeTenant(
     operator: JwtPayload,
@@ -404,7 +404,7 @@ export class AuthService {
     const tokens = await this.generateTokens(opUser, {
       clientIdOverride: targetClientId,
       assumed: true,
-      expiresIn: '8h',
+      expiresIn: `${ASSUMED_SESSION_TTL_HOURS}h`,
     });
 
     this.logger.log(
@@ -460,7 +460,7 @@ export class AuthService {
 
     return this.generateTokens(
       session.user,
-      isAssumed ? { clientIdOverride: session.clientId, assumed: true, expiresIn: '8h' } : undefined,
+      isAssumed ? { clientIdOverride: session.clientId, assumed: true, expiresIn: `${ASSUMED_SESSION_TTL_HOURS}h` } : undefined,
     );
   }
 

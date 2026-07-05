@@ -29,5 +29,6 @@ export const OTP_MAX_RESENDS_PER_WINDOW = 5;
 /** Lifetime (days) of a normal (non-assumed) refresh token / session. */
 export const REFRESH_TTL_DAYS = 30;
 
-/** Lifetime (hours) of a GIFSY operator's assumed-tenant (A2) session — short-lived by design. */
-export const ASSUMED_SESSION_TTL_HOURS = 8;
+/** Lifetime (hours) of a GIFSY operator's assumed-tenant (A2) session — bounded by design
+ *  (kept well below the 30-day normal session so a borrowed tenant context can't linger). */
+export const ASSUMED_SESSION_TTL_HOURS = 24;
