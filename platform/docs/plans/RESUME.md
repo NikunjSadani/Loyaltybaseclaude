@@ -526,13 +526,13 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 ▶ **THINGS TO BE DONE — START HERE (present this list first; ask the owner which to pick up).** ✅ Cutover #5 is DONE — prod serves
 `5c2bb65` (sales-KYC UAT fixes — status-tag removal, re-KYC amber badges, approval-stepper current-submission + reviewer-level label);
 **prod == develop == main == `5c2bb65`**. Gate: api jest 1427 · nest 0 · FE vitest 1784 · tsc 0. *(Prior: cutover #4 at `824eac0` — rewards FREE_AMOUNT fix + Credits/Payouts Config card.)*
-**A. Owner-gated Deoleo go-live (owner or client-files):**
-  1. **#76 — load real Deoleo master data** (outlets/hierarchy/catalog/schemes via the app UIs) — **THE LAST HARD BLOCKER**, waits on the client's files.
-  2. **#143 — WhatsApp `deoleo_kyc_approval` runtime-verify** (template APPROVED; needs a real approval to a real phone).
-  3. **⚠️ Fix two broken reward catalog items in prod** — **Amazon Voucher** + **To Bank** are free-amount vouchers with a missing min/max → **un-redeemable**; owner re-saves each in the prod **Gift Catalogue** (the now-live FREE_AMOUNT guard from cutover #4 enforces the bounds on save).
-  4. **Set `creditsPayouts.notifyEmails` in prod** — currently empty → credit-batch emails fall back to Gifsy ops; owner can set the Deoleo recipients via the new **Credits & Payouts** config card (live in prod since cutover #4).
+**A. Owner-gated Deoleo go-live — ✅ ALL CLEARED (2026-07-05/06):**
+  1. ✅ **#76 — master data** — outlets + sales hierarchy loaded in prod; owner confirmed no rewards data pending.
+  2. ✅ **#143 — WhatsApp `deoleo_kyc_approval`** — owner confirms it worked on staging → code path + approved template proven (residual: eyeball the first real prod approval).
+  3. ✅ **Two reward catalog items** — owner set min/max in prod; both free-amount **min 250 · max 50,000**, ACTIVE, prod-verified → redeemable.
+  4. ~~Set `creditsPayouts.notifyEmails`~~ — **NOT a config toggle → FOLDED into B5 (Notifications Core).** Enqueued EMAIL rows never deliver (the queue drainer is PUSH-only — `notifications.enqueue` writes a QUEUED row, only `push-delivery.worker` drains). Recipients recorded (nikunj.sadani@ / payel.ghosh@ / nikita@gifsy.in) for when the email worker ships. **Only remaining owner step = the live end-to-end smoke** (a real KYC→wallet, a credit upload moving a wallet, a redemption per channel, prod OTP).
 **B. Blocked on an owner DECISION:** 5. **Notifications Core** go/no-go (drainer is push-only; in-app inbox needs a migration; 2/3
-  events blocked upstream). 6. **Email provider** — ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
+  events blocked upstream). **Scope now explicitly INCLUDES the credit-batch confirmation email** (folded from A4 — enqueued today but never sent until the email worker exists; recipients above). 6. **Email provider** — ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
 **C. Buildable now — C-batch SHIPPED** (`873a2ec`): ✅ C7 `/admin/outlets/ids` lite endpoint · ✅ C9 GIFSY read-only "Security &
   Platform Config" (#101, `auth.constants.ts` single-source-of-truth) · ✅ C10 force-logout (self `/v1/auth/logout-all` + admin
   per-user `/admin/users/:id/revoke-sessions`). **8. §A-DOMAIN still PULLED** — needs a `Client.domains` Prisma migration +
@@ -582,13 +582,13 @@ KYC-PDF render, not-interested-404), as is the earlier C-batch (C7 `/admin/outle
 **INVESTIGATION RESOLVED (record, not a bug):** "outlet logged in before KYC approval" — the reported outlet was genuinely APPROVED
 2026-07-02, logged in AFTER approval, and is now mid-re-KYC (keeps earned access by design); login correctly blocks
 `PENDING_VERIFICATION`. **NEXT = master data #76 when files arrive** (nothing else queued);
-notifications/P7 still PAUSED (events flag-OFF; email provider TBD, ZeptoMail vs SES). Required onboarding-flow builds logged in
+notifications/P7 still PAUSED (events flag-OFF; email provider TBD, ZeptoMail vs SES) — **and the credit-batch confirmation email is
+now folded INTO this Notifications-Core build** (it's enqueued today but never sent because only PUSH drains; `notifyEmails` is a
+no-op until the email worker ships; recipients nikunj.sadani@/payel.ghosh@/nikita@gifsy.in recorded). Required onboarding-flow builds logged in
 POST-GO-LIVE-BACKLOG §A-DOMAIN (needs a `Client.domains` migration — schedule before client #2) + §A-ONBOARDING (incl. the
-GIFSY_ADMIN-in-tenant-context fix, SHIPPED). **⚠️ TWO OPEN OWNER-ACTION ITEMS (from this session — don't lose):** **(a)** **two broken
-reward catalog items in prod** — **Amazon Voucher** + **To Bank** are free-amount vouchers with a **missing min/max** → currently
-**un-redeemable**; the owner must fix them in the prod **Gift Catalogue** (re-saving each through the now-live FREE_AMOUNT guard enforces
-the bounds). **(b)** **`creditsPayouts.notifyEmails` is empty in prod** — credit-batch emails fall back to Gifsy ops; the owner can set the
-Deoleo recipients via the new **Credits & Payouts** config card (live in prod). Keep the fix-as-found loop available (fixes push to `develop`
+GIFSY_ADMIN-in-tenant-context fix, SHIPPED). **✅ THE PRIOR TWO OWNER-ACTION ITEMS ARE CLEARED (2026-07-05/06):** the two broken
+reward catalog items are FIXED in prod (owner set min 250 · max 50,000 on both → ACTIVE + redeemable, prod-verified); and
+`creditsPayouts.notifyEmails` is reframed as part of Notifications-Core (above), not a standalone config action. Keep the fix-as-found loop available (fixes push to `develop`
 → reach prod on the next `main` deploy). Full as-run record = **`runbooks/PROD-CUTOVER-RECORD.md`** (§ 2026-07-05 — CUTOVER #5); runbook (banner-marked COMPLETE) =
 **`runbooks/CUTOVER-RUNBOOK.md`**. If a NEW transactional notification is requested: PUSH → enqueue post-commit via
 `SalesNotificationsService`; WhatsApp/SMS → `whatsapp-kyc.config.ts` + `Msg91Service.sendWhatsappTemplate` fire-and-forget post-commit.
