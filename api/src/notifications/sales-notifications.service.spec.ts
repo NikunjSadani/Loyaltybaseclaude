@@ -254,7 +254,7 @@ describe('SalesNotificationsService', () => {
       expect(recipients).toEqual(['mu1', 'u1']);
       notifications.enqueue.mock.calls.forEach(([arg]) => {
         expect(arg).toMatchObject({ channel: 'PUSH', subject: 'New targets uploaded' });
-        expect(arg.variables).toEqual({ url: '/sales/targets' });
+        expect(arg.variables).toEqual({ url: '/sales/dashboard' });
       });
     });
 

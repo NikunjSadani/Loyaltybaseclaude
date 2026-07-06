@@ -183,7 +183,10 @@ export class SalesNotificationsService {
             userId,
             'New targets uploaded',
             'New targets have been uploaded. Check your dashboard.',
-            '/sales/targets',
+            // Deep-link to a REAL route — the sales app has no /sales/targets page;
+            // the targets hero lives on the dashboard (matches the body copy above).
+            // A non-existent path here 404s when the user taps the push (prod bug).
+            '/sales/dashboard',
           ),
         ),
       );
