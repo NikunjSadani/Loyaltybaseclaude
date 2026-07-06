@@ -18,7 +18,7 @@
 
 ## ▶ THINGS TO BE DONE — START HERE (present this first; ask the owner which to pick up)
 
-✅ Cutover #6 is DONE — prod serves `c36f6c8` (per-tenant per-purpose OTP templates [headline] + re-KYC Step-1 deep-link auto-skip + assumed-session TTL 8h→24h + doc reframes); **prod == develop == main == `c36f6c8`**. Gate: api jest 1446 · nest 0 · FE vitest 1786 · tsc 0. **Post-cutover: the Deoleo `otpTemplates` config-row was written** (guarded job; login/redemptionSelf=`6a391d46…`, kycConsent/redemptionSales=`6a391cf2…`; effective ≤5 min); owner residual = a real-phone prod login-OTP verify. *(Prior: cutover #5 at `5c2bb65` — sales-KYC UAT fixes: status-tag removal, re-KYC amber badges, approval-stepper current-submission + reviewer-level label.)*
+✅ Cutover #6 is DONE — prod serves `c36f6c8` (per-tenant per-purpose OTP templates [headline] + re-KYC Step-1 deep-link auto-skip + assumed-session TTL 8h→24h + doc reframes); **prod == develop == main == `c36f6c8`**. Gate: api jest 1446 · nest 0 · FE vitest 1786 · tsc 0. **Post-cutover: the Deoleo `otpTemplates` config-row was written** (guarded job; login/redemptionSelf=`6a391d46…`, kycConsent/redemptionSales=`6a391cf2…`) and ✅ **RUNTIME-VERIFIED IN PROD** — owner did a real-phone login, OTP arrived on the new `login` template (the other 3 purposes share the resolver → confirm on first real redemption/KYC). *(Prior: cutover #5 at `5c2bb65` — sales-KYC UAT fixes: status-tag removal, re-KYC amber badges, approval-stepper current-submission + reviewer-level label.)*
 
 **A. Owner-gated Deoleo go-live — ✅ ALL CLEARED (2026-07-05/06):**
 1. ✅ **#76 — master data** — outlets + sales hierarchy loaded in prod; owner confirmed no rewards data pending.
