@@ -1694,8 +1694,10 @@ export class KycService {
         user: true,
         partner: {
           include: {
+            // real outlets are isPrimary=false → prefer primary if flagged, else first outlet (avoids an empty outlets[]).
             outlets: {
-              where: { isPrimary: true, deletedAt: null },
+              where: { deletedAt: null },
+              orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
               take: 1,
             },
           },
@@ -2050,8 +2052,10 @@ export class KycService {
           select: {
             businessName: true,
             phone: true,
+            // real outlets are isPrimary=false → prefer primary if flagged, else first outlet (avoids an empty outlets[]).
             outlets: {
-              where: { isPrimary: true, deletedAt: null },
+              where: { deletedAt: null },
+              orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
               select: { outletCode: true },
               take: 1,
             },
@@ -2372,8 +2376,10 @@ export class KycService {
           user: { select: { id: true, name: true, phone: true } },
           partner: {
             include: {
+              // real outlets are isPrimary=false → prefer primary if flagged, else first outlet (avoids an empty outlets[]).
               outlets: {
-                where: { isPrimary: true, deletedAt: null },
+                where: { deletedAt: null },
+                orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
                 take: 1,
                 select: { id: true, reKycFlags: true },
               },
@@ -2982,8 +2988,10 @@ export class KycService {
           user: true,
           partner: {
             include: {
+              // real outlets are isPrimary=false → prefer primary if flagged, else first outlet (avoids an empty outlets[]).
               outlets: {
-                where: { isPrimary: true, deletedAt: null },
+                where: { deletedAt: null },
+                orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
                 take: 1,
               },
             },
@@ -3076,8 +3084,10 @@ export class KycService {
             ifscCode: true,
             upiId: true,
             paymentMode: true,
+            // real outlets are isPrimary=false → prefer primary if flagged, else first outlet (avoids an empty outlets[]).
             outlets: {
-              where: { isPrimary: true, deletedAt: null },
+              where: { deletedAt: null },
+              orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
               take: 1,
               select: {
                 outletCode: true,
@@ -3165,8 +3175,10 @@ export class KycService {
             ifscCode: true,
             upiId: true,
             paymentMode: true,
+            // real outlets are isPrimary=false → prefer primary if flagged, else first outlet (avoids an empty outlets[]).
             outlets: {
-              where: { isPrimary: true, deletedAt: null },
+              where: { deletedAt: null },
+              orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
               take: 1,
               select: {
                 outletCode: true,
@@ -3258,8 +3270,10 @@ export class KycService {
             ifscCode: true,
             upiId: true,
             paymentMode: true,
+            // real outlets are isPrimary=false → prefer primary if flagged, else first outlet (avoids an empty outlets[]).
             outlets: {
-              where: { isPrimary: true, deletedAt: null },
+              where: { deletedAt: null },
+              orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
               take: 1,
               select: {
                 outletCode: true,

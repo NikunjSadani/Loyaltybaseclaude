@@ -111,6 +111,9 @@ const mockPrisma = {
 };
 
 const mockNotifications = { enqueue: jest.fn().mockResolvedValue({ id: 'n1' }) };
+// sendWhatsappTemplate rides the KYC_APPROVED notify() hook → the deoleo_kyc_approval
+// owner message. Needed to assert the approval WhatsApp carries the real programName.
+const mockMsg91 = { sendOtp: jest.fn(), sendWhatsappTemplate: jest.fn().mockResolvedValue(undefined) };
 const mockStorage = {
   generateKey: jest.fn(),
   uploadFile: jest.fn(),
@@ -140,7 +143,7 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
             targetsUploaded: jest.fn(),
           },
         },
-        { provide: Msg91Service, useValue: { sendOtp: jest.fn() } },
+        { provide: Msg91Service, useValue: mockMsg91 },
         { provide: TenantSettingsService, useValue: { getOtpTemplateId: jest.fn(async () => undefined) } },
         { provide: StorageService, useValue: mockStorage },
         { provide: JwtService, useValue: { sign: jest.fn(), verify: jest.fn() } },
@@ -328,6 +331,53 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
       expect(mockTx.user.update).not.toHaveBeenCalled();
       expect(mockTx.wallet.create).not.toHaveBeenCalled();
       expect(mockNotifications.enqueue).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Commit: bulk approval resolves programName from a NON-primary outlet ────
+  describe('commit: non-primary outlet (real prod shape)', () => {
+    it('regression: the deoleo_kyc_approval WhatsApp carries the real programName from a NON-primary outlet', async () => {
+      // Real prod outlets are isPrimary=false. The load now orders `isPrimary desc,
+      // createdAt asc` (no isPrimary:true filter), so a non-primary outlet resolves as
+      // outlets[0] and its programName rides the KYC_APPROVED intent → the approval
+      // WhatsApp gets the real program (not blank, the pre-fix empty-outlets[] bug).
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([{ id: SUB_ID }]);
+      mockTx.kycSubmission.findFirst.mockResolvedValue({
+        id: SUB_ID,
+        userId: 'user-1',
+        partnerId: 'partner-1',
+        status: 'PENDING_GIFSY',
+        user: { name: 'Suresh', phone: '9820100001' },
+        partner: {
+          clientId: 'deoleo',
+          ownerName: 'Acme Owner',
+          phone: '9000000001',
+          outlets: [
+            { id: 'outlet-np', isPrimary: false, deletedAt: null, reKycFlags: null, programName: 'Wholesale' },
+          ],
+        },
+      });
+      mockTx.kycVerificationItem.upsert.mockResolvedValue({});
+      mockTx.kycVerificationItem.findMany.mockResolvedValue(
+        KYC_FIELD_ORDER.map(({ key }) => ({ fieldKey: key, decision: 'APPROVED' })),
+      );
+      mockTx.kycSubmission.updateMany.mockResolvedValue({ count: 1 });
+      mockTx.wallet.findFirst.mockResolvedValue(null);
+      mockTx.wallet.create.mockResolvedValue({ id: 'wallet-1' });
+      mockTx.user.update.mockResolvedValue({});
+      mockTx.kycStatusHistory.create.mockResolvedValue({});
+      mockTx.auditLog.create.mockResolvedValue({});
+
+      const file = { buffer: makeXlsx([allApproveRow(SUB_ID)]), size: 1 } as Express.Multer.File;
+      const result = await service.bulkVerify(gifsy, file, true) as { results: Array<{ outcome: string }> };
+      expect(result.results[0].outcome).toBe('approved');
+
+      // The approval WhatsApp must carry [ownerName, programName] with the REAL program.
+      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
+        '9000000001',
+        'deoleo_kyc_approval',
+        ['Acme Owner', 'Wholesale'],
+      );
     });
   });
 

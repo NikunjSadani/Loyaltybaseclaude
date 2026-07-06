@@ -2325,6 +2325,42 @@ describe('KycService', () => {
       expect(mockTx.kycSubmission.update).not.toHaveBeenCalled();
     });
 
+    it('regression: a field-scoped re-KYC succeeds (no 409) when the only outlet is NON-primary (real prod shape)', async () => {
+      // Real prod outlets are isPrimary=false. The load now orders `isPrimary desc,
+      // createdAt asc` (no isPrimary:true filter), so the non-primary outlet resolves
+      // as outlets[0] → primaryOutlet is non-null → the fieldKeys path writes flags
+      // instead of throwing the "no active outlet" 409.
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's-approved',
+        userId: 'user1',
+        status: 'APPROVED',
+        user: { id: 'user1', name: 'Kumar', phone: '9000000001' },
+        partner: {
+          outlets: [{ id: 'outlet-np', isPrimary: false, reKycFlags: null }],
+        },
+      });
+      mockTx.kycSubmission.update.mockResolvedValueOnce({});
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+
+      const res = await service.reKyc(gifsy, 's-approved', {
+        reason: 'GST mismatch',
+        fieldKeys: ['GST_VALIDATION'],
+      });
+
+      // No 409 → status flipped + flags written on the non-primary outlet.
+      expect(res.newStatus).toBe('RE_KYC_REQUIRED');
+      expect(mockTx.outlet.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'outlet-np' },
+          data: expect.objectContaining({
+            reKycFlags: expect.objectContaining({ gstNumber: true }),
+          }),
+        }),
+      );
+    });
+
     it('requires reason (empty string should be caught at DTO level, service receives non-empty)', async () => {
       // reason is validated as MinLength(1) in DTO; testing service does not crash with reason
       seedApprovedSubmission();
