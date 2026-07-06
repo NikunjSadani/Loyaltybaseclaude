@@ -710,7 +710,8 @@ export class KycService {
           channel: 'PUSH',
           subject: 'KYC approved',
           body: 'Your KYC is approved.',
-          variables: { event, ...variables },
+          // url = deep-link so a tapped push opens a real authenticated route (a urless push falls back to '/' → /auth/login).
+          variables: { event, ...variables, url: '/sales/kyc' },
         })
         .catch(() => {
           // Non-critical: push enqueue failures must not fail the request.

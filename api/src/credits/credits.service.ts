@@ -417,7 +417,8 @@ export class CreditsService {
             channel: 'PUSH',
             subject: 'Points credited',
             body: `You earned ${totalPoints} points.`,
-            variables: { event: 'WALLET_POINTS_EARNED', points: totalPoints, batchId: id },
+            // url = deep-link so a tapped push opens a real authenticated route (a urless push falls back to '/' → /auth/login).
+            variables: { event: 'WALLET_POINTS_EARNED', points: totalPoints, batchId: id, url: '/partner/wallet' },
           })
           .catch(() => undefined);
       }

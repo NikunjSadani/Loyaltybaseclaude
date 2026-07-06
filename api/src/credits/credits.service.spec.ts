@@ -59,6 +59,8 @@ const mockPrisma = {
   creditPayoutEntry: { findMany: jest.fn() },
   creditPayoutDownload: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn() },
   creditReversal: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn(), count: jest.fn() },
+  // Post-commit PUSH loop resolves each credited partner's userId to enqueue a WALLET_POINTS_EARNED push.
+  channelPartner: { findFirst: jest.fn() },
   outlet: { findMany: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
@@ -275,6 +277,8 @@ describe('CreditsService', () => {
       });
       // O1 resolves to partner p1.
       mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      // Post-commit push loop resolves p1 → its userId so the WALLET_POINTS_EARNED push fires.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'partnerUser1' });
 
       const res = await service.confirmBatch(admin, 'b1');
 
@@ -300,6 +304,14 @@ describe('CreditsService', () => {
           description: 'May bonus',
         },
         mockTx,   // same tx — atomicity guaranteed
+      );
+      // The WALLET_POINTS_EARNED PUSH deep-links to a real authenticated route
+      // (a urless push falls back to '/' → /auth/login → the signed-in user is bounced out).
+      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'PUSH',
+          variables: expect.objectContaining({ event: 'WALLET_POINTS_EARNED', url: '/partner/wallet' }),
+        }),
       );
     });
 

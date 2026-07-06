@@ -625,6 +625,15 @@ describe('RewardsService', () => {
       });
       const hist = mockPrisma.redemptionStatusHistory.create.mock.calls?.[0]?.[0];
       expect(hist.data).toMatchObject({ orderId: 'o1', fromStatus: 'PENDING', toStatus: 'CONFIRMED', changedById: 'user1' });
+      // The REDEMPTION_CONFIRMED PUSH deep-links to a real authenticated route
+      // (a urless push falls back to '/' → /auth/login → the signed-in user is bounced out).
+      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user1',
+          channel: 'PUSH',
+          variables: expect.objectContaining({ event: 'REDEMPTION_CONFIRMED', url: '/partner/rewards' }),
+        }),
+      );
       expect(res.status).toBe('CONFIRMED');
     });
 
@@ -1125,6 +1134,14 @@ describe('RewardsService', () => {
       // Confirmation notify goes to the OUTLET's phone.
       expect(mockNotifications.enqueue).toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'outletUser1', recipientPhone: '9000000000' }),
+      );
+      // The REDEMPTION_CONFIRMED PUSH deep-links to a real authenticated route
+      // (a urless push falls back to '/' → /auth/login → the signed-in user is bounced out).
+      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'PUSH',
+          variables: expect.objectContaining({ event: 'REDEMPTION_CONFIRMED', url: '/partner/rewards' }),
+        }),
       );
       expect(res.status).toBe('CONFIRMED');
     });

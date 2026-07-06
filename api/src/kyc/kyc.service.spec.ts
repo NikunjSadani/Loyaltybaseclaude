@@ -2012,6 +2012,13 @@ describe('KycService', () => {
       expect(mockNotifications.enqueue).toHaveBeenCalledWith(
         expect.objectContaining({ variables: expect.objectContaining({ event: 'KYC_APPROVED' }) }),
       );
+      // The KYC_APPROVED PUSH deep-links to a real authenticated route (a urless push → '/' → /auth/login).
+      expect(mockNotifications.enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'PUSH',
+          variables: expect.objectContaining({ event: 'KYC_APPROVED', url: '/sales/kyc' }),
+        }),
+      );
     });
 
     it('all 7 terminal with 1 REJECTED → RE_UPLOAD_REQUIRED + reKycFlags', async () => {

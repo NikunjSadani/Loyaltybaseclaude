@@ -779,7 +779,8 @@ export class RewardsService {
         channel: 'PUSH',
         subject: 'Redemption confirmed',
         body: 'Your redemption is confirmed.',
-        variables: { event: 'REDEMPTION_CONFIRMED', orderId: order.id, orderNumber: order.orderNumber },
+        // url = deep-link so a tapped push opens a real authenticated route (a urless push falls back to '/' → /auth/login).
+        variables: { event: 'REDEMPTION_CONFIRMED', orderId: order.id, orderNumber: order.orderNumber, url: '/partner/rewards' },
       })
       .catch((e) => this.logger.error(`[confirmRedeemForOutlet] push enqueue failed: ${e}`));
 
@@ -1224,7 +1225,8 @@ export class RewardsService {
         channel: 'PUSH',
         subject: 'Redemption confirmed',
         body: 'Your redemption is confirmed.',
-        variables: { event: 'REDEMPTION_CONFIRMED', orderId: order.id, orderNumber: order.orderNumber },
+        // url = deep-link so a tapped push opens a real authenticated route (a urless push falls back to '/' → /auth/login).
+        variables: { event: 'REDEMPTION_CONFIRMED', orderId: order.id, orderNumber: order.orderNumber, url: '/partner/rewards' },
       })
       .catch((e) => this.logger.error(`[confirmRedeem] push enqueue failed: ${e}`));
 
