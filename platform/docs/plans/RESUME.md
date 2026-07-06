@@ -8,10 +8,10 @@ client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch *
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
 `dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-06.
 
-🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #6 IS LIVE (prod `c36f6c8`) — develop is 6 code fixes + docs AHEAD of prod, all PENDING THE
+🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #6 IS LIVE (prod `c36f6c8`) — develop is 7 code fixes + docs AHEAD of prod, all PENDING THE
 NEXT CUTOVER.** **Prod is still serving cutover-#6 `c36f6c8`** (unchanged until the next cutover). develop carries a post-cutover-#6 bug-fix
-sweep whose LAST CODE commit is `58a302c` (the WhatsApp build, fix #6); session docs ride on top, so verify the live HEAD via `git log` — do
-NOT pin HEAD to a single SHA. The sweep (6 code fixes) is not yet in prod — it ships on the NEXT (owner-gated) cutover. **Pending-next-cutover fixes (oldest→newest):**
+sweep whose LAST CODE commit is `6d25c10` (the money-path WhatsApp AUDIT FIXES, fix #7); session docs ride on top, so verify the live HEAD via `git log` — do
+NOT pin HEAD to a single SHA. The sweep (7 code fixes) is not yet in prod — it ships on the NEXT (owner-gated) cutover. **Pending-next-cutover fixes (oldest→newest):**
 **(1)** `36a4325` — targets push 404: "New targets uploaded" deep-linked `/sales/targets` (no such route) → tap 404; now `/sales/dashboard`.
 **(2)** `ea227c0` — approval-WhatsApp blank program name: read `programName` from the `isPrimary` outlet, but every real outlet is
 `isPrimary=false` (all 2,907) → blank. **(3)** `2d5b715` — 4 pushes had no click URL → the SW opens `data.url || '/'` and root `/` redirects
@@ -25,8 +25,16 @@ now wired end-to-end (persists + drives the metric). **(6)** `58a302c` — feat(
 per-tenant money WhatsApps, direct MSG91 fire-and-forget post-commit — points_credit fires at credit-batch confirm to POINTS outlets
 `[owner,points,redeemable balance,credit month,date]`; payout_credit fires on Flow A (credit-based payout UTR upload — REPLACES the
 previously-dead queued WhatsApp) AND Flow B (redemption cash-out UTR) `[owner,points,UTR,payment date,month]`; both templates must be APPROVED
-in MSG91 to deliver. Plus 2 doc commits (`2d0d983` cutover-#6 record + `fb41be8` OTP-template login runtime-verified). Gate at `58a302c`:
-**api jest 1464 · nest 0 · FE vitest 1790 · tsc 0**. **NOT-bugs / decisions this sweep:** the "submitted WhatsApp before OTP" report was
+in MSG91 to deliver — **✅ BOTH templates APPROVED (owner-confirmed 2026-07-06).** **(7)** `6d25c10` — **money-path WhatsApp AUDIT FIXES**
+(2 independent adversarial auditors + own trace found 4 real defects, all fixed): **A (HIGH)** payouts Flow B gathered the WhatsApp payload with
+reads INSIDE the money `$transaction` (a notification read failure could roll back a committed bulk payout) → now pushes only ids in-tx,
+batch-reads partner/order POST-COMMIT, whole block try/catch-wrapped; **B (HIGH)** all dates/months used `new Date().getDate()/.getMonth()` =
+server-LOCAL but prod runs UTC → wrong day (00:00–05:30 IST window) + wrong MONTH at boundaries on a money notice → new shared
+`api/src/common/ist-date.ts` (`monthYearIST`/`formatDateIST`, shift by IST offset + read `getUTC*`); **C (MED)** credits Flow A used the nullable
+master-file `outlet.phone` → now the KYC-verified `partner.phone`; **D (LOW)** Flow B could send "{{2}}=0" → now only sends when `points>0`. The
+high-risk class (variable order/count, idempotency, double-send, cross-tenant) audited CLEAN. Plus 2 doc commits (`2d0d983` cutover-#6 record +
+`fb41be8` OTP-template login runtime-verified). Gate at `6d25c10`:
+**api jest 1471 · nest 0 · FE vitest 1790 · tsc 0**. **NOT-bugs / decisions this sweep:** the "submitted WhatsApp before OTP" report was
 verified NOT-a-bug (prod OTP-timeline read: the consent OTP was verified BEFORE the submission routed; the WhatsApp fires post-OTP) · owner
 decided a KYC rejected/re-upload OWNER notification is NOT needed · the `isPrimary` fixes used a CODE sweep — the alternative (setting
 `isPrimary=true` per partner + backfilling all 2,907 rows) was deliberately NOT taken. **Notification-delivery audit finding (OPEN GAP):** the
@@ -35,9 +43,9 @@ credit-batch EMAIL, the KYC owner SMS for UNDER_REVIEW (+ the now-dropped REJECT
 (DISPATCHED/DELIVERED/CANCELLED); these need Notifications-Core (SMS/email worker) or channel conversion — owner decision pending.
 
 **OPEN POINTS (start here next session):**
-- **(a)** run an **INDEPENDENT adversarial audit** of the money-path WhatsApp build (`58a302c` — `deoleo_points_credit` + `deoleo_payout_credit`) BEFORE the cutover.
-- **(b)** the **NEXT cutover** of the 6-fix batch (`c36f6c8` → `58a302c`) — owner-gated.
-- **(c)** OWNER: get **`deoleo_points_credit` + `deoleo_payout_credit` APPROVED in MSG91** (both templates must be approved to deliver).
+- **(a)** ✅ DONE — the **INDEPENDENT adversarial audit** of the money-path WhatsApp build ran (2 auditors + own trace); found 4 real defects, all FIXED + gate-green + pushed (`6d25c10`): Flow B gather moved out of the money tx, IST-aware date util (prod is UTC), Flow A recipient → KYC `partner.phone`, Flow B `points>0` guard. Gate api jest 1471 · nest 0 · FE vitest 1790 · tsc 0.
+- **(b)** the **NEXT cutover** of the now-7-fix batch (`c36f6c8` → `6d25c10`) — owner-gated. **← the immediate next step.**
+- **(c)** ✅ DONE — **BOTH `deoleo_points_credit` + `deoleo_payout_credit` APPROVED in MSG91** (owner-confirmed 2026-07-06) → they deliver once the sweep ships.
 - **(d)** **#74 owner ops** — credential rotation + click the 2 GCP alert-email verification links (monitoring + backups/PITR already done).
 - **(e)** the **Notifications-Core decision** for the still-dead SMS/email notifications (credit-batch email, KYC owner SMS, redemption-fulfilment SMS).
 - **(f)** the **live end-to-end prod smoke** (a real KYC→wallet, a credit upload moving a wallet, a redemption per channel, prod OTP).
@@ -55,7 +63,7 @@ audit CLEAN; no migration); **(2)** sales re-KYC wizard **auto-skips Step 1 (Sel
 (`fa8e534`); **(3)** the **assumed-tenant session TTL raised 8h → 24h** (`66ac21e` — `ASSUMED_SESSION_TTL_HOURS=24`, single source now drives
 access + refresh TTL + the admin Security-config display; normal 7d/30d sessions unchanged); **(4)** doc reframes (credit-batch email folded into
 Notifications-Core; WhatsApp KYC templates verified-working-on-staging). Gate at cutover #6: **api jest 1446 · nest 0 · FE vitest 1786 · tsc 0**.
-**At cutover, prod == main == `c36f6c8`** (develop has since advanced 6 code fixes + docs ahead — the post-cutover-#6 sweep above, whose last CODE commit is `58a302c`; verify the live HEAD via `git log`, PENDING the next cutover).
+**At cutover, prod == main == `c36f6c8`** (develop has since advanced 6 code fixes + docs ahead — the post-cutover-#6 sweep above, whose last CODE commit is `6d25c10`; verify the live HEAD via `git log`, PENDING the next cutover).
 **Post-cutover config-write applied:** the Deoleo `program_settings.otpTemplates` row was written via
 the guarded `gifsy-oneoff-prodcheck` Cloud Run Job (`current_database()='gifsy_prod'` guard; no row → the 4-template map, exactly 1 row, job reset
 to no-op after; `login`+`redemptionSelf`=`6a391d466b4d90893904e1d2`, `kycConsent`+`redemptionSales`=`6a391cf2d011d41f630a1364`; effective ≤5 min
@@ -156,7 +164,7 @@ deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLO
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1464 · nest 0 · FE vitest 1790 · tsc 0 (the post-cutover-#6 sweep — gate ran at develop's last CODE commit `58a302c`; prod serves `c36f6c8` [cutover-#6 gate api jest 1446 · nest 0 · FE vitest 1786 · tsc 0] and develop is 6 code fixes + docs AHEAD of prod pending the next cutover — verify the live HEAD via `git log`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1471 · nest 0 · FE vitest 1790 · tsc 0 (the post-cutover-#6 sweep — gate ran at develop's last CODE commit `6d25c10`; prod serves `c36f6c8` [cutover-#6 gate api jest 1446 · nest 0 · FE vitest 1786 · tsc 0] and develop is 7 code fixes + docs AHEAD of prod pending the next cutover — verify the live HEAD via `git log`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -243,7 +251,7 @@ already understand → STOP, present the ideal vs the shortcut, and let the owne
 edges (and even then, say why closing them isn't worth it), never for a gap I could design correctly now.
 
 DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`; runtime-verified where an API/edge check was possible):
-- **🆕 2026-07-06 — POST-CUTOVER-#6 BUG-FIX SWEEP (develop `c36f6c8` → `58a302c`; 6 code fixes + 2 docs; PENDING NEXT CUTOVER, prod still `c36f6c8`):**
+- **🆕 2026-07-06 — POST-CUTOVER-#6 BUG-FIX SWEEP (develop `c36f6c8` → `6d25c10`; 7 code fixes + 2 docs; PENDING NEXT CUTOVER, prod still `c36f6c8`):**
   · **TARGETS-PUSH 404** (`36a4325`) — the "New targets uploaded" push deep-linked `/sales/targets` (no such route) → tap 404; now `/sales/dashboard`.
   · **APPROVAL-WHATSAPP BLANK PROGRAM NAME** (`ea227c0`) — read `programName` from the `isPrimary` outlet, but every real outlet is `isPrimary=false`
     (all 2,907) → the name came through blank.
@@ -259,9 +267,17 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
   · **`deoleo_points_credit` + `deoleo_payout_credit` MONEY WHATSAPPS** (`58a302c`) — two per-tenant money WhatsApps, direct MSG91 fire-and-forget
     post-commit. points_credit fires at credit-batch confirm to POINTS outlets `[owner,points,redeemable balance,credit month,date]`; payout_credit
     fires on Flow A (credit-based payout UTR upload — REPLACES the previously-dead queued WhatsApp) AND Flow B (redemption cash-out UTR)
-    `[owner,points,UTR,payment date,month]`. Both templates must be APPROVED in MSG91 to deliver. **Independent adversarial audit of this money-path
-    build is still OWED before the next cutover.**
-  · **Docs** (`2d0d983` cutover-#6 record + `fb41be8` OTP-template login runtime-verified). Gate at `58a302c`: **api jest 1464 · nest 0 · FE vitest 1790 · tsc 0**.
+    `[owner,points,UTR,payment date,month]`. Both templates **✅ APPROVED in MSG91 (owner-confirmed 2026-07-06)**.
+  · **MONEY-PATH WHATSAPP AUDIT FIXES** (`6d25c10`, fix #7) — 2 independent adversarial auditors + own trace found 4 real defects, all fixed:
+    **A (HIGH)** payouts Flow B gathered the WhatsApp payload with reads INSIDE the money `$transaction` (a notification read failure could roll back
+    a committed bulk payout) → now pushes only ids in-tx, batch-reads partner/order POST-COMMIT, whole block try/catch-wrapped; **B (HIGH)** all
+    dates/months used `new Date().getDate()/.getMonth()` = server-LOCAL but prod runs UTC (no TZ) → wrong day (00:00–05:30 IST window) + wrong MONTH
+    at boundaries → new shared `api/src/common/ist-date.ts` (`monthYearIST`/`formatDateIST`, shift by IST offset + read `getUTC*`, mirrors
+    `ActivityTrackingService.istDateKey`); both services' duplicated private helpers deleted; **C (MED)** credits Flow A used the nullable master-file
+    `outlet.phone` → now the KYC-verified `partner.phone` (matches the other 2 sends); **D (LOW)** Flow B could send "{{2}}=0" → now only when
+    `points>0`. The high-risk class (variable order/count, idempotency, double-send, cross-tenant) audited CLEAN. **NEW TRAP: server-local `Date`
+    getters read UTC in prod — user-facing IST dates MUST go through `ist-date.ts` (or shift by `IST_OFFSET_MIN` then read `getUTC*`).**
+  · **Docs** (`2d0d983` cutover-#6 record + `fb41be8` OTP-template login runtime-verified). Gate at `6d25c10`: **api jest 1471 · nest 0 · FE vitest 1790 · tsc 0**.
   · **NOT-bugs / decisions:** "submitted WhatsApp before OTP" verified NOT-a-bug (prod OTP-timeline: consent OTP verified BEFORE the submission routed;
     fires post-OTP) · owner decided a KYC rejected/re-upload OWNER notification is NOT needed.
   · **OPEN GAP (notification-delivery audit):** the queue drainer is PUSH-only, so `enqueue({channel:'SMS'|'EMAIL'|'WHATSAPP'})` never delivers —
@@ -480,8 +496,8 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE — **✅ CUTOVER #6 IS LIVE (2026-07-06). Prod serving `c36f6c8` (unchanged until the next cutover); develop is 6 code fixes + docs AHEAD (post-cutover-#6
-sweep whose last CODE commit is `58a302c`; verify the live HEAD via `git log`), PENDING the next cutover; prod == main == `c36f6c8`.** *(Latest gate ran at develop's last CODE commit `58a302c`: api jest 1464 · nest 0 · FE vitest 1790 · tsc 0.)*
+🚀 CUTOVER STATE — **✅ CUTOVER #6 IS LIVE (2026-07-06). Prod serving `c36f6c8` (unchanged until the next cutover); develop is 7 code fixes + docs AHEAD (post-cutover-#6
+sweep whose last CODE commit is `6d25c10`; verify the live HEAD via `git log`), PENDING the next cutover; prod == main == `c36f6c8`.** *(Latest gate ran at develop's last CODE commit `6d25c10`: api jest 1471 · nest 0 · FE vitest 1790 · tsc 0.)*
 **PRIOR — CUTOVER #5 (2026-07-05) — prod was serving `5c2bb65`.**
 Cutover #5 moved prod `main` **`824eac0` → `5c2bb65`** (5 commits, **CODE-ONLY — 0 migrations**, so the in-VPC `migrate deploy` was a no-op).
 Owner approved the `production` gate; both prod Cloud Run services serve `5c2bb65`; pre-cutover backup **`pre-cutover5-develop-5c2bb65`**
@@ -616,12 +632,14 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 **HOUSEKEEPING:** #90–95 already pruned; #74 (owner ops) mostly done (monitoring + backups/PITR ON; only optional cred-rotation left).
 
 Now: greet the owner. **🚀 CUTOVER #6 IS LIVE (2026-07-06) — prod serves `c36f6c8`; the DEOLEO TENANT is CREATED + ACTIVE + LIVE on
-`deoleoloyalty.gifsy.in`. develop has since advanced 6 code fixes + docs AHEAD of prod `c36f6c8` (a post-cutover-#6 bug-fix sweep whose last CODE commit is `58a302c`; verify the live HEAD via `git log`), PENDING
+`deoleoloyalty.gifsy.in`. develop has since advanced 7 code fixes + docs AHEAD of prod `c36f6c8` (a post-cutover-#6 bug-fix sweep whose last CODE commit is `6d25c10`; verify the live HEAD via `git log`), PENDING
 the NEXT (owner-gated) cutover** — targets-push 404 (`36a4325`) · approval-WhatsApp blank program name (`ea227c0`) · 4 pushes with no click
 URL bounced to login (`2d5b715`) · the whole `isPrimary` blank-outlet class swept, 9 loads (`a685e2d`, CODE-only, no backfill) · KYC-SLA
-setting now persists + drives the metric (`08734ce`) · the `deoleo_points_credit` + `deoleo_payout_credit` money WhatsApps (`58a302c`).
-Gate at `58a302c`: **api jest 1464 · nest 0 · FE vitest 1790 · tsc 0**. **Before the cutover: run an INDEPENDENT adversarial audit of the
-money-path WhatsApp build `58a302c`; owner must get both MSG91 templates approved.** See the **OPEN POINTS** list near the top of this prompt.
+setting now persists + drives the metric (`08734ce`) · the `deoleo_points_credit` + `deoleo_payout_credit` money WhatsApps (`58a302c`) · **the
+money-path WhatsApp AUDIT FIXES (`6d25c10`, fix #7 — Flow B gather moved out of the money tx, IST-aware date util, Flow A recipient → KYC
+`partner.phone`, Flow B `points>0` guard).** Gate at `6d25c10`: **api jest 1471 · nest 0 · FE vitest 1790 · tsc 0**. **✅ The money-path audit
+is DONE and ✅ both MSG91 templates are APPROVED — the immediate next step is the NEXT (owner-gated) cutover** (`c36f6c8` → `6d25c10`). See the
+**OPEN POINTS** list near the top of this prompt.
 **PRIOR — CUTOVER #5 (2026-07-05) — prod was serving `5c2bb65`.** Cutover #5 moved prod `main` **`824eac0` → `5c2bb65`** (5 commits, CODE-ONLY — 0 migrations,
 in-VPC migrate = no-op); owner approved the `production` gate; both prod services serve `5c2bb65`; pre-cutover backup
 **`pre-cutover5-develop-5c2bb65`** (rollback = redeploy `824eac0`). Cutover #5 payload (5 items — the sales-KYC UAT fixes + follow-ups):
@@ -667,7 +685,7 @@ reward catalog items are FIXED in prod (owner set min 250 · max 50,000 on both 
 
 **START THE SESSION by presenting the ▶ THINGS TO BE DONE list above** (A owner-gated go-live · B owner-decision · C
 buildable-now · D later) and **ask the owner which to pick up** — do NOT silently begin work. Default recommendation if the
-owner is open-ended: since cutover #6 is live (prod `c36f6c8`) and develop carries a 6-fix post-cutover sweep (last CODE commit `58a302c`; verify the live HEAD via `git log`) pending the next
-cutover, lead with the **OPEN POINTS** — run the independent adversarial audit of the money-path WhatsApp build (`58a302c`), then tee up the
-NEXT cutover (owner-gated) and the MSG91 template approvals; master data (#76) is done.
+owner is open-ended: since cutover #6 is live (prod `c36f6c8`) and develop carries a 7-fix post-cutover sweep (last CODE commit `6d25c10`; verify the live HEAD via `git log`) pending the next
+cutover, and the money-path audit + MSG91 template approvals are BOTH DONE, lead with **the NEXT cutover** (owner-gated, `c36f6c8` → `6d25c10`) —
+that is the immediate next step; master data (#76) is done.
 ```
