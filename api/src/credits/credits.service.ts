@@ -1,11 +1,13 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { Msg91Service } from '../notifications/msg91.service';
+import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { paiseToRupees, formatINR, toPaiseBigInt } from '../common/money';
+import { paiseToRupees, toPaiseBigInt } from '../common/money';
 import {
   resolveEffectiveKycStatus,
   isPartnerPayable,
@@ -48,12 +50,95 @@ import {
  */
 @Injectable()
 export class CreditsService {
+  private readonly logger = new Logger(CreditsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly msg91: Msg91Service,
     private readonly walletService: WalletService,
     private readonly tenantSettings: TenantSettingsService,
   ) {}
+
+  /**
+   * Format a `YYYY-MM` period (or a Date) as "MMM YYYY" (e.g. "July 2026") for the
+   * WhatsApp money-notification bodies. A malformed period falls back to the raw string.
+   */
+  private monthYear(periodOrDate: string | Date): string {
+    const MONTHS = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December',
+    ];
+    if (periodOrDate instanceof Date) {
+      return `${MONTHS[periodOrDate.getMonth()]} ${periodOrDate.getFullYear()}`;
+    }
+    const m = /^(\d{4})-(\d{2})$/.exec(periodOrDate);
+    if (!m) return periodOrDate;
+    const monthIdx = Number(m[2]) - 1;
+    return monthIdx >= 0 && monthIdx < 12 ? `${MONTHS[monthIdx]} ${m[1]}` : periodOrDate;
+  }
+
+  /** Format a date as "DD MMM YYYY" (e.g. "06 Jul 2026") for the WhatsApp money-notification bodies. */
+  private formatDate(d: Date): string {
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${day} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+  }
+
+  /**
+   * Send the outlet OWNER a WhatsApp template on a POINTS credit (deoleo_points_credit).
+   *
+   * Fire-and-forget + POST-COMMIT: MUST NEVER throw into — or roll back — the credit
+   * batch (the batch is CONFIRMED before this runs). Every path is wrapped in try/catch
+   * and swallowed (mirrors KycService.sendKycWhatsapp). Tenant-gated via WHATSAPP_KYC:
+   * a clientId with no `pointsCreditTemplate` no-ops. Skips silently if the owner has
+   * no phone.
+   *
+   * bodyValues (in template order):
+   *   {{1}} ownerName · {{2}} points credited · {{3}} redeemable balance AFTER the credit
+   *   {{4}} month-year credited ("July 2026") · {{5}} date credited ("06 Jul 2026")
+   */
+  private async sendPointsCreditWhatsapp(
+    clientId: string,
+    data: {
+      partnerId: string;
+      ownerName?: string | null;
+      phone?: string | null;
+      totalPoints: number;
+      period: string;
+    },
+  ): Promise<void> {
+    try {
+      const template = WHATSAPP_KYC[clientId]?.pointsCreditTemplate;
+      if (!template) return; // tenant not configured for WhatsApp → no-op
+
+      const phone = data.phone?.trim();
+      if (!phone) {
+        this.logger.warn(`[credit-whatsapp] points-credit skipped — no owner phone (client ${clientId})`);
+        return;
+      }
+
+      // Redeemable balance AFTER the credit — read the partner's wallet. A missing
+      // wallet (never credited) reads 0; never throws.
+      const wallet = await this.prisma.wallet.findFirst({
+        where: { partnerId: data.partnerId },
+        select: { redeemablePoints: true },
+      });
+      const redeemableBalance = wallet?.redeemablePoints ?? 0;
+
+      const ownerName = data.ownerName?.trim() || 'Partner';
+      await this.msg91.sendWhatsappTemplate(phone, template, [
+        ownerName,
+        String(data.totalPoints),
+        String(redeemableBalance),
+        this.monthYear(data.period),
+        this.formatDate(new Date()),
+      ]);
+    } catch (e) {
+      // Non-critical: a WhatsApp delivery failure must NEVER fail the credit batch.
+      this.logger.warn(`[credit-whatsapp] points-credit send failed (client ${clientId}): ${e}`);
+    }
+  }
 
   // ─── Settings-enforcement helpers (Stream MONEY-CREDITS) ──────────────────
   // The credit/payout safety caps and the month-cutoff window were previously
@@ -406,24 +491,40 @@ export class CreditsService {
     // NEVER break the money path; the SMS/email below is unaffected.
     try {
       for (const [partnerId, totalPoints] of creditedByPartner) {
+        // Fetch the owner identity for BOTH the PUSH (userId) and the WhatsApp
+        // (ownerName + phone) in one read.
         const partner = await this.prisma.channelPartner.findFirst({
           where: { id: partnerId },
-          select: { userId: true },
+          select: { userId: true, ownerName: true, phone: true },
         });
-        if (!partner?.userId) continue;
-        await this.notifications
-          .enqueue({
-            userId: partner.userId,
-            channel: 'PUSH',
-            subject: 'Points credited',
-            body: `You earned ${totalPoints} points.`,
-            // url = deep-link so a tapped push opens a real authenticated route (a urless push falls back to '/' → /auth/login).
-            variables: { event: 'WALLET_POINTS_EARNED', points: totalPoints, batchId: id, url: '/partner/wallet' },
-          })
-          .catch(() => undefined);
+        if (partner?.userId) {
+          await this.notifications
+            .enqueue({
+              userId: partner.userId,
+              channel: 'PUSH',
+              subject: 'Points credited',
+              body: `You earned ${totalPoints} points.`,
+              // url = deep-link so a tapped push opens a real authenticated route (a urless push falls back to '/' → /auth/login).
+              variables: { event: 'WALLET_POINTS_EARNED', points: totalPoints, batchId: id, url: '/partner/wallet' },
+            })
+            .catch(() => undefined);
+        }
+
+        // Owner WhatsApp on points credit (deoleo_points_credit). Tenant-gated +
+        // fire-and-forget + POST-COMMIT: this MUST NEVER throw into or roll back the
+        // money transaction (the batch is already CONFIRMED above). Mirrors the KYC
+        // send style — resolve the template, no-op if the tenant is unconfigured or
+        // the owner has no phone, and swallow any delivery failure.
+        await this.sendPointsCreditWhatsapp(user.clientId, {
+          partnerId,
+          ownerName: partner?.ownerName ?? null,
+          phone: partner?.phone ?? null,
+          totalPoints,
+          period: batch.period,
+        });
       }
     } catch {
-      // Best-effort: a push enqueue failure must never affect a confirmed credit batch.
+      // Best-effort: a push/whatsapp failure must never affect a confirmed credit batch.
     }
 
     // Notify the team (fire-and-forget; don't block confirm on failure).
@@ -1070,7 +1171,14 @@ export class CreditsService {
     if (paidOutletIds.length > 0) {
       const outlets = await this.prisma.outlet.findMany({
         where: { clientId: user.clientId, outletCode: { in: paidOutletIds } },
-        select: { outletCode: true, name: true, phone: true, partnerId: true },
+        select: {
+          outletCode: true,
+          name: true,
+          phone: true,
+          partnerId: true,
+          // The payout WhatsApp addresses the outlet OWNER by name.
+          partner: { select: { ownerName: true } },
+        },
       });
       const phoneMap = new Map(outlets.map((o) => [o.outletCode, o]));
       for (const row of parseResult.rows) {
@@ -1078,22 +1186,30 @@ export class CreditsService {
         const entry = download.entries.find((e) => e.outletId === row.outletId);
         const outlet = phoneMap.get(row.outletId);
         if (!entry || !outlet?.phone) continue;
-        // amountPaise is a BigInt from Prisma; convert for the human-readable WhatsApp body.
-        await this.notify({
-          userId: outlet.partnerId ?? download.downloadedBy,
-          channel: 'WHATSAPP',
-          recipientPhone: outlet.phone,
-          body: `Your payout of ${formatINR(entry.amountPaise)} has been confirmed. UTR: ${
-            row.utr ?? ''
-          }.`,
-          variables: {
-            event: 'CREDITS_PAYOUT_CONFIRMED',
-            outletName: outlet.name,
-            amountPaise: Number(entry.amountPaise),
-            utr: row.utr ?? '',
-            period: download.period,
-          },
-        });
+
+        // Owner WhatsApp on payout credit (deoleo_payout_credit). DIRECT send (the old
+        // queued WHATSAPP notify() never delivered — the queue only drains PUSH), fire-
+        // and-forget + POST-COMMIT: the money tx above is already committed, so this
+        // MUST NEVER throw into it. Tenant-gated via WHATSAPP_KYC.
+        //   {{1}} ownerName · {{2}} points · {{3}} UTR · {{4}} date of payment · {{5}} month
+        // pointsPaid = paid amount as a whole number (Deoleo: 1 point = ₹1 → paise ÷ 100).
+        try {
+          const template = WHATSAPP_KYC[user.clientId]?.payoutCreditTemplate;
+          if (template) {
+            const ownerName = outlet.partner?.ownerName?.trim() || 'Partner';
+            const pointsPaid = Math.round(Number(entry.amountPaise) / 100);
+            await this.msg91.sendWhatsappTemplate(outlet.phone, template, [
+              ownerName,
+              String(pointsPaid),
+              row.utr ?? '',
+              this.formatDate(new Date()),
+              this.monthYear(download.period),
+            ]);
+          }
+        } catch (e) {
+          // Non-critical: a WhatsApp delivery failure must NEVER fail the payout.
+          this.logger.warn(`[credit-whatsapp] payout-credit send failed (client ${user.clientId}): ${e}`);
+        }
       }
     }
 

@@ -12,6 +12,7 @@ import * as XLSX from 'xlsx';
 import { CreditsService } from './credits.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { Msg91Service } from '../notifications/msg91.service';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -60,13 +61,21 @@ const mockPrisma = {
   creditPayoutDownload: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn() },
   creditReversal: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn(), count: jest.fn() },
   // Post-commit PUSH loop resolves each credited partner's userId to enqueue a WALLET_POINTS_EARNED push.
+  // (Also resolves ownerName+phone for the deoleo_points_credit WhatsApp.)
   channelPartner: { findFirst: jest.fn() },
+  // Post-commit points-credit WhatsApp reads the partner's redeemable balance AFTER the credit.
+  wallet: { findFirst: jest.fn() },
   outlet: { findMany: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
 };
 
 const mockNotifications = { enqueue: jest.fn().mockResolvedValue({ id: 'n1' }) };
+
+// Direct MSG91 WhatsApp sends (deoleo_points_credit / deoleo_payout_credit).
+const mockMsg91 = {
+  sendWhatsappTemplate: jest.fn().mockResolvedValue(undefined),
+};
 
 // ─── Mock TenantSettingsService (Stream MONEY-CREDITS) ──────────────────────────
 // The credit/payout caps + month-cutoff are read from here. `mockCreditsPayouts` is
@@ -124,11 +133,17 @@ describe('CreditsService', () => {
     // Default: no matching payout entries for PAYOUT-reversal path (tests override per case).
     mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
 
+    // Default: partner resolves for the post-commit PUSH + WhatsApp; wallet balance read.
+    mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'partnerUser1', ownerName: 'Ravi Traders', phone: '9900000041' });
+    mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 500 });
+    mockMsg91.sendWhatsappTemplate.mockResolvedValue(undefined);
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         CreditsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: NotificationsService, useValue: mockNotifications },
+        { provide: Msg91Service, useValue: mockMsg91 },
         { provide: WalletService, useValue: mockWalletService },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
       ],
@@ -459,6 +474,86 @@ describe('CreditsService', () => {
       // The bulk $transaction receives an options 2nd arg with the raised timeout.
       const opts = mockPrisma.$transaction.mock.calls[0][1];
       expect(opts).toMatchObject({ timeout: 180000, maxWait: 20000 });
+    });
+
+    it('sends the deoleo_points_credit WhatsApp POST-COMMIT with the right ordered bodyValues', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2026-07-06T10:00:00.000Z'));
+      try {
+        mockPrisma.creditBatch.findFirst.mockResolvedValue({
+          id: 'b1',
+          status: 'PENDING_CONFIRM',
+          period: '2026-07',
+          uploadedBy: 'admin1',
+          totalOutlets: 1,
+          totalPoints: 50,
+          totalPayoutPaise: BigInt(0),
+          rows: [
+            { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
+          ],
+        });
+        mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+        // Owner resolved for the WhatsApp; wallet redeemable balance AFTER the credit.
+        mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'u1', ownerName: 'Ravi Traders', phone: '9900000041' });
+        mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 500 });
+
+        await service.confirmBatch(admin, 'b1');
+
+        // DIRECT send with the deoleo_points_credit template + ordered bodyValues:
+        //   [ownerName, points, redeemableBalance, "July 2026" (period), "06 Jul 2026" (today)].
+        expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
+          '9900000041',
+          'deoleo_points_credit',
+          ['Ravi Traders', '50', '500', 'July 2026', '06 Jul 2026'],
+        );
+        // Balance is read scoped to the credited partner.
+        expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { partnerId: 'p1' } }),
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('a points-credit WhatsApp failure does NOT fail the confirmed batch (fire-and-forget)', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'PENDING_CONFIRM',
+        period: '2026-07',
+        uploadedBy: 'admin1',
+        totalOutlets: 1,
+        totalPoints: 50,
+        totalPayoutPaise: BigInt(0),
+        rows: [
+          { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
+        ],
+      });
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'u1', ownerName: 'Ravi', phone: '9900000041' });
+      mockMsg91.sendWhatsappTemplate.mockRejectedValue(new Error('MSG91 down'));
+
+      const res = await service.confirmBatch(admin, 'b1');
+      expect(res.pointsCredited).toBe(1);
+    });
+
+    it('no-ops the points-credit WhatsApp when the partner has no phone', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1',
+        status: 'PENDING_CONFIRM',
+        period: '2026-07',
+        uploadedBy: 'admin1',
+        totalOutlets: 1,
+        totalPoints: 50,
+        totalPayoutPaise: BigInt(0),
+        rows: [
+          { outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' },
+        ],
+      });
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'u1', ownerName: 'Ravi', phone: null });
+
+      await service.confirmBatch(admin, 'b1');
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
     });
   });
 
@@ -1071,7 +1166,7 @@ describe('CreditsService', () => {
       expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     });
 
-    it('applies PAID, sets the download to PAID, and notifies the outlet', async () => {
+    it('applies PAID, sets the download to PAID, and sends the payout WhatsApp (Flow A)', async () => {
       mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
         id: 'd1',
         downloadCode,
@@ -1082,7 +1177,7 @@ describe('CreditsService', () => {
       });
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
       mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'O1', name: 'A', phone: '900', partnerId: 'p1' },
+        { outletCode: 'O1', name: 'A', phone: '9900000041', partnerId: 'p1', partner: { ownerName: 'Ravi Traders' } },
       ]);
 
       const file = buildUtrFile([[downloadCode, 'O1', 'UTR123456', 'Success', '']]);
@@ -1097,7 +1192,45 @@ describe('CreditsService', () => {
         data: { status: 'PAID', utr: 'UTR123456', paidAt: expect.any(Date) },
       });
       expect(mockTx.creditPayoutDownload.update.mock.calls[0][0].data.status).toBe('PAID');
-      expect(mockNotifications.enqueue).toHaveBeenCalled();
+      // The DIRECT payout WhatsApp fires (deoleo_payout_credit); the old dead WHATSAPP
+      // enqueue is gone — the notify() queue never drained non-PUSH.
+      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends the deoleo_payout_credit WhatsApp with the right ordered bodyValues (Flow A)', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2026-07-06T10:00:00.000Z'));
+      try {
+        mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+          id: 'd1',
+          downloadCode,
+          period: '2026-05',
+          downloadedBy: 'g1',
+          // ₹150 = 15000 paise → Deoleo 1pt=₹1 → 150 points paid.
+          entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(15000) }],
+        });
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          { outletCode: 'O1', name: 'A', phone: '9900000041', partnerId: 'p1', partner: { ownerName: 'Ravi Traders' } },
+        ]);
+
+        const file = buildUtrFile([[downloadCode, 'O1', 'UTR123456', 'Success', '']]);
+        await service.uploadUtr(gifsy, 'd1', file, true);
+
+        // bodyValues order: [ownerName, points, utr, date-of-payment (today), month (download.period)].
+        expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
+          '9900000041',
+          'deoleo_payout_credit',
+          ['Ravi Traders', '150', 'UTR123456', '06 Jul 2026', 'May 2026'],
+        );
+        // The old dead WHATSAPP enqueue must be gone (queue never drained non-PUSH).
+        const whatsappEnqueues = mockNotifications.enqueue.mock.calls
+          .map((c) => c[0])
+          .filter((p: { channel?: string }) => p.channel === 'WHATSAPP');
+        expect(whatsappEnqueues).toHaveLength(0);
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('refuses to apply when the parse result has errors', async () => {

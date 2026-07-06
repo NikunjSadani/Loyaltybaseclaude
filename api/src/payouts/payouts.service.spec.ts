@@ -9,6 +9,7 @@ import * as XLSX from 'xlsx';
 import { PayoutsService } from './payouts.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
+import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockTx = {
@@ -17,6 +18,8 @@ const mockTx = {
   auditLog: { create: jest.fn() },
   payoutTransaction: { update: jest.fn() },
   payoutBatch: { update: jest.fn() },
+  // Flow-B payout WhatsApp resolves the partner owner (ownerName+phone) inside the tx.
+  channelPartner: { findFirst: jest.fn() },
   redemptionOrder: {
     findFirst: jest.fn(),
     update: jest.fn(),
@@ -52,6 +55,10 @@ const mockWallet = {
   reverse: jest.fn(),
 };
 
+const mockMsg91 = {
+  sendWhatsappTemplate: jest.fn().mockResolvedValue(undefined),
+};
+
 const gifsy: JwtPayload = {
   sub: 'admin1',
   role: 'GIFSY_ADMIN',
@@ -73,6 +80,7 @@ describe('PayoutsService', () => {
         PayoutsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: WalletService, useValue: mockWallet },
+        { provide: Msg91Service, useValue: mockMsg91 },
       ],
     }).compile();
     service = module.get(PayoutsService);
@@ -765,6 +773,10 @@ describe('PayoutsService', () => {
       mockTx.redemptionOrder.update.mockResolvedValue({});
       mockTx.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
       mockTx.payoutTransaction.update.mockResolvedValue({});
+      // Flow-B payout WhatsApp: default partner owner (bare 10-digit phone) + redemption points.
+      mockTx.channelPartner.findFirst.mockResolvedValue({ ownerName: 'Ravi Traders', phone: '9900000041' });
+      mockTx.redemptionOrder.findFirst.mockResolvedValue({ pointsDeducted: 500, partnerId: 'p1', orderNumber: 'RO-1' });
+      mockMsg91.sendWhatsappTemplate.mockResolvedValue(undefined);
     });
 
     it('throws NotFound for a batch outside the tenant', async () => {
@@ -818,6 +830,58 @@ describe('PayoutsService', () => {
         }),
       );
       expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('PAID → sends the payout-credit WhatsApp POST-COMMIT with the right ordered bodyValues (Flow B)', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2026-07-06T10:00:00.000Z'));
+      try {
+        mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+        mockPrisma.payoutTransaction.findMany
+          .mockResolvedValueOnce([
+            { id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1' },
+          ])
+          .mockResolvedValueOnce([]);
+        // Owner + redeemed points resolved inside the tx for the payout WhatsApp.
+        mockTx.channelPartner.findFirst.mockResolvedValue({ ownerName: 'Ravi Traders', phone: '9900000041' });
+        mockTx.redemptionOrder.findFirst.mockResolvedValue({ pointsDeducted: 500, partnerId: 'p1', orderNumber: 'RO-1' });
+
+        await service.uploadPayoutUtr(
+          gifsy,
+          'b1',
+          buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+          true,
+        );
+
+        // DIRECT send via Msg91 with the deoleo_payout_credit template + ordered bodyValues:
+        //   [ownerName, points, utr, date-of-payment, month].
+        expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledWith(
+          '9900000041',
+          'deoleo_payout_credit',
+          ['Ravi Traders', '500', 'UTR12345678', '06 Jul 2026', 'July 2026'],
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('a payout-credit WhatsApp failure does NOT fail the payout (fire-and-forget)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          { id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1' },
+        ])
+        .mockResolvedValueOnce([]);
+      mockMsg91.sendWhatsappTemplate.mockRejectedValue(new Error('MSG91 down'));
+
+      const res = await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+        true,
+      );
+      // The payout still applied despite the WhatsApp send throwing.
+      expect(res).toMatchObject({ applied: true, paidCount: 1 });
     });
 
     it('FAILED → marks payout FAILED, reverses points ONCE (M2 claim) and order FAILED', async () => {

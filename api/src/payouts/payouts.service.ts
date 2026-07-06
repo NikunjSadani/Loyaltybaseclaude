@@ -1,11 +1,14 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { PayoutStatus, Prisma, RedemptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
+import { Msg91Service } from '../notifications/msg91.service';
+import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
 import { rupeesToPaise } from '../common/money';
@@ -30,10 +33,35 @@ import {
  */
 @Injectable()
 export class PayoutsService {
+  private readonly logger = new Logger(PayoutsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly wallet: WalletService,
+    private readonly msg91: Msg91Service,
   ) {}
+
+  /** Format a `YYYY-MM` period (or a Date) as "MMM YYYY" (e.g. "July 2026") for WhatsApp bodies. */
+  private monthYear(periodOrDate: string | Date): string {
+    const MONTHS = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December',
+    ];
+    if (periodOrDate instanceof Date) {
+      return `${MONTHS[periodOrDate.getMonth()]} ${periodOrDate.getFullYear()}`;
+    }
+    const m = /^(\d{4})-(\d{2})$/.exec(periodOrDate);
+    if (!m) return periodOrDate;
+    const monthIdx = Number(m[2]) - 1;
+    return monthIdx >= 0 && monthIdx < 12 ? `${MONTHS[monthIdx]} ${m[1]}` : periodOrDate;
+  }
+
+  /** Format a date as "DD MMM YYYY" (e.g. "06 Jul 2026") for WhatsApp bodies. */
+  private formatDate(d: Date): string {
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${day} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+  }
 
   /** GET /v1/payouts/transactions — paginated, filterable payout transactions. */
   async listTransactions(user: JwtPayload, q: ListTransactionsQueryDto) {
@@ -687,6 +715,17 @@ export class PayoutsService {
     let failedCount = 0;
     let reversedCount = 0;
 
+    // Collected DURING the tx (do NOT send inside it): one payout-credit WhatsApp per
+    // PAID redemption cash-out, dispatched AFTER the tx commits so a delivery failure
+    // can never roll back the money path. Each entry carries the resolved OWNER
+    // identity + redeemed points + UTR.
+    const payoutWhatsapps: Array<{
+      phone: string;
+      ownerName: string;
+      points: number;
+      utr: string;
+    }> = [];
+
     // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
     await this.prisma.$transaction(async (tx) => {
       for (const row of parseResult.rows) {
@@ -709,6 +748,33 @@ export class PayoutsService {
             },
           });
           paidCount++;
+
+          // Gather (do NOT send) the payout-credit WhatsApp payload: the partner's
+          // ownerName + phone and the redeemed points. Sent AFTER commit below.
+          // Tenant-gated so we only pay the read cost for configured tenants.
+          if (WHATSAPP_KYC[user.clientId]?.payoutCreditTemplate) {
+            const [partner, order] = await Promise.all([
+              tx.channelPartner.findFirst({
+                where: { id: txn.partnerId },
+                select: { ownerName: true, phone: true },
+              }),
+              txn.redemptionOrderId
+                ? tx.redemptionOrder.findFirst({
+                    where: { id: txn.redemptionOrderId },
+                    select: { pointsDeducted: true },
+                  })
+                : Promise.resolve(null),
+            ]);
+            const phone = partner?.phone?.trim();
+            if (phone) {
+              payoutWhatsapps.push({
+                phone,
+                ownerName: partner?.ownerName?.trim() || 'Partner',
+                points: order?.pointsDeducted ?? 0,
+                utr: row.utr ?? '',
+              });
+            }
+          }
 
           // Complete the linked redemption (DELIVERED) unless it is already in a
           // terminal state. No points change on success.
@@ -773,6 +839,35 @@ export class PayoutsService {
         }
       }
     }, { timeout: 180_000, maxWait: 20_000 });
+
+    // POST-COMMIT owner WhatsApp on payout credit (deoleo_payout_credit) for each PAID
+    // redemption cash-out. DIRECT send, fire-and-forget: the money tx above is already
+    // committed, so a delivery failure MUST NEVER affect it. Tenant-gated + per-send
+    // try/catch (mirrors the KYC send style).
+    //   {{1}} ownerName · {{2}} points · {{3}} UTR · {{4}} date of payment · {{5}} month
+    // Note {{5}} for a redemption = the month of PAYMENT (monthYear(now)) — a redemption
+    // is not tied to a credit month (product decision).
+    if (payoutWhatsapps.length > 0) {
+      const template = WHATSAPP_KYC[user.clientId]?.payoutCreditTemplate;
+      if (template) {
+        const paymentMonth = this.monthYear(now);
+        const paymentDate = this.formatDate(now);
+        for (const w of payoutWhatsapps) {
+          try {
+            await this.msg91.sendWhatsappTemplate(w.phone, template, [
+              w.ownerName,
+              String(w.points),
+              w.utr,
+              paymentDate,
+              paymentMonth,
+            ]);
+          } catch (e) {
+            // Non-critical: a WhatsApp delivery failure must NEVER fail the payout.
+            this.logger.warn(`[payout-whatsapp] payout-credit send failed (client ${user.clientId}): ${e}`);
+          }
+        }
+      }
+    }
 
     return { applied: true, paidCount, failedCount, reversedCount };
   }
