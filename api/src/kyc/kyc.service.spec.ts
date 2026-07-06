@@ -69,6 +69,8 @@ const mockPrisma = {
   salesUserAssignment: { findFirst: jest.fn() },
   consentRecord: { create: jest.fn() },
   kycVerificationItem: { upsert: jest.fn() },
+  // slaMetrics resolves the SLA target from the tenant's stored `slaTargetHours` row.
+  programSetting: { findFirst: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
@@ -2709,6 +2711,56 @@ describe('KycService', () => {
       const approvedWhere = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
       expect(approvedWhere.status).toBe('APPROVED');
       expect(approvedWhere.user).toBeUndefined();
+    });
+
+    // ── SLA target now driven by the persisted `slaTargetHours` setting ──
+    // Two APPROVED submissions: one approved in 30h, one in 60h.
+    const twoApprovals = [
+      { createdAt: new Date('2026-01-01T00:00:00Z'), statusHistory: [{ createdAt: new Date('2026-01-02T06:00:00Z') }] }, // 30h
+      { createdAt: new Date('2026-01-01T00:00:00Z'), statusHistory: [{ createdAt: new Date('2026-01-03T12:00:00Z') }] }, // 60h
+    ];
+
+    it('uses the stored slaTargetHours setting (96) — no breach when both are under it', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue({ settingValue: 96 });
+      mockPrisma.kycSubmission.findMany
+        .mockResolvedValueOnce(twoApprovals) // APPROVED query
+        .mockResolvedValueOnce([]); // pending query
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
+
+      const res = await service.slaMetrics(gifsy);
+      // Both 30h and 60h are ≤ 96h → zero breaches, 100% compliance.
+      expect(res.slaTargetHours).toBe(96);
+      expect(res.slaBreachCount).toBe(0);
+      expect(res.slaComplianceRate).toBe(100);
+      // Resolved for the caller's tenant.
+      expect(mockPrisma.programSetting.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { clientId: 'deoleo', settingKey: 'slaTargetHours' } }),
+      );
+    });
+
+    it('falls back to 48 when no slaTargetHours row exists — the 60h approval breaches', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue(null);
+      mockPrisma.kycSubmission.findMany
+        .mockResolvedValueOnce(twoApprovals)
+        .mockResolvedValueOnce([]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
+
+      const res = await service.slaMetrics(gifsy);
+      // Default 48h → the 60h approval breaches, the 30h one does not.
+      expect(res.slaTargetHours).toBe(48);
+      expect(res.slaBreachCount).toBe(1);
+    });
+
+    it('ignores an out-of-range stored value and falls back to 48', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue({ settingValue: 9999 });
+      mockPrisma.kycSubmission.findMany
+        .mockResolvedValueOnce(twoApprovals)
+        .mockResolvedValueOnce([]);
+      mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
+
+      const res = await service.slaMetrics(gifsy);
+      expect(res.slaTargetHours).toBe(48);
+      expect(res.slaBreachCount).toBe(1);
     });
   });
 

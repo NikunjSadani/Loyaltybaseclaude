@@ -589,6 +589,19 @@ export class AdminCoreService {
   async upsertSetting(user: JwtPayload, dto: UpsertSettingDto) {
     const clientId = user.clientId;
 
+    // Key-specific guard: the KYC SLA target drives the breach count on the SLA KPI
+    // dashboard (kyc.service.ts slaMetrics()). A non-integer / out-of-range value would
+    // poison that metric, so reject anything outside 1–168 working hours here (the FE
+    // SettingRow also enforces the same min/max — defence in depth).
+    if (dto.key === 'slaTargetHours') {
+      const n = typeof dto.value === 'string' ? parseInt(dto.value, 10) : Number(dto.value);
+      if (!Number.isInteger(n) || n < 1 || n > 168) {
+        throw new BadRequestException('slaTargetHours must be a whole number between 1 and 168.');
+      }
+      // Persist a normalised integer so the stored value never carries a stray string/float.
+      dto.value = n;
+    }
+
     const setting = await this.prisma.programSetting.upsert({
       where: { clientId_settingKey: { clientId, settingKey: dto.key } },
       update: { settingValue: dto.value, updatedById: user.sub },

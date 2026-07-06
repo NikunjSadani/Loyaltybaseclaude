@@ -8,6 +8,13 @@ import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig
 import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings'
 import { fetchPointsExpiry, savePointsExpiry } from '@/lib/points-expiry'
 import {
+  fetchKycSlaHours,
+  saveKycSlaHours,
+  KYC_SLA_DEFAULT_HOURS,
+  KYC_SLA_MIN_HOURS,
+  KYC_SLA_MAX_HOURS,
+} from '@/lib/kyc-sla'
+import {
   fetchVisibilityCaptureMode,
   saveVisibilityCaptureMode,
   type VisibilityCaptureMode,
@@ -17,7 +24,6 @@ import { useAdminSession } from '@/lib/admin-session'
 interface Settings {
   holdingPeriodDays: number
   otpValidityHours: number
-  kycSlaHours: number
   visibilityGeoRadiusMeters: number
   visibilityLookbackDays: number
   visibilityHashSimilarityThreshold: number
@@ -170,7 +176,7 @@ export default function SettingsPage() {
   }
 
   const [settings, setSettings] = useState<Settings>({
-    holdingPeriodDays: 30, otpValidityHours: 6, kycSlaHours: 48,
+    holdingPeriodDays: 30, otpValidityHours: 6,
     visibilityGeoRadiusMeters: 50, visibilityLookbackDays: 30, visibilityHashSimilarityThreshold: 90,
     visibilityExifWindowHours: 24, lowBalanceAlertThreshold: 100000,
     tds194rRate: 10, tds194rThreshold: 20000, tds194cRateIndividual: 1,
@@ -249,6 +255,41 @@ export default function SettingsPage() {
     }
     setPointsExpirySaved(true)
     setTimeout(() => setPointsExpirySaved(false), 3000)
+  }
+
+  // ── KYC SLA target (per-tenant; programSetting `slaTargetHours`) ──
+  // Round-trips via GET/PUT /api/admin/settings (the generic settings upsert). The WRITE
+  // is GIFSY_ADMIN-only (settings PUT enforces tenancy:write + Gifsy-Admin), so the input +
+  // save are editable only for GIFSY_ADMIN; CLIENT_ADMIN/MIS_USER may VIEW (the GET is
+  // tenancy:read) but the control is disabled and the save is hidden. The saved value drives
+  // the breach count on the KYC SLA KPI dashboard (backend slaMetrics()). Held as a STRING so
+  // typing works; parsed + bound-checked on save. `kycSlaLoaded` gates the input + save so we
+  // can never persist the placeholder default over the real stored value before the fetch.
+  const [kycSlaHours,       setKycSlaHours]       = useState<string>(String(KYC_SLA_DEFAULT_HOURS))
+  const [kycSlaLoaded,      setKycSlaLoaded]      = useState(false)
+  const [kycSlaSaved,       setKycSlaSaved]       = useState(false)
+  const [kycSlaError,       setKycSlaError]       = useState<string | null>(null)
+
+  useEffect(() => {
+    fetchKycSlaHours()
+      .then((hours) => setKycSlaHours(String(hours)))
+      .finally(() => setKycSlaLoaded(true))
+  }, [])
+
+  async function handleKycSlaSave() {
+    setKycSlaError(null)
+    const n = Number(kycSlaHours.trim())
+    if (!Number.isInteger(n) || n < KYC_SLA_MIN_HOURS || n > KYC_SLA_MAX_HOURS) {
+      setKycSlaError(`Enter a whole number of working hours between ${KYC_SLA_MIN_HOURS} and ${KYC_SLA_MAX_HOURS}.`)
+      return
+    }
+    const ok = await saveKycSlaHours(n)
+    if (!ok) {
+      setKycSlaError('Could not save — the KYC SLA target can only be changed by a Gifsy Admin.')
+      return
+    }
+    setKycSlaSaved(true)
+    setTimeout(() => setKycSlaSaved(false), 3000)
   }
 
   // ── Conversion rate (per-tenant; Points→₹). saveGifsySettings PUTs /v1/admin/settings
@@ -573,10 +614,52 @@ export default function SettingsPage() {
       )}
 
       {/* KYC SLA */}
-      <Card>
-        <CardHeader><CardTitle className="text-base">KYC SLA Configuration</CardTitle><CardDescription>Turnaround time targets for KYC approvals (Gifsy KPI)</CardDescription></CardHeader>
+      <Card data-testid="kyc-sla-card">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base">KYC SLA Configuration</CardTitle>
+              <CardDescription className="mt-1">
+                Turnaround time target for KYC approvals (Gifsy KPI). Breaches are flagged on the
+                KPI dashboard. This is a Gifsy-operated setting — only a Gifsy Admin can change it.
+              </CardDescription>
+            </div>
+            {isGifsyAdmin && (
+              <button
+                data-testid="kyc-sla-save"
+                onClick={handleKycSlaSave}
+                disabled={!kycSlaLoaded}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 ${
+                  kycSlaSaved
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-[var(--brand-primary)] text-white hover:bg-[var(--brand-primary-dark)] disabled:opacity-50 disabled:cursor-not-allowed'
+                }`}
+              >
+                {kycSlaSaved ? '✓ Saved' : <><Save className="h-3.5 w-3.5" /> Save</>}
+              </button>
+            )}
+          </div>
+        </CardHeader>
         <CardContent>
-          <SettingRow label="KYC SLA Target (working hours)" description="Maximum working hours from KYC submission to approval/rejection. Breaches are flagged in the KPI dashboard." value={settings.kycSlaHours} onChange={set('kycSlaHours')} min={1} max={168} />
+          <SettingRow
+            label="KYC SLA Target (working hours)"
+            description="Maximum working hours from KYC submission to approval/rejection. Breaches are flagged in the KPI dashboard."
+            type="number"
+            value={kycSlaHours}
+            onChange={(v) => setKycSlaHours(v)}
+            min={KYC_SLA_MIN_HOURS}
+            max={KYC_SLA_MAX_HOURS}
+            disabled={!isGifsyAdmin || !kycSlaLoaded}
+            testId="kyc-sla-input"
+          />
+          {!isGifsyAdmin && (
+            <p className="text-xs text-gray-400 mt-2">
+              The KYC SLA target is a Gifsy-operated setting — only a Gifsy Admin can change it.
+            </p>
+          )}
+          {kycSlaError && (
+            <p className="text-xs text-red-600 mt-2">{kycSlaError}</p>
+          )}
         </CardContent>
       </Card>
 

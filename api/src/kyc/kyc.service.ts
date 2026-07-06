@@ -2250,12 +2250,44 @@ export class KycService {
     return { outletId, markedAt: new Date().toISOString() };
   }
 
+  /**
+   * Resolve the KYC SLA target (working hours) for the caller's tenant.
+   *
+   * Precedence: the persisted `slaTargetHours` programSetting → SLA_TARGET_HOURS env
+   * → 48 (the SETTINGS_DEFAULTS default). Fully defensive — never throws and never
+   * lets a bad stored/env value poison the metric: a non-integer or out-of-range
+   * (1–168) value at any layer falls through to the next source. The admin settings
+   * page persists this via the `slaTargetHours` upsert key, which is itself guarded.
+   */
+  private async resolveSlaTargetHours(user: JwtPayload): Promise<number> {
+    const inRange = (n: number) => Number.isInteger(n) && n >= 1 && n <= 168;
+
+    // 1) Stored per-tenant programSetting (the admin-set value).
+    try {
+      const row = await this.prisma.programSetting.findFirst({
+        where: { clientId: user.clientId, settingKey: 'slaTargetHours' },
+        select: { settingValue: true },
+      });
+      const raw = row?.settingValue;
+      const stored =
+        typeof raw === 'string' ? parseInt(raw, 10) : typeof raw === 'number' ? raw : NaN;
+      if (inRange(stored)) return stored;
+    } catch {
+      // Never let a settings read failure break the metric — fall through to env/default.
+    }
+
+    // 2) Deployment env override, then 3) the hard default of 48.
+    const envVal = parseInt(process.env.SLA_TARGET_HOURS ?? '', 10);
+    if (inRange(envVal)) return envVal;
+    return 48;
+  }
+
   // ─── GET /v1/kyc/sla-metrics ─────────────────────────────────────────────────
   async slaMetrics(user: JwtPayload) {
     // GIFSY-only is enforced by @Roles on the controller; re-checked logically here.
     if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
-    const slaTargetHours = parseInt(process.env.SLA_TARGET_HOURS ?? '48', 10);
+    const slaTargetHours = await this.resolveSlaTargetHours(user);
     const now = new Date();
 
     const approved = await this.prisma.kycSubmission.findMany({
@@ -2337,6 +2369,9 @@ export class KycService {
     const reUploadRate = totalCount > 0 ? (reUploadCount / totalCount) * 100 : 0;
 
     return {
+      // The resolved target the breach count was computed against (admin-set setting →
+      // env → 48). Surfaced so the dashboard can display the SLA it is measuring against.
+      slaTargetHours,
       avgApprovalTimeHours: Math.round(avgApprovalTimeHours * 10) / 10,
       slaComplianceRate: Math.round(slaComplianceRate * 10) / 10,
       slaBreachCount,

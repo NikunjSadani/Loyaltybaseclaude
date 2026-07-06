@@ -551,6 +551,60 @@ describe('AdminCoreService', () => {
       const res = await service.getSettings(clientAdmin);
       expect(res.settings.otpExpiryMinutes).toBe(10); // constant wins (set after the DB loop)
     });
+
+    it('returns a stored slaTargetHours row, overlaying the 48 default', async () => {
+      mockPrisma.programSetting.findMany.mockResolvedValue([
+        { settingKey: 'slaTargetHours', settingValue: 96 },
+      ]);
+      const res = await service.getSettings(clientAdmin);
+      expect(res.settings.slaTargetHours).toBe(96);
+    });
+
+    it('falls back to the 48 slaTargetHours default when no row exists', async () => {
+      mockPrisma.programSetting.findMany.mockResolvedValue([]);
+      const res = await service.getSettings(clientAdmin);
+      expect(res.settings.slaTargetHours).toBe(48);
+    });
+  });
+
+  describe('upsertSetting', () => {
+    beforeEach(() => {
+      mockPrisma.programSetting.upsert.mockResolvedValue({ id: 'ps1' });
+      mockPrisma.auditLog.create.mockResolvedValue({ id: 'al1' });
+    });
+
+    it('persists slaTargetHours as a normalised integer, tenant-scoped', async () => {
+      await service.upsertSetting(gifsy, { key: 'slaTargetHours', value: '96' });
+      const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
+      expect(call.where).toEqual({
+        clientId_settingKey: { clientId: 'deoleo', settingKey: 'slaTargetHours' },
+      });
+      // '96' string was normalised to the integer 96 on both update + create paths.
+      expect(call.update.settingValue).toBe(96);
+      expect(call.create.settingValue).toBe(96);
+      // Cache bust so the new value is visible immediately.
+      expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+    });
+
+    it('rejects an out-of-range slaTargetHours (169) and does not persist', async () => {
+      await expect(
+        service.upsertSetting(gifsy, { key: 'slaTargetHours', value: 169 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-integer slaTargetHours and does not persist', async () => {
+      await expect(
+        service.upsertSetting(gifsy, { key: 'slaTargetHours', value: 'abc' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    it('leaves non-SLA keys untouched (no coercion)', async () => {
+      await service.upsertSetting(gifsy, { key: 'programName', value: 'My Program' });
+      const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
+      expect(call.update.settingValue).toBe('My Program');
+    });
   });
 
   describe('saveGiftConfig', () => {
