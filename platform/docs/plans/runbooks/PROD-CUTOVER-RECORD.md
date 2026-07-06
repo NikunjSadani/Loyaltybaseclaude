@@ -303,3 +303,69 @@ Gate green at cutover: **api jest 1427 · nest 0 · FE vitest 1784 · tsc 0**.
 Code rollback = **redeploy both services to the prior prod revision `824eac0`** (unwinds the whole cutover #5); this cutover added
 no migrations, so there is nothing to reverse in the DB. DB restore (only if ever needed) via the Step-1 backup
 `pre-cutover5-develop-5c2bb65` / PITR-clone (never a blind in-place restore — `gifsy-db` is shared with staging).
+
+---
+
+# Production Cutover — Record (2026-07-06 `develop` → `main` — CODE-ONLY — CUTOVER #6: per-tenant per-purpose OTP templates + re-KYC deep-link auto-skip + assumed-session 24h TTL)
+
+> **Executed 2026-07-06. As-run record of the SIXTH cutover** — the `develop`→`main` promotion of the per-tenant/per-purpose OTP
+> template selection (headline) + the sales re-KYC wizard deep-link auto-skip + the assumed-tenant session TTL raise onto the
+> already-live prod (`5c2bb65` → `c36f6c8`, **7 commits**). Owner-driven: the owner approved the GitHub `production` gate personally.
+> **CODE-ONLY — 0 migrations**, so the in-VPC `gifsy-migrate` step was a **no-op / not required**. The 2026-07-05 record above
+> (cutover #5) is the sales-KYC UAT fixes; this section is the OTP-templates + re-KYC deep-link + assumed-session-TTL promotion.
+> Runbook: [`CUTOVER-RUNBOOK.md`](CUTOVER-RUNBOOK.md).
+
+## Pre-state (verified)
+`gifsy_prod`: live, serving `main` HEAD **`5c2bb65`** (the cutover-#5 code), Deoleo tenant CREATED + ACTIVE + LIVE on the real domain
+(platform defaults: conversion `1`, expiry null, visibility OFF). `main` was **7 commits behind `develop` with 0 pending migrations**.
+Gate green at cutover: **api jest 1446 · nest 0 · FE vitest 1786 · tsc 0**.
+
+## Steps executed (in order)
+1. **Step 1 — Pre-cutover backup (double-guarded).** On-demand backup of the shared `gifsy-db` instance:
+   description `"pre-cutover6-develop-c36f6c8"`, `ON_DEMAND`, **SUCCESSFUL**. **PITR remained ON.** Rollback point = redeploy `5c2bb65`.
+2. **Step 2 — Merge `develop`→`main` (owner-triggered).** Prod `main` HEAD moved **`5c2bb65` → `c36f6c8`** (the 7-commit,
+   **CODE-ONLY** jump). The owner approved the GitHub `production` environment gate. **0 migrations** in this batch → the
+   in-VPC `gifsy-migrate` step was a **no-op (not required)**; the pipeline deployed the new revision directly. **Both
+   `gifsy-api` (rev `gifsy-api-00019-ms7`) and `gifsy-frontend` (rev `gifsy-frontend-00015-sr8`) are Ready=True @ 100% traffic on
+   `c36f6c8`.**
+3. **Step 3 — Live verification on the real domain.** `https://deoleoloyalty.gifsy.in/auth/login` → **200**;
+   the brand wordmark `/brand/deoleo-wordmark-white.png` → **200 image/png** (no regression); both prod Cloud Run services confirmed
+   Ready=True @ 100% traffic on the `c36f6c8` image. *(`/api/health` returns **401** = the edge proxy auth gate on `/api/*` for an
+   unauthenticated request, NOT a fault.)*
+4. **Step 4 — Post-cutover config-write (Deoleo OTP templates).** The Deoleo `program_settings.otpTemplates` row was written via the
+   guarded `gifsy-oneoff-prodcheck` Cloud Run Job (`current_database()='gifsy_prod'` guard). **BEFORE: no row → AFTER: the 4-template
+   map; exactly 1 row; job reset to no-op after.** Values: `login` + `redemptionSelf` = `6a391d466b4d90893904e1d2`, `kycConsent` +
+   `redemptionSales` = `6a391cf2d011d41f630a1364`. Effective within **≤5 min** (TenantSettingsService 5-min cache TTL).
+
+## What was in this cutover (payload — 7 commits)
+- **Per-tenant, per-purpose OTP template selection** (the headline) — `TenantSettingsService.otpTemplates`
+  `{login / redemptionSelf / kycConsent / redemptionSales}` + a `getOtpTemplateId` resolver, threaded to
+  `Msg91Service.sendOtp(…, templateId?)` at **all 4 send sites**. **Unset → the global env template, byte-identical to before.**
+  Independent adversarial audit **CLEAN**; **no migration**.
+- **Sales re-KYC wizard: auto-skip Step 1 (Select Outlet) on a deep-link** (`fa8e534`) — a deep-link into the re-KYC wizard for a
+  `RE_KYC_REQUIRED` outlet now auto-skips the Select-Outlet step.
+- **Assumed-tenant session TTL raised 8h → 24h** (`66ac21e`) — `ASSUMED_SESSION_TTL_HOURS=24`; a single source now drives the
+  access + refresh TTL **and** the admin Security-config display. **Normal 7d/30d sessions unchanged.**
+- **Doc reframes** — the credit-batch email is folded into Notifications-Core; the WhatsApp KYC templates are noted
+  verified-working-on-staging.
+
+## Post-state (verified)
+- **Cutover #6 rolled prod `5c2bb65` → `c36f6c8`.** Both prod services — `gifsy-api` (rev `gifsy-api-00019-ms7`) and
+  `gifsy-frontend` (rev `gifsy-frontend-00015-sr8`) — are **Ready=True @ 100% traffic** on **`c36f6c8`**.
+- **0 migrations applied** (code-only cutover; the in-VPC migrate step was a no-op).
+- Pre-cutover backup **`pre-cutover6-develop-c36f6c8`** taken (ON_DEMAND, gifsy-db); PITR ON.
+- Live-verified on `deoleoloyalty.gifsy.in` (`/auth/login` 200; `/brand/deoleo-wordmark-white.png` 200 image/png — no regression;
+  `/api/health` 401 = the edge proxy auth gate, not a fault).
+- **Deoleo `otpTemplates` config-row applied** (post-cutover, guarded job): exactly 1 row with the 4-template map; effective ≤5 min.
+- **prod == develop == main == `c36f6c8`**.
+
+## What remains (owner-gated — NOT done)
+- **Real-phone prod login-OTP verify** — confirm a real-phone prod login OTP arrives on the **new** Deoleo OTP template (this cutover's config-write).
+- **Live end-to-end smoke** — a real KYC→wallet, a credit upload moving a wallet, a redemption per channel, prod OTP.
+- **#74 — owner ops before go-live** — monitoring + backups/PITR + credential rotation.
+- **NOTE — the prior owner-gated items are now CLEARED (2026-07-05/06):** #76 master data (outlets + hierarchy loaded; no rewards data pending) · #143 WhatsApp `deoleo_kyc_approval` (owner confirms it worked on staging) · the two reward catalog items (owner set min 250 · max 50,000 on both → ACTIVE + redeemable, prod-verified) · `creditsPayouts.notifyEmails` reframed into the Notifications-Core build (enqueued EMAIL never delivers — the queue drainer is PUSH-only — so it's not a config toggle).
+
+## Rollback (unchanged path)
+Code rollback = **redeploy both services to the prior prod revision `5c2bb65`** (unwinds the whole cutover #6); this cutover added
+no migrations, so there is nothing to reverse in the DB. DB restore (only if ever needed) via the Step-1 backup
+`pre-cutover6-develop-c36f6c8` / PITR-clone (never a blind in-place restore — `gifsy-db` is shared with staging).

@@ -8,19 +8,23 @@ client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch *
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
 `dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-05.
 
-🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #5 EXECUTED 2026-07-05 — prod now serving `5c2bb65`; DEOLEO TENANT CREATED + ACTIVE + LIVE on the
-real domain.** Cutover #5 moved prod `main` **824eac0 → 5c2bb65** (5 commits, **CODE-ONLY — 0 migrations**, so the in-VPC migrate step was a
-no-op). Owner approved the `production` gate; both prod Cloud Run services serve `5c2bb65`; pre-cutover backup **`pre-cutover5-develop-5c2bb65`**
-(ON_DEMAND, gifsy-db; rollback = redeploy `824eac0`). **Cutover #5 payload (5 items — the sales-KYC UAT fixes + follow-ups):** **(1)** the
-misleading per-document **"Pending" status tag REMOVED** from the sales KYC store-info (`6ad4d62` — `KycDocument.status` is never advanced off
-PENDING, so it read as a false hold on approved outlets); **(2)** `0028a07` — cutover #4 doc updates (part of this batch reaching prod); **(3)**
-re-KYC flagged docs + photos now **amber-badged ("Needs re-capture")** on the sales-senior KYC detail (`6e96d5b`), parity with the Gifsy
-reviewer (driven by `flaggedDocTypes`); **(4)** the **Approval-Status stepper reflects the CURRENT submission** (`12d781f`) — a re-KYC rejected
-by the ASM shows first-approver = Rejected + Gifsy = pending (was a stale "Approved" + "Queued for Gifsy"); uses latest-event-per-stage + keys
-the Gifsy step off `kyc.status`; **(5)** the **first-approver step LABEL reflects the real reviewer level** (`5c2bb65`) — was hardcoded from a
-bad `submittedByRole==='XSR'` cast → always "ASM Review"; now derived from the PENDING_*_APPROVAL status (awaiting) or the approver's role
-(acted), correct under vacant-level skipping. Gate at cutover #5: **api jest 1427 · nest 0 · FE vitest 1784 · tsc 0**. **prod == develop ==
-main == `5c2bb65`.**
+🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #6 EXECUTED 2026-07-06 — prod now serving `c36f6c8`; DEOLEO TENANT CREATED + ACTIVE + LIVE on the
+real domain.** Cutover #6 moved prod `main` **5c2bb65 → c36f6c8** (7 commits, **CODE-ONLY — 0 migrations**, so the in-VPC migrate step was a
+no-op). Owner approved the `production` gate; both prod Cloud Run services (`gifsy-api-00019-ms7` + `gifsy-frontend-00015-sr8`) are Ready=True
+@ 100% traffic on `c36f6c8`; pre-cutover backup **`pre-cutover6-develop-c36f6c8`** (ON_DEMAND, gifsy-db; rollback = redeploy `5c2bb65`).
+Live-verified on `deoleoloyalty.gifsy.in` (`/auth/login` 200; `/brand/deoleo-wordmark-white.png` 200 image/png; `/api/health` 401 = the edge
+proxy auth gate, not a fault). **Cutover #6 payload (7 commits):** **(1)** the headline — **per-tenant, per-purpose OTP template selection**
+(`TenantSettingsService.otpTemplates` `{login / redemptionSelf / kycConsent / redemptionSales}` + a `getOtpTemplateId` resolver, threaded to
+`Msg91Service.sendOtp(…, templateId?)` at all 4 send sites; **unset → the global env template, byte-identical to before**; independent adversarial
+audit CLEAN; no migration); **(2)** sales re-KYC wizard **auto-skips Step 1 (Select Outlet) on a deep-link** for `RE_KYC_REQUIRED` outlets
+(`fa8e534`); **(3)** the **assumed-tenant session TTL raised 8h → 24h** (`66ac21e` — `ASSUMED_SESSION_TTL_HOURS=24`, single source now drives
+access + refresh TTL + the admin Security-config display; normal 7d/30d sessions unchanged); **(4)** doc reframes (credit-batch email folded into
+Notifications-Core; WhatsApp KYC templates verified-working-on-staging). Gate at cutover #6: **api jest 1446 · nest 0 · FE vitest 1786 · tsc 0**.
+**prod == develop == main == `c36f6c8`.** **Post-cutover config-write applied:** the Deoleo `program_settings.otpTemplates` row was written via
+the guarded `gifsy-oneoff-prodcheck` Cloud Run Job (`current_database()='gifsy_prod'` guard; no row → the 4-template map, exactly 1 row, job reset
+to no-op after; `login`+`redemptionSelf`=`6a391d466b4d90893904e1d2`, `kycConsent`+`redemptionSales`=`6a391cf2d011d41f630a1364`; effective ≤5 min
+via the 5-min cache TTL). Owner's residual = a **real-phone prod login-OTP arrives on the new template**. *(Prior: cutover #5 at `5c2bb65` —
+sales-KYC UAT fixes: per-document "Pending" tag removal, re-KYC amber badges, approval-stepper current-submission + reviewer-level label.)*
 
 **PRIOR — CUTOVER #4 (2026-07-04→05) — prod was serving `824eac0`.** Cutover #4 moved prod `main` **eb841e9 → 824eac0** (3 commits,
 **CODE-ONLY — 0 migrations**, so the in-VPC migrate step was a no-op). Owner approved the `production` gate; both prod Cloud Run services were
@@ -116,7 +120,7 @@ deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLO
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1427 · nest 0 · FE vitest 1784 · tsc 0 (prod serving `5c2bb65` after cutover #5; prod == develop == main == `5c2bb65`; prior cutover-#4 gate was api jest 1427 · nest 0 · FE vitest 1776 · tsc 0 at `824eac0`).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1446 · nest 0 · FE vitest 1786 · tsc 0 (prod serving `c36f6c8` after cutover #6; prod == develop == main == `c36f6c8`; prior cutover-#5 gate was api jest 1427 · nest 0 · FE vitest 1784 · tsc 0 at `5c2bb65`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
