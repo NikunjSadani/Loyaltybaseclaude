@@ -8,9 +8,10 @@ client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch *
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
 `dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-06.
 
-🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #6 IS LIVE (prod `c36f6c8`) — develop is now `58a302c` = 6 code fixes + 2 docs AHEAD, all PENDING THE
-NEXT CUTOVER.** **Prod is still serving cutover-#6 `c36f6c8`.** develop HEAD **`58a302c`** carries a post-cutover-#6 bug-fix sweep (6 code
-fixes + 2 doc commits) not yet in prod — it ships on the NEXT (owner-gated) cutover. **Pending-next-cutover fixes (oldest→newest):**
+🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #6 IS LIVE (prod `c36f6c8`) — develop is 6 code fixes + docs AHEAD of prod, all PENDING THE
+NEXT CUTOVER.** **Prod is still serving cutover-#6 `c36f6c8`** (unchanged until the next cutover). develop carries a post-cutover-#6 bug-fix
+sweep whose LAST CODE commit is `58a302c` (the WhatsApp build, fix #6); session docs ride on top, so verify the live HEAD via `git log` — do
+NOT pin HEAD to a single SHA. The sweep (6 code fixes) is not yet in prod — it ships on the NEXT (owner-gated) cutover. **Pending-next-cutover fixes (oldest→newest):**
 **(1)** `36a4325` — targets push 404: "New targets uploaded" deep-linked `/sales/targets` (no such route) → tap 404; now `/sales/dashboard`.
 **(2)** `ea227c0` — approval-WhatsApp blank program name: read `programName` from the `isPrimary` outlet, but every real outlet is
 `isPrimary=false` (all 2,907) → blank. **(3)** `2d5b715` — 4 pushes had no click URL → the SW opens `data.url || '/'` and root `/` redirects
@@ -54,7 +55,7 @@ audit CLEAN; no migration); **(2)** sales re-KYC wizard **auto-skips Step 1 (Sel
 (`fa8e534`); **(3)** the **assumed-tenant session TTL raised 8h → 24h** (`66ac21e` — `ASSUMED_SESSION_TTL_HOURS=24`, single source now drives
 access + refresh TTL + the admin Security-config display; normal 7d/30d sessions unchanged); **(4)** doc reframes (credit-batch email folded into
 Notifications-Core; WhatsApp KYC templates verified-working-on-staging). Gate at cutover #6: **api jest 1446 · nest 0 · FE vitest 1786 · tsc 0**.
-**At cutover, prod == main == `c36f6c8`** (develop has since advanced to `58a302c` — the post-cutover-#6 sweep above, PENDING the next cutover).
+**At cutover, prod == main == `c36f6c8`** (develop has since advanced 6 code fixes + docs ahead — the post-cutover-#6 sweep above, whose last CODE commit is `58a302c`; verify the live HEAD via `git log`, PENDING the next cutover).
 **Post-cutover config-write applied:** the Deoleo `program_settings.otpTemplates` row was written via
 the guarded `gifsy-oneoff-prodcheck` Cloud Run Job (`current_database()='gifsy_prod'` guard; no row → the 4-template map, exactly 1 row, job reset
 to no-op after; `login`+`redemptionSelf`=`6a391d466b4d90893904e1d2`, `kycConsent`+`redemptionSales`=`6a391cf2d011d41f630a1364`; effective ≤5 min
@@ -155,7 +156,7 @@ deliver + in-app inbox needs an `InAppNotification` migration; 2 of 3 events BLO
 
 GATES (run the FULL suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`):
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` · `cd platform &&
-npx tsc --noEmit`. **Latest green: api jest 1464 · nest 0 · FE vitest 1790 · tsc 0 (develop `58a302c` — the post-cutover-#6 sweep; prod serves `c36f6c8` [cutover-#6 gate api jest 1446 · nest 0 · FE vitest 1786 · tsc 0] and develop is now AHEAD of prod pending the next cutover).** **Last pushed HEAD: run
+npx tsc --noEmit`. **Latest green: api jest 1464 · nest 0 · FE vitest 1790 · tsc 0 (the post-cutover-#6 sweep — gate ran at develop's last CODE commit `58a302c`; prod serves `c36f6c8` [cutover-#6 gate api jest 1446 · nest 0 · FE vitest 1786 · tsc 0] and develop is 6 code fixes + docs AHEAD of prod pending the next cutover — verify the live HEAD via `git log`).** **Last pushed HEAD: run
 `git -C C:\Users\nikun\Loyaltybaseclaude log --oneline -1`** (don't trust a hardcoded SHA). **Deploy ≠ pushed** — a
 docs-only commit after a code push re-tags the serving image, so verify the serving SHA matches the CODE you mean to
 test (`gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project
@@ -479,8 +480,8 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
 - **ADMIN DASHBOARDS (4 REAL) + TICKET SLA ✅** — earlier this session; see [[admin-dashboard-consolidation]] + traps
   #1/#2. (Prior UAT batches in GO-LIVE-ISSUE-LIST.md + [[deoleo-go-live-bundle]].)
 
-🚀 CUTOVER STATE — **✅ CUTOVER #6 IS LIVE (2026-07-06). Prod serving `c36f6c8`; develop `58a302c` = 6 fixes + 2 docs AHEAD (post-cutover-#6
-sweep, PENDING the next cutover); prod == main == `c36f6c8`.** *(Latest gate at develop `58a302c`: api jest 1464 · nest 0 · FE vitest 1790 · tsc 0.)*
+🚀 CUTOVER STATE — **✅ CUTOVER #6 IS LIVE (2026-07-06). Prod serving `c36f6c8` (unchanged until the next cutover); develop is 6 code fixes + docs AHEAD (post-cutover-#6
+sweep whose last CODE commit is `58a302c`; verify the live HEAD via `git log`), PENDING the next cutover; prod == main == `c36f6c8`.** *(Latest gate ran at develop's last CODE commit `58a302c`: api jest 1464 · nest 0 · FE vitest 1790 · tsc 0.)*
 **PRIOR — CUTOVER #5 (2026-07-05) — prod was serving `5c2bb65`.**
 Cutover #5 moved prod `main` **`824eac0` → `5c2bb65`** (5 commits, **CODE-ONLY — 0 migrations**, so the in-VPC `migrate deploy` was a no-op).
 Owner approved the `production` gate; both prod Cloud Run services serve `5c2bb65`; pre-cutover backup **`pre-cutover5-develop-5c2bb65`**
@@ -615,7 +616,7 @@ cutover-coupled remainder) · memories [[deoleo-go-live-bundle]] (read FIRST for
 **HOUSEKEEPING:** #90–95 already pruned; #74 (owner ops) mostly done (monitoring + backups/PITR ON; only optional cred-rotation left).
 
 Now: greet the owner. **🚀 CUTOVER #6 IS LIVE (2026-07-06) — prod serves `c36f6c8`; the DEOLEO TENANT is CREATED + ACTIVE + LIVE on
-`deoleoloyalty.gifsy.in`. develop has since advanced to `58a302c` = 6 code fixes + 2 docs AHEAD (a post-cutover-#6 bug-fix sweep), PENDING
+`deoleoloyalty.gifsy.in`. develop has since advanced 6 code fixes + docs AHEAD of prod `c36f6c8` (a post-cutover-#6 bug-fix sweep whose last CODE commit is `58a302c`; verify the live HEAD via `git log`), PENDING
 the NEXT (owner-gated) cutover** — targets-push 404 (`36a4325`) · approval-WhatsApp blank program name (`ea227c0`) · 4 pushes with no click
 URL bounced to login (`2d5b715`) · the whole `isPrimary` blank-outlet class swept, 9 loads (`a685e2d`, CODE-only, no backfill) · KYC-SLA
 setting now persists + drives the metric (`08734ce`) · the `deoleo_points_credit` + `deoleo_payout_credit` money WhatsApps (`58a302c`).
@@ -666,7 +667,7 @@ reward catalog items are FIXED in prod (owner set min 250 · max 50,000 on both 
 
 **START THE SESSION by presenting the ▶ THINGS TO BE DONE list above** (A owner-gated go-live · B owner-decision · C
 buildable-now · D later) and **ask the owner which to pick up** — do NOT silently begin work. Default recommendation if the
-owner is open-ended: since cutover #6 is live (prod `c36f6c8`) and develop `58a302c` carries a 6-fix post-cutover sweep pending the next
+owner is open-ended: since cutover #6 is live (prod `c36f6c8`) and develop carries a 6-fix post-cutover sweep (last CODE commit `58a302c`; verify the live HEAD via `git log`) pending the next
 cutover, lead with the **OPEN POINTS** — run the independent adversarial audit of the money-path WhatsApp build (`58a302c`), then tee up the
 NEXT cutover (owner-gated) and the MSG91 template approvals; master data (#76) is done.
 ```
