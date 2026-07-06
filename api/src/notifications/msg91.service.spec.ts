@@ -139,3 +139,98 @@ describe('Msg91Service.sendWhatsappTemplate', () => {
     ).rejects.toThrow(/timeout/i);
   });
 });
+
+// Covers the per-tenant, per-purpose OTP template override on sendOtp: the templateId
+// param wins when non-empty, else the global env template is used — and the dev bypasses
+// (FIXED_OTP, missing authKey) still short-circuit BEFORE any fetch.
+describe('Msg91Service.sendOtp — per-tenant template override', () => {
+  const realFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    jest.restoreAllMocks();
+  });
+
+  it('uses the override templateId in the request body when provided (non-empty)', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({ type: 'success' }) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(
+      makeConfig({ MSG91_AUTH_KEY: 'key-123', MSG91_OTP_TEMPLATE_ID: 'env-tpl' }),
+    );
+    await service.sendOtp('9000000001', '123456', 'SMS', 'tenant-tpl');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://control.msg91.com/api/v5/otp');
+    const body = JSON.parse(init.body);
+    expect(body.template_id).toBe('tenant-tpl');
+    expect(body.mobile).toBe('919000000001');
+    expect(body.otp).toBe('123456');
+  });
+
+  it('trims the override templateId before use', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(
+      makeConfig({ MSG91_AUTH_KEY: 'key-123', MSG91_OTP_TEMPLATE_ID: 'env-tpl' }),
+    );
+    await service.sendOtp('9000000001', '123456', 'SMS', '  tenant-tpl  ');
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).template_id).toBe('tenant-tpl');
+  });
+
+  it('falls back to the env template when the override is undefined', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(
+      makeConfig({ MSG91_AUTH_KEY: 'key-123', MSG91_OTP_TEMPLATE_ID: 'env-tpl' }),
+    );
+    await service.sendOtp('9000000001', '123456', 'SMS');
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).template_id).toBe('env-tpl');
+  });
+
+  it('falls back to the env template when the override is an empty / whitespace string', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(
+      makeConfig({ MSG91_AUTH_KEY: 'key-123', MSG91_OTP_TEMPLATE_ID: 'env-tpl' }),
+    );
+    await service.sendOtp('9000000001', '123456', 'SMS', '   ');
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).template_id).toBe('env-tpl');
+  });
+
+  it('FIXED_OTP bypass short-circuits BEFORE fetch, even with an override', async () => {
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    // isFixedOtpAllowed() is true under the test NODE_ENV; a non-empty FIXED_OTP => bypass.
+    const service = new Msg91Service(
+      makeConfig({ MSG91_AUTH_KEY: 'key-123', MSG91_OTP_TEMPLATE_ID: 'env-tpl', FIXED_OTP: '123456' }),
+    );
+    await expect(service.sendOtp('9000000001', '123456', 'SMS', 'tenant-tpl')).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('missing-authKey dev bypass short-circuits BEFORE fetch, even with an override', async () => {
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const service = new Msg91Service(makeConfig({ MSG91_OTP_TEMPLATE_ID: 'env-tpl' })); // no authKey
+    await expect(service.sendOtp('9000000001', '123456', 'SMS', 'tenant-tpl')).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

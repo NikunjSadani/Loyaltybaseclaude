@@ -17,6 +17,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { KYC_FIELD_ORDER, kycFieldDecisionHeader, kycFieldRemarkHeader } from './kyc-review-dump';
@@ -140,6 +141,7 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
           },
         },
         { provide: Msg91Service, useValue: { sendOtp: jest.fn() } },
+        { provide: TenantSettingsService, useValue: { getOtpTemplateId: jest.fn(async () => undefined) } },
         { provide: StorageService, useValue: mockStorage },
         { provide: JwtService, useValue: { sign: jest.fn(), verify: jest.fn() } },
         { provide: ConfigService, useValue: { get: jest.fn(() => 'test-secret') } },

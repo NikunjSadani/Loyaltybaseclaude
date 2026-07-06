@@ -130,7 +130,7 @@ export class AuthService {
 
   // ── Send OTP ────────────────────────────────────────────────────────────────
 
-  async sendOtp(phone: string, channel: 'SMS' | 'WHATSAPP'): Promise<{ success: boolean; expiresIn: number }> {
+  async sendOtp(phone: string, channel: 'SMS' | 'WHATSAPP', clientId?: string): Promise<{ success: boolean; expiresIn: number }> {
     if (!phone || phone.replace(/\D/g, '').length !== 10) {
       throw new BadRequestException('Invalid phone number — must be 10 digits');
     }
@@ -192,8 +192,8 @@ export class AuthService {
       },
     });
 
-    // Send via MSG91
-    await this.sendViaMSG91(cleanPhone, otp, channel);
+    // Send via MSG91 — pass the tenant so the per-tenant login template can be resolved.
+    await this.sendViaMSG91(cleanPhone, otp, channel, clientId);
 
     // Mask the phone in logs (PII) — last 4 digits only. cleanPhone is the 10-digit number.
     this.logger.log(`OTP sent to ****${cleanPhone.slice(-4)} via ${channel}`);
@@ -531,10 +531,12 @@ export class AuthService {
     return generateNumericOtp();
   }
 
-  private async sendViaMSG91(phone: string, otp: string, channel: 'SMS' | 'WHATSAPP'): Promise<void> {
+  private async sendViaMSG91(phone: string, otp: string, channel: 'SMS' | 'WHATSAPP', clientId?: string): Promise<void> {
     // Delegates to the shared Msg91Service — behavior is byte-identical to the
     // former inline implementation (FIXED_OTP/missing-authKey bypasses + the
     // HTTP-200-with-{type:'error'} failure check live there now).
-    await this.msg91.sendOtp(phone, otp, channel);
+    // Per-tenant login template; undefined (no clientId / no override) → global env template.
+    const tpl = await this.tenantSettings.getOtpTemplateId(clientId, 'login');
+    await this.msg91.sendOtp(phone, otp, channel, tpl);
   }
 }

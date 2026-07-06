@@ -33,6 +33,26 @@ export interface SalesAppSettings {
   upiEnabled:               boolean;
 }
 
+/**
+ * Per-tenant, per-purpose MSG91 OTP template IDs. Each field holds an MSG91-registered
+ * template_id used for that OTP purpose; an EMPTY string means "use the global env
+ * template" (MSG91_OTP_TEMPLATE_ID) — the prior behaviour, so platform + unconfigured
+ * tenants are byte-identical to before.
+ */
+export interface OtpTemplatesSettings {
+  /** Login OTP (pre-auth send-otp). */
+  login:           string;
+  /** Partner SELF redemption confirmation OTP. */
+  redemptionSelf:  string;
+  /** Outlet-owner KYC consent OTP. */
+  kycConsent:      string;
+  /** SALES-ASSISTED redemption OTP (sent to the outlet's phone). */
+  redemptionSales: string;
+}
+
+/** The distinguishable OTP purposes, keyed to OtpTemplatesSettings. */
+export type OtpTemplatePurpose = 'login' | 'redemptionSelf' | 'kycConsent' | 'redemptionSales';
+
 export interface CreditsPayoutsSettings {
   monthCutoffDay:  number;
   safetyCapPoints: number;
@@ -65,6 +85,11 @@ export interface EffectiveSettings {
   redemptionChannels:     RedemptionChannels;
   salesApp:               SalesAppSettings;
   creditsPayouts:         CreditsPayoutsSettings;
+  /**
+   * Per-tenant, per-purpose OTP template IDs. Every field defaults to '' (use the global
+   * env template). Resolved per send site via getOtpTemplateId(clientId, purpose).
+   */
+  otpTemplates:           OtpTemplatesSettings;
   /**
    * Allowed "Program Name" values for the Outlet Master upload (per-tenant). Drives the
    * upload validator + template generator on the FE. The value stored on each outlet stays
@@ -100,6 +125,7 @@ type SettingKey =
   | 'redemptionChannels'
   | 'salesApp'
   | 'creditsPayouts'
+  | 'otpTemplates'
   | 'outletPrograms'
   | 'outletCategories';
 
@@ -107,6 +133,7 @@ const NESTED_KEYS: ReadonlySet<SettingKey> = new Set([
   'redemptionChannels',
   'salesApp',
   'creditsPayouts',
+  'otpTemplates',
 ]);
 
 @Injectable()
@@ -157,6 +184,14 @@ export class TenantSettingsService {
         fourEyesEnabled: false,
         notifyEmails:    [],
       },
+      // Every OTP template defaults to '' = "use the global env template" (MSG91_OTP_TEMPLATE_ID),
+      // so a tenant that hasn't configured per-purpose templates behaves exactly as before.
+      otpTemplates: {
+        login:           '',
+        redemptionSelf:  '',
+        kycConsent:      '',
+        redemptionSales: '',
+      },
       // Allowed Outlet Master upload lists — default to the prior hardcoded FE constants
       // so existing tenants see no behaviour change until they customise them.
       outletPrograms:   ['Trade Loyalty', 'Gold Programme'],
@@ -192,6 +227,31 @@ export class TenantSettingsService {
   /** Convenience for the money path. */
   async getConversionRate(clientId: string): Promise<number> {
     return (await this.getEffectiveSettings(clientId)).conversionRate;
+  }
+
+  /**
+   * Resolve the per-tenant MSG91 template id for an OTP purpose, or `undefined` to fall
+   * back to the global env template (MSG91_OTP_TEMPLATE_ID). Returns `undefined` when:
+   *   - clientId is falsy (e.g. pre-auth login before the tenant is known), OR
+   *   - the tenant has no non-empty override for that purpose.
+   * NEVER throws — a settings read failure resolves to `undefined` so the send site
+   * transparently uses the global template rather than failing the OTP.
+   */
+  async getOtpTemplateId(
+    clientId: string | undefined | null,
+    purpose: OtpTemplatePurpose,
+  ): Promise<string | undefined> {
+    if (!clientId) return undefined;
+    try {
+      const settings = await this.getEffectiveSettings(clientId);
+      const tpl = settings.otpTemplates[purpose]?.trim();
+      return tpl ? tpl : undefined;
+    } catch (e) {
+      // getEffectiveSettings already fails-soft to defaults, but belt-and-braces: any
+      // unexpected throw here must fall back to the global template, never break the send.
+      this.logger.warn(`getOtpTemplateId(${clientId}, ${purpose}) failed; using env template: ${e}`);
+      return undefined;
+    }
   }
 
   /**
@@ -235,6 +295,7 @@ export class TenantSettingsService {
       redemptionChannels: { ...base.redemptionChannels },
       salesApp:           { ...base.salesApp },
       creditsPayouts:     { ...base.creditsPayouts },
+      otpTemplates:       { ...base.otpTemplates },
     };
 
     for (const row of rows) {
@@ -314,6 +375,19 @@ export class TenantSettingsService {
           }
           break;
         }
+        case 'otpTemplates': {
+          if (this.isObj(v)) {
+            const d = base.otpTemplates;
+            // Each field is a trimmed string; a non-string / missing value → '' (use env template).
+            out.otpTemplates = {
+              login:           this.str(v.login,           d.login),
+              redemptionSelf:  this.str(v.redemptionSelf,  d.redemptionSelf),
+              kycConsent:      this.str(v.kycConsent,       d.kycConsent),
+              redemptionSales: this.str(v.redemptionSales, d.redemptionSales),
+            };
+          }
+          break;
+        }
         case 'outletPrograms': {
           // Replace-whole list. A non-array OR an empty (post-clean) list keeps the default,
           // so a tenant can never lock itself out of all outlet uploads.
@@ -367,6 +441,10 @@ export class TenantSettingsService {
   }
   private bool(v: unknown, fallback: boolean): boolean {
     return typeof v === 'boolean' ? v : fallback;
+  }
+  /** A trimmed string; a non-string / missing value falls back to the default (usually ''). */
+  private str(v: unknown, fallback: string): string {
+    return typeof v === 'string' ? v.trim() : fallback;
   }
   private isObj(v: unknown): v is Record<string, unknown> {
     return typeof v === 'object' && v !== null && !Array.isArray(v);

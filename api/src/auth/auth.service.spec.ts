@@ -197,6 +197,43 @@ describe('AuthService', () => {
     it('should reject invalid phone (< 10 digits)', async () => {
       await expect(service.sendOtp('12345', 'SMS')).rejects.toThrow();
     });
+
+    it('uses the global env template when the tenant has no login override', async () => {
+      mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp_1' });
+      // programSetting.findMany defaults to [] → no otpTemplates override → undefined → env template.
+      await service.sendOtp('9876543210', 'SMS', 'deoleo');
+
+      const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body);
+      expect(body.template_id).toBe('test-template'); // MSG91_OTP_TEMPLATE_ID env
+    });
+
+    it('threads the per-tenant login template into the MSG91 send when configured', async () => {
+      mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp_1' });
+      mockPrisma.programSetting.findMany.mockResolvedValueOnce([
+        { settingKey: 'otpTemplates', settingValue: { login: 'login-tpl' } },
+      ]);
+
+      await service.sendOtp('9876543210', 'SMS', 'deoleo');
+
+      const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body);
+      expect(body.template_id).toBe('login-tpl');
+    });
+
+    it('uses the env template when no clientId is passed (pre-auth, tenant unknown)', async () => {
+      mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp_1' });
+      mockPrisma.programSetting.findMany.mockResolvedValueOnce([
+        { settingKey: 'otpTemplates', settingValue: { login: 'login-tpl' } },
+      ]);
+
+      // No clientId → getOtpTemplateId short-circuits to undefined → env template (no DB read).
+      await service.sendOtp('9876543210', 'SMS');
+
+      const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body);
+      expect(body.template_id).toBe('test-template');
+    });
   });
 
   // â”€â”€ verifyOtp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

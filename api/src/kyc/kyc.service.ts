@@ -16,6 +16,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
@@ -150,6 +151,7 @@ export class KycService {
     private readonly notifications: NotificationsService,
     private readonly salesNotifications: SalesNotificationsService,
     private readonly msg91: Msg91Service,
+    private readonly tenantSettings: TenantSettingsService,
     private readonly storage: StorageService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
@@ -361,7 +363,9 @@ export class KycService {
     });
 
     // Real send in prod; a no-op when FIXED_OTP is honored (msg91 service handles it).
-    await this.msg91.sendOtp(mobile, otp, 'SMS');
+    // Per-tenant KYC consent template; undefined → global env template.
+    const tpl = await this.tenantSettings.getOtpTemplateId(user.clientId, 'kycConsent');
+    await this.msg91.sendOtp(mobile, otp, 'SMS', tpl);
     return { success: true, expiresIn: 600 };
   }
 

@@ -19,7 +19,7 @@ export class AuthController {
   @Post('send-otp')
   @HttpCode(HttpStatus.OK)
   async sendOtp(@Body() dto: SendOtpDto) {
-    return this.authService.sendOtp(dto.phone, dto.channel);
+    return this.authService.sendOtp(dto.phone, dto.channel, dto.clientId);
   }
 
   /** Step 2 — Verify OTP and receive tokens (10 attempts per minute per IP) */

@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsMobilePhone, IsIn, Length } from 'class-validator';
+import { IsString, IsNotEmpty, IsMobilePhone, IsIn, Length, IsOptional } from 'class-validator';
 
 export class SendOtpDto {
   @IsMobilePhone('en-IN', {}, { message: 'Must be a valid 10-digit Indian mobile number' })
@@ -7,6 +7,15 @@ export class SendOtpDto {
 
   @IsIn(['SMS', 'WHATSAPP'], { message: 'channel must be SMS or WHATSAPP' })
   channel: 'SMS' | 'WHATSAPP';
+
+  /**
+   * The tenant slug resolved by the FE from the request Host (pre-auth, so no session yet).
+   * Used only to pick the per-tenant login OTP template; falls back to the global env
+   * template when absent. Optional so an unbranded/legacy caller still works.
+   */
+  @IsOptional()
+  @IsString()
+  clientId?: string;
 }
 
 export class VerifyOtpDto {

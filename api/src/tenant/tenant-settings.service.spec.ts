@@ -207,6 +207,65 @@ describe('TenantSettingsService', () => {
     });
   });
 
+  describe('otpTemplates + getOtpTemplateId', () => {
+    it('defaults every otpTemplates field to empty string', async () => {
+      const s = await new TenantSettingsService(makePrisma([])).getEffectiveSettings('deoleo');
+      expect(s.otpTemplates).toEqual({
+        login: '', redemptionSelf: '', kycConsent: '', redemptionSales: '',
+      });
+    });
+
+    it('DEEP-MERGES a partial otpTemplates override, keeping sibling defaults + trimming', async () => {
+      const svc = new TenantSettingsService(makePrisma([
+        { settingKey: 'otpTemplates', settingValue: { login: '  login-tpl  ', redemptionSales: 'sales-tpl' } },
+      ]));
+      const s = await svc.getEffectiveSettings('deoleo');
+      expect(s.otpTemplates).toEqual({
+        login: 'login-tpl', redemptionSelf: '', kycConsent: '', redemptionSales: 'sales-tpl',
+      });
+    });
+
+    it('coerces a non-string otpTemplates field to empty string', async () => {
+      const svc = new TenantSettingsService(makePrisma([
+        { settingKey: 'otpTemplates', settingValue: { login: 42, kycConsent: null } },
+      ]));
+      const s = await svc.getEffectiveSettings('deoleo');
+      expect(s.otpTemplates.login).toBe('');
+      expect(s.otpTemplates.kycConsent).toBe('');
+    });
+
+    it('getOtpTemplateId returns the configured value for a set purpose', async () => {
+      const svc = new TenantSettingsService(makePrisma([
+        { settingKey: 'otpTemplates', settingValue: { login: 'login-tpl' } },
+      ]));
+      expect(await svc.getOtpTemplateId('deoleo', 'login')).toBe('login-tpl');
+    });
+
+    it('getOtpTemplateId returns undefined for an empty/unset purpose', async () => {
+      const svc = new TenantSettingsService(makePrisma([
+        { settingKey: 'otpTemplates', settingValue: { login: 'login-tpl' } },
+      ]));
+      // kycConsent unset → undefined (fall back to the global env template).
+      expect(await svc.getOtpTemplateId('deoleo', 'kycConsent')).toBeUndefined();
+    });
+
+    it('getOtpTemplateId returns undefined for a falsy clientId (no DB read)', async () => {
+      const prisma = makePrisma([{ settingKey: 'otpTemplates', settingValue: { login: 'x' } }]);
+      const svc = new TenantSettingsService(prisma);
+      expect(await svc.getOtpTemplateId(undefined, 'login')).toBeUndefined();
+      expect(await svc.getOtpTemplateId(null, 'login')).toBeUndefined();
+      expect(await svc.getOtpTemplateId('', 'login')).toBeUndefined();
+      expect(prisma.programSetting.findMany).not.toHaveBeenCalled();
+    });
+
+    it('getOtpTemplateId returns undefined (never throws) when the read throws', async () => {
+      const prisma = { programSetting: { findMany: jest.fn().mockRejectedValue(new Error('db down')) } } as any;
+      const svc = new TenantSettingsService(prisma);
+      // getEffectiveSettings fails-soft to defaults (all ''), so this resolves to undefined.
+      await expect(svc.getOtpTemplateId('deoleo', 'login')).resolves.toBeUndefined();
+    });
+  });
+
   it('falls back to defaults if the settings read throws (never crashes a money path)', async () => {
     const prisma = { programSetting: { findMany: jest.fn().mockRejectedValue(new Error('db down')) } } as any;
     const svc = new TenantSettingsService(prisma);

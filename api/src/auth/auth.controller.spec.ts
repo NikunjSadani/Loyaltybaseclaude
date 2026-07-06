@@ -39,7 +39,9 @@ describe('AuthController', () => {
 
       const result = await controller.sendOtp({ phone: '9876543210', channel: 'SMS' });
 
-      expect(mockAuthService.sendOtp).toHaveBeenCalledWith('9876543210', 'SMS');
+      // 3rd arg = the FE-resolved tenant slug for the per-tenant login OTP template
+      // (undefined here → the backend falls back to the global env template).
+      expect(mockAuthService.sendOtp).toHaveBeenCalledWith('9876543210', 'SMS', undefined);
       expect(result.success).toBe(true);
     });
   });

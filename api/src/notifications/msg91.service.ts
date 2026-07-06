@@ -14,12 +14,21 @@ export class Msg91Service {
 
   constructor(private readonly config: ConfigService) {}
 
-  async sendOtp(phone: string, otp: string, channel: 'SMS' | 'WHATSAPP' = 'SMS'): Promise<void> {
+  async sendOtp(
+    phone: string,
+    otp: string,
+    channel: 'SMS' | 'WHATSAPP' = 'SMS',
+    templateId?: string,
+  ): Promise<void> {
     // `.trim()` defends against secrets saved with a leading UTF-8 BOM (U+FEFF) or
     // stray whitespace/newline — a BOM on MSG91_AUTH_KEY made `fetch` throw a
     // ByteString error ("character … value 65279") when set as the authkey header.
     const authKey    = this.config.get<string>('MSG91_AUTH_KEY')?.trim();
-    const templateId = this.config.get<string>('MSG91_OTP_TEMPLATE_ID')?.trim();
+    // Per-tenant, per-purpose template override: use the caller-supplied templateId when
+    // it's a non-empty string, else fall back to the global env template (prior behaviour,
+    // so platform + unconfigured tenants are byte-identical to before).
+    const override   = templateId?.trim();
+    const resolvedTemplateId = override || this.config.get<string>('MSG91_OTP_TEMPLATE_ID')?.trim();
     // FIXED_OTP is a dev/staging convenience only, gated by isFixedOtpAllowed (non-prod
     // NODE_ENV, or an explicit ALLOW_FIXED_OTP opt-in; always refused on the prod DB). On
     // prod we fall through to the real MSG91 call so a stray env var can't suppress real SMS.
@@ -41,7 +50,7 @@ export class Msg91Service {
     // so it is NOT passed here. Both SMS and WhatsApp use the same endpoint;
     // routing is determined by the template type registered in MSG91.
     const url  = 'https://control.msg91.com/api/v5/otp';
-    const body = { template_id: templateId, mobile: `91${phone}`, otp };
+    const body = { template_id: resolvedTemplateId, mobile: `91${phone}`, otp };
 
     // Never hang the OTP request on an unresponsive MSG91 (e.g. egress/IP-whitelist issues):
     // a 10s timeout makes the send fail fast with a clear error instead of an endless spinner.

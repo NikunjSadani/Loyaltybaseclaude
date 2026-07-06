@@ -493,7 +493,9 @@ export class RewardsService {
     // (the default Nest logger emits debug in prod → it would land in Cloud Logging).
     this.logger.debug(`[redeemForOutlet] OTP generated for order ${order.id}`);
     try {
-      await this.msg91.sendOtp(otpPhone, otp, 'SMS');
+      // Per-tenant SALES-ASSISTED redemption template; undefined → global env template.
+      const tpl = await this.tenantSettings.getOtpTemplateId(user.clientId, 'redemptionSales');
+      await this.msg91.sendOtp(otpPhone, otp, 'SMS', tpl);
     } catch (e) {
       this.logger.error(`[redeemForOutlet] OTP send failed for order ${order.id}: ${e}`);
       // No debit happened at redeem (pointsDeducted:0), so just undo the OTP + order so nothing is orphaned.
@@ -912,7 +914,9 @@ export class RewardsService {
     // emits debug in prod → it would land in Cloud Logging).
     this.logger.debug(`[redeem] OTP generated for order ${order.id}`);
     try {
-      await this.msg91.sendOtp(user.phone, otp, 'SMS');
+      // Per-tenant SELF redemption template; undefined → global env template.
+      const tpl = await this.tenantSettings.getOtpTemplateId(user.clientId, 'redemptionSelf');
+      await this.msg91.sendOtp(user.phone, otp, 'SMS', tpl);
     } catch (e) {
       this.logger.error(`[redeem] OTP send failed for order ${order.id}: ${e}`);
       // No debit happened at redeem (pointsDeducted:0), so just undo the OTP + order so nothing is orphaned.

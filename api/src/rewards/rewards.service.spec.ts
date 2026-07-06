@@ -81,9 +81,13 @@ const LENIENT_SETTINGS = () => ({
   creditsPayouts: { monthCutoffDay: 28, safetyCapPoints: 50000, safetyCapInr: 100000, fourEyesEnabled: false, notifyEmails: [] },
 });
 let mockSettings = LENIENT_SETTINGS();
+// Per-tenant, per-purpose OTP template id. Default undefined = "use the global env
+// template" (unchanged legacy behaviour); the OTP-template block overrides per case.
+let mockOtpTemplateId: string | undefined = undefined;
 const mockTenantSettings = {
   getEffectiveSettings: jest.fn(async () => mockSettings),
   getConversionRate: jest.fn(async () => mockSettings.conversionRate),
+  getOtpTemplateId: jest.fn(async () => mockOtpTemplateId),
 };
 
 // Default for the in-tx TOCTOU eligibility re-check (`tx.channelPartner.findFirst`).
@@ -127,6 +131,7 @@ describe('RewardsService', () => {
     }).compile();
     service = module.get(RewardsService);
     mockSettings = LENIENT_SETTINGS();
+    mockOtpTemplateId = undefined; // default: no per-tenant override (global env template)
     // Default: atomic claims (PENDING→CONFIRMED, refund pointsDeducted>0→0, stock
     // decrement) win. Individual tests override to simulate a lost race.
     mockPrisma.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
@@ -500,6 +505,25 @@ describe('RewardsService', () => {
       expect(otpCreate.data.code).toMatch(/^\d{6}$/);
       expect(res.requiredPoints).toBe(1000);
       expect(res.orderId).toBe('o1');
+    });
+
+    it('resolves the per-tenant redemptionSelf template and passes it to sendOtp', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o1', orderNumber: 'RDM-x' });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+
+      // Unset → sendOtp gets undefined (global env template).
+      await service.redeem(partner, { rewardId: 'r1', quantity: 1 });
+      expect(mockTenantSettings.getOtpTemplateId).toHaveBeenCalledWith('deoleo', 'redemptionSelf');
+      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('9991112222', expect.stringMatching(/^\d{6}$/), 'SMS', undefined);
+
+      // Configured → sendOtp gets the per-tenant template id.
+      jest.clearAllMocks();
+      mockOtpTemplateId = 'self-tpl';
+      await service.redeem(partner, { rewardId: 'r1', quantity: 1 });
+      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('9991112222', expect.stringMatching(/^\d{6}$/), 'SMS', 'self-tpl');
     });
 
     it('A-2a: OTP send failure cancels the order, clears the OTP, and 503s', async () => {
@@ -962,7 +986,8 @@ describe('RewardsService', () => {
       expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'cp-out' } });
 
       // OTP delivered synchronously to the OUTLET's phone (A-2a: Msg91Service.sendOtp).
-      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('9000000000', expect.stringMatching(/^\d{6}$/), 'SMS');
+      // 4th arg = resolved per-tenant template (undefined here → global env template).
+      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('9000000000', expect.stringMatching(/^\d{6}$/), 'SMS', undefined);
 
       // Audit trail records the operating sales user.
       const audit = mockPrisma.auditLog.create.mock.calls?.[0]?.[0];
@@ -978,6 +1003,17 @@ describe('RewardsService', () => {
 
       expect(res.orderId).toBe('o-out');
       expect(res.requiredPoints).toBe(1000);
+    });
+
+    it('resolves the per-tenant redemptionSales template and passes it to sendOtp', async () => {
+      wireAssigned();
+      mockOtpTemplateId = 'sales-tpl';
+
+      await service.redeemForOutlet(sales, { rewardId: 'r1', targetPartnerId: 'cp-out' });
+
+      expect(mockTenantSettings.getOtpTemplateId).toHaveBeenCalledWith('deoleo', 'redemptionSales');
+      // Sent to the OUTLET's phone with the resolved per-tenant template.
+      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('9000000000', expect.stringMatching(/^\d{6}$/), 'SMS', 'sales-tpl');
     });
 
     it('rejects insufficient OUTLET balance with 400 and creates NO order', async () => {

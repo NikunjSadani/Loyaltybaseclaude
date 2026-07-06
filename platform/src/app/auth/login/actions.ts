@@ -39,11 +39,15 @@ export async function sendOTP(
 ): Promise<SendOTPResult> {
   try {
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
+    // Resolve the tenant from the request Host (same as verifyOTP) so the backend can
+    // pick the per-tenant login OTP template; absent → the global env template is used.
+    const hdrs = await headers();
+    const clientId = resolveClientId(hdrs.get('x-forwarded-host') ?? hdrs.get('host'));
     const res = await fetch(`${baseUrl}/api/auth/send-otp`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       // Backend SendOtpDto expects `phone` (not `mobile`).
-      body: JSON.stringify({ phone: mobile, channel }),
+      body: JSON.stringify({ phone: mobile, channel, clientId }),
       // Never let an unreachable API host hang the login form forever — fail fast to the
       // catch below (which surfaces "Network error") instead of an endless spinner.
       signal: AbortSignal.timeout(12_000),

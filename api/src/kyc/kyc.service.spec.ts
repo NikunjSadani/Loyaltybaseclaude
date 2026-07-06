@@ -18,6 +18,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { KYC_FIELD_KEYS } from './kyc-verification.helper';
@@ -78,6 +79,13 @@ const mockMsg91 = {
   sendWhatsappTemplate: jest.fn().mockResolvedValue(undefined),
 };
 
+// Per-tenant, per-purpose OTP template resolver. Default undefined = "use the global env
+// template"; the sendConsentOtp template test overrides it per case.
+let mockKycOtpTemplateId: string | undefined = undefined;
+const mockTenantSettings = {
+  getOtpTemplateId: jest.fn(async () => mockKycOtpTemplateId),
+};
+
 const mockStorage = {
   generateKey: jest.fn((folder: string, name: string) => `${folder}/2026-06/uuid-${name}`),
   uploadFile: jest.fn().mockResolvedValue('https://storage.googleapis.com/bucket/key'),
@@ -136,6 +144,7 @@ describe('KycService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockKycOtpTemplateId = undefined; // default: no per-tenant override (global env template)
     // clearAllMocks does not drain mockResolvedValueOnce queues nor clear a
     // mockResolvedValue impl; reset the mocks that create() now also touches so
     // stale values from prior suites (sendConsentOtp etc.) don't bleed.
@@ -184,6 +193,7 @@ describe('KycService', () => {
           },
         },
         { provide: Msg91Service, useValue: mockMsg91 },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: StorageService, useValue: mockStorage },
         { provide: JwtService, useValue: mockJwt },
         { provide: ConfigService, useValue: mockConfig },
@@ -2618,13 +2628,21 @@ describe('KycService', () => {
       mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
     });
 
-    it('creates a KYC_CONSENT OtpCode and sends it via MSG91', async () => {
+    it('creates a KYC_CONSENT OtpCode and sends it via MSG91 (global env template when unset)', async () => {
       const res = await service.sendConsentOtp(partner, dto);
       expect(res).toEqual({ success: true, expiresIn: 600 });
       const created = mockPrisma.otpCode.create.mock.calls[0][0].data;
       expect(created.purpose).toBe('KYC_CONSENT');
       expect(created.phone).toBe('7795096288');
-      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('7795096288', expect.any(String), 'SMS');
+      // 4th arg = resolved per-tenant template; undefined here → global env template.
+      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('7795096288', expect.any(String), 'SMS', undefined);
+      expect(mockTenantSettings.getOtpTemplateId).toHaveBeenCalledWith('deoleo', 'kycConsent');
+    });
+
+    it('passes the per-tenant kycConsent template when one is configured', async () => {
+      mockKycOtpTemplateId = 'kyc-tpl';
+      await service.sendConsentOtp(partner, dto);
+      expect(mockMsg91.sendOtp).toHaveBeenCalledWith('7795096288', expect.any(String), 'SMS', 'kyc-tpl');
     });
 
     it('rejects a number already registered to another enrolled outlet', async () => {
