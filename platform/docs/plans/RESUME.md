@@ -52,8 +52,8 @@ case-insensitive upload + hierarchy phone-correction orphan fix + redeem-button 
 Keep the fix-as-found loop available (owner reports a bug → diagnose → fix/delegate → INDEPENDENT audit → FULL gate → runtime-verify →
 push to `develop`; prod follows on the next `main` deploy). **Remaining is owner-gated (Deoleo go-live):** ✅ conversion rate=1 (verified
 backend) · ✅ first Deoleo CLIENT_ADMIN created (2026-07-02) · ✅ login logo + `/brand/*` fix LIVE (prod `eb841e9`) → **load real master data**
-via the app UIs when the client sends files (**#76 — THE LAST HARD BLOCKER**). Plus **#143**
-— WhatsApp `deoleo_kyc_approval` template runtime-verify (template APPROVED 2026-07-02; needs a real approval to a real phone). The recon'd
+via the app UIs when the client sends files (**#76 — DONE: outlets + hierarchy loaded, no rewards data pending**). **#143 — WhatsApp
+`deoleo_kyc_approval` — DONE: BOTH KYC WhatsApp templates (submit + approval) verified WORKING ON STAGING (owner-confirmed 2026-07-06).** The recon'd
 **scale/ops plan** is COMPLETE on develop (now all in prod via `9d366f9`): pagination stream (W1+W2), observability O1+O2, security
 log-leak fixed, KYC-submit-500 RESOLVED, ASM enrollment, KYC "Rejected/Re-upload" consolidation; notifications/P7 still PAUSED (build all
 events flag-OFF; **email provider still open** — ZeptoMail vs SES). **Required onboarding-flow builds** are logged in POST-GO-LIVE-BACKLOG
@@ -308,8 +308,8 @@ DONE THIS SESSION (all gate-green + independently audited + pushed to `develop`;
     guard) + `kyc.service.sendKycWhatsapp` **fire-and-forget POST-COMMIT** (fully try/catch — can NEVER throw into/block/rollback the KYC tx) wired
     at SUBMIT (`deoleo_kyc_submission`: owner·date·program) + the single canonical `KYC_APPROVED` hook in `notify()` (`deoleo_kyc_approval`:
     owner·program). Recipient = `ChannelPartner.phone` (KYC contact), NOT the rep. Per-tenant config-gated via `notifications/whatsapp-kyc.config.ts`
-    (only `deoleo`). **SUBMIT trigger RUNTIME-VERIFIED — a real WhatsApp was delivered to a test phone (9830011252) on staging.** APPROVAL trigger
-    runtime-verify DEFERRED (the `deoleo_kyc_approval` MSG91 template isn't owner-verified yet — task #143). `MSG91_WHATSAPP_NUMBER` defaults to the
+    (only `deoleo`). **BOTH KYC WhatsApp templates RUNTIME-VERIFIED WORKING ON STAGING (owner-confirmed 2026-07-06):** SUBMIT (`deoleo_kyc_submission`)
+    AND APPROVAL (`deoleo_kyc_approval`) — real WhatsApp delivered. #143 CLOSED; residual is only to eyeball the first real PROD approval (not a blocker). `MSG91_WHATSAPP_NUMBER` defaults to the
     number in code; add explicitly to prod env at cutover. **Pattern for a NEW transactional WhatsApp/SMS: add to `whatsapp-kyc.config.ts` + call
     `sendWhatsappTemplate` fire-and-forget post-commit; success logs nothing → confirm on a real phone.**
   · **ADMIN-CREATION UI** (`d306129`, audit SHIP) — closed an owner-found gap: there was NO UI to create admins (backend `POST /v1/admin/users`
@@ -573,9 +573,9 @@ resolved a 307 that first rendered the wordmark as a broken image (the auth-midd
 `brand/`). Cutover #3 shipped the re-KYC batch (see DONE-THIS-SESSION): **field-level re-KYC** (non-flagged fields locked, backend-enforced;
 approver highlight), **re-KYC in-flight display fix** (`isReKycActionable`), **program-name/category case-insensitive upload**, **hierarchy
 phone-correction orphan fix** (+ 8 staging orphans cleaned), **redeem-button KYC gate**. **Owner-gated Deoleo go-live: ✅ conversion rate=1
-(verified backend) · ✅ first CLIENT_ADMIN created (2026-07-02) · ✅ login logo + `/brand/*` fix LIVE (prod `eb841e9`) · ⏳ load real master
-data (#76 — the LAST hard blocker, waits on the client's files) · ⏳ #143 WhatsApp `deoleo_kyc_approval` runtime-verify (code-ready,
-template APPROVED — needs a real approval+phone).** Scale/ops COMPLETE + now in prod (pagination, observability O1+O2, log-leak fix,
+(verified backend) · ✅ first CLIENT_ADMIN created (2026-07-02) · ✅ login logo + `/brand/*` fix LIVE (prod `eb841e9`) · ✅ #76 master
+data DONE (outlets + hierarchy loaded, no rewards data pending) · ✅ #143 WhatsApp `deoleo_kyc_approval` DONE — BOTH KYC WhatsApp templates
+(submit + approval) verified WORKING ON STAGING (owner-confirmed 2026-07-06).** Scale/ops COMPLETE + now in prod (pagination, observability O1+O2, log-leak fix,
 KYC-submit-500, ASM enrollment, conversion-rate editor, Rejected/Re-upload, download-helper sweep, WhatsApp-post-OTP, OTP-gates-routing,
 KYC-PDF render, not-interested-404), as is the earlier C-batch (C7 `/admin/outlets/ids` · C9 GIFSY security-config #101 via
 `auth.constants.ts` · C10 force-logout) and the sales-KYC/UX batch (assignment-driven KYC list, branch member-filter, etc.).
