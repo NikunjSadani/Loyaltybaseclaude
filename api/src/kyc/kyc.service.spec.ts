@@ -1171,6 +1171,60 @@ describe('KycService', () => {
       const res = await service.approve(gifsy, 's1');
       expect(res).toEqual({ message: 'KYC approved successfully' });
     });
+
+    /**
+     * Seed an approve() happy path whose loaded outlet is `isPrimary: false` — the
+     * REAL prod shape (outlets are created with isPrimary=false; only seed/test data
+     * flags primary). Before the fix the load filtered on `isPrimary: true`, so this
+     * outlet was excluded → outlets[]=[] → whatsappProgramName=null → blank message.
+     * The load now orders `isPrimary desc, createdAt asc` (no isPrimary filter), so
+     * the non-primary outlet resolves and carries its programName.
+     */
+    const seedApproveNonPrimaryOutlet = () => {
+      const partnerWithOwner = {
+        userId: 'owner-9',
+        clientId: 'deoleo',
+        ownerName: 'Acme Owner',
+        phone: '9000000001',
+        outlets: [
+          { id: 'outlet-1', isPrimary: false, deletedAt: null, reKycFlags: null, programName: 'Wholesale' },
+        ],
+      };
+      const row = {
+        id: 's1',
+        userId: 'user1',
+        status: 'PENDING_GIFSY',
+        partnerId: 'p1',
+        user: { name: 'n', phone: 'p' },
+        partner: partnerWithOwner,
+      };
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(row);
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(row);
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
+      mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({ id: 'w1' });
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+    };
+
+    it('APPROVE (regression): resolves whatsappProgramName from a NON-primary outlet (real prod shape)', async () => {
+      seedApproveNonPrimaryOutlet();
+      await service.approve(gifsy, 's1');
+
+      // The approval WhatsApp must carry the outlet's real programName — not a blank.
+      expect(mockMsg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
+      const [phone, template, values] = mockMsg91.sendWhatsappTemplate.mock.calls[0];
+      expect(phone).toBe('9000000001');
+      expect(template).toBe('deoleo_kyc_approval');
+      // [ownerName, programName] — the 2nd body value must be the outlet's program.
+      expect(values).toEqual(['Acme Owner', 'Wholesale']);
+      expect(values[1]).toBe('Wholesale');
+    });
   });
 
   describe('list', () => {

@@ -1722,8 +1722,18 @@ export class KycService {
           user: true,
           partner: {
             include: {
+              // WHY no `isPrimary: true` filter: real outlets are created with
+              // isPrimary=false (schema default; nothing in the upload/creation path
+              // flags an outlet primary — only seed/test data does). Filtering on
+              // isPrimary:true returned an EMPTY outlets[] in prod, so the approval
+              // WhatsApp's program name resolved to null (blank "…enrolled under ").
+              // applyBridgeOutcome reads outlets[0] for whatsappProgramName (approve)
+              // AND as the outlet to attach reKycFlags (re-upload) — both must be a
+              // REAL outlet. Prefer a primary if one is ever flagged, else the first
+              // (oldest) non-deleted outlet; forward-correct if isPrimary is ever set.
               outlets: {
-                where: { isPrimary: true, deletedAt: null },
+                where: { deletedAt: null },
+                orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
                 take: 1,
               },
             },
@@ -1848,8 +1858,18 @@ export class KycService {
           user: true,
           partner: {
             include: {
+              // WHY no `isPrimary: true` filter: real outlets are created with
+              // isPrimary=false (schema default; nothing in the upload/creation path
+              // flags an outlet primary — only seed/test data does). Filtering on
+              // isPrimary:true returned an EMPTY outlets[] in prod, so the approval
+              // WhatsApp's program name resolved to null (blank "…enrolled under ").
+              // applyBridgeOutcome reads outlets[0] for whatsappProgramName (approve)
+              // AND as the outlet to attach reKycFlags (re-upload) — both must be a
+              // REAL outlet. Prefer a primary if one is ever flagged, else the first
+              // (oldest) non-deleted outlet; forward-correct if isPrimary is ever set.
               outlets: {
-                where: { isPrimary: true, deletedAt: null },
+                where: { deletedAt: null },
+                orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
                 take: 1,
               },
             },
