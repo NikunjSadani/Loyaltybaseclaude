@@ -42,3 +42,6 @@ coverage/
 
 # Misc
 *.tmp
+
+# Local Claude preview dev-server config (machine-specific paths)
+.claude/launch.json
