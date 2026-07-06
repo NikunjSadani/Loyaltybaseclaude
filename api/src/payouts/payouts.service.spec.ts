@@ -18,8 +18,6 @@ const mockTx = {
   auditLog: { create: jest.fn() },
   payoutTransaction: { update: jest.fn() },
   payoutBatch: { update: jest.fn() },
-  // Flow-B payout WhatsApp resolves the partner owner (ownerName+phone) inside the tx.
-  channelPartner: { findFirst: jest.fn() },
   redemptionOrder: {
     findFirst: jest.fn(),
     update: jest.fn(),
@@ -48,6 +46,10 @@ const mockPrisma = {
   fundLedger: { findFirst: jest.fn() },
   tdsRecord: { create: jest.fn() },
   auditLog: { create: jest.fn() },
+  // Flow-B payout WhatsApp batch-reads the partner owner (ownerName+phone) + the
+  // redemption order (pointsDeducted) POST-COMMIT — not inside the tx.
+  channelPartner: { findMany: jest.fn() },
+  redemptionOrder: { findMany: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
 };
 
@@ -773,9 +775,12 @@ describe('PayoutsService', () => {
       mockTx.redemptionOrder.update.mockResolvedValue({});
       mockTx.redemptionOrder.updateMany.mockResolvedValue({ count: 1 });
       mockTx.payoutTransaction.update.mockResolvedValue({});
-      // Flow-B payout WhatsApp: default partner owner (bare 10-digit phone) + redemption points.
-      mockTx.channelPartner.findFirst.mockResolvedValue({ ownerName: 'Ravi Traders', phone: '9900000041' });
+      // FAILED path still reads the order inside the tx to reverse points.
       mockTx.redemptionOrder.findFirst.mockResolvedValue({ pointsDeducted: 500, partnerId: 'p1', orderNumber: 'RO-1' });
+      // Flow-B payout WhatsApp: POST-COMMIT batch-reads — partner owner (bare 10-digit
+      // phone) keyed by id, and the redemption order (pointsDeducted) keyed by id.
+      mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'p1', ownerName: 'Ravi Traders', phone: '9900000041' }]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([{ id: 'o1', pointsDeducted: 500 }]);
       mockMsg91.sendWhatsappTemplate.mockResolvedValue(undefined);
     });
 
@@ -842,9 +847,9 @@ describe('PayoutsService', () => {
             { id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1' },
           ])
           .mockResolvedValueOnce([]);
-        // Owner + redeemed points resolved inside the tx for the payout WhatsApp.
-        mockTx.channelPartner.findFirst.mockResolvedValue({ ownerName: 'Ravi Traders', phone: '9900000041' });
-        mockTx.redemptionOrder.findFirst.mockResolvedValue({ pointsDeducted: 500, partnerId: 'p1', orderNumber: 'RO-1' });
+        // Owner + redeemed points resolved POST-COMMIT via batch findMany for the WhatsApp.
+        mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'p1', ownerName: 'Ravi Traders', phone: '9900000041' }]);
+        mockPrisma.redemptionOrder.findMany.mockResolvedValue([{ id: 'o1', pointsDeducted: 500 }]);
 
         await service.uploadPayoutUtr(
           gifsy,
@@ -863,6 +868,30 @@ describe('PayoutsService', () => {
       } finally {
         jest.useRealTimers();
       }
+    });
+
+    it('FIX D: a PAID txn with 0/absent redemption points sends NO WhatsApp (guards the "0 points" msg)', async () => {
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          { id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1' },
+        ])
+        .mockResolvedValueOnce([]);
+      // Partner resolves with a valid phone, but the order has 0 points (or is absent) —
+      // e.g. an already-reversed / non-redemption txn. No "0 points" message must go out.
+      mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'p1', ownerName: 'Ravi Traders', phone: '9900000041' }]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([{ id: 'o1', pointsDeducted: 0 }]);
+
+      const res = await service.uploadPayoutUtr(
+        gifsy,
+        'b1',
+        buildUpload([{ txnId: 'txn1', utr: 'UTR12345678', status: 'PAID' }]),
+        true,
+      );
+
+      // The payout still applied, but no WhatsApp fired.
+      expect(res).toMatchObject({ applied: true, paidCount: 1 });
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
     });
 
     it('a payout-credit WhatsApp failure does NOT fail the payout (fire-and-forget)', async () => {

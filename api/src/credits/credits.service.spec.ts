@@ -1176,8 +1176,9 @@ describe('CreditsService', () => {
         entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) }],
       });
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      // FIX C: the recipient is now the KYC-verified partner phone, not outlet.phone.
       mockPrisma.outlet.findMany.mockResolvedValue([
-        { outletCode: 'O1', name: 'A', phone: '9900000041', partnerId: 'p1', partner: { ownerName: 'Ravi Traders' } },
+        { outletCode: 'O1', name: 'A', partnerId: 'p1', partner: { ownerName: 'Ravi Traders', phone: '9900000041' } },
       ]);
 
       const file = buildUtrFile([[downloadCode, 'O1', 'UTR123456', 'Success', '']]);
@@ -1210,8 +1211,9 @@ describe('CreditsService', () => {
           entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(15000) }],
         });
         mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+        // FIX C: recipient = partner.phone (the KYC contact mobile), not outlet.phone.
         mockPrisma.outlet.findMany.mockResolvedValue([
-          { outletCode: 'O1', name: 'A', phone: '9900000041', partnerId: 'p1', partner: { ownerName: 'Ravi Traders' } },
+          { outletCode: 'O1', name: 'A', partnerId: 'p1', partner: { ownerName: 'Ravi Traders', phone: '9900000041' } },
         ]);
 
         const file = buildUtrFile([[downloadCode, 'O1', 'UTR123456', 'Success', '']]);

@@ -8,6 +8,7 @@ import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { paiseToRupees, toPaiseBigInt } from '../common/money';
+import { monthYearIST, formatDateIST } from '../common/ist-date';
 import {
   resolveEffectiveKycStatus,
   isPartnerPayable,
@@ -61,31 +62,6 @@ export class CreditsService {
   ) {}
 
   /**
-   * Format a `YYYY-MM` period (or a Date) as "MMM YYYY" (e.g. "July 2026") for the
-   * WhatsApp money-notification bodies. A malformed period falls back to the raw string.
-   */
-  private monthYear(periodOrDate: string | Date): string {
-    const MONTHS = [
-      'January', 'February', 'March', 'April', 'May', 'June',
-      'July', 'August', 'September', 'October', 'November', 'December',
-    ];
-    if (periodOrDate instanceof Date) {
-      return `${MONTHS[periodOrDate.getMonth()]} ${periodOrDate.getFullYear()}`;
-    }
-    const m = /^(\d{4})-(\d{2})$/.exec(periodOrDate);
-    if (!m) return periodOrDate;
-    const monthIdx = Number(m[2]) - 1;
-    return monthIdx >= 0 && monthIdx < 12 ? `${MONTHS[monthIdx]} ${m[1]}` : periodOrDate;
-  }
-
-  /** Format a date as "DD MMM YYYY" (e.g. "06 Jul 2026") for the WhatsApp money-notification bodies. */
-  private formatDate(d: Date): string {
-    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${day} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
-  }
-
-  /**
    * Send the outlet OWNER a WhatsApp template on a POINTS credit (deoleo_points_credit).
    *
    * Fire-and-forget + POST-COMMIT: MUST NEVER throw into — or roll back — the credit
@@ -131,8 +107,8 @@ export class CreditsService {
         ownerName,
         String(data.totalPoints),
         String(redeemableBalance),
-        this.monthYear(data.period),
-        this.formatDate(new Date()),
+        monthYearIST(data.period),
+        formatDateIST(new Date()),
       ]);
     } catch (e) {
       // Non-critical: a WhatsApp delivery failure must NEVER fail the credit batch.
@@ -1169,47 +1145,57 @@ export class CreditsService {
       .map((r) => r.outletId);
 
     if (paidOutletIds.length > 0) {
-      const outlets = await this.prisma.outlet.findMany({
-        where: { clientId: user.clientId, outletCode: { in: paidOutletIds } },
-        select: {
-          outletCode: true,
-          name: true,
-          phone: true,
-          partnerId: true,
-          // The payout WhatsApp addresses the outlet OWNER by name.
-          partner: { select: { ownerName: true } },
-        },
-      });
-      const phoneMap = new Map(outlets.map((o) => [o.outletCode, o]));
-      for (const row of parseResult.rows) {
-        if (row.status !== 'OK' || !row.success) continue;
-        const entry = download.entries.find((e) => e.outletId === row.outletId);
-        const outlet = phoneMap.get(row.outletId);
-        if (!entry || !outlet?.phone) continue;
+      // POST-COMMIT notify block: the money tx above is already committed, so a fetch
+      // OR send failure here MUST NEVER surface as a 500 — wrap the whole block in a
+      // swallow (mirrors confirmBatch's outer wrap around its post-commit sends).
+      try {
+        const outlets = await this.prisma.outlet.findMany({
+          where: { clientId: user.clientId, outletCode: { in: paidOutletIds } },
+          select: {
+            outletCode: true,
+            name: true,
+            partnerId: true,
+            // The payout WhatsApp addresses the KYC-verified partner OWNER (name + phone) —
+            // NOT the nullable master-file outlet.phone (matches the other two sends).
+            partner: { select: { ownerName: true, phone: true } },
+          },
+        });
+        const phoneMap = new Map(outlets.map((o) => [o.outletCode, o]));
+        for (const row of parseResult.rows) {
+          if (row.status !== 'OK' || !row.success) continue;
+          const entry = download.entries.find((e) => e.outletId === row.outletId);
+          const outlet = phoneMap.get(row.outletId);
+          const phone = outlet?.partner?.phone?.trim();
+          if (!entry || !phone) continue;
 
-        // Owner WhatsApp on payout credit (deoleo_payout_credit). DIRECT send (the old
-        // queued WHATSAPP notify() never delivered — the queue only drains PUSH), fire-
-        // and-forget + POST-COMMIT: the money tx above is already committed, so this
-        // MUST NEVER throw into it. Tenant-gated via WHATSAPP_KYC.
-        //   {{1}} ownerName · {{2}} points · {{3}} UTR · {{4}} date of payment · {{5}} month
-        // pointsPaid = paid amount as a whole number (Deoleo: 1 point = ₹1 → paise ÷ 100).
-        try {
-          const template = WHATSAPP_KYC[user.clientId]?.payoutCreditTemplate;
-          if (template) {
-            const ownerName = outlet.partner?.ownerName?.trim() || 'Partner';
-            const pointsPaid = Math.round(Number(entry.amountPaise) / 100);
-            await this.msg91.sendWhatsappTemplate(outlet.phone, template, [
-              ownerName,
-              String(pointsPaid),
-              row.utr ?? '',
-              this.formatDate(new Date()),
-              this.monthYear(download.period),
-            ]);
+          // Owner WhatsApp on payout credit (deoleo_payout_credit). DIRECT send (the old
+          // queued WHATSAPP notify() never delivered — the queue only drains PUSH), fire-
+          // and-forget + POST-COMMIT: the money tx above is already committed, so this
+          // MUST NEVER throw into it. Tenant-gated via WHATSAPP_KYC.
+          //   {{1}} ownerName · {{2}} points · {{3}} UTR · {{4}} date of payment · {{5}} month
+          // pointsPaid = paid amount as a whole number (Deoleo: 1 point = ₹1 → paise ÷ 100;
+          // assumes a 1:1 conversion rate, which the Deoleo tenant runs).
+          try {
+            const template = WHATSAPP_KYC[user.clientId]?.payoutCreditTemplate;
+            if (template) {
+              const ownerName = outlet?.partner?.ownerName?.trim() || 'Partner';
+              const pointsPaid = Math.round(Number(entry.amountPaise) / 100);
+              await this.msg91.sendWhatsappTemplate(phone, template, [
+                ownerName,
+                String(pointsPaid),
+                row.utr ?? '',
+                formatDateIST(new Date()),
+                monthYearIST(download.period),
+              ]);
+            }
+          } catch (e) {
+            // Non-critical: a WhatsApp delivery failure must NEVER fail the payout.
+            this.logger.warn(`[credit-whatsapp] payout-credit send failed (client ${user.clientId}): ${e}`);
           }
-        } catch (e) {
-          // Non-critical: a WhatsApp delivery failure must NEVER fail the payout.
-          this.logger.warn(`[credit-whatsapp] payout-credit send failed (client ${user.clientId}): ${e}`);
         }
+      } catch (e) {
+        // Non-critical: the post-commit fetch/notify must never surface as a 500.
+        this.logger.warn(`[credit-whatsapp] payout-credit notify block failed (client ${user.clientId}): ${e}`);
       }
     }
 
