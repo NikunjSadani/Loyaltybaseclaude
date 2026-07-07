@@ -43,10 +43,12 @@ const PAYOUT_WITH_NARRATION = {
   payoutAmountPaise: 500_000, paidAt: '2026-05-10T00:00:00.000Z', utr: 'UTR123',
   narration: 'Store branding bonus',
 };
+// A credit row now leads with the resolved FIELD NAME as its header and shows the
+// RAW narration below (only when fieldName is present) — mirroring the sales ledger.
 const TX_WITH_NARRATION = {
   id: 'tx1', transactionType: 'CREDIT_POINTS_EARNED', description: 'Monthly Target — May 2026',
   points: 1000, date: '2026-05-10T00:00:00.000Z', balanceType: 'EARNED', balanceAfter: 1000,
-  referenceType: 'SCHEME', referenceId: 's1', kpiLabel: 'Monthly Target',
+  referenceType: 'CREDIT_BATCH', referenceId: 'b1', fieldName: 'Monthly Target',
   narration: 'Q1 performance bonus',
 };
 const BALANCE = {
@@ -110,5 +112,16 @@ describe('Y — Narration on the combined wallet statement', () => {
     narrations.forEach((el) => {
       expect(el.textContent?.trim().length).toBeGreaterThan(0);
     });
+  });
+
+  it('Y5: a credit row LEADS with the resolved field name (not the raw upload description)', async () => {
+    await renderAndWait();
+    // The header is the fieldName ('Monthly Target'); the raw description
+    // ('Monthly Target — May 2026') is NOT used as the header for a credit row.
+    const item = (await screen.findAllByTestId('transaction-item'))
+      .find((el) => /Q1 performance bonus/.test(el.textContent ?? ''));
+    expect(item).toBeDefined();
+    expect(item!.textContent).toContain('Monthly Target');
+    expect(item!.textContent).not.toContain('Monthly Target — May 2026');
   });
 });

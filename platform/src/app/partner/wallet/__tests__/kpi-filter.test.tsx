@@ -42,12 +42,14 @@ import WalletPage from '../page';
 // option, W2), a DEBIT redemption with no kpiLabel (W3 hide / W4 restore), and a PAID
 // payout whose label is exactly "Visibility" (RETAILER-only option, W6).
 const POINTS_TXNS = [
+  // A credit row: the KPI filter keys on the resolved FIELD NAME (not the dead kpiLabel).
   { id: 'tx1', transactionType: 'CREDIT_POINTS_EARNED', description: 'Monthly Target — May 2026',
     points: 1000, date: '2026-05-10T00:00:00.000Z', balanceType: 'EARNED', balanceAfter: 1000,
-    referenceType: 'SCHEME', referenceId: 's1', kpiLabel: 'Monthly Target' },
+    referenceType: 'CREDIT_BATCH', referenceId: 'b1', fieldName: 'Monthly Target' },
+  // A redemption (non-credit) row: no field name → keeps its own header, no filter option.
   { id: 'tx2', transactionType: 'DEBIT_REDEMPTION', description: 'Redemption — Amazon Voucher',
     points: 500, date: '2026-05-12T00:00:00.000Z', balanceType: 'REDEEMED', balanceAfter: 500,
-    referenceType: 'REDEMPTION', referenceId: 'r1', kpiLabel: null },
+    referenceType: 'REDEMPTION', referenceId: 'r1', fieldName: null },
 ];
 const INR_PAYOUTS = [
   { id: 'p1', status: 'PAID', period: '2026-05', kpiLabel: 'Visibility',

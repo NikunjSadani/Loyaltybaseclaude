@@ -39,9 +39,9 @@ interface ApiWalletTransaction {
   balanceAfter:    number;
   referenceType:   string | null;
   referenceId:     string | null;
-  /** Optional KPI/parameter label (earn entries) — forward-compatible. */
-  kpiLabel?:       string | null;
-  /** Optional admin-supplied note — forward-compatible. */
+  /** Credit FIELD NAME resolved from the batch (credit rows only; null otherwise). */
+  fieldName?:      string | null;
+  /** RAW upload narration (credit rows) — null/empty when the upload carried no note. */
   narration?:      string | null;
 }
 
@@ -73,6 +73,14 @@ function mapApiBalance(api: ApiWalletBalance): WalletBalance {
 }
 
 function mapApiTransaction(t: ApiWalletTransaction): WalletTransaction {
+  // Credit rows lead with the resolved FIELD NAME as the header and show the raw
+  // upload narration as a small gray sub-line below (only when non-empty) — the
+  // same treatment as the sales outlet ledger. Non-credit rows keep their own
+  // description as the header and carry no field-name sub-line.
+  const hasFieldName = !!t.fieldName;
+  const header    = hasFieldName ? (t.fieldName as string) : t.description;
+  const narration = hasFieldName && t.narration ? t.narration : undefined;
+
   return {
     id:             t.id,
     walletId:       'w1',
@@ -81,11 +89,12 @@ function mapApiTransaction(t: ApiWalletTransaction): WalletTransaction {
     bucket:         mapBucket(t.balanceType),
     amount:         t.points,
     balanceAfter:   t.balanceAfter,
-    description:    t.description,
+    description:    header,
     schemeId:       t.referenceId,
     invoiceId:      null,
-    kpiLabel:       t.kpiLabel ?? undefined,
-    narration:      t.narration ?? undefined,
+    // The KPI filter keys on the field name (the backend never populated kpiLabel).
+    kpiLabel:       t.fieldName ?? undefined,
+    narration,
     reversedById:   null,
     reversalReason: null,
     createdAt:      new Date(t.date),
@@ -116,8 +125,10 @@ function isMainEntry(tx: WalletTransaction) { return tx.type===TransactionType.C
    own presentational component (TransactionItem for points, a payout row for INR).
 ─────────────────────────────────────────────────────────────────────────────── */
 
-type PointsRow = { kind: 'points'; date: Date; kpiLabel?: string; tx: WalletTransaction };
-type PayoutRow = { kind: 'payout'; date: Date; kpiLabel?: string; entry: PayoutLedgerEntry };
+// Points rows filter/label on the resolved credit FIELD NAME; payout rows keep
+// their own kpiLabel. `label` is the unified filter key across both kinds.
+type PointsRow = { kind: 'points'; date: Date; label?: string; tx: WalletTransaction };
+type PayoutRow = { kind: 'payout'; date: Date; label?: string; entry: PayoutLedgerEntry };
 type LedgerRow = PointsRow | PayoutRow;
 
 function downloadCombinedStatement(rows: LedgerRow[], period: string) {
@@ -259,7 +270,8 @@ export default function WalletPage() {
   const pointsRows = useMemo<PointsRow[]>(
     () => transactions
       .filter(isMainEntry)
-      .map((tx) => ({ kind: 'points', date: new Date(tx.createdAt), kpiLabel: tx.kpiLabel, tx })),
+      // `tx.kpiLabel` now carries the resolved credit field name (see mapApiTransaction).
+      .map((tx) => ({ kind: 'points', date: new Date(tx.createdAt), label: tx.kpiLabel, tx })),
     [transactions],
   );
 
@@ -271,7 +283,7 @@ export default function WalletPage() {
       .map((p) => {
         const [yr, mo] = p.period.split('-');
         const date = p.paidAt ? new Date(p.paidAt) : new Date(+yr, +mo - 1, 1);
-        return { kind: 'payout', date, kpiLabel: p.kpiLabel, entry: p };
+        return { kind: 'payout', date, label: p.kpiLabel, entry: p };
       }),
     [payouts],
   );
@@ -305,14 +317,14 @@ export default function WalletPage() {
     const isVisibility = identity.outletType === 'SSS' || identity.outletType === 'SSS_TOT';
     return [...new Set(
       periodRows
-        .map((r) => r.kpiLabel)
+        .map((r) => r.label)
         .filter((l): l is string => !!l && (isVisibility || l !== 'Visibility')),
     )];
   }, [periodRows, identity.outletType]);
 
   /* Rows to actually display — periodRows further filtered by kpiFilter, newest first */
   const displayedRows = useMemo(() => {
-    const filtered = kpiFilter ? periodRows.filter((r) => r.kpiLabel === kpiFilter) : periodRows;
+    const filtered = kpiFilter ? periodRows.filter((r) => r.label === kpiFilter) : periodRows;
     return [...filtered].sort((a, b) => +b.date - +a.date);
   }, [periodRows, kpiFilter]);
 

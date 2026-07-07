@@ -29,6 +29,8 @@ const mockPrisma = {
   wallet: { findFirst: jest.fn() },
   walletTransaction: { findMany: jest.fn(), count: jest.fn() },
   pointsLedger: { findMany: jest.fn() },
+  outlet: { findFirst: jest.fn() },
+  creditBatch: { findMany: jest.fn() },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
@@ -386,6 +388,116 @@ describe('WalletService', () => {
       const res = await service.listTransactions(partner, {});
       expect(res.pagination).toEqual({ page: 1, limit: 20, total: 1, pages: 1 });
       expect(res.transactions[0].description).toBe('Points earned');
+      // A non-credit row carries no field name and a null raw narration.
+      expect(res.transactions[0].fieldName).toBeNull();
+      expect(res.transactions[0].narration).toBeNull();
+    });
+
+    it('resolves fieldName for a CREDIT_BATCH row from the batch (blank narration → amount match) and returns the raw narration', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletCode: 'OUT-1' });
+      const creditTx = {
+        id: 'c1',
+        transactionType: 'CREDIT_POINTS_EARNED',
+        description: null, // blank upload narration → resolves by amount only
+        points: 10,
+        createdAt: new Date('2026-02-01'),
+        balanceType: 'REDEEMABLE',
+        balanceAfter: 10,
+        referenceType: 'CREDIT_BATCH',
+        referenceId: 'b1',
+      };
+      // Page query AND the full-set credit query both return this one credit tx.
+      mockPrisma.walletTransaction.findMany.mockResolvedValue([creditTx]);
+      mockPrisma.walletTransaction.count.mockResolvedValue(1);
+      mockPrisma.creditBatch.findMany.mockResolvedValue([
+        { id: 'b1', rows: [{ outletId: 'OUT-1', awardType: 'POINTS', amount: 10, fieldName: 'Volume Target', narration: '' }] },
+      ]);
+
+      const res = await service.listTransactions(partner, {});
+
+      // Batch lookup is tenant-scoped to the caller's client.
+      expect(mockPrisma.creditBatch.findMany).toHaveBeenCalledWith({
+        where: { id: { in: ['b1'] }, clientId: 'deoleo' },
+        select: { id: true, rows: true },
+      });
+      expect(res.transactions[0].fieldName).toBe('Volume Target');
+      // narration is the RAW description (null here since the upload had none).
+      expect(res.transactions[0].narration).toBeNull();
+    });
+
+    it('resolves the field name pagination-robustly — full-set query drives consumption for a single-item page', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletCode: 'OUT-1' });
+      // The PAGE holds only the 2nd (newest) of two same-amount credit rows.
+      const pageTx = {
+        id: 'c2',
+        transactionType: 'CREDIT_POINTS_EARNED',
+        description: null,
+        points: 10,
+        createdAt: new Date('2026-02-02'),
+        balanceType: 'REDEEMABLE',
+        balanceAfter: 20,
+        referenceType: 'CREDIT_BATCH',
+        referenceId: 'b1',
+      };
+      // The FULL credit set (both rows) — resolved over the whole batch so the page
+      // row maps to the SECOND batch row via oldest→newest consumption.
+      const fullCreditSet = [
+        { id: 'c1', referenceType: 'CREDIT_BATCH', referenceId: 'b1', description: null, points: 10, createdAt: new Date('2026-02-01') },
+        { id: 'c2', referenceType: 'CREDIT_BATCH', referenceId: 'b1', description: null, points: 10, createdAt: new Date('2026-02-02') },
+      ];
+      // 1st findMany = the page; 2nd findMany = the full credit set.
+      mockPrisma.walletTransaction.findMany
+        .mockResolvedValueOnce([pageTx])
+        .mockResolvedValueOnce(fullCreditSet);
+      mockPrisma.walletTransaction.count.mockResolvedValue(2);
+      mockPrisma.creditBatch.findMany.mockResolvedValue([
+        { id: 'b1', rows: [
+          { outletId: 'OUT-1', awardType: 'POINTS', amount: 10, fieldName: 'First KPI', narration: '' },
+          { outletId: 'OUT-1', awardType: 'POINTS', amount: 10, fieldName: 'Second KPI', narration: '' },
+        ] },
+      ]);
+
+      const res = await service.listTransactions(partner, {});
+
+      // The page's tx (c2, newest) consumes the SECOND row after c1 (oldest) took the first.
+      expect(res.transactions).toHaveLength(1);
+      expect(res.transactions[0].id).toBe('c2');
+      expect(res.transactions[0].fieldName).toBe('Second KPI');
+    });
+
+    it('leaves a non-credit tx with fieldName:null even when a credit batch is present', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1' });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletCode: 'OUT-1' });
+      const redeemTx = {
+        id: 'r1',
+        transactionType: 'DEBIT_REDEMPTION',
+        description: 'Redeemed a voucher',
+        points: -50,
+        createdAt: new Date('2026-02-03'),
+        balanceType: 'REDEEMED',
+        balanceAfter: 0,
+        referenceType: 'REDEMPTION',
+        referenceId: 'red1',
+      };
+      // Page = the redeem row; full credit-set query = none (no CREDIT_BATCH txns).
+      mockPrisma.walletTransaction.findMany
+        .mockResolvedValueOnce([redeemTx])
+        .mockResolvedValueOnce([]);
+      mockPrisma.walletTransaction.count.mockResolvedValue(1);
+
+      const res = await service.listTransactions(partner, {});
+
+      expect(res.transactions[0].fieldName).toBeNull();
+      // Its description stays its own header; narration is the raw description.
+      expect(res.transactions[0].description).toBe('Redeemed a voucher');
+      expect(res.transactions[0].narration).toBe('Redeemed a voucher');
+      // No CREDIT_BATCH txns → the batch lookup is skipped entirely.
+      expect(mockPrisma.creditBatch.findMany).not.toHaveBeenCalled();
     });
   });
 });

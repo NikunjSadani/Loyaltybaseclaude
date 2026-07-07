@@ -3,6 +3,7 @@ import { Prisma, PointsLedgerType, WalletTransactionType } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { resolveCreditFieldNames } from '../common/credit-field-name.helper';
 import { AdjustType, AdjustWalletDto, ListTransactionsQueryDto } from './dto/wallet.dto';
 
 /**
@@ -283,6 +284,38 @@ export class WalletService {
       this.prisma.walletTransaction.count({ where }),
     ]);
 
+    // ── Resolve the credit FIELD NAME for CREDIT_BATCH rows on this page ──────────
+    // WalletTransaction stores the batch id + narration, not the field name; the
+    // shared resolver replays the batch `rows` JSON read-time. Because this endpoint
+    // is PAGINATED, resolving over ONLY the page could mis-map when a batch straddles
+    // a page boundary (consumption order would be wrong). So we resolve over ALL of
+    // this wallet's CREDIT_BATCH txns (a separate lightweight query), then apply the
+    // Map to the page → pagination-robust, page boundaries can never mis-map.
+    const outlet = await this.prisma.outlet.findFirst({
+      where: { clientId: user.clientId, partnerId: channelPartner.id, deletedAt: null },
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+      select: { outletCode: true },
+    });
+    const outletCode = outlet?.outletCode ?? '';
+
+    const allCreditTxns = await this.prisma.walletTransaction.findMany({
+      where: { walletId: wallet.id, referenceType: 'CREDIT_BATCH' },
+      select: {
+        id: true,
+        referenceType: true,
+        referenceId: true,
+        description: true,
+        points: true,
+        createdAt: true,
+      },
+    });
+    const fieldNameByTxId = await resolveCreditFieldNames(
+      this.prisma,
+      user.clientId,
+      outletCode,
+      allCreditTxns,
+    );
+
     const passbook = transactions.map((t) => ({
       id: t.id,
       transactionType: t.transactionType,
@@ -293,6 +326,11 @@ export class WalletService {
       balanceAfter: t.balanceAfter,
       referenceType: t.referenceType,
       referenceId: t.referenceId,
+      // Credit rows resolve to their batch field name; everything else is null.
+      fieldName: fieldNameByTxId.get(t.id) ?? null,
+      // RAW upload narration (BEFORE the getDefaultDescription fallback) — null/empty
+      // when the upload carried no narration, so the FE only shows a real note.
+      narration: t.description,
     }));
 
     return {
