@@ -8,16 +8,23 @@ client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch *
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
 `dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-06.
 
-🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #7 IS LIVE (prod `98ced7a`, executed 2026-07-07) — the 7 money-path fixes are now IN PROD**
-(verified live on `deoleoloyalty.gifsy.in`: login 200, wordmark 200, /api/health 401=edge auth gate; both prod services on `98ced7a`; pre-cutover
-backup `1783339420752`; CODE-ONLY, 0 migrations; both MSG91 templates `deoleo_points_credit`/`deoleo_payout_credit` APPROVED so they deliver).
-**prod == main == `98ced7a`** — verify the live HEAD via `git log`, do NOT pin HEAD to a single SHA. **🆕 ON DEVELOP (post-cutover-#7, ✅ committed
-`4be63f3`, gate-green, staging-verify + next cutover PENDING): the PRESENCE-BASED partner-wallet reward-track fix** (the partner app's
-points-vs-payout wallet/rewards was DEMO-driven via `partner-session.ts` `REWARD_TRACK`; NOT a money bug — the credit award is
-config-driven/correct — but a display gap; owner design = presence-based: points card if points activity, payout card if payout activity, both
-if both, full combined history always; backend `/partner/me` returns real `outletType`+`hasPointsActivity`+`hasPayoutActivity` + a `loading`
-flag, FE gates on those, demo `REWARD_TRACK`/`usePartnerSession` retired; presence is DATA-DRIVEN so a no-credit-yet outlet shows neither card).
-**So develop is now 1 code fix ahead of prod `98ced7a` (`4be63f3`), pending the next cutover.** **The 7 cutover-#7 fixes (oldest→newest):**
+🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #8 IS LIVE (prod `4b33e4c`, executed 2026-07-07) — a 4-fix UX/parity batch is now IN PROD**
+(verified live on `deoleoloyalty.gifsy.in`: login 200, wordmark 200, /api/health 401=edge auth gate; both prod services on `4b33e4c`; pre-cutover
+backup `1783420492810` `pre-cutover8-develop-4b33e4c`; CODE-ONLY, 0 migrations). **prod == main == develop == `4b33e4c`** — verify the live HEAD
+via `git log`, do NOT pin HEAD to a single SHA. **The 4 cutover-#8 code fixes:** **(A)** `4be63f3` — **PRESENCE-BASED partner-wallet reward-track**
+(the partner app's points-vs-payout wallet/rewards was DEMO-driven via `partner-session.ts` `REWARD_TRACK`; NOT a money bug — the credit award is
+config-driven/correct — but a display gap; presence-based: points card if points activity, payout card if payout activity, both if both, full
+combined history always; backend `/partner/me` returns real `outletType`+`hasPointsActivity`+`hasPayoutActivity`+a `loading` flag; demo
+`REWARD_TRACK`/`usePartnerSession` retired). **(B)** `f1907dc` — **sales outlet ledger: credit rows lead with the FIELD NAME** (resolved read-time
+from the CreditBatch `rows` JSON) + narration sub-line + raw batch CUID dropped + KPI filter wired. **(C)** `33ca0f8` — **pre-OTP submit copy**:
+the sales KYC "Submit KYC" button (which only saves a DRAFT + sends the consent OTP) relabelled **"Send OTP to Outlet Owner"** + a helper line — it
+was confusing users into thinking the KYC was enrolled before OTP (investigated `OUT-2026-001` via a guarded prod read: NOT a bug, routing is
+OTP-gated in `consent()`; it was pure copy perception). **(D)** `4b33e4c` — **partner-wallet field-name parity** via a NEW shared resolver
+`api/src/common/credit-field-name.helper.ts` (EXTRACTED from the sales ledger; kyc.service + wallet.service both call it now — no drift); partner
+wallet credit rows now show field-name header + narration + a working KPI filter (was a generic "Points earned" + dead filter); pagination-robust
+(resolves over the full credit-txn set). Money path untouched in all 4. Gate at `4b33e4c`: **api jest 1484 · nest 0 · FE vitest 1796 · tsc 0.**
+**NEW REUSABLE: the credit FIELD NAME is resolved READ-TIME from `CreditBatch.rows` JSON (WalletTransaction stores only the batch id + narration) via
+`resolveCreditFieldNames` — POINTS-only pool, tenant-scoped, 1:1 consumption match; shared by the sales ledger + partner wallet.** **The 7 cutover-#7 fixes (oldest→newest, now historical):**
 **(1)** `36a4325` — targets push 404: "New targets uploaded" deep-linked `/sales/targets` (no such route) → tap 404; now `/sales/dashboard`.
 **(2)** `ea227c0` — approval-WhatsApp blank program name: read `programName` from the `isPrimary` outlet, but every real outlet is
 `isPrimary=false` (all 2,907) → blank. **(3)** `2d5b715` — 4 pushes had no click URL → the SW opens `data.url || '/'` and root `/` redirects
