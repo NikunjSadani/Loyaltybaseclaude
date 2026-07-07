@@ -8,10 +8,16 @@ client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch *
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
 `dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-06.
 
-🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #6 IS LIVE (prod `c36f6c8`) — develop is 7 code fixes + docs AHEAD of prod, all PENDING THE
-NEXT CUTOVER.** **Prod is still serving cutover-#6 `c36f6c8`** (unchanged until the next cutover). develop carries a post-cutover-#6 bug-fix
-sweep whose LAST CODE commit is `6d25c10` (the money-path WhatsApp AUDIT FIXES, fix #7); session docs ride on top, so verify the live HEAD via `git log` — do
-NOT pin HEAD to a single SHA. The sweep (7 code fixes) is not yet in prod — it ships on the NEXT (owner-gated) cutover. **Pending-next-cutover fixes (oldest→newest):**
+🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #7 IS LIVE (prod `98ced7a`, executed 2026-07-07) — the 7 money-path fixes are now IN PROD**
+(verified live on `deoleoloyalty.gifsy.in`: login 200, wordmark 200, /api/health 401=edge auth gate; both prod services on `98ced7a`; pre-cutover
+backup `1783339420752`; CODE-ONLY, 0 migrations; both MSG91 templates `deoleo_points_credit`/`deoleo_payout_credit` APPROVED so they deliver).
+**prod == main == `98ced7a`** — verify the live HEAD via `git log`, do NOT pin HEAD to a single SHA. **🆕 ON DEVELOP (post-cutover-#7, ✅ committed
+`4be63f3`, gate-green, staging-verify + next cutover PENDING): the PRESENCE-BASED partner-wallet reward-track fix** (the partner app's
+points-vs-payout wallet/rewards was DEMO-driven via `partner-session.ts` `REWARD_TRACK`; NOT a money bug — the credit award is
+config-driven/correct — but a display gap; owner design = presence-based: points card if points activity, payout card if payout activity, both
+if both, full combined history always; backend `/partner/me` returns real `outletType`+`hasPointsActivity`+`hasPayoutActivity` + a `loading`
+flag, FE gates on those, demo `REWARD_TRACK`/`usePartnerSession` retired; presence is DATA-DRIVEN so a no-credit-yet outlet shows neither card).
+**So develop is now 1 code fix ahead of prod `98ced7a` (`4be63f3`), pending the next cutover.** **The 7 cutover-#7 fixes (oldest→newest):**
 **(1)** `36a4325` — targets push 404: "New targets uploaded" deep-linked `/sales/targets` (no such route) → tap 404; now `/sales/dashboard`.
 **(2)** `ea227c0` — approval-WhatsApp blank program name: read `programName` from the `isPrimary` outlet, but every real outlet is
 `isPrimary=false` (all 2,907) → blank. **(3)** `2d5b715` — 4 pushes had no click URL → the SW opens `data.url || '/'` and root `/` redirects
