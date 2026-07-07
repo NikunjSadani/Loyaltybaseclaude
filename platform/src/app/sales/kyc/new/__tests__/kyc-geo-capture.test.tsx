@@ -135,9 +135,11 @@ describe('G12–G14 — step gates block on missing geo', () => {
     expect(continueBtn).toBeDisabled();
   });
 
-  it('G13: "Submit KYC" button is not visible at initial render (not on bank step)', () => {
+  it('G13: the final submit/consent button is not visible at initial render (not on bank step)', () => {
     render(<NewKYCPage />);
-    expect(screen.queryByRole('button', { name: /submit kyc/i })).not.toBeInTheDocument();
+    // The bank-step CTA sends the outlet-owner consent OTP ("Send OTP to Outlet Owner");
+    // it must not be present on the initial (outlet-select) step.
+    expect(screen.queryByRole('button', { name: /send otp to outlet owner/i })).not.toBeInTheDocument();
   });
 
   it('G14: step bar shows all 4 steps (Outlet, Details, Address, Bank)', () => {

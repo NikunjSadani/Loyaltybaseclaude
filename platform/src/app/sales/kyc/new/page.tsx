@@ -2294,7 +2294,10 @@ export default function NewKYCPage() {
               </div>
             )}
 
-            {/* Submit */}
+            {/* Submit — this does NOT finalise the KYC. It saves the details and sends
+                a consent OTP to the outlet owner; the KYC is only submitted for review
+                AFTER that OTP is verified. Label reflects that so reps/owners don't think
+                it's already enrolled at this step. */}
             <div className="flex gap-3 pt-1">
               <Button variant="outline" className="flex-1" onClick={() => setStep('address')}>← Back</Button>
               <Button variant="primary" className="flex-1" loading={submitting} onClick={handleSubmit}
@@ -2307,9 +2310,12 @@ export default function NewKYCPage() {
                   !paymentGeo ||
                   isDocUploading(docs.cheque)
                 }>
-                Submit KYC
+                Send OTP to Outlet Owner
               </Button>
             </div>
+            <p className="text-[11px] text-gray-400 text-center pt-1">
+              The KYC is submitted for review only after the outlet owner verifies the OTP.
+            </p>
           </CardContent>
         </Card>
       )}
