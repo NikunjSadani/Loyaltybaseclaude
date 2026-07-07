@@ -47,7 +47,15 @@ const REAL_API_TRANSACTION = {
   referenceId:     'scheme-1',
 };
 
-const SESSION_KEY = 'partner_outlet_type_demo';
+// The wallet page reads the REAL points/payout presence signals from usePartnerIdentity
+// (replaces the demo session). A points-active partner shows the points balance card;
+// the combined statement below always renders regardless.
+vi.mock('@/lib/partner-identity', () => ({
+  usePartnerIdentity: () => ({
+    businessName: 'Anil Traders', ownerName: 'Owner', partnerCode: 'P1',
+    outletType: 'WHOLESALER', hasPointsActivity: true, hasPayoutActivity: false,
+  }),
+}));
 
 import WalletPage from '../page';
 
@@ -62,6 +70,12 @@ function stubFetch(
         json: () => Promise.resolve({ success: true, data: { transactions: txData } }),
       });
     }
+    if ((url as string).includes('/api/partner/payouts')) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ success: true, data: { payouts: [] } }),
+      });
+    }
     return Promise.resolve({
       ok: true,
       json: () => Promise.resolve({ success: true, data: balanceData }),
@@ -70,7 +84,6 @@ function stubFetch(
 }
 
 async function renderWallet() {
-  localStorage.setItem(SESSION_KEY, 'WHOLESALER');
   render(<WalletPage />);
   await waitFor(
     () => expect(screen.queryByTestId('wallet-kpi-filter')).toBeInTheDocument(),
@@ -79,9 +92,6 @@ async function renderWallet() {
 }
 
 describe('PW — Partner wallet API wiring (live data)', () => {
-  beforeEach(() => {
-    localStorage.clear();
-  });
   afterEach(() => { vi.unstubAllGlobals(); });
 
   // ── Endpoint wiring ──────────────────────────────────────────────────────────

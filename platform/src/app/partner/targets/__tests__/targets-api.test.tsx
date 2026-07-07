@@ -27,24 +27,6 @@ vi.mock('next/link', () => ({
   ),
 }));
 
-vi.mock('@/lib/partner-session', () => ({
-  usePartnerSession: () => ({
-    outletId: 'OUT-001', outletType: 'WHOLESALER', firmName: 'Kumar General Store',
-    partnerName: 'Rajesh Kumar', tier: 'Gold', mobile: '9876543210',
-    track: 'POINTS',
-    pointsBalance: 4250, pointsLifetime: 8550,
-    leaderboardRank: 12, leaderboardTotal: 248,
-    inrEarnedThisCycle: 0, pendingPayoutInr: 0,
-  }),
-  OUTLET_TYPE_LABELS: { SSS: 'SSS', WHOLESALER: 'Wholesaler', SUB_STOCKIST: 'Sub-Stockist', SSS_TOT: 'SSS TOT' },
-  OUTLET_TYPE_COLORS: {
-    WHOLESALER:   { bg: 'bg-amber-100',   text: 'text-amber-700'  },
-    SSS:          { bg: 'bg-blue-100',    text: 'text-blue-700'   },
-    SUB_STOCKIST: { bg: 'bg-purple-100',  text: 'text-purple-700' },
-    SSS_TOT:      { bg: 'bg-emerald-100', text: 'text-emerald-700'},
-  },
-}));
-
 import PartnerTargetsPage from '../page';
 
 // ─── Shared mock response factory ────────────────────────────────────────────

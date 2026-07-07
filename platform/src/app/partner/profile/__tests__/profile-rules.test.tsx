@@ -27,7 +27,16 @@ vi.mock('next/link', () => ({
 vi.mock('@/components/pwa/PwaAppSettings', () => ({ default: () => null }));
 vi.mock('@/lib/api-client', () => ({ api: { get: vi.fn() } }));
 
-const SESSION_KEY = 'partner_outlet_type_demo';
+// Outlet-type gating (Visibility Invoices) + points-presence come from the REAL
+// identity signal now (usePartnerIdentity), not the retired demo session. `mockIdentity`
+// is mutable so each test can set the outlet type / points signal under test.
+let mockIdentity = {
+  businessName: 'Anil Traders', ownerName: 'Anil Traders Owner', partnerCode: 'OUT-2026-000123',
+  outletType: 'WHOLESALER' as string | null, hasPointsActivity: true, hasPayoutActivity: false,
+};
+vi.mock('@/lib/partner-identity', () => ({
+  usePartnerIdentity: () => mockIdentity,
+}));
 
 import { api } from '@/lib/api-client';
 import ProfilePage from '../page';
@@ -48,7 +57,7 @@ const ME = {
 };
 
 function setOutletType(type: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST' | 'SSS_TOT') {
-  localStorage.setItem(SESSION_KEY, type);
+  mockIdentity = { ...mockIdentity, outletType: type };
 }
 
 async function renderAndLoad() {
@@ -61,7 +70,10 @@ async function renderAndLoad() {
 
 describe('Q — Partner profile page rules', () => {
   beforeEach(() => {
-    localStorage.clear();
+    mockIdentity = {
+      businessName: 'Anil Traders', ownerName: 'Anil Traders Owner', partnerCode: 'OUT-2026-000123',
+      outletType: 'WHOLESALER', hasPointsActivity: true, hasPayoutActivity: false,
+    };
     (api.get as ReturnType<typeof vi.fn>).mockResolvedValue(ME);
   });
 

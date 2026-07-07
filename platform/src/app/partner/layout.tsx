@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -12,7 +12,6 @@ import { Sidebar } from '@/components/layout/sidebar';
 import { SiteFooter } from '@/components/layout/site-footer';
 import type { NavItem } from '@/components/layout/nav-bottom';
 import type { SidebarSection } from '@/components/layout/sidebar';
-import { usePartnerSession } from '@/lib/partner-session';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { RequireAuth } from '@/components/auth/require-auth';
@@ -20,8 +19,8 @@ import { logout, PORTAL_ROLES } from '@/lib/auth-client';
 
 /* ── Notifications ───────────────────────────────────────────────────────────── */
 
-function getNotifications(track: 'POINTS' | 'INR') {
-  if (track === 'POINTS') {
+function getNotifications(hasPoints: boolean) {
+  if (hasPoints) {
     return [
       { id: 1, icon: Coins,       iconBg: 'bg-emerald-100 text-emerald-600', title: '200 points credited',      body: 'KPI achievement — May 2026 cycle confirmed.',         time: '2 min ago',  unread: true  },
       { id: 2, icon: Trophy,      iconBg: 'bg-amber-100 text-amber-600',     title: 'Rank improved!',           body: 'You moved up to Rank #12 on the leaderboard.',       time: '1 hr ago',   unread: true  },
@@ -39,12 +38,22 @@ function getNotifications(track: 'POINTS' | 'INR') {
 
 export default function PartnerLayout({ children }: { children: React.ReactNode }) {
   const router       = useRouter();
-  const session      = usePartnerSession();
-  const identity     = usePartnerIdentity(); // REAL identity (replaces demo persona)
+  const identity     = usePartnerIdentity(); // REAL identity + presence signals (replaces demo persona/track)
   const clientConfig = useClientConfig();
   const features     = clientConfig.features;
   const [notifOpen,      setNotifOpen]      = useState(false);
-  const [notifications,  setNotifications]  = useState(() => getNotifications(session.track));
+  // Notifications are seeded once on mount; base them on the real points signal
+  // (payout-style otherwise). The identity upgrades async from /partner/me, so the
+  // initial mount uses the loading default (false → payout notifications), which is
+  // the safe generic set; a re-mount after identity loads reflects the real signal.
+  const [notifications,  setNotifications]  = useState(() => getNotifications(identity.hasPointsActivity));
+
+  // Re-seed the (static) notification set once the real points signal resolves from
+  // /partner/me, so a points partner sees points-style notifications and a payout
+  // partner the payout-style set. Keyed on the boolean so it runs only on transition.
+  useEffect(() => {
+    setNotifications(getNotifications(identity.hasPointsActivity));
+  }, [identity.hasPointsActivity]);
 
   const unreadCount = notifications.filter(n => n.unread).length;
   const markAllRead = () => setNotifications(prev => prev.map(n => ({ ...n, unread: false })));
@@ -56,7 +65,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
 
   /* ── Nav items — gated by feature flags ── */
   const walletOn      = features.walletModule;
-  const rewardsOn     = features.walletModule && session.track === 'POINTS';
+  const rewardsOn     = features.walletModule && identity.hasPointsActivity;
   const leaderboardOn = features.partnerApp.showLeaderboard;
 
   const mobileNavItems: NavItem[] = [

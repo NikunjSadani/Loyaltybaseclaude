@@ -15,7 +15,10 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 const mockPrisma = {
   programSetting:    { findFirst: jest.fn() },
   channelPartner:    { findFirst: jest.fn() },
-  payoutTransaction: { findMany: jest.fn() },
+  payoutTransaction: { findMany: jest.fn(), findFirst: jest.fn() },
+  creditPayoutEntry: { findFirst: jest.fn() },
+  wallet:            { findFirst: jest.fn() },
+  pointsLedger:      { findFirst: jest.fn() },
   outlet:            { findMany: jest.fn() },
   outletTarget:      { findFirst: jest.fn(), findMany: jest.fn() },
   outletSalesRecord: { findMany: jest.fn() },
@@ -45,6 +48,119 @@ describe('PartnerService', () => {
       providers: [PartnerService, { provide: PrismaService, useValue: mockPrisma }],
     }).compile();
     service = module.get(PartnerService);
+  });
+
+  // ─── getMe (identity + presence-based points/payout signals) ──────────────────
+
+  describe('getMe', () => {
+    it('returns null identity + false activity flags when the caller has no channel partner', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      const res = await service.getMe(partner);
+      expect(res).toEqual({
+        businessName: null,
+        ownerName: null,
+        partnerCode: null,
+        phone: null,
+        email: null,
+        entityType: null,
+        outletType: null,
+        hasPointsActivity: false,
+        hasPayoutActivity: false,
+      });
+      // No activity queries when there is no partner to resolve.
+      expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
+      expect(mockPrisma.wallet.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('resolves the PRIMARY outlet type (order by isPrimary desc, createdAt asc — not isPrimary:true)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', businessName: 'Firm', ownerName: 'Owner', partnerCode: 'P1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { id: 'o1', outletType: { code: 'WHOLESALER' } },
+        { id: 'o2', outletType: { code: 'SSS' } },
+      ]);
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMe(partner);
+
+      expect(mockPrisma.outlet.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { clientId: 'deoleo', partnerId: 'cp1', deletedAt: null },
+          orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+        }),
+      );
+      expect(res.outletType).toBe('WHOLESALER');
+      expect(res.businessName).toBe('Firm');
+    });
+
+    it('hasPointsActivity is true when the wallet has redeemablePoints > 0 (no ledger lookup needed)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletType: { code: 'WHOLESALER' } }]);
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 500, lifetimeEarned: 500 });
+      mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMe(partner);
+      expect(res.hasPointsActivity).toBe(true);
+      expect(mockPrisma.pointsLedger.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('hasPointsActivity is true via a PointsLedger row even when balances are zero', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletType: { code: 'WHOLESALER' } }]);
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 0, lifetimeEarned: 0 });
+      mockPrisma.pointsLedger.findFirst.mockResolvedValue({ id: 'l1' });
+      mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMe(partner);
+      expect(mockPrisma.pointsLedger.findFirst).toHaveBeenCalledWith({
+        where: { walletId: 'w1' },
+        select: { id: true },
+      });
+      expect(res.hasPointsActivity).toBe(true);
+    });
+
+    it('a PAYOUT-only partner: hasPayoutActivity true via a credit payout entry, hasPointsActivity false', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletType: { code: 'SSS' } }]);
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue({ id: 'e1' });
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMe(partner);
+      expect(mockPrisma.creditPayoutEntry.findFirst).toHaveBeenCalledWith({
+        where: { clientId: 'deoleo', outletId: { in: ['o1'] }, status: { in: ['PAID', 'PENDING'] } },
+        select: { id: true },
+      });
+      expect(res.hasPointsActivity).toBe(false);
+      expect(res.hasPayoutActivity).toBe(true);
+    });
+
+    it('a BOTH-active partner sees both flags true (points wallet + payout transaction)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletType: { code: 'WHOLESALER' } }]);
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 0, lifetimeEarned: 1200 });
+      mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue({ id: 'pt1' });
+
+      const res = await service.getMe(partner);
+      expect(res.hasPointsActivity).toBe(true);
+      expect(res.hasPayoutActivity).toBe(true);
+    });
+
+    it('does not query credit payout entries when the partner has no outlets', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMe(partner);
+      expect(mockPrisma.creditPayoutEntry.findFirst).not.toHaveBeenCalled();
+      expect(res.outletType).toBeNull();
+      expect(res.hasPayoutActivity).toBe(false);
+    });
   });
 
   // ─── getBanners ──────────────────────────────────────────────────────────────

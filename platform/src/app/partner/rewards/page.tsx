@@ -16,7 +16,7 @@ import { useToast } from '@/components/ui/toast';
 import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { api } from '@/lib/api-client';
-import { usePartnerSession } from '@/lib/partner-session';
+import { usePartnerIdentity } from '@/lib/partner-identity';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 
 /* ─── Partner cash beneficiary (from GET /api/auth/me) ─────────────────────────
@@ -825,8 +825,8 @@ function CashPayoutSheet({
 type MainTab = 'catalogue' | 'vouchers' | 'bank';
 
 export default function RewardsPage() {
-  const router  = useRouter();
-  const session = usePartnerSession();
+  const router   = useRouter();
+  const identity = usePartnerIdentity(); // REAL points-presence signal (replaces demo track)
   const [gifts,     setGifts]     = useState<CatalogueItem[]>([]);
   const [loading,   setLoading]   = useState(true);
   const [tab,       setTab]       = useState<MainTab>('catalogue');
@@ -837,15 +837,14 @@ export default function RewardsPage() {
   const [voucherDetail, setVoucherDetail] = useState<CatalogueItem | null>(null);
   const [showBank,  setShowBank]  = useState(false);
   const [balance,   setBalance]   = useState(0);
-  // Real cash beneficiary + conversionRate from /api/auth/me (source of truth for
-  // the cash-payout flow). Null until loaded / when the partner has no rails.
+  // Real cash beneficiary + conversionRate + partner mobile from /api/auth/me (source of
+  // truth for the cash-payout / delivery flow). Null until loaded / when the partner has no rails.
   const [beneficiary,    setBeneficiary]    = useState<CashBeneficiary | null>(null);
   const [conversionRate, setConversionRate] = useState<number | null>(null);
+  const [mobile,         setMobile]         = useState('');
   const settings = getGifsySettings();
 
   useEffect(() => {
-    setBalance(session.pointsBalance);
-
     // Live catalogue only — no localStorage / GIFT_CATALOGUE fallback.
     api.get<{
       items: ApiCatalogItem[];
@@ -866,6 +865,7 @@ export default function RewardsPage() {
     api.get<{
       conversionRate?: number;
       user?: {
+        phone?: string | null;
         channelPartner?: {
           bankName?: string | null;
           bankAccountNumber?: string | null;
@@ -879,6 +879,8 @@ export default function RewardsPage() {
       .then((result) => {
         if (!result.success || !result.data) return;
         const cp = result.data.user?.channelPartner;
+        // Real registered mobile (for the physical-gift delivery address) — no demo literal.
+        if (result.data.user?.phone) setMobile(result.data.user.phone);
         if (cp) {
           setBeneficiary({
             bankName:          cp.bankName ?? null,
@@ -894,10 +896,13 @@ export default function RewardsPage() {
         }
       });
       // Failure simply leaves beneficiary null → the cash tab shows the KYC empty-state.
-  }, [session.pointsBalance]);
+  }, []);
 
-  /* ── Gate: non-wholesalers don't have a points balance ── */
-  if (!loading && session.track !== 'POINTS') {
+  /* ── Gate: partners with no points reality don't get the rewards catalogue.
+     Keyed on the IDENTITY signal (not the catalogue load) so a payout-only partner
+     sees the gate as soon as identity resolves, without waiting on a catalogue they
+     never need. ── */
+  if (!identity.loading && !identity.hasPointsActivity) {
     return (
       <div className="flex flex-col items-center justify-center py-20 gap-4 text-center">
         <Gift className="h-12 w-12 text-gray-300" />
@@ -977,7 +982,7 @@ export default function RewardsPage() {
     setBalance(prev => Math.max(0, prev - pts));
   };
 
-  if (loading) return <div className="flex items-center justify-center min-h-64"><Spinner size="lg" /></div>;
+  if (loading || identity.loading) return <div className="flex items-center justify-center min-h-64"><Spinner size="lg" /></div>;
 
   const channels = ch; // already computed above
 
@@ -1217,7 +1222,7 @@ export default function RewardsPage() {
       {detail && (
         <GiftDetailSheet
           gift={detail} onClose={() => setDetail(null)}
-          myBalance={balance} mobile={session.mobile}
+          myBalance={balance} mobile={mobile}
           onWishlist={toggleWishlist} isWishlisted={wishlist.has(detail.id)}
           onRedeemed={handleRedeemed}
         />

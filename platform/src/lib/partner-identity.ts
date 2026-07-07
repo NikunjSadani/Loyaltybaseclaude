@@ -18,6 +18,22 @@ export interface PartnerIdentity {
   /** owner/person name for the shell sub-line (channelPartner.ownerName). */
   ownerName: string;
   partnerCode: string | null;
+  /** The partner's PRIMARY outlet's OutletType.code (e.g. 'WHOLESALER'); null while loading / no outlet. */
+  outletType: string | null;
+  /**
+   * REAL presence signals that drive the points-vs-payout experience (replaces the demo
+   * REWARD_TRACK). Both default false while loading — a section is only shown once its
+   * signal is confirmed true, so a payout-only partner never flashes a points UI.
+   */
+  hasPointsActivity: boolean;
+  hasPayoutActivity: boolean;
+  /**
+   * True until GET /partner/me settles (resolve OR error). Consumers that GATE on the
+   * presence signals (e.g. the rewards page) must wait for this to be false before
+   * deciding "no points" — otherwise the false-while-loading defaults would flash the
+   * gate/empty state to a partner who actually has points.
+   */
+  loading: boolean;
 }
 
 /**
@@ -30,6 +46,10 @@ export function usePartnerIdentity(): PartnerIdentity {
     businessName: fallbackName,
     ownerName: fallbackName,
     partnerCode: null,
+    outletType: null,
+    hasPointsActivity: false,
+    hasPayoutActivity: false,
+    loading: true,
   });
 
   useEffect(() => {
@@ -37,16 +57,25 @@ export function usePartnerIdentity(): PartnerIdentity {
     fetch('/api/partner/me', { headers: { ...authHeader() } })
       .then((r) => (r.ok ? r.json() : null))
       .then((res) => {
+        if (cancelled) return;
         const d = res?.data;
-        if (cancelled || !d) return;
         const name = getStoredUser()?.name ?? '';
-        setIdentity({
-          businessName: d.businessName || name,
-          ownerName: d.ownerName || name,
-          partnerCode: d.partnerCode ?? null,
-        });
+        // Settle loading regardless — a caller with no channel-partner row (d null) is a
+        // resolved "no activity" state, not an eternal load.
+        setIdentity((prev) => ({
+          businessName: d?.businessName || name || prev.businessName,
+          ownerName: d?.ownerName || name || prev.ownerName,
+          partnerCode: d?.partnerCode ?? null,
+          outletType: d?.outletType ?? null,
+          hasPointsActivity: d?.hasPointsActivity === true,
+          hasPayoutActivity: d?.hasPayoutActivity === true,
+          loading: false,
+        }));
       })
-      .catch(() => {/* keep the JWT-name fallback */});
+      .catch(() => {
+        // Keep the JWT-name fallback, but settle loading so gates can resolve.
+        if (!cancelled) setIdentity((prev) => ({ ...prev, loading: false }));
+      });
     return () => {
       cancelled = true;
     };

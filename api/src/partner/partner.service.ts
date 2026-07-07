@@ -25,11 +25,19 @@ export class PartnerService {
    * GET /v1/partner/me — the caller's own channel-partner identity (real, JWT-scoped). Replaces the
    * FE demo persona (lib/partner-session DEMO_SESSIONS) for shell/header display. Returns nulls when
    * the caller has no channel partner so the FE can fall back to the JWT user name.
+   *
+   * ALSO drives the partner app's points-vs-payout experience from REAL data (was the hardcoded
+   * demo REWARD_TRACK). Three presence-based signals — never keyed off a single "mode" or the last
+   * ledger entry, since a partner can hold BOTH points and payout in the same period:
+   *   - outletType         — the partner's PRIMARY outlet's OutletType.code (for outlet-typed heroes)
+   *   - hasPointsActivity  — the partner holds/held ANY points reality (wallet balance/lifetime or ledger)
+   *   - hasPayoutActivity  — the partner has ANY payout reality (credit payout entries or payout txns)
    */
   async getMe(user: JwtPayload) {
     const partner = await this.prisma.channelPartner.findFirst({
       where: { userId: user.sub, clientId: user.clientId },
       select: {
+        id: true,
         partnerCode: true,
         businessName: true,
         ownerName: true,
@@ -38,6 +46,11 @@ export class PartnerService {
         entityType: true,
       },
     });
+
+    const { outletType, hasPointsActivity, hasPayoutActivity } = partner
+      ? await this.resolvePartnerActivity(user.clientId, partner.id)
+      : { outletType: null, hasPointsActivity: false, hasPayoutActivity: false };
+
     return {
       businessName: partner?.businessName ?? null,
       ownerName: partner?.ownerName ?? null,
@@ -45,7 +58,73 @@ export class PartnerService {
       phone: partner?.phone ?? null,
       email: partner?.email ?? null,
       entityType: partner?.entityType ?? null,
+      outletType,
+      hasPointsActivity,
+      hasPayoutActivity,
     };
+  }
+
+  /**
+   * Resolve the presence-based points/payout signals for a partner (tenant-scoped).
+   *
+   * Queries (all scoped to clientId + this partner):
+   *   - outletType: the PRIMARY outlet's OutletType.code. Primary-outlet selection matches the
+   *     codebase pattern — order by isPrimary desc then createdAt asc and take the first (do NOT
+   *     filter isPrimary:true, which returns empty for real outlets that never set the flag).
+   *   - hasPointsActivity: the partner's Wallet has redeemablePoints > 0 OR lifetimeEarned > 0,
+   *     OR any PointsLedger row exists for that wallet.
+   *   - hasPayoutActivity: any CreditPayoutEntry with status PAID or PENDING for one of the
+   *     partner's outlets, OR any PayoutTransaction for the partner.
+   */
+  private async resolvePartnerActivity(
+    clientId: string,
+    partnerId: string,
+  ): Promise<{ outletType: string | null; hasPointsActivity: boolean; hasPayoutActivity: boolean }> {
+    // Partner's outlets — id (payout-entry scoping) + primary-outlet type resolution in one query.
+    const outlets = await this.prisma.outlet.findMany({
+      where: { clientId, partnerId, deletedAt: null },
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+      select: { id: true, outletType: { select: { code: true } } },
+    });
+    const outletType = outlets[0]?.outletType?.code ?? null;
+    const outletIds = outlets.map((o) => o.id);
+
+    // Wallet reality — the partner's wallet balances + any ledger row.
+    const wallet = await this.prisma.wallet.findFirst({
+      where: { partnerId },
+      select: { id: true, redeemablePoints: true, lifetimeEarned: true },
+    });
+    let hasPointsActivity =
+      !!wallet && (wallet.redeemablePoints > 0 || wallet.lifetimeEarned > 0);
+    if (!hasPointsActivity && wallet) {
+      const ledgerRow = await this.prisma.pointsLedger.findFirst({
+        where: { walletId: wallet.id },
+        select: { id: true },
+      });
+      hasPointsActivity = !!ledgerRow;
+    }
+
+    // Payout reality — a credit payout entry against one of the partner's outlets,
+    // or a payout transaction for the partner. Either presence flips the flag.
+    const [payoutEntry, payoutTxn] = await Promise.all([
+      outletIds.length
+        ? this.prisma.creditPayoutEntry.findFirst({
+            where: {
+              clientId,
+              outletId: { in: outletIds },
+              status: { in: ['PAID', 'PENDING'] },
+            },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+      this.prisma.payoutTransaction.findFirst({
+        where: { partnerId },
+        select: { id: true },
+      }),
+    ]);
+    const hasPayoutActivity = !!payoutEntry || !!payoutTxn;
+
+    return { outletType, hasPointsActivity, hasPayoutActivity };
   }
 
   /**

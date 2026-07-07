@@ -1,43 +1,46 @@
-﻿/// <reference types="vitest/globals" />
+/// <reference types="vitest/globals" />
 /**
- * TDD — KPI filter in partner wallet (POINTS track)
+ * TDD — KPI filter in the combined partner wallet statement
  *
- * Outlets want to filter their transaction history by a specific KPI
- * (e.g. "Monthly Sales Target" credits only, or "Visibility" credits only).
+ * The wallet renders ONE combined statement (points + payouts). Partners can filter
+ * its history by a specific KPI/parameter label.
  *
  * Rules:
  *  - Filter is a <select> with data-testid="wallet-kpi-filter"
- *  - Options are derived from the kpiLabel values on transactions
- *    for the selected period (plus "All KPIs" as default)
- *  - Visibility KPI option appears only for RETAILER/MT outlets
- *    (those types are eligible for visibility incentives)
- *  - Selecting a KPI hides transactions with a different / null kpiLabel
- *  - Selecting "All KPIs" shows everything again
+ *  - Options are derived from the kpiLabel values on the period's rows
+ *    (points transactions AND payout entries), plus "All Parameters" as default
+ *  - A KPI named exactly "Visibility" appears only for RETAILER/MT outlet types
+ *    (SSS / SSS_TOT — those eligible for visibility incentives)
+ *  - Selecting a KPI hides rows with a different / null kpiLabel
+ *  - Selecting "All Parameters" shows everything again
  *
- * W1: POINTS-track wallet has a data-testid="wallet-kpi-filter" select
- * W2: Dropdown has "All Parameters" + at least one KPI from transactions
- * W3: Selecting a KPI hides transactions with a different kpiLabel
- * W4: Selecting "All Parameters" restores all transactions
- * W5: WHOLESALER session has NO Visibility KPI option (not eligible)
- * W6: RETAILER session DOES have a Visibility KPI option
+ * W1: the wallet shows a data-testid="wallet-kpi-filter" select
+ * W2: dropdown has "All Parameters" + at least one KPI from the rows
+ * W3: selecting a KPI hides rows with a different kpiLabel
+ * W4: selecting "All Parameters" restores all rows
+ * W5: a WHOLESALER outlet has NO exact "Visibility" KPI option (not eligible)
+ * W6: an SSS outlet DOES have the "Visibility" KPI option
  */
 
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-vi.mock('@/lib/redemption-store', () => ({
-  loadRedemptions: () => [],
+// The Visibility-option gating keys off the REAL outlet type from usePartnerIdentity.
+// `mockIdentity` is mutable so W5/W6 can flip the outlet type.
+let mockIdentity = {
+  businessName: 'Anil Traders', ownerName: 'Owner', partnerCode: 'P1',
+  outletType: 'WHOLESALER' as string | null, hasPointsActivity: true, hasPayoutActivity: true,
+};
+vi.mock('@/lib/partner-identity', () => ({
+  usePartnerIdentity: () => mockIdentity,
 }));
 
 import WalletPage from '../page';
 
-const SESSION_KEY = 'partner_outlet_type_demo';
-
-// Real API data (the demo fallback was removed in the #57 cleanup). Provide, in the
-// default 2026-05 window: a CREDIT with a kpiLabel (POINTS dropdown option, W2), a
-// DEBIT redemption with no kpiLabel (W3 hide / W4 restore), and a PAID INR payout with
-// a Visibility kpiLabel (RETAILER-only Visibility option, W6).
+// Real API data. In the default 2026-05 window: a CREDIT with a kpiLabel (dropdown
+// option, W2), a DEBIT redemption with no kpiLabel (W3 hide / W4 restore), and a PAID
+// payout whose label is exactly "Visibility" (RETAILER-only option, W6).
 const POINTS_TXNS = [
   { id: 'tx1', transactionType: 'CREDIT_POINTS_EARNED', description: 'Monthly Target — May 2026',
     points: 1000, date: '2026-05-10T00:00:00.000Z', balanceType: 'EARNED', balanceAfter: 1000,
@@ -47,7 +50,7 @@ const POINTS_TXNS = [
     referenceType: 'REDEMPTION', referenceId: 'r1', kpiLabel: null },
 ];
 const INR_PAYOUTS = [
-  { id: 'p1', status: 'PAID', period: '2026-05', kpiLabel: 'Visibility Drive',
+  { id: 'p1', status: 'PAID', period: '2026-05', kpiLabel: 'Visibility',
     payoutAmountPaise: 500_000, paidAt: '2026-05-10T00:00:00.000Z', utr: 'UTR123', narration: null },
 ];
 const BALANCE = {
@@ -66,34 +69,33 @@ function stubFetch() {
   }));
 }
 
-describe('W — KPI filter in partner wallet (POINTS track)', () => {
+describe('W — KPI filter in the combined partner wallet statement', () => {
   beforeEach(() => {
-    localStorage.clear();
+    mockIdentity = {
+      businessName: 'Anil Traders', ownerName: 'Owner', partnerCode: 'P1',
+      outletType: 'WHOLESALER', hasPointsActivity: true, hasPayoutActivity: true,
+    };
   });
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  // Helper: render wallet and wait for spinner to clear (500ms load delay in page)
   async function renderWallet() {
     stubFetch();
     render(<WalletPage />);
-    // The wallet has a 350-500ms load delay; wait for content
     await waitFor(
       () => expect(screen.queryByTestId('wallet-kpi-filter')).toBeInTheDocument(),
       { timeout: 3000 },
     );
   }
 
-  it('W1: POINTS-track wallet shows a kpi-filter select', async () => {
-    localStorage.setItem(SESSION_KEY, 'WHOLESALER');
+  it('W1: the wallet shows a kpi-filter select', async () => {
     await renderWallet();
     const select = screen.getByTestId('wallet-kpi-filter');
     expect(select.tagName.toLowerCase()).toBe('select');
   });
 
-  it('W2: dropdown has "All Parameters" + at least one KPI from transactions', async () => {
-    localStorage.setItem(SESSION_KEY, 'WHOLESALER');
+  it('W2: dropdown has "All Parameters" + at least one KPI from the rows', async () => {
     await renderWallet();
     const select  = screen.getByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent ?? '');
@@ -101,17 +103,12 @@ describe('W — KPI filter in partner wallet (POINTS track)', () => {
     expect(options.length).toBeGreaterThan(1);
   });
 
-  it('W3: selecting a KPI hides transactions with a different kpiLabel', async () => {
-    localStorage.setItem(SESSION_KEY, 'WHOLESALER');
+  it('W3: selecting a KPI hides rows with a different kpiLabel', async () => {
     await renderWallet();
     const select  = screen.getByTestId('wallet-kpi-filter');
-    const options = Array.from(select.querySelectorAll('option'));
-    const kpiOpt  = options.find(o => !/all parameters/i.test(o.textContent ?? ''));
-    if (!kpiOpt) return;
+    // Filter to "Monthly Target" — the redemption row (null label) must disappear.
+    fireEvent.change(select, { target: { value: 'Monthly Target' } });
 
-    fireEvent.change(select, { target: { value: kpiOpt.value } });
-
-    // Redemption entries have no kpiLabel — they should be hidden
     await waitFor(() => {
       const redemptions = screen
         .queryAllByText(/redemption.*amazon voucher/i)
@@ -120,15 +117,10 @@ describe('W — KPI filter in partner wallet (POINTS track)', () => {
     });
   });
 
-  it('W4: selecting "All Parameters" restores all transactions', async () => {
-    localStorage.setItem(SESSION_KEY, 'WHOLESALER');
+  it('W4: selecting "All Parameters" restores all rows', async () => {
     await renderWallet();
     const select  = screen.getByTestId('wallet-kpi-filter');
-    const options = Array.from(select.querySelectorAll('option'));
-    const kpiOpt  = options.find(o => !/all parameters/i.test(o.textContent ?? ''));
-    if (!kpiOpt) return;
-
-    fireEvent.change(select, { target: { value: kpiOpt.value } });
+    fireEvent.change(select, { target: { value: 'Monthly Target' } });
     fireEvent.change(select, { target: { value: '' } });
 
     await waitFor(() => {
@@ -136,19 +128,19 @@ describe('W — KPI filter in partner wallet (POINTS track)', () => {
     });
   });
 
-  it('W5: WHOLESALER session has NO Visibility KPI option', async () => {
-    localStorage.setItem(SESSION_KEY, 'WHOLESALER');
+  it('W5: WHOLESALER outlet has NO exact "Visibility" KPI option', async () => {
+    mockIdentity = { ...mockIdentity, outletType: 'WHOLESALER' };
     await renderWallet();
     const select  = screen.getByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent ?? '');
-    expect(options.some(t => /visibility/i.test(t))).toBe(false);
+    expect(options.includes('Visibility')).toBe(false);
   });
 
-  it('W6: RETAILER session DOES have a Visibility KPI option', async () => {
-    localStorage.setItem(SESSION_KEY, 'SSS');
+  it('W6: SSS outlet DOES have the "Visibility" KPI option', async () => {
+    mockIdentity = { ...mockIdentity, outletType: 'SSS' };
     await renderWallet();
     const select  = screen.getByTestId('wallet-kpi-filter');
     const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent ?? '');
-    expect(options.some(t => /visibility/i.test(t))).toBe(true);
+    expect(options.includes('Visibility')).toBe(true);
   });
 });

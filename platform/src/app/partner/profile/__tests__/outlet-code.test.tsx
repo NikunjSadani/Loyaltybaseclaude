@@ -19,8 +19,11 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
 }));
 vi.mock('@/components/pwa/PwaAppSettings', () => ({ default: () => null }));
-vi.mock('@/lib/partner-session', () => ({
-  usePartnerSession: () => ({ outletType: 'WHOLESALER' }),
+vi.mock('@/lib/partner-identity', () => ({
+  usePartnerIdentity: () => ({
+    businessName: 'Anil Traders', ownerName: 'Anil Traders Owner', partnerCode: 'OUT-2026-000123',
+    outletType: 'WHOLESALER', hasPointsActivity: true, hasPayoutActivity: false,
+  }),
 }));
 vi.mock('@/lib/api-client', () => ({ api: { get: vi.fn() } }));
 

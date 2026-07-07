@@ -1,20 +1,20 @@
-﻿/// <reference types="vitest/globals" />
+/// <reference types="vitest/globals" />
 /**
- * TDD — Narration field on wallet transactions (both tracks)
+ * TDD — Narration field on wallet transactions (combined statement)
  *
- * Admins can attach an optional narration to any payout/transaction row.
- * It is displayed as a small extra line under the main transaction header.
+ * Admins can attach an optional narration to any payout/transaction row. It is
+ * displayed as a small extra line under the main row. The wallet now renders a
+ * single COMBINED statement, so both a payout row and a points row appear together.
  *
- * INR track (PayoutLedgerEntry):
- *   layout: kpiLabel · period  /  UTR (if any)  /  narration (if any)
+ * Payout row (PayoutLedgerEntry):
+ *   layout: kpiLabel · period  /  UTR (if any)  /  narration (data-testid="payout-narration")
+ * Points row (WalletTransaction via TransactionItem):
+ *   layout: description  /  subLabel (if any)  /  narration (data-testid="transaction-narration")
  *
- * POINTS track (WalletTransaction via TransactionItem):
- *   layout: description  /  subLabel (if any)  /  narration (if any)
- *
- * Y1: INR track — a payout WITH narration shows narration text (data-testid="payout-narration")
- * Y2: INR track — a payout WITHOUT narration shows no payout-narration element
- * Y3: POINTS track — a transaction WITH narration shows narration text (data-testid="transaction-narration")
- * Y4: POINTS track — a transaction WITHOUT narration shows no transaction-narration element
+ * Y1: a payout WITH narration shows a payout-narration element
+ * Y2: every payout-narration rendered has non-empty text
+ * Y3: a transaction WITH narration shows a transaction-narration element
+ * Y4: every transaction-narration rendered has non-empty text
  */
 
 import React from 'react';
@@ -24,18 +24,20 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
 }));
-vi.mock('@/lib/redemption-store', () => ({
-  loadRedemptions: () => [],
+
+// A BOTH-active partner so the combined statement shows points + payout rows together.
+vi.mock('@/lib/partner-identity', () => ({
+  usePartnerIdentity: () => ({
+    businessName: 'Anil Traders', ownerName: 'Owner', partnerCode: 'P1',
+    outletType: 'SSS', hasPointsActivity: true, hasPayoutActivity: true,
+  }),
 }));
 
 import WalletPage from '../page';
 
-const SESSION_KEY = 'partner_outlet_type_demo';
-
-// Real API shapes (demo fallback was removed in the #57 mock-data cleanup), so the
-// page now renders narration only from live data — stub the live endpoints with a
-// PAID payout (INR track) and an earned transaction (POINTS track) that carry a
-// narration, both in the default 2026-05 period window.
+// Real API shapes — the page renders narration only from live data. Stub the live
+// endpoints with a PAID payout (payout row) and an earned transaction (points row)
+// that both carry a narration, both in the default 2026-05 period window.
 const PAYOUT_WITH_NARRATION = {
   id: 'p1', status: 'PAID', period: '2026-05', kpiLabel: 'Visibility Drive',
   payoutAmountPaise: 500_000, paidAt: '2026-05-10T00:00:00.000Z', utr: 'UTR123',
@@ -63,20 +65,17 @@ function stubFetch() {
   }));
 }
 
-async function renderAndWait(outletType: string) {
-  localStorage.setItem(SESSION_KEY, outletType);
+async function renderAndWait() {
   stubFetch();
   render(<WalletPage />);
-  // Wait for loading to settle — statement-controls-row appears once data is loaded
   await waitFor(
     () => expect(screen.getByTestId('statement-controls-row')).toBeInTheDocument(),
     { timeout: 3000 },
   );
 }
 
-describe('Y — Narration on wallet transactions', () => {
+describe('Y — Narration on the combined wallet statement', () => {
   beforeEach(() => {
-    localStorage.clear();
     vi.useFakeTimers({ shouldAdvanceTime: true });
   });
 
@@ -85,33 +84,28 @@ describe('Y — Narration on wallet transactions', () => {
     vi.unstubAllGlobals();
   });
 
-  // ── INR track (RETAILER) ──
-
-  it('Y1: INR track — payout with narration shows payout-narration element', async () => {
-    await renderAndWait('SSS');
-    const narrations = screen.getAllByTestId('payout-narration');
+  it('Y1: payout with narration shows a payout-narration element', async () => {
+    await renderAndWait();
+    const narrations = await screen.findAllByTestId('payout-narration');
     expect(narrations.length).toBeGreaterThan(0);
   });
 
-  it('Y2: INR track — payout without narration has no payout-narration element for that row', async () => {
-    await renderAndWait('SSS');
-    // Every payout-narration that IS rendered must have non-empty text
+  it('Y2: every payout-narration rendered has non-empty text', async () => {
+    await renderAndWait();
     const narrations = screen.queryAllByTestId('payout-narration');
     narrations.forEach((el) => {
       expect(el.textContent?.trim().length).toBeGreaterThan(0);
     });
   });
 
-  // ── POINTS track (WHOLESALER) ──
-
-  it('Y3: POINTS track — transaction with narration shows transaction-narration element', async () => {
-    await renderAndWait('WHOLESALER');
-    const narrations = screen.getAllByTestId('transaction-narration');
+  it('Y3: transaction with narration shows a transaction-narration element', async () => {
+    await renderAndWait();
+    const narrations = await screen.findAllByTestId('transaction-narration');
     expect(narrations.length).toBeGreaterThan(0);
   });
 
-  it('Y4: POINTS track — every transaction-narration rendered has non-empty text', async () => {
-    await renderAndWait('WHOLESALER');
+  it('Y4: every transaction-narration rendered has non-empty text', async () => {
+    await renderAndWait();
     const narrations = screen.queryAllByTestId('transaction-narration');
     narrations.forEach((el) => {
       expect(el.textContent?.trim().length).toBeGreaterThan(0);

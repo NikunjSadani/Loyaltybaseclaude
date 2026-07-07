@@ -13,7 +13,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { Modal } from '@/components/ui/modal';
 import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { KYCStatus } from '@/types';
-import { usePartnerSession, type OutletType } from '@/lib/partner-session';
+import { usePartnerIdentity } from '@/lib/partner-identity';
 import { api } from '@/lib/api-client';
 import { logoutAction } from '@/lib/auth-actions';
 import PwaAppSettings from '@/components/pwa/PwaAppSettings';
@@ -60,10 +60,7 @@ const kycConfig: Record<KYCStatus, { icon: React.ReactNode; label: string; varia
 };
 
 /** Outlet types that can see Visibility Invoices */
-const VISIBILITY_INVOICE_TYPES = new Set<OutletType>(['SSS', 'SSS_TOT']);
-
-/** Outlet types that earn and can see Points Summary (Deoleo: Wholesalers only) */
-const POINTS_OUTLET_TYPES = new Set<OutletType>(['WHOLESALER']);
+const VISIBILITY_INVOICE_TYPES = new Set<string>(['SSS', 'SSS_TOT']);
 
 /** Display helper — show a real value, else an em-dash (never a fabricated placeholder). */
 const orDash = (v?: string | null): string => (v && v.trim() ? v : '—');
@@ -71,8 +68,8 @@ const orDash = (v?: string | null): string => (v && v.trim() ? v : '—');
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function ProfilePage() {
-  const router  = useRouter();
-  const session = usePartnerSession();
+  const router   = useRouter();
+  const identity = usePartnerIdentity(); // REAL outlet type + points-presence signal (replaces demo session)
 
   const [profile,     setProfile]     = useState<ProfileData | null>(null);
   const [loading,     setLoading]     = useState(true);
@@ -182,8 +179,8 @@ export default function ProfilePage() {
   }
 
   const kycCfg = profile.partner.kycStatus ? kycConfig[profile.partner.kycStatus] : null;
-  const showVisibilityInvoices = VISIBILITY_INVOICE_TYPES.has(session.outletType);
-  const showPointsSummary      = POINTS_OUTLET_TYPES.has(session.outletType);
+  const showVisibilityInvoices = identity.outletType !== null && VISIBILITY_INVOICE_TYPES.has(identity.outletType);
+  const showPointsSummary      = identity.hasPointsActivity;
 
   const { bankName, accountNumber, ifscCode, upiId } = profile.bank;
   const hasBank = Boolean(bankName || accountNumber || ifscCode);

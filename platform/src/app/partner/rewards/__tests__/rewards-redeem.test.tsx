@@ -19,14 +19,15 @@ import { vi, describe, it, expect, afterEach, beforeEach } from 'vitest';
 const pushMock = vi.fn();
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: pushMock }) }));
 
-vi.mock('@/lib/partner-session', () => ({
-  usePartnerSession: () => ({
-    outletId: 'o1', outletType: 'WHOLESALER', firmName: 'Kumar Store',
-    partnerName: 'Rajesh', tier: 'Gold', mobile: '9876543210',
-    track: 'POINTS', pointsBalance: 50_000, pointsLifetime: 60_000,
-    leaderboardRank: 1, leaderboardTotal: 10,
-    inrEarnedThisCycle: 0, pendingPayoutInr: 0,
-  }),
+// Rewards is gated on the REAL points-presence signal from usePartnerIdentity
+// (replaces the demo REWARD_TRACK). A points-active partner reaches the catalogue.
+// `mockIdentity` is mutable so a test can simulate a payout-only partner (gate shown).
+let mockIdentity = {
+  businessName: 'Kumar Store', ownerName: 'Rajesh', partnerCode: 'P1',
+  outletType: 'WHOLESALER', hasPointsActivity: true, hasPayoutActivity: false,
+};
+vi.mock('@/lib/partner-identity', () => ({
+  usePartnerIdentity: () => mockIdentity,
 }));
 
 vi.mock('@/lib/gifsy-settings', () => ({
@@ -76,6 +77,11 @@ function catalogResponse() {
 beforeEach(() => {
   pushMock.mockClear();
   toastError.mockClear();
+  // Default: a points-active partner reaches the catalogue.
+  mockIdentity = {
+    businessName: 'Kumar Store', ownerName: 'Rajesh', partnerCode: 'P1',
+    outletType: 'WHOLESALER', hasPointsActivity: true, hasPayoutActivity: false,
+  };
 });
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -86,6 +92,23 @@ async function openVoucherSheet(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('RR — Rewards live catalogue + redeem flow', () => {
+  it('RR0: a PAYOUT-only partner (hasPointsActivity=false) sees the gate, not the catalogue', async () => {
+    mockIdentity = {
+      businessName: 'Sharma Kirana', ownerName: 'Amit', partnerCode: 'P2',
+      outletType: 'SSS', hasPointsActivity: false, hasPayoutActivity: true,
+    };
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogResponse());
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: {} }) });
+    }));
+    render(<RewardsPage />);
+    // The gate copy renders; the catalogue item never does.
+    expect(await screen.findByText(/rewards not available/i)).toBeInTheDocument();
+    expect(screen.queryByText('Amazon Voucher ₹500')).not.toBeInTheDocument();
+    // No Vouchers tab either (the catalogue UI is entirely gated out).
+    expect(screen.queryByRole('button', { name: /vouchers/i })).not.toBeInTheDocument();
+  });
+
   it('RR1: renders catalogue items from GET /api/rewards/catalog', async () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
       if (url.includes('/api/rewards/catalog')) return Promise.resolve(catalogResponse());
