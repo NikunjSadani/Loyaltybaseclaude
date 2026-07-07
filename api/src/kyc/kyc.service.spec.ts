@@ -67,6 +67,8 @@ const mockPrisma = {
   // assertCanViewSubmission's reassignment-aware allow-path looks up the outlet's
   // CURRENT active assignment (unassignedAt null) to a salesUser in the caller's subtree.
   salesUserAssignment: { findFirst: jest.fn() },
+  // ledger() resolves each credit tx's field name from its CreditBatch rows JSON.
+  creditBatch: { findMany: jest.fn() },
   consentRecord: { create: jest.fn() },
   kycVerificationItem: { upsert: jest.fn() },
   // slaMetrics resolves the SLA target from the tenant's stored `slaTargetHours` row.
@@ -1596,6 +1598,67 @@ describe('KycService', () => {
     it('throws NotFound when the (scoped) submission is not found', async () => {
       mockPrisma.kycSubmission.findFirst.mockResolvedValue(null);
       await expect(service.ledger(sss, 's1')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // ── field-name resolution from the CreditBatch rows JSON ──────────────────
+    describe('credit field-name resolution', () => {
+      const wt = (over: Partial<Record<string, unknown>>) => ({
+        id: 'wt', createdAt: new Date('2026-01-01'), description: '',
+        transactionType: 'CREDIT_BONUS', points: 100, balanceAfter: 100,
+        referenceType: null, referenceId: null, ...over,
+      });
+
+      const seedWithTxs = (transactions: unknown[]) =>
+        mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+          id: 's1', userId: 'sss1',
+          partner: {
+            clientId: 'deoleo', businessName: 'B', phone: 'p',
+            outlets: [{ outletCode: 'OUT-1' }],
+            wallets: [{ redeemablePoints: 0, lifetimeEarned: 0, lifetimeRedeemed: 0, transactions }],
+          },
+        });
+
+      it('resolves fieldName from the batch row by amount when the narration is blank', async () => {
+        seedWithTxs([
+          wt({ id: 'c1', referenceType: 'CREDIT_BATCH', referenceId: 'b1', points: 300, description: '' }),
+        ]);
+        mockPrisma.creditBatch.findMany.mockResolvedValue([
+          { id: 'b1', rows: [{ outletId: 'OUT-1', fieldName: 'Monthly Scheme', amount: 300, narration: '', awardType: 'POINTS' }] },
+        ]);
+        const res = await service.ledger(sss, 's1');
+        const tx = res.transactions.find((t) => t.id === 'c1');
+        expect(tx?.fieldName).toBe('Monthly Scheme');
+        // Tenant-scoped batch query.
+        expect(mockPrisma.creditBatch.findMany.mock.calls[0][0].where).toEqual({
+          id: { in: ['b1'] }, clientId: 'deoleo',
+        });
+      });
+
+      it('maps two same-amount rows 1:1 by consumption order (oldest→newest)', async () => {
+        // transactions come newest-first; c-old was credited first (row A), c-new second (row B).
+        seedWithTxs([
+          wt({ id: 'c-new', createdAt: new Date('2026-01-02'), referenceType: 'CREDIT_BATCH', referenceId: 'b1', points: 50, description: '' }),
+          wt({ id: 'c-old', createdAt: new Date('2026-01-01'), referenceType: 'CREDIT_BATCH', referenceId: 'b1', points: 50, description: '' }),
+        ]);
+        mockPrisma.creditBatch.findMany.mockResolvedValue([
+          { id: 'b1', rows: [
+            { outletId: 'OUT-1', fieldName: 'Field A', amount: 50, narration: '', awardType: 'POINTS' },
+            { outletId: 'OUT-1', fieldName: 'Field B', amount: 50, narration: '', awardType: 'POINTS' },
+          ] },
+        ]);
+        const res = await service.ledger(sss, 's1');
+        expect(res.transactions.find((t) => t.id === 'c-old')?.fieldName).toBe('Field A');
+        expect(res.transactions.find((t) => t.id === 'c-new')?.fieldName).toBe('Field B');
+      });
+
+      it('gives a redeem (non-credit) tx fieldName null', async () => {
+        seedWithTxs([
+          wt({ id: 'r1', transactionType: 'DEBIT_REDEMPTION', referenceType: 'REDEMPTION_ORDER', referenceId: 'ord1', points: -20 }),
+        ]);
+        const res = await service.ledger(sss, 's1');
+        expect(res.transactions.find((t) => t.id === 'r1')?.fieldName).toBeNull();
+        expect(mockPrisma.creditBatch.findMany).not.toHaveBeenCalled();
+      });
     });
   });
 

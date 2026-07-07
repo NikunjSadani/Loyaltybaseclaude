@@ -2050,6 +2050,7 @@ export class KycService {
       include: {
         partner: {
           select: {
+            clientId: true,
             businessName: true,
             phone: true,
             // real outlets are isPrimary=false → prefer primary if flagged, else first outlet (avoids an empty outlets[]).
@@ -2061,7 +2062,20 @@ export class KycService {
             },
             wallets: {
               include: {
-                transactions: { orderBy: { createdAt: 'desc' }, take: 200 },
+                transactions: {
+                  orderBy: { createdAt: 'desc' },
+                  take: 200,
+                  select: {
+                    id: true,
+                    createdAt: true,
+                    description: true,
+                    transactionType: true,
+                    points: true,
+                    balanceAfter: true,
+                    referenceType: true,
+                    referenceId: true,
+                  },
+                },
               },
             },
           },
@@ -2080,17 +2094,90 @@ export class KycService {
 
     const partner = submission.partner;
     const wallet = partner?.wallets[0] ?? null;
+    const outletCode = partner?.outlets[0]?.outletCode ?? '';
+    const transactions = wallet?.transactions ?? [];
+
+    // ── Resolve the credit FIELD NAME for each CREDIT_BATCH transaction ──────────
+    // WalletTransaction does not persist the field name (it stores the batch id as
+    // referenceId + the narration as description). Resolve it read-time from the
+    // batch's `rows` JSON. Each credit tx maps 1:1 to one batch row (creditEarn is
+    // called once per POINTS row, in row order); we replay that by CONSUMING rows,
+    // so even same-amount/blank-narration rows map deterministically.
+    const fieldNameByTxId = new Map<string, string | null>();
+    const creditBatchIds = [
+      ...new Set(
+        transactions
+          .filter((tx) => tx.referenceType === 'CREDIT_BATCH' && tx.referenceId)
+          .map((tx) => tx.referenceId as string),
+      ),
+    ];
+
+    if (creditBatchIds.length > 0) {
+      const batches = await this.prisma.creditBatch.findMany({
+        where: { id: { in: creditBatchIds }, clientId: partner?.clientId ?? '' },
+        select: { id: true, rows: true },
+      });
+
+      // Per batch, the not-yet-consumed rows for THIS outlet (by outlet CODE).
+      type BatchRow = { fieldName?: string; amount?: number; narration?: string };
+      const rowsByBatch = new Map<string, BatchRow[]>();
+      for (const batch of batches) {
+        let parsed: BatchRow[] = [];
+        // Defensive: a malformed/absent `rows` → treat as no rows (never throw).
+        try {
+          const raw = batch.rows as unknown;
+          if (Array.isArray(raw)) {
+            // POINTS rows only — a PAYOUT row (amount in paise) never credits the
+            // wallet, so excluding it avoids a numeric amount collision consuming
+            // the wrong row.
+            parsed = (raw as (BatchRow & { outletId?: string; awardType?: string })[]).filter(
+              (r) => r && r.outletId === outletCode && r.awardType === 'POINTS',
+            );
+          }
+        } catch {
+          parsed = [];
+        }
+        rowsByBatch.set(batch.id, parsed);
+      }
+
+      // Iterate credit transactions OLDEST→NEWEST (transactions come newest-first)
+      // so consumption order mirrors the credit-time creditEarn call order.
+      const creditTxsOldestFirst = transactions
+        .filter((tx) => tx.referenceType === 'CREDIT_BATCH' && tx.referenceId)
+        .slice()
+        .reverse();
+
+      for (const tx of creditTxsOldestFirst) {
+        const pool = rowsByBatch.get(tx.referenceId as string);
+        if (!pool || pool.length === 0) {
+          fieldNameByTxId.set(tx.id, null);
+          continue;
+        }
+        const txDesc = tx.description ?? '';
+        // Prefer an amount + narration match; fall back to amount-only.
+        let idx = pool.findIndex(
+          (r) => r.amount === tx.points && (r.narration ?? '') === txDesc,
+        );
+        if (idx === -1) idx = pool.findIndex((r) => r.amount === tx.points);
+        if (idx === -1) {
+          fieldNameByTxId.set(tx.id, null);
+          continue;
+        }
+        const [row] = pool.splice(idx, 1); // CONSUME so same-amount rows map 1:1
+        fieldNameByTxId.set(tx.id, row.fieldName ?? null);
+      }
+    }
 
     return {
       meta: {
         name: partner?.businessName ?? 'Unknown',
-        outletCode: partner?.outlets[0]?.outletCode ?? '',
+        outletCode,
         mobile: partner?.phone ?? '',
         balance: wallet?.redeemablePoints ?? 0,
         lifetime: wallet?.lifetimeEarned ?? 0,
         redeemed: wallet?.lifetimeRedeemed ?? 0,
       },
-      transactions: (wallet?.transactions ?? []).map((tx) => ({
+      transactions: transactions.map((tx) => ({
         id: tx.id,
         date: tx.createdAt.toISOString().split('T')[0],
         description: tx.description ?? '',
@@ -2098,6 +2185,8 @@ export class KycService {
         points: tx.points,
         balance: tx.balanceAfter,
         ref: tx.referenceId ?? undefined,
+        // Credit rows resolve to their batch field name; everything else is null.
+        fieldName: fieldNameByTxId.get(tx.id) ?? null,
       })),
     };
   }

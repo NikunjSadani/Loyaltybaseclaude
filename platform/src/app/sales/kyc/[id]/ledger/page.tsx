@@ -21,8 +21,8 @@ interface LedgerEntry {
   points: number;      // positive = credit, negative = debit
   balance: number;
   ref?: string;
-  /** KPI that generated this earn entry; undefined for redemptions, holds, credits */
-  kpiLabel?: string;
+  /** Credit FIELD NAME resolved from the batch (credit rows only; null otherwise). */
+  fieldName?: string | null;
 }
 
 interface OutletMeta {
@@ -48,6 +48,13 @@ function toWalletTx(entry: LedgerEntry): WalletTransaction & { _ref?: string } {
   else if (entry.type === 'expire')                          type = TransactionType.EXPIRE;
   else /* hold */                                            type = TransactionType.LOCK;
 
+  // Credit rows lead with the FIELD NAME as the header and show the upload
+  // narration (the original `description`) as a small gray sub-line below (only
+  // when non-empty). Non-credit rows keep their own description as the header.
+  const hasFieldName = !!entry.fieldName;
+  const header    = hasFieldName ? (entry.fieldName as string) : entry.description;
+  const narration = hasFieldName && entry.description ? entry.description : undefined;
+
   return {
     id:             entry.id,
     walletId:       '',
@@ -56,7 +63,8 @@ function toWalletTx(entry: LedgerEntry): WalletTransaction & { _ref?: string } {
     bucket:         WalletBucket.EARNED,
     amount:         Math.abs(entry.points),
     balanceAfter:   entry.balance,
-    description:    entry.description,
+    description:    header,
+    narration,
     schemeId:       null,
     invoiceId:      null,
     reversedById:   null,
@@ -165,9 +173,9 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
     return [keyToInput(Math.min(...keys)), keyToInput(Math.max(...keys))];
   }, [rawEntries]);
 
-  /* KPI options — distinct kpiLabels from ALL raw entries */
+  /* KPI options — distinct credit FIELD NAMES from ALL raw entries */
   const kpiOptions = useMemo(() => [
-    ...new Set(rawEntries.map((e) => e.kpiLabel).filter((l): l is string => !!l)),
+    ...new Set(rawEntries.map((e) => e.fieldName).filter((l): l is string => !!l)),
   ], [rawEntries]);
 
   /* Apply date-range + earn/burn + KPI filter */
@@ -181,7 +189,7 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
         if (earnBurnFilter === 'burn') return BURN_TYPES.has(e.type);
         return true;
       })
-      .filter((e) => !kpiFilter || e.kpiLabel === kpiFilter);
+      .filter((e) => !kpiFilter || e.fieldName === kpiFilter);
   }, [rawEntries, fromMonth, toMonth, earnBurnFilter, kpiFilter]);
 
   const periodDisp = rangeLabel(fromMonth, toMonth);
@@ -398,9 +406,6 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
                   return (
                     <div key={entry.id}>
                       <TransactionItem transaction={walletTx} />
-                      {entry.ref && (
-                        <p className="text-[10px] text-gray-400 font-mono pb-2 -mt-2 pl-11">#{entry.ref}</p>
-                      )}
                     </div>
                   );
                 })}
