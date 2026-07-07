@@ -181,8 +181,13 @@ export class CreditsController {
     @Param('id') id: string,
     @UploadedFile() file: Express.Multer.File,
     @Query() query: UtrUploadQueryDto,
+    // Accept apply from EITHER the query string OR the multipart body: a FormData
+    // POST naturally carries fields in the body, and reading only @Query silently
+    // ran every "Apply" as a preview. Robust to both call shapes.
+    @Body() body: { apply?: string } = {},
   ) {
-    return this.credits.uploadUtr(user, id, file, query.apply === 'true');
+    const apply = query.apply === 'true' || body?.apply === 'true';
+    return this.credits.uploadUtr(user, id, file, apply);
   }
 
   // ─── Reversals (GIFSY_ADMIN only) ──────────────────────────────────────────

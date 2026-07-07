@@ -283,8 +283,11 @@ function PayoutPageInner() {
     fd.append('file', utrFile);
     fd.append('apply', 'true');
 
+    // apply=true MUST go in the query string — the backend reads it via @Query
+    // (credits.controller uploadUtr). Sending it only in the multipart body made
+    // every "Apply" silently run as a PREVIEW (nothing committed, batch stayed OPEN).
     const res  = await fetch(
-      `/api/admin/credits/payout-downloads/${utrDownloadId}/utr`,
+      `/api/admin/credits/payout-downloads/${utrDownloadId}/utr?apply=true`,
       { method: 'POST', body: fd },
     );
     const json = await res.json();
