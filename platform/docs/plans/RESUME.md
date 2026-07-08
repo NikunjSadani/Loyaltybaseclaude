@@ -8,10 +8,15 @@ client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch *
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
 `dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-06.
 
-🟢 CURRENT MODE — **GO-LIVE: 🚀 CUTOVER #9 (prod → `ebd474b`, 2026-07-08) — the PAYOUT UTR "APPLY" FIX.** Owner "do the cutover"; `main`
-fast-forwarded `4b33e4c` → `ebd474b` (2 commits = 1 code fix + 1 doc, CODE-ONLY 0 migrations; pre-cutover backup **`1783479870311`**
-`pre-cutover9-develop-ebd474b`; rollback = redeploy `4b33e4c`). **Owner-gated `production` deploy — verify prod is serving `ebd474b` on both
-Cloud Run services (`git log` / `gcloud run services describe`); do NOT pin HEAD to a single SHA.** **The fix (`ebd474b`):** the admin credit-payout
+🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #9 IS LIVE (prod `ebd474b`, 2026-07-08) — the PAYOUT UTR "APPLY" FIX is IN PROD** (verified live:
+`deoleoloyalty.gifsy.in` login 200, /api/health 401=edge gate; both prod services on `ebd474b`). `main` fast-forwarded `4b33e4c` → `ebd474b`
+(2 commits = 1 code fix + 1 doc, CODE-ONLY 0 migrations; pre-cutover backup **`1783479870311`** `pre-cutover9-develop-ebd474b`; rollback =
+redeploy `4b33e4c`). **prod == main == `ebd474b`** — verify the live HEAD via `git log`, do NOT pin HEAD to a single SHA. **⚠️ FLAKY-CI TRAP (hit at
+cutover #9): the CI + the prod-deploy test job can FLAKE (a 25s fast-fail; the exact `NODE_ENV=test npm test -- --forceExit --no-coverage` command
+passes clean locally + in the staging deploy on the same code — likely a runner hiccup / dangling fire-and-forget async cut by `--forceExit`). The prod
+deploy (`deploy.yml`) gates the approval on `needs: test == success`, so a flaked test job means NO "Review deployments" gate appears (looks like
+"there's no approve option"). FIX: on the "Deploy — Production (main)" run for the SHA, click "Re-run failed jobs" → tests pass → gate appears → approve.
+`deploy.yml` also has an emergency `skip_tests` workflow_dispatch input as a last resort.** **The fix (`ebd474b`):** the admin credit-payout
 **UTR "Apply" never committed** — the FE sent `apply=true` in the multipart BODY but the endpoint reads it via `@Query` (`credits.controller`
 `uploadUtr`), so EVERY Apply silently ran as a PREVIEW: nothing persisted, entries stayed `PROCESSING`, the `CreditPayoutDownload` stayed `OPEN`,
 and the FE printed "Applied: **undefined** paid/failed/skipped" (the preview response has no counts). Diagnosed from the owner's screenshot + a guarded
