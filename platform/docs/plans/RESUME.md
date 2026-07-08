@@ -8,10 +8,31 @@ client: Deoleo). Repo root: C:\Users\nikun\Loyaltybaseclaude (git root; branch *
 (thin Next.js 16, app router). Backend: `api/` (NestJS + Prisma 7 — owns the DB + ALL business logic; runs compiled
 `dist/`). Thin FE over a next.config proxy `/api/*` → backend `/v1/*`. State as of 2026-07-06.
 
-🟢 CURRENT MODE — **GO-LIVE: ✅ CUTOVER #8 IS LIVE (prod `4b33e4c`, executed 2026-07-07) — a 4-fix UX/parity batch is now IN PROD**
-(verified live on `deoleoloyalty.gifsy.in`: login 200, wordmark 200, /api/health 401=edge auth gate; both prod services on `4b33e4c`; pre-cutover
-backup `1783420492810` `pre-cutover8-develop-4b33e4c`; CODE-ONLY, 0 migrations). **prod == main == develop == `4b33e4c`** — verify the live HEAD
-via `git log`, do NOT pin HEAD to a single SHA. **The 4 cutover-#8 code fixes:** **(A)** `4be63f3` — **PRESENCE-BASED partner-wallet reward-track**
+🟢 CURRENT MODE — **GO-LIVE: 🚀 CUTOVER #9 (prod → `ebd474b`, 2026-07-08) — the PAYOUT UTR "APPLY" FIX.** Owner "do the cutover"; `main`
+fast-forwarded `4b33e4c` → `ebd474b` (2 commits = 1 code fix + 1 doc, CODE-ONLY 0 migrations; pre-cutover backup **`1783479870311`**
+`pre-cutover9-develop-ebd474b`; rollback = redeploy `4b33e4c`). **Owner-gated `production` deploy — verify prod is serving `ebd474b` on both
+Cloud Run services (`git log` / `gcloud run services describe`); do NOT pin HEAD to a single SHA.** **The fix (`ebd474b`):** the admin credit-payout
+**UTR "Apply" never committed** — the FE sent `apply=true` in the multipart BODY but the endpoint reads it via `@Query` (`credits.controller`
+`uploadUtr`), so EVERY Apply silently ran as a PREVIEW: nothing persisted, entries stayed `PROCESSING`, the `CreditPayoutDownload` stayed `OPEN`,
+and the FE printed "Applied: **undefined** paid/failed/skipped" (the preview response has no counts). Diagnosed from the owner's screenshot + a guarded
+prod read (both recent Deoleo downloads OPEN, entries PROCESSING, no utr/paidAt, 0 PayoutTransactions). Fix: FE sends `?apply=true` in the QUERY string
++ backend `uploadUtr` now reads `apply` from EITHER `@Query` OR `@Body` (so a FormData field can't be silently ignored again). No money-logic change —
+the apply tx was already correct, it just never ran. Gate `ebd474b`: api jest 1484 · nest 0 · FE vitest 1796 · tsc 0. **REUSABLE TRAP: a `fetch` with
+a `FormData` body puts fields in the BODY, not the query string — an endpoint reading a flag via `@Query` will silently ignore it. Match the send
+mechanism to how the controller reads it (or read both).**
+
+▶ **NEXT SESSION STARTS HERE — the WALLET-SURFACING FIX (owner-approved, design decision PENDING):** credit payouts write `CreditPayoutEntry`, but
+the outlet WALLET's payout history (`partner.service.getPayouts`, `GET /v1/partner/payouts`) reads ONLY `PayoutTransaction` (created ONLY by
+redemption cash-outs in `rewards.service.ts:739,1186` — NEVER by a credit payout). So a credit payout — even fully applied to PAID with a UTR — NEVER
+appears in the outlet's wallet. WORSE: the presence flag `hasPayoutActivity` (`partner.service.resolvePartnerActivity`) counts `CreditPayoutEntry` OR
+`PayoutTransaction`, so the payout CARD shows but the STATEMENT/list is empty for credit-only partners ("card shows, no rows/UTR"). **THE FIX: union
+`CreditPayoutEntry` (paid, +likely pending/processing) into `getPayouts()` so credit payouts + UTRs show in the wallet.** **OPEN DESIGN Q for the owner:
+show payouts from generation (PENDING/PROCESSING = "payout pending") or ONLY once PAID with the UTR? — my recommendation: show BOTH (pending→paid),
+mirroring the redemption side.** Same audit + gate + staging-verify loop; needs a cutover after. **NOTE: my recommendation is to build this on the
+partner wallet parity foundation from cutover #8 — reuse the presence-based statement; the payout rows already render, they just need the credit-payout
+source unioned in.**
+
+**PRIOR — CUTOVER #8 (prod `4b33e4c`, 2026-07-07) — a 4-fix UX/parity batch. The 4 cutover-#8 code fixes:** **(A)** `4be63f3` — **PRESENCE-BASED partner-wallet reward-track**
 (the partner app's points-vs-payout wallet/rewards was DEMO-driven via `partner-session.ts` `REWARD_TRACK`; NOT a money bug — the credit award is
 config-driven/correct — but a display gap; presence-based: points card if points activity, payout card if payout activity, both if both, full
 combined history always; backend `/partner/me` returns real `outletType`+`hasPointsActivity`+`hasPayoutActivity`+a `loading` flag; demo
