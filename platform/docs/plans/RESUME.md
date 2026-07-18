@@ -26,16 +26,22 @@ the apply tx was already correct, it just never ran. Gate `ebd474b`: api jest 14
 a `FormData` body puts fields in the BODY, not the query string — an endpoint reading a flag via `@Query` will silently ignore it. Match the send
 mechanism to how the controller reads it (or read both).**
 
-▶ **NEXT SESSION STARTS HERE — the WALLET-SURFACING FIX (owner-approved, design decision PENDING):** credit payouts write `CreditPayoutEntry`, but
-the outlet WALLET's payout history (`partner.service.getPayouts`, `GET /v1/partner/payouts`) reads ONLY `PayoutTransaction` (created ONLY by
-redemption cash-outs in `rewards.service.ts:739,1186` — NEVER by a credit payout). So a credit payout — even fully applied to PAID with a UTR — NEVER
-appears in the outlet's wallet. WORSE: the presence flag `hasPayoutActivity` (`partner.service.resolvePartnerActivity`) counts `CreditPayoutEntry` OR
-`PayoutTransaction`, so the payout CARD shows but the STATEMENT/list is empty for credit-only partners ("card shows, no rows/UTR"). **THE FIX: union
-`CreditPayoutEntry` (paid, +likely pending/processing) into `getPayouts()` so credit payouts + UTRs show in the wallet.** **OPEN DESIGN Q for the owner:
-show payouts from generation (PENDING/PROCESSING = "payout pending") or ONLY once PAID with the UTR? — my recommendation: show BOTH (pending→paid),
-mirroring the redemption side.** Same audit + gate + staging-verify loop; needs a cutover after. **NOTE: my recommendation is to build this on the
-partner wallet parity foundation from cutover #8 — reuse the presence-based statement; the payout rows already render, they just need the credit-payout
-source unioned in.**
+▶ **NEXT = THE NEXT (owner-gated) CUTOVER (`ebd474b` → `186c92e`).** ✅ **The WALLET-SURFACING FIX is BUILT + on `develop` `186c92e`** (2026-07-18,
+gate api jest 1485 · nest 0 · FE vitest 1798 · tsc 0; owner-approved, staging-verify then cutover). `partner.service.getPayouts` now UNIONS
+`CreditPayoutEntry` (PENDING/PROCESSING/PAID; FAILED/REVERSED excluded) into the wallet payout history alongside the redemption `PayoutTransaction`
+rail — one row per entry, merged + sorted by effective date (`paidAt ?? createdAt`) newest-first, cap 100; `period` = the credit month `'YYYY-MM'` used
+verbatim. `resolvePartnerActivity` (the `hasPayoutActivity` card flag) aligned to the SAME status set so the card & the statement can't disagree (that
+was the "card shows, empty list" bug). FE: pending payout rows now show with a "Payout pending" amber badge + muted amount + added-date; the
+lifetime-received CARD still counts PAID only; Excel export marks pending rows. **Independent adversarial audit (money path) caught + fixed 2 HIGH + 1
+MED before ship:** (HIGH-1) `CreditPayoutEntry.outletId` stores the outlet **CODE**, not the Outlet PK — the first cut keyed the query on the PK cuid and
+matched NOTHING (feature dead; the pre-existing presence probe was dead the same way since cutover #8); now keyed on `outletCode`, consistent with
+`invoices.service`/`tds.service` (both join via `outletCode`). (HIGH-2) `mapPayoutStatus` never handled `'SUCCESS'` — the REAL completed value in the
+`PayoutStatus` enum (no `PAID`/`COMPLETED`; `payouts.service:723` writes `SUCCESS`) → every completed redemption mapped to PENDING; now `SUCCESS`→PAID.
+(MED-1) presence probe counted FAILED/REVERSED redemptions the list hides → card-vs-list mismatch; both rails now exclude FAILED/REVERSED at the query.
+**REUSABLE TRAPS: (a) `CreditPayoutEntry.outletId` == the outlet CODE everywhere (no FK — join via `Outlet.outletCode`); keying it by the Outlet PK
+matches nothing. (b) a "completed" `PayoutTransaction` is `status='SUCCESS'` (the enum has no PAID/COMPLETED) — any status mapper MUST handle SUCCESS.**
+Owner's residual = staging runtime-verify (a real credit-payout PAID + a real redemption on ONE partner both appearing in the wallet), then it rolls
+into the next cutover.
 
 **PRIOR — CUTOVER #8 (prod `4b33e4c`, 2026-07-07) — a 4-fix UX/parity batch. The 4 cutover-#8 code fixes:** **(A)** `4be63f3` — **PRESENCE-BASED partner-wallet reward-track**
 (the partner app's points-vs-payout wallet/rewards was DEMO-driven via `partner-session.ts` `REWARD_TRACK`; NOT a money bug — the credit award is
