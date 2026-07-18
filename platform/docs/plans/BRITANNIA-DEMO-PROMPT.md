@@ -15,6 +15,30 @@
 
 ---
 
+## Context for the new (fresh) session — read this first
+
+If you are a fresh agent/session starting the build, here is everything you need; you do **not** need
+anything from the production monorepo.
+
+- **What this is:** a **disposable, front-end-only** clickable demo to win a pitch. Mock data only,
+  no backend/auth/API. It is a *design artifact*, not the product.
+- **Where you are:** a **new, empty repo** (e.g. `britannia-rewards-demo/`), separate from the
+  production platform. Scaffold a fresh Next.js (App Router) app. Do not look for or import anything
+  from another project.
+- **Why the constraints matter:** the demo is later reskinned into the company's real rewards
+  platform, which is Next.js + React + Tailwind + shadcn/ui (Radix + CVA + tailwind-merge). Building
+  in that same idiom + keeping the data layer as **one swappable seam** (see BUILD NOTES in the
+  prompt) is what makes the eventual port cheap. Framer Motion is the only extra dependency.
+- **Definition of done:** the 5-step **golden path** in the prompt is flawless and clickable on a
+  phone viewport, light + dark mode, with real mock-state interactions (redeem debits the wallet,
+  slider recomputes live). Run the dev server and click through it yourself before declaring done.
+- **Design intent (the "why" behind the rules):** premium = **restraint** (whitespace, sparing red,
+  hide-don't-placeholder); the Dream Reward is the **emotional hero**; the Wallet is deliberately
+  **calm/bank-statement** as a tonal contrast; confetti is a **reward**, used once, after redemption.
+  When in doubt, remove rather than add.
+
+---
+
 ## The prompt (paste into a fresh session / v0 / Cursor)
 
 ```
@@ -147,6 +171,26 @@ DO NOT
 - Do not add analytics dashboards, ERP screens, or admin/management views (this is the REP app only).
 - Do not over-design or add unnecessary widgets. Do not flood the UI with red.
 - Do not show placeholder/empty cards — hide instead.
+
+BUILD NOTES (do these — they make the demo good AND easy to productionise later)
+- ONE SWAPPABLE DATA SEAM: put ALL mock data + mock mutations in a single module (e.g.
+  lib/mock-store.ts) exposed through one hook/context (points, wallet, campaigns, dreamReward,
+  rewards, notifications). Screens read/write ONLY through this seam — never inline literals. Later
+  this single file is swapped for real API calls, so keep components purely presentational.
+- INTERACTIONS MUST BE REAL against mock state: redeeming debits the balance AND appends a wallet
+  row; the forecast slider recomputes the date live; choosing a Dream Reward updates the dashboard.
+  No dead buttons, no static screens pretending to be live.
+- GOLDEN PATH FIRST — depth over breadth. Make the 5-step click-through flawless before polishing
+  secondary screens. One-shot "build everything" attempts look nice but break on interaction; don't.
+- IMAGES: use tasteful, consistent reward/product imagery (curated remote images, or clean SVG /
+  gradient placeholders) — never broken images or grey boxes; they destroy the premium feel.
+- INDIAN LOCALE: format money/points with en-IN (₹47,250; 1,00,000 grouping). Friendly dates.
+- Fonts via next/font (Inter). Dark mode via a class-based theme provider. Honour
+  prefers-reduced-motion for all non-essential motion.
+- Domain naming: use points / wallet / redemption / campaign / dreamReward so it maps 1:1 to the
+  real platform later.
+- If an App Router / Next.js API behaves unexpectedly, check the INSTALLED Next version's docs
+  rather than assuming older behaviour.
 
 DELIVER
 A runnable Next.js app with all rep-facing screens above, seeded with the Britannia mock data, the
