@@ -434,6 +434,28 @@ model Client {
   @@map("clients")
 }
 
+// ──────────────────────────────────────────────────────────
+// ClientDomain — DB-driven tenant domain → slug routing (§A-DOMAIN).
+//
+// Replaces the in-code CLIENT_REGISTRY.domains map. A domain maps to
+// exactly ONE tenant platform-wide: the migration hand-adds a
+// LOWER("domain") UNIQUE index (Prisma can't model an expression
+// index). `clientId` is a bare slug (= Client.id), no FK — matches
+// the clientId convention on every other model. isPrimary marks the
+// tenant's canonical/display domain.
+// ──────────────────────────────────────────────────────────
+model ClientDomain {
+  id        String   @id @default(cuid())
+  clientId  String
+  domain    String
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([clientId])
+  @@map("client_domains")
+}
+
 model User {
   id                String     @id @default(cuid())
   clientId          String

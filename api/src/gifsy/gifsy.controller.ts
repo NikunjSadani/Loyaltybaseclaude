@@ -1,9 +1,25 @@
-import { Body, Controller, Get, Param, Patch, Post, Put } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Put,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { GifsyService } from './gifsy.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { CreateClientDto, UpdateClientDto, UpdateOutletTypeConfigDto } from './dto/gifsy.dto';
+import {
+  BrandingAssetDto,
+  CreateClientDto,
+  UpdateClientDto,
+  UpdateOutletTypeConfigDto,
+} from './dto/gifsy.dto';
 
 /**
  * GIFSY platform super-admin API — re-homed from
@@ -39,6 +55,25 @@ export class GifsyController {
     @Body() dto: UpdateClientDto,
   ) {
     return this.gifsy.updateClient(user, slug, dto);
+  }
+
+  /**
+   * POST /v1/gifsy/clients/:slug/branding-asset — upload a branding image and
+   * persist its URL onto the client's branding blob. Same GIFSY_ADMIN +
+   * tenancy:write gate as the client PATCH. The image rides as multipart field
+   * `file`; the target slot (`kind`) rides as a multipart form field.
+   */
+  @Post('clients/:slug/branding-asset')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('tenancy:write')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024 } }))
+  uploadBrandingAsset(
+    @CurrentUser() user: JwtPayload,
+    @Param('slug') slug: string,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: BrandingAssetDto,
+  ) {
+    return this.gifsy.uploadBrandingAsset(user, slug, file, dto.kind);
   }
 
   @Get('clients')

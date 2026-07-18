@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -6,6 +7,8 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
+import { sniffFileType } from '../common/file-signature';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { CreateClientDto, UpdateClientDto, UpdateOutletTypeConfigDto } from './dto/gifsy.dto';
 
@@ -66,9 +69,58 @@ const MODULE_FEATURE_KEYS = [
  */
 const RESERVED_CLIENT_SLUGS = new Set(['gifsy', 'admin', 'api', 'platform', 'www', 'app']);
 
+/**
+ * Tenant custom domains are constrained to the platform's own zone: every routed
+ * hostname must be a subdomain of `gifsy.in`. Kept as a single constant so the
+ * scope can be widened later (e.g. to allow BYO apex domains) in exactly one
+ * place. NOTE: `.endsWith(TENANT_DOMAIN_SUFFIX)` also rejects the bare apex
+ * `gifsy.in` itself (8 chars, no leading label), which is intended.
+ */
+const TENANT_DOMAIN_SUFFIX = '.gifsy.in';
+
+/**
+ * First-label subdomains a tenant may NOT claim — platform infrastructure
+ * hostnames (e.g. `api.gifsy.in`, `app.gifsy.in`). Rejecting these stops a tenant
+ * from hijacking a system host by registering it as a custom domain.
+ */
+const RESERVED_DOMAIN_LABELS = new Set([
+  'api',
+  'app',
+  'www',
+  'platform',
+  'admin',
+  'status',
+  'mail',
+  'uat',
+]);
+
+/**
+ * Maps a branding-asset `kind` (upload endpoint) to the branding-blob URL field
+ * it fills — also the UpdateClientDto field name, so persistence flows through
+ * the existing branding-merge update path.
+ */
+const BRANDING_ASSET_FIELDS = {
+  logo: 'logoUrl',
+  wordmarkWhite: 'wordmarkWhiteUrl',
+  wordmarkColor: 'wordmarkColorUrl',
+  favicon: 'faviconUrl',
+} as const;
+
+type BrandingAssetKind = keyof typeof BRANDING_ASSET_FIELDS;
+
+/**
+ * RFC-1123 hostname shape (lower-cased): dot-separated labels, each 1-63 chars of
+ * [a-z0-9-] not starting/ending with a hyphen; total ≤ 253 chars.
+ */
+const HOSTNAME_RE =
+  /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
 @Injectable()
 export class GifsyService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
+  ) {}
 
   private assertGifsy(user: JwtPayload): void {
     if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden');
@@ -98,6 +150,134 @@ export class GifsyService {
   }
 
   /**
+   * Validate one domain's SHAPE + POLICY (not uniqueness). Throws
+   * BadRequestException on a malformed hostname, a non-`.gifsy.in` domain, or a
+   * reserved first label. Input is assumed already normalised (lower-cased).
+   */
+  private validateDomainFormat(domain: string): void {
+    if (!HOSTNAME_RE.test(domain)) {
+      throw new BadRequestException(`"${domain}" is not a valid hostname.`);
+    }
+    if (!domain.endsWith(TENANT_DOMAIN_SUFFIX)) {
+      throw new BadRequestException(
+        `Domain "${domain}" must be a subdomain of ${TENANT_DOMAIN_SUFFIX.slice(1)}.`,
+      );
+    }
+    const firstLabel = domain.split('.')[0];
+    if (RESERVED_DOMAIN_LABELS.has(firstLabel)) {
+      throw new BadRequestException(
+        `"${firstLabel}" is a reserved subdomain and cannot be assigned to a tenant.`,
+      );
+    }
+  }
+
+  /**
+   * Validate + reconcile a tenant's custom-domain set inside a transaction.
+   *
+   * Steps: normalise (lower-case/trim) + dedupe → per-domain format/policy check →
+   * GLOBAL cross-tenant uniqueness (case-insensitive; a domain maps to exactly one
+   * tenant platform-wide) → reconcile the stored rows to match the input (delete
+   * removed, create added, preserving existing rows) → guarantee EXACTLY ONE
+   * primary. The unique-index race (two tenants claiming one domain concurrently)
+   * surfaces as P2002 → re-wrapped as ConflictException.
+   */
+  private async validateAndWriteDomains(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    rawDomains: string[],
+  ): Promise<void> {
+    // Normalise + dedupe (preserve first-seen order for primary selection).
+    const seen = new Set<string>();
+    const domains: string[] = [];
+    for (const raw of rawDomains) {
+      const d = (raw ?? '').trim().toLowerCase();
+      if (!d) continue;
+      this.validateDomainFormat(d);
+      if (!seen.has(d)) {
+        seen.add(d);
+        domains.push(d);
+      }
+    }
+
+    // GLOBAL uniqueness: a domain may not belong to a DIFFERENT tenant. Prisma
+    // can't express LOWER() in a where, so match case-insensitively.
+    for (const d of domains) {
+      const clash = await tx.clientDomain.findFirst({
+        where: {
+          domain: { equals: d, mode: 'insensitive' },
+          clientId: { not: clientId },
+        },
+        select: { id: true },
+      });
+      if (clash) {
+        throw new ConflictException(`Domain ${d} is already assigned to another tenant`);
+      }
+    }
+
+    // Reconcile: delete removed, create added — keep untouched rows (so isPrimary
+    // survives across a PATCH that doesn't reorder).
+    const existing = await tx.clientDomain.findMany({ where: { clientId } });
+    const existingByDomain = new Map(existing.map((r) => [r.domain.toLowerCase(), r]));
+    const target = new Set(domains);
+
+    const toDelete = existing.filter((r) => !target.has(r.domain.toLowerCase()));
+    if (toDelete.length) {
+      await tx.clientDomain.deleteMany({ where: { id: { in: toDelete.map((r) => r.id) } } });
+    }
+
+    for (const d of domains) {
+      if (!existingByDomain.has(d)) {
+        try {
+          await tx.clientDomain.create({ data: { clientId, domain: d, isPrimary: false } });
+        } catch (e) {
+          if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+            throw new ConflictException(`Domain ${d} is already assigned to another tenant`);
+          }
+          throw e;
+        }
+      }
+    }
+
+    await this.ensureExactlyOnePrimary(tx, clientId, domains);
+  }
+
+  /**
+   * Guarantee a client's domain rows have EXACTLY ONE primary. Preference order:
+   * an existing primary (if still present) → the canonical `<slug>.gifsy.in` →
+   * the first domain in the supplied order → the first row. Everyone else is
+   * demoted. No-op for a client with zero domains.
+   */
+  private async ensureExactlyOnePrimary(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    orderedDomains: string[],
+  ): Promise<void> {
+    const rows = await tx.clientDomain.findMany({ where: { clientId } });
+    if (rows.length === 0) return;
+
+    const canonical = `${clientId}${TENANT_DOMAIN_SUFFIX}`;
+    // First explicitly-supplied domain in input order (skip the canonical, which
+    // create/update append). A branded domain, when supplied, should be primary —
+    // mirroring the Deoleo backfill where `deoleoloyalty.gifsy.in` is primary.
+    const firstBranded = orderedDomains.find((d) => d.toLowerCase() !== canonical);
+    const winner =
+      rows.find((r) => r.isPrimary) ??
+      (firstBranded ? rows.find((r) => r.domain.toLowerCase() === firstBranded) : undefined) ??
+      rows.find((r) => r.domain.toLowerCase() === canonical) ??
+      rows[0];
+
+    for (const r of rows) {
+      const shouldBePrimary = r.id === winner.id;
+      if (r.isPrimary !== shouldBePrimary) {
+        await tx.clientDomain.update({
+          where: { id: r.id },
+          data: { isPrimary: shouldBePrimary },
+        });
+      }
+    }
+  }
+
+  /**
    * POST /v1/gifsy/clients — create a new tenant Client row and provision its
    * OutletTypeClientConfig rows in a single transaction. GIFSY_ADMIN only.
    * Throws 409 ConflictException if the slug already exists.
@@ -110,7 +290,12 @@ export class GifsyService {
     // that lets a user mint GIFSY_ADMIN operators (privilege escalation); it also
     // collides with the proxy's special-casing of the `gifsy` host. Block it + a few
     // other infrastructure slugs.
-    if (RESERVED_CLIENT_SLUGS.has(dto.slug.toLowerCase())) {
+    // Reserved slugs are a SUPERSET of the reserved DOMAIN labels: a slug seeds the
+    // canonical `<slug>.gifsy.in` domain, so a slug like `status`/`mail`/`uat` (domain-
+    // reserved but not slug-reserved) would fail deep inside the create transaction with
+    // a confusing 400 rollback. Reject it cleanly up front instead.
+    const slugLc = dto.slug.toLowerCase();
+    if (RESERVED_CLIENT_SLUGS.has(slugLc) || RESERVED_DOMAIN_LABELS.has(slugLc)) {
       throw new ConflictException(`Slug "${dto.slug}" is reserved and cannot be used.`);
     }
 
@@ -146,6 +331,14 @@ export class GifsyService {
         });
 
         await this.provisionOutletTypeConfigs(tx, created.id);
+
+        // Always seed the canonical `<slug>.gifsy.in` (deduped against any
+        // explicitly-supplied domains) so a new tenant is immediately routable.
+        const canonical = `${created.id}${TENANT_DOMAIN_SUFFIX}`;
+        await this.validateAndWriteDomains(tx, created.id, [
+          ...(dto.domains ?? []),
+          canonical,
+        ]);
 
         return created;
       });
@@ -213,6 +406,11 @@ export class GifsyService {
       'supportEmail',
       'supportPhone',
       'invoicePrefix',
+      'logoUrl',
+      'wordmarkWhiteUrl',
+      'wordmarkColorUrl',
+      'faviconUrl',
+      'productBrands',
     ] as const;
     if (brandingKeys.some((k) => dto[k] !== undefined)) {
       const branding = { ...((existing.branding ?? {}) as Record<string, unknown>) };
@@ -244,7 +442,42 @@ export class GifsyService {
       data.features = features as Prisma.InputJsonValue;
     }
 
-    const client = await this.prisma.client.update({ where: { id: slug }, data });
+    // Notifications: deep-merge the provided keys over the existing blob. The
+    // nested `templateIds` is itself deep-merged so unspecified template ids —
+    // and any msg91-related keys already on the row — are never dropped. No
+    // WhatsApp send path is touched; this is persistence only.
+    if (dto.notifications !== undefined) {
+      const existingNotif = (existing.notifications ?? {}) as Record<string, unknown>;
+      const incoming = dto.notifications as Record<string, unknown>;
+      const notifications: Record<string, unknown> = { ...existingNotif, ...incoming };
+      const incomingTemplateIds = incoming.templateIds;
+      if (
+        incomingTemplateIds &&
+        typeof incomingTemplateIds === 'object' &&
+        !Array.isArray(incomingTemplateIds)
+      ) {
+        notifications.templateIds = {
+          ...((existingNotif.templateIds as Record<string, unknown>) ?? {}),
+          ...(incomingTemplateIds as Record<string, unknown>),
+        };
+      }
+      data.notifications = notifications as Prisma.InputJsonValue;
+    }
+
+    // Domains reconcile needs a transaction (multi-row delete/create + primary
+    // invariant); the scalar/JSON update rides in the same tx so a domain clash
+    // rolls the whole PATCH back. Without domains, keep the plain single update.
+    const client =
+      dto.domains !== undefined
+        ? await this.prisma.$transaction(async (tx) => {
+            const updated = await tx.client.update({ where: { id: slug }, data });
+            // Always keep the canonical `<slug>.gifsy.in` in the set so a PATCH can
+            // never leave a tenant with zero domains (unroutable). Deduped downstream.
+            const canonical = `${slug}${TENANT_DOMAIN_SUFFIX}`;
+            await this.validateAndWriteDomains(tx, slug, [...dto.domains!, canonical]);
+            return updated;
+          })
+        : await this.prisma.client.update({ where: { id: slug }, data });
 
     const branding = (client.branding ?? {}) as Record<string, unknown>;
     const features = (client.features ?? {}) as Record<string, unknown>;
@@ -269,6 +502,63 @@ export class GifsyService {
         referralModule: features.referralModule,
       },
     };
+  }
+
+  /**
+   * POST /v1/gifsy/clients/:slug/branding-asset — upload a branding image (logo /
+   * white wordmark / colour wordmark / favicon) to object storage and persist its
+   * URL onto the client's branding blob. GIFSY_ADMIN only.
+   *
+   * Safety mirrors the KYC document upload (AF-10): null/empty check, 5 MB cap, and
+   * a magic-byte sniff — but here the allowlist is IMAGES ONLY, so a PDF (valid for
+   * KYC) as well as any SVG/HTML/script masquerade is rejected. Persistence flows
+   * through updateClient so the URL rides the existing branding-merge path.
+   */
+  async uploadBrandingAsset(
+    user: JwtPayload,
+    slug: string,
+    file: Express.Multer.File,
+    kind: BrandingAssetKind,
+  ): Promise<{ url: string }> {
+    this.assertGifsy(user);
+
+    const field = BRANDING_ASSET_FIELDS[kind];
+    if (!field) {
+      throw new BadRequestException(`Unknown branding asset kind "${kind}".`);
+    }
+
+    const existing = await this.prisma.client.findFirst({ where: { id: slug } });
+    if (!existing) {
+      throw new NotFoundException('Client not found');
+    }
+
+    if (!file) throw new BadRequestException('No file uploaded');
+    if (!file.buffer?.length) throw new BadRequestException('Empty file');
+
+    const MAX_BYTES = 5 * 1024 * 1024; // 5 MB — a logo/favicon is far smaller
+    if (file.size > MAX_BYTES) {
+      throw new BadRequestException('File too large (max 5 MB)');
+    }
+
+    // Untrusted client mimetype: derive the REAL type from the bytes and require
+    // an image (rejects PDF, and any SVG/HTML/script payload labelled image/*).
+    const sniffed = sniffFileType(file.buffer);
+    if (!sniffed || !sniffed.mime.startsWith('image/')) {
+      throw new BadRequestException(
+        'Unsupported or corrupt file. Upload a PNG, JPG, WEBP, or GIF image.',
+      );
+    }
+
+    const key = this.storage.generateKey(
+      `branding/${slug}`,
+      file.originalname || `${kind}.${sniffed.ext}`,
+    );
+    const url = await this.storage.uploadFile(file.buffer, key, sniffed.mime);
+
+    // Persist through the existing branding-merge update path.
+    await this.updateClient(user, slug, { [field]: url } as UpdateClientDto);
+
+    return { url };
   }
 
   /**
@@ -382,16 +672,28 @@ export class GifsyService {
     const invoicing = (c.invoicing ?? {}) as Record<string, unknown>;
     const wallet = (c.wallet ?? {}) as Record<string, unknown>;
 
+    // Custom domains ordered primary-first (then alphabetical) so the console
+    // edit form can display the set and highlight the routable primary.
+    const domainRows = await this.prisma.clientDomain.findMany({
+      where: { clientId: slug },
+      orderBy: [{ isPrimary: 'desc' }, { domain: 'asc' }],
+    });
+    const domains = domainRows.map((r) => r.domain);
+
     return {
       slug: c.id,
       internalName: c.internalName,
       status: c.status,
       onboardedAt: c.onboardedAt,
 
+      domains,
+
       branding: {
         displayName: (branding.displayName as string) ?? c.internalName,
         primaryColor: (branding.primaryColor as string) ?? '#6b7280',
         logoUrl: (branding.logoUrl as string) ?? '',
+        wordmarkWhiteUrl: (branding.wordmarkWhiteUrl as string) ?? '',
+        wordmarkColorUrl: (branding.wordmarkColorUrl as string) ?? '',
         faviconUrl: (branding.faviconUrl as string) ?? '',
         supportEmail: (branding.supportEmail as string) ?? '',
         supportPhone: (branding.supportPhone as string) ?? '',
