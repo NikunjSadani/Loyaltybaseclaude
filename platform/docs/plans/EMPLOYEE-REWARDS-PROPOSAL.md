@@ -4,6 +4,11 @@
 > Created 2026-07-18. This is a *separate product line* from the trade-loyalty platform
 > (operator Gifsy; live client Deoleo). Kept as its own document deliberately — it shares the
 > engine, not the roadmap. Everything below is a first-pass proposal and will change.
+>
+> **Related pitch asset:** [BRITANNIA-DEMO-PROMPT.md](./BRITANNIA-DEMO-PROMPT.md) — a finalized prompt
+> for a throwaway, front-end-only clickable *demo* of the sales-rep flavor of this rewards engine
+> (Britannia-branded, "Dream Reward" hero). Build it in a separate repo; see that doc's
+> "Transport / reuse" note for how the design comes back into the real platform.
 
 ---
 
