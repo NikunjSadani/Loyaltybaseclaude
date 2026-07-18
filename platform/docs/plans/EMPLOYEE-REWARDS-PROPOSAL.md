@@ -28,9 +28,12 @@ A **basic employee rewards portal**. The concept is deliberately simple:
   vendor**, who gets **scoped admin access** to see *their* orders and upload *their* order/
   fulfilment status.
 
+### Resolved decisions
+- **Employee login = phone + OTP** (owner, 2026-07-18). Reuses the existing MSG91 send-otp /
+  verify-otp auth wholesale — no new auth path, no SSO/IdP work. Employees are keyed by phone
+  (same `User (clientId, phone)` model as today). Pins Phase 2 to the low end.
+
 ### Open decisions (pin down before building — see §6)
-- **Employee login model:** phone + OTP (reuses everything as-is) vs **email / corporate SSO**
-  (additive auth path). *Biggest foundation-shaping question.*
 - **Vendor scope:** "see my orders + upload status" only, or also self-list/price their own
   gifts (approval workflow)?
 
@@ -100,7 +103,7 @@ Not a Deoleo-clone tenant; not a greenfield rebuild.
 |---|---|---|
 | **0 — Foundation** | `productType` + capability flags; isolated deployment + DB; CI wiring; decide login model | Infra + scaffolding; unblocks everything |
 | **1 — Member abstraction** | Unbind wallet / points / redemption / tickets from outlet/partner; generic member | **The hard part** — money-path, heavy audit |
-| **2 — Identity & intake** | Employee login; employee-roster import; point-grant upload (trimmed credit-batch, no outlet resolution) | Effort swings on login model |
+| **2 — Identity & intake** | Employee login (**phone+OTP — reuses existing auth**); employee-roster import; point-grant upload (trimmed credit-batch, no outlet resolution) | Login resolved → low end |
 | **3 — Employee app** | Wallet, catalog, redeem+OTP, tickets, schemes | Mostly config on the member layer + FE |
 | **4 — Vendor role** | Catalog ownership; vendor-scoped orders; vendor fulfilment upload | Extends existing fulfilment |
 | **5 — Celebratory skin** | Congrats popups, richer push, per-tenant branding for the client | Polish — last |
@@ -118,7 +121,7 @@ turnaround and the login model.
 
 ## 6. Risks & things to pin down
 
-- **Login model** (§1) — shapes the foundation; decide before Phase 0 finishes.
+- ~~**Login model**~~ — RESOLVED: phone + OTP (reuses existing auth). No longer a risk.
 - **Member abstraction touches money paths** — the wallet is keyed to `partnerId` today; the recent
   `CreditPayoutEntry.outletId` bug shows how deep "outlet" runs. Refactor with full audit + gate +
   runtime-verify per the standing discipline.
@@ -142,12 +145,12 @@ pacing factor, not raw build speed.*
 |---|---|---|
 | 0 — Foundation | 2 – 4 | infra/CI for a 2nd deployment + DB |
 | 1 — Member abstraction | 4 – 6 | money-path refactor + audit depth |
-| 2 — Identity & intake | 3 – 5 | **phone-OTP (low) vs email/SSO (high)** |
+| 2 — Identity & intake | 3 – 4 | login RESOLVED (phone+OTP, reuses auth) → low end |
 | 3 — Employee app | 3 – 4 | mostly config once §1 lands |
 | 4 — Vendor role | 3 – 4 | view+status (low) vs self-listing (higher) |
 | 5 — Celebratory skin | 2 – 3 | polish |
 | 6 — Hardening & pilot | 3 – 5 | E2E + first-client UAT loops |
-| **Total** | **~20 – 31 build-days** | |
+| **Total** | **~20 – 30 build-days** | login resolved trims the high end; vendor scope is the last swing |
 
 **Translation to calendar:**
 - **~4–6 weeks** of focused build effort for a **UAT-ready v1** (all phases), assuming reasonably
