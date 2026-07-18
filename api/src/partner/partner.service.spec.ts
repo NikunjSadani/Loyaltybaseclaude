@@ -16,7 +16,7 @@ const mockPrisma = {
   programSetting:    { findFirst: jest.fn() },
   channelPartner:    { findFirst: jest.fn() },
   payoutTransaction: { findMany: jest.fn(), findFirst: jest.fn() },
-  creditPayoutEntry: { findFirst: jest.fn() },
+  creditPayoutEntry: { findFirst: jest.fn(), findMany: jest.fn() },
   wallet:            { findFirst: jest.fn() },
   pointsLedger:      { findFirst: jest.fn() },
   outlet:            { findMany: jest.fn() },
@@ -124,14 +124,15 @@ describe('PartnerService', () => {
 
     it('a PAYOUT-only partner: hasPayoutActivity true via a credit payout entry, hasPointsActivity false', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
-      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletType: { code: 'SSS' } }]);
+      // CreditPayoutEntry.outletId stores the outlet CODE, so the probe must key on outletCode.
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O001', outletType: { code: 'SSS' } }]);
       mockPrisma.wallet.findFirst.mockResolvedValue(null);
       mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue({ id: 'e1' });
       mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
 
       const res = await service.getMe(partner);
       expect(mockPrisma.creditPayoutEntry.findFirst).toHaveBeenCalledWith({
-        where: { clientId: 'deoleo', outletId: { in: ['o1'] }, status: { in: ['PAID', 'PENDING'] } },
+        where: { clientId: 'deoleo', outletId: { in: ['O001'] }, status: { in: ['PENDING', 'PROCESSING', 'PAID'] } },
         select: { id: true },
       });
       expect(res.hasPointsActivity).toBe(false);
@@ -199,10 +200,12 @@ describe('PartnerService', () => {
 
     it('maps payout transactions scoped to the caller partner', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
       mockPrisma.payoutTransaction.findMany.mockResolvedValue([
         {
           id: 't1',
-          status: 'COMPLETED',
+          status: 'SUCCESS', // the real completed value in the PayoutStatus enum
           netAmountPaise: 12345,
           providerRefId: 'UTR123',
           completedAt: new Date('2026-05-10T00:00:00.000Z'),
@@ -215,9 +218,15 @@ describe('PartnerService', () => {
         },
       ]);
       const res = await service.getPayouts(partner);
+      // FAILED/REVERSED are excluded at the query so they never crowd the 100-cap or the card.
       expect(mockPrisma.payoutTransaction.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { partnerId: 'cp1' }, take: 100 }),
+        expect.objectContaining({
+          where: { partnerId: 'cp1', status: { notIn: ['FAILED', 'REVERSED'] } },
+          take: 100,
+        }),
       );
+      // With no outlets, credit payouts are not queried at all.
+      expect(mockPrisma.creditPayoutEntry.findMany).not.toHaveBeenCalled();
       expect(res.payouts[0]).toMatchObject({
         id: 't1',
         period: '2026-05',
@@ -227,6 +236,86 @@ describe('PartnerService', () => {
         status: 'PAID',
         narration: 'Q1 Incentive',
       });
+    });
+
+    it('unions credit payout entries (pending + paid) with redemption payouts, newest-first', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      // Outlets return CODES (that is what CreditPayoutEntry.outletId holds).
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'O001' }, { outletCode: 'O002' }]);
+      // One redemption cash-out completed as 'SUCCESS' (the real enum value; paid 2026-05-10)…
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([
+        {
+          id: 't1',
+          status: 'SUCCESS',
+          netAmountPaise: 5000,
+          providerRefId: 'UTR-RED',
+          completedAt: new Date('2026-05-10T00:00:00.000Z'),
+          createdAt: new Date('2026-05-01T00:00:00.000Z'),
+          batch: { batchCode: 'B1', notes: 'Redemption', createdAt: new Date('2026-05-02T00:00:00.000Z') },
+        },
+      ]);
+      // …one PAID credit payout (paid 2026-06-20) and one still-PENDING (added 2026-07-02).
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        {
+          id: 'ce-paid',
+          period: '2026-06',
+          fieldName: 'Monthly Scheme',
+          amountPaise: 80000n,
+          narration: 'June payout',
+          status: 'PAID',
+          utr: 'UTR-CE',
+          paidAt: new Date('2026-06-20T00:00:00.000Z'),
+          createdAt: new Date('2026-06-05T00:00:00.000Z'),
+        },
+        {
+          id: 'ce-pending',
+          period: '2026-06',
+          fieldName: 'Monthly Scheme',
+          amountPaise: 40000n,
+          narration: 'June payout',
+          status: 'PENDING',
+          utr: null,
+          paidAt: null,
+          createdAt: new Date('2026-07-02T00:00:00.000Z'),
+        },
+      ]);
+
+      const res = await service.getPayouts(partner);
+
+      // Credit payouts are scoped by the partner's outlet CODES + the surfaced status set.
+      expect(mockPrisma.creditPayoutEntry.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            clientId: 'deoleo',
+            outletId: { in: ['O001', 'O002'] },
+            status: { in: ['PENDING', 'PROCESSING', 'PAID'] },
+          }),
+          take: 100,
+        }),
+      );
+
+      // All three surface; sorted by effective date desc: pending-added-Jul-2, redemption-May-10… wait
+      // effective date = paidAt ?? createdAt → ce-pending(Jul-2) > ce-paid(Jun-20) > t1(May-10).
+      expect(res.payouts.map((p) => p.id)).toEqual(['ce-pending', 'ce-paid', 't1']);
+
+      const pending = res.payouts.find((p) => p.id === 'ce-pending')!;
+      expect(pending).toMatchObject({
+        period: '2026-06',
+        kpiLabel: 'Monthly Scheme',
+        payoutAmountPaise: 40000,
+        status: 'PENDING',
+        narration: 'June payout',
+      });
+      expect(pending.utr).toBeUndefined();
+      expect(pending.paidAt).toBeUndefined();
+      expect(pending.uploadedAt).toBe(new Date('2026-07-02T00:00:00.000Z').toISOString());
+
+      const paid = res.payouts.find((p) => p.id === 'ce-paid')!;
+      expect(paid).toMatchObject({ status: 'PAID', utr: 'UTR-CE', payoutAmountPaise: 80000 });
+      expect(paid.paidAt).toBe(new Date('2026-06-20T00:00:00.000Z').toISOString());
+
+      // No leaked internal sort key on the wire.
+      expect((res.payouts[0] as Record<string, unknown>)._sortAt).toBeUndefined();
     });
   });
 

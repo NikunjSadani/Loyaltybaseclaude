@@ -149,7 +149,7 @@ function downloadCombinedStatement(rows: LedgerRow[], period: string) {
     return {
       Date: r.date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
       Description: `${p.kpiLabel} · ${monthLabel(p.period)}`,
-      Type: 'Payout',
+      Type: p.status === 'PAID' ? 'Payout' : 'Payout (Pending)',
       Points: '',
       // payoutAmountPaise is integer paise; divide by 100 for the Excel sheet
       'Amount (₹)': p.payoutAmountPaise / 100,
@@ -275,14 +275,18 @@ export default function WalletPage() {
     [transactions],
   );
 
-  // Payout rows: every PAID payout entry (the ledger the partner can see), dated by
-  // paidAt (fall back to the period's first day when a paidAt is somehow absent).
+  // Payout rows: every in-flight-or-paid payout entry (pending → paid, mirroring the
+  // credit-payout lifecycle; FAILED/REVERSED are excluded by the backend). Dated by
+  // paidAt once money has hit, else by uploadedAt (when the payout was added), else
+  // the period's first day — so a pending row carries its real added-date.
   const payoutRows = useMemo<PayoutRow[]>(
     () => payouts
-      .filter((p) => p.status === 'PAID')
+      .filter((p) => p.status !== 'FAILED')
       .map((p) => {
         const [yr, mo] = p.period.split('-');
-        const date = p.paidAt ? new Date(p.paidAt) : new Date(+yr, +mo - 1, 1);
+        const date = p.paidAt ? new Date(p.paidAt)
+          : p.uploadedAt ? new Date(p.uploadedAt)
+          : new Date(+yr, +mo - 1, 1);
         return { kind: 'payout', date, label: p.kpiLabel, entry: p };
       }),
     [payouts],
@@ -495,7 +499,11 @@ export default function WalletPage() {
 /* ─── Payout statement row (INR entry inside the combined statement) ───────────── */
 
 function PayoutStatementRow({ entry: p }: { entry: PayoutLedgerEntry }) {
-  const d   = p.paidAt ? new Date(p.paidAt) : null;
+  const isPaid = p.status === 'PAID';
+  // Date the chip by when money hit (paidAt); before payment, by when the payout was
+  // added (uploadedAt) so a pending row isn't a blank "—".
+  const dateSrc = p.paidAt ?? p.uploadedAt;
+  const d   = dateSrc ? new Date(dateSrc) : null;
   const day = d ? String(d.getDate()).padStart(2, '0') : '—';
   const mon = d ? MONTH_SHORT[d.getMonth() + 1] : '';
 
@@ -511,14 +519,22 @@ function PayoutStatementRow({ entry: p }: { entry: PayoutLedgerEntry }) {
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-gray-900 truncate">{p.kpiLabel} · {monthLabel(p.period)}</p>
         {p.utr && <p className="text-[10px] text-gray-400 font-mono">UTR {p.utr}</p>}
+        {!isPaid && (
+          <span
+            data-testid="payout-pending-badge"
+            className="inline-block mt-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-100 rounded px-1.5 py-0.5"
+          >
+            Payout pending
+          </span>
+        )}
         {p.narration && (
           <p data-testid="payout-narration" className="text-[10px] text-gray-500 mt-0.5 leading-snug">{p.narration}</p>
         )}
       </div>
 
-      {/* Amount */}
+      {/* Amount — muted until the payout is actually paid */}
       {/* payoutAmountPaise is integer paise; fmtInr expects rupees */}
-      <p className="text-sm font-bold text-emerald-700 shrink-0">{fmtInr(p.payoutAmountPaise / 100)}</p>
+      <p className={`text-sm font-bold shrink-0 ${isPaid ? 'text-emerald-700' : 'text-gray-400'}`}>{fmtInr(p.payoutAmountPaise / 100)}</p>
     </div>
   );
 }

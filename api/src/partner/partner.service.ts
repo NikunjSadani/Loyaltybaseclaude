@@ -80,14 +80,17 @@ export class PartnerService {
     clientId: string,
     partnerId: string,
   ): Promise<{ outletType: string | null; hasPointsActivity: boolean; hasPayoutActivity: boolean }> {
-    // Partner's outlets — id (payout-entry scoping) + primary-outlet type resolution in one query.
+    // Partner's outlets — outletCode (payout-entry scoping) + primary-outlet type in one query.
+    // NB: CreditPayoutEntry.outletId stores the outlet CODE (not the Outlet PK) — it is a
+    // bare string set from the uploaded "Outlet ID", resolved elsewhere via outletCode
+    // (credits.service confirmBatch). So the credit-payout scope MUST key on outletCode.
     const outlets = await this.prisma.outlet.findMany({
       where: { clientId, partnerId, deletedAt: null },
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-      select: { id: true, outletType: { select: { code: true } } },
+      select: { outletCode: true, outletType: { select: { code: true } } },
     });
     const outletType = outlets[0]?.outletType?.code ?? null;
-    const outletIds = outlets.map((o) => o.id);
+    const outletCodes = outlets.map((o) => o.outletCode);
 
     // Wallet reality — the partner's wallet balances + any ledger row.
     const wallet = await this.prisma.wallet.findFirst({
@@ -106,19 +109,24 @@ export class PartnerService {
 
     // Payout reality — a credit payout entry against one of the partner's outlets,
     // or a payout transaction for the partner. Either presence flips the flag.
+    // The status set MUST match the one surfaced by getPayouts (PENDING/PROCESSING/
+    // PAID) so the payout CARD and the payout LIST can never disagree — otherwise a
+    // partner with only in-flight credit payouts sees the card but an empty list.
     const [payoutEntry, payoutTxn] = await Promise.all([
-      outletIds.length
+      outletCodes.length
         ? this.prisma.creditPayoutEntry.findFirst({
             where: {
               clientId,
-              outletId: { in: outletIds },
-              status: { in: ['PAID', 'PENDING'] },
+              outletId: { in: outletCodes },
+              status: { in: ['PENDING', 'PROCESSING', 'PAID'] },
             },
             select: { id: true },
           })
         : Promise.resolve(null),
+      // Match the LIST rail: a FAILED/REVERSED redemption is hidden from the statement,
+      // so it must not flip the card on either (else card shows, list empty).
       this.prisma.payoutTransaction.findFirst({
-        where: { partnerId },
+        where: { partnerId, status: { notIn: ['FAILED', 'REVERSED'] } },
         select: { id: true },
       }),
     ]);
@@ -160,18 +168,75 @@ export class PartnerService {
     });
     if (!partner) return { payouts: [] };
 
-    const transactions = await this.prisma.payoutTransaction.findMany({
-      where: { partnerId: partner.id },
-      include: {
-        batch: {
-          select: { batchCode: true, notes: true, createdAt: true },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
+    // The partner's outlets — credit payouts are scoped by outlet CODE (a partner may
+    // own several outlets); redemption payouts are scoped by partnerId. CreditPayoutEntry
+    // .outletId holds the outlet CODE (a bare string, not the Outlet PK) — see the note
+    // in resolvePartnerActivity — so this MUST key on outletCode or it matches nothing.
+    const outlets = await this.prisma.outlet.findMany({
+      where: { clientId: user.clientId, partnerId: partner.id, deletedAt: null },
+      select: { outletCode: true },
     });
+    const outletCodes = outlets.map((o) => o.outletCode);
 
-    const payouts = transactions.map((t) => ({
+    // Two payout rails, unioned into one history the partner sees in the wallet:
+    //   • redemption cash-outs → PayoutTransaction (scoped by partnerId)
+    //   • credit-based payouts → CreditPayoutEntry (scoped by outletId)
+    // Credit entries are surfaced from generation (PENDING/PROCESSING) through PAID
+    // so the outlet sees a payout is coming, then the SAME row flips to PAID with its
+    // UTR — mirroring the redemption side. FAILED/REVERSED are excluded (a transient
+    // bank-reject that GLM-2 re-banks / a clawed-back award — not a payout to show).
+    const [transactions, creditEntries] = await Promise.all([
+      this.prisma.payoutTransaction.findMany({
+        // Hide FAILED/REVERSED at the query so they don't consume the 100-cap or the
+        // presence card (aligns the list rail with the credit rail + the presence probe).
+        where: { partnerId: partner.id, status: { notIn: ['FAILED', 'REVERSED'] } },
+        include: {
+          batch: {
+            select: { batchCode: true, notes: true, createdAt: true },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+      outletCodes.length
+        ? this.prisma.creditPayoutEntry.findMany({
+            where: {
+              clientId: user.clientId,
+              outletId: { in: outletCodes },
+              status: { in: ['PENDING', 'PROCESSING', 'PAID'] },
+            },
+            select: {
+              id: true,
+              period: true,
+              fieldName: true,
+              amountPaise: true,
+              narration: true,
+              status: true,
+              utr: true,
+              paidAt: true,
+              createdAt: true,
+            },
+            orderBy: { createdAt: 'desc' },
+            take: 100,
+          })
+        : Promise.resolve(
+            [] as Array<{
+              id: string;
+              period: string;
+              fieldName: string;
+              amountPaise: bigint;
+              narration: string;
+              status: string;
+              utr: string | null;
+              paidAt: Date | null;
+              createdAt: Date;
+            }>,
+          ),
+    ]);
+
+    // Effective date = when money hit (completedAt/paidAt) else when it was added
+    // (createdAt); the merged list sorts newest-first on it, then caps at 100.
+    const redemptionPayouts = transactions.map((t) => ({
       id: t.id,
       period: this.toPeriod(t.completedAt ?? t.createdAt),
       kpiLabel: t.batch?.notes ?? 'Incentive Payout',
@@ -182,7 +247,28 @@ export class PartnerService {
       paidAt: t.completedAt?.toISOString() ?? undefined,
       status: this.mapPayoutStatus(t.status),
       narration: t.batch?.notes ?? undefined,
+      _sortAt: (t.completedAt ?? t.createdAt).getTime(),
     }));
+
+    const creditPayouts = creditEntries.map((e) => ({
+      id: e.id,
+      period: e.period, // already 'YYYY-MM' (the credit month) — no server-TZ derivation
+      kpiLabel: e.fieldName || 'Credit Payout',
+      achievedPct: 100,
+      payoutAmountPaise: Number(e.amountPaise),
+      uploadedAt: e.createdAt.toISOString(), // when the payout was generated/added
+      utr: e.utr ?? undefined,
+      paidAt: e.paidAt?.toISOString() ?? undefined,
+      status: this.mapCreditEntryStatus(e.status),
+      narration: e.narration || undefined,
+      _sortAt: (e.paidAt ?? e.createdAt).getTime(),
+    }));
+
+    const payouts = [...redemptionPayouts, ...creditPayouts]
+      .sort((a, b) => b._sortAt - a._sortAt)
+      .slice(0, 100)
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      .map(({ _sortAt, ...p }) => p);
 
     return { payouts };
   }
@@ -522,9 +608,22 @@ export class PartnerService {
   }
 
   private mapPayoutStatus(s: string): 'PAID' | 'PENDING' | 'PROCESSING' | 'FAILED' {
-    if (s === 'PAID' || s === 'COMPLETED') return 'PAID';
+    // 'SUCCESS' is the actual completed value in the PayoutStatus enum (payouts.service
+    // writes it on UTR upload); 'PAID'/'COMPLETED' are kept as defensive aliases. Missing
+    // 'SUCCESS' here mapped every paid redemption to PENDING → shown as perpetually pending.
+    if (s === 'SUCCESS' || s === 'PAID' || s === 'COMPLETED') return 'PAID';
     if (s === 'FAILED' || s === 'REVERSED') return 'FAILED';
     if (s === 'INITIATED' || s === 'PROCESSING') return 'PROCESSING';
+    return 'PENDING';
+  }
+
+  // CreditEntryStatus → the wallet's 4-state payout status. FAILED/REVERSED map to
+  // FAILED (though getPayouts excludes them from the surfaced set); PROCESSING is the
+  // in-flight state (entry pulled into a payout download, awaiting UTR).
+  private mapCreditEntryStatus(s: string): 'PAID' | 'PENDING' | 'PROCESSING' | 'FAILED' {
+    if (s === 'PAID') return 'PAID';
+    if (s === 'FAILED' || s === 'REVERSED') return 'FAILED';
+    if (s === 'PROCESSING') return 'PROCESSING';
     return 'PENDING';
   }
 }
