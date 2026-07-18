@@ -40,8 +40,10 @@ matched NOTHING (feature dead; the pre-existing presence probe was dead the same
 (MED-1) presence probe counted FAILED/REVERSED redemptions the list hides → card-vs-list mismatch; both rails now exclude FAILED/REVERSED at the query.
 **REUSABLE TRAPS: (a) `CreditPayoutEntry.outletId` == the outlet CODE everywhere (no FK — join via `Outlet.outletCode`); keying it by the Outlet PK
 matches nothing. (b) a "completed" `PayoutTransaction` is `status='SUCCESS'` (the enum has no PAID/COMPLETED) — any status mapper MUST handle SUCCESS.**
-Owner's residual = staging runtime-verify (a real credit-payout PAID + a real redemption on ONE partner both appearing in the wallet), then it rolls
-into the next cutover.
+**✅ RUNTIME-VERIFIED ON STAGING (2026-07-18):** the live `GET /v1/partner/payouts` on `186c92e` now returns the PENDING credit payout `seed-cpe-1`
+(₹5,000 "Visibility Spend") for the O003 partner — the same call returned `[]` before the fix (guarded read: old by-PK query 0 rows vs new by-code
+query 1 row). Reactivated seed outlet O003 (`isActive`→true) via a guarded staging write (backup taken; left active) to enable the login. Owner's
+residual = just the NEXT cutover (`ebd474b` → `186c92e`).
 
 **PRIOR — CUTOVER #8 (prod `4b33e4c`, 2026-07-07) — a 4-fix UX/parity batch. The 4 cutover-#8 code fixes:** **(A)** `4be63f3` — **PRESENCE-BASED partner-wallet reward-track**
 (the partner app's points-vs-payout wallet/rewards was DEMO-driven via `partner-session.ts` `REWARD_TRACK`; NOT a money bug — the credit award is
