@@ -38,16 +38,6 @@ card & list can't disagree. FE: pending rows get a "Payout pending" badge + mute
 card stays PAID-only. **Independent audit caught + fixed 2 HIGH + 1 MED before ship** — see TRAPS
 (a)/(b) below.
 
-## 🆕 NEW INITIATIVES (proposal stage — NO code in this repo)
-- **Employee Rewards product** (a 2nd product line): `docs/plans/EMPLOYEE-REWARDS-PROPOSAL.md` +
-  memory [[employee-rewards-product]]. Reuse the engine via a **member abstraction** + capability-gated
-  product mode + **separate deployment/DB**. Catalog-only, no KYC/GST/TDS. **Login = phone+OTP
-  (decided).** ~4–6wk full-stack v1. Only open decision: **vendor scope**.
-- **Britannia sales-rewards DEMO**: `docs/plans/BRITANNIA-DEMO-PROMPT.md` — a throwaway,
-  front-end-only clickable demo being built in a **SEPARATE session + repo** (`britannia-rewards-demo/`),
-  NOT here. Design transports back cheaply (real platform already uses the same shadcn/Radix idiom;
-  only Framer Motion is new; mock data does not transport by design).
-
 ## 🔶 STANDING MODE — orchestrator
 Default to orchestrating substantial work: decompose into **parallel sub-agents** (they write code —
 background agents are denied shell; YOU run the gates), integrate shared files yourself, and ALWAYS
@@ -153,7 +143,6 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
 - **§A-DOMAIN** (tenant domain hard-coded from slug) — needs a `Client.domains` migration +
   tenant-resolver rewrite (4–7 days) before client #2. Does not fit a code-only cutover.
 - **#74 residual:** optional secret rotation + real prod MSG91 (monitoring + backups/PITR already ON).
-- **NEW:** Employee Rewards product (proposal) · Britannia demo (separate session). See NEW INITIATIVES.
 - **POST-GO-LIVE-BACKLOG (later):** multi-tenant SSR branding, configurable RBAC (AF-12 kept OFF),
   WhatsApp per-tenant generalization, OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics.
 
@@ -182,6 +171,4 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 Greet. State: **cutover #9 is live (prod `ebd474b`); the wallet-surfacing fix is on develop (`186c92e`),
 runtime-verified on staging, PENDING the next owner-gated cutover — the immediate next step.** Present
 the OPEN THREADS and ask which to pick up. If the owner is open-ended, lead with the next cutover.
-(The owner may also be running the Britannia demo in its own separate session — that build does not
-happen in this repo.)
 ```
