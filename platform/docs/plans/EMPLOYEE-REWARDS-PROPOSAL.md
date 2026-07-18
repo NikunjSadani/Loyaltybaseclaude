@@ -160,3 +160,33 @@ pacing factor, not raw build speed.*
 **What the estimate is NOT:** it is not a fixed-price commitment. Software estimates carry real
 uncertainty; treat these as planning ranges, revisited after Phase 0 (once the login model and
 vendor scope are locked, the range tightens considerably).
+
+### 7.1 Scope of the estimate — it is full-stack, end-to-end
+
+Each build-day **already includes** backend + frontend + the wiring + infra + quality, per the
+standard discipline used across this platform:
+
+| Layer | Counted in the estimate |
+|---|---|
+| Backend | Prisma schema + migrations, NestJS modules/services/controllers, business logic, DTO/validation, RBAC |
+| Frontend | Next.js pages/components, state, auth flow, loading/error states |
+| FE↔BE wiring | The Next proxy `/api/*` → backend `/v1/*` integration (known, repeatable pattern — low risk) |
+| Infra | The 2nd Cloud Run deployment + Postgres DB + CI/deploy pipeline + seed/bootstrap |
+| Quality | jest + vitest + tsc gates, independent adversarial audit (money paths), staging runtime-verify per phase |
+
+**NOT included in the estimate** (can extend calendar; several need the owner/client, not Claude):
+
+- **Bespoke visual/brand design + creative** — Claude builds the *mechanics* of the celebratory UX;
+  polished art direction + client-supplied assets (logos, gift images, reward SKUs) come from the
+  owner/client.
+- **Client data delivery** — employee roster, catalog items, vendor list. Loading is fast but gated
+  on the client sending files (this was the last blocker for Deoleo go-live).
+- **External integrations** — the estimate assumes **manual / vendor-upload fulfilment** (as today).
+  **Automated voucher provisioning** (e.g. an Amazon-voucher API) is extra; **email/SSO login** adds
+  to Phase 2 + needs the IdP set up; **email notifications** depend on the open Notifications-Core
+  provider decision (ZeptoMail vs SES).
+- **GCP provisioning / secrets needing owner hands** (owner-ops).
+- **Open-ended client change requests / UAT iteration** beyond the built-in per-phase loops.
+
+Baseline assumption behind the 4–6 week v1: **manual fulfilment + phone-OTP login + prompt owner
+decisions**. The excluded items above are the levers that move the number.
