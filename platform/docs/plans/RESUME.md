@@ -22,12 +22,21 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ## ▶ IMMEDIATE NEXT — finish §A-DOMAIN (mostly owner-gated)
 P0–P2 + P4/P4b are DONE and IN PROD. Remaining (plans: `A-DOMAIN-PLAN.md`, `A-DOMAIN-P0-DESIGN.md`):
 - **P3 edge worker deploy** (`cloudflare-worker/` coarse `*.gifsy.in` — code committed `934ff4d`, NOT
-  deployed). Needs 3 owner Cloudflare-dashboard confirms (proxied wildcard `*.gifsy.in` DNS record +
-  wildcard TLS [Universal SSL covers 1 level; `uat.*` 2-level needs ACM] + `*.gifsy.in/*` worker route)
-  then a manual `npx wrangler deploy`. Only needed before client #2 / true zero-touch onboarding.
-- **P5** retire the registry: owner-gated write to populate `clients.branding` from the registry
-  (prod deoleo branding is already PARTIALLY populated — displayName/primaryColor present) + retire
-  `CLIENT_REGISTRY` after a bake behind the kill-switch.
+  deployed). **CLOUDFLARE ACCESS REALITY (verified 2026-07-19):** `wrangler` is OAuth-logged-in as the
+  OWNER's account (`nikunj.sadani28@gmail.com`, zone `gifsy.in` id `cbef1d2c…`, worker script `gifsy-proxy`,
+  current routes = the 4 plain `*.gifsy.in/*` per-host). The token CAN read/write **worker routes +
+  `wrangler deploy`** (workers_scripts/routes write) + ssl_certs — so **I can ship the P3 worker myself**.
+  It CANNOT touch **DNS records / SSL universal settings** (API returns `Authentication error` — no dns_records
+  scope) → the **owner must add the proxied wildcard `*.gifsy.in` DNS record + confirm wildcard TLS in the
+  dashboard** (Universal SSL covers 1 level; the `uat.*` 2-level staging host needs ACM). SEQUENCE: owner adds
+  DNS+TLS → then I `wrangler deploy` (a LIVE-edge change on Deoleo — get owner go; deploying before the DNS
+  wildcard is inert + pointless). Only needed before client #2 / true zero-touch onboarding.
+- **P5** retire the registry: **branding backfill SQL is READY** — `platform/docs/plans/A-DOMAIN-BRANDING-BACKFILL.sql`
+  (guarded, idempotent, fill-gaps `COALESCE(existing-non-empty, registry)` merge; deoleo for prod, +clientb for
+  staging; visually a no-op today since the resolver already renders via the registry fallback). **PENDING owner
+  run-approval** (prod DB write: fresh backup → run staging first + verify routing returns full branding → run
+  prod via the guarded in-VPC job → read-back). Then retire `CLIENT_REGISTRY` after a bake behind the
+  `TENANT_ROUTING_SOURCE=registry` kill-switch. (prod deoleo branding today = displayName/primaryColor only.)
 - **P6** hardening + E2E + security audit + docs.
 - **D-1 (#159)** converge `resolveClient` off `AdminConfig` onto the `clients` table (RBAC-sensitive —
   permission.guard reads `features.rbacEnforcement`; two feature vocabularies; needs a real-DB reconcile +
@@ -117,6 +126,16 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 - **(IST)** server-local `Date` getters read **UTC in prod** (no TZ in the image) — user-facing IST
   dates MUST go through `api/src/common/ist-date.ts` (`monthYearIST`/`formatDateIST`), or shift by
   `IST_OFFSET_MIN` then read `getUTC*`.
+- **(A-DOMAIN-c)** `client_domains.clientId` is a **bare slug** (= `Client.id`, no FK — matches every
+  other model's clientId); `domain` global-uniqueness is a **hand-added `LOWER("domain")` UNIQUE index**
+  in the migration (Prisma can't model an expression index) — don't expect Prisma `@@unique` to enforce it,
+  and match domains case-insensitively (`{ equals, mode:'insensitive' }`).
+- **(A-DOMAIN-d)** the gifsy client-detail **Wallet/Invoicing/Feature cards edited INERT `Client.*` JSON
+  blobs the runtime never reads** — the REAL per-tenant config lives in `program_settings` (conversion
+  rate/floors, via `TenantSettingsService`/`settings.controller`), `PointExpiryConfig` (expiry), the
+  hardcoded `TECH_GIFSY` invoice constant, and `AdminConfig` (features, the D-1 store). "Make the card
+  persist" ≠ "make it work" — wire the card to the REAL store (P4b did Wallet via a tenant-targeted
+  `/gifsy/clients/:slug/wallet-settings`; Invoicing/Features left read-only). Same two-store divergence as D-1.
 
 ## META-LESSONS (baked into CLAUDE.md agreements 1 & 2)
 1. A fix is DONE only when **EVERY consumer + alternate data path + scale case** is traced (grep all
