@@ -31,12 +31,21 @@ P0–P2 + P4/P4b are DONE and IN PROD. Remaining (plans: `A-DOMAIN-PLAN.md`, `A-
   dashboard** (Universal SSL covers 1 level; the `uat.*` 2-level staging host needs ACM). SEQUENCE: owner adds
   DNS+TLS → then I `wrangler deploy` (a LIVE-edge change on Deoleo — get owner go; deploying before the DNS
   wildcard is inert + pointless). Only needed before client #2 / true zero-touch onboarding.
-- **P5** retire the registry: **branding backfill SQL is READY** — `platform/docs/plans/A-DOMAIN-BRANDING-BACKFILL.sql`
-  (guarded, idempotent, fill-gaps `COALESCE(existing-non-empty, registry)` merge; deoleo for prod, +clientb for
-  staging; visually a no-op today since the resolver already renders via the registry fallback). **PENDING owner
-  run-approval** (prod DB write: fresh backup → run staging first + verify routing returns full branding → run
-  prod via the guarded in-VPC job → read-back). Then retire `CLIENT_REGISTRY` after a bake behind the
-  `TENANT_ROUTING_SOURCE=registry` kill-switch. (prod deoleo branding today = displayName/primaryColor only.)
+- **P5** retire the registry — **branding backfill ✅ DONE + VERIFIED (2026-07-19, prod + staging).** Ran the
+  hardened `A-DOMAIN-BRANDING-BACKFILL.sql` (audited GO-WITH-FIXES → one atomic `DO` block: in-txn
+  `current_database()` guard + `jsonb_typeof='object'` merge-guard + `ROW_COUNT=1` assert) as a `pg` script via
+  the guarded one-off jobs (`gifsy-oneoff-staging`→staging, `gifsy-oneoff-prodcheck`→prod; both reset to no-op
+  after). Fresh `gifsy-db` backup taken first. Result: fill-gaps `COALESCE(existing-non-empty, registry)`
+  **preserved every operator value** and filled only true gaps. **Prod deoleo pre** = `{displayName:"Deoleo",
+  primaryColor, supportEmail:"support@gifsy.in", supportPhone:"+916289864191", invoicePrefix:"TGSL-DEO-"}` → **post**
+  KEPT all five + FILLED `logoUrl / faviconUrl / wordmarkWhiteUrl / wordmarkColorUrl / productBrands:["Bertolli","Figaro"]`.
+  `GET /v1/tenants/routing` now serves all 6 whitelisted fields for deoleo (was displayName+primaryColor only);
+  values == the registry fallback → **zero visual change** confirmed. Staging deoleo+clientb likewise filled +
+  routing-verified. **REMAINING P5 (owner-gated, not yet done):** retire the `CLIENT_REGISTRY` *code* — but NOT
+  yet: the resolver still reads **features / partnerClasses / approvalHierarchy / invoicing / notifications** from
+  the registry (only *branding* is in the DB routing path), so full retirement needs **D-1** (non-branding config
+  → DB) first, plus a bake behind the `TENANT_ROUTING_SOURCE=registry` kill-switch. i.e. the DB is now the
+  branding source-of-truth; the registry code stays as the non-branding-config source + routing fallback until D-1.
 - **P6** hardening + E2E + security audit + docs.
 - **D-1 (#159)** converge `resolveClient` off `AdminConfig` onto the `clients` table (RBAC-sensitive —
   permission.guard reads `features.rbacEnforcement`; two feature vocabularies; needs a real-DB reconcile +
@@ -174,8 +183,9 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   enqueued SMS/EMAIL/WhatsApp never deliver (genuinely dead: credit-batch EMAIL, KYC owner SMS for
   UNDER_REVIEW, redemption-fulfilment SMS). Recipients recorded (nikunj.sadani@ / payel.ghosh@ /
   nikita@gifsy.in). + **email provider** ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
-- **§A-DOMAIN** — ✅ P1/P2/P4/P4b IN PROD (cutover #10). Remaining = P3 edge deploy (owner Cloudflare
-  confirms) · P5 registry-retire (owner-gated `clients.branding` backfill) · P6 · D-1 (#159). See IMMEDIATE NEXT.
+- **§A-DOMAIN** — ✅ P1/P2/P4/P4b IN PROD (cutover #10) + **P5 branding-backfill DONE + verified on prod &
+  staging (2026-07-19)** — DB is now the branding source-of-truth (zero visual change). Remaining = P3 edge deploy
+  (owner Cloudflare confirms) · P5-tail registry-*code*-retire (gated on D-1 + a bake) · P6 · D-1 (#159). See IMMEDIATE NEXT.
 - **#74 residual:** optional secret rotation + real prod MSG91 (monitoring + backups/PITR already ON).
 - **POST-GO-LIVE-BACKLOG (later):** multi-tenant SSR branding, configurable RBAC (AF-12 kept OFF),
   WhatsApp per-tenant generalization, OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics.
