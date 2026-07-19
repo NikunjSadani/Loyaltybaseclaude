@@ -1,4 +1,17 @@
-import { IsArray, IsBoolean, IsIn, IsObject, IsOptional, IsString, Matches } from 'class-validator';
+import {
+  IsArray,
+  IsBoolean,
+  IsIn,
+  IsInt,
+  IsNumber,
+  IsObject,
+  IsOptional,
+  IsString,
+  Matches,
+  Max,
+  Min,
+  ValidateIf,
+} from 'class-validator';
 
 /**
  * Body for POST /v1/gifsy/clients — onboard a new tenant.
@@ -181,6 +194,48 @@ export class UpdateClientDto {
 export class BrandingAssetDto {
   @IsIn(['logo', 'wordmarkWhite', 'wordmarkColor', 'favicon'])
   kind!: 'logo' | 'wordmarkWhite' | 'wordmarkColor' | 'favicon';
+}
+
+/**
+ * Body for PUT /v1/gifsy/clients/:slug/wallet-settings — GIFSY-operator,
+ * tenant-TARGETED write of the real per-tenant wallet money settings. Every field
+ * is required (a full replace of the wallet money config — the FE always loads the
+ * current values into the form and re-sends the whole set).
+ *
+ * These write through the SAME per-tenant stores the tenant Settings panel uses:
+ *   - conversionRate         → program_settings `conversionRate` (money hot path)
+ *   - pointsExpiryDays        → PointExpiryConfig default row (null = never expire)
+ *   - minBankTransferAmount   → program_settings `minBankTransferAmount` (₹ floor)
+ *   - minVoucherFreeAmount    → program_settings `minVoucherFreeAmount`  (₹ floor)
+ *
+ * conversionRate carries only a shape check here (`@IsNumber` rejects NaN/±∞); the
+ * money-path floor (>= MIN_RATE 0.005) + ceiling + centi-grid snap are enforced in
+ * the service so a "save" can never silently no-op below the read-layer floor.
+ */
+export class UpdateWalletSettingsDto {
+  /** Points→₹ rate. Service enforces >= 0.005 and <= 100000, then snaps to 2 dp. */
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  conversionRate!: number;
+
+  /**
+   * Tenant-wide default points expiry. `null` = never expire; otherwise an integer
+   * number of days in [1, 36500]. `@ValidateIf` skips the int/range checks for null.
+   */
+  @ValidateIf((o) => o.pointsExpiryDays !== null)
+  @IsInt()
+  @Min(1)
+  @Max(36500)
+  pointsExpiryDays!: number | null;
+
+  /** Minimum ₹ for a bank/DBT-transfer redemption. Non-negative. */
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
+  minBankTransferAmount!: number;
+
+  /** Minimum ₹ for a free-amount voucher redemption. Non-negative. */
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
+  minVoucherFreeAmount!: number;
 }
 
 /**

@@ -19,6 +19,7 @@ import {
   CreateClientDto,
   UpdateClientDto,
   UpdateOutletTypeConfigDto,
+  UpdateWalletSettingsDto,
 } from './dto/gifsy.dto';
 
 /**
@@ -88,6 +89,35 @@ export class GifsyController {
   @RequirePermission('tenancy:read')
   getClientDetail(@CurrentUser() user: JwtPayload, @Param('slug') slug: string) {
     return this.gifsy.getClientDetail(user, slug);
+  }
+
+  /**
+   * GET /v1/gifsy/clients/:slug/wallet-settings — the target tenant's REAL wallet
+   * money settings (conversion rate, points-expiry days, redemption ₹ floors), read
+   * from the same per-tenant stores the money path enforces. GIFSY_ADMIN only.
+   */
+  @Get('clients/:slug/wallet-settings')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('tenancy:read')
+  getWalletSettings(@CurrentUser() user: JwtPayload, @Param('slug') slug: string) {
+    return this.gifsy.getWalletSettings(user, slug);
+  }
+
+  /**
+   * PUT /v1/gifsy/clients/:slug/wallet-settings — write the target tenant's wallet
+   * money settings, delegating to the SAME conversion-rate / points-expiry / floor
+   * writes the tenant Settings panel uses (money path — conversion rate is validated
+   * hard and can never be 0/negative). GIFSY_ADMIN only.
+   */
+  @Put('clients/:slug/wallet-settings')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('tenancy:write')
+  updateWalletSettings(
+    @CurrentUser() user: JwtPayload,
+    @Param('slug') slug: string,
+    @Body() dto: UpdateWalletSettingsDto,
+  ) {
+    return this.gifsy.updateWalletSettings(user, slug, dto);
   }
 
   @Get('clients/:slug/outlet-type-configs')

@@ -8,7 +8,7 @@ import {
   Palette, Shield, Users, Bell, FileText, Wallet, Building2, ShoppingBag, Loader2,
   Settings, Power, Globe, Plus, Trash2, Star, Image as ImageIcon, Upload,
 } from 'lucide-react';
-import { applyFeatureFlagUpdate, validateTenantDomain, normalizeTenantDomain, TENANT_DOMAIN_SUFFIX } from '@/lib/platform/platform-admin';
+import { validateTenantDomain, normalizeTenantDomain, TENANT_DOMAIN_SUFFIX } from '@/lib/platform/platform-admin';
 import type { ClientConfig, FeatureKey } from '@/lib/platform/client-config';
 import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-section';
 import { getToken } from '@/lib/auth-client';
@@ -31,6 +31,23 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
 };
 
 const FEATURE_KEYS = Object.keys(FEATURE_META) as FeatureKey[];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Platform self-bill invoicing identity — PLATFORM-FIXED (no per-tenant store).
+// Mirrors the backend TECH_GIFSY constant in api/src/invoices/invoice.helpers.ts.
+// Every visibility invoice is self-billed by Tech Gifsy Solutions Ltd; the invoice
+// number format is hardcoded `TGSL-VIS-<OUTLET>-<YYYYMM>-<SEQ>`. Display-only.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PLATFORM_INVOICING = {
+  legalName: 'Tech Gifsy Solutions Limited',
+  gstin:     '19AAACT9811F1Z9',
+  pan:       'AAACT9811F',
+  state:     'West Bengal',
+  address:   '16, India Exchange Place, Kolkata, West Bengal 700001',
+  sacCode:   '998361',
+  numberFormat: 'TGSL-VIS-<OUTLET>-<YYYYMM>-<SEQ>',
+} as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Branding assets — the 4 upload slots and which branding-blob URL each fills.
@@ -140,7 +157,6 @@ interface ClientPatchBody {
   primaryColor?: string;
   supportEmail?: string;
   supportPhone?: string;
-  invoicePrefix?: string;
 }
 
 /** Shape returned by the PATCH endpoint (subset we merge back into local config).
@@ -154,7 +170,6 @@ interface ClientPatchResponse {
   primaryColor?: string;
   supportEmail?: string;
   supportPhone?: string;
-  invoicePrefix?: string;
   features?: Record<string, boolean>;
 }
 
@@ -207,10 +222,6 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
           primaryColor: updated.primaryColor ?? patch.primaryColor ?? prev.branding.primaryColor,
           supportEmail: updated.supportEmail ?? patch.supportEmail ?? prev.branding.supportEmail,
           supportPhone: updated.supportPhone ?? patch.supportPhone ?? prev.branding.supportPhone,
-        },
-        invoicing: {
-          ...prev.invoicing,
-          invoicePrefix: updated.invoicePrefix ?? patch.invoicePrefix ?? prev.invoicing.invoicePrefix,
         },
       }));
       flashSaved();
@@ -321,11 +332,33 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
     }
   }, [config.slug, flashSaved]);
 
-  /** Toggle a single feature flag using the platform rule (GIFSY_ADMIN only) */
-  const toggleFeature = useCallback((key: FeatureKey, value: boolean) => {
-    setConfig((prev) => applyFeatureFlagUpdate(prev, key, value, 'GIFSY_ADMIN'));
-    flashSaved();
-  }, [flashSaved]);
+  /**
+   * REAL persistence for the tenant's Product Brands list. The PATCH endpoint merges
+   * `productBrands` into the branding blob (that IS its real store), so this is durable
+   * — unlike the other in-memory branding fields which live in Client settings. The
+   * PATCH projection echoes productBrands, so we merge the authoritative value back.
+   */
+  const saveProductBrands = useCallback(async (
+    productBrands: string[],
+  ): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const res = await fetch(`/api/gifsy/clients/${config.slug}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken() ?? ''}` },
+        body: JSON.stringify({ productBrands }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) {
+        return { ok: false, error: j?.error || j?.message || `Save failed (HTTP ${res.status})` };
+      }
+      const next = (j.data?.productBrands as string[] | undefined) ?? productBrands;
+      setConfig((prev) => ({ ...prev, branding: { ...prev.branding, productBrands: next } }));
+      flashSaved();
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Network error — please try again.' };
+    }
+  }, [config.slug, flashSaved]);
 
   return (
     <div className="space-y-6">
@@ -365,7 +398,7 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
         </div>
       </div>
 
-      {/* REAL client-settings editor (status + branding/invoicing → PATCH) */}
+      {/* REAL client-settings editor (status + core branding → PATCH) */}
       <Section icon={Settings} title="Client settings" defaultOpen>
         <ClientSettingsSection
           config={config}
@@ -385,16 +418,13 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
         <BrandAssetsSection config={config} onUpload={uploadAsset} />
       </Section>
 
-      {/* Sections */}
-      <Section icon={Palette} title="Branding" defaultOpen>
-        <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-300 mb-3">
-          <strong>Dev mode:</strong> this card updates in-memory only. Persist display name, colour &amp; support details in <strong>Client settings</strong> (top); upload logo/wordmark/favicon in <strong>Brand Assets</strong>.
-        </div>
-        <BrandingSection config={config} onChange={(b) => { setConfig((p) => ({ ...p, branding: { ...p.branding, ...b } })); flashSaved(); }} />
+      {/* Product Brands — REAL persistence via PATCH { productBrands } (branding blob) */}
+      <Section icon={Palette} title="Product Brands" defaultOpen>
+        <ProductBrandsSection config={config} onSave={saveProductBrands} />
       </Section>
 
       <Section icon={Shield} title="Feature Flags" defaultOpen>
-        <FeatureFlagsSection config={config} onToggle={toggleFeature} />
+        <FeatureFlagsSection config={config} />
       </Section>
 
       <Section icon={Users} title="Partner Classes">
@@ -409,18 +439,14 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
         <NotificationsSection config={config} onSave={saveNotifications} />
       </Section>
 
+      {/* Invoicing — READ-ONLY (platform-fixed self-bill identity, no per-tenant store) */}
       <Section icon={FileText} title="Invoicing">
-        <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-300 mb-3">
-          <strong>Dev mode:</strong> this card updates in-memory only. The invoice prefix persists via <strong>Client settings</strong> (top).
-        </div>
-        <InvoicingSection config={config} onChange={(inv) => { setConfig((p) => ({ ...p, invoicing: { ...p.invoicing, ...inv } })); flashSaved(); }} />
+        <InvoicingSection />
       </Section>
 
-      <Section icon={Wallet} title="Wallet Defaults">
-        <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-300 mb-3">
-          <strong>Dev mode:</strong> Wallet defaults update in-memory only. DB persistence comes in Platform Phase 2.
-        </div>
-        <WalletSection config={config} onChange={(w) => { setConfig((p) => ({ ...p, wallet: { ...p.wallet, ...w } })); flashSaved(); }} />
+      {/* Wallet — REAL money-path settings via /api/gifsy/clients/:slug/wallet-settings */}
+      <Section icon={Wallet} title="Wallet Settings">
+        <WalletSettingsSection slug={config.slug} />
       </Section>
 
       <Section icon={ShoppingBag} title="Outlet Type Configuration">
@@ -511,7 +537,6 @@ function ClientSettingsSection({
     primaryColor:  config.branding.primaryColor,
     supportEmail:  config.branding.supportEmail,
     supportPhone:  config.branding.supportPhone,
-    invoicePrefix: config.invoicing.invoicePrefix,
   });
 
   // Keep the draft in sync when the config changes underneath us (e.g. after a save
@@ -524,7 +549,6 @@ function ClientSettingsSection({
       primaryColor:  config.branding.primaryColor,
       supportEmail:  config.branding.supportEmail,
       supportPhone:  config.branding.supportPhone,
-      invoicePrefix: config.invoicing.invoicePrefix,
     });
   }, [config]);
 
@@ -537,7 +561,6 @@ function ClientSettingsSection({
     if (draft.primaryColor  !== config.branding.primaryColor)  patch.primaryColor  = draft.primaryColor;
     if (draft.supportEmail  !== config.branding.supportEmail)  patch.supportEmail  = draft.supportEmail;
     if (draft.supportPhone  !== config.branding.supportPhone)  patch.supportPhone  = draft.supportPhone;
-    if (draft.invoicePrefix !== config.invoicing.invoicePrefix) patch.invoicePrefix = draft.invoicePrefix;
     return patch;
   };
 
@@ -607,11 +630,6 @@ function ClientSettingsSection({
             onChange={(e) => setDraft((p) => ({ ...p, supportPhone: e.target.value }))}
             className={INPUT_CLS} />
         </Field>
-        <Field label="Invoice prefix">
-          <input data-testid="invoice-prefix-input" value={draft.invoicePrefix}
-            onChange={(e) => setDraft((p) => ({ ...p, invoicePrefix: e.target.value }))}
-            className={INPUT_CLS + ' font-mono'} />
-        </Field>
       </div>
 
       {error && (
@@ -638,73 +656,71 @@ function ClientSettingsSection({
 // Branding section
 // ─────────────────────────────────────────────────────────────────────────────
 
-function BrandingSection({
-  config, onChange,
+function ProductBrandsSection({
+  config, onSave,
 }: {
   config: ClientConfig;
-  onChange: (partial: Partial<ClientConfig['branding']>) => void;
+  onSave: (productBrands: string[]) => Promise<{ ok: boolean; error?: string }>;
 }) {
+  const saved = config.branding.productBrands ?? [];
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft]     = useState(config.branding);
+  const [draft, setDraft]     = useState(saved.join(', '));
+  const [saving, setSaving]   = useState(false);
+  const [error, setError]     = useState<string | null>(null);
 
-  const save = () => { onChange(draft); setEditing(false); };
-  const cancel = () => { setDraft(config.branding); setEditing(false); };
+  // Re-sync when the authoritative list arrives after a save.
+  useEffect(() => { setDraft((config.branding.productBrands ?? []).join(', ')); }, [config.branding.productBrands]);
+
+  const parse = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
+
+  const save = async () => {
+    setSaving(true); setError(null);
+    const res = await onSave(parse(draft));
+    setSaving(false);
+    if (res.ok) setEditing(false);
+    else setError(res.error ?? 'Save failed');
+  };
+  const cancel = () => { setDraft(saved.join(', ')); setError(null); setEditing(false); };
 
   if (!editing) {
     return (
-      <div className="space-y-4 pt-2">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl shrink-0" style={{ backgroundColor: config.branding.primaryColor }} />
-          <div>
-            <p className="text-sm font-semibold text-white">{config.branding.displayName}</p>
-            <p className="text-xs text-white/40 font-mono">{config.branding.primaryColor}</p>
+      <div className="space-y-3 pt-2">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex-1 min-w-0">
+            <p className="text-white/40 text-xs mb-1">Brands</p>
+            {saved.length ? (
+              <div className="flex flex-wrap gap-1.5">
+                {saved.map((b) => (
+                  <span key={b} className="px-2 py-0.5 rounded-full text-xs bg-white/5 border border-white/10 text-white/80">{b}</span>
+                ))}
+              </div>
+            ) : (
+              <p className="text-white/30 text-xs">No product brands yet.</p>
+            )}
           </div>
-          <button onClick={() => setEditing(true)} className="ml-auto flex items-center gap-1.5 text-xs text-white/40 hover:text-white transition-colors">
+          <button onClick={() => setEditing(true)} className="flex items-center gap-1.5 text-xs text-white/40 hover:text-white transition-colors shrink-0">
             <Pencil className="w-3.5 h-3.5" />Edit
           </button>
         </div>
-        <div className="grid grid-cols-2 gap-3 text-xs">
-          <InfoRow label="Support email" value={config.branding.supportEmail} />
-          <InfoRow label="Support phone" value={config.branding.supportPhone} />
-          <InfoRow label="Brands" value={config.branding.productBrands.join(', ') || '—'} />
-        </div>
+        <p className="text-xs text-white/30">
+          Display name, colour &amp; support details live in <strong>Client settings</strong> (top); logo/wordmark/favicon in <strong>Brand Assets</strong>.
+        </p>
       </div>
     );
   }
 
   return (
     <div className="space-y-4 pt-2">
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Display name">
-          <input value={draft.displayName} onChange={(e) => setDraft((p) => ({ ...p, displayName: e.target.value }))}
-            className={INPUT_CLS} />
-        </Field>
-        <Field label="Primary colour">
-          <div className="flex items-center gap-2">
-            <input type="color" value={draft.primaryColor}
-              onChange={(e) => setDraft((p) => ({ ...p, primaryColor: e.target.value }))}
-              className="w-9 h-9 rounded-lg border border-white/20 bg-transparent cursor-pointer p-0.5" />
-            <input value={draft.primaryColor} onChange={(e) => setDraft((p) => ({ ...p, primaryColor: e.target.value }))}
-              className={INPUT_CLS + ' flex-1 font-mono'} />
-          </div>
-        </Field>
-        <Field label="Support email">
-          <input value={draft.supportEmail} onChange={(e) => setDraft((p) => ({ ...p, supportEmail: e.target.value }))}
-            className={INPUT_CLS} />
-        </Field>
-        <Field label="Support phone">
-          <input value={draft.supportPhone} onChange={(e) => setDraft((p) => ({ ...p, supportPhone: e.target.value }))}
-            className={INPUT_CLS} />
-        </Field>
-        <Field label="Product brands (comma-separated)" className="col-span-2">
-          <input
-            value={draft.productBrands.join(', ')}
-            onChange={(e) => setDraft((p) => ({ ...p, productBrands: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) }))}
-            className={INPUT_CLS}
-          />
-        </Field>
-      </div>
-      <EditActions onSave={save} onCancel={cancel} />
+      <Field label="Product brands (comma-separated)">
+        <input
+          data-testid="product-brands-input"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          className={INPUT_CLS}
+        />
+      </Field>
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      <EditActions onSave={save} onCancel={cancel} saving={saving} />
     </div>
   );
 }
@@ -935,11 +951,13 @@ function AssetSlot({
 // Feature flags section
 // ─────────────────────────────────────────────────────────────────────────────
 
+// READ-ONLY (informational). Real feature-flag wiring is a separate task (D-1 #159);
+// this card shows the current flags without a persist path so it can't flash a fake
+// "Saved" over a write the runtime never reads.
 function FeatureFlagsSection({
-  config, onToggle,
+  config,
 }: {
   config: ClientConfig;
-  onToggle: (key: FeatureKey, value: boolean) => void;
 }) {
   return (
     <div className="pt-2 space-y-2">
@@ -947,19 +965,27 @@ function FeatureFlagsSection({
         const enabled = !!(config.features as unknown as Record<string, boolean>)[key];
         const meta    = FEATURE_META[key];
         return (
-          <div key={key} className="flex items-center gap-4 px-4 py-3 rounded-xl bg-white/5 border border-white/5 hover:border-white/10 transition-colors">
+          <div key={key} className="flex items-center gap-4 px-4 py-3 rounded-xl bg-white/5 border border-white/5">
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-white">{meta.label}</p>
               <p className="text-xs text-white/40 mt-0.5">{meta.description}</p>
             </div>
-            <Toggle enabled={enabled} onChange={(v) => onToggle(key, v)} />
+            <span
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border shrink-0 ${
+                enabled
+                  ? 'bg-green-500/15 border-green-500/30 text-green-400'
+                  : 'bg-white/5 border-white/10 text-white/40'
+              }`}
+            >
+              {enabled ? <CheckCircle className="w-3 h-3" /> : <X className="w-3 h-3" />}
+              {enabled ? 'On' : 'Off'}
+            </span>
           </div>
         );
       })}
 
-      {/* PartnerApp auto-sync note */}
       <p className="text-xs text-white/30 pt-1 px-1">
-        Partner app tabs (Invoices, Wallet) sync automatically with Invoice Module and Wallet Module flags.
+        Feature changes are applied via runtime tenant config (coming soon).
       </p>
     </div>
   );
@@ -1115,166 +1141,222 @@ function NotificationsSection({
 // Invoicing section
 // ─────────────────────────────────────────────────────────────────────────────
 
-function InvoicingSection({
-  config, onChange,
-}: {
-  config: ClientConfig;
-  onChange: (partial: Partial<ClientConfig['invoicing']>) => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft]     = useState(config.invoicing);
-
-  const save   = () => { onChange(draft); setEditing(false); };
-  const cancel = () => { setDraft(config.invoicing); setEditing(false); };
-
-  if (!editing) {
-    return (
-      <div className="pt-2 space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="grid grid-cols-2 gap-3 flex-1 text-xs">
-            <InfoRow label="Seller legal name" value={config.invoicing.sellerLegalName} />
-            <InfoRow label="GSTIN"             value={config.invoicing.sellerGstin} mono />
-            <InfoRow label="State"             value={config.invoicing.sellerState} />
-            <InfoRow label="PAN"               value={config.invoicing.sellerPan} mono />
-            <InfoRow label="Invoice prefix"    value={config.invoicing.invoicePrefix} mono />
-            <InfoRow label="SAC code"          value={config.invoicing.sacCode} mono />
-            <InfoRow label="Bank name"         value={config.invoicing.bankName} />
-            <InfoRow label="Bank IFSC"         value={config.invoicing.bankIfsc} mono />
-          </div>
-          <button onClick={() => setEditing(true)} className="ml-4 flex items-center gap-1.5 text-xs text-white/40 hover:text-white transition-colors">
-            <Pencil className="w-3.5 h-3.5" />Edit
-          </button>
+// READ-ONLY. Invoicing identity is PLATFORM-FIXED (self-bill by Tech Gifsy Solutions
+// Ltd) — there is no per-tenant invoicing store, and the invoice-number format is
+// hardcoded server-side (`TGSL-VIS-…`). Display the platform values from the shared
+// PLATFORM_INVOICING constant so nothing here can flash a fake "Saved".
+function InvoicingSection() {
+  return (
+    <div className="pt-2 space-y-3">
+      <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-2 text-xs text-blue-300">
+        Invoicing identity is platform-managed (self-bill by <strong>Tech Gifsy Solutions Ltd</strong>). It is the same for every tenant and cannot be edited here.
+      </div>
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        <InfoRow label="Seller legal name" value={PLATFORM_INVOICING.legalName} />
+        <InfoRow label="GSTIN"             value={PLATFORM_INVOICING.gstin} mono />
+        <InfoRow label="PAN"               value={PLATFORM_INVOICING.pan} mono />
+        <InfoRow label="State"             value={PLATFORM_INVOICING.state} />
+        <InfoRow label="SAC code"          value={PLATFORM_INVOICING.sacCode} mono />
+        <InfoRow label="Invoice number"    value={PLATFORM_INVOICING.numberFormat} mono />
+        <div className="col-span-2">
+          <InfoRow label="Registered address" value={PLATFORM_INVOICING.address} />
         </div>
       </div>
-    );
-  }
-
-  return (
-    <div className="pt-2 space-y-4">
-      <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-2 text-xs text-blue-300">
-        Seller legal name is always <strong>Tech Gifsy Solutions Limited</strong> and cannot be changed.
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="GSTIN">
-          <input value={draft.sellerGstin} onChange={(e) => setDraft((p) => ({ ...p, sellerGstin: e.target.value }))}
-            className={INPUT_CLS + ' font-mono'} />
-        </Field>
-        <Field label="Seller state">
-          <input value={draft.sellerState} onChange={(e) => setDraft((p) => ({ ...p, sellerState: e.target.value }))}
-            className={INPUT_CLS} />
-        </Field>
-        <Field label="Invoice prefix">
-          <input value={draft.invoicePrefix} onChange={(e) => setDraft((p) => ({ ...p, invoicePrefix: e.target.value }))}
-            className={INPUT_CLS + ' font-mono'} />
-        </Field>
-        <Field label="SAC code">
-          <input value={draft.sacCode} onChange={(e) => setDraft((p) => ({ ...p, sacCode: e.target.value }))}
-            className={INPUT_CLS + ' font-mono'} />
-        </Field>
-        <Field label="Bank name">
-          <input value={draft.bankName} onChange={(e) => setDraft((p) => ({ ...p, bankName: e.target.value }))}
-            className={INPUT_CLS} />
-        </Field>
-        <Field label="Bank IFSC">
-          <input value={draft.bankIfsc} onChange={(e) => setDraft((p) => ({ ...p, bankIfsc: e.target.value }))}
-            className={INPUT_CLS + ' font-mono'} />
-        </Field>
-        <Field label="Bank branch" className="col-span-2">
-          <input value={draft.bankBranch} onChange={(e) => setDraft((p) => ({ ...p, bankBranch: e.target.value }))}
-            className={INPUT_CLS} />
-        </Field>
-        <Field label="Seller address" className="col-span-2">
-          <input value={draft.sellerAddress} onChange={(e) => setDraft((p) => ({ ...p, sellerAddress: e.target.value }))}
-            className={INPUT_CLS} />
-        </Field>
-      </div>
-      <EditActions onSave={save} onCancel={cancel} />
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wallet section
+// Wallet settings — REAL money-path config, self-fetched from
+// GET /api/gifsy/clients/:slug/wallet-settings and saved via PUT the same.
+// conversionRate / points-expiry / redemption ₹ floors write to the same per-tenant
+// stores the money path enforces. A BLANK conversion rate is treated as invalid
+// (never coerced to 0 — a 0 rate is a divide-by-zero in redemption math).
 // ─────────────────────────────────────────────────────────────────────────────
 
-function WalletSection({
-  config, onChange,
-}: {
-  config: ClientConfig;
-  onChange: (partial: Partial<ClientConfig['wallet']>) => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft]     = useState(config.wallet);
+interface WalletSettings {
+  conversionRate: number;
+  pointsExpiryDays: number | null;
+  minBankTransferAmount: number;
+  minVoucherFreeAmount: number;
+}
 
-  const save   = () => { onChange(draft); setEditing(false); };
-  const cancel = () => { setDraft(config.wallet); setEditing(false); };
+function WalletSettingsSection({ slug }: { slug: string }) {
+  const [loading, setLoading]   = useState(true);
+  const [loadError, setLoadErr] = useState<string | null>(null);
+  const [saving, setSaving]     = useState(false);
+  const [saveError, setSaveErr] = useState<string | null>(null);
+  const [saved, setSaved]       = useState(false);
 
-  if (!editing) {
+  // Server snapshot (authoritative). Draft fields are STRINGS so a blank input is
+  // distinguishable from 0 (and never silently coerced to 0).
+  const [server, setServer]     = useState<WalletSettings | null>(null);
+  const [rate, setRate]         = useState('');
+  const [expiry, setExpiry]     = useState('');
+  const [minBank, setMinBank]   = useState('');
+  const [minVoucher, setMinV]   = useState('');
+
+  const hydrate = useCallback((w: WalletSettings) => {
+    setServer(w);
+    setRate(String(w.conversionRate));
+    setExpiry(w.pointsExpiryDays == null ? '' : String(w.pointsExpiryDays));
+    setMinBank(String(w.minBankTransferAmount));
+    setMinV(String(w.minVoucherFreeAmount));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setLoadErr(null);
+    fetch(`/api/gifsy/clients/${slug}/wallet-settings`, {
+      headers: { Authorization: `Bearer ${getToken() ?? ''}` },
+    })
+      .then(async (r) => {
+        const j = await r.json().catch(() => null);
+        if (!r.ok || !j?.success) throw new Error(j?.error || j?.message || 'Failed to load');
+        return j.data as WalletSettings;
+      })
+      .then((w) => { if (!cancelled) hydrate(w); })
+      .catch((e) => { if (!cancelled) setLoadErr(e instanceof Error ? e.message : 'Could not load wallet settings'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [slug, hydrate]);
+
+  const flash = () => { setSaved(true); setTimeout(() => setSaved(false), 2500); };
+
+  const save = async () => {
+    setSaveErr(null);
+
+    // Conversion rate — BLANK is invalid (must not become 0). Enforce the same
+    // money-path bounds the backend does so the error is caught before the round-trip.
+    const rateTrim = rate.trim();
+    if (rateTrim === '') { setSaveErr('Enter a conversion rate (1 = 1 point → ₹1).'); return; }
+    const rateNum = Number(rateTrim);
+    if (!Number.isFinite(rateNum) || rateNum < 0.005 || rateNum > 100000) {
+      setSaveErr('Conversion rate must be a number between 0.005 and 100000.'); return;
+    }
+
+    // Points expiry — blank = never expire (null); otherwise a positive integer.
+    const expiryTrim = expiry.trim();
+    let expiryVal: number | null;
+    if (expiryTrim === '') {
+      expiryVal = null;
+    } else {
+      const n = Number(expiryTrim);
+      if (!Number.isInteger(n) || n < 1) { setSaveErr('Points expiry must be a whole number of days ≥ 1, or blank for never.'); return; }
+      expiryVal = n;
+    }
+
+    // ₹ floors — non-negative numbers (blank = 0 is acceptable for a floor).
+    const bankNum = Number(minBank.trim() === '' ? '0' : minBank.trim());
+    const vNum    = Number(minVoucher.trim() === '' ? '0' : minVoucher.trim());
+    if (!Number.isFinite(bankNum) || bankNum < 0) { setSaveErr('Minimum bank/DBT amount must be a non-negative number.'); return; }
+    if (!Number.isFinite(vNum) || vNum < 0)       { setSaveErr('Minimum voucher amount must be a non-negative number.'); return; }
+
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/gifsy/clients/${slug}/wallet-settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken() ?? ''}` },
+        body: JSON.stringify({
+          conversionRate: rateNum,
+          pointsExpiryDays: expiryVal,
+          minBankTransferAmount: bankNum,
+          minVoucherFreeAmount: vNum,
+        }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) { setSaveErr(j?.error || j?.message || `Save failed (HTTP ${res.status})`); return; }
+      hydrate(j.data as WalletSettings); // reflect the authoritative (snapped) values
+      flash();
+    } catch {
+      setSaveErr('Network error — please try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
     return (
-      <div className="pt-2">
-        <div className="flex items-center justify-between">
-          <div className="grid grid-cols-2 gap-3 flex-1 text-xs">
-            <InfoRow label="Holding period" value={`${config.wallet.defaultHoldingPeriodDays} days`} />
-            <InfoRow label="Points expiry"  value={config.wallet.pointsExpiryDays ? `${config.wallet.pointsExpiryDays} days` : 'Never'} />
-            <InfoRow label="Min redemption" value={`₹${config.wallet.minRedemptionAmount}`} />
-            <InfoRow label="Points → ₹"    value={`1 pt = ₹${config.wallet.pointsToRupeeRatio}`} />
-            <InfoRow label="Redemption modes" value={config.wallet.redemptionModes.join(', ')} />
-          </div>
-          <button onClick={() => setEditing(true)} className="ml-4 flex items-center gap-1.5 text-xs text-white/40 hover:text-white transition-colors">
-            <Pencil className="w-3.5 h-3.5" />Edit
-          </button>
-        </div>
+      <div className="flex items-center gap-2 py-6 text-white/40 text-sm">
+        <Loader2 className="w-4 h-4 animate-spin" />Loading wallet settings…
       </div>
     );
   }
+  if (loadError || !server) {
+    return <p className="py-4 text-xs text-red-400">{loadError ?? 'Could not load wallet settings.'}</p>;
+  }
+
+  const dirty =
+    rate.trim() !== String(server.conversionRate) ||
+    (expiry.trim() === '' ? server.pointsExpiryDays != null : expiry.trim() !== String(server.pointsExpiryDays ?? '')) ||
+    minBank.trim() !== String(server.minBankTransferAmount) ||
+    minVoucher.trim() !== String(server.minVoucherFreeAmount);
 
   return (
     <div className="pt-2 space-y-4">
+      <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-2 text-xs text-blue-300">
+        These are the tenant&apos;s <strong>live</strong> money-path settings. The conversion rate is enforced on every redemption (orders freeze the rate at order time).
+      </div>
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Holding period (days)">
-          <input type="number" value={draft.defaultHoldingPeriodDays}
-            onChange={(e) => setDraft((p) => ({ ...p, defaultHoldingPeriodDays: Number(e.target.value) }))}
-            className={INPUT_CLS} min={0} />
+        <Field label="Points → ₹ conversion rate">
+          <input
+            data-testid="wallet-conversion-rate"
+            type="number" step="0.005" min={0.005}
+            value={rate}
+            onChange={(e) => setRate(e.target.value)}
+            className={INPUT_CLS}
+            placeholder="1 = 1 point → ₹1"
+          />
         </Field>
         <Field label="Points expiry (days, blank = never)">
-          <input type="number" value={draft.pointsExpiryDays ?? ''}
-            onChange={(e) => setDraft((p) => ({ ...p, pointsExpiryDays: e.target.value ? Number(e.target.value) : null }))}
-            className={INPUT_CLS} min={0} placeholder="Never" />
+          <input
+            data-testid="wallet-points-expiry"
+            type="number" min={1}
+            value={expiry}
+            onChange={(e) => setExpiry(e.target.value)}
+            className={INPUT_CLS}
+            placeholder="Never"
+          />
         </Field>
-        <Field label="Min redemption amount (₹)">
-          <input type="number" value={draft.minRedemptionAmount}
-            onChange={(e) => setDraft((p) => ({ ...p, minRedemptionAmount: Number(e.target.value) }))}
-            className={INPUT_CLS} min={0} />
+        <Field label="Min bank / DBT transfer (₹)">
+          <input
+            data-testid="wallet-min-bank"
+            type="number" min={0}
+            value={minBank}
+            onChange={(e) => setMinBank(e.target.value)}
+            className={INPUT_CLS}
+          />
         </Field>
-        <Field label="Points to ₹ ratio">
-          <input type="number" value={draft.pointsToRupeeRatio} step="0.01"
-            onChange={(e) => setDraft((p) => ({ ...p, pointsToRupeeRatio: Number(e.target.value) }))}
-            className={INPUT_CLS} min={0} />
-        </Field>
-        <Field label="Redemption modes" className="col-span-2">
-          <div className="flex flex-wrap gap-2 pt-1">
-            {(['UPI', 'NEFT', 'RTGS', 'IMPS'] as const).map((mode) => {
-              const on = draft.redemptionModes.includes(mode);
-              return (
-                <button key={mode} type="button"
-                  onClick={() => setDraft((p) => ({
-                    ...p,
-                    redemptionModes: on
-                      ? p.redemptionModes.filter((m) => m !== mode)
-                      : [...p.redemptionModes, mode],
-                  }))}
-                  className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${
-                    on ? 'bg-[var(--brand-primary)]/20 border-[var(--brand-primary)]/50 text-white' : 'bg-white/5 border-white/10 text-white/40'
-                  }`}
-                >
-                  {mode}
-                </button>
-              );
-            })}
-          </div>
+        <Field label="Min voucher redemption (₹)">
+          <input
+            data-testid="wallet-min-voucher"
+            type="number" min={0}
+            value={minVoucher}
+            onChange={(e) => setMinV(e.target.value)}
+            className={INPUT_CLS}
+          />
         </Field>
       </div>
-      <EditActions onSave={save} onCancel={cancel} />
+
+      {saveError && <p data-testid="wallet-save-error" className="text-xs text-red-400">{saveError}</p>}
+
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          data-testid="wallet-settings-save"
+          disabled={saving || !dirty}
+          onClick={save}
+          className="flex items-center gap-1.5 px-3 py-2 bg-[var(--brand-primary)] text-white text-xs font-medium rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50"
+        >
+          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+          Save wallet settings
+        </button>
+        {saved && (
+          <span className="flex items-center gap-1.5 text-xs text-green-400">
+            <CheckCircle className="w-3.5 h-3.5" />Saved
+          </span>
+        )}
+        {!dirty && !saved && <span className="text-xs text-white/30">No unsaved changes</span>}
+      </div>
     </div>
   );
 }
@@ -1301,24 +1383,6 @@ function InfoRow({ label, value, mono = false }: { label: string; value: string;
       <p className="text-white/40 text-xs mb-0.5">{label}</p>
       <p className={`text-white/80 text-xs ${mono ? 'font-mono' : ''}`}>{value}</p>
     </div>
-  );
-}
-
-function Toggle({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={enabled}
-      onClick={() => onChange(!enabled)}
-      className={`relative w-10 h-5 rounded-full shrink-0 transition-colors ${
-        enabled ? 'bg-[var(--brand-primary)]' : 'bg-white/15'
-      }`}
-    >
-      <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-        enabled ? 'translate-x-5' : 'translate-x-0.5'
-      }`} />
-    </button>
   );
 }
 

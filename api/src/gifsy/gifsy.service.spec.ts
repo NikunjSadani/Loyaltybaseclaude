@@ -14,6 +14,8 @@ import {
 import { GifsyService } from './gifsy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { AdminCoreService } from '../admin-core/admin-core.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
@@ -33,6 +35,18 @@ const mockPrisma = {
 const mockStorage = {
   generateKey: jest.fn(),
   uploadFile: jest.fn(),
+};
+
+// The tenant-targeted wallet-settings path DELEGATES to these real services; the
+// specs assert on the delegation (args) rather than re-implementing their bodies.
+const mockAdminCore = {
+  upsertSetting: jest.fn(),
+  setPointsExpiry: jest.fn(),
+  getPointsExpiry: jest.fn(),
+};
+
+const mockTenantSettings = {
+  getEffectiveSettings: jest.fn(),
 };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
@@ -60,6 +74,8 @@ describe('GifsyService', () => {
         GifsyService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: StorageService, useValue: mockStorage },
+        { provide: AdminCoreService, useValue: mockAdminCore },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
       ],
     }).compile();
     service = module.get(GifsyService);
@@ -886,6 +902,156 @@ describe('GifsyService', () => {
       await expect(
         service.uploadBrandingAsset(gifsy, 'deoleo', undefined as never, 'logo'),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  // ── Wallet settings (GIFSY-operator, tenant-TARGETED money-path write) ──────
+  describe('getWalletSettings', () => {
+    it('throws Forbidden for non-GIFSY callers', async () => {
+      await expect(service.getWalletSettings(partner, 'deoleo')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+
+    it('throws NotFound when the target tenant does not exist', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue(null);
+      await expect(service.getWalletSettings(gifsy, 'nope')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('reads the TARGET tenant slug (not the caller clientId) from the real stores', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue({ id: 'acme' });
+      mockTenantSettings.getEffectiveSettings.mockResolvedValue({
+        conversionRate: 2,
+        minBankTransferAmount: 300,
+        minVoucherFreeAmount: 150,
+      });
+      mockAdminCore.getPointsExpiry.mockResolvedValue({ pointsExpiryDays: 365 });
+
+      // Caller is assumed into 'deoleo' but the path targets 'acme'.
+      const res = await service.getWalletSettings(gifsy, 'acme');
+
+      expect(mockTenantSettings.getEffectiveSettings).toHaveBeenCalledWith('acme');
+      // getPointsExpiry is called with a payload re-pointed at the TARGET tenant.
+      expect(mockAdminCore.getPointsExpiry.mock.calls[0][0]).toMatchObject({ clientId: 'acme' });
+      expect(res).toEqual({
+        slug: 'acme',
+        conversionRate: 2,
+        pointsExpiryDays: 365,
+        minBankTransferAmount: 300,
+        minVoucherFreeAmount: 150,
+      });
+    });
+  });
+
+  describe('updateWalletSettings', () => {
+    const validDto = {
+      conversionRate: 1.5,
+      pointsExpiryDays: 180,
+      minBankTransferAmount: 250,
+      minVoucherFreeAmount: 250,
+    };
+
+    beforeEach(() => {
+      mockPrisma.client.findUnique.mockResolvedValue({ id: 'acme' });
+      mockTenantSettings.getEffectiveSettings.mockResolvedValue({
+        conversionRate: 1.5,
+        minBankTransferAmount: 250,
+        minVoucherFreeAmount: 250,
+      });
+      mockAdminCore.getPointsExpiry.mockResolvedValue({ pointsExpiryDays: 180 });
+      mockAdminCore.upsertSetting.mockResolvedValue({});
+      mockAdminCore.setPointsExpiry.mockResolvedValue({ pointsExpiryDays: 180 });
+    });
+
+    it('throws Forbidden for non-GIFSY callers (before any write)', async () => {
+      await expect(
+        service.updateWalletSettings(partner, 'acme', validDto),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFound for an unknown target tenant (before any write)', async () => {
+      mockPrisma.client.findUnique.mockResolvedValue(null);
+      await expect(
+        service.updateWalletSettings(gifsy, 'nope', validDto),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('MONEY GUARD: rejects a zero conversion rate (divide-by-zero) with no write', async () => {
+      await expect(
+        service.updateWalletSettings(gifsy, 'acme', { ...validDto, conversionRate: 0 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+      expect(mockAdminCore.setPointsExpiry).not.toHaveBeenCalled();
+    });
+
+    it('MONEY GUARD: rejects a negative conversion rate with no write', async () => {
+      await expect(
+        service.updateWalletSettings(gifsy, 'acme', { ...validDto, conversionRate: -1 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('MONEY GUARD: rejects a sub-MIN_RATE rate the read layer would silently drop', async () => {
+      await expect(
+        service.updateWalletSettings(gifsy, 'acme', { ...validDto, conversionRate: 0.001 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('rejects a negative redemption floor with no write', async () => {
+      await expect(
+        service.updateWalletSettings(gifsy, 'acme', { ...validDto, minBankTransferAmount: -5 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('MONEY GUARD: rejects a zero/negative/non-integer pointsExpiryDays with no write (0 ≠ never)', async () => {
+      for (const bad of [0, -1, 3.5]) {
+        await expect(
+          service.updateWalletSettings(gifsy, 'acme', { ...validDto, pointsExpiryDays: bad }),
+        ).rejects.toBeInstanceOf(BadRequestException);
+      }
+      expect(mockAdminCore.setPointsExpiry).not.toHaveBeenCalled();
+      expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('DELEGATES to the REAL settings writes, re-pointed at the TARGET tenant, and snaps the rate', async () => {
+      // 1.567 must snap to the centi grid the money path enforces (Math.round(rate*100)/100) → 1.57.
+      await service.updateWalletSettings(gifsy, 'acme', { ...validDto, conversionRate: 1.567 });
+
+      // Every upsertSetting call carries a payload targeting 'acme' (not the caller's 'deoleo').
+      for (const call of mockAdminCore.upsertSetting.mock.calls) {
+        expect(call[0]).toMatchObject({ clientId: 'acme' });
+      }
+      const byKey = Object.fromEntries(
+        mockAdminCore.upsertSetting.mock.calls.map((c) => [c[1].key, c[1].value]),
+      );
+      expect(byKey.conversionRate).toBe(1.57); // snapped to 2 dp
+      expect(byKey.minBankTransferAmount).toBe(250);
+      expect(byKey.minVoucherFreeAmount).toBe(250);
+      // Points expiry delegated to the real PointExpiryConfig write, also target-scoped.
+      expect(mockAdminCore.setPointsExpiry.mock.calls[0][0]).toMatchObject({ clientId: 'acme' });
+      expect(mockAdminCore.setPointsExpiry.mock.calls[0][1]).toEqual({ pointsExpiryDays: 180 });
+    });
+
+    it('passes pointsExpiryDays=null (never expire) straight through to the real write', async () => {
+      await service.updateWalletSettings(gifsy, 'acme', { ...validDto, pointsExpiryDays: null });
+      expect(mockAdminCore.setPointsExpiry.mock.calls[0][1]).toEqual({ pointsExpiryDays: null });
+    });
+
+    it('returns the freshly-read authoritative values after the writes', async () => {
+      const res = await service.updateWalletSettings(gifsy, 'acme', validDto);
+      expect(res).toEqual({
+        slug: 'acme',
+        conversionRate: 1.5,
+        pointsExpiryDays: 180,
+        minBankTransferAmount: 250,
+        minVoucherFreeAmount: 250,
+      });
     });
   });
 });

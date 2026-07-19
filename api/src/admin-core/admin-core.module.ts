@@ -39,5 +39,9 @@ import { TdsModule } from '../tds/tds.module';
     OperationsDashboardService,
     FinanceDashboardService,
   ],
+  // Exported so GifsyModule can reuse the SAME per-tenant settings writes
+  // (upsertSetting / setPointsExpiry) for the GIFSY-operator tenant-targeted
+  // wallet-settings path — never a re-implementation of the money-path logic.
+  exports: [AdminCoreService],
 })
 export class AdminCoreModule {}

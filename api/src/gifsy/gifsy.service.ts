@@ -8,9 +8,16 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { AdminCoreService } from '../admin-core/admin-core.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { sniffFileType } from '../common/file-signature';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { CreateClientDto, UpdateClientDto, UpdateOutletTypeConfigDto } from './dto/gifsy.dto';
+import {
+  CreateClientDto,
+  UpdateClientDto,
+  UpdateOutletTypeConfigDto,
+  UpdateWalletSettingsDto,
+} from './dto/gifsy.dto';
 
 /**
  * GIFSY platform-operator domain — ported from
@@ -120,10 +127,156 @@ export class GifsyService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
+    // Reused to delegate the tenant-targeted wallet-settings write to the SAME
+    // per-tenant settings stores the tenant Settings panel uses (never re-implemented).
+    private readonly adminCore: AdminCoreService,
+    private readonly tenantSettings: TenantSettingsService,
   ) {}
 
   private assertGifsy(user: JwtPayload): void {
     if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden');
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // WALLET SETTINGS — GIFSY-operator, tenant-TARGETED money-path config
+  // (conversion rate / points-expiry / redemption floors) for :slug
+  // ════════════════════════════════════════════════════════════════════════
+
+  /** Conversion-rate ceiling — mirrors the tenant Settings panel's fat-finger guard. */
+  private static readonly MAX_CONVERSION_RATE = 100000;
+
+  /**
+   * The client-detail page edits a tenant the operator is NOT assumed into, so the
+   * caller-scoped `/v1/admin/settings/*` endpoints (which key off `user.clientId`)
+   * can't target it. This builds a payload that re-points those SAME service methods
+   * at the target tenant `slug` while preserving the operator's `sub` for audit
+   * attribution. Only ever used with a GIFSY_ADMIN caller (assertGifsy gates entry).
+   */
+  private targetedPayload(user: JwtPayload, slug: string): JwtPayload {
+    return { ...user, clientId: slug };
+  }
+
+  /** Confirm the target tenant exists (404 otherwise) — shared by GET + PUT. */
+  private async assertClientExists(slug: string): Promise<void> {
+    const client = await this.prisma.client.findUnique({
+      where: { id: slug },
+      select: { id: true },
+    });
+    if (!client) throw new NotFoundException(`Client "${slug}" not found.`);
+  }
+
+  /**
+   * GET /v1/gifsy/clients/:slug/wallet-settings — the target tenant's REAL wallet
+   * money settings, read from the same stores the money path enforces:
+   *   - conversionRate / minBankTransferAmount / minVoucherFreeAmount ← TenantSettingsService
+   *     (program_settings overlaid on typed defaults)
+   *   - pointsExpiryDays ← the active default PointExpiryConfig row (AdminCoreService)
+   * GIFSY_ADMIN only.
+   */
+  async getWalletSettings(user: JwtPayload, slug: string) {
+    this.assertGifsy(user);
+    await this.assertClientExists(slug);
+
+    const settings = await this.tenantSettings.getEffectiveSettings(slug);
+    const { pointsExpiryDays } = await this.adminCore.getPointsExpiry(
+      this.targetedPayload(user, slug),
+    );
+
+    return {
+      slug,
+      conversionRate: settings.conversionRate,
+      pointsExpiryDays,
+      minBankTransferAmount: settings.minBankTransferAmount,
+      minVoucherFreeAmount: settings.minVoucherFreeAmount,
+    };
+  }
+
+  /**
+   * PUT /v1/gifsy/clients/:slug/wallet-settings — write the target tenant's wallet
+   * money settings by DELEGATING to the exact same service methods the tenant
+   * Settings panel uses:
+   *   - conversionRate / minBankTransferAmount / minVoucherFreeAmount → AdminCoreService.upsertSetting
+   *     (program_settings upsert + audit + TenantSettingsService cache-bust)
+   *   - pointsExpiryDays → AdminCoreService.setPointsExpiry (PointExpiryConfig default row)
+   * No copy of the money logic lives here; the rate-freeze semantics (the money path
+   * snapshots conversionRateCenti at order time) are preserved because the real write
+   * is used. GIFSY_ADMIN only.
+   *
+   * Money-path validation (defence-in-depth over the DTO shape check):
+   *   - conversionRate must be finite and within [MIN_RATE 0.005, 100000] — a 0/negative
+   *     rate is a divide-by-zero in redemption math, and a sub-MIN_RATE rate is silently
+   *     dropped by the read layer (a "save" that no-ops). Snapped to the centi grid the
+   *     money path enforces so the stored/displayed rate can never drift from the enforced one.
+   *   - the ₹ floors must be non-negative (also enforced by the DTO).
+   */
+  async updateWalletSettings(user: JwtPayload, slug: string, dto: UpdateWalletSettingsDto) {
+    this.assertGifsy(user);
+    await this.assertClientExists(slug);
+
+    // ── Conversion rate — hard money-path validation ──
+    const rate = dto.conversionRate;
+    if (
+      typeof rate !== 'number' ||
+      !Number.isFinite(rate) ||
+      rate < TenantSettingsService.MIN_RATE ||
+      rate > GifsyService.MAX_CONVERSION_RATE
+    ) {
+      throw new BadRequestException(
+        `Conversion rate must be a number between ${TenantSettingsService.MIN_RATE} and ${GifsyService.MAX_CONVERSION_RATE} (1 = 1 point → ₹1).`,
+      );
+    }
+    // Snap to the centi grid the money path snapshots (Math.round(rate*100)) so the
+    // displayed/stored rate is exactly the rate redemptions will freeze — no drift.
+    const snappedRate = Math.round(rate * 100) / 100;
+
+    // ── ₹ floors — non-negative finite (belt-and-braces over the DTO @Min(0)) ──
+    for (const [label, v] of [
+      ['minBankTransferAmount', dto.minBankTransferAmount],
+      ['minVoucherFreeAmount', dto.minVoucherFreeAmount],
+    ] as const) {
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+        throw new BadRequestException(`${label} must be a non-negative number.`);
+      }
+    }
+
+    // ── Points expiry — null (never expire) OR a positive integer of days.
+    // Service-level guard matching the money fields above; without it, a 0 would
+    // slip past as `expiryDays: 0` (instant expiry) if the DTO were ever bypassed.
+    const expiry = dto.pointsExpiryDays;
+    if (
+      expiry !== null &&
+      (typeof expiry !== 'number' || !Number.isInteger(expiry) || expiry < 1 || expiry > 36500)
+    ) {
+      throw new BadRequestException(
+        'pointsExpiryDays must be null (never expire) or an integer between 1 and 36500.',
+      );
+    }
+
+    const targeted = this.targetedPayload(user, slug);
+
+    // Delegate each write to the REAL settings service (same store, audit, cache-bust).
+    // No `category` — byte-identical to the tenant Settings panel's saveGifsySettings
+    // path (which PUTs { key, value }), so the same key can't be created with divergent
+    // metadata depending on which UI wrote first.
+    await this.adminCore.upsertSetting(targeted, {
+      key: 'conversionRate',
+      value: snappedRate,
+    });
+    await this.adminCore.upsertSetting(targeted, {
+      key: 'minBankTransferAmount',
+      value: dto.minBankTransferAmount,
+    });
+    await this.adminCore.upsertSetting(targeted, {
+      key: 'minVoucherFreeAmount',
+      value: dto.minVoucherFreeAmount,
+    });
+    // Points expiry via the PointExpiryConfig default-row write (null = never expire).
+    await this.adminCore.setPointsExpiry(targeted, {
+      pointsExpiryDays: dto.pointsExpiryDays,
+    });
+
+    // Return the freshly-read authoritative values (cache was busted by upsertSetting).
+    return this.getWalletSettings(user, slug);
   }
 
   /**
