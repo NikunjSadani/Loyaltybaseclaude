@@ -11,18 +11,29 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-- **prod == main == `ebd474b`** — CUTOVER #9 (live 2026-07-08). Deoleo tenant ACTIVE + LIVE on
-  `deoleoloyalty.gifsy.in`. Platform defaults: conversion 1:1, expiry null, visibility OFF.
-- **develop is AHEAD of prod:** last CODE commit **`186c92e`** = the WALLET-SURFACING FIX (docs on
-  top). **PENDING the next owner-gated cutover** (`ebd474b` → `186c92e`, CODE-ONLY, 0 migrations).
-- Gate green at `186c92e`: **api jest 1485 · nest 0 · FE vitest 1798 · tsc 0**.
+- **prod == main == develop == `437045a`** — CUTOVER #10 (live 2026-07-19). Ships the WALLET-SURFACING
+  fix **+ §A-DOMAIN P1/P2/P4/P4b**. The `client_domains` migration applied on prod (backfilled).
+  Post-cutover VERIFIED: `/health` 200, `/v1/tenants/routing` 200 (deoleo → `[deoleoloyalty, deoleo].gifsy.in`),
+  real-domain `deoleoloyalty.gifsy.in/auth/login` 200 + "Deoleo" SSR, unknown-host fail-safe 404.
+- **DB tenant-routing is LIVE in prod** (`TENANT_ROUTING_SOURCE` default `db`, registry fallback →
+  Deoleo unaffected). Kill-switch: set `TENANT_ROUTING_SOURCE=registry` on the FE service.
+- Gate green at `437045a`: **api jest 1529 · nest 0 · FE vitest 1844 · tsc 0**.
 
-## ▶ IMMEDIATE NEXT — the next owner-gated cutover (`ebd474b` → `186c92e`)
-The **wallet-surfacing fix** is built, audited, gate-green, and **runtime-verified on staging** (live
-`GET /v1/partner/payouts` on `186c92e` returns the credit payout that was `[]` before). Only the
-cutover remains: backup → `git push origin origin/develop:main` → owner approves the `production`
-gate → verify serving SHA. **The owner's only other Deoleo residual is the live end-to-end prod
-smoke** (a real KYC→wallet, a credit upload moving a wallet, a redemption per channel, prod OTP).
+## ▶ IMMEDIATE NEXT — finish §A-DOMAIN (mostly owner-gated)
+P0–P2 + P4/P4b are DONE and IN PROD. Remaining (plans: `A-DOMAIN-PLAN.md`, `A-DOMAIN-P0-DESIGN.md`):
+- **P3 edge worker deploy** (`cloudflare-worker/` coarse `*.gifsy.in` — code committed `934ff4d`, NOT
+  deployed). Needs 3 owner Cloudflare-dashboard confirms (proxied wildcard `*.gifsy.in` DNS record +
+  wildcard TLS [Universal SSL covers 1 level; `uat.*` 2-level needs ACM] + `*.gifsy.in/*` worker route)
+  then a manual `npx wrangler deploy`. Only needed before client #2 / true zero-touch onboarding.
+- **P5** retire the registry: owner-gated write to populate `clients.branding` from the registry
+  (prod deoleo branding is already PARTIALLY populated — displayName/primaryColor present) + retire
+  `CLIENT_REGISTRY` after a bake behind the kill-switch.
+- **P6** hardening + E2E + security audit + docs.
+- **D-1 (#159)** converge `resolveClient` off `AdminConfig` onto the `clients` table (RBAC-sensitive —
+  permission.guard reads `features.rbacEnforcement`; two feature vocabularies; needs a real-DB reconcile +
+  runtime-verify). Deferred from P1. Also what makes the gifsy-console Feature-flag card runtime-authoritative.
+- **P4b money-path runtime-verify** (owner, OTP-gated): as GIFSY_ADMIN change a tenant's conversion rate
+  on the client-detail Wallet card → confirm a redemption uses it + the tenant Settings panel matches.
 
 ⚠️ **FLAKY-CI TRAP:** CI + the prod-deploy `test` job can flake (25s fast-fail; the exact command
 passes clean locally + in the staging deploy on the same code). `deploy.yml` gates the approval on
@@ -30,13 +41,17 @@ passes clean locally + in the staging deploy on the same code). `deploy.yml` gat
 "no approve option"). FIX: on the "Deploy — Production (main)" run, **"Re-run failed jobs"** → tests
 pass → gate appears → approve. `deploy.yml` has an emergency `skip_tests` dispatch input.
 
-### Wallet-surfacing fix (`186c92e`) — the current cutover payload
-`partner.service.getPayouts` now UNIONS `CreditPayoutEntry` (statuses PENDING/PROCESSING/PAID) into
-the partner wallet alongside redemption `PayoutTransaction` — one row per entry, pending→paid, sorted
-by `paidAt ?? createdAt`, cap 100. Presence flag (`resolvePartnerActivity`) aligned to the same set so
-card & list can't disagree. FE: pending rows get a "Payout pending" badge + muted amount; lifetime
-card stays PAID-only. **Independent audit caught + fixed 2 HIGH + 1 MED before ship** — see TRAPS
-(a)/(b) below.
+### §A-DOMAIN — what it is (the current cutover payload)
+DB-driven `*.gifsy.in` tenant routing + branding-to-DB, so a new tenant is provisionable from the
+console/DB with no code edit. **Backend** (`client_domains` table [global LOWER(domain) unique],
+`GET /v1/tenants/routing`, gifsy client CRUD domains + branding-asset upload). **FE resolver** reads
+that endpoint (SWR cache, cold-start block-warm, registry fallback, prod fail-closed login,
+`TENANT_ROUTING_SOURCE` kill-switch). **P4b** wired the gifsy client-detail Wallet card to the REAL
+per-tenant money stores (conversion/expiry/floors via a tenant-targeted GIFSY settings write);
+Invoicing/Features made read-only. Every phase: gate + INDEPENDENT adversarial audit (the P1 audit
+caught 2 HIGH dead-feature bugs; P2 caught the cold-start branded-host mis-route; P4b money-path clean)
++ staging runtime-verify. Traps (a)/(b) below still apply. **See the two new A-DOMAIN traps at the
+bottom of TRAPS.**
 
 ## 🔶 STANDING MODE — orchestrator
 Default to orchestrating substantial work: decompose into **parallel sub-agents** (they write code —
@@ -140,8 +155,8 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   enqueued SMS/EMAIL/WhatsApp never deliver (genuinely dead: credit-batch EMAIL, KYC owner SMS for
   UNDER_REVIEW, redemption-fulfilment SMS). Recipients recorded (nikunj.sadani@ / payel.ghosh@ /
   nikita@gifsy.in). + **email provider** ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
-- **§A-DOMAIN** (tenant domain hard-coded from slug) — needs a `Client.domains` migration +
-  tenant-resolver rewrite (4–7 days) before client #2. Does not fit a code-only cutover.
+- **§A-DOMAIN** — ✅ P1/P2/P4/P4b IN PROD (cutover #10). Remaining = P3 edge deploy (owner Cloudflare
+  confirms) · P5 registry-retire (owner-gated `clients.branding` backfill) · P6 · D-1 (#159). See IMMEDIATE NEXT.
 - **#74 residual:** optional secret rotation + real prod MSG91 (monitoring + backups/PITR already ON).
 - **POST-GO-LIVE-BACKLOG (later):** multi-tenant SSR branding, configurable RBAC (AF-12 kept OFF),
   WhatsApp per-tenant generalization, OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics.
@@ -164,11 +179,12 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 | 6 | `c36f6c8` | per-tenant per-purpose OTP templates + re-KYC wizard skip + 24h assume TTL |
 | 7 | `98ced7a` | targets-404, `isPrimary` blank-outlet sweep, push click-URLs, KYC-SLA wiring, `deoleo_points_credit`/`payout_credit` money WhatsApps + audit fixes |
 | 8 | `4b33e4c` | presence-based partner wallet, sales+partner ledger field-name (shared resolver), pre-OTP copy |
-| 9 | `ebd474b` | **CURRENT PROD** — payout UTR "Apply" query-vs-body fix |
-| → | `186c92e` | **NEXT (staged on develop)** — wallet-surfacing (credit payouts in the partner wallet) |
+| 9 | `ebd474b` | payout UTR "Apply" query-vs-body fix |
+| 10 | `437045a` | **CURRENT PROD** (2026-07-19) — wallet-surfacing (credit payouts in partner wallet) + §A-DOMAIN P1/P2/P4/P4b + `client_domains` migration; verified live |
 
 ## START THE SESSION
-Greet. State: **cutover #9 is live (prod `ebd474b`); the wallet-surfacing fix is on develop (`186c92e`),
-runtime-verified on staging, PENDING the next owner-gated cutover — the immediate next step.** Present
-the OPEN THREADS and ask which to pick up. If the owner is open-ended, lead with the next cutover.
+Greet. State: **cutover #10 is live (prod == develop == `437045a`); §A-DOMAIN P1/P2/P4/P4b + the
+wallet-surfacing fix are IN PROD & verified.** §A-DOMAIN remaining = P3 edge deploy (needs owner
+Cloudflare confirms) · P5 registry-retire (owner-gated branding backfill) · P6 · D-1 (#159). Present the
+OPEN THREADS and ask which to pick up.
 ```
