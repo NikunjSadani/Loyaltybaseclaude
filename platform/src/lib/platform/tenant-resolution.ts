@@ -5,12 +5,24 @@
  *   hostname  →  resolveSlugFromHostname()  →  slug
  *   slug      →  resolveClientConfig()      →  ClientConfig | null
  *
- * Both functions are pure (no I/O) so they are fully unit-testable.
- * The Next.js middleware calls these and sets x-tenant-slug on each request.
+ * §A-DOMAIN Phase 2: the domain→slug decision and the branding overlay are now
+ * DB-aware. The pure core (`resolveSlugFromDomainMap`, `applyDbBranding`) takes
+ * its data as arguments so it stays fully unit-testable; the DB map/branding come
+ * from the in-memory `tenant-routing-cache` snapshot (fetched from
+ * `GET /v1/tenants/routing`), with `CLIENT_REGISTRY` as the rollout fallback.
+ *
+ * The Next.js proxy calls these and sets x-tenant-slug on each request. It reads
+ * the sync snapshot only (never blocks) and triggers a background refresh — see
+ * tenant-routing-cache.ts.
  */
 
 import { CLIENT_REGISTRY } from './client-registry';
-import type { ClientConfig } from './client-config';
+import type { BrandingConfig, ClientConfig } from './client-config';
+import {
+  ensureWarm,
+  getRoutingSnapshot,
+  type PublicBranding,
+} from './tenant-routing-cache';
 
 /**
  * The slug served when running on localhost / no subdomain detected.
@@ -37,10 +49,10 @@ const PLATFORM_RESERVED = new Set(['www', 'app', 'api', 'admin', 'status', 'mail
 const OPERATOR_HOSTS = new Set(['app.gifsy.in', 'uat.app.gifsy.in']);
 
 /**
- * Full custom-hostname → slug map, built from each tenant's `domains` (a branded
- * domain that differs from the slug, e.g. `deoleoloyalty.gifsy.in` → `deoleo`).
- * Checked BEFORE the subdomain-label heuristic so a branded domain resolves to the
- * right tenant. (Long-term this map comes from a `clients.domains` column.)
+ * Registry-derived custom-hostname → slug map, built from each tenant's `domains`
+ * (a branded domain that differs from the slug, e.g. `deoleoloyalty.gifsy.in` →
+ * `deoleo`). Used as the fallback when the DB routing map lacks the host (or the
+ * DB source is disabled). The DB map is layered OVER this (DB wins per-host).
  */
 const DOMAIN_TO_SLUG: Record<string, string> = Object.fromEntries(
   Object.values(CLIENT_REGISTRY).flatMap((cfg) =>
@@ -48,20 +60,26 @@ const DOMAIN_TO_SLUG: Record<string, string> = Object.fromEntries(
   ),
 );
 
+/** The registry map as a Map, precomputed once (the pure resolver takes a Map). */
+const REGISTRY_DOMAIN_TO_SLUG: ReadonlyMap<string, string> = new Map(
+  Object.entries(DOMAIN_TO_SLUG),
+);
+
 /**
- * Extracts the tenant slug from an incoming hostname.
- *
- * Examples:
- *   deoleoloyalty.gifsy.in → "deoleo"   (custom domain map — branded ≠ slug)
- *   deoleo.gifsy.in        → "deoleo"
- *   clientb.app.gifsy.in   → "clientb"
- *   gifsy.in               → null   (bare domain — platform root)
- *   www.gifsy.in           → null   (reserved)
- *   localhost                    → DEFAULT_DEV_SLUG
- *   localhost:3000               → DEFAULT_DEV_SLUG
- *   ""                           → DEFAULT_DEV_SLUG
+ * PURE domain→slug decision. Fed a single `domainToSlug` map (the caller merges
+ * the DB map over the registry map so DB wins). Preserves ALL rules IN ORDER:
+ *   1. OPERATOR_HOSTS (full-host)      → 'gifsy'
+ *   2. localhost / empty               → DEFAULT_DEV_SLUG
+ *   3. strip a leading `uat.` prefix (staging)
+ *   4. domainToSlug lookup (DB-over-registry) → slug
+ *   5. bare domain (≤2 labels)         → null
+ *   6. PLATFORM_RESERVED first label   → null
+ *   7. subdomain-label heuristic       → that label
  */
-export function resolveSlugFromHostname(hostname: string): string | null {
+export function resolveSlugFromDomainMap(
+  hostname: string,
+  domainToSlug: ReadonlyMap<string, string>,
+): string | null {
   // Strip port
   const host = hostname.toLowerCase().split(':')[0].trim();
 
@@ -84,7 +102,8 @@ export function resolveSlugFromHostname(hostname: string): string | null {
   const resolveHost = host.startsWith('uat.') ? host.slice(4) : host;
 
   // Custom branded domain (full-hostname match) wins over the subdomain heuristic.
-  if (DOMAIN_TO_SLUG[resolveHost]) return DOMAIN_TO_SLUG[resolveHost];
+  const mapped = domainToSlug.get(resolveHost);
+  if (mapped) return mapped;
 
   const parts = resolveHost.split('.');
 
@@ -100,10 +119,229 @@ export function resolveSlugFromHostname(hostname: string): string | null {
 }
 
 /**
- * Looks up a ClientConfig by slug.
- * Returns null if the slug is unknown (show 404 / redirect to platform home).
+ * Extracts the tenant slug from an incoming hostname using the REGISTRY map only
+ * (pure/sync, no DB). Kept for backward compatibility with existing importers and
+ * tests. The DB-aware path is `resolveTenant` / `resolveTenantSync` below.
+ *
+ * Examples:
+ *   deoleoloyalty.gifsy.in → "deoleo"   (custom domain map — branded ≠ slug)
+ *   deoleo.gifsy.in        → "deoleo"
+ *   clientb.app.gifsy.in   → "clientb"
+ *   gifsy.in               → null   (bare domain — platform root)
+ *   www.gifsy.in           → null   (reserved)
+ *   localhost                    → DEFAULT_DEV_SLUG
+ *   localhost:3000               → DEFAULT_DEV_SLUG
+ *   ""                           → DEFAULT_DEV_SLUG
+ */
+export function resolveSlugFromHostname(hostname: string): string | null {
+  return resolveSlugFromDomainMap(hostname, REGISTRY_DOMAIN_TO_SLUG);
+}
+
+/**
+ * Merge the DB domain→slug map OVER the registry map so a DB entry wins per-host,
+ * while registry-only hosts still resolve during rollout. Called on the hot path,
+ * so it stays a cheap allocation (a handful of entries).
+ */
+function mergedDomainMap(): ReadonlyMap<string, string> {
+  const snap = getRoutingSnapshot();
+  if (!snap || snap.domainToSlug.size === 0) return REGISTRY_DOMAIN_TO_SLUG;
+  const merged = new Map(REGISTRY_DOMAIN_TO_SLUG);
+  for (const [domain, slug] of snap.domainToSlug) merged.set(domain, slug);
+  return merged;
+}
+
+/**
+ * PURE branding overlay. Given the registry config (or null) and the DB branding
+ * (or undefined), returns the ClientConfig to render:
+ *   - registry present + DB branding → registry OVERLAID with NON-EMPTY DB fields
+ *     (DB wins per-field only when non-empty; empty/missing → keep registry, so a
+ *     staging tenant whose DB branding is all "" is never clobbered).
+ *   - registry present + no DB branding → the registry config unchanged.
+ *   - NO registry entry + DB branding → a synthesised minimal ClientConfig (so a
+ *     new DB-provisioned tenant still renders — see synthesizeConfig).
+ *   - NO registry entry + no DB branding → null (unknown tenant → fail-closed).
+ */
+export function applyDbBranding(
+  slug: string,
+  registryConfig: ClientConfig | null,
+  dbBranding: PublicBranding | undefined,
+): ClientConfig | null {
+  const overlay = pickNonEmptyBranding(dbBranding);
+
+  if (!registryConfig) {
+    // DB-only tenant (not in the registry). Synthesise a config from the DB
+    // branding + safe defaults so it renders; null if there is nothing to show.
+    if (Object.keys(overlay).length === 0) return null;
+    return synthesizeConfig(slug, overlay);
+  }
+
+  if (Object.keys(overlay).length === 0) return registryConfig;
+
+  const branding: BrandingConfig = { ...registryConfig.branding, ...overlay };
+  return { ...registryConfig, branding };
+}
+
+/** A 6-digit hex color — the only shape `primaryColor` is allowed to take. */
+const HEX6 = /^#[0-9a-fA-F]{6}$/;
+
+/** Keep only the non-empty public branding fields (empty "" → dropped). */
+function pickNonEmptyBranding(b: PublicBranding | undefined): Partial<BrandingConfig> {
+  const out: Partial<BrandingConfig> = {};
+  if (!b) return out;
+  if (b.displayName && b.displayName.trim() !== '') out.displayName = b.displayName;
+  // primaryColor is DB-influenced and feeds a CSS var / the x-tenant-color header —
+  // only accept a strict 6-hex value, else keep the registry color (the CSS sink is
+  // separately hard-sanitized, but rejecting junk here avoids a broken theme too).
+  if (b.primaryColor && HEX6.test(b.primaryColor.trim())) out.primaryColor = b.primaryColor.trim();
+  if (b.logoUrl && b.logoUrl.trim() !== '') out.logoUrl = b.logoUrl;
+  if (b.wordmarkWhiteUrl && b.wordmarkWhiteUrl.trim() !== '') out.wordmarkWhiteUrl = b.wordmarkWhiteUrl;
+  if (b.wordmarkColorUrl && b.wordmarkColorUrl.trim() !== '') out.wordmarkColorUrl = b.wordmarkColorUrl;
+  if (b.faviconUrl && b.faviconUrl.trim() !== '') out.faviconUrl = b.faviconUrl;
+  return out;
+}
+
+/**
+ * Synthesise a minimal, SAFE ClientConfig for a DB-only tenant (one with routing
+ * branding but no CLIENT_REGISTRY entry — a tenant provisioned after the registry
+ * is frozen). This exists so such a tenant still RENDERS pre-login branding; it is
+ * NOT a substitute for a full registry/config entry. Feature flags are deliberately
+ * conservative (visibility/referral/RBAC OFF). Note that runtime feature/RBAC
+ * enforcement comes from the BACKEND (per §A-DOMAIN D-1), not this FE config, so
+ * these defaults only affect FE tab/visibility rendering.
+ */
+function synthesizeConfig(slug: string, branding: Partial<BrandingConfig>): ClientConfig {
+  const displayName = branding.displayName ?? slug;
+  return {
+    slug,
+    internalName: displayName,
+    status: 'ONBOARDING',
+    onboardedAt: new Date().toISOString().slice(0, 10),
+    branding: {
+      displayName,
+      primaryColor: branding.primaryColor ?? '#16a34a',
+      logoUrl: branding.logoUrl ?? '',
+      wordmarkWhiteUrl: branding.wordmarkWhiteUrl,
+      wordmarkColorUrl: branding.wordmarkColorUrl,
+      faviconUrl: branding.faviconUrl ?? '',
+      supportEmail: '',
+      supportPhone: '',
+      productBrands: [],
+    },
+    features: {
+      visibilityInvoiceModule: false,
+      kycApprovalFlow: true,
+      campaignEnrollmentForm: true,
+      salesTeamApp: true,
+      walletModule: true,
+      referralModule: false,
+      selfEnrollmentAllowed: true,
+      nonKycOutletCampaigns: false,
+      multiLevelApproval: false,
+      rbacEnforcement: false,
+      partnerApp: {
+        showSchemes: true,
+        showInvoices: false,
+        showWallet: true,
+        showTeam: true,
+        showLeaderboard: false,
+      },
+    },
+    partnerClasses: [
+      { key: 'STANDARD', displayName: 'Standard', color: '#2563eb', order: 1 },
+    ],
+    approvalHierarchy: {
+      levels: [
+        {
+          roleKey: 'L1',
+          displayName: 'Sales Officer',
+          shortName: 'SO',
+          canInitiateKyc: true,
+          canApproveKyc: true,
+          canViewAllOutlets: false,
+        },
+      ],
+      requireGifsyFinalApproval: true,
+    },
+    notifications: {
+      msg91AuthKey: 'DEMO_KEY',
+      whatsappSenderId: '',
+      smsSenderId: '',
+      templateIds: {
+        schemePublished: '',
+        enrollmentConfirm: '',
+        otpVerification: '',
+        kycApproved: '',
+        kycRejected: '',
+        payoutGenerated: '',
+      },
+    },
+    invoicing: {
+      sellerLegalName: 'Tech Gifsy Solutions Limited',
+      sellerGstin: '',
+      sellerState: '',
+      sellerAddress: '',
+      sellerPan: '',
+      bankName: '',
+      bankAccountNumber: '',
+      bankIfsc: '',
+      bankBranch: '',
+      invoicePrefix: 'TGSL',
+      sacCode: '998361',
+    },
+    wallet: {
+      defaultHoldingPeriodDays: 30,
+      pointsExpiryDays: 365,
+      minRedemptionAmount: 500,
+      redemptionModes: ['UPI', 'NEFT'],
+      pointsToRupeeRatio: 1.0,
+    },
+  };
+}
+
+/**
+ * Looks up a ClientConfig by slug, DB-branding-aware.
+ * Returns the registry config OVERLAID with any non-empty DB branding fields, a
+ * synthesised config for a DB-only tenant, or null if the slug is unknown
+ * everywhere (show 404 / redirect to platform home).
  */
 export function resolveClientConfig(slug: string): ClientConfig | null {
   if (!slug) return null;
-  return CLIENT_REGISTRY[slug.toLowerCase()] ?? null;
+  const key = slug.toLowerCase();
+  const registryConfig = CLIENT_REGISTRY[key] ?? null;
+  const dbBranding = getRoutingSnapshot()?.slugToBranding.get(key);
+  return applyDbBranding(key, registryConfig, dbBranding);
+}
+
+/** The DB-aware resolution result. */
+export interface ResolvedTenant {
+  slug: string | null;
+  config: ClientConfig | null;
+}
+
+/**
+ * SYNC DB-aware resolution: reads the in-memory routing snapshot (DB map merged
+ * over registry) and resolves the config with branding overlay. Never does I/O —
+ * safe for the proxy hot path. On cold start (null snapshot) this is exactly the
+ * registry behaviour.
+ */
+export function resolveTenantSync(hostname: string): ResolvedTenant {
+  const slug = resolveSlugFromDomainMap(hostname, mergedDomainMap());
+  if (slug === null) return { slug: null, config: null };
+  return { slug, config: resolveClientConfig(slug) };
+}
+
+/**
+ * ASYNC DB-aware resolver for NON-hot-path consumers (login actions, SSR helpers).
+ * Triggers a background stale-while-revalidate refresh (never awaited → never
+ * blocks) and returns the current sync snapshot result. Degrades to the registry
+ * when the DB path yields nothing. The proxy does NOT use this — it reads
+ * `resolveTenantSync` and drives the refresh via `waitUntil` instead.
+ */
+export async function resolveTenant(hostname: string): Promise<ResolvedTenant> {
+  // Block ONLY on a genuine cold start (null snapshot) so a DB-only branded host
+  // resolves to the right slug on the very first login/SSR of a fresh instance
+  // instead of the bare label. Once warm this is instant; ensureWarm swallows its
+  // own errors (registry fallback), so this can't reject.
+  await ensureWarm();
+  return resolveTenantSync(hostname);
 }

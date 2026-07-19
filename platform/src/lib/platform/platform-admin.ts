@@ -57,6 +57,58 @@ export function validateNewClientSlug(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Tenant custom domains (§A-DOMAIN)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Every routed tenant hostname must be a subdomain of this zone. Mirrors the
+ * backend `TENANT_DOMAIN_SUFFIX` (gifsy.service.ts).
+ */
+export const TENANT_DOMAIN_SUFFIX = '.gifsy.in';
+
+/**
+ * First-label subdomains a tenant may NOT claim — platform-infrastructure hosts.
+ * Mirrors the backend `RESERVED_DOMAIN_LABELS`; kept in sync so the console blocks
+ * a clash BEFORE the round-trip (the backend remains the authoritative guard).
+ */
+export const RESERVED_DOMAIN_LABELS = new Set([
+  'api', 'app', 'www', 'platform', 'admin', 'status', 'mail', 'uat',
+]);
+
+/** RFC-1123 hostname shape (lower-cased) — mirrors the backend HOSTNAME_RE. */
+const DOMAIN_HOSTNAME_RE =
+  /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
+/** Lower-case + trim a domain to the canonical form the backend stores/compares. */
+export function normalizeTenantDomain(domain: string): string {
+  return (domain ?? '').trim().toLowerCase();
+}
+
+/**
+ * Client-side validation of one branded tenant domain. Returns a human-readable
+ * error string, or null when the domain is acceptable. Uniqueness across tenants
+ * is NOT checked here — that is the backend 409 (surfaced in the console).
+ */
+export function validateTenantDomain(domain: string): string | null {
+  const d = normalizeTenantDomain(domain);
+  if (!d) return 'Enter a domain.';
+  if (!d.endsWith(TENANT_DOMAIN_SUFFIX)) {
+    return 'Domain must be a subdomain of gifsy.in (e.g. brand.gifsy.in).';
+  }
+  if (d === TENANT_DOMAIN_SUFFIX.slice(1)) {
+    return 'Enter a subdomain of gifsy.in, not the bare gifsy.in.';
+  }
+  if (!DOMAIN_HOSTNAME_RE.test(d)) {
+    return `"${d}" is not a valid hostname.`;
+  }
+  const firstLabel = d.split('.')[0];
+  if (RESERVED_DOMAIN_LABELS.has(firstLabel)) {
+    return `"${firstLabel}" is a reserved subdomain and cannot be assigned to a tenant.`;
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // applyFeatureFlagUpdate
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -1,14 +1,14 @@
 'use client';
 
-import { use, useEffect, useState, useCallback } from 'react';
+import { use, useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import {
   ArrowLeft, CheckCircle, Clock, AlertCircle,
   Pencil, Save, X, ChevronDown, ChevronUp,
   Palette, Shield, Users, Bell, FileText, Wallet, Building2, ShoppingBag, Loader2,
-  Settings, Power,
+  Settings, Power, Globe, Plus, Trash2, Star, Image as ImageIcon, Upload,
 } from 'lucide-react';
-import { applyFeatureFlagUpdate } from '@/lib/platform/platform-admin';
+import { applyFeatureFlagUpdate, validateTenantDomain, normalizeTenantDomain, TENANT_DOMAIN_SUFFIX } from '@/lib/platform/platform-admin';
 import type { ClientConfig, FeatureKey } from '@/lib/platform/client-config';
 import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-section';
 import { getToken } from '@/lib/auth-client';
@@ -31,6 +31,31 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
 };
 
 const FEATURE_KEYS = Object.keys(FEATURE_META) as FeatureKey[];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Branding assets — the 4 upload slots and which branding-blob URL each fills.
+// `kind` is the multipart field the backend expects; the mapped field is where
+// the returned URL lands in BrandingConfig (and drives the preview).
+// ─────────────────────────────────────────────────────────────────────────────
+
+type BrandingAssetKind = 'logo' | 'wordmarkWhite' | 'wordmarkColor' | 'favicon';
+
+/** The branding-blob URL fields the asset uploads write to (all string-valued). */
+type BrandingAssetField = 'logoUrl' | 'wordmarkWhiteUrl' | 'wordmarkColorUrl' | 'faviconUrl';
+
+const BRANDING_ASSET_FIELD: Record<BrandingAssetKind, BrandingAssetField> = {
+  logo:          'logoUrl',
+  wordmarkWhite: 'wordmarkWhiteUrl',
+  wordmarkColor: 'wordmarkColorUrl',
+  favicon:       'faviconUrl',
+};
+
+const BRANDING_ASSET_META: { kind: BrandingAssetKind; label: string; hint: string; dark?: boolean }[] = [
+  { kind: 'logo',          label: 'Logo',            hint: 'Square mark — app icon / hexagon slot' },
+  { kind: 'wordmarkWhite', label: 'Wordmark (white)', hint: 'For DARK surfaces (sales navy header, sidebar)', dark: true },
+  { kind: 'wordmarkColor', label: 'Wordmark (colour)', hint: 'For LIGHT surfaces (white partner header)' },
+  { kind: 'favicon',       label: 'Favicon',         hint: 'Browser-tab icon' },
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Page
@@ -198,6 +223,104 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
     }
   }, [config.slug, flashSaved]);
 
+  /**
+   * REAL persistence for the tenant's custom-domain set. The backend RECONCILES
+   * the stored set to the supplied one (canonical `<slug>.gifsy.in` is always kept)
+   * and re-derives the primary. The PATCH projection does NOT echo domains, so we
+   * refetch the detail afterwards to read the authoritative primary-first ordering.
+   * Returns a 409 conflict message (domain already assigned to another tenant)
+   * cleanly for the caller to surface.
+   */
+  const saveDomains = useCallback(async (domains: string[]): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const res = await fetch(`/api/gifsy/clients/${config.slug}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken() ?? ''}` },
+        body: JSON.stringify({ domains }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) {
+        // 409 domain clash surfaces here as { success:false, error:'Domain … already assigned …' }
+        return { ok: false, error: j?.error || j?.message || `Save failed (HTTP ${res.status})` };
+      }
+      // Refetch the detail to get the canonical primary-first domain ordering.
+      const detailRes = await fetch(`/api/gifsy/clients/${config.slug}`, {
+        headers: { Authorization: `Bearer ${getToken() ?? ''}` },
+      });
+      const detailJson = await detailRes.json().catch(() => null);
+      const nextDomains: string[] | undefined = detailJson?.success ? detailJson.data?.domains : undefined;
+      // On refetch success use the authoritative primary-first set; if the refetch
+      // FAILED, keep the prior (server-derived) domains rather than the sent list —
+      // the sent list omits the backend-appended canonical and isn't primary-first,
+      // so it would transiently look unroutable. Self-heals on the next full load.
+      setConfig((prev) => ({ ...prev, domains: nextDomains ?? prev.domains }));
+      flashSaved();
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Network error — please try again.' };
+    }
+  }, [config.slug, flashSaved]);
+
+  /**
+   * REAL persistence for notifications (sender IDs + WhatsApp/SMS template names).
+   * Deep-merged server-side into the notifications blob; msg91AuthKey is untouched
+   * (it is never sent to the browser and never written here).
+   */
+  const saveNotifications = useCallback(async (
+    n: Pick<ClientConfig['notifications'], 'whatsappSenderId' | 'smsSenderId' | 'templateIds'>,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const res = await fetch(`/api/gifsy/clients/${config.slug}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken() ?? ''}` },
+        body: JSON.stringify({ notifications: n }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) {
+        return { ok: false, error: j?.error || j?.message || `Save failed (HTTP ${res.status})` };
+      }
+      setConfig((prev) => ({ ...prev, notifications: { ...prev.notifications, ...n } }));
+      flashSaved();
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Network error — please try again.' };
+    }
+  }, [config.slug, flashSaved]);
+
+  /**
+   * REAL upload of a branding image (logo / white wordmark / colour wordmark /
+   * favicon). Multipart to the branding-asset endpoint (which sniffs magic bytes,
+   * caps at 5 MB, and persists the returned URL onto the branding blob), then the
+   * returned URL is merged into local state to drive the preview.
+   */
+  const uploadAsset = useCallback(async (
+    kind: BrandingAssetKind,
+    file: File,
+  ): Promise<{ ok: boolean; url?: string; error?: string }> => {
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('kind', kind);
+      const res = await fetch(`/api/gifsy/clients/${config.slug}/branding-asset`, {
+        method: 'POST',
+        // Do NOT set Content-Type — the browser sets the multipart boundary.
+        headers: { Authorization: `Bearer ${getToken() ?? ''}` },
+        body: fd,
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success || !j.data?.url) {
+        return { ok: false, error: j?.error || j?.message || `Upload failed (HTTP ${res.status})` };
+      }
+      const url = j.data.url as string;
+      const field = BRANDING_ASSET_FIELD[kind];
+      setConfig((prev) => ({ ...prev, branding: { ...prev.branding, [field]: url } }));
+      flashSaved();
+      return { ok: true, url };
+    } catch {
+      return { ok: false, error: 'Network error — please try again.' };
+    }
+  }, [config.slug, flashSaved]);
+
   /** Toggle a single feature flag using the platform rule (GIFSY_ADMIN only) */
   const toggleFeature = useCallback((key: FeatureKey, value: boolean) => {
     setConfig((prev) => applyFeatureFlagUpdate(prev, key, value, 'GIFSY_ADMIN'));
@@ -252,8 +375,21 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
         />
       </Section>
 
+      {/* Custom domains (§A-DOMAIN) — REAL persistence via PATCH { domains } */}
+      <Section icon={Globe} title="Domains" defaultOpen>
+        <DomainsSection config={config} onSave={saveDomains} />
+      </Section>
+
+      {/* Brand assets — REAL uploads via the branding-asset endpoint */}
+      <Section icon={ImageIcon} title="Brand Assets">
+        <BrandAssetsSection config={config} onUpload={uploadAsset} />
+      </Section>
+
       {/* Sections */}
       <Section icon={Palette} title="Branding" defaultOpen>
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-300 mb-3">
+          <strong>Dev mode:</strong> this card updates in-memory only. Persist display name, colour &amp; support details in <strong>Client settings</strong> (top); upload logo/wordmark/favicon in <strong>Brand Assets</strong>.
+        </div>
         <BrandingSection config={config} onChange={(b) => { setConfig((p) => ({ ...p, branding: { ...p.branding, ...b } })); flashSaved(); }} />
       </Section>
 
@@ -270,10 +406,13 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
       </Section>
 
       <Section icon={Bell} title="Notifications (MSG91)">
-        <NotificationsSection config={config} onChange={(n) => { setConfig((p) => ({ ...p, notifications: { ...p.notifications, ...n } })); flashSaved(); }} />
+        <NotificationsSection config={config} onSave={saveNotifications} />
       </Section>
 
       <Section icon={FileText} title="Invoicing">
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 text-xs text-amber-300 mb-3">
+          <strong>Dev mode:</strong> this card updates in-memory only. The invoice prefix persists via <strong>Client settings</strong> (top).
+        </div>
         <InvoicingSection config={config} onChange={(inv) => { setConfig((p) => ({ ...p, invoicing: { ...p.invoicing, ...inv } })); flashSaved(); }} />
       </Section>
 
@@ -571,6 +710,228 @@ function BrandingSection({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Domains section — REAL persistence via PATCH { domains } (§A-DOMAIN)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function DomainsSection({
+  config, onSave,
+}: {
+  config: ClientConfig;
+  onSave: (domains: string[]) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const canonical = `${config.slug}${TENANT_DOMAIN_SUFFIX}`;
+  const saved = config.domains ?? [];
+  const [list, setList]         = useState<string[]>(saved);
+  const [newDomain, setNewDomain] = useState('');
+  const [addError, setAddError] = useState<string | null>(null);
+  const [saving, setSaving]     = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Re-sync when the authoritative (primary-first) set arrives after a save.
+  useEffect(() => { setList(config.domains ?? []); }, [config.domains]);
+
+  // The saved primary is the first entry of the primary-first ordering.
+  const primary = saved[0];
+
+  const add = () => {
+    const err = validateTenantDomain(newDomain);
+    if (err) { setAddError(err); return; }
+    const d = normalizeTenantDomain(newDomain);
+    if (list.some((x) => x.toLowerCase() === d)) { setAddError('Domain is already in the list.'); return; }
+    setList((p) => [...p, d]);
+    setNewDomain('');
+    setAddError(null);
+  };
+
+  const remove = (d: string) => {
+    if (d.toLowerCase() === canonical.toLowerCase()) return; // canonical is not removable
+    setList((p) => p.filter((x) => x !== d));
+  };
+
+  const sameSet = (a: string[], b: string[]) => {
+    if (a.length !== b.length) return false;
+    const sa = new Set(a.map((x) => x.toLowerCase()));
+    return b.every((x) => sa.has(x.toLowerCase()));
+  };
+  const dirty = !sameSet(list, saved);
+
+  const save = async () => {
+    setSaving(true); setSaveError(null);
+    const res = await onSave(list);
+    setSaving(false);
+    if (!res.ok) setSaveError(res.error ?? 'Save failed');
+  };
+
+  return (
+    <div className="pt-2 space-y-3">
+      <div className="space-y-2">
+        {list.length === 0 && (
+          <p className="text-xs text-white/40">
+            No domains yet — the canonical <code className="font-mono">{canonical}</code> is provisioned on save.
+          </p>
+        )}
+        {list.map((d) => {
+          const isCanonical = d.toLowerCase() === canonical.toLowerCase();
+          const isPrimary   = !!primary && d.toLowerCase() === primary.toLowerCase();
+          return (
+            <div key={d} className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-white/5 border border-white/5">
+              <Globe className="w-4 h-4 text-white/40 shrink-0" />
+              <span className="text-sm font-mono text-white/80 flex-1 min-w-0 truncate">{d}</span>
+              {isPrimary && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-green-500/15 border border-green-500/30 text-green-400">
+                  <Star className="w-3 h-3" />Primary
+                </span>
+              )}
+              {isCanonical && (
+                <span className="px-2 py-0.5 rounded-full text-xs bg-white/10 border border-white/10 text-white/40">Default</span>
+              )}
+              {!isCanonical && (
+                <button onClick={() => remove(d)} className="text-white/30 hover:text-red-400 transition-colors" aria-label={`Remove ${d}`}>
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Add a branded domain */}
+      <div className="flex items-start gap-2">
+        <div className="flex-1">
+          <input
+            value={newDomain}
+            onChange={(e) => { setNewDomain(e.target.value.toLowerCase().replace(/[^a-z0-9.-]/g, '')); setAddError(null); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
+            placeholder="brand.gifsy.in"
+            className={INPUT_CLS + ' font-mono'}
+          />
+          {addError && (
+            <p className="flex items-center gap-1 text-xs text-red-400 mt-1">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" />{addError}
+            </p>
+          )}
+        </div>
+        <button onClick={add}
+          className="flex items-center gap-1.5 px-3 py-2 bg-white/5 border border-white/10 text-white/70 text-xs font-medium rounded-lg hover:text-white transition-colors shrink-0">
+          <Plus className="w-3.5 h-3.5" />Add
+        </button>
+      </div>
+
+      <p className="text-xs text-white/30">
+        Each domain must be a <code className="font-mono">*.gifsy.in</code> subdomain (non-reserved first label) and
+        unique across all tenants. The canonical <code className="font-mono">{canonical}</code> is always kept; the
+        first branded domain becomes the primary.
+      </p>
+
+      {saveError && (
+        <p className="flex items-center gap-1 text-xs text-red-400">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0" />{saveError}
+        </p>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button onClick={save} disabled={saving || !dirty}
+          className="flex items-center gap-1.5 px-3 py-2 bg-[var(--brand-primary)] text-white text-xs font-medium rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50">
+          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}Save domains
+        </button>
+        {!dirty && <span className="text-xs text-white/30">No unsaved changes</span>}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Brand assets section — REAL uploads via POST clients/:slug/branding-asset
+// ─────────────────────────────────────────────────────────────────────────────
+
+function BrandAssetsSection({
+  config, onUpload,
+}: {
+  config: ClientConfig;
+  onUpload: (kind: BrandingAssetKind, file: File) => Promise<{ ok: boolean; url?: string; error?: string }>;
+}) {
+  return (
+    <div className="pt-2 grid grid-cols-2 gap-3">
+      {BRANDING_ASSET_META.map((slot) => (
+        <AssetSlot
+          key={slot.kind}
+          meta={slot}
+          url={(config.branding[BRANDING_ASSET_FIELD[slot.kind]] as string | undefined) ?? ''}
+          onUpload={(file) => onUpload(slot.kind, file)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function AssetSlot({
+  meta, url, onUpload,
+}: {
+  meta: { kind: BrandingAssetKind; label: string; hint: string; dark?: boolean };
+  url: string;
+  onUpload: (file: File) => Promise<{ ok: boolean; url?: string; error?: string }>;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading]       = useState(false);
+  const [error, setError]               = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState(false);
+
+  // A fresh URL might now load — reset the "broken image" state when it changes.
+  useEffect(() => { setPreviewError(false); }, [url]);
+
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // let the same file be re-selected after an error
+    if (!file) return;
+    setUploading(true); setError(null); setPreviewError(false);
+    const res = await onUpload(file);
+    setUploading(false);
+    if (!res.ok) setError(res.error ?? 'Upload failed');
+  };
+
+  return (
+    <div className="rounded-xl border border-white/10 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium text-white">{meta.label}</p>
+        {url && !previewError && !error && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
+      </div>
+
+      {/* Preview — dark slot for the white wordmark so it's visible */}
+      <div className={`h-20 rounded-lg flex items-center justify-center overflow-hidden border border-white/5 ${meta.dark ? 'bg-slate-900' : 'bg-white/5'}`}>
+        {url && !previewError ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={url} alt={meta.label} className="max-h-full max-w-full object-contain" onError={() => setPreviewError(true)} />
+        ) : url && previewError ? (
+          <div className="text-center px-2">
+            <ImageIcon className="w-5 h-5 text-amber-400 mx-auto" />
+            <p className="text-[10px] text-amber-300 mt-1 leading-tight">Preview unavailable — URL saved</p>
+          </div>
+        ) : (
+          <ImageIcon className="w-5 h-5 text-white/20" />
+        )}
+      </div>
+
+      <p className="text-xs text-white/30">{meta.hint}</p>
+      {url && <p className="text-[10px] text-white/30 font-mono truncate" title={url}>{url}</p>}
+      {error && <p className="text-xs text-red-400">{error}</p>}
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif"
+        className="hidden"
+        onChange={onFile}
+      />
+      <button onClick={() => inputRef.current?.click()} disabled={uploading}
+        className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 bg-white/5 border border-white/10 text-white/70 text-xs font-medium rounded-lg hover:text-white transition-colors disabled:opacity-50">
+        {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+        {url ? 'Replace' : 'Upload'}
+      </button>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Feature flags section
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -665,16 +1026,32 @@ function HierarchySection({ config }: { config: ClientConfig }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function NotificationsSection({
-  config, onChange,
+  config, onSave,
 }: {
   config: ClientConfig;
-  onChange: (partial: Partial<ClientConfig['notifications']>) => void;
+  onSave: (n: Pick<ClientConfig['notifications'], 'whatsappSenderId' | 'smsSenderId' | 'templateIds'>) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft]     = useState(config.notifications);
+  const [saving, setSaving]   = useState(false);
+  const [error, setError]     = useState<string | null>(null);
 
-  const save   = () => { onChange(draft); setEditing(false); };
-  const cancel = () => { setDraft(config.notifications); setEditing(false); };
+  // Re-sync the draft when the config changes underneath us (after a save merges).
+  useEffect(() => { setDraft(config.notifications); }, [config.notifications]);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    const res = await onSave({
+      whatsappSenderId: draft.whatsappSenderId,
+      smsSenderId:      draft.smsSenderId,
+      templateIds:      draft.templateIds,
+    });
+    setSaving(false);
+    if (res.ok) setEditing(false);
+    else setError(res.error ?? 'Save failed');
+  };
+  const cancel = () => { setDraft(config.notifications); setError(null); setEditing(false); };
 
   if (!editing) {
     return (
@@ -716,7 +1093,7 @@ function NotificationsSection({
         </Field>
       </div>
 
-      <p className="text-xs font-medium text-white/50">Template IDs</p>
+      <p className="text-xs font-medium text-white/50">Template IDs / names</p>
       <div className="grid grid-cols-2 gap-3">
         {(Object.keys(config.notifications.templateIds) as (keyof typeof config.notifications.templateIds)[]).map((k) => (
           <Field key={k} label={camelToLabel(k)}>
@@ -728,7 +1105,8 @@ function NotificationsSection({
           </Field>
         ))}
       </div>
-      <EditActions onSave={save} onCancel={cancel} />
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      <EditActions onSave={save} onCancel={cancel} saving={saving} />
     </div>
   );
 }
@@ -957,15 +1335,15 @@ function FlagChip({ label, on }: { label: string; on: boolean }) {
   );
 }
 
-function EditActions({ onSave, onCancel }: { onSave: () => void; onCancel: () => void }) {
+function EditActions({ onSave, onCancel, saving = false }: { onSave: () => void; onCancel: () => void; saving?: boolean }) {
   return (
     <div className="flex items-center gap-2 pt-2">
-      <button onClick={onSave}
-        className="flex items-center gap-1.5 px-3 py-2 bg-[var(--brand-primary)] text-white text-xs font-medium rounded-lg hover:opacity-90 transition-opacity">
-        <Save className="w-3.5 h-3.5" />Save
+      <button onClick={onSave} disabled={saving}
+        className="flex items-center gap-1.5 px-3 py-2 bg-[var(--brand-primary)] text-white text-xs font-medium rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50">
+        {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}Save
       </button>
-      <button onClick={onCancel}
-        className="flex items-center gap-1.5 px-3 py-2 bg-white/5 border border-white/10 text-white/60 text-xs font-medium rounded-lg hover:text-white transition-colors">
+      <button onClick={onCancel} disabled={saving}
+        className="flex items-center gap-1.5 px-3 py-2 bg-white/5 border border-white/10 text-white/60 text-xs font-medium rounded-lg hover:text-white transition-colors disabled:opacity-50">
         <X className="w-3.5 h-3.5" />Cancel
       </button>
     </div>

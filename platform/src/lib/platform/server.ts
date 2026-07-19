@@ -5,6 +5,7 @@
 
 import { headers } from 'next/headers';
 import { resolveClientConfig } from './tenant-resolution';
+import { refreshIfStale } from './tenant-routing-cache';
 import { buildCssVariables } from './client-config';
 import { DEOLEO_CONFIG } from './client-registry';
 import type { ClientConfig } from './client-config';
@@ -25,6 +26,12 @@ import type { ClientConfig } from './client-config';
  * endpoint + a wired middleware) is a separate feature — see POST-GO-LIVE-BACKLOG.md §A.
  */
 export async function getTenantConfig(): Promise<ClientConfig> {
+  // §A-DOMAIN Phase 2: keep the DB routing/branding snapshot warm for SSR-only
+  // entry paths (non-blocking; the proxy usually primes it first). resolveClientConfig
+  // reads the snapshot and overlays any non-empty DB branding, falling back to the
+  // registry — so this is DB-aware without an inline network wait.
+  void refreshIfStale();
+
   const hdrs = await headers();
   const slug = hdrs.get('x-tenant-slug');
 

@@ -8,6 +8,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   validateNewClientSlug,
+  validateTenantDomain,
+  normalizeTenantDomain,
   applyFeatureFlagUpdate,
   canClientAdminModify,
   buildClientSummary,
@@ -68,6 +70,60 @@ describe('validateNewClientSlug', () => {
       const errs = validateNewClientSlug(reserved, EXISTING);
       expect(errs.some((e) => /reserved/i.test(e))).toBe(true);
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// validateTenantDomain (§A-DOMAIN) — mirrors the backend policy so the console
+// can reject a bad/reserved domain before the round-trip.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('validateTenantDomain', () => {
+  it('accepts a valid branded *.gifsy.in subdomain', () => {
+    expect(validateTenantDomain('deoleoloyalty.gifsy.in')).toBeNull();
+    expect(validateTenantDomain('reliance-retail.gifsy.in')).toBeNull();
+  });
+
+  it('normalises case/whitespace before validating', () => {
+    expect(validateTenantDomain('  DeoleoLoyalty.Gifsy.IN  ')).toBeNull();
+    expect(normalizeTenantDomain('  DeoleoLoyalty.Gifsy.IN  ')).toBe('deoleoloyalty.gifsy.in');
+  });
+
+  it('rejects a non-gifsy.in domain', () => {
+    expect(validateTenantDomain('brand.example.com')).toMatch(/subdomain of gifsy\.in/i);
+  });
+
+  it('rejects the bare apex gifsy.in', () => {
+    expect(validateTenantDomain('gifsy.in')).toBeTruthy();
+  });
+
+  it('rejects an empty domain', () => {
+    expect(validateTenantDomain('')).toBeTruthy();
+    expect(validateTenantDomain('   ')).toBeTruthy();
+  });
+
+  it('rejects a reserved first label', () => {
+    for (const reserved of ['api', 'app', 'www', 'platform', 'admin', 'status', 'mail', 'uat']) {
+      expect(validateTenantDomain(`${reserved}.gifsy.in`)).toMatch(/reserved/i);
+    }
+  });
+
+  it('rejects a malformed hostname (leading hyphen)', () => {
+    expect(validateTenantDomain('-bad.gifsy.in')).toBeTruthy();
+  });
+
+  it('allows a non-reserved multi-label subdomain', () => {
+    expect(validateTenantDomain('shop.reliance.gifsy.in')).toBeNull();
+  });
+
+  it('scopes the reserved check to the FIRST label only (a reserved word deeper in the host is allowed)', () => {
+    // Only parts[0] is checked against RESERVED_DOMAIN_LABELS (mirrors the backend),
+    // so a reserved word as a NON-first label must not block the domain.
+    expect(validateTenantDomain('shop.api.gifsy.in')).toBeNull();
+    expect(validateTenantDomain('store.admin.gifsy.in')).toBeNull();
+    // …but a non-reserved word that merely CONTAINS a reserved substring is fine too.
+    expect(validateTenantDomain('apparel.gifsy.in')).toBeNull();
+    expect(validateTenantDomain('mailroom.gifsy.in')).toBeNull();
   });
 });
 

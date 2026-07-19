@@ -17,6 +17,7 @@
 import { cookies } from 'next/headers';
 import { jwtVerify } from 'jose';
 import { resolveClientConfig } from '@/lib/platform/tenant-resolution';
+import { refreshIfStale } from '@/lib/platform/tenant-routing-cache';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 const WEEK = 60 * 60 * 24 * 7;
@@ -137,6 +138,9 @@ export async function getAssumedContext(): Promise<{ brandName: string | null }>
     const { payload } = await jwtVerify(token, secret);
     if (payload.assumed !== true) return { brandName: null };
     const clientId = (payload.clientId as string) ?? '';
+    // §A-DOMAIN Phase 2: DB-aware display name (non-blocking cache warm; resolveClientConfig
+    // overlays any non-empty DB branding over the registry, falling back to it).
+    void refreshIfStale();
     const cfg = resolveClientConfig(clientId);
     return { brandName: cfg?.branding.displayName ?? clientId ?? null };
   } catch {

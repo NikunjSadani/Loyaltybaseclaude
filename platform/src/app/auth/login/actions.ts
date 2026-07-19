@@ -1,7 +1,7 @@
 'use server';
 
 import { cookies, headers } from 'next/headers';
-import { resolveSlugFromHostname } from '@/lib/platform/tenant-resolution';
+import { resolveTenant } from '@/lib/platform/tenant-resolution';
 
 interface SendOTPResult {
   success: boolean;
@@ -21,16 +21,27 @@ const DEFAULT_CLIENT_ID = 'deoleo';
 
 /**
  * Resolve the tenant clientId from the request Host header. Delegates to the
- * shared `resolveSlugFromHostname` so login uses the SAME resolution as the rest
- * of the app — including the CLIENT_REGISTRY custom-domain map, so a branded
- * domain whose label differs from the slug resolves correctly:
- *   deoleoloyalty.gifsy.in → deoleo   (custom-domain map)
+ * shared DB-aware `resolveTenant` so login uses the SAME resolution as the rest
+ * of the app — the DB routing map (from GET /v1/tenants/routing) layered over the
+ * CLIENT_REGISTRY custom-domain map, so a branded domain whose label differs from
+ * the slug resolves correctly:
+ *   deoleoloyalty.gifsy.in → deoleo   (DB map / custom-domain map)
  *   deoleo.gifsy.in        → deoleo   (subdomain label)
- *   gifsy.in / www / localhost → DEFAULT_CLIENT_ID
+ *   localhost (dev) → DEFAULT_CLIENT_ID
  * The backend `verify-otp` requires `clientId` in the body to scope the user lookup.
+ * DB-aware; `resolveTenant` cold-warms the DB map so a branded host resolves on the
+ * first login of a fresh instance.
+ *
+ * FAIL-CLOSED (design §5): in PRODUCTION an unknown/null-resolving host (bare domain,
+ * reserved subdomain) returns null — it must NOT silently scope the login to Deoleo.
+ * Dev keeps the Deoleo default (localhost has no subdomain). A real tenant login always
+ * arrives on a tenant host (→ a slug) or the operator host (→ 'gifsy'), so null only
+ * happens for non-login hosts.
  */
-function resolveClientId(host: string | null): string {
-  return resolveSlugFromHostname(host ?? '') ?? DEFAULT_CLIENT_ID;
+async function resolveClientId(host: string | null): Promise<string | null> {
+  const { slug } = await resolveTenant(host ?? '');
+  if (slug) return slug;
+  return process.env.NODE_ENV === 'production' ? null : DEFAULT_CLIENT_ID;
 }
 
 export async function sendOTP(
@@ -42,7 +53,11 @@ export async function sendOTP(
     // Resolve the tenant from the request Host (same as verifyOTP) so the backend can
     // pick the per-tenant login OTP template; absent → the global env template is used.
     const hdrs = await headers();
-    const clientId = resolveClientId(hdrs.get('x-forwarded-host') ?? hdrs.get('host'));
+    const clientId = await resolveClientId(hdrs.get('x-forwarded-host') ?? hdrs.get('host'));
+    if (!clientId) {
+      // Fail-closed: could not determine the tenant from this host (prod).
+      return { success: false, error: 'Unable to determine your organization from this address.' };
+    }
     const res = await fetch(`${baseUrl}/api/auth/send-otp`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -77,13 +92,18 @@ export async function verifyOTP(
     // (set by cloudflare-worker/worker.js). Read that first so a branded custom domain
     // resolves its tenant instead of falling back to DEFAULT_CLIENT_ID.
     const hdrs = await headers();
-    let clientId = resolveClientId(hdrs.get('x-forwarded-host') ?? hdrs.get('host'));
+    let clientId = await resolveClientId(hdrs.get('x-forwarded-host') ?? hdrs.get('host'));
 
     // DEV-ONLY clientId override (#39 / Q3). On localhost there is no real subdomain, so the form
     // offers an explicit org field to log in as GIFSY (or any non-default tenant). NEVER honored in
     // production — there the Host subdomain is authoritative, so a tenant cannot impersonate another.
     if (process.env.NODE_ENV !== 'production' && clientIdOverride) {
       clientId = clientIdOverride.trim().toLowerCase();
+    }
+
+    if (!clientId) {
+      // Fail-closed: unknown tenant for this host (prod, no dev override).
+      return { success: false, error: 'Unable to determine your organization from this address.' };
     }
 
     const res = await fetch(`${baseUrl}/api/auth/verify-otp`, {

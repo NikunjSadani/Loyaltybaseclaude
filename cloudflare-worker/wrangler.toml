@@ -4,19 +4,31 @@ compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 
-# Route all four subdomains through this worker.
-# zone_name tells Cloudflare which zone owns the domain.
+# §A-DOMAIN Phase 3 — coarse tenant-agnostic frontend routing.
+#
+# The wildcard `*.gifsy.in/*` route sends EVERY gifsy.in subdomain through this
+# worker, so a new tenant frontend host needs NO route edit here — worker.js
+# routes any non-API, non-reserved host to the frontend origin. The API hosts
+# stay as explicit routes (they point at a different, non-frontend origin); a
+# more specific route wins, but listing them keeps intent clear and is harmless.
+#
+# PREREQUISITE (Cloudflare dashboard, provisioned separately — confirm before deploy):
+#   The wildcard route REQUIRES a proxied `*.gifsy.in` DNS record + wildcard TLS
+#   (edge cert covering `*.gifsy.in`) in the zone. Without both, a brand-new
+#   tenant host has no DNS/cert and the coarse route cannot serve it.
+#
+# SUPERSEDED: the previously per-host `custom_domain = true` entries
+# (deoleoloyalty.gifsy.in, uat.deoleoloyalty.gifsy.in, app.gifsy.in,
+# uat.app.gifsy.in, plus the plain platform./deoleo./clientb. routes) are no
+# longer needed for ROUTING — the wildcard covers them. They are intentionally
+# NOT re-listed here. NOTE for the owner: `custom_domain = true` entries also
+# provisioned each host's DNS record + managed SSL cert; if the wildcard DNS +
+# wildcard TLS are NOT yet in place, KEEP the relevant custom_domain entries (or
+# their DNS/cert) until the wildcard cert covers them, so those hosts don't lose
+# DNS/certs during the transition.
 routes = [
-  { pattern = "api.gifsy.in/*",      zone_name = "gifsy.in" },
-  { pattern = "platform.gifsy.in/*", zone_name = "gifsy.in" },
-  { pattern = "deoleo.gifsy.in/*",   zone_name = "gifsy.in" },
-  { pattern = "clientb.gifsy.in/*",  zone_name = "gifsy.in" },
-  # Custom Domain (not a plain route): wrangler creates the proxied DNS record + managed
-  # SSL cert + binds the Worker — the branded tenant domains had no DNS records otherwise.
-  { pattern = "deoleoloyalty.gifsy.in", custom_domain = true },
-  { pattern = "uat.deoleoloyalty.gifsy.in", custom_domain = true },
-  { pattern = "api.staging.gifsy.in", custom_domain = true },
-  # GIFSY operator console — app.gifsy.in (prod) + uat.app.gifsy.in (staging) → clientId `gifsy`.
-  { pattern = "app.gifsy.in", custom_domain = true },
-  { pattern = "uat.app.gifsy.in", custom_domain = true },
+  { pattern = "*.gifsy.in/*",          zone_name = "gifsy.in" },
+  # API hosts kept explicit — they route to a non-frontend origin.
+  { pattern = "api.gifsy.in/*",         zone_name = "gifsy.in" },
+  { pattern = "api.staging.gifsy.in/*", zone_name = "gifsy.in" },
 ]

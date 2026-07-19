@@ -13,9 +13,10 @@
  *   DEMO_MODE=true bypasses JWT and injects demo headers.
  */
 
-import { NextRequest, NextResponse } from 'next/server'
+import { NextRequest, NextResponse, type NextFetchEvent } from 'next/server'
 import { jwtVerify } from 'jose'
-import { resolveSlugFromHostname, resolveClientConfig } from '@/lib/platform/tenant-resolution'
+import { resolveTenantSync } from '@/lib/platform/tenant-resolution'
+import { ensureWarm, refreshIfStale } from '@/lib/platform/tenant-routing-cache'
 
 // Refuse to run in production without a real JWT_SECRET — never fall back to a weak default.
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
@@ -43,27 +44,40 @@ export const ROLE_ROUTES: Record<string, string[]> = {
   '/partner': ['SSS', 'WHOLESALER', 'SUB_STOCKIST'],
 }
 
-export async function proxy(request: NextRequest) {
+export async function proxy(request: NextRequest, event: NextFetchEvent) {
   const { pathname } = request.nextUrl
   const headers = new Headers(request.headers)
   // Expose the request path to Server Components (root layout reads this to gate the
   // per-portal PWA <head> meta to /sales + /partner only).
   headers.set('x-pathname', pathname)
 
+  // §A-DOMAIN Phase 2: cold-start warm + stale-while-revalidate for the DB routing map.
+  // `ensureWarm` AWAITS a single fetch ONLY on a genuine cold start (null snapshot on a
+  // fresh instance) so a DB-only BRANDED host (label ≠ slug) resolves to the right slug
+  // on the very first request instead of the bare label; once warm it is instant. Then
+  // `waitUntil` refreshes a stale-but-present snapshot in the background without blocking.
+  // Both swallow their own errors (registry fallback), so neither can reject.
+  await ensureWarm()
+  if (event && typeof event.waitUntil === 'function') {
+    event.waitUntil(refreshIfStale())
+  } else {
+    void refreshIfStale()
+  }
+
   // ── Step 1: Tenant resolution ──────────────────────────────────────────────
   const hostname =
     request.headers.get('x-forwarded-host') ??
     request.headers.get('host') ??
     request.nextUrl.hostname
-  const slug     = resolveSlugFromHostname(hostname)
+  // DB-aware sync resolution (DB map merged over registry; registry-only on cold
+  // start). Returns both the slug and the branding-overlaid config in one pass.
+  const { slug, config: clientConfig } = resolveTenantSync(hostname)
 
   if (slug === null) {
     // Bare domain / no subdomain — serve platform root without a tenant
     headers.set('x-tenant-slug',  '')
     headers.set('x-tenant-valid', 'false')
   } else {
-    const clientConfig = resolveClientConfig(slug)
-
     if (!clientConfig) {
       // The GIFSY operator console resolves to slug 'gifsy' — the platform operator,
       // NOT a tenant in CLIENT_REGISTRY. Let it through as a no-tenant platform context
@@ -84,8 +98,9 @@ export async function proxy(request: NextRequest) {
     } else {
       headers.set('x-tenant-slug',  clientConfig.slug)
       headers.set('x-tenant-valid', 'true')
-      headers.set('x-tenant-color', clientConfig.branding.primaryColor)
-      headers.set('x-tenant-name',  clientConfig.branding.displayName)
+      // (x-tenant-color / x-tenant-name intentionally dropped — they had no reader and,
+      //  now that branding is DB-influenced, an unsanitized value header is a needless
+      //  sink. SSR branding is resolved via getTenantConfig(), not these headers.)
     }
   }
 

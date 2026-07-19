@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, ArrowRight, Check, AlertCircle, Building2 } from 'lucide-react';
-import { validateNewClientSlug } from '@/lib/platform/platform-admin';
+import { validateNewClientSlug, validateTenantDomain, normalizeTenantDomain } from '@/lib/platform/platform-admin';
 import type { FeatureKey } from '@/lib/platform/client-config';
 import { getToken } from '@/lib/auth-client';
 
@@ -18,6 +18,9 @@ interface OnboardingForm {
   slug: string;
   internalName: string;
   status: 'ACTIVE' | 'ONBOARDING' | 'INACTIVE';
+  // Optional ADDITIONAL branded domain (the canonical <slug>.gifsy.in is always
+  // seeded by the backend). Blank = only the canonical domain is provisioned.
+  brandedDomain: string;
 
   // Branding
   displayName: string;
@@ -78,6 +81,7 @@ export default function OnboardClientPage() {
     slug:          '',
     internalName:  '',
     status:        'ONBOARDING',
+    brandedDomain: '',
     displayName:   '',
     primaryColor:  '#2563eb',
     supportEmail:  '',
@@ -87,6 +91,7 @@ export default function OnboardClientPage() {
   });
 
   const [slugErrors, setSlugErrors] = useState<string[]>([]);
+  const [domainError, setDomainError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   // Existing tenant slugs from the DB — the authoritative uniqueness source for
@@ -121,7 +126,12 @@ export default function OnboardClientPage() {
     if (step === 'identity') {
       const errs = validateNewClientSlug(form.slug, existingSlugs);
       setSlugErrors(errs);
-      if (errs.length > 0) return;
+      // Branded domain is OPTIONAL — only validate when the operator typed one.
+      const domErr = form.brandedDomain.trim()
+        ? validateTenantDomain(form.brandedDomain)
+        : null;
+      setDomainError(domErr);
+      if (errs.length > 0 || domErr) return;
     }
     const nextIndex = currentStepIndex + 1;
     if (nextIndex < STEPS.length) setStep(STEPS[nextIndex].key);
@@ -152,6 +162,11 @@ export default function OnboardClientPage() {
           supportPhone: form.supportPhone,
           invoicePrefix: form.invoicePrefix,
           features: form.features,
+          // Only the ADDITIONAL branded domain — the backend always seeds the
+          // canonical <slug>.gifsy.in on create. Omit the key when none entered.
+          ...(form.brandedDomain.trim()
+            ? { domains: [normalizeTenantDomain(form.brandedDomain)] }
+            : {}),
         }),
       });
       const json = await res.json();
@@ -216,7 +231,7 @@ export default function OnboardClientPage() {
       {/* Step panel */}
       <div className="border border-white/10 rounded-xl p-6">
         {step === 'identity' && (
-          <IdentityStep form={form} onChange={updateForm} errors={slugErrors} />
+          <IdentityStep form={form} onChange={updateForm} errors={slugErrors} domainError={domainError} />
         )}
         {step === 'branding' && (
           <BrandingStep form={form} onChange={updateForm} />
@@ -281,17 +296,18 @@ export default function OnboardClientPage() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function IdentityStep({
-  form, onChange, errors,
+  form, onChange, errors, domainError,
 }: {
   form: OnboardingForm;
   onChange: (p: Partial<OnboardingForm>) => void;
   errors: string[];
+  domainError: string | null;
 }) {
   return (
     <div className="space-y-4">
       <StepHeader title="Client Identity" description="Basic identifiers for the new client tenant." />
 
-      <Field label="Slug" hint="Lowercase, alphanumeric, hyphens only. Drives the subdomain (e.g. clientb.gifsy.in).">
+      <Field label="Slug" hint="Lowercase, alphanumeric, hyphens only. Drives the auto-provisioned subdomain (e.g. clientb.gifsy.in).">
         <input
           value={form.slug}
           onChange={(e) => onChange({ slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
@@ -306,7 +322,30 @@ function IdentityStep({
         {form.slug && errors.length === 0 && (
           <p className="text-xs text-green-400 mt-1 flex items-center gap-1">
             <Check className="w-3.5 h-3.5" />
-            Domain: <span className="font-mono">{form.slug}.gifsy.in</span>
+            Auto-provisioned domain: <span className="font-mono">{form.slug}.gifsy.in</span>
+          </p>
+        )}
+      </Field>
+
+      <Field
+        label="Branded domain (optional)"
+        hint="An ADDITIONAL customer-facing host on top of the auto-provisioned one. Must be a *.gifsy.in subdomain (e.g. deoleoloyalty.gifsy.in). Leave blank to use only the slug domain."
+      >
+        <input
+          value={form.brandedDomain}
+          onChange={(e) => onChange({ brandedDomain: e.target.value.toLowerCase().replace(/[^a-z0-9.-]/g, '') })}
+          placeholder="e.g. relianceloyalty.gifsy.in"
+          className={INPUT_CLS + ' font-mono'}
+        />
+        {domainError && (
+          <p className="flex items-center gap-1 text-xs text-red-400 mt-1">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0" />{domainError}
+          </p>
+        )}
+        {form.brandedDomain.trim() && !domainError && (
+          <p className="text-xs text-green-400 mt-1 flex items-center gap-1">
+            <Check className="w-3.5 h-3.5" />
+            Branded domain: <span className="font-mono">{form.brandedDomain.trim().toLowerCase()}</span>
           </p>
         )}
       </Field>
@@ -469,7 +508,10 @@ function ReviewStep({ form }: { form: OnboardingForm }) {
           <ReviewRow label="Slug"         value={form.slug} mono />
           <ReviewRow label="Internal name" value={form.internalName} />
           <ReviewRow label="Status"        value={form.status} />
-          <ReviewRow label="Domain"        value={`${form.slug}.gifsy.in`} mono />
+          <ReviewRow label="Auto domain"   value={`${form.slug}.gifsy.in`} mono />
+          {form.brandedDomain.trim() && (
+            <ReviewRow label="Branded domain" value={form.brandedDomain.trim().toLowerCase()} mono />
+          )}
         </ReviewSection>
 
         <ReviewSection title="Branding">
@@ -491,7 +533,9 @@ function ReviewStep({ form }: { form: OnboardingForm }) {
         </ReviewSection>
 
         <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3 text-xs text-blue-300">
-          After onboarding: provision DNS <code className="font-mono">{form.slug}.gifsy.in</code>, upload logo, and configure MSG91 credentials in environment variables.
+          After onboarding: provision DNS for <code className="font-mono">{form.slug}.gifsy.in</code>
+          {form.brandedDomain.trim() && <> and <code className="font-mono">{form.brandedDomain.trim().toLowerCase()}</code></>}
+          , upload brand assets, and configure MSG91 credentials in environment variables.
         </div>
       </div>
     </div>
