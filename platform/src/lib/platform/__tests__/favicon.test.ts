@@ -17,9 +17,11 @@ describe('resolveFaviconIcoHref', () => {
     );
   });
 
-  it('does NOT prefer a legacy local /favicons path — falls back to the static slug path (Deoleo no-regression)', () => {
-    // deoleo's registry/DB value is `/favicons/deoleo.ico`, a file that was never
-    // committed; the committed art is `/icons/deoleo/favicon.ico`.
+  it('does NOT prefer a legacy local /favicons path — falls back to the canonical slug path (Deoleo no-regression)', () => {
+    // deoleo's registry/DB value is `/favicons/deoleo.ico`; a LOCAL path always falls back
+    // to the CANONICAL committed art at `/icons/deoleo/favicon.ico` (only absolute http(s)
+    // URLs are preferred). `/favicons/deoleo.ico` is also committed now, but the helper
+    // can't stat a URL, so it stays on the single canonical `/icons/<slug>/` location.
     expect(resolveFaviconIcoHref('/favicons/deoleo.ico', 'deoleo')).toBe(
       '/icons/deoleo/favicon.ico',
     );
