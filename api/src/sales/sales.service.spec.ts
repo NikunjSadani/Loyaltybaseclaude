@@ -7,6 +7,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { SalesService } from './sales.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isSelfOrDescendant } from './sales-hierarchy-access.helper';
 import { currentMonthKey } from '../targets/targets.helpers';
@@ -20,6 +21,11 @@ const mockPrisma = {
   salesHierarchyLevel: { findFirst: jest.fn() },
 };
 
+// TenantService.resolveClient feeds the DB-backed feature blob into /sales/me
+// (§A-DOMAIN "P5").
+const TENANT_FEATURES = { salesTeamApp: true, walletModule: true };
+const mockTenant = { resolveClient: jest.fn() };
+
 const caller: JwtPayload = { sub: 'user-mgr', role: 'SALES', clientId: 'deoleo', phone: '', name: '' };
 
 describe('SalesService', () => {
@@ -27,8 +33,13 @@ describe('SalesService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockTenant.resolveClient.mockResolvedValue({ features: TENANT_FEATURES });
     const module: TestingModule = await Test.createTestingModule({
-      providers: [SalesService, { provide: PrismaService, useValue: mockPrisma }],
+      providers: [
+        SalesService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: TenantService, useValue: mockTenant },
+      ],
     }).compile();
     service = module.get(SalesService);
   });
@@ -608,7 +619,15 @@ describe('SalesService', () => {
       expect(res).toEqual({
         employeeCode: 'XSR-M001', role: 'SALES_ISR', roleLabel: 'Executive Sales Representative',
         level: 5, region: 'West', zone: 'Z1', name: 'Anita Rep', phone: '9900000041',
+        features: TENANT_FEATURES,
       });
+    });
+
+    it('includes the DB-backed tenant feature blob (resolveClient) on /sales/me', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      const res = await service.getMe(caller);
+      expect(mockTenant.resolveClient).toHaveBeenCalledWith('deoleo');
+      expect(res.features).toEqual(TENANT_FEATURES);
     });
 
     it('falls back to JWT name/phone + null employeeCode when not a sales user', async () => {

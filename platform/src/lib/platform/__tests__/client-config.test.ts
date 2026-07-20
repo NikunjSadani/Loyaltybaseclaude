@@ -1,6 +1,12 @@
 /**
  * TDD tests for the ClientConfig type system and pure helper functions.
  * Run: npx vitest run src/lib/platform/__tests__/client-config.test.ts
+ *
+ * §A-DOMAIN "P5": the in-code CLIENT_REGISTRY is now a MINIMAL fallback — each entry
+ * spreads DEFAULT_CLIENT_CONFIG and overrides only identity + branding. Rich
+ * per-tenant features/partnerClasses/invoicing/hierarchy are DB-served, so the pure
+ * helpers below are exercised against a local RICH_CONFIG fixture rather than the
+ * (now minimal) DEOLEO_CONFIG seed.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -14,63 +20,59 @@ import {
   type FeatureKey,
 } from '../client-config';
 import { DEOLEO_CONFIG } from '../client-registry';
+import { DEFAULT_CLIENT_CONFIG } from '../default-client-config';
+
+// A fully-populated config for exercising the pure helpers (independent of the
+// reduced registry). Spreads DEFAULT then adds the rich fields the helpers read.
+const RICH_CONFIG: ClientConfig = {
+  ...DEFAULT_CLIENT_CONFIG,
+  slug: 'rich',
+  internalName: 'Rich Co',
+  branding: { ...DEFAULT_CLIENT_CONFIG.branding, displayName: 'Rich Co', primaryColor: '#16a34a' },
+  features: {
+    ...DEFAULT_CLIENT_CONFIG.features,
+    visibilityInvoiceModule: true,
+    nonKycOutletCampaigns: true,
+    multiLevelApproval: true,
+  },
+  partnerClasses: [
+    { key: 'GOLD',     displayName: 'Gold',     color: '#d97706', order: 1 },
+    { key: 'SILVER',   displayName: 'Silver',   color: '#6b7280', order: 2 },
+    { key: 'STANDARD', displayName: 'Standard', color: '#2563eb', order: 3 },
+  ],
+  approvalHierarchy: {
+    levels: [
+      { roleKey: 'L1', displayName: 'Sales Officer', shortName: 'SO', canInitiateKyc: true, canApproveKyc: false, canViewAllOutlets: false },
+      { roleKey: 'L2', displayName: 'Regional Sales Manager', shortName: 'RSM', canInitiateKyc: false, canApproveKyc: true, canViewAllOutlets: true },
+    ],
+    requireGifsyFinalApproval: true,
+  },
+  invoicing: { ...DEFAULT_CLIENT_CONFIG.invoicing, sellerGstin: '19AABCT1234A1ZX', sellerState: 'West Bengal' },
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Deoleo seed config smoke tests
+// Deoleo seed config — now a MINIMAL registry fallback
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('DEOLEO_CONFIG seed', () => {
+describe('DEOLEO_CONFIG seed (minimal registry fallback)', () => {
   it('has a valid slug', () => {
     expect(DEOLEO_CONFIG.slug).toBe('deoleo');
   });
 
-  it('passes full validation with zero errors', () => {
-    expect(validateClientConfig(DEOLEO_CONFIG)).toEqual([]);
+  it('keeps the branded domain seed for cold-start domain→slug resolution', () => {
+    expect(DEOLEO_CONFIG.domains).toContain('deoleoloyalty.gifsy.in');
   });
 
-  it('has all features enabled', () => {
-    const keys: FeatureKey[] = [
-      'visibilityInvoiceModule',
-      'kycApprovalFlow',
-      'campaignEnrollmentForm',
-      'salesTeamApp',
-      'walletModule',
-      'selfEnrollmentAllowed',
-      'nonKycOutletCampaigns',
-      'multiLevelApproval',
-    ];
-    for (const k of keys) {
-      expect(isFeatureEnabled(DEOLEO_CONFIG, k)).toBe(true);
-    }
-  });
-
-  it('has the correct brand colour', () => {
+  it('keeps the tenant branding (cold-start fallback before the DB overlay warms)', () => {
     expect(DEOLEO_CONFIG.branding.primaryColor).toBe('#16a34a');
+    expect(DEOLEO_CONFIG.branding.displayName).toBe('Deoleo India');
   });
 
-  it('invoicing references Tech Gifsy Solutions Limited', () => {
-    expect(DEOLEO_CONFIG.invoicing.sellerLegalName).toBe('Tech Gifsy Solutions Limited');
-  });
-
-  it('invoicing seller is registered in West Bengal', () => {
-    expect(DEOLEO_CONFIG.invoicing.sellerState).toBe('West Bengal');
-  });
-
-  it('has at least two approval levels', () => {
-    expect(DEOLEO_CONFIG.approvalHierarchy.levels.length).toBeGreaterThanOrEqual(2);
-  });
-
-  it('L1 level is the Sales Officer', () => {
-    const l1 = getApprovalLevel(DEOLEO_CONFIG, 'L1');
-    expect(l1).not.toBeNull();
-    expect(l1!.canInitiateKyc).toBe(true);
-  });
-
-  it('has at least GOLD and SILVER partner classes', () => {
-    const gold   = getPartnerClass(DEOLEO_CONFIG, 'GOLD');
-    const silver = getPartnerClass(DEOLEO_CONFIG, 'SILVER');
-    expect(gold).not.toBeNull();
-    expect(silver).not.toBeNull();
+  it('inherits DEFAULT (conservative) features — rich per-tenant flags are DB-served', () => {
+    // The registry no longer carries per-tenant feature richness; it mirrors DEFAULT.
+    expect(DEOLEO_CONFIG.features).toEqual(DEFAULT_CLIENT_CONFIG.features);
+    expect(isFeatureEnabled(DEOLEO_CONFIG, 'walletModule')).toBe(true);
+    expect(isFeatureEnabled(DEOLEO_CONFIG, 'visibilityInvoiceModule')).toBe(false);
   });
 });
 
@@ -80,8 +82,8 @@ describe('DEOLEO_CONFIG seed', () => {
 
 describe('isFeatureEnabled', () => {
   const cfg = (overrides: Partial<ClientConfig['features']>): ClientConfig => ({
-    ...DEOLEO_CONFIG,
-    features: { ...DEOLEO_CONFIG.features, ...overrides },
+    ...RICH_CONFIG,
+    features: { ...RICH_CONFIG.features, ...overrides },
   });
 
   it('returns true when flag is on', () => {
@@ -95,7 +97,7 @@ describe('isFeatureEnabled', () => {
   it('returns false for unknown flag key gracefully', () => {
     // TypeScript prevents this at compile time, but runtime should not throw
     expect(() =>
-      isFeatureEnabled(DEOLEO_CONFIG, 'nonExistentFlag' as FeatureKey),
+      isFeatureEnabled(RICH_CONFIG, 'nonExistentFlag' as FeatureKey),
     ).not.toThrow();
   });
 });
@@ -106,13 +108,13 @@ describe('isFeatureEnabled', () => {
 
 describe('getApprovalLevel', () => {
   it('returns the matching level', () => {
-    const lvl = getApprovalLevel(DEOLEO_CONFIG, 'L1');
+    const lvl = getApprovalLevel(RICH_CONFIG, 'L1');
     expect(lvl).not.toBeNull();
     expect(lvl!.roleKey).toBe('L1');
   });
 
   it('returns null for a non-existent level key', () => {
-    expect(getApprovalLevel(DEOLEO_CONFIG, 'L99')).toBeNull();
+    expect(getApprovalLevel(RICH_CONFIG, 'L99')).toBeNull();
   });
 });
 
@@ -122,7 +124,7 @@ describe('getApprovalLevel', () => {
 
 describe('getPartnerClass', () => {
   it('returns the matching partner class config', () => {
-    const gold = getPartnerClass(DEOLEO_CONFIG, 'GOLD');
+    const gold = getPartnerClass(RICH_CONFIG, 'GOLD');
     expect(gold).not.toBeNull();
     expect(gold!.key).toBe('GOLD');
     expect(gold!.displayName).toBeDefined();
@@ -130,7 +132,7 @@ describe('getPartnerClass', () => {
   });
 
   it('returns null for an unknown class key', () => {
-    expect(getPartnerClass(DEOLEO_CONFIG, 'DIAMOND')).toBeNull();
+    expect(getPartnerClass(RICH_CONFIG, 'DIAMOND')).toBeNull();
   });
 });
 
@@ -140,37 +142,37 @@ describe('getPartnerClass', () => {
 
 describe('validateClientConfig', () => {
   it('returns an error when slug is empty', () => {
-    const errs = validateClientConfig({ ...DEOLEO_CONFIG, slug: '' });
+    const errs = validateClientConfig({ ...RICH_CONFIG, slug: '' });
     expect(errs.some((e) => /slug/i.test(e))).toBe(true);
   });
 
   it('returns an error when displayName is empty', () => {
     const errs = validateClientConfig({
-      ...DEOLEO_CONFIG,
-      branding: { ...DEOLEO_CONFIG.branding, displayName: '' },
+      ...RICH_CONFIG,
+      branding: { ...RICH_CONFIG.branding, displayName: '' },
     });
     expect(errs.some((e) => /displayName|name/i.test(e))).toBe(true);
   });
 
   it('returns an error when primaryColor is not a valid hex', () => {
     const errs = validateClientConfig({
-      ...DEOLEO_CONFIG,
-      branding: { ...DEOLEO_CONFIG.branding, primaryColor: 'not-a-color' },
+      ...RICH_CONFIG,
+      branding: { ...RICH_CONFIG.branding, primaryColor: 'not-a-color' },
     });
     expect(errs.some((e) => /color/i.test(e))).toBe(true);
   });
 
   it('returns an error when approval hierarchy has zero levels', () => {
     const errs = validateClientConfig({
-      ...DEOLEO_CONFIG,
-      approvalHierarchy: { ...DEOLEO_CONFIG.approvalHierarchy, levels: [] },
+      ...RICH_CONFIG,
+      approvalHierarchy: { ...RICH_CONFIG.approvalHierarchy, levels: [] },
     });
     expect(errs.some((e) => /level|hierarchy/i.test(e))).toBe(true);
   });
 
   it('returns an error when no partner classes are defined', () => {
     const errs = validateClientConfig({
-      ...DEOLEO_CONFIG,
+      ...RICH_CONFIG,
       partnerClasses: [],
     });
     expect(errs.some((e) => /partner class/i.test(e))).toBe(true);
@@ -178,10 +180,14 @@ describe('validateClientConfig', () => {
 
   it('returns an error when invoicing seller name is empty', () => {
     const errs = validateClientConfig({
-      ...DEOLEO_CONFIG,
-      invoicing: { ...DEOLEO_CONFIG.invoicing, sellerLegalName: '' },
+      ...RICH_CONFIG,
+      invoicing: { ...RICH_CONFIG.invoicing, sellerLegalName: '' },
     });
     expect(errs.some((e) => /seller|invoic/i.test(e))).toBe(true);
+  });
+
+  it('a fully-populated rich config validates with zero errors', () => {
+    expect(validateClientConfig(RICH_CONFIG)).toEqual([]);
   });
 });
 

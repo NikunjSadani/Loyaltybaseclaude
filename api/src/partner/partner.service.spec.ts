@@ -8,6 +8,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { PartnerService } from './partner.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 // ─── Mock Prisma ───────────────────────────────────────────────────────────────
@@ -24,6 +25,17 @@ const mockPrisma = {
   outletSalesRecord: { findMany: jest.fn() },
   kpiDef:            { findMany: jest.fn() },
   salesUserAssignment: { findMany: jest.fn() },
+};
+
+// TenantService.resolveClient feeds the DB-backed feature blob into /partner/me
+// (§A-DOMAIN "P5"). Default to a representative Deoleo-shaped blob.
+const TENANT_FEATURES = {
+  walletModule: true,
+  visibilityInvoiceModule: true,
+  partnerApp: { showLeaderboard: false, showWallet: true },
+};
+const mockTenant = {
+  resolveClient: jest.fn(),
 };
 
 const partner: JwtPayload = {
@@ -44,8 +56,13 @@ describe('PartnerService', () => {
     // getTargets now also fetches KpiDef labels (for the name-override fallback);
     // default to an empty KPI set so existing target tests are unaffected.
     mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+    mockTenant.resolveClient.mockResolvedValue({ features: TENANT_FEATURES });
     const module: TestingModule = await Test.createTestingModule({
-      providers: [PartnerService, { provide: PrismaService, useValue: mockPrisma }],
+      providers: [
+        PartnerService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: TenantService, useValue: mockTenant },
+      ],
     }).compile();
     service = module.get(PartnerService);
   });
@@ -66,10 +83,25 @@ describe('PartnerService', () => {
         outletType: null,
         hasPointsActivity: false,
         hasPayoutActivity: false,
+        features: TENANT_FEATURES,
       });
       // No activity queries when there is no partner to resolve.
       expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
       expect(mockPrisma.wallet.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('returns the DB-backed tenant feature blob (resolveClient) on /partner/me', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      const res = await service.getMe(partner);
+      expect(mockTenant.resolveClient).toHaveBeenCalledWith('deoleo');
+      expect(res.features).toEqual(TENANT_FEATURES);
+    });
+
+    it('features falls back to {} when tenant resolution throws (never 500s /me)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      mockTenant.resolveClient.mockRejectedValueOnce(new Error('inactive client'));
+      const res = await service.getMe(partner);
+      expect(res.features).toEqual({});
     });
 
     it('resolves the PRIMARY outlet type (order by isPrimary desc, createdAt asc — not isPrimary:true)', async () => {

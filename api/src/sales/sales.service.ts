@@ -4,6 +4,8 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isReKycActionable } from '../common/kyc-rekyc.helper';
 import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-access.helper';
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
+import { TenantService } from '../tenant/tenant.service';
+import { resolveTenantFeatures } from '../common/tenant-features.helper';
 
 /**
  * One row of the sales team leaderboard — the exact shape the FE
@@ -40,7 +42,10 @@ type LeaderboardScope = 'rm' | 'state' | 'national';
  */
 @Injectable()
 export class SalesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenant: TenantService,
+  ) {}
 
   /**
    * GET /v1/sales/team
@@ -473,6 +478,11 @@ export class SalesService {
         hierarchyLevel: { select: { code: true, name: true, level: true } },
       },
     });
+    // Per-tenant feature blob (DB-backed via TenantService.resolveClient — D-1), so a
+    // sales-shell feature gate reads from THIS authenticated response rather than the
+    // in-code CLIENT_REGISTRY. Parallel to /partner/me and /admin/settings/config.
+    const features = await resolveTenantFeatures(this.tenant, user.clientId);
+
     return {
       employeeCode: su?.employeeCode ?? null,
       role:         su?.hierarchyLevel?.code ?? null,
@@ -482,6 +492,7 @@ export class SalesService {
       zone:         su?.zone ?? null,
       name:         su?.user?.name ?? user.name ?? null,
       phone:        su?.user?.phone ?? user.phone ?? null,
+      features,
     };
   }
 

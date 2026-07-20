@@ -4,7 +4,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { Trophy, Medal, ArrowLeft, TrendingUp, MapPin, Globe, Map } from 'lucide-react';
 import Link from 'next/link';
 import { formatPoints } from '@/lib/utils';
-import { useClientConfig } from '@/lib/platform/client-config-context';
+import { useTenantFeatures } from '@/lib/tenant-features';
 import { authHeader } from '@/lib/api-client';
 
 type Scope = 'india' | 'state' | 'district';
@@ -67,7 +67,9 @@ function mapApiLeaderboard(
 }
 
 export default function LeaderboardPage() {
-  const { features } = useClientConfig();
+  // Feature gating is DB-sourced via the authenticated /partner/me endpoint
+  // (§A-DOMAIN "P5"), NOT the in-code registry.
+  const { features, loading: featuresLoading } = useTenantFeatures('/api/partner/me');
   const [scope, setScope] = useState<Scope>('india');
   const [partners, setPartners] = useState<Partner[]>([]);
   const [loading, setLoading] = useState(true);
@@ -75,6 +77,9 @@ export default function LeaderboardPage() {
   const [hasLocationData, setHasLocationData] = useState(false);
 
   useEffect(() => {
+    // Wait for the authenticated features to settle before deciding whether to fetch,
+    // so an enabled tenant is not mis-gated by the while-loading default.
+    if (featuresLoading) return;
     if (!features.partnerApp.showLeaderboard) { setLoading(false); return; }
     fetch('/api/leaderboard', { headers: { ...authHeader() } })
       .then(r => r.json())
@@ -87,7 +92,9 @@ export default function LeaderboardPage() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    // Re-run once the authenticated features settle; `scope` is intentionally omitted
+    // (fetch-once — scope filtering is client-side and must not re-fetch).
+  }, [featuresLoading, features.partnerApp.showLeaderboard]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = useMemo(() => {
     let list = partners;
@@ -104,6 +111,17 @@ export default function LeaderboardPage() {
   const top3 = filtered.slice(0, 3);
   const nextRankEntry = myEntry && myEntry.rank > 1 ? filtered[myEntry.rank - 2] : null;
   const kpiGapToNext  = nextRankEntry ? nextRankEntry.primaryKpiValue - myEntry!.primaryKpiValue : null;
+
+  // Wait for the authenticated features before applying the gate, so an enabled
+  // tenant never flashes the "not available" state while /partner/me is in flight.
+  if (featuresLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 space-y-3">
+        <div className="w-8 h-8 border-2 border-[var(--brand-primary)] border-t-transparent rounded-full animate-spin" />
+        <p className="text-sm text-gray-500">Loading leaderboard…</p>
+      </div>
+    );
+  }
 
   // Feature-flag gate — all hooks called above; safe to return early now
   if (!features.partnerApp.showLeaderboard) {

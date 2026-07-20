@@ -32,6 +32,7 @@ import {
   Smartphone,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { useTenantFeatures } from '@/lib/tenant-features';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { useAdminSession, adminRoleLabel } from '@/lib/admin-session';
 import { RequireAuth } from '@/components/auth/require-auth';
@@ -133,7 +134,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const pathname     = usePathname();
   const router       = useRouter();
   const clientConfig = useClientConfig();
-  const features     = clientConfig.features;
+  // Feature gating is DB-sourced via the authenticated tenant-config endpoint
+  // (§A-DOMAIN "P5"), NOT the in-code registry. Branding still comes from clientConfig.
+  const { features } = useTenantFeatures('/api/admin/settings/config');
   const adminSession = useAdminSession();
   // Master Visibility switch (per-tenant, default OFF). Lives in GifsySettings, NOT ClientConfig
   // features — so it is gated here directly rather than via the featureFlag map below.

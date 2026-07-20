@@ -17,6 +17,7 @@
  */
 
 import { CLIENT_REGISTRY } from './client-registry';
+import { DEFAULT_CLIENT_CONFIG } from './default-client-config';
 import type { BrandingConfig, ClientConfig } from './client-config';
 import {
   ensureWarm,
@@ -211,89 +212,21 @@ function pickNonEmptyBranding(b: PublicBranding | undefined): Partial<BrandingCo
  */
 function synthesizeConfig(slug: string, branding: Partial<BrandingConfig>): ClientConfig {
   const displayName = branding.displayName ?? slug;
+  // Spread DEFAULT_CLIENT_CONFIG so the safe feature/partnerClass/invoicing/wallet
+  // defaults live in ONE place; override only identity + the DB-supplied branding.
   return {
+    ...DEFAULT_CLIENT_CONFIG,
     slug,
     internalName: displayName,
-    status: 'ONBOARDING',
     onboardedAt: new Date().toISOString().slice(0, 10),
     branding: {
+      ...DEFAULT_CLIENT_CONFIG.branding,
       displayName,
-      primaryColor: branding.primaryColor ?? '#16a34a',
+      primaryColor: branding.primaryColor ?? DEFAULT_CLIENT_CONFIG.branding.primaryColor,
       logoUrl: branding.logoUrl ?? '',
       wordmarkWhiteUrl: branding.wordmarkWhiteUrl,
       wordmarkColorUrl: branding.wordmarkColorUrl,
       faviconUrl: branding.faviconUrl ?? '',
-      supportEmail: '',
-      supportPhone: '',
-      productBrands: [],
-    },
-    features: {
-      visibilityInvoiceModule: false,
-      kycApprovalFlow: true,
-      campaignEnrollmentForm: true,
-      salesTeamApp: true,
-      walletModule: true,
-      referralModule: false,
-      selfEnrollmentAllowed: true,
-      nonKycOutletCampaigns: false,
-      multiLevelApproval: false,
-      rbacEnforcement: false,
-      partnerApp: {
-        showSchemes: true,
-        showInvoices: false,
-        showWallet: true,
-        showTeam: true,
-        showLeaderboard: false,
-      },
-    },
-    partnerClasses: [
-      { key: 'STANDARD', displayName: 'Standard', color: '#2563eb', order: 1 },
-    ],
-    approvalHierarchy: {
-      levels: [
-        {
-          roleKey: 'L1',
-          displayName: 'Sales Officer',
-          shortName: 'SO',
-          canInitiateKyc: true,
-          canApproveKyc: true,
-          canViewAllOutlets: false,
-        },
-      ],
-      requireGifsyFinalApproval: true,
-    },
-    notifications: {
-      msg91AuthKey: 'DEMO_KEY',
-      whatsappSenderId: '',
-      smsSenderId: '',
-      templateIds: {
-        schemePublished: '',
-        enrollmentConfirm: '',
-        otpVerification: '',
-        kycApproved: '',
-        kycRejected: '',
-        payoutGenerated: '',
-      },
-    },
-    invoicing: {
-      sellerLegalName: 'Tech Gifsy Solutions Limited',
-      sellerGstin: '',
-      sellerState: '',
-      sellerAddress: '',
-      sellerPan: '',
-      bankName: '',
-      bankAccountNumber: '',
-      bankIfsc: '',
-      bankBranch: '',
-      invoicePrefix: 'TGSL',
-      sacCode: '998361',
-    },
-    wallet: {
-      defaultHoldingPeriodDays: 30,
-      pointsExpiryDays: 365,
-      minRedemptionAmount: 500,
-      redemptionModes: ['UPI', 'NEFT'],
-      pointsToRupeeRatio: 1.0,
     },
   };
 }

@@ -17,9 +17,9 @@
 
 import { createContext, useContext, type ReactNode } from 'react';
 import type { ClientConfig } from './client-config';
-import { DEOLEO_CONFIG } from './client-registry';
+import { DEFAULT_CLIENT_CONFIG } from './default-client-config';
 
-const ClientConfigContext = createContext<ClientConfig>(DEOLEO_CONFIG);
+const ClientConfigContext = createContext<ClientConfig>(DEFAULT_CLIENT_CONFIG);
 
 export function ClientConfigProvider({
   config,

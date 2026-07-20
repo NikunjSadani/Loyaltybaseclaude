@@ -4,6 +4,8 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
 import { kpiCodeKeys, NAMES_KEY, lastNMonths } from '../targets/targets.helpers';
 import { buildPayoutStatement } from '../common/payout-statement.helper';
+import { TenantService } from '../tenant/tenant.service';
+import { resolveTenantFeatures } from '../common/tenant-features.helper';
 
 /**
  * Partner self-service — ported from platform/src/app/api/partner/* onto /v1.
@@ -18,7 +20,10 @@ import { buildPayoutStatement } from '../common/payout-statement.helper';
  */
 @Injectable()
 export class PartnerService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenant: TenantService,
+  ) {}
 
   private readonly bannerSettingKey = 'banner_config';
 
@@ -52,6 +57,11 @@ export class PartnerService {
       ? await this.resolvePartnerActivity(user.clientId, partner.id)
       : { outletType: null, hasPointsActivity: false, hasPayoutActivity: false };
 
+    // Per-tenant feature blob (DB-backed via TenantService.resolveClient — D-1). The
+    // partner shell reads its runtime feature gating (walletModule / partnerApp.*)
+    // from THIS authenticated response instead of the in-code CLIENT_REGISTRY.
+    const features = await resolveTenantFeatures(this.tenant, user.clientId);
+
     return {
       businessName: partner?.businessName ?? null,
       ownerName: partner?.ownerName ?? null,
@@ -62,6 +72,7 @@ export class PartnerService {
       outletType,
       hasPointsActivity,
       hasPayoutActivity,
+      features,
     };
   }
 

@@ -11,6 +11,8 @@
 import { useState, useEffect } from 'react';
 import { authHeader } from '@/lib/api-client';
 import { getStoredUser } from '@/lib/auth-client';
+import type { FeatureFlags } from '@/lib/platform/client-config';
+import { DEFAULT_FEATURES, normalizeFeatures } from '@/lib/tenant-features';
 
 export interface PartnerIdentity {
   /** firm/business name for the shell header (channelPartner.businessName). */
@@ -27,6 +29,14 @@ export interface PartnerIdentity {
    */
   hasPointsActivity: boolean;
   hasPayoutActivity: boolean;
+  /**
+   * The caller's tenant feature flags (DB-backed, from the same /partner/me response —
+   * §A-DOMAIN "P5"). The partner shell reads its nav gating (walletModule /
+   * partnerApp.showLeaderboard) from HERE, not the in-code CLIENT_REGISTRY. Fully
+   * shaped (normalizeFeatures) so nested keys are always safe to read; DEFAULT_FEATURES
+   * while loading / when the caller has no resolvable tenant features.
+   */
+  features: FeatureFlags;
   /**
    * True until GET /partner/me settles (resolve OR error). Consumers that GATE on the
    * presence signals (e.g. the rewards page) must wait for this to be false before
@@ -49,6 +59,7 @@ export function usePartnerIdentity(): PartnerIdentity {
     outletType: null,
     hasPointsActivity: false,
     hasPayoutActivity: false,
+    features: DEFAULT_FEATURES,
     loading: true,
   });
 
@@ -69,6 +80,7 @@ export function usePartnerIdentity(): PartnerIdentity {
           outletType: d?.outletType ?? null,
           hasPointsActivity: d?.hasPointsActivity === true,
           hasPayoutActivity: d?.hasPayoutActivity === true,
+          features: normalizeFeatures(d?.features),
           loading: false,
         }));
       })

@@ -40,7 +40,9 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
   const router       = useRouter();
   const identity     = usePartnerIdentity(); // REAL identity + presence signals (replaces demo persona/track)
   const clientConfig = useClientConfig();
-  const features     = clientConfig.features;
+  // Feature gating is DB-sourced from the same authenticated /partner/me response
+  // (§A-DOMAIN "P5"), NOT the in-code registry. Branding still comes from clientConfig.
+  const features     = identity.features;
   const [notifOpen,      setNotifOpen]      = useState(false);
   // Notifications are seeded once on mount; base them on the real points signal
   // (payout-style otherwise). The identity upgrades async from /partner/me, so the

@@ -7,7 +7,7 @@ import { headers } from 'next/headers';
 import { resolveClientConfig } from './tenant-resolution';
 import { refreshIfStale } from './tenant-routing-cache';
 import { buildCssVariables } from './client-config';
-import { DEOLEO_CONFIG } from './client-registry';
+import { DEFAULT_CLIENT_CONFIG } from './default-client-config';
 import type { ClientConfig } from './client-config';
 
 /**
@@ -15,10 +15,10 @@ import type { ClientConfig } from './client-config';
  * full ClientConfig from the in-code registry (Prisma-free).
  *
  * Fallback chain (airtight — server rendering must never break):
- *   1. No slug header           → DEOLEO_CONFIG (dev / no-subdomain — the only runtime
- *                                 path today, since no middleware sets x-tenant-slug)
+ *   1. No slug header           → DEFAULT_CLIENT_CONFIG (dev / no-subdomain — the
+ *                                 platform-neutral fallback)
  *   2. Slug present in registry  → resolveClientConfig(slug)
- *   3. Slug unknown in registry  → DEOLEO_CONFIG (last resort)
+ *   3. Slug unknown in registry  → DEFAULT_CLIENT_CONFIG (last resort)
  *
  * D2 (#31): the DB-backed branch (`getClientConfigFromDb` → platform Prisma) was retired.
  * It never executed at runtime (no middleware sets the slug → always Branch 1), so this is
@@ -35,8 +35,8 @@ export async function getTenantConfig(): Promise<ClientConfig> {
   const hdrs = await headers();
   const slug = hdrs.get('x-tenant-slug');
 
-  if (!slug) return DEOLEO_CONFIG;
-  return resolveClientConfig(slug) ?? DEOLEO_CONFIG;
+  if (!slug) return DEFAULT_CLIENT_CONFIG;
+  return resolveClientConfig(slug) ?? DEFAULT_CLIENT_CONFIG;
 }
 
 /**

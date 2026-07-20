@@ -211,10 +211,14 @@ describe('buildClientSummary', () => {
   });
 
   it('counts enabled features correctly', () => {
-    const deoleo  = buildClientSummary(DEOLEO_CONFIG);
-    const clientb = buildClientSummary(CLIENT_B_CONFIG);
-    // Deoleo has more features on than Client B
-    expect(deoleo.enabledFeatureCount).toBeGreaterThan(clientb.enabledFeatureCount);
+    // §A-DOMAIN "P5": the registry entries now inherit DEFAULT features, so the count
+    // reflects the config passed in. A config with an extra module ON counts higher.
+    const base = buildClientSummary(DEOLEO_CONFIG);
+    const more = buildClientSummary({
+      ...DEOLEO_CONFIG,
+      features: { ...DEOLEO_CONFIG.features, visibilityInvoiceModule: true, referralModule: true },
+    });
+    expect(more.enabledFeatureCount).toBeGreaterThan(base.enabledFeatureCount);
   });
 
   it('reflects the status from ClientConfig', () => {

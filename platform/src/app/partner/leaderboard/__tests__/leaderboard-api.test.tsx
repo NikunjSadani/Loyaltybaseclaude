@@ -22,9 +22,11 @@ vi.mock('next/link', () => ({
   ),
 }));
 
-// Leaderboard is opt-in per tenant; these API tests always render with showLeaderboard=true
-vi.mock('@/lib/platform/client-config-context', () => ({
-  useClientConfig: () => ({
+// Leaderboard is opt-in per tenant; features now come from the authenticated
+// /partner/me endpoint via useTenantFeatures (§A-DOMAIN "P5"). These API tests
+// always render with showLeaderboard=true, resolved (loading=false).
+vi.mock('@/lib/tenant-features', () => ({
+  useTenantFeatures: () => ({
     features: {
       walletModule: true,
       partnerApp: {
@@ -32,10 +34,8 @@ vi.mock('@/lib/platform/client-config-context', () => ({
         showTeam: true, showLeaderboard: true,
       },
     },
-    branding: { displayName: 'Test', primaryColor: '#16a34a' },
+    loading: false,
   }),
-  ClientConfigProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  useFeatureFlag: () => true,
 }));
 
 import LeaderboardPage from '../page';
