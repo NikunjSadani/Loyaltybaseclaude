@@ -212,7 +212,7 @@ jobs:
             --min-instances=1 \
             --max-instances=10 \
             --cpu-throttling \
-            --set-env-vars="NODE_ENV=production" \
+            --set-env-vars="NODE_ENV=production,EDGE_SECRET=${{ secrets.EDGE_SECRET }}" \
             --set-secrets="JWT_SECRET=JWT_SECRET:latest"
 
   # ── Post-deploy health check ─────────────────────────────────────────────────

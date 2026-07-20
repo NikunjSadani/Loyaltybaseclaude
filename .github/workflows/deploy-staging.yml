@@ -186,7 +186,7 @@ jobs:
             --cpu=1 \
             --min-instances=0 \
             --max-instances=3 \
-            --set-env-vars="NODE_ENV=production" \
+            --set-env-vars="NODE_ENV=production,EDGE_SECRET=${{ secrets.EDGE_SECRET }}" \
             --set-secrets="JWT_SECRET=JWT_SECRET_STAGING:latest"
 
   # ── Summary ──────────────────────────────────────────────────────────────────
