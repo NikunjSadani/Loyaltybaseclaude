@@ -7,7 +7,8 @@ import * as XLSX from 'xlsx';
 import { jsonToSheetSafe } from '@/lib/xlsx-safe';
 import { Spinner } from '@/components/ui/spinner';
 import { TransactionItem } from '@/components/wallet/transaction-item';
-import { TransactionType, WalletBucket, type WalletTransaction } from '@/types';
+import { PayoutStatementRow } from '@/components/wallet/payout-statement-row';
+import { TransactionType, WalletBucket, type WalletTransaction, type PayoutLedgerEntry } from '@/types';
 
 /* ─── Types ─────────────────────────────────────────────────────────────────── */
 
@@ -33,6 +34,13 @@ interface OutletMeta {
   lifetime: number;
   redeemed: number;
 }
+
+/* Combined statement rows — points transactions AND ₹ payout entries, interleaved
+   by date (mirrors the partner wallet). Payout rows carry no points/running-balance
+   (balance stays points-only); points rows carry no ₹/UTR. */
+type SalesPointsRow = { kind: 'points'; date: Date; label?: string; entry: LedgerEntry };
+type SalesPayoutRow = { kind: 'payout'; date: Date; label?: string; payout: PayoutLedgerEntry };
+type SalesLedgerRow = SalesPointsRow | SalesPayoutRow;
 
 /* ─── (mock data removed — wired to /api/kyc/[id]/ledger) ─────────────────── */
 
@@ -78,10 +86,10 @@ type EarnBurnFilter = 'all' | 'earn' | 'burn';
 const EARN_TYPES = new Set<TxType>(['earn', 'credit']);
 const BURN_TYPES = new Set<TxType>(['redeem', 'expire', 'hold']);
 
-function txDateToMonthKey(dateStr: string): number {
-  const [yr, mo] = dateStr.split('-');
-  return parseInt(yr, 10) * 100 + parseInt(mo, 10);
-}
+// TZ-safe month key: points dates are UTC-midnight ('YYYY-MM-DD') and payout dates are
+// UTC ISO / a UTC-constructed period day, so read UTC getters — matches the string-based
+// auto-range (.slice) and never rolls a month-boundary row into the wrong month.
+function dateMonthKey(d: Date): number { return d.getUTCFullYear() * 100 + (d.getUTCMonth() + 1); }
 function inputToKey(val: string): number {
   const [yr, mo] = val.split('-');
   return parseInt(yr, 10) * 100 + parseInt(mo, 10);
@@ -102,24 +110,53 @@ const CURRENT_MONTH = new Date().toISOString().slice(0, 7);
 const DEFAULT_FROM  = CURRENT_MONTH;
 const DEFAULT_TO    = CURRENT_MONTH;
 
-/* ─── Excel download ─────────────────────────────────────────────────────────── */
+/* period 'YYYY-MM' → 'May 2026' (matches the payout row's on-screen label). */
+function periodLabel(period: string): string {
+  const [yr, mo] = period.split('-');
+  return new Date(+yr, +mo - 1, 1).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+}
+/** A JS Date → the YYYY-MM-DD the points rows carry, for the Excel Date column. */
+function dateToYmd(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 
-function downloadLedger(entries: LedgerEntry[], outletName: string, period: string) {
+/* ─── Excel download — unified points + payout statement ──────────────────────── */
+
+function downloadLedger(rows: SalesLedgerRow[], outletName: string, period: string) {
   const TYPE_LABEL: Record<TxType, string> = {
     earn: 'Earned', credit: 'Credited', redeem: 'Redeemed', hold: 'On Hold', expire: 'Expired',
   };
-  const rows = entries.map((e) => ({
-    Date:        e.date,
-    Description: e.description,
-    Type:        TYPE_LABEL[e.type],
-    Points:      e.points > 0 ? `+${e.points}` : String(e.points),
-    Balance:     e.balance,
-    Reference:   e.ref ?? '',
-  }));
-  const ws = jsonToSheetSafe(rows);
-  ws['!cols'] = [{ wch: 13 }, { wch: 48 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 18 }];
+  const sheetRows = rows.map((r) => {
+    if (r.kind === 'points') {
+      const e = r.entry;
+      return {
+        Date:         e.date,
+        Description:  e.description,
+        Type:         TYPE_LABEL[e.type],
+        Points:       e.points > 0 ? `+${e.points}` : String(e.points),
+        Balance:      e.balance,
+        'Amount (₹)': '' as string | number,
+        UTR:          '',
+        Reference:    e.ref ?? '',
+      };
+    }
+    // Payout row: ₹ + UTR; points/running-balance stay blank (balance is points-only).
+    const p = r.payout;
+    return {
+      Date:         dateToYmd(r.date),
+      Description:  `${p.kpiLabel} · ${periodLabel(p.period)}`,
+      Type:         p.status === 'PAID' ? 'Payout' : 'Payout (Pending)',
+      Points:       '',
+      Balance:      '' as string | number,
+      'Amount (₹)': p.payoutAmountPaise / 100,
+      UTR:          p.utr ?? '—',
+      Reference:    p.narration ?? '',
+    };
+  });
+  const ws = jsonToSheetSafe(sheetRows);
+  ws['!cols'] = [{ wch: 13 }, { wch: 48 }, { wch: 12 }, { wch: 10 }, { wch: 10 }, { wch: 14 }, { wch: 20 }, { wch: 18 }];
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Points Ledger');
+  XLSX.utils.book_append_sheet(wb, ws, 'Wallet Statement');
   XLSX.writeFile(wb, `${outletName.replace(/[^a-z0-9]/gi, '-').toLowerCase()}-ledger-${period}.xlsx`);
 }
 
@@ -130,6 +167,7 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
 
   const [outlet,        setOutlet]        = useState<OutletMeta | null>(null);
   const [rawEntries,    setRawEntries]    = useState<LedgerEntry[]>([]);
+  const [rawPayouts,    setRawPayouts]    = useState<PayoutLedgerEntry[]>([]);
   const [loading,       setLoading]       = useState(true);
   const [fetchError,    setFetchError]    = useState('');
   const [earnBurnFilter, setEarnBurnFilter] = useState<EarnBurnFilter>('all');
@@ -148,13 +186,21 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
       .then((r) => r.json())
       .then((body) => {
         if (!body.success) { setFetchError(body.error ?? 'Failed to load'); return; }
-        const { meta, transactions } = body.data;
+        const { meta, transactions, payouts } = body.data;
         setOutlet(meta);
         setRawEntries(transactions ?? []);
-        if (transactions?.length) {
-          const dates = transactions.map((t: LedgerEntry) => t.date);
-          const min   = dates.reduce((a: string, b: string) => (a < b ? a : b));
-          const max   = dates.reduce((a: string, b: string) => (a > b ? a : b));
+        setRawPayouts(payouts ?? []);
+        // Auto-range from the COMBINED history (points + payouts) so a payout-only
+        // (wholesaler) outlet — which has no points rows — still gets a sensible window.
+        const dates: string[] = [
+          ...((transactions ?? []) as LedgerEntry[]).map((t) => t.date),
+          ...((payouts ?? []) as PayoutLedgerEntry[]).map(
+            (p) => (p.paidAt ?? p.uploadedAt ?? `${p.period}-01`).slice(0, 10),
+          ),
+        ];
+        if (dates.length) {
+          const min   = dates.reduce((a, b) => (a < b ? a : b));
+          const max   = dates.reduce((a, b) => (a > b ? a : b));
           const toKey = (d: string) => d.slice(0, 7);
           setFromMonth(toKey(min));
           setToMonth(toKey(max));
@@ -166,31 +212,51 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
       .finally(() => setLoading(false));
   }, [id]);
 
-  /* Bounds for <input type="month"> */
+  /* ── Combined rows: points transactions + ₹ payout entries (interleaved) ── */
+  const allRows = useMemo<SalesLedgerRow[]>(() => {
+    const pointsRows: SalesLedgerRow[] = rawEntries.map((e) => ({
+      kind: 'points', date: new Date(e.date), label: e.fieldName ?? undefined, entry: e,
+    }));
+    const payoutRows: SalesLedgerRow[] = rawPayouts
+      .filter((p) => p.status !== 'FAILED')
+      .map((p) => {
+        const [yr, mo] = p.period.split('-');
+        const date = p.paidAt ? new Date(p.paidAt)
+          : p.uploadedAt ? new Date(p.uploadedAt)
+          : new Date(Date.UTC(+yr, +mo - 1, 1)); // UTC so dateMonthKey's UTC getters key it right
+        return { kind: 'payout', date, label: p.kpiLabel, payout: p };
+      });
+    return [...pointsRows, ...payoutRows];
+  }, [rawEntries, rawPayouts]);
+
+  /* Bounds for <input type="month"> — across the COMBINED history */
   const [minMonth, maxMonth] = useMemo(() => {
-    if (!rawEntries.length) return [DEFAULT_FROM, DEFAULT_TO];
-    const keys = rawEntries.map((e) => txDateToMonthKey(e.date));
+    if (!allRows.length) return [DEFAULT_FROM, DEFAULT_TO];
+    const keys = allRows.map((r) => dateMonthKey(r.date));
     return [keyToInput(Math.min(...keys)), keyToInput(Math.max(...keys))];
-  }, [rawEntries]);
+  }, [allRows]);
 
-  /* KPI options — distinct credit FIELD NAMES from ALL raw entries */
+  /* KPI options — distinct labels (credit field names + payout KPI labels) */
   const kpiOptions = useMemo(() => [
-    ...new Set(rawEntries.map((e) => e.fieldName).filter((l): l is string => !!l)),
-  ], [rawEntries]);
+    ...new Set(allRows.map((r) => r.label).filter((l): l is string => !!l)),
+  ], [allRows]);
 
-  /* Apply date-range + earn/burn + KPI filter */
-  const filtered = useMemo(() => {
+  /* Apply date-range + earn/burn + KPI filter, newest-first */
+  const displayedRows = useMemo(() => {
     const fromKey = inputToKey(fromMonth);
     const toKey   = inputToKey(toMonth);
-    return rawEntries
-      .filter((e) => { const k = txDateToMonthKey(e.date); return k >= fromKey && k <= toKey; })
-      .filter((e) => {
-        if (earnBurnFilter === 'earn') return EARN_TYPES.has(e.type);
-        if (earnBurnFilter === 'burn') return BURN_TYPES.has(e.type);
-        return true;
+    return allRows
+      .filter((r) => { const k = dateMonthKey(r.date); return k >= fromKey && k <= toKey; })
+      .filter((r) => {
+        // Earn/Burn applies to points rows; payout rows are inbound ₹ → treated as "earn".
+        if (earnBurnFilter === 'all') return true;
+        if (r.kind === 'payout') return earnBurnFilter === 'earn';
+        if (earnBurnFilter === 'earn') return EARN_TYPES.has(r.entry.type);
+        return BURN_TYPES.has(r.entry.type);
       })
-      .filter((e) => !kpiFilter || e.fieldName === kpiFilter);
-  }, [rawEntries, fromMonth, toMonth, earnBurnFilter, kpiFilter]);
+      .filter((r) => !kpiFilter || r.label === kpiFilter)
+      .sort((a, b) => +b.date - +a.date);
+  }, [allRows, fromMonth, toMonth, earnBurnFilter, kpiFilter]);
 
   const periodDisp = rangeLabel(fromMonth, toMonth);
 
@@ -288,9 +354,9 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
 
                 <div className="flex items-center gap-2">
                   {/* Excel download */}
-                  {filtered.length > 0 && (
+                  {displayedRows.length > 0 && (
                     <button
-                      onClick={() => downloadLedger(filtered, o.name, `${fromMonth}_${toMonth}`)}
+                      onClick={() => downloadLedger(displayedRows, o.name, `${fromMonth}_${toMonth}`)}
                       title="Download as Excel"
                       className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border border-gray-200 bg-white text-gray-600 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-all"
                     >
@@ -389,26 +455,27 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
                     <option key={label} value={label}>{label}</option>
                   ))}
                 </select>
-                <span className="ml-auto text-[10px] text-gray-400">{filtered.length} entries</span>
+                <span className="ml-auto text-[10px] text-gray-400">{displayedRows.length} entries</span>
               </div>
             </div>
 
-            {/* Transaction list */}
-            {filtered.length === 0 ? (
+            {/* Transaction list — points rows + ₹ payout rows, interleaved by date */}
+            {displayedRows.length === 0 ? (
               <div className="flex flex-col items-center gap-2 py-12">
                 <Coins className="h-8 w-8 text-gray-200" />
                 <p className="text-sm text-gray-400">No transactions for this period</p>
               </div>
             ) : (
               <div className="divide-y divide-gray-50 px-4">
-                {filtered.map((entry) => {
-                  const walletTx = toWalletTx(entry);
-                  return (
-                    <div key={entry.id}>
-                      <TransactionItem transaction={walletTx} />
+                {displayedRows.map((r) =>
+                  r.kind === 'points' ? (
+                    <div key={`pts-${r.entry.id}`}>
+                      <TransactionItem transaction={toWalletTx(r.entry)} />
                     </div>
-                  );
-                })}
+                  ) : (
+                    <PayoutStatementRow key={`pay-${r.payout.id}`} entry={r.payout} />
+                  ),
+                )}
               </div>
             )}
           </div>

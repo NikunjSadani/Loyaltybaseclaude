@@ -23,6 +23,7 @@ import { generateNumericOtp } from '../common/otp';
 import { sniffFileType } from '../common/file-signature';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
 import { resolveCreditFieldNames } from '../common/credit-field-name.helper';
+import { buildPayoutStatement } from '../common/payout-statement.helper';
 import {
   hasReKycFlags,
   allowedDocTypes,
@@ -2110,6 +2111,18 @@ export class KycService {
       transactions,
     );
 
+    // Unified payout history for this outlet's owner (₹ + UTR), from the SAME shared
+    // builder the partner wallet uses (buildPayoutStatement) — so the sales outlet
+    // ledger and the partner wallet can never drift. Scoped to the submission's
+    // partner; access is already gated by assertCanViewSubmission above.
+    const payouts = submission.partnerId
+      ? await buildPayoutStatement(
+          this.prisma,
+          partner?.clientId ?? user.clientId,
+          submission.partnerId,
+        )
+      : [];
+
     return {
       meta: {
         name: partner?.businessName ?? 'Unknown',
@@ -2130,6 +2143,7 @@ export class KycService {
         // Credit rows resolve to their batch field name; everything else is null.
         fieldName: fieldNameByTxId.get(tx.id) ?? null,
       })),
+      payouts,
     };
   }
 

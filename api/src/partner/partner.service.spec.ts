@@ -315,7 +315,7 @@ describe('PartnerService', () => {
       expect(paid.paidAt).toBe(new Date('2026-06-20T00:00:00.000Z').toISOString());
 
       // No leaked internal sort key on the wire.
-      expect((res.payouts[0] as Record<string, unknown>)._sortAt).toBeUndefined();
+      expect((res.payouts[0] as unknown as Record<string, unknown>)._sortAt).toBeUndefined();
     });
   });
 

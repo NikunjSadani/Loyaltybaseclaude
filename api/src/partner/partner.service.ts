@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
 import { kpiCodeKeys, NAMES_KEY, lastNMonths } from '../targets/targets.helpers';
+import { buildPayoutStatement } from '../common/payout-statement.helper';
 
 /**
  * Partner self-service — ported from platform/src/app/api/partner/* onto /v1.
@@ -168,108 +169,15 @@ export class PartnerService {
     });
     if (!partner) return { payouts: [] };
 
-    // The partner's outlets — credit payouts are scoped by outlet CODE (a partner may
-    // own several outlets); redemption payouts are scoped by partnerId. CreditPayoutEntry
-    // .outletId holds the outlet CODE (a bare string, not the Outlet PK) — see the note
-    // in resolvePartnerActivity — so this MUST key on outletCode or it matches nothing.
-    const outlets = await this.prisma.outlet.findMany({
-      where: { clientId: user.clientId, partnerId: partner.id, deletedAt: null },
-      select: { outletCode: true },
-    });
-    const outletCodes = outlets.map((o) => o.outletCode);
-
-    // Two payout rails, unioned into one history the partner sees in the wallet:
-    //   • redemption cash-outs → PayoutTransaction (scoped by partnerId)
-    //   • credit-based payouts → CreditPayoutEntry (scoped by outletId)
-    // Credit entries are surfaced from generation (PENDING/PROCESSING) through PAID
-    // so the outlet sees a payout is coming, then the SAME row flips to PAID with its
-    // UTR — mirroring the redemption side. FAILED/REVERSED are excluded (a transient
-    // bank-reject that GLM-2 re-banks / a clawed-back award — not a payout to show).
-    const [transactions, creditEntries] = await Promise.all([
-      this.prisma.payoutTransaction.findMany({
-        // Hide FAILED/REVERSED at the query so they don't consume the 100-cap or the
-        // presence card (aligns the list rail with the credit rail + the presence probe).
-        where: { partnerId: partner.id, status: { notIn: ['FAILED', 'REVERSED'] } },
-        include: {
-          batch: {
-            select: { batchCode: true, notes: true, createdAt: true },
-          },
-        },
-        orderBy: { createdAt: 'desc' },
-        take: 100,
-      }),
-      outletCodes.length
-        ? this.prisma.creditPayoutEntry.findMany({
-            where: {
-              clientId: user.clientId,
-              outletId: { in: outletCodes },
-              status: { in: ['PENDING', 'PROCESSING', 'PAID'] },
-            },
-            select: {
-              id: true,
-              period: true,
-              fieldName: true,
-              amountPaise: true,
-              narration: true,
-              status: true,
-              utr: true,
-              paidAt: true,
-              createdAt: true,
-            },
-            orderBy: { createdAt: 'desc' },
-            take: 100,
-          })
-        : Promise.resolve(
-            [] as Array<{
-              id: string;
-              period: string;
-              fieldName: string;
-              amountPaise: bigint;
-              narration: string;
-              status: string;
-              utr: string | null;
-              paidAt: Date | null;
-              createdAt: Date;
-            }>,
-          ),
-    ]);
-
-    // Effective date = when money hit (completedAt/paidAt) else when it was added
-    // (createdAt); the merged list sorts newest-first on it, then caps at 100.
-    const redemptionPayouts = transactions.map((t) => ({
-      id: t.id,
-      period: this.toPeriod(t.completedAt ?? t.createdAt),
-      kpiLabel: t.batch?.notes ?? 'Incentive Payout',
-      achievedPct: 100,
-      payoutAmountPaise: Number(t.netAmountPaise),
-      uploadedAt: (t.batch?.createdAt ?? t.createdAt).toISOString(),
-      utr: t.providerRefId ?? undefined,
-      paidAt: t.completedAt?.toISOString() ?? undefined,
-      status: this.mapPayoutStatus(t.status),
-      narration: t.batch?.notes ?? undefined,
-      _sortAt: (t.completedAt ?? t.createdAt).getTime(),
-    }));
-
-    const creditPayouts = creditEntries.map((e) => ({
-      id: e.id,
-      period: e.period, // already 'YYYY-MM' (the credit month) — no server-TZ derivation
-      kpiLabel: e.fieldName || 'Credit Payout',
-      achievedPct: 100,
-      payoutAmountPaise: Number(e.amountPaise),
-      uploadedAt: e.createdAt.toISOString(), // when the payout was generated/added
-      utr: e.utr ?? undefined,
-      paidAt: e.paidAt?.toISOString() ?? undefined,
-      status: this.mapCreditEntryStatus(e.status),
-      narration: e.narration || undefined,
-      _sortAt: (e.paidAt ?? e.createdAt).getTime(),
-    }));
-
-    const payouts = [...redemptionPayouts, ...creditPayouts]
-      .sort((a, b) => b._sortAt - a._sortAt)
-      .slice(0, 100)
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      .map(({ _sortAt, ...p }) => p);
-
+    // Delegated to the shared builder so the partner wallet + the sales outlet
+    // ledger (kyc.service.ledger) can never drift — it does the exact two-rail
+    // union (redemption by partnerId + credit by outlet CODE), status mapping,
+    // FAILED/REVERSED exclusion, newest-first sort and 100-cap.
+    const payouts = await buildPayoutStatement(
+      this.prisma,
+      user.clientId,
+      partner.id,
+    );
     return { payouts };
   }
 
@@ -601,29 +509,4 @@ export class PartnerService {
     return { team };
   }
 
-  private toPeriod(d: Date): string {
-    const yr = d.getFullYear();
-    const mo = String(d.getMonth() + 1).padStart(2, '0');
-    return `${yr}-${mo}`;
-  }
-
-  private mapPayoutStatus(s: string): 'PAID' | 'PENDING' | 'PROCESSING' | 'FAILED' {
-    // 'SUCCESS' is the actual completed value in the PayoutStatus enum (payouts.service
-    // writes it on UTR upload); 'PAID'/'COMPLETED' are kept as defensive aliases. Missing
-    // 'SUCCESS' here mapped every paid redemption to PENDING → shown as perpetually pending.
-    if (s === 'SUCCESS' || s === 'PAID' || s === 'COMPLETED') return 'PAID';
-    if (s === 'FAILED' || s === 'REVERSED') return 'FAILED';
-    if (s === 'INITIATED' || s === 'PROCESSING') return 'PROCESSING';
-    return 'PENDING';
-  }
-
-  // CreditEntryStatus → the wallet's 4-state payout status. FAILED/REVERSED map to
-  // FAILED (though getPayouts excludes them from the surfaced set); PROCESSING is the
-  // in-flight state (entry pulled into a payout download, awaiting UTR).
-  private mapCreditEntryStatus(s: string): 'PAID' | 'PENDING' | 'PROCESSING' | 'FAILED' {
-    if (s === 'PAID') return 'PAID';
-    if (s === 'FAILED' || s === 'REVERSED') return 'FAILED';
-    if (s === 'PROCESSING') return 'PROCESSING';
-    return 'PENDING';
-  }
 }

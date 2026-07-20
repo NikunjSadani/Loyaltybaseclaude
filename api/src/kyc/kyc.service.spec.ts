@@ -62,13 +62,17 @@ const mockPrisma = {
   kycStatusHistory: { create: jest.fn(), findMany: jest.fn() },
   kycDocument: { create: jest.fn(), findUnique: jest.fn() },
   otpCode: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
-  outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
+  outlet: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   // assertCanViewSubmission's reassignment-aware allow-path looks up the outlet's
   // CURRENT active assignment (unassignedAt null) to a salesUser in the caller's subtree.
   salesUserAssignment: { findFirst: jest.fn() },
   // ledger() resolves each credit tx's field name from its CreditBatch rows JSON.
   creditBatch: { findMany: jest.fn() },
+  // ledger() also unions the outlet's payouts via buildPayoutStatement (shared with the
+  // partner wallet) → these findMany must exist (default: no payouts, so ledger resolves).
+  payoutTransaction: { findMany: jest.fn().mockResolvedValue([]) },
+  creditPayoutEntry: { findMany: jest.fn().mockResolvedValue([]) },
   consentRecord: { create: jest.fn() },
   kycVerificationItem: { upsert: jest.fn() },
   // slaMetrics resolves the SLA target from the tenant's stored `slaTargetHours` row.
@@ -182,6 +186,12 @@ describe('KycService', () => {
     // Tests that assert a collision override these with mockResolvedValueOnce.
     mockTx.channelPartner.findFirst.mockResolvedValue(null);
     mockTx.channelPartner.findMany.mockResolvedValue([]);
+    // ledger() now unions the outlet's payouts via buildPayoutStatement — default to no
+    // payouts so ledger tests that don't exercise them still resolve (reset above wipes
+    // definition-level defaults). Payout-specific tests override with mockResolvedValueOnce.
+    mockPrisma.outlet.findMany.mockResolvedValue([]);
+    mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
+    mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         KycService,
@@ -1572,6 +1582,31 @@ describe('KycService', () => {
       });
       mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
       await expect(service.ledger(so, 's1')).resolves.toBeDefined();
+    });
+
+    it("surfaces the outlet owner's payouts (₹ + UTR) via the shared builder, scoped by outlet CODE", async () => {
+      // Partner reads their OWN submission (where.userId = sub). Submission has a partner
+      // + one outlet code → buildPayoutStatement unions its credit payouts into the ledger.
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        id: 's1', userId: 'sss1', partnerId: 'p1',
+        partner: { clientId: 'deoleo', businessName: 'B', phone: 'p', outlets: [{ outletCode: 'O1' }], wallets: [] },
+      });
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([{ outletCode: 'O1' }]);
+      mockPrisma.payoutTransaction.findMany.mockResolvedValueOnce([]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValueOnce([
+        {
+          id: 'ce1', period: '2026-05', fieldName: 'Visibility', amountPaise: 500000n,
+          narration: 'note', status: 'PAID', utr: 'UTR123',
+          paidAt: new Date('2026-05-10'), createdAt: new Date('2026-05-01'),
+        },
+      ]);
+      const res = await service.ledger(sss, 's1');
+      expect(res.payouts).toHaveLength(1);
+      expect(res.payouts[0]).toMatchObject({
+        id: 'ce1', payoutAmountPaise: 500000, utr: 'UTR123', status: 'PAID', kpiLabel: 'Visibility',
+      });
+      // Credit payouts MUST be keyed on the outlet CODE, not the Outlet PK.
+      expect(mockPrisma.creditPayoutEntry.findMany.mock.calls[0][0].where.outletId).toEqual({ in: ['O1'] });
     });
 
     it('forbids the ledger read when the outlet is NOT assigned into the subtree (unrelated SO preserved)', async () => {
