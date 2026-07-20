@@ -11,19 +11,23 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-- **prod == main == `437045a`** (CUTOVER #10, live 2026-07-19 — WALLET-SURFACING + §A-DOMAIN P1/P2/P4/P4b).
-  **develop is ~68 commits AHEAD of prod** (HEAD `8f817b9`) — everything below is on develop/staging,
-  staging-verified, **NOT in prod yet** → awaiting the next owner-gated cutover (#11). Verify HEADs via `git log`.
-- **develop payload beyond prod (all done + gate-green + staging-verified this session):**
-  **sales-ledger payout unification** (`af9948b`), **§A-DOMAIN D-1** (`9872806`, resolveClient→clients table),
-  **§A-DOMAIN P5** (`c4d1cf9`, registry-code retired: features from authenticated /me), **P6/S1 edge-secret**
-  (`98ea243`+`a90d75b`, code shipped INERT), and the **P6 hardening batch** (`4cab103` favicon-from-DB-branding +
-  `ad2b074` proxy/worker unit tests + `f578cad` 2nd-tenant DB-routing E2E + seed). Plus the P3 worker (deployed to
-  CF edge, now stamping the edge secret — version `44088f8a`) + branding-backfill (live in prod DB, needed no cutover).
+- **prod == main == develop == `e8de31a`** (CUTOVER #11, live 2026-07-20 — §A-DOMAIN COMPLETE: D-1 + P5 + P6/S1 +
+  sales-ledger unification). develop is now **level with prod** (0 ahead). Verify HEADs via `git log`.
+- **§A-DOMAIN is FULLY LIVE on prod (verified post-cutover):** DB-driven routing (D-1, resolveClient→`clients`),
+  features-from-authenticated-`/me` (P5, registry reduced to fallback), and **S1 edge-secret ENFORCING on production**
+  — prod smoke confirmed: legit Deoleo login 200 + secret matches the worker; a forged direct-`.run.app`
+  `x-forwarded-host` resolves to `default`, NOT the spoofed tenant (forge rejected). Code-only cutover — **no new
+  migrations**. Also live: favicon-from-DB-branding, proxy/worker unit tests, 2nd-tenant DB-routing E2E, the sales-ledger
+  payout unification. P3 worker (`44088f8a`) stamps the edge secret for all `*.gifsy.in`.
 - **DB tenant-routing LIVE in prod** (`TENANT_ROUTING_SOURCE` default `db`, registry fallback → Deoleo
-  unaffected). Kill-switch: `TENANT_ROUTING_SOURCE=registry` on the FE service.
-- Gate green on develop `8f817b9`: **api jest 1540 · nest 0 · FE vitest 1917 · tsc 0**. (prod `437045a`
-  gate was api 1529 · FE 1844.)
+  unaffected). Kill-switch: `TENANT_ROUTING_SOURCE=registry` on the FE service. **⚠️ `RBAC_ENFORCEMENT` env still OFF.**
+- Gate green on `e8de31a`: **api jest 1540 · nest 0 · FE vitest 1917 · tsc 0**. Pre-cutover backup `1784547142461`;
+  rollback ref = prior prod `437045a`.
+- **⚠️ KNOWN TEST-ONLY DEBT (does NOT affect prod): the E2E harness is half-migrated for AF-6.** `f600d42` fixed
+  `login.ts`+`write.ts` (cookie/JWT reads) but an audit found `helpers/assert.ts` + 2 specs still read the removed
+  localStorage token (would false-fail), ~40 specs read it and survive only by luck, and some "cross-role reader"
+  specs silently auth as the page's role (proxy strips the Bearer, uses the cookie). NEEDS a complete cookie-migration
+  pass + an F3 design call (backend-direct Bearer vs 2nd browser context). Harness doesn't run in CI/prod → zero prod impact.
 
 ## ▶ IMMEDIATE NEXT — finish §A-DOMAIN P6 + cutover #11
 P0–P2 + P4/P4b IN PROD; **P3 + D-1 + P5 ✅ DONE on develop (staging-verified, awaiting cutover #11)**. **P6 ✅ DONE
@@ -287,14 +291,15 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 | 7 | `98ced7a` | targets-404, `isPrimary` blank-outlet sweep, push click-URLs, KYC-SLA wiring, `deoleo_points_credit`/`payout_credit` money WhatsApps + audit fixes |
 | 8 | `4b33e4c` | presence-based partner wallet, sales+partner ledger field-name (shared resolver), pre-OTP copy |
 | 9 | `ebd474b` | payout UTR "Apply" query-vs-body fix |
-| 10 | `437045a` | **CURRENT PROD** (2026-07-19) — wallet-surfacing (credit payouts in partner wallet) + §A-DOMAIN P1/P2/P4/P4b + `client_domains` migration; verified live |
-| 11 | *(pending, develop `8f817b9`)* | **NOT YET CUT** — sales-ledger payout unification + §A-DOMAIN D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6 (S1 edge-secret [ENFORCING on staging, verified — prod enforces at this cutover] + proxy/worker tests + favicon-from-DB-branding + 2nd-tenant E2E + 2 finding-fixes `58ce1ab` + favicon data-hygiene `b1ece3b`). ~68 commits ahead; all staging-verified; owner-gated |
+| 10 | `437045a` | (2026-07-19) — wallet-surfacing (credit payouts in partner wallet) + §A-DOMAIN P1/P2/P4/P4b + `client_domains` migration; verified live |
+| 11 | `e8de31a` | **CURRENT PROD** (2026-07-20) — §A-DOMAIN COMPLETE: sales-ledger payout unification + D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6 (S1 edge-secret NOW ENFORCING on prod + proxy/worker tests + favicon-from-DB-branding + 2nd-tenant E2E + 2 finding-fixes `58ce1ab`). 24 commits, CODE-ONLY (no migrations); verified live (SHA, health, D-1 routing, S1 forge-rejected). Backup `1784547142461` |
 
 ## START THE SESSION
-Greet. State: **prod == main == `437045a` (cutover #10 live); develop is ~66 commits AHEAD (HEAD `58ce1ab`),
-all staging-verified, awaiting cutover #11.** §A-DOMAIN: P1/P2/P4/P4b IN PROD; **P3 + D-1 + P5 ✅ DONE on develop**
-(DB is now the full runtime source-of-truth); **P6 ✅ DONE on develop + staging** — proxy/worker tests + favicon-from-DB-branding
-+ 2nd-tenant DB-routing E2E shipped; S1 edge-secret **ENFORCING on staging (verified — legit edge login 200+deoleo; forged
-direct-`.run.app` host → rejected)**; prod enforces automatically at cutover #11. **§A-DOMAIN is now essentially complete;
-the next step is cutover #11 itself.** Present the OPEN THREADS and ask which to pick up.
+Greet. State: **prod == main == develop == `e8de31a` (CUTOVER #11 LIVE 2026-07-20). §A-DOMAIN is COMPLETE and fully
+live on prod — DB-driven routing (D-1) + features-from-`/me` (P5) + S1 edge-secret ENFORCING on production (verified:
+legit Deoleo login OK + forged direct-`.run.app` host rejected). develop is level with prod (0 ahead).** Open items:
+(1) **owner:** one real-OTP login on `deoleoloyalty.gifsy.in` as the final human smoke; (2) **test-only debt:** the E2E
+harness is half-migrated for AF-6 (`assert.ts` + ~40 specs still read the removed localStorage token; some cross-role
+reads silently use the page's role) → needs a complete cookie-migration pass + an F3 design call (zero prod impact).
+Present the OPEN THREADS and ask which to pick up.
 ```
