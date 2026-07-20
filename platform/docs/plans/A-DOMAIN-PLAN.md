@@ -1,11 +1,16 @@
 # §A-DOMAIN — DB-driven tenant domain routing + branding (build plan)
 
-> **Status (updated 2026-07-20): P0–P5 + D-1 ✅ SHIPPED, P6 IN PROGRESS.** P0/P1/P2/P4/P4b are IN PROD
-> (cutover #10, `437045a`); P3 worker DEPLOYED to CF edge; branding-backfill live in prod DB; **D-1 (resolveClient
-> →clients) + P5 (registry-code retired, features from authenticated /me) ✅ DONE on develop (`9872806`/`c4d1cf9`,
-> audited GO, staging-verified) — awaiting cutover #11.** Only **P6** remains: S1 edge-secret (code done+inert,
-> activation pending) + proxy/worker tests + 2nd-tenant E2E + favicon-by-slug fix + docs. See [[deoleo-go-live-bundle]]
-> NEWEST-54/53 + `RESUME.md` for the as-built detail. (Original plan below is retained for reference.)
+> **Status (updated 2026-07-20): P0–P5 + D-1 ✅ SHIPPED, P6 ~DONE (owner-gated S1 tail remains).** P0/P1/P2/P4/P4b
+> are IN PROD (cutover #10, `437045a`); P3 worker DEPLOYED to CF edge; branding-backfill live in prod DB; **D-1
+> (resolveClient→clients) + P5 (registry-code retired, features from authenticated /me) ✅ DONE on develop
+> (`9872806`/`c4d1cf9`).** **P6 (`f578cad`, audited GO + full-gate-green + staging-verified):** proxy/worker unit tests
+> (43) + favicon-from-DB-branding (runtime-verified — absolute-GCS-URL preferred, Deoleo static fallback intact) +
+> 2nd-tenant DB-routing E2E (vitest slice + Playwright + seed) all SHIPPED; **S1 edge-secret WORKER ACTIVATED** (256-bit
+> secret bound + worker `44088f8a` stamping `x-edge-secret`, all frontends INERT until their `EDGE_SECRET` env is set).
+> **Only remaining P6 step:** owner adds the `EDGE_SECRET` GitHub Actions repo secret → staging enforces → I runtime-verify
+> a forged direct-`.run.app` host no longer resolves a foreign tenant; prod enforces at cutover #11. Two non-blocking
+> findings logged (proxy `/api/*` 403 dead-branch; worker relative-Location rewrite). See [[deoleo-go-live-bundle]]
+> NEWEST-55/54 + `RESUME.md` for the as-built detail. (Original plan below is retained for reference.)
 > Created 2026-07-18. Supersedes the sizing in `POST-GO-LIVE-BACKLOG.md:23-44`. Tracks as task **#150**.
 
 ## 0. Goal in one line
