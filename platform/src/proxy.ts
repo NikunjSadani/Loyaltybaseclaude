@@ -17,6 +17,7 @@ import { NextRequest, NextResponse, type NextFetchEvent } from 'next/server'
 import { jwtVerify } from 'jose'
 import { resolveTenantSync } from '@/lib/platform/tenant-resolution'
 import { ensureWarm, refreshIfStale } from '@/lib/platform/tenant-routing-cache'
+import { resolveTrustedHost } from '@/lib/platform/edge-trust'
 
 // Refuse to run in production without a real JWT_SECRET — never fall back to a weak default.
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
@@ -65,9 +66,10 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
   }
 
   // ── Step 1: Tenant resolution ──────────────────────────────────────────────
+  // S1 — only TRUST the client-controllable x-forwarded-host when the request came
+  // through the edge worker (x-edge-secret). See lib/platform/edge-trust.ts.
   const hostname =
-    request.headers.get('x-forwarded-host') ??
-    request.headers.get('host') ??
+    resolveTrustedHost((n) => request.headers.get(n)) ??
     request.nextUrl.hostname
   // DB-aware sync resolution (DB map merged over registry; registry-only on cold
   // start). Returns both the slug and the branding-overlaid config in one pass.

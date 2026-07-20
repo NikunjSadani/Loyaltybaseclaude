@@ -2,6 +2,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { resolveTenant } from '@/lib/platform/tenant-resolution';
+import { resolveTrustedHost } from '@/lib/platform/edge-trust';
 
 interface SendOTPResult {
   success: boolean;
@@ -44,6 +45,7 @@ async function resolveClientId(host: string | null): Promise<string | null> {
   return process.env.NODE_ENV === 'production' ? null : DEFAULT_CLIENT_ID;
 }
 
+
 export async function sendOTP(
   mobile: string,
   channel: 'SMS' | 'WHATSAPP',
@@ -53,7 +55,7 @@ export async function sendOTP(
     // Resolve the tenant from the request Host (same as verifyOTP) so the backend can
     // pick the per-tenant login OTP template; absent → the global env template is used.
     const hdrs = await headers();
-    const clientId = await resolveClientId(hdrs.get('x-forwarded-host') ?? hdrs.get('host'));
+    const clientId = await resolveClientId(resolveTrustedHost((n) => hdrs.get(n)));
     if (!clientId) {
       // Fail-closed: could not determine the tenant from this host (prod).
       return { success: false, error: 'Unable to determine your organization from this address.' };
@@ -92,7 +94,7 @@ export async function verifyOTP(
     // (set by cloudflare-worker/worker.js). Read that first so a branded custom domain
     // resolves its tenant instead of falling back to DEFAULT_CLIENT_ID.
     const hdrs = await headers();
-    let clientId = await resolveClientId(hdrs.get('x-forwarded-host') ?? hdrs.get('host'));
+    let clientId = await resolveClientId(resolveTrustedHost((n) => hdrs.get(n)));
 
     // DEV-ONLY clientId override (#39 / Q3). On localhost there is no real subdomain, so the form
     // offers an explicit org field to log in as GIFSY (or any non-default tenant). NEVER honored in

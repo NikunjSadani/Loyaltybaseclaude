@@ -62,7 +62,7 @@ function resolveOrigin(hostname) {
 }
 
 export default {
-  async fetch(request, _env, _ctx) {
+  async fetch(request, env, _ctx) {
     const url = new URL(request.url)
     const hostname = url.hostname
 
@@ -83,6 +83,12 @@ export default {
     const headers = new Headers(request.headers)
     headers.set('x-forwarded-host', hostname)
     headers.set('x-forwarded-proto', url.protocol.replace(':', ''))
+    // S1 — the *.run.app origins are public, so a direct hit could forge x-forwarded-host.
+    // Stamp a shared secret so the frontend only TRUSTS x-forwarded-host on worker-forwarded
+    // requests. Strip any inbound value first so a client can't smuggle one THROUGH the
+    // worker. No-op until EDGE_SECRET is configured (safe, reversible rollout).
+    headers.delete('x-edge-secret')
+    if (env && env.EDGE_SECRET) headers.set('x-edge-secret', env.EDGE_SECRET)
     // Remove Cf-* headers that Cloud Run doesn't need and that might confuse it.
     headers.delete('cf-connecting-ip')
     headers.delete('cf-ipcountry')
