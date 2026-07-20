@@ -90,7 +90,7 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 
 ## GATES (full suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`)
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` ·
-`cd platform && npx tsc --noEmit`. **Latest green: api jest 1485 · nest 0 · FE vitest 1798 · tsc 0.**
+`cd platform && npx tsc --noEmit`. **Latest green: api jest 1530 · nest 0 · FE vitest 1847 · tsc 0.**
 - **Deploy ≠ pushed** (a docs-only commit re-tags the image) — verify the serving SHA:
   `gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project gifsy-platform --format='value(spec.template.spec.containers[0].image)'`.
 - FE tsc gotcha: a stale `.next/types` surfaces a phantom `RejectionModal` error (pre-existing,
