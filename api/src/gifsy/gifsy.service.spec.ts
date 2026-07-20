@@ -15,6 +15,7 @@ import { GifsyService } from './gifsy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { AdminCoreService } from '../admin-core/admin-core.service';
+import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
@@ -49,6 +50,12 @@ const mockTenantSettings = {
   getEffectiveSettings: jest.fn(),
 };
 
+// @Global TenantService — createClient/updateClient bust its resolveClient cache
+// after a console write so a stale feature/status can't be served for 5 min.
+const mockTenant = {
+  invalidateCache: jest.fn(),
+};
+
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' };
 
@@ -76,6 +83,7 @@ describe('GifsyService', () => {
         { provide: StorageService, useValue: mockStorage },
         { provide: AdminCoreService, useValue: mockAdminCore },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
+        { provide: TenantService, useValue: mockTenant },
       ],
     }).compile();
     service = module.get(GifsyService);
@@ -171,6 +179,8 @@ describe('GifsyService', () => {
       expect(res.primaryColor).toBe('#16a34a');
       expect(res.logoUrl).toBe('https://cdn/logo.png');
       expect(res.productBrands).toEqual(['Figaro']);
+      // The resolveClient cache is busted so the edit takes effect immediately.
+      expect(mockTenant.invalidateCache).toHaveBeenCalledWith('deoleo');
     });
 
     it('projects supportPhone + invoicePrefix from the merged branding (edit form can reflect them)', async () => {
@@ -659,6 +669,8 @@ describe('GifsyService', () => {
         where: { id: 'c1' },
         data: { isPrimary: true },
       });
+      // The new tenant's config cache slot is primed/busted so it resolves immediately.
+      expect(mockTenant.invalidateCache).toHaveBeenCalledWith('acme');
     });
 
     it('does not double-create the canonical when the caller also lists it (normalised + deduped)', async () => {

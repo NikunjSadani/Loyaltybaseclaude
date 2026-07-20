@@ -191,32 +191,27 @@ describe('VisibilityCaptureMode gate — mode: AMOUNT_UPLOAD', () => {
 
 describe('VisibilityCaptureMode gate — default (unset = PHOTO_APPROVAL)', () => {
   it('resolveVisibilityCaptureMode returns PHOTO_APPROVAL when feature is absent', async () => {
-    // Build a real TenantService with a prisma mock that returns a config WITHOUT visibilityCaptureMode.
+    // Build a real TenantService with a prisma mock that returns a `clients` row
+    // (the new source of truth) WITHOUT visibilityCaptureMode in features.
     const prismaWithConfig = {
-      adminConfig: {
-        findMany: jest.fn().mockResolvedValue([
-          {
-            clientId: 'acme',
-            key: 'client_config',
-            value: {
-              slug: 'acme',
-              name: 'Acme Corp',
-              isActive: true,
-              features: {
-                loyalty: true,
-                visibility: true,
-                leaderboard: false,
-                schemes: false,
-                selfEnrollment: false,
-                targets: true,
-                rewards: false,
-                tds: false,
-                // visibilityCaptureMode intentionally absent
-              },
-              branding: { primaryColor: '#000', displayName: 'Acme' },
-            },
+      client: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'acme',
+          internalName: 'Acme Corp',
+          status: 'ACTIVE',
+          features: {
+            loyalty: true,
+            visibility: true,
+            leaderboard: false,
+            schemes: false,
+            selfEnrollment: false,
+            targets: true,
+            rewards: false,
+            tds: false,
+            // visibilityCaptureMode intentionally absent
           },
-        ]),
+          branding: { primaryColor: '#000', displayName: 'Acme' },
+        }),
       },
     };
 

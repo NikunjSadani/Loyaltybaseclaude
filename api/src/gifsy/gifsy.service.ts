@@ -9,6 +9,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { AdminCoreService } from '../admin-core/admin-core.service';
+import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { sniffFileType } from '../common/file-signature';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -131,6 +132,9 @@ export class GifsyService {
     // per-tenant settings stores the tenant Settings panel uses (never re-implemented).
     private readonly adminCore: AdminCoreService,
     private readonly tenantSettings: TenantSettingsService,
+    // @Global TenantService — used to bust the resolveClient feature/status cache
+    // after a console edit so a stale 5-min-cached config can't be served.
+    private readonly tenant: TenantService,
   ) {}
 
   private assertGifsy(user: JwtPayload): void {
@@ -504,6 +508,10 @@ export class GifsyService {
       throw e;
     }
 
+    // Bust the resolveClient cache so the new tenant's features/status resolve
+    // immediately rather than after the 5-min TTL.
+    this.tenant.invalidateCache(client.id);
+
     const branding = (client.branding ?? {}) as Record<string, unknown>;
     const features = (client.features ?? {}) as Record<string, unknown>;
     return {
@@ -631,6 +639,10 @@ export class GifsyService {
             return updated;
           })
         : await this.prisma.client.update({ where: { id: slug }, data });
+
+    // Bust the resolveClient cache so an edited feature flag / status / branding
+    // takes effect immediately rather than after the 5-min TTL.
+    this.tenant.invalidateCache(slug);
 
     const branding = (client.branding ?? {}) as Record<string, unknown>;
     const features = (client.features ?? {}) as Record<string, unknown>;

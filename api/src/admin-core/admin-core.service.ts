@@ -652,29 +652,36 @@ export class AdminCoreService {
   /**
    * admin/settings/visibility-capture-mode — GIFSY_ADMIN-only PUT.
    *
-   * Reads the current ClientConfig, merges only the `visibilityCaptureMode`
-   * feature key (preserves every other feature flag and all top-level config
-   * fields), then persists via TenantService.upsertClientConfig which also
-   * busts the in-memory cache.
+   * Reads the current features (now sourced from the `clients` table), merges
+   * only the `visibilityCaptureMode` key (preserves every other feature flag),
+   * writes it straight back to `clients.features`, then busts the TenantService
+   * in-memory cache so the change is visible immediately.
    *
    * The GET path is already covered by GET /v1/admin/settings/config which
    * returns the full `features` object including `visibilityCaptureMode`.
    */
   async setVisibilityCaptureMode(user: JwtPayload, dto: SetVisibilityCaptureModeDto) {
     const clientId = user.clientId;
-    // Load the full current config (throws NotFoundException if not found)
-    const config = await this.tenant.resolveClient(clientId);
+    // Read the merge-base FRESH (not the 5-min-cached resolveClient) so a concurrent
+    // feature edit on another instance can't be clobbered by this read-modify-write.
+    const row = await this.prisma.client.findUnique({
+      where: { id: clientId },
+      select: { features: true },
+    });
+    if (!row) throw new NotFoundException(`Unknown client: "${clientId}".`);
+    const current = (row.features ?? {}) as Record<string, unknown>;
 
     // Merge — only update visibilityCaptureMode; all other feature flags are preserved.
-    const updatedConfig = {
-      ...config,
-      features: {
-        ...config.features,
-        visibilityCaptureMode: dto.mode,
-      },
+    const features = {
+      ...current,
+      visibilityCaptureMode: dto.mode,
     };
 
-    await this.tenant.upsertClientConfig(clientId, updatedConfig);
+    await this.prisma.client.update({
+      where: { id: clientId },
+      data:  { features: features as any },
+    });
+    this.tenant.invalidateCache(clientId);
 
     await this.prisma.auditLog.create({
       data: {

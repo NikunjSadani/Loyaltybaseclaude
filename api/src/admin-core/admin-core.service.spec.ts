@@ -48,10 +48,11 @@ const mockPrisma = {
     updateMany: jest.fn(),
   },
   auditLog: { create: jest.fn() },
+  client: { update: jest.fn(), findUnique: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
-const mockTenant = { resolveClient: jest.fn(), upsertClientConfig: jest.fn() };
+const mockTenant = { resolveClient: jest.fn(), invalidateCache: jest.fn() };
 const mockTenantSettings = {
   invalidate: jest.fn(),
   getVisibilityEnabledUncached: jest.fn().mockResolvedValue(true),
@@ -638,48 +639,47 @@ describe('AdminCoreService', () => {
     };
 
     beforeEach(() => {
+      // setVisibilityCaptureMode now reads the merge-base FRESH from clients.findUnique.
+      mockPrisma.client.findUnique.mockResolvedValue({ features: structuredClone(baseConfig.features) });
       mockTenant.resolveClient.mockResolvedValue(structuredClone(baseConfig));
-      mockTenant.upsertClientConfig.mockResolvedValue(undefined);
+      mockPrisma.client.update.mockResolvedValue({ id: 'deoleo' });
       mockPrisma.auditLog.create.mockResolvedValue({ id: 'al1' });
     });
 
-    it('VCM1: sets mode to AMOUNT_UPLOAD and persists via upsertClientConfig', async () => {
+    it('VCM1: sets mode to AMOUNT_UPLOAD and persists to clients.features', async () => {
       const res = await service.setVisibilityCaptureMode(gifsy, { mode: 'AMOUNT_UPLOAD' });
       expect(res).toEqual({ mode: 'AMOUNT_UPLOAD' });
 
-      const savedConfig = mockTenant.upsertClientConfig.mock.calls[0][1];
-      expect(savedConfig.features.visibilityCaptureMode).toBe('AMOUNT_UPLOAD');
+      const arg = mockPrisma.client.update.mock.calls[0][0];
+      expect(arg.data.features.visibilityCaptureMode).toBe('AMOUNT_UPLOAD');
     });
 
     it('VCM2: merges — does NOT clobber other feature flags when changing mode', async () => {
       await service.setVisibilityCaptureMode(gifsy, { mode: 'AMOUNT_UPLOAD' });
 
-      const savedConfig = mockTenant.upsertClientConfig.mock.calls[0][1];
-      // All other feature flags must remain intact
-      expect(savedConfig.features.loyalty).toBe(true);
-      expect(savedConfig.features.visibility).toBe(true);
-      expect(savedConfig.features.rewards).toBe(true);
-      expect(savedConfig.features.targets).toBe(true);
-      // And branding is untouched
-      expect(savedConfig.branding.primaryColor).toBe('#c00');
-      expect(savedConfig.slug).toBe('deoleo');
+      const arg = mockPrisma.client.update.mock.calls[0][0];
+      // All other feature flags must remain intact in the written features blob
+      expect(arg.data.features.loyalty).toBe(true);
+      expect(arg.data.features.visibility).toBe(true);
+      expect(arg.data.features.rewards).toBe(true);
+      expect(arg.data.features.targets).toBe(true);
     });
 
     it('VCM3: sets mode to PHOTO_APPROVAL (round-trip back)', async () => {
       // Start from AMOUNT_UPLOAD
-      mockTenant.resolveClient.mockResolvedValueOnce({
-        ...baseConfig,
+      mockPrisma.client.findUnique.mockResolvedValueOnce({
         features: { ...baseConfig.features, visibilityCaptureMode: 'AMOUNT_UPLOAD' as const },
       });
       const res = await service.setVisibilityCaptureMode(gifsy, { mode: 'PHOTO_APPROVAL' });
       expect(res).toEqual({ mode: 'PHOTO_APPROVAL' });
-      const savedConfig = mockTenant.upsertClientConfig.mock.calls[0][1];
-      expect(savedConfig.features.visibilityCaptureMode).toBe('PHOTO_APPROVAL');
+      const arg = mockPrisma.client.update.mock.calls[0][0];
+      expect(arg.data.features.visibilityCaptureMode).toBe('PHOTO_APPROVAL');
     });
 
-    it('VCM4: calls upsertClientConfig with caller clientId (tenant-scoped)', async () => {
+    it('VCM4: writes clients.update scoped to the caller clientId + busts the cache', async () => {
       await service.setVisibilityCaptureMode(gifsy, { mode: 'AMOUNT_UPLOAD' });
-      expect(mockTenant.upsertClientConfig.mock.calls[0][0]).toBe('deoleo');
+      expect(mockPrisma.client.update.mock.calls[0][0].where).toEqual({ id: 'deoleo' });
+      expect(mockTenant.invalidateCache).toHaveBeenCalledWith('deoleo');
     });
 
     it('VCM5: writes an audit log entry with the new mode', async () => {
@@ -691,8 +691,8 @@ describe('AdminCoreService', () => {
       expect(audit.metadata).toMatchObject({ key: 'visibilityCaptureMode', value: 'AMOUNT_UPLOAD' });
     });
 
-    it('VCM6: propagates NotFoundException when the client config does not exist', async () => {
-      mockTenant.resolveClient.mockRejectedValueOnce(new NotFoundException('Unknown client'));
+    it('VCM6: propagates NotFoundException when the client row does not exist', async () => {
+      mockPrisma.client.findUnique.mockResolvedValueOnce(null);
       await expect(
         service.setVisibilityCaptureMode(gifsy, { mode: 'AMOUNT_UPLOAD' }),
       ).rejects.toBeInstanceOf(NotFoundException);

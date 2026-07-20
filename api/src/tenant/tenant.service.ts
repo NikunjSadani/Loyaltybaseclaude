@@ -52,9 +52,43 @@ export class TenantService {
   ) {}
 
   /**
+   * Map a `clients` table row to the ClientConfig shape consumers expect.
+   *
+   * `isActive` = status !== 'INACTIVE', so ACTIVE **and** ONBOARDING both resolve
+   * as active (only INACTIVE trips the ForbiddenException gate in resolveClient).
+   * `features` is returned AS-IS (the raw JSON blob) — do NOT remap/rename keys;
+   * the only dynamically-read keys (rbacEnforcement, visibilityCaptureMode) live
+   * directly on `clients.features`, so passing the blob through preserves both.
+   */
+  private mapClientRow(client: {
+    id: string;
+    internalName: string;
+    status: string;
+    branding: unknown;
+    features: unknown;
+  }): ClientConfig {
+    const b = (client.branding ?? {}) as {
+      primaryColor?: string;
+      displayName?: string;
+      logoUrl?: string;
+    };
+    return {
+      slug:     client.id,
+      name:     client.internalName,
+      isActive: client.status !== 'INACTIVE',
+      branding: {
+        primaryColor: b.primaryColor ?? '#16a34a',
+        displayName:  b.displayName ?? client.internalName,
+        logoUrl:      b.logoUrl,
+      },
+      features: (client.features ?? {}) as unknown as ClientFeatures,
+    };
+  }
+
+  /**
    * Resolve a client config by slug.
-   * Reads from DB (with short-lived cache). GIFSY_ADMIN is the only role
-   * that can modify these configs — CLIENT_ADMIN cannot.
+   * Reads from the `clients` table (with short-lived cache). GIFSY_ADMIN is the
+   * only role that can modify these configs — CLIENT_ADMIN cannot.
    */
   async resolveClient(slug: string): Promise<ClientConfig> {
     const cached = this.cache.get(slug);
@@ -63,15 +97,13 @@ export class TenantService {
       return cached.config;
     }
 
-    const rows = await this.prisma.adminConfig.findMany({
-      where: { clientId: slug, key: 'client_config' },
-    });
+    const client = await this.prisma.client.findUnique({ where: { id: slug } });
 
-    if (rows.length === 0) {
+    if (!client) {
       throw new NotFoundException(`Unknown client: "${slug}". Contact Gifsy to onboard.`);
     }
 
-    const config = rows[0].value as unknown as ClientConfig;
+    const config = this.mapClientRow(client);
 
     if (!config.isActive) {
       throw new ForbiddenException(`Client "${slug}" account is inactive.`);
@@ -128,21 +160,7 @@ export class TenantService {
 
   /** List all client configs — GIFSY_ADMIN only */
   async listAllClients(): Promise<ClientConfig[]> {
-    const rows = await this.prisma.adminConfig.findMany({
-      where: { key: 'client_config' },
-      orderBy: { clientId: 'asc' },
-    });
-    return rows.map((r) => r.value as unknown as ClientConfig);
-  }
-
-  /** Seed initial client config — only callable by GIFSY_ADMIN */
-  async upsertClientConfig(slug: string, config: ClientConfig): Promise<void> {
-    await this.prisma.adminConfig.upsert({
-      where:  { clientId_key: { clientId: slug, key: 'client_config' } } as any,
-      create: { clientId: slug, key: 'client_config', value: config as any },
-      update: { value: config as any },
-    });
-    this.invalidateCache(slug);
-    this.logger.log(`Client config updated: ${slug}`);
+    const rows = await this.prisma.client.findMany({ orderBy: { id: 'asc' } });
+    return rows.map((r) => this.mapClientRow(r));
   }
 }
