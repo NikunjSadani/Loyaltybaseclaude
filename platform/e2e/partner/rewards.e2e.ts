@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -36,7 +37,7 @@ test.describe('@partner rewards catalogue (read)', () => {
     // The balance chip reads "{pts} pts". Seed: 50,000 redeemable (minus any CI runs that drained
     // it via redemption-write). We check for > 0 via the API rather than a brittle text match —
     // the render displays formatPoints(balance), so we just verify the chip is present and not "0".
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     const r = await page.request.get('/api/wallet', {
       headers: { Authorization: `Bearer ${token}` },
     });

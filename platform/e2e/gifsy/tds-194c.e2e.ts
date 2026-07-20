@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { ROLES } from '../fixtures/roles';
 import { expectScopedOut } from '../helpers/assert';
 
@@ -34,7 +35,7 @@ import { expectScopedOut } from '../helpers/assert';
 
 /** Exchange the GIFSY session for a deoleo-scoped operator token. */
 async function assumeDeoleoToken(page: import('@playwright/test').Page): Promise<string> {
-  const gifsyToken = await page.evaluate(() => localStorage.getItem('token'));
+  const gifsyToken = await cookieToken(page);
   expect(gifsyToken, 'gifsy session must be live').toBeTruthy();
   const res = await page.request.post('/api/auth/assume-tenant', {
     headers: { Authorization: `Bearer ${gifsyToken}`, 'Content-Type': 'application/json' },
@@ -95,7 +96,7 @@ test.describe('@gifsy 194C cross-tenant TDS endpoint (S4g)', () => {
     const ctx = await browser.newContext({ storageState: ROLES.clientAdmin.storageStatePath });
     const page = await ctx.newPage();
     await page.goto('/admin/dashboard');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'clientAdmin session must be live').toBeTruthy();
 
     const r = await page.request.get('/api/admin/tds/194c?fy=2025-26', {

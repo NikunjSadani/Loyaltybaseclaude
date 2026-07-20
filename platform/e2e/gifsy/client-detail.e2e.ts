@@ -40,9 +40,9 @@ test.describe('@gifsy client detail (B3 / #49)', () => {
     // secret. (We assert the response body, NOT page.content() — the latter includes the bundled
     // editor-component source, where "msg91AuthKey" legitimately appears as an input field name.)
     const apiBody = await page.evaluate(async () => {
-      const r = await fetch('/api/gifsy/clients/deoleo', {
-        headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` },
-      });
+      // AF-6: this same-origin fetch carries the GIFSY httpOnly `token` cookie automatically and the
+      // proxy authenticates from it (any Authorization header is stripped) — no explicit Bearer needed.
+      const r = await fetch('/api/gifsy/clients/deoleo');
       return r.text();
     });
     expect(apiBody, 'backend must not send msg91AuthKey to the browser').not.toContain('msg91AuthKey');

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -42,7 +43,7 @@ test.describe('@partner targets (read)', () => {
 
   test('API returns the expected shape for the current period', async ({ page }) => {
     await page.goto('/partner/targets');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     const period = currentPeriod();
     const r = await page.request.get(`/api/partner/targets?period=${period}`, {
       headers: { Authorization: `Bearer ${token}` },

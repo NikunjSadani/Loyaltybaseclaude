@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 import { uniqueMarker } from '../helpers/persist';
 
@@ -52,7 +53,7 @@ test.describe('@clientAdmin credits payout write-persistence + double-process gu
     await page.goto('/admin/credits-payouts');
     await expectNoFabricatedData(page);
 
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'CLIENT_ADMIN must be logged in (storageState)').toBeTruthy();
 
     // Use a unique marker so each run creates a distinct period-suffixed batch.

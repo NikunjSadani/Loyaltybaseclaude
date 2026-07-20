@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -37,7 +38,7 @@ test.describe('@partner orders (read)', () => {
   test('order list matches what the API returns (scoped to this partner)', async ({ page }) => {
     await page.goto('/partner/rewards/orders');
 
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     const r = await page.request.get('/api/rewards/orders', {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -60,7 +61,7 @@ test.describe('@partner orders (read)', () => {
 
   test('API returns only this partner\'s orders (no cross-partner leak)', async ({ page }) => {
     await page.goto('/partner/rewards/orders');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     const r = await page.request.get('/api/rewards/orders', {
       headers: { Authorization: `Bearer ${token}` },
     });

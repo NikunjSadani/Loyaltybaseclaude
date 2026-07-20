@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 
 /**
  * GIFSY KYC per-field verify write-persistence (S2 / W5 — gap #38, stage 2).
@@ -59,7 +60,7 @@ test.describe('@gifsy KYC per-field verify write-persistence (S2/W5)', () => {
   }) => {
     // Navigate to the Gifsy KYC approvals workspace to ensure GIFSY session is live.
     await page.goto('/admin/kyc/approvals');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'GIFSY must be logged in (storageState)').toBeTruthy();
     const gifsyAuth = { Authorization: `Bearer ${token}` };
 

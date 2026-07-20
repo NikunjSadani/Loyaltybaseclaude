@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { ROLES } from '../fixtures/roles';
 import { resolveOtp } from '../helpers/otp';
 
@@ -17,7 +18,7 @@ const VOUCHER_COST = 500; // RW001 "Amazon Voucher ₹500"
 test.describe('@partner redemption money-path (S4)', () => {
   test('redeeming a fixed voucher debits points and PERSISTS', async ({ page }) => {
     await page.goto('/partner/rewards');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     const readBalance = async (): Promise<number> => {
       const r = await page.request.get('/api/wallet', { headers: { Authorization: `Bearer ${token}` } });
       const j = await r.json();

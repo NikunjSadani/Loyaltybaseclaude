@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { tokenFor } from '../helpers/write';
+import { requestAs } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -50,88 +50,79 @@ test.describe('@clientAdmin scheme enrollment write-persistence (W7)', () => {
     await page.goto('/admin/schemes');
     await expectNoFabricatedData(page);
 
-    // Cross-role: read the partner token from its storageState (same pattern as
-    // visibility-write.e2e.ts which uses tokenFor('gifsy') for the cross-role read).
-    // The enrollment WRITE goes through the real /api/* proxy with a real partner session.
-    const partnerToken = tokenFor('partner');
+    // Cross-role: POST /v1/schemes/:id/enroll is role-gated to WHOLESALER/SUB_STOCKIST/SSS/SALES_*
+    // (NOT CLIENT_ADMIN). AF-6: the proxy authenticates from the request's session COOKIE and ignores
+    // any Authorization header, so an in-page fetch / page.request would run as the CLIENT_ADMIN page
+    // session (→ 403 on enroll, wrong caller on my-enrollment). Use a real PARTNER-cookie request
+    // context (seed-cp-1 / CP001 / WHOLESALER) so the write + read genuinely run as the partner.
+    const partner = await requestAs('partner');
+    try {
+      // Helper: read the partner's current enrollment for this scheme (fresh DB read).
+      const readEnrollment = async (): Promise<{ id: string; status: string } | null> => {
+        const r = await partner.get(`/api/schemes/${SCHEME_ID}/my-enrollment`);
+        if (r.status() === 404) return null;
+        expect(r.status(), 'my-enrollment GET must return 200 or 404').toBe(200);
+        const j = await r.json();
+        // TransformInterceptor envelope: { data: { enrollment: {...} } } or { enrollment: {...} }
+        return (j.data?.enrollment ?? j.enrollment) as { id: string; status: string } | null;
+      };
 
-    // Helper: read the partner's current enrollment for this scheme (fresh DB read).
-    const readEnrollment = async (): Promise<{ id: string; status: string } | null> => {
-      const r = await page.request.get(`/api/schemes/${SCHEME_ID}/my-enrollment`, {
-        headers: { Authorization: `Bearer ${partnerToken}` },
+      // Step 1: note pre-enrollment state (may already exist from a previous run — idempotent).
+      const before = await readEnrollment();
+
+      // Step 2: POST enroll (SELF mode — the partner enrolls themselves).
+      const enrollRes = await partner.post(`/api/schemes/${SCHEME_ID}/enroll`, {
+        headers: { 'Content-Type': 'application/json' },
+        data: { enrollmentMode: 'SELF', formValues: {} },
       });
-      if (r.status() === 404) return null;
-      expect(r.status(), 'my-enrollment GET must return 200 or 404').toBe(200);
-      const j = await r.json();
-      // TransformInterceptor envelope: { data: { enrollment: {...} } } or { enrollment: {...} }
-      return (j.data?.enrollment ?? j.enrollment) as { id: string; status: string } | null;
-    };
+      const enrollBody = await enrollRes.json().catch(() => null);
 
-    // Step 1: note pre-enrollment state (may already exist from a previous run — idempotent).
-    const before = await readEnrollment();
+      // Enrollment must succeed (200 or 201). On re-run the upsert returns 200.
+      expect(
+        [200, 201],
+        `enroll returned ${enrollRes.status()}: ${JSON.stringify(enrollBody)}`,
+      ).toContain(enrollRes.status());
 
-    // Step 2: POST enroll (SELF mode — the partner enrolls themselves).
-    const enrollResult = await page.evaluate(
-      async ({ schemeId, tok }) => {
-        const res = await fetch(`/api/schemes/${schemeId}/enroll`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${tok}`,
-          },
-          body: JSON.stringify({
-            enrollmentMode: 'SELF',
-            formValues: {},
-          }),
-        });
-        return { status: res.status, body: await res.json().catch(() => null) };
-      },
-      { schemeId: SCHEME_ID, tok: partnerToken },
-    );
+      const enrollPayload = enrollBody?.data ?? enrollBody;
+      const enrollment = enrollPayload?.enrollment as
+        | { id: string; status: string; enrollmentMode: string }
+        | undefined;
 
-    // Enrollment must succeed (200 or 201). On re-run the upsert returns 200.
-    expect(
-      [200, 201],
-      `enroll returned ${enrollResult.status}: ${JSON.stringify(enrollResult.body)}`,
-    ).toContain(enrollResult.status);
+      expect(enrollment?.id, 'enroll response must include an enrollment id').toBeTruthy();
+      expect(enrollment?.status, 'enrollment status must be ACTIVE in the response').toBe('ACTIVE');
+      expect(enrollment?.enrollmentMode, 'enrollment mode must be SELF').toBe('SELF');
 
-    const enrollPayload = enrollResult.body?.data ?? enrollResult.body;
-    const enrollment = enrollPayload?.enrollment as
-      | { id: string; status: string; enrollmentMode: string }
-      | undefined;
+      const newEnrollmentId = enrollment!.id;
 
-    expect(enrollment?.id, 'enroll response must include an enrollment id').toBeTruthy();
-    expect(enrollment?.status, 'enrollment status must be ACTIVE in the response').toBe('ACTIVE');
-    expect(enrollment?.enrollmentMode, 'enrollment mode must be SELF').toBe('SELF');
+      // Step 3: PERSISTENCE PROOF — a FRESH GET /api/schemes/:id/my-enrollment returns
+      // this enrollment from the DB (not from response state, not optimistic UI).
+      // We poll so transient read-lag in staging is tolerated.
+      const freshEnrollment = await expect
+        .poll(readEnrollment, {
+          timeout: 10_000,
+          message: `Fresh GET /api/schemes/${SCHEME_ID}/my-enrollment must return the enrollment after POST`,
+        })
+        .not.toBeNull();
 
-    const newEnrollmentId = enrollment!.id;
+      // Narrow the type for assertions (expect.poll resolves to the polled value).
+      const persisted = (await readEnrollment()) as { id: string; status: string } | null;
+      expect(persisted, 'enrollment must be readable from the DB after write').not.toBeNull();
+      expect(persisted!.status, 'persisted enrollment must be ACTIVE').toBe('ACTIVE');
 
-    // Step 3: PERSISTENCE PROOF — a FRESH GET /api/schemes/:id/my-enrollment returns
-    // this enrollment from the DB (not from response state, not optimistic UI).
-    // We poll so transient read-lag in staging is tolerated.
-    const freshEnrollment = await expect
-      .poll(readEnrollment, {
-        timeout: 10_000,
-        message: `Fresh GET /api/schemes/${SCHEME_ID}/my-enrollment must return the enrollment after POST`,
-      })
-      .not.toBeNull();
+      if (before === null) {
+        // First-run: the enrollment id must be the one just created.
+        expect(persisted!.id, 'new enrollment id must match the response id').toBe(newEnrollmentId);
+      } else {
+        // Re-run (idempotent upsert): the same record exists and is still ACTIVE.
+        // The upsert does not change the id; the persisted id may differ from newEnrollmentId
+        // only if the DB re-used the old id (which upsert preserves). Either way, status=ACTIVE.
+        expect(persisted!.status, 'idempotent re-enrollment must remain ACTIVE').toBe('ACTIVE');
+      }
 
-    // Narrow the type for assertions (expect.poll resolves to the polled value).
-    const persisted = (await readEnrollment()) as { id: string; status: string } | null;
-    expect(persisted, 'enrollment must be readable from the DB after write').not.toBeNull();
-    expect(persisted!.status, 'persisted enrollment must be ACTIVE').toBe('ACTIVE');
-
-    if (before === null) {
-      // First-run: the enrollment id must be the one just created.
-      expect(persisted!.id, 'new enrollment id must match the response id').toBe(newEnrollmentId);
-    } else {
-      // Re-run (idempotent upsert): the same record exists and is still ACTIVE.
-      // The upsert does not change the id; the persisted id may differ from newEnrollmentId
-      // only if the DB re-used the old id (which upsert preserves). Either way, status=ACTIVE.
-      expect(persisted!.status, 'idempotent re-enrollment must remain ACTIVE').toBe('ACTIVE');
+      // Suppress TS unused-variable warning (freshEnrollment is the poll result for the timeout guard).
+      void freshEnrollment;
+    } finally {
+      await partner.dispose();
     }
-
-    // Suppress TS unused-variable warning (freshEnrollment is the poll result for the timeout guard).
-    void freshEnrollment;
   });
 });

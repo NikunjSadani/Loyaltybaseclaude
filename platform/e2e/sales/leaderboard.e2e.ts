@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 
 /**
  * SALES_SO leaderboard — DATA-VISIBILITY `/sales/leaderboard` (S3 read slice).
@@ -44,7 +45,7 @@ test.describe('@sales leaderboard', () => {
 
   test('GET /api/sales/leaderboard endpoint is reachable (200, not 404/403)', async ({ page }) => {
     await page.goto('/sales/leaderboard');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'SALES_SO must be logged in').toBeTruthy();
 
     const res = await page.request.get('/api/sales/leaderboard?scope=rm', {

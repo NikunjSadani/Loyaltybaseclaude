@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { ROLES } from '../fixtures/roles';
 import { expectScopedOut } from '../helpers/assert';
+import { cookieToken } from '../helpers/write';
 
 /**
  * A1 / gap #38 — the Gifsy platform operator must see + act on KYC across ALL brands.
@@ -15,7 +16,7 @@ import { expectScopedOut } from '../helpers/assert';
 test.describe('@gifsy KYC cross-tenant access (A1 / #38)', () => {
   test('the review-queue spans multiple brands, each tagged with its own clientId', async ({ page }) => {
     await page.goto('/admin/kyc/approvals');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'gifsy must be logged in (storageState)').toBeTruthy();
 
     const r = await page.request.get('/api/kyc/review-queue', {
@@ -37,7 +38,7 @@ test.describe('@gifsy KYC cross-tenant access (A1 / #38)', () => {
     const ctx = await browser.newContext({ storageState: ROLES.clientAdmin.storageStatePath });
     const p = await ctx.newPage();
     await p.goto('/admin/dashboard');
-    const token = await p.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(p);
     const r = await p.request.get('/api/kyc/review-queue', {
       headers: { Authorization: `Bearer ${token}` },
     });

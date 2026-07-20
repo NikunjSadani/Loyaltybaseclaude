@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 
 /**
  * W9 / #42 — the REAL INR-payout DISBURSEMENT money path (distinct from the credits-confirm rail in
@@ -24,7 +25,7 @@ const COMPLETED_BATCH = 'seed-pb-2';
 
 /** Exchange the GIFSY session for a deoleo-scoped operator token (the A2 assume-tenant flow). */
 async function assumeDeoleo(page: Page): Promise<string> {
-  const gifsyToken = await page.evaluate(() => localStorage.getItem('token'));
+  const gifsyToken = await cookieToken(page);
   expect(gifsyToken, 'a live GIFSY session is required').toBeTruthy();
   const res = await page.request.post('/api/auth/assume-tenant', {
     headers: { Authorization: `Bearer ${gifsyToken}`, 'Content-Type': 'application/json' },

@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { ROLES } from '../fixtures/roles';
 import { resolveOtp } from '../helpers/otp';
-import { tokenFor } from '../helpers/write';
+import { cookieToken, requestAs } from '../helpers/write';
 
 /**
  * Money-path write-persistence (stream S3 / write-flow W4) — SALES-ASSISTED REDEMPTION.
@@ -49,106 +49,109 @@ const REWARD_ID = 'seed-rk-1';
 test.describe('@sales assisted-redemption money-path (S3/W4)', () => {
   test('sales-assisted redeem debits the OUTLET wallet and PERSISTS', async ({ page }) => {
     // ── 1. Navigate to the sales catalogue so the SO's session is warmed up in the
-    //       browser context. The SO token lives in the storageState injected by the
-    //       `sales` playwright project; we read it from localStorage for API calls.
+    //       browser context. The SO session is injected by the `sales` playwright project;
+    //       AF-6 keeps the JWT in an httpOnly `token` cookie, read via cookieToken(page).
     await page.goto('/sales/catalogue');
 
-    const soToken = await page.evaluate(() => localStorage.getItem('token'));
-    if (!soToken) throw new Error('SO session token not found in localStorage — setup project may have failed');
+    const soToken = await cookieToken(page);
+    if (!soToken) throw new Error('SO session token not found (cookie) — setup project may have failed');
 
-    // ── 2. Read CP001's CURRENT balance via the partner's own token (cross-role read).
-    //       /api/wallet is partner-gated, so we use tokenFor('partner') from helpers/write.
-    //       This is the BEFORE snapshot — the ground truth from the backend.
-    const partnerToken = tokenFor('partner');
-    const readBalance = async (): Promise<number> => {
-      const r = await page.request.get('/api/wallet', {
-        headers: { Authorization: `Bearer ${partnerToken}` },
+    // ── 2. Read CP001's CURRENT balance via a PARTNER request context (cross-role read).
+    //       /api/wallet is partner-gated, and AF-6 makes the proxy authenticate from the request's
+    //       COOKIE (ignoring any Authorization header) — page.request would authenticate as the SALES
+    //       page session and 403 on /api/wallet. A real PARTNER-cookie context gives the FRESH,
+    //       authoritative backend balance (the BEFORE snapshot), immune to optimistic UI.
+    const partner = await requestAs('partner');
+    try {
+      const readBalance = async (): Promise<number> => {
+        const r = await partner.get('/api/wallet');
+        const j = await r.json();
+        return (j.data?.redeemablePoints as number) ?? (j.redeemablePoints as number);
+      };
+
+      const before = await readBalance();
+      // SKIP gracefully if CP001 has been drained — don't fail CI on a depleted fixture.
+      // Re-seed gifsy_dev (npx prisma db seed) to restore 50,000 pts. See SHARED-POOL CAVEAT above.
+      test.skip(before < VOUCHER_COST, `CP001 wallet has ${before} pts (< ${VOUCHER_COST}) — re-seed gifsy_dev`);
+
+      // ── 3. POST /api/rewards/redeem-for-outlet as the SO (the SALES page session's cookie
+      //       authenticates as the SO; the Authorization header is redundant post-AF-6 but harmless).
+      //       Body: { rewardId: 'seed-rk-1', targetPartnerId: 'seed-cp-1' }
+      //       The backend: verifies the SalesUserAssignment, checks affordability on CP001's wallet,
+      //       creates a PENDING RedemptionOrder on CP001, and sends the OTP to CP001's phone
+      //       (9000000002 = ROLES.partner.phone).
+      const initiateRes = await page.request.post('/api/rewards/redeem-for-outlet', {
+        headers: {
+          Authorization: `Bearer ${soToken}`,
+          'Content-Type': 'application/json',
+        },
+        data: JSON.stringify({
+          rewardId: REWARD_ID,
+          targetPartnerId: TARGET_PARTNER_ID,
+        }),
       });
-      const j = await r.json();
-      return (j.data?.redeemablePoints as number) ?? (j.redeemablePoints as number);
-    };
 
-    const before = await readBalance();
-    // SKIP gracefully if CP001 has been drained — don't fail CI on a depleted fixture.
-    // Re-seed gifsy_dev (npx prisma db seed) to restore 50,000 pts. See SHARED-POOL CAVEAT above.
-    test.skip(before < VOUCHER_COST, `CP001 wallet has ${before} pts (< ${VOUCHER_COST}) — re-seed gifsy_dev`);
+      expect(initiateRes.status()).toBe(201);
+      const initiateBody = (await initiateRes.json()) as { data?: { orderId: string; orderNumber: string }; orderId?: string };
+      // The API wraps in { success, data } via TransformInterceptor — unwrap either shape.
+      const orderId: string = initiateBody.data?.orderId ?? (initiateBody as unknown as { orderId: string }).orderId;
+      expect(orderId).toBeTruthy();
 
-    // ── 3. POST /api/rewards/redeem-for-outlet as the SO (SO's JWT in the header).
-    //       Body: { rewardId: 'seed-rk-1', targetPartnerId: 'seed-cp-1' }
-    //       The backend: verifies the SalesUserAssignment, checks affordability on CP001's wallet,
-    //       creates a PENDING RedemptionOrder on CP001, and sends the OTP to CP001's phone
-    //       (9000000002 = ROLES.partner.phone).
-    const initiateRes = await page.request.post('/api/rewards/redeem-for-outlet', {
-      headers: {
-        Authorization: `Bearer ${soToken}`,
-        'Content-Type': 'application/json',
-      },
-      data: JSON.stringify({
-        rewardId: REWARD_ID,
-        targetPartnerId: TARGET_PARTNER_ID,
-      }),
-    });
+      // ── 4. Resolve the OTP via the env-aware seam.
+      //       The OTP is bound to ROLES.partner's phone (9000000002) — the OUTLET's registered number.
+      //       resolveOtp(ROLES.partner) returns:
+      //         LOCAL:   env.fixedOtp (e.g. '123456') — FIXED_OTP backend backdoor honours it.
+      //         STAGING: fetches the just-sent real OTP from E2E_OTP_FETCH_URL keyed on that phone.
+      //       NEVER a hardcoded literal here — this is what makes the spec staging-portable.
+      const otp = await resolveOtp(ROLES.partner);
 
-    expect(initiateRes.status()).toBe(201);
-    const initiateBody = (await initiateRes.json()) as { data?: { orderId: string; orderNumber: string }; orderId?: string };
-    // The API wraps in { success, data } via TransformInterceptor — unwrap either shape.
-    const orderId: string = initiateBody.data?.orderId ?? (initiateBody as unknown as { orderId: string }).orderId;
-    expect(orderId).toBeTruthy();
+      // ── 5. POST /api/rewards/redeem-for-outlet/confirm as the SO.
+      //       Body: { orderId, targetPartnerId, otp }
+      //       The backend: re-verifies the SalesUserAssignment, validates the OTP bound to CP001's user,
+      //       then in ONE $transaction: atomically claims PENDING→CONFIRMED, consumes the OTP, debits
+      //       CP001's wallet via WalletService.debitRedeem (passbook + ledger), decrements stock for
+      //       stock-tracked items, and records a RedemptionStatusHistory row (actor = SO's userId).
+      const confirmRes = await page.request.post('/api/rewards/redeem-for-outlet/confirm', {
+        headers: {
+          Authorization: `Bearer ${soToken}`,
+          'Content-Type': 'application/json',
+        },
+        data: JSON.stringify({
+          orderId,
+          targetPartnerId: TARGET_PARTNER_ID,
+          otp,
+        }),
+      });
 
-    // ── 4. Resolve the OTP via the env-aware seam.
-    //       The OTP is bound to ROLES.partner's phone (9000000002) — the OUTLET's registered number.
-    //       resolveOtp(ROLES.partner) returns:
-    //         LOCAL:   env.fixedOtp (e.g. '123456') — FIXED_OTP backend backdoor honours it.
-    //         STAGING: fetches the just-sent real OTP from E2E_OTP_FETCH_URL keyed on that phone.
-    //       NEVER a hardcoded literal here — this is what makes the spec staging-portable.
-    const otp = await resolveOtp(ROLES.partner);
+      expect(confirmRes.status()).toBe(201);
+      const confirmBody = (await confirmRes.json()) as { data?: { status: string }; status?: string };
+      const confirmedStatus: string = confirmBody.data?.status ?? (confirmBody as unknown as { status: string }).status;
+      expect(confirmedStatus).toBe('CONFIRMED');
 
-    // ── 5. POST /api/rewards/redeem-for-outlet/confirm as the SO.
-    //       Body: { orderId, targetPartnerId, otp }
-    //       The backend: re-verifies the SalesUserAssignment, validates the OTP bound to CP001's user,
-    //       then in ONE $transaction: atomically claims PENDING→CONFIRMED, consumes the OTP, debits
-    //       CP001's wallet via WalletService.debitRedeem (passbook + ledger), decrements stock for
-    //       stock-tracked items, and records a RedemptionStatusHistory row (actor = SO's userId).
-    const confirmRes = await page.request.post('/api/rewards/redeem-for-outlet/confirm', {
-      headers: {
-        Authorization: `Bearer ${soToken}`,
-        'Content-Type': 'application/json',
-      },
-      data: JSON.stringify({
-        orderId,
-        targetPartnerId: TARGET_PARTNER_ID,
-        otp,
-      }),
-    });
+      // ── 6. PERSISTENCE: fresh backend read shows the debit is stuck on CP001's wallet.
+      //       This is NOT optimistic UI — it's a new HTTP request that hits the DB.
+      //       Poll with timeout to allow any async ledger flush (WalletService.debitRedeem
+      //       runs inside the confirm $transaction so the debit is synchronous, but
+      //       expect.poll absorbs any replication/propagation lag in future deployments).
+      await expect.poll(readBalance, { timeout: 10_000 }).toBe(before - VOUCHER_COST);
 
-    expect(confirmRes.status()).toBe(201);
-    const confirmBody = (await confirmRes.json()) as { data?: { status: string }; status?: string };
-    const confirmedStatus: string = confirmBody.data?.status ?? (confirmBody as unknown as { status: string }).status;
-    expect(confirmedStatus).toBe('CONFIRMED');
-
-    // ── 6. PERSISTENCE: fresh backend read shows the debit is stuck on CP001's wallet.
-    //       This is NOT optimistic UI — it's a new HTTP request that hits the DB.
-    //       Poll with timeout to allow any async ledger flush (WalletService.debitRedeem
-    //       runs inside the confirm $transaction so the debit is synchronous, but
-    //       expect.poll absorbs any replication/propagation lag in future deployments).
-    await expect.poll(readBalance, { timeout: 10_000 }).toBe(before - VOUCHER_COST);
-
-    // ── 7. ATTRIBUTION: confirm the debit is attributed to the ASSISTED flow, not a
-    //       self-redemption by the partner. We verify the order exists via the partner's
-    //       token on /api/rewards/orders — if it's visible as the partner's own order
-    //       (RedemptionOrder.partnerId = seed-cp-1) then the wallet debit is correctly
-    //       attributed to CP001 (the outlet), not the SO who operated the flow.
-    const ordersRes = await page.request.get('/api/rewards/orders', {
-      headers: { Authorization: `Bearer ${partnerToken}` },
-    });
-    expect(ordersRes.status()).toBe(200);
-    const ordersBody = (await ordersRes.json()) as {
-      data?: { orders: { id: string; status: string }[] };
-      orders?: { id: string; status: string }[];
-    };
-    const orders = ordersBody.data?.orders ?? (ordersBody as unknown as { orders: { id: string; status: string }[] }).orders;
-    const confirmedOrder = orders.find((o) => o.id === orderId);
-    expect(confirmedOrder, 'RedemptionOrder should be visible on CP001 partner session').toBeTruthy();
-    expect(confirmedOrder?.status).toBe('CONFIRMED');
+      // ── 7. ATTRIBUTION: confirm the debit is attributed to the ASSISTED flow, not a
+      //       self-redemption by the partner. We verify the order exists via the partner's
+      //       session on /api/rewards/orders — if it's visible as the partner's own order
+      //       (RedemptionOrder.partnerId = seed-cp-1) then the wallet debit is correctly
+      //       attributed to CP001 (the outlet), not the SO who operated the flow.
+      const ordersRes = await partner.get('/api/rewards/orders');
+      expect(ordersRes.status()).toBe(200);
+      const ordersBody = (await ordersRes.json()) as {
+        data?: { orders: { id: string; status: string }[] };
+        orders?: { id: string; status: string }[];
+      };
+      const orders = ordersBody.data?.orders ?? (ordersBody as unknown as { orders: { id: string; status: string }[] }).orders;
+      const confirmedOrder = orders.find((o) => o.id === orderId);
+      expect(confirmedOrder, 'RedemptionOrder should be visible on CP001 partner session').toBeTruthy();
+      expect(confirmedOrder?.status).toBe('CONFIRMED');
+    } finally {
+      await partner.dispose();
+    }
   });
 });

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -31,7 +32,7 @@ test.describe('@gifsy Platform Users (S4g)', () => {
 
   test('API returns real users — at least one user exists in the DB', async ({ page }) => {
     await page.goto('/gifsy/users');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'gifsy session must be live').toBeTruthy();
 
     const r = await page.request.get('/api/admin/users', {

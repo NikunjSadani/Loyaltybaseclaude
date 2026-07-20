@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { uniqueMarker } from '../helpers/persist';
-import { tokenFor } from '../helpers/write';
+import { cookieToken, requestAs } from '../helpers/write';
 
 /**
  * W15 — Tenant settings write-persistence (GIFSY writes → GIFSY reads back).
@@ -48,83 +48,79 @@ test.describe('@clientAdmin settings write-persistence — GIFSY writes + reads 
     async ({ page }) => {
       await page.goto('/admin/settings');
 
-      const clientAdminToken = await page.evaluate(() => localStorage.getItem('token'));
+      const clientAdminToken = await cookieToken(page);
       expect(clientAdminToken, 'CLIENT_ADMIN must be logged in (storageState)').toBeTruthy();
 
-      // Read the GIFSY token — PUT is GIFSY_ADMIN only; GET also permits GIFSY_ADMIN.
-      const gifsyToken = tokenFor('gifsy');
+      // PUT is GIFSY_ADMIN only; GET also permits GIFSY_ADMIN. AF-6: the proxy authenticates from the
+      // request's session COOKIE and ignores any Authorization header, so an in-page fetch / page.request
+      // would act as the CLIENT_ADMIN page session (→ 403 on PUT, wrong namespace on GET). Use a real
+      // GIFSY-cookie request context so the write + read genuinely run as GIFSY.
+      const gifsy = await requestAs('gifsy');
+      try {
+        const settingKey = 'e2e_test_marker';
+        const settingValue = uniqueMarker('E2E-Setting');
 
-      const settingKey = 'e2e_test_marker';
-      const settingValue = uniqueMarker('E2E-Setting');
-
-      // ── Step 1: GIFSY writes the setting ──────────────────────────────────────
-      // UpsertSettingDto: { key: string, value: any, category?: string, description?: string }
-      // The GIFSY token carries clientId='gifsy', so this row lands in the gifsy namespace.
-      const writeResult = await page.evaluate(
-        async ({ tok, key, value }) => {
-          const res = await fetch('/api/admin/settings', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-            body: JSON.stringify({ key, value }),
-          });
-          return { status: res.status, body: await res.json().catch(() => null) };
-        },
-        { tok: gifsyToken, key: settingKey, value: settingValue },
-      );
-
-      expect(
-        [200, 201],
-        `PUT /api/admin/settings returned ${writeResult.status}: ${JSON.stringify(writeResult.body)}`,
-      ).toContain(writeResult.status);
-
-      // ── Step 2: GIFSY reads back and sees the new value ────────────────────────
-      // getSettings() returns { settings: { [key]: value, ... } } wrapped in { success, data }.
-      // Reading as GIFSY — same clientId namespace as the write — so the row is visible.
-      const readSettingsAsGifsy = async (): Promise<Record<string, unknown>> => {
-        const r = await page.request.get('/api/admin/settings', {
-          headers: { Authorization: `Bearer ${gifsyToken}` },
+        // ── Step 1: GIFSY writes the setting ──────────────────────────────────────
+        // UpsertSettingDto: { key: string, value: any, category?: string, description?: string }
+        // The GIFSY token carries clientId='gifsy', so this row lands in the gifsy namespace.
+        const writeRes = await gifsy.put('/api/admin/settings', {
+          headers: { 'Content-Type': 'application/json' },
+          data: { key: settingKey, value: settingValue },
         });
-        expect(r.status(), 'GET /api/admin/settings as GIFSY must return 200').toBe(200);
-        const j = await r.json();
-        return (j.data?.settings ?? j.settings ?? {}) as Record<string, unknown>;
-      };
+        const writeBody = await writeRes.json().catch(() => null);
+        expect(
+          [200, 201],
+          `PUT /api/admin/settings returned ${writeRes.status()}: ${JSON.stringify(writeBody)}`,
+        ).toContain(writeRes.status());
 
-      await expect
-        .poll(readSettingsAsGifsy, {
-          timeout: 10_000,
-          message: `Setting "${settingKey}" must appear in GIFSY GET /api/admin/settings with value "${settingValue}"`,
-        })
-        .toMatchObject({ [settingKey]: settingValue });
+        // ── Step 2: GIFSY reads back and sees the new value ────────────────────────
+        // getSettings() returns { settings: { [key]: value, ... } } wrapped in { success, data }.
+        // Reading as GIFSY — same clientId namespace as the write — so the row is visible.
+        const readSettingsAsGifsy = async (): Promise<Record<string, unknown>> => {
+          const r = await gifsy.get('/api/admin/settings');
+          expect(r.status(), 'GET /api/admin/settings as GIFSY must return 200').toBe(200);
+          const j = await r.json();
+          return (j.data?.settings ?? j.settings ?? {}) as Record<string, unknown>;
+        };
 
-      // Final strong assertion.
-      const finalSettings = await readSettingsAsGifsy();
-      expect(
-        finalSettings[settingKey],
-        `Setting key "${settingKey}" must equal the written value`,
-      ).toBe(settingValue);
+        await expect
+          .poll(readSettingsAsGifsy, {
+            timeout: 10_000,
+            message: `Setting "${settingKey}" must appear in GIFSY GET /api/admin/settings with value "${settingValue}"`,
+          })
+          .toMatchObject({ [settingKey]: settingValue });
 
-      // ── Step 3: Prove the REAL BUG — CLIENT_ADMIN cannot see GIFSY-written setting ─
-      // This assertion documents the known gap: the setting written under clientId='gifsy'
-      // is NOT visible to CLIENT_ADMIN (clientId='deoleo'). When the backend adds a
-      // cross-tenant write path, this assertion should be removed and the main flow
-      // updated to use CLIENT_ADMIN for the read.
-      const clientAdminSettings = await page.request.get('/api/admin/settings', {
-        headers: { Authorization: `Bearer ${clientAdminToken}` },
-      });
-      expect(
-        clientAdminSettings.status(),
-        'GET /api/admin/settings as CLIENT_ADMIN must return 200',
-      ).toBe(200);
-      const clientAdminBody = await clientAdminSettings.json();
-      const clientAdminSettingsObj = (clientAdminBody.data?.settings ?? clientAdminBody.settings ?? {}) as Record<string, unknown>;
-      // The GIFSY-written key must NOT appear in the CLIENT_ADMIN view (cross-namespace isolation).
-      // ⚠️ REAL FINDING: until the backend adds PUT /v1/admin/settings?forClient=<tenant>,
-      // GIFSY has NO way to write settings into a tenant's namespace.
-      expect(
-        clientAdminSettingsObj[settingKey],
-        `KNOWN GAP (W15): GIFSY-written setting "${settingKey}" must NOT be visible to CLIENT_ADMIN ` +
-          `(different clientId namespace). Backend needs a cross-tenant write path.`,
-      ).toBeUndefined();
+        // Final strong assertion.
+        const finalSettings = await readSettingsAsGifsy();
+        expect(
+          finalSettings[settingKey],
+          `Setting key "${settingKey}" must equal the written value`,
+        ).toBe(settingValue);
+
+        // ── Step 3: Prove the REAL BUG — CLIENT_ADMIN cannot see GIFSY-written setting ─
+        // This assertion documents the known gap: the setting written under clientId='gifsy'
+        // is NOT visible to CLIENT_ADMIN (clientId='deoleo'). When the backend adds a
+        // cross-tenant write path, this assertion should be removed and the main flow
+        // updated to use CLIENT_ADMIN for the read. Read via the page session — its cookie
+        // authenticates as CLIENT_ADMIN.
+        const clientAdminSettings = await page.request.get('/api/admin/settings');
+        expect(
+          clientAdminSettings.status(),
+          'GET /api/admin/settings as CLIENT_ADMIN must return 200',
+        ).toBe(200);
+        const clientAdminBody = await clientAdminSettings.json();
+        const clientAdminSettingsObj = (clientAdminBody.data?.settings ?? clientAdminBody.settings ?? {}) as Record<string, unknown>;
+        // The GIFSY-written key must NOT appear in the CLIENT_ADMIN view (cross-namespace isolation).
+        // ⚠️ REAL FINDING: until the backend adds PUT /v1/admin/settings?forClient=<tenant>,
+        // GIFSY has NO way to write settings into a tenant's namespace.
+        expect(
+          clientAdminSettingsObj[settingKey],
+          `KNOWN GAP (W15): GIFSY-written setting "${settingKey}" must NOT be visible to CLIENT_ADMIN ` +
+            `(different clientId namespace). Backend needs a cross-tenant write path.`,
+        ).toBeUndefined();
+      } finally {
+        await gifsy.dispose();
+      }
     },
   );
 });

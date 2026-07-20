@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { authHeader } from '../helpers/write';
+import { cookieToken, requestAs } from '../helpers/write';
 
 /**
  * SALES_SO KYC first-approve write-persistence (S2 / W5 — gap #38, stage 1).
@@ -45,7 +45,7 @@ test.describe('@sales KYC first-approve write-persistence (S2/W5)', () => {
     page,
   }) => {
     await page.goto('/sales/kyc');
-    const soToken = await page.evaluate(() => localStorage.getItem('token'));
+    const soToken = await cookieToken(page);
     expect(soToken, 'SALES_SO must be logged in (storageState)').toBeTruthy();
     const soAuth = { Authorization: `Bearer ${soToken}` };
 
@@ -114,16 +114,23 @@ test.describe('@sales KYC first-approve write-persistence (S2/W5)', () => {
     // We do NOT re-read as the SALES_SO because SALES_SO's getOne would see the same
     // in-process response-path. Using GIFSY as the fresh independent reader mirrors the
     // partner/visibility-write.e2e.ts precedent (partner writes → gifsy reads).
-    const gifsyAuth = authHeader('gifsy');
-    const readRes = await page.request.get(`/api/kyc/${target.id}`, { headers: gifsyAuth });
-    expect(readRes.status(), `GET /api/kyc/${target.id} as GIFSY must succeed`).toBe(200);
+    // AF-6: the proxy authenticates from the session COOKIE and ignores any Authorization header, so a
+    // page.request read would authenticate as the SALES_SO (the page's cookie), not GIFSY. Use a real
+    // GIFSY-cookie request context so this is a genuinely independent cross-role reader.
+    const gifsy = await requestAs('gifsy');
+    try {
+      const readRes = await gifsy.get(`/api/kyc/${target.id}`);
+      expect(readRes.status(), `GET /api/kyc/${target.id} as GIFSY must succeed`).toBe(200);
 
-    const readBody = await readRes.json();
-    const persistedStatus: string =
-      readBody.data?.submission?.status ?? readBody.submission?.status;
-    expect(
-      persistedStatus,
-      `FRESH READ (as GIFSY): submission ${target.id} must be PENDING_GIFSY after SO first-approve`,
-    ).toBe('PENDING_GIFSY');
+      const readBody = await readRes.json();
+      const persistedStatus: string =
+        readBody.data?.submission?.status ?? readBody.submission?.status;
+      expect(
+        persistedStatus,
+        `FRESH READ (as GIFSY): submission ${target.id} must be PENDING_GIFSY after SO first-approve`,
+      ).toBe('PENDING_GIFSY');
+    } finally {
+      await gifsy.dispose();
+    }
   });
 });

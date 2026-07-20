@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 
 /**
  * Partner invoice detail cross-partner scope guard (Stream S3p, Wave 3).
@@ -37,7 +38,7 @@ const OTHER_PARTNER_FAKE_ID = 'other-partner-invoice-99999999';
 test.describe('@partner invoice detail scope guard', () => {
   test('GET /api/partner/invoices/:non-existent-id returns 404 or 403 (not 200)', async ({ page }) => {
     await page.goto('/partner/invoices');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'partner must be logged in').toBeTruthy();
 
     const r = await page.request.get(`/api/partner/invoices/${FAKE_INVOICE_ID}`, {
@@ -98,7 +99,7 @@ test.describe('@partner invoice detail scope guard', () => {
 
   test('direct API call with a second fabricated id also returns non-200', async ({ page }) => {
     await page.goto('/partner/invoices');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
 
     const r = await page.request.get(`/api/partner/invoices/${OTHER_PARTNER_FAKE_ID}`, {
       headers: { Authorization: `Bearer ${token}` },

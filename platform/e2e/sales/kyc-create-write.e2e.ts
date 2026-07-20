@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { authHeader } from '../helpers/write';
+import { cookieToken, requestAs } from '../helpers/write';
 
 /**
  * SALES_SO KYC create (W16) — write-persistence spec for POST /api/kyc.
@@ -51,7 +51,7 @@ test.describe('@sales kyc-create write (W16)', () => {
     page,
   }) => {
     await page.goto('/sales/kyc/new');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'SALES_SO must be logged in').toBeTruthy();
 
     // Submit a skeleton payload with missing required fields.  The backend should return:
@@ -93,21 +93,28 @@ test.describe('@sales kyc-create write (W16)', () => {
     // We use seed-kyc-4 as a known-seeded submission to prove the GIFSY cross-read path works.
     // This is not strictly a CREATE test, but it validates the cross-role read leg that a real
     // kyc-create flow would depend on.
-    const gifsyAuth = authHeader('gifsy');
-    const res = await page.request.get('/api/kyc/seed-kyc-4', { headers: gifsyAuth });
+    // AF-6: the proxy authenticates from the session COOKIE and ignores any Authorization header, so a
+    // page.request read would authenticate as the page's role, not GIFSY. Use a real GIFSY-cookie
+    // request context so this is a genuinely independent GIFSY reader.
+    const gifsy = await requestAs('gifsy');
+    try {
+      const res = await gifsy.get('/api/kyc/seed-kyc-4');
 
-    if (res.status() === 404) {
-      // seed-kyc-4 doesn't exist — skip gracefully (e.g. seed not run yet).
-      test.skip(true, 'seed-kyc-4 not found — seed not run or DB reset; skipping cross-role read');
-      return;
+      if (res.status() === 404) {
+        // seed-kyc-4 doesn't exist — skip gracefully (e.g. seed not run yet).
+        test.skip(true, 'seed-kyc-4 not found — seed not run or DB reset; skipping cross-role read');
+        return;
+      }
+
+      expect(res.status(), 'GET /api/kyc/seed-kyc-4 as GIFSY must succeed').toBe(200);
+      const body = await res.json();
+      expect(body.success, 'GIFSY cross-read response must have success:true').toBe(true);
+      expect(
+        body.data?.submission?.id,
+        'GIFSY cross-read must return the submission id',
+      ).toBe('seed-kyc-4');
+    } finally {
+      await gifsy.dispose();
     }
-
-    expect(res.status(), 'GET /api/kyc/seed-kyc-4 as GIFSY must succeed').toBe(200);
-    const body = await res.json();
-    expect(body.success, 'GIFSY cross-read response must have success:true').toBe(true);
-    expect(
-      body.data?.submission?.id,
-      'GIFSY cross-read must return the submission id',
-    ).toBe('seed-kyc-4');
   });
 });

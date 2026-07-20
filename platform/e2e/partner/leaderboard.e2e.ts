@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -44,7 +45,7 @@ test.describe('@partner leaderboard (read)', () => {
 
   test('API returns the expected leaderboard shape', async ({ page }) => {
     await page.goto('/partner/leaderboard');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     const r = await page.request.get('/api/leaderboard', {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -76,7 +77,7 @@ test.describe('@partner leaderboard (read)', () => {
     // Wait for the loading spinner to clear before any further assertions.
     await expect(page.locator('.animate-spin')).toHaveCount(0, { timeout: 12_000 });
 
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     const r = await page.request.get('/api/leaderboard', {
       headers: { Authorization: `Bearer ${token}` },
     });

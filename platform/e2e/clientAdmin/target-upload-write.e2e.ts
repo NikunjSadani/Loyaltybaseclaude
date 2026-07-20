@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import * as XLSX from 'xlsx';
 
 /**
@@ -46,7 +47,7 @@ test.describe('@clientAdmin target upload write-persistence (W8)', () => {
     async ({ page }) => {
       await page.goto('/admin/targets');
 
-      const token = await page.evaluate(() => localStorage.getItem('token'));
+      const token = await cookieToken(page);
       expect(token, 'CLIENT_ADMIN must be logged in (storageState)').toBeTruthy();
 
       const auth = { Authorization: `Bearer ${token}` };
@@ -226,7 +227,7 @@ test.describe('@clientAdmin target upload write-persistence (W8)', () => {
   test('uploading a non-xlsx file is rejected with 400', async ({ page }) => {
     await page.goto('/admin/targets');
 
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'CLIENT_ADMIN must be logged in (storageState)').toBeTruthy();
 
     const result = await page.evaluate(

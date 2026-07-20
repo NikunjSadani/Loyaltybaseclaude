@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -30,7 +31,7 @@ const OUT_OF_SCOPE_KYC_ID = 'seed-kyc-b1';
 test.describe('@sales kyc-detail', () => {
   test('API read: GET /api/kyc/:id returns the in-scope submission', async ({ page }) => {
     await page.goto('/sales/kyc');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'SALES_SO must be logged in').toBeTruthy();
     const auth = { Authorization: `Bearer ${token}` };
 
@@ -64,7 +65,7 @@ test.describe('@sales kyc-detail', () => {
     page,
   }) => {
     await page.goto('/sales/kyc');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'SALES_SO must be logged in').toBeTruthy();
 
     const res = await page.request.get(`/api/kyc/${OUT_OF_SCOPE_KYC_ID}`, {

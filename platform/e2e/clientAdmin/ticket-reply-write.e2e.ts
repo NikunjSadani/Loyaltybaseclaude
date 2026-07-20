@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { uniqueMarker } from '../helpers/persist';
-import { tokenFor } from '../helpers/write';
+import { cookieToken, requestAs } from '../helpers/write';
 
 /**
  * W13 — Admin replies to a partner ticket → the PARTNER session sees the reply.
@@ -34,11 +34,8 @@ test.describe('@clientAdmin ticket reply write-persistence, cross-session (W13)'
   test('admin posts a reply → PARTNER fresh read sees the message in the thread', async ({ page }) => {
     await page.goto('/admin/tickets');
 
-    const adminToken = await page.evaluate(() => localStorage.getItem('token'));
+    const adminToken = await cookieToken(page);
     expect(adminToken, 'CLIENT_ADMIN must be logged in (storageState)').toBeTruthy();
-
-    // Cross-role: read the partner's token so we can verify the partner sees the reply.
-    const partnerToken = tokenFor('partner');
 
     // The unique reply text — this run's marker.
     const replyText = uniqueMarker('E2E-AdminReply');
@@ -68,33 +65,38 @@ test.describe('@clientAdmin ticket reply write-persistence, cross-session (W13)'
     expect(newMsgId, 'POST must return the created message with an id').toBeTruthy();
 
     // ── Step 2: PERSISTENCE — PARTNER reads the ticket and sees the admin reply ──
-    // The partner uses their own token (cross-role pattern). The ticket was created
-    // BY the partner, so loadAccessible allows them to GET it.
-    const readTicketAsPartner = async (): Promise<string[]> => {
-      const r = await page.request.get(`/api/tickets/${TICKET_ID}`, {
-        headers: { Authorization: `Bearer ${partnerToken}` },
-      });
-      expect(r.status(), `GET /api/tickets/${TICKET_ID} as partner must return 200`).toBe(200);
-      const j = await r.json();
-      const ticket = (j.data?.ticket ?? j.ticket) as
-        | { messages?: { id: string; message: string }[] }
-        | undefined;
-      return (ticket?.messages ?? []).map((m) => m.message);
-    };
+    // The ticket was created BY the partner, so loadAccessible allows them to GET it. AF-6: the proxy
+    // authenticates from the request's session COOKIE and ignores any Authorization header, so
+    // page.request would read as the CLIENT_ADMIN page session — use a real PARTNER-cookie request
+    // context to genuinely prove the PARTNER sees the admin reply in their own thread.
+    const partner = await requestAs('partner');
+    try {
+      const readTicketAsPartner = async (): Promise<string[]> => {
+        const r = await partner.get(`/api/tickets/${TICKET_ID}`);
+        expect(r.status(), `GET /api/tickets/${TICKET_ID} as partner must return 200`).toBe(200);
+        const j = await r.json();
+        const ticket = (j.data?.ticket ?? j.ticket) as
+          | { messages?: { id: string; message: string }[] }
+          | undefined;
+        return (ticket?.messages ?? []).map((m) => m.message);
+      };
 
-    // The admin's reply text must appear in the PARTNER's view of the thread.
-    await expect
-      .poll(readTicketAsPartner, {
-        timeout: 10_000,
-        message: `Admin reply "${replyText}" must appear in the ticket thread when read by the PARTNER`,
-      })
-      .toContain(replyText);
+      // The admin's reply text must appear in the PARTNER's view of the thread.
+      await expect
+        .poll(readTicketAsPartner, {
+          timeout: 10_000,
+          message: `Admin reply "${replyText}" must appear in the ticket thread when read by the PARTNER`,
+        })
+        .toContain(replyText);
 
-    // Final confirmation — the message is real and persisted (not optimistic).
-    const partnerMessages = await readTicketAsPartner();
-    expect(
-      partnerMessages,
-      `Partner must see the admin reply "${replyText}" in ticket ${TICKET_ID}`,
-    ).toContain(replyText);
+      // Final confirmation — the message is real and persisted (not optimistic).
+      const partnerMessages = await readTicketAsPartner();
+      expect(
+        partnerMessages,
+        `Partner must see the admin reply "${replyText}" in ticket ${TICKET_ID}`,
+      ).toContain(replyText);
+    } finally {
+      await partner.dispose();
+    }
   });
 });

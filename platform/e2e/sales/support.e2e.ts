@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -33,7 +34,7 @@ test.describe('@sales support', () => {
 
   test('API returns only this SO\'s own tickets (scoped)', async ({ page }) => {
     await page.goto('/sales/support');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'SALES_SO must be logged in').toBeTruthy();
 
     const res = await page.request.get('/api/tickets', {

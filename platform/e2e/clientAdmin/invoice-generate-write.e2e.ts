@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -39,7 +40,7 @@ test.describe('@clientAdmin invoice generate write-persistence (W6)', () => {
     await page.goto('/admin/invoices');
     await expectNoFabricatedData(page);
 
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'CLIENT_ADMIN must be logged in (storageState)').toBeTruthy();
 
     const authH = { Authorization: `Bearer ${token}` };

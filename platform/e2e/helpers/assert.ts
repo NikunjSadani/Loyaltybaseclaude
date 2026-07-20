@@ -1,5 +1,6 @@
 import { expect, type Page } from '@playwright/test';
 import { FABRICATED_TOKENS } from '../fixtures/fabricated';
+import { cookieToken } from './write';
 
 /**
  * Assert the page renders NO known fabricated/demo value (gap #40). Reads the full rendered text
@@ -50,11 +51,11 @@ export async function expectScopedOut(
   await expect(page.locator('body')).toBeVisible();
   const url = new URL(page.url());
 
-  // Live-session guard (FP-2), read AFTER navigating so we're on the http origin (reading
-  // localStorage on about:blank throws SecurityError). The FE redirects to /auth/login only when no
-  // token exists, so a dead/expired session lands here with no token → this fails LOUDLY rather than
+  // Live-session guard (FP-2). AF-6 — the JWT is an httpOnly `token` cookie now (NOT localStorage);
+  // Playwright reads it from the browser context. The FE redirects to /auth/login only when no token
+  // cookie exists, so a dead/expired session lands here with no token → this fails LOUDLY rather than
   // letting a login-redirect masquerade as "correctly scoped out".
-  const token = await page.evaluate(() => localStorage.getItem('token'));
+  const token = await cookieToken(page);
   expect(token, `no live session when testing scope-out of ${path} (dead/expired session, not an authz block?)`).toBeTruthy();
 
   if (!url.pathname.startsWith(path)) {

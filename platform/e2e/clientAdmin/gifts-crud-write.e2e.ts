@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { uniqueMarker } from '../helpers/persist';
 
 /**
@@ -29,7 +30,7 @@ test.describe('@clientAdmin reward catalog CRUD write-persistence (W10)', () => 
   test('create a reward → fresh GET shows it; PATCH → re-read reflects update', async ({ page }) => {
     await page.goto('/admin/rewards');
 
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'CLIENT_ADMIN must be logged in (storageState)').toBeTruthy();
 
     const auth = { Authorization: `Bearer ${token}` };

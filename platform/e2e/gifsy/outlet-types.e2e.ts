@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -49,7 +50,7 @@ test.describe('@gifsy Outlet Types master (S4g)', () => {
 
   test('API GET /api/gifsy/clients/platform/outlet-type-configs responds for GIFSY_ADMIN', async ({ page }) => {
     await page.goto('/gifsy/outlet-types');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'gifsy session must be live').toBeTruthy();
 
     const r = await page.request.get('/api/gifsy/clients/platform/outlet-type-configs', {

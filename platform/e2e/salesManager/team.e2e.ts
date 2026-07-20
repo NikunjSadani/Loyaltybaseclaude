@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -60,7 +61,7 @@ test.describe('@salesManager team roll-up', () => {
     page,
   }) => {
     await page.goto('/sales/dashboard');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'SALES_ASM must be logged in').toBeTruthy();
     const auth = { Authorization: `Bearer ${token}` };
 
@@ -94,7 +95,7 @@ test.describe('@salesManager team roll-up', () => {
 
   test('GET /api/sales/team must NOT return fabricated member names', async ({ page }) => {
     await page.goto('/sales/dashboard');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'SALES_ASM must be logged in').toBeTruthy();
 
     const res = await page.request.get('/api/sales/team', {
@@ -123,7 +124,7 @@ test.describe('@salesManager team roll-up', () => {
 
   test('GET /api/sales/team/:memberId returns the SO detail including EMP001', async ({ page }) => {
     await page.goto('/sales/dashboard');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'SALES_ASM must be logged in').toBeTruthy();
     const auth = { Authorization: `Bearer ${token}` };
 
@@ -161,7 +162,7 @@ test.describe('@salesManager team roll-up', () => {
     page,
   }) => {
     await page.goto('/sales/dashboard');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'SALES_ASM must be logged in').toBeTruthy();
     const auth = { Authorization: `Bearer ${token}` };
 
@@ -217,7 +218,7 @@ test.describe('@salesManager team roll-up', () => {
     await setSalesRolePickerToASM(page);
 
     // Resolve the member id via API first, then drive the FE page.
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     const listRes = await page.request.get('/api/sales/team', {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -250,7 +251,7 @@ test.describe('@salesManager team roll-up', () => {
   }) => {
     await setSalesRolePickerToASM(page);
 
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     const listRes = await page.request.get('/api/sales/team', {
       headers: { Authorization: `Bearer ${token}` },
     });

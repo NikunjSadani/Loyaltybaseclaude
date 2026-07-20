@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { expectNoFabricatedData } from '../helpers/assert';
 
 /**
@@ -56,7 +57,7 @@ test.describe('@partner profile (read / W17)', () => {
 
   test('GET /api/auth/me returns real partner data for CP001', async ({ page }) => {
     await page.goto('/partner/profile');
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     const r = await page.request.get('/api/auth/me', {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -80,7 +81,7 @@ test.describe('@partner profile (read / W17)', () => {
     await expect(pointsSummary).toBeVisible({ timeout: 10_000 });
     // The balance shown must be the real wallet value, not the mock 4,250.
     // Seed: 50,000 redeemable (minus any CI deductions). We verify via the API.
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     const r = await page.request.get('/api/wallet', {
       headers: { Authorization: `Bearer ${token}` },
     });

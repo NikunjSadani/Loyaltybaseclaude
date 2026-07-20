@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { uniqueMarker } from '../helpers/persist';
 
 /**
@@ -31,7 +32,7 @@ test.describe('@clientAdmin credit field create + deactivate write-persistence (
   }) => {
     await page.goto('/admin/credits');
 
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'CLIENT_ADMIN must be logged in (storageState)').toBeTruthy();
 
     const auth = { Authorization: `Bearer ${token}` };

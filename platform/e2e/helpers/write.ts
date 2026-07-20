@@ -18,7 +18,9 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { request, type APIRequestContext, type Page } from '@playwright/test';
 import { ROLES, type RoleKey } from '../fixtures/roles';
+import { resolveEnv } from '../fixtures/env';
 
 /** Shape of a Playwright storageState JSON file (subset we need). */
 interface StorageState {
@@ -74,4 +76,18 @@ export function tokenFor(roleKey: RoleKey): string {
  */
 export function authHeader(roleKey: RoleKey): { Authorization: string } {
   return { Authorization: `Bearer ${tokenFor(roleKey)}` };
+}
+
+/** The current role's live JWT from the httpOnly `token` cookie (AF-6 — NOT localStorage).
+ *  Returns null if there is no session. Playwright reads httpOnly cookies via the context. */
+export async function cookieToken(page: Page): Promise<string | null> {
+  const c = (await page.context().cookies()).find((ck) => ck.name === 'token');
+  return c?.value ?? null;
+}
+
+/** An API request context authenticated AS `role` — carries that role's httpOnly `token` cookie, so a
+ *  request through the FE `/api/*` proxy authenticates as `role` (the proxy injects the Bearer from the
+ *  cookie and ignores any Authorization header). Use this for TRUE cross-role reads. Dispose after use. */
+export async function requestAs(role: RoleKey): Promise<APIRequestContext> {
+  return request.newContext({ baseURL: resolveEnv().baseURL, storageState: ROLES[role].storageStatePath });
 }

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { cookieToken } from '../helpers/write';
 import { uniqueMarker } from '../helpers/persist';
 
 /**
@@ -25,7 +26,7 @@ test.describe('@clientAdmin banner create write-persistence (W14)', () => {
   test('create a banner (ACTIVE) → fresh GET shows it by title', async ({ page }) => {
     await page.goto('/admin/banners');
 
-    const token = await page.evaluate(() => localStorage.getItem('token'));
+    const token = await cookieToken(page);
     expect(token, 'CLIENT_ADMIN must be logged in (storageState)').toBeTruthy();
 
     const auth = { Authorization: `Bearer ${token}` };
