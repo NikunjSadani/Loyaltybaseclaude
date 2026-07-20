@@ -22,16 +22,23 @@ import { ROLES, type RoleKey } from '../fixtures/roles';
 
 /** Shape of a Playwright storageState JSON file (subset we need). */
 interface StorageState {
+  cookies?: { name: string; value: string }[];
   origins?: {
     localStorage?: { name: string; value: string }[];
   }[];
 }
 
 /**
- * Read the JWT that a role's persisted storageState carries (localStorage key
- * `token`). Throws a clear error if the storageState file is absent or the
- * token is missing — which almost always means `npm run e2e` was invoked
- * without running the `setup` project first.
+ * Read the JWT that a role's persisted storageState carries. AF-6 — the token is an
+ * httpOnly `token` COOKIE now (not localStorage, which a stored-XSS could read); Playwright
+ * captures httpOnly cookies in storageState, so we read it from there (with a legacy
+ * localStorage fallback for older captures). Throws a clear error if the storageState file is
+ * absent or the token is missing — which almost always means `npm run e2e` was invoked without
+ * running the `setup` project first.
+ *
+ * NOTE (AF-6): the edge proxy STRIPS any inbound `Authorization` header and injects its own from
+ * the cookie, so an explicit Bearer only reaches the BACKEND directly; through the FE `/api/*`
+ * proxy it's the session COOKIE (which `page.request.*` sends automatically) that authenticates.
  */
 export function tokenFor(roleKey: RoleKey): string {
   const filePath = ROLES[roleKey].storageStatePath;
@@ -46,13 +53,15 @@ export function tokenFor(roleKey: RoleKey): string {
   }
 
   const ss = JSON.parse(raw) as StorageState;
+  const cookieTok = (ss.cookies ?? []).find((c) => c.name === 'token');
+  if (cookieTok?.value) return cookieTok.value;
   for (const origin of ss.origins ?? []) {
     const entry = (origin.localStorage ?? []).find((x) => x.name === 'token');
     if (entry?.value) return entry.value;
   }
 
   throw new Error(
-    `tokenFor('${roleKey}'): no 'token' entry found in localStorage of ${filePath}. ` +
+    `tokenFor('${roleKey}'): no 'token' cookie or localStorage entry found in ${filePath}. ` +
       `The login for this role may have failed during setup.`,
   );
 }

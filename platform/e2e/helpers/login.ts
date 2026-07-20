@@ -9,7 +9,8 @@ import { resolveOtp } from './otp';
  * real token and hides exactly the bugs we hunt).
  *
  * Flow (auth/login/page.tsx): enter phone → Send OTP → fill 6 OTP boxes (auto-submits) →
- * verifyOTP stores the JWT in localStorage and `window.location.href = roleDashboard`.
+ * verifyOTP sets the JWT as an httpOnly `token` cookie (AF-6: NOT localStorage) and
+ * `window.location.href = roleDashboard`.
  */
 export async function login(page: Page, role: RoleDef): Promise<void> {
   const env = resolveEnv();
@@ -73,17 +74,20 @@ export async function login(page: Page, role: RoleDef): Promise<void> {
     `expected ${role.key} to land on ${role.expectedDashboardPath}, got ${landed}`,
   ).toBe(true);
 
-  // Sanity: a real token landed where api-client reads it.
-  const token = await page.evaluate(() => localStorage.getItem('token'));
-  expect(token, `login for ${role.key} produced no JWT`).toBeTruthy();
+  // Sanity: a real session landed. AF-6 — the JWT is an httpOnly `token` cookie now (NOT
+  // localStorage, which a stored-XSS could read). Playwright reads httpOnly cookies via the context.
+  const cookies = await page.context().cookies();
+  const tokenCookie = cookies.find((c) => c.name === 'token');
+  expect(tokenCookie?.value, `login for ${role.key} produced no JWT cookie`).toBeTruthy();
 
-  // Assert the RIGHT role authenticated (FP-1). A token alone doesn't prove identity — if the seed
-  // ever attaches a different role to this phone, every spec would silently run as the wrong role.
-  const storedUser = await page.evaluate(() => localStorage.getItem('user'));
-  expect(storedUser, `login for ${role.key} stored no user`).toBeTruthy();
-  const parsed = JSON.parse(storedUser as string) as { role?: string };
+  // Assert the RIGHT role authenticated (FP-1) by decoding the JWT payload — a token alone doesn't
+  // prove identity; if the seed ever attaches a different role to this phone, every spec would
+  // silently run as the wrong role. (No localStorage `user` post-AF-6.)
+  const payload = JSON.parse(
+    Buffer.from(tokenCookie!.value.split('.')[1], 'base64').toString('utf8'),
+  ) as { role?: string };
   expect(
-    parsed.role,
-    `expected ${role.key} (${role.phone}) to log in as ${role.backendRole}, got ${parsed.role}`,
+    payload.role,
+    `expected ${role.key} (${role.phone}) to log in as ${role.backendRole}, got ${payload.role}`,
   ).toBe(role.backendRole);
 }
