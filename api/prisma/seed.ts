@@ -183,6 +183,9 @@ async function main() {
   // 4. clientb cross-tenant dataset (for the E2E tenant-isolation tests) ────────
   await seedClientBDemo();
 
+  // 5. §A-DOMAIN client_domains routing rows (deoleo + clientb) ─────────────────
+  await seedClientDomains();
+
   console.log('\n✅  Seed complete.');
 }
 
@@ -936,15 +939,24 @@ async function seedClientBDemo() {
   const demoPasswordHash = await bcrypt.hash('ChangeMeOnFirstLogin!', 12);
   const emptyJson = {} as const;
 
+  // §A-DOMAIN P6: clientb is a DB-provisioned SECOND tenant. Give it DISTINCTIVE
+  // DB branding (values that differ from the CLIENT_REGISTRY.clientb config) so the
+  // `GET /v1/tenants/routing` E2E can prove the branding came from the DB, not the
+  // code registry. Set on BOTH create + update so a re-seed against an existing
+  // gifsy_dev makes the routing-endpoint precondition deterministic.
+  const clientbDbBranding = {
+    displayName: 'Zenith Rewards (DB)',
+    primaryColor: '#7c3aed',
+  } as const;
   await prisma.client.upsert({
     where: { id: CLIENTB_CLIENT_ID },
-    update: {},
+    update: { branding: clientbDbBranding },
     create: {
       id: CLIENTB_CLIENT_ID,
       internalName: 'Client B (Demo)',
       status: 'ACTIVE',
       onboardedAt: new Date(),
-      branding: emptyJson,
+      branding: clientbDbBranding,
       features: emptyJson,
       approvalHierarchy: emptyJson,
       notifications: emptyJson,
@@ -1058,6 +1070,40 @@ async function seedClientBDemo() {
     `   ✓ clientb: admin ${clientAdmin.phone} + partner CPB001 (Zenith Trading Co) + wallet + outlet OB001 + PENDING_GIFSY KYC`,
   );
   console.log('   ✅ clientb cross-tenant dataset ready.');
+}
+
+// ── §A-DOMAIN client_domains routing rows ─────────────────────────────────────
+// The `client_domains` table drives the DB-backed domain→slug resolver (P2) and
+// is served by `GET /v1/tenants/routing`. The Phase-0 backfill migration inserts
+// these on a DB that ALREADY has the tenants; on a fresh local/CI DB, migrations
+// run BEFORE this seed (empty `clients` table → backfill inserts nothing), so we
+// seed the routing rows explicitly here to make the routing endpoint deterministic
+// locally — matching the values staging/prod hold post-backfill.
+//
+//   deoleo  → deoleoloyalty.gifsy.in (PRIMARY, branded: label ≠ slug), deoleo.gifsy.in
+//   clientb → zenithrewards.gifsy.in (PRIMARY, branded: label ≠ slug, NOT in the code
+//             registry — proves DB-only routing), clientb.gifsy.in
+//
+// Idempotent: each row is upserted on a fixed id. LOWER(domain) is globally unique
+// (expression index), so the domains never collide across tenants.
+async function seedClientDomains() {
+  console.log('\n🌐  Seeding §A-DOMAIN client_domains routing rows…');
+  const rows: { id: string; clientId: string; domain: string; isPrimary: boolean }[] = [
+    { id: 'seed-dom-deoleo-1', clientId: DEOLEO_CLIENT_ID, domain: 'deoleoloyalty.gifsy.in', isPrimary: true },
+    { id: 'seed-dom-deoleo-2', clientId: DEOLEO_CLIENT_ID, domain: 'deoleo.gifsy.in', isPrimary: false },
+    { id: 'seed-dom-clientb-1', clientId: CLIENTB_CLIENT_ID, domain: 'zenithrewards.gifsy.in', isPrimary: true },
+    { id: 'seed-dom-clientb-2', clientId: CLIENTB_CLIENT_ID, domain: 'clientb.gifsy.in', isPrimary: false },
+  ];
+  for (const r of rows) {
+    await prisma.clientDomain.upsert({
+      where: { id: r.id },
+      update: { clientId: r.clientId, domain: r.domain, isPrimary: r.isPrimary },
+      create: r,
+    });
+  }
+  console.log(
+    '   ✓ domains: deoleo→[deoleoloyalty.gifsy.in, deoleo.gifsy.in], clientb→[zenithrewards.gifsy.in, clientb.gifsy.in]',
+  );
 }
 
 main()
