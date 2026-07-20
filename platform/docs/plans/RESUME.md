@@ -12,7 +12,7 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 🟢 CURRENT STATE
 - **prod == main == `437045a`** (CUTOVER #10, live 2026-07-19 — WALLET-SURFACING + §A-DOMAIN P1/P2/P4/P4b).
-  **develop is ~67 commits AHEAD of prod** (HEAD `b1ece3b`) — everything below is on develop/staging,
+  **develop is ~68 commits AHEAD of prod** (HEAD `8f817b9`) — everything below is on develop/staging,
   staging-verified, **NOT in prod yet** → awaiting the next owner-gated cutover (#11). Verify HEADs via `git log`.
 - **develop payload beyond prod (all done + gate-green + staging-verified this session):**
   **sales-ledger payout unification** (`af9948b`), **§A-DOMAIN D-1** (`9872806`, resolveClient→clients table),
@@ -22,13 +22,14 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
   CF edge, now stamping the edge secret — version `44088f8a`) + branding-backfill (live in prod DB, needed no cutover).
 - **DB tenant-routing LIVE in prod** (`TENANT_ROUTING_SOURCE` default `db`, registry fallback → Deoleo
   unaffected). Kill-switch: `TENANT_ROUTING_SOURCE=registry` on the FE service.
-- Gate green on develop `b1ece3b`: **api jest 1540 · nest 0 · FE vitest 1917 · tsc 0**. (prod `437045a`
+- Gate green on develop `8f817b9`: **api jest 1540 · nest 0 · FE vitest 1917 · tsc 0**. (prod `437045a`
   gate was api 1529 · FE 1844.)
 
 ## ▶ IMMEDIATE NEXT — finish §A-DOMAIN P6 + cutover #11
-P0–P2 + P4/P4b IN PROD; **P3 + D-1 + P5 ✅ DONE on develop (staging-verified, awaiting cutover #11)**. **P6 is now
-~done on develop (tests + favicon + E2E shipped `f578cad`, staging-verified); only the owner-gated S1 enforcement
-tail remains.** Plans: `A-DOMAIN-PLAN.md`, `A-DOMAIN-P0-DESIGN.md`. Status:
+P0–P2 + P4/P4b IN PROD; **P3 + D-1 + P5 ✅ DONE on develop (staging-verified, awaiting cutover #11)**. **P6 ✅ DONE
+on develop + staging — S1 edge-secret now ENFORCING on staging (verified); tests + favicon + E2E shipped. The only
+§A-DOMAIN item left is prod enablement, which happens automatically at cutover #11.** Plans: `A-DOMAIN-PLAN.md`,
+`A-DOMAIN-P0-DESIGN.md`. Status:
 - **P3 edge worker — ✅ DEPLOYED + VERIFIED LIVE (2026-07-20).** Owner added the proxied wildcard `*.gifsy.in`
   DNS record (AAAA `*`→`100::`, orange-cloud) + Universal SSL already covers `*.gifsy.in` (cert SAN
   `DNS:gifsy.in, DNS:*.gifsy.in`, GTS, Active; plus ACM Advanced certs for the existing 2-level hosts). Both
@@ -67,20 +68,22 @@ tail remains.** Plans: `A-DOMAIN-PLAN.md`, `A-DOMAIN-P0-DESIGN.md`. Status:
   `DEFAULT_CLIENT_CONFIG`. Deoleo nav provably unchanged; branded-host SSR still resolves. **2 LOW future-tenant notes
   (NOT Deoleo blockers → 2ND-TENANT list):** admin layout doesn't gate on features-loading (flash for a future
   non-default tenant); MIS_USER gets `DEFAULT_FEATURES` (`/admin/settings/config` is GIFSY/CLIENT_ADMIN-only).
-- **P6 (#158) — ~DONE on develop; only the owner-gated S1 enforcement tail remains.**
-  - **S1 edge-secret — WORKER ACTIVATED, frontend still INERT (2026-07-20).** The `*.run.app` origins are public
+- **P6 (#158) — ✅ DONE on develop + staging (S1 ENFORCING + verified). Prod enforces automatically at cutover #11.**
+  - **S1 edge-secret — ✅ ACTIVATED + ENFORCING on staging (2026-07-20, verified).** The `*.run.app` origins are public
     (`ingress=all` + IAM `allUsers`, verified) → a direct hit could forge `x-forwarded-host` (bounded: post-login scope
     is JWT-enforced). Fix = an **edge secret**: worker stamps `x-edge-secret`; `lib/platform/edge-trust.ts`
     `resolveTrustedHost` (used by `proxy.ts` + `auth/login/actions.ts`) trusts `x-forwarded-host` ONLY when it matches,
-    else falls back to Host (safe). **Env-gated** (`EDGE_SECRET` unset/empty → inert → prior behaviour). **DONE:** a
-    256-bit secret is bound to the `gifsy-proxy` worker (`wrangler secret put`) + the worker is redeployed (version
-    `44088f8a`) so it now strips any inbound `x-edge-secret` and stamps the real one; legit hosts re-smoke-tested 200
-    (deoleo prod+uat login, api, apex). The value is in the scratch file `EDGE_SECRET-owner-handoff.txt` (NOT chat).
-    **▶ REMAINING (owner + me):** (1) **OWNER adds the `EDGE_SECRET` GitHub Actions repo secret** = that value (gh CLI
-    NOT installed → I can't); (2) next staging deploy makes staging ENFORCE → I verify a forged direct-`.run.app` hit no
-    longer resolves a foreign tenant; (3) prod enforces at cutover #11 (deploy.yml already injects `EDGE_SECRET`).
-    **CRITICAL ORDERING (already satisfied):** the worker must stamp the secret BEFORE any frontend enforces — the worker
-    is live now, all frontends inert, so adding the GitHub secret is safe in any order.
+    else falls back to Host (safe). **Env-gated** (`EDGE_SECRET` unset/empty → inert → prior behaviour). **AS-BUILT:** a
+    256-bit secret is bound to the `gifsy-proxy` worker (`wrangler secret put`) + worker redeployed (version `44088f8a`)
+    so it strips any inbound `x-edge-secret` and stamps the real one; the OWNER added the matching `EDGE_SECRET` GitHub
+    Actions repo secret (gh CLI not installed → owner did it in the UI); an empty-commit redeploy (`8f817b9`) baked it into
+    the staging frontend env → **staging now ENFORCES.** **RUNTIME-VERIFIED on staging:** (1) legit login via the edge
+    worker `uat.deoleoloyalty.gifsy.in/auth/login` → 200 + slug=deoleo (login intact, secret matches); (2) a FORGED direct
+    `*.run.app` hit with `x-forwarded-host: clientb.gifsy.in` → 404 + slug=`default` (NOT clientb — forge REJECTED);
+    (3) baseline direct hit (no forge) → identical 404 + `default`. (2)==(3) ⇒ the spoofed host had zero effect. **Secret
+    value in scratch file `EDGE_SECRET-owner-handoff.txt` (owner can delete it now).** **▶ REMAINING: prod enforces
+    automatically at cutover #11** (deploy.yml already injects `EDGE_SECRET` from the same GitHub secret). Ordering safe:
+    the worker stamps for prod too, but prod FE has no `EDGE_SECRET` until #11 → inert until then.
   - **Tests + favicon + E2E — ✅ SHIPPED `f578cad` (audited GO, full gate green, staging-verified).**
     `4cab103` **favicon-from-DB-branding**: `layout.tsx` now uses `resolveFaviconIcoHref(branding.faviconUrl, slug)` —
     prefers the DB `faviconUrl` ONLY when it's an absolute http(s) URL (a console-uploaded GCS asset), else the static
@@ -128,7 +131,7 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 
 ## GATES (full suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`)
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` ·
-`cd platform && npx tsc --noEmit`. **Latest green (develop `b1ece3b`): api jest 1540 · nest 0 · FE vitest 1917 · tsc 0.**
+`cd platform && npx tsc --noEmit`. **Latest green (develop `8f817b9`): api jest 1540 · nest 0 · FE vitest 1917 · tsc 0.**
 - **Deploy ≠ pushed** (a docs-only commit re-tags the image) — verify the serving SHA:
   `gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project gifsy-platform --format='value(spec.template.spec.containers[0].image)'`.
 - FE tsc gotcha: a stale `.next/types` surfaces a phantom `RejectionModal` error (pre-existing,
@@ -252,10 +255,11 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
 - **§A-DOMAIN** — P1/P2/P4/P4b IN PROD (cutover #10); P3 worker DEPLOYED (`eb56c29b`, live); branding-backfill
   live in prod DB. **D-1 ✅ + P5 ✅ DONE on develop (`9872806`/`c4d1cf9`, audited GO, staging-verified)** — the DB
   is now the full runtime source-of-truth (features/RBAC/capture-mode read `clients`; FE features from authenticated
-  /me; registry reduced to fallback). **P6 ~DONE on develop (`f578cad`): proxy/worker unit tests + favicon-from-DB-branding
-  (runtime-verified) + 2nd-tenant DB-routing E2E all SHIPPED; S1 edge-secret WORKER ACTIVATED (secret bound + worker
-  `44088f8a` stamping, frontend still inert). Remaining = owner adds the `EDGE_SECRET` GitHub secret → I runtime-verify
-  staging enforcement (forged-host).** All develop work awaits **cutover #11** (owner-gated). **2ND-TENANT list (LOW,
+  /me; registry reduced to fallback). **P6 ✅ DONE on develop + staging: proxy/worker unit tests + favicon-from-DB-branding
+  (runtime-verified) + 2nd-tenant DB-routing E2E all SHIPPED; S1 edge-secret ENFORCING on staging (owner added the
+  `EDGE_SECRET` GitHub secret; redeploy `8f817b9` → runtime-verified: legit edge login 200+deoleo, a forged direct-`.run.app`
+  `x-forwarded-host: clientb` → 404+`default` = forge rejected). Prod enforces automatically at cutover #11.** All develop
+  work awaits **cutover #11** (owner-gated). **2ND-TENANT list (LOW,
   before client #2): admin features-loading gate · MIS_USER feature fallback · Option-C multi-outlet.**
   See IMMEDIATE NEXT. **Data-hygiene ✅ DONE `b1ece3b`: committed `public/favicons/{deoleo,clientb}.ico` (byte-identical
   copies of the canonical `/icons/<slug>/favicon.ico`) so the stored `branding.faviconUrl=/favicons/<slug>.ico` now resolves
@@ -284,13 +288,13 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 | 8 | `4b33e4c` | presence-based partner wallet, sales+partner ledger field-name (shared resolver), pre-OTP copy |
 | 9 | `ebd474b` | payout UTR "Apply" query-vs-body fix |
 | 10 | `437045a` | **CURRENT PROD** (2026-07-19) — wallet-surfacing (credit payouts in partner wallet) + §A-DOMAIN P1/P2/P4/P4b + `client_domains` migration; verified live |
-| 11 | *(pending, develop `b1ece3b`)* | **NOT YET CUT** — sales-ledger payout unification + §A-DOMAIN D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6 (S1 edge-secret [worker activated, FE inert] + proxy/worker tests + favicon-from-DB-branding + 2nd-tenant E2E + the 2 finding-fixes `58ce1ab` + favicon data-hygiene `b1ece3b`). ~67 commits ahead; all staging-verified; owner-gated |
+| 11 | *(pending, develop `8f817b9`)* | **NOT YET CUT** — sales-ledger payout unification + §A-DOMAIN D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6 (S1 edge-secret [ENFORCING on staging, verified — prod enforces at this cutover] + proxy/worker tests + favicon-from-DB-branding + 2nd-tenant E2E + 2 finding-fixes `58ce1ab` + favicon data-hygiene `b1ece3b`). ~68 commits ahead; all staging-verified; owner-gated |
 
 ## START THE SESSION
 Greet. State: **prod == main == `437045a` (cutover #10 live); develop is ~66 commits AHEAD (HEAD `58ce1ab`),
 all staging-verified, awaiting cutover #11.** §A-DOMAIN: P1/P2/P4/P4b IN PROD; **P3 + D-1 + P5 ✅ DONE on develop**
-(DB is now the full runtime source-of-truth); **P6 ~DONE** — proxy/worker tests + favicon-from-DB-branding + 2nd-tenant
-DB-routing E2E all shipped (`f578cad`, runtime-verified); S1 edge-secret WORKER ACTIVATED (secret bound + worker
-`44088f8a` stamping, FE inert) — the ONLY remaining P6 step is the owner adding the `EDGE_SECRET` GitHub secret so I can
-runtime-verify staging enforcement. Then cutover #11. Present the OPEN THREADS and ask which to pick up.
+(DB is now the full runtime source-of-truth); **P6 ✅ DONE on develop + staging** — proxy/worker tests + favicon-from-DB-branding
++ 2nd-tenant DB-routing E2E shipped; S1 edge-secret **ENFORCING on staging (verified — legit edge login 200+deoleo; forged
+direct-`.run.app` host → rejected)**; prod enforces automatically at cutover #11. **§A-DOMAIN is now essentially complete;
+the next step is cutover #11 itself.** Present the OPEN THREADS and ask which to pick up.
 ```
