@@ -1,8 +1,12 @@
 # §A-DOMAIN — DB-driven tenant domain routing + branding (build plan)
 
-> **Status: PLAN — ready to execute.** Created 2026-07-18. Supersedes the sizing in
-> `POST-GO-LIVE-BACKLOG.md:23-44` (§A-DOMAIN) and folds in the "Multi-tenant SSR branding" row (§A).
-> Owner decisions locked 2026-07-18 (see §1). Tracks as task **#150** (C8: §A-DOMAIN).
+> **Status (updated 2026-07-20): P0–P5 + D-1 ✅ SHIPPED, P6 IN PROGRESS.** P0/P1/P2/P4/P4b are IN PROD
+> (cutover #10, `437045a`); P3 worker DEPLOYED to CF edge; branding-backfill live in prod DB; **D-1 (resolveClient
+> →clients) + P5 (registry-code retired, features from authenticated /me) ✅ DONE on develop (`9872806`/`c4d1cf9`,
+> audited GO, staging-verified) — awaiting cutover #11.** Only **P6** remains: S1 edge-secret (code done+inert,
+> activation pending) + proxy/worker tests + 2nd-tenant E2E + favicon-by-slug fix + docs. See [[deoleo-go-live-bundle]]
+> NEWEST-54/53 + `RESUME.md` for the as-built detail. (Original plan below is retained for reference.)
+> Created 2026-07-18. Supersedes the sizing in `POST-GO-LIVE-BACKLOG.md:23-44`. Tracks as task **#150**.
 
 ## 0. Goal in one line
 

@@ -1,3 +1,4 @@
+-- ✅ RAN ON PROD + STAGING 2026-07-19 (idempotent — re-running is a no-op). Do NOT re-run casually.
 -- §A-DOMAIN P5 prerequisite — BRANDING BACKFILL (fill-gaps, idempotent, additive).
 -- Copies each tenant's FULL branding from the in-code CLIENT_REGISTRY into clients.branding,
 -- WITHOUT overwriting any value the operator already set: each field =

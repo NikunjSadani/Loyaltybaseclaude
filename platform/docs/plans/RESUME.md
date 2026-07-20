@@ -11,16 +11,22 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-- **prod == main == develop == `437045a`** — CUTOVER #10 (live 2026-07-19). Ships the WALLET-SURFACING
-  fix **+ §A-DOMAIN P1/P2/P4/P4b**. The `client_domains` migration applied on prod (backfilled).
-  Post-cutover VERIFIED: `/health` 200, `/v1/tenants/routing` 200 (deoleo → `[deoleoloyalty, deoleo].gifsy.in`),
-  real-domain `deoleoloyalty.gifsy.in/auth/login` 200 + "Deoleo" SSR, unknown-host fail-safe 404.
-- **DB tenant-routing is LIVE in prod** (`TENANT_ROUTING_SOURCE` default `db`, registry fallback →
-  Deoleo unaffected). Kill-switch: set `TENANT_ROUTING_SOURCE=registry` on the FE service.
-- Gate green at `437045a`: **api jest 1529 · nest 0 · FE vitest 1844 · tsc 0**.
+- **prod == main == `437045a`** (CUTOVER #10, live 2026-07-19 — WALLET-SURFACING + §A-DOMAIN P1/P2/P4/P4b).
+  **develop is ~60 commits AHEAD of prod** (HEAD `a90d75b`) — everything below is on develop/staging,
+  staging-verified, **NOT in prod yet** → awaiting the next owner-gated cutover (#11). Verify HEADs via `git log`.
+- **develop payload beyond prod (all done + gate-green + staging-verified this session):**
+  **sales-ledger payout unification** (`af9948b`), **§A-DOMAIN D-1** (`9872806`, resolveClient→clients table),
+  **§A-DOMAIN P5** (`c4d1cf9`, registry-code retired: features from authenticated /me), **P6/S1 edge-secret**
+  (`98ea243`+`a90d75b`, code shipped but INERT until activated). Plus the P3 worker (deployed to CF edge) +
+  branding-backfill (already live in prod DB, needed no cutover).
+- **DB tenant-routing LIVE in prod** (`TENANT_ROUTING_SOURCE` default `db`, registry fallback → Deoleo
+  unaffected). Kill-switch: `TENANT_ROUTING_SOURCE=registry` on the FE service.
+- Gate green on develop `a90d75b`: **api jest 1540 · nest 0 · FE vitest 1861 · tsc 0**. (prod `437045a`
+  gate was api 1529 · FE 1844.)
 
-## ▶ IMMEDIATE NEXT — finish §A-DOMAIN (mostly owner-gated)
-P0–P2 + P4/P4b are DONE and IN PROD. Remaining (plans: `A-DOMAIN-PLAN.md`, `A-DOMAIN-P0-DESIGN.md`):
+## ▶ IMMEDIATE NEXT — finish §A-DOMAIN P6 + cutover #11
+P0–P2 + P4/P4b IN PROD; **P3 + D-1 + P5 ✅ DONE on develop (staging-verified, awaiting cutover #11)**. Only **P6**
+remains (S1 activation + tests + favicon + docs). Plans: `A-DOMAIN-PLAN.md`, `A-DOMAIN-P0-DESIGN.md`. Status:
 - **P3 edge worker — ✅ DEPLOYED + VERIFIED LIVE (2026-07-20).** Owner added the proxied wildcard `*.gifsy.in`
   DNS record (AAAA `*`→`100::`, orange-cloud) + Universal SSL already covers `*.gifsy.in` (cert SAN
   `DNS:gifsy.in, DNS:*.gifsy.in`, GTS, Active; plus ACM Advanced certs for the existing 2-level hosts). Both
@@ -41,25 +47,37 @@ P0–P2 + P4/P4b are DONE and IN PROD. Remaining (plans: `A-DOMAIN-PLAN.md`, `A-
   mismatch (`SEC_E_WRONG_PRINCIPAL`) is PRE-EXISTING, unrelated. If the owner wants mail/status/www to serve real
   content, drop them from the worker's `RESERVED_HOSTS` or add explicit handling. **Now truly zero-touch:
   onboarding client #2 needs NO Cloudflare edit — just a DB `client_domains` row + console.**
-- **P5** retire the registry — **branding backfill ✅ DONE + VERIFIED (2026-07-19, prod + staging).** Ran the
-  hardened `A-DOMAIN-BRANDING-BACKFILL.sql` (audited GO-WITH-FIXES → one atomic `DO` block: in-txn
-  `current_database()` guard + `jsonb_typeof='object'` merge-guard + `ROW_COUNT=1` assert) as a `pg` script via
-  the guarded one-off jobs (`gifsy-oneoff-staging`→staging, `gifsy-oneoff-prodcheck`→prod; both reset to no-op
-  after). Fresh `gifsy-db` backup taken first. Result: fill-gaps `COALESCE(existing-non-empty, registry)`
-  **preserved every operator value** and filled only true gaps. **Prod deoleo pre** = `{displayName:"Deoleo",
-  primaryColor, supportEmail:"support@gifsy.in", supportPhone:"+916289864191", invoicePrefix:"TGSL-DEO-"}` → **post**
-  KEPT all five + FILLED `logoUrl / faviconUrl / wordmarkWhiteUrl / wordmarkColorUrl / productBrands:["Bertolli","Figaro"]`.
-  `GET /v1/tenants/routing` now serves all 6 whitelisted fields for deoleo (was displayName+primaryColor only);
-  values == the registry fallback → **zero visual change** confirmed. Staging deoleo+clientb likewise filled +
-  routing-verified. **REMAINING P5 (owner-gated, not yet done):** retire the `CLIENT_REGISTRY` *code* — but NOT
-  yet: the resolver still reads **features / partnerClasses / approvalHierarchy / invoicing / notifications** from
-  the registry (only *branding* is in the DB routing path), so full retirement needs **D-1** (non-branding config
-  → DB) first, plus a bake behind the `TENANT_ROUTING_SOURCE=registry` kill-switch. i.e. the DB is now the
-  branding source-of-truth; the registry code stays as the non-branding-config source + routing fallback until D-1.
-- **P6** hardening + E2E + security audit + docs.
-- **D-1 (#159)** converge `resolveClient` off `AdminConfig` onto the `clients` table (RBAC-sensitive —
-  permission.guard reads `features.rbacEnforcement`; two feature vocabularies; needs a real-DB reconcile +
-  runtime-verify). Deferred from P1. Also what makes the gifsy-console Feature-flag card runtime-authoritative.
+- **D-1 (#159) — ✅ DONE on develop (`9872806`, audited GO, staging-verified).** `resolveClient` (tenant.service)
+  now reads the `clients` table (`mapClientRow`) instead of `AdminConfig` `client_config` (prod had **0** such rows
+  for deoleo → resolveClient already fail-open-threw; converging onto `clients.features.rbacEnforcement=false` is a
+  **byte-identical RBAC posture**, verified). `visibilityCaptureMode` moved onto `clients.features` (writer repointed
+  to a fresh-read merge base); gifsy console create/update now bust the 5-min resolveClient cache; `upsertClientConfig`
+  deleted. Fail-open RBAC preserved (missing row / absent flag / non-object features → false). Staging-verified: deoleo
+  `/admin/settings/config` 200+features, RBAC still off, operator `gifsy` dashboards 200 (resolveClient throws → caught).
+  **⚠️ `RBAC_ENFORCEMENT` env master-switch still OFF — before ever flipping it ON, confirm no tenant has an
+  unexpected truthy `clients.features.rbacEnforcement`.**
+- **P5 (#157) — ✅ DONE on develop (`c4d1cf9`, audited GO, staging-verified).** Branding backfill done earlier (prod+
+  staging, live). Registry-code retirement: FE features now served from **authenticated DB-backed /me** (`/partner/me`,
+  `/sales/me`, admin `/admin/settings/config`) via `lib/tenant-features.ts` (`useTenantFeatures`/`normalizeFeatures`,
+  fail-soft `{}`); admin/partner layouts + partner leaderboard read features from there, NOT `CLIENT_REGISTRY`. Registry
+  **REDUCED, not deleted** (it's the kill-switch/cold-start domain→slug fallback): `DEOLEO`/`CLIENT_B` now spread a new
+  `DEFAULT_CLIENT_CONFIG` overriding only slug/status/domains/branding; the 2 hard `DEOLEO_CONFIG` imports →
+  `DEFAULT_CLIENT_CONFIG`. Deoleo nav provably unchanged; branded-host SSR still resolves. **2 LOW future-tenant notes
+  (NOT Deoleo blockers → 2ND-TENANT list):** admin layout doesn't gate on features-loading (flash for a future
+  non-default tenant); MIS_USER gets `DEFAULT_FEATURES` (`/admin/settings/config` is GIFSY/CLIENT_ADMIN-only).
+- **P6 (#158) — IN PROGRESS.** **S1 security ✅ code done + INERT/shipped (`98ea243`+`a90d75b`), activation pending.**
+  The `*.run.app` origins are public (`ingress=all` + IAM `allUsers`, verified) → a direct hit could forge
+  `x-forwarded-host` (bounded: post-login scope is JWT-enforced). Fix = an **edge secret**: worker stamps `x-edge-secret`;
+  `lib/platform/edge-trust.ts` `resolveTrustedHost` (used by `proxy.ts` + `auth/login/actions.ts`) trusts
+  `x-forwarded-host` ONLY when it matches, else falls back to Host (safe). **Env-gated** (`EDGE_SECRET` unset → inert →
+  prior behaviour) so it ships reversibly; both workflows now inject `EDGE_SECRET` into the frontend from a GitHub secret.
+  **▶ S1 ACTIVATION (do next):** (1) generate secret + `wrangler secret put EDGE_SECRET` + `wrangler deploy` (worker
+  stamps it; all frontends inert until their env is set — prod safe); (2) **OWNER adds the `EDGE_SECRET` GitHub Actions
+  repo secret** = same value (gh CLI NOT installed → I can't; value handed via a scratch file, not chat); (3) staging
+  redeploy → enforce → verify a forged direct-`.run.app` hit no longer resolves a foreign tenant; (4) prod activates on
+  cutover. **P6 REMAINING (mine, no owner):** `proxy.ts` + `worker.js` full unit tests (edge-trust done, 6 tests; rest
+  zero), a 2nd-tenant-via-console E2E, the **favicon-by-slug fix** (`app/layout.tsx` keys favicon on `config.slug` not
+  `branding.faviconUrl` → a DB-only tenant has no favicon), docs sweep (A-DOMAIN-PLAN status banners, backfill-SQL RAN marker).
 - **P4b money-path runtime-verify** (owner, OTP-gated): as GIFSY_ADMIN change a tenant's conversion rate
   on the client-detail Wallet card → confirm a redemption uses it + the tenant Settings panel matches.
 
@@ -90,7 +108,7 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 
 ## GATES (full suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`)
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` ·
-`cd platform && npx tsc --noEmit`. **Latest green: api jest 1530 · nest 0 · FE vitest 1847 · tsc 0.**
+`cd platform && npx tsc --noEmit`. **Latest green (develop `a90d75b`): api jest 1540 · nest 0 · FE vitest 1861 · tsc 0.**
 - **Deploy ≠ pushed** (a docs-only commit re-tags the image) — verify the serving SHA:
   `gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project gifsy-platform --format='value(spec.template.spec.containers[0].image)'`.
 - FE tsc gotcha: a stale `.next/types` surfaces a phantom `RejectionModal` error (pre-existing,
@@ -152,9 +170,27 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 - **(A-DOMAIN-d)** the gifsy client-detail **Wallet/Invoicing/Feature cards edited INERT `Client.*` JSON
   blobs the runtime never reads** — the REAL per-tenant config lives in `program_settings` (conversion
   rate/floors, via `TenantSettingsService`/`settings.controller`), `PointExpiryConfig` (expiry), the
-  hardcoded `TECH_GIFSY` invoice constant, and `AdminConfig` (features, the D-1 store). "Make the card
-  persist" ≠ "make it work" — wire the card to the REAL store (P4b did Wallet via a tenant-targeted
-  `/gifsy/clients/:slug/wallet-settings`; Invoicing/Features left read-only). Same two-store divergence as D-1.
+  hardcoded `TECH_GIFSY` invoice constant, and `clients.features` (the runtime feature/RBAC store — post-D-1).
+  "Make the card persist" ≠ "make it work" — wire the card to the REAL store (P4b did Wallet via a tenant-targeted
+  `/gifsy/clients/:slug/wallet-settings`; Invoicing/Features left read-only).
+- **(A-DOMAIN-e) D-1 DONE:** `resolveClient` (tenant.service) reads the **`clients` table** now (not `AdminConfig`
+  `client_config`, which is RETIRED). It returns the raw `clients.features` blob; RBAC reads `(features as any)
+  .rbacEnforcement` dynamically (fail-open: missing row/flag/non-object → false). `visibilityCaptureMode` lives on
+  `clients.features`. Console create/update MUST `tenant.invalidateCache(slug)` (5-min cache). `RBAC_ENFORCEMENT`
+  env master-switch is OFF — flipping it needs a per-tenant `clients.features.rbacEnforcement` audit first.
+- **(A-DOMAIN-f) P5 features seam:** FE feature-gating reads `features` from the **authenticated** role endpoint
+  (`/partner/me`, `/sales/me`, admin `/admin/settings/config`) via `lib/tenant-features.ts` (`useTenantFeatures`/
+  `normalizeFeatures` — sparse/absent blob → `DEFAULT_FEATURES`, guaranteed nested `partnerApp`), NOT `CLIENT_REGISTRY`.
+  The registry is REDUCED to a domain→slug + `DEFAULT_CLIENT_CONFIG` fallback (kill-switch/cold-start) — do NOT delete it.
+- **(A-DOMAIN-g) worker route matches across dots:** `*.gifsy.in/*` also matches `api.gifsy.in`/`uat.x.gifsy.in` — safe
+  only because they hit the SAME `gifsy-proxy` worker + its explicit API-host check wins. `wrangler deploy` does NOT
+  prune Custom Domains absent from `wrangler.toml`, and it ROTATES the local `.wrangler` oauth_token (a cached-token
+  CF-API script 401s after — re-read or use wrangler). Reserved `www/mail/status.gifsy.in` 502 by worker design.
+- **(A-DOMAIN-h) S1 edge-secret:** the `*.run.app` origins are public (`ingress=all` + IAM `allUsers`) → `x-forwarded-host`
+  is forgeable by a direct hit. `lib/platform/edge-trust.ts` `resolveTrustedHost` trusts it only when the worker's
+  `x-edge-secret` matches; **env-gated** (`EDGE_SECRET` unset → inert). The CI frontend `--set-env-vars` REPLACES the
+  whole env set → `EDGE_SECRET` must live in the workflow (GitHub secret), never a manual `gcloud run update` (wiped next
+  deploy). Activation order: worker must send the secret BEFORE the frontend env is set, else legit login breaks.
 
 ## META-LESSONS (baked into CLAUDE.md agreements 1 & 2)
 1. A fix is DONE only when **EVERY consumer + alternate data path + scale case** is traced (grep all
@@ -193,10 +229,14 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   enqueued SMS/EMAIL/WhatsApp never deliver (genuinely dead: credit-batch EMAIL, KYC owner SMS for
   UNDER_REVIEW, redemption-fulfilment SMS). Recipients recorded (nikunj.sadani@ / payel.ghosh@ /
   nikita@gifsy.in). + **email provider** ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
-- **§A-DOMAIN** — ✅ P1/P2/P4/P4b IN PROD (cutover #10) + **P5 branding-backfill DONE (2026-07-19)** + **P3 edge
-  worker DEPLOYED + verified (2026-07-20, worker `eb56c29b`, wildcard `*.gifsy.in/*` live, zero-touch proven)**.
-  DB is now the branding source-of-truth. Remaining = P5-tail registry-*code*-retire (gated on D-1 + a bake) · P6 ·
-  D-1 (#159). **Onboarding client #2 now needs NO Cloudflare edit.** See IMMEDIATE NEXT.
+- **§A-DOMAIN** — P1/P2/P4/P4b IN PROD (cutover #10); P3 worker DEPLOYED (`eb56c29b`, live); branding-backfill
+  live in prod DB. **D-1 ✅ + P5 ✅ DONE on develop (`9872806`/`c4d1cf9`, audited GO, staging-verified)** — the DB
+  is now the full runtime source-of-truth (features/RBAC/capture-mode read `clients`; FE features from authenticated
+  /me; registry reduced to fallback). **P6 IN PROGRESS: S1 edge-secret code done+inert; remaining = S1 activation
+  (owner adds `EDGE_SECRET` GitHub secret; I do wrangler+worker deploy+verify) · proxy/worker tests · 2nd-tenant E2E ·
+  favicon-by-slug fix · docs.** All develop work awaits **cutover #11** (owner-gated). **2ND-TENANT list (LOW,
+  before client #2): admin features-loading gate · MIS_USER feature fallback · favicon-by-slug · Option-C multi-outlet.**
+  See IMMEDIATE NEXT.
 - **#74 residual:** optional secret rotation + real prod MSG91 (monitoring + backups/PITR already ON).
 - **POST-GO-LIVE-BACKLOG (later):** multi-tenant SSR branding, configurable RBAC (AF-12 kept OFF),
   WhatsApp per-tenant generalization, OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics.
@@ -221,10 +261,12 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 | 8 | `4b33e4c` | presence-based partner wallet, sales+partner ledger field-name (shared resolver), pre-OTP copy |
 | 9 | `ebd474b` | payout UTR "Apply" query-vs-body fix |
 | 10 | `437045a` | **CURRENT PROD** (2026-07-19) — wallet-surfacing (credit payouts in partner wallet) + §A-DOMAIN P1/P2/P4/P4b + `client_domains` migration; verified live |
+| 11 | *(pending, develop `a90d75b`)* | **NOT YET CUT** — sales-ledger payout unification + §A-DOMAIN D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6/S1 edge-secret (inert). ~60 commits ahead; all staging-verified; owner-gated |
 
 ## START THE SESSION
-Greet. State: **cutover #10 is live (prod == develop == `437045a`); §A-DOMAIN P1/P2/P4/P4b + the
-wallet-surfacing fix are IN PROD & verified.** §A-DOMAIN remaining = P3 edge deploy (needs owner
-Cloudflare confirms) · P5 registry-retire (owner-gated branding backfill) · P6 · D-1 (#159). Present the
-OPEN THREADS and ask which to pick up.
+Greet. State: **prod == main == `437045a` (cutover #10 live); develop is ~60 commits AHEAD (HEAD `a90d75b`),
+all staging-verified, awaiting cutover #11.** §A-DOMAIN: P1/P2/P4/P4b IN PROD; **P3 + D-1 + P5 ✅ DONE on develop**
+(DB is now the full runtime source-of-truth); **P6 IN PROGRESS** — S1 edge-secret code done+inert (activation next:
+owner adds `EDGE_SECRET` GitHub secret + I do wrangler/worker deploy/verify), then proxy/worker tests + 2nd-tenant
+E2E + favicon-by-slug fix + docs. Then cutover #11. Present the OPEN THREADS and ask which to pick up.
 ```
