@@ -155,9 +155,11 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
 
     for (const [prefix, allowedRoles] of Object.entries(ROLE_ROUTES)) {
       if (pathname.startsWith(prefix) && !allowedRoles.includes(role)) {
-        if (pathname.startsWith('/api/')) {
-          return NextResponse.json({ success: false, error: 'Forbidden' }, { status: 403 })
-        }
+        // ROLE_ROUTES lists only PAGE prefixes (/admin, /admin/gifsy, /sales, /partner) —
+        // an /api/* path never matches one (it starts with '/api/'), so a wrong-role match
+        // here is always a page request → redirect to login. API-route role enforcement is
+        // the BACKEND's job (the NestJS role guards on each endpoint); the edge proxy only
+        // authenticates the /api/* request (Bearer injection below) and gates PAGE access.
         return NextResponse.redirect(new URL('/auth/login', request.url))
       }
     }

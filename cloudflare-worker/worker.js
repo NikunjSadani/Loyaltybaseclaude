@@ -104,8 +104,13 @@ export default {
 
     const response = await fetch(backendRequest)
 
-    // Copy response headers and rewrite any Location header that points back
-    // to the Cloud Run .run.app domain (e.g. from NextResponse.redirect).
+    // Copy response headers and rewrite any Location header that points back to the
+    // Cloud Run .run.app domain (e.g. from NextResponse.redirect) so the browser stays
+    // on the public host. NOTE: a RELATIVE Location (e.g. "/dashboard") does NOT throw —
+    // `new URL(loc, backendBase)` resolves it against the .run.app origin, so its hostname
+    // ends with `.run.app` and it too is rewritten to the public host. That is harmless
+    // (the browser would resolve a relative redirect against the public host anyway). The
+    // catch below only fires for a genuinely unparseable Location value.
     const responseHeaders = new Headers(response.headers)
     const location = responseHeaders.get('location')
     if (location) {
@@ -117,7 +122,7 @@ export default {
           responseHeaders.set('location', loc.toString())
         }
       } catch {
-        // relative redirect — leave as-is
+        // unparseable Location — leave as-is
       }
     }
 

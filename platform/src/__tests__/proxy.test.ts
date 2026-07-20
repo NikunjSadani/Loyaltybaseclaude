@@ -247,6 +247,18 @@ describe('proxy — Step 2: valid token + role gating', () => {
     const res = await run(withToken('/sales/outlets'));
     expect(isNext(res)).toBe(true);
   });
+
+  it('an /api/* request is NOT role-gated by the proxy — it passes through (backend enforces)', async () => {
+    // ROLE_ROUTES lists only PAGE prefixes; an /api/* path never matches one (it starts
+    // with '/api/'), so an authenticated request passes through with injected auth REGARDLESS
+    // of role — the NestJS role guards on the endpoint are the real gate. This documents the
+    // removal of the old unreachable /api/* 403 branch; re-adding a broken proxy gate re-fails here.
+    mockJwt.mockResolvedValue({ payload: { role: 'SALES_SO', sub: 'so-1' } } as never);
+    const res = await run(withToken('/api/admin/users'));
+    expect(isNext(res)).toBe(true);
+    expect(fwd(res, 'authorization')).toBe('Bearer jwt.abc.def');
+    expect(fwd(res, 'x-user-role')).toBe('SALES_SO');
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
