@@ -12,7 +12,7 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 🟢 CURRENT STATE
 - **prod == main == `437045a`** (CUTOVER #10, live 2026-07-19 — WALLET-SURFACING + §A-DOMAIN P1/P2/P4/P4b).
-  **develop is ~66 commits AHEAD of prod** (HEAD `58ce1ab`) — everything below is on develop/staging,
+  **develop is ~67 commits AHEAD of prod** (HEAD `b1ece3b`) — everything below is on develop/staging,
   staging-verified, **NOT in prod yet** → awaiting the next owner-gated cutover (#11). Verify HEADs via `git log`.
 - **develop payload beyond prod (all done + gate-green + staging-verified this session):**
   **sales-ledger payout unification** (`af9948b`), **§A-DOMAIN D-1** (`9872806`, resolveClient→clients table),
@@ -22,7 +22,7 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
   CF edge, now stamping the edge secret — version `44088f8a`) + branding-backfill (live in prod DB, needed no cutover).
 - **DB tenant-routing LIVE in prod** (`TENANT_ROUTING_SOURCE` default `db`, registry fallback → Deoleo
   unaffected). Kill-switch: `TENANT_ROUTING_SOURCE=registry` on the FE service.
-- Gate green on develop `58ce1ab`: **api jest 1540 · nest 0 · FE vitest 1917 · tsc 0**. (prod `437045a`
+- Gate green on develop `b1ece3b`: **api jest 1540 · nest 0 · FE vitest 1917 · tsc 0**. (prod `437045a`
   gate was api 1529 · FE 1844.)
 
 ## ▶ IMMEDIATE NEXT — finish §A-DOMAIN P6 + cutover #11
@@ -128,7 +128,7 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 
 ## GATES (full suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`)
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` ·
-`cd platform && npx tsc --noEmit`. **Latest green (develop `58ce1ab`): api jest 1540 · nest 0 · FE vitest 1917 · tsc 0.**
+`cd platform && npx tsc --noEmit`. **Latest green (develop `b1ece3b`): api jest 1540 · nest 0 · FE vitest 1917 · tsc 0.**
 - **Deploy ≠ pushed** (a docs-only commit re-tags the image) — verify the serving SHA:
   `gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project gifsy-platform --format='value(spec.template.spec.containers[0].image)'`.
 - FE tsc gotcha: a stale `.next/types` surfaces a phantom `RejectionModal` error (pre-existing,
@@ -257,9 +257,9 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   `44088f8a` stamping, frontend still inert). Remaining = owner adds the `EDGE_SECRET` GitHub secret → I runtime-verify
   staging enforcement (forged-host).** All develop work awaits **cutover #11** (owner-gated). **2ND-TENANT list (LOW,
   before client #2): admin features-loading gate · MIS_USER feature fallback · Option-C multi-outlet.**
-  See IMMEDIATE NEXT. **Optional data-hygiene (owner, pre-existing + now harmless): deoleo/clientb DB `branding.faviconUrl`
-  = `/favicons/<slug>.ico` points at never-committed files (404) — the favicon fix already falls back to the committed
-  `/icons/<slug>/favicon.ico`, so this is cosmetic; permanent cleanup = commit `public/favicons/*.ico` OR correct the DB value.**
+  See IMMEDIATE NEXT. **Data-hygiene ✅ DONE `b1ece3b`: committed `public/favicons/{deoleo,clientb}.ico` (byte-identical
+  copies of the canonical `/icons/<slug>/favicon.ico`) so the stored `branding.faviconUrl=/favicons/<slug>.ico` now resolves
+  (no DB write). The layout still emits the canonical `/icons/<slug>/` path via the helper — the copies just make the stored value valid.**
 - **#74 residual:** optional secret rotation + real prod MSG91 (monitoring + backups/PITR already ON).
 - **POST-GO-LIVE-BACKLOG (later):** multi-tenant SSR branding, configurable RBAC (AF-12 kept OFF),
   WhatsApp per-tenant generalization, OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics.
@@ -284,7 +284,7 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 | 8 | `4b33e4c` | presence-based partner wallet, sales+partner ledger field-name (shared resolver), pre-OTP copy |
 | 9 | `ebd474b` | payout UTR "Apply" query-vs-body fix |
 | 10 | `437045a` | **CURRENT PROD** (2026-07-19) — wallet-surfacing (credit payouts in partner wallet) + §A-DOMAIN P1/P2/P4/P4b + `client_domains` migration; verified live |
-| 11 | *(pending, develop `58ce1ab`)* | **NOT YET CUT** — sales-ledger payout unification + §A-DOMAIN D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6 (S1 edge-secret [worker activated, FE inert] + proxy/worker tests + favicon-from-DB-branding + 2nd-tenant E2E + the 2 finding-fixes `58ce1ab`). ~66 commits ahead; all staging-verified; owner-gated |
+| 11 | *(pending, develop `b1ece3b`)* | **NOT YET CUT** — sales-ledger payout unification + §A-DOMAIN D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6 (S1 edge-secret [worker activated, FE inert] + proxy/worker tests + favicon-from-DB-branding + 2nd-tenant E2E + the 2 finding-fixes `58ce1ab` + favicon data-hygiene `b1ece3b`). ~67 commits ahead; all staging-verified; owner-gated |
 
 ## START THE SESSION
 Greet. State: **prod == main == `437045a` (cutover #10 live); develop is ~66 commits AHEAD (HEAD `58ce1ab`),
