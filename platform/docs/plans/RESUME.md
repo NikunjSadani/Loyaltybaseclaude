@@ -21,16 +21,26 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## ▶ IMMEDIATE NEXT — finish §A-DOMAIN (mostly owner-gated)
 P0–P2 + P4/P4b are DONE and IN PROD. Remaining (plans: `A-DOMAIN-PLAN.md`, `A-DOMAIN-P0-DESIGN.md`):
-- **P3 edge worker deploy** (`cloudflare-worker/` coarse `*.gifsy.in` — code committed `934ff4d`, NOT
-  deployed). **CLOUDFLARE ACCESS REALITY (verified 2026-07-19):** `wrangler` is OAuth-logged-in as the
-  OWNER's account (`nikunj.sadani28@gmail.com`, zone `gifsy.in` id `cbef1d2c…`, worker script `gifsy-proxy`,
-  current routes = the 4 plain `*.gifsy.in/*` per-host). The token CAN read/write **worker routes +
-  `wrangler deploy`** (workers_scripts/routes write) + ssl_certs — so **I can ship the P3 worker myself**.
-  It CANNOT touch **DNS records / SSL universal settings** (API returns `Authentication error` — no dns_records
-  scope) → the **owner must add the proxied wildcard `*.gifsy.in` DNS record + confirm wildcard TLS in the
-  dashboard** (Universal SSL covers 1 level; the `uat.*` 2-level staging host needs ACM). SEQUENCE: owner adds
-  DNS+TLS → then I `wrangler deploy` (a LIVE-edge change on Deoleo — get owner go; deploying before the DNS
-  wildcard is inert + pointless). Only needed before client #2 / true zero-touch onboarding.
+- **P3 edge worker — ✅ DEPLOYED + VERIFIED LIVE (2026-07-20).** Owner added the proxied wildcard `*.gifsy.in`
+  DNS record (AAAA `*`→`100::`, orange-cloud) + Universal SSL already covers `*.gifsy.in` (cert SAN
+  `DNS:gifsy.in, DNS:*.gifsy.in`, GTS, Active; plus ACM Advanced certs for the existing 2-level hosts). Both
+  prereqs were runtime-confirmed (a random `<x>.gifsy.in` resolves to CF anycast + presents the valid `*.gifsy.in`
+  cert). Then I `npx wrangler deploy`'d `cloudflare-worker/` (tenant-agnostic coarse worker, new version
+  `eb56c29b`) → triggers now `*.gifsy.in/*` + `api.gifsy.in/*` + `api.staging.gifsy.in/*`. **The 5 pre-existing
+  Worker Custom Domains (deoleoloyalty, uat.deoleoloyalty, api.staging, app, uat.app) were untouched** (config
+  has NO `custom_domain` entries, so wrangler doesn't reconcile them). **VERIFIED:** `deoleoloyalty.gifsy.in/auth/login`
+  200, `api.gifsy.in/health` 200, `app.gifsy.in` 200, apex `gifsy.in` 200 — all unaffected; and a NEVER-configured
+  `newtenant-probe-x9z.gifsy.in` → **404 from the frontend** (routes through worker→frontend→Next fail-closes on
+  unknown slug, NOT a CF black-hole) = **zero-touch routing PROVEN**. **Independently pre-audited** (2 agents:
+  Cloudflare-docs auditor CONFIRMED all 6 platform claims w/ cited docs; repo-config auditor confirmed
+  `wrangler.toml` already declared the `*.gifsy.in/*` route + same prereqs). **Owner-flag (2 reserved hosts now
+  502 by worker design — NOT regressions): `mail.gifsy.in` & `status.gifsy.in` return 502 "No backend configured"
+  on HTTPS.** `status` had no prior record (only resolves via the new wildcard → nothing was ever there). `mail`
+  EMAIL/MX is unaffected (worker only touches HTTP); only a hypothetical webpage at `https://mail.gifsy.in` 502s.
+  `www.gifsy.in` is a SEPARATE grey-cloud Firebase record (199.36.158.100) the worker never touches — its TLS-SNI
+  mismatch (`SEC_E_WRONG_PRINCIPAL`) is PRE-EXISTING, unrelated. If the owner wants mail/status/www to serve real
+  content, drop them from the worker's `RESERVED_HOSTS` or add explicit handling. **Now truly zero-touch:
+  onboarding client #2 needs NO Cloudflare edit — just a DB `client_domains` row + console.**
 - **P5** retire the registry — **branding backfill ✅ DONE + VERIFIED (2026-07-19, prod + staging).** Ran the
   hardened `A-DOMAIN-BRANDING-BACKFILL.sql` (audited GO-WITH-FIXES → one atomic `DO` block: in-txn
   `current_database()` guard + `jsonb_typeof='object'` merge-guard + `ROW_COUNT=1` assert) as a `pg` script via
@@ -183,9 +193,10 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   enqueued SMS/EMAIL/WhatsApp never deliver (genuinely dead: credit-batch EMAIL, KYC owner SMS for
   UNDER_REVIEW, redemption-fulfilment SMS). Recipients recorded (nikunj.sadani@ / payel.ghosh@ /
   nikita@gifsy.in). + **email provider** ZeptoMail (~$0.25/1k) vs SES (~$0.10/1k).
-- **§A-DOMAIN** — ✅ P1/P2/P4/P4b IN PROD (cutover #10) + **P5 branding-backfill DONE + verified on prod &
-  staging (2026-07-19)** — DB is now the branding source-of-truth (zero visual change). Remaining = P3 edge deploy
-  (owner Cloudflare confirms) · P5-tail registry-*code*-retire (gated on D-1 + a bake) · P6 · D-1 (#159). See IMMEDIATE NEXT.
+- **§A-DOMAIN** — ✅ P1/P2/P4/P4b IN PROD (cutover #10) + **P5 branding-backfill DONE (2026-07-19)** + **P3 edge
+  worker DEPLOYED + verified (2026-07-20, worker `eb56c29b`, wildcard `*.gifsy.in/*` live, zero-touch proven)**.
+  DB is now the branding source-of-truth. Remaining = P5-tail registry-*code*-retire (gated on D-1 + a bake) · P6 ·
+  D-1 (#159). **Onboarding client #2 now needs NO Cloudflare edit.** See IMMEDIATE NEXT.
 - **#74 residual:** optional secret rotation + real prod MSG91 (monitoring + backups/PITR already ON).
 - **POST-GO-LIVE-BACKLOG (later):** multi-tenant SSR branding, configurable RBAC (AF-12 kept OFF),
   WhatsApp per-tenant generalization, OTel O3, DB-RLS, invoice-PDF/email, TDS filing, DPDP, analytics.
