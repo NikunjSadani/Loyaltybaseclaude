@@ -40,4 +40,4 @@ Thumbs.db
 prisma/generated/
 
 # Incremental TS build cache (machine-specific)
-tsconfig.build.tsbuildinfo
+*.tsbuildinfo
