@@ -4,6 +4,7 @@ import { headers } from 'next/headers';
 import './globals.css';
 import { ToastProvider } from '@/components/ui/toast';
 import { getTenantConfig, getBrandStyle } from '@/lib/platform/server';
+import { resolveFaviconIcoHref } from '@/lib/platform/favicon';
 import { ClientConfigProvider } from '@/lib/platform/client-config-context';
 import PwaHead from '@/components/pwa/PwaHead';
 import ServiceWorkerRegister from '@/components/pwa/ServiceWorkerRegister';
@@ -67,9 +68,15 @@ export default async function RootLayout({
         <style dangerouslySetInnerHTML={{ __html: brandStyle }} />
         <meta name="theme-color" content={config.branding.primaryColor} />
         {/* Per-tenant browser-tab favicon — the tenant's brand mark (same art as
-            the installed-app icons). The root /favicon.ico (Deoleo) is the fallback
-            for any request without this per-tenant <link>. */}
-        <link rel="icon" href={`/icons/${config.slug}/favicon.ico`} sizes="any" />
+            the installed-app icons). A console-provisioned tenant (§A-DOMAIN, no
+            committed static assets under public/icons/<slug>/) sets an absolute GCS
+            faviconUrl in its DB branding → prefer it. A legacy in-code tenant's
+            faviconUrl is a local /favicons/<slug>.ico path that was never committed
+            (real art lives at /icons/<slug>/favicon.ico) → fall back to the static
+            slug path. See resolveFaviconIcoHref. The 192 png stays slug-based (no
+            branding png field); a DB-only tenant simply has no 192 icon — the .ico
+            is the browser-tab favicon. */}
+        <link rel="icon" href={resolveFaviconIcoHref(config.branding.faviconUrl, config.slug)} sizes="any" />
         <link rel="icon" type="image/png" sizes="192x192" href={`/icons/${config.slug}/icon-192.png`} />
         {/* PWA install meta (manifest + iOS) — only for the /sales + /partner shells */}
         {pwaScope && <PwaHead scope={pwaScope} />}
