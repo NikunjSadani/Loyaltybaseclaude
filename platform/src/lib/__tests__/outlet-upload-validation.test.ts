@@ -16,7 +16,16 @@
  *   O80–O81 : Re-KYC — Outlet Name as a flaggable field
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// The outlet-upload validator reads the per-tenant UPI gate via getGifsySettings()
+// (salesApp.upiEnabled). Mock it so the Payout-Method UPI-under-tenant-off reject is
+// deterministic and no background /api/settings refresh fires under jsdom.
+const { gifsyMock } = vi.hoisted(() => ({ gifsyMock: { upiEnabled: false } }));
+vi.mock('@/lib/gifsy-settings', () => ({
+  getGifsySettings: () => ({ salesApp: { upiEnabled: gifsyMock.upiEnabled } }),
+}));
+
 import {
   OUTLET_UPLOAD_HEADERS,
   REKYC_FLAG_HEADERS,
@@ -69,9 +78,15 @@ function makeRow(overrides: Partial<OutletUploadRow> = {}): OutletUploadRow {
     state:           'Maharashtra',
     zone:            '',
     xsrId:           'ISR-M001',  // must be a leaf in MOCK_EMPLOYEES
+    payoutMethod:    '',
     ...overrides,
   };
 }
+
+// Keep the UPI gate OFF by default; the UPI-enabled cases flip it explicitly.
+beforeEach(() => {
+  gifsyMock.upiEnabled = false;
+});
 
 /**
  * Existing outlets for Re-KYC tests (needs kycStatus).
@@ -204,7 +219,7 @@ describe('outlet master row validation — happy paths (CREATE)', () => {
     const blankRow: OutletUploadRow = {
       rowNum: 2, outletId: '', outletName: '', programName: '', programCategory: '',
       outletType: '', beat: '', distributorId: '', distributorName: '', metro: '',
-      city: '', state: '', zone: '', xsrId: '',
+      city: '', state: '', zone: '', xsrId: '', payoutMethod: '',
     };
     const result = validateOutletUpload([blankRow], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows).toHaveLength(0);
@@ -219,6 +234,57 @@ describe('outlet master row validation — happy paths (CREATE)', () => {
   it('O14b — a non-Yes/No Metro is still rejected when it IS filled', () => {
     const result = validateOutletUpload([makeRow({ metro: 'Maybe' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows[0].errors.some(e => /metro/i.test(e))).toBe(true);
+  });
+});
+
+// ─── O82–O88: Payout Method column (per-outlet payout mandate) ───────────────
+
+describe('outlet master — Payout Method column', () => {
+  it('O82 — blank Payout Method is accepted (defaults to BANK downstream)', () => {
+    const result = validateOutletUpload([makeRow({ payoutMethod: '' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].status).toBe('OK');
+    expect(result.rows[0].errors.some(e => /payout/i.test(e))).toBe(false);
+  });
+
+  it('O83 — BANK / ANY are accepted case-insensitively', () => {
+    for (const v of ['BANK', 'bank', 'Bank', 'ANY', 'any']) {
+      const result = validateOutletUpload([makeRow({ payoutMethod: v })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+      expect(result.rows[0].status).toBe('OK');
+    }
+  });
+
+  it('O84 — an invalid non-blank Payout Method is an error', () => {
+    const result = validateOutletUpload([makeRow({ payoutMethod: 'CASH' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].status).toBe('ERROR');
+    expect(result.rows[0].errors.some(e => /payout method .* is invalid/i.test(e))).toBe(true);
+  });
+
+  it('O85 — UPI is REJECTED when the tenant has UPI disabled', () => {
+    gifsyMock.upiEnabled = false;
+    const result = validateOutletUpload([makeRow({ payoutMethod: 'upi' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].status).toBe('ERROR');
+    expect(result.rows[0].errors.some(e => /UPI is disabled for this tenant/i.test(e))).toBe(true);
+  });
+
+  it('O86 — UPI is accepted (case-insensitive) when the tenant has UPI enabled', () => {
+    gifsyMock.upiEnabled = true;
+    const result = validateOutletUpload([makeRow({ payoutMethod: 'UPI' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].status).toBe('OK');
+  });
+
+  it('O87 — ANY is allowed even when UPI is disabled (degrades to bank-only downstream)', () => {
+    gifsyMock.upiEnabled = false;
+    const result = validateOutletUpload([makeRow({ payoutMethod: 'ANY' })], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
+    expect(result.rows[0].status).toBe('OK');
+  });
+
+  it('O88 — the Payout Method column is included in the template + optional headers', () => {
+    expect(OUTLET_UPLOAD_HEADERS).toContain('Payout Method');
+    const { headers } = getOutletAdditionTemplateData(VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, LEAF_ROLE_CODE);
+    expect(headers).toContain('Payout Method');
+    // Absent Payout Method column is accepted (optional).
+    const without = OUTLET_UPLOAD_HEADERS.filter(h => h !== 'Payout Method');
+    expect(validateOutletUploadHeaders(without)).toBeNull();
   });
 });
 
@@ -675,7 +741,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
         rowNum: 2, outletId: 'OUT-ACTIVE-01', outletName: '',
         programName: '', programCategory: '', outletType: '',
         beat: '', distributorId: '', distributorName: '',
-        metro: '', city: '', state: '', zone: '', xsrId: '',
+        metro: '', city: '', state: '', zone: '', xsrId: '', payoutMethod: '',
       }],
       OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
@@ -689,7 +755,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
         rowNum: 2, outletId: 'OUT-INACTIVE-01', outletName: '',
         programName: '', programCategory: '', outletType: '',
         beat: '', distributorId: '', distributorName: '',
-        metro: '', city: '', state: '', zone: '', xsrId: '',
+        metro: '', city: '', state: '', zone: '', xsrId: '', payoutMethod: '',
       }],
       OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
@@ -836,7 +902,7 @@ describe('O82–O87 — Zone column in outlet addition template', () => {
       outletType: 'SSS', beat: 'Test Beat', distributorId: '', distributorName: '',
       metro: 'Yes', city: 'Mumbai', state: 'Maharashtra',
       zone: '',   // intentionally blank
-      xsrId: 'ISR-M001',
+      xsrId: 'ISR-M001', payoutMethod: '',
     };
     const result = validateOutletUpload(
       [row], EXISTING, ['Trade Loyalty'], ['Standard'], VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,

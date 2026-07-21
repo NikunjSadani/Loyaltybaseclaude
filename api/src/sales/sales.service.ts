@@ -1153,6 +1153,9 @@ export class SalesService {
             kycSubmittedAt: latestKyc?.createdAt?.toISOString().split('T')[0],
             kycRejectionReason: latestKyc?.rejectionReason ?? null,
             reKycFlags: outlet.reKycFlags ?? null,
+            // Per-outlet payout MANDATE (BANK|UPI|ANY) — the KYC wizard reads this to pin/lock
+            // the paymentMode toggle + required fields. Default BANK; UPI only if tenant upiEnabled.
+            requiredPaymentType: outlet.requiredPaymentType,
             existingKyc,
             targetPct: 0,
           };

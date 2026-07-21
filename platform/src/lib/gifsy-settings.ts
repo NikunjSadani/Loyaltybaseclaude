@@ -134,7 +134,15 @@ export function hydrateGifsySettings(srv: ServerSettings | null | undefined): vo
 /** Refresh from GET /v1/settings. Safe to call repeatedly. */
 export async function refreshGifsySettings(): Promise<void> {
   const res = await api.get<ServerSettings>('/api/settings');
-  if (res.success) writeCache(fromServer(res.data, store));
+  // Guard `res.data`: a success response with an empty/absent body must NOT crash the
+  // fire-and-forget refresh (fromServer dereferences srv) — it no-ops and keeps the cache.
+  if (res.success && res.data) {
+    writeCache(fromServer(res.data, store));
+  } else if (res.success && !res.data) {
+    // Success-with-empty-body → the cache stays stale (e.g. upiEnabled could lag the server).
+    // Log so a silently-stale settings cache is observable rather than a mystery.
+    console.warn('[gifsy-settings] /api/settings returned success with no body — settings cache left stale');
+  }
 }
 
 // Partial: visibilityCaptureMode is NOT saved through here — it has its own GIFSY-only

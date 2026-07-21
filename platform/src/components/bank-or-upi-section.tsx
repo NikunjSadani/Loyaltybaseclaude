@@ -14,6 +14,14 @@ export interface BankOrUpiSectionProps {
   paymentMode:          PaymentMode;
   onPaymentModeChange:  (mode: PaymentMode) => void;
 
+  /**
+   * Per-outlet payout MANDATE pin. When set, the Bank/UPI toggle is HIDDEN and the panel
+   * is FORCED to this mode (the rep cannot change it) — wins over the tenant UPI gate.
+   * Omitted → the rep chooses (subject to the tenant UPI gate below). The parent derives
+   * this from the outlet's requiredPaymentType via `pinnedPaymentMode`.
+   */
+  lockedMode?: PaymentMode;
+
   /** Bank fields (controlled) */
   bankName:           string;
   accountHolderName:  string;
@@ -65,6 +73,7 @@ const labelCls = 'text-xs font-medium text-gray-600 block mb-1';
 export function BankOrUpiSection({
   paymentMode,
   onPaymentModeChange,
+  lockedMode,
   bankName,
   accountHolderName,
   accountNumber,
@@ -165,9 +174,10 @@ export function BankOrUpiSection({
     onPaymentModeChange(mode);
   };
 
-  // Effective mode: when UPI is disabled for the tenant, always bank (regardless of the
-  // controlled prop, which the force-bank effect above is converging to 'bank').
-  const effectiveMode: PaymentMode = upiEnabled ? paymentMode : 'bank';
+  // Effective mode: a per-outlet MANDATE pin (lockedMode) always wins. Otherwise, when UPI
+  // is disabled for the tenant it's always bank (regardless of the controlled prop, which
+  // the force-bank effect above is converging to 'bank'); else the controlled prop.
+  const effectiveMode: PaymentMode = lockedMode ?? (upiEnabled ? paymentMode : 'bank');
 
   // Locked (re-KYC non-flagged) bank field → muted, non-editable, but value stays shown.
   const lockedInputCls = inputCls + ' disabled:bg-gray-50 disabled:text-gray-500 disabled:cursor-not-allowed';
@@ -178,8 +188,9 @@ export function BankOrUpiSection({
 
   return (
     <div className="space-y-4">
-      {/* ── Mode toggle (hidden entirely when UPI is disabled for the tenant) ── */}
-      {upiEnabled && (
+      {/* ── Mode toggle (hidden when UPI is disabled for the tenant, OR when a per-outlet
+             MANDATE pins the mode via lockedMode — the rep can't change a pinned mode) ── */}
+      {upiEnabled && !lockedMode && (
         <div className="flex rounded-xl border border-gray-200 overflow-hidden" data-testid="payment-mode-toggle">
           <button
             type="button"

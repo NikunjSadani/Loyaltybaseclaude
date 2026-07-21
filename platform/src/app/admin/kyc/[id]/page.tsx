@@ -107,6 +107,7 @@ interface ApiKycDetail {
     address?: string | null; city?: string | null; state?: string | null; pincode?: string | null;
     bankName?: string | null; bankAccountNumber?: string | null; ifscCode?: string | null; upiId?: string | null;
     outlets?: { name?: string; outletCode: string; phone?: string;
+      requiredPaymentType?: 'BANK' | 'UPI' | 'ANY' | null;
       addressLine1?: string | null; addressLine2?: string | null;
       city?: string | null; state?: string | null; pincode?: string | null }[];
   } | null;
@@ -124,6 +125,8 @@ type KycDetailShape = {
   salesUser: string; territory: string; region: string;
   submittedDate: string; ageHrs: number; status: string;
   bankName: string; accountNumber: string; ifscCode: string; upiId: string;
+  // Outlet-master mandated payout method (primary outlet); '' when unset.
+  requiredPaymentType: '' | 'BANK' | 'UPI' | 'ANY';
   pennyDropStatus: 'verified' | 'failed' | 'pending';
   agreementStatus: 'signed' | 'pending'; agreementDate: string;
   statusHistory: Array<{ status: string; timestamp: string; user: string; remark?: string }>;
@@ -186,6 +189,7 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     accountNumber:    s.partner?.bankAccountNumber ?? '',
     ifscCode:         s.partner?.ifscCode ?? '',
     upiId:            s.partner?.upiId ?? '',
+    requiredPaymentType: s.partner?.outlets?.[0]?.requiredPaymentType ?? '',
     pennyDropStatus:  'pending',
     agreementStatus:  'pending',
     agreementDate:    '',
@@ -207,6 +211,13 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     })),
   };
 }
+
+/** Friendly label for the outlet-mandated payout method (from the outlet master). */
+const REQUIRED_PAYMENT_LABELS: Record<string, string> = {
+  BANK: 'Bank account',
+  UPI: 'UPI',
+  ANY: "Any (rep's choice)",
+};
 
 const STATUS_COLORS: Record<string, string> = {
   SUBMITTED: 'bg-blue-100 text-blue-700',
@@ -675,6 +686,14 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
             <h2 className="text-sm font-semibold text-gray-800 mb-3 flex items-center gap-2">
               <CreditCard className="w-4 h-4 text-[var(--brand-primary)]" />
               Bank Details
+              {kyc.requiredPaymentType && REQUIRED_PAYMENT_LABELS[kyc.requiredPaymentType] && (
+                <span
+                  data-testid="required-payout-pill"
+                  className="ml-auto text-[11px] font-semibold text-gray-600 bg-gray-100 border border-gray-200 px-2 py-0.5 rounded-full"
+                >
+                  Required payout: {REQUIRED_PAYMENT_LABELS[kyc.requiredPaymentType]}
+                </span>
+              )}
             </h2>
             <div className="space-y-2 text-xs">
               <div className="flex gap-2">

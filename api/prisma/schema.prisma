@@ -78,6 +78,18 @@ enum OutletKycIntent {
   NOT_INTERESTED
 }
 
+// Per-outlet MANDATE for which payout details the outlet must provide at KYC.
+// BANK = must give bank account (name/number/IFSC + cheque); UPI = must give a UPI id;
+// ANY = the rep chooses (among the tenant-allowed modes). Set/updated ONLY at the outlet
+// master-upload (create or re-upload) — the KYC re-submission flow does NOT change it.
+// Default BANK. UPI is only permissible when the tenant's salesApp.upiEnabled is ON — the
+// outlet config can never enable UPI a tenant has disabled.
+enum OutletPaymentType {
+  BANK
+  UPI
+  ANY
+}
+
 enum KycDocumentType {
   AADHAAR_FRONT
   AADHAAR_BACK
@@ -936,6 +948,9 @@ model Outlet {
   zone            String?
   programName     String?
   programCategory String?
+  // Per-outlet payout-detail MANDATE (set/updated only at the outlet master-upload). Drives the
+  // KYC form's paymentMode + required fields. Default BANK. UPI only if tenant upiEnabled is ON.
+  requiredPaymentType OutletPaymentType @default(BANK)
   outletCode      String
   name            String
   ownerName       String?

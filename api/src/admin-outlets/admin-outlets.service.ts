@@ -1,9 +1,11 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { KycStatus, OutletKycIntent, Prisma } from '@prisma/client';
+import { KycStatus, OutletKycIntent, OutletPaymentType, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
+import { parseOutletPaymentType } from '../common/payment-type.helper';
 import {
   BulkDeleteOutletsDto,
   ListOutletsQueryDto,
@@ -153,18 +155,25 @@ function mapRowToOutletData(row: OutletUploadRowDto, outletTypeId: string): Outl
   };
 }
 
-/** create payload for a new Outlet — partnerId omitted (NULL); created PENDING. */
+/** create payload for a new Outlet — partnerId omitted (NULL); created PENDING.
+ *  A CREATE always persists a payout mandate — a blank cell defaults to BANK. */
 function buildOutletCreate(
   clientId: string,
   outletCode: string,
   data: OutletWriteData,
+  requiredPaymentType: OutletPaymentType,
 ): Prisma.OutletUncheckedCreateInput {
-  return { clientId, outletCode, isActive: false, ...data };
+  return { clientId, outletCode, isActive: false, requiredPaymentType, ...data };
 }
 
-/** update payload for an existing Outlet — identity + isActive left untouched. */
-function buildOutletUpdate(data: OutletWriteData): Prisma.OutletUncheckedUpdateInput {
-  return { ...data };
+/** update payload for an existing Outlet — identity + isActive left untouched. The payout
+ *  mandate is overwritten ONLY when the column was present/non-blank (null = leave as-is),
+ *  so a blank cell never wipes an outlet's existing requiredPaymentType. */
+function buildOutletUpdate(
+  data: OutletWriteData,
+  requiredPaymentType: OutletPaymentType | null,
+): Prisma.OutletUncheckedUpdateInput {
+  return { ...data, ...(requiredPaymentType !== null ? { requiredPaymentType } : {}) };
 }
 
 /** The 20 Re-KYC field flags persisted onto Outlet.reKycFlags (+ remarks). */
@@ -269,6 +278,7 @@ export class AdminOutletsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly salesNotifications: SalesNotificationsService,
+    private readonly tenantSettings: TenantSettingsService,
   ) {}
 
   /**
@@ -657,6 +667,11 @@ export class AdminOutletsService {
       if (c.outletType.isActive) typeIdByCode.set(c.outletType.code.toUpperCase(), c.outletType.id);
     }
 
+    // The tenant's UPI gate — the AUTHORITATIVE guard for the payout-mandate column. A UPI
+    // row is rejected (not silently coerced) when the tenant has UPI disabled; ANY is allowed
+    // (it just degrades to bank-only downstream). Read once for the whole batch.
+    const upiEnabled = (await this.tenantSettings.getEffectiveSettings(clientId)).salesApp.upiEnabled === true;
+
     const rowResults: UpsertRowResult[] = [];
     let created = 0;
     let updated = 0;
@@ -691,6 +706,20 @@ export class AdminOutletsService {
         }
       }
 
+      // 2b. Resolve the payout MANDATE (optional column). Blank → null here (CREATE defaults it
+      //     to BANK; UPDATE leaves the existing value untouched). A non-blank cell must parse to
+      //     BANK/UPI/ANY, and a UPI cell is REJECTED when the tenant has UPI disabled.
+      let requiredPaymentType: OutletPaymentType | null = null;
+      const rawPayout = (row.payoutMethod ?? '').trim();
+      if (rawPayout) {
+        requiredPaymentType = parseOutletPaymentType(rawPayout);
+        if (requiredPaymentType === null) {
+          errors.push(`Invalid Payout Method "${row.payoutMethod}" — must be BANK, UPI, or ANY`);
+        } else if (requiredPaymentType === OutletPaymentType.UPI && !upiEnabled) {
+          errors.push('UPI is disabled for this tenant — cannot set outlet to UPI');
+        }
+      }
+
       if (errors.length > 0 || !outletTypeId) {
         rowResults.push({ rowNum: row.rowNum, outletId: outletCode, status: 'ERROR', action: 'CREATE', errors });
         continue;
@@ -714,10 +743,12 @@ export class AdminOutletsService {
 
         const outlet = await tx.outlet.upsert({
           where: { clientId_outletCode: { clientId, outletCode } },
-          create: buildOutletCreate(clientId, outletCode, data),
+          // CREATE always writes a mandate (blank cell → BANK).
+          create: buildOutletCreate(clientId, outletCode, data, requiredPaymentType ?? OutletPaymentType.BANK),
+          // UPDATE only overwrites the mandate when the column was present/non-blank.
           update: reactivate
             ? {
-                ...buildOutletUpdate(data),
+                ...buildOutletUpdate(data, requiredPaymentType),
                 isActive: true,
                 reactivatedAt: now,
                 deactivatedAt: null,
@@ -726,7 +757,7 @@ export class AdminOutletsService {
                 kycIntentBy: null,
                 kycIntentAt: null,
               }
-            : buildOutletUpdate(data),
+            : buildOutletUpdate(data, requiredPaymentType),
         });
 
         // Re-tag: close any active assignment for this outlet, then attach the XSR.

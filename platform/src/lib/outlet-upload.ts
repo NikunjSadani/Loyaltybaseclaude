@@ -24,6 +24,8 @@ import type {
 } from '@/types';
 import type { HierarchyEmployee, TenantHierarchyLevel } from '@/types';
 import { KYCStatus } from '@/types';
+import { parseOutletPaymentType } from '@/lib/payment-type';
+import { getGifsySettings } from '@/lib/gifsy-settings';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -41,6 +43,7 @@ export const OUTLET_UPLOAD_HEADERS = [
   'State',
   'Zone',
   'XSR ID',
+  'Payout Method',
 ] as const;
 
 /**
@@ -127,8 +130,9 @@ function isBlankOutletRow(row: OutletUploadRow): boolean {
 // ─── Header validators ────────────────────────────────────────────────────────
 
 /** Columns that may be absent from the upload (still shipped in the template so users
- *  CAN fill them, but not compulsory). Owner 2026-06-25: Beat + Metro are optional. */
-export const OPTIONAL_OUTLET_HEADERS = ['Beat', 'Metro'] as const;
+ *  CAN fill them, but not compulsory). Owner 2026-06-25: Beat + Metro are optional.
+ *  Payout Method is optional too — a blank cell defaults the outlet mandate to BANK. */
+export const OPTIONAL_OUTLET_HEADERS = ['Beat', 'Metro', 'Payout Method'] as const;
 
 export function validateOutletUploadHeaders(headers: readonly string[]): string | null {
   const optional = new Set<string>(OPTIONAL_OUTLET_HEADERS);
@@ -171,6 +175,7 @@ export function parseOutletUploadRows(rawRows: Record<string, unknown>[]): Outle
     state:           cell(raw['State']),
     zone:            cell(raw['Zone']),
     xsrId:           cell(raw['XSR ID']),
+    payoutMethod:    cell(raw['Payout Method']),
   }));
 }
 
@@ -235,6 +240,11 @@ export function validateOutletUpload(
   const typeHint = validOutletTypes.length
     ? `must be one of: ${validOutletTypes.join(', ')}`
     : 'no outlet types are enabled for this tenant — ask Gifsy to enable outlet types before adding outlets';
+
+  // Per-tenant UPI gate (default OFF). A "UPI" payout cell is rejected — not silently
+  // coerced — when the tenant has UPI disabled. This mirrors the backend guard in
+  // AdminOutletsService.upsert (the authoritative one); the backend re-checks on POST.
+  const upiEnabled = getGifsySettings().salesApp?.upiEnabled === true;
 
   const rowResults: OutletUploadRowResult[] = [];
 
@@ -390,6 +400,18 @@ export function validateOutletUpload(
         } else if (emp.roleCode !== leafRoleCode) {
           errors.push(`XSR ID "${row.xsrId}" has role "${emp.roleCode}" — only ${leafRoleCode} (field-level) employees can be assigned outlets`);
         }
+      }
+    }
+
+    // Payout Method — OPTIONAL for every action. Blank → the outlet mandate defaults to BANK
+    // downstream (no error). If provided it must be BANK/UPI/ANY (case-insensitive), and a UPI
+    // value is rejected when the tenant has UPI disabled (ANY is allowed — bank-only downstream).
+    if (row.payoutMethod && row.payoutMethod.trim()) {
+      const parsed = parseOutletPaymentType(row.payoutMethod);
+      if (parsed === null) {
+        errors.push(`Payout Method "${row.payoutMethod}" is invalid — must be BANK, UPI, or ANY`);
+      } else if (parsed === 'UPI' && !upiEnabled) {
+        errors.push('UPI is disabled for this tenant — cannot set outlet to UPI');
       }
     }
 
@@ -553,8 +575,8 @@ export function getOutletAdditionTemplateData(
     : 'No outlet types are enabled for this tenant yet — ask Gifsy to enable outlet types before adding outlets';
 
   const exampleRows: string[][] = [
-    ['OUT-2026-001', 'Verma Traders', validPrograms[0] ?? 'Trade Loyalty', validCategories[0] ?? 'Standard', exType1, 'Andheri Beat',  'DIST-01', 'ABC Distributors', 'Yes', 'Mumbai', 'Maharashtra', 'West Zone',   `${leafRoleCode}-M001`],
-    ['OUT-2026-002', 'Patel Kirana',  validPrograms[0] ?? 'Trade Loyalty', validCategories[1] ?? 'Premium',  exType2, 'Borivali Beat', 'DIST-02', 'XYZ Distributors', 'No',  'Pune',   'Maharashtra', '',            `${leafRoleCode}-P001`],
+    ['OUT-2026-001', 'Verma Traders', validPrograms[0] ?? 'Trade Loyalty', validCategories[0] ?? 'Standard', exType1, 'Andheri Beat',  'DIST-01', 'ABC Distributors', 'Yes', 'Mumbai', 'Maharashtra', 'West Zone',   `${leafRoleCode}-M001`, 'BANK'],
+    ['OUT-2026-002', 'Patel Kirana',  validPrograms[0] ?? 'Trade Loyalty', validCategories[1] ?? 'Premium',  exType2, 'Borivali Beat', 'DIST-02', 'XYZ Distributors', 'No',  'Pune',   'Maharashtra', '',            `${leafRoleCode}-P001`, 'ANY'],
   ];
 
   const dosAndDonts: string[][] = [
@@ -574,6 +596,7 @@ export function getOutletAdditionTemplateData(
     ['State',             'State where the outlet is located'],
     ['Zone',              'Geographic sales zone this outlet belongs to (e.g. "West Zone", "North Zone"). Leave blank if not applicable.'],
     ['XSR ID',            `Employee ID of the ${leafRoleCode} (field sales rep) this outlet is assigned to. Must exist in the Employee Hierarchy.`],
+    ['Payout Method',     'Optional — BANK, UPI, or ANY (case-insensitive). Blank defaults to BANK. UPI only if UPI payouts are enabled for your tenant, else the row is rejected.'],
     ['', ''],
     ['✓ DOs', ''],
     ['DO',  'Use whatever Outlet ID coding scheme you like — any characters are accepted, just keep each ID unique'],
@@ -585,7 +608,8 @@ export function getOutletAdditionTemplateData(
     ['✗ DON\'Ts', ''],
     ['DON\'T', 'Re-upload an existing Outlet ID — it will be rejected. This upload is for new outlets only.'],
     ['DON\'T', 'Enter an XSR ID that belongs to a non-field role (SO, ASM, RSM, ZNM, NSM) — only ISR-level IDs are accepted'],
-    ['DON\'T', 'Leave Outlet ID, Outlet Name, Program Name, Program Category, Outlet Type, City, State, or XSR ID blank (Beat and Metro may be left blank)'],
+    ['DON\'T', 'Leave Outlet ID, Outlet Name, Program Name, Program Category, Outlet Type, City, State, or XSR ID blank (Beat, Metro and Payout Method may be left blank)'],
+    ['DON\'T', 'Enter UPI in Payout Method when UPI payouts are not enabled for your tenant — the row will be rejected'],
     ['', ''],
     ['COMMON MISTAKES', ''],
     ['MISTAKE', 'Using a SO/ASM ID in the XSR ID column — only leaf-level (ISR) IDs are accepted'],
@@ -878,6 +902,7 @@ export function generateOutletGuideHtml(validOutletTypes: string[] = []): string
   <tr><td><code>City</code></td><td><span class="badge badge-red">Required</span></td><td></td></tr>
   <tr><td><code>State</code></td><td><span class="badge badge-red">Required</span></td><td></td></tr>
   <tr><td><code>XSR ID</code></td><td><span class="badge badge-red">Required</span></td><td>Must be a valid ISR-level employee ID in the Employee Hierarchy</td></tr>
+  <tr><td><code>Payout Method</code></td><td><span class="badge badge-green">Optional</span></td><td>Per-outlet payout mandate — <code>BANK</code>, <code>UPI</code>, or <code>ANY</code> (case-insensitive). Blank defaults to <code>BANK</code>. <code>UPI</code> is only accepted when UPI payouts are enabled for your tenant, otherwise the row is rejected.</td></tr>
 </table>
 
 <div class="warn">⚠ <strong>Outlet IDs are permanent.</strong> This upload only creates new outlets. If an Outlet ID already exists in the system, that row is rejected. To reassign an outlet to a different ISR, use the Re-tagging Upload.</div>
@@ -1016,7 +1041,7 @@ export interface UploadErrorReport {
   errorHeader: string;
 }
 
-/** Outlet Master (Addition/Upsert) error report — full 13-column file + Remarks. */
+/** Outlet Master (Addition/Upsert) error report — full 14-column file + Remarks. */
 export function buildOutletUploadErrorReport(
   result: OutletUploadValidationResult,
   parsed: OutletUploadRow[],
@@ -1039,6 +1064,7 @@ export function buildOutletUploadErrorReport(
       'State':            p?.state ?? '',
       'Zone':             p?.zone ?? '',
       'XSR ID':           p?.xsrId ?? '',
+      'Payout Method':    p?.payoutMethod ?? '',
       __errors:           r.errors,
     } as Record<string, unknown>;
   });

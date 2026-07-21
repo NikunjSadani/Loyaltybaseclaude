@@ -14,6 +14,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { BankOrUpiSection, type PaymentMode } from '@/components/bank-or-upi-section';
 import { SearchableSelect } from '@/components/ui/searchable-select';
+import { pinnedPaymentMode, type OutletPaymentType } from '@/lib/payment-type';
+import { getGifsySettings } from '@/lib/gifsy-settings';
 import { isValidUpiId } from '@/lib/upi-utils';
 import { INDIAN_STATES } from '@/lib/indian-states';
 import { isValidGstin, panFromGstin, GSTIN_LENGTH } from '@/lib/gstin';
@@ -38,6 +40,9 @@ interface AssignedOutlet {
   type: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
   programName?: string;
   programCategory?: string;
+  /** Per-outlet payout MANDATE — pins the KYC paymentMode (see pinnedPaymentMode).
+   *  Absent (legacy data) → treated as 'ANY' (rep chooses). */
+  requiredPaymentType?: OutletPaymentType;
   /** Present for re-entry outlets (rejected/resubmission/re-KYC) and approved */
   kycStatus?:    'APPROVED' | 'RE_KYC_REQUIRED' | 'REJECTED' | 'RE_UPLOAD_REQUIRED' | 'RESUBMISSION_REQUIRED' | 'DRAFT';
   /** The REAL latest KYC status from the API (NOT_STARTED / SUBMITTED / PENDING_GIFSY /
@@ -330,6 +335,7 @@ export default function NewKYCPage() {
             reKycRemarks: o.kycRejectionReason ?? o.reKycFlags?.remarks ?? undefined,
             programName:     o.programName ?? '',
             programCategory: o.programCategory ?? '',
+            requiredPaymentType: o.requiredPaymentType ?? undefined,
           }));
           setAssignedOutlets(outlets);
           // Build registered phones map from outlet mobiles for conflict detection
@@ -404,9 +410,34 @@ export default function NewKYCPage() {
     if (selectedOutlet) setForm((f) => ({ ...f, partnerClass: selectedOutlet.type }));
   }, [selectedOutlet]);
 
+  /* ── Per-outlet payout MANDATE → pinned paymentMode ──
+   *   The selected outlet's requiredPaymentType (BANK/UPI/ANY), honoring the tenant UPI
+   *   gate, decides the ONE mode the form must PIN (or null when the rep may choose).
+   *   The tenant gate wins inside the helper (a UPI outlet on upiEnabled=false → 'bank').
+   *   `pinnedMode` also feeds <BankOrUpiSection lockedMode> below to lock/hide the toggle. */
+  const upiEnabled = getGifsySettings().salesApp?.upiEnabled === true;
+  const pinnedMode: PaymentMode | null = selectedOutlet
+    ? pinnedPaymentMode(selectedOutlet.requiredPaymentType ?? 'ANY', upiEnabled)
+    : null;
+
+  /* Force paymentMode to the pinned mode whenever the selected outlet changes AND on the
+   * ?outletId= re-entry prefill (keyed on outletId so re-derivation fires on outlet switch).
+   * This also fixes the latent re-entry bug where a UPI outlet re-opened in bank mode
+   * (paymentMode defaults to 'bank' and was never re-derived). ANY (pinnedMode=null) keeps
+   * the rep's current choice. */
+  useEffect(() => {
+    if (pinnedMode) setPaymentMode(pinnedMode);
+  }, [selectedOutlet?.outletId, pinnedMode]);
+
   /* ── Pre-fill existing KYC data when a Re-KYC outlet is selected ── */
   useEffect(() => {
-    if (!selectedOutlet?.existingKyc) return;
+    if (!selectedOutlet?.existingKyc) {
+      // FRESH outlet (no prior KYC): clear any payment text fields carried over from a
+      // previously-selected re-entry outlet — else one outlet's bank/UPI details bleed into
+      // this outlet's submission (the per-outlet pinned-mode mandate makes this easier to hit).
+      setForm((f) => ({ ...f, bankName: '', accountHolderName: '', accountNumber: '', ifscCode: '', upiId: '' }));
+      return;
+    }
     const k = selectedOutlet.existingKyc;
     setForm((f) => ({
       ...f,
@@ -2153,6 +2184,7 @@ export default function NewKYCPage() {
             <BankOrUpiSection
               paymentMode={paymentMode}
               onPaymentModeChange={setPaymentMode}
+              lockedMode={pinnedMode ?? undefined}
               bankName={form.bankName}
               accountHolderName={form.accountHolderName}
               accountNumber={form.accountNumber}

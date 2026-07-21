@@ -40,6 +40,9 @@ interface KYCDetail {
   outletId?: string;
   outletCode?: string;
   outletType?: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
+  // The payout method the outlet-master mandates for this outlet — lets the approver
+  // verify the rep captured the required type (BANK / UPI / ANY = rep's choice).
+  requiredPaymentType?: 'BANK' | 'UPI' | 'ANY';
   status: KYCStatus;
   submittedAt: string;
   submittedByRole: KYCSubmitterRole;
@@ -93,6 +96,13 @@ function docLabel(type: string): string {
 
 /** The document types that are store/owner PHOTOS (rendered as images, not list rows). */
 const PHOTO_DOC_TYPES = new Set(['STORE_BOARD_PHOTO', 'SELFIE']);
+
+/** Friendly label for the outlet-mandated payout method (from the outlet master). */
+const REQUIRED_PAYMENT_LABELS: Record<string, string> = {
+  BANK: 'Bank account',
+  UPI: 'UPI',
+  ANY: "Any (rep's choice)",
+};
 
 /** Map a raw KycDocument row (id + documentType + viewUrl) into the view shape.
  *  NOTE: the per-document `status` is intentionally dropped — no workflow ever advances
@@ -601,6 +611,8 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           // detail endpoint now selects — without it the gate sees `undefined` and
           // hides redeem for every outlet, even wholesalers.
           outletType:      s.partner?.outlets?.[0]?.outletType?.code ?? undefined,
+          // Outlet-master mandated payout method (primary outlet), for reviewer verification.
+          requiredPaymentType: s.partner?.outlets?.[0]?.requiredPaymentType ?? undefined,
           partnerName:     s.user?.name                       ?? '',
           // OWNER/contact-person name — captured in the KYC form, validated by the
           // Gifsy reviewer against the submitted PAN/Aadhaar. Distinct from the rep
@@ -1099,7 +1111,17 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
               <>
                 <div className="border-t border-gray-100" />
                 <div>
-                  <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Payment Details</p>
+                  <div className="flex items-center gap-2 mb-2">
+                    <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Payment Details</p>
+                    {kyc.requiredPaymentType && REQUIRED_PAYMENT_LABELS[kyc.requiredPaymentType] && (
+                      <span
+                        data-testid="required-payout-pill"
+                        className="text-[10px] font-semibold text-gray-500 bg-gray-100 border border-gray-200 px-1.5 py-0.5 rounded-full"
+                      >
+                        Required payout: {REQUIRED_PAYMENT_LABELS[kyc.requiredPaymentType]}
+                      </span>
+                    )}
+                  </div>
                   <div className="space-y-1.5">
                     {[
                       { label: 'Bank',    value: kyc.bankName       },

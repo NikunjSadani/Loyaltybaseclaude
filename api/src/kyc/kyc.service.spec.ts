@@ -90,8 +90,12 @@ const mockMsg91 = {
 // Per-tenant, per-purpose OTP template resolver. Default undefined = "use the global env
 // template"; the sendConsentOtp template test overrides it per case.
 let mockKycOtpTemplateId: string | undefined = undefined;
+// Tenant UPI gate consumed by the create() payout-mandate guard. Default OFF (mirrors the
+// EffectiveSettings default salesApp.upiEnabled=false); UPI tests flip it per case.
+let mockUpiEnabled = false;
 const mockTenantSettings = {
   getOtpTemplateId: jest.fn(async () => mockKycOtpTemplateId),
+  getEffectiveSettings: jest.fn(async () => ({ salesApp: { upiEnabled: mockUpiEnabled } })),
 };
 
 const mockStorage = {
@@ -153,6 +157,7 @@ describe('KycService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockKycOtpTemplateId = undefined; // default: no per-tenant override (global env template)
+    mockUpiEnabled = false; // default: tenant UPI gate OFF (payout-mandate guard)
     // clearAllMocks does not drain mockResolvedValueOnce queues nor clear a
     // mockResolvedValue impl; reset the mocks that create() now also touches so
     // stale values from prior suites (sendConsentOtp etc.) don't bleed.
@@ -276,6 +281,9 @@ describe('KycService', () => {
       city: 'Mumbai',
       state: 'Maharashtra',
       pincode: '400058',
+      bankName: 'HDFC',
+      accountNumber: '50100',
+      ifscCode: 'HDFC0001',
     };
 
     const primeCreateMocks = () => {
@@ -287,6 +295,7 @@ describe('KycService', () => {
         partnerId: null,
         outletCode: 'OUT-1',
         outletType: { code: 'SSS' },
+        requiredPaymentType: 'BANK',
       });
       // assertPhoneAvailable: partner-clash null + employee-clash null → phone available.
       mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
@@ -751,6 +760,7 @@ describe('KycService', () => {
         partnerId: 'cp-existing',
         outletCode: 'OUT-1',
         outletType: { code: 'SSS' },
+        requiredPaymentType: 'BANK',
       });
       // assertPhoneAvailable (exceptPartnerId='cp-existing'): both clashes null → available.
       mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
@@ -767,6 +777,9 @@ describe('KycService', () => {
           city: 'X',
           state: 'Y',
           pincode: '110011',
+          bankName: 'HDFC',
+          accountNumber: '50100',
+          ifscCode: 'HDFC0001',
         } as never),
       ).rejects.toBeInstanceOf(BadRequestException);
       // The dup guard keys on the resolved OUTLET partner, not the rep.
@@ -793,6 +806,7 @@ describe('KycService', () => {
         partnerId: null,
         outletCode: 'OUT-1',
         outletType: { code: 'WHOLESALER' },
+        requiredPaymentType: 'BANK',
       });
       mockTx.user.findFirst.mockResolvedValueOnce(null); // no existing owner
       mockTx.user.create.mockResolvedValueOnce({ id: 'owner-1' });
@@ -809,6 +823,9 @@ describe('KycService', () => {
         city: 'X',
         state: 'Y',
         pincode: '110011',
+        bankName: 'HDFC',
+        accountNumber: '50100',
+        ifscCode: 'HDFC0001',
       } as never);
       expect(res).toEqual({ submissionId: 'sub1', status: 'DRAFT', escalatedFrom: null });
       // Owner created in PENDING_VERIFICATION with the outletType-mapped role.
@@ -849,6 +866,7 @@ describe('KycService', () => {
         partnerId: null,
         outletCode: 'OUT-1',
         outletType: { code: 'WHOLESALER' },
+        requiredPaymentType: 'BANK',
       });
       mockTx.user.findFirst.mockResolvedValueOnce(null);
       mockTx.user.create.mockResolvedValueOnce({ id: 'owner-1' });
@@ -865,9 +883,155 @@ describe('KycService', () => {
         city: 'X',
         state: 'Y',
         pincode: '110011',
+        bankName: 'HDFC',
+        accountNumber: '50100',
+        ifscCode: 'HDFC0001',
         addressNameMismatch: true,
       } as never);
       expect(mockTx.kycSubmission.create.mock.calls[0][0].data.addressNameMismatch).toBe(true);
+    });
+  });
+
+  // ─── create() PAYOUT MANDATE (per-outlet requiredPaymentType, backend-authoritative) ─
+  // The outlet's requiredPaymentType pins the payout method a KYC submission may capture.
+  // The backend rejects a submission whose paymentMode violates the mandate (or the tenant
+  // UPI gate), and requires the matching payout fields. The guard runs BEFORE the write
+  // transaction, so reject-path tests only need to reach the guard.
+  describe('create() payout mandate', () => {
+    const dtoBase = {
+      outletId: 'outlet-1',
+      partnerName: 'Acme',
+      mobile: '9000000000',
+      address: 'addr1',
+      city: 'X',
+      state: 'Y',
+      pincode: '110011',
+    };
+    const bankFields = { bankName: 'HDFC', accountNumber: '50100', ifscCode: 'HDFC0001' };
+
+    /** Prime up to the mandate guard only (outlet resolve + assertPhoneAvailable). */
+    const primeToGuard = (requiredPaymentType: string) => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1',
+        clientId: 'deoleo',
+        partnerId: null,
+        outletCode: 'OUT-1',
+        outletType: { code: 'SSS' },
+        requiredPaymentType,
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // partner-clash
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);      // employee-clash
+    };
+
+    /** Prime a FULL partner-less happy path (create forces DRAFT; routing is deferred). */
+    const primeHappy = (requiredPaymentType: string) => {
+      primeToGuard(requiredPaymentType);
+      mockTx.user.findFirst.mockResolvedValueOnce(null); // no existing owner
+      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-1' });
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-new' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null); // no in-flight dup
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub1' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+    };
+
+    it('BANK outlet + rep sends bank (with bank fields) → OK', async () => {
+      primeHappy('BANK');
+      const res = await service.create(so, {
+        ...dtoBase, ...bankFields, paymentMode: 'bank',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub1', status: 'DRAFT' });
+    });
+
+    it('BANK outlet + rep sends upi → 400 (mandate violation)', async () => {
+      primeToGuard('BANK');
+      await expect(
+        service.create(so, { ...dtoBase, paymentMode: 'upi', upiId: 'acme@upi' } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('BANK outlet + bank mode but MISSING bank fields → 400', async () => {
+      primeToGuard('BANK');
+      await expect(
+        service.create(so, { ...dtoBase, paymentMode: 'bank' } as never),
+      ).rejects.toThrow(/Bank payout requires/i);
+    });
+
+    it('UPI outlet (tenant upiEnabled) + upi + upiId → OK', async () => {
+      mockUpiEnabled = true;
+      primeHappy('UPI');
+      const res = await service.create(so, {
+        ...dtoBase, paymentMode: 'upi', upiId: 'acme@upi',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub1', status: 'DRAFT' });
+    });
+
+    it('UPI outlet (tenant upiEnabled) + upi but MISSING upiId → 400', async () => {
+      mockUpiEnabled = true;
+      primeToGuard('UPI');
+      await expect(
+        service.create(so, { ...dtoBase, paymentMode: 'upi' } as never),
+      ).rejects.toThrow(/UPI payout requires/i);
+    });
+
+    it('ANY outlet accepts either mode (bank OK; upi OK when tenant upiEnabled)', async () => {
+      primeHappy('ANY');
+      const bankRes = await service.create(so, {
+        ...dtoBase, ...bankFields, paymentMode: 'bank',
+      } as never);
+      expect(bankRes).toMatchObject({ submissionId: 'sub1' });
+
+      mockUpiEnabled = true;
+      primeHappy('ANY');
+      const upiRes = await service.create(so, {
+        ...dtoBase, paymentMode: 'upi', upiId: 'acme@upi',
+      } as never);
+      expect(upiRes).toMatchObject({ submissionId: 'sub1' });
+    });
+
+    it('UPI mode on a upiEnabled=false tenant → 400 (tenant gate wins)', async () => {
+      mockUpiEnabled = false; // default, but explicit for the intent
+      primeToGuard('ANY');
+      await expect(
+        service.create(so, { ...dtoBase, paymentMode: 'upi', upiId: 'acme@upi' } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('ANY outlet with NO paymentMode sent (two modes allowed) → 400 (no silent default)', async () => {
+      mockUpiEnabled = true; // ANY + upiEnabled → 2 allowed modes → pinnedPaymentMode is null
+      primeToGuard('ANY');
+      await expect(
+        service.create(so, { ...dtoBase, ...bankFields } as never),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('re-KYC resubmit: a required bank field that is LOCKED (not flagged) and EMPTY does NOT 400 (MED-1)', async () => {
+      // Legacy scenario: an outlet back-filled to requiredPaymentType=BANK whose stored bank
+      // fields were never captured (it was UPI before). An admin re-KYC flags a NON-bank field
+      // only, so the bank fields are LOCKED to their (empty) stored values and the rep cannot
+      // fill them. The guard must NOT deadlock the resubmission on those locked-empty fields.
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1', clientId: 'deoleo', partnerId: 'cp-existing',
+        outletCode: 'OUT-1', outletType: { code: 'SSS' },
+        requiredPaymentType: 'BANK',
+        reKycFlags: { mobileNumber: true }, // a true, NON-bank flag → lock active; bank locked
+        addressLine1: 'addr1', city: 'X', state: 'Y', pincode: '110011',
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // partner-clash
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);      // employee-clash
+      mockPrisma.channelPartner.findUnique.mockResolvedValueOnce({     // stored bank = EMPTY
+        ownerName: 'Acme', phone: '9000000000', gstNumber: null, panNumber: null,
+        bankName: '', bankAccountHolder: '', bankAccountNumber: '', ifscCode: '', upiId: '',
+      });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(null);  // no prior docs
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'cp-existing' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);      // no in-flight dup
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-1' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      // paymentMode='bank', no bank fields sent — they're locked+empty. Must NOT throw.
+      const res = await service.create(so, { ...dtoBase, paymentMode: 'bank' } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-1' });
     });
   });
 
@@ -918,6 +1082,7 @@ describe('KycService', () => {
         partnerId: 'cp-existing',
         outletCode: 'OUT-1',
         outletType: { code: 'SSS' },
+        requiredPaymentType: 'BANK',
         reKycFlags,
         // stored address on the outlet (the lock pins non-flagged address fields to these)
         addressLine1: '12 SV Road',
@@ -1094,6 +1259,9 @@ describe('KycService', () => {
       city: 'Mumbai',
       state: 'Maharashtra',
       pincode: '400001',
+      bankName: 'HDFC',
+      accountNumber: '50100',
+      ifscCode: 'HDFC0001',
     };
 
     /** Fully prime a partner-less create() that resolves to SUBMITTED, for `clientId`. */
@@ -1105,6 +1273,7 @@ describe('KycService', () => {
         outletCode: 'OUT-1',
         outletType: { code: 'SSS' },
         programName: 'Olive Oil',
+        requiredPaymentType: 'BANK',
       });
       // assertPhoneAvailable: partner-clash null, employee-clash null → available.
       mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);

@@ -91,6 +91,14 @@ export class OutletUploadRowDto {
   @IsOptional()
   @IsString()
   xsrId?: string = '';
+
+  // Per-outlet payout MANDATE cell (raw "BANK"/"UPI"/"ANY", case-insensitive; blank →
+  // default BANK). The service parses + validates it (parseOutletPaymentType) and rejects
+  // a UPI row when the tenant has UPI disabled — kept a plain @IsString here like the
+  // other passthrough columns.
+  @IsOptional()
+  @IsString()
+  payoutMethod?: string = '';
 }
 
 /** POST /upsert — persists the Outlet Master upload (max 500 rows/request). */

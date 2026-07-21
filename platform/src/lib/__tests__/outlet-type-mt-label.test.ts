@@ -38,6 +38,7 @@ function makeRow(overrides: Record<string, string>) {
     metro:           'Yes',
     zone:            '',
     xsrId:           'EMP-001',
+    payoutMethod:    '',
     ...overrides,
   };
 }

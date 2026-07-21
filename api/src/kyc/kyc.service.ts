@@ -25,6 +25,12 @@ import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
 import { resolveCreditFieldNames } from '../common/credit-field-name.helper';
 import { buildPayoutStatement } from '../common/payout-statement.helper';
 import {
+  isPaymentModeAllowed,
+  allowedPaymentModes,
+  pinnedPaymentMode,
+  type PaymentMode,
+} from '../common/payment-type.helper';
+import {
   hasReKycFlags,
   allowedDocTypes,
   applyReKycTextLock,
@@ -1044,6 +1050,76 @@ export class KycService {
       }
     }
 
+    // ── PAYOUT MANDATE (per-outlet requiredPaymentType) — AUTHORITATIVE GUARD ────
+    // The outlet's requiredPaymentType pins which payout method a KYC submission may
+    // capture. The FE gates this too, but the BACKEND is authoritative: reject a
+    // submission whose paymentMode violates the mandate (or the tenant UPI gate), and
+    // require the matching payout fields. This runs on first submit AND on re-KYC
+    // resubmit (same create() path), so a mandate-violating resubmission is also
+    // rejected. Field validation uses the re-KYC-LOCKED `text` (the values actually
+    // persisted), so a resubmit that pins non-flagged bank fields back to stored still
+    // satisfies the guard.
+    const requiredType = outlet.requiredPaymentType;
+    // Tenant UPI gate: UPI is never usable when salesApp.upiEnabled is false.
+    const { salesApp } = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    const upiEnabled = salesApp.upiEnabled;
+
+    // Resolve the effective payout mode: prefer the DTO's explicit mode (the FE always
+    // sends it); otherwise derive it only when the mandate pins exactly one mode. Never
+    // silently default when the mode is genuinely ambiguous (ANY with no mode sent).
+    let effectiveMode: PaymentMode | undefined = dto.paymentMode;
+    if (!effectiveMode) {
+      const pinned = pinnedPaymentMode(requiredType, upiEnabled);
+      if (!pinned) {
+        throw new BadRequestException(
+          'A payment method (bank or UPI) must be selected for this outlet.',
+        );
+      }
+      effectiveMode = pinned;
+    }
+
+    // Validate the effective mode against the mandate + tenant UPI gate.
+    if (!isPaymentModeAllowed(requiredType, effectiveMode, upiEnabled)) {
+      const allowed = allowedPaymentModes(requiredType, upiEnabled);
+      const label =
+        allowed.length > 1 ? 'bank or UPI' : allowed[0] === 'upi' ? 'UPI' : 'bank';
+      throw new BadRequestException(
+        `This outlet requires payout by ${label}; the submitted payment method is not permitted.`,
+      );
+    }
+
+    // Enforce the required payout FIELDS for the effective mode, validated against the
+    // (re-KYC-locked) values that will actually be persisted. The cancelled-cheque doc
+    // is gated by the FE; the backend validates the text fields here.
+    const isFilled = (v: unknown): boolean => typeof v === 'string' && v.trim() !== '';
+    // A payout field is only ENFORCEABLE when the rep can actually provide it THIS submission:
+    // on first submit everything is editable; on a re-KYC resubmit only FLAGGED fields are
+    // editable (non-flagged fields are locked to stored). Never demand a locked-empty field
+    // the rep is unable to fill — that would deadlock the resubmission (e.g. a legacy UPI
+    // outlet back-filled to requiredPaymentType=BANK whose bank fields were never captured
+    // and aren't flagged for re-entry). First submit / flagged fields are still fully enforced.
+    const reKycActive = !!outlet.partnerId && hasReKycFlags(reKycFlags);
+    const canProvide = (field: string): boolean =>
+      !reKycActive || (reKycFlags as Record<string, unknown> | null)?.[field] === true;
+    if (effectiveMode === 'bank') {
+      const missing = (
+        [
+          ['bankName', text.bankName],
+          ['accountNumber', text.accountNumber],
+          ['ifscCode', text.ifscCode],
+        ] as const
+      )
+        .filter(([k, v]) => !isFilled(v) && canProvide(k))
+        .map(([k]) => k);
+      if (missing.length) {
+        throw new BadRequestException(
+          `Bank payout requires: ${missing.join(', ')}.`,
+        );
+      }
+    } else if (!isFilled(text.upiId) && canProvide('upiId')) {
+      throw new BadRequestException('UPI payout requires a upiId.');
+    }
+
     // Common ChannelPartner detail patch (bank + identity) from the LOCKED text.
     const partnerDetails = {
       businessName: text.partnerName as string,
@@ -1454,7 +1530,12 @@ export class KycService {
           // the detail payload (below) so the sales/admin KYC detail page can restrict
           // the resubmission form to the flagged fields — mirrors the backend lock in create().
           reKycFlags: true,
-        } } } },
+          // Per-outlet payout MANDATE — surfaced so the reviewer detail page can show which
+          // payout method (BANK/UPI/ANY) this outlet was required to provide.
+          requiredPaymentType: true,
+          // Order primary-first so the reviewer pages' outlets[0] (detail header, outletCode,
+          // outletType AND the required-payout pill) is the PRIMARY outlet, not arbitrary DB order.
+        }, orderBy: { isPrimary: 'desc' } } } },
         // 3.4d: the detail-page field panel seeds its current state from these.
         verificationItems: {
           select: { fieldKey: true, decision: true, remark: true, source: true, verifiedAt: true },

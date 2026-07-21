@@ -759,6 +759,7 @@ export interface OutletUploadRow {
   state:            string;
   zone:             string;   // optional geographic zone, e.g. "West Zone" — blank is accepted
   xsrId:            string;
+  payoutMethod:     string;   // per-outlet payout MANDATE — "BANK"/"UPI"/"ANY" (case-insensitive); blank → BANK
 }
 
 /** Validation result for one row in the outlet addition upload */

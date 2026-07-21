@@ -10,6 +10,7 @@ import { AdminOutletsService } from './admin-outlets.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockTx = {
@@ -39,6 +40,12 @@ const mockStorage = {
   generateKey: jest.fn(),
 };
 
+// The upsert reads the tenant UPI gate (salesApp.upiEnabled) to validate the Payout Method
+// column. Default OFF; the UPI-enabled cases override it per test.
+const mockTenantSettings = {
+  getEffectiveSettings: jest.fn(),
+};
+
 const TENANT_A = 'tenant-a';
 const admin: JwtPayload = { sub: 'actor1', role: 'CLIENT_ADMIN', clientId: TENANT_A, phone: '', name: '' };
 
@@ -57,11 +64,14 @@ describe('AdminOutletsService', () => {
     mockTx.outlet.findMany.mockResolvedValue([]);
     mockTx.outlet.groupBy.mockResolvedValue([]);
     mockTx.channelPartner.findMany.mockResolvedValue([]);
+    // Default: UPI disabled for the tenant (matches the platform default).
+    mockTenantSettings.getEffectiveSettings.mockResolvedValue({ salesApp: { upiEnabled: false } });
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdminOutletsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: StorageService, useValue: mockStorage },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
         {
           provide: SalesNotificationsService,
           useValue: {
@@ -407,6 +417,92 @@ describe('AdminOutletsService', () => {
       expect(res.reactivated).toBe(0);
       const upsertArgs = mockTx.outlet.upsert.mock.calls[0][0];
       expect(upsertArgs.update.isActive).toBeUndefined(); // isActive left untouched
+    });
+  });
+
+  describe('upsert — Payout Method (per-outlet payout mandate)', () => {
+    const enableType = () =>
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletType: { id: 'type1', code: 'SSS', isActive: true } },
+      ]);
+
+    it('CREATE with a blank Payout Method defaults requiredPaymentType to BANK', async () => {
+      enableType();
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      mockTx.outlet.findUnique.mockResolvedValue(null); // CREATE
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: 'ISR-1', payoutMethod: '' }],
+      });
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create.requiredPaymentType).toBe('BANK');
+    });
+
+    it('CREATE parses the Payout Method case-insensitively ("any" → ANY)', async () => {
+      enableType();
+      mockTx.outlet.findUnique.mockResolvedValue(null);
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', payoutMethod: 'any' }],
+      });
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create.requiredPaymentType).toBe('ANY');
+    });
+
+    it('marks a row ERROR (and does NOT upsert) for an invalid Payout Method value', async () => {
+      enableType();
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', payoutMethod: 'CASH' }],
+      });
+      expect(res.rows[0].status).toBe('ERROR');
+      expect(res.rows[0].errors.join(' ')).toMatch(/Invalid Payout Method/i);
+      expect(mockTx.outlet.upsert).not.toHaveBeenCalled();
+    });
+
+    it('REJECTS a UPI Payout Method when the tenant has UPI disabled (authoritative guard)', async () => {
+      enableType();
+      mockTenantSettings.getEffectiveSettings.mockResolvedValue({ salesApp: { upiEnabled: false } });
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', payoutMethod: 'UPI' }],
+      });
+      expect(res.rows[0].status).toBe('ERROR');
+      expect(res.rows[0].errors.join(' ')).toMatch(/UPI is disabled for this tenant/i);
+      expect(mockTx.outlet.upsert).not.toHaveBeenCalled();
+    });
+
+    it('ACCEPTS a UPI Payout Method when the tenant has UPI enabled', async () => {
+      enableType();
+      mockTenantSettings.getEffectiveSettings.mockResolvedValue({ salesApp: { upiEnabled: true } });
+      mockTx.outlet.findUnique.mockResolvedValue(null);
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', payoutMethod: 'UPI' }],
+      });
+      expect(res.rows[0].status).toBe('OK');
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create.requiredPaymentType).toBe('UPI');
+    });
+
+    it('UPDATE with a blank Payout Method does NOT overwrite an existing mandate', async () => {
+      enableType();
+      mockTx.outlet.findUnique.mockResolvedValue({ id: 'o1' }); // existing → UPDATE
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', payoutMethod: '' }],
+      });
+      expect(mockTx.outlet.upsert.mock.calls[0][0].update.requiredPaymentType).toBeUndefined();
+    });
+
+    it('UPDATE with a non-blank Payout Method overwrites the mandate', async () => {
+      enableType();
+      mockTx.outlet.findUnique.mockResolvedValue({ id: 'o1' });
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', payoutMethod: 'BANK' }],
+      });
+      expect(mockTx.outlet.upsert.mock.calls[0][0].update.requiredPaymentType).toBe('BANK');
     });
   });
 
