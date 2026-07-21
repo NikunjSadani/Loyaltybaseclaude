@@ -12,9 +12,6 @@ region     = "asia-south1"
 # db_tier = "db-g1-small"   ← default, ~$12/month
 # db_tier = "db-custom-2-3840"  ← upgrade when traffic grows, ~$90/month
 
-# Redis — 1GB is plenty for launch
-redis_memory_gb = 1
-
 # Images — GitHub Actions updates these on each deploy.
 # For the very first apply (before any deploy has run), the images below
 # need to exist in Artifact Registry. Run the first CI/CD push before applying

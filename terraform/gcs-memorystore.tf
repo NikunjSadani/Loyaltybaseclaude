@@ -58,32 +58,17 @@ resource "google_storage_bucket" "terraform_state" {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Memorystore Redis — PRODUCTION ONLY
+# Memorystore Redis — REMOVED 2026-07-21.
 #
-# Staging skips Redis entirely (OTP/session falls back to DB).
-# This saves ~$30/month on staging.
-# Redis is used in production for: OTP cache, session store, leaderboard cache.
+# Both instances (gifsy-redis, gifsy-redis-prod) were provisioned by the original
+# platform scaffold but NEVER wired into the NestJS backend (throttling is
+# in-memory; no CacheModule/ioredis/REDIS_URL usage in api/src). Deleted via
+# `gcloud redis instances delete` — ~₹8,500/mo saved, zero runtime impact.
+# If a real global-rate-limit / shared-cache need ever appears, re-provision AND
+# actually wire it (see api app.module.ts ThrottlerModule).
+#
+# NOTE: the live `REDIS_URL` secret in Secret Manager is intentionally retained
+# until prod is redeployed without it (the running prod revision still reads it
+# at instance startup — the deploy.yml reference has been removed for the next
+# cutover). Delete the live secret only AFTER that redeploy.
 # ─────────────────────────────────────────────────────────────────────────────
-
-resource "google_redis_instance" "gifsy_redis_prod" {
-  name           = "gifsy-redis-prod"
-  tier           = "BASIC"        # upgrade to STANDARD_HA when uptime SLA is needed
-  memory_size_gb = var.redis_memory_gb
-  region         = var.region
-
-  redis_version      = "REDIS_7_0"
-  authorized_network = google_compute_network.gifsy_vpc.id
-  auth_enabled       = true
-
-  display_name = "Gifsy Redis — Production"
-
-  depends_on = [
-    google_project_service.apis,
-    google_compute_network.gifsy_vpc,
-  ]
-}
-
-resource "google_secret_manager_secret_version" "redis_url" {
-  secret      = google_secret_manager_secret.redis_url.id
-  secret_data = "redis://:${google_redis_instance.gifsy_redis_prod.auth_string}@${google_redis_instance.gifsy_redis_prod.host}:${google_redis_instance.gifsy_redis_prod.port}"
-}

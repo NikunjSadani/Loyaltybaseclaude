@@ -59,7 +59,6 @@ output "monthly_cost_estimate" {
     Estimated monthly cost (asia-south1, no Load Balancer):
 
       Cloud SQL ${var.db_tier}        ~$12
-      Redis BASIC 1GB (prod only)     ~$16
       Cloud Run prod (min 1 each)     ~$9
       Cloud Run staging (scale-to-0)  ~$1
       VPC connector (prod)            ~$14
@@ -67,7 +66,7 @@ output "monthly_cost_estimate" {
       Secret Manager                  ~$1
       Domain mappings (SSL)           free
       ─────────────────────────────────────
-      Total                           ~$58/month (~Rs 4,900)
+      Total                           ~$42/month (~Rs 3,500)
 
     Removed: Load Balancer + CDN (was ~$38/month)
 

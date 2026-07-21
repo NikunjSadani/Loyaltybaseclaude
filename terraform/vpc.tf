@@ -1,10 +1,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # VPC — private networking
 #
-# The VPC connector is only needed for production Cloud Run → Memorystore Redis
-# (private IP).  Staging Cloud Run skips Redis entirely, so no connector needed
-# for staging.  Cloud SQL is reached via Unix socket (--add-cloudsql-instances)
-# which doesn't require a VPC connector on either environment.
+# The VPC connector was only ever needed for production Cloud Run → Memorystore
+# Redis (private IP). Redis is now DELETED (2026-07-21), so the connector is
+# VESTIGIAL — Cloud SQL is reached via the Unix socket (--add-cloudsql-instances)
+# which needs no connector on either environment (staging already runs with none).
+# It can be removed entirely for ~₹1,445/mo more (drop the resource below, the
+# api_prod vpc_access block, and the two --vpc-connector flags in deploy.yml, then
+# `gcloud compute networks vpc-access connectors delete gifsy-connector`). Left in
+# place pending owner go-ahead.
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "google_compute_network" "gifsy_vpc" {
@@ -25,7 +29,7 @@ resource "google_compute_subnetwork" "gifsy_subnet" {
   private_ip_google_access = true
 }
 
-# Private services range — needed for Cloud SQL private IP and Memorystore
+# Private services range — needed for Cloud SQL private IP
 resource "google_compute_global_address" "private_ip_range" {
   name          = "gifsy-private-ip-range"
   purpose       = "VPC_PEERING"
@@ -41,8 +45,8 @@ resource "google_service_networking_connection" "private_vpc_connection" {
   depends_on              = [google_project_service.apis]
 }
 
-# VPC Access Connector — production Cloud Run → Memorystore Redis (private IP)
-# Staging Cloud Run does NOT use this (no Redis on staging).
+# VPC Access Connector — VESTIGIAL (was for Memorystore Redis, now deleted).
+# Still attached to api_prod but carries no traffic; see header note to remove.
 resource "google_vpc_access_connector" "gifsy_connector" {
   name           = "gifsy-connector"
   region         = var.region

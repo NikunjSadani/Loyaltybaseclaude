@@ -10,9 +10,8 @@ Cloud Load Balancer (static IP: see terraform output lb_ip_address)
    │  *.gifsy.in  →  gifsy-frontend (Cloud Run, port 3000)
    │  api.gifsy.in → gifsy-api     (Cloud Run, port 4000)
    │
-   ├── gifsy-api     ──[VPC connector]──► Cloud SQL (gifsy_prod / gifsy_staging)
-   │                                  ──► Memorystore Redis
-   │                                  ──► GCS bucket (gifsy-platform-files)
+   ├── gifsy-api     ──► Cloud SQL (gifsy_prod / gifsy_staging, /cloudsql socket)
+   │                 ──► GCS bucket (gifsy-platform-files)
    │
    └── gifsy-frontend ─────────────────► (stateless; calls gifsy-api)
 ```
@@ -59,7 +58,7 @@ terraform apply \
   -var="db_password=YOUR_STRONG_PASSWORD_HERE"
 ```
 
-> One apply creates everything: VPC, Cloud SQL (shared), Redis (prod only),
+> One apply creates everything: VPC, Cloud SQL (shared),
 > GCS, Artifact Registry, Cloud Run × 4 services, Load Balancer, IAM, Secret Manager.
 > Note the outputs — you'll need `lb_ip_address` and `deployer_sa_email`.
 >
@@ -96,7 +95,7 @@ bash api/scripts/push-secrets.sh production
 bash api/scripts/push-secrets.sh staging
 ```
 
-> DATABASE_URL and REDIS_URL are already set by Terraform. The script handles:
+> DATABASE_URL is already set by Terraform. The script handles:
 > JWT_SECRET, MSG91_*, CORS_ORIGINS, GCS_BUCKET, GCP_PROJECT_ID.
 
 **⚠️ CORS_ORIGINS values to enter:**
@@ -231,25 +230,25 @@ echo -n "new-value" | gcloud secrets versions add SECRET_NAME \
 ## Cost Estimate (asia-south1)
 
 One `terraform apply` creates all infrastructure. Staging is lean by design:
-no Redis, no Load Balancer, scale-to-zero Cloud Run.
+no Load Balancer, scale-to-zero Cloud Run. (Memorystore Redis was removed
+2026-07-21 — it was never wired into the backend.)
 
 | Service | Notes | $/month |
 |---|---|---|
 | Cloud SQL db-g1-small (shared) | One instance, two databases | ~$12 |
-| Memorystore Redis 1GB (prod only) | Staging has no Redis | ~$30 |
 | Cloud Run prod (2 services, min-1) | API + frontend always warm | ~$20 |
 | Cloud Run staging (2 services, min-0) | Scale-to-zero, ~$0 when idle | ~$1 |
 | Load Balancer + CDN (prod only) | Staging uses .run.app URLs | ~$25 |
-| VPC connector (prod only) | Required for Cloud Run → Redis | ~$12 |
+| VPC connector (prod only) | Vestigial (was for Redis); removable | ~$12 |
 | GCS + Artifact Registry | Uploads bucket + Docker images | ~$2 |
-| **Total** | | **~$102/month (~₹8,500)** |
+| **Total** | | **~$72/month (~₹6,000)** |
 
 **Upgrade Cloud SQL when traffic grows:**
 ```bash
 terraform apply -var="db_tier=db-custom-2-3840"   # +$80/month, online upgrade
 ```
 
-Staging never costs more than ~$2–3/month because it has no Redis, no LB,
+Staging never costs more than ~$2–3/month because it has no LB,
 no VPC connector, and Cloud Run scales to zero between test runs.
 
 ---

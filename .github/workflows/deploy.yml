@@ -157,7 +157,6 @@ jobs:
               GCS_BUCKET=GCS_BUCKET:latest,\
               GCP_PROJECT_ID=GCP_PROJECT_ID:latest,\
               CORS_ORIGINS=CORS_ORIGINS:latest,\
-              REDIS_URL=REDIS_URL:latest,\
               VAPID_PUBLIC_KEY=VAPID_PUBLIC_KEY:latest,\
               VAPID_PRIVATE_KEY=VAPID_PRIVATE_KEY:latest,\
               PUSH_DRAIN_SECRET=PUSH_DRAIN_SECRET:latest,\

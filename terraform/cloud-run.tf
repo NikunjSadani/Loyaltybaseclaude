@@ -7,8 +7,8 @@
 #   gifsy-frontend-staging  staging Next.js frontend      port 3000
 #
 # Cost difference:
-#   Production: min-instances=1, VPC connector (→ Redis), full secrets
-#   Staging:    scale-to-zero, no VPC connector, no Redis, FIXED_OTP active
+#   Production: min-instances=1, full secrets
+#   Staging:    scale-to-zero, FIXED_OTP active
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── PRODUCTION — NestJS API ───────────────────────────────────────────────────
@@ -25,7 +25,13 @@ resource "google_cloud_run_v2_service" "api_prod" {
       max_instance_count = 10
     }
 
-    # VPC connector required to reach Memorystore Redis (private IP only)
+    # VPC connector — VESTIGIAL. Its only purpose was reaching Memorystore Redis
+    # (private IP), which is now deleted. Cloud SQL is reached via the /cloudsql
+    # unix socket (see the cloudsql volume below), not this connector — staging runs
+    # the same DB connection with NO connector. Safe to remove entirely (drop this
+    # block + the vpc.tf connector resource + the two --vpc-connector flags in
+    # deploy.yml, then `gcloud compute networks vpc-access connectors delete`) for a
+    # further ~₹1,445/mo. Left in place pending owner go-ahead.
     vpc_access {
       connector = google_vpc_access_connector.gifsy_connector.id
       egress    = "PRIVATE_RANGES_ONLY"
@@ -143,15 +149,7 @@ resource "google_cloud_run_v2_service" "api_prod" {
           }
         }
       }
-      env {
-        name = "REDIS_URL"
-        value_source {
-          secret_key_ref {
-            secret  = google_secret_manager_secret.redis_url.secret_id
-            version = "latest"
-          }
-        }
-      }
+      # REDIS_URL removed 2026-07-21 — Redis deleted (was never read by the backend).
 
       # ── Business config — not sensitive, stored as plain env vars ─────────────
       env {
@@ -211,7 +209,6 @@ resource "google_cloud_run_v2_service" "api_prod" {
     google_project_service.apis,
     google_vpc_access_connector.gifsy_connector,
     google_sql_database_instance.gifsy_db,
-    google_redis_instance.gifsy_redis_prod,
   ]
 
   # GitHub Actions deploys real images via `gcloud run deploy`.
@@ -279,7 +276,7 @@ resource "google_cloud_run_v2_service_iam_member" "frontend_prod_public" {
 }
 
 # ── STAGING — NestJS API ──────────────────────────────────────────────────────
-# Lean: scale-to-zero, no Redis (no VPC connector needed), FIXED_OTP active.
+# Lean: scale-to-zero, no VPC connector, FIXED_OTP active.
 # ~$0/month when idle; wakes in ~3 seconds on first request.
 
 resource "google_cloud_run_v2_service" "api_staging" {
@@ -294,8 +291,8 @@ resource "google_cloud_run_v2_service" "api_staging" {
       max_instance_count = 3
     }
 
-    # No VPC connector — staging has no Redis instance
-    # Cloud SQL reached via unix socket (cloud_sql_instance volume, no public IP needed)
+    # No VPC connector — Cloud SQL is reached via the unix socket
+    # (cloud_sql_instance volume, no public IP needed)
 
     volumes {
       name = "cloudsql"
@@ -413,8 +410,6 @@ resource "google_cloud_run_v2_service" "api_staging" {
           }
         }
       }
-      # No REDIS_URL on staging — staging has no Redis instance
-
       # ── Business config — same values as production ───────────────────────────
       env {
         name  = "PLATFORM_DOMAIN"

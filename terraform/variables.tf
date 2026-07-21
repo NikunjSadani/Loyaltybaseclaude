@@ -28,14 +28,6 @@ variable "db_tier" {
   # Next tier: db-custom-2-3840 (2 vCPU, 3.75 GB) ~$90/month
 }
 
-# ── Memorystore (production only — staging skips Redis) ───────────────────────
-
-variable "redis_memory_gb" {
-  description = "Memorystore Redis size in GB (production only)"
-  type        = number
-  default     = 1
-}
-
 # ── Cloud Run — production ────────────────────────────────────────────────────
 
 variable "prod_api_image" {
