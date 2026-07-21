@@ -12,9 +12,18 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 🟢 CURRENT STATE
 - **prod == main == `e8de31a`** (CUTOVER #11, live 2026-07-20 — §A-DOMAIN COMPLETE: D-1 + P5 + P6/S1 +
-  sales-ledger unification). **develop `2f21a8e`** = prod + TEST-ONLY/doc commits (E2E-harness revival — see below —
-  + docs) **+ the 🆕 KYC ADDRESS-PROOF WAIVER feature (`2f21a8e`, Deoleo-only) — a REAL feature awaiting the next cutover
-  (adds a migration `20260721120000_add_kyc_address_name_mismatch`)**; the 2 tiny FE fixes also ride it. Verify HEADs via `git log`.
+  sales-ledger unification). **develop `11fe3a8`** = prod + TEST-ONLY/doc commits (E2E-harness revival — see below —
+  + docs) **+ TWO REAL features awaiting the next cutover: the 🆕 KYC ADDRESS-PROOF WAIVER (`2f21a8e`) and the 🆕 PER-OUTLET
+  PAYOUT MANDATE (`11fe3a8`) — each adds a migration (`..._add_kyc_address_name_mismatch`, `..._add_outlet_required_payment_type`)**;
+  the 2 tiny FE fixes also ride the cutover. Verify HEADs via `git log`.
+- **🆕 PER-OUTLET PAYOUT MANDATE (develop `11fe3a8`, gate-green, audit-clean, STAGING-VERIFY pending):** the client can configure
+  PER OUTLET (at master-upload) which payout details an outlet must give — new `Outlet.requiredPaymentType` enum `BANK|UPI|ANY`
+  (NOT NULL DEFAULT BANK, additive migration). HARD MANDATE: the uploaded value pins the KYC Bank/UPI toggle (rep can't change);
+  backend `create()` guard rejects a mismatched `paymentMode` + requires the matching fields; UPI is never allowed when tenant
+  `salesApp.upiEnabled` is false (a UPI upload row under a UPI-disabled tenant is REJECTED in the error report). Shared
+  `payment-type` helper (api `common/` + FE `lib/` mirror) is the single contract. Independent audit clean (no HIGH; MED-1
+  re-KYC-locked-empty deadlock FIXED + all LOWs). Gate: api jest 1557 · nest 0 · FE vitest 1924 · tsc 0. **⚠️ needs the same
+  migration cutover; no prod flag/DB write required (the column defaults to BANK).** See memory [[deoleo-go-live-bundle]] NEWEST-59.
 - **🆕 KYC ADDRESS-PROOF WAIVER (develop `2f21a8e`, gate-green, STAGING-VERIFIED, ships NEXT cutover):** in `sales/kyc/new`,
   ticking "shop board name & address proof name do not match" WAIVES the required Address Proof upload — Deoleo-only, gated on new
   `clients.features.kycAddressProofWaiver` (a runtime behaviour flag, EXCLUDED from the gifsy-console `FeatureKey` module set →
@@ -161,7 +170,7 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 
 ## GATES (full suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`)
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` ·
-`cd platform && npx tsc --noEmit`. **Latest green (develop `2f21a8e`, incl. the waiver feature): api jest 1541 · nest 0 · FE vitest 1917 · tsc 0.** (The
+`cd platform && npx tsc --noEmit`. **Latest green (develop `11fe3a8`, incl. waiver + payout-mandate): api jest 1557 · nest 0 · FE vitest 1924 · tsc 0.** (The
 `4b0d03f` E2E-harness-revival commit is mostly test-only — e2e specs aren't in the jest/vitest gate; the 2 tiny FE
 fixes + next.config are tsc-clean & vitest-green. The E2E harness itself is a SEPARATE runtime gate: 294/0/4 green.)
 - **Deploy ≠ pushed** (a docs-only commit re-tags the image) — verify the serving SHA:
@@ -333,8 +342,10 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 ## START THE SESSION
 Greet. State: **prod == main == `e8de31a` (CUTOVER #11 LIVE 2026-07-20). §A-DOMAIN is COMPLETE and fully live on prod
 — DB-driven routing (D-1) + features-from-`/me` (P5) + S1 edge-secret ENFORCING on production (verified). develop
-`2f21a8e` = prod + test-only/doc commits + the 🆕 KYC ADDRESS-PROOF WAIVER feature (Deoleo-only; gate-green, staging-verified;
-ships next cutover — adds a migration + needs a PROD `clients.features.kycAddressProofWaiver=true` flag-set at go-live).** **✅ E2E HARNESS REVIVED + CLEAN-BASELINED (`4b0d03f`+`f89697c`, 2026-07-21
+`11fe3a8` = prod + test-only/doc commits + TWO real features awaiting the next cutover: the 🆕 KYC ADDRESS-PROOF WAIVER
+(`2f21a8e`, needs a PROD `clients.features.kycAddressProofWaiver=true` flag-set at go-live) and the 🆕 PER-OUTLET PAYOUT
+MANDATE (`11fe3a8`, `Outlet.requiredPaymentType` BANK|UPI|ANY; no prod flag needed — defaults to BANK). Both add a migration;
+both gate-green + independent-audit-clean.** **✅ E2E HARNESS REVIVED + CLEAN-BASELINED (`4b0d03f`+`f89697c`, 2026-07-21
 — 295/0/3 green AND reproducible on a fresh gifsy_dev; runs against a local prod build, not `next dev`; the harness
 auto reset+seeds gifsy_dev before each run via `e2e/global-setup.ts`; see `platform/docs/plans/E2E-HARNESS-REVIVAL.md`
 §0 + §"CLEAN BASELINE" for the resolved story + run-book).** No E2E pickup remains — the only untouched slice is the
