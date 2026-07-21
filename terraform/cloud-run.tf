@@ -25,13 +25,14 @@ resource "google_cloud_run_v2_service" "api_prod" {
       max_instance_count = 10
     }
 
-    # VPC connector — VESTIGIAL. Its only purpose was reaching Memorystore Redis
-    # (private IP), which is now deleted. Cloud SQL is reached via the /cloudsql
-    # unix socket (see the cloudsql volume below), not this connector — staging runs
-    # the same DB connection with NO connector. Safe to remove entirely (drop this
-    # block + the vpc.tf connector resource + the two --vpc-connector flags in
-    # deploy.yml, then `gcloud compute networks vpc-access connectors delete`) for a
-    # further ~₹1,445/mo. Left in place pending owner go-ahead.
+    # VPC connector — REQUIRED. gifsy-db is a PRIVATE-IP-ONLY Cloud SQL instance
+    # (ipv4Enabled=false, only 10.49.0.3 on gifsy-vpc). The /cloudsql socket volume
+    # below supplies the Cloud SQL Auth Proxy, but that proxy still needs a network
+    # route INTO the VPC to reach a private-IP instance — this connector is that route.
+    # Removing it breaks ALL database access (prod + staging). It formerly ALSO served
+    # the (now-deleted) Redis; the DB purpose remains, so it stays. (A cheaper future
+    # alternative is Cloud Run Direct VPC egress, which replaces the connector — but
+    # that's a tested migration, NOT a delete.)
     vpc_access {
       connector = google_vpc_access_connector.gifsy_connector.id
       egress    = "PRIVATE_RANGES_ONLY"
@@ -291,8 +292,10 @@ resource "google_cloud_run_v2_service" "api_staging" {
       max_instance_count = 3
     }
 
-    # No VPC connector — Cloud SQL is reached via the unix socket
-    # (cloud_sql_instance volume, no public IP needed)
+    # NOTE: this terraform block omits vpc_access, but the LIVE staging service is
+    # deployed WITH --vpc-connector=gifsy-connector (see .github/workflows) — it must
+    # be, since gifsy-db is private-IP-only. This block is stale drift vs the gcloud
+    # deploy; the running service reaches the DB through the connector like prod does.
 
     volumes {
       name = "cloudsql"
