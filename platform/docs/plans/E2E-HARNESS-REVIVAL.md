@@ -53,15 +53,24 @@ cd platform && E2E_BASE_URL=http://localhost:3100 npx playwright test
 ```
 ⚠️ `next start` warns about `output: standalone` but serves fine (the proxy runs — that's what matters).
 
-## ⚠️ FOLLOW-UP (recommended, NOT blocking — the harness is green today)
-`gifsy_dev` is a **long-lived, test-polluted DB** — the revival kept hitting accumulated residue (37 tickets
-vs 1 seeded, orphan hierarchy employees holding template phones, a stale reward name `Amazon Gift Card 500`
-that the seed's `update:{}` never renames, IN_PROGRESS ticket status). Several specs match that reality and a
-few blockers were cleaned surgically (guarded gifsy_dev writes). For **CI-grade reproducibility** (green on a
-FRESH DB / in CI), do a clean-baseline pass: `prisma migrate reset` + make the seed deterministic (add fields
-to the `update:` clauses, esp. rewardCatalog name) + self-cleaning write-fixtures (tickets/outlets/hierarchy
-specs should delete what they create). This would also let the reward-name specs revert to the seed's
-`Amazon Voucher ₹500`. Until then the harness is green against the owner's gifsy_dev.
+## ✅ CLEAN BASELINE — DONE (2026-07-21, `f89697c`, 295/0/3 on a FRESH DB)
+The harness is now **reproducible on a pristine `gifsy_dev`**, not just the long-lived polluted one:
+- **`e2e/global-setup.ts`** — before every run it TRUNCATEs `gifsy_dev` + re-seeds → a pristine baseline.
+  GATED to LOCAL (`E2E_ENV !== 'staging'`) and skippable via `E2E_SKIP_RESET=1`. NEVER touches the shared
+  staging/prod DB. (Backed by `api/prisma/reset-e2e-db.mjs`, hard-guarded to `current_database()==='gifsy_dev'`,
+  truncate-only so a running backend keeps serving.) So the run-book above no longer needs a manual re-seed —
+  the suite resets itself. Run `next start` with the DB proxy up and just `npx playwright test`.
+- **The seed now OWNS the values specs assert** — it was incomplete: deoleo's branding ("Deoleo India" /
+  "Deoleo India Pvt. Ltd." + Bertolli,Figaro + support email + 4/5 modules) and clientb's ONBOARDING/3-modules
+  state used to exist only as residue on the dev DB. The seed sets them now, so a fresh DB reproduces them.
+- Reward-name specs reverted to the seed values (`Amazon Voucher ₹500` / `UPI Cashback ₹1000`).
+- One-off `prisma migrate reset` (owner-consented) reapplied all 11 migrations cleanly — no drift.
+
+**Residual (genuinely optional):** the seed's `update:{}` idempotency pattern means a re-seed WITHOUT a reset
+still leaves some stale values — irrelevant now that the harness always resets first, but if you ever run
+`prisma db seed` by hand over a dirty DB, prefer `node prisma/reset-e2e-db.mjs && npx prisma db seed`. Also, the
+`hostHeader` local mode is proven; the STAGING run mode (`E2E_ENV=staging`, real subdomains, OTP-fetch) is still
+a separate, not-yet-exercised path — and there (no reset possible) the specs' robust assertions carry it.
 
 ---
 <details><summary>HISTORICAL — the original pickup plan (superseded by §0 above)</summary>

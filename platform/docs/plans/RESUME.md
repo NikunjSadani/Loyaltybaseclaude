@@ -12,7 +12,7 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 🟢 CURRENT STATE
 - **prod == main == `e8de31a`** (CUTOVER #11, live 2026-07-20 — §A-DOMAIN COMPLETE: D-1 + P5 + P6/S1 +
-  sales-ledger unification). **develop `4b0d03f`** = prod + TEST-ONLY/doc commits (E2E-harness revival — see below —
+  sales-ledger unification). **develop `f89697c`** = prod + TEST-ONLY/doc commits (E2E-harness revival — see below —
   + docs; not worth a cutover on their own, though the 2 tiny FE fixes in it will ride the next cutover). Verify HEADs via `git log`.
 - **§A-DOMAIN is FULLY LIVE on prod (verified post-cutover):** DB-driven routing (D-1, resolveClient→`clients`),
   features-from-authenticated-`/me` (P5, registry reduced to fallback), and **S1 edge-secret ENFORCING on production**
@@ -24,7 +24,7 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
   unaffected). Kill-switch: `TENANT_ROUTING_SOURCE=registry` on the FE service. **⚠️ `RBAC_ENFORCEMENT` env still OFF.**
 - Gate green on `e8de31a`: **api jest 1540 · nest 0 · FE vitest 1917 · tsc 0**. Pre-cutover backup `1784547142461`;
   rollback ref = prior prod `437045a`.
-- **✅ E2E HARNESS REVIVED (2026-07-21, `4b0d03f`): 294 passed / 0 failed / 4 skipped.** See below + the dedicated plan.
+- **✅ E2E HARNESS REVIVED + CLEAN-BASELINED (2026-07-21, `4b0d03f`+`f89697c`): 295 passed / 0 failed / 3 skipped, now REPRODUCIBLE on a fresh gifsy_dev.** See below + the dedicated plan.
 
 ## ▶ E2E HARNESS REVIVAL — ✅ DONE (2026-07-21, `4b0d03f`)
 **Full pickup/record: `platform/docs/plans/E2E-HARNESS-REVIVAL.md` (§0 = the resolved story + the NEW run-book).**
@@ -36,10 +36,13 @@ via the unset EDGE_SECRET path). (C) server-action CSRF handled by a **default-O
 `next.config`. (D) ~25 stale specs reconciled; a dedicated **CP004/`partnerApproved`** approved-partner fixture added
 (both redeem money-paths gate on KYC-APPROVED); visibility enabled for the test tenants in the seed. (E) two tiny
 **prod-source** fixes surfaced by the harness: the `/admin/outlets` client-redirect fix + the gated next.config origin.
-Gate: api jest 1540 · nest 0 · FE vitest 1917 · tsc 0. **⚠️ FOLLOW-UP (recommended, non-blocking):** `gifsy_dev` is a
-long-lived TEST-POLLUTED DB (37 tickets vs 1 seeded, orphan employees, stale reward name); the harness is green
-against it but a **clean-baseline pass** (`migrate reset` + seed determinism + self-cleaning write-fixtures) is needed
-for CI-grade reproducibility on a fresh DB. See the plan doc §"FOLLOW-UP".
+Gate: api jest 1540 · nest 0 · FE vitest 1917 · tsc 0. **✅ CLEAN-BASELINE DONE (`f89697c`, 295/0/3 on a FRESH DB):**
+`e2e/global-setup.ts` now TRUNCATEs + re-seeds `gifsy_dev` before every run (gated LOCAL-only via `E2E_ENV!==staging`,
+skippable with `E2E_SKIP_RESET`; guarded to `current_database()==='gifsy_dev'`) → the suite resets itself, no more
+manual re-seed and no residue drift. The seed now OWNS deoleo's canonical branding + module config (previously
+residue-only), clientb is ONBOARDING, and the reward-name specs use the seed values. A one-off owner-consented
+`prisma migrate reset` reapplied all 11 migrations cleanly (no drift). Only the STAGING run mode remains a separate,
+not-yet-exercised path (there, no reset is possible — robust assertions carry it). See the plan doc §"CLEAN BASELINE".
 
 <details><summary>§A-DOMAIN P6 + cutover #11 — ✅ DONE + LIVE (reference, superseded)</summary>
 
@@ -150,7 +153,7 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 
 ## GATES (full suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`)
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` ·
-`cd platform && npx tsc --noEmit`. **Latest green (develop `4b0d03f`): api jest 1540 · nest 0 · FE vitest 1917 · tsc 0.** (The
+`cd platform && npx tsc --noEmit`. **Latest green (develop `f89697c`): api jest 1540 · nest 0 · FE vitest 1917 · tsc 0.** (The
 `4b0d03f` E2E-harness-revival commit is mostly test-only — e2e specs aren't in the jest/vitest gate; the 2 tiny FE
 fixes + next.config are tsc-clean & vitest-green. The E2E harness itself is a SEPARATE runtime gate: 294/0/4 green.)
 - **Deploy ≠ pushed** (a docs-only commit re-tags the image) — verify the serving SHA:
@@ -320,10 +323,10 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 ## START THE SESSION
 Greet. State: **prod == main == `e8de31a` (CUTOVER #11 LIVE 2026-07-20). §A-DOMAIN is COMPLETE and fully live on prod
 — DB-driven routing (D-1) + features-from-`/me` (P5) + S1 edge-secret ENFORCING on production (verified). develop
-`4b0d03f` = prod + test-only/doc commits.** **✅ E2E HARNESS REVIVAL is DONE (`4b0d03f`, 2026-07-21 — 294/0/4 green;
-runs against a local prod build now, not `next dev`; see `platform/docs/plans/E2E-HARNESS-REVIVAL.md` §0 for the
-resolved story + new run-book).** No E2E pickup remains. **Recommended (non-blocking) follow-up:** a clean-baseline
-pass for the harness (`gifsy_dev` is test-polluted → `migrate reset` + seed determinism + self-cleaning write-fixtures
-for CI-grade reproducibility). Other open item — **owner:** one real-OTP login on `deoleoloyalty.gifsy.in` as the
+`f89697c` = prod + test-only/doc commits.** **✅ E2E HARNESS REVIVED + CLEAN-BASELINED (`4b0d03f`+`f89697c`, 2026-07-21
+— 295/0/3 green AND reproducible on a fresh gifsy_dev; runs against a local prod build, not `next dev`; the harness
+auto reset+seeds gifsy_dev before each run via `e2e/global-setup.ts`; see `platform/docs/plans/E2E-HARNESS-REVIVAL.md`
+§0 + §"CLEAN BASELINE" for the resolved story + run-book).** No E2E pickup remains — the only untouched slice is the
+STAGING run mode (separate, not-yet-exercised). Other open item — **owner:** one real-OTP login on `deoleoloyalty.gifsy.in` as the
 final human smoke of cutover #11. Present the OPEN THREADS and ask which to pick up.
 ```
