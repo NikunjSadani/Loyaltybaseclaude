@@ -12,7 +12,7 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 🟢 CURRENT STATE
 - **prod == main == `e8de31a`** (CUTOVER #11, live 2026-07-20 — §A-DOMAIN COMPLETE: D-1 + P5 + P6/S1 +
-  sales-ledger unification). **develop `ffe82bd`** (feature commits `2f21a8e`+`11fe3a8`, docs on top) = prod + TEST-ONLY/doc
+  sales-ledger unification). **develop `748fd81`** (feature commits `2f21a8e`+`11fe3a8`, docs + the Redis-removal infra commit on top) = prod + TEST-ONLY/doc
   commits (E2E-harness revival — see below) **+ TWO REAL features awaiting the next cutover: the 🆕 KYC ADDRESS-PROOF WAIVER
   (`2f21a8e`) and the 🆕 PER-OUTLET PAYOUT MANDATE (`11fe3a8`, ✅ staging-verified) — each adds a migration (`..._add_kyc_address_name_mismatch`, `..._add_outlet_required_payment_type`)**;
   the 2 tiny FE fixes also ride the cutover. Verify HEADs via `git log`.
@@ -288,15 +288,17 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
 `/v1/auth/assume-tenant` {clientId}).
 
 ## OPEN THREADS
-- **💸 INFRA COST-REDUCTION — THE ACTIVE PICKUP (owner: "we will start with the infra question again"). Full detail = memory
-  [[infra-cost-reduction]].** Deoleo go-live MAY postpone to post-Sept → cut idle cost. **Key finding: Redis is 52% of the ~₹17.5k/mo
-  bill and is UNUSED** (no code connects — `ThrottlerModule` is in-memory, prod `gifsy-api` logs zero redis, deps `ioredis`/`cache-manager`
-  never imported; it's a leftover from the initial platform scaffold `d839bc0`). **Levers:** (1) delete both Redis instances
-  (`gifsy-redis`+`gifsy-redis-prod`) after a 60-sec prod-api boot-verify + strip `REDIS_URL`/redis terraform → ~₹8.5k/mo, permanent,
-  ~zero risk; (2) Artifact Registry cleanup policy (↑353%, but it's REQUIRED — not waste); (3) prod Cloud Run min=1→0 + pause the prod
-  schedulers; (4–6) stop `gifsy-db`/`gifsy-db-dev`/VPC-connector when fully frozen. Shut-down/bring-up = easy, reversible, <1hr, no data
-  loss. **PENDING owner go: (a) I run delete-Redis + Artifact-cleanup + pause items, or (b) hand the gcloud commands; + is staging-UAT/dev
-  continuing during the pause?** All prod/staging infra changes are owner-gated. gcloud+wrangler authed; terraform in `terraform/`.
+- **💸 INFRA COST-REDUCTION — IN PROGRESS. Full detail = memory [[infra-cost-reduction]].** Deoleo go-live MAY postpone to post-Sept →
+  cut idle cost (~₹17.5k/mo bill). **✅ DONE: both Redis instances DELETED (owner "turn it off then") + terraform/deploy wiring stripped
+  (develop `748fd81`, `terraform validate` Success) → ~₹8,500/mo (52%) removed, permanent, zero runtime impact** (Redis was never wired —
+  in-memory throttler, no ioredis/cache-manager imports, scaffold leftover). **Two deliberate NOT-yet-done exceptions (surfaced, owner-gated):**
+  (i) the LIVE `REDIS_URL` Secret Manager secret is RETAINED — the running prod revision still reads it at instance startup; the deploy.yml/
+  cloud-run refs are removed so the NEXT cutover drops it → delete the live secret only AFTER cutover #12, and do NOT `terraform apply` prod
+  before then; (ii) the **VPC connector (~₹1,445/mo) is now provably dead** (Redis-only; Cloud SQL uses the `/cloudsql` socket) — removal
+  steps in the memory, left attached pending owner go. **REMAINING LEVERS (owner decision still open):** Artifact Registry cleanup policy
+  (↑353%, REQUIRED infra — not waste); prod Cloud Run min=1→0 + pause prod schedulers (~₹800/mo, pause item); VPC-connector removal;
+  stop `gifsy-db`/`gifsy-db-dev` when fully frozen (needs the staging-UAT?/dev-continuing? answers). Also owner's call: strip dead
+  `ioredis`/`cache-manager` deps from api/package.json. All prod/staging infra changes owner-gated; gcloud+wrangler authed; terraform in `terraform/`.
 - **✅ E2E HARNESS REVIVAL — DONE (test-only, zero prod impact) — `platform/docs/plans/E2E-HARNESS-REVIVAL.md`.**
   Revived + clean-baselined (`4b0d03f`+`f89697c`, 295/0/3, reproducible on a fresh gifsy_dev; runs against a local
   prod build, auto reset+seeds via `e2e/global-setup.ts`). ALL of (A) requestAs (was the run-target, not a bug),
@@ -353,18 +355,20 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 ## START THE SESSION
 Greet. **THE OWNER SAID "we will start with the infra question again" → LEAD WITH THAT.** First state current status, then
 go straight to the infra cost-reduction pickup.
-State: **prod == main == `e8de31a` (CUTOVER #11 LIVE 2026-07-20). §A-DOMAIN COMPLETE + fully live on prod. develop `ffe82bd`
+State: **prod == main == `e8de31a` (CUTOVER #11 LIVE 2026-07-20). §A-DOMAIN COMPLETE + fully live on prod. develop `748fd81`
 (feature commits `2f21a8e`+`11fe3a8`, docs on top) = prod + test-only/doc + TWO real features awaiting the next migration
 cutover: the 🆕 KYC ADDRESS-PROOF WAIVER (`2f21a8e`, needs a PROD `clients.features.kycAddressProofWaiver=true` flag-set at
 go-live) and the 🆕 PER-OUTLET PAYOUT MANDATE (`11fe3a8`, `Outlet.requiredPaymentType` BANK|UPI|ANY, no prod flag needed —
 defaults to BANK). Both gate-green (api jest 1557 · nest 0 · FE vitest 1924 · tsc 0), independent-audit-clean, and ✅
 STAGING-VERIFIED (the payout-mandate upload-reject + submit-guard proven live on staging `ffe82bd`).**
-**▶ THE ACTIVE PICKUP = INFRA COST-REDUCTION (memory [[infra-cost-reduction]] has the full breakdown):** Deoleo go-live may
-postpone to post-Sept; the owner wants to cut idle GCP cost (~₹17.5k/mo ≈ $210). **The headline: Redis is 52% of the bill and
-UNUSED** (no code connects — throttler is in-memory, prod logs zero redis, deps never imported; scaffold leftover). Pending
-owner go: **(a)** I delete the 2 Redis instances (after a 60-sec prod-api boot-verify) + strip `REDIS_URL`/redis terraform +
-add an Artifact-Registry cleanup policy (the permanent ~₹9k/mo wins) + the prod Cloud-Run-min-0 / pause-schedulers items, **or
-(b)** hand the exact gcloud commands; **+ need: is staging-UAT still needed during the pause? is dev continuing?** (those decide
-whether to also stop `gifsy-db`/`gifsy-db-dev`/VPC-connector). All prod/staging infra changes are owner-gated. gcloud+wrangler authed.
-Then note the other open items (both features awaiting cutover #12; the waiver's one real-OTP prod smoke) and ask.
+**▶ INFRA COST-REDUCTION — IN PROGRESS (memory [[infra-cost-reduction]] has the full breakdown):** Deoleo go-live may postpone to
+post-Sept; the owner wants to cut idle GCP cost (~₹17.5k/mo ≈ $210). **✅ DONE: both Redis instances DELETED + terraform/deploy
+wiring stripped (develop `748fd81`) → ~₹8,500/mo (52%) gone, permanent, zero impact** (Redis was never wired). **Two owner-gated
+exceptions left in place:** (i) the LIVE `REDIS_URL` secret must survive until cutover #12 redeploys prod without it (do NOT
+`terraform apply` prod before then); (ii) the VPC connector (~₹1,445/mo) is now provably dead — removal steps in the memory,
+pending owner go. **REMAINING owner decisions:** Artifact-Registry cleanup policy (↑353%, REQUIRED infra); prod Cloud-Run-min-0 +
+pause prod schedulers (~₹800/mo); VPC-connector removal; stop `gifsy-db`/`gifsy-db-dev` if fully frozen — **need: is staging-UAT
+still needed during the pause? is dev continuing?** Plus owner's call: strip dead `ioredis`/`cache-manager` deps from api/package.json.
+All prod/staging infra changes owner-gated; gcloud+wrangler authed. Then note the other open items (both features awaiting cutover #12;
+the waiver's one real-OTP prod smoke) and ask. **REMEMBER: never unilaterally defer follow-up work — surface it, let the owner decide** [[no-unilateral-deferral]].
 ```
