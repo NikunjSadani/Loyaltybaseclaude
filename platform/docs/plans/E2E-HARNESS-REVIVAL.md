@@ -1,28 +1,70 @@
-# E2E Harness Revival — PICK UP FIRST after compaction
+# E2E Harness Revival — ✅ COMPLETE (2026-07-21, commit `4b0d03f`)
 
-> **Created 2026-07-20.** This is the immediate-next task. The go-live Playwright E2E harness
-> (`platform/e2e`) had been **dead since AF-6** (no role could log in). The AF-6 **login fix is DONE +
-> committed (`5d6d717`, on `develop`/`main` = prod `e8de31a`)** — the harness runs again and **161 specs
-> pass**. What remains is **reviving the rest of the harness**, which turned out to be a much bigger job
-> than the login fix. **None of this affects production — the harness is a test tool, it does not run in
-> prod or CI.** Prod (§A-DOMAIN, cutover #11) is live and healthy; this is purely test-infra debt.
+> **DONE.** The go-live Playwright E2E harness (`platform/e2e`) is REVIVED and **fully green: 294 passed /
+> 0 failed / 4 skipped** (the 4 skips are in-spec conditional-data guards). It had been dead since AF-6
+> moved the JWT to an httpOnly cookie. Gate at revival: api jest 1540 · nest 0 · FE vitest 1917 · tsc 0.
+> Two tiny production-source fixes were surfaced by the harness (see §0). Everything else is test-only.
+
+## 0. WHAT THE REVIVAL TOOK (the resolved story — read this, the old plan below is historical)
+
+**A. The `requestAs` "mystery" resolved → it was the RUN TARGET, not a code bug.** Next 16 renamed
+`middleware`→`proxy`; `src/proxy.ts` IS the middleware. But **local `next dev` (Turbopack) does NOT run the
+proxy for `/api/*`** — so every auth-injected client call 401s. A **production build DOES** (verified). So
+the harness now runs against a **local prod build** (`next build` + `next start`), not `next dev`.
+
+**B. Tenant steering via `hostHeader` (new local strategy, `env.ts`).** A prod build compiles OUT the dev
+"Organization" clientId field, so gifsy/clientb can't pick their tenant that way. Instead each role sends
+`x-forwarded-host: <role.host>` (roles.ts `host`), which the proxy + login server-action trust locally
+(EDGE_SECRET unset → `resolveTrustedHost` trusts it) — exactly how staging resolves by real subdomain.
+`app.gifsy.in`→gifsy, `clientb.gifsy.in`→clientb, `deoleoloyalty.gifsy.in`→deoleo. Set at the project level
+(playwright.config `tenantHeaders`) + per-role in `login()` for setup.
+
+**C. Server-action CSRF for local prod build.** Injecting `x-forwarded-host` ≠ the real `origin: localhost`
+trips Next's Server-Action CSRF guard. Fixed with a **default-OFF, gated** `E2E_LOCAL_ORIGIN` entry in
+`next.config` `serverActions.allowedOrigins` (inert on every real deploy — an attacker can't forge
+`Origin: localhost` from a victim browser). Run the local prod server with `E2E_LOCAL_ORIGIN=localhost:3100`.
+
+**D. ~25 stale specs reconciled to the current app** (reward names, strict-mode locators, gifsy UI reworks,
+AF-6 assume-tenant cookie transport for payouts, invoice pagination cap, hierarchy leaf code, robust
+cross-tenant count). **Money-path fixture:** sales-assisted + partner self redeem now gate on KYC-APPROVED
+(owner 2026-06-27); CP001 is the pending-KYC fixture, so a dedicated **CP004 / `partnerApproved`** approved+
+funded+SO-assigned fixture was seeded and both redeem specs run against it. **Seed** also enables Visibility
+for the test tenants (gifsy_dev only). `operator-switch` migrated to cookie-based assume/exit assertions.
+
+**E. Two production-source fixes (harness-surfaced):** (1) `/admin/outlets` orphan redirect was swallowed by
+the `'use client'` admin layout → made it a client-side redirect (runtime-verified). (2) the gated
+`next.config` origin above.
+
+## ▶ THE RUN-BOOK (how to run it now — REPLACES the `next dev` runbook in §2 below)
+```bash
+# 1. DB proxy → gifsy_dev  (leave running)
+"$TEMP/cloud-sql-proxy.exe" --credentials-file "<repo>/gifsy-platform-60018da0d5b4.json" \
+  gifsy-platform:asia-south1:gifsy-db-dev --port 5433
+# 2. Seed  (adds CP004 fixture + clientb + visibility-enable)
+cd api && npx prisma db seed
+# 3. Backend :4000  (FIXED_OTP)
+cd api && ./node_modules/.bin/tsc -p tsconfig.build.json && FIXED_OTP=123456 node dist/main.js
+# 4. FE — PRODUCTION build (NOT next dev), :3100, with the CSRF affordance
+cd platform && npx next build
+JWT_SECRET=<api/.env JWT_SECRET> NEXT_PUBLIC_APP_URL=http://localhost:3100 \
+  NEXT_PUBLIC_API_URL=http://localhost:4000 E2E_LOCAL_ORIGIN=localhost:3100 npx next start -p 3100
+# 5. Playwright
+cd platform && E2E_BASE_URL=http://localhost:3100 npx playwright test
+```
+⚠️ `next start` warns about `output: standalone` but serves fine (the proxy runs — that's what matters).
+
+## ⚠️ FOLLOW-UP (recommended, NOT blocking — the harness is green today)
+`gifsy_dev` is a **long-lived, test-polluted DB** — the revival kept hitting accumulated residue (37 tickets
+vs 1 seeded, orphan hierarchy employees holding template phones, a stale reward name `Amazon Gift Card 500`
+that the seed's `update:{}` never renames, IN_PROGRESS ticket status). Several specs match that reality and a
+few blockers were cleaned surgically (guarded gifsy_dev writes). For **CI-grade reproducibility** (green on a
+FRESH DB / in CI), do a clean-baseline pass: `prisma migrate reset` + make the seed deterministic (add fields
+to the `update:` clauses, esp. rewardCatalog name) + self-cleaning write-fixtures (tickets/outlets/hierarchy
+specs should delete what they create). This would also let the reward-name specs revert to the seed's
+`Amazon Voucher ₹500`. Until then the harness is green against the owner's gifsy_dev.
 
 ---
-
-## 0. TL;DR — what's done, what's left
-
-| | State |
-|---|---|
-| **AF-6 login/token migration** | ✅ DONE + verified (`5d6d717`). All 7 role logins pass; 161 specs pass (was 0). tsc 0. |
-| **~132 PRE-EXISTING stale specs** | ❌ TODO — harness last green **2026-06-21**; a month of app drift (D-1, P5, dashboards, KYC) broke specs the migration never touched. Separate re-validation effort. |
-| **`requestAs` cross-role reads 401 locally** | ⚠️ INVESTIGATE — 7 specs; proven NOT a code bug in isolation (see §3). Verify on the real stack. |
-| **`gifsy/operator-switch.e2e.ts` `homeToken`** | ❌ TODO — asserts a localStorage key AF-6 removed; needs the new exit-to-platform mechanism (product question). |
-
-**Recommended order:** (1) resolve the `requestAs` runtime question (§3) — it gates whether the 7 cross-role
-specs are actually green; (2) then grind the ~132 stale specs (§4) in batches by role/area; (3) fix
-`operator-switch` (§5).
-
----
+<details><summary>HISTORICAL — the original pickup plan (superseded by §0 above)</summary>
 
 ## 1. What the harness is + why it matters
 
@@ -204,3 +246,5 @@ proxy tab when done.
 - The AF-6 migration commit: **`5d6d717`**. The proxy behaviour: `platform/src/proxy.ts` (strips
   Authorization, injects Bearer from the cookie — the crux of Workstream A).
 </content>
+
+</details>

@@ -12,8 +12,8 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 🟢 CURRENT STATE
 - **prod == main == `e8de31a`** (CUTOVER #11, live 2026-07-20 — §A-DOMAIN COMPLETE: D-1 + P5 + P6/S1 +
-  sales-ledger unification). **develop `5d6d717`** = prod + 2 TEST-ONLY/doc commits (E2E-harness AF-6 login fix +
-  docs; not worth a cutover on their own). Verify HEADs via `git log`.
+  sales-ledger unification). **develop `4b0d03f`** = prod + TEST-ONLY/doc commits (E2E-harness revival — see below —
+  + docs; not worth a cutover on their own, though the 2 tiny FE fixes in it will ride the next cutover). Verify HEADs via `git log`.
 - **§A-DOMAIN is FULLY LIVE on prod (verified post-cutover):** DB-driven routing (D-1, resolveClient→`clients`),
   features-from-authenticated-`/me` (P5, registry reduced to fallback), and **S1 edge-secret ENFORCING on production**
   — prod smoke confirmed: legit Deoleo login 200 + secret matches the worker; a forged direct-`.run.app`
@@ -24,20 +24,22 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
   unaffected). Kill-switch: `TENANT_ROUTING_SOURCE=registry` on the FE service. **⚠️ `RBAC_ENFORCEMENT` env still OFF.**
 - Gate green on `e8de31a`: **api jest 1540 · nest 0 · FE vitest 1917 · tsc 0**. Pre-cutover backup `1784547142461`;
   rollback ref = prior prod `437045a`.
-- **⚠️ TEST-ONLY DEBT (zero prod impact): the E2E harness needs a REVIVAL — see IMMEDIATE NEXT + the dedicated plan.**
+- **✅ E2E HARNESS REVIVED (2026-07-21, `4b0d03f`): 294 passed / 0 failed / 4 skipped.** See below + the dedicated plan.
 
-## ▶ IMMEDIATE NEXT — E2E HARNESS REVIVAL (§A-DOMAIN is DONE + live; this is the pickup)
-**🎯 READ `platform/docs/plans/E2E-HARNESS-REVIVAL.md` — it is the full pickup doc (what the harness is, the exact
-local run-book, the 3 remaining workstreams, and the `requestAs` investigation notes).** In one line: the go-live
-Playwright E2E harness (`platform/e2e`) was DEAD since AF-6 (moved the JWT to an httpOnly cookie; no role could log
-in). The **AF-6 login fix is DONE + committed (`5d6d717`)** — the harness runs again and **161 specs pass** (was 0);
-tsc 0; ZERO prod impact (it never runs in CI/prod). **Remaining (test-only):** (A) `requestAs` cross-role reads 401 on
-the LOCAL `next dev` stack — proven NOT a code bug in isolation (raw curl + even a garbage token get the backend's
-"Authentication required" → the local proxy isn't Bearer-injecting for non-browser clients) → **first check whether
-`platform/src/proxy.ts` is actually wired as `middleware.ts`, then verify `requestAs` on the real stack/CI**; (B)
-~132 PRE-EXISTING stale specs (harness last green 2026-06-21; a month of app drift across UNTOUCHED specs) → triage
-by role in batches; (C) `gifsy/operator-switch.e2e.ts` `homeToken` (an AF-6 mechanism change) → deferred. Local
-stack was left RUNNING (proxy :5433, backend :4000, FE :3100) — see the plan doc §6.
+## ▶ E2E HARNESS REVIVAL — ✅ DONE (2026-07-21, `4b0d03f`)
+**Full pickup/record: `platform/docs/plans/E2E-HARNESS-REVIVAL.md` (§0 = the resolved story + the NEW run-book).**
+The go-live Playwright harness (`platform/e2e`), dead since AF-6, is REVIVED and **fully green (294/0/4)**. Key
+resolutions: (A) the `requestAs`/401 "mystery" was the RUN TARGET — local `next dev` (Turbopack) does NOT run the
+proxy for `/api/*`; a **prod build does**, so the harness now runs against a local **`next build`+`next start`** (NOT
+`next dev`). (B) tenant steering via the new **`hostHeader`** strategy (`x-forwarded-host` per role, trusted locally
+via the unset EDGE_SECRET path). (C) server-action CSRF handled by a **default-OFF `E2E_LOCAL_ORIGIN`** gate in
+`next.config`. (D) ~25 stale specs reconciled; a dedicated **CP004/`partnerApproved`** approved-partner fixture added
+(both redeem money-paths gate on KYC-APPROVED); visibility enabled for the test tenants in the seed. (E) two tiny
+**prod-source** fixes surfaced by the harness: the `/admin/outlets` client-redirect fix + the gated next.config origin.
+Gate: api jest 1540 · nest 0 · FE vitest 1917 · tsc 0. **⚠️ FOLLOW-UP (recommended, non-blocking):** `gifsy_dev` is a
+long-lived TEST-POLLUTED DB (37 tickets vs 1 seeded, orphan employees, stale reward name); the harness is green
+against it but a **clean-baseline pass** (`migrate reset` + seed determinism + self-cleaning write-fixtures) is needed
+for CI-grade reproducibility on a fresh DB. See the plan doc §"FOLLOW-UP".
 
 <details><summary>§A-DOMAIN P6 + cutover #11 — ✅ DONE + LIVE (reference, superseded)</summary>
 
@@ -148,8 +150,9 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 
 ## GATES (full suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`)
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` ·
-`cd platform && npx tsc --noEmit`. **Latest green (develop `5d6d717`): api jest 1540 · nest 0 · FE vitest 1917 · tsc 0.** (The
-`5d6d717` E2E-harness commit is test-only — e2e specs aren't in the jest/vitest gate; tsc still 0 with the changes.)
+`cd platform && npx tsc --noEmit`. **Latest green (develop `4b0d03f`): api jest 1540 · nest 0 · FE vitest 1917 · tsc 0.** (The
+`4b0d03f` E2E-harness-revival commit is mostly test-only — e2e specs aren't in the jest/vitest gate; the 2 tiny FE
+fixes + next.config are tsc-clean & vitest-green. The E2E harness itself is a SEPARATE runtime gate: 294/0/4 green.)
 - **Deploy ≠ pushed** (a docs-only commit re-tags the image) — verify the serving SHA:
   `gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project gifsy-platform --format='value(spec.template.spec.containers[0].image)'`.
 - FE tsc gotcha: a stale `.next/types` surfaces a phantom `RejectionModal` error (pre-existing,
@@ -317,10 +320,10 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 ## START THE SESSION
 Greet. State: **prod == main == `e8de31a` (CUTOVER #11 LIVE 2026-07-20). §A-DOMAIN is COMPLETE and fully live on prod
 — DB-driven routing (D-1) + features-from-`/me` (P5) + S1 edge-secret ENFORCING on production (verified). develop
-`5d6d717` = prod + 2 test-only/doc commits.** **🎯 THE PICKUP = E2E HARNESS REVIVAL — read
-`platform/docs/plans/E2E-HARNESS-REVIVAL.md` FIRST (it's the full pickup doc: the AF-6 login fix is DONE + committed
-`5d6d717` so the harness runs again + 161 specs pass; remaining test-only = the `requestAs` cross-role runtime
-question + ~132 pre-existing stale specs + operator-switch homeToken; local stack was left running). ZERO prod
-impact.** Other open item — **owner:** one real-OTP login on `deoleoloyalty.gifsy.in` as the final human smoke of
-cutover #11. Present the OPEN THREADS and ask which to pick up (default = harness revival).
+`4b0d03f` = prod + test-only/doc commits.** **✅ E2E HARNESS REVIVAL is DONE (`4b0d03f`, 2026-07-21 — 294/0/4 green;
+runs against a local prod build now, not `next dev`; see `platform/docs/plans/E2E-HARNESS-REVIVAL.md` §0 for the
+resolved story + new run-book).** No E2E pickup remains. **Recommended (non-blocking) follow-up:** a clean-baseline
+pass for the harness (`gifsy_dev` is test-polluted → `migrate reset` + seed determinism + self-cleaning write-fixtures
+for CI-grade reproducibility). Other open item — **owner:** one real-OTP login on `deoleoloyalty.gifsy.in` as the
+final human smoke of cutover #11. Present the OPEN THREADS and ask which to pick up.
 ```
