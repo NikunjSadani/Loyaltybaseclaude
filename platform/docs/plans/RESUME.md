@@ -16,14 +16,16 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
   + docs) **+ TWO REAL features awaiting the next cutover: the 🆕 KYC ADDRESS-PROOF WAIVER (`2f21a8e`) and the 🆕 PER-OUTLET
   PAYOUT MANDATE (`11fe3a8`) — each adds a migration (`..._add_kyc_address_name_mismatch`, `..._add_outlet_required_payment_type`)**;
   the 2 tiny FE fixes also ride the cutover. Verify HEADs via `git log`.
-- **🆕 PER-OUTLET PAYOUT MANDATE (develop `11fe3a8`, gate-green, audit-clean, STAGING-VERIFY pending):** the client can configure
+- **🆕 PER-OUTLET PAYOUT MANDATE (develop `11fe3a8`, gate-green, audit-clean, ✅ STAGING-VERIFIED):** the client can configure
   PER OUTLET (at master-upload) which payout details an outlet must give — new `Outlet.requiredPaymentType` enum `BANK|UPI|ANY`
   (NOT NULL DEFAULT BANK, additive migration). HARD MANDATE: the uploaded value pins the KYC Bank/UPI toggle (rep can't change);
   backend `create()` guard rejects a mismatched `paymentMode` + requires the matching fields; UPI is never allowed when tenant
   `salesApp.upiEnabled` is false (a UPI upload row under a UPI-disabled tenant is REJECTED in the error report). Shared
   `payment-type` helper (api `common/` + FE `lib/` mirror) is the single contract. Independent audit clean (no HIGH; MED-1
-  re-KYC-locked-empty deadlock FIXED + all LOWs). Gate: api jest 1557 · nest 0 · FE vitest 1924 · tsc 0. **⚠️ needs the same
-  migration cutover; no prod flag/DB write required (the column defaults to BANK).** See memory [[deoleo-go-live-bundle]] NEWEST-59.
+  re-KYC-locked-empty deadlock FIXED + all LOWs). Gate: api jest 1557 · nest 0 · FE vitest 1924 · tsc 0. **✅ STAGING-VERIFIED**
+  (upload UPI-under-deoleo REJECTED + case-insensitive accept; KYC submit guard 400s a mode-mismatch + missing-fields; migration
+  live). **⚠️ needs the same migration cutover; no prod flag/DB write required (the column defaults to BANK).** See memory
+  [[deoleo-go-live-bundle]] NEWEST-59.
 - **🆕 KYC ADDRESS-PROOF WAIVER (develop `2f21a8e`, gate-green, STAGING-VERIFIED, ships NEXT cutover):** in `sales/kyc/new`,
   ticking "shop board name & address proof name do not match" WAIVES the required Address Proof upload — Deoleo-only, gated on new
   `clients.features.kycAddressProofWaiver` (a runtime behaviour flag, EXCLUDED from the gifsy-console `FeatureKey` module set →
