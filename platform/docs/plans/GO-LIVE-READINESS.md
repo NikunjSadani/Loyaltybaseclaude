@@ -70,10 +70,11 @@ For **each role × each page**:
 **It fails CI when a page fabricates, a scope leaks, or a flow doesn't persist** — the enforcement no human can shortcut. `tsc` + unit tests remain necessary, never sufficient (`VERIFICATION-PROTOCOL.md`).
 
 ### Env-parameterised (encodes the local↔staging intent)
-The same suite runs against **local** (`BASE_URL=http://localhost:3000`, `OTP_MODE=fixed`) and **staging**
-(`BASE_URL=<staging>`, `OTP_MODE=msg91`, real subdomains → real `clientId` resolution). A green **local** run is the
-merge gate; a green **staging** run is the pre-prod gate. (This is *why* `ENVIRONMENTS.md` lists the local↔staging
-differences — the harness must not assume `FIXED_OTP`/`localhost` semantics.)
+The same suite runs against **local** (a LOCAL PROD BUILD on `E2E_BASE_URL=http://localhost:3100` + `hostHeader`
+tenant steering + auto reset-seed — see `E2E-HARNESS-REVIVAL.md` §0; the old `next dev :3000` mode no longer runs the
+proxy for `/api/*`) and **staging** (`E2E_BASE_URL=<staging>`, `E2E_ENV=staging`, real subdomains → real `clientId`
+resolution). A green **local** run is the merge gate; a green **staging** run is the pre-prod gate. (This is *why*
+`ENVIRONMENTS.md` lists the local↔staging differences — the harness must not assume `FIXED_OTP`/`localhost` semantics.)
 
 ### CI integration
 - Add the E2E job to CI: run the harness on every PR/`develop` push (spins up the stack + seeded `gifsy_dev`-shape DB).

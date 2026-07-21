@@ -1,5 +1,18 @@
 # Go-live E2E harness
 
+> **⚡ 2026-07-21 — RUN-MECHANICS CHANGED (post-AF-6 revival). READ [`docs/plans/E2E-HARNESS-REVIVAL.md`](../docs/plans/E2E-HARNESS-REVIVAL.md) §0 + its RUN-BOOK; the "Prerequisites/Run" below are OUTDATED.**
+> The harness is REVIVED + green (295/0/3) and reproducible on a fresh DB. Key deltas vs. the text below:
+> - **Run against a LOCAL PROD BUILD** — `next build` + `next start -p 3100` (NOT `next dev`; Turbopack `next dev`
+>   does not run the proxy for `/api/*`). Point at `:3100` (`E2E_BASE_URL=http://localhost:3100`). Start `next start`
+>   with `E2E_LOCAL_ORIGIN=localhost:3100` (a default-OFF next.config gate for the server-action CSRF).
+> - **Tenant per role via `x-forwarded-host`** (the `hostHeader` strategy in `fixtures/env.ts`/`roles.ts`), trusted
+>   locally because `EDGE_SECRET` is unset — exactly how staging resolves by subdomain.
+> - **JWT is an httpOnly `token` COOKIE** (AF-6), not localStorage. Read via `helpers/write.ts:cookieToken`.
+> - **The DB is auto-reset each run** — `global-setup.ts` truncates + re-seeds `gifsy_dev` (LOCAL-only, guarded), so
+>   you no longer manually re-seed. Skippable with `E2E_SKIP_RESET=1`.
+> - **Writes ARE implemented** (money-path redeem, KYC approve, payout, visibility, invoice, hierarchy, tickets).
+>   The approved-partner money-path uses the `partnerApproved` (CP004) fixture/project.
+
 The **executable** form of [`docs/plans/DATA-VISIBILITY.md`](../docs/plans/DATA-VISIBILITY.md) and the
 enforcement described in [`GO-LIVE-READINESS.md`](../docs/plans/GO-LIVE-READINESS.md). It drives the
 **real running stack** (FE → `next.config.ts` proxy → NestJS backend → DB) as each role and asserts:

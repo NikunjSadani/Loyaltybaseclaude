@@ -12,7 +12,7 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 🟢 CURRENT STATE
 - **prod == main == `e8de31a`** (CUTOVER #11, live 2026-07-20 — §A-DOMAIN COMPLETE: D-1 + P5 + P6/S1 +
-  sales-ledger unification). **develop `f89697c`** = prod + TEST-ONLY/doc commits (E2E-harness revival — see below —
+  sales-ledger unification). **develop `3b0b0be`** = prod + TEST-ONLY/doc commits (E2E-harness revival — see below —
   + docs; not worth a cutover on their own, though the 2 tiny FE fixes in it will ride the next cutover). Verify HEADs via `git log`.
 - **§A-DOMAIN is FULLY LIVE on prod (verified post-cutover):** DB-driven routing (D-1, resolveClient→`clients`),
   features-from-authenticated-`/me` (P5, registry reduced to fallback), and **S1 edge-secret ENFORCING on production**
@@ -153,7 +153,7 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 
 ## GATES (full suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`)
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` ·
-`cd platform && npx tsc --noEmit`. **Latest green (develop `f89697c`): api jest 1540 · nest 0 · FE vitest 1917 · tsc 0.** (The
+`cd platform && npx tsc --noEmit`. **Latest green (develop `3b0b0be`): api jest 1540 · nest 0 · FE vitest 1917 · tsc 0.** (The
 `4b0d03f` E2E-harness-revival commit is mostly test-only — e2e specs aren't in the jest/vitest gate; the 2 tiny FE
 fixes + next.config are tsc-clean & vitest-green. The E2E harness itself is a SEPARATE runtime gate: 294/0/4 green.)
 - **Deploy ≠ pushed** (a docs-only commit re-tags the image) — verify the serving SHA:
@@ -323,7 +323,7 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 ## START THE SESSION
 Greet. State: **prod == main == `e8de31a` (CUTOVER #11 LIVE 2026-07-20). §A-DOMAIN is COMPLETE and fully live on prod
 — DB-driven routing (D-1) + features-from-`/me` (P5) + S1 edge-secret ENFORCING on production (verified). develop
-`f89697c` = prod + test-only/doc commits.** **✅ E2E HARNESS REVIVED + CLEAN-BASELINED (`4b0d03f`+`f89697c`, 2026-07-21
+`3b0b0be` = prod + test-only/doc commits.** **✅ E2E HARNESS REVIVED + CLEAN-BASELINED (`4b0d03f`+`f89697c`, 2026-07-21
 — 295/0/3 green AND reproducible on a fresh gifsy_dev; runs against a local prod build, not `next dev`; the harness
 auto reset+seeds gifsy_dev before each run via `e2e/global-setup.ts`; see `platform/docs/plans/E2E-HARNESS-REVIVAL.md`
 §0 + §"CLEAN BASELINE" for the resolved story + run-book).** No E2E pickup remains — the only untouched slice is the
