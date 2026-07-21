@@ -39,6 +39,9 @@ const BASE_URL = resolveEnv().baseURL;
 export default defineConfig({
   testDir: './e2e',
   testMatch: '**/*.e2e.ts',
+  // Reset gifsy_dev to a pristine seed baseline before the suite (LOCAL only; skipped for staging and
+  // when E2E_SKIP_RESET is set) — makes every run reproducible. See e2e/global-setup.ts.
+  globalSetup: './e2e/global-setup.ts',
   // Each spec drives the real running stack (FE → proxy → backend → gifsy_dev). No app is spawned here:
   // the owner already runs `next dev` (:3000) + `node dist/main.js` (:4000) + the DB proxy (:5433).
   // ⚠️ Runtime is SERIAL by design (single worker). Specs share live DB state — the partner

@@ -199,23 +199,41 @@ async function seedDeoleoDemo() {
   // 3.0 Tenant row — clientId on every model below is just a string tag, but the
   // app reads the Client config, so make sure the tenant exists.
   const emptyJson = {} as const;
+  // Deoleo's canonical operator-console config — the gifsy overview/client-detail specs assert these
+  // REAL values (they used to pass only against a residue-branded dev DB; the seed now owns them so a
+  // fresh gifsy_dev reproduces them). `branding` holds displayName/productBrands/supportEmail; the
+  // top-level module flags drive the "N/M modules on" tally (4/5 on: referral off). Set on BOTH
+  // create + update so a re-seed over an existing row is deterministic too.
+  const deoleoBranding = {
+    displayName: 'Deoleo India',
+    primaryColor: '#0b5d3b',
+    supportEmail: 'support@deoleo.gifsy.in',
+    productBrands: ['Bertolli', 'Figaro'],
+  } as const;
+  const deoleoFeatures = {
+    visibilityInvoiceModule: true,
+    kycApprovalFlow: true,
+    walletModule: true,
+    salesTeamApp: true,
+    referralModule: false, // 4/5 modules on
+  } as const;
   await prisma.client.upsert({
     where: { id: DEOLEO_CLIENT_ID },
-    update: {},
+    update: { internalName: 'Deoleo India Pvt. Ltd.', branding: deoleoBranding, features: deoleoFeatures },
     create: {
       id: DEOLEO_CLIENT_ID,
-      internalName: 'Deoleo (Demo)',
+      internalName: 'Deoleo India Pvt. Ltd.',
       status: 'ACTIVE',
       onboardedAt: new Date(),
-      branding: emptyJson,
-      features: emptyJson,
+      branding: deoleoBranding,
+      features: deoleoFeatures,
       approvalHierarchy: emptyJson,
       notifications: emptyJson,
       invoicing: emptyJson,
       wallet: emptyJson,
     },
   });
-  console.log(`   ✓ Client [${DEOLEO_CLIENT_ID}]`);
+  console.log(`   ✓ Client [${DEOLEO_CLIENT_ID}] — branding + 4/5 modules`);
 
   // NOTE on idempotency strategy: gifsy_dev may already hold rows from manual
   // testing that use FIXED ids (seed-cp-1, seed-w-1, …) with their own natural
@@ -1016,16 +1034,24 @@ async function seedClientBDemo() {
     displayName: 'Zenith Rewards (DB)',
     primaryColor: '#7c3aed',
   } as const;
+  // clientb is the SECOND tenant mid-onboarding — status ONBOARDING (login still admits it,
+  // configure-before-activate) with 3/5 modules on, so the operator overview shows "1 active, 1
+  // onboarding" + a "3/5 modules on" card. Set on create + update for a deterministic re-seed.
+  const clientbFeatures = {
+    visibilityInvoiceModule: true,
+    kycApprovalFlow: true,
+    walletModule: true, // 3/5 modules on (salesTeamApp + referralModule off)
+  } as const;
   await prisma.client.upsert({
     where: { id: CLIENTB_CLIENT_ID },
-    update: { branding: clientbDbBranding },
+    update: { branding: clientbDbBranding, status: 'ONBOARDING', features: clientbFeatures },
     create: {
       id: CLIENTB_CLIENT_ID,
       internalName: 'Client B (Demo)',
-      status: 'ACTIVE',
+      status: 'ONBOARDING',
       onboardedAt: new Date(),
       branding: clientbDbBranding,
-      features: emptyJson,
+      features: clientbFeatures,
       approvalHierarchy: emptyJson,
       notifications: emptyJson,
       invoicing: emptyJson,

@@ -18,7 +18,7 @@ import { resolveOtp } from '../helpers/otp';
  * NOTE: each run drains 500 pts from CP004 (starts 50,000). CI seeds fresh; locally re-seed gifsy_dev
  * when low. The test SKIPS (not fails) when the balance is already < 500.
  */
-const VOUCHER_COST = 500; // RW001 "Amazon Gift Card 500" (500-pt fixed GIFT_CARD voucher)
+const VOUCHER_COST = 500; // RW001 "Amazon Voucher ₹500" (500-pt fixed GIFT_CARD voucher)
 
 test.describe('@partnerApproved redemption money-path (S4)', () => {
   test('redeeming a fixed voucher debits points and PERSISTS', async ({ page }) => {
@@ -33,15 +33,11 @@ test.describe('@partnerApproved redemption money-path (S4)', () => {
     const before = await readBalance();
     test.skip(before < VOUCHER_COST, `wallet has ${before} pts (< ${VOUCHER_COST}) — re-seed gifsy_dev`);
 
-    // RW001 ("Amazon Gift Card 500") is a GIFT_CARD-mode reward → the FE buckets it under the
-    // "Vouchers" tab (redemptionMode === 'GIFT_CARD'), NOT the default Physical tab. Switch tabs,
-    // then open the FIXED-voucher redeem sheet for the 500-pt voucher.
-    //
-    // The rendered name is "Amazon Gift Card 500", NOT the seed.ts literal "Amazon Voucher ₹500":
-    // the seed upserts RW001 with `update: {}`, so a re-seed over an existing gifsy_dev row keeps
-    // its original name. Assert the ACTUAL rendered name (matches clientAdmin/gifts-read.e2e.ts).
+    // RW001 ("Amazon Voucher ₹500", the seed value) is a GIFT_CARD-mode reward → the FE buckets it
+    // under the "Vouchers" tab (redemptionMode === 'GIFT_CARD'), NOT the default Physical tab. Switch
+    // tabs, then open the FIXED-voucher redeem sheet for the 500-pt voucher.
     await page.getByRole('button', { name: 'Vouchers' }).click();
-    const card = page.getByText('Amazon Gift Card 500').first();
+    const card = page.getByText('Amazon Voucher ₹500').first();
     await expect(card).toBeVisible({ timeout: 10_000 });
     await card.click();
 

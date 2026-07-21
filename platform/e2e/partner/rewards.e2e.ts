@@ -24,21 +24,17 @@ test.describe('@partner rewards catalogue (read)', () => {
     await expect(page.getByRole('heading', { name: /rewards catalogue/i })).toBeVisible();
   });
 
-  test('renders the seeded voucher RW001 (Amazon Gift Card 500) from the real API', async ({ page }) => {
+  test('renders the seeded voucher RW001 (Amazon Voucher ₹500) from the real API', async ({ page }) => {
     await page.goto('/partner/rewards');
     // RW001 is a GIFT_CARD-mode reward, so the FE buckets it under the "Vouchers" tab
     // (redemptionMode === 'GIFT_CARD' → voucherItems), NOT the default "Physical" tab (which is
     // empty here → "No items found"). RW002 (the cash-mode reward) is surfaced via the Bank Transfer
     // tab with no named card, so RW001 is the name-assertable proof that the real catalog loaded.
-    // Switch to the Vouchers tab, then assert the REAL seeded name.
-    //
-    // NOTE the name is "Amazon Gift Card 500", NOT the seed.ts literal "Amazon Voucher ₹500": the
-    // seed upserts RW001 on a fixed id with `update: {}`, so a re-seed over an existing gifsy_dev
-    // row never renames it — the live row keeps the original "Amazon Gift Card 500". This matches
-    // the sibling clientAdmin/gifts-read.e2e.ts assertion. Assert the ACTUAL rendered name.
+    // Switch to the Vouchers tab, then assert the REAL seeded name "Amazon Voucher ₹500"
+    // (matches the sibling clientAdmin/gifts-read.e2e.ts assertion).
     await page.getByRole('button', { name: 'Vouchers' }).click();
     // The card renders gift.name verbatim — proves GET /api/rewards/catalog returned the real row.
-    const card = page.getByText('Amazon Gift Card 500').first();
+    const card = page.getByText('Amazon Voucher ₹500').first();
     await expect(card).toBeVisible({ timeout: 10_000 });
   });
 

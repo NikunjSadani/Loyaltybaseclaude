@@ -9,8 +9,8 @@ import { expectNoFabricatedData } from '../helpers/assert';
  *   GET /api/admin/rewards/categories                 → { categories }
  *
  * Seed truth (api/prisma/seed.ts):
- *   RW001 — "Amazon Gift Card 500"   (GIFT_CARD, 500 pts, ACTIVE)
- *   RW002 — "Cash Payout 500"        (UPI,       1000 pts, ACTIVE)
+ *   RW001 — "Amazon Voucher ₹500"   (GIFT_CARD, 500 pts, ACTIVE)
+ *   RW002 — "UPI Cashback ₹1000"        (UPI,       1000 pts, ACTIVE)
  * The "Active" stat-card label appears multiple times on the page
  * (stat card + status filter dropdown), so avoid bare getByText('Active').
  *
@@ -30,16 +30,16 @@ test.describe('@clientAdmin gifts (reward catalogue)', () => {
     await page.goto('/admin/gifts');
     // Wait for the loading spinner to clear — the table renders after the API call.
     await expect(page.locator('[aria-label="Loading"]')).toHaveCount(0, { timeout: 10_000 });
-    // RW001 name — "Amazon Gift Card 500" (seed-rk-1). Assert by code (more stable).
+    // RW001 name — "Amazon Voucher ₹500" (seed-rk-1). Assert by code (more stable).
     await expect(page.getByText('RW001')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText('Amazon Gift Card 500')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('Amazon Voucher ₹500')).toBeVisible({ timeout: 10_000 });
   });
 
-  test('shows RW002 (Cash Payout 500)', async ({ page }) => {
+  test('shows RW002 (UPI Cashback ₹1000)', async ({ page }) => {
     await page.goto('/admin/gifts');
     await expect(page.locator('[aria-label="Loading"]')).toHaveCount(0, { timeout: 10_000 });
     await expect(page.getByText('RW002')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText('Cash Payout 500')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('UPI Cashback ₹1000')).toBeVisible({ timeout: 10_000 });
   });
 
   test('shows the item codes RW001 and RW002 in the table (code column, font-mono)', async ({ page }) => {
