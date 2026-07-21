@@ -62,8 +62,13 @@ test.describe('@gifsy Outlet Types master (S4g)', () => {
     expect(r.status(), 'no server error on outlet-type-configs').not.toBe(500);
   });
 
-  test('the Add Outlet Type button is present for GIFSY_ADMIN', async ({ page }) => {
+  test('the master catalog is read-only for GIFSY_ADMIN (no Add control)', async ({ page }) => {
     await page.goto('/gifsy/outlet-types');
-    await expect(page.getByRole('button', { name: /Add Outlet Type/i })).toBeVisible();
+    // The global master list is now READ-ONLY by design: there is no global OutletType CRUD, so the
+    // old "Add Outlet Type" button (which only mutated local state) was removed. Per-tenant
+    // enable/disable/rename moved to each client's detail page. Assert the read-only note is shown
+    // and that no add/create control exists (see src/app/gifsy/outlet-types/page.tsx).
+    await expect(page.getByText(/This catalog is read-only/i)).toBeVisible();
+    await expect(page.getByRole('button', { name: /Add Outlet Type/i })).toHaveCount(0);
   });
 });

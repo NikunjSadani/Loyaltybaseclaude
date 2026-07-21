@@ -34,7 +34,12 @@ test.describe('@clientAdmin /admin/users/outlets — real API-backed outlet list
 
   test('heading "Outlet Management" renders (page mounted, not spinner)', async ({ page }) => {
     await page.goto('/admin/users/outlets');
-    await expect(page.getByRole('heading', { name: 'Outlet Management' })).toBeVisible({ timeout: 10_000 });
+    // "Outlet Management" now appears twice — once in the page-header banner and once as the
+    // in-page <main> title — so an unscoped getByRole('heading') hits a strict-mode violation.
+    // Scope to <main> to assert the page body mounted (not just the layout banner).
+    await expect(
+      page.getByRole('main').getByRole('heading', { name: 'Outlet Management' }),
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   /**
@@ -80,10 +85,22 @@ test.describe('@clientAdmin /admin/users/outlets — real API-backed outlet list
   });
 });
 
-// ─── /admin/outlets (legacy URL → redirects to the live page) ───────────────────
-// The orphan mock-backed Outlet Master page (gap #57b) was removed; /admin/outlets
-// now redirects to the real, data-wired /admin/users/outlets (covered above).
-
+// ─── /admin/outlets (legacy URL → should redirect to the live page) ─────────────
+// The orphan Outlet Master page was replaced by a server-component redirect:
+//   src/app/admin/outlets/page.tsx → redirect('/admin/users/outlets')
+// INTENDED behaviour: visiting /admin/outlets lands on /admin/users/outlets.
+//
+// ⚠️ SUSPECTED REAL APP REGRESSION (not spec staleness): at runtime the redirect
+// does NOT fire — the URL stays on /admin/outlets and the admin error boundary
+// renders "This page couldn't load" (Reload / Back). Evidence: error-context for
+// this test shows 23× received "http://localhost:3100/admin/outlets" + the error
+// UI. The identical redirect() pattern in src/app/page.tsx (→ /auth/login) works,
+// and every OTHER admin page renders fine, so the break is specific to a
+// server-component redirect() page mounted under the 'use client' admin layout
+// (src/app/admin/layout.tsx). Fix belongs in app source (out of scope for this
+// test-only pass); the assertion below keeps the CORRECT intended behaviour and
+// stays red until the redirect is fixed — it is deliberately NOT weakened to
+// assert the broken error page (that would mask the regression).
 test.describe('@clientAdmin /admin/outlets — legacy redirect', () => {
   test('redirects to /admin/users/outlets (orphan mock page removed)', async ({ page }) => {
     await page.goto('/admin/outlets');

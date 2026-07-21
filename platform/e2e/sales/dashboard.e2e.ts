@@ -17,10 +17,12 @@ test.describe('@sales dashboard', () => {
   test('shows the real sales-user identity (EMP001 / Demo Sales Officer), not a demo persona', async ({ page }) => {
     await page.goto('/sales/dashboard');
     // Seed truth: SO display name = "Demo Sales Officer", employee code = EMP001.
-    // Assert the stable employee code OR the display name — either confirms the real identity.
-    const byName = page.getByText(/demo sales officer/i).first();
-    const byCode = page.getByText(/EMP001/i).first();
-    await expect(byName.or(byCode)).toBeVisible({ timeout: 10_000 });
+    // BOTH render in the sales-shell banner. Assert each separately (a strict, stronger
+    // check that proves the real identity — the display name AND the stable code — not a
+    // demo persona). A composed `.first().or(.first())` resolves to TWO elements (one per
+    // branch) and trips strict mode, so it must not be collapsed into a single locator.
+    await expect(page.getByText(/demo sales officer/i).first()).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(/EMP001/i).first()).toBeVisible({ timeout: 10_000 });
   });
 
   test('no fabricated values + no cross-tenant leak (#40 / Q6)', async ({ page }) => {

@@ -309,6 +309,29 @@ async function seedDeoleoDemo() {
       city: 'Bengaluru',
       state: 'Karnataka',
     },
+    {
+      // CP004 — the APPROVED, funded, SO-assigned partner used by the sales-assisted redemption
+      // money-path E2E (platform/e2e/sales/assisted-redemption-write.e2e.ts). Distinct from CP001,
+      // which is deliberately KYC-PENDING (it's the KYC-flow fixture). CP004 gets an APPROVED
+      // KycSubmission (seed-kyc-5) + a SalesUserAssignment (seed-sa-3) below, and its own partner
+      // login (phone 9000000008 → e2e role `partnerApproved`) so the spec can read ITS wallet.
+      userId: 'seed-cp-user-4',
+      partnerId: 'seed-cp-4',
+      walletId: 'seed-w-4',
+      outletId: 'seed-o-4',
+      phone: '9000000008',
+      role: UserRole.WHOLESALER,
+      businessName: 'Deoleo Demo Approved Wholesale',
+      ownerName: 'Anil Verma',
+      partnerCode: 'CP004',
+      outletType: wholesalerType,
+      outletCode: 'O004',
+      gstNumber: '27KLMNO9012P1Z8',
+      panNumber: 'KLMNO9012P',
+      redeemablePoints: 50000,
+      city: 'Nagpur',
+      state: 'Maharashtra',
+    },
   ];
 
   const createdPartners: { partnerId: string; outletId: string; userId: string }[] = [];
@@ -535,6 +558,21 @@ async function seedDeoleoDemo() {
   });
   console.log(`   ✓ ProgramSetting [employee_hierarchy] — ${hierarchySnapshot.length} employees (EMPASM1, EMP001)`);
 
+  // Enable the Visibility module for BOTH test tenants so the E2E harness can exercise the visibility
+  // flows (admin bulk-upload, partner photo submit, cross-tenant isolation). The gate is
+  // TenantSettings.getVisibilityEnabledUncached → programSetting `visibilityEnabled` === true (default
+  // OFF; PROD Deoleo launches OFF). This is gifsy_dev TEST DATA only — the seed never runs on
+  // staging/prod, so it does not change any real tenant's posture. Without it the visibility specs 403
+  // with "Visibility is not enabled for this tenant." See platform/e2e {partner,clientAdmin,clientbAdmin} visibility specs.
+  for (const cid of [DEOLEO_CLIENT_ID, CLIENTB_CLIENT_ID]) {
+    await prisma.programSetting.upsert({
+      where: { clientId_settingKey: { clientId: cid, settingKey: 'visibilityEnabled' } },
+      update: { settingValue: true },
+      create: { clientId: cid, settingKey: 'visibilityEnabled', settingValue: true },
+    });
+  }
+  console.log('   ✓ ProgramSetting [visibilityEnabled=true] for deoleo + clientb (E2E visibility flows)');
+
   // 3.4a Assign the SO to the first partner's outlet (CP001 / O001).
   const firstOutletId = createdPartners[0]?.outletId;
   const firstPartnerId = createdPartners[0]?.partnerId;
@@ -570,6 +608,36 @@ async function seedDeoleoDemo() {
       },
     });
     console.log(`   ✓ SalesUserAssignment (2nd) → outlet ${secondOutletId}`);
+  }
+
+  // 3.4b-cp4 Assign the SO to CP004 / O004 (the APPROVED, funded outlet) + give it an APPROVED KYC so
+  // the sales-assisted redemption money-path E2E has an eligible target (confirm-redeem gates on
+  // KYC-APPROVED, owner decision 2026-06-27). CP004 is createdPartners[2] (the 3rd partnerSpecs entry).
+  const cp4 = createdPartners[2];
+  if (cp4) {
+    await prisma.salesUserAssignment.upsert({
+      where: { id: 'seed-sa-3' },
+      update: {},
+      create: {
+        id: 'seed-sa-3',
+        salesUserId: salesUser.id,
+        partnerId: cp4.partnerId,
+        outletId: cp4.outletId,
+        notes: 'Demo seed assignment (approved outlet for assisted redemption)',
+      },
+    });
+    await prisma.kycSubmission.upsert({
+      where: { id: 'seed-kyc-5' },
+      update: { status: KycStatus.APPROVED },
+      create: {
+        id: 'seed-kyc-5',
+        userId: cp4.userId,
+        partnerId: cp4.partnerId,
+        status: KycStatus.APPROVED,
+        submittedAt: new Date('2026-05-01'),
+      },
+    });
+    console.log('   ✓ SalesUserAssignment (3rd, CP004/O004) + APPROVED KycSubmission seed-kyc-5');
   }
 
   // 3.4c Partner-raised support ticket — gives /admin/tickets a real row and

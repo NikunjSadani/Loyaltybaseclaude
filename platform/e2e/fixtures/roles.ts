@@ -16,6 +16,13 @@ export interface RoleDef {
   phone: string;
   /** tenant slug the backend scopes the user lookup to (verify-otp body). */
   clientId: string;
+  /**
+   * Public host this tenant is served on — used by the `hostHeader` local strategy (env.ts) to inject
+   * `x-forwarded-host` so the FE proxy/login-action resolves the tenant from the host, exactly like a
+   * real subdomain on staging. `app.gifsy.in` → operator (gifsy); a tenant's branded/subdomain host →
+   * its slug (see lib/platform/tenant-resolution.ts OPERATOR_HOSTS + resolveSlugFromDomainMap).
+   */
+  host: string;
   /** dev fixed OTP; staging would inject a real one. */
   otp: string;
   /** where login should land this role (login/page.tsx getRoleDashboard). */
@@ -43,6 +50,19 @@ export const ROLES = {
     key: 'partner',
     phone: '9000000002',
     clientId: 'deoleo',
+    host: 'deoleoloyalty.gifsy.in',
+    otp: OTP,
+    expectedDashboardPath: '/partner/dashboard',
+    backendRole: 'WHOLESALER',
+  }),
+  // CP004 (seed-cp-4) — an APPROVED, funded, SO-assigned partner. Used by the sales-assisted
+  // redemption money-path spec to read the TARGET outlet's own wallet (the balance the SO debits).
+  // Distinct from `partner` (CP001), which is KYC-pending (the KYC-flow fixture).
+  partnerApproved: role({
+    key: 'partnerApproved',
+    phone: '9000000008',
+    clientId: 'deoleo',
+    host: 'deoleoloyalty.gifsy.in',
     otp: OTP,
     expectedDashboardPath: '/partner/dashboard',
     backendRole: 'WHOLESALER',
@@ -51,6 +71,7 @@ export const ROLES = {
     key: 'clientAdmin',
     phone: '9000000001',
     clientId: 'deoleo',
+    host: 'deoleoloyalty.gifsy.in',
     otp: OTP,
     expectedDashboardPath: '/admin/dashboard',
     backendRole: 'CLIENT_ADMIN',
@@ -59,6 +80,7 @@ export const ROLES = {
     key: 'sales',
     phone: '9000000003',
     clientId: 'deoleo',
+    host: 'deoleoloyalty.gifsy.in',
     otp: OTP,
     expectedDashboardPath: '/sales/dashboard',
     backendRole: 'SALES_SO',
@@ -69,6 +91,7 @@ export const ROLES = {
     key: 'clientbAdmin',
     phone: '9000000020',
     clientId: 'clientb',
+    host: 'clientb.gifsy.in',
     otp: OTP,
     expectedDashboardPath: '/admin/dashboard',
     backendRole: 'CLIENT_ADMIN',
@@ -80,6 +103,7 @@ export const ROLES = {
     key: 'gifsy',
     phone: '9830011252',
     clientId: 'gifsy',
+    host: 'app.gifsy.in',
     otp: OTP,
     expectedDashboardPath: '/gifsy',
     backendRole: 'GIFSY_ADMIN',
@@ -91,6 +115,7 @@ export const ROLES = {
     key: 'mis',
     phone: '9000000004',
     clientId: 'deoleo',
+    host: 'deoleoloyalty.gifsy.in',
     otp: OTP,
     expectedDashboardPath: '/admin/dashboard',
     backendRole: 'MIS_USER',
@@ -102,6 +127,7 @@ export const ROLES = {
     key: 'salesManager',
     phone: '9000000006',
     clientId: 'deoleo',
+    host: 'deoleoloyalty.gifsy.in',
     otp: OTP,
     expectedDashboardPath: '/sales/dashboard',
     backendRole: 'SALES_ASM',

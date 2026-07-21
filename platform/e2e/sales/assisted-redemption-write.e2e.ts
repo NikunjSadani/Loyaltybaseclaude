@@ -40,13 +40,20 @@ import { cookieToken, requestAs } from '../helpers/write';
 /** RW001 "Amazon Voucher ₹500" — 500 pts fixed cost. */
 const VOUCHER_COST = 500;
 
-/** seed-cp-1 (CP001) — the target partner ID for the assisted redemption. */
-const TARGET_PARTNER_ID = 'seed-cp-1';
+/** seed-cp-4 (CP004) — the APPROVED, funded, SO-assigned target partner for the assisted redemption.
+ *  (CP001 can't be used: it's deliberately KYC-pending as the KYC-flow fixture, and confirm-redeem
+ *  gates on KYC-APPROVED.) CP004's own partner login is the `partnerApproved` role. */
+const TARGET_PARTNER_ID = 'seed-cp-4';
 
 /** seed-rk-1 (RW001) — the reward catalog item ID used for assisted redemption. */
 const REWARD_ID = 'seed-rk-1';
 
 test.describe('@sales assisted-redemption money-path (S3/W4)', () => {
+  // Targets CP004 (seed-cp-4) — a DEDICATED approved+funded+SO-assigned outlet with its own partner
+  // login (`partnerApproved`, phone 9000000008). CP001 can't be used: confirm-redeem gates on
+  // KYC-APPROVED (owner decision 2026-06-27) and CP001 is deliberately KYC-pending as the KYC-flow
+  // fixture. The fixture (partner + APPROVED seed-kyc-5 + seed-sa-3 assignment + 50k pts wallet) is
+  // seeded in api/prisma/seed.ts §3.3/§3.4b-cp4.
   test('sales-assisted redeem debits the OUTLET wallet and PERSISTS', async ({ page }) => {
     // ── 1. Navigate to the sales catalogue so the SO's session is warmed up in the
     //       browser context. The SO session is injected by the `sales` playwright project;
@@ -61,7 +68,7 @@ test.describe('@sales assisted-redemption money-path (S3/W4)', () => {
     //       COOKIE (ignoring any Authorization header) — page.request would authenticate as the SALES
     //       page session and 403 on /api/wallet. A real PARTNER-cookie context gives the FRESH,
     //       authoritative backend balance (the BEFORE snapshot), immune to optimistic UI.
-    const partner = await requestAs('partner');
+    const partner = await requestAs('partnerApproved'); // CP004's own wallet context (the target)
     try {
       const readBalance = async (): Promise<number> => {
         const r = await partner.get('/api/wallet');
@@ -79,7 +86,7 @@ test.describe('@sales assisted-redemption money-path (S3/W4)', () => {
       //       Body: { rewardId: 'seed-rk-1', targetPartnerId: 'seed-cp-1' }
       //       The backend: verifies the SalesUserAssignment, checks affordability on CP001's wallet,
       //       creates a PENDING RedemptionOrder on CP001, and sends the OTP to CP001's phone
-      //       (9000000002 = ROLES.partner.phone).
+      //       (9000000008 = ROLES.partnerApproved.phone).
       const initiateRes = await page.request.post('/api/rewards/redeem-for-outlet', {
         headers: {
           Authorization: `Bearer ${soToken}`,
@@ -103,11 +110,11 @@ test.describe('@sales assisted-redemption money-path (S3/W4)', () => {
       //         LOCAL:   env.fixedOtp (e.g. '123456') — FIXED_OTP backend backdoor honours it.
       //         STAGING: fetches the just-sent real OTP from E2E_OTP_FETCH_URL keyed on that phone.
       //       NEVER a hardcoded literal here — this is what makes the spec staging-portable.
-      const otp = await resolveOtp(ROLES.partner);
+      const otp = await resolveOtp(ROLES.partnerApproved); // OTP bound to CP004's phone (9000000008)
 
       // ── 5. POST /api/rewards/redeem-for-outlet/confirm as the SO.
       //       Body: { orderId, targetPartnerId, otp }
-      //       The backend: re-verifies the SalesUserAssignment, validates the OTP bound to CP001's user,
+      //       The backend: re-verifies the SalesUserAssignment, validates the OTP bound to CP004's user,
       //       then in ONE $transaction: atomically claims PENDING→CONFIRMED, consumes the OTP, debits
       //       CP001's wallet via WalletService.debitRedeem (passbook + ledger), decrements stock for
       //       stock-tracked items, and records a RedemptionStatusHistory row (actor = SO's userId).

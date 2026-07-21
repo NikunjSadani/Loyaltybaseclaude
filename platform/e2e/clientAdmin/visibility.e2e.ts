@@ -4,7 +4,12 @@ import { expectNoFabricatedData } from '../helpers/assert';
 /**
  * CLIENT_ADMIN visibility page — `/admin/visibility`.
  *
- * The page tab labels (from the actual page component):
+ * MASTER SWITCH: the whole surface only renders when the tenant's Visibility module
+ * is enabled (settings.visibilityEnabled === true). When it is off the page shows
+ * "Visibility is disabled for this tenant." and NO tabs render. The deoleo seed now
+ * sets programSetting visibilityEnabled=true, so the tabs below are present.
+ *
+ * The page tab labels (from the actual page component), given visibilityEnabled=true:
  *   - "Bulk Upload"           — always rendered (the primary tab)
  *   - "Approval Queue (N)"   — only when visibilityPhotoEnabled = true (Gifsy setting)
  *   - "Fraud Log (N)"        — only when visibilityPhotoEnabled = true

@@ -68,6 +68,16 @@ const nextConfig: NextConfig = {
         'deoleoloyalty.gifsy.in',     // Deoleo prod (explicit for the launch domain; also covered above)
         'uat.deoleoloyalty.gifsy.in', // Deoleo UAT — 4-part host; `*` does not cross dots
         'clientb.app.gifsy.in',       // 4-part prod hostname (tenant-resolution tests) — not covered by `*.gifsy.in`
+        // E2E-ONLY (default OFF): the local prod-build harness runs on http://localhost:<port> but
+        // injects `x-forwarded-host: <tenant>.gifsy.in` to resolve tenants like staging does. That
+        // makes Origin (localhost) ≠ x-forwarded-host, which Next's Server-Action CSRF guard aborts.
+        // Whitelisting the local Origin lets the login/assume server actions through. Gated on
+        // E2E_LOCAL_ORIGIN so REAL deploys never carry it (an attacker can't forge Origin:localhost
+        // from a victim browser anyway, so this is low-risk even if ever left on). See e2e/README.md +
+        // e2e/fixtures/env.ts hostHeader strategy.
+        ...(process.env.E2E_LOCAL_ORIGIN
+          ? [process.env.E2E_LOCAL_ORIGIN, 'localhost:3100', 'localhost:3000', 'localhost']
+          : []),
       ],
     },
   },

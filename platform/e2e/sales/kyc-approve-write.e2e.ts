@@ -11,23 +11,19 @@ import { cookieToken, requestAs } from '../helpers/write';
  *
  * What the SALES_SO role can approve:
  *   canFirstApprove('SALES_SO', status) is TRUE only for PENDING_SO_APPROVAL.
- *   A SALES_SO creates submissions at PENDING_ASM_APPROVAL (because seed-su-1
- *   reports to an ASM manager, so the first-approver above is the ASM). Neither
- *   seed-kyc-1 (PENDING_GIFSY) nor seed-kyc-2 (UNDER_REVIEW) is in
- *   PENDING_SO_APPROVAL. There is no seeded SALES_ISR who would produce a
- *   PENDING_SO_APPROVAL submission.
+ *   The seed provides seed-kyc-4 (partner CP001/O001) in PENDING_SO_APPROVAL as the dedicated
+ *   first-approve target (seed.ts §3.9). Its update path RE-ARMS the status to
+ *   PENDING_SO_APPROVAL on every re-seed, so a fresh DB always has exactly this row to act on.
+ *   (seed-kyc-1 is PENDING_GIFSY and seed-kyc-2 is UNDER_REVIEW — neither is SO-approvable.)
  *
- * Strategy — check at runtime for a PENDING_SO_APPROVAL row:
- *   a) If one exists (e.g. created by a manual test or a prior run), act on it
- *      and assert the status advance persists.
- *   b) If none exist, SKIP with a clear explanation rather than faking data or
- *      acting on the wrong status (which would 403).
+ * Strategy — find the PENDING_SO_APPROVAL row at runtime:
+ *   a) If one exists (seed-kyc-4 on a fresh seed, or any downline row), act on it and assert
+ *      the status advance persists.
+ *   b) If none exist (a prior run already advanced seed-kyc-4 and the DB was not re-seeded),
+ *      SKIP with a clear explanation rather than acting on the wrong status (which would 403).
  *
- * This is not a code defect — it reflects the real seed topology. A PENDING_SO_APPROVAL
- * submission can be created by seeding a SALES_ISR user who reports to the SO, or by
- * manually running POST /v1/kyc as that ISR. The spec is written to be re-runnable:
- * once such a row exists, the test passes and subsequent runs will find a PENDING_GIFSY
- * row (which this spec skips), preventing double-approval.
+ * Re-runnable: once seed-kyc-4 is advanced to PENDING_GIFSY it is no longer SO-approvable, so a
+ * second run without a re-seed skips (preventing double-approval). Re-seed to re-arm.
  *
  * Routes used:
  *   GET  /api/kyc?status=PENDING_SO_APPROVAL  — list SALES_SO-approvable submissions
@@ -51,7 +47,16 @@ test.describe('@sales KYC first-approve write-persistence (S2/W5)', () => {
 
     // ── Step 1: find a submission this SO can first-approve ──────────────────
     // The SO can only act on PENDING_SO_APPROVAL (canFirstApprove gate in kyc.service.ts).
-    // The seed does NOT have any PENDING_SO_APPROVAL rows for deoleo — see module docblock.
+    // The seed provides seed-kyc-4 (partner CP001/O001) in PENDING_SO_APPROVAL — the update
+    // path RE-ARMS it to PENDING_SO_APPROVAL on every re-seed (seed.ts §3.9), so a fresh DB
+    // always has exactly this target.
+    //
+    // NOTE: GET /api/kyc honours the `?status=` filter ONLY for tenant-wide readers
+    // (kyc.service.ts:1353 — `q.status && canReadTenantWide(role)`). A SALES_SO is NOT
+    // tenant-wide, so the status query param is IGNORED and the list returns the SO's WHOLE
+    // downline in every status, newest-first. We therefore filter client-side for the
+    // PENDING_SO_APPROVAL row rather than trusting submissions[0] (which is nondeterministic
+    // once runtime downline rows exist).
     const listRes = await page.request.get('/api/kyc?status=PENDING_SO_APPROVAL&limit=50', {
       headers: soAuth,
     });
@@ -59,26 +64,23 @@ test.describe('@sales KYC first-approve write-persistence (S2/W5)', () => {
 
     const listBody = await listRes.json();
     const submissions: { id: string; status: string }[] = listBody.data?.submissions ?? [];
+    const target = submissions.find((s) => s.status === 'PENDING_SO_APPROVAL');
 
     // ── SKIP GUARD ────────────────────────────────────────────────────────────
-    // No PENDING_SO_APPROVAL submission exists in the current seed state. The seed
-    // only provides seed-kyc-1 (PENDING_GIFSY) and seed-kyc-2 (UNDER_REVIEW) for the
-    // deoleo tenant. PENDING_SO_APPROVAL is produced by a SALES_ISR → SO chain which is
-    // not seeded. This is expected in a fresh dev environment; the test gates correctly
-    // rather than silently passing with a 403 or acting on the wrong status.
-    if (submissions.length === 0) {
+    // No PENDING_SO_APPROVAL submission is currently in the SO's downline. This happens when
+    // a prior run already advanced seed-kyc-4 to PENDING_GIFSY and the DB has not been
+    // re-seeded. The test gates correctly rather than acting on the wrong status (which would
+    // 403) — re-seed gifsy_dev (npx prisma db seed) to re-arm seed-kyc-4.
+    if (!target) {
       test.skip(
         true,
-        'No PENDING_SO_APPROVAL submission found for the deoleo tenant — the seed does not ' +
-          'include a SALES_ISR-created submission that would land in SO-approvable state. ' +
-          'To exercise this path: seed or manually create a KYC submission as a SALES_ISR ' +
-          "who reports to seed-su-1 (the SALES_SO, phone 9000000003). Once that row exists " +
-          'in PENDING_SO_APPROVAL this test will self-activate on the next run.',
+        'No PENDING_SO_APPROVAL submission found in the SO downline — seed-kyc-4 was likely ' +
+          'already advanced to PENDING_GIFSY by a prior run. Re-seed gifsy_dev (npx prisma db ' +
+          'seed) to re-arm the seed-kyc-4 first-approve target; this test then self-activates.',
       );
       return; // unreachable after skip but TypeScript requires explicit return
     }
 
-    const target = submissions[0];
     expect(target.id, 'picked a real submission id').toBeTruthy();
     expect(target.status, 'pre-condition: submission must be in PENDING_SO_APPROVAL').toBe(
       'PENDING_SO_APPROVAL',

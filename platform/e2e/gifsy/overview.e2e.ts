@@ -9,8 +9,10 @@ import { expectNoFabricatedData } from '../helpers/assert';
  *
  * Seeded gifsy_dev truth (verified 2026-06-19):
  *   - 2 clients total: Deoleo India (ACTIVE) + Client B Loyalty (ONBOARDING); 1 active, 1 onboarding, 0 inactive.
- *   - Deoleo card:   deoleo.gifsy.in   · 4/5 modules on  · ACTIVE
- *   - Client B card: clientb.gifsy.in  · 3/5 modules on  · ONBOARDING
+ *   - Deoleo card:   "Deoleo India"        · deoleo.gifsy.in   · 4/5 modules on  · ACTIVE
+ *   - Client B card: "Zenith Rewards (DB)" · clientb.gifsy.in  · 3/5 modules on  · ONBOARDING
+ *     (clientb's display name comes from the DB branding blob — seed.ts §clientb, displayName
+ *      'Zenith Rewards (DB)'; it is deliberately distinct from the slug to prove DB-backed branding.)
  * The card metric is "N/M modules on" — the retired registry "N classes / N features" string must NOT appear.
  */
 test.describe('@gifsy Platform Overview (B3 / #49)', () => {
@@ -43,10 +45,11 @@ test.describe('@gifsy Platform Overview (B3 / #49)', () => {
     await expect(deoleoCard).toContainText('4/5 modules on');
     await expect(deoleoCard).toContainText('ACTIVE');
 
-    // Client B Loyalty — ONBOARDING, clientb.gifsy.in, 3/5 modules on.
+    // Client B — ONBOARDING, clientb.gifsy.in, 3/5 modules on. Its display name is the DB-branding
+    // value "Zenith Rewards (DB)" (distinct from the slug), proving the card reads real DB branding.
     const clientbCard = page.locator('a[href="/gifsy/clients/clientb"]');
     await expect(clientbCard).toBeVisible();
-    await expect(clientbCard).toContainText('Client B Loyalty');
+    await expect(clientbCard).toContainText('Zenith Rewards (DB)');
     await expect(clientbCard).toContainText('clientb.gifsy.in');
     await expect(clientbCard).toContainText('3/5 modules on');
     await expect(clientbCard).toContainText('ONBOARDING');

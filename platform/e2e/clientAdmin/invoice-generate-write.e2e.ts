@@ -47,7 +47,9 @@ test.describe('@clientAdmin invoice generate write-persistence (W6)', () => {
 
     // Helper: fetch invoice ids for the target period (fresh backend read each call).
     const invoiceIds = async (): Promise<string[]> => {
-      const r = await page.request.get(`/api/admin/invoices?period=${PERIOD}&limit=200`, {
+      // NOTE: ListInvoicesQueryDto caps `limit` at 100 (@Max(100), Wave-2 pagination). A
+      // request with limit=200 now 400s on validation — use the max allowed page size.
+      const r = await page.request.get(`/api/admin/invoices?period=${PERIOD}&limit=100`, {
         headers: authH,
       });
       expect(r.status(), 'list endpoint must respond 200').toBe(200);

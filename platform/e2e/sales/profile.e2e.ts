@@ -51,7 +51,14 @@ test.describe('@sales profile', () => {
   }) => {
     await page.goto('/sales/profile');
     await page.waitForLoadState('networkidle');
-    await expect(page.getByText(SO_EMPLOYEE_CODE)).toBeVisible({ timeout: 10_000 });
+    // EMP001 renders in TWO places: the shared sales-shell banner AND the profile-page
+    // body (under the "Demo Sales Officer" heading). Scope to the <main> region so this
+    // proves the PROFILE PAGE itself renders the real code (not merely the shell banner
+    // that every sales page shows) — a stricter anti-demo-placeholder guard. An unscoped
+    // getByText('EMP001') matches both elements and trips strict mode.
+    await expect(
+      page.getByRole('main').getByText(SO_EMPLOYEE_CODE),
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   test('renders no fabricated values (#40)', async ({ page }) => {

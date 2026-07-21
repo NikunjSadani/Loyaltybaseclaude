@@ -66,18 +66,36 @@ test.describe('@clientAdmin hierarchy template round-trip', () => {
     // 3) Confirm the upload — this drives persistEmployees → PUT /api/admin/hierarchy-config.
     await confirmBtn.click();
 
-    // 4) SUCCESS, not error: the green banner must appear AND the failure path must NOT fire.
-    //    (Pre-fix, a rolled-back relational write returned 500 but the banner showed anyway; post-fix
-    //    the banner is gated on a confirmed PUT, and a failure shows the "could not be saved" error.)
-    await expect(page.getByText(/Upload confirmed:/i)).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByText(/Upload could not be saved/i)).toHaveCount(0);
+    // 4) SUCCESS, not error. Race the two TERMINAL banners so a rejected confirm fails FAST with the
+    //    server's actual message instead of a blind 15s timeout on a success banner that will never
+    //    appear. If the failure banner is the one that renders, surface its exact text — this keeps the
+    //    guard STRICT (a real persistence failure still fails the test) while making the cause obvious.
+    //
+    //    PRECONDITION: this test presumes a genuinely clean gifsy_dev (`prisma migrate reset` + seed).
+    //    The confirm PUT is CORRECTLY rejected by the backend §0b phone-uniqueness guard if any template
+    //    example phone (the RSM example row emits phone 9900000004) already belongs to a DIFFERENT
+    //    employee code left over in the tenant. The seed is upsert-only (it never wipes prior sales
+    //    users), so an upsert-on-a-dirty-DB reseed can leave an orphan (e.g. `RSM-EX5` still holding
+    //    9900000004 from an older template revision) that trips the guard. That is an environment/data
+    //    residue problem, not a UI regression — do NOT relax this assertion to paper over it.
+    const successBanner = page.getByText(/Upload confirmed:/i);
+    const failureBanner = page.getByText(/Upload could not be saved/i);
+    await expect(successBanner.or(failureBanner)).toBeVisible({ timeout: 15_000 });
+    if (await failureBanner.isVisible()) {
+      throw new Error(
+        `Confirm upload was rejected by the server (expected success): ${await failureBanner.textContent()}`,
+      );
+    }
+    await expect(successBanner).toBeVisible();
 
     // 5) PERSISTENCE: reload (forces a fresh backend GET, not optimistic state) and assert the
     //    template's leaf employee code is STILL rendered. This is the "0 after refresh" guard.
+    //    The current chain template (getHierarchyChainTemplateData) emits the leaf row as
+    //    `${leafRoleCode}-P001`; for the deoleo hierarchy the leaf role is XSR → "XSR-P001".
     await page.reload();
     await expect(page.locator('.animate-spin').or(page.locator('[aria-label="Loading"]'))).toHaveCount(0, {
       timeout: 12_000,
     });
-    await expect(page.getByText('XSR-M001').first()).toBeVisible({ timeout: 12_000 });
+    await expect(page.getByText('XSR-P001').first()).toBeVisible({ timeout: 12_000 });
   });
 });

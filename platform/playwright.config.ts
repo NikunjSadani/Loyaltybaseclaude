@@ -1,6 +1,18 @@
 import { defineConfig, devices } from '@playwright/test';
-import { ROLES } from './e2e/fixtures/roles';
+import { ROLES, type RoleDef } from './e2e/fixtures/roles';
 import { resolveEnv } from './e2e/fixtures/env';
+
+// hostHeader (local prod-build) strategy: each role project injects `x-forwarded-host: <role.host>` on
+// every spec request so the FE proxy resolves the tenant from the host — the same way staging does by
+// real subdomain — since the local run is now a production build (`next start`), not `next dev`. Inert
+// for staging/subdomain (real Host is authoritative) and for devClientIdField. Setup is multi-role, so
+// IT sets the header per-role inside login() instead of here. See e2e/fixtures/env.ts TenantStrategy.
+const ENV = resolveEnv();
+function tenantHeaders(role: RoleDef): Record<string, string> | undefined {
+  return ENV.tenantStrategy === 'hostHeader' && role.host
+    ? { 'x-forwarded-host': role.host }
+    : undefined;
+}
 
 /**
  * Go-live E2E harness — the executable form of `docs/plans/DATA-VISIBILITY.md`.
@@ -60,43 +72,51 @@ export default defineConfig({
       name: 'partner',
       testMatch: /partner\/.*\.e2e\.ts/,
       dependencies: ['setup'],
-      use: { ...devices['Desktop Chrome'], storageState: ROLES.partner.storageStatePath },
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.partner.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.partner) },
     },
     {
       name: 'clientAdmin',
       testMatch: /clientAdmin\/.*\.e2e\.ts/,
       dependencies: ['setup'],
-      use: { ...devices['Desktop Chrome'], storageState: ROLES.clientAdmin.storageStatePath },
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.clientAdmin.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.clientAdmin) },
     },
     {
       name: 'sales',
       testMatch: /sales\/.*\.e2e\.ts/,
       dependencies: ['setup'],
-      use: { ...devices['Desktop Chrome'], storageState: ROLES.sales.storageStatePath },
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.sales.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.sales) },
     },
     {
       name: 'gifsy',
       testMatch: /gifsy\/.*\.e2e\.ts/,
       dependencies: ['setup'],
-      use: { ...devices['Desktop Chrome'], storageState: ROLES.gifsy.storageStatePath },
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.gifsy.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.gifsy) },
     },
     {
       name: 'clientbAdmin',
       testMatch: /clientbAdmin\/.*\.e2e\.ts/,
       dependencies: ['setup'],
-      use: { ...devices['Desktop Chrome'], storageState: ROLES.clientbAdmin.storageStatePath },
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.clientbAdmin.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.clientbAdmin) },
+    },
+    {
+      // CP004 (seed-cp-4) — an APPROVED, funded deoleo partner. Hosts the money-path redeem specs that
+      // require KYC-APPROVED (the default `partner`/CP001 is the pending-KYC fixture and 400s on confirm).
+      name: 'partnerApproved',
+      testMatch: /partnerApproved\/.*\.e2e\.ts/,
+      dependencies: ['setup'],
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.partnerApproved.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.partnerApproved) },
     },
     {
       name: 'mis',
       testMatch: /mis\/.*\.e2e\.ts/,
       dependencies: ['setup'],
-      use: { ...devices['Desktop Chrome'], storageState: ROLES.mis.storageStatePath },
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.mis.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.mis) },
     },
     {
       name: 'salesManager',
       testMatch: /salesManager\/.*\.e2e\.ts/,
       dependencies: ['setup'],
-      use: { ...devices['Desktop Chrome'], storageState: ROLES.salesManager.storageStatePath },
+      use: { ...devices['Desktop Chrome'], storageState: ROLES.salesManager.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.salesManager) },
     },
   ],
 });

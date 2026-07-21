@@ -5,9 +5,10 @@ import { expectNoFabricatedData } from '../helpers/assert';
 /**
  * Partner rewards catalogue read (Stream S3p, Wave 3).
  *
- * Tests: GET /api/rewards/catalog renders the seeded rewards RW001 / RW002
- * ("Amazon Gift Card 500" / "Amazon Gift Card 500" — both fixed at 500 pts)
- * without surfacing fabricated rank/points tokens (#40).
+ * Tests: GET /api/rewards/catalog renders the seeded rewards RW001 ("Amazon
+ * Voucher ₹500", 500 pts, GIFT_CARD → Vouchers tab) / RW002 ("UPI Cashback
+ * ₹1000", UPI → cash payout on the Bank Transfer tab) without surfacing
+ * fabricated rank/points tokens (#40).
  *
  * The WRITE path (POST /api/rewards/redeem → OTP → /confirm) is exercised in
  * partner/redemption-write.e2e.ts; this file is the catalogue READ companion.
@@ -23,12 +24,21 @@ test.describe('@partner rewards catalogue (read)', () => {
     await expect(page.getByRole('heading', { name: /rewards catalogue/i })).toBeVisible();
   });
 
-  test('renders the seeded catalog items RW001 / RW002 from the real API', async ({ page }) => {
+  test('renders the seeded voucher RW001 (Amazon Gift Card 500) from the real API', async ({ page }) => {
     await page.goto('/partner/rewards');
-    // The seeded rewards are "Amazon Gift Card 500" (pointsCost=500, both RW001 and RW002).
-    // Expect at least one card to render — proves GET /api/rewards/catalog returned real rows.
-    // The locator targets text within the card grid; allow up to 10s for the fetch to complete.
-    const card = page.getByText('Amazon Gift Card', { exact: false }).first();
+    // RW001 is a GIFT_CARD-mode reward, so the FE buckets it under the "Vouchers" tab
+    // (redemptionMode === 'GIFT_CARD' → voucherItems), NOT the default "Physical" tab (which is
+    // empty here → "No items found"). RW002 (the cash-mode reward) is surfaced via the Bank Transfer
+    // tab with no named card, so RW001 is the name-assertable proof that the real catalog loaded.
+    // Switch to the Vouchers tab, then assert the REAL seeded name.
+    //
+    // NOTE the name is "Amazon Gift Card 500", NOT the seed.ts literal "Amazon Voucher ₹500": the
+    // seed upserts RW001 on a fixed id with `update: {}`, so a re-seed over an existing gifsy_dev
+    // row never renames it — the live row keeps the original "Amazon Gift Card 500". This matches
+    // the sibling clientAdmin/gifts-read.e2e.ts assertion. Assert the ACTUAL rendered name.
+    await page.getByRole('button', { name: 'Vouchers' }).click();
+    // The card renders gift.name verbatim — proves GET /api/rewards/catalog returned the real row.
+    const card = page.getByText('Amazon Gift Card 500').first();
     await expect(card).toBeVisible({ timeout: 10_000 });
   });
 

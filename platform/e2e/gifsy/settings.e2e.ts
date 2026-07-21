@@ -14,8 +14,10 @@ import { expectNoFabricatedData } from '../helpers/assert';
  *  2. All 5 settings sections render (Platform Identity, Security, Redemption
  *     Thresholds, Platform Notifications, Data Retention).
  *  3. The two redemption-threshold inputs with known data-testids are present.
- *  4. "Dev mode" warning banner renders (confirms Phase 2 deferred persistence).
- *  5. No fabricated data tokens (#40).
+ *  4. The amber "Note" banner renders (only the redemption thresholds persist; the
+ *     other sections are display-only placeholders — replaced the old "Dev mode" banner).
+ *  5. Only the Redemption Thresholds section is editable → exactly one Save Section button.
+ *  6. No fabricated data tokens (#40).
  */
 test.describe('@gifsy Platform Settings (S4g)', () => {
   test('page renders with the Platform Settings heading', async ({ page }) => {
@@ -51,19 +53,22 @@ test.describe('@gifsy Platform Settings (S4g)', () => {
     await expect(voucherInput).toHaveValue('250');
   });
 
-  test('dev-mode warning banner is visible', async ({ page }) => {
+  test('the partial-wiring Note banner is visible', async ({ page }) => {
     await page.goto('/gifsy/settings');
-    await expect(page.getByText(/Dev mode/i).first()).toBeVisible();
+    // The old "Dev mode" banner was replaced by an amber "Note" explaining that only the
+    // redemption thresholds persist to the server and the other sections are display-only
+    // placeholders (see src/app/gifsy/settings/page.tsx lines 50-54).
+    await expect(page.getByText(/display-only placeholders and are not yet wired/i)).toBeVisible();
   });
 
-  test('each section has a Save Section button', async ({ page }) => {
+  test('only the Redemption Thresholds section has a Save Section button', async ({ page }) => {
     await page.goto('/gifsy/settings');
 
-    // Multiple sections each have a "Save Section" button.
+    // The Identity / Security / Notifications / Data-Retention sections became read-only
+    // (disabled inputs, no fake Save button). Only Redemption Thresholds persists to the
+    // server, so there is now exactly ONE "Save Section" button on the page.
     const saveButtons = page.getByRole('button', { name: /Save Section/i });
-    await expect(saveButtons.first()).toBeVisible();
-    // There are 4+ sections with save buttons.
-    const count = await saveButtons.count();
-    expect(count, 'at least 4 Save Section buttons (one per editable section)').toBeGreaterThanOrEqual(4);
+    await expect(saveButtons).toHaveCount(1);
+    await expect(page.getByTestId('settings-redemption-save')).toBeVisible();
   });
 });

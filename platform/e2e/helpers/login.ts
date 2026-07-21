@@ -14,6 +14,17 @@ import { resolveOtp } from './otp';
  */
 export async function login(page: Page, role: RoleDef): Promise<void> {
   const env = resolveEnv();
+
+  // hostHeader (local prod-build) strategy: steer tenant resolution by injecting x-forwarded-host on
+  // EVERY request from this page — the login page SSR, the send-otp/verify-otp server actions (which
+  // resolve clientId from the host via resolveTrustedHost), and the post-login navigations. Must be set
+  // BEFORE the first goto. Trusted locally because EDGE_SECRET is unset (lib/platform/edge-trust.ts).
+  // The role projects set the same header at the project level (playwright.config.ts) for post-login
+  // spec requests. See env.ts TenantStrategy.
+  if (env.tenantStrategy === 'hostHeader' && role.host) {
+    await page.setExtraHTTPHeaders({ 'x-forwarded-host': role.host });
+  }
+
   await page.goto('/auth/login');
 
   const phoneInput = page.locator('input[type="tel"]'); // only type=tel on the mobile step

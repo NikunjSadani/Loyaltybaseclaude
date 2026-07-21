@@ -20,9 +20,21 @@ export type E2eEnvName = 'local' | 'staging';
 
 /** How a role's tenant is told to the backend. */
 export type TenantStrategy =
-  /** Local dev: type the clientId into the dev-only "Organization" override field on the login form. */
+  /**
+   * Local PROD-BUILD (the default): inject `x-forwarded-host: <role.host>` on every request so the
+   * FE proxy + login server action resolve the tenant from the host — EXACTLY as staging does by real
+   * subdomain. This is the local strategy since AF-6/Turbopack: the harness now runs against a local
+   * production build (`next build` + `next start`), NOT `next dev` — because (a) Turbopack `next dev`
+   * does not run the proxy for `/api/*` (client-side calls 401), and (b) the dev "Organization" field
+   * (below) is compiled OUT of a production build (`process.env.NODE_ENV` is inlined at build). The
+   * header is TRUSTED locally because `EDGE_SECRET` is unset (see lib/platform/edge-trust.ts); on a real
+   * deploy EDGE_SECRET is set so an unsigned x-forwarded-host is ignored — this affordance is inert there.
+   */
+  | 'hostHeader'
+  /** Legacy local `next dev`: type the clientId into the dev-only "Organization" override field. Kept for
+   *  back-compat, but `next dev` no longer runs the proxy for `/api/*` — prefer `hostHeader` + a prod build. */
   | 'devClientIdField'
-  /** Staging: tenant comes from the host/subdomain; the override field is NOT rendered (NODE_ENV=production). */
+  /** Staging: tenant comes from the real host/subdomain; the override field is NOT rendered (prod build). */
   | 'subdomain';
 
 /** How the harness obtains the OTP for a given phone. */
@@ -54,7 +66,9 @@ const ENV_NAME = (process.env.E2E_ENV ?? 'local').toLowerCase() as E2eEnvName;
 const DEFAULTS: Record<E2eEnvName, Omit<E2eEnv, 'name'>> = {
   local: {
     baseURL: 'http://localhost:3000',
-    tenantStrategy: 'devClientIdField',
+    // Default to hostHeader (local prod-build). See TenantStrategy docs for why `next dev`/devClientIdField
+    // no longer works post-AF-6/Turbopack. Run: `next build` then `next start -p 3100` and point at :3100.
+    tenantStrategy: 'hostHeader',
     otpStrategy: 'fixed',
     fixedOtp: '123456',
   },
@@ -88,7 +102,7 @@ export function resolveEnv(): E2eEnv {
   const baseURL = process.env.E2E_BASE_URL ?? d.baseURL;
   const tenantStrategy = oneOf<TenantStrategy>(
     process.env.E2E_TENANT_STRATEGY,
-    ['devClientIdField', 'subdomain'],
+    ['hostHeader', 'devClientIdField', 'subdomain'],
     'E2E_TENANT_STRATEGY',
   ) ?? d.tenantStrategy;
   const otpStrategy = oneOf<OtpStrategy>(

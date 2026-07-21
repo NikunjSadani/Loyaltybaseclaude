@@ -21,23 +21,20 @@ import { uniqueMarker } from '../helpers/persist';
  * verify that a clientb session cannot see it (the clientb tenant's list will not
  * contain our deoleo-scoped outletId).
  *
- * ── REAL PRODUCT BUG (W11, SEED) ────────────────────────────────────────────
- * AdminOutletsService.upsert() resolves outlet types via OutletTypeClientConfig
- * (the per-tenant enabled type map). The seed (api/prisma/seed.ts) does NOT
- * create any OutletTypeClientConfig rows for the deoleo tenant — it directly
- * inserts Outlet rows with outletTypeId set.  This means:
+ * ── OUTLET TYPE RESOLUTION (contract) ───────────────────────────────────────
+ * AdminOutletsService.upsert() resolves the row's `outletType` against the
+ * per-tenant enabled type map (OutletTypeClientConfig), matching on the outlet
+ * type CODE (upper-cased) — NOT the display name. The seed now creates an
+ * OutletTypeClientConfig row per (tenant, type) for deoleo (api/prisma/seed.ts
+ * §2/§3.3 — "enables outlet upsert"), so every active type code is accepted.
  *
- *   POST /v1/admin/outlets/upsert { outletType: 'Retailer' }
- *   → typeIdByCode is empty for deoleo
- *   → every row returns status: 'ERROR' ("Unknown outlet type: Retailer")
- *   → created=0, nothing is written to the DB
+ * The row must therefore carry a real type CODE (e.g. 'WHOLESALER' / 'SSS').
+ * A display name like 'Retailer' is NOT a code and returns
+ * status: 'ERROR' ("Unknown outlet type: Retailer") → created=0.
  *
- * Fix needed in api/prisma/seed.ts: add OutletTypeClientConfig rows for deoleo
- * that enable at least RETAILER and WHOLESALER outlet types.  Until then, the
- * upsert endpoint cannot create any outlets for deoleo.
- *
- * The test asserts the error loudly (created must be > 0) and fails as a
- * real finding rather than silently skipping.
+ * The test still asserts the write loudly (created + updated must be > 0), so a
+ * genuinely missing OutletTypeClientConfig seed would fail as a real finding
+ * rather than silently skipping.
  * ─────────────────────────────────────────────────────────────────────────────
  *
  * Idempotent: upsert with the same outletId on re-run updates the row (safe).
@@ -70,7 +67,9 @@ test.describe('@clientAdmin outlet upsert write-persistence (W11)', () => {
                 rowNum: 1,
                 outletId: code,
                 outletName: name,
-                outletType: 'Retailer',
+                // Must be a real enabled outlet type CODE (resolved via OutletTypeClientConfig,
+                // matched by code upper-cased) — not a display name like "Retailer".
+                outletType: 'WHOLESALER',
                 programName: 'E2E',
                 programCategory: 'E2E',
                 city: 'Pune',
@@ -103,14 +102,15 @@ test.describe('@clientAdmin outlet upsert write-persistence (W11)', () => {
     const updated = upsertData?.updated ?? 0;
     const errorRows = upsertData?.errors ?? [];
 
-    // REAL BUG: if created=0 and updated=0, the OutletTypeClientConfig rows are
-    // missing from the seed.  This MUST fail loudly as a real product finding.
+    // PERSISTENCE GUARD: if created=0 and updated=0 the write did not land. Most
+    // likely the outlet type code is not enabled for deoleo (OutletTypeClientConfig
+    // missing) — fail loudly as a real finding rather than skipping.
     expect(
       created + updated,
-      `REAL BUG (W11): POST /api/admin/outlets/upsert wrote 0 rows. ` +
+      `POST /api/admin/outlets/upsert wrote 0 rows. ` +
         `Row errors: ${JSON.stringify(errorRows)}. ` +
-        `Root cause: OutletTypeClientConfig is not seeded for deoleo — ` +
-        `add OutletTypeClientConfig rows for RETAILER/WHOLESALER in api/prisma/seed.ts.`,
+        `Check that the outlet type code ('WHOLESALER') is enabled for deoleo via ` +
+        `OutletTypeClientConfig (seeded in api/prisma/seed.ts).`,
     ).toBeGreaterThan(0);
 
     // ── Step 2: PERSISTENCE — fresh GET must include our outlet ─────────────────

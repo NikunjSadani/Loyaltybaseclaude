@@ -17,12 +17,23 @@ test.describe('@gifsy client detail (B3 / #49)', () => {
 
     // Header — display name as the heading, internalName + subdomain beneath it.
     await expect(page.getByRole('heading', { name: 'Deoleo India' })).toBeVisible();
-    // exact: the subdomain <code> must not collide with the support@deoleo.gifsy.in email text.
-    await expect(page.getByText('deoleo.gifsy.in', { exact: true })).toBeVisible();
+    // The subdomain now appears in 3 places (the header line + the §A-DOMAIN "Domains" list rows),
+    // so a bare exact-text match is a strict-mode violation. Scope to the HEADER paragraph
+    // (`{internalName} · <slug>.gifsy.in`) — this asserts the real branding header specifically and
+    // still excludes the support@deoleo.gifsy.in email text.
+    await expect(
+      page.getByRole('paragraph').filter({ hasText: 'Deoleo India Pvt. Ltd.' }),
+    ).toContainText('deoleo.gifsy.in');
 
-    // Branding section is open by default — brands + support email render there.
-    await expect(page.getByText('Bertolli, Figaro')).toBeVisible();
-    await expect(page.getByText('support@deoleo.gifsy.in')).toBeVisible();
+    // Product Brands section is open by default. The real seeded brands now render as INDIVIDUAL
+    // chips (one <span> per brand), not a single joined "Bertolli, Figaro" string — so assert each
+    // brand chip. This still proves the real DB branding (api/prisma/seed.ts sets ["Bertolli","Figaro"]).
+    await expect(page.getByText('Bertolli', { exact: true })).toBeVisible();
+    await expect(page.getByText('Figaro', { exact: true })).toBeVisible();
+
+    // Support email now lives as an EDITABLE field in the "Client settings" section (an <input>, not
+    // free text), so assert its value rather than getByText (which never matches an input value).
+    await expect(page.getByTestId('support-email-input')).toHaveValue('support@deoleo.gifsy.in');
   });
 
   test('NEVER leaks an MSG91 secret / API key to the browser', async ({ page }) => {
