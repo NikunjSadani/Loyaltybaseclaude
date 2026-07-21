@@ -216,6 +216,9 @@ async function seedDeoleoDemo() {
     walletModule: true,
     salesTeamApp: true,
     referralModule: false, // 4/5 modules on
+    // Behaviour flag (not a module): waive the KYC Address Proof upload when the rep
+    // ticks "shop board name and address proof name do not match". Deoleo-only.
+    kycAddressProofWaiver: true,
   } as const;
   await prisma.client.upsert({
     where: { id: DEOLEO_CLIENT_ID },

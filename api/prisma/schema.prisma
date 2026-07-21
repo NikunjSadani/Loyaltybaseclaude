@@ -731,6 +731,13 @@ model KycSubmission {
   escalatedFrom       String? // SalesRole that was skipped due to resignation (e.g. 'SO')
   version             Int       @default(1)
 
+  // Shop-board name vs address-proof name mismatch, declared by the submitting rep.
+  // When true, the tenant's `kycAddressProofWaiver` feature waives the Address Proof
+  // document upload (the box was ticked instead of attaching a proof) — this column is
+  // the durable audit trail that a reviewer sees ("address proof waived — names differ").
+  // Distinct from the review-dump's bank-holder-vs-owner `nameMismatch` (a computed value).
+  addressNameMismatch Boolean   @default(false)
+
   // ── Geo capture #1 — taken when the outlet board photo is shot ──────────────
   boardPhotoLat         Decimal?  @db.Decimal(10, 8)
   boardPhotoLng         Decimal?  @db.Decimal(11, 8)

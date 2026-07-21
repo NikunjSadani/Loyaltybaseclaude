@@ -927,6 +927,7 @@ export class KycService {
         status: status as never,
         escalatedFrom: escalatedFrom ?? null,
         reviewerNotes: dto.reviewerNotes ?? null,
+        addressNameMismatch: dto.addressNameMismatch ?? false,
         submittedAt: new Date(),
 
         boardPhotoLat: dto.boardPhotoGeo?.lat ?? null,

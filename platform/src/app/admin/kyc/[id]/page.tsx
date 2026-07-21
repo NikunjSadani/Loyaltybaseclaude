@@ -92,6 +92,9 @@ interface ApiKycDetail {
   createdAt?: string;
   rejectionReason?: string | null;
   reviewerNotes?: string | null;
+  // Rep-declared mismatch between the shop board name and the address-proof name
+  // (address proof skipped for waiver-enabled tenants).
+  addressNameMismatch?: boolean;
   reKycFlags?: ReKycFlags;
   // KYC-captured geo (Prisma Decimal → JSON string on the wire).
   boardPhotoLat?: string | number | null; boardPhotoLng?: string | number | null;
@@ -128,6 +131,7 @@ type KycDetailShape = {
   documents: Array<{ id: string; type: string; label: string; url: string; status: 'pending' | 'verified' | 'rejected' }>;
   verificationItems: Array<{ fieldKey: string; decision: string; remark?: string | null; source?: string | null }>;
   reKycFlags: ReKycFlags;
+  addressNameMismatch: boolean;
 };
 
 /** Coerce a KYC-captured lat/lng pair (Prisma Decimal → JSON string) into numbers.
@@ -150,6 +154,7 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
   return {
     id:               s.id,
     reKycFlags:       s.reKycFlags ?? null,
+    addressNameMismatch: s.addressNameMismatch === true,
     verificationItems: s.verificationItems ?? [],
     // Human outlet ID for the header (KYC is partner-keyed → the enrolled outlet's code).
     // Prefer the real Outlet code; fall back to the partner code if no outlet is linked yet.
@@ -506,6 +511,15 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           <div>
             <h1 className="text-lg font-bold text-gray-900">{kyc.outletName}</h1>
             <p className="text-xs text-gray-500">Outlet ID: <span className="font-mono">{kyc.outletCode || '—'}</span> · Submitted: {kyc.submittedDate}</p>
+            {kyc.addressNameMismatch && (
+              <span
+                data-testid="address-name-mismatch-badge"
+                className="inline-flex items-center gap-1 mt-1.5 text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full"
+              >
+                <AlertTriangle className="w-3 h-3" />
+                Names differ — shop board vs address proof
+              </span>
+            )}
           </div>
         </div>
         <span className={`px-3 py-1 rounded-full text-xs font-semibold ${STATUS_COLORS[kyc.status]}`}>

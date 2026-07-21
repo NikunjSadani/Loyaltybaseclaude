@@ -48,6 +48,7 @@ export function normalizeFeatures(raw: unknown): FeatureFlags {
   return {
     visibilityInvoiceModule: bool(f.visibilityInvoiceModule, d.visibilityInvoiceModule),
     kycApprovalFlow:         bool(f.kycApprovalFlow,         d.kycApprovalFlow),
+    kycAddressProofWaiver:   bool(f.kycAddressProofWaiver,   d.kycAddressProofWaiver),
     campaignEnrollmentForm:  bool(f.campaignEnrollmentForm,  d.campaignEnrollmentForm),
     salesTeamApp:            bool(f.salesTeamApp,            d.salesTeamApp),
     walletModule:            bool(f.walletModule,            d.walletModule),

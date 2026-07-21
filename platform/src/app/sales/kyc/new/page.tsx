@@ -21,6 +21,7 @@ import {
   hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels,
   isWizardFieldFlagged, isWizardFieldEditable,
 } from '@/lib/rekyc-fields';
+import { useTenantFeatures } from '@/lib/tenant-features';
 import type { GeoCapture } from '@/types';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
@@ -268,6 +269,13 @@ export default function NewKYCPage() {
   /* Address name mismatch flag */
   const [nameMismatch, setNameMismatch] = useState(false);
 
+  /* Per-tenant feature: when ON, ticking the name-mismatch box WAIVES the address
+   * proof (no self-declaration). While features load, DEFAULT_FEATURES has the flag
+   * OFF → the SAFE default of requiring the document. */
+  const { features } = useTenantFeatures('/api/sales/me');
+  const waiverEnabled = features.kycAddressProofWaiver;
+  const addressProofRequired = !(waiverEnabled && nameMismatch);
+
   /* B — Consent checkboxes */
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [agreedToComms, setAgreedToComms] = useState(false);
@@ -464,7 +472,13 @@ export default function NewKYCPage() {
           boardPhotoGeoAccuracy?: string | number | null; boardPhotoGeoAt?: string | null;
           paymentLat?: string | number | null; paymentLng?: string | number | null;
           paymentGeoAccuracy?: string | number | null; paymentGeoAt?: string | null;
+          addressNameMismatch?: boolean;
         };
+
+        // Carry over the shop-board/address-proof name-mismatch declaration so a re-KYC
+        // resubmit doesn't silently drop the waiver (which would re-require an address proof
+        // the outlet legitimately doesn't have) or lose the reviewer's mismatch badge.
+        setNameMismatch(sub.addressNameMismatch === true);
 
         // Documents + photos → form slots. SIGNATURE is handled via the pad below.
         const nextDocs: Partial<Record<DocKey, UploadedFile>> = {};
@@ -1050,6 +1064,7 @@ export default function NewKYCPage() {
           upiId:            form.upiId,
           boardPhotoGeo:    boardPhotoGeo ?? undefined,
           paymentGeo:       paymentGeo   ?? undefined,
+          addressNameMismatch: nameMismatch,
           documents,
           signatureDataUrl,
           agreedToTerms,
@@ -1950,8 +1965,8 @@ export default function NewKYCPage() {
               </p>
 
               {/* Address Proof upload */}
-              <FileUploadCard docKey="shopAddressDoc" label="Address Proof" required
-                hint="Accepted: GST certificate, electricity bill, telephone bill, rent agreement, Aadhaar card (if sole proprietor) · PDF or image · Max 5 MB"
+              <FileUploadCard docKey="shopAddressDoc" label="Address Proof" required={addressProofRequired}
+                hint={`Accepted: GST certificate, trade license, food license, drug license, GST purchase bill, electricity bill, telephone bill, rent agreement, Aadhaar card (if sole proprietor) · PDF or image · Max 5 MB${addressProofRequired ? '' : ' · Optional when names don’t match'}`}
                 inputRef={shopAddressDocRef} />
 
               {/* ── Name mismatch checkbox ── */}
@@ -1975,8 +1990,9 @@ export default function NewKYCPage() {
                 </span>
               </label>
 
-              {/* ── Self Declaration — shown only when mismatch is flagged ── */}
-              {nameMismatch && (
+              {/* ── Self Declaration — shown only when mismatch is flagged AND the
+                     address-proof waiver is OFF for this tenant ── */}
+              {nameMismatch && !waiverEnabled && (
                 <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 space-y-3">
                   {/* Info banner */}
                   <div className="flex items-start gap-2">
@@ -2054,8 +2070,8 @@ export default function NewKYCPage() {
               <Button variant="primary" className="flex-1" onClick={() => setStep('bank')}
                 disabled={
                   !form.address || !form.city || !form.pincode ||
-                  !docs.shopAddressDoc || !docs.storeBoardPhoto ||
-                  (nameMismatch && !docs.selfDeclaration) ||
+                  (addressProofRequired && !docs.shopAddressDoc) || !docs.storeBoardPhoto ||
+                  (!waiverEnabled && nameMismatch && !docs.selfDeclaration) ||
                   boardPhotoGeoLoading ||
                   !boardPhotoGeo ||
                   isDocUploading(docs.shopAddressDoc) ||

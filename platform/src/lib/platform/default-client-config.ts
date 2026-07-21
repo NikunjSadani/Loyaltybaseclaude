@@ -36,6 +36,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
   features: {
     visibilityInvoiceModule: false,
     kycApprovalFlow: true,
+    kycAddressProofWaiver: false,
     campaignEnrollmentForm: true,
     salesTeamApp: true,
     walletModule: true,

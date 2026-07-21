@@ -826,6 +826,48 @@ describe('KycService', () => {
       // Submission filed BY the rep but ABOUT the outlet's partner.
       expect(mockTx.kycSubmission.create.mock.calls[0][0].data.userId).toBe('so1');
       expect(mockTx.kycSubmission.create.mock.calls[0][0].data.partnerId).toBe('cp-new');
+      // Address-proof-waiver: the mismatch flag defaults to false when the rep does not declare it.
+      expect(mockTx.kycSubmission.create.mock.calls[0][0].data.addressNameMismatch).toBe(false);
+    });
+
+    it('persists addressNameMismatch=true when the rep declares the shop-board/address-proof names differ', async () => {
+      // Mirror the partner-less-outlet setup above (assertPhoneAvailable + routing + tx writes).
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // employee-clash null
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce({ id: 'so-su', reportingToId: 'asm-su' })
+        .mockResolvedValueOnce({
+          id: 'asm-su',
+          isActive: true,
+          deletedAt: null,
+          reportingToId: null,
+          hierarchyLevel: { code: 'ASM' },
+        });
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-1',
+        clientId: 'deoleo',
+        partnerId: null,
+        outletCode: 'OUT-1',
+        outletType: { code: 'WHOLESALER' },
+      });
+      mockTx.user.findFirst.mockResolvedValueOnce(null);
+      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-1' });
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-new' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub1' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      await service.create(so, {
+        outletId: 'outlet-1',
+        partnerName: 'Acme',
+        mobile: '9000000000',
+        address: 'addr1',
+        city: 'X',
+        state: 'Y',
+        pincode: '110011',
+        addressNameMismatch: true,
+      } as never);
+      expect(mockTx.kycSubmission.create.mock.calls[0][0].data.addressNameMismatch).toBe(true);
     });
   });
 

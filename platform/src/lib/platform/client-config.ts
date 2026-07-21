@@ -22,6 +22,10 @@ export interface FeatureFlags {
   referralModule: boolean;
 
   // Behaviours
+  // KYC: when a rep ticks "shop board name & address proof name do not match", WAIVE the
+  // Address Proof upload (no self-declaration doc). Deoleo-only; runtime behaviour flag,
+  // NOT a gifsy-console module toggle (excluded from FeatureKey below).
+  kycAddressProofWaiver: boolean;
   selfEnrollmentAllowed: boolean;   // Partners can self-accept schemes
   nonKycOutletCampaigns: boolean;   // Campaigns can target non-KYC outlets
   multiLevelApproval: boolean;      // ≥2 approval levels in hierarchy
@@ -39,7 +43,10 @@ export interface FeatureFlags {
   };
 }
 
-export type FeatureKey = keyof Omit<FeatureFlags, 'partnerApp'>;
+// The gifsy-console module toggles. Excludes `partnerApp` (nested) and
+// `kycAddressProofWaiver` (a runtime KYC behaviour flag set via clients.features, not a
+// console module) so the console's exhaustive feature Records stay to the module set.
+export type FeatureKey = keyof Omit<FeatureFlags, 'partnerApp' | 'kycAddressProofWaiver'>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Branding

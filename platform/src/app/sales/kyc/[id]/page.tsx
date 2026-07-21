@@ -46,6 +46,9 @@ interface KYCDetail {
   submittedByName: string;
   lastOrderDate?: string;
   rejectionReason?: string;
+  // The submitting rep declared the shop board name and the address-proof name do not
+  // match (and, for waiver-enabled tenants, the address proof upload was skipped).
+  addressNameMismatch?: boolean;
   // Admin's per-field re-KYC request (bulk-upload or reviewer flagged). Drives the
   // amber re-KYC banner + re-entry even when status stays APPROVED.
   reKycFlags?: ReKycFlags;
@@ -622,6 +625,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           submittedByRole: (s.user?.role as KYCSubmitterRole) ?? 'SO',
           submittedByName: s.user?.name                       ?? '',
           rejectionReason: s.rejectionReason                  ?? undefined,
+          addressNameMismatch: s.addressNameMismatch === true,
           reKycFlags:      s.reKycFlags                        ?? undefined,
           gstNumber:       s.partner?.gstNumber,
           panNumber:       s.partner?.panNumber,
@@ -786,6 +790,15 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
               <span className="flex items-center gap-1 text-[10px] font-semibold text-[#16a34a] bg-emerald-50 px-1.5 py-0.5 rounded-full">
                 <ShoppingCart className="h-2.5 w-2.5" />
                 Last order {relativeDate(kyc.lastOrderDate)}
+              </span>
+            )}
+            {kyc.addressNameMismatch && (
+              <span
+                data-testid="address-name-mismatch-badge"
+                className="flex items-center gap-1 text-[10px] font-semibold text-amber-700 bg-amber-100 border border-amber-200 px-1.5 py-0.5 rounded-full"
+              >
+                <AlertTriangle className="h-2.5 w-2.5" />
+                Names differ — shop board vs address proof
               </span>
             )}
           </div>
