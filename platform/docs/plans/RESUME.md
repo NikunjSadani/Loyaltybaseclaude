@@ -294,11 +294,15 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   in-memory throttler, no ioredis/cache-manager imports, scaffold leftover). **Two deliberate NOT-yet-done exceptions (surfaced, owner-gated):**
   (i) the LIVE `REDIS_URL` Secret Manager secret is RETAINED — the running prod revision still reads it at instance startup; the deploy.yml/
   cloud-run refs are removed so the NEXT cutover drops it → delete the live secret only AFTER cutover #12, and do NOT `terraform apply` prod
-  before then; (ii) the **VPC connector (~₹1,445/mo) is now provably dead** (Redis-only; Cloud SQL uses the `/cloudsql` socket) — removal
-  steps in the memory, left attached pending owner go. **REMAINING LEVERS (owner decision still open):** Artifact Registry cleanup policy
-  (↑353%, REQUIRED infra — not waste); prod Cloud Run min=1→0 + pause prod schedulers (~₹800/mo, pause item); VPC-connector removal;
-  stop `gifsy-db`/`gifsy-db-dev` when fully frozen (needs the staging-UAT?/dev-continuing? answers). Also owner's call: strip dead
-  `ioredis`/`cache-manager` deps from api/package.json. All prod/staging infra changes owner-gated; gcloud+wrangler authed; terraform in `terraform/`.
+  before then; (ii) the **VPC connector (~₹1,445/mo) is REQUIRED, NOT removable — I wrongly called it "vestigial"; owner challenged, live
+  audit disproved it** (commit `4a0794a` fixed the terraform/README comments). `gifsy-db` is PRIVATE-IP-ONLY (`ipv4Enabled=false`,
+  10.49.0.3) and BOTH live prod+staging API services route to it THROUGH the connector — deleting it = full DB outage; the terraform
+  staging block that omits `vpc_access` is stale drift. Only cost lever = migrate to Direct VPC egress (tested change, not a delete).
+  **REMAINING LEVERS (owner decision open):** Artifact Registry — the `keep-last-10` policy is KEEP-only → DELETES NOTHING (repo ~94GB);
+  add a DELETE rule + drop empty `gifsy-repo` → ~₹700-830/mo; prod Cloud Run min=1→0 + pause prod schedulers (~₹800/mo — note push-drain
+  pings every minute, so staging isn't truly sleeping either); stop `gifsy-db`/`gifsy-db-dev` when fully frozen (needs the
+  staging-UAT?/dev-continuing? answers). Also owner's call: strip dead `ioredis`/`cache-manager` deps from api/package.json. All
+  prod/staging infra changes owner-gated; gcloud+wrangler authed; terraform in `terraform/`.
 - **✅ E2E HARNESS REVIVAL — DONE (test-only, zero prod impact) — `platform/docs/plans/E2E-HARNESS-REVIVAL.md`.**
   Revived + clean-baselined (`4b0d03f`+`f89697c`, 295/0/3, reproducible on a fresh gifsy_dev; runs against a local
   prod build, auto reset+seeds via `e2e/global-setup.ts`). ALL of (A) requestAs (was the run-target, not a bug),
@@ -365,9 +369,10 @@ STAGING-VERIFIED (the payout-mandate upload-reject + submit-guard proven live on
 post-Sept; the owner wants to cut idle GCP cost (~₹17.5k/mo ≈ $210). **✅ DONE: both Redis instances DELETED + terraform/deploy
 wiring stripped (develop `748fd81`) → ~₹8,500/mo (52%) gone, permanent, zero impact** (Redis was never wired). **Two owner-gated
 exceptions left in place:** (i) the LIVE `REDIS_URL` secret must survive until cutover #12 redeploys prod without it (do NOT
-`terraform apply` prod before then); (ii) the VPC connector (~₹1,445/mo) is now provably dead — removal steps in the memory,
-pending owner go. **REMAINING owner decisions:** Artifact-Registry cleanup policy (↑353%, REQUIRED infra); prod Cloud-Run-min-0 +
-pause prod schedulers (~₹800/mo); VPC-connector removal; stop `gifsy-db`/`gifsy-db-dev` if fully frozen — **need: is staging-UAT
+`terraform apply` prod before then); (ii) the VPC connector (~₹1,445/mo) is **REQUIRED (not removable — I was wrong; `gifsy-db` is
+private-IP-only and both live services route through it; fixed docs in `4a0794a`)** — only lever is a Direct-VPC-egress migration.
+**REMAINING owner decisions:** Artifact-Registry — add a DELETE rule (the `keep-last-10` KEEP-only policy deletes nothing; repo ~94GB)
+~₹700-830/mo; prod Cloud-Run-min-0 + pause prod schedulers (~₹800/mo); stop `gifsy-db`/`gifsy-db-dev` if fully frozen — **need: is staging-UAT
 still needed during the pause? is dev continuing?** Plus owner's call: strip dead `ioredis`/`cache-manager` deps from api/package.json.
 All prod/staging infra changes owner-gated; gcloud+wrangler authed. Then note the other open items (both features awaiting cutover #12;
 the waiver's one real-OTP prod smoke) and ask. **REMEMBER: never unilaterally defer follow-up work — surface it, let the owner decide** [[no-unilateral-deferral]].
