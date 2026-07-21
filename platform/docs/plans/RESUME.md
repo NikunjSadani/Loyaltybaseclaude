@@ -269,10 +269,12 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
 `/v1/auth/assume-tenant` {clientId}).
 
 ## OPEN THREADS
-- **🎯 E2E HARNESS REVIVAL (the pickup — test-only, zero prod impact) — `platform/docs/plans/E2E-HARNESS-REVIVAL.md`.**
-  AF-6 login fix DONE (`5d6d717`, 161 specs pass). Remaining: (A) `requestAs` cross-role 401 on local `next dev`
-  (first check `proxy.ts` is wired as `middleware.ts`, then verify on the real stack); (B) ~132 pre-existing stale
-  specs (triage by role); (C) `operator-switch` `homeToken`. See the plan doc for the full local run-book.
+- **✅ E2E HARNESS REVIVAL — DONE (test-only, zero prod impact) — `platform/docs/plans/E2E-HARNESS-REVIVAL.md`.**
+  Revived + clean-baselined (`4b0d03f`+`f89697c`, 295/0/3, reproducible on a fresh gifsy_dev; runs against a local
+  prod build, auto reset+seeds via `e2e/global-setup.ts`). ALL of (A) requestAs (was the run-target, not a bug),
+  (B) the stale specs, (C) operator-switch — resolved. Only optional remainder: the **STAGING run mode**
+  (`E2E_ENV=staging`, real subdomains, OTP-fetch) is a separate, not-yet-exercised path (there, no DB reset is
+  possible — the specs' robust assertions carry it) — do it only if wiring the harness into CI against staging.
 - **§A-DOMAIN — ✅ COMPLETE + LIVE ON PROD** (cutover #11 `e8de31a`, 2026-07-20): DB routing (D-1) + features-from-`/me`
   (P5) + S1 edge-secret enforcing (verified). Nothing left except the owner's real-OTP prod smoke.
 - **Owner-gated Deoleo go-live: ✅ ALL CLEARED** (master data #76 loaded, both KYC WhatsApp templates
