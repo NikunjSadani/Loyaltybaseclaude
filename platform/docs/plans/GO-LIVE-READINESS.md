@@ -122,7 +122,7 @@ resolution). A green **local** run is the merge gate; a green **staging** run is
 - **Staging E2E can't run there now** — `FIXED_OTP` was removed from staging (real MSG91), so a staging harness run needs the test-only OTP read-back endpoint (unbuilt, → P8) **or** temporarily re-adding `FIXED_OTP`. Local runs are unaffected.
 - **Staging shares the prod `gifsy-db` instance** (different DB names) — any DB op double-guards the DB name.
 - **Prod deploy health-check is advisory** (the deploy doesn't fail on a bad `/health`) — the migrate `--wait` step is the real gate; making `/health` a hard post-deploy gate is the A-4 residual.
-- **Redis** — `REDIS_URL` is bound but OTP is stored in the DB and the throttler is in-memory (per-instance, not global across Cloud Run instances). Verify whether Redis is actually used/needed; minor hardening, not a blocker.
+- **Rate limiting is in-memory per-instance** — the `@nestjs/throttler` counters are per Cloud Run instance, so limits do not aggregate across instances. **Redis was removed 2026-07-22** (it was never wired in — OTP lives in the DB, the throttler was always in-memory), and the `REDIS_URL` secret is deleted (see `INFRA-ARCHITECTURE.md`). Cross-instance limits, if ever needed, require a shared store (DB) — a new build, not a Redis restore. Minor hardening, not a blocker; tracked as `GLm-5`.
 
 ## 4. Who does what
 - **Owner:** answer the 🟦 product decisions in `DATA-VISIBILITY.md §3` (who-sees-what); confirm when to run E2E against staging + staging access.

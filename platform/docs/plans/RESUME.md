@@ -291,13 +291,12 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
 - **💸 INFRA COST-REDUCTION — IN PROGRESS. Full detail = memory [[infra-cost-reduction]].** Deoleo go-live MAY postpone to post-Sept →
   cut idle cost (~₹17.5k/mo bill). **✅ DONE: both Redis instances DELETED (owner "turn it off then") + terraform/deploy wiring stripped
   (develop `748fd81`, `terraform validate` Success) → ~₹8,500/mo (52%) removed, permanent, zero runtime impact** (Redis was never wired —
-  in-memory throttler, no ioredis/cache-manager imports, scaffold leftover). **Two deliberate NOT-yet-done exceptions (surfaced, owner-gated):**
-  (i) the LIVE `REDIS_URL` Secret Manager secret is RETAINED — the running prod revision still reads it at instance startup; the deploy.yml/
-  cloud-run refs are removed so the NEXT cutover drops it → delete the live secret only AFTER cutover #12, and do NOT `terraform apply` prod
-  before then; (ii) the **VPC connector (~₹1,445/mo) is REQUIRED, NOT removable — I wrongly called it "vestigial"; owner challenged, live
-  audit disproved it** (commit `4a0794a` fixed the terraform/README comments). `gifsy-db` is PRIVATE-IP-ONLY (`ipv4Enabled=false`,
-  10.49.0.3) and BOTH live prod+staging API services route to it THROUGH the connector — deleting it = full DB outage; the terraform
-  staging block that omits `vpc_access` is stale drift. Only cost lever = migrate to Direct VPC egress (tested change, not a delete)
+  in-memory throttler, no ioredis/cache-manager imports, scaffold leftover). The `REDIS_URL` Secret Manager secret + the prod env var are
+  now **DELETED too** (2026-07-22) — Redis is fully gone everywhere. *(History: the secret was briefly RETAINED because the running prod
+  revision read it at startup; the Direct-VPC-egress prod redeploy dropped that dependency, so the secret was then deleted.)*
+  The VPC connector was likewise removed: earlier in the session I wrongly called it "vestigial" (owner challenged; `gifsy-db` is
+  PRIVATE-IP-ONLY `10.49.0.3` and both live services routed to it THROUGH the connector, so a straight delete = full DB outage — the fix
+  was to **migrate to Direct VPC egress**, a tested change, not a delete)
   — **Direct-VPC-egress migration: Phase 1 (staging) ✅ + Phase 3 (PROD) ✅ DONE + runtime-verified 2026-07-22 (owner "go ahead").**
   prod `gifsy-api` on Direct VPC egress (canary rev `00026-hap` + `/health/ready` startup probe → ramp 10→50→100%, DB SELECT 1 over
   direct egress 200 throughout, zero errors; connector rev `00024-7sp` @0% = instant rollback). All 7 jobs off the connector; both
@@ -305,7 +304,7 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   **✅ Phase 4 DONE (2026-07-22, owner option-b — portal not live → no soak): connector `gifsy-connector` DELETED, ~₹1,445/mo saved,
   MIGRATION COMPLETE.** Post-delete verified prod+staging `/health/ready` 200 `{db:up}`, zero errors; terraform connector resource removed
   (`0b8b5f0`, validate Success). Combined session infra savings (Redis+connector) ≈ **₹10k/mo (~57%)**, zero prod impact. Residual cosmetic
-  only (stale `00025-xey` canary rev, empty `gifsy-repo`, old connector revs auto-GC'd). Plan: `platform/docs/plans/DIRECT-VPC-EGRESS-MIGRATION.md`; detail [[infra-cost-reduction]].
+  only (stale `00025-xey` canary rev, empty `gifsy-repo`, old connector revs auto-GC'd). Architecture record: `platform/docs/plans/INFRA-ARCHITECTURE.md` (all 3 changes); migration plan: `platform/docs/plans/DIRECT-VPC-EGRESS-MIGRATION.md`; detail [[infra-cost-reduction]].
   **✅ DONE (2026-07-22): Artifact Registry durable cleanup policy LIVE on `gifsy-images`** (independent-audited SAFE, dry-run-verified,
   enabled live; 4 serving images confirmed intact). Was a KEEP-only `keep-last-10` that deleted nothing (repo ~94GB / 699 imgs, all <40d
   = temporary build churn). New policy per owner steering (design for FUTURE steady-state, not current churn): keep-prod-latest (anchors
@@ -313,8 +312,8 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   multi-arch outage risk. Immediate reclaim small (~62 old imgs); bulk self-reduces as staging ages out + building slows. Policy JSON in
   session scratchpad. Trivial pending: drop empty `gifsy-repo` (0 bytes) after a ref-check. **REMAINING LEVERS (owner decision open):**
   prod Cloud Run min=1→0 + pause prod schedulers (~₹800/mo — note push-drain pings every minute, so staging isn't truly sleeping either);
-  stop `gifsy-db`/`gifsy-db-dev` when fully frozen (needs the staging-UAT?/dev-continuing? answers). Also owner's call: strip dead
-  `ioredis`/`cache-manager` deps from api/package.json. All prod/staging infra changes owner-gated; gcloud+wrangler authed; terraform in `terraform/`.
+  stop `gifsy-db`/`gifsy-db-dev` when fully frozen (needs the staging-UAT?/dev-continuing? answers). (Dead `ioredis`/`cache-manager`
+  deps ✅ REMOVED from api/package.json 2026-07-22, gate-green.) All prod/staging infra changes owner-gated; gcloud+wrangler authed; terraform in `terraform/`.
 - **✅ E2E HARNESS REVIVAL — DONE (test-only, zero prod impact) — `platform/docs/plans/E2E-HARNESS-REVIVAL.md`.**
   Revived + clean-baselined (`4b0d03f`+`f89697c`, 295/0/3, reproducible on a fresh gifsy_dev; runs against a local
   prod build, auto reset+seeds via `e2e/global-setup.ts`). ALL of (A) requestAs (was the run-target, not a bug),
@@ -379,13 +378,13 @@ defaults to BANK). Both gate-green (api jest 1557 · nest 0 · FE vitest 1924 ·
 STAGING-VERIFIED (the payout-mandate upload-reject + submit-guard proven live on staging `ffe82bd`).**
 **▶ INFRA COST-REDUCTION — IN PROGRESS (memory [[infra-cost-reduction]] has the full breakdown):** Deoleo go-live may postpone to
 post-Sept; the owner wants to cut idle GCP cost (~₹17.5k/mo ≈ $210). **✅ DONE: both Redis instances DELETED + terraform/deploy
-wiring stripped (develop `748fd81`) → ~₹8,500/mo (52%) gone, permanent, zero impact** (Redis was never wired). **Two owner-gated
-exceptions left in place:** (i) the LIVE `REDIS_URL` secret must survive until cutover #12 redeploys prod without it (do NOT
-`terraform apply` prod before then); (ii) the VPC connector (~₹1,445/mo) is **REQUIRED (not removable — I was wrong; `gifsy-db` is
-private-IP-only and both live services route through it; fixed docs in `4a0794a`)** — only lever is a Direct-VPC-egress migration.
+wiring stripped (develop `748fd81`) → ~₹8,500/mo (52%) gone, permanent, zero impact** (Redis was never wired); the `REDIS_URL` secret
++ prod env var are now **DELETED too** (Redis fully gone). **✅ VPC connector migration COMPLETE:** `gifsy-connector` was NOT a straight
+delete (both live services routed private-IP DB traffic through it) — it was **migrated to Direct VPC egress** (Phase 1+3+4 DONE + verified
+2026-07-22, connector then DELETED, ~₹1,445/mo saved). Both former "owner-gated exceptions" are now resolved — see `INFRA-ARCHITECTURE.md`.
 **✅ Artifact-Registry durable cleanup policy DONE + LIVE (2026-07-22, independent-audited, serving imgs verified intact).** **REMAINING
 owner decisions:** prod Cloud-Run-min-0 + pause prod schedulers (~₹800/mo); stop `gifsy-db`/`gifsy-db-dev` if fully frozen — **need: is staging-UAT
-still needed during the pause? is dev continuing?** Plus owner's call: strip dead `ioredis`/`cache-manager` deps from api/package.json.
+still needed during the pause? is dev continuing?** (Dead `ioredis`/`cache-manager` deps ✅ REMOVED from api/package.json, gate-green.)
 All prod/staging infra changes owner-gated; gcloud+wrangler authed. Then note the other open items (both features awaiting cutover #12;
 the waiver's one real-OTP prod smoke) and ask. **REMEMBER: never unilaterally defer follow-up work — surface it, let the owner decide** [[no-unilateral-deferral]].
 ```

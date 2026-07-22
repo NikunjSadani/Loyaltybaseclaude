@@ -92,7 +92,7 @@ A short checklist the **owner** completes up front (the rest of the runbook assu
 
 1. **`test`** — runs api + platform suites (`needs`-gated; a RED suite means the deploy jobs never run → **silent skip**, no deploy. `workflow_dispatch` has a `skip_tests` emergency input — do **not** use it for this cutover).
 2. **`approve`** — `environment: production`, a **required-reviewer gate**. The run **pauses** here until the **owner** approves in the GitHub UI.
-3. **`deploy-api`** — builds + pushes `api:<sha>` and `api:latest`, then **runs DB migrations** via the in-VPC Cloud Run Job (`gifsy-migrate`, `npx prisma migrate deploy`, prod `DATABASE_URL` secret, `--vpc-connector gifsy-connector`, `--set-cloudsql-instances`, `--execute-now --wait`) — **before** the new revision serves; `--wait` **fails the deploy if a migration fails**. Then `gcloud run deploy gifsy-api --image …:<sha>`.
+3. **`deploy-api`** — builds + pushes `api:<sha>` and `api:latest`, then **runs DB migrations** via the in-VPC Cloud Run Job (`gifsy-migrate`, `npx prisma migrate deploy`, prod `DATABASE_URL` secret, Direct VPC egress `--network=gifsy-vpc --subnet=gifsy-subnet-asia-south1 --vpc-egress=private-ranges-only`, `--set-cloudsql-instances`, `--execute-now --wait`) — **before** the new revision serves; `--wait` **fails the deploy if a migration fails**. Then `gcloud run deploy gifsy-api --image …:<sha>`. *(The old `--vpc-connector gifsy-connector` was replaced by Direct VPC egress 2026-07-22 — see `../INFRA-ARCHITECTURE.md`.)*
 4. **`deploy-frontend`** — builds + pushes `frontend:<sha>`, deploys `gifsy-frontend`.
 5. **`health-check`** — waits 15s, curls `<NEXT_PUBLIC_API_URL>/health` (**advisory only** — it logs a warning but does not fail the deploy).
 
@@ -310,7 +310,7 @@ gcloud run jobs deploy gifsy-bootstrap \
   --command=node --args=prisma/bootstrap.js \
   --set-secrets=DATABASE_URL=DATABASE_URL:latest \
   --set-env-vars=BOOTSTRAP_CONFIRM=gifsy_prod,GIFSY_ADMIN_NAME=Nikunj,GIFSY_ADMIN_PHONE=9830011252 \
-  --vpc-connector=gifsy-connector \
+  --network=gifsy-vpc --subnet=gifsy-subnet-asia-south1 --vpc-egress=private-ranges-only \
   --set-cloudsql-instances=gifsy-platform:asia-south1:gifsy-db \
   --service-account=gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com \
   --execute-now --wait

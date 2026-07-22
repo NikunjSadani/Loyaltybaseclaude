@@ -12,8 +12,10 @@
   `db push` against staging/prod).
 - **Run as an in-VPC Cloud Run Job**, *not* from a laptop and *not* from a GitHub Actions runner.
   **Why:** the staging/prod Cloud SQL instance `gifsy-platform:asia-south1:gifsy-db` is
-  **private-IP only** — unreachable from outside the VPC. The job has the VPC connector
-  (`gifsy-connector`) + the Cloud SQL instance binding, so it *can* reach the private IP.
+  **private-IP only** — unreachable from outside the VPC. The job attaches a **Direct VPC egress**
+  network interface (`--network=gifsy-vpc --subnet=gifsy-subnet-asia-south1 --vpc-egress=private-ranges-only`)
+  + the Cloud SQL instance binding, so it *can* reach the private IP. *(This replaced the old
+  `gifsy-connector` VPC Access connector, deleted 2026-07-22 — see `INFRA-ARCHITECTURE.md`.)*
 
 ## The 2026-06-20 baseline squash
 

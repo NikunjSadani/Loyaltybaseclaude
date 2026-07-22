@@ -54,7 +54,7 @@
 >   --command=node --args=prisma/bootstrap.js \
 >   --set-secrets=DATABASE_URL=DATABASE_URL:latest \
 >   --set-env-vars=BOOTSTRAP_CONFIRM=gifsy_prod,GIFSY_ADMIN_NAME=Nikunj,GIFSY_ADMIN_PHONE=9830011252 \
->   --vpc-connector=gifsy-connector \
+>   --network=gifsy-vpc --subnet=gifsy-subnet-asia-south1 --vpc-egress=private-ranges-only \
 >   --set-cloudsql-instances=<SQL_INSTANCE> \
 >   --service-account=gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com \
 >   --execute-now --wait

@@ -24,20 +24,6 @@ resource "google_secret_manager_secret" "database_url_staging" {
   depends_on = [google_project_service.apis]
 }
 
-# REDIS_URL — RETAINED (not stripped) on purpose. Redis itself is deleted, but the
-# running prod revision (e8de31a) still reads this secret at instance startup, so the
-# live secret must survive until the next cutover redeploys prod without it (the
-# deploy.yml + cloud-run.tf references are already removed). Keeping this container
-# resource guarantees `terraform apply` will NOT delete the live secret before then.
-# Delete this block AND the live secret only AFTER the post-cutover redeploy.
-resource "google_secret_manager_secret" "redis_url" {
-  secret_id = "REDIS_URL"
-  replication {
-    auto {}
-  }
-  depends_on = [google_project_service.apis]
-}
-
 resource "google_secret_manager_secret" "jwt_secret" {
   secret_id = "JWT_SECRET"
   replication {

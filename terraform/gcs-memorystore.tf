@@ -67,8 +67,6 @@ resource "google_storage_bucket" "terraform_state" {
 # If a real global-rate-limit / shared-cache need ever appears, re-provision AND
 # actually wire it (see api app.module.ts ThrottlerModule).
 #
-# NOTE: the live `REDIS_URL` secret in Secret Manager is intentionally retained
-# until prod is redeployed without it (the running prod revision still reads it
-# at instance startup — the deploy.yml reference has been removed for the next
-# cutover). Delete the live secret only AFTER that redeploy.
+# The `REDIS_URL` Secret Manager secret has also been deleted (2026-07-22); its
+# declaration was removed from secret-manager.tf.
 # ─────────────────────────────────────────────────────────────────────────────

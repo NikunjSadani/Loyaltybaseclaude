@@ -258,7 +258,7 @@ no VPC connector, and Cloud Run scales to zero between test runs.
 **Cloud Run can't connect to Cloud SQL:**
 ```bash
 gcloud run services describe gifsy-api --region=asia-south1
-# Check: cloudsql-instances annotation, VPC connector
+# Check: cloudsql-instances annotation, Direct VPC egress (network interfaces on gifsy-vpc/gifsy-subnet-asia-south1 — no VPC connector)
 ```
 
 **Secrets not loading:**

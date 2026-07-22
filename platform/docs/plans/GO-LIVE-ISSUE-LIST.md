@@ -635,7 +635,7 @@ money rails compile + serve with the canonical KYC resolver + `REVERSED` state l
 | GLm-2 | ✅ DONE (in #86) | `tickets.escalate` already validates the assignee is in-tenant (`tickets.service.ts:128` — `findFirst {id, clientId}` → "not found in this tenant"). The "OPEN" was stale; landed with the GL-RBAC work. |
 | GLm-3 | ✅ DONE (Lane 4, 2026-06-29) | `kyc.slaMetrics` rejection-reason histogram now scopes via the related submission (`kycSubmission: { ...kycTenantFilter(user) }`) like every other query in the method. No-op for the live GIFSY-only caller; defense-in-depth vs a future CLIENT_ADMIN. |
 | GLm-4 | OPEN (post-launch) | Legacy `sid`-less JWTs match on `(userId,clientId)` until they expire — do a hard cutover (reject `sid`-less) post-launch once old tokens age out. |
-| GLm-5 | TRACK | In-memory per-instance throttler (limits scale with Cloud Run instances); dead `REDIS_URL` bound but unused. |
+| GLm-5 | TRACK | In-memory per-instance throttler (limits scale with Cloud Run instances). *(Redis removed 2026-07-22 — the `REDIS_URL` secret is deleted; Redis was never backing the throttler. Cross-instance limits would need a shared store, a new build. See `INFRA-ARCHITECTURE.md`.)* |
 | GLm-6 | VERIFY | Confirm prod env has `DEMO_MODE` unset (proxy injects a GIFSY_ADMIN header when set); the proxy `DEMO_MODE` path must be off in prod. |
 | GLm-7 | NOTE | TDS file-hash audit flagged a "collision" — MISREAD: it already uses a `\x01` delimiter (od-verified) + fixed 4-field arity = collision-safe. No change. |
 

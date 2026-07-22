@@ -332,7 +332,7 @@ Common causes: empty/placeholder auth key (logs `MSG91 not configured`), unappro
 - ✅ **Automated backups ON** — 14 retained, daily `startTime=20:30`.
 - ✅ **PITR ON** — `pointInTimeRecoveryEnabled=true`, `transactionLogRetentionDays=7`. *(GO-LIVE-READINESS §3.1 says PITR is OFF — that is STALE; this doc corrects it.)*
 - ✅ **Prod Cloud Run services live** — `gifsy-api`, `gifsy-frontend` (+ staging variants).
-- ✅ **All prod secrets exist** in Secret Manager (`DATABASE_URL`, `JWT_SECRET`, `MSG91_AUTH_KEY`, `MSG91_SENDER_ID`, `MSG91_OTP_TEMPLATE_ID`, `MSG91_SMS_TEMPLATE_ID`, `GCS_BUCKET`, `GCP_PROJECT_ID`, `CORS_ORIGINS`, `REDIS_URL`, …) — rotation = new versions, not creation.
+- ✅ **All prod secrets exist** in Secret Manager (`DATABASE_URL`, `JWT_SECRET`, `MSG91_AUTH_KEY`, `MSG91_SENDER_ID`, `MSG91_OTP_TEMPLATE_ID`, `MSG91_SMS_TEMPLATE_ID`, `GCS_BUCKET`, `GCP_PROJECT_ID`, `CORS_ORIGINS`, …) — rotation = new versions, not creation. *(`REDIS_URL` was removed 2026-07-22 — Redis is gone; see `../INFRA-ARCHITECTURE.md`.)*
 - ✅ **Prod injects secrets** via `--set-secrets …:latest` (deploy.yml) — the rotation+restart pattern in §3 matches how Cloud Run consumes them.
 - ✅ **`/health` endpoint exists** (`api/src/app.controller.ts` → `{status:'ok'}`) — used for the uptime check.
 
