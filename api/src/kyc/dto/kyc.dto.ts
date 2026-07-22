@@ -176,9 +176,10 @@ export class CreateKycDto {
   signatureDataUrl?: string;
 
   // Shop-board name vs address-proof name mismatch, declared by the submitting rep.
-  // For a tenant with the `kycAddressProofWaiver` feature, ticking this box waives the
-  // Address Proof upload; the boolean is persisted as the audit trail. Ignored (stays
-  // false effect) for tenants without the feature — the FE still requires the document there.
+  // For a tenant with the `kycAddressProofWaiver` feature, declaring this drops the extra
+  // signed self-declaration document — the Address Proof upload itself stays required
+  // either way. The boolean is persisted as the audit trail. Document requirements are
+  // gated on the FE (the new-KYC form); the backend accepts the flag on any tenant.
   @IsOptional()
   @IsBoolean()
   addressNameMismatch?: boolean;

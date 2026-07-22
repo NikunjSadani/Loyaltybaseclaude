@@ -2,23 +2,33 @@ import { test, expect } from '@playwright/test';
 import { requestAs } from '../helpers/write';
 
 /**
- * SALES_SO KYC address-proof WAIVER (Deoleo-only) — write-persistence spec.
+ * SALES_SO KYC address-proof name-mismatch WAIVER (Deoleo-only) — write-persistence spec.
  *
  * FEATURE UNDER TEST
  *   On the sales "new outlet" KYC form (/sales/kyc/new), when the tenant has
  *   `clients.features.kycAddressProofWaiver = true` (the seed sets this for `deoleo`,
  *   and the `sales` Playwright project logs in as a deoleo SALES_SO — so the flag is
  *   ON for this project), ticking "Shop board name and address proof name do not
- *   match" WAIVES the otherwise-required Address Proof upload:
+ *   match" DROPS the extra signed SELF-DECLARATION document that a non-waiver tenant
+ *   would otherwise have to download, fill, sign, and upload:
  *     - the "Self Declaration Required" panel does NOT appear, and
- *     - the rep may Continue past the Address step WITHOUT an Address Proof.
- *   The mismatch persists as `KycSubmission.addressNameMismatch = true` and surfaces to
- *   reviewers as a "Names differ — shop board vs address proof" badge
+ *     - the rep may Continue past the Address step without that self-declaration.
+ *   The **Address Proof upload itself stays required** either way — the waiver only
+ *   removes the self-declaration. The mismatch persists as
+ *   `KycSubmission.addressNameMismatch = true` and surfaces to reviewers as a
+ *   "Names differ — shop board vs address proof" badge
  *   (data-testid="address-name-mismatch-badge") on /sales/kyc/[id] and /admin/kyc/[id].
  *
+ *   The FE document gating itself (address proof ALWAYS required; self-declaration
+ *   dropped only when the waiver is ON) is pure and unit-tested in
+ *   platform/src/lib/__tests__/kyc-document-gating.test.ts — that is where the
+ *   "address proof never becomes optional" guarantee is locked. This spec proves the
+ *   two backend-observable halves: the tenant precondition and the mismatch-flag
+ *   persistence + reviewer surface.
+ *
  * WHY THIS IS AN API-LEVEL WRITE SPEC (not an interactive Address-step drive)
- *   The FE Address step is only reachable PAST the Details step, whose two required
- *   inputs — Owner Photo and (on Address) Store Board Photo — are CAMERA captures via
+ *   The FE Address step is only reachable PAST the Details step, whose required inputs —
+ *   Owner Photo and (on Address) Store Board Photo — are CAMERA captures via
  *   `navigator.mediaDevices.getUserMedia`, and the Address "Continue" also requires a
  *   captured geolocation. The go-live harness launches `devices['Desktop Chrome']` with
  *   NO fake-media / fake-geo flags (playwright.config.ts), and every document write goes
@@ -27,18 +37,15 @@ import { requestAs } from '../helpers/write';
  *   interactive checkbox→panel-hidden→Continue-enabled assertions cannot run headlessly
  *   here without false-flaking.
  *
- *   Instead we prove the waiver where the harness is authoritative — the BACKEND. The
- *   service `KycService.create()` (api/src/kyc/kyc.service.ts) hard-requires only a valid
- *   outlet + a 10-digit mobile; `documents` is optional and `addressNameMismatch` is
- *   persisted (dto.addressNameMismatch ?? false) — and the submission is created BEFORE
- *   the (separate) outlet-owner consent OTP. So a rep CAN persist a KYC with the mismatch
- *   flag set and NO Address Proof document, which is exactly what the waiver enables. We:
+ *   Instead we prove the backend-observable behaviour where the harness is authoritative.
+ *   The service `KycService.create()` (api/src/kyc/kyc.service.ts) hard-requires only a
+ *   valid outlet + a 10-digit mobile; `documents` is optional and `addressNameMismatch`
+ *   is persisted (dto.addressNameMismatch ?? false) — the flag is accepted on ANY tenant
+ *   (document requirements are an FE gate, not a backend one). We:
  *     1. assert the deoleo-only precondition: /api/sales/me → features.kycAddressProofWaiver true;
- *     2. write a waived submission (addressNameMismatch:true, no SHOP_ESTABLISHMENT doc);
- *     3. cross-read it as GIFSY and assert it persisted WITHOUT an address proof;
+ *     2. write a submission with the mismatch declared (addressNameMismatch:true);
+ *     3. cross-read it as GIFSY and assert the flag persisted server-side;
  *     4. re-read its detail page and assert the reviewer mismatch badge renders.
- *   This is a stronger guarantee than the FE-only visual check: it verifies the backend
- *   genuinely accepts and stores an address-proof-less submission, end-to-end.
  *
  * STATE DEPENDENCY (serial, single-worker; global-setup re-seeds gifsy_dev per run)
  *   Test 3 CONSUMES one NOT_STARTED outlet assigned to the SO by creating a pending KYC
@@ -52,10 +59,10 @@ import { requestAs } from '../helpers/write';
 /** Address Proof document type (DOC_TYPE_MAP.shopAddressDoc in the FE new-KYC page). */
 const ADDRESS_PROOF_TYPE = 'SHOP_ESTABLISHMENT';
 
-test.describe('@sales kyc address-proof waiver (Deoleo-only) — write', () => {
+test.describe('@sales kyc address-proof name-mismatch waiver (Deoleo-only) — write', () => {
   // ── 1. Precondition: the waiver flag is ON for this deoleo sales project ──────────
   // The FE reads it via useTenantFeatures('/api/sales/me') → data.features. If this is
-  // false the checkbox does nothing, so it is the linchpin of the whole feature.
+  // false the checkbox never drops the self-declaration, so it is the linchpin.
   test('/api/sales/me reports kycAddressProofWaiver = true for the deoleo SALES_SO', async ({
     page,
   }) => {
@@ -67,13 +74,13 @@ test.describe('@sales kyc address-proof waiver (Deoleo-only) — write', () => {
     expect(
       body.data?.features?.kycAddressProofWaiver,
       'the deoleo tenant must have features.kycAddressProofWaiver = true (seed api/prisma/seed.ts) — ' +
-        'without it the mismatch checkbox never waives the address proof',
+        'without it the mismatch checkbox never drops the self-declaration',
     ).toBe(true);
   });
 
   // ── 2. The /sales/kyc/new FE page renders under the waiver tenant ─────────────────
   // Mirrors kyc-create-write's render smoke — proves the route compiles + the outlet
-  // step (which drives the waiver flow) is reachable for the deoleo SALES_SO.
+  // step (which drives the mismatch flow) is reachable for the deoleo SALES_SO.
   test('/sales/kyc/new FE page renders (outlet step is reachable)', async ({ page }) => {
     await page.goto('/sales/kyc/new');
     await expect(page).toHaveURL(/\/sales\/kyc\/new/);
@@ -86,8 +93,8 @@ test.describe('@sales kyc address-proof waiver (Deoleo-only) — write', () => {
     await expect(outletSearchOrStep.or(stepLabel)).toBeVisible({ timeout: 10_000 });
   });
 
-  // ── 3. Write path: a waived submission persists WITHOUT an address proof + shows the badge ──
-  test('a mismatch-waived KYC persists with no address proof and surfaces the reviewer badge', async ({
+  // ── 3. Write path: a declared-mismatch KYC persists the flag + surfaces the badge ──
+  test('a declared-mismatch KYC persists addressNameMismatch and surfaces the reviewer badge', async ({
     page,
   }) => {
     // 3a. Pick a NOT_STARTED outlet assigned to this SO (dynamic — no hardcoded fixture),
@@ -110,11 +117,11 @@ test.describe('@sales kyc address-proof waiver (Deoleo-only) — write', () => {
     // number and differs per attempt, so a retry never trips "phone already in use".
     const mobile = `8${String(Date.now()).slice(-9)}`;
 
-    // 3b. Create the WAIVED submission as the SO (the `sales` project's session cookie
-    //     authenticates through the proxy; AF-6 injects the Bearer from it). The whole
-    //     point of the waiver: addressNameMismatch:true AND no SHOP_ESTABLISHMENT doc.
-    //     `documents: []` is deliberate — the backend must accept a submission with no
-    //     address proof (indeed no documents) when the mismatch is declared.
+    // 3b. Create the submission as the SO (the `sales` project's session cookie
+    //     authenticates through the proxy; AF-6 injects the Bearer from it) with the
+    //     mismatch declared. The backend accepts addressNameMismatch on any tenant and
+    //     `documents` is optional server-side (document requirements are the FE's job),
+    //     so a minimal submission is sufficient to exercise the persistence path.
     const createRes = await page.request.post('/api/kyc', {
       headers: { 'Content-Type': 'application/json' },
       data: JSON.stringify({
@@ -137,7 +144,7 @@ test.describe('@sales kyc address-proof waiver (Deoleo-only) — write', () => {
 
     expect(
       createRes.status(),
-      'POST /api/kyc must accept a waived submission (addressNameMismatch:true, no address proof)',
+      'POST /api/kyc must accept a submission with the mismatch declared (addressNameMismatch:true)',
     ).toBe(201);
     const createBody = (await createRes.json()) as { success?: boolean; data?: { submissionId?: string } };
     expect(createBody.success).toBe(true);
@@ -145,9 +152,9 @@ test.describe('@sales kyc address-proof waiver (Deoleo-only) — write', () => {
     expect(submissionId, 'create must return the new submissionId').toBeTruthy();
 
     // 3c. PERSISTENCE (cross-role): GIFSY reads the submission back from the DB and sees
-    //     the mismatch flag stored AND no address-proof document — proving the waiver is
-    //     honoured server-side, not just in the FE. AF-6: a real GIFSY-cookie context is
-    //     an independent reader (page.request would authenticate as the SALES page).
+    //     the mismatch flag stored — proving the audit trail is honoured server-side, not
+    //     just in the FE. AF-6: a real GIFSY-cookie context is an independent reader
+    //     (page.request would authenticate as the SALES page).
     const gifsy = await requestAs('gifsy');
     try {
       const readRes = await gifsy.get(`/api/kyc/${submissionId}`);
@@ -165,10 +172,13 @@ test.describe('@sales kyc address-proof waiver (Deoleo-only) — write', () => {
         'the declared shop-board/address-proof name mismatch must persist as addressNameMismatch=true',
       ).toBe(true);
 
+      // Sanity: this minimal API-level submission carried no documents. (The FE keeps the
+      // Address Proof mandatory — see kyc-document-gating.test.ts — but the backend does
+      // not enforce it, which is why this API-level write path can persist without one.)
       const hasAddressProof = (submission?.documents ?? []).some((d) => d.documentType === ADDRESS_PROOF_TYPE);
       expect(
         hasAddressProof,
-        `no ${ADDRESS_PROOF_TYPE} (Address Proof) document must be stored — the upload is genuinely waived`,
+        `this minimal submission was created with documents:[] — no ${ADDRESS_PROOF_TYPE} is expected server-side`,
       ).toBe(false);
     } finally {
       await gifsy.dispose();
@@ -180,7 +190,7 @@ test.describe('@sales kyc address-proof waiver (Deoleo-only) — write', () => {
     await page.waitForLoadState('networkidle');
     await expect(
       page.getByTestId('address-name-mismatch-badge'),
-      'the reviewer "Names differ — shop board vs address proof" badge must render for a waived submission',
+      'the reviewer "Names differ — shop board vs address proof" badge must render for a declared-mismatch submission',
     ).toBeVisible({ timeout: 10_000 });
   });
 });

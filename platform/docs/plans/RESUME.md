@@ -26,11 +26,13 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
   (upload UPI-under-deoleo REJECTED + case-insensitive accept; KYC submit guard 400s a mode-mismatch + missing-fields; migration
   live). **⚠️ needs the same migration cutover; no prod flag/DB write required (the column defaults to BANK).** See memory
   [[deoleo-go-live-bundle]] NEWEST-59.
-- **🆕 KYC ADDRESS-PROOF WAIVER (develop `2f21a8e`, gate-green, STAGING-VERIFIED, ships NEXT cutover):** in `sales/kyc/new`,
-  ticking "shop board name & address proof name do not match" WAIVES the required Address Proof upload — Deoleo-only, gated on new
-  `clients.features.kycAddressProofWaiver` (a runtime behaviour flag, EXCLUDED from the gifsy-console `FeatureKey` module set →
-  DB/seed-set only). Persisted as new `KycSubmission.addressNameMismatch` (additive migration) + a neutral "Names differ" reviewer
-  badge on both `kyc/[id]` pages. Flag-OFF = byte-identical (audit-proven). Staging flag ON (backup was `features={}`).
+- **🆕 KYC ADDRESS-PROOF WAIVER (develop `2f21a8e` + semantics-correction, gate-green, ships NEXT cutover):** in `sales/kyc/new`,
+  ticking "shop board name & address proof name do not match" DROPS the extra signed self-declaration document — the **Address Proof
+  upload itself stays REQUIRED** (owner-corrected 2026-07-22: the original build wrongly made the Address Proof optional too; now the
+  waiver only removes the self-declaration). Deoleo-only, gated on new `clients.features.kycAddressProofWaiver` (a runtime behaviour
+  flag, EXCLUDED from the gifsy-console `FeatureKey` module set → DB/seed-set only). Gating is a pure helper `lib/kyc-document-gating.ts`
+  (unit-tested — address proof never becomes optional). Persisted as new `KycSubmission.addressNameMismatch` (additive migration) + a
+  neutral "Names differ" reviewer badge on both `kyc/[id]` pages. Flag-OFF = byte-identical. Staging flag ON (backup was `features={}`).
   **⚠️ GO-LIVE: at the next cutover also `jsonb_set` `kycAddressProofWaiver=true` onto PROD deoleo `clients.features`** (likely `{}`
   today → additive is fine; ~5-min `resolveClient` cache). See memory [[deoleo-go-live-bundle]] NEWEST-58.
 - **§A-DOMAIN is FULLY LIVE on prod (verified post-cutover):** DB-driven routing (D-1, resolveClient→`clients`),
