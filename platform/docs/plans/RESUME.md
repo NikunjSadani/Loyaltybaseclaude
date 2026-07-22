@@ -11,11 +11,19 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-- **prod == main == `e8de31a`** (CUTOVER #11, live 2026-07-20 — §A-DOMAIN COMPLETE: D-1 + P5 + P6/S1 +
-  sales-ledger unification). **develop `99d46b8`** (feature commits `2f21a8e`+`11fe3a8`, then the full infra-cost-reduction work: Redis + VPC→Direct-egress + Artifact-Registry, all DONE + documented) = prod + TEST-ONLY/doc
-  commits (E2E-harness revival — see below) **+ TWO REAL features awaiting the next cutover: the 🆕 KYC ADDRESS-PROOF WAIVER
-  (`2f21a8e`) and the 🆕 PER-OUTLET PAYOUT MANDATE (`11fe3a8`, ✅ staging-verified) — each adds a migration (`..._add_kyc_address_name_mismatch`, `..._add_outlet_required_payment_type`)**;
-  the 2 tiny FE fixes also ride the cutover. Verify HEADs via `git log`.
+- **prod == main == develop == `2187498`** (CUTOVER #12 `d028566` + CUTOVER #13 `2187498`, both LIVE 2026-07-22).
+  develop and main are at the SAME SHA — nothing pending. Verify HEADs via `git log`. (Prior: cutover #11 `e8de31a`,
+  §A-DOMAIN COMPLETE + infra-cost-reduction, both still live.)
+- **✅ CUTOVER #12 (`d028566`, live 2026-07-22) shipped BOTH develop features + the infra-workflow changes to prod:**
+  (1) **PER-OUTLET PAYOUT MANDATE** — `Outlet.requiredPaymentType BANK|UPI|ANY` (migration `..._add_outlet_required_payment_type`),
+  **fully LIVE, needs no flag** (defaults BANK); (2) **KYC ADDRESS-PROOF WAIVER** (migration `..._add_kyc_address_name_mismatch`);
+  plus `deploy.yml` Direct-VPC-egress + `/health/ready` startup probe + `REDIS_URL` removal (matched the manual prod state).
+  Both migrations verified applied on prod (additive, zero-downtime). Smoke: both services `/health/ready` 200 `{db:up}`.
+- **✅ CUTOVER #13 (`2187498`, live 2026-07-22, code-only) shipped the WAIVER SEMANTICS-FIX + set the prod flag:** the waiver
+  now drops ONLY the self-declaration (Address Proof stays required — owner-corrected before the flag went live). Prod deoleo
+  `clients.features.kycAddressProofWaiver=true` SET (guarded write, keycount 10→11, `rbacEnforcement` untouched at false;
+  backup captured). **Waiver is now LIVE for Deoleo in prod.** Remaining verify = owner real-OTP prod check of the KYC form
+  (Address Proof still required + self-declaration gone) — FE gating is unit-tested + staging-verified + audit-clean.
 - **🆕 PER-OUTLET PAYOUT MANDATE (develop `11fe3a8`, gate-green, audit-clean, ✅ STAGING-VERIFIED):** the client can configure
   PER OUTLET (at master-upload) which payout details an outlet must give — new `Outlet.requiredPaymentType` enum `BANK|UPI|ANY`
   (NOT NULL DEFAULT BANK, additive migration). HARD MANDATE: the uploaded value pins the KYC Bank/UPI toggle (rep can't change);
@@ -367,17 +375,20 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 | 8 | `4b33e4c` | presence-based partner wallet, sales+partner ledger field-name (shared resolver), pre-OTP copy |
 | 9 | `ebd474b` | payout UTR "Apply" query-vs-body fix |
 | 10 | `437045a` | (2026-07-19) — wallet-surfacing (credit payouts in partner wallet) + §A-DOMAIN P1/P2/P4/P4b + `client_domains` migration; verified live |
-| 11 | `e8de31a` | **CURRENT PROD** (2026-07-20) — §A-DOMAIN COMPLETE: sales-ledger payout unification + D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6 (S1 edge-secret NOW ENFORCING on prod + proxy/worker tests + favicon-from-DB-branding + 2nd-tenant E2E + 2 finding-fixes `58ce1ab`). 24 commits, CODE-ONLY (no migrations); verified live (SHA, health, D-1 routing, S1 forge-rejected). Backup `1784547142461` |
+| 11 | `e8de31a` | (2026-07-20) — §A-DOMAIN COMPLETE: sales-ledger payout unification + D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6 (S1 edge-secret NOW ENFORCING on prod + proxy/worker tests + favicon-from-DB-branding + 2nd-tenant E2E + 2 finding-fixes `58ce1ab`). 24 commits, CODE-ONLY (no migrations); verified live. Backup `1784547142461` |
+| 12 | `d028566` | (2026-07-22) — per-outlet PAYOUT MANDATE (`Outlet.requiredPaymentType`, live no-flag) + KYC address-proof WAIVER + infra-workflow (Direct-VPC-egress + `/health/ready` startup probe + `REDIS_URL` removal). 33 commits, **2 additive migrations** (`..._add_outlet_required_payment_type`, `..._add_kyc_address_name_mismatch`) verified applied; both services `/health/ready` 200. Rollback ref `e8de31a` |
+| 13 | `2187498` | **CURRENT PROD** (2026-07-22) — waiver SEMANTICS-FIX (drops ONLY the self-declaration; Address Proof stays required) + prod deoleo `clients.features.kycAddressProofWaiver=true` SET (guarded write, keycount 10→11, rbac untouched). 1 commit, CODE-ONLY (no migrations); verified live (SHA, /health/ready). Waiver now LIVE for Deoleo. Rollback ref `d028566` |
 
 ## START THE SESSION
 Greet. State current status, then present the open pickups and ask which to take (do NOT hard-lead one — the next move is
 the owner's choice among the leftovers below).
 
-**STATE:** prod == main == `e8de31a` (CUTOVER #11 LIVE 2026-07-20). §A-DOMAIN COMPLETE + fully live on prod. **develop `99d46b8`**
-(verify via `git log`) = prod + test-only/doc + infra-cost commits + **TWO real features awaiting the next migration cutover (#12):**
-the 🆕 KYC ADDRESS-PROOF WAIVER (`2f21a8e`, needs a PROD `clients.features.kycAddressProofWaiver=true` flag-set at go-live) and the
-🆕 PER-OUTLET PAYOUT MANDATE (`11fe3a8`, `Outlet.requiredPaymentType` BANK|UPI|ANY, no prod flag — defaults BANK). Both gate-green
-(api jest 1557 · nest 0 · FE vitest 1924 · tsc 0), audit-clean, ✅ STAGING-VERIFIED.
+**STATE:** prod == main == develop == `2187498` (CUTOVERS #12 `d028566` + #13 `2187498`, both LIVE 2026-07-22; verify via `git log`).
+develop and main are at the SAME SHA — nothing pending. **Both develop features are now LIVE in prod:** the PER-OUTLET PAYOUT MANDATE
+(no flag, defaults BANK) and the KYC ADDRESS-PROOF WAIVER (semantics-corrected — drops only the self-declaration, Address Proof stays
+required — + prod deoleo `clients.features.kycAddressProofWaiver=true` SET). Gate at #13: api jest 1557 · nest 0 · FE vitest 1930 · tsc 0.
+Only remaining verify = the owner's real-OTP prod check of the KYC form (waiver behaviour + payout-mandate toggle) — both FE-gated,
+unit-tested + staging-verified + audit-clean.
 
 **✅ INFRA COST-REDUCTION — FULLY COMPLETE this session (2026-07-22). Canonical doc = `platform/docs/plans/INFRA-ARCHITECTURE.md`
 (current topology + the change log + the "Leftover / open infra items" pick-up list); detail in memory [[infra-cost-reduction]].**
@@ -391,7 +402,8 @@ All stale Redis/connector refs swept from code + docs; independent grep-audit cl
 1. **Infra pause levers** — only if Deoleo go-live slips post-Sept: prod Cloud-Run-min-0 + pause prod schedulers (~₹800/mo), stop
    `gifsy-db-dev`/`gifsy-db` in a full freeze (~₹1k/₹2k/mo). **Blocked on two owner answers: is staging-UAT needed during the pause? is
    dev continuing?** Reversible; bring-up < 1hr.
-2. **Cutover #12** — ship the 2 develop features to prod (owner-gated; waiver needs the prod `clients.features` flag-set at go-live).
+2. ✅ **Cutover #12/#13 DONE** (2026-07-22) — both develop features + the waiver semantics-fix + the prod waiver flag are LIVE.
+   Only remaining = the owner's real-OTP prod UAT of the KYC form.
 3. **Other open threads** (below): Notifications-Core go/no-go (owner decision), #74 owner-ops (monitoring/backups/cred-rotation), the
    E2E harness STAGING run-mode (optional), the 2ND-TENANT LOW items + POST-GO-LIVE-BACKLOG.
 
