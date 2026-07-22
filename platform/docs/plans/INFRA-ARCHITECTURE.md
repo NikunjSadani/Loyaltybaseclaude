@@ -106,6 +106,30 @@ attachment (they proxy `/api/*` → the backend and never touch the DB).
 
 ---
 
+## Leftover / open infra items (pick-up list)
+The three cost-reduction changes above are DONE. What remains is **owner-decision-gated**, not blocked on
+engineering — nothing here is half-built:
+
+1. **Idle-cost "pause levers" (for a possible post-Sept Deoleo postponement).** Reversible; only worth doing
+   if the launch actually slips. **Needs two owner answers first: (a) is staging-UAT needed during the pause?
+   (b) is dev continuing?**
+   - Prod Cloud Run `min-instances 1→0` + pause the prod schedulers (`push-drain-prod`, `expire-sweep-prod`)
+     → ~₹800/mo. Instant/reversible; first hit after idle cold-starts ~10–20s (the `/health/ready` startup
+     probe gates the DB path, so no failed requests). Safe pre-launch (no users).
+   - Stop `gifsy-db-dev` (~₹1,000/mo) — only if dev is idle.
+   - Stop `gifsy-db` (prod+staging shared, ~₹2,000/mo) — **only** if no staging UAT during the freeze; take a
+     backup first. This is the deepest lever (prod DB offline) — do last, and only in a full freeze.
+   - Bring-up from a full freeze ≈ under an hour, no data loss. Detail: memory `[[infra-cost-reduction]]`.
+2. **Two develop features await the next prod migration cutover (#12)** — the KYC address-proof waiver
+   (`2f21a8e`) + the per-outlet payout mandate (`11fe3a8`). Not infra, but the next thing that touches prod.
+   `deploy.yml` is already Direct-VPC-egress-consistent, so cutover #12 keeps prod on the new networking; the
+   prod `gifsy-migrate` job is already migrated off the connector, so its `jobs deploy` won't conflict.
+3. **Minor posture note (optional, low priority):** `gifsy-db-dev` is a PUBLIC-IP instance (dev-only, lower
+   stakes) while prod/staging are private-IP. Tightening dev to private-IP would add connector/proxy
+   complexity for local dev — not worth it unless a policy requires it. Left as-is intentionally.
+4. **Cosmetic (no action):** ~354 old Cloud Run revisions still tag the deleted connector — zero running
+   instances, zero cost, un-startable; Cloud Run auto-prunes them. Not a doc/code reference.
+
 ## Cross-references
 - **[`DIRECT-VPC-EGRESS-MIGRATION.md`](DIRECT-VPC-EGRESS-MIGRATION.md)** — full phased plan + as-run findings for change 2 (the flag gotchas per command type, the `/cloudsql`-socket-over-direct-egress proof, the startup-probe R2 fix, rollback).
 - **`terraform/README.md`** — cost table + provisioning notes (already reflects Redis removal + Direct VPC egress).

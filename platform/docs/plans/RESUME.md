@@ -12,7 +12,7 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 
 ## 🟢 CURRENT STATE
 - **prod == main == `e8de31a`** (CUTOVER #11, live 2026-07-20 — §A-DOMAIN COMPLETE: D-1 + P5 + P6/S1 +
-  sales-ledger unification). **develop `748fd81`** (feature commits `2f21a8e`+`11fe3a8`, docs + the Redis-removal infra commit on top) = prod + TEST-ONLY/doc
+  sales-ledger unification). **develop `99d46b8`** (feature commits `2f21a8e`+`11fe3a8`, then the full infra-cost-reduction work: Redis + VPC→Direct-egress + Artifact-Registry, all DONE + documented) = prod + TEST-ONLY/doc
   commits (E2E-harness revival — see below) **+ TWO REAL features awaiting the next cutover: the 🆕 KYC ADDRESS-PROOF WAIVER
   (`2f21a8e`) and the 🆕 PER-OUTLET PAYOUT MANDATE (`11fe3a8`, ✅ staging-verified) — each adds a migration (`..._add_kyc_address_name_mismatch`, `..._add_outlet_required_payment_type`)**;
   the 2 tiny FE fixes also ride the cutover. Verify HEADs via `git log`.
@@ -368,23 +368,31 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 | 11 | `e8de31a` | **CURRENT PROD** (2026-07-20) — §A-DOMAIN COMPLETE: sales-ledger payout unification + D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6 (S1 edge-secret NOW ENFORCING on prod + proxy/worker tests + favicon-from-DB-branding + 2nd-tenant E2E + 2 finding-fixes `58ce1ab`). 24 commits, CODE-ONLY (no migrations); verified live (SHA, health, D-1 routing, S1 forge-rejected). Backup `1784547142461` |
 
 ## START THE SESSION
-Greet. **THE OWNER SAID "we will start with the infra question again" → LEAD WITH THAT.** First state current status, then
-go straight to the infra cost-reduction pickup.
-State: **prod == main == `e8de31a` (CUTOVER #11 LIVE 2026-07-20). §A-DOMAIN COMPLETE + fully live on prod. develop `748fd81`
-(feature commits `2f21a8e`+`11fe3a8`, docs on top) = prod + test-only/doc + TWO real features awaiting the next migration
-cutover: the 🆕 KYC ADDRESS-PROOF WAIVER (`2f21a8e`, needs a PROD `clients.features.kycAddressProofWaiver=true` flag-set at
-go-live) and the 🆕 PER-OUTLET PAYOUT MANDATE (`11fe3a8`, `Outlet.requiredPaymentType` BANK|UPI|ANY, no prod flag needed —
-defaults to BANK). Both gate-green (api jest 1557 · nest 0 · FE vitest 1924 · tsc 0), independent-audit-clean, and ✅
-STAGING-VERIFIED (the payout-mandate upload-reject + submit-guard proven live on staging `ffe82bd`).**
-**▶ INFRA COST-REDUCTION — IN PROGRESS (memory [[infra-cost-reduction]] has the full breakdown):** Deoleo go-live may postpone to
-post-Sept; the owner wants to cut idle GCP cost (~₹17.5k/mo ≈ $210). **✅ DONE: both Redis instances DELETED + terraform/deploy
-wiring stripped (develop `748fd81`) → ~₹8,500/mo (52%) gone, permanent, zero impact** (Redis was never wired); the `REDIS_URL` secret
-+ prod env var are now **DELETED too** (Redis fully gone). **✅ VPC connector migration COMPLETE:** `gifsy-connector` was NOT a straight
-delete (both live services routed private-IP DB traffic through it) — it was **migrated to Direct VPC egress** (Phase 1+3+4 DONE + verified
-2026-07-22, connector then DELETED, ~₹1,445/mo saved). Both former "owner-gated exceptions" are now resolved — see `INFRA-ARCHITECTURE.md`.
-**✅ Artifact-Registry durable cleanup policy DONE + LIVE (2026-07-22, independent-audited, serving imgs verified intact).** **REMAINING
-owner decisions:** prod Cloud-Run-min-0 + pause prod schedulers (~₹800/mo); stop `gifsy-db`/`gifsy-db-dev` if fully frozen — **need: is staging-UAT
-still needed during the pause? is dev continuing?** (Dead `ioredis`/`cache-manager` deps ✅ REMOVED from api/package.json, gate-green.)
-All prod/staging infra changes owner-gated; gcloud+wrangler authed. Then note the other open items (both features awaiting cutover #12;
-the waiver's one real-OTP prod smoke) and ask. **REMEMBER: never unilaterally defer follow-up work — surface it, let the owner decide** [[no-unilateral-deferral]].
+Greet. State current status, then present the open pickups and ask which to take (do NOT hard-lead one — the next move is
+the owner's choice among the leftovers below).
+
+**STATE:** prod == main == `e8de31a` (CUTOVER #11 LIVE 2026-07-20). §A-DOMAIN COMPLETE + fully live on prod. **develop `99d46b8`**
+(verify via `git log`) = prod + test-only/doc + infra-cost commits + **TWO real features awaiting the next migration cutover (#12):**
+the 🆕 KYC ADDRESS-PROOF WAIVER (`2f21a8e`, needs a PROD `clients.features.kycAddressProofWaiver=true` flag-set at go-live) and the
+🆕 PER-OUTLET PAYOUT MANDATE (`11fe3a8`, `Outlet.requiredPaymentType` BANK|UPI|ANY, no prod flag — defaults BANK). Both gate-green
+(api jest 1557 · nest 0 · FE vitest 1924 · tsc 0), audit-clean, ✅ STAGING-VERIFIED.
+
+**✅ INFRA COST-REDUCTION — FULLY COMPLETE this session (2026-07-22). Canonical doc = `platform/docs/plans/INFRA-ARCHITECTURE.md`
+(current topology + the change log + the "Leftover / open infra items" pick-up list); detail in memory [[infra-cost-reduction]].**
+Three changes DONE + runtime-verified, **~₹10k/mo (~57% of the bill) saved, zero prod impact:** (1) **Redis DELETED** (both
+Memorystore instances + `REDIS_URL` secret + prod env + the dead `ioredis`/`cache-manager` deps — was never wired); (2) **VPC connector
+→ Direct VPC egress** (`gifsy-connector` migrated then DELETED — prod cut over via canary→ramp + a `/health/ready` startup probe; both
+workflows + terraform updated; all 7 jobs migrated); (3) **Artifact Registry durable cleanup policy LIVE** + stray `gifsy-repo` deleted.
+All stale Redis/connector refs swept from code + docs; independent grep-audit clean; gate green; `terraform validate` OK.
+
+**▶ LEFTOVER / NEXT PICKUPS (all owner-DECISION-gated — nothing half-built; see INFRA-ARCHITECTURE.md "Leftover / open infra items"):**
+1. **Infra pause levers** — only if Deoleo go-live slips post-Sept: prod Cloud-Run-min-0 + pause prod schedulers (~₹800/mo), stop
+   `gifsy-db-dev`/`gifsy-db` in a full freeze (~₹1k/₹2k/mo). **Blocked on two owner answers: is staging-UAT needed during the pause? is
+   dev continuing?** Reversible; bring-up < 1hr.
+2. **Cutover #12** — ship the 2 develop features to prod (owner-gated; waiver needs the prod `clients.features` flag-set at go-live).
+3. **Other open threads** (below): Notifications-Core go/no-go (owner decision), #74 owner-ops (monitoring/backups/cred-rotation), the
+   E2E harness STAGING run-mode (optional), the 2ND-TENANT LOW items + POST-GO-LIVE-BACKLOG.
+
+Then ask which to pick up. **REMEMBER: never unilaterally defer follow-up work — surface it, let the owner decide** [[no-unilateral-deferral]];
+orchestrate substantial work by default [[default-to-orchestration]].
 ```
