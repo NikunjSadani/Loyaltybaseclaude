@@ -101,7 +101,9 @@ jobs:
             --command=npx \
             --args=prisma,migrate,deploy \
             --set-secrets=DATABASE_URL=DATABASE_URL_STAGING:latest \
-            --vpc-connector=gifsy-connector \
+            --network=gifsy-vpc \
+            --subnet=gifsy-subnet-asia-south1 \
+            --vpc-egress=private-ranges-only \
             --set-cloudsql-instances=${{ env.SQL_INSTANCE }} \
             --service-account=gifsy-api-sa@gifsy-platform.iam.gserviceaccount.com \
             --execute-now --wait
@@ -121,7 +123,9 @@ jobs:
             --max-instances=3 \
             --cpu-throttling \
             --add-cloudsql-instances=${{ env.SQL_INSTANCE }} \
-            --vpc-connector=gifsy-connector \
+            --network=gifsy-vpc \
+            --subnet=gifsy-subnet-asia-south1 \
+            --vpc-egress=private-ranges-only \
             --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=7d,JWT_REFRESH_EXPIRES_IN=30d,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,FIXED_OTP=123456,ALLOW_FIXED_OTP=true,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in" \
             --set-secrets="\
               DATABASE_URL=DATABASE_URL_STAGING:latest,\
