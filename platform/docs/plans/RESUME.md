@@ -298,11 +298,15 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   audit disproved it** (commit `4a0794a` fixed the terraform/README comments). `gifsy-db` is PRIVATE-IP-ONLY (`ipv4Enabled=false`,
   10.49.0.3) and BOTH live prod+staging API services route to it THROUGH the connector — deleting it = full DB outage; the terraform
   staging block that omits `vpc_access` is stale drift. Only cost lever = migrate to Direct VPC egress (tested change, not a delete).
-  **REMAINING LEVERS (owner decision open):** Artifact Registry — the `keep-last-10` policy is KEEP-only → DELETES NOTHING (repo ~94GB);
-  add a DELETE rule + drop empty `gifsy-repo` → ~₹700-830/mo; prod Cloud Run min=1→0 + pause prod schedulers (~₹800/mo — note push-drain
-  pings every minute, so staging isn't truly sleeping either); stop `gifsy-db`/`gifsy-db-dev` when fully frozen (needs the
-  staging-UAT?/dev-continuing? answers). Also owner's call: strip dead `ioredis`/`cache-manager` deps from api/package.json. All
-  prod/staging infra changes owner-gated; gcloud+wrangler authed; terraform in `terraform/`.
+  **✅ DONE (2026-07-22): Artifact Registry durable cleanup policy LIVE on `gifsy-images`** (independent-audited SAFE, dry-run-verified,
+  enabled live; 4 serving images confirmed intact). Was a KEEP-only `keep-last-10` that deleted nothing (repo ~94GB / 699 imgs, all <40d
+  = temporary build churn). New policy per owner steering (design for FUTURE steady-state, not current churn): keep-prod-latest (anchors
+  current prod via `latest` tag) + keep-recent-30 + delete-untagged>7d + delete-old>30d (self-adapting retention). Untagged=0 disproved the
+  multi-arch outage risk. Immediate reclaim small (~62 old imgs); bulk self-reduces as staging ages out + building slows. Policy JSON in
+  session scratchpad. Trivial pending: drop empty `gifsy-repo` (0 bytes) after a ref-check. **REMAINING LEVERS (owner decision open):**
+  prod Cloud Run min=1→0 + pause prod schedulers (~₹800/mo — note push-drain pings every minute, so staging isn't truly sleeping either);
+  stop `gifsy-db`/`gifsy-db-dev` when fully frozen (needs the staging-UAT?/dev-continuing? answers). Also owner's call: strip dead
+  `ioredis`/`cache-manager` deps from api/package.json. All prod/staging infra changes owner-gated; gcloud+wrangler authed; terraform in `terraform/`.
 - **✅ E2E HARNESS REVIVAL — DONE (test-only, zero prod impact) — `platform/docs/plans/E2E-HARNESS-REVIVAL.md`.**
   Revived + clean-baselined (`4b0d03f`+`f89697c`, 295/0/3, reproducible on a fresh gifsy_dev; runs against a local
   prod build, auto reset+seeds via `e2e/global-setup.ts`). ALL of (A) requestAs (was the run-target, not a bug),
@@ -371,8 +375,8 @@ wiring stripped (develop `748fd81`) → ~₹8,500/mo (52%) gone, permanent, zero
 exceptions left in place:** (i) the LIVE `REDIS_URL` secret must survive until cutover #12 redeploys prod without it (do NOT
 `terraform apply` prod before then); (ii) the VPC connector (~₹1,445/mo) is **REQUIRED (not removable — I was wrong; `gifsy-db` is
 private-IP-only and both live services route through it; fixed docs in `4a0794a`)** — only lever is a Direct-VPC-egress migration.
-**REMAINING owner decisions:** Artifact-Registry — add a DELETE rule (the `keep-last-10` KEEP-only policy deletes nothing; repo ~94GB)
-~₹700-830/mo; prod Cloud-Run-min-0 + pause prod schedulers (~₹800/mo); stop `gifsy-db`/`gifsy-db-dev` if fully frozen — **need: is staging-UAT
+**✅ Artifact-Registry durable cleanup policy DONE + LIVE (2026-07-22, independent-audited, serving imgs verified intact).** **REMAINING
+owner decisions:** prod Cloud-Run-min-0 + pause prod schedulers (~₹800/mo); stop `gifsy-db`/`gifsy-db-dev` if fully frozen — **need: is staging-UAT
 still needed during the pause? is dev continuing?** Plus owner's call: strip dead `ioredis`/`cache-manager` deps from api/package.json.
 All prod/staging infra changes owner-gated; gcloud+wrangler authed. Then note the other open items (both features awaiting cutover #12;
 the waiver's one real-OTP prod smoke) and ask. **REMEMBER: never unilaterally defer follow-up work — surface it, let the owner decide** [[no-unilateral-deferral]].
