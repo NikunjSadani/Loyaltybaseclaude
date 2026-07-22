@@ -41,15 +41,27 @@ only at the final step (connector deletion).
 
 ---
 
+## ⭐ AS-RUN FINDINGS (Phase 1 executed on staging 2026-07-22 — apply to prod)
+1. **R1 RESOLVED — the `/cloudsql` socket works over Direct VPC egress.** Runtime-proven on
+   staging: the migrate job (`prisma migrate deploy`) reached the private-IP DB and succeeded
+   (13.97s), and the API service did a full OTP login round-trip (send-otp WRITE + verify-otp READ →
+   valid CLIENT_ADMIN token). **No `DATABASE_URL` change, no SSL rework** — the happy path holds.
+2. **CRITICAL flag gotcha (differs by command type):**
+   - `gcloud run deploy` / `gcloud run services update` (the **API services**) **DO** support
+     `--clear-vpc-connector` → keep it: `--clear-vpc-connector --network=… --subnet=… --vpc-egress=private-ranges-only`.
+   - `gcloud run jobs deploy` (the **migrate jobs**) does **NOT** support `--clear-vpc-connector`
+     (only `--vpc-connector`/`--network`/`--subnet`). Its command uses **`--network/--subnet/--vpc-egress` only (NO `--clear`)**.
+   - A resource that **already has a connector** rejects a bare `--network` swap
+     (`"VPC connector and direct VPC can not be used together"`). So each **connector-bearing job**
+     needs a **one-time** `gcloud run jobs update <job> --clear-vpc-connector --network=gifsy-vpc --subnet=gifsy-subnet-asia-south1 --vpc-egress=private-ranges-only`
+     BEFORE the workflow's `jobs deploy --network …` will succeed. (Services auto-clear via `--clear-vpc-connector`, so no separate step for them.)
+   - **Prod (deploy.yml) must therefore:** API deploy → keep `--clear-vpc-connector`; migrate-job deploy → `--network/--subnet` only; AND run the one-time `jobs update --clear-vpc-connector` on `gifsy-migrate` (+ the 5 ad-hoc prod/shared jobs) before/at cutover.
+
 ## The exact change-set (the swap, everywhere)
-Everywhere a workload attaches the connector, replace:
-```
---vpc-connector=gifsy-connector
-```
-with (keeping `--set-cloudsql-instances` / the `/cloudsql` volume unchanged):
-```
---network=gifsy-vpc --subnet=gifsy-subnet-asia-south1 --vpc-egress=private-ranges-only
-```
+Everywhere a workload attaches the connector, replace `--vpc-connector=gifsy-connector` with
+`--network=gifsy-vpc --subnet=gifsy-subnet-asia-south1 --vpc-egress=private-ranges-only`
+(keeping `--set-cloudsql-instances` / the `/cloudsql` volume unchanged) — **plus `--clear-vpc-connector`
+ONLY on the `run deploy`/services commands, NOT on `jobs deploy` (see AS-RUN FINDINGS #2).**
 Terraform equivalent inside `template.vpc_access`:
 ```hcl
 vpc_access {
