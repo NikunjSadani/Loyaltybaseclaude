@@ -101,7 +101,6 @@ jobs:
             --command=npx \
             --args=prisma,migrate,deploy \
             --set-secrets=DATABASE_URL=DATABASE_URL_STAGING:latest \
-            --clear-vpc-connector \
             --network=gifsy-vpc \
             --subnet=gifsy-subnet-asia-south1 \
             --vpc-egress=private-ranges-only \
