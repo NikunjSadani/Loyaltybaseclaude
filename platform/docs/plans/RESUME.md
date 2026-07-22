@@ -297,7 +297,10 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   before then; (ii) the **VPC connector (~₹1,445/mo) is REQUIRED, NOT removable — I wrongly called it "vestigial"; owner challenged, live
   audit disproved it** (commit `4a0794a` fixed the terraform/README comments). `gifsy-db` is PRIVATE-IP-ONLY (`ipv4Enabled=false`,
   10.49.0.3) and BOTH live prod+staging API services route to it THROUGH the connector — deleting it = full DB outage; the terraform
-  staging block that omits `vpc_access` is stale drift. Only cost lever = migrate to Direct VPC egress (tested change, not a delete).
+  staging block that omits `vpc_access` is stale drift. Only cost lever = migrate to Direct VPC egress (tested change, not a delete)
+  — **Direct-VPC-egress migration IN PROGRESS: Phase 1 (staging) ✅ DONE + runtime-verified 2026-07-22 (both staging api + migrate job
+  on direct egress via the workflow; DB r/w proven; socket rides direct egress = no DATABASE_URL change; flag gotchas fixed). Now soaking
+  2-3d, then prod (Phase 3) + connector delete (Phase 4) on owner go. Plan: `platform/docs/plans/DIRECT-VPC-EGRESS-MIGRATION.md`.**
   **✅ DONE (2026-07-22): Artifact Registry durable cleanup policy LIVE on `gifsy-images`** (independent-audited SAFE, dry-run-verified,
   enabled live; 4 serving images confirmed intact). Was a KEEP-only `keep-last-10` that deleted nothing (repo ~94GB / 699 imgs, all <40d
   = temporary build churn). New policy per owner steering (design for FUTURE steady-state, not current churn): keep-prod-latest (anchors

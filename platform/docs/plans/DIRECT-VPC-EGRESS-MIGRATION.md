@@ -83,7 +83,12 @@ staging-api block absent = optional add), `terraform/vpc.tf` (connector resource
 ### Phase 0 — Pre-flight ✅ DONE (this audit)
 GA/region, firewall, consumer inventory, DB-connection method, IP headroom — all confirmed above.
 
-### Phase 1 — STAGING cutover = the canary  *(the critical de-risking phase)*
+### Phase 1 — STAGING cutover = the canary  ✅ DONE + VERIFIED (2026-07-22)
+**Result:** staging API + migrate job both on Direct VPC egress; the **workflow** deploys the
+pattern end-to-end (build → migrate job over direct egress `ttkm7` success → API `run deploy`);
+runtime-verified `/health` 200 + OTP login round-trip (send-otp WRITE 200, verify-otp READ 200 →
+CLIENT_ADMIN token). R1 resolved (socket, no DATABASE_URL change). Workflow flags corrected
+(`deploy-staging.yml` `d94c984`). **Now: 2–3 day soak, then prod (Phase 3) on owner go.** Original steps:
 Staging shares the same VPC / subnet / DB, so it proves the whole thing before prod is touched.
 1. Edit `deploy-staging.yml`: swap the connector flags on the `gifsy-api-staging` deploy **and** the
    `gifsy-migrate-staging` job (the change-set above). *(Parallelizable with the doc + terraform edits.)*
