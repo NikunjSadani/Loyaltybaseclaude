@@ -112,7 +112,14 @@ The 5 ad-hoc jobs pin the connector; they must not be orphaned when it's deleted
   `gifsy-activate-deoleo` — historical). Update the runbook command templates
   (`CUTOVER-RUNBOOK.md`, `PROD-DATA-LOAD.md`, `MIGRATIONS.md`) so future ad-hoc jobs use direct egress.
 
-### Phase 3 — PROD cutover  *(owner-gated; low-traffic window)*
+### Phase 3 — PROD cutover  ✅ DONE + VERIFIED (2026-07-22, owner "go ahead")
+**Result:** prod `gifsy-api` on **Direct VPC egress** — no-traffic canary (rev `00026-hap`, image
+`e8de31a`, `/health/ready` startup probe) → ramped 10→50→100%, `/health/ready` 200 throughout (live
+`SELECT 1` over direct egress), zero error logs. Connector rev `00024-7sp` retained at 0% = **instant
+rollback** (`update-traffic --to-revisions=gifsy-api-00024-7sp=100`). All 7 jobs migrated off the
+connector. `deploy.yml`+`deploy-staging.yml` updated (flags + `/health/ready` startup probe) so future
+deploys stay on direct egress. **Startup probe = the R2 fix** (a new instance isn't served traffic until
+its DB is reachable → cold-start latency never hits a user). **Prod FE unaffected (no VPC).** Original steps:
 1. Edit `deploy.yml`: swap the connector flags on the `gifsy-api` deploy + the `gifsy-migrate` job.
 2. *(Extra safety)* optionally deploy a `--no-traffic` canary revision on `gifsy-api` first, validate its
    DB path, then ramp traffic 10→50→100 via `update-traffic`.
@@ -120,7 +127,14 @@ The 5 ad-hoc jobs pin the connector; they must not be orphaned when it's deleted
    migrate job). Keep the connector **alive** throughout.
 4. Rollback if anything fails: `update-traffic` back to the prior (connector) revision — instant.
 
-### Phase 4 — Decommission + cleanup  *(after prod soaks clean)*
+### Phase 4 — Decommission + cleanup  ⏳ HELD for prod soak (the only remaining step = the ₹1,445/mo saving)
+**Blocking pre-req before deleting the connector:** GCP won't delete a connector still referenced by any
+revision/job. The retained rollback revision `gifsy-api-00024-7sp` (connector) + the old staging api
+revisions still reference it. So deletion means **giving up the instant rollback** — do it only AFTER
+prod soaks clean on direct egress (hours/days) + owner confirm. To execute: delete the old connector-based
+revisions (`gcloud run revisions delete gifsy-api-00024-7sp …`), confirm no consumers, then
+`gcloud compute networks vpc-access connectors delete gifsy-connector --region asia-south1`, then terraform
++ docs cleanup. Also drop the stale `gifsy-api-00025-xey` failed-canary revision + empty `gifsy-repo`. Steps:
 1. Delete the connector: `gcloud compute networks vpc-access connectors delete gifsy-connector --region asia-south1`. **← the savings step, and the only irreversible one.**
 2. Terraform (drift-doc, `terraform validate`): replace the prod-api `vpc_access` block, remove the
    connector `depends_on` + the `google_vpc_access_connector` resource, update comments + the cost line

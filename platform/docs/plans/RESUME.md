@@ -298,9 +298,12 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   audit disproved it** (commit `4a0794a` fixed the terraform/README comments). `gifsy-db` is PRIVATE-IP-ONLY (`ipv4Enabled=false`,
   10.49.0.3) and BOTH live prod+staging API services route to it THROUGH the connector — deleting it = full DB outage; the terraform
   staging block that omits `vpc_access` is stale drift. Only cost lever = migrate to Direct VPC egress (tested change, not a delete)
-  — **Direct-VPC-egress migration IN PROGRESS: Phase 1 (staging) ✅ DONE + runtime-verified 2026-07-22 (both staging api + migrate job
-  on direct egress via the workflow; DB r/w proven; socket rides direct egress = no DATABASE_URL change; flag gotchas fixed). Now soaking
-  2-3d, then prod (Phase 3) + connector delete (Phase 4) on owner go. Plan: `platform/docs/plans/DIRECT-VPC-EGRESS-MIGRATION.md`.**
+  — **Direct-VPC-egress migration: Phase 1 (staging) ✅ + Phase 3 (PROD) ✅ DONE + runtime-verified 2026-07-22 (owner "go ahead").**
+  prod `gifsy-api` on Direct VPC egress (canary rev `00026-hap` + `/health/ready` startup probe → ramp 10→50→100%, DB SELECT 1 over
+  direct egress 200 throughout, zero errors; connector rev `00024-7sp` @0% = instant rollback). All 7 jobs off the connector; both
+  workflows updated (`ef8d697`, flags + startup probe = R2 fix). Manual `services update` cutover, decoupled from feature cutover #12.
+  **ONLY REMAINING = Phase 4: DELETE the connector (the ₹1,445/mo saving) — HELD for prod soak + owner confirm** (must first delete the
+  `00024` rollback rev = give up rollback). Plan: `platform/docs/plans/DIRECT-VPC-EGRESS-MIGRATION.md`; detail in [[infra-cost-reduction]].
   **✅ DONE (2026-07-22): Artifact Registry durable cleanup policy LIVE on `gifsy-images`** (independent-audited SAFE, dry-run-verified,
   enabled live; 4 serving images confirmed intact). Was a KEEP-only `keep-last-10` that deleted nothing (repo ~94GB / 699 imgs, all <40d
   = temporary build churn). New policy per owner steering (design for FUTURE steady-state, not current churn): keep-prod-latest (anchors
