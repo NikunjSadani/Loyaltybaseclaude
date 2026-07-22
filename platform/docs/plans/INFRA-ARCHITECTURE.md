@@ -110,6 +110,20 @@ attachment (they proxy `/api/*` → the backend and never touch the DB).
 The three cost-reduction changes above are DONE. What remains is **owner-decision-gated**, not blocked on
 engineering — nothing here is half-built:
 
+0. **Cloud SQL cost analysis — DECISION: KEEP AS-IS (2026-07-22).** After the Redis/connector/LB cuts, the
+   **~₹4,500/mo Cloud SQL forecast is the single biggest line** — owner asked whether to reduce it. Reconciled
+   (est., no live billing access — SA lacks perms, Billing API disabled): the ₹4,500 is the WHOLE Cloud SQL
+   category = **both** instances + storage + backups, NOT `db-g1-small` alone: `gifsy-db` all-in ≈ ₹2,700–2,900
+   (g1-small compute ~₹2,400 + 20GB SSD ~₹340 + backups/PITR ~₹300–500), `gifsy-db-dev` ≈ ₹1,000
+   (f1-micro ~₹800 + 10GB ~₹170). Already at the structural floor: **Enterprise edition** (not Plus), **ZONAL**
+   (not HA), **shared instance** (prod+staging on one), SSD-only, disk can't shrink. Levers considered:
+   (i) drop `gifsy-db` to **db-f1-micro** (only tier below g1-small) → saves ~₹1,500–1,800/mo compute, but 0.6GB
+   RAM running two DBs is "not for production" → OOM/thrash under load; viable ONLY pre-launch, reversible
+   (~1–2 min restart); (ii) stop `gifsy-db-dev` (~₹1,000/mo, zero prod impact if dev idle); (iii) CUD — likely
+   **NOT eligible** for shared-core tiers. **OWNER DECISION 2026-07-22: keep everything as-is — no client update
+   received yet, so not pausing/downgrading.** Revisit if the launch slips (then the pause levers below apply).
+   Free micro-win still open: `gifsy-db` `storageAutoResizeLimit=0` (uncapped) — could set a 50GB ceiling to
+   avoid a runaway-growth bill; zero downside.
 1. **Idle-cost "pause levers" (for a possible post-Sept Deoleo postponement).** Reversible; only worth doing
    if the launch actually slips. **Needs two owner answers first: (a) is staging-UAT needed during the pause?
    (b) is dev continuing?**
@@ -120,10 +134,9 @@ engineering — nothing here is half-built:
    - Stop `gifsy-db` (prod+staging shared, ~₹2,000/mo) — **only** if no staging UAT during the freeze; take a
      backup first. This is the deepest lever (prod DB offline) — do last, and only in a full freeze.
    - Bring-up from a full freeze ≈ under an hour, no data loss. Detail: memory `[[infra-cost-reduction]]`.
-2. **Two develop features await the next prod migration cutover (#12)** — the KYC address-proof waiver
-   (`2f21a8e`) + the per-outlet payout mandate (`11fe3a8`). Not infra, but the next thing that touches prod.
-   `deploy.yml` is already Direct-VPC-egress-consistent, so cutover #12 keeps prod on the new networking; the
-   prod `gifsy-migrate` job is already migrated off the connector, so its `jobs deploy` won't conflict.
+2. **✅ Cutover #12 + #13 DONE (2026-07-22)** — the KYC address-proof waiver (semantics-corrected) + the
+   per-outlet payout mandate are LIVE in prod (`2187498`), incl. the prod `kycAddressProofWaiver` flag. Both
+   migrations applied; the Direct-VPC-egress deploy.yml carried prod cleanly. (Was the pending item here.)
 3. **Minor posture note (optional, low priority):** `gifsy-db-dev` is a PUBLIC-IP instance (dev-only, lower
    stakes) while prod/staging are private-IP. Tightening dev to private-IP would add connector/proxy
    complexity for local dev — not worth it unless a policy requires it. Left as-is intentionally.
