@@ -302,8 +302,10 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   prod `gifsy-api` on Direct VPC egress (canary rev `00026-hap` + `/health/ready` startup probe → ramp 10→50→100%, DB SELECT 1 over
   direct egress 200 throughout, zero errors; connector rev `00024-7sp` @0% = instant rollback). All 7 jobs off the connector; both
   workflows updated (`ef8d697`, flags + startup probe = R2 fix). Manual `services update` cutover, decoupled from feature cutover #12.
-  **ONLY REMAINING = Phase 4: DELETE the connector (the ₹1,445/mo saving) — HELD for prod soak + owner confirm** (must first delete the
-  `00024` rollback rev = give up rollback). Plan: `platform/docs/plans/DIRECT-VPC-EGRESS-MIGRATION.md`; detail in [[infra-cost-reduction]].
+  **✅ Phase 4 DONE (2026-07-22, owner option-b — portal not live → no soak): connector `gifsy-connector` DELETED, ~₹1,445/mo saved,
+  MIGRATION COMPLETE.** Post-delete verified prod+staging `/health/ready` 200 `{db:up}`, zero errors; terraform connector resource removed
+  (`0b8b5f0`, validate Success). Combined session infra savings (Redis+connector) ≈ **₹10k/mo (~57%)**, zero prod impact. Residual cosmetic
+  only (stale `00025-xey` canary rev, empty `gifsy-repo`, old connector revs auto-GC'd). Plan: `platform/docs/plans/DIRECT-VPC-EGRESS-MIGRATION.md`; detail [[infra-cost-reduction]].
   **✅ DONE (2026-07-22): Artifact Registry durable cleanup policy LIVE on `gifsy-images`** (independent-audited SAFE, dry-run-verified,
   enabled live; 4 serving images confirmed intact). Was a KEEP-only `keep-last-10` that deleted nothing (repo ~94GB / 699 imgs, all <40d
   = temporary build churn). New policy per owner steering (design for FUTURE steady-state, not current churn): keep-prod-latest (anchors

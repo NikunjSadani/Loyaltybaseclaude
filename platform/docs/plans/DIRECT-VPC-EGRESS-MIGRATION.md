@@ -127,7 +127,14 @@ its DB is reachable → cold-start latency never hits a user). **Prod FE unaffec
    migrate job). Keep the connector **alive** throughout.
 4. Rollback if anything fails: `update-traffic` back to the prior (connector) revision — instant.
 
-### Phase 4 — Decommission + cleanup  ⏳ HELD for prod soak (the only remaining step = the ₹1,445/mo saving)
+### Phase 4 — Decommission + cleanup  ✅ DONE (2026-07-22, owner option-b: portal not live → no soak needed)
+**MIGRATION COMPLETE.** Connector `gifsy-connector` **DELETED** (`gcloud compute networks vpc-access
+connectors delete` — GCP allowed it; the ~354 old inactive connector-referencing revisions became
+non-startable, harmless). **~₹1,445/mo saved.** Post-delete verified: prod `/health/ready` 200 `{db:up}`
+×5, staging 200 `{db:up}`, zero prod errors. Terraform `google_vpc_access_connector` resource + refs
+removed (`terraform validate` Success, commit `0b8b5f0`) so `apply` won't recreate it. Residual cosmetic
+cleanup (non-urgent, no cost): stale `gifsy-api-00025-xey` failed-canary revision + empty `gifsy-repo`
+AR repo + the ~354 old connector revisions (Cloud Run auto-GCs these over time). Original steps kept below:
 **Blocking pre-req before deleting the connector:** GCP won't delete a connector still referenced by any
 revision/job. The retained rollback revision `gifsy-api-00024-7sp` (connector) + the old staging api
 revisions still reference it. So deletion means **giving up the instant rollback** — do it only AFTER
