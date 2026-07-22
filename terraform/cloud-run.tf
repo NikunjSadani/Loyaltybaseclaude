@@ -25,17 +25,18 @@ resource "google_cloud_run_v2_service" "api_prod" {
       max_instance_count = 10
     }
 
-    # VPC connector — REQUIRED. gifsy-db is a PRIVATE-IP-ONLY Cloud SQL instance
-    # (ipv4Enabled=false, only 10.49.0.3 on gifsy-vpc). The /cloudsql socket volume
-    # below supplies the Cloud SQL Auth Proxy, but that proxy still needs a network
-    # route INTO the VPC to reach a private-IP instance — this connector is that route.
-    # Removing it breaks ALL database access (prod + staging). It formerly ALSO served
-    # the (now-deleted) Redis; the DB purpose remains, so it stays. (A cheaper future
-    # alternative is Cloud Run Direct VPC egress, which replaces the connector — but
-    # that's a tested migration, NOT a delete.)
+    # Direct VPC egress — reaches the PRIVATE-IP-ONLY gifsy-db (10.49.0.3) over the
+    # VPC via a direct subnet interface (replaced the deleted gifsy-connector, 2026-07-22).
+    # The /cloudsql socket volume below supplies the Auth Proxy; this provides its VPC
+    # route. egress=PRIVATE_RANGES_ONLY preserves the posture (public traffic goes direct).
+    # NOTE: the live services are set by the gcloud deploys (workflows) — this block is
+    # honest drift-doc (services carry lifecycle ignore_changes=[template]).
     vpc_access {
-      connector = google_vpc_access_connector.gifsy_connector.id
-      egress    = "PRIVATE_RANGES_ONLY"
+      egress = "PRIVATE_RANGES_ONLY"
+      network_interfaces {
+        network    = google_compute_network.gifsy_vpc.name
+        subnetwork = google_compute_subnetwork.gifsy_subnet.name
+      }
     }
 
     volumes {
@@ -208,7 +209,7 @@ resource "google_cloud_run_v2_service" "api_prod" {
 
   depends_on = [
     google_project_service.apis,
-    google_vpc_access_connector.gifsy_connector,
+    google_compute_subnetwork.gifsy_subnet,
     google_sql_database_instance.gifsy_db,
   ]
 
@@ -293,9 +294,9 @@ resource "google_cloud_run_v2_service" "api_staging" {
     }
 
     # NOTE: this terraform block omits vpc_access, but the LIVE staging service is
-    # deployed WITH --vpc-connector=gifsy-connector (see .github/workflows) — it must
-    # be, since gifsy-db is private-IP-only. This block is stale drift vs the gcloud
-    # deploy; the running service reaches the DB through the connector like prod does.
+    # deployed WITH Direct VPC egress (--network=gifsy-vpc --subnet=gifsy-subnet-asia-south1
+    # --vpc-egress=private-ranges-only, see .github/workflows) — required since gifsy-db is
+    # private-IP-only. This block is stale drift vs the gcloud deploy (which is authoritative).
 
     volumes {
       name = "cloudsql"

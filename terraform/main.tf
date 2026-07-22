@@ -16,7 +16,6 @@ resource "google_project_service" "apis" {
     "storage.googleapis.com",
     "secretmanager.googleapis.com",
     "artifactregistry.googleapis.com",
-    "vpcaccess.googleapis.com",
     "servicenetworking.googleapis.com",
     "compute.googleapis.com",
     "cloudresourcemanager.googleapis.com",

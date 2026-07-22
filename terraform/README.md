@@ -239,7 +239,7 @@ no Load Balancer, scale-to-zero Cloud Run. (Memorystore Redis was removed
 | Cloud Run prod (2 services, min-1) | API + frontend always warm | ~$20 |
 | Cloud Run staging (2 services, min-0) | Scale-to-zero, ~$0 when idle | ~$1 |
 | Load Balancer + CDN (prod only) | Staging uses .run.app URLs | ~$25 |
-| VPC connector | Required — Cloud Run → private-IP Cloud SQL (prod+staging) | ~$12 |
+| Direct VPC egress | Cloud Run → private-IP Cloud SQL (replaced the connector 2026-07-22) | ~$0 |
 | GCS + Artifact Registry | Uploads bucket + Docker images | ~$2 |
 | **Total** | | **~$72/month (~₹6,000)** |
 

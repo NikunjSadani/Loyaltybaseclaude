@@ -61,7 +61,7 @@ output "monthly_cost_estimate" {
       Cloud SQL ${var.db_tier}        ~$12
       Cloud Run prod (min 1 each)     ~$9
       Cloud Run staging (scale-to-0)  ~$1
-      VPC connector (prod)            ~$14
+      Direct VPC egress               ~$0 (replaced the connector)
       GCS + Artifact Registry         ~$5
       Secret Manager                  ~$1
       Domain mappings (SSL)           free

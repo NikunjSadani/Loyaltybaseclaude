@@ -1,14 +1,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # VPC — private networking
 #
-# The VPC connector is REQUIRED: gifsy-db is a PRIVATE-IP-ONLY Cloud SQL instance
-# (ipv4Enabled=false, 10.49.0.3 on gifsy-vpc), so Cloud Run — BOTH prod and staging
-# (verified on the live services) — reaches the DB THROUGH this connector. The
-# --add-cloudsql-instances socket supplies the Auth Proxy, but the proxy needs a VPC
-# route to a private-IP instance, which is this connector. It formerly ALSO carried
-# Redis traffic (Redis deleted 2026-07-21); the DB purpose remains, so it stays.
-# The ONLY way to drop the connector cost (~₹1,445/mo) is to migrate Cloud Run to
-# Direct VPC egress (replaces the connector) — a tested change, not a delete.
+# gifsy-db is a PRIVATE-IP-ONLY Cloud SQL instance (ipv4Enabled=false, 10.49.0.3 on
+# gifsy-vpc). Cloud Run reaches it over the VPC. As of 2026-07-22 both prod and
+# staging use **Direct VPC egress** (Cloud Run `vpc_access { network_interfaces }`
+# on gifsy-subnet-asia-south1, egress=private-ranges-only) — the Serverless VPC
+# Access connector (`gifsy-connector`) it replaced has been DELETED (~₹1,445/mo
+# saved). Do NOT re-add the connector resource — the live services + workflows use
+# network_interfaces; a startup probe on /health/ready gates cold-start DB readiness.
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "google_compute_network" "gifsy_vpc" {
@@ -45,16 +44,7 @@ resource "google_service_networking_connection" "private_vpc_connection" {
   depends_on              = [google_project_service.apis]
 }
 
-# VPC Access Connector — REQUIRED for Cloud Run → private-IP Cloud SQL (both prod
-# and staging). Already at the minimum size (min_instances=2). See header note.
-resource "google_vpc_access_connector" "gifsy_connector" {
-  name           = "gifsy-connector"
-  region         = var.region
-  network        = google_compute_network.gifsy_vpc.name
-  ip_cidr_range  = "10.8.0.0/28"
-  min_instances  = 2
-  max_instances  = 10  # GCP default when connector was first created
-  min_throughput = 200
-  max_throughput = 1000 # 100 Mbps × max_instances; must match GCP value
-  depends_on     = [google_project_service.apis]
-}
+# VPC Access Connector — REMOVED 2026-07-22. Migrated to Cloud Run Direct VPC egress
+# (see cloud-run.tf `vpc_access { network_interfaces }` + the deploy workflows). The
+# connector was deleted via `gcloud compute networks vpc-access connectors delete
+# gifsy-connector`. Do NOT re-add it.
