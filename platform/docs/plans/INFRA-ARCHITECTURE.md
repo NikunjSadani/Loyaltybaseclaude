@@ -1,14 +1,16 @@
-# Infrastructure Architecture — change record & current topology
+# Infrastructure Architecture — canonical INFRA reference
 
-> **Purpose:** the canonical record of the 2026-07-22 infrastructure changes and the current GCP
-> topology. Three cost-reduction changes landed together (idle GCP bill was ~₹17.5k/mo ≈ $210):
+> **This is the single source of truth for the GCP INFRASTRUCTURE** — the current cloud topology and the
+> change log for how it got there. For the **software/system architecture** (C4/arc42 — services, data
+> model, auth, multi-tenancy) see [`../spec/04-architecture.md`](../spec/04-architecture.md); its §6
+> Deployment is a one-line summary that defers here for infra detail. For the deep as-run runbook of the
+> VPC change see [`DIRECT-VPC-EGRESS-MIGRATION.md`](DIRECT-VPC-EGRESS-MIGRATION.md). (No overlap by design:
+> 04 owns the app design, this owns the infra, the migration doc owns the VPC how-to.)
+>
+> **Summary:** three cost-reduction changes landed 2026-07-22 (idle GCP bill was ~₹17.5k/mo ≈ $210):
 > **(1)** Redis removed, **(2)** the Serverless VPC Access connector replaced by **Direct VPC egress**,
 > **(3)** an Artifact Registry cleanup policy made live. Combined saving ≈ **₹10k/mo (~57%)**, zero prod
-> impact. All three are DONE + verified.
->
-> Detailed migration plan / as-run log for change (2) lives in
-> [`DIRECT-VPC-EGRESS-MIGRATION.md`](DIRECT-VPC-EGRESS-MIGRATION.md). Live infra state is also tracked in
-> `RESUME.md` (OPEN THREADS → infra cost-reduction) and memory `[[infra-cost-reduction]]`.
+> impact. All three DONE + verified. Live state also tracked in memory `[[infra-cost-reduction]]`.
 
 ---
 

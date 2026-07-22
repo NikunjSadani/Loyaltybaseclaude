@@ -114,6 +114,9 @@ flowchart TB
 
 ## 6 · Deployment
 
+> This section is a high-level summary. **Canonical current infra topology + change log (Direct VPC egress,
+> no Redis, Artifact Registry policy) lives in [`../plans/INFRA-ARCHITECTURE.md`](../plans/INFRA-ARCHITECTURE.md).**
+
 - **Target (Phase S):** **Docker → Cloud Run** for **two** services — the **backend API** (`gifsy-api`; owns the
   DB, gets `DATABASE_URL`/Cloud SQL/secrets; reaches the private-IP Cloud SQL over **Direct VPC egress** — no Redis,
   no VPC connector; see `../plans/INFRA-ARCHITECTURE.md`) + the **thin web frontend** (`gifsy-frontend`; stateless; takes
