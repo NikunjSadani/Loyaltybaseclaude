@@ -139,6 +139,15 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
   // the backend's JwtStrategy (which reads `Authorization: Bearer`) keeps working unchanged
   // — the injected request headers ride the next.config `/api/*`→backend rewrite.
   headers.delete('authorization')
+
+  // Wave 3 — active-outlet selection. The picker/switcher store the chosen ChannelPartner
+  // id in the httpOnly `active_partner_id` cookie; we forward it to the backend as
+  // `x-active-partner-id` (the backend RE-AUTHORIZES it — a foreign id → 403, so it's UX
+  // state, not a credential). Hygiene: STRIP any client-supplied inbound value FIRST so the
+  // header is set SOLELY from the cookie, never from a forged request header. Absent cookie →
+  // no header → backend uses the login's own partner, byte-identical to today.
+  headers.delete('x-active-partner-id')
+
   const token = request.cookies.get('token')?.value
 
   if (!token) {
@@ -169,6 +178,12 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
     headers.set('x-user-id',   payload.sub as string) // JWT user id is the `sub` claim, not `userId`
     headers.set('x-user-role', role)
     if (payload.partnerId) headers.set('x-partner-id', payload.partnerId as string)
+
+    // Wave 3 — inject the active-outlet selection SOLELY from the httpOnly cookie (the
+    // inbound header was stripped above). Only set when present, so the absent-cookie
+    // path is byte-identical to today. The backend re-authorizes the id (foreign → 403).
+    const activePartnerId = request.cookies.get('active_partner_id')?.value
+    if (activePartnerId) headers.set('x-active-partner-id', activePartnerId)
 
     return NextResponse.next({ request: { headers } })
   } catch {

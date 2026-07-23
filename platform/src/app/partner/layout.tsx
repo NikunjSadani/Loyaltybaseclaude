@@ -6,7 +6,9 @@ import { useRouter } from 'next/navigation';
 import {
   Home, Wallet, Gift, User, Bell, CheckCircle,
   Coins, Trophy, X, HeadphonesIcon, Target, Banknote, Medal,
+  Store, Users, ChevronDown, Check,
 } from 'lucide-react';
+import { setActivePartner } from '@/lib/active-partner-actions';
 import { NavBottom } from '@/components/layout/nav-bottom';
 import { Sidebar } from '@/components/layout/sidebar';
 import { SiteFooter } from '@/components/layout/site-footer';
@@ -32,6 +34,87 @@ function getNotifications(hasPoints: boolean) {
     { id: 2, icon: CheckCircle, iconBg: 'bg-blue-100 text-blue-600',       title: 'KPI achievement confirmed',  body: 'April 2026 — 100% achieved. Payout processing.',       time: '1 day ago',  unread: true  },
     { id: 3, icon: Target,      iconBg: 'bg-amber-100 text-amber-600',     title: 'Target updated',             body: 'May 2026 target has been set. Check your dashboard.',  time: '3 days ago', unread: false },
   ];
+}
+
+/* ── Outlet switcher (Wave 3) ───────────────────────────────────────────────────
+   Compact header control shown ONLY to a login that operates more than one outlet.
+   Lists the operable outlets, marks the one currently active (matching
+   `active_partner_id`, or the own outlet when nothing is selected), and on selection
+   writes the cookie via setActivePartner then hard-reloads /partner/dashboard so all
+   data refetches under the newly-active outlet. Single-outlet logins never render it. */
+export function OutletSwitcher({
+  outlets,
+  activePartnerId,
+}: {
+  outlets: import('@/lib/partner-identity').OperableOutlet[];
+  activePartnerId: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const isCurrent = (o: import('@/lib/partner-identity').OperableOutlet) =>
+    activePartnerId ? o.partnerId === activePartnerId : o.isOwnLogin;
+  const current = outlets.find(isCurrent) ?? outlets[0];
+
+  const choose = async (partnerId: string) => {
+    setBusy(true);
+    await setActivePartner(partnerId);
+    // Hard reload so the proxy re-injects x-active-partner-id and every page refetches.
+    window.location.href = '/partner/dashboard';
+  };
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        disabled={busy}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="flex items-center gap-1.5 pl-2 pr-2 py-1.5 rounded-full hover:bg-gray-100 text-gray-600 transition-colors max-w-[9rem]"
+      >
+        <Store className="h-4 w-4 shrink-0 text-[var(--brand-primary)]" />
+        <span className="hidden sm:block text-sm font-medium truncate">
+          {current?.businessName ?? 'Switch outlet'}
+        </span>
+        <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div
+            role="menu"
+            className="absolute right-0 mt-1 w-64 max-h-80 overflow-y-auto bg-white rounded-xl border border-gray-200 shadow-lg z-50 py-1"
+          >
+            <p className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+              Switch outlet
+            </p>
+            {outlets.map((o) => {
+              const active = isCurrent(o);
+              return (
+                <button
+                  key={o.partnerId}
+                  type="button"
+                  role="menuitem"
+                  disabled={busy}
+                  aria-current={active ? 'true' : undefined}
+                  onClick={() => (active ? setOpen(false) : choose(o.partnerId))}
+                  className="w-full flex items-center gap-2 text-left px-3 py-2.5 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">{o.businessName}</p>
+                    <p className="text-xs text-gray-400 truncate">{o.outletCode}</p>
+                  </div>
+                  {active && <Check className="h-4 w-4 text-[var(--brand-primary)] shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 /* ── Page ─────────────────────────────────────────────────────────────────────── */
@@ -65,10 +148,23 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
     void logout();
   };
 
+  // Wave 3 — Group Overview is login-scoped, NOT an operable outlet. Clear the
+  // active-partner cookie before navigating (exactly like the picker's chooseGroupOverview),
+  // so a user who had switched to a sibling returns to their OWN outlet context after
+  // viewing the overview. Plain <Link> otherwise; only wired for the gated group entry.
+  const handleGroupOverview: React.MouseEventHandler<HTMLAnchorElement> = async (e) => {
+    e.preventDefault();
+    await setActivePartner(null);
+    router.push('/partner/group');
+  };
+
   /* ── Nav items — gated by feature flags ── */
   const walletOn      = features.walletModule;
   const rewardsOn     = features.walletModule && identity.hasPointsActivity;
   const leaderboardOn = features.partnerApp.showLeaderboard;
+  // Wave 3 — the read-only group overview nav entry (page built by FE-2), shown only
+  // when this login belongs to an owner group.
+  const groupOn       = identity.groupOverviewAvailable;
 
   const mobileNavItems: NavItem[] = [
     { href: '/partner/dashboard',    label: 'Home',       icon: Home          },
@@ -83,6 +179,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
     {
       items: [
         { href: '/partner/dashboard',    label: 'Dashboard',    icon: Home          },
+        ...(groupOn       ? [{ href: '/partner/group',       label: 'Group Overview', icon: Users, onClick: handleGroupOverview }] : []),
         ...(walletOn      ? [{ href: '/partner/wallet',      label: 'My Wallet',  icon: Wallet }] : []),
         ...(rewardsOn     ? [{ href: '/partner/rewards',     label: 'Rewards',    icon: Gift   }] : []),
         { href: '/partner/targets',      label: 'Targets',      icon: Target        },
@@ -142,6 +239,14 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
+              {/* Outlet switcher (Wave 3) — only for a login that operates >1 outlet. */}
+              {identity.operableOutlets.length > 1 && (
+                <OutletSwitcher
+                  outlets={identity.operableOutlets}
+                  activePartnerId={identity.activePartnerId}
+                />
+              )}
+
               {/* Notification bell */}
               <button
                 onClick={() => { setNotifOpen(true); markAllRead(); }}

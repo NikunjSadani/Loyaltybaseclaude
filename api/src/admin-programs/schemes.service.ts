@@ -31,6 +31,9 @@ export class SchemesService {
     const enrollments = await this.prisma.schemeEnrollment.findMany({
       where: { schemeId: scheme.id },
       include: {
+        // The enrollee is now the SHOP (partner); userId is the performing login (nullable —
+        // null for a login-less sibling), kept for audit. Join both.
+        partner: { select: { id: true, partnerCode: true, businessName: true, ownerName: true, phone: true } },
         user: { select: { id: true, name: true, phone: true, email: true, role: true } },
       },
       orderBy: { enrolledAt: 'desc' },
@@ -43,9 +46,13 @@ export class SchemesService {
     const rows: Record<string, unknown>[] = enrollments.map((e) => ({
       'Enrollment ID': e.id,
       'Scheme ID': e.schemeId,
-      'User ID': e.userId,
-      Name: e.user?.name ?? '',
-      Phone: e.user?.phone ?? '',
+      'Partner ID': e.partnerId,
+      'Partner Code': e.partner?.partnerCode ?? '',
+      Name: e.partner?.businessName ?? e.partner?.ownerName ?? '',
+      Phone: e.partner?.phone ?? e.user?.phone ?? '',
+      // The login that performed the enrollment (audit — blank for a login-less sibling).
+      'Enrolled By (User ID)': e.userId ?? '',
+      'Enrolled By Name': e.user?.name ?? '',
       Email: e.user?.email ?? '',
       Role: e.user?.role ?? '',
       Status: e.status,

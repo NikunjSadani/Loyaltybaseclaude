@@ -13,6 +13,7 @@ import {
   EnrollmentFormSchema,
   validateSubmittedValues,
 } from './enrollment-form.helper';
+import { resolveActivePartnerId } from '../common/partner-group.helper';
 
 /**
  * Schemes — ported from platform/src/app/api/schemes/*.
@@ -245,10 +246,14 @@ export class SchemesService {
    * Submit an enrollment for the caller (SELF) or on behalf of a partner (SALES).
    *
    * Access model:
-   *   SELF  — caller must be a ChannelPartner in this tenant. userId = user.sub.
+   *   SELF  — caller must be a ChannelPartner in this tenant (own, or an authorized
+   *           login-less same-group sibling via the Wave-3 picker). The SHOP (partnerId)
+   *           is the enrollment subject; userId = the login that performed it (null for a
+   *           login-less sibling — audit only).
    *   SALES — caller must be a sales user with an active assignment to the target
-   *           partner. userId = target partner's userId. targetPartnerId is the
-   *           ChannelPartner.id (never trusted without the assignment check).
+   *           partner. Subject = target partner; userId = target partner's userId (null
+   *           for a login-less target). targetPartnerId is the ChannelPartner.id (never
+   *           trusted without the assignment check).
    *
    * Tenant: scheme + partner must both belong to user.clientId.
    * Scheme state: must be ACTIVE, non-deleted, and within start–end dates.
@@ -259,26 +264,53 @@ export class SchemesService {
    * Form values: required fields present, types correct, visibleWhen-hidden fields
    *   skipped, CALCULATED fields recomputed server-side (client values discarded).
    * Upsert: re-enrollment updates formValues + sets status ACTIVE; use the
-   *   @@unique([schemeId, userId]) constraint (idempotent update on repeat).
+   *   @@unique([schemeId, partnerId]) constraint (idempotent update on repeat).
    */
-  async submitEnrollment(user: JwtPayload, schemeId: string, dto: SubmitEnrollmentDto) {
+  async submitEnrollment(
+    user: JwtPayload,
+    schemeId: string,
+    dto: SubmitEnrollmentDto,
+    requestedPartnerId?: string,
+  ) {
     const mode = dto.enrollmentMode ?? 'SELF';
 
-    // ── 1. Resolve the enrolled userId + verify access ─────────────────────
-    let enrolledUserId: string;
+    // ── 1. Resolve the enrollment SUBJECT (the SHOP = partnerId) + the login that
+    //       performed it (userId, audit-only; null for a login-less sibling/target) ──
+    let subjectPartnerId: string;
+    let enrolledUserId: string | null;
 
     if (mode === 'SELF') {
-      // Verify caller is a ChannelPartner in this tenant.
-      const partner = await this.prisma.channelPartner.findFirst({
-        where: { userId: user.sub, clientId: user.clientId, deletedAt: null },
-        select: { id: true, userId: true },
+      // Wave 3 login picker: resolve the ACTIVE partner (own, or an authorized login-less
+      // same-group same-phone sibling) from the optional x-active-partner-id selector. The helper
+      // re-authorizes the selector so a forged/foreign id can never enroll another outlet. Absent /
+      // own / empty selector → the login's own partner (isSwitched=false), keeping today's behaviour
+      // byte-identical (userId = user.sub, no extra query, no switch).
+      const { partnerId, forbidden, isSwitched } = await resolveActivePartnerId(this.prisma, {
+        clientId: user.clientId,
+        userSub: user.sub,
+        phone: user.phone,
+        requestedPartnerId,
       });
-      if (!partner) {
+      if (forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+      if (!partnerId) {
+        // Null partner → today's no-partner path (a non-partner login cannot self-enroll).
         throw new ForbiddenException(
           'No ChannelPartner record found for your account in this tenant.',
         );
       }
-      enrolledUserId = user.sub;
+      // The SHOP is the enrollment subject — a login-less sibling is now fully supported. The login's
+      // own partner carries the login's user (userId === user.sub, no extra query). A switched sibling
+      // is login-LESS (userId = null); we fetch its userId purely for the audit column (null is fine).
+      subjectPartnerId = partnerId;
+      if (isSwitched) {
+        const active = await this.prisma.channelPartner.findFirst({
+          where: { id: partnerId, clientId: user.clientId, deletedAt: null },
+          select: { userId: true },
+        });
+        enrolledUserId = active?.userId ?? null;
+      } else {
+        enrolledUserId = user.sub;
+      }
     } else {
       // SALES mode — verify caller is a sales user with assignment to the target.
       if (!dto.targetPartnerId) {
@@ -336,12 +368,11 @@ export class SchemesService {
         );
       }
 
-      // A parent owner (userId nullable) is never an enrollment target; a real partner
-      // always has a linked user. Guard defensively.
-      if (!targetPartner.userId) {
-        throw new ForbiddenException('This partner has no linked user to enroll.');
-      }
-      enrolledUserId = targetPartner.userId;
+      // The SHOP is the enrollment subject. A login-less target (userId = null — e.g. a child
+      // outlet reached via the picker) is now enrollable on-behalf; its userId is recorded as null
+      // (audit only). The subject is the target partner regardless.
+      subjectPartnerId = targetPartner.id;
+      enrolledUserId = targetPartner.userId ?? null;
     }
 
     // ── 2. Load and validate scheme (tenant + state) ─────────────────────────
@@ -372,9 +403,10 @@ export class SchemesService {
     const campaignType: string = enrollmentForm?.campaignType ?? 'MIXED';
 
     if (campaignType !== 'MIXED') {
-      // Determine KYC status for the enrolled user.
+      // Determine KYC status for the SUBJECT shop (keyed by partnerId — works for a login-less
+      // sibling that has no userId to look up by).
       const enrolledPartner = await this.prisma.channelPartner.findFirst({
-        where: { userId: enrolledUserId, clientId: user.clientId },
+        where: { id: subjectPartnerId, clientId: user.clientId },
         select: {
           kycSubmissions: {
             orderBy: { createdAt: 'desc' },
@@ -423,15 +455,16 @@ export class SchemesService {
     }
 
     // ── 5. Upsert the SchemeEnrollment ───────────────────────────────────────
-    // Re-enrollment (upsert on @@unique[schemeId, userId]) resets status to
-    // ACTIVE and updates formValues + mode. This is intentional: a partner who
-    // re-enrolls is updating their form submission, not creating a new record.
+    // Re-enrollment (upsert on @@unique[schemeId, partnerId]) resets status to
+    // ACTIVE and updates formValues + mode + the audit userId. This is intentional: a
+    // shop that re-enrolls is updating its form submission, not creating a new record.
     const enrollment = await this.prisma.schemeEnrollment.upsert({
       where: {
-        schemeId_userId: { schemeId, userId: enrolledUserId },
+        schemeId_partnerId: { schemeId, partnerId: subjectPartnerId },
       },
       create: {
         schemeId,
+        partnerId: subjectPartnerId,
         userId: enrolledUserId,
         status: 'ACTIVE',
         enrollmentMode: mode,
@@ -439,6 +472,7 @@ export class SchemesService {
         enrolledAt: now,
       },
       update: {
+        userId: enrolledUserId,
         status: 'ACTIVE',
         enrollmentMode: mode,
         formValues: (finalFormValues ?? Prisma.JsonNull) as Prisma.InputJsonValue,
@@ -456,13 +490,26 @@ export class SchemesService {
    * Returns the calling user's own enrollment for the given scheme, or 404.
    * Tenant-scoped: the scheme must belong to user.clientId.
    */
-  async getMyEnrollment(user: JwtPayload, schemeId: string) {
+  async getMyEnrollment(user: JwtPayload, schemeId: string, requestedPartnerId?: string) {
     // Validate tenant ownership of the scheme first.
     await this.assertSchemeOwnership(user, schemeId);
 
+    // Wave 3 login picker: read the ACTIVE SHOP's enrollment (keyed by partnerId). Absent / own /
+    // empty selector → the login's own partner (isSwitched=false), keeping today's behaviour
+    // byte-identical. A forged/foreign id → forbidden (re-authorized in the helper). A login-less
+    // sibling is fully supported — its enrollment is keyed by its partnerId like any other shop.
+    const { partnerId, forbidden } = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
+    });
+    if (forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+    if (!partnerId) throw new NotFoundException('Enrollment not found.');
+
     const enrollment = await this.prisma.schemeEnrollment.findUnique({
       where: {
-        schemeId_userId: { schemeId, userId: user.sub },
+        schemeId_partnerId: { schemeId, partnerId },
       },
     });
 

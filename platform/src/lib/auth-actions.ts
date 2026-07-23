@@ -155,5 +155,8 @@ export async function logoutAction(): Promise<{ success: boolean }> {
   cookieStore.delete('refresh_token');
   cookieStore.delete('home_token');
   cookieStore.delete('home_refresh_token');
+  // Wave 3 — also drop the active-outlet selection so a shared device / the next login
+  // starts in its OWN outlet context (never a previous user's selected sibling).
+  cookieStore.delete('active_partner_id');
   return { success: true };
 }

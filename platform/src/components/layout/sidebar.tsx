@@ -11,6 +11,9 @@ export interface SidebarItem {
   label: string;
   icon: LucideIcon;
   badge?: number;
+  /** Optional click handler (e.g. Group Overview clears the active-partner cookie before
+   *  navigating). When omitted the entry is a plain <Link> — byte-identical to before. */
+  onClick?: React.MouseEventHandler<HTMLAnchorElement>;
 }
 
 export interface SidebarSection {
@@ -83,6 +86,7 @@ export function Sidebar({
                 <Link
                   key={item.href}
                   href={item.href}
+                  onClick={item.onClick}
                   title={collapsed ? item.label : undefined}
                   className={cn(
                     'flex items-center gap-3 px-4 py-2.5 mx-2 rounded-lg text-sm transition-colors',

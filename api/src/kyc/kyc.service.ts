@@ -1940,6 +1940,10 @@ export class KycService {
         // (KYC is partner-keyed; the enrolled outlet's code lives on the partner's outlets).
         partner: { include: { outlets: { select: {
           id: true, name: true, outletCode: true, phone: true,
+          // parentId → the owner-GROUP parent (isParent ChannelPartner). Used to fetch the
+          // approved parent's identity/payout values for the per-field "verified on parent"
+          // signal below (booleans only — the parent's raw values never leave this method).
+          parentId: true,
           // Address lives on the Outlet (captured at KYC) — surfaced so the reviewer
           // can see the submitted address (ChannelPartner has no address columns).
           addressLine1: true, addressLine2: true, city: true, state: true, pincode: true,
@@ -2045,7 +2049,92 @@ export class KycService {
         ? this.maskPartnerSensitiveFields(proposedRaw as Record<string, unknown>, masked)
         : null;
 
-    return { submission: { ...submission, partner, proposedPartner, documents, reKycFlags } };
+    // ── Stream C: per-field "verified on parent" signal ──────────────────────
+    // When a child outlet was grouped-BEFORE-KYC (Outlet.parentId set) under an APPROVED parent
+    // (the owner group), some of the child's identity/payout details are inherited from the group.
+    // Surface, per field, whether the child's CURRENT value equals the approved parent's value so
+    // the reviewer UI can badge fields already vetted at the group level.
+    //
+    // WHY computed here on the RAW (pre-mask) values: the compare must run BEFORE the child's PII
+    // is masked to last-4 (else a masked reader's PAN/GST/bank would never equal the parent's full
+    // value and every field would read false). We ship ONLY the booleans — never the parent's raw
+    // PAN/bank/etc — so nothing leaks past the child's mask. This is the child-vs-parent axis and is
+    // INDEPENDENT of the Wave-2 proposedPartner re-KYC diff: it keys off the child's current
+    // `partner` values (submission.partner), NOT proposedPartner.
+    const parentIdForVerify =
+      detailOutlets.find((o) => o.isPrimary)?.parentId ??
+      detailOutlets.find((o) => o.parentId)?.parentId ??
+      null;
+    const approvedParent =
+      parentIdForVerify && submission.partner
+        ? await this.prisma.channelPartner.findFirst({
+            where: {
+              id: parentIdForVerify,
+              clientId: submission.partner.clientId, // tenant-scope to the child's tenant
+              isParent: true,
+              onboardedAt: { not: null }, // only an APPROVED parent's values count as verified
+              deletedAt: null,
+            },
+            select: {
+              businessName: true, ownerName: true, phone: true,
+              gstNumber: true, panNumber: true,
+              bankName: true, bankAccountNumber: true, bankAccountHolder: true,
+              ifscCode: true, upiId: true,
+            },
+          })
+        : null;
+    const parentVerified = this.computeParentVerified(
+      submission.partner as Record<string, unknown> | null,
+      approvedParent,
+    );
+
+    return { submission: { ...submission, partner, proposedPartner, documents, reKycFlags, parentVerified } };
+  }
+
+  /**
+   * Per-field booleans: does the child's CURRENT value equal the APPROVED parent's value?
+   * A field is `true` ONLY when BOTH sides carry a non-empty value AND they match after
+   * normalization (PAN/GST case+space-insensitive via the shared canonical form; bank/UPI
+   * trimmed; the rest trimmed). Address is intentionally absent — a parent has no address
+   * columns, so no address field can ever be "verified on parent". Ships booleans only.
+   */
+  private computeParentVerified(
+    child: Record<string, unknown> | null | undefined,
+    parent: Record<string, unknown> | null | undefined,
+  ): Record<string, boolean> {
+    const trimOrNull = (v: unknown): string | null => {
+      if (typeof v !== 'string') return null;
+      const t = v.trim();
+      return t.length > 0 ? t : null;
+    };
+    // [child/parent key, canonical identity field or null]. Non-identity fields → trimmed compare.
+    const fields: Array<[string, 'pan' | 'gst' | 'bank' | 'upi' | null]> = [
+      ['panNumber', 'pan'],
+      ['gstNumber', 'gst'],
+      ['bankAccountNumber', 'bank'],
+      ['ifscCode', null],
+      ['upiId', 'upi'],
+      ['bankName', null],
+      ['bankAccountHolder', null],
+      ['ownerName', null],
+      ['businessName', null],
+      ['phone', null],
+    ];
+    const result: Record<string, boolean> = {};
+    for (const [key, idField] of fields) {
+      let verified = false;
+      if (child && parent) {
+        const cn = idField
+          ? normalizeIdentityValue(idField, child[key] as string | null | undefined)
+          : trimOrNull(child[key]);
+        const pn = idField
+          ? normalizeIdentityValue(idField, parent[key] as string | null | undefined)
+          : trimOrNull(parent[key]);
+        verified = cn != null && pn != null && cn === pn;
+      }
+      result[key] = verified;
+    }
+    return result;
   }
 
   /** A browser-renderable read URL for a single KYC document. Fails CLOSED:

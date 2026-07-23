@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
@@ -6,6 +6,10 @@ import { kpiCodeKeys, NAMES_KEY, lastNMonths } from '../targets/targets.helpers'
 import { buildPayoutStatement } from '../common/payout-statement.helper';
 import { TenantService } from '../tenant/tenant.service';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
+import {
+  resolveActivePartnerId,
+  resolveOperableContexts,
+} from '../common/partner-group.helper';
 
 /**
  * Partner self-service — ported from platform/src/app/api/partner/* onto /v1.
@@ -28,6 +32,32 @@ export class PartnerService {
   private readonly bannerSettingKey = 'banner_config';
 
   /**
+   * Wave 3 login-picker ACCESS BOUNDARY. Resolves the ChannelPartner a request may ACT ON from the
+   * optional client-supplied `x-active-partner-id` selector (threaded here as `requestedPartnerId`).
+   *
+   * SECURITY INVARIANT: NEVER trust the header. `resolveActivePartnerId` re-authorizes it — absent /
+   * empty / own selector → the login's OWN partner (today's single-outlet behaviour, one query, no
+   * switch); a selector naming a valid login-less same-group same-phone sibling → that sibling;
+   * anything else → forbidden. A missed site would let a forged header reach another partner's data.
+   *
+   * Returns `null` when the login has no partner at all (e.g. a parent-only phone) — callers treat
+   * that as "no operable outlet" and return today's empty/no-partner response.
+   */
+  private async resolveActivePartner(
+    user: JwtPayload,
+    requestedPartnerId?: string,
+  ): Promise<string | null> {
+    const { partnerId, forbidden } = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
+    });
+    if (forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+    return partnerId;
+  }
+
+  /**
    * GET /v1/partner/me — the caller's own channel-partner identity (real, JWT-scoped). Replaces the
    * FE demo persona (lib/partner-session DEMO_SESSIONS) for shell/header display. Returns nulls when
    * the caller has no channel partner so the FE can fall back to the JWT user name.
@@ -39,19 +69,50 @@ export class PartnerService {
    *   - hasPointsActivity  — the partner holds/held ANY points reality (wallet balance/lifetime or ledger)
    *   - hasPayoutActivity  — the partner has ANY payout reality (credit payout entries or payout txns)
    */
-  async getMe(user: JwtPayload) {
-    const partner = await this.prisma.channelPartner.findFirst({
-      where: { userId: user.sub, clientId: user.clientId },
-      select: {
-        id: true,
-        partnerCode: true,
-        businessName: true,
-        ownerName: true,
-        phone: true,
-        email: true,
-        entityType: true,
-      },
+  async getMe(user: JwtPayload, requestedPartnerId?: string) {
+    // Wave 3 login-picker payload — everything THIS LOGIN may operate (own + login-less same-group
+    // same-phone siblings) + read-only group-overview availability. Always keyed off the login itself
+    // (user.sub / user.phone), independent of the selected active outlet, so the picker list is stable.
+    // ownPartnerId is derived from the login → ALWAYS safe; we resolve it FIRST and use it as the
+    // degrade target below.
+    const { ownPartnerId, operable, groupParent } = await resolveOperableContexts(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
     });
+
+    // The DISPLAYED identity reflects the ACTIVE outlet — own by default, or the switched-to sibling
+    // when a valid selector is supplied. AUDIT FIX (HIGH): getMe drives the ENTIRE partner shell, so a
+    // stale/foreign selector (e.g. a shared-device cookie) must NOT 403 the whole portal. Unlike the
+    // money/read endpoints (which stay fail-closed via `resolveActivePartner`), the identity/shell
+    // endpoint DEGRADES: an invalid/forbidden selector falls back to the login's OWN partner for the
+    // displayed identity and flags `activeSelectorInvalid` so the FE can clear the stale cookie. This
+    // resolution NEVER throws (we read `forbidden` directly instead of the throwing private helper).
+    const active = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
+    });
+    const activeSelectorInvalid = active.forbidden;
+    const activePartnerId = active.forbidden ? ownPartnerId : active.partnerId;
+
+    const partner = activePartnerId
+      ? await this.prisma.channelPartner.findFirst({
+          // Load by the RESOLVED (authorized) id, tenant-scoped. Not by userId — a switched sibling
+          // is login-less (userId=null) and would never match a userId:user.sub filter.
+          where: { id: activePartnerId, clientId: user.clientId },
+          select: {
+            id: true,
+            partnerCode: true,
+            businessName: true,
+            ownerName: true,
+            phone: true,
+            email: true,
+            entityType: true,
+          },
+        })
+      : null;
 
     const { outletType, hasPointsActivity, hasPayoutActivity } = partner
       ? await this.resolvePartnerActivity(user.clientId, partner.id)
@@ -73,6 +134,17 @@ export class PartnerService {
       hasPointsActivity,
       hasPayoutActivity,
       features,
+      // Login-picker: the operable set + parent-overview availability (Wave 3).
+      // `activePartnerId` = the currently-selected outlet (own by default) so the FE switcher can
+      // mark which operable entry is active — the selector cookie is httpOnly, so the FE can't read it.
+      activePartnerId,
+      // AUDIT FIX (HIGH): true when the supplied x-active-partner-id selector was invalid/forbidden —
+      // the displayed identity above degraded to the login's OWN partner instead of 403-ing the shell.
+      // The FE clears the stale selector cookie when it sees this. Default false (absent/valid selector).
+      activeSelectorInvalid,
+      operableOutlets: operable,
+      groupOverviewAvailable: groupParent != null,
+      groupParent,
     };
   }
 
@@ -173,12 +245,11 @@ export class PartnerService {
    * Scoped to the caller's channel partner within the tenant; returns an empty
    * list when the caller has no channel partner.
    */
-  async getPayouts(user: JwtPayload) {
-    const partner = await this.prisma.channelPartner.findFirst({
-      where: { userId: user.sub, clientId: user.clientId },
-      select: { id: true },
-    });
-    if (!partner) return { payouts: [] };
+  async getPayouts(user: JwtPayload, requestedPartnerId?: string) {
+    // Wave 3: resolve the ACTIVE partner (own, or an authorized switched-to sibling). The selector
+    // is re-authorized here — a forged id can never surface another partner's payout statement.
+    const partnerId = await this.resolveActivePartner(user, requestedPartnerId);
+    if (!partnerId) return { payouts: [] };
 
     // Delegated to the shared builder so the partner wallet + the sales outlet
     // ledger (kyc.service.ledger) can never drift — it does the exact two-rail
@@ -187,7 +258,7 @@ export class PartnerService {
     const payouts = await buildPayoutStatement(
       this.prisma,
       user.clientId,
-      partner.id,
+      partnerId,
     );
     return { payouts };
   }
@@ -208,19 +279,18 @@ export class PartnerService {
    * (userId → id → Outlet[]) so only the caller's own outlets are returned.
    * Tenant scope: every query is filtered by clientId from the JWT.
    */
-  async getTargets(user: JwtPayload, q: ListPartnerTargetsQueryDto) {
-    // ── Resolve the caller's ChannelPartner + their outlet codes ─────────────
-    const partner = await this.prisma.channelPartner.findFirst({
-      where: { userId: user.sub, clientId: user.clientId },
-      select: { id: true },
-    });
+  async getTargets(user: JwtPayload, q: ListPartnerTargetsQueryDto, requestedPartnerId?: string) {
+    // ── Resolve the ACTIVE partner (own, or an authorized switched-to sibling) + its outlet codes ──
+    // Wave 3 access boundary: the selector is re-authorized, so a forged id can never read another
+    // partner's targets; when switched, we return the SIBLING's outlets' targets.
+    const partnerId = await this.resolveActivePartner(user, requestedPartnerId);
 
-    if (!partner) return { period: q.period ?? null, outlets: [] };
+    if (!partnerId) return { period: q.period ?? null, outlets: [] };
 
     const outlets = await this.prisma.outlet.findMany({
       where: {
         clientId: user.clientId,
-        partnerId: partner.id,
+        partnerId,
         isActive: true,
         deletedAt: null,
       },
@@ -353,6 +423,7 @@ export class PartnerService {
     user: JwtPayload,
     months = 24,
     kpiCode?: string,
+    requestedPartnerId?: string,
   ): Promise<{
     kpiCode: string | null;
     kpiName: string | null;
@@ -361,14 +432,12 @@ export class PartnerService {
   }> {
     const span = Math.min(Math.max(Math.trunc(months) || 0, 1), 36);
 
-    const partner = await this.prisma.channelPartner.findFirst({
-      where: { userId: user.sub, clientId: user.clientId },
-      select: { id: true },
-    });
-    if (!partner) return { kpiCode: null, kpiName: null, unit: null, trend: [] };
+    // Wave 3 access boundary: trend the ACTIVE partner's outlets (own, or an authorized sibling).
+    const partnerId = await this.resolveActivePartner(user, requestedPartnerId);
+    if (!partnerId) return { kpiCode: null, kpiName: null, unit: null, trend: [] };
 
     const outlets = await this.prisma.outlet.findMany({
-      where: { partnerId: partner.id, clientId: user.clientId },
+      where: { partnerId, clientId: user.clientId },
       select: { outletCode: true },
     });
     const outletCodes = outlets.map((o) => o.outletCode);
@@ -440,15 +509,13 @@ export class PartnerService {
    * Caller-scoped (own partner only) + tenant-scoped (clientId from the JWT).
    * Inactive/deleted sales users are excluded; results are deduped.
    */
-  async getSalesTeam(user: JwtPayload) {
-    const partner = await this.prisma.channelPartner.findFirst({
-      where: { userId: user.sub, clientId: user.clientId },
-      select: { id: true },
-    });
-    if (!partner) return { team: [] };
+  async getSalesTeam(user: JwtPayload, requestedPartnerId?: string) {
+    // Wave 3 access boundary: the assigned reps of the ACTIVE partner (own, or an authorized sibling).
+    const partnerId = await this.resolveActivePartner(user, requestedPartnerId);
+    if (!partnerId) return { team: [] };
 
     const outlets = await this.prisma.outlet.findMany({
-      where: { clientId: user.clientId, partnerId: partner.id, deletedAt: null },
+      where: { clientId: user.clientId, partnerId, deletedAt: null },
       select: { id: true },
     });
     const outletIds = outlets.map((o) => o.id);
@@ -458,7 +525,7 @@ export class PartnerService {
         unassignedAt: null,
         salesUser: { isActive: true, deletedAt: null, clientId: user.clientId },
         OR: [
-          { partnerId: partner.id },
+          { partnerId },
           ...(outletIds.length ? [{ outletId: { in: outletIds } }] : []),
         ],
       },

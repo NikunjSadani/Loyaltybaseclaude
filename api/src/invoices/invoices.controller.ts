@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Patch,
   Post,
@@ -115,8 +116,12 @@ export class PartnerInvoicesController {
   constructor(private readonly invoices: InvoicesService) {}
 
   @Get()
-  list(@CurrentUser() user: JwtPayload, @Query() q: ListInvoicesQueryDto) {
-    return this.invoices.list(user, q);
+  list(
+    @CurrentUser() user: JwtPayload,
+    @Query() q: ListInvoicesQueryDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.invoices.list(user, q, activePartnerId);
   }
 
   /**
@@ -130,8 +135,9 @@ export class PartnerInvoicesController {
     @CurrentUser() user: JwtPayload,
     @Query() q: ListInvoicesQueryDto,
     @Res({ passthrough: true }) res: Response,
+    @Headers('x-active-partner-id') activePartnerId?: string,
   ): Promise<StreamableFile> {
-    const { buffer, filename } = await this.invoices.exportXlsx(user, q);
+    const { buffer, filename } = await this.invoices.exportXlsx(user, q, activePartnerId);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -139,8 +145,12 @@ export class PartnerInvoicesController {
   }
 
   @Get(':id')
-  getById(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.invoices.getById(user, id);
+  getById(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.invoices.getById(user, id, activePartnerId);
   }
 
   @Patch(':id/invoice-number')
@@ -148,7 +158,8 @@ export class PartnerInvoicesController {
     @CurrentUser() user: JwtPayload,
     @Param('id') id: string,
     @Body() dto: UpdateInvoiceNumberDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
   ) {
-    return this.invoices.updateInvoiceNumber(user, id, dto);
+    return this.invoices.updateInvoiceNumber(user, id, dto, activePartnerId);
   }
 }

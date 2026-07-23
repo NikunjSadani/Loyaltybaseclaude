@@ -1,8 +1,15 @@
 # Partner → Multiple Outlets (Parent-Child Owner Groups)
 
-> **Status:** DESIGN LOCKED (2026-07-22, owner Q&A this session). Not yet built. This doc is the
-> single source of truth — the earlier discussion was lost because it was never written down, so
-> everything agreed is captured here before any code.
+> **Status (2026-07-23):** ✅ **Wave 1 + Wave 2 + Wave 3 ALL DONE — on develop, gate green, 3-lens
+> adversarial audit + fixes applied.** W1+W2 migrations verified on STAGING; W3 adds two more additive
+> migrations (OTP order-binding + scheme-enrollment-by-shop) that apply on the next develop push. **NOT in
+> prod (owner-gated cutover pending).** Wave 3 = login picker + read-only group overview + child KYC
+> pre-fill/badge + scheme-enrollment re-key. Next = owner UAT on staging, then the owner-gated cutover.
+>
+> ⚠️ **§9 "BUILD STATUS" is the AUTHORITATIVE AS-BUILT record.** The design EVOLVED substantially
+> during Wave 2 (owner decisions on DB-vs-app enforcement, single-source-of-truth, re-KYC
+> stage-at-approval, reserve-at-form-submit). Where §2–§8 below (the original locked intent) differ
+> from §9, **§9 wins** — the most material changes are flagged inline with **⟪Wave-2 as-built⟫**.
 >
 > **Applies to:** Loyaltybase (`api/` + `platform/`). Deoleo is LIVE in prod, so this is an
 > **additive, opt-in** change — no existing outlet is affected until an admin explicitly groups it.
@@ -56,6 +63,10 @@ detail with the group — the admin must re-KYC the child to make its details di
   most one group**. You cannot KYC a second outlet on an existing PAN unless it's in that PAN's group.
 - **PAN is locked** everywhere except the **re-KYC flow**. Changing PAN = a different legal entity =
   the outlet **leaves the group**. PAN can pre-fill from the parent **or** a sibling child.
+- **⟪Wave-2 as-built⟫** PAN is enforced by a **hard partial-unique DB index** `(clientId,panNumber)
+  WHERE groupId IS NULL` (always-on; unique for ungrouped owners, grouped siblings share) + the app
+  check. The **PAN-change-to-leave-group ordering is NOT yet enabled** — a `TODO(wave4)` in
+  `kyc.service`; resolve with the owner before allowing group-leave via re-KYC.
 
 ### 2.5 The other identity fields
 - **GST, phone, bank, UPI:** **unique-except-within-group** — may repeat or differ among a group's
@@ -64,6 +75,24 @@ detail with the group — the admin must re-KYC the child to make its details di
   at all**. This feature **adds** uniqueness enforcement for PAN/bank/UPI.
 - **Tenant-configurable:** a per-tenant policy decides **which** of {GST, phone, bank, UPI} are
   enforced unique (PAN identical-within-group is always on). Default for Deoleo: **all enforced**.
+- **⟪Wave-2 as-built — supersedes the "all tenant-configurable" intent⟫** GST **also** became an
+  **always-on hard DB rule** (partial-unique index like PAN) — the app check MUST agree with a DB
+  index, so `policy.gst` is now **informational only** (a legal tax ID is never legitimately
+  duplicated). **bank/UPI** stay tenant-configurable and are **app-enforced** (no DB index) made
+  race-proof by a per-value **transaction advisory lock** (`acquireIdentityLocks`). **phone** stays in
+  the group-aware `assertPhoneAvailable`. All values are normalized (trim; upper-case PAN/GST) so the
+  check, the DB index, and the persisted value agree.
+
+### 2.5b Re-KYC = STAGE-AT-APPROVAL  ⟪Wave-2 as-built — NEW, not in the original design⟫
+An approved partner must **never** carry unverified re-KYC values, even briefly. So a re-KYC does **not**
+overwrite the live ChannelPartner/Outlet at draft time — it **stages** the proposed identity/payout **+
+outlet address** on `KycSubmission.proposedPartner` and applies them to the live records **only at Gifsy
+approval** (atomically, with the uniqueness check + lock + phone re-validation + login-sync at that
+point; a violation rolls the whole approval back — never a half-apply). Every reviewer surface (detail
+pages + bulk/queue/Excel) overlays the **proposed** values so the approver sees what they're approving.
+Brand-new KYC is unchanged (still creates the partner at draft). **Reserve-at-form-submit + 48h
+stale-draft cleanup** (`POST /v1/kyc/cleanup-stale-drafts`, secret-gated; reclaims an abandoned
+brand-new draft's throwaway partner + reuses its orphan owner-User on retry).
 
 ### 2.6 Wallet
 - Each child keeps its **own wallet + ledger + redemption**, paid out to its **own bank** (per the
@@ -121,9 +150,20 @@ document machinery instead of a brand-new table.
 - **Migrations are additive / zero-downtime** (new nullable columns + a flag defaulting false). No
   existing outlet is grouped until an admin uploads Parent IDs.
 
-*(Exact column placement finalized in Wave 1 — the parent could alternatively carry a self-`parentId`;
-the outlet-level `parentId` is preferred as the single source of truth because the admin uploads at
-outlet level and it avoids dual-column drift.)*
+**⟪Wave-2 as-built — the actual schema⟫** (`Outlet.parentId` = the single source of truth, set pre-KYC):
+- **`ChannelPartner.groupId String?`** — a **DERIVED** mirror of the owner's `Outlet.parentId`, written
+  by KYC-create and kept in lockstep by a **DB trigger** on `outlets` (`sync_channel_partner_group_id`,
+  fires on parentId/partnerId change). It exists ONLY to host the partial-unique DB indexes on
+  `channel_partners` (which can't reference `outlets.parentId`). This is a source→derived relationship
+  (never edited independently), NOT the dual-column drift the note below warned about — the trigger is
+  the drift guard. (An outlet can be grouped BEFORE it has an owner, so the link MUST live on the outlet;
+  `groupId` on the owner is the DB-index's copy of it.)
+- **Partial-unique indexes** `(clientId,gstNumber)` and `(clientId,panNumber)` `WHERE groupId IS NULL AND
+  … IS NOT NULL AND deletedAt IS NULL` (the hard rule for ungrouped owners). The old full
+  `@@unique([clientId,gstNumber])` is **dropped**.
+- **`KycSubmission.proposedPartner Json?`** — the staged re-KYC patch (§2.5b).
+- Migration `20260723120000_partner_group_uniqueness` (groupId + backfill + 2 partial uniques + trigger +
+  proposedPartner + a scoped demo-data fix). Prisma can't model partial indexes/triggers → hand-authored.
 
 ---
 
@@ -242,8 +282,106 @@ Additive + opt-in; zero impact on live Deoleo. Gate: api jest 1572 · nest 0 · 
 1. **PHONE is NOT in the helper.** It stays in `kyc.service.assertPhoneAvailable` (needs last-10-digit normalisation) — **Stream A** makes THAT group-aware. Also `User @@unique([clientId,phone])` means a group's shared phone maps to **ONE** login User; siblings sharing it are **login-less** (`ChannelPartner.userId=null`) and reached via that login's picker → **Stream A must NOT create a duplicate User** for a shared phone; **Stream D** resolves "operable outlets" by phone-match, not by User→ChannelPartner.
 2. **Parent-leak sites** (exclude parents with `isParent:false`) — 3 REAL: `admin-programs/channel-partners.service.ts:46` (findMany) + `:57` (count); `admin-core/admin-core.service.ts:888` (count). Defensive (add too): `tds.service.ts:191/380/751/854`, `payouts.service.ts:829`. Wallet-at-approval `kyc.service.ts:2946` — guard `!isParent` if group-create ever reuses the KYC approval path. (Full map was produced by a sub-agent this session.)
 
-### ▶ Wave 2 — NEXT (Streams A ‖ B in parallel, on the frozen contract)
-- **Stream A** — wire `checkGroupUniqueness` into the write paths (`kyc.service.create` both branches + re-KYC; make `assertPhoneAvailable` group-aware; the add-to-parent + un-group validation) + PAN/bank/UPI enforcement + read `uniquenessPolicy`.
-- **Stream B** — parent entity + admin outlet-master `parentId` column (parse/validate/link + add-to-parent + un-group guard) + parent create (ID-min) + parent details/docs → straight-to-Gifsy approval + the 3 parent-leak `isParent:false` filters.
-- **File-partition to avoid contention**: A owns `kyc.service.ts` write paths; B owns `admin-outlets.service.ts` + the parent CRUD + the leak-filter edits. Route any shared-file overlap through the orchestrator at integration.
-- Then **Wave 3** (C ‖ D: pre-fill/badge + login picker/parent-portal/wallet-rollup), **Wave 4** (integrate + adversarial audit + E2E + staging-verify), then owner-gated cutover.
+### ✅ Wave 2 — DONE (2026-07-23, develop `1e2e4eb`, gate green: api jest 1650 · nest 0 · FE vitest 1940 · tsc 0)
+Wave 2 (uniqueness enforcement + parent entity + admin grouping) built via parallel streams, then a
+full audit-driven fix pass (3 adversarial auditors on the delta, all findings reconciled). Additive +
+opt-in — the grouping/parent machinery is DORMANT until an admin sets a `parentId` (zero impact on live
+Deoleo). **Pushed to develop; migration applied on staging (after a guarded staging PAN-dedup, below).**
+
+**Design evolutions this wave (all owner-decided — supersede the earlier §3/§4 sketch where they differ):**
+- **Single source of truth for the group link** = `Outlet.parentId` (an outlet can be grouped PRE-KYC,
+  before an owner exists — so the link MUST live on the outlet). A **derived** `ChannelPartner.groupId`
+  mirrors it, maintained by a **DB trigger** on `outlets` (`sync_channel_partner_group_id`, fires on
+  parentId/partnerId change) + set inline at KYC partner-create. `groupId` exists ONLY to host the DB index.
+- **PAN + GST = hard DB rule (always-on):** partial-unique indexes `(clientId, {pan,gst}) WHERE groupId
+  IS NULL AND … IS NOT NULL AND deletedAt IS NULL` — unique for ungrouped owners, grouped siblings share.
+  `isFieldEnforced` returns true for PAN AND GST regardless of policy (the app check MUST agree with the
+  DB index). The old full `@@unique([clientId,gstNumber])` is DROPPED. `policy.gst` is now informational.
+- **bank/UPI = tenant-configurable, app-enforced** (no DB index) + a per-value transaction advisory lock
+  (`acquireIdentityLocks`, `pg_advisory_xact_lock`) that serializes concurrent same-value writers →
+  race-proof without a constraint. The lock also belts-and-suspenders PAN/GST.
+- **`normalizeIdentityValue`** (trim; upper-case PAN/GST) is applied consistently across the check, the
+  DB index key, and the persisted value — so no whitespace/case variant slips a duplicate.
+- **`checkGroupUniqueness` INCLUDES parents** (a parent anchors its own group = `[cand.id]`) — else a
+  parent could share a tenant-enforced bank/UPI with an unrelated outlet (bank/UPI have no DB index).
+- **Reserve-at-form-submit + 48h stale-draft cleanup:** identity is reserved when the rep submits the
+  form (create writes the DRAFT partner). An abandoned brand-new draft is reclaimed after 48h (scheduler
+  endpoint `POST /v1/kyc/cleanup-stale-drafts`, secret-gated) — deletes the throwaway partner (+ reuses
+  the orphan owner-User on retry). ⚠️ **Needs a Cloud Scheduler job + `KYC_CLEANUP_SECRET` env per env.**
+- **Re-KYC = STAGE-AT-APPROVAL** (an approved partner NEVER carries unverified values, even briefly): a
+  re-KYC stages its proposed identity/payout **+ outlet ADDRESS** on `KycSubmission.proposedPartner` and
+  applies them to the live ChannelPartner/Outlet ONLY at Gifsy approval — atomically, with the uniqueness
+  check + lock + phone re-validation + login-sync at that point. `overlayProposedIdentity` shows the
+  proposed values (incl. address) on every reviewer surface (detail pages + bulk/queue/Excel). Cleanup of
+  a re-KYC draft just deletes the draft (the live partner was never touched).
+- **Un-group = a DEDICATED admin action** (`POST /admin/outlets/:outletCode/ungroup`), NOT a blank upload
+  cell; blocks while the child still shares PAN/GST/bank/UPI/**phone** with the group (§4.5). Re-link A→B
+  via upload is blocked (un-group first).
+
+**As-built files:** `partner-group.helper.ts` (+normalize/lock/parent-inclusion); `kyc.service.ts`
+(uniqueness gate + stage-at-approval + cleanup + orphan-reuse); `admin-outlets/{parents.service,
+parents.controller,admin-outlets.service}` + DTO; leak filters (channel-partners/admin-core/tds/payouts);
+FE `admin|sales/kyc/[id]/page.tsx` (proposed-vs-current diff). Migration `20260723120000_partner_group_uniqueness`.
+
+### ✅ Wave 3 — DONE (2026-07-23, on develop; gate green: api jest 1718 · nest 0 · FE vitest 1971 · tsc 0)
+Streams C/D built via parallel sub-agents, then a **3-lens independent adversarial audit** (auth boundary /
+money path / regression) + a full audit-fix pass. Additive + opt-in — dormant until an admin groups an
+outlet. **On develop; migrations applied on staging via CI; NOT in prod (owner-gated cutover pending).**
+
+**As-built:**
+- **Login picker + active-partner selector.** Outlet/partner identity is NOT in the JWT — it is re-resolved
+  per request. A phone → one login → its own partner + **login-less same-group same-phone siblings**
+  (`userId=null`) reached via a picker. The selected outlet rides an httpOnly cookie `active_partner_id` →
+  the proxy injects header **`x-active-partner-id`** → EVERY partner-self-resolution site
+  (`partner`/`wallet`/`rewards`/`visibility`/`schemes`/`invoices`/`leaderboard`) re-authorizes it via
+  `resolveActivePartnerId` (the shared **access boundary**: absent/own → own; a valid operable sibling →
+  that sibling; anything else → forbidden). The money/write paths **fail closed** (403); the **shell endpoint
+  `/partner/me` degrades to own** on an invalid selector (+ `activeSelectorInvalid` → the FE self-heals by
+  clearing the cookie; logout also clears it) so a stale/shared-device cookie never bricks the portal.
+- **Read-only group overview** (`GET /v1/partner/group/wallet`, new `GroupService`) — a consolidated wallet
+  roll-up (sum of **Int POINTS**, not paise) + per-outlet drill-down, unlocked when the login's phone owns a
+  parent (+ own-group cross-check so an admin phone-typo can't expose an unrelated group). FE `/partner/group`
+  page + `/partner/select` picker + a header outlet-switcher (hidden for single-outlet logins).
+- **Stream C — child KYC pre-fill + "verified on parent" badge.** A grouped-before-KYC child pre-fills owner
+  identity from its APPROVED parent (PAN locked to the group PAN); both KYC detail pages show a per-field
+  "verified on parent" badge (server-computed booleans, pre-mask → PII-safe). *(Owner decision: `parentPrefill`
+  stays in the `/api/sales/outlets` list payload — reaches only authorized sales staff; not tightened.)*
+- **Scheme enrollment RE-KEYED by SHOP** (owner decision): `SchemeEnrollment` moved from the login (`userId`)
+  to the **partner/shop** (`@@unique[schemeId, partnerId]`; `userId` now nullable audit-only) so a login-less
+  sibling can self-enroll via the picker. Migration `20260723140000_scheme_enrollment_by_partner` backfills
+  `partnerId` from each enrollment's login and deletes un-backfillable orphans.
+- **Redemption OTP is now order-bound** (`OtpCode.referenceId`, migration `20260723130000_otp_reference_id`) —
+  a login can hold concurrent PENDING orders across outlets, so the confirm OTP is scoped to its order.
+
+**Known minor Wave-3 gap (owner-aware, not a blocker):** the scheme LIST eligibility filter is still keyed by the
+login (`SchemeEligibility.specificPartnerId = user.sub`), so a switched login-less sibling may not see its
+specific-eligibility schemes in the catalog list — but `submitEnrollment` does NOT gate on eligibility, so the
+sibling can still enroll. Thread the active partner into the list eligibility if this becomes a real UX need.
+
+**Migrations this feature adds (all additive / forward-only):** `20260722100000_partner_multi_outlet_foundation`
+(W1) · `20260723120000_partner_group_uniqueness` (W2) · `20260723130000_otp_reference_id` (W3) ·
+`20260723140000_scheme_enrollment_by_partner` (W3). W1+W2 already applied on staging; W3's two apply on the
+next develop push.
+
+### ⚠️ CUTOVER CHECKLIST (owner-gated; the migrations are NOT yet in prod)
+1. **PROD dup-PAN pre-check BEFORE `migrate deploy`** — the PAN partial-unique index FAILS to build if two
+   ungrouped active partners already share a PAN. Guarded read (same as staging):
+   `SELECT "panNumber", count(*) FROM channel_partners WHERE "deletedAt" IS NULL AND "panNumber" IS NOT NULL AND "isParent"=false GROUP BY "clientId","panNumber" HAVING count(*)>1`.
+   If non-empty → GROUP those real multi-outlet owners (or clear) first. (Deoleo prod is likely clean — no
+   outlets onboarded yet — but VERIFY. Staging had 9 UAT-junk dups; nulled under guarded write 2026-07-23.)
+2. **PROD scheme-enrollment orphan pre-check** — the W3 `scheme_enrollment_by_partner` migration **self-aborts**
+   (RAISE EXCEPTION, no silent delete) if any enrollment's `userId` maps to no ChannelPartner. Run the pre-check
+   so the deploy doesn't abort:
+   `SELECT count(*) FROM scheme_enrollments e WHERE NOT EXISTS (SELECT 1 FROM channel_partners cp WHERE cp."userId"=e."userId")`.
+   Expect 0 on prod (real enrollments always came from a partner login). If >0, inspect + resolve before migrating.
+3. **Cloud Scheduler job** hitting `POST /v1/kyc/cleanup-stale-drafts` daily + the `KYC_CLEANUP_SECRET`
+   env/secret set on prod (and staging) — else the 48h cleanup never runs (endpoint fail-closes).
+4. **Before ever flipping a tenant's `uniquenessPolicy.bank`/`upi` to true on prod:** sweep for existing
+   duplicate bank/UPI among ungrouped active partners (no DB index to reveal them) and group them first.
+5. **The §4.5 PAN-change-to-leave-group ordering is a TODO (`TODO(wave4)` in kyc.service)** — resolve with the
+   owner before enabling group-leave via re-KYC.
+
+### ▶ REMAINING — owner UAT on staging (real OTP) then the owner-gated cutover
+Owner exercises the full flow on staging: multi-outlet login → picker → switch → wallet/redeem per outlet →
+group overview; grouped-child KYC pre-fill + verified-on-parent; login-less sibling scheme self-enroll; the
+re-KYC stage-at-approval. Then the owner-gated prod cutover per the checklist above.

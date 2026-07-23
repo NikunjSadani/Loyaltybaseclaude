@@ -63,6 +63,10 @@ interface KYCDetail {
   upiId?: string;
   // Re-KYC staged identity/payout changes (proposed vs current), or undefined when none.
   proposedChanges?: ProposedChanges;
+  // Wave-3 grouped child: per-field "current value matches the approved parent" flags,
+  // server-computed pre-mask. Keyed on panNumber/gstNumber/bankAccountNumber/ifscCode/
+  // upiId/bankName/bankAccountHolder/ownerName/businessName/phone. Undefined when none.
+  parentVerified?: Record<string, boolean>;
   documents: KYCDoc[];
   photos: { label: string; url: string; documentType: string }[];
   approvalHistory: ApprovalEvent[];
@@ -128,6 +132,8 @@ interface ApiSalesKYC {
   submittedAt: string;
   rejectionReason?: string | null;
   reKycFlags?: ReKycFlags;
+  // Wave-3 grouped child: per-field match-with-approved-parent flags (server pre-mask).
+  parentVerified?: Record<string, boolean>;
   user: { id: string; name: string; phone: string; role: string };
   partner: {
     id: string;
@@ -346,6 +352,25 @@ function ProposedFieldValue({
   );
 }
 
+/**
+ * Wave-3 grouped child: a subtle emerald badge shown next to an identity field whose CURRENT
+ * value matches the outlet's APPROVED parent. Distinct from the amber "Proposed change" pill —
+ * a field can be BOTH (both render side by side). Keys off the child's current value via
+ * `parentVerified[field]` (server-computed pre-mask), so a masked sales reviewer still sees it.
+ * Purely additive — renders nothing when not verified.
+ */
+function VerifiedOnParentBadge({ verified }: { verified?: boolean }): ReactNode {
+  if (!verified) return null;
+  return (
+    <span
+      data-testid="verified-on-parent-badge"
+      className="ml-1.5 inline-flex items-center gap-0.5 text-[10px] font-sans font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full whitespace-nowrap align-middle"
+    >
+      <CheckCircle className="h-2.5 w-2.5" /> Verified on parent
+    </span>
+  );
+}
+
 function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
   // Address lives on the OUTLET (captured at KYC), not ChannelPartner.
   const o = s.partner.outlets?.[0];
@@ -379,6 +404,7 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
       s.partner.outlets?.[0] as Record<string, unknown> | null | undefined,
       s.proposedPartner as Record<string, unknown> | null | undefined,
     ),
+    parentVerified: s.parentVerified ?? undefined,
     documents: (s.documents ?? []).map(mapDoc),
     photos: (s.documents ?? [])
       .filter(d => PHOTO_DOC_TYPES.has(d.documentType) && d.viewUrl)
@@ -790,6 +816,8 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           // diff the proposed patch so the reviewer sees WHAT they are approving (§ money path).
           // Address is diffed against the outlet (outlets[0]), not the partner scalars.
           proposedChanges: buildProposedChanges(s.partner, s.partner?.outlets?.[0], s.proposedPartner),
+          // Wave-3 grouped child: per-field match-with-approved-parent flags (drives the badge).
+          parentVerified:  s.parentVerified ?? undefined,
           documents:       (s.documents ?? []).map(mapDoc),
           // Store/owner photos are rendered as images; everything else lists as a doc row.
           photos:          (s.documents ?? [])
@@ -1103,8 +1131,8 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
               <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Partner Details</p>
               <div className="space-y-2.5">
                 {[
-                  { icon: <User className="h-3.5 w-3.5" />,   label: 'Owner Name', value: <ProposedFieldValue change={kyc.proposedChanges?.ownerName}>{kyc.ownerName}</ProposedFieldValue> },
-                  { icon: <Phone className="h-3.5 w-3.5" />,  label: 'Mobile',  value: <ProposedFieldValue change={kyc.proposedChanges?.phone}>{`+91 ${kyc.outletPhone}`}</ProposedFieldValue> },
+                  { icon: <User className="h-3.5 w-3.5" />,   label: 'Owner Name', value: <><ProposedFieldValue change={kyc.proposedChanges?.ownerName}>{kyc.ownerName}</ProposedFieldValue><VerifiedOnParentBadge verified={kyc.parentVerified?.ownerName} /></> },
+                  { icon: <Phone className="h-3.5 w-3.5" />,  label: 'Mobile',  value: <><ProposedFieldValue change={kyc.proposedChanges?.phone}>{`+91 ${kyc.outletPhone}`}</ProposedFieldValue><VerifiedOnParentBadge verified={kyc.parentVerified?.phone} /></> },
                   { icon: <MapPin className="h-3.5 w-3.5" />, label: 'Address', value: <ProposedFieldValue change={kyc.proposedChanges?.address}>{[kyc.address, kyc.city, kyc.state, kyc.pincode].filter(Boolean).join(', ') || '—'}</ProposedFieldValue> },
                 ].map(row => (
                   <div key={row.label} className="flex items-start gap-2">
@@ -1147,6 +1175,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                     <span className="text-xs text-gray-400">GST</span>
                     <span data-testid="kyc-store-gst" className="text-sm font-mono text-gray-800">
                       <ProposedFieldValue change={kyc.proposedChanges?.gstNumber}>{kyc.gstNumber}</ProposedFieldValue>
+                      <VerifiedOnParentBadge verified={kyc.parentVerified?.gstNumber} />
                     </span>
                   </div>
                 )}
@@ -1155,6 +1184,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                     <span className="text-xs text-gray-400">PAN</span>
                     <span data-testid="kyc-store-pan" className="text-sm font-mono text-gray-800">
                       <ProposedFieldValue change={kyc.proposedChanges?.panNumber}>{kyc.panNumber}</ProposedFieldValue>
+                      <VerifiedOnParentBadge verified={kyc.parentVerified?.panNumber} />
                     </span>
                   </div>
                 )}
@@ -1288,13 +1318,14 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                 Also shows when a re-KYC stages a payment change even if the live value is empty. */}
             {(() => {
               const c = kyc.proposedChanges;
+              const pv = kyc.parentVerified;
               const paymentRows = [
-                { label: 'Bank',           value: kyc.bankName as ReactNode, change: c?.bankName          },
-                { label: 'Account',        value: kyc.accountNumber as ReactNode, change: c?.bankAccountNumber },
-                { label: 'Account Holder', value: undefined as ReactNode, change: c?.bankAccountHolder  },
-                { label: 'IFSC',           value: kyc.ifscCode as ReactNode, change: c?.ifscCode          },
-                { label: 'UPI ID',         value: kyc.upiId as ReactNode, change: c?.upiId             },
-                { label: 'Payment Mode',   value: undefined as ReactNode, change: c?.paymentMode       },
+                { label: 'Bank',           value: kyc.bankName as ReactNode, change: c?.bankName,          verified: pv?.bankName          },
+                { label: 'Account',        value: kyc.accountNumber as ReactNode, change: c?.bankAccountNumber, verified: pv?.bankAccountNumber },
+                { label: 'Account Holder', value: undefined as ReactNode, change: c?.bankAccountHolder,   verified: pv?.bankAccountHolder  },
+                { label: 'IFSC',           value: kyc.ifscCode as ReactNode, change: c?.ifscCode,          verified: pv?.ifscCode          },
+                { label: 'UPI ID',         value: kyc.upiId as ReactNode, change: c?.upiId,             verified: pv?.upiId             },
+                { label: 'Payment Mode',   value: undefined as ReactNode, change: c?.paymentMode,       verified: undefined            },
               ].filter(row => row.value || row.change);
               if (paymentRows.length === 0) return null;
               return (
@@ -1318,6 +1349,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                           <span className="text-xs text-gray-400">{row.label}</span>
                           <span className="text-sm font-medium text-gray-800 font-mono">
                             <ProposedFieldValue change={row.change}>{row.value}</ProposedFieldValue>
+                            <VerifiedOnParentBadge verified={row.verified} />
                           </span>
                         </div>
                       ))}

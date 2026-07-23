@@ -13,6 +13,12 @@ const mockPrisma = {
   scheme: { findMany: jest.fn(), count: jest.fn(), create: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
   schemeEligibility: { findMany: jest.fn() },
   schemeEnrollmentForm: { upsert: jest.fn(), findUnique: jest.fn() },
+  // Wave 3 enrollment threading (submitEnrollment / getMyEnrollment).
+  channelPartner: { findFirst: jest.fn() },
+  salesUser: { findFirst: jest.fn() },
+  salesUserAssignment: { findFirst: jest.fn() },
+  outlet: { findMany: jest.fn() },
+  schemeEnrollment: { upsert: jest.fn(), findUnique: jest.fn() },
 };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
@@ -288,4 +294,170 @@ describe('SchemesService', () => {
     });
   });
 
+});
+
+// ── Wave 3 login picker: enrollment acts on the ACTIVE partner (resolveActivePartnerId) ──────
+//
+// SchemeEnrollment is now keyed by the SHOP (@@unique[schemeId, partnerId]); userId is optional
+// audit metadata. A login-less same-group sibling (userId = null) is therefore FULLY enrollable —
+// its enrollment is keyed by its partnerId and records userId = null. Own / absent-header paths stay
+// byte-identical (subject = the login's own shop, userId = user.sub). The SALES-on-behalf branch
+// targets an explicit outlet and never consults the selector.
+describe('SchemesService — Wave 3 enrollment threading', () => {
+  let service: SchemesService;
+
+  // An ACTIVE, in-window scheme with NO enrollment form → campaignType defaults MIXED (no KYC gate,
+  // no form-values validation), so the enrollment path reaches the upsert.
+  const activeScheme = {
+    id: 'sch1',
+    clientId: 'deoleo',
+    status: 'ACTIVE',
+    deletedAt: null,
+    startDate: new Date('2026-01-01'),
+    endDate: new Date('2030-01-01'),
+    enrollmentForm: null,
+  };
+
+  // Outlet switching needs a real 10-digit phone (operable set = same-group + same-phone).
+  const switcher: JwtPayload = { sub: 'user1', role: 'SSS', clientId: 'deoleo', phone: '9800000001', name: '' };
+  const salesUser: JwtPayload = { sub: 'salesUser1', role: 'SALES_ISR', clientId: 'deoleo', phone: '9900000041', name: '' };
+  const selfDto = () => ({ enrollmentMode: 'SELF' }) as never;
+  const salesEnrollDto = () => ({ enrollmentMode: 'SALES', targetPartnerId: 'tp1' }) as never;
+
+  beforeEach(async () => {
+    jest.resetAllMocks();
+    mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+    mockPrisma.schemeEnrollment.upsert.mockResolvedValue({ id: 'enr1' });
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [SchemesService, { provide: PrismaService, useValue: mockPrisma }],
+    }).compile();
+    service = module.get(SchemesService);
+  });
+
+  describe('submitEnrollment (SELF)', () => {
+    it('no header → enrolls the login’s OWN user (byte-identical to today)', async () => {
+      // resolveActivePartnerId own lookup (where.userId) → own; not switched → enrolledUserId = user.sub.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', groupId: 'g1' });
+
+      await service.submitEnrollment(switcher, 'sch1', selfDto());
+
+      expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith({
+        where: { userId: 'user1', clientId: 'deoleo', deletedAt: null, isParent: false },
+        select: { id: true, groupId: true },
+      });
+      expect(mockPrisma.schemeEnrollment.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { schemeId_partnerId: { schemeId: 'sch1', partnerId: 'cp1' } },
+        }),
+      );
+      // Subject = own shop (cp1); audit userId = the login.
+      const upsertCall = mockPrisma.schemeEnrollment.upsert.mock.calls[0][0];
+      expect(upsertCall.create.partnerId).toBe('cp1');
+      expect(upsertCall.create.userId).toBe('user1');
+    });
+
+    it('forbidden selector (outside the operable set) → ForbiddenException, no enrollment', async () => {
+      // own has no group → any non-own selector is a forbidden cross-partner reach.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', groupId: null });
+
+      await expect(
+        service.submitEnrollment(switcher, 'sch1', selfDto(), 'someoneElse'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.schemeEnrollment.upsert).not.toHaveBeenCalled();
+    });
+
+    it('switched login-less sibling (userId=null) → SELF-enrolls the SHOP; enrollment userId is null', async () => {
+      // own lookup (where.userId) → own (group g1); by-id lookups (helper sibling-auth + the audit
+      // userId re-fetch) → the login-less sibling (userId null).
+      mockPrisma.channelPartner.findFirst.mockImplementation((args: any) =>
+        args.where.userId
+          ? Promise.resolve({ id: 'cp1', groupId: 'g1' })
+          : Promise.resolve({ id: 'sib1', userId: null }),
+      );
+
+      await service.submitEnrollment(switcher, 'sch1', selfDto(), 'sib1');
+
+      // The enrollment is keyed by the SIBLING shop, with a null audit userId (no login of its own).
+      expect(mockPrisma.schemeEnrollment.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { schemeId_partnerId: { schemeId: 'sch1', partnerId: 'sib1' } },
+        }),
+      );
+      const upsertCall = mockPrisma.schemeEnrollment.upsert.mock.calls[0][0];
+      expect(upsertCall.create.partnerId).toBe('sib1');
+      expect(upsertCall.create.userId).toBeNull();
+    });
+
+    it('no partner at all → today’s no-partner ForbiddenException', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      await expect(service.submitEnrollment(switcher, 'sch1', selfDto())).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(mockPrisma.schemeEnrollment.upsert).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('submitEnrollment (SALES on-behalf) — selector must NOT affect it', () => {
+    it('ignores x-active-partner-id and enrolls the TARGET partner’s user via the assignment path', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1' });
+      // Target partner resolved by id (NOT via resolveActivePartnerId's own userId lookup).
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'tp1', userId: 'targetUser' });
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValue({ id: 'asg1' });
+
+      // A selector IS passed — the SALES branch must ignore it entirely.
+      await service.submitEnrollment(salesUser, 'sch1', salesEnrollDto(), 'sib1');
+
+      // Enrollment is keyed to the TARGET shop, not to any switched partner; audit userId = target's.
+      expect(mockPrisma.schemeEnrollment.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { schemeId_partnerId: { schemeId: 'sch1', partnerId: 'tp1' } },
+        }),
+      );
+      const upsertCall = mockPrisma.schemeEnrollment.upsert.mock.calls[0][0];
+      expect(upsertCall.create.userId).toBe('targetUser');
+      // Proof the SELF/resolveActivePartnerId path was never taken: no own (where.userId) lookup.
+      const ownLookups = mockPrisma.channelPartner.findFirst.mock.calls.filter(
+        (c: any) => c[0]?.where?.userId !== undefined,
+      );
+      expect(ownLookups).toHaveLength(0);
+    });
+  });
+
+  describe('getMyEnrollment', () => {
+    it('no header → reads the login’s OWN enrollment (byte-identical to today)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', groupId: 'g1' });
+      mockPrisma.schemeEnrollment.findUnique.mockResolvedValue({ id: 'enr1' });
+
+      await service.getMyEnrollment(switcher, 'sch1');
+
+      expect(mockPrisma.schemeEnrollment.findUnique).toHaveBeenCalledWith({
+        where: { schemeId_partnerId: { schemeId: 'sch1', partnerId: 'cp1' } },
+      });
+    });
+
+    it('forbidden selector → ForbiddenException, no enrollment read', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', groupId: null });
+      await expect(service.getMyEnrollment(switcher, 'sch1', 'someoneElse')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(mockPrisma.schemeEnrollment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('switched login-less sibling → reads the SIBLING shop’s enrollment (keyed by partnerId)', async () => {
+      mockPrisma.channelPartner.findFirst.mockImplementation((args: any) =>
+        args.where.userId
+          ? Promise.resolve({ id: 'cp1', groupId: 'g1' })
+          : Promise.resolve({ id: 'sib1', userId: null }),
+      );
+      mockPrisma.schemeEnrollment.findUnique.mockResolvedValue({ id: 'enrSib' });
+
+      const res = await service.getMyEnrollment(switcher, 'sch1', 'sib1');
+
+      expect(res).toEqual({ enrollment: { id: 'enrSib' } });
+      expect(mockPrisma.schemeEnrollment.findUnique).toHaveBeenCalledWith({
+        where: { schemeId_partnerId: { schemeId: 'sch1', partnerId: 'sib1' } },
+      });
+    });
+  });
 });

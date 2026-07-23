@@ -2,6 +2,7 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isReKycActionable } from '../common/kyc-rekyc.helper';
+import { resolveGroupPan } from '../common/partner-group.helper';
 import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-access.helper';
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 import { TenantService } from '../tenant/tenant.service';
@@ -432,7 +433,7 @@ export class SalesService {
     });
     if (!member) throw new NotFoundException('Member not found');
 
-    const outlets = await this.buildOutlets(memberId);
+    const outlets = await this.buildOutlets(memberId, user.clientId);
     return { outlets };
   }
 
@@ -458,7 +459,7 @@ export class SalesService {
     });
     const subtreeIds = [...descendantSalesUserIds(salesUser.id, edges)];
 
-    return { outlets: await this.buildOutlets(subtreeIds) };
+    return { outlets: await this.buildOutlets(subtreeIds, user.clientId) };
   }
 
   /**
@@ -1022,7 +1023,7 @@ export class SalesService {
    * Target/TargetAchievement are dropped, so the partner-target read and the
    * achievement-derived targetPct are removed; targetPct is reported as 0.
    */
-  private async buildOutlets(salesUserId: string | string[]) {
+  private async buildOutlets(salesUserId: string | string[], clientId: string) {
     const ids = Array.isArray(salesUserId) ? salesUserId : [salesUserId];
     const assignments = await this.prisma.salesUserAssignment.findMany({
       where: {
@@ -1038,6 +1039,27 @@ export class SalesService {
         outlet: {
           include: {
             outletType: { select: { code: true } },
+            // Owner-GROUP parent (Outlet.parentId → an isParent ChannelPartner). Surfaced so a
+            // child outlet grouped-BEFORE-KYC can PRE-FILL the KYC form from the parent's approved
+            // identity/payout details AND lock the child PAN to the group. Only an APPROVED parent
+            // (onboardedAt != null) may pre-fill — an unapproved parent carries unverified values.
+            // (A parent has NO address columns — address lives on the Outlet — so none is pre-filled.)
+            parent: {
+              select: {
+                businessName: true,
+                ownerName: true,
+                phone: true,
+                email: true,
+                gstNumber: true,
+                panNumber: true,
+                bankName: true,
+                bankAccountNumber: true,
+                bankAccountHolder: true,
+                ifscCode: true,
+                upiId: true,
+                onboardedAt: true,
+              },
+            },
             partner: {
               select: {
                 id: true,
@@ -1068,15 +1090,35 @@ export class SalesService {
       },
     });
 
+    // An outlet uploaded via the master file has NO owner/partner until KYC.
+    // INCLUDE those — a sales rep must see the outlets they're assigned that
+    // still need NEW enrollment/KYC. (Previously these were filtered out, so a
+    // rep whose assigned outlets were all un-KYC'd saw an EMPTY list and could
+    // not start enrollment.) Partner-derived fields are null/0 for partner-less
+    // outlets; sales-assisted redeem (B1) is gated on an APPROVED partner FE-side.
+    const filtered = assignments.filter((a) => a.outlet !== null);
+
+    // Resolve each APPROVED-parent group's canonical PAN once (dedupe by parentId). The child's
+    // KYC PAN must equal this value, so the FE locks the PAN field to it. resolveGroupPan falls
+    // back to a grouped sibling's PAN when the parent itself carries none. Only approved parents
+    // (onboardedAt != null) are resolved — an unapproved parent never pre-fills a child.
+    const approvedParentIds = [
+      ...new Set(
+        filtered
+          .filter((a) => a.outlet!.parentId && a.outlet!.parent?.onboardedAt != null)
+          .map((a) => a.outlet!.parentId!),
+      ),
+    ];
+    const groupPanByParent = new Map<string, string | null>(
+      await Promise.all(
+        approvedParentIds.map(
+          async (pid) => [pid, await resolveGroupPan(this.prisma, clientId, pid)] as const,
+        ),
+      ),
+    );
+
     return (
-      assignments
-        // An outlet uploaded via the master file has NO owner/partner until KYC.
-        // INCLUDE those — a sales rep must see the outlets they're assigned that
-        // still need NEW enrollment/KYC. (Previously these were filtered out, so a
-        // rep whose assigned outlets were all un-KYC'd saw an EMPTY list and could
-        // not start enrollment.) Partner-derived fields are null/0 for partner-less
-        // outlets; sales-assisted redeem (B1) is gated on an APPROVED partner FE-side.
-        .filter((a) => a.outlet !== null)
+      filtered
         .map((a) => {
           const outlet = a.outlet!;
           const partner = outlet.partner; // null until the outlet is KYC'd
@@ -1123,6 +1165,28 @@ export class SalesService {
                 }
               : null;
 
+          // Owner-group PRE-FILL: when this child outlet is grouped under an APPROVED parent, the
+          // KYC form pre-fills the parent's identity/payout values and LOCKS the child PAN to the
+          // group's canonical PAN (`groupPan`). Omitted (undefined) when there is no parent or the
+          // parent is unapproved — an unapproved parent carries unverified values (never pre-fill).
+          // The parent has NO address columns (address lives on the Outlet), so none is pre-filled.
+          const parentApproved = !!(outlet.parentId && outlet.parent?.onboardedAt != null);
+          const parentPrefill = parentApproved
+            ? {
+                businessName: outlet.parent!.businessName ?? '',
+                ownerName: outlet.parent!.ownerName ?? '',
+                gstNumber: outlet.parent!.gstNumber ?? '',
+                panNumber: outlet.parent!.panNumber ?? '',
+                bankName: outlet.parent!.bankName ?? '',
+                bankAccountNumber: outlet.parent!.bankAccountNumber ?? '',
+                bankAccountHolder: outlet.parent!.bankAccountHolder ?? '',
+                ifscCode: outlet.parent!.ifscCode ?? '',
+                upiId: outlet.parent!.upiId ?? '',
+                // The value the child PAN must equal (parent's PAN, else a grouped sibling's).
+                groupPan: groupPanByParent.get(outlet.parentId!) ?? null,
+              }
+            : undefined;
+
           return {
             id: outlet.id,
             partnerId: partner?.id ?? null,
@@ -1157,6 +1221,8 @@ export class SalesService {
             // the paymentMode toggle + required fields. Default BANK; UPI only if tenant upiEnabled.
             requiredPaymentType: outlet.requiredPaymentType,
             existingKyc,
+            // Owner-group pre-fill (approved parent only) — undefined when ungrouped/unapproved.
+            parentPrefill,
             targetPct: 0,
           };
         })

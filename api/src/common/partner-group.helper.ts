@@ -265,3 +265,212 @@ export async function acquireIdentityLocks(
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key})::bigint)`;
   }
 }
+
+// ── Wave 3: operable-context resolution (login picker + read-only parent overview) ──────────
+//
+// The login model: a phone → ONE `User` (`@@unique([clientId, phone])`) → ONE own `ChannelPartner`
+// (`userId=user.sub`). A person who runs several shops holds a SEPARATE ChannelPartner per shop; only
+// one carries the login, the rest are LOGIN-LESS siblings (`userId=null`) in the SAME group, reached
+// via this login's picker. A PARENT is a login-less `isParent=true` owner whose phone may match the
+// login → grants a read-only "Group Overview" across all its children.
+//
+// SECURITY INVARIANT (audited): the "operable set" is the ONLY authority for which partner a request
+// may act on. Every partner-self-resolution site MUST resolve its target partner through
+// `resolveActivePartnerId` (never trust a client-supplied partner id blind). Absent selector → the
+// login's OWN partner (today's single-outlet behaviour, unchanged, zero extra query on the hot path).
+//
+// Why operable siblings are constrained to SAME-GROUP **and** SAME-PHONE (not bare phone-match):
+// phone-uniqueness is only enforced when the tenant policy has it on, so two *ungrouped* outlets could
+// share a phone under a policy-off tenant and must NEVER be merged into one login. Grouping is the
+// mechanism that legitimately allows a shared phone, so operability ⟹ same group. An ungrouped login
+// therefore has exactly one operable context (itself) regardless of policy.
+
+/** Last-10-digit phone key — mirrors kyc.service.phoneLast10 (the one match/uniqueness normalization).
+ *  Returns null unless exactly 10 digits remain, so we never match on an empty/garbage `endsWith`. */
+export function normalizePhoneLast10(raw: string | null | undefined): string | null {
+  const digits = (raw ?? '').replace(/\D/g, '').slice(-10);
+  return digits.length === 10 ? digits : null;
+}
+
+export interface OperablePartner {
+  partnerId: string;
+  outletId: string | null;
+  outletCode: string | null;
+  businessName: string | null;
+  ownerName: string | null;
+  isOwnLogin: boolean; // true = the login's own partner (userId = user.sub)
+}
+
+export interface GroupParentRef {
+  parentId: string;
+  businessName: string | null;
+  ownerName: string | null;
+}
+
+export interface OperableContexts {
+  ownPartnerId: string | null;
+  /** All partners this login may operate (own + login-less same-group same-phone siblings). Own-first. */
+  operable: OperablePartner[];
+  /** Read-only group overview target, when this login's phone is a parent's phone. */
+  groupParent: GroupParentRef | null;
+}
+
+/** Only an active (approved+active) outlet is operable — a representative outlet for display. */
+const OPERABLE_OUTLET_SELECT = {
+  where: { isActive: true, deletedAt: null },
+  select: { id: true, outletCode: true, name: true, isPrimary: true, createdAt: true },
+  orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+  take: 1,
+} satisfies Prisma.ChannelPartner$outletsArgs;
+
+function pickOutlet(outlets: { id: string; outletCode: string | null; name: string | null }[] | undefined) {
+  const o = outlets?.[0];
+  return { outletId: o?.id ?? null, outletCode: o?.outletCode ?? null };
+}
+
+/**
+ * Resolve everything a login can touch — the picker payload for `/partner/me`.
+ * `phone` is the login's JWT phone (authoritative); `userSub` its user id.
+ */
+export async function resolveOperableContexts(
+  db: Db,
+  params: { clientId: string; userSub: string; phone: string | null },
+): Promise<OperableContexts> {
+  const { clientId, userSub, phone } = params;
+  const last10 = normalizePhoneLast10(phone);
+
+  const own = await db.channelPartner.findFirst({
+    where: { userId: userSub, clientId, deletedAt: null },
+    select: {
+      id: true,
+      businessName: true,
+      ownerName: true,
+      groupId: true,
+      isParent: true,
+      outlets: OPERABLE_OUTLET_SELECT,
+    },
+  });
+
+  const operable: OperablePartner[] = [];
+  if (own && !own.isParent) {
+    operable.push({
+      partnerId: own.id,
+      ...pickOutlet(own.outlets),
+      businessName: own.businessName,
+      ownerName: own.ownerName,
+      isOwnLogin: true,
+    });
+  }
+
+  // Login-less siblings: same group + same phone + no login of their own. Only when we have a real
+  // group AND a valid phone (else there is nothing to safely merge — see the SECURITY INVARIANT above).
+  if (own?.groupId && last10) {
+    const siblings = await db.channelPartner.findMany({
+      where: {
+        clientId,
+        deletedAt: null,
+        isParent: false,
+        userId: null,
+        groupId: own.groupId,
+        id: { not: own.id },
+        phone: { endsWith: last10 },
+      },
+      select: {
+        id: true,
+        businessName: true,
+        ownerName: true,
+        outlets: OPERABLE_OUTLET_SELECT,
+      },
+    });
+    for (const s of siblings) {
+      // Only surface a sibling that actually has an operable (active) outlet.
+      if (!s.outlets?.length) continue;
+      operable.push({
+        partnerId: s.id,
+        ...pickOutlet(s.outlets),
+        businessName: s.businessName,
+        ownerName: s.ownerName,
+        isOwnLogin: false,
+      });
+    }
+  }
+
+  let groupParent: GroupParentRef | null = null;
+  if (last10) {
+    const parent = await db.channelPartner.findFirst({
+      where: { clientId, deletedAt: null, isParent: true, phone: { endsWith: last10 } },
+      select: { id: true, businessName: true, ownerName: true },
+    });
+    if (parent) groupParent = { parentId: parent.id, businessName: parent.businessName, ownerName: parent.ownerName };
+  }
+
+  return { ownPartnerId: own?.id ?? null, operable, groupParent };
+}
+
+/**
+ * Authorize + resolve the partner a request should ACT ON, from an optional client-supplied selector.
+ *
+ * - Absent / empty / equal-to-own selector → the login's OWN partner (fast path: one query).
+ * - A selector naming a valid operable sibling → that sibling.
+ * - A selector naming anything else → `forbidden` (the caller throws ForbiddenException). NEVER trust
+ *   the selector without this re-authorization — it is the whole access boundary for outlet switching.
+ *
+ * Returns `partnerId=null, forbidden=false` when the login has no partner at all (e.g. a parent-only
+ * phone) — the caller treats that as "no operable outlet" exactly as today.
+ */
+export async function resolveActivePartnerId(
+  db: Db,
+  params: { clientId: string; userSub: string; phone: string | null; requestedPartnerId?: string | null },
+): Promise<{ partnerId: string | null; forbidden: boolean; isSwitched: boolean }> {
+  const { clientId, userSub, phone, requestedPartnerId } = params;
+
+  const own = await db.channelPartner.findFirst({
+    // isParent:false — a parent is login-less by construction, so a login never resolves to one;
+    // filtering it defends against a model violation (a parent with a userId) letting a login
+    // enumerate every child of its own group via the switch query below (audit LOW-2).
+    where: { userId: userSub, clientId, deletedAt: null, isParent: false },
+    select: { id: true, groupId: true },
+  });
+
+  const requested = (requestedPartnerId ?? '').trim() || null;
+  if (!requested || requested === own?.id) {
+    return { partnerId: own?.id ?? null, forbidden: false, isSwitched: false };
+  }
+
+  // A switch was requested — it is valid ONLY if it names a login-less sibling in the login's own
+  // group carrying the login's phone AND with an ACTIVE outlet (the same constraint the picker
+  // applies — else a crafted header could operate an inactive sibling the UI never surfaces).
+  // Anything else is a forbidden cross-partner reach.
+  const last10 = normalizePhoneLast10(phone);
+  if (!own?.groupId || !last10) return { partnerId: null, forbidden: true, isSwitched: false };
+
+  const sibling = await db.channelPartner.findFirst({
+    where: {
+      id: requested,
+      clientId,
+      deletedAt: null,
+      isParent: false,
+      userId: null,
+      groupId: own.groupId,
+      phone: { endsWith: last10 },
+      outlets: { some: { isActive: true, deletedAt: null } },
+    },
+    select: { id: true },
+  });
+  if (!sibling) return { partnerId: null, forbidden: true, isSwitched: false };
+  return { partnerId: sibling.id, forbidden: false, isSwitched: true };
+}
+
+/** Resolve the read-only group-overview parent for a login's phone (auth = phone owns the parent). */
+export async function resolveGroupParentByPhone(
+  db: Db,
+  params: { clientId: string; phone: string | null },
+): Promise<string | null> {
+  const last10 = normalizePhoneLast10(params.phone);
+  if (!last10) return null;
+  const parent = await db.channelPartner.findFirst({
+    where: { clientId: params.clientId, deletedAt: null, isParent: true, phone: { endsWith: last10 } },
+    select: { id: true },
+  });
+  return parent?.id ?? null;
+}

@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Post,
   Query,
@@ -53,8 +54,11 @@ export class VisibilityController {
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,
     @Body() dto: SubmitVisibilityDto,
+    // `x-active-partner-id` (Wave 3 login picker): the active-outlet selector. Re-authorized in the
+    // service — a forged/foreign id can never submit against another partner's outlet.
+    @Headers('x-active-partner-id') activePartnerId?: string,
   ) {
-    return this.visibility.submit(user, file, dto);
+    return this.visibility.submit(user, file, dto, activePartnerId);
   }
 
   @Post('submissions/:id/approve')

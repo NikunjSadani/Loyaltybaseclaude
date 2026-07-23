@@ -11,6 +11,7 @@ import {
   SubmitVisibilityDto,
 } from './dto/visibility.dto';
 import { StorageService } from '../storage/storage.service';
+import { resolveActivePartnerId } from '../common/partner-group.helper';
 
 /** Image MIME allowlist for visibility photo submissions. */
 const ALLOWED_IMAGE_MIME = ['image/jpeg', 'image/png', 'image/webp'];
@@ -82,7 +83,12 @@ export class VisibilityService {
    * Mode gate: only PHOTO_APPROVAL tenants accept photo submissions (mirrors the
    * approve/reject gate). Submissions land in SUBMITTED (queued for review).
    */
-  async submit(user: JwtPayload, file: Express.Multer.File, dto: SubmitVisibilityDto) {
+  async submit(
+    user: JwtPayload,
+    file: Express.Multer.File,
+    dto: SubmitVisibilityDto,
+    requestedPartnerId?: string,
+  ) {
     // 0. Master gate — visibility must be enabled for the tenant.
     await this.assertVisibilityEnabled(user);
 
@@ -105,12 +111,20 @@ export class VisibilityService {
       );
     }
 
-    // 3. Resolve the calling partner from the JWT (never from the request body).
-    const partner = await this.prisma.channelPartner.findFirst({
-      where: { userId: user.sub, user: { clientId: user.clientId } },
-      select: { id: true },
+    // 3. Resolve the ACTIVE partner (Wave 3 login picker). Absent / own / empty selector → the
+    //    login's OWN partner (today's single-outlet behaviour); a valid same-group same-phone
+    //    login-less sibling → that sibling; anything else → forbidden. Re-authorized inside the
+    //    helper so a forged/foreign x-active-partner-id can NEVER reach another outlet. A switched
+    //    user therefore submits for the ACTIVE outlet, not the login's own.
+    const { partnerId, forbidden } = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
     });
-    if (!partner) throw new ForbiddenException('Only channel partners can submit visibility photos');
+    if (forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+    // Null partner → today's no-partner behaviour (a non-partner login has nothing to submit for).
+    if (!partnerId) throw new ForbiddenException('Only channel partners can submit visibility photos');
 
     // 4. Validate the program belongs to this tenant.
     const program = await this.prisma.visibilityProgram.findFirst({
@@ -124,13 +138,13 @@ export class VisibilityService {
     let outletId = dto.outletId;
     if (outletId) {
       const outlet = await this.prisma.outlet.findFirst({
-        where: { id: outletId, partnerId: partner.id, clientId: user.clientId },
+        where: { id: outletId, partnerId, clientId: user.clientId },
         select: { id: true },
       });
       if (!outlet) throw new NotFoundException('Outlet not found for this partner');
     } else {
       const outlets = await this.prisma.outlet.findMany({
-        where: { partnerId: partner.id, clientId: user.clientId, isActive: true },
+        where: { partnerId, clientId: user.clientId, isActive: true },
         select: { id: true },
         take: 2,
       });
@@ -156,7 +170,7 @@ export class VisibilityService {
     const submission = await this.prisma.visibilitySubmission.create({
       data: {
         programId: program.id,
-        partnerId: partner.id,
+        partnerId,
         outletId,
         imageUrls: [imageUrl],
         latitude: Number.isFinite(geoLat as number) ? (geoLat as number) : null,

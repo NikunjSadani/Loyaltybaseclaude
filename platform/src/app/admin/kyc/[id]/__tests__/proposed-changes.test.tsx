@@ -137,3 +137,54 @@ describe('KYCPC — Admin KYC re-KYC proposed-change rendering', () => {
     expect(screen.getByText('27AABCS1429B1Z5')).toBeInTheDocument();
   });
 });
+
+/**
+ * KYCPV — Admin KYC detail: "Verified on parent" badge (Wave-3 grouped child)
+ *
+ * A grouped child whose CURRENT identity/payout value matches its APPROVED parent carries a
+ * per-field `parentVerified` flag (server-computed PRE-MASK). The reviewer sees a subtle emerald
+ * badge, distinct from the amber "Proposed change" pill — a field can be BOTH.
+ */
+describe('KYCPV — Admin KYC verified-on-parent badge', () => {
+  it('KYCPV1: parent-verified fields show the "Verified on parent" badge', async () => {
+    stubFetch({ ...REKYC_SUBMISSION, proposedPartner: null, parentVerified: { panNumber: true, gstNumber: true } });
+    render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
+    await screen.findAllByText('Sharma General Store');
+    expect(screen.getAllByTestId('verified-on-parent-badge')).toHaveLength(2);
+    // No proposed changes here → no proposed-change pills.
+    expect(screen.queryByTestId('proposed-change')).not.toBeInTheDocument();
+  });
+
+  it('KYCPV2: a field that is BOTH proposed AND parent-verified shows the pill and the badge', async () => {
+    // REKYC_SUBMISSION proposes a new GSTIN + Account; also flag GST as verified-on-parent.
+    stubFetch({ ...REKYC_SUBMISSION, parentVerified: { gstNumber: true } });
+    render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
+    // The amber proposed pill still renders unchanged (GST + Account = 2)…
+    expect(await screen.findByText('29ZZZZZ9999Z9Z9')).toBeInTheDocument();
+    expect(screen.getAllByTestId('proposed-change')).toHaveLength(2);
+    // …alongside exactly one verified badge (on GST).
+    expect(screen.getAllByTestId('verified-on-parent-badge')).toHaveLength(1);
+  });
+
+  it('KYCPV3: a masked reader still gets the badge (parentVerified computed pre-mask)', async () => {
+    stubFetch({
+      id: 'KYC001', status: 'PENDING_GIFSY',
+      submittedAt: '2026-05-01T00:00:00.000Z', createdAt: '2026-05-01T00:00:00.000Z',
+      user: { id: 'u1', name: 'Rohit Verma', phone: '98xxxxx321', role: 'SALES_SO' },
+      partner: { ...BASE_PARTNER, panNumber: 'AABxxxxx9B' },  // PII-masked PAN on the wire
+      proposedPartner: null,
+      parentVerified: { panNumber: true },                    // still computed on the unmasked value
+      documents: [], statusHistory: [],
+    });
+    render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
+    await screen.findAllByText('Sharma General Store');
+    expect(screen.getByTestId('verified-on-parent-badge')).toBeInTheDocument();
+  });
+
+  it('KYCPV4: no parentVerified → no badge (purely additive)', async () => {
+    stubFetch({ ...REKYC_SUBMISSION, proposedPartner: null });
+    render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
+    await screen.findAllByText('Sharma General Store');
+    expect(screen.queryByTestId('verified-on-parent-badge')).not.toBeInTheDocument();
+  });
+});

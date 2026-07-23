@@ -3,6 +3,10 @@ import {
   clashIsOutsideGroup,
   checkGroupUniqueness,
   checkPanMatchesGroup,
+  normalizePhoneLast10,
+  resolveOperableContexts,
+  resolveActivePartnerId,
+  resolveGroupParentByPhone,
   type UniquenessPolicy,
 } from './partner-group.helper';
 
@@ -180,5 +184,128 @@ describe('partner-group.helper — checkPanMatchesGroup', () => {
   it('passes when the group has no PAN yet (first member sets it)', async () => {
     const db = mockDb({ parentPan: null, siblingPan: null });
     expect(await checkPanMatchesGroup(db, { clientId: 'd', ourParentId: 'P1', pan: 'PANNEW' })).toBeNull();
+  });
+});
+
+// ── Wave 3: operable-context resolution ───────────────────────────────────────────────────
+
+describe('partner-group.helper — normalizePhoneLast10', () => {
+  it('reduces to the last 10 digits, stripping non-digits + country code', () => {
+    expect(normalizePhoneLast10('+91 98300-11252')).toBe('9830011252');
+    expect(normalizePhoneLast10('919830011252')).toBe('9830011252');
+    expect(normalizePhoneLast10('9830011252')).toBe('9830011252');
+  });
+  it('returns null for anything that is not 10 digits', () => {
+    expect(normalizePhoneLast10('12345')).toBeNull();
+    expect(normalizePhoneLast10('')).toBeNull();
+    expect(normalizePhoneLast10(null)).toBeNull();
+    expect(normalizePhoneLast10(undefined)).toBeNull();
+  });
+});
+
+// A where-aware mock: routes findFirst by the shape of its `where`, findMany = siblings.
+function ctxDb(opts: {
+  own?: { id: string; groupId?: string | null; isParent?: boolean; businessName?: string | null; ownerName?: string | null; outlets?: any[] } | null;
+  siblings?: Array<{ id: string; businessName?: string | null; ownerName?: string | null; outlets?: any[] }>;
+  parent?: { id: string; businessName?: string | null; ownerName?: string | null } | null;
+  sibleById?: { id: string } | null;
+}) {
+  const findFirst = jest.fn().mockImplementation(({ where }: any) => {
+    if (where?.userId) return Promise.resolve(opts.own ?? null); // own lookup
+    if (where?.isParent === true) return Promise.resolve(opts.parent ?? null); // parent-by-phone
+    if (where?.id) return Promise.resolve(opts.sibleById ?? null); // sibling authorize by id
+    return Promise.resolve(null);
+  });
+  const findMany = jest.fn().mockResolvedValue(opts.siblings ?? []);
+  return { channelPartner: { findFirst, findMany } } as any;
+}
+
+const OUTLET = [{ id: 'o1', outletCode: 'O001', name: 'Shop', isPrimary: true, createdAt: new Date() }];
+
+describe('partner-group.helper — resolveOperableContexts', () => {
+  it('single ungrouped login → exactly one operable context (itself), no siblings, no group', async () => {
+    const db = ctxDb({ own: { id: 'P0', groupId: null, businessName: 'A', outlets: OUTLET } });
+    const r = await resolveOperableContexts(db, { clientId: 'd', userSub: 'u1', phone: '9830011252' });
+    expect(r.ownPartnerId).toBe('P0');
+    expect(r.operable.map((o) => o.partnerId)).toEqual(['P0']);
+    expect(r.operable[0].isOwnLogin).toBe(true);
+    expect(r.groupParent).toBeNull();
+    expect(db.channelPartner.findMany).not.toHaveBeenCalled(); // no group → never searches siblings
+  });
+
+  it('grouped login sharing a phone → own + login-less same-group same-phone sibling', async () => {
+    const db = ctxDb({
+      own: { id: 'P0', groupId: 'PAR', businessName: 'A', outlets: OUTLET },
+      siblings: [{ id: 'P1', businessName: 'B', outlets: OUTLET }],
+    });
+    const r = await resolveOperableContexts(db, { clientId: 'd', userSub: 'u1', phone: '9830011252' });
+    expect(r.operable.map((o) => o.partnerId)).toEqual(['P0', 'P1']);
+    expect(r.operable[1].isOwnLogin).toBe(false);
+    // the sibling query is constrained to the login's own group + login-less + phone
+    const args = (db.channelPartner.findMany as jest.Mock).mock.calls[0][0];
+    expect(args.where.groupId).toBe('PAR');
+    expect(args.where.userId).toBeNull();
+    expect(args.where.phone.endsWith).toBe('9830011252');
+  });
+
+  it('drops a same-group sibling that has no ACTIVE outlet (not operable)', async () => {
+    const db = ctxDb({
+      own: { id: 'P0', groupId: 'PAR', outlets: OUTLET },
+      siblings: [{ id: 'P1', outlets: [] }],
+    });
+    const r = await resolveOperableContexts(db, { clientId: 'd', userSub: 'u1', phone: '9830011252' });
+    expect(r.operable.map((o) => o.partnerId)).toEqual(['P0']);
+  });
+
+  it('parent phone with no own outlet → only the read-only group overview', async () => {
+    const db = ctxDb({ own: null, parent: { id: 'PAR', businessName: 'Group', ownerName: 'Owner' } });
+    const r = await resolveOperableContexts(db, { clientId: 'd', userSub: 'u1', phone: '9830011252' });
+    expect(r.ownPartnerId).toBeNull();
+    expect(r.operable).toEqual([]);
+    expect(r.groupParent).toEqual({ parentId: 'PAR', businessName: 'Group', ownerName: 'Owner' });
+  });
+});
+
+describe('partner-group.helper — resolveActivePartnerId (the access boundary)', () => {
+  it('no selector → own partner (fast path, not switched)', async () => {
+    const db = ctxDb({ own: { id: 'P0', groupId: 'PAR' } });
+    const r = await resolveActivePartnerId(db, { clientId: 'd', userSub: 'u1', phone: '9830011252' });
+    expect(r).toEqual({ partnerId: 'P0', forbidden: false, isSwitched: false });
+  });
+
+  it('selector == own → own (not treated as a switch)', async () => {
+    const db = ctxDb({ own: { id: 'P0', groupId: 'PAR' } });
+    const r = await resolveActivePartnerId(db, { clientId: 'd', userSub: 'u1', phone: '9830011252', requestedPartnerId: 'P0' });
+    expect(r).toEqual({ partnerId: 'P0', forbidden: false, isSwitched: false });
+  });
+
+  it('selector = a valid operable sibling → authorized switch', async () => {
+    const db = ctxDb({ own: { id: 'P0', groupId: 'PAR' }, sibleById: { id: 'P1' } });
+    const r = await resolveActivePartnerId(db, { clientId: 'd', userSub: 'u1', phone: '9830011252', requestedPartnerId: 'P1' });
+    expect(r).toEqual({ partnerId: 'P1', forbidden: false, isSwitched: true });
+  });
+
+  it('selector = an unrelated partner (not in operable set) → FORBIDDEN', async () => {
+    const db = ctxDb({ own: { id: 'P0', groupId: 'PAR' }, sibleById: null });
+    const r = await resolveActivePartnerId(db, { clientId: 'd', userSub: 'u1', phone: '9830011252', requestedPartnerId: 'EVIL' });
+    expect(r.forbidden).toBe(true);
+    expect(r.partnerId).toBeNull();
+  });
+
+  it('selector on an UNGROUPED login → forbidden (no siblings possible)', async () => {
+    const db = ctxDb({ own: { id: 'P0', groupId: null } });
+    const r = await resolveActivePartnerId(db, { clientId: 'd', userSub: 'u1', phone: '9830011252', requestedPartnerId: 'P1' });
+    expect(r.forbidden).toBe(true);
+  });
+});
+
+describe('partner-group.helper — resolveGroupParentByPhone', () => {
+  it('returns the parent id when a parent carries the phone', async () => {
+    const db = ctxDb({ parent: { id: 'PAR' } });
+    expect(await resolveGroupParentByPhone(db, { clientId: 'd', phone: '9830011252' })).toBe('PAR');
+  });
+  it('null when no parent matches / phone invalid', async () => {
+    expect(await resolveGroupParentByPhone(ctxDb({ parent: null }), { clientId: 'd', phone: '9830011252' })).toBeNull();
+    expect(await resolveGroupParentByPhone(ctxDb({ parent: { id: 'X' } }), { clientId: 'd', phone: '123' })).toBeNull();
   });
 });

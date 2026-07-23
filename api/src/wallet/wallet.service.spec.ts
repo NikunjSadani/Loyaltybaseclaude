@@ -5,7 +5,7 @@
 // Run: npx jest src/wallet/wallet.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { WalletService } from './wallet.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -37,6 +37,8 @@ const mockPrisma = {
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '', name: '' };
+// Wave 3 outlet-switching needs a real 10-digit phone (operable set = same-group + same-phone).
+const switcher: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '9800000001', name: '' };
 
 describe('WalletService', () => {
   let service: WalletService;
@@ -62,8 +64,10 @@ describe('WalletService', () => {
     it('returns a zeroed summary when the caller has no channel partner', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       const res = await service.getWallet(partner);
+      // Wave 3: the active partner is resolved through the access-boundary helper (own by default).
       expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith({
-        where: { userId: 'user1', user: { clientId: 'deoleo' } },
+        where: { userId: 'user1', clientId: 'deoleo', deletedAt: null, isParent: false },
+        select: { id: true, groupId: true },
       });
       expect(res.redeemablePoints).toBe(0);
       expect(res.lifetimeExpired).toBe(0);
@@ -85,6 +89,31 @@ describe('WalletService', () => {
       const res = await service.getWallet(partner);
       expect(res.redeemablePoints).toBe(90);
       expect(res.lifetimeEarned).toBe(100);
+    });
+
+    // ── Wave 3 outlet switching ──────────────────────────────────────────────────
+    it('resolves a SWITCHED sibling wallet when a valid x-active-partner-id selector is supplied', async () => {
+      // own login → group g1; the selector names a login-less same-group same-phone sibling.
+      mockPrisma.channelPartner.findFirst.mockImplementation((args: any) =>
+        args.where.userId
+          ? Promise.resolve({ id: 'cp1', groupId: 'g1' })   // own (resolveActivePartnerId)
+          : Promise.resolve({ id: 'sib1' }),                 // the sibling authorization lookup (where.id)
+      );
+      mockPrisma.wallet.findFirst.mockResolvedValue({
+        earnedPoints: 10, lockedPoints: 0, redeemablePoints: 7, redeemedPoints: 3,
+        expiredPoints: 0, lifetimeEarned: 10, lifetimeRedeemed: 3, lifetimeExpired: 0,
+      });
+      const res = await service.getWallet(switcher, 'sib1');
+      // The wallet is loaded for the SIBLING, not the login's own partner.
+      expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'sib1' } });
+      expect(res.redeemablePoints).toBe(7);
+    });
+
+    it('throws ForbiddenException + loads no wallet when the selector is outside the operable set', async () => {
+      // own login has no group → any non-own selector is a forbidden cross-partner reach.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', groupId: null });
+      await expect(service.getWallet(switcher, 'someoneElse')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.wallet.findFirst).not.toHaveBeenCalled();
     });
   });
 
@@ -353,9 +382,11 @@ describe('WalletService', () => {
     it('targets the caller’s own partner by default', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       const res = await service.listTransactions(partner, { userId: 'someoneElse' });
-      // Non-admins cannot inspect another user — userId is ignored.
+      // Non-admins cannot inspect another user — userId is ignored; the active partner is resolved
+      // via the Wave 3 access-boundary helper (own by default).
       expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith({
-        where: { userId: 'user1', user: { clientId: 'deoleo' } },
+        where: { userId: 'user1', clientId: 'deoleo', deletedAt: null, isParent: false },
+        select: { id: true, groupId: true },
       });
       expect(res).toEqual({ transactions: [], pagination: { page: 1, limit: 20, total: 0, pages: 0 } });
     });
@@ -363,8 +394,36 @@ describe('WalletService', () => {
     it('lets a GIFSY admin target another user via userId', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       await service.listTransactions(gifsy, { userId: 'user1' });
+      // Admin ?userId targeting resolves the partner straight from the target user (unchanged feature).
       expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith({
         where: { userId: 'user1', user: { clientId: 'deoleo' } },
+        select: { id: true },
+      });
+    });
+
+    it('threads the x-active-partner-id selector to a SWITCHED sibling passbook (non-admin)', async () => {
+      mockPrisma.channelPartner.findFirst.mockImplementation((args: any) =>
+        args.where.userId
+          ? Promise.resolve({ id: 'cp1', groupId: 'g1' })   // own (resolveActivePartnerId)
+          : Promise.resolve({ id: 'sib1' }),                 // the sibling authorization lookup
+      );
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'wSib' });
+      mockPrisma.walletTransaction.findMany.mockResolvedValue([]);
+      mockPrisma.walletTransaction.count.mockResolvedValue(0);
+      mockPrisma.outlet.findFirst.mockResolvedValue(null);
+
+      await service.listTransactions(switcher, {}, 'sib1');
+      // The passbook wallet belongs to the SIBLING, not the login's own partner.
+      expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'sib1' } });
+    });
+
+    it('GIFSY-admin ?userId targeting IGNORES the outlet selector (separate support feature)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      // A selector is passed, but admin-targeting resolves from the target user and never consults it.
+      await service.listTransactions(gifsy, { userId: 'user9' }, 'sib1');
+      expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith({
+        where: { userId: 'user9', user: { clientId: 'deoleo' } },
+        select: { id: true },
       });
     });
 

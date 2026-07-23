@@ -17,7 +17,10 @@ function getRoleDashboard(role?: string): string {
   const r = role ?? '';
   // Role values match the backend UserRole enum.
   if (r === 'GIFSY_ADMIN') return '/gifsy';
-  if (['SSS', 'WHOLESALER', 'SUB_STOCKIST'].includes(r)) return '/partner/dashboard';
+  // Wave 3 — partner logins go through the outlet picker (/partner/select) first. It
+  // auto-forwards single-outlet logins straight to /partner/dashboard (today's behaviour),
+  // and shows a picker only when the login operates multiple outlets or has a group overview.
+  if (['SSS', 'WHOLESALER', 'SUB_STOCKIST'].includes(r)) return '/partner/select';
   if (['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'].includes(r)) return '/sales/dashboard';
   return '/admin/dashboard'; // CLIENT_ADMIN, MIS_USER
 }

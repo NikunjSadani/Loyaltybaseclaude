@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Patch, Post, Query } from '@nestjs/common';
 import { RewardsService } from './rewards.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -43,18 +43,30 @@ const SALES_ROLES = [
 export class RewardsController {
   constructor(private readonly rewards: RewardsService) {}
 
+  // Wave 3 login-picker: `x-active-partner-id` names WHICH outlet's partner a
+  // multi-outlet login is acting on (its own or a login-less same-group sibling).
+  // The service re-authorizes it through resolveActivePartnerId — a bogus/foreign
+  // id is rejected there (403), so it is never trusted blind. Absent → own partner.
   @Post('redeem')
   @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
   @RequirePermission('rewards:read')
-  redeem(@CurrentUser() user: JwtPayload, @Body() dto: RedeemDto) {
-    return this.rewards.redeem(user, dto);
+  redeem(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: RedeemDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.rewards.redeem(user, dto, activePartnerId);
   }
 
   @Post('redeem/confirm')
   @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
   @RequirePermission('rewards:read')
-  confirmRedeem(@CurrentUser() user: JwtPayload, @Body() dto: RedeemConfirmDto) {
-    return this.rewards.confirmRedeem(user, dto);
+  confirmRedeem(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: RedeemConfirmDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.rewards.confirmRedeem(user, dto, activePartnerId);
   }
 
   /** SALES-ASSISTED redeem (B1, #50-E) — a sales user redeems for an assigned outlet. */
@@ -81,15 +93,23 @@ export class RewardsController {
   @Get('catalog')
   @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST', ...SALES_ROLES)
   @RequirePermission('rewards:read')
-  listCatalog(@CurrentUser() user: JwtPayload, @Query() query: ListCatalogQueryDto) {
-    return this.rewards.listCatalog(user, query);
+  listCatalog(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: ListCatalogQueryDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.rewards.listCatalog(user, query, activePartnerId);
   }
 
   @Get('catalog/:id')
   @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST', ...SALES_ROLES)
   @RequirePermission('rewards:read')
-  getCatalogItem(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.rewards.getCatalogItem(user, id);
+  getCatalogItem(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.rewards.getCatalogItem(user, id, activePartnerId);
   }
 
   // Orders reads are multi-audience + self-scoping in the service (partner → own,
@@ -99,14 +119,22 @@ export class RewardsController {
   // that page. Safety is the service-layer scoping, not a role allowlist here.
   @Get('orders')
   @RequirePermission('rewards:read')
-  listOrders(@CurrentUser() user: JwtPayload, @Query() query: ListOrdersQueryDto) {
-    return this.rewards.listOrders(user, query);
+  listOrders(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: ListOrdersQueryDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.rewards.listOrders(user, query, activePartnerId);
   }
 
   @Get('orders/:id')
   @RequirePermission('rewards:read')
-  getOrder(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.rewards.getOrder(user, id);
+  getOrder(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.rewards.getOrder(user, id, activePartnerId);
   }
 
   /** GIFSY-only NON-STATUS edits (tracking / notes / voucher). Status moves go via POST :id/transition. */

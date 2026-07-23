@@ -19,10 +19,14 @@ const mockTx = {
 };
 
 const mockPrisma = {
-  visibilitySubmission: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
+  visibilitySubmission: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn(), create: jest.fn() },
   visibilityApproval: { create: jest.fn() },
   visibilityFraudLog: { findMany: jest.fn(), count: jest.fn() },
   outletVisibilityRecord: { findMany: jest.fn() },
+  // Wave 3 login-picker threading on submit resolves the active partner + its outlet.
+  channelPartner: { findFirst: jest.fn() },
+  visibilityProgram: { findFirst: jest.fn() },
+  outlet: { findFirst: jest.fn(), findMany: jest.fn() },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
@@ -289,5 +293,104 @@ describe('VisibilityService', () => {
       // Passes the gate (exempt) and proceeds to the DB lookup → NotFound, not Forbidden.
       await expect(service.approve(gifsy, 'sub1')).rejects.toThrow('Submission not found');
     });
+  });
+});
+
+// ── Wave 3 login picker: submit acts on the ACTIVE partner (resolveActivePartnerId) ──────────
+describe('VisibilityService.submit — Wave 3 active-partner threading', () => {
+  let service: VisibilityService;
+
+  // A valid in-memory image the file-validation block accepts.
+  const img = {
+    buffer: Buffer.from('img'),
+    size: 3,
+    mimetype: 'image/jpeg',
+    originalname: 'photo.jpg',
+  } as Express.Multer.File;
+
+  // Outlet switching needs a real 10-digit phone (operable set = same-group + same-phone).
+  const switcher: JwtPayload = { sub: 'user1', role: 'SSS', clientId: 'deoleo', phone: '9800000001', name: '' };
+  const submitDto = (outletId?: string) => ({ programId: 'prog1', outletId }) as never;
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    mockTenant.resolveVisibilityCaptureMode.mockResolvedValue('PHOTO_APPROVAL');
+    mockTenant.resolveVisibilityEnabled.mockResolvedValue(true);
+    mockStorage.generateKey.mockReturnValue('visibility/deoleo/key.jpg');
+    mockStorage.uploadFile.mockResolvedValue('https://gcs/visibility/deoleo/key.jpg');
+    mockPrisma.visibilityProgram.findFirst.mockResolvedValue({ id: 'prog1' });
+    mockPrisma.visibilitySubmission.create.mockResolvedValue({
+      id: 'sub1',
+      status: 'SUBMITTED',
+      submittedAt: new Date('2026-07-23'),
+    });
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        VisibilityService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: TenantService, useValue: mockTenant },
+        { provide: StorageService, useValue: mockStorage },
+      ],
+    }).compile();
+    service = module.get(VisibilityService);
+  });
+
+  it('no header → resolves the login’s OWN partner and submits for its outlet', async () => {
+    // resolveActivePartnerId own lookup (where.userId) → own partner; no switch.
+    mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', groupId: 'g1' });
+    mockPrisma.outlet.findFirst.mockResolvedValue({ id: 'out1' });
+
+    const res = await service.submit(switcher, img, submitDto('out1'));
+
+    // The own lookup goes through the shared access-boundary helper.
+    expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith({
+      where: { userId: 'user1', clientId: 'deoleo', deletedAt: null, isParent: false },
+      select: { id: true, groupId: true },
+    });
+    // Outlet validated against the OWN partner; submission stamped with the OWN partnerId.
+    expect(mockPrisma.outlet.findFirst).toHaveBeenCalledWith({
+      where: { id: 'out1', partnerId: 'cp1', clientId: 'deoleo' },
+      select: { id: true },
+    });
+    expect(mockPrisma.visibilitySubmission.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ partnerId: 'cp1', outletId: 'out1' }) }),
+    );
+    expect(res.submissionId).toBe('sub1');
+  });
+
+  it('valid x-active-partner-id sibling → submits for the SIBLING outlet, not the login’s own', async () => {
+    // own lookup (where.userId) → own in group g1; sibling authorization lookup (where.id) → the sibling.
+    mockPrisma.channelPartner.findFirst.mockImplementation((args: any) =>
+      args.where.userId
+        ? Promise.resolve({ id: 'cp1', groupId: 'g1' })
+        : Promise.resolve({ id: 'sib1' }),
+    );
+    mockPrisma.outlet.findFirst.mockResolvedValue({ id: 'outSib' });
+
+    await service.submit(switcher, img, submitDto('outSib'), 'sib1');
+
+    expect(mockPrisma.outlet.findFirst).toHaveBeenCalledWith({
+      where: { id: 'outSib', partnerId: 'sib1', clientId: 'deoleo' },
+      select: { id: true },
+    });
+    expect(mockPrisma.visibilitySubmission.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ partnerId: 'sib1' }) }),
+    );
+  });
+
+  it('forbidden selector (outside the operable set) → ForbiddenException, nothing submitted', async () => {
+    // own has no group → any non-own selector is a forbidden cross-partner reach.
+    mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', groupId: null });
+
+    await expect(service.submit(switcher, img, submitDto('x'), 'someoneElse')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(mockPrisma.visibilitySubmission.create).not.toHaveBeenCalled();
+  });
+
+  it('no partner at all → today’s no-partner ForbiddenException (byte-identical behaviour)', async () => {
+    mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+    await expect(service.submit(switcher, img, submitDto('x'))).rejects.toBeInstanceOf(ForbiddenException);
+    expect(mockPrisma.visibilitySubmission.create).not.toHaveBeenCalled();
   });
 });

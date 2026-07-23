@@ -322,9 +322,11 @@ describe('RewardsService', () => {
       mockPrisma.redemptionOrder.count.mockResolvedValue(0);
 
       await service.listOrders(partner, {});
+      // Tenant scope is now the partner's own clientId column (so a login-less
+      // switched sibling's orders are visible); non-admin still pins to their partnerId.
       expect(mockPrisma.redemptionOrder.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { partner: { user: { clientId: 'deoleo' } }, partnerId: 'cp1' },
+          where: { partner: { clientId: 'deoleo' }, partnerId: 'cp1' },
         }),
       );
     });
@@ -337,7 +339,7 @@ describe('RewardsService', () => {
       await service.listOrders(partner, {});
       expect(mockPrisma.redemptionOrder.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { partner: { user: { clientId: 'deoleo' } }, partnerId: 'none' },
+          where: { partner: { clientId: 'deoleo' }, partnerId: 'none' },
         }),
       );
     });
@@ -350,9 +352,34 @@ describe('RewardsService', () => {
       expect(mockPrisma.channelPartner.findFirst).not.toHaveBeenCalled();
       expect(mockPrisma.redemptionOrder.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { partner: { user: { clientId: 'deoleo' } } },
+          where: { partner: { clientId: 'deoleo' } },
         }),
       );
+    });
+
+    it('scopes a SWITCHED non-admin to the sibling partnerId named by x-active-partner-id', async () => {
+      // resolveActivePartnerId: own lookup, then the sibling authorization query.
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', groupId: 'grp1' }) // own (login) partner, grouped
+        .mockResolvedValueOnce({ id: 'cp-sib' });               // requested sibling is operable
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+
+      await service.listOrders(partner, {}, 'cp-sib');
+      expect(mockPrisma.redemptionOrder.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { partner: { clientId: 'deoleo' }, partnerId: 'cp-sib' },
+        }),
+      );
+    });
+
+    it('403s a non-admin whose x-active-partner-id is not an operable sibling', async () => {
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', groupId: 'grp1' }) // own partner
+        .mockResolvedValueOnce(null);                          // requested id not operable
+      await expect(service.listOrders(partner, {}, 'cp-foreign'))
+        .rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.redemptionOrder.findMany).not.toHaveBeenCalled();
     });
   });
 
@@ -362,21 +389,36 @@ describe('RewardsService', () => {
       await expect(service.getOrder(partner, 'o9')).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('forbids a non-admin from viewing another user’s order', async () => {
+    it('forbids a non-admin from viewing another partner’s order', async () => {
+      // Order belongs to cp-other; the caller's resolved active partner is cp1.
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
-        id: 'o1',
+        id: 'o1', partnerId: 'cp-other',
         partner: { userId: 'someoneElse' },
       });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' }); // resolve own
       await expect(service.getOrder(partner, 'o1')).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('returns the order for its owner', async () => {
+    it('returns the order for its owner (order.partnerId === resolved active partner)', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
-        id: 'o1',
+        id: 'o1', partnerId: 'cp1',
         partner: { userId: 'user1' },
       });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' }); // resolve own
       const res = await service.getOrder(partner, 'o1');
       expect(res.order.id).toBe('o1');
+    });
+
+    it('returns a SWITCHED sibling’s order when named by x-active-partner-id', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o2', partnerId: 'cp-sib',
+        partner: { userId: null }, // login-less sibling
+      });
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', groupId: 'grp1' }) // own partner
+        .mockResolvedValueOnce({ id: 'cp-sib' });               // operable sibling
+      const res = await service.getOrder(partner, 'o2', 'cp-sib');
+      expect(res.order.id).toBe('o2');
     });
   });
 
@@ -588,12 +630,14 @@ describe('RewardsService', () => {
         .rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('forbids confirming another user’s order', async () => {
+    it('forbids confirming an order that is not the resolved active partner’s', async () => {
+      // Order belongs to cp-other; caller's resolved active partner is cp1 (default).
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
-        ...pendingOrder, partner: { id: 'cp1', userId: 'someoneElse' },
+        ...pendingOrder, partnerId: 'cp-other', partner: { id: 'cp-other', userId: 'someoneElse' },
       });
       await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
         .rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 
     it('happy path: debits via WalletService(tx), sets CONFIRMED, writes history', async () => {
@@ -762,9 +806,10 @@ describe('RewardsService', () => {
         id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
         expiresAt: new Date(Date.now() + 60000),
       });
-      // In-tx TOCTOU re-read + bank snapshot return an eligible partner.
+      // Resolver own-lookup + in-tx TOCTOU re-read + bank snapshot all proxy this
+      // mock; id 'cp1' makes the resolved active partner == order.partnerId.
       mockPrisma.channelPartner.findFirst.mockResolvedValue({
-        isActive: true, deletedAt: null,
+        id: 'cp1', isActive: true, deletedAt: null,
         kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
         bankAccountHolder: null, ownerName: 'Owner', upiId: 'only@upi',
         bankAccountNumber: null, ifscCode: null, bankName: null,
@@ -790,8 +835,10 @@ describe('RewardsService', () => {
         id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
         expiresAt: new Date(Date.now() + 60000),
       });
+      // id 'cp1' so the resolver's own-lookup == order.partnerId (also serves the
+      // in-tx TOCTOU re-read + bank snapshot, which proxy the same mock).
       mockPrisma.channelPartner.findFirst.mockResolvedValue({
-        isActive: true, deletedAt: null,
+        id: 'cp1', isActive: true, deletedAt: null,
         kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
         bankAccountHolder: 'Holder', ownerName: 'Owner', upiId: null,
         bankAccountNumber: '0011223344', ifscCode: 'HDFC0001234', bankName: 'HDFC',
@@ -843,9 +890,10 @@ describe('RewardsService', () => {
           bankAccountNumber: '0011223344', ifscCode: 'HDFC0001234', upiId: 'ravi@upi',
         },
       });
-      // The in-tx TOCTOU re-read must also return an eligible partner so we reach GLB-2.
+      // The resolver own-lookup (id 'cp1' == order.partnerId) + in-tx TOCTOU re-read
+      // both proxy this mock; APPROVED so we reach GLB-2.
       mockPrisma.channelPartner.findFirst.mockResolvedValue({
-        isActive: true, deletedAt: null,
+        id: 'cp1', isActive: true, deletedAt: null,
         kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
       });
       mockPrisma.otpCode.findFirst.mockResolvedValue({
@@ -879,6 +927,219 @@ describe('RewardsService', () => {
       // Should NOT throw BadRequest from GLB-2 (debitRedeem may still get called).
       await expect(service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }))
         .resolves.toMatchObject({ status: 'CONFIRMED' });
+    });
+
+    // ── AUDIT FIX (MED): per-order OTP binding ────────────────────────────────
+    // A login can now hold concurrent PENDING orders across outlets (login picker), whose
+    // REDEMPTION_CONFIRM OTPs share the same login user. Before the fix the confirm returned the
+    // LATEST unverified OTP regardless of order, so confirming order A could consume order B's OTP.
+    // The OtpCode.referenceId scope binds each confirm to the OTP issued for THAT order.
+    it('MED: an OTP issued for order B cannot confirm order A; the per-order OTP confirms B', async () => {
+      const orderA = { ...pendingOrder, id: 'orderA', partnerId: 'cp1', orderNumber: 'RDM-A' };
+      const orderB = { ...pendingOrder, id: 'orderB', partnerId: 'cp1', orderNumber: 'RDM-B' };
+      // The ONLY live OTP is the one BOUND to order B (referenceId 'orderB'); order A has none.
+      mockPrisma.otpCode.findFirst.mockImplementation((args: { where?: { referenceId?: string } }) =>
+        Promise.resolve(
+          args?.where?.referenceId === 'orderB'
+            ? { id: 'otpB', code: '123456', attempts: 0, maxAttempts: 3, expiresAt: new Date(Date.now() + 60000) }
+            : null,
+        ),
+      );
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'orderB', status: 'CONFIRMED' });
+
+      // Confirming order A (with what the user believes is the OTP) finds NO order-A OTP → 401, no debit.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(orderA);
+      await expect(service.confirmRedeem(partner, { orderId: 'orderA', otp: '123456' }))
+        .rejects.toBeInstanceOf(UnauthorizedException);
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+
+      // The correct per-order OTP confirms order B, and the lookup is scoped to order B's id.
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(orderB);
+      const res = await service.confirmRedeem(partner, { orderId: 'orderB', otp: '123456' });
+      expect(res.status).toBe('CONFIRMED');
+      expect(mockPrisma.otpCode.findFirst).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          where: { userId: 'user1', purpose: 'REDEMPTION_CONFIRM', verifiedAt: null, referenceId: 'orderB' },
+        }),
+      );
+      expect(mockWallet.debitRedeem).toHaveBeenCalledWith(
+        'cp1', 1000, { referenceId: 'orderB', description: 'Redemption RDM-B' }, mockPrisma,
+      );
+    });
+
+    it('MED: redeem binds the created OTP to the new order id (referenceId)', async () => {
+      const fixedItem = {
+        id: 'r1', clientId: 'deoleo', status: 'ACTIVE', deletedAt: null,
+        pointsCost: 500, redemptionMode: 'GIFT_CARD',
+        minRedemptionPoints: null, maxRedemptionPoints: null, stockQuantity: null,
+      };
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o-new', orderNumber: 'RDM-NEW' });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+
+      await service.redeem(partner, { rewardId: 'r1', quantity: 1 });
+
+      const otpCreate = mockPrisma.otpCode.create.mock.calls?.[0]?.[0];
+      expect(otpCreate.data.referenceId).toBe('o-new'); // bound to the created order
+    });
+  });
+
+  // ─── Wave 3 login-picker: partner-self outlet switching (x-active-partner-id) ──
+  //
+  // A multi-outlet login operates its own partner OR a login-less same-group,
+  // same-phone sibling named by the `x-active-partner-id` header (threaded as
+  // requestedPartnerId). resolveActivePartnerId is the whole access boundary:
+  //   - own-lookup (findFirst by userId) resolves the login's own partner + groupId
+  //   - a switch is authorized by a SECOND findFirst (the sibling operability query)
+  // The MONEY INVARIANT: a switched redeem/confirm debits the SIBLING's wallet and
+  // writes the SIBLING's order — never the login's own.
+  describe('Wave 3 — partner-self outlet switching', () => {
+    const fixedItem = {
+      id: 'r1', clientId: 'deoleo', status: 'ACTIVE', deletedAt: null,
+      pointsCost: 500, redemptionMode: 'GIFT_CARD',
+      minRedemptionPoints: null, maxRedemptionPoints: null, stockQuantity: null,
+    };
+
+    // ── redeem ──────────────────────────────────────────────────────────────
+    it('no header → own partner: wallet + order target the login’s own partner', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' }); // own, ungrouped
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o1', orderNumber: 'RDM-x' });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+
+      await service.redeem(partner, { rewardId: 'r1', quantity: 1 }); // NO header
+
+      expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'cp1' } });
+      const created = mockPrisma.redemptionOrder.create.mock.calls?.[0]?.[0];
+      expect(created.data.partnerId).toBe('cp1');
+    });
+
+    it('valid sibling header → redeem debits/creates against the SIBLING, OTP stays login-level', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      // resolveActivePartnerId: own-lookup (grouped) then the sibling operability query.
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', groupId: 'grp1' }) // login's own partner
+        .mockResolvedValueOnce({ id: 'cp-sib' });               // requested sibling is operable
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.create.mockResolvedValue({ id: 'o-sib', orderNumber: 'RDM-SIB' });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp1' });
+
+      const res = await service.redeem(partner, { rewardId: 'r1', quantity: 2 }, 'cp-sib');
+
+      // Affordability + order + supersede all target the SIBLING.
+      expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'cp-sib' } });
+      const created = mockPrisma.redemptionOrder.create.mock.calls?.[0]?.[0];
+      expect(created.data.partnerId).toBe('cp-sib');
+      expect(created.data.totalPointsCost).toBe(1000); // 500 × 2
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { partnerId: 'cp-sib', status: 'PENDING' },
+        data: { status: 'CANCELLED', cancelledAt: expect.any(Date) },
+      });
+      // OTP is LOGIN-level: bound to + cleared for user.sub, not the sibling.
+      expect(mockPrisma.otpCode.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'user1', purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
+      });
+      const otpCreate = mockPrisma.otpCode.create.mock.calls?.[0]?.[0];
+      expect(otpCreate.data.userId).toBe('user1');
+      expect(res.orderId).toBe('o-sib');
+    });
+
+    it('forbidden header → ForbiddenException, NO order created and NO wallet debit', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(fixedItem);
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', groupId: 'grp1' }) // own partner
+        .mockResolvedValueOnce(null);                          // requested id is NOT operable
+
+      await expect(service.redeem(partner, { rewardId: 'r1', quantity: 1 }, 'cp-foreign'))
+        .rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.redemptionOrder.create).not.toHaveBeenCalled();
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    // ── confirm ─────────────────────────────────────────────────────────────
+    it('confirm on a switched redeem STAYS on the sibling: debit + claim target order.partnerId', async () => {
+      const switchedOrder = {
+        id: 'o-sib', status: 'PENDING', partnerId: 'cp-sib', orderNumber: 'RDM-SIB',
+        totalPointsCost: 1000, quantity: 1, redemptionMode: 'GIFT_CARD',
+        // Login-less sibling: userId is null — the OLD userId-based ownership check
+        // would 403 this; the new order.partnerId === activePartnerId check allows it.
+        partner: {
+          id: 'cp-sib', userId: null, isActive: true, deletedAt: null,
+          kycSubmissions: [{ status: 'APPROVED' }],
+        },
+        reward: { name: 'Gift', stockQuantity: null },
+      };
+      // 1st findFirst = resolver own (grouped); 2nd = sibling operability (authorizes
+      // cp-sib); 3rd+ = the in-tx TOCTOU re-read → beforeEach default (eligible).
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', groupId: 'grp1' })
+        .mockResolvedValueOnce({ id: 'cp-sib' });
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(switchedOrder);
+      mockPrisma.otpCode.findFirst.mockResolvedValue({
+        id: 'otp1', code: '123456', attempts: 0, maxAttempts: 3,
+        expiresAt: new Date(Date.now() + 60000),
+      });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w-sib', redeemablePoints: 5000 });
+      mockPrisma.redemptionOrder.update.mockResolvedValue({ id: 'o-sib', status: 'CONFIRMED' });
+
+      const res = await service.confirmRedeem(partner, { orderId: 'o-sib', otp: '123456' }, 'cp-sib');
+
+      // OTP verified against the LOGIN user (login-level), not the sibling — AND scoped to THIS order.
+      expect(mockPrisma.otpCode.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId: 'user1', purpose: 'REDEMPTION_CONFIRM', verifiedAt: null, referenceId: 'o-sib' },
+        }),
+      );
+      // Debit + claim target the SIBLING wallet/order (order.partnerId), never cp1.
+      expect(mockWallet.debitRedeem).toHaveBeenCalledWith(
+        'cp-sib', 1000,
+        { referenceId: 'o-sib', description: 'Redemption RDM-SIB' },
+        mockPrisma,
+      );
+      expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: 'o-sib', status: 'PENDING' },
+        data: { status: 'CONFIRMED', pointsDeducted: 1000, valuePaise: 100000n },
+      });
+      expect(res.status).toBe('CONFIRMED');
+    });
+
+    it('confirm with a forbidden header → ForbiddenException before any order load or debit', async () => {
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', groupId: 'grp1' }) // own
+        .mockResolvedValueOnce(null);                          // requested not operable
+      await expect(
+        service.confirmRedeem(partner, { orderId: 'o-sib', otp: '123456' }, 'cp-foreign'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mockPrisma.redemptionOrder.findFirst).not.toHaveBeenCalled();
+      expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
+    });
+
+    // ── reads ───────────────────────────────────────────────────────────────
+    it('listCatalog affordability uses the SWITCHED sibling’s wallet', async () => {
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', groupId: 'grp1' })
+        .mockResolvedValueOnce({ id: 'cp-sib' });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 750 });
+      mockPrisma.rewardCatalog.findMany.mockResolvedValue([{ id: 'r1', pointsCost: 500 }]);
+      mockPrisma.rewardCatalog.count.mockResolvedValue(1);
+
+      const res = await service.listCatalog(partner, {}, 'cp-sib');
+      expect(mockPrisma.wallet.findFirst).toHaveBeenCalledWith({ where: { partnerId: 'cp-sib' } });
+      expect(res.userBalance).toBe(750);
+      expect(res.items[0].isAffordable).toBe(true);
+    });
+
+    it('getCatalogItem 403s a forbidden selector but is otherwise identity-agnostic', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({ id: 'r1' });
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'cp1', groupId: 'grp1' })
+        .mockResolvedValueOnce(null); // requested id not operable
+      await expect(service.getCatalogItem(partner, 'r1', 'cp-foreign'))
+        .rejects.toBeInstanceOf(ForbiddenException);
     });
   });
 
@@ -1109,10 +1370,10 @@ describe('RewardsService', () => {
         orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
       });
 
-      // OTP looked up for the OUTLET's user (not the sales rep).
+      // OTP looked up for the OUTLET's user (not the sales rep) — AND scoped to THIS order.
       expect(mockPrisma.otpCode.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { userId: 'outletUser1', purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
+          where: { userId: 'outletUser1', purpose: 'REDEMPTION_CONFIRM', verifiedAt: null, referenceId: 'o-out' },
         }),
       );
       // Atomic PENDING→CONFIRMED claim with the valuePaise freeze.
@@ -2015,6 +2276,9 @@ describe('RewardsService', () => {
      * fields so the snapshot fetch succeeds — extra fields are ignored by each select.
      */
     const partnerSnap = {
+      // Wave 3: confirmRedeem now resolves the active partner via channelPartner.findFirst
+      // (own-lookup) BEFORE the tx, so this shared override must carry the id the order is on.
+      id: 'cp1',
       // Eligibility fields (TOCTOU in-tx re-check)
       isActive: true,
       deletedAt: null,
@@ -2230,6 +2494,7 @@ describe('RewardsService', () => {
       // since $transaction proxies to mockPrisma and there is only one channelPartner
       // lookup per-call sequence, a single mockResolvedValue suffices.
       mockPrisma.channelPartner.findFirst.mockResolvedValue({
+        id: 'cp1', // Wave 3: also serves the pre-tx active-partner own-lookup (must match order.partnerId)
         isActive: true,
         deletedAt: null,
         kycSubmissions: [{ id: 'ks1', status: 'RE_KYC_REQUIRED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
@@ -2251,8 +2516,9 @@ describe('RewardsService', () => {
       mockPrisma.redemptionStatusHistory.create.mockResolvedValue({});
       mockPrisma.payoutTransaction.create.mockResolvedValue({ id: 'pt1' });
       // Both TOCTOU check and bank snapshot return partnerSnap (which has APPROVED KYC).
+      // Wave 3: also serves the pre-tx active-partner own-lookup (id must match order.partnerId).
       mockPrisma.channelPartner.findFirst.mockResolvedValue({
-        isActive: true, deletedAt: null,
+        id: 'cp1', isActive: true, deletedAt: null,
         kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
         bankAccountHolder: 'Alice', ownerName: 'Alice Owner', upiId: 'alice@upi',
         bankAccountNumber: '9988776655', ifscCode: 'ICIC0001234', bankName: 'ICICI',

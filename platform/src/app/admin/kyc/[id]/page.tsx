@@ -96,6 +96,10 @@ interface ApiKycDetail {
   // (address proof skipped for waiver-enabled tenants).
   addressNameMismatch?: boolean;
   reKycFlags?: ReKycFlags;
+  // Wave-3 grouped child: per-field "current value matches the approved parent" map,
+  // server-computed PRE-MASK (safe under PII masking). Keyed on panNumber/gstNumber/
+  // bankAccountNumber/ifscCode/upiId/bankName/bankAccountHolder/ownerName/businessName/phone.
+  parentVerified?: Record<string, boolean>;
   // KYC-captured geo (Prisma Decimal → JSON string on the wire).
   boardPhotoLat?: string | number | null; boardPhotoLng?: string | number | null;
   paymentLat?: string | number | null; paymentLng?: string | number | null;
@@ -150,6 +154,8 @@ type KycDetailShape = {
   addressNameMismatch: boolean;
   // Re-KYC staged identity/payout changes (proposed vs current), or undefined when none.
   proposedChanges?: ProposedChanges;
+  // Wave-3: per-field "matches the approved parent" flags (grouped child), or undefined.
+  parentVerified?: Record<string, boolean>;
 };
 
 /* ─── Re-KYC proposed-change diff (stage-at-approval) ─────────────────────────── */
@@ -264,6 +270,25 @@ function ProposedFieldValue({
   );
 }
 
+/**
+ * Wave-3 grouped child: a subtle emerald badge shown next to an identity field whose CURRENT
+ * value matches the outlet's APPROVED parent. Deliberately distinct from the amber "Proposed
+ * change" pill — a field can be BOTH (it renders both, side by side). Keys off the child's
+ * current value via `parentVerified[field]` (server-computed pre-mask), so a masked reviewer
+ * still sees it. Renders nothing when not verified (purely additive).
+ */
+function VerifiedOnParentBadge({ verified }: { verified?: boolean }): ReactNode {
+  if (!verified) return null;
+  return (
+    <span
+      data-testid="verified-on-parent-badge"
+      className="ml-1.5 inline-flex items-center gap-0.5 text-[10px] font-sans font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full whitespace-nowrap align-middle"
+    >
+      <CheckCircle className="w-2.5 h-2.5" /> Verified on parent
+    </span>
+  );
+}
+
 /** Coerce a KYC-captured lat/lng pair (Prisma Decimal → JSON string) into numbers.
  *  Returns null unless BOTH are present and finite. */
 function parseGeo(lat: unknown, lng: unknown): { lat: number; lng: number } | null {
@@ -298,6 +323,7 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     reKycFlags:       s.reKycFlags ?? null,
     addressNameMismatch: s.addressNameMismatch === true,
     proposedChanges,
+    parentVerified:   s.parentVerified ?? undefined,
     verificationItems: s.verificationItems ?? [],
     // Human outlet ID for the header (KYC is partner-keyed → the enrolled outlet's code).
     // Prefer the real Outlet code; fall back to the partner code if no outlet is linked yet.
@@ -729,12 +755,14 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                 <span className="text-gray-500 w-24 flex-shrink-0">Firm Name</span>
                 <span className="text-gray-800 font-medium">
                   <ProposedFieldValue change={kyc.proposedChanges?.businessName}>{kyc.firmName}</ProposedFieldValue>
+                  <VerifiedOnParentBadge verified={kyc.parentVerified?.businessName} />
                 </span>
               </div>
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">Owner Name</span>
                 <span className="text-gray-800 font-medium">
                   <ProposedFieldValue change={kyc.proposedChanges?.ownerName}>{kyc.ownerName || '—'}</ProposedFieldValue>
+                  <VerifiedOnParentBadge verified={kyc.parentVerified?.ownerName} />
                 </span>
               </div>
               <div className="flex gap-2">
@@ -746,6 +774,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                 <span className="flex items-center gap-1 text-gray-800">
                   <Phone className="w-3 h-3" />
                   <ProposedFieldValue change={kyc.proposedChanges?.phone}>{kyc.mobile}</ProposedFieldValue>
+                  <VerifiedOnParentBadge verified={kyc.parentVerified?.phone} />
                 </span>
               </div>
               <div className="flex gap-2">
@@ -791,12 +820,14 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                 <span className="text-gray-500 w-24 flex-shrink-0">PAN</span>
                 <span className="font-mono text-gray-800 font-medium">
                   <ProposedFieldValue change={kyc.proposedChanges?.panNumber} mono>{kyc.panNumber || '—'}</ProposedFieldValue>
+                  <VerifiedOnParentBadge verified={kyc.parentVerified?.panNumber} />
                 </span>
               </div>
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">GSTIN</span>
                 <span className="font-mono text-gray-800 font-medium">
                   <ProposedFieldValue change={kyc.proposedChanges?.gstNumber} mono>{kyc.gstNumber || '—'}</ProposedFieldValue>
+                  <VerifiedOnParentBadge verified={kyc.parentVerified?.gstNumber} />
                 </span>
               </div>
             </div>
@@ -874,12 +905,14 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                 <span className="text-gray-500 w-24 flex-shrink-0">Bank</span>
                 <span className="text-gray-800 font-medium">
                   <ProposedFieldValue change={kyc.proposedChanges?.bankName}>{kyc.bankName}</ProposedFieldValue>
+                  <VerifiedOnParentBadge verified={kyc.parentVerified?.bankName} />
                 </span>
               </div>
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">Account No.</span>
                 <span className="font-mono text-gray-800">
                   <ProposedFieldValue change={kyc.proposedChanges?.bankAccountNumber} mono>{kyc.accountNumber}</ProposedFieldValue>
+                  <VerifiedOnParentBadge verified={kyc.parentVerified?.bankAccountNumber} />
                 </span>
               </div>
               {/* Account Holder — no standing row; surfaced only when a re-KYC stages a change. */}
@@ -888,6 +921,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                   <span className="text-gray-500 w-24 flex-shrink-0">Acct Holder</span>
                   <span className="text-gray-800">
                     <ProposedFieldValue change={kyc.proposedChanges.bankAccountHolder}>—</ProposedFieldValue>
+                    <VerifiedOnParentBadge verified={kyc.parentVerified?.bankAccountHolder} />
                   </span>
                 </div>
               )}
@@ -895,6 +929,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                 <span className="text-gray-500 w-24 flex-shrink-0">IFSC</span>
                 <span className="font-mono text-gray-800">
                   <ProposedFieldValue change={kyc.proposedChanges?.ifscCode} mono>{kyc.ifscCode}</ProposedFieldValue>
+                  <VerifiedOnParentBadge verified={kyc.parentVerified?.ifscCode} />
                 </span>
               </div>
               {(kyc.upiId || kyc.proposedChanges?.upiId) && (
@@ -902,6 +937,7 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                   <span className="text-gray-500 w-24 flex-shrink-0">UPI ID</span>
                   <span className="font-mono text-gray-800">
                     <ProposedFieldValue change={kyc.proposedChanges?.upiId} mono>{kyc.upiId}</ProposedFieldValue>
+                    <VerifiedOnParentBadge verified={kyc.parentVerified?.upiId} />
                   </span>
                 </div>
               )}

@@ -1,7 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ListLeaderboardQueryDto } from './dto/leaderboard.dto';
+import { resolveActivePartnerId } from '../common/partner-group.helper';
 
 /**
  * Leaderboard — ported from platform/src/app/api/leaderboard/* onto /v1.
@@ -14,10 +15,21 @@ export class LeaderboardService {
   constructor(private readonly prisma: PrismaService) {}
 
   /** GET /v1/leaderboard — the latest published leaderboard for the caller's tenant. */
-  async list(user: JwtPayload, q: ListLeaderboardQueryDto) {
+  async list(user: JwtPayload, q: ListLeaderboardQueryDto, requestedPartnerId?: string) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 50;
     const skip = (page - 1) * limit;
+
+    // Resolve which outlet's row is "ME" (Wave 3 login picker). Absent/own selector →
+    // the login's own partner; a valid same-group same-phone sibling → that sibling;
+    // anything else → Forbidden (the shared access boundary is the sole authority).
+    const active = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
+    });
+    if (active.forbidden) throw new ForbiddenException('You cannot act on that outlet.');
 
     // Get the latest published snapshot for a config in the caller's tenant.
     const snapshot = await this.prisma.leaderboardSnapshot.findFirst({
@@ -34,7 +46,7 @@ export class LeaderboardService {
       };
     }
 
-    const [entries, total, currentPartner] = await Promise.all([
+    const [entries, total] = await Promise.all([
       this.prisma.leaderboardEntry.findMany({
         where: { snapshotId: snapshot.id },
         include: {
@@ -45,13 +57,9 @@ export class LeaderboardService {
         take: limit,
       }),
       this.prisma.leaderboardEntry.count({ where: { snapshotId: snapshot.id } }),
-      this.prisma.channelPartner.findFirst({
-        where: { userId: user.sub, clientId: user.clientId },
-        select: { id: true },
-      }),
     ]);
 
-    const currentPartnerId = currentPartner?.id ?? null;
+    const currentPartnerId = active.partnerId;
 
     const ranked = entries.map((e) => ({
       rank: e.rank,

@@ -555,6 +555,11 @@ model OtpCode {
   attempts    Int        @default(0)
   maxAttempts Int        @default(3)
   ipAddress   String?
+  // Scopes an OTP to a specific entity so a confirm can only consume the OTP issued for THAT entity.
+  // Used by REDEMPTION_CONFIRM to bind the OTP to its RedemptionOrder id — a login can now hold
+  // concurrent PENDING orders across outlets (login picker), so an order-scoped lookup prevents one
+  // order's confirm consuming another order's OTP. Nullable: purposes that don't scope leave it null.
+  referenceId String?
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
@@ -564,6 +569,7 @@ model OtpCode {
   @@index([userId])
   @@index([purpose])
   @@index([expiresAt])
+  @@index([referenceId])
   @@map("otp_codes")
 }
 
@@ -726,6 +732,9 @@ model ChannelPartner {
   redemptionOrders      RedemptionOrder[]
   payoutTransactions    PayoutTransaction[]
   leaderboardEntries    LeaderboardEntry[]
+  // Scheme enrollments are keyed by the SHOP (this partner), not the login — so a
+  // login-less sibling can self-enroll via the Wave-3 picker.
+  schemeEnrollments     SchemeEnrollment[]
 
   @@unique([clientId, partnerCode])
   // NOTE: the old `@@unique([clientId, gstNumber])` is REPLACED by a PARTIAL unique index
@@ -2099,9 +2108,17 @@ model ReportDeliveryLog {
 }
 
 model SchemeEnrollment {
-  id             String   @id @default(cuid())
-  schemeId       String
-  userId         String
+  id       String @id @default(cuid())
+  schemeId String
+  // The enrollment SUBJECT is the SHOP (ChannelPartner), NOT the login — so a login-less
+  // same-group sibling (a child outlet with no login of its own, reached via the Wave-3
+  // login picker) can self-enroll. Keyed @@unique([schemeId, partnerId]).
+  partnerId String
+  // The login that PERFORMED the enrollment, for audit only. Nullable: null when a
+  // login-less sibling is enrolled (SELF via the picker) or a login-less partner is the
+  // SALES target. The User relation is optional + SetNull so deleting the login keeps the
+  // shop's enrollment intact.
+  userId         String?
   status         String   @default("ACTIVE")
   enrollmentMode String   @default("SELF")
   formValues     Json?
@@ -2109,10 +2126,12 @@ model SchemeEnrollment {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  scheme Scheme @relation(fields: [schemeId], references: [id], onDelete: Cascade)
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scheme  Scheme         @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  partner ChannelPartner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  user    User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
 
-  @@unique([schemeId, userId])
+  @@unique([schemeId, partnerId])
+  @@index([partnerId])
   @@index([userId])
   @@index([schemeId])
   @@map("scheme_enrollments")

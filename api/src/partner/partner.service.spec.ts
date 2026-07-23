@@ -15,7 +15,8 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
   programSetting:    { findFirst: jest.fn() },
-  channelPartner:    { findFirst: jest.fn() },
+  // findMany added for Wave 3 resolveOperableContexts (login-less same-group sibling lookup).
+  channelPartner:    { findFirst: jest.fn(), findMany: jest.fn() },
   payoutTransaction: { findMany: jest.fn(), findFirst: jest.fn() },
   creditPayoutEntry: { findFirst: jest.fn(), findMany: jest.fn() },
   wallet:            { findFirst: jest.fn() },
@@ -43,6 +44,16 @@ const partner: JwtPayload = {
   role: 'RETAILER',
   clientId: 'deoleo',
   phone: '',
+  name: '',
+};
+
+// A login WITH a real phone — Wave 3 outlet-switching requires a valid 10-digit phone (the operable
+// set is same-group + same-phone), so switch/forbidden fixtures use this one.
+const switcher: JwtPayload = {
+  sub: 'user1',
+  role: 'RETAILER',
+  clientId: 'deoleo',
+  phone: '9800000001',
   name: '',
 };
 
@@ -84,10 +95,99 @@ describe('PartnerService', () => {
         hasPointsActivity: false,
         hasPayoutActivity: false,
         features: TENANT_FEATURES,
+        // Wave 3 picker payload: no active partner + empty operable set + no group overview for a partner-less login.
+        activePartnerId: null,
+        activeSelectorInvalid: false,
+        operableOutlets: [],
+        groupOverviewAvailable: false,
+        groupParent: null,
       });
       // No activity queries when there is no partner to resolve.
       expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
       expect(mockPrisma.wallet.findFirst).not.toHaveBeenCalled();
+    });
+
+    // ── Wave 3 login picker ──────────────────────────────────────────────────────
+    it('includes the login-picker payload: operableOutlets (own-first) + groupOverviewAvailable + groupParent', async () => {
+      // own login in group g1, one login-less same-phone sibling, and a parent carrying the login's phone.
+      mockPrisma.channelPartner.findFirst.mockImplementation((args: any) => {
+        const w = args.where;
+        if (w.isParent === true) return Promise.resolve({ id: 'parent1', businessName: 'Parent Co', ownerName: 'Owner P' });
+        if (w.userId) return Promise.resolve({
+          id: 'cp1', partnerCode: 'P1', businessName: 'My Shop', ownerName: 'Me',
+          phone: '9800000001', email: null, entityType: 'FIRM', groupId: 'g1', isParent: false,
+          outlets: [{ id: 'o1', outletCode: 'OC1', name: 'My Shop', isPrimary: true, createdAt: new Date() }],
+        });
+        // display-load by id (the active/own partner)
+        return Promise.resolve({
+          id: 'cp1', partnerCode: 'P1', businessName: 'My Shop', ownerName: 'Me',
+          phone: '9800000001', email: null, entityType: 'FIRM',
+        });
+      });
+      mockPrisma.channelPartner.findMany.mockResolvedValue([
+        { id: 'sib1', businessName: 'Sibling Shop', ownerName: 'Me',
+          outlets: [{ id: 'o2', outletCode: 'OC2', name: 'Sibling Shop', isPrimary: true, createdAt: new Date() }] },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMe(switcher);
+
+      expect(res.businessName).toBe('My Shop');       // display = active (own) outlet, no selector
+      expect(res.operableOutlets).toHaveLength(2);
+      expect(res.operableOutlets[0]).toMatchObject({ partnerId: 'cp1', isOwnLogin: true });   // own-first
+      expect(res.operableOutlets[1]).toMatchObject({ partnerId: 'sib1', outletCode: 'OC2', isOwnLogin: false });
+      expect(res.groupOverviewAvailable).toBe(true);
+      expect(res.groupParent).toMatchObject({ parentId: 'parent1' });
+    });
+
+    it('reflects the SWITCHED sibling identity when a valid x-active-partner-id selector is supplied', async () => {
+      mockPrisma.channelPartner.findFirst.mockImplementation((args: any) => {
+        const w = args.where;
+        if (w.isParent === true) return Promise.resolve(null);                 // no parent overview
+        if (w.userId) return Promise.resolve({ id: 'cp1', groupId: 'g1', isParent: false,
+          businessName: 'My Shop', ownerName: 'Me', outlets: [] });            // own (auth + operable own)
+        // where.id → the sibling authorization lookup AND the display-load both resolve the sibling.
+        return Promise.resolve({ id: 'sib1', partnerCode: 'P2', businessName: 'Sibling Shop',
+          ownerName: 'Me', phone: '9800000001', email: null, entityType: 'FIRM' });
+      });
+      mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMe(switcher, 'sib1');
+      expect(res.businessName).toBe('Sibling Shop');   // display reflects the switched-to outlet
+      expect(res.activeSelectorInvalid).toBe(false);   // a valid selector is not flagged invalid
+    });
+
+    // AUDIT FIX (HIGH): getMe drives the WHOLE partner shell — an invalid/forbidden selector (a stale
+    // or foreign cookie, e.g. on a shared device) must DEGRADE to the login's own identity, NOT 403
+    // the entire portal. Only the money/read endpoints stay fail-closed. The FE clears the stale
+    // cookie when it sees activeSelectorInvalid:true.
+    it('degrades to OWN identity + activeSelectorInvalid:true for a forbidden selector (never 403s the shell)', async () => {
+      mockPrisma.channelPartner.findFirst.mockImplementation((args: any) => {
+        const w = args.where;
+        if (w.isParent === true) return Promise.resolve(null);                 // no parent overview
+        if (w.userId) return Promise.resolve({ id: 'cp1', groupId: null, isParent: false,
+          businessName: 'My Shop', ownerName: 'Me', outlets: [] });            // own (operable + auth); ungrouped
+        // display-load by the OWN id (degrade target)
+        return Promise.resolve({ id: 'cp1', partnerCode: 'P1', businessName: 'My Shop',
+          ownerName: 'Me', phone: '9800000001', email: null, entityType: 'FIRM' });
+      });
+      mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.wallet.findFirst.mockResolvedValue(null);
+      mockPrisma.creditPayoutEntry.findFirst.mockResolvedValue(null);
+      mockPrisma.payoutTransaction.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMe(switcher, 'evil'); // forged/foreign selector — must NOT throw
+      expect(res.businessName).toBe('My Shop');          // degraded to own identity
+      expect(res.activePartnerId).toBe('cp1');           // fell back to own partner
+      expect(res.activeSelectorInvalid).toBe(true);
     });
 
     it('returns the DB-backed tenant feature blob (resolveClient) on /partner/me', async () => {
@@ -223,11 +323,32 @@ describe('PartnerService', () => {
     it('returns an empty list when the caller has no channel partner', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       const res = await service.getPayouts(partner);
+      // Wave 3: the caller's partner is now resolved via the access-boundary helper (own by default).
+      // The own-lookup pins isParent:false (a login never resolves to a login-less parent — audit LOW-2).
       expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith({
-        where: { userId: 'user1', clientId: 'deoleo' },
-        select: { id: true },
+        where: { userId: 'user1', clientId: 'deoleo', deletedAt: null, isParent: false },
+        select: { id: true, groupId: true },
       });
       expect(res).toEqual({ payouts: [] });
+    });
+
+    it('routes to the SWITCHED sibling statement when a valid selector is supplied', async () => {
+      // own login → group g1; the selector names an operable login-less same-phone sibling.
+      mockPrisma.channelPartner.findFirst.mockImplementation((args: any) =>
+        args.where.userId
+          ? Promise.resolve({ id: 'cp1', groupId: 'g1' })   // own (resolveActivePartnerId)
+          : Promise.resolve({ id: 'sib1' }),                 // the sibling authorization lookup
+      );
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      mockPrisma.payoutTransaction.findMany.mockResolvedValue([]);
+
+      await service.getPayouts(switcher, 'sib1');
+
+      // buildPayoutStatement scopes the redemption rail to the SIBLING partner id, not the login's own.
+      expect(mockPrisma.payoutTransaction.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { partnerId: 'sib1', status: { notIn: ['FAILED', 'REVERSED'] } } }),
+      );
     });
 
     it('maps payout transactions scoped to the caller partner', async () => {
@@ -357,8 +478,13 @@ describe('PartnerService', () => {
     it('returns empty outlets when the caller has no channel partner', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       const res = await service.getTargets(partner, {});
+      // Wave 3: resolved through the access-boundary helper (own by default; select adds groupId).
+      // The own-lookup pins isParent:false (a login never resolves to a login-less parent — audit LOW-2).
       expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { userId: 'user1', clientId: 'deoleo' } }),
+        expect.objectContaining({
+          where: { userId: 'user1', clientId: 'deoleo', deletedAt: null, isParent: false },
+          select: { id: true, groupId: true },
+        }),
       );
       expect(res).toEqual({ period: null, outlets: [] });
     });

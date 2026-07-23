@@ -62,6 +62,19 @@ interface AssignedOutlet {
     bankName: string; accountHolderName: string; accountNumber: string; ifscCode: string; upiId: string;
   };
   reKycRemarks?: string;
+  /** Wave-3 grouped-before-KYC child: present ONLY when this outlet has an APPROVED
+   *  parent. Owner identity/payout values to PRE-FILL a FRESH KYC from (all EDITABLE
+   *  except PAN). `groupPan` is the group's canonical PAN the child PAN is LOCKED to
+   *  (null → parent has no PAN yet, nothing to lock). Absent parentPrefill = no approved
+   *  parent → the form behaves exactly as before. Backend `checkPanMatchesGroup` remains
+   *  the authoritative guard; this is UX assistance only. */
+  parentPrefill?: {
+    businessName?: string; ownerName?: string;
+    gstNumber?: string; panNumber?: string;
+    bankName?: string; bankAccountNumber?: string; bankAccountHolder?: string;
+    ifscCode?: string; upiId?: string;
+    groupPan?: string | null;
+  };
 }
 
 /** Upload state for a single KYC document slot */
@@ -339,6 +352,8 @@ export default function NewKYCPage() {
             programName:     o.programName ?? '',
             programCategory: o.programCategory ?? '',
             requiredPaymentType: o.requiredPaymentType ?? undefined,
+            // Approved-parent pre-fill (grouped-before-KYC child) — present only when set.
+            parentPrefill:   o.parentPrefill ?? undefined,
           }));
           setAssignedOutlets(outlets);
           // Build registered phones map from outlet mobiles for conflict detection
@@ -432,6 +447,24 @@ export default function NewKYCPage() {
     if (pinnedMode) setPaymentMode(pinnedMode);
   }, [selectedOutlet?.outletId, pinnedMode]);
 
+  /* ── Group-PAN lock (grouped-before-KYC child of an APPROVED parent) ──
+   *   When the outlet's approved parent has a canonical PAN, the child PAN is PINNED to
+   *   it: the field is forced to `groupPan`, read-only + disabled, and badged. When the
+   *   parent has no PAN yet (`groupPan` null) there is nothing to lock to → PAN stays
+   *   editable. Composes with the GSTIN-derived read-only below (both → consistently
+   *   locked). Backend `checkPanMatchesGroup` is the authoritative guard. */
+  const groupPan = selectedOutlet?.parentPrefill?.groupPan ?? null;
+  const groupPanLocked = !!groupPan;
+
+  /* Keep the PAN FORM value pinned to the group PAN whenever locked, so submit always
+   * sends the group's canonical PAN — even on a re-entry whose existingKyc PAN differs,
+   * or after the parent PAN resolves. The input also forces the display value below.
+   * `if (!groupPan) return` narrows groupPan to a string for the setForm below. */
+  useEffect(() => {
+    if (!groupPan) return;
+    setForm((f) => (f.panNumber === groupPan ? f : { ...f, panNumber: groupPan }));
+  }, [groupPan]);
+
   /* ── Pre-fill existing KYC data when a Re-KYC outlet is selected ── */
   useEffect(() => {
     if (!selectedOutlet?.existingKyc) {
@@ -447,7 +480,13 @@ export default function NewKYCPage() {
       partnerName:   k.partnerName,
       mobile:        k.mobile,
       gstNumber:     k.gstNumber,
-      panNumber:     k.panNumber,
+      // Group-PAN lock wins over the existing-KYC PAN: when this grouped child's PAN is
+      // pinned to the group's canonical `groupPan`, the re-entry prefill must NOT restore
+      // the stale existingKyc PAN — otherwise the locked input DISPLAYS groupPan while
+      // form.panNumber holds the old value, and submit would send the wrong (uneditable)
+      // PAN → backend checkPanMatchesGroup hard-blocks. Keeps the code comment's claim
+      // ("submit always sends the group's canonical PAN even on re-entry") true.
+      panNumber:     groupPan ?? k.panNumber,
       address:       k.address,
       city:          k.city,
       state:         k.state,
@@ -460,6 +499,31 @@ export default function NewKYCPage() {
     }));
     // Trigger mobile-conflict check for the pre-filled number
     if (k.mobile.length === 10) setMobileCheck('ok');
+  }, [selectedOutlet]);
+
+  /* ── Pre-fill owner identity from an APPROVED parent (grouped-before-KYC child) ──
+   *   When the selected outlet carries `parentPrefill` (present only when it has an
+   *   approved parent) AND this is a FRESH KYC (no `existingKyc` re-entry), seed the
+   *   owner identity/payout fields from the parent so the rep CONFIRMS rather than
+   *   re-types. Everything stays EDITABLE; PAN is separately pinned to the group PAN
+   *   below. Declared AFTER the existingKyc effect so, for a fresh outlet, it wins the
+   *   shared setForm ordering (existingKyc clears the bank fields → this re-seeds them).
+   *   Mobile is intentionally NOT pre-filled — each outlet needs its own unique number. */
+  useEffect(() => {
+    const pf = selectedOutlet?.parentPrefill;
+    if (!pf || selectedOutlet?.existingKyc) return; // no parent, or a re-entry → skip
+    setForm((f) => ({
+      ...f,
+      partnerName:       pf.ownerName          ?? f.partnerName,
+      gstNumber:         pf.gstNumber           ?? f.gstNumber,
+      // PAN: the group's canonical PAN wins (it's the locked value); else the parent PAN.
+      panNumber:         pf.groupPan ?? pf.panNumber ?? f.panNumber,
+      bankName:          pf.bankName            ?? f.bankName,
+      accountHolderName: pf.bankAccountHolder   ?? f.accountHolderName,
+      accountNumber:     pf.bankAccountNumber   ?? f.accountNumber,
+      ifscCode:          pf.ifscCode            ?? f.ifscCode,
+      upiId:             pf.upiId               ?? f.upiId,
+    }));
   }, [selectedOutlet]);
 
   /* ── Reset all captured/carried-over evidence whenever the SELECTED OUTLET changes,
@@ -658,7 +722,12 @@ export default function NewKYCPage() {
     // A real GSTIN is 15 chars; the embedded PAN is chars [2..11], available once
     // 12+ chars are entered. Below 12 we leave the existing PAN untouched.
     const gst = e.target.value.toUpperCase().slice(0, GSTIN_LENGTH);
-    setForm((f) => ({ ...f, gstNumber: gst, panNumber: gst.length >= 12 ? panFromGstin(gst) : f.panNumber }));
+    setForm((f) => ({
+      ...f,
+      gstNumber: gst,
+      // Group-PAN lock wins: never let a GST-derived PAN override the pinned group PAN.
+      panNumber: groupPanLocked ? f.panNumber : (gst.length >= 12 ? panFromGstin(gst) : f.panNumber),
+    }));
   };
 
   /** Auto-run conflict check when 10 digits entered. No OTP here. */
@@ -1897,13 +1966,23 @@ export default function NewKYCPage() {
             <div>
               <label className={labelCls}>
                 PAN Number
-                {form.gstNumber.length >= 12 && <span className="ml-1.5 text-[11px] text-emerald-600 font-normal">● Auto-filled from GST</span>}
+                {/* Group-PAN lock wins the hint: when pinned to the parent group PAN we don't
+                    claim it was auto-filled from GST (the group PAN is authoritative). */}
+                {form.gstNumber.length >= 12 && !groupPanLocked && <span className="ml-1.5 text-[11px] text-emerald-600 font-normal">● Auto-filled from GST</span>}
+                {groupPanLocked && (
+                  <span
+                    data-testid="group-pan-locked-badge"
+                    className="ml-1.5 text-[10px] font-semibold text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded-full border border-gray-200 align-middle"
+                  >
+                    Group PAN — locked
+                  </span>
+                )}
                 <FlagBadge field="panNumber" />
               </label>
-              <input className={`${inputCls} ${form.gstNumber.length >= 12 ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : ''} ${flagCls('panNumber')}`}
-                placeholder="AAPFU0939F" value={form.panNumber} onChange={set('panNumber')}
-                disabled={isFieldLocked('panNumber')}
-                readOnly={isFieldLocked('panNumber') || form.gstNumber.length >= 12} />
+              <input className={`${inputCls} ${(form.gstNumber.length >= 12 || groupPanLocked) ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : ''} ${flagCls('panNumber')}`}
+                placeholder="AAPFU0939F" value={groupPan ?? form.panNumber} onChange={set('panNumber')}
+                disabled={isFieldLocked('panNumber') || groupPanLocked}
+                readOnly={isFieldLocked('panNumber') || form.gstNumber.length >= 12 || groupPanLocked} />
             </div>
 
             {/* KYC Documents */}

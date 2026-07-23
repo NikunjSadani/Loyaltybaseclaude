@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Headers, Query } from '@nestjs/common';
 import { LeaderboardService } from './leaderboard.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -16,7 +16,11 @@ export class LeaderboardController {
 
   @Get()
   @RequirePermission('engagement:read')
-  list(@CurrentUser() user: JwtPayload, @Query() query: ListLeaderboardQueryDto) {
-    return this.leaderboard.list(user, query);
+  list(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: ListLeaderboardQueryDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.leaderboard.list(user, query, activePartnerId);
   }
 }

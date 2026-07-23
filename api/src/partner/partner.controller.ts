@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Headers, Query } from '@nestjs/common';
 import { PartnerService } from './partner.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -17,9 +17,14 @@ import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
 export class PartnerController {
   constructor(private readonly partner: PartnerService) {}
 
+  // `x-active-partner-id` (Wave 3 login picker): the active-outlet selector — a ChannelPartner id,
+  // or absent for the login's own outlet. Re-authorized in the service (never trusted blind).
   @Get('me')
-  getMe(@CurrentUser() user: JwtPayload) {
-    return this.partner.getMe(user);
+  getMe(
+    @CurrentUser() user: JwtPayload,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.partner.getMe(user, activePartnerId);
   }
 
   @Get('banners')
@@ -30,14 +35,21 @@ export class PartnerController {
 
   @Get('payouts')
   @RequirePermission('payouts:read')
-  getPayouts(@CurrentUser() user: JwtPayload) {
-    return this.partner.getPayouts(user);
+  getPayouts(
+    @CurrentUser() user: JwtPayload,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.partner.getPayouts(user, activePartnerId);
   }
 
   @Get('targets')
   @RequirePermission('targets:read')
-  getTargets(@CurrentUser() user: JwtPayload, @Query() query: ListPartnerTargetsQueryDto) {
-    return this.partner.getTargets(user, query);
+  getTargets(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: ListPartnerTargetsQueryDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.partner.getTargets(user, query, activePartnerId);
   }
 
   // Primary-KPI target-vs-achieved trend (last N months) for the dashboard chart.
@@ -47,14 +59,18 @@ export class PartnerController {
     @CurrentUser() user: JwtPayload,
     @Query('months') months?: string,
     @Query('kpi') kpi?: string,
+    @Headers('x-active-partner-id') activePartnerId?: string,
   ) {
-    return this.partner.getTargetTrend(user, months ? Number(months) : 24, kpi);
+    return this.partner.getTargetTrend(user, months ? Number(months) : 24, kpi, activePartnerId);
   }
 
   // The caller's own assigned sales reps (Support page "Your Sales Team").
   // Caller- + tenant-scoped in the service; basic self-info, like /me.
   @Get('sales-team')
-  getSalesTeam(@CurrentUser() user: JwtPayload) {
-    return this.partner.getSalesTeam(user);
+  getSalesTeam(
+    @CurrentUser() user: JwtPayload,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.partner.getSalesTeam(user, activePartnerId);
   }
 }

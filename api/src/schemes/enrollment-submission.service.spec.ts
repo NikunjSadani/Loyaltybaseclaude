@@ -169,9 +169,11 @@ describe('SchemesService — P4.3 enrollment submission', () => {
 
       expect(result).toEqual({ enrollment: fakeEnrollment });
 
-      // Verify the upsert was called with the correct userId.
+      // Verify the upsert was keyed by the SHOP (partnerId) and records the performing login.
       const upsertCall = mockPrisma.schemeEnrollment.upsert.mock.calls[0][0];
-      expect(upsertCall.where).toEqual({ schemeId_userId: { schemeId: 'scheme1', userId: 'partner-user' } });
+      expect(upsertCall.where).toEqual({ schemeId_partnerId: { schemeId: 'scheme1', partnerId: 'cp1' } });
+      expect(upsertCall.create.partnerId).toBe('cp1');
+      expect(upsertCall.create.userId).toBe('partner-user');
       expect(upsertCall.create.enrollmentMode).toBe('SELF');
     });
 
@@ -460,9 +462,9 @@ describe('SchemesService — P4.3 enrollment submission', () => {
       // Both create and update blocks must set status ACTIVE and the form values.
       expect(upsertCall.create.status).toBe('ACTIVE');
       expect(upsertCall.update.status).toBe('ACTIVE');
-      // The unique key must match the Prisma compound unique name.
+      // The unique key must match the Prisma compound unique name (now shop-keyed).
       expect(upsertCall.where).toEqual({
-        schemeId_userId: { schemeId: 'scheme1', userId: 'partner-user' },
+        schemeId_partnerId: { schemeId: 'scheme1', partnerId: 'cp1' },
       });
     });
   });
@@ -584,17 +586,19 @@ describe('SchemesService — P4.3 enrollment submission', () => {
   // ── L) getMyEnrollment — success ─────────────────────────────────────────
   describe('L) getMyEnrollment — success', () => {
     it('returns the caller own enrollment', async () => {
-      const fakeEnrollment = { id: 'enr1', schemeId: 'scheme1', userId: 'partner-user', status: 'ACTIVE' };
+      const fakeEnrollment = { id: 'enr1', schemeId: 'scheme1', partnerId: 'cp1', userId: 'partner-user', status: 'ACTIVE' };
 
       // assertSchemeOwnership calls scheme.findFirst.
       mockPrisma.scheme.findFirst.mockResolvedValue({ id: 'scheme1', clientId: 'deoleo', deletedAt: null });
+      // resolveActivePartnerId own-lookup → the login's own shop.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', groupId: null });
       mockPrisma.schemeEnrollment.findUnique.mockResolvedValue(fakeEnrollment);
 
       const result = await service.getMyEnrollment(partnerUser, 'scheme1');
 
       expect(result).toEqual({ enrollment: fakeEnrollment });
       expect(mockPrisma.schemeEnrollment.findUnique).toHaveBeenCalledWith({
-        where: { schemeId_userId: { schemeId: 'scheme1', userId: 'partner-user' } },
+        where: { schemeId_partnerId: { schemeId: 'scheme1', partnerId: 'cp1' } },
       });
     });
   });
@@ -603,6 +607,7 @@ describe('SchemesService — P4.3 enrollment submission', () => {
   describe('M) getMyEnrollment — not enrolled', () => {
     it('throws NotFoundException when no enrollment exists', async () => {
       mockPrisma.scheme.findFirst.mockResolvedValue({ id: 'scheme1', clientId: 'deoleo', deletedAt: null });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1', groupId: null });
       mockPrisma.schemeEnrollment.findUnique.mockResolvedValue(null);
 
       await expect(

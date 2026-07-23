@@ -11,11 +11,24 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-- **prod == main == `2187498`** (CUTOVER #12 `d028566` + #13 `2187498`, both LIVE 2026-07-22). **develop `18275ac`**
-  (verify via `git log`) = prod + the **🏗️ PARTNER→MULTI-OUTLET Wave 1 (foundation)** + docs. Wave 1 is additive+opt-in
-  (nothing grouped until an admin sets a parentId → zero impact on live Deoleo); migration applied+verified on staging.
-  **NEXT = Wave 2 (Streams A‖B).** Full spec + as-built contract = `platform/docs/plans/PARTNER-MULTI-OUTLET.md`; memory
-  **[[partner-multi-outlet]]**. Gate at `18275ac`: api jest 1572 · nest 0 · FE vitest 1931 · tsc 0.
+- **prod == main == `2187498`** (CUTOVER #12 `d028566` + #13 `2187498`, both LIVE 2026-07-22). **develop `1e2e4eb`**
+  (verify via `git log`) = prod + **🏗️ PARTNER→MULTI-OUTLET Wave 1 + Wave 2** (uniqueness engine + parent entity + admin
+  grouping + re-KYC stage-at-approval). Additive+opt-in (dormant until an admin sets a parentId → zero impact on live
+  Deoleo). **✅ ON STAGING: migration `20260723120000_partner_group_uniqueness` applied + every DB object verified**
+  (groupId col, PAN+GST partial-unique indexes, trigger, proposedPartner col, old GST @@unique dropped); both services
+  serve `1e2e4eb`, `/health/ready` db:up. Gate at `1e2e4eb`: **api jest 1650 · nest 0 · FE vitest 1940 · tsc 0**; 3
+  adversarial audits reconciled. **NOT in prod — owner-gated cutover pending** (see the CUTOVER CHECKLIST below).
+  **NEXT = Wave 3** (login picker + parent portal + wallet roll-up). Full as-built + cutover checklist =
+  `platform/docs/plans/PARTNER-MULTI-OUTLET.md` §9; memory **[[partner-multi-outlet]]**.
+  - **⚠️ PARTNER-MULTI-OUTLET CUTOVER CHECKLIST (before prod):** (1) **PROD dup-PAN guarded read BEFORE `migrate deploy`**
+    — the PAN partial-unique index FAILS over ungrouped duplicate PANs; group/clear them first (`SELECT "panNumber",
+    count(*) FROM channel_partners WHERE "deletedAt" IS NULL AND "panNumber" IS NOT NULL AND "isParent"=false GROUP BY
+    "clientId","panNumber" HAVING count(*)>1`). Prod likely clean (no outlets onboarded) but VERIFY. *(Staging had 9
+    UAT-junk dups → nulled under a guarded, independently-audited write 2026-07-23; backup in scratchpad.)* (2) create a
+    **Cloud Scheduler** job → `POST /v1/kyc/cleanup-stale-drafts` daily + set **`KYC_CLEANUP_SECRET`** (else the 48h
+    stale-draft cleanup never runs). (3) sweep dup bank/UPI **before** ever flipping a tenant's `uniquenessPolicy.bank`/
+    `upi` to true (no DB index reveals them). (4) The **§4.5 PAN-change-to-leave-group ordering is `TODO(wave4)`** in
+    kyc.service — resolve with owner before enabling group-leave via re-KYC.
 - **✅ CUTOVER #12 (`d028566`, live 2026-07-22) shipped BOTH develop features + the infra-workflow changes to prod:**
   (1) **PER-OUTLET PAYOUT MANDATE** — `Outlet.requiredPaymentType BANK|UPI|ANY` (migration `..._add_outlet_required_payment_type`),
   **fully LIVE, needs no flag** (defaults BANK); (2) **KYC ADDRESS-PROOF WAIVER** (migration `..._add_kyc_address_name_mismatch`);
@@ -385,20 +398,26 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 Greet. State current status, then present the open pickups and ask which to take (do NOT hard-lead one — the next move is
 the owner's choice among the leftovers below).
 
-**🏗️ ACTIVE WORK — PARTNER → MULTIPLE OUTLETS (parent-child owner groups). Full spec + as-built contract =
-`platform/docs/plans/PARTNER-MULTI-OUTLET.md`; memory [[partner-multi-outlet]] (READ BOTH FIRST).** Owner-driven, multi-wave
-orchestrated build. Design LOCKED (Option B grouping layer; PAN golden-key; admin-only `Outlet.parentId` link;
-tenant-configurable uniqueness — new PAN/bank/UPI enforcement; pre-fill + "verified on parent" badge; login picker;
-read-only consolidated wallet roll-up). **✅ WAVE 1 (FOUNDATION) DONE — develop `18275ac`, gate GREEN (api jest 1572 · nest 0 ·
-FE vitest 1931 · tsc 0), migration `20260722100000_partner_multi_outlet_foundation` APPLIED+verified on staging.** The shared
-contract: schema (ChannelPartner.isParent + nullable userId/phone; Outlet.parentId) + `api/src/common/partner-group.helper.ts`
-(`checkGroupUniqueness` + 15 tests) + tenant `uniquenessPolicy` setting + a seeded parent+2-child group. Additive+opt-in → ZERO
-impact on live Deoleo. **▶ RESUME AT WAVE 2 — Streams A ‖ B in parallel** (A = wire the uniqueness helper into kyc.service write
-paths + group-aware assertPhoneAvailable + add-to-parent/un-group validation; B = parent entity + admin parentId upload + parent
-KYC straight-to-Gifsy + 3 leak `isParent:false` filters). File-partition: A owns kyc.service write paths, B owns admin-outlets +
-parent CRUD. Then Wave 3 (C‖D), Wave 4 (integrate+audit+E2E+staging-verify), owner-gated cutover. **See PARTNER-MULTI-OUTLET.md §9
-for the exact frozen contract + the 2 critical stream notes (phone stays in assertPhoneAvailable + the User-uniqueness/shared-phone
-nuance; the parent-leak sites).**
+**🏗️ ACTIVE WORK — PARTNER → MULTIPLE OUTLETS (parent-child owner groups). Full AS-BUILT + cutover checklist =
+`platform/docs/plans/PARTNER-MULTI-OUTLET.md` §9; memory [[partner-multi-outlet]] (READ BOTH FIRST).** Owner-driven, multi-wave
+orchestrated build. **✅ WAVE 1 + 2 + 3 ALL DONE — on develop (verify HEAD via `git log`), gate GREEN (api jest 1718 · nest 0 ·
+FE vitest 1971 · tsc 0), 3-lens adversarial audit [auth-boundary/money/regression] + full audit-fix pass. NOT in prod —
+owner-gated cutover pending; owner UAT on staging next.** W1+W2 as-built (design evolved — §9 authoritative): single-source-of-truth
+`Outlet.parentId` + trigger-derived `ChannelPartner.groupId`; PAN+GST hard partial-unique DB indexes, bank/UPI app+advisory-lock;
+parent entity + admin Parent-ID upload + dedicated un-group; **re-KYC STAGE-AT-APPROVAL** (proposed identity/payout+address staged
+on `KycSubmission.proposedPartner`, applied only at Gifsy approval); reserve-at-submit + 48h cleanup. **W3 as-built:** **login picker**
+(outlet identity is NOT in the JWT → re-resolved per request; login-less same-group same-phone siblings reached via httpOnly cookie
+`active_partner_id` → proxy header **`x-active-partner-id`** → EVERY partner-self site re-authorizes via `resolveActivePartnerId`;
+money/write paths **fail-closed**, shell `/partner/me` **degrades-to-own** + `activeSelectorInvalid`→FE self-heals + logout clears the
+cookie — a stale/shared-device cookie never bricks the portal); **read-only group wallet overview** (`GET /v1/partner/group/wallet`,
+new GroupService, sum of Int POINTS + per-outlet drill-down + own-group cross-check); **Stream C** child KYC parent pre-fill (PAN
+locked to group PAN) + verified-on-parent badge (server booleans, pre-mask, PII-safe); **scheme enrollment RE-KEYED by shop**
+(`@@unique[schemeId,partnerId]`, userId nullable) so login-less siblings self-enroll; **order-bound redemption OTP** (`OtpCode.referenceId`).
+**4 additive migrations** (`_partner_multi_outlet_foundation`·`_partner_group_uniqueness` on staging; `20260723130000_otp_reference_id`·
+`20260723140000_scheme_enrollment_by_partner` apply on the develop push). **▶ NEXT = owner UAT on staging (real OTP) → owner-gated
+cutover.** **⚠️ CUTOVER CHECKLIST (prod dup-PAN + scheme-enrollment-orphan pre-checks · Cloud Scheduler + `KYC_CLEANUP_SECRET` ·
+bank/UPI dup sweep before flipping policy · §4.5 `TODO(wave4)`) — see PARTNER-MULTI-OUTLET.md §9.** Owner decisions locked this session:
+scheme-enrollment re-keyed by shop (built); `parentPrefill` kept in the sales-outlet list (authorized staff only, not tightened).
 
 **STATE (prior work, all LIVE):** prod == main == `2187498` (CUTOVERS #12 `d028566` + #13 `2187498`, LIVE 2026-07-22). Both develop
 features LIVE in prod: PER-OUTLET PAYOUT MANDATE (no flag) + KYC ADDRESS-PROOF WAIVER (semantics-corrected + prod flag SET). Only

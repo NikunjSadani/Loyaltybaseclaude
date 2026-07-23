@@ -27,8 +27,13 @@ export class WalletController {
   @Get()
   @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
   @RequirePermission('wallet:read')
-  getWallet(@CurrentUser() user: JwtPayload) {
-    return this.wallet.getWallet(user);
+  getWallet(
+    @CurrentUser() user: JwtPayload,
+    // `x-active-partner-id` (Wave 3 login picker): the active-outlet selector. Re-authorized in the
+    // service — a forged/foreign id can never surface another partner's wallet.
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.wallet.getWallet(user, activePartnerId);
   }
 
   @Post('adjust')
@@ -41,8 +46,13 @@ export class WalletController {
   @Get('transactions')
   @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST')
   @RequirePermission('wallet:read')
-  listTransactions(@CurrentUser() user: JwtPayload, @Query() query: ListTransactionsQueryDto) {
-    return this.wallet.listTransactions(user, query);
+  listTransactions(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: ListTransactionsQueryDto,
+    // Wave 3 login picker selector (ignored on the GIFSY-admin ?userId= support path — see service).
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.wallet.listTransactions(user, query, activePartnerId);
   }
 
   /**

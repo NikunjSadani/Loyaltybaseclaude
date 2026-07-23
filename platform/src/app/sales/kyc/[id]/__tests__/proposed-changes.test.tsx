@@ -12,7 +12,7 @@
  */
 
 import React, { Suspense, act } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -122,5 +122,58 @@ describe('SPC — Sales KYC re-KYC proposed-change rendering', () => {
     await waitFor(() => expect(screen.getByText('Kumar General Store')).toBeInTheDocument());
     expect(screen.queryByTestId('proposed-changes-banner')).not.toBeInTheDocument();
     expect(screen.queryByTestId('proposed-change')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * SPV — Sales KYC detail: "Verified on parent" badge (Wave-3 grouped child)
+ *
+ * A grouped child whose CURRENT value matches its APPROVED parent carries a per-field
+ * `parentVerified` flag (server pre-mask). The sales approver sees a subtle emerald badge,
+ * distinct from the amber "Proposed change" pill — a field can be BOTH. The badge lives inside
+ * the collapsible Store Information; a proposed change auto-opens it, otherwise open it manually.
+ */
+describe('SPV — Sales KYC verified-on-parent badge', () => {
+  it('SPV1: parent-verified fields show the badge (details opened manually)', async () => {
+    stubFetch({ ...BASE, proposedPartner: null, parentVerified: { panNumber: true, gstNumber: true } });
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('Kumar General Store')).toBeInTheDocument());
+    // No proposed change → details stay closed; open Store Information to reveal the fields.
+    fireEvent.click(screen.getByRole('button', { name: /store information/i }));
+    expect(screen.getAllByTestId('verified-on-parent-badge')).toHaveLength(2);
+    expect(screen.queryByTestId('proposed-change')).not.toBeInTheDocument();
+  });
+
+  it('SPV2: a field BOTH proposed AND parent-verified shows the pill and the badge (auto-open)', async () => {
+    // REKYC proposes new Owner + GST; flag GST as verified-on-parent too.
+    stubFetch({ ...REKYC, parentVerified: { gstNumber: true } });
+    await renderPage();
+    // A proposed change auto-opens details → the proposed owner name is visible.
+    await waitFor(() => expect(screen.getByText('Mahesh Kumar')).toBeInTheDocument());
+    // Proposed pills unchanged (Owner + GST = 2)…
+    expect(screen.getAllByTestId('proposed-change')).toHaveLength(2);
+    // …plus exactly one verified badge (GST).
+    expect(screen.getAllByTestId('verified-on-parent-badge')).toHaveLength(1);
+  });
+
+  it('SPV3: a masked reader still gets the badge (parentVerified pre-mask)', async () => {
+    stubFetch({
+      ...BASE,
+      partner: { ...BASE.partner, panNumber: 'AAPxxxxx9F' },  // PII-masked PAN on the wire
+      proposedPartner: null,
+      parentVerified: { panNumber: true },
+    });
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('Kumar General Store')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /store information/i }));
+    expect(screen.getByTestId('verified-on-parent-badge')).toBeInTheDocument();
+  });
+
+  it('SPV4: no parentVerified → no badge (purely additive)', async () => {
+    stubFetch({ ...BASE, proposedPartner: null });
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('Kumar General Store')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /store information/i }));
+    expect(screen.queryByTestId('verified-on-parent-badge')).not.toBeInTheDocument();
   });
 });

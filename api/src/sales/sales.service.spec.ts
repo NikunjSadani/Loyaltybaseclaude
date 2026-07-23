@@ -19,6 +19,9 @@ const mockPrisma = {
   outletSalesRecord: { findFirst: jest.fn(), findMany: jest.fn() },
   kpiDef: { findMany: jest.fn() },
   salesHierarchyLevel: { findFirst: jest.fn() },
+  // Used by resolveGroupPan (owner-group PAN resolution) for the KYC pre-fill in buildOutlets.
+  channelPartner: { findUnique: jest.fn(), findFirst: jest.fn() },
+  outlet: { findFirst: jest.fn() },
 };
 
 // TenantService.resolveClient feeds the DB-backed feature blob into /sales/me
@@ -602,6 +605,93 @@ describe('SalesService', () => {
       expect(existingKyc.accountHolderName).toBe('');
       expect(existingKyc.address).toBe('');
       expect(existingKyc.pincode).toBe('');
+    });
+
+    // ── Stream C: owner-group KYC pre-fill (parentPrefill) ──────────────────────
+    // A child outlet grouped-before-KYC (Outlet.parentId set) whose parent is APPROVED.
+    const groupedOutlet = (parent: Record<string, unknown> | null) => ({
+      outlet: {
+        id: 'o-child',
+        outletCode: 'OC-CHILD',
+        name: 'Child Outlet',
+        phone: '999',
+        city: 'Delhi',
+        district: 'Central',
+        state: 'DL',
+        outletType: { code: 'RETAIL' },
+        parentId: parent ? 'parent-1' : null,
+        parent,
+        partner: null, // not KYC'd yet — grouped before KYC
+      },
+    });
+    const primeCaller = () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
+    };
+
+    it('emits parentPrefill (with groupPan) when the outlet is grouped under an APPROVED parent', async () => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        groupedOutlet({
+          businessName: 'Group Owner Co',
+          ownerName: 'Group Owner',
+          phone: '9820000000',
+          email: 'owner@group.com',
+          gstNumber: '07AAACT9811F1Z9',
+          panNumber: 'AAACT9811F',
+          bankName: 'HDFC',
+          bankAccountNumber: '123456789',
+          bankAccountHolder: 'Group Owner',
+          ifscCode: 'HDFC0000001',
+          upiId: 'owner@upi',
+          onboardedAt: new Date('2024-01-01T00:00:00.000Z'), // APPROVED
+        }),
+      ]);
+      // resolveGroupPan → parent has a PAN → returned as the group's canonical PAN (normalized upper).
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'AAACT9811F' });
+
+      const res = await service.getMyOutlets(caller);
+      const prefill = res.outlets[0].parentPrefill!;
+      expect(prefill).toBeDefined();
+      expect(prefill).toMatchObject({
+        businessName: 'Group Owner Co',
+        ownerName: 'Group Owner',
+        gstNumber: '07AAACT9811F1Z9',
+        panNumber: 'AAACT9811F',
+        bankName: 'HDFC',
+        bankAccountNumber: '123456789',
+        bankAccountHolder: 'Group Owner',
+        ifscCode: 'HDFC0000001',
+        upiId: 'owner@upi',
+        groupPan: 'AAACT9811F',
+      });
+      // The select must fetch the parent relation + onboardedAt for the approval gate.
+      const include = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].include;
+      expect(include.outlet.include.parent.select.onboardedAt).toBe(true);
+    });
+
+    it('OMITS parentPrefill when the parent is UNAPPROVED (onboardedAt null)', async () => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        groupedOutlet({
+          businessName: 'Group Owner Co',
+          ownerName: 'Group Owner',
+          panNumber: 'AAACT9811F',
+          onboardedAt: null, // NOT approved → never pre-fill
+        }),
+      ]);
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].parentPrefill).toBeUndefined();
+      // An unapproved parent must NOT trigger a group-PAN resolution.
+      expect(mockPrisma.channelPartner.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('OMITS parentPrefill when the outlet has no parent (ungrouped)', async () => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([groupedOutlet(null)]);
+      const res = await service.getMyOutlets(caller);
+      expect(res.outlets[0].parentPrefill).toBeUndefined();
+      expect(mockPrisma.channelPartner.findUnique).not.toHaveBeenCalled();
     });
   });
 

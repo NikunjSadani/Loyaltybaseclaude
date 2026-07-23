@@ -3666,6 +3666,146 @@ describe('KycService', () => {
     });
   });
 
+  // ── Stream C: "verified on parent" per-field signal in getOne() ───────────────
+  describe('parentVerified (owner-group signal) in getOne()', () => {
+    // A child outlet grouped-before-KYC (outlets[0].parentId set), with its CURRENT
+    // (approved) identity/payout values on submission.partner.
+    const childPartner = {
+      id: 'child-p1',
+      clientId: 'deoleo',
+      businessName: 'Ravi Traders',
+      ownerName: 'Ravi Kumar',
+      phone: '9820011111',
+      gstNumber: '27AABCU9603R1ZM',
+      panNumber: 'ABCDE1234F',
+      bankName: 'HDFC',
+      bankAccountNumber: '123456789012',
+      bankAccountHolder: 'Ravi Kumar',
+      ifscCode: 'HDFC0000123',
+      upiId: 'ravi@upi',
+      outlets: [{ id: 'o1', isPrimary: true, parentId: 'parent-1', reKycFlags: null }],
+    };
+    const childSubmission = (partner: Record<string, unknown>) => ({
+      id: 's1',
+      userId: 'other', // non-owner reader path
+      partnerId: 'child-p1',
+      partner,
+      documents: [],
+      statusHistory: [],
+      user: { id: 'other', name: 'Ravi', phone: '9820011111', role: 'RETAILER' },
+    });
+
+    it('marks a field TRUE when the child value equals the approved parent value (case/space-insensitive for PAN), FALSE when it differs', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(childSubmission(childPartner));
+      // Approved parent: PAN matches (lower-cased → proves normalization), GST differs.
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({
+        businessName: 'Ravi Traders',
+        ownerName: 'Ravi Kumar',
+        phone: '9820011111',
+        gstNumber: 'DIFFERENTGST99',
+        panNumber: '  abcde1234f  ',
+        bankName: 'HDFC',
+        bankAccountNumber: '123456789012',
+        bankAccountHolder: 'Ravi Kumar',
+        ifscCode: 'HDFC0000123',
+        upiId: 'ravi@upi',
+      });
+      const res = (await service.getOne(mis, 's1')) as {
+        submission: { parentVerified: Record<string, boolean> };
+      };
+      const pv = res.submission.parentVerified;
+      expect(pv.panNumber).toBe(true); // normalized (upper+trim) equal
+      expect(pv.gstNumber).toBe(false); // differs
+      expect(pv.bankAccountNumber).toBe(true);
+      expect(pv.ifscCode).toBe(true);
+      expect(pv.upiId).toBe(true);
+      expect(pv.businessName).toBe(true);
+      expect(pv.ownerName).toBe(true);
+      expect(pv.phone).toBe(true);
+      // Fetched only an APPROVED parent, tenant-scoped to the child.
+      const where = mockPrisma.channelPartner.findFirst.mock.calls[0][0].where;
+      expect(where.id).toBe('parent-1');
+      expect(where.clientId).toBe('deoleo');
+      expect(where.isParent).toBe(true);
+      expect(where.onboardedAt).toEqual({ not: null });
+    });
+
+    it('marks a field FALSE when either side is empty/absent', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(
+        childSubmission({ ...childPartner, bankName: '' }), // child bankName empty
+      );
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({
+        businessName: 'Ravi Traders',
+        ownerName: 'Ravi Kumar',
+        phone: '9820011111',
+        gstNumber: '27AABCU9603R1ZM',
+        panNumber: 'ABCDE1234F',
+        bankName: 'HDFC', // parent has it, child empty → false
+        bankAccountNumber: '123456789012',
+        bankAccountHolder: 'Ravi Kumar',
+        ifscCode: 'HDFC0000123',
+        upiId: null, // parent missing UPI → false even though child has one
+      });
+      const res = (await service.getOne(mis, 's1')) as {
+        submission: { parentVerified: Record<string, boolean> };
+      };
+      expect(res.submission.parentVerified.bankName).toBe(false); // child empty
+      expect(res.submission.parentVerified.upiId).toBe(false); // parent empty
+      expect(res.submission.parentVerified.panNumber).toBe(true); // both present + equal (control)
+    });
+
+    it('computes correct booleans even when the reader is MASKED (compare runs pre-mask)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(childSubmission(childPartner));
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({
+        panNumber: 'ABCDE1234F',
+        gstNumber: '27AABCU9603R1ZM',
+        bankAccountNumber: '123456789012',
+      });
+      const res = (await service.getOne(mis, 's1')) as {
+        submission: {
+          partner: { panNumber: string; bankAccountNumber: string } | null;
+          parentVerified: Record<string, boolean>;
+        };
+      };
+      // The returned child PII is masked to last-4 for the MIS reader…
+      expect(res.submission.partner?.panNumber).toBe('****234F');
+      expect(res.submission.partner?.bankAccountNumber).toBe('****9012');
+      // …yet the parent-verified booleans (computed on the RAW values) are still correct.
+      expect(res.submission.parentVerified.panNumber).toBe(true);
+      expect(res.submission.parentVerified.gstNumber).toBe(true);
+      expect(res.submission.parentVerified.bankAccountNumber).toBe(true);
+    });
+
+    it('returns an all-false map and does NOT query for a parent when the outlet is ungrouped', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(
+        childSubmission({
+          ...childPartner,
+          outlets: [{ id: 'o1', isPrimary: true, parentId: null, reKycFlags: null }],
+        }),
+      );
+      const res = (await service.getOne(mis, 's1')) as {
+        submission: { parentVerified: Record<string, boolean> };
+      };
+      expect(mockPrisma.channelPartner.findFirst).not.toHaveBeenCalled();
+      const pv = res.submission.parentVerified;
+      expect(Object.values(pv).every((v) => v === false)).toBe(true);
+      expect(pv).toHaveProperty('panNumber', false);
+      expect(pv).toHaveProperty('phone', false);
+    });
+
+    it('returns an all-false map when the parent exists but is NOT approved (query returns null)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(childSubmission(childPartner));
+      // The onboardedAt-filtered query finds no approved parent.
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      const res = (await service.getOne(mis, 's1')) as {
+        submission: { parentVerified: Record<string, boolean> };
+      };
+      expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledTimes(1);
+      expect(res.submission.parentVerified.panNumber).toBe(false);
+      expect(res.submission.parentVerified.gstNumber).toBe(false);
+    });
+  });
+
   // ── Task 3.4d: review-queue ──────────────────────────────────────────────────
   describe('reviewQueue (GET /v1/kyc/review-queue)', () => {
     it('is Gifsy-only — non-Gifsy caller gets ForbiddenException', async () => {

@@ -899,6 +899,100 @@ describe('InvoicesService', () => {
     });
   });
 
+  // ── Wave 3: x-active-partner-id selector (login picker) ────────────────────────
+
+  describe('active partner selector (Wave 3)', () => {
+    // A partner login carrying a real phone (needed for sibling resolution).
+    const partnerWithPhone: JwtPayload = {
+      sub: 'partner1',
+      role: 'PARTNER',
+      clientId: 'deoleo',
+      phone: '9990000001',
+      name: '',
+    };
+
+    it('list: no selector → own partnerId (today’s behaviour)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'p1', groupId: 'g1' });
+      mockPrisma.autoInvoice.findMany.mockResolvedValue([]);
+      mockPrisma.autoInvoice.count.mockResolvedValue(0);
+
+      await service.list(partnerWithPhone, {});
+      const where = mockPrisma.autoInvoice.findMany.mock.calls[0][0].where;
+      expect(where.partnerId).toBe('p1');
+      // Only the own lookup ran — no sibling query on the absent-header hot path.
+      expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledTimes(1);
+    });
+
+    it('list: valid sibling selector → the sibling’s invoices', async () => {
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'p1', groupId: 'g1' }) // own
+        .mockResolvedValueOnce({ id: 'p2' }); // resolved sibling
+      mockPrisma.autoInvoice.findMany.mockResolvedValue([]);
+      mockPrisma.autoInvoice.count.mockResolvedValue(0);
+
+      await service.list(partnerWithPhone, {}, 'p2');
+      const where = mockPrisma.autoInvoice.findMany.mock.calls[0][0].where;
+      expect(where.partnerId).toBe('p2');
+    });
+
+    it('list: forbidden selector → ForbiddenException', async () => {
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'p1', groupId: 'g1' }) // own
+        .mockResolvedValueOnce(null); // not an operable sibling
+      await expect(
+        service.list(partnerWithPhone, {}, 'p-OTHER'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('getById: switched partner sees the ACTIVE (sibling) outlet invoice', async () => {
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({
+        id: 'inv1',
+        clientId: 'deoleo',
+        partnerId: 'p2',
+      });
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'p1', groupId: 'g1' }) // own
+        .mockResolvedValueOnce({ id: 'p2' }); // resolved sibling
+      const result = await service.getById(partnerWithPhone, 'inv1', 'p2');
+      expect(result).toBeDefined();
+    });
+
+    it('getById: forbidden selector → ForbiddenException', async () => {
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({
+        id: 'inv1',
+        clientId: 'deoleo',
+        partnerId: 'p2',
+      });
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'p1', groupId: 'g1' })
+        .mockResolvedValueOnce(null);
+      await expect(
+        service.getById(partnerWithPhone, 'inv1', 'bad'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('updateInvoiceNumber: switched partner edits the ACTIVE outlet invoice', async () => {
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({
+        id: 'inv1',
+        clientId: 'deoleo',
+        partnerId: 'p2',
+        status: 'GENERATED',
+      });
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'p1', groupId: 'g1' })
+        .mockResolvedValueOnce({ id: 'p2' });
+      mockPrisma.autoInvoice.update.mockResolvedValue({ id: 'inv1', invoiceNumberEdited: true });
+
+      const result = await service.updateInvoiceNumber(
+        partnerWithPhone,
+        'inv1',
+        { invoiceNumber: 'TGSL-VIS-O2-202501-001' },
+        'p2',
+      );
+      expect(result.invoiceNumberEdited).toBe(true);
+    });
+  });
+
   // ── exportXlsx (#44) ───────────────────────────────────────────────────────────
 
   describe('exportXlsx', () => {

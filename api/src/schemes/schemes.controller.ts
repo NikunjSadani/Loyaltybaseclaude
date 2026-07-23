@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Put, Query } from '@nestjs/common';
 import { SchemesService } from './schemes.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -118,8 +118,11 @@ export class SchemesController {
     @CurrentUser() user: JwtPayload,
     @Param('id') id: string,
     @Body() dto: SubmitEnrollmentDto,
+    // `x-active-partner-id` (Wave 3 login picker): active-outlet selector for the PARTNER-self (SELF)
+    // branch. Re-authorized in the service; the SALES-on-behalf branch ignores it (targets an outlet).
+    @Headers('x-active-partner-id') activePartnerId?: string,
   ) {
-    return this.schemes.submitEnrollment(user, id, dto);
+    return this.schemes.submitEnrollment(user, id, dto, activePartnerId);
   }
 
   /**
@@ -131,7 +134,13 @@ export class SchemesController {
   @Get(':id/my-enrollment')
   @Roles('SSS', 'WHOLESALER', 'SUB_STOCKIST', 'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR')
   @RequirePermission('schemes:read')
-  getMyEnrollment(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.schemes.getMyEnrollment(user, id);
+  getMyEnrollment(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    // `x-active-partner-id` (Wave 3 login picker): read the ACTIVE partner's enrollment. Re-authorized
+    // in the service; absent → the login's own enrollment (today's behaviour).
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.schemes.getMyEnrollment(user, id, activePartnerId);
   }
 }

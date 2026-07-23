@@ -19,6 +19,7 @@ import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { roundToRupeePaise } from '../tds/tds.helpers';
 import { resolveEffectiveKycStatus, isPartnerPayable } from '../kyc/kyc-eligibility';
+import { resolveActivePartnerId } from '../common/partner-group.helper';
 import {
   AdminListCatalogQueryDto,
   CreateRewardCatalogDto,
@@ -94,7 +95,7 @@ export class RewardsService {
   }
 
   /** GET /v1/rewards/catalog — active catalog with per-item affordability vs the caller's wallet. */
-  async listCatalog(user: JwtPayload, q: ListCatalogQueryDto) {
+  async listCatalog(user: JwtPayload, q: ListCatalogQueryDto, requestedPartnerId?: string) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
     const skip = (page - 1) * limit;
@@ -110,12 +111,12 @@ export class RewardsService {
       if (q.maxPoints !== undefined) where.pointsCost.lte = q.maxPoints;
     }
 
-    // Get caller's wallet balance to flag eligible items.
-    const partner = await this.prisma.channelPartner.findFirst({
-      where: { userId: user.sub, user: { clientId: user.clientId } },
-    });
-    const wallet = partner
-      ? await this.prisma.wallet.findFirst({ where: { partnerId: partner.id } })
+    // Affordability is measured against the ACTIVE partner's wallet (own by default,
+    // or a switched sibling named by x-active-partner-id). resolveActive re-authorizes
+    // the selector — a forbidden id throws before any balance is read.
+    const activePartnerId = await this.resolveActive(user, requestedPartnerId);
+    const wallet = activePartnerId
+      ? await this.prisma.wallet.findFirst({ where: { partnerId: activePartnerId } })
       : null;
     const userBalance = wallet ? wallet.redeemablePoints : 0;
 
@@ -150,28 +151,36 @@ export class RewardsService {
   }
 
   /** GET /v1/rewards/catalog/:id — a single active (non-deleted) catalog item in the tenant. */
-  async getCatalogItem(user: JwtPayload, id: string) {
+  async getCatalogItem(user: JwtPayload, id: string, requestedPartnerId?: string) {
     const item = await this.prisma.rewardCatalog.findFirst({
       where: { id, deletedAt: null, clientId: user.clientId },
     });
     if (!item) throw new NotFoundException('Reward item not found');
+    // The item is tenant-scoped (not partner-scoped), so the response is identical
+    // regardless of the active outlet. We still re-authorize the selector so a bogus
+    // x-active-partner-id is rejected consistently across every rewards endpoint
+    // (never silently accepted on one read) — validation only, result unchanged.
+    await this.resolveActive(user, requestedPartnerId);
     return { item };
   }
 
   /** GET /v1/rewards/orders — paginated redemption orders (own only for non-admins). */
-  async listOrders(user: JwtPayload, q: ListOrdersQueryDto) {
+  async listOrders(user: JwtPayload, q: ListOrdersQueryDto, requestedPartnerId?: string) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
     const skip = (page - 1) * limit;
 
+    // Tenant scope by the partner's own clientId column (NOT partner.user.clientId):
+    // a login-less sibling has no linked user, so a user-relation scope would hide
+    // the switched sibling's orders. partner.clientId is authoritative for both.
     const where: Prisma.RedemptionOrderWhereInput = {
-      partner: { user: { clientId: user.clientId } },
+      partner: { clientId: user.clientId },
     };
     if (!this.isGifsy(user)) {
-      const partner = await this.prisma.channelPartner.findFirst({
-        where: { userId: user.sub, user: { clientId: user.clientId } },
-      });
-      where.partnerId = partner?.id ?? 'none';
+      // Non-admins see only the ACTIVE partner's orders (own by default, or a
+      // switched sibling named by x-active-partner-id — re-authorized here).
+      const activePartnerId = await this.resolveActive(user, requestedPartnerId);
+      where.partnerId = activePartnerId ?? 'none';
     }
     if (q.status) where.status = q.status;
 
@@ -196,9 +205,11 @@ export class RewardsService {
   }
 
   /** GET /v1/rewards/orders/:id — one order; non-admins may only see their own. */
-  async getOrder(user: JwtPayload, id: string) {
+  async getOrder(user: JwtPayload, id: string, requestedPartnerId?: string) {
+    // Tenant scope by partner.clientId so a switched sibling's order is visible
+    // (a login-less sibling has no linked user → partner.user.clientId would miss it).
     const order = await this.prisma.redemptionOrder.findFirst({
-      where: { id, partner: { user: { clientId: user.clientId } } },
+      where: { id, partner: { clientId: user.clientId } },
       include: {
         reward: true,
         partner: { select: { id: true, businessName: true, userId: true } },
@@ -206,9 +217,14 @@ export class RewardsService {
     });
     if (!order) throw new NotFoundException('Order not found');
 
-    // Non-admins can only see their own orders.
-    if (!this.isGifsy(user) && order.partner?.userId !== user.sub) {
-      throw new ForbiddenException('Forbidden');
+    // Non-admins can only see the ACTIVE partner's order. Authorization is the
+    // resolved active partner (own or an authorized sibling) — NOT the raw login's
+    // userId, which would 403 a legitimately-switched sibling (userId=null).
+    if (!this.isGifsy(user)) {
+      const activePartnerId = await this.resolveActive(user, requestedPartnerId);
+      if (!activePartnerId || order.partnerId !== activePartnerId) {
+        throw new ForbiddenException('Forbidden');
+      }
     }
 
     return { order };
@@ -266,13 +282,34 @@ export class RewardsService {
     );
   }
 
-  /** Resolve the caller's tenant-scoped ChannelPartner or throw 404. */
-  private async requirePartner(user: JwtPayload) {
-    const partner = await this.prisma.channelPartner.findFirst({
-      where: { userId: user.sub, user: { clientId: user.clientId } },
+  /**
+   * Wave 3 login-picker — resolve the PARTNER a partner-self request should ACT ON.
+   *
+   * SECURITY INVARIANT: this is the ONLY authority for outlet switching on the
+   * partner-self money path. `resolveActivePartnerId` re-authorizes the optional
+   * `x-active-partner-id` selector against the login's operable set (own partner +
+   * login-less same-group same-phone siblings) — an absent/own selector returns the
+   * login's own partner (byte-identical fast path), a valid sibling returns that
+   * sibling, and anything else is `forbidden`. Callers MUST use the returned
+   * partnerId for EVERY downstream partner resolution (wallet, order create, order
+   * re-loads inside the confirm $transaction) so a mid-flow re-resolution can never
+   * silently switch back to the login's own wallet — the classic money bug.
+   *
+   * Returns the resolved partnerId (string) or null when the login owns no partner
+   * (e.g. a parent-only phone) — the caller treats null as today's no-partner case.
+   */
+  private async resolveActive(
+    user: JwtPayload,
+    requestedPartnerId?: string,
+  ): Promise<string | null> {
+    const res = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
     });
-    if (!partner) throw new NotFoundException('Partner account not found');
-    return partner;
+    if (res.forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+    return res.partnerId;
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -466,6 +503,9 @@ export class RewardsService {
           purpose: 'REDEMPTION_CONFIRM',
           expiresAt: new Date(Date.now() + 10 * 60 * 1000),
           maxAttempts: 3,
+          // Bind the OTP to THIS order so its confirm can't consume another outlet's OTP
+          // (a login/outlet can now hold concurrent PENDING orders — login picker).
+          referenceId: created.id,
         },
       });
       return created;
@@ -611,8 +651,8 @@ export class RewardsService {
       throw new BadRequestException('Outlet has no linked user for redemption.');
     }
 
-    // OTP is bound to the OUTLET's user (it was delivered to the outlet's phone).
-    const otpId = await this.verifyRedemptionOtp(partner.userId, dto.otp);
+    // OTP is bound to the OUTLET's user (it was delivered to the outlet's phone) AND to THIS order.
+    const otpId = await this.verifyRedemptionOtp(partner.userId, dto.otp, order.id);
 
     const requiredPoints = order.totalPointsCost;
 
@@ -803,7 +843,7 @@ export class RewardsService {
    * debiting, creates a PENDING order, and issues a REDEMPTION_CONFIRM OTP. The
    * actual wallet debit happens at confirm time.
    */
-  async redeem(user: JwtPayload, dto: RedeemDto) {
+  async redeem(user: JwtPayload, dto: RedeemDto, requestedPartnerId?: string) {
     const quantity = dto.quantity ?? 1;
 
     // ACTIVE non-deleted catalog item, in-tenant.
@@ -856,9 +896,16 @@ export class RewardsService {
       throw new BadRequestException('Redemption must cost a positive number of points');
     }
 
-    const partner = await this.requirePartner(user);
+    // SECURITY INVARIANT: resolve the ACTIVE partner ONCE (own or an authorized
+    // switched sibling). This same activePartnerId drives the wallet check, the
+    // PENDING supersede AND the order.partnerId — so the whole redemption (and every
+    // downstream confirm re-load, which keys off order.partnerId) targets the outlet
+    // the login actually switched to, never the login's own wallet. A forbidden
+    // selector throws here before any read; null (no partner) → today's 404.
+    const activePartnerId = await this.resolveActive(user, requestedPartnerId);
+    if (!activePartnerId) throw new NotFoundException('Partner account not found');
 
-    const wallet = await this.prisma.wallet.findFirst({ where: { partnerId: partner.id } });
+    const wallet = await this.prisma.wallet.findFirst({ where: { partnerId: activePartnerId } });
     if (!wallet) throw new NotFoundException('Wallet not found');
     if (wallet.redeemablePoints < requiredPoints) {
       throw new BadRequestException(
@@ -876,8 +923,11 @@ export class RewardsService {
     // OTPs guarantees the single active REDEMPTION_CONFIRM OTP can confirm only
     // THIS order — closing the cross-order OTP-confusion the audit flagged.
     const order = await this.prisma.$transaction(async (tx) => {
+      // Supersede the ACTIVE partner's abandoned PENDING orders (never debited). The
+      // OTP delete/create stay bound to user.sub — the OTP is LOGIN-level (one active
+      // REDEMPTION_CONFIRM per login), while the order/wallet are the active outlet's.
       await tx.redemptionOrder.updateMany({
-        where: { partnerId: partner.id, status: 'PENDING' },
+        where: { partnerId: activePartnerId, status: 'PENDING' },
         data: { status: 'CANCELLED', cancelledAt: new Date() },
       });
       await tx.otpCode.deleteMany({
@@ -885,7 +935,7 @@ export class RewardsService {
       });
       const created = await tx.redemptionOrder.create({
         data: {
-          partnerId: partner.id,
+          partnerId: activePartnerId,
           rewardId: item.id,
           orderNumber,
           quantity,
@@ -912,6 +962,10 @@ export class RewardsService {
           purpose: 'REDEMPTION_CONFIRM',
           expiresAt: new Date(Date.now() + 10 * 60 * 1000),
           maxAttempts: 3,
+          // Bind the OTP to THIS order so its confirm can't consume another order's OTP. The OTP
+          // stays LOGIN-level for delivery (userId), but a login can now hold concurrent PENDING
+          // orders across outlets (login picker) — the order scope is the new confusion guard.
+          referenceId: created.id,
         },
       });
       return created;
@@ -954,9 +1008,19 @@ export class RewardsService {
    * WalletService.debitRedeem, flips the order to CONFIRMED, decrements stock for
    * stock-tracked items, and writes a status-history row. Notifies on commit.
    */
-  async confirmRedeem(user: JwtPayload, dto: RedeemConfirmDto) {
+  async confirmRedeem(user: JwtPayload, dto: RedeemConfirmDto, requestedPartnerId?: string) {
+    // SECURITY INVARIANT: resolve the ACTIVE partner FIRST (own or an authorized
+    // switched sibling; forbidden → 403). The order must belong to THIS partner — we
+    // authorize by order.partnerId === activePartnerId, NOT by order.partner.userId
+    // (a switched sibling has userId=null and would be wrongly 403'd). Every in-tx
+    // re-load below keys off order.partnerId (== the resolved active partner), so the
+    // debit/payout can never drift back to the login's own wallet.
+    const activePartnerId = await this.resolveActive(user, requestedPartnerId);
+
     const order = await this.prisma.redemptionOrder.findFirst({
-      where: { id: dto.orderId, partner: { user: { clientId: user.clientId } } },
+      // Tenant scope by partner.clientId so a switched sibling's order is found
+      // (a login-less sibling has no linked user → partner.user.clientId would miss it).
+      where: { id: dto.orderId, partner: { clientId: user.clientId } },
       include: {
         reward: true,
         partner: {
@@ -981,7 +1045,10 @@ export class RewardsService {
       },
     });
     if (!order) throw new NotFoundException('Redemption order not found');
-    if (order.partner?.userId !== user.sub) throw new ForbiddenException('Forbidden');
+    // Authorize the order against the resolved active partner (own or switched sibling).
+    if (!activePartnerId || order.partnerId !== activePartnerId) {
+      throw new ForbiddenException('Forbidden');
+    }
     if (order.status !== 'PENDING') {
       throw new BadRequestException('Order is not awaiting confirmation');
     }
@@ -1021,7 +1088,7 @@ export class RewardsService {
       }
     }
 
-    const otpId = await this.verifyRedemptionOtp(user.sub, dto.otp);
+    const otpId = await this.verifyRedemptionOtp(user.sub, dto.otp, order.id);
 
     const requiredPoints = order.totalPointsCost;
 
@@ -1063,8 +1130,11 @@ export class RewardsService {
       // an ineligible partner: a throw inside $transaction triggers a full rollback
       // (claim reverts). isPartnerPayable = active + not-deleted + KYC-APPROVED.
       {
+        // SECURITY INVARIANT: re-load by order.partnerId (== the resolved active
+        // partner) + clientId — NEVER re-resolve from user.sub here, which would
+        // silently switch a switched-outlet confirm back to the login's own partner.
         const freshPartner = await tx.channelPartner.findFirst({
-          where: { id: order.partnerId },
+          where: { id: order.partnerId, clientId: user.clientId },
           select: {
             isActive: true,
             deletedAt: true,
@@ -1162,9 +1232,11 @@ export class RewardsService {
         order.redemptionMode === 'UPI' ||
         order.redemptionMode === 'BANK_TRANSFER'
       ) {
-        // Fetch full partner for bank snapshot inside the tx.
+        // Fetch full partner for bank snapshot inside the tx. SECURITY INVARIANT:
+        // keyed by order.partnerId (== the resolved active partner) + clientId — the
+        // payout beneficiary is the switched outlet, never re-resolved from user.sub.
         const partnerSnap = await tx.channelPartner.findFirst({
-          where: { id: order.partnerId },
+          where: { id: order.partnerId, clientId: user.clientId },
           select: {
             bankAccountHolder: true,
             ownerName: true,
@@ -1550,16 +1622,21 @@ export class RewardsService {
   }
 
   /**
-   * Validate the user's latest unverified REDEMPTION_CONFIRM OTP and return its id.
+   * Validate the unverified REDEMPTION_CONFIRM OTP issued for a SPECIFIC order and return its id.
    * Self-contained (does NOT reuse auth.verifyOtp, which auto-registers users).
    * Bumps attempts + 401 on a miss. Does NOT set verifiedAt — the caller marks it
    * INSIDE the confirm transaction so a failed debit rolls the OTP back (M1).
    * FIXED_OTP is honoured ONLY outside production — a dev backdoor on a money
    * confirm must never be live in prod (H2).
+   *
+   * AUDIT FIX (MED): scoped to `orderId` (OtpCode.referenceId). A login can now hold concurrent
+   * PENDING orders across outlets (login picker) whose OTPs share the same login user, so a
+   * user-level lookup could let one order's confirm consume another order's OTP. The referenceId
+   * filter binds the confirm to the OTP issued for THIS order.
    */
-  private async verifyRedemptionOtp(userId: string, otp: string): Promise<string> {
+  private async verifyRedemptionOtp(userId: string, otp: string, orderId: string): Promise<string> {
     const record = await this.prisma.otpCode.findFirst({
-      where: { userId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null },
+      where: { userId, purpose: 'REDEMPTION_CONFIRM', verifiedAt: null, referenceId: orderId },
       orderBy: { createdAt: 'desc' },
     });
     if (!record) {

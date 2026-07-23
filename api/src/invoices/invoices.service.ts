@@ -22,6 +22,7 @@ import {
   ListInvoicesQueryDto,
   UpdateInvoiceNumberDto,
 } from './dto/invoices.dto';
+import { resolveActivePartnerId } from '../common/partner-group.helper';
 
 /**
  * Self-bill visibility invoicing service (P6.7).
@@ -339,12 +340,12 @@ export class InvoicesService {
    * The `partnerId` on the JWT comes from the partner sub-system; we resolve it
    * via the ChannelPartner linked to the caller's userId.
    */
-  async list(user: JwtPayload, q: ListInvoicesQueryDto) {
+  async list(user: JwtPayload, q: ListInvoicesQueryDto, requestedPartnerId?: string) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
     const skip = (page - 1) * limit;
 
-    const where = await this.buildScopedWhere(user, q);
+    const where = await this.buildScopedWhere(user, q, requestedPartnerId);
     // null where ⇒ partner role with no resolvable partner ⇒ empty page.
     if (!where) return { invoices: [], pagination: { page, limit, total: 0, pages: 0 } };
 
@@ -370,6 +371,7 @@ export class InvoicesService {
   private async buildScopedWhere(
     user: JwtPayload,
     q: ListInvoicesQueryDto,
+    requestedPartnerId?: string,
   ): Promise<Prisma.AutoInvoiceWhereInput | null> {
     const where: Prisma.AutoInvoiceWhereInput = { clientId: user.clientId };
     if (q.period) where.period = q.period;
@@ -389,7 +391,7 @@ export class InvoicesService {
     }
 
     if (this.isPartnerRole(user.role)) {
-      const partner = await this.resolveCallerPartner(user);
+      const partner = await this.resolveCallerPartner(user, requestedPartnerId);
       if (!partner) return null;
       where.partnerId = partner.id;
     }
@@ -414,8 +416,9 @@ export class InvoicesService {
   async exportXlsx(
     user: JwtPayload,
     q: ListInvoicesQueryDto,
+    requestedPartnerId?: string,
   ): Promise<{ buffer: Buffer; filename: string }> {
-    const where = await this.buildScopedWhere(user, q);
+    const where = await this.buildScopedWhere(user, q, requestedPartnerId);
 
     const invoices = where
       ? await this.prisma.autoInvoice.findMany({
@@ -438,7 +441,7 @@ export class InvoicesService {
   // ── getById ────────────────────────────────────────────────────────────────
 
   /** Get a single invoice by id — tenant-scoped; partner sees only their own. */
-  async getById(user: JwtPayload, id: string) {
+  async getById(user: JwtPayload, id: string, requestedPartnerId?: string) {
     const { clientId } = user;
 
     const invoice = await this.prisma.autoInvoice.findFirst({
@@ -448,7 +451,7 @@ export class InvoicesService {
 
     // Partner-scope guard.
     if (this.isPartnerRole(user.role)) {
-      const partner = await this.resolveCallerPartner(user);
+      const partner = await this.resolveCallerPartner(user, requestedPartnerId);
       if (!partner || invoice.partnerId !== partner.id) {
         throw new ForbiddenException('Access denied');
       }
@@ -467,7 +470,12 @@ export class InvoicesService {
    * - Partner may edit only their own invoice.
    * - Sets invoiceNumberEdited = true.
    */
-  async updateInvoiceNumber(user: JwtPayload, id: string, dto: UpdateInvoiceNumberDto) {
+  async updateInvoiceNumber(
+    user: JwtPayload,
+    id: string,
+    dto: UpdateInvoiceNumberDto,
+    requestedPartnerId?: string,
+  ) {
     const { clientId } = user;
     const newNumber = dto.invoiceNumber.trim().toUpperCase();
 
@@ -478,7 +486,7 @@ export class InvoicesService {
 
     // Partner-scope guard.
     if (this.isPartnerRole(user.role)) {
-      const partner = await this.resolveCallerPartner(user);
+      const partner = await this.resolveCallerPartner(user, requestedPartnerId);
       if (!partner || invoice.partnerId !== partner.id) {
         throw new ForbiddenException('Access denied');
       }
@@ -539,15 +547,25 @@ export class InvoicesService {
   }
 
   /**
-   * Resolve the ChannelPartner for the calling user (partner role).
-   * Returns null if not found (caller has no partner record yet).
+   * Resolve the ChannelPartner a partner request should read (Wave 3 login picker).
+   *
+   * Absent/own selector → the login's OWN partner (today's single-outlet behaviour).
+   * A valid same-group same-phone sibling → that sibling (a switched context).
+   * Any other selector → ForbiddenException (the shared access boundary in
+   * partner-group.helper is the sole authority — never trust the raw selector).
+   * Returns null when the login has no partner at all (caller short-circuits as today).
    */
   private async resolveCallerPartner(
     user: JwtPayload,
+    requestedPartnerId?: string,
   ): Promise<{ id: string } | null> {
-    return this.prisma.channelPartner.findFirst({
-      where: { userId: user.sub, clientId: user.clientId },
-      select: { id: true },
+    const { partnerId, forbidden } = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
     });
+    if (forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+    return partnerId ? { id: partnerId } : null;
   }
 }

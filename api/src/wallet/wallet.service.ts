@@ -1,9 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, PointsLedgerType, WalletTransactionType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { resolveCreditFieldNames } from '../common/credit-field-name.helper';
+import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { AdjustType, AdjustWalletDto, ListTransactionsQueryDto } from './dto/wallet.dto';
 
 /**
@@ -205,8 +206,8 @@ export class WalletService {
 
   // ─── Public read paths ──────────────────────────────────────────────────────
 
-  /** GET /v1/wallet — the caller's own wallet summary (zeros if no partner/wallet). */
-  async getWallet(user: JwtPayload) {
+  /** GET /v1/wallet — the ACTIVE partner's wallet summary (zeros if no partner/wallet). */
+  async getWallet(user: JwtPayload, requestedPartnerId?: string) {
     // Per-tenant points→₹ rate (was a per-deploy env constant).
     const conversionRate = await this.tenantSettings.getConversionRate(user.clientId);
     const emptyWallet = {
@@ -222,13 +223,19 @@ export class WalletService {
       conversionRate,
     };
 
-    const channelPartner = await this.prisma.channelPartner.findFirst({
-      where: { userId: user.sub, user: { clientId: user.clientId } },
+    // Wave 3: resolve the ACTIVE partner (own, or an authorized switched-to sibling). The selector is
+    // re-authorized here — a forged/foreign id can NEVER surface another partner's wallet balance.
+    const { partnerId, forbidden } = await resolveActivePartnerId(this.prisma, {
+      clientId: user.clientId,
+      userSub: user.sub,
+      phone: user.phone,
+      requestedPartnerId,
     });
-    if (!channelPartner) return emptyWallet;
+    if (forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+    if (!partnerId) return emptyWallet; // no operable partner → graceful zeros (unchanged)
 
     const wallet = await this.prisma.wallet.findFirst({
-      where: { partnerId: channelPartner.id },
+      where: { partnerId },
     });
     if (!wallet) return emptyWallet;
 
@@ -247,7 +254,7 @@ export class WalletService {
   }
 
   /** GET /v1/wallet/transactions — paginated passbook for the caller (or another user, GIFSY-only). */
-  async listTransactions(user: JwtPayload, q: ListTransactionsQueryDto) {
+  async listTransactions(user: JwtPayload, q: ListTransactionsQueryDto, requestedPartnerId?: string) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
     const skip = (page - 1) * limit;
@@ -257,17 +264,34 @@ export class WalletService {
       pagination: { page, limit, total: 0, pages: 0 },
     };
 
-    // GIFSY admins may target another user's passbook via ?userId=; everyone else sees their own.
-    const targetUserId =
-      q.userId && user.role === 'GIFSY_ADMIN' ? q.userId : user.sub;
+    // Two DISTINCT resolution paths:
+    //  - GIFSY admin targeting ANOTHER user via ?userId= → admin support tooling, NOT outlet-switching.
+    //    Resolve the partner straight from the target user; the Wave 3 selector does not apply here.
+    //  - Everyone else → the ACTIVE partner from the login-picker selector (own, or an authorized
+    //    same-group same-phone sibling), re-authorized so a forged header can't reach another passbook.
+    const isAdminTargeting = !!q.userId && user.role === 'GIFSY_ADMIN';
 
-    const channelPartner = await this.prisma.channelPartner.findFirst({
-      where: { userId: targetUserId, user: { clientId: user.clientId } },
-    });
-    if (!channelPartner) return emptyResult;
+    let partnerId: string | null;
+    if (isAdminTargeting) {
+      const target = await this.prisma.channelPartner.findFirst({
+        where: { userId: q.userId, user: { clientId: user.clientId } },
+        select: { id: true },
+      });
+      partnerId = target?.id ?? null;
+    } else {
+      const active = await resolveActivePartnerId(this.prisma, {
+        clientId: user.clientId,
+        userSub: user.sub,
+        phone: user.phone,
+        requestedPartnerId,
+      });
+      if (active.forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+      partnerId = active.partnerId;
+    }
+    if (!partnerId) return emptyResult;
 
     const wallet = await this.prisma.wallet.findFirst({
-      where: { partnerId: channelPartner.id },
+      where: { partnerId },
     });
     if (!wallet) return emptyResult;
 
@@ -292,7 +316,7 @@ export class WalletService {
     // this wallet's CREDIT_BATCH txns (a separate lightweight query), then apply the
     // Map to the page → pagination-robust, page boundaries can never mis-map.
     const outlet = await this.prisma.outlet.findFirst({
-      where: { clientId: user.clientId, partnerId: channelPartner.id, deletedAt: null },
+      where: { clientId: user.clientId, partnerId, deletedAt: null },
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
       select: { outletCode: true },
     });
