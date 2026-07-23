@@ -11,9 +11,11 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-- **prod == main == develop == `2187498`** (CUTOVER #12 `d028566` + CUTOVER #13 `2187498`, both LIVE 2026-07-22).
-  develop and main are at the SAME SHA — nothing pending. Verify HEADs via `git log`. (Prior: cutover #11 `e8de31a`,
-  §A-DOMAIN COMPLETE + infra-cost-reduction, both still live.)
+- **prod == main == `2187498`** (CUTOVER #12 `d028566` + #13 `2187498`, both LIVE 2026-07-22). **develop `18275ac`**
+  (verify via `git log`) = prod + the **🏗️ PARTNER→MULTI-OUTLET Wave 1 (foundation)** + docs. Wave 1 is additive+opt-in
+  (nothing grouped until an admin sets a parentId → zero impact on live Deoleo); migration applied+verified on staging.
+  **NEXT = Wave 2 (Streams A‖B).** Full spec + as-built contract = `platform/docs/plans/PARTNER-MULTI-OUTLET.md`; memory
+  **[[partner-multi-outlet]]**. Gate at `18275ac`: api jest 1572 · nest 0 · FE vitest 1931 · tsc 0.
 - **✅ CUTOVER #12 (`d028566`, live 2026-07-22) shipped BOTH develop features + the infra-workflow changes to prod:**
   (1) **PER-OUTLET PAYOUT MANDATE** — `Outlet.requiredPaymentType BANK|UPI|ANY` (migration `..._add_outlet_required_payment_type`),
   **fully LIVE, needs no flag** (defaults BANK); (2) **KYC ADDRESS-PROOF WAIVER** (migration `..._add_kyc_address_name_mismatch`);
@@ -383,12 +385,24 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 Greet. State current status, then present the open pickups and ask which to take (do NOT hard-lead one — the next move is
 the owner's choice among the leftovers below).
 
-**STATE:** prod == main == develop == `2187498` (CUTOVERS #12 `d028566` + #13 `2187498`, both LIVE 2026-07-22; verify via `git log`).
-develop and main are at the SAME SHA — nothing pending. **Both develop features are now LIVE in prod:** the PER-OUTLET PAYOUT MANDATE
-(no flag, defaults BANK) and the KYC ADDRESS-PROOF WAIVER (semantics-corrected — drops only the self-declaration, Address Proof stays
-required — + prod deoleo `clients.features.kycAddressProofWaiver=true` SET). Gate at #13: api jest 1557 · nest 0 · FE vitest 1930 · tsc 0.
-Only remaining verify = the owner's real-OTP prod check of the KYC form (waiver behaviour + payout-mandate toggle) — both FE-gated,
-unit-tested + staging-verified + audit-clean.
+**🏗️ ACTIVE WORK — PARTNER → MULTIPLE OUTLETS (parent-child owner groups). Full spec + as-built contract =
+`platform/docs/plans/PARTNER-MULTI-OUTLET.md`; memory [[partner-multi-outlet]] (READ BOTH FIRST).** Owner-driven, multi-wave
+orchestrated build. Design LOCKED (Option B grouping layer; PAN golden-key; admin-only `Outlet.parentId` link;
+tenant-configurable uniqueness — new PAN/bank/UPI enforcement; pre-fill + "verified on parent" badge; login picker;
+read-only consolidated wallet roll-up). **✅ WAVE 1 (FOUNDATION) DONE — develop `18275ac`, gate GREEN (api jest 1572 · nest 0 ·
+FE vitest 1931 · tsc 0), migration `20260722100000_partner_multi_outlet_foundation` APPLIED+verified on staging.** The shared
+contract: schema (ChannelPartner.isParent + nullable userId/phone; Outlet.parentId) + `api/src/common/partner-group.helper.ts`
+(`checkGroupUniqueness` + 15 tests) + tenant `uniquenessPolicy` setting + a seeded parent+2-child group. Additive+opt-in → ZERO
+impact on live Deoleo. **▶ RESUME AT WAVE 2 — Streams A ‖ B in parallel** (A = wire the uniqueness helper into kyc.service write
+paths + group-aware assertPhoneAvailable + add-to-parent/un-group validation; B = parent entity + admin parentId upload + parent
+KYC straight-to-Gifsy + 3 leak `isParent:false` filters). File-partition: A owns kyc.service write paths, B owns admin-outlets +
+parent CRUD. Then Wave 3 (C‖D), Wave 4 (integrate+audit+E2E+staging-verify), owner-gated cutover. **See PARTNER-MULTI-OUTLET.md §9
+for the exact frozen contract + the 2 critical stream notes (phone stays in assertPhoneAvailable + the User-uniqueness/shared-phone
+nuance; the parent-leak sites).**
+
+**STATE (prior work, all LIVE):** prod == main == `2187498` (CUTOVERS #12 `d028566` + #13 `2187498`, LIVE 2026-07-22). Both develop
+features LIVE in prod: PER-OUTLET PAYOUT MANDATE (no flag) + KYC ADDRESS-PROOF WAIVER (semantics-corrected + prod flag SET). Only
+remaining verify = the owner's real-OTP prod check of the KYC form. Verify HEADs via `git log`.
 
 **✅ INFRA COST-REDUCTION — FULLY COMPLETE this session (2026-07-22). Canonical doc = `platform/docs/plans/INFRA-ARCHITECTURE.md`
 (current topology + the change log + the "Leftover / open infra items" pick-up list); detail in memory [[infra-cost-reduction]].**

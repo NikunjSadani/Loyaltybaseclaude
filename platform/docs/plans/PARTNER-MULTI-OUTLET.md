@@ -219,3 +219,31 @@ gates, does the independent adversarial audit, and staging-runtime-verifies each
 - **Nullable `userId` on `ChannelPartner`** — verify no code assumes it's non-null (grep all consumers).
 - **PAN pre-fill from a sibling** when the parent is bare — the group's PAN source is the first member
   that has one; enforce identity thereafter.
+
+---
+
+## 9. BUILD STATUS
+
+### ✅ Wave 1 — FOUNDATION DONE (2026-07-22, develop `18275ac`, gate green, migration applied on staging)
+Additive + opt-in; zero impact on live Deoleo. Gate: api jest 1572 · nest 0 · FE vitest 1931 · tsc 0.
+
+**As-built — the FROZEN CONTRACT Streams A/B/C/D build against:**
+- **Schema** (`api/prisma/schema.prisma`): `ChannelPartner.isParent Boolean @default(false)`; `ChannelPartner.userId`/`phone` now **nullable** (a bare parent may be login-less); `Outlet.parentId String?` → parent `ChannelPartner` via named relations `OutletOwner` (existing partner) / `OutletParent` (new) + `@@index([parentId])`. Migration `20260722100000_partner_multi_outlet_foundation` (additive DDL, applied on staging).
+- **Group link = `Outlet.parentId`** (single source of truth, set by admin upload). A group = all outlets sharing a `parentId`.
+- **Uniqueness helper** `api/src/common/partner-group.helper.ts` (+ `.spec.ts`, 15 tests). Nest-free — returns a `UniquenessViolation | null`; the caller throws `BadRequestException(violation.message)`. Exports:
+  - `checkGroupUniqueness(db, { clientId, ourParentId, details: {gstNumber,panNumber,bankAccountNumber,upiId}, policy, exceptPartnerId }) → UniquenessViolation | null` — **the main entry** (PAN identical-in-group + absent-outside; GST/bank/UPI unique-except-in-group per policy).
+  - `resolveOutletParentId(db, clientId, outletId) → string | null`
+  - `checkPanMatchesGroup`, `resolveGroupPan`, pure `isFieldEnforced`, `clashIsOutsideGroup` (unit-tested).
+  - `db` = a PrismaService or `$transaction` client (typed `Pick<Prisma.TransactionClient,'channelPartner'|'outlet'>`).
+- **Tenant policy**: `settings.uniquenessPolicy: { gst, phone, bank, upi }` via `TenantSettingsService.getEffectiveSettings(clientId)` (mirrors `redemptionChannels`; NESTED_KEYS → replace-whole). Typed default = `{gst:true,phone:true,bank:false,upi:false}` (today's behaviour). **Deoleo seeded all-on.**
+- **Seed** (`api/prisma/seed.ts`, gifsy_dev only): parent `seed-parent-1`/`CPP01` (isParent, PAN `ZXCVB1234Z`, login-less, no outlet/wallet) + children `seed-cp-5`/`seed-o-5`/`CP005`/`O005` (phone `9000000021`, GST `27ZXCVB1234Z1Z1`, bank `111122223333`) and `seed-cp-6`/`seed-o-6`/`CP006`/`O006` (phone `9000000022`, GST `29ZXCVB1234Z1Z9`, bank `444455556666`) — grouped under the parent, **shared PAN, distinct GST/phone/bank** + deoleo `uniquenessPolicy` all-on. *(Not yet DB-run locally — the dev-DB proxy was down; validates on the next E2E reset / local DB up.)*
+
+**TWO CONTRACT NOTES for the streams (critical):**
+1. **PHONE is NOT in the helper.** It stays in `kyc.service.assertPhoneAvailable` (needs last-10-digit normalisation) — **Stream A** makes THAT group-aware. Also `User @@unique([clientId,phone])` means a group's shared phone maps to **ONE** login User; siblings sharing it are **login-less** (`ChannelPartner.userId=null`) and reached via that login's picker → **Stream A must NOT create a duplicate User** for a shared phone; **Stream D** resolves "operable outlets" by phone-match, not by User→ChannelPartner.
+2. **Parent-leak sites** (exclude parents with `isParent:false`) — 3 REAL: `admin-programs/channel-partners.service.ts:46` (findMany) + `:57` (count); `admin-core/admin-core.service.ts:888` (count). Defensive (add too): `tds.service.ts:191/380/751/854`, `payouts.service.ts:829`. Wallet-at-approval `kyc.service.ts:2946` — guard `!isParent` if group-create ever reuses the KYC approval path. (Full map was produced by a sub-agent this session.)
+
+### ▶ Wave 2 — NEXT (Streams A ‖ B in parallel, on the frozen contract)
+- **Stream A** — wire `checkGroupUniqueness` into the write paths (`kyc.service.create` both branches + re-KYC; make `assertPhoneAvailable` group-aware; the add-to-parent + un-group validation) + PAN/bank/UPI enforcement + read `uniquenessPolicy`.
+- **Stream B** — parent entity + admin outlet-master `parentId` column (parse/validate/link + add-to-parent + un-group guard) + parent create (ID-min) + parent details/docs → straight-to-Gifsy approval + the 3 parent-leak `isParent:false` filters.
+- **File-partition to avoid contention**: A owns `kyc.service.ts` write paths; B owns `admin-outlets.service.ts` + the parent CRUD + the leak-filter edits. Route any shared-file overlap through the orchestrator at integration.
+- Then **Wave 3** (C ‖ D: pre-fill/badge + login picker/parent-portal/wallet-rollup), **Wave 4** (integrate + adversarial audit + E2E + staging-verify), then owner-gated cutover.
