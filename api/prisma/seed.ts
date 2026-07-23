@@ -435,6 +435,75 @@ async function seedDeoleoDemo() {
     console.log(`   ✓ Partner ${p.partnerCode} (${p.role}) + wallet + outlet ${p.outletCode}`);
   }
 
+  // 3.3e Parent-child owner GROUP (docs/plans/PARTNER-MULTI-OUTLET.md). A non-operating PARENT
+  // owner (login-less, holds the group golden-key PAN, no outlet, no wallet) + two child outlets
+  // grouped under it via Outlet.parentId. The children SHARE the group PAN but carry DISTINCT
+  // GST (different state codes on the same PAN — the real-world case) + phone + bank. Exercises
+  // Streams A/B/C/D + E2E.
+  const GROUP_PAN = 'ZXCVB1234Z';
+  const parentOwner = await prisma.channelPartner.upsert({
+    where: { id: 'seed-parent-1' },
+    update: { businessName: 'Deoleo Demo Owner Group', panNumber: GROUP_PAN, isParent: true },
+    create: {
+      id: 'seed-parent-1',
+      clientId: DEOLEO_CLIENT_ID,
+      partnerCode: 'CPP01',
+      businessName: 'Deoleo Demo Owner Group',
+      ownerName: 'Group Owner',
+      panNumber: GROUP_PAN,
+      isParent: true,
+      isActive: true,
+    },
+  });
+  const childSpecs = [
+    { userId: 'seed-cp-user-5', partnerId: 'seed-cp-5', walletId: 'seed-w-5', outletId: 'seed-o-5',
+      phone: '9000000021', partnerCode: 'CP005', outletCode: 'O005', businessName: 'Deoleo Group Shop A',
+      gstNumber: '27ZXCVB1234Z1Z1', bank: '111122223333', city: 'Pune', state: 'Maharashtra' },
+    { userId: 'seed-cp-user-6', partnerId: 'seed-cp-6', walletId: 'seed-w-6', outletId: 'seed-o-6',
+      phone: '9000000022', partnerCode: 'CP006', outletCode: 'O006', businessName: 'Deoleo Group Shop B',
+      gstNumber: '29ZXCVB1234Z1Z9', bank: '444455556666', city: 'Bengaluru', state: 'Karnataka' },
+  ];
+  for (const c of childSpecs) {
+    const cUser = await prisma.user.upsert({
+      where: { id: c.userId },
+      update: { name: 'Group Owner' },
+      create: { id: c.userId, clientId: DEOLEO_CLIENT_ID, phone: c.phone, name: 'Group Owner', role: UserRole.WHOLESALER, status: UserStatus.ACTIVE, passwordHash: demoPasswordHash },
+    });
+    const cPartner = await prisma.channelPartner.upsert({
+      where: { id: c.partnerId },
+      update: { businessName: c.businessName, phone: c.phone, gstNumber: c.gstNumber, panNumber: GROUP_PAN, bankAccountNumber: c.bank },
+      create: {
+        id: c.partnerId, clientId: DEOLEO_CLIENT_ID, userId: cUser.id, partnerCode: c.partnerCode,
+        businessName: c.businessName, ownerName: 'Group Owner', phone: c.phone, gstNumber: c.gstNumber,
+        panNumber: GROUP_PAN, bankAccountNumber: c.bank, entityType: EntityType.FIRM,
+        gstRegistrationType: GstRegistrationType.REGULAR, isActive: true, onboardedAt: new Date(),
+      },
+    });
+    await prisma.wallet.upsert({
+      where: { id: c.walletId }, update: {},
+      create: { id: c.walletId, partnerId: cPartner.id, earnedPoints: 12000, redeemablePoints: 12000, lifetimeEarned: 12000, lastTransactionAt: new Date() },
+    });
+    await prisma.outlet.upsert({
+      where: { id: c.outletId },
+      update: { name: c.businessName, parentId: parentOwner.id },
+      create: {
+        id: c.outletId, clientId: DEOLEO_CLIENT_ID, partnerId: cPartner.id, parentId: parentOwner.id,
+        outletTypeId: wholesalerType.id, outletCode: c.outletCode, name: c.businessName, ownerName: 'Group Owner',
+        phone: c.phone, city: c.city, state: c.state, isActive: true, isPrimary: true,
+      },
+    });
+  }
+  console.log('   ✓ Parent owner group CPP01 + child outlets O005/O006 (shared PAN ' + GROUP_PAN + ')');
+
+  // Deoleo uniqueness policy — enforce ALL identity fields (owner decision; the typed default
+  // leaves bank/UPI off). gifsy_dev TEST DATA only (the seed never runs on staging/prod).
+  await prisma.programSetting.upsert({
+    where: { clientId_settingKey: { clientId: DEOLEO_CLIENT_ID, settingKey: 'uniquenessPolicy' } },
+    update: { settingValue: { gst: true, phone: true, bank: true, upi: true } },
+    create: { clientId: DEOLEO_CLIENT_ID, settingKey: 'uniquenessPolicy', settingValue: { gst: true, phone: true, bank: true, upi: true } },
+  });
+  console.log('   ✓ ProgramSetting [uniquenessPolicy=all-on] for deoleo');
+
   // 3.4 Sales hierarchy levels + SalesUsers with manager→SO downline.
 
   // Level 1 — SO (front-line sales officer).

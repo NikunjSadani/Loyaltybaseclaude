@@ -336,6 +336,11 @@ export class SchemesService {
         );
       }
 
+      // A parent owner (userId nullable) is never an enrollment target; a real partner
+      // always has a linked user. Guard defensively.
+      if (!targetPartner.userId) {
+        throw new ForbiddenException('This partner has no linked user to enroll.');
+      }
       enrolledUserId = targetPartner.userId;
     }
 

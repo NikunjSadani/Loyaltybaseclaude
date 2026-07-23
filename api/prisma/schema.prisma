@@ -672,36 +672,46 @@ model SalesUserAssignment {
 // ============================================================
 
 model ChannelPartner {
-  id                String    @id @default(cuid())
-  clientId          String // denormalised for efficient tenant filtering
-  userId            String    @unique
-  partnerCode       String
-  businessName      String
-  ownerName         String
-  phone             String
-  email             String?
-  gstNumber         String?
-  panNumber         String?
+  id                  String               @id @default(cuid())
+  clientId            String // denormalised for efficient tenant filtering
+  // Nullable: a PARENT owner (isParent=true) may exist with no login. @unique still holds —
+  // Postgres treats multiple NULLs as distinct, so many login-less parents are fine.
+  userId              String?              @unique
+  partnerCode         String
+  businessName        String
+  ownerName           String
+  // Nullable for the same reason — a bare parent may have no phone/login.
+  phone               String?
+  email               String?
+  gstNumber           String?
+  panNumber           String?
   // ── Entity / GST registration type (set at KYC approval; feeds P6 invoicing/TDS) ──
   entityType          EntityType?
   gstRegistrationType GstRegistrationType?
   // ── Bank / payout details (set on KYC approval) ──────────────────────────────
-  bankName          String?
-  bankAccountNumber String?
-  bankAccountHolder String?
-  ifscCode          String?
-  upiId             String?
-  paymentMode       String? // 'bank' | 'upi'
-  totalEarnedPoints Int       @default(0)
-  referredBy        String?
-  isActive          Boolean   @default(true)
-  onboardedAt       DateTime?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
-  deletedAt         DateTime?
+  bankName            String?
+  bankAccountNumber   String?
+  bankAccountHolder   String?
+  ifscCode            String?
+  upiId               String?
+  paymentMode         String? // 'bank' | 'upi'
+  totalEarnedPoints   Int                  @default(0)
+  referredBy          String?
+  isActive            Boolean              @default(true)
+  // Parent-child owner groups (see docs/plans/PARTNER-MULTI-OUTLET.md). A PARENT is a
+  // non-operating owner: no outlet of its own, no spendable wallet; groups child outlets
+  // (via Outlet.parentId) + provides the consolidated read-only view. Excluded from all
+  // partner-facing lists/KPIs by an `isParent:false` filter.
+  isParent            Boolean              @default(false)
+  onboardedAt         DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  deletedAt           DateTime?
 
-  user                  User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  outlets               Outlet[]
+  user                  User?                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  outlets               Outlet[]               @relation("OutletOwner")
+  // Outlets that name THIS partner as their parent (child outlets of a parent group).
+  childOutlets          Outlet[]               @relation("OutletParent")
   kycSubmissions        KycSubmission[]
   wallets               Wallet[]
   salesAssignments      SalesUserAssignment[]
@@ -748,7 +758,7 @@ model KycSubmission {
   // document upload (the box was ticked instead of attaching a proof) — this column is
   // the durable audit trail that a reviewer sees ("address proof waived — names differ").
   // Distinct from the review-dump's bank-holder-vs-owner `nameMismatch` (a computed value).
-  addressNameMismatch Boolean   @default(false)
+  addressNameMismatch Boolean @default(false)
 
   // ── Geo capture #1 — taken when the outlet board photo is shot ──────────────
   boardPhotoLat         Decimal?  @db.Decimal(10, 8)
@@ -765,12 +775,12 @@ model KycSubmission {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  partner        ChannelPartner?    @relation(fields: [partnerId], references: [id], onDelete: SetNull)
-  documents          KycDocument[]
-  statusHistory      KycStatusHistory[]
-  consentRecords     ConsentRecord[]
-  verificationItems  KycVerificationItem[]
+  user              User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  partner           ChannelPartner?       @relation(fields: [partnerId], references: [id], onDelete: SetNull)
+  documents         KycDocument[]
+  statusHistory     KycStatusHistory[]
+  consentRecords    ConsentRecord[]
+  verificationItems KycVerificationItem[]
 
   @@index([userId])
   @@index([partnerId])
@@ -936,51 +946,58 @@ model OutletTypeClientConfig {
 }
 
 model Outlet {
-  id              String           @id @default(cuid())
-  clientId        String // tenant slug — outlet carries its own tenant tag (may exist before its owner/partner)
-  partnerId       String? // owner attached at KYC; outlet can be created (via upload) before its owner exists
-  outletTypeId    String
+  id                  String            @id @default(cuid())
+  clientId            String // tenant slug — outlet carries its own tenant tag (may exist before its owner/partner)
+  partnerId           String? // owner attached at KYC; outlet can be created (via upload) before its owner exists
+  // Parent-child owner group link — the SINGLE authoritative grouping field, set by the admin
+  // outlet-master upload (the "Parent ID" column). Points at a PARENT ChannelPartner (isParent=true).
+  // Group membership of an outlet = its parentId; a group = all outlets sharing a parentId.
+  // See docs/plans/PARTNER-MULTI-OUTLET.md.
+  parentId            String?
+  outletTypeId        String
   // ── Reference-only master-file columns (from the outlet upload) — used for report grouping/summary ──
-  distributorCode String?
-  distributorName String?
-  beat            String?
-  metro           String?
-  zone            String?
-  programName     String?
-  programCategory String?
+  distributorCode     String?
+  distributorName     String?
+  beat                String?
+  metro               String?
+  zone                String?
+  programName         String?
+  programCategory     String?
   // Per-outlet payout-detail MANDATE (set/updated only at the outlet master-upload). Drives the
   // KYC form's paymentMode + required fields. Default BANK. UPI only if tenant upiEnabled is ON.
   requiredPaymentType OutletPaymentType @default(BANK)
-  outletCode      String
-  name            String
-  ownerName       String?
-  phone           String?
-  addressLine1    String? // captured at KYC, not in the outlet master file
-  addressLine2    String?
-  city            String
-  district        String?
-  state           String
-  pincode         String? // captured at KYC, not in the outlet master file
-  country         String           @default("IN")
-  latitude        Decimal?         @db.Decimal(10, 8)
-  longitude       Decimal?         @db.Decimal(11, 8)
-  isActive        Boolean          @default(true)
-  isPrimary       Boolean          @default(false)
+  outletCode          String
+  name                String
+  ownerName           String?
+  phone               String?
+  addressLine1        String? // captured at KYC, not in the outlet master file
+  addressLine2        String?
+  city                String
+  district            String?
+  state               String
+  pincode             String? // captured at KYC, not in the outlet master file
+  country             String            @default("IN")
+  latitude            Decimal?          @db.Decimal(10, 8)
+  longitude           Decimal?          @db.Decimal(11, 8)
+  isActive            Boolean           @default(true)
+  isPrimary           Boolean           @default(false)
   // Outlet-level KYC intent — set when a sales agent marks the outlet as not interested.
   // When NOT_INTERESTED: outlet is also deactivated (isActive = false).
-  kycIntent       OutletKycIntent?
-  kycIntentBy     String? // userId of the sales agent who marked it
-  kycIntentAt     DateTime? // when it was marked
+  kycIntent           OutletKycIntent?
+  kycIntentBy         String? // userId of the sales agent who marked it
+  kycIntentAt         DateTime? // when it was marked
   // Re-KYC flags: which KYC fields must be re-captured (ReKYCFlags shape — 20 booleans + remarks),
   // set via the Re-KYC flag upload. Read/written atomically per outlet; null = no re-KYC pending.
-  reKycFlags      Json?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  deletedAt       DateTime?
-  deactivatedAt   DateTime?
-  reactivatedAt   DateTime?
+  reKycFlags          Json?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  deletedAt           DateTime?
+  deactivatedAt       DateTime?
+  reactivatedAt       DateTime?
 
-  partner               ChannelPartner?        @relation(fields: [partnerId], references: [id], onDelete: SetNull)
+  partner               ChannelPartner?        @relation("OutletOwner", fields: [partnerId], references: [id], onDelete: SetNull)
+  // The parent owner of this outlet's group (isParent ChannelPartner), set by the admin upload.
+  parent                ChannelPartner?        @relation("OutletParent", fields: [parentId], references: [id], onDelete: SetNull)
   outletType            OutletType             @relation(fields: [outletTypeId], references: [id])
   geoHistory            OutletGeoHistory[]
   salesAssignments      SalesUserAssignment[]
@@ -989,6 +1006,7 @@ model Outlet {
   @@unique([clientId, outletCode])
   @@index([clientId])
   @@index([partnerId])
+  @@index([parentId])
   @@index([outletTypeId])
   @@index([distributorCode])
   @@index([pincode])
@@ -1530,21 +1548,21 @@ model FundReceipt {
 }
 
 model TdsRecord {
-  id                  String    @id @default(cuid())
-  payoutTransactionId String    @unique
+  id                  String      @id @default(cuid())
+  payoutTransactionId String      @unique
   partnerId           String
   panNumber           String?
   tdsPaise            BigInt
   section             TdsSection?
-  tdsRate             Decimal   @db.Decimal(5, 2)
+  tdsRate             Decimal     @db.Decimal(5, 2)
   assessmentYear      String?
   quarterPeriod       String?
   formType            String?
   certificateNumber   String?
   certificateIssuedAt DateTime?
   certificateUrl      String?
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
 
   payoutTransaction PayoutTransaction @relation(fields: [payoutTransactionId], references: [id], onDelete: Cascade)
 
@@ -1896,7 +1914,7 @@ model PwaInstall {
   id          String   @id @default(cuid())
   userId      String
   clientId    String
-  platform    String   // ANDROID | IOS | DESKTOP | OTHER
+  platform    String // ANDROID | IOS | DESKTOP | OTHER
   userAgent   String?
   installedAt DateTime @default(now())
   lastSeenAt  DateTime @default(now())
@@ -1921,7 +1939,7 @@ model PwaInstall {
 model UserActivityDay {
   id           String   @id @default(cuid())
   userId       String
-  clientId     String   // active-context clientId from the JWT (tenant index; report scopes by User.clientId)
+  clientId     String // active-context clientId from the JWT (tenant index; report scopes by User.clientId)
   activityDate DateTime @db.Date // IST calendar day (no time component)
   firstSeenAt  DateTime @default(now())
   lastSeenAt   DateTime @default(now())
@@ -2348,21 +2366,21 @@ model CreditField {
 }
 
 model CreditBatch {
-  id             String            @id @default(cuid())
-  clientId       String
-  batchCode      String            @unique
-  period         String
-  status         CreditBatchStatus @default(PENDING_CONFIRM)
-  uploadedBy     String
-  uploadedAt     DateTime          @default(now())
-  confirmedAt    DateTime?
-  confirmedBy    String?
-  totalOutlets   Int               @default(0)
-  totalPoints      Int             @default(0)
-  totalPayoutPaise BigInt          @default(0)
-  rows           Json              @default("[]")
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
+  id               String            @id @default(cuid())
+  clientId         String
+  batchCode        String            @unique
+  period           String
+  status           CreditBatchStatus @default(PENDING_CONFIRM)
+  uploadedBy       String
+  uploadedAt       DateTime          @default(now())
+  confirmedAt      DateTime?
+  confirmedBy      String?
+  totalOutlets     Int               @default(0)
+  totalPoints      Int               @default(0)
+  totalPayoutPaise BigInt            @default(0)
+  rows             Json              @default("[]")
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
 
   payoutEntries CreditPayoutEntry[]
   reversals     CreditReversal[]
@@ -2374,22 +2392,22 @@ model CreditBatch {
 }
 
 model CreditPayoutEntry {
-  id         String            @id @default(cuid())
-  clientId   String
-  batchId    String
-  downloadId String?
-  outletId   String
-  outletName String
-  fieldId    String
-  fieldName  String
-  period     String
+  id          String            @id @default(cuid())
+  clientId    String
+  batchId     String
+  downloadId  String?
+  outletId    String
+  outletName  String
+  fieldId     String
+  fieldName   String
+  period      String
   amountPaise BigInt
-  narration  String            @default("")
-  status     CreditEntryStatus @default(PENDING)
-  utr        String?
-  paidAt     DateTime?
-  createdAt  DateTime          @default(now())
-  updatedAt  DateTime          @updatedAt
+  narration   String            @default("")
+  status      CreditEntryStatus @default(PENDING)
+  utr         String?
+  paidAt      DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
 
   batch    CreditBatch           @relation(fields: [batchId], references: [id])
   download CreditPayoutDownload? @relation(fields: [downloadId], references: [id])
@@ -2403,20 +2421,20 @@ model CreditPayoutEntry {
 }
 
 model CreditPayoutDownload {
-  id             String   @id @default(cuid())
-  clientId       String
-  downloadCode   String   @unique
-  period         String
-  groupType      String
-  fieldId        String?
-  fieldName      String?
-  status         String   @default("OPEN")
-  downloadedBy   String
-  downloadedAt   DateTime @default(now())
+  id               String   @id @default(cuid())
+  clientId         String
+  downloadCode     String   @unique
+  period           String
+  groupType        String
+  fieldId          String?
+  fieldName        String?
+  status           String   @default("OPEN")
+  downloadedBy     String
+  downloadedAt     DateTime @default(now())
   totalAmountPaise BigInt
-  bankSnapshots  Json     @default("[]")
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  bankSnapshots    Json     @default("[]")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   entries CreditPayoutEntry[]
 
@@ -2427,30 +2445,30 @@ model CreditPayoutDownload {
 }
 
 model CreditReversal {
-  id              String               @id @default(cuid())
-  clientId        String
-  batchId         String
-  outletId        String
-  outletName      String
-  fieldId         String
-  fieldName       String
-  period          String
-  awardType       CreditAwardType
-  originalPaise   BigInt
-  requestedPaise  BigInt
-  approvedPaise   BigInt?
+  id             String               @id @default(cuid())
+  clientId       String
+  batchId        String
+  outletId       String
+  outletName     String
+  fieldId        String
+  fieldName      String
+  period         String
+  awardType      CreditAwardType
+  originalPaise  BigInt
+  requestedPaise BigInt
+  approvedPaise  BigInt?
   // Reporting only: PENDING points an approved POINTS reversal could NOT claw back
   // (partner already redeemed them). reversed = approvedPaise - shortfallPaise.
   // The client settles `pending` off-platform; the platform does nothing with it.
-  shortfallPaise  BigInt               @default(0)
-  requestedBy     String
-  requestedAt     DateTime             @default(now())
-  approvedBy      String?
-  approvedAt      DateTime?
-  status          CreditReversalStatus @default(PENDING_GIFSY)
-  remarks         String?
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
+  shortfallPaise BigInt               @default(0)
+  requestedBy    String
+  requestedAt    DateTime             @default(now())
+  approvedBy     String?
+  approvedAt     DateTime?
+  status         CreditReversalStatus @default(PENDING_GIFSY)
+  remarks        String?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
 
   batch CreditBatch @relation(fields: [batchId], references: [id])
 

@@ -605,6 +605,12 @@ export class RewardsService {
       }
     }
 
+    // A parent owner (userId nullable) never redeems; a real operating outlet always
+    // has a linked user. Guard defensively so a null can't reach OTP/notify below.
+    if (!partner.userId) {
+      throw new BadRequestException('Outlet has no linked user for redemption.');
+    }
+
     // OTP is bound to the OUTLET's user (it was delivered to the outlet's phone).
     const otpId = await this.verifyRedemptionOtp(partner.userId, dto.otp);
 

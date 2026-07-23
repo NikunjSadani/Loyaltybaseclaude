@@ -26,6 +26,19 @@ export interface RedemptionChannels {
   bankTransfer:  boolean;
 }
 
+/**
+ * Parent-child owner-group UNIQUENESS policy (docs/plans/PARTNER-MULTI-OUTLET.md). Which
+ * exact-match identity fields are enforced unique-except-within-group. PAN is NOT here — it
+ * is always the group golden-key (identical-within-group). Default preserves today's
+ * behaviour: GST + phone enforced; bank/UPI were never checked, so default false.
+ */
+export interface UniquenessPolicySettings {
+  gst:   boolean;
+  phone: boolean;
+  bank:  boolean;
+  upi:   boolean;
+}
+
 export interface SalesAppSettings {
   ledgerLabel:              string;
   redeemGiftWholesalerOnly: boolean;
@@ -101,6 +114,11 @@ export interface EffectiveSettings {
    * as outletPrograms. Never empty (default-guarded).
    */
   outletCategories:       string[];
+  /**
+   * Parent-child owner-group uniqueness policy — which identity fields are enforced
+   * unique-except-within-group. PAN is always enforced separately (group golden-key).
+   */
+  uniquenessPolicy:       UniquenessPolicySettings;
 }
 
 /**
@@ -127,13 +145,15 @@ type SettingKey =
   | 'creditsPayouts'
   | 'otpTemplates'
   | 'outletPrograms'
-  | 'outletCategories';
+  | 'outletCategories'
+  | 'uniquenessPolicy';
 
 const NESTED_KEYS: ReadonlySet<SettingKey> = new Set([
   'redemptionChannels',
   'salesApp',
   'creditsPayouts',
   'otpTemplates',
+  'uniquenessPolicy',
 ]);
 
 @Injectable()
@@ -196,6 +216,9 @@ export class TenantSettingsService {
       // so existing tenants see no behaviour change until they customise them.
       outletPrograms:   ['Trade Loyalty', 'Gold Programme'],
       outletCategories: ['Premium', 'Standard', 'Economy'],
+      // Uniqueness policy — default preserves today's behaviour (GST + phone enforced;
+      // bank/UPI were never checked). Deoleo turns bank/UPI on via a per-tenant override.
+      uniquenessPolicy: { gst: true, phone: true, bank: false, upi: false },
     };
   }
 
@@ -296,6 +319,7 @@ export class TenantSettingsService {
       salesApp:           { ...base.salesApp },
       creditsPayouts:     { ...base.creditsPayouts },
       otpTemplates:       { ...base.otpTemplates },
+      uniquenessPolicy:   { ...base.uniquenessPolicy },
     };
 
     for (const row of rows) {
@@ -338,6 +362,17 @@ export class TenantSettingsService {
               physicalGifts: this.bool(v.physicalGifts, base.redemptionChannels.physicalGifts),
               vouchers:      this.bool(v.vouchers,      base.redemptionChannels.vouchers),
               bankTransfer:  this.bool(v.bankTransfer,  base.redemptionChannels.bankTransfer),
+            };
+          }
+          break;
+        }
+        case 'uniquenessPolicy': {
+          if (this.isObj(v)) {
+            out.uniquenessPolicy = {
+              gst:   this.bool(v.gst,   base.uniquenessPolicy.gst),
+              phone: this.bool(v.phone, base.uniquenessPolicy.phone),
+              bank:  this.bool(v.bank,  base.uniquenessPolicy.bank),
+              upi:   this.bool(v.upi,   base.uniquenessPolicy.upi),
             };
           }
           break;

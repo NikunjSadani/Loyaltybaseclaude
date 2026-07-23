@@ -2848,7 +2848,9 @@ export class KycService {
       partnerId: string | null;
       user: { name: string | null; phone: string | null };
       partner: {
-        userId: string;
+        // Nullable since parent owners may be login-less; a real operating partner
+        // (the only kind that reaches this approval path) always has one.
+        userId: string | null;
         clientId: string;
         // The OUTLET OWNER's KYC contact identity (set from dto at submit) — the
         // WhatsApp recipient on approval. Distinct from `user` (the submitting rep).
@@ -2927,7 +2929,7 @@ export class KycService {
 
       await tx.user.update({
         where: { id: ownerUserId },
-        data: { status: 'ACTIVE', ...(loginPhoneChanged ? { phone: newPhone } : {}) },
+        data: { status: 'ACTIVE', ...(loginPhoneChanged && newPhone ? { phone: newPhone } : {}) },
       });
       if (loginPhoneChanged) {
         await tx.userSession.updateMany({
