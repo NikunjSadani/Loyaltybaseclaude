@@ -827,7 +827,9 @@ export class PayoutsService {
           ];
           const [partners, orders] = await Promise.all([
             this.prisma.channelPartner.findMany({
-              where: { id: { in: partnerIds } },
+              // isParent:false — defensive; parents have no wallet/payouts so never appear
+              // here (docs/plans/PARTNER-MULTI-OUTLET.md §9).
+              where: { id: { in: partnerIds }, isParent: false },
               select: { id: true, ownerName: true, phone: true },
             }),
             orderIds.length > 0

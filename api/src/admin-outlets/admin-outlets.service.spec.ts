@@ -4,7 +4,7 @@
 // Run: npx jest src/admin-outlets/admin-outlets.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { AdminOutletsService } from './admin-outlets.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -14,19 +14,33 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockTx = {
-  outlet: { findUnique: jest.fn(), upsert: jest.fn(), updateMany: jest.fn(), findMany: jest.fn(), groupBy: jest.fn() },
+  outlet: {
+    findUnique: jest.fn(),
+    findFirst: jest.fn(),
+    upsert: jest.fn(),
+    update: jest.fn(),
+    updateMany: jest.fn(),
+    findMany: jest.fn(),
+    groupBy: jest.fn(),
+  },
   salesUserAssignment: { updateMany: jest.fn(), create: jest.fn() },
-  channelPartner: { findMany: jest.fn() },
+  // The add-to-parent uniqueness check now runs INSIDE the row transaction (advisory-locked),
+  // so its reads (parent PAN via findUnique, sibling PAN via findFirst, clash search via
+  // findMany) + the advisory lock ($executeRaw) resolve against the tx client, not prisma.
+  channelPartner: { findMany: jest.fn(), findUnique: jest.fn() },
   userSession: { updateMany: jest.fn() },
   auditLog: { create: jest.fn() },
+  $executeRaw: jest.fn(),
 };
 
 const mockPrisma = {
-  outlet: { findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), count: jest.fn() },
+  outlet: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), count: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn() },
   salesUser: { findUnique: jest.fn() },
   salesUserAssignment: { updateMany: jest.fn() },
   kycSubmission: { findMany: jest.fn() },
+  // Owner-group (Parent ID) paths read parents + run the uniqueness helper against this model.
+  channelPartner: { findMany: jest.fn(), findUnique: jest.fn() },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
@@ -62,10 +76,20 @@ describe('AdminOutletsService', () => {
     // deactivate()'s session-revoke step queries these inside the tx; default to
     // "no partners stranded" so the pre-existing deactivate tests don't have to mock it.
     mockTx.outlet.findMany.mockResolvedValue([]);
+    mockTx.outlet.findFirst.mockResolvedValue(null);
     mockTx.outlet.groupBy.mockResolvedValue([]);
     mockTx.channelPartner.findMany.mockResolvedValue([]);
-    // Default: UPI disabled for the tenant (matches the platform default).
-    mockTenantSettings.getEffectiveSettings.mockResolvedValue({ salesApp: { upiEnabled: false } });
+    mockTx.channelPartner.findUnique.mockResolvedValue(null);
+    // Default: UPI disabled for the tenant (matches the platform default). uniquenessPolicy
+    // all-on so the owner-group grouping tests exercise every enforced field.
+    mockTenantSettings.getEffectiveSettings.mockResolvedValue({
+      salesApp: { upiEnabled: false },
+      uniquenessPolicy: { gst: true, phone: true, bank: true, upi: true },
+    });
+    // Owner-group preloads default to "nothing found" so pre-existing upsert tests (which
+    // never send a Parent ID) never touch these.
+    mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+    mockPrisma.channelPartner.findUnique.mockResolvedValue(null);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdminOutletsService,
@@ -503,6 +527,373 @@ describe('AdminOutletsService', () => {
         rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', payoutMethod: 'BANK' }],
       });
       expect(mockTx.outlet.upsert.mock.calls[0][0].update.requiredPaymentType).toBe('BANK');
+    });
+  });
+
+  describe('upsert — Parent ID (owner groups)', () => {
+    const enableType = () =>
+      mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([
+        { outletType: { id: 'type1', code: 'SSS', isActive: true } },
+      ]);
+
+    it('an ABSENT Parent ID column leaves grouping untouched (no parent preload, no parentId write)', async () => {
+      enableType();
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      mockTx.outlet.findUnique.mockResolvedValue(null); // CREATE
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      // Row carries NO parentId key at all.
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: 'ISR-1' }],
+      });
+
+      expect(res.rows[0].status).toBe('OK');
+      // No owner-group work happened (the footgun-avoidance: a re-upload without the column
+      // never un-groups anything).
+      expect(mockPrisma.channelPartner.findMany).not.toHaveBeenCalled();
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create.parentId).toBeUndefined();
+    });
+
+    it('links an outlet to an existing parent by partnerCode → writes Outlet.parentId', async () => {
+      enableType();
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      // parent preload: CPP01 is a real parent
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([
+        { partnerCode: 'CPP01', id: 'parent1', isParent: true },
+      ]);
+      // existing-outlets preload: OUT-1 is brand new (pre-KYC) → no owner → passes trivially
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([]);
+      mockTx.outlet.findUnique.mockResolvedValue(null); // CREATE
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: 'ISR-1', parentId: 'CPP01' }],
+      });
+
+      expect(res.rows[0].status).toBe('OK');
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create.parentId).toBe('parent1');
+    });
+
+    it('ERRORs when the Parent ID does not resolve to a partner', async () => {
+      enableType();
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([]); // no such parent
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([]);
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', parentId: 'CPPX' }],
+      });
+      expect(res.rows[0].status).toBe('ERROR');
+      expect(res.rows[0].errors.join(' ')).toMatch(/not found/i);
+      expect(mockTx.outlet.upsert).not.toHaveBeenCalled();
+    });
+
+    it('ERRORs when the Parent ID resolves to a non-parent partner', async () => {
+      enableType();
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([
+        { partnerCode: 'CP001', id: 'cp1', isParent: false },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([]);
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', parentId: 'CP001' }],
+      });
+      expect(res.rows[0].status).toBe('ERROR');
+      expect(res.rows[0].errors.join(' ')).toMatch(/not a parent owner/i);
+      expect(mockTx.outlet.upsert).not.toHaveBeenCalled();
+    });
+
+    it('add-to-parent BLOCKS a PAN mismatch (approved outlet whose PAN ≠ the group PAN)', async () => {
+      enableType();
+      // parent preload (batched, on prisma)
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([
+        { partnerCode: 'CPP01', id: 'parent1', isParent: true },
+      ]);
+      // Existing APPROVED outlet with an owner whose PAN differs from the group PAN.
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        {
+          id: 'o1',
+          outletCode: 'OUT-1',
+          partner: { id: 'cp1', panNumber: 'MISMATCH1Z', gstNumber: null, bankAccountNumber: null, upiId: null },
+        },
+      ]);
+      // The uniqueness check now runs INSIDE the tx: resolveGroupPan reads the parent's PAN on tx.
+      mockTx.channelPartner.findUnique.mockResolvedValueOnce({ panNumber: 'GROUPPAN99Z' });
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', parentId: 'CPP01' }],
+      });
+      expect(res.rows[0].status).toBe('ERROR');
+      expect(res.rows[0].errors.join(' ')).toMatch(/re-kyc|PAN/i);
+      // The advisory lock was taken BEFORE the check (race-proofing), and no link was written.
+      expect(mockTx.$executeRaw).toHaveBeenCalled();
+      expect(mockTx.outlet.upsert).not.toHaveBeenCalled();
+    });
+
+    it('add-to-parent BLOCKS a field colliding with an outlet OUTSIDE the group (GST)', async () => {
+      enableType();
+      // (1) parent preload — batched on prisma
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([
+        { partnerCode: 'CPP01', id: 'parent1', isParent: true },
+      ]);
+      // (2) GST clash search inside checkGroupUniqueness → runs on the tx client now.
+      mockTx.channelPartner.findMany.mockResolvedValueOnce([{ id: 'other', outlets: [{ parentId: null }] }]);
+      // Existing outlet: owner has a GST but NO PAN (so the PAN check is a no-op).
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        {
+          id: 'o1',
+          outletCode: 'OUT-1',
+          partner: { id: 'cp1', panNumber: null, gstNumber: 'GSTDUP123', bankAccountNumber: null, upiId: null },
+        },
+      ]);
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', parentId: 'CPP01' }],
+      });
+      expect(res.rows[0].status).toBe('ERROR');
+      expect(res.rows[0].errors.join(' ')).toMatch(/outside this group/i);
+      expect(mockTx.outlet.upsert).not.toHaveBeenCalled();
+    });
+
+    it('add-to-parent acquires the advisory LOCK before the uniqueness check, then links on pass', async () => {
+      enableType();
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      // parent preload
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([
+        { partnerCode: 'CPP01', id: 'parent1', isParent: true },
+      ]);
+      // Existing outlet whose PAN already equals the group PAN → clean fit → link allowed.
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        {
+          id: 'o1',
+          outletCode: 'OUT-1',
+          partner: { id: 'cp1', panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null },
+        },
+      ]);
+      mockTx.channelPartner.findUnique.mockResolvedValueOnce({ panNumber: 'GROUPPAN99Z' }); // group PAN matches
+      const execOrder: string[] = [];
+      mockTx.$executeRaw.mockImplementation(async () => {
+        execOrder.push('lock');
+        return 1;
+      });
+      mockTx.channelPartner.findMany.mockImplementation(async () => {
+        execOrder.push('check');
+        return [];
+      });
+      mockTx.outlet.findUnique.mockResolvedValue(null); // CREATE
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: 'ISR-1', parentId: 'CPP01' }],
+      });
+
+      expect(res.rows[0].status).toBe('OK');
+      // The lock ($executeRaw) is taken BEFORE any clash-search read runs.
+      expect(mockTx.$executeRaw).toHaveBeenCalled();
+      if (execOrder.includes('check')) expect(execOrder.indexOf('lock')).toBeLessThan(execOrder.indexOf('check'));
+      // On a clean fit the link is written.
+      expect(mockTx.outlet.upsert.mock.calls[0][0].create.parentId).toBe('parent1');
+    });
+
+    it('BLOCKS a re-link A→B: an outlet already grouped under a DIFFERENT parent is NOT moved by upload (§4.5)', async () => {
+      enableType();
+      // Target parent B resolves fine.
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([
+        { partnerCode: 'CPP-B', id: 'parentB', isParent: true },
+      ]);
+      // The existing outlet is ALREADY grouped under parent A.
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        {
+          id: 'o1',
+          outletCode: 'OUT-1',
+          parentId: 'parentA',
+          partner: { id: 'cp1', panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null },
+        },
+      ]);
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', parentId: 'CPP-B' }],
+      });
+
+      expect(res.rows[0].status).toBe('ERROR');
+      expect(res.rows[0].errors.join(' ')).toMatch(/already grouped under another parent/i);
+      // A bulk move between groups is refused BEFORE any lock/check/write — un-grouping is a
+      // dedicated action only.
+      expect(mockTx.$executeRaw).not.toHaveBeenCalled();
+      expect(mockTx.outlet.upsert).not.toHaveBeenCalled();
+    });
+
+    it('ALLOWS re-affirming the SAME parent (already grouped under it) → still links, no error', async () => {
+      enableType();
+      mockPrisma.salesUser.findUnique.mockResolvedValue({ id: 'su1' });
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([
+        { partnerCode: 'CPP01', id: 'parent1', isParent: true },
+      ]);
+      // Already grouped under the SAME parent (parent1) → re-affirm is a no-op pass, not a move.
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        {
+          id: 'o1',
+          outletCode: 'OUT-1',
+          parentId: 'parent1',
+          partner: { id: 'cp1', panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null },
+        },
+      ]);
+      mockTx.channelPartner.findUnique.mockResolvedValueOnce({ panNumber: 'GROUPPAN99Z' }); // group PAN matches
+      mockTx.outlet.findUnique.mockResolvedValue({ id: 'o1' }); // existing → UPDATE
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: 'ISR-1', parentId: 'CPP01' }],
+      });
+
+      expect(res.rows[0].status).toBe('OK');
+      expect(mockTx.outlet.upsert.mock.calls[0][0].update.parentId).toBe('parent1');
+    });
+
+    it('a PRESENT-but-BLANK Parent ID cell is a NO-OP (never un-groups; no preload, no parentId write)', async () => {
+      enableType();
+      mockTx.outlet.findUnique.mockResolvedValue({ id: 'o1' }); // existing → UPDATE
+      mockTx.outlet.upsert.mockResolvedValue({ id: 'o1' });
+
+      // A grouped outlet is re-uploaded with an EMPTY Parent ID cell — un-grouping must NOT happen
+      // here (that is the dedicated ungroupOutlet action only).
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', parentId: '' }],
+      });
+
+      expect(res.rows[0].status).toBe('OK');
+      expect(res.rows[0].action).toBe('UPDATE');
+      // No owner-group work at all: a blank cell is not a link row, so nothing is preloaded and
+      // parentId is left untouched (undefined = no change).
+      expect(mockPrisma.channelPartner.findMany).not.toHaveBeenCalled();
+      expect(mockTx.outlet.upsert.mock.calls[0][0].update.parentId).toBeUndefined();
+    });
+
+    it('a SOFT-DELETED parent is not a valid link target — the preload filters deletedAt:null (F8)', async () => {
+      enableType();
+      // The parent-preload query returns nothing (a soft-deleted parent is filtered out by the
+      // deletedAt:null WHERE), so the code resolves "Parent ID not found".
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([]);
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([]);
+
+      const res = await service.upsert(admin, {
+        rows: [{ rowNum: 2, outletId: 'OUT-1', outletType: 'SSS', xsrId: '', parentId: 'CPP01' }],
+      });
+
+      expect(res.rows[0].status).toBe('ERROR');
+      expect(res.rows[0].errors.join(' ')).toMatch(/not found/i);
+      // The preload WHERE carries the soft-delete guard.
+      expect(mockPrisma.channelPartner.findMany.mock.calls[0][0].where).toMatchObject({ deletedAt: null });
+      expect(mockTx.outlet.upsert).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('ungroupOutlet — dedicated explicit un-group (§4.5)', () => {
+    it('BLOCKS un-group while the child still shares a detail (shared PAN) → 400, no parentId clear', async () => {
+      // outlet lookup: grouped under parent1, owner shares the group PAN
+      mockPrisma.outlet.findFirst.mockResolvedValue({
+        id: 'o1',
+        parentId: 'parent1',
+        partner: { id: 'cp1', phone: null, panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null },
+      });
+      // parent (group member) shares the same PAN
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({
+        phone: null, panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null,
+      });
+      mockPrisma.outlet.findMany.mockResolvedValue([]); // no siblings
+
+      await expect(service.ungroupOutlet(admin, 'OUT-1')).rejects.toBeInstanceOf(BadRequestException);
+      // parentId was NOT cleared (no update ran).
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+    });
+
+    it('BLOCKS un-group while the child shares a PHONE with the group (last-10 match, F4)', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue({
+        id: 'o1',
+        parentId: 'parent1',
+        // distinct PAN, but the phone matches the parent's (different formatting).
+        partner: { id: 'cp1', phone: '+91 98300-11252', panNumber: 'CHILDPAN01Z', gstNumber: null, bankAccountNumber: null, upiId: null },
+      });
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({
+        phone: '9830011252', panNumber: 'PARENTPAN9Z', gstNumber: null, bankAccountNumber: null, upiId: null,
+      });
+      mockPrisma.outlet.findMany.mockResolvedValue([]); // no siblings
+
+      await expect(service.ungroupOutlet(admin, 'OUT-1')).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+    });
+
+    it('UN-GROUPS when fully distinct → clears Outlet.parentId (trigger clears groupId) + writes audit', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue({
+        id: 'o1',
+        parentId: 'parent1',
+        partner: { id: 'cp1', phone: '9000000001', panNumber: 'CHILDPAN01Z', gstNumber: null, bankAccountNumber: null, upiId: null },
+      });
+      // parent shares nothing (different PAN + phone)
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({
+        phone: '9000000009', panNumber: 'PARENTPAN9Z', gstNumber: null, bankAccountNumber: null, upiId: null,
+      });
+      mockPrisma.outlet.findMany.mockResolvedValue([]); // no siblings
+      mockTx.outlet.update.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.ungroupOutlet(admin, 'OUT-1');
+
+      expect(res).toMatchObject({ outletCode: 'OUT-1', ungrouped: true });
+      // Clears ONLY parentId (the trigger owns groupId — we never write it).
+      expect(mockTx.outlet.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'o1' }, data: { parentId: null } }),
+      );
+      expect(mockTx.auditLog.create).toHaveBeenCalled();
+    });
+
+    it('is idempotent for an already-ungrouped outlet (parentId null) → no update, no error', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue({ id: 'o1', parentId: null, partner: null });
+      const res = await service.ungroupOutlet(admin, 'OUT-1');
+      expect(res).toMatchObject({ ungrouped: false, alreadyUngrouped: true });
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+    });
+
+    it('DETECTS a CASE-VARIANT share (child PAN lower-case vs group PAN upper-case) → BLOCKS un-group', async () => {
+      // Canonical PAN is upper-cased; a trim-only compare would miss this share and wrongly allow
+      // the un-group. The normalized compare catches it.
+      mockPrisma.outlet.findFirst.mockResolvedValue({
+        id: 'o1',
+        parentId: 'parent1',
+        partner: { id: 'cp1', phone: null, panNumber: 'grouppan99z', gstNumber: null, bankAccountNumber: null, upiId: null },
+      });
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({
+        phone: null, panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null,
+      });
+      mockPrisma.outlet.findMany.mockResolvedValue([]); // no siblings
+
+      await expect(service.ungroupOutlet(admin, 'OUT-1')).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+    });
+
+    it("excludes the child's OWN partner from the sibling scan (a partner owning 2 group outlets must not self-block)", async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue({
+        id: 'o1',
+        parentId: 'parent1',
+        partner: { id: 'cp1', phone: '9000000001', panNumber: 'CHILDPAN01Z', gstNumber: null, bankAccountNumber: null, upiId: null },
+      });
+      // parent shares nothing.
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({
+        phone: '9000000009', panNumber: 'PARENTPAN9Z', gstNumber: null, bankAccountNumber: null, upiId: null,
+      });
+      mockPrisma.outlet.findMany.mockResolvedValue([]); // the child's own 2nd outlet is filtered out by the query
+      mockTx.outlet.update.mockResolvedValue({ id: 'o1' });
+
+      const res = await service.ungroupOutlet(admin, 'OUT-1');
+
+      expect(res).toMatchObject({ ungrouped: true });
+      // The sibling scan excludes BOTH the child outlet AND the child's own partner.
+      const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      expect(where.id).toEqual({ not: 'o1' });
+      expect(where.partner).toMatchObject({ id: { not: 'cp1' } });
+    });
+
+    it('throws NotFound for an unknown / cross-tenant outlet (scoped by clientId + deletedAt:null)', async () => {
+      mockPrisma.outlet.findFirst.mockResolvedValue(null);
+      await expect(service.ungroupOutlet(admin, 'OUT-X')).rejects.toBeInstanceOf(NotFoundException);
+      const where = mockPrisma.outlet.findFirst.mock.calls[0][0].where;
+      expect(where).toMatchObject({ clientId: TENANT_A, outletCode: 'OUT-X', deletedAt: null });
     });
   });
 

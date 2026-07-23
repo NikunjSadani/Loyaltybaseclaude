@@ -347,8 +347,10 @@ async function seedDeoleoDemo() {
       partnerCode: 'CP004',
       outletType: wholesalerType,
       outletCode: 'O004',
-      gstNumber: '27KLMNO9012P1Z8',
-      panNumber: 'KLMNO9012P',
+      // Distinct PAN/GST family from CP003 (which keeps KLMNO9012P). These are two SEPARATE
+      // demo owners, so they must not share a PAN — enforced now by the partial-unique PAN index.
+      gstNumber: '27QRSTU3456V1Z8',
+      panNumber: 'QRSTU3456V',
       redeemablePoints: 50000,
       city: 'Nagpur',
       state: 'Maharashtra',

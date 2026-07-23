@@ -11,13 +11,15 @@ const GST_ONLY: UniquenessPolicy = { gst: true, phone: false, bank: false, upi: 
 
 describe('partner-group.helper — pure predicates', () => {
   describe('isFieldEnforced', () => {
-    it('PAN is always enforced regardless of policy', () => {
-      expect(isFieldEnforced('pan', { gst: false, phone: false, bank: false, upi: false })).toBe(true);
+    it('PAN and GST are ALWAYS enforced regardless of policy (DB-backed golden keys)', () => {
+      const allOff = { gst: false, phone: false, bank: false, upi: false };
+      expect(isFieldEnforced('pan', allOff)).toBe(true);
+      expect(isFieldEnforced('gst', allOff)).toBe(true); // GST is always-on now (has a partial-unique DB index)
     });
-    it('policy gates gst/bank/upi', () => {
-      expect(isFieldEnforced('gst', GST_ONLY)).toBe(true);
+    it('policy gates bank/upi only', () => {
       expect(isFieldEnforced('bank', GST_ONLY)).toBe(false);
       expect(isFieldEnforced('upi', ALL_ON)).toBe(true);
+      expect(isFieldEnforced('upi', GST_ONLY)).toBe(false);
     });
   });
 
@@ -40,7 +42,7 @@ describe('partner-group.helper — pure predicates', () => {
 
 // Minimal mocked Prisma client covering the two models the helper touches.
 function mockDb(opts: {
-  candidates?: Array<{ id: string; outlets: Array<{ parentId: string | null }> }>;
+  candidates?: Array<{ id: string; isParent?: boolean; outlets: Array<{ parentId: string | null }> }>;
   parentPan?: string | null;
   siblingPan?: string | null;
 }) {
@@ -112,6 +114,43 @@ describe('partner-group.helper — checkGroupUniqueness', () => {
       policy: { gst: false, phone: false, bank: false, upi: false },
     });
     expect(v?.field).toBe('pan');
+  });
+
+  it('includes PARENTS in the clash search: a parent bank OUTSIDE the group is a violation', async () => {
+    // A parent has no owned outlets; its group is its OWN id. Here the parent 'PARENT9' holds the
+    // bank but we belong to 'PARENT1' → outside → violation (bank has no DB index, so the check is
+    // the only guard — regression test for the "parent bank/UPI slip" audit finding).
+    const db = mockDb({ candidates: [{ id: 'PARENT9', isParent: true, outlets: [] }] });
+    const v = await checkGroupUniqueness(db, {
+      clientId: 'deoleo',
+      ourParentId: 'PARENT1',
+      details: { bankAccountNumber: 'ACC1' },
+      policy: ALL_ON,
+    });
+    expect(v?.field).toBe('bank');
+    expect(v?.reason).toBe('duplicate-outside-group');
+  });
+
+  it('allows sharing a value with OUR OWN parent (parent group id == our parentId)', async () => {
+    const db = mockDb({ candidates: [{ id: 'PARENT1', isParent: true, outlets: [] }] });
+    const v = await checkGroupUniqueness(db, {
+      clientId: 'deoleo',
+      ourParentId: 'PARENT1',
+      details: { bankAccountNumber: 'ACC1' },
+      policy: ALL_ON,
+    });
+    expect(v).toBeNull();
+  });
+
+  it('GST is enforced even when policy.gst is false (always-on DB-backed rule)', async () => {
+    const db = mockDb({ candidates: [{ id: 'other', outlets: [{ parentId: null }] }] });
+    const v = await checkGroupUniqueness(db, {
+      clientId: 'deoleo',
+      ourParentId: null,
+      details: { gstNumber: 'GST1' },
+      policy: { gst: false, phone: false, bank: false, upi: false },
+    });
+    expect(v?.field).toBe('gst');
   });
 });
 

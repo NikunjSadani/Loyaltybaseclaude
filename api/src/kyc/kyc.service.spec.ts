@@ -31,7 +31,8 @@ import {
 // Includes all table operations needed by the new approve(), verifyField(),
 // and the shared applyBridgeOutcome() helper.
 const mockTx = {
-  kycSubmission: { update: jest.fn(), findFirst: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
+  // findUnique + delete added for the 48h stale-draft cleanup (cleanupOneStaleDraft).
+  kycSubmission: { update: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), updateMany: jest.fn(), delete: jest.fn() },
   kycVerificationItem: {
     upsert: jest.fn(),
     findMany: jest.fn(),
@@ -41,10 +42,15 @@ const mockTx = {
   kycStatusHistory: { create: jest.fn() },
   auditLog: { create: jest.fn() },
   user: { findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
-  channelPartner: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), create: jest.fn() },
+  channelPartner: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), create: jest.fn(), delete: jest.fn() },
   userSession: { updateMany: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
-  outlet: { update: jest.fn(), updateMany: jest.fn() },
+  // outlet.findFirst is used inside the tx by the partner-group helper's resolveGroupPan
+  // (PAN golden-key resolution for a GROUPED outlet whose parent carries no PAN).
+  outlet: { update: jest.fn(), updateMany: jest.fn(), findFirst: jest.fn() },
+  // $executeRaw is the advisory-lock primitive acquireIdentityLocks issues inside create()'s
+  // tx (partner-child owner groups) BEFORE the uniqueness check. A no-op mock here.
+  $executeRaw: jest.fn(),
 };
 
 const mockPrisma = {
@@ -93,9 +99,16 @@ let mockKycOtpTemplateId: string | undefined = undefined;
 // Tenant UPI gate consumed by the create() payout-mandate guard. Default OFF (mirrors the
 // EffectiveSettings default salesApp.upiEnabled=false); UPI tests flip it per case.
 let mockUpiEnabled = false;
+// Parent-child owner-group uniqueness policy consumed by create()/sendConsentOtp (phone flag)
+// and checkGroupUniqueness (gst/bank/upi flags). Default mirrors the EffectiveSettings default
+// (gst+phone enforced; bank/upi off). Group tests flip fields per case.
+let mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
 const mockTenantSettings = {
   getOtpTemplateId: jest.fn(async () => mockKycOtpTemplateId),
-  getEffectiveSettings: jest.fn(async () => ({ salesApp: { upiEnabled: mockUpiEnabled } })),
+  getEffectiveSettings: jest.fn(async () => ({
+    salesApp: { upiEnabled: mockUpiEnabled },
+    uniquenessPolicy: mockUniquenessPolicy,
+  })),
 };
 
 const mockStorage = {
@@ -158,6 +171,7 @@ describe('KycService', () => {
     jest.clearAllMocks();
     mockKycOtpTemplateId = undefined; // default: no per-tenant override (global env template)
     mockUpiEnabled = false; // default: tenant UPI gate OFF (payout-mandate guard)
+    mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false }; // default policy
     // clearAllMocks does not drain mockResolvedValueOnce queues nor clear a
     // mockResolvedValue impl; reset the mocks that create() now also touches so
     // stale values from prior suites (sendConsentOtp etc.) don't bleed.
@@ -173,6 +187,11 @@ describe('KycService', () => {
     // test's tx (the "passes in isolation, fails in-suite" symptom). Fully reset every
     // mockTx op so each test starts with empty queues.
     for (const table of Object.values(mockTx)) {
+      // $executeRaw is a top-level jest.fn on mockTx (not a table of ops) — reset it directly.
+      if (typeof table === 'function') {
+        (table as jest.Mock).mockReset();
+        continue;
+      }
       for (const fn of Object.values(table)) {
         (fn as jest.Mock).mockReset();
       }
@@ -354,13 +373,14 @@ describe('KycService', () => {
     });
 
     it('rejects a duplicate GST with a clean 400 (not a tx-aborting 500) on the create path', async () => {
-      // Regression for the staging KYC-submit 500: a partner-less outlet whose GST
-      // already belongs to another partner in the tenant must return a clean
-      // BadRequest. The old code let channelPartner.create() P2002 → the tx aborted →
-      // "current transaction is aborted" → generic 500. We now PRE-CHECK the GST.
+      // Regression for the staging KYC-submit 500: a partner-less (ungrouped) outlet whose
+      // GST already belongs to another partner in the tenant must return a clean BadRequest.
+      // The old code let channelPartner.create() P2002 → the tx aborted → generic 500. GST
+      // uniqueness is now enforced GROUP-AWARE by checkGroupUniqueness (tx.channelPartner
+      // .findMany) BEFORE the insert; an ungrouped clash (outlets:[] → outside our null group)
+      // is a violation.
       primeCreateMocks();
-      // The GST pre-check (tx.channelPartner.findFirst) finds an existing owner.
-      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ id: 'other-partner' });
+      mockTx.channelPartner.findMany.mockResolvedValueOnce([{ id: 'other-partner', outlets: [] }]);
       await expect(
         service.create(so, {
           ...baseDto,
@@ -1109,10 +1129,11 @@ describe('KycService', () => {
       mockPrisma.kycDocument.create.mockResolvedValue({});
     };
 
-    /** The data written to the partner update (post-lock). */
-    const partnerUpdateData = () => mockTx.channelPartner.update.mock.calls[0][0].data;
-    /** The data written to the outlet update (post-lock). */
-    const outletUpdateData = () => mockTx.outlet.update.mock.calls[0][0].data;
+    // Stage-at-approval: a re-KYC no longer writes the partner OR the outlet address at draft time —
+    // the re-KYC-LOCK-applied patch (identity/payout AND the outlet address) is STAGED on
+    // KycSubmission.proposedPartner (and applied to the partner + primary outlet only at approval).
+    // The text-lock behavior is asserted against that single staged patch.
+    const partnerUpdateData = () => mockTx.kycSubmission.create.mock.calls[0][0].data.proposedPartner;
     /** The documentTypes actually persisted. */
     const persistedDocTypes = () =>
       mockPrisma.kycDocument.create.mock.calls.map((c) => c[0].data.documentType);
@@ -1155,7 +1176,7 @@ describe('KycService', () => {
       expect(data.gstNumber).toBe('27ABCDE1234F1ZK'); // non-flagged → pinned to stored
     });
 
-    it('NON-flagged address change → PINNED to the stored outlet address', async () => {
+    it('NON-flagged address change → PINNED to the stored outlet address (staged on proposedPartner)', async () => {
       primeReentry({ mobileNumber: true });
       await service.create(so, {
         ...baseDto,
@@ -1163,15 +1184,19 @@ describe('KycService', () => {
         address: 'Tampered Address',
         city: 'Delhi',
       } as never);
-      const data = outletUpdateData();
+      // Stage-at-approval: a re-KYC stages the address on proposedPartner; the live outlet is NOT
+      // written at draft time.
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+      const data = partnerUpdateData();
       expect(data.addressLine1).toBe('12 SV Road'); // non-flagged → pinned
       expect(data.city).toBe('Mumbai');             // non-flagged → pinned
     });
 
-    it('flagged address field → the change is accepted', async () => {
+    it('flagged address field → the change is accepted (staged on proposedPartner, live outlet untouched)', async () => {
       primeReentry({ streetAddress: true });
       await service.create(so, { ...baseDto, address: 'New Address 99' } as never);
-      expect(outletUpdateData().addressLine1).toBe('New Address 99');
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+      expect(partnerUpdateData().addressLine1).toBe('New Address 99');
     });
 
     it('a document of a FLAGGED type is processed', async () => {
@@ -1245,6 +1270,575 @@ describe('KycService', () => {
       const types = persistedDocTypes();
       expect(types).toContain('GST_CERTIFICATE');
       expect(types).toContain('CANCELLED_CHEQUE');
+    });
+  });
+
+  // ─── create() GROUP-AWARE identity/phone uniqueness (partner-child owner groups) ──
+  // Wave-2 Stream A: checkGroupUniqueness wired into create() + a group-aware
+  // assertPhoneAvailable + the login-less-sibling (userId=null) guard. PAN is the group
+  // golden-key (identical-within-group); GST/bank/UPI are unique-except-within-group per
+  // the tenant policy; an UNGROUPED outlet keeps today's strict behavior.
+  describe('create() group-aware uniqueness', () => {
+    const groupedDto = {
+      outletId: 'outlet-2',
+      partnerName: 'Sibling Store',
+      mobile: '9000000002',
+      address: 'addr2',
+      city: 'X',
+      state: 'Y',
+      pincode: '110022',
+      bankName: 'HDFC',
+      accountNumber: '50100',
+      ifscCode: 'HDFC0001',
+    };
+
+    /** Prime a GROUPED (parentId set), partner-less create() up to the tx writes. */
+    const primeGroupedCreate = (opts?: { parentPan?: string | null }) => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-2',
+        clientId: 'deoleo',
+        partnerId: null,
+        parentId: 'parent-1', // grouped
+        outletCode: 'OUT-2',
+        outletType: { code: 'SSS' },
+        requiredPaymentType: 'BANK',
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // phone partner-clash
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);      // employee-clash
+      // Parent PAN lookup (consumed only when the dto carries a PAN → checkPanMatchesGroup).
+      mockTx.channelPartner.findUnique.mockResolvedValue({ panNumber: opts?.parentPan ?? null });
+      mockTx.user.findFirst.mockResolvedValueOnce(null);
+      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-2' });
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-2' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-2' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockPrisma.kycDocument.create.mockResolvedValue({});
+    };
+
+    /** Prime an UNGROUPED (parentId null), partner-less create() up to the tx writes. */
+    const primeUngroupedCreate = () => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-2',
+        clientId: 'deoleo',
+        partnerId: null,
+        parentId: null, // ungrouped
+        outletCode: 'OUT-2',
+        outletType: { code: 'SSS' },
+        requiredPaymentType: 'BANK',
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+      mockTx.user.findFirst.mockResolvedValueOnce(null);
+      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-2' });
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-2' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-2' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockPrisma.kycDocument.create.mockResolvedValue({});
+    };
+
+    it('allows a grouped sibling to SHARE GST / bank / UPI with an in-group sibling', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: true, upi: true }; // all enforced
+      primeGroupedCreate();
+      // Every identity clash resolves to a SAME-GROUP sibling (parentId === our group) → allowed.
+      // The partnerCode lookup (where.partnerCode) resolves to no taken codes.
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) => {
+        if (args?.where?.partnerCode) return [];
+        return [{ id: 'sibling-1', outlets: [{ parentId: 'parent-1' }] }];
+      });
+      const res = await service.create(so, {
+        ...groupedDto,
+        gstNumber: '29ABCDE1234F1Z5',
+        upiId: 'sib@upi',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-2', status: 'DRAFT' });
+      expect(mockTx.channelPartner.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('BLOCKS a GST that belongs to an outlet OUTSIDE the group', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeGroupedCreate();
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) => {
+        if (args?.where?.partnerCode) return [];
+        return [{ id: 'outsider', outlets: [{ parentId: null }] }]; // ungrouped outsider
+      });
+      await expect(
+        service.create(so, { ...groupedDto, gstNumber: '29ABCDE1234F1Z5' } as never),
+      ).rejects.toThrow(/GST number is already registered to another outlet outside this group/i);
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
+    });
+
+    it('BLOCKS a bank account that belongs to an outlet OUTSIDE the group (policy bank ON)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: true, upi: false };
+      primeGroupedCreate();
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) => {
+        if (args?.where?.partnerCode) return [];
+        return [{ id: 'outsider', outlets: [{ parentId: 'other-group' }] }];
+      });
+      await expect(
+        service.create(so, { ...groupedDto } as never), // bankAccountNumber='50100' from groupedDto
+      ).rejects.toThrow(/bank account number is already registered to another outlet outside this group/i);
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
+    });
+
+    it('BLOCKS a UPI that belongs to an outlet OUTSIDE the group (policy upi ON)', async () => {
+      mockUniquenessPolicy = { gst: false, phone: true, bank: false, upi: true };
+      primeGroupedCreate();
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) => {
+        if (args?.where?.partnerCode) return [];
+        return [{ id: 'outsider', outlets: [{ parentId: 'other-group' }] }];
+      });
+      await expect(
+        service.create(so, { ...groupedDto, upiId: 'x@upi' } as never),
+      ).rejects.toThrow(/UPI ID is already registered to another outlet outside this group/i);
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
+    });
+
+    it('BLOCKS a PAN that MISMATCHES the group PAN (golden-key, always enforced)', async () => {
+      mockUniquenessPolicy = { gst: false, phone: true, bank: false, upi: false };
+      primeGroupedCreate({ parentPan: 'GROUPPAN01F' }); // the group's canonical PAN
+      await expect(
+        service.create(so, { ...groupedDto, panNumber: 'DIFFERENT9F' } as never),
+      ).rejects.toThrow(/group already uses PAN GROUPPAN01F/i);
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
+    });
+
+    it('allows a PAN that MATCHES the group PAN', async () => {
+      mockUniquenessPolicy = { gst: false, phone: true, bank: false, upi: false };
+      primeGroupedCreate({ parentPan: 'GROUPPAN01F' });
+      // PAN matches the group → checkPanMatchesGroup passes; the outside-PAN scan finds none.
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) => {
+        if (args?.where?.partnerCode) return [];
+        return []; // no outside PAN holder
+      });
+      const res = await service.create(so, { ...groupedDto, panNumber: 'GROUPPAN01F' } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-2' });
+    });
+
+    it('BLOCKS a PAN duplicate OUTSIDE the group for an UNGROUPED outlet (PAN always enforced)', async () => {
+      mockUniquenessPolicy = { gst: false, phone: true, bank: false, upi: false };
+      primeUngroupedCreate();
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) => {
+        if (args?.where?.partnerCode) return [];
+        return [{ id: 'pan-owner', outlets: [] }]; // any clash is "outside" for an ungrouped outlet
+      });
+      await expect(
+        service.create(so, { ...groupedDto, panNumber: 'ABCDE1234F' } as never),
+      ).rejects.toThrow(/PAN is already registered to another outlet/i);
+    });
+
+    it('policy with bank/UPI OFF does NOT check them — a colliding bank/UPI is allowed', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false }; // bank/upi OFF
+      primeUngroupedCreate();
+      // Even though every identity query would return an OUTSIDE clash, bank/UPI are never
+      // queried (policy off) and the dto carries no GST/PAN → create succeeds.
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) => {
+        if (args?.where?.partnerCode) return [];
+        return [{ id: 'outsider', outlets: [] }];
+      });
+      const res = await service.create(so, {
+        ...groupedDto, // bank fields present
+        upiId: 'x@upi',
+      } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-2' });
+    });
+
+    // ── assertPhoneAvailable group-awareness ──────────────────────────────────────
+    it('assertPhoneAvailable EXCLUDES same-group siblings via a NOT filter when grouped', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeGroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]); // clean identity
+      await service.create(so, { ...groupedDto } as never);
+      const where = mockPrisma.channelPartner.findFirst.mock.calls[0][0].where;
+      // Group-aware: same-group siblings are excluded from the phone clash search.
+      expect(where.NOT).toEqual({ outlets: { some: { parentId: 'parent-1' } } });
+      expect(where.isParent).toBe(false);
+      expect(where.deletedAt).toBeNull();
+    });
+
+    it('assertPhoneAvailable STILL blocks a phone on an outlet OUTSIDE the group', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-2', clientId: 'deoleo', partnerId: null, parentId: 'parent-1',
+        outletCode: 'OUT-2', outletType: { code: 'SSS' }, requiredPaymentType: 'BANK',
+      });
+      // The NOT-filtered query still finds an OUTSIDE-group partner on this phone → block.
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({ businessName: 'Outside Store' });
+      await expect(
+        service.create(so, { ...groupedDto } as never),
+      ).rejects.toThrow(/already registered to another outlet \(Outside Store\)/i);
+    });
+
+    it('assertPhoneAvailable is SKIPPED for the partner-clash when tenant policy.phone is OFF', async () => {
+      mockUniquenessPolicy = { gst: true, phone: false, bank: false, upi: false }; // phone OFF
+      primeGroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      await service.create(so, { ...groupedDto } as never);
+      // With phone uniqueness disabled, the partner-clash query is never issued (the only
+      // channelPartner.findFirst call site in create() is assertPhoneAvailable's phone check).
+      expect(mockPrisma.channelPartner.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('ungrouped outlet keeps STRICT phone uniqueness — no NOT filter', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeUngroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      await service.create(so, { ...groupedDto } as never);
+      const where = mockPrisma.channelPartner.findFirst.mock.calls[0][0].where;
+      expect(where.NOT).toBeUndefined(); // ungrouped → any clash blocks
+    });
+
+    // ── login-less sibling (userId=null) guard ────────────────────────────────────
+    it('grouped sibling reusing an existing GROUP phone → login-less partner (userId=null), NO 2nd User', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeGroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]); // clean identity
+      // A User already carries this phone (the group's existing login).
+      mockTx.user.findFirst.mockReset();
+      mockTx.user.findFirst.mockResolvedValueOnce({ id: 'group-login' });
+      // …and it belongs to a SAME-GROUP sibling → reuse it (login-less new partner).
+      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ id: 'sibling-cp' });
+      await service.create(so, { ...groupedDto } as never);
+      // No second User is created (User @@unique([clientId, phone])).
+      expect(mockTx.user.create).not.toHaveBeenCalled();
+      // The new partner is login-less.
+      expect(mockTx.channelPartner.create.mock.calls[0][0].data.userId).toBeNull();
+    });
+
+    it('grouped outlet whose existing-phone User is NOT a same-group sibling → rejected', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeGroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      mockTx.user.findFirst.mockReset();
+      mockTx.user.findFirst.mockResolvedValueOnce({ id: 'unrelated-login' });
+      mockTx.channelPartner.findFirst.mockResolvedValueOnce(null); // no same-group sibling
+      await expect(
+        service.create(so, { ...groupedDto } as never),
+      ).rejects.toThrow(/already registered to another account/i);
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
+    });
+
+    // ── Fix-pass Stream 1: advisory lock + write-side normalization + groupId + F2 phone ──
+
+    it('acquires the advisory lock BEFORE the uniqueness-check DB read (lock ordering)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeGroupedCreate();
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) =>
+        args?.where?.partnerCode ? [] : [],
+      );
+      await service.create(so, { ...groupedDto, gstNumber: '29ABCDE1234F1Z5' } as never);
+      // The lock (pg_advisory_xact_lock via $executeRaw) is taken, and its FIRST call precedes
+      // the earliest channelPartner.findMany the uniqueness check / partner-create issues.
+      expect(mockTx.$executeRaw).toHaveBeenCalled();
+      const lockOrder = Math.min(...mockTx.$executeRaw.mock.invocationCallOrder);
+      const readOrder = Math.min(...mockTx.channelPartner.findMany.mock.invocationCallOrder);
+      expect(lockOrder).toBeLessThan(readOrder);
+    });
+
+    it('persists PAN/GST upper-cased + trimmed (write-side normalization, F5)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeUngroupedCreate();
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) =>
+        args?.where?.partnerCode ? [] : [],
+      );
+      await service.create(so, {
+        ...groupedDto,
+        panNumber: '  abcde1234f  ',
+        gstNumber: ' 29abcde1234f1z5 ',
+      } as never);
+      const data = mockTx.channelPartner.create.mock.calls[0][0].data;
+      expect(data.panNumber).toBe('ABCDE1234F');
+      expect(data.gstNumber).toBe('29ABCDE1234F1Z5');
+    });
+
+    it('sets groupId=parentId inline at partner-create for a grouped-before-KYC sibling', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeGroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      await service.create(so, { ...groupedDto } as never);
+      expect(mockTx.channelPartner.create.mock.calls[0][0].data.groupId).toBe('parent-1');
+    });
+
+    it('sets groupId=null inline at partner-create for an ungrouped outlet', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeUngroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      await service.create(so, { ...groupedDto } as never);
+      expect(mockTx.channelPartner.create.mock.calls[0][0].data.groupId).toBeNull();
+    });
+
+    it('a brand-new-outlet draft stores NO proposedPartner snapshot (undefined → NULL)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeUngroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      await service.create(so, { ...groupedDto } as never);
+      expect(mockTx.kycSubmission.create.mock.calls[0][0].data.proposedPartner).toBeUndefined();
+    });
+
+    it('sibling-login lookup matches by phone LAST-10 (F2), reusing the group login for a 91-prefixed variant', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeGroupedCreate();
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      // An existing group login is found (by last-10) and belongs to a same-group sibling →
+      // reused login-less; no 2nd User created.
+      mockTx.user.findFirst.mockReset();
+      mockTx.user.findFirst.mockResolvedValueOnce({ id: 'group-login' });
+      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ id: 'sibling-cp' });
+      // 91-prefixed format variant of groupedDto.mobile ('9000000002').
+      await service.create(so, { ...groupedDto, mobile: '919000000002' } as never);
+      const where = mockTx.user.findFirst.mock.calls[0][0].where;
+      expect(where.phone).toEqual({ endsWith: '9000000002' });
+      expect(mockTx.user.create).not.toHaveBeenCalled();
+      expect(mockTx.channelPartner.create.mock.calls[0][0].data.userId).toBeNull();
+    });
+
+    it('re-KYC create STAGES the proposed patch on proposedPartner and does NOT overwrite the live partner', async () => {
+      // Stage-at-approval model: a re-KYC never mutates the already-approved ChannelPartner at
+      // draft time — the normalized proposed patch is staged on KycSubmission.proposedPartner and
+      // applied to the partner only at Gifsy approval (applyBridgeOutcome).
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-9',
+        clientId: 'deoleo',
+        partnerId: 'cp-existing', // re-KYC branch
+        parentId: null,
+        outletCode: 'OUT-9',
+        outletType: { code: 'SSS' },
+        requiredPaymentType: 'BANK',
+        reKycFlags: null,
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // phone-clash
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // employee-clash
+      mockTx.channelPartner.findMany.mockResolvedValue([]); // early-UX group-uniqueness → no clash
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-9' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockPrisma.kycDocument.create.mockResolvedValue({});
+
+      await service.create(so, {
+        outletId: 'outlet-9',
+        partnerName: 'Re Store',
+        mobile: '9000000009',
+        address: 'a',
+        city: 'c',
+        state: 's',
+        pincode: '110001',
+        gstNumber: '29ABCDE1234F1Z5',
+        panNumber: 'abcde1234f',
+        bankName: 'HDFC',
+        accountNumber: '50100',
+        ifscCode: 'HDFC0001',
+        paymentMode: 'bank',
+      } as never);
+
+      // The live partner is NEVER updated (nor snapshot-read) at draft time, and the live outlet
+      // address is NOT written either — it too is staged on proposedPartner for apply-at-approval.
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+      // The proposed patch is staged (normalized: PAN upper-cased) AND now carries the outlet address.
+      const staged = mockTx.kycSubmission.create.mock.calls[0][0].data.proposedPartner;
+      expect(staged).toMatchObject({
+        gstNumber: '29ABCDE1234F1Z5',
+        panNumber: 'ABCDE1234F',
+        bankAccountNumber: '50100',
+        paymentMode: 'bank',
+        // Outlet address is now staged alongside the identity/payout fields (stage-at-approval).
+        addressLine1: 'a',
+        city: 'c',
+        state: 's',
+        pincode: '110001',
+      });
+    });
+
+    // ── Safe-orphan reuse (HIGH fix): a PENDING_VERIFICATION owner-login left by the cleanup's
+    //    partner hard-delete is REUSED for a fresh KYC on the same ungrouped outlet+phone. ──
+    /** Prime an UNGROUPED partner-less create() where an existing User already holds the phone. */
+    const primeUngroupedOrphanCreate = () => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-2', clientId: 'deoleo', partnerId: null, parentId: null,
+        outletCode: 'OUT-2', outletType: { code: 'SSS' }, requiredPaymentType: 'BANK',
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // phone partner-clash
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);      // employee-clash
+      mockTx.channelPartner.findMany.mockResolvedValue([]);            // clean identity
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-2' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-2' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockPrisma.kycDocument.create.mockResolvedValue({});
+    };
+
+    it('REUSES a safe orphan owner-login (PENDING_VERIFICATION, owner role, no partner) — no 2nd User', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeUngroupedOrphanCreate();
+      // An existing User holds this phone: PENDING_VERIFICATION, owner role, and owns NO partner
+      // (its partner was hard-deleted by the 48h cleanup) → safe orphan → reuse it.
+      mockTx.user.findFirst.mockResolvedValueOnce({ id: 'orphan-1', status: 'PENDING_VERIFICATION', role: 'SSS' });
+      mockTx.channelPartner.findFirst.mockResolvedValueOnce(null); // owns no ChannelPartner
+      mockTx.user.update.mockResolvedValueOnce({});
+
+      await service.create(so, { ...groupedDto } as never);
+
+      // No SECOND User created (User @@unique([clientId, phone])); the orphan is reused as owner.
+      expect(mockTx.user.create).not.toHaveBeenCalled();
+      expect(mockTx.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'orphan-1' } }),
+      );
+      expect(mockTx.channelPartner.create.mock.calls[0][0].data.userId).toBe('orphan-1');
+    });
+
+    it('does NOT reuse a User that OWNS a partner (real different account) → rejects', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeUngroupedOrphanCreate();
+      mockTx.user.findFirst.mockResolvedValueOnce({ id: 'live-1', status: 'PENDING_VERIFICATION', role: 'SSS' });
+      mockTx.channelPartner.findFirst.mockResolvedValueOnce({ id: 'owned-cp' }); // owns a partner → NOT an orphan
+      await expect(service.create(so, { ...groupedDto } as never)).rejects.toThrow(
+        /already registered to another account/i,
+      );
+      expect(mockTx.user.create).not.toHaveBeenCalled();
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
+    });
+
+    it('does NOT reuse a non-owner (e.g. admin) role User on the same phone → rejects', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeUngroupedOrphanCreate();
+      // Right status but an ADMIN role → not an outlet-owner login → never repurposed (H1).
+      mockTx.user.findFirst.mockResolvedValueOnce({ id: 'admin-1', status: 'PENDING_VERIFICATION', role: 'CLIENT_ADMIN' });
+      await expect(service.create(so, { ...groupedDto } as never)).rejects.toThrow(
+        /already registered to another account/i,
+      );
+      // Role gate short-circuits BEFORE the owns-a-partner read.
+      expect(mockTx.channelPartner.findFirst).not.toHaveBeenCalled();
+      expect(mockTx.user.create).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── 48h STALE-DRAFT CLEANUP (partner-child owner groups) ────────────────────
+  describe('cleanupStaleKycDrafts', () => {
+    const OLD = new Date('2020-01-01T00:00:00.000Z'); // safely older than now - 48h
+
+    /** A brand-new draft's throwaway partner with NO downstream data of any kind (provably fresh). */
+    const freshPartner = (id: string) => ({
+      id,
+      wallets: [],
+      kycSubmissions: [],
+      redemptionOrders: [],
+      payoutTransactions: [],
+      visibilitySubmissions: [],
+      leaderboardEntries: [],
+    });
+
+    it('deletes a brand-new stale draft AND its throwaway (fresh) partner', async () => {
+      mockPrisma.kycSubmission.findMany
+        .mockResolvedValueOnce([{ id: 'd1' }])
+        .mockResolvedValue([]);
+      mockTx.kycSubmission.findUnique.mockResolvedValueOnce({
+        id: 'd1',
+        status: 'DRAFT',
+        partnerId: 'p1',
+        proposedPartner: null, // brand-new (no staged re-KYC patch)
+        createdAt: OLD,
+      });
+      mockTx.channelPartner.findUnique.mockResolvedValueOnce(freshPartner('p1'));
+      mockTx.channelPartner.delete.mockResolvedValueOnce({});
+      mockTx.kycSubmission.delete.mockResolvedValueOnce({});
+
+      const res = await service.cleanupStaleKycDrafts();
+      expect(mockTx.channelPartner.delete).toHaveBeenCalledWith({ where: { id: 'p1' } });
+      expect(mockTx.kycSubmission.delete).toHaveBeenCalledWith({ where: { id: 'd1' } });
+      expect(res).toEqual({ deletedDrafts: 1, deletedPartners: 1 });
+    });
+
+    it('re-KYC stale draft (proposedPartner present) → deletes ONLY the draft, partner untouched', async () => {
+      // Stage-at-approval: the live partner was never overwritten at draft time, so there is nothing
+      // to revert or delete — the abandoned re-KYC draft is simply dropped, partner left intact.
+      mockPrisma.kycSubmission.findMany
+        .mockResolvedValueOnce([{ id: 'd2' }])
+        .mockResolvedValue([]);
+      mockTx.kycSubmission.findUnique.mockResolvedValueOnce({
+        id: 'd2',
+        status: 'DRAFT',
+        partnerId: 'p2',
+        proposedPartner: { gstNumber: 'NEWGST', panNumber: 'NEWPAN' }, // staged re-KYC patch
+        createdAt: OLD,
+      });
+      mockTx.kycSubmission.delete.mockResolvedValueOnce({});
+
+      const res = await service.cleanupStaleKycDrafts();
+      // The partner is NEVER loaded, updated, or deleted for a re-KYC draft.
+      expect(mockTx.channelPartner.findUnique).not.toHaveBeenCalled();
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockTx.channelPartner.delete).not.toHaveBeenCalled();
+      expect(mockTx.kycSubmission.delete).toHaveBeenCalledWith({ where: { id: 'd2' } });
+      expect(res).toEqual({ deletedDrafts: 1, deletedPartners: 0 });
+    });
+
+    it('leaves a draft that routed since listing (status no longer DRAFT) untouched', async () => {
+      mockPrisma.kycSubmission.findMany
+        .mockResolvedValueOnce([{ id: 'd3' }])
+        .mockResolvedValue([]);
+      mockTx.kycSubmission.findUnique.mockResolvedValueOnce({
+        id: 'd3',
+        status: 'PENDING_SO_APPROVAL',
+        partnerId: 'p3',
+        proposedPartner: null,
+        createdAt: OLD,
+      });
+
+      const res = await service.cleanupStaleKycDrafts();
+      expect(mockTx.kycSubmission.delete).not.toHaveBeenCalled();
+      expect(mockTx.channelPartner.delete).not.toHaveBeenCalled();
+      expect(res).toEqual({ deletedDrafts: 0, deletedPartners: 0 });
+    });
+
+    it('strengthened deleteSafe: a partner with a REDEMPTION ORDER is NOT deleted (draft still dropped)', async () => {
+      mockPrisma.kycSubmission.findMany
+        .mockResolvedValueOnce([{ id: 'd4' }])
+        .mockResolvedValue([]);
+      mockTx.kycSubmission.findUnique.mockResolvedValueOnce({
+        id: 'd4',
+        status: 'DRAFT',
+        partnerId: 'p4',
+        proposedPartner: null, // brand-new-shaped
+        createdAt: OLD,
+      });
+      // Provably NOT fresh: a downstream redemption order exists → the partner became real → keep it.
+      mockTx.channelPartner.findUnique.mockResolvedValueOnce({
+        ...freshPartner('p4'),
+        redemptionOrders: [{ id: 'ro-1' }],
+      });
+      mockTx.kycSubmission.delete.mockResolvedValueOnce({});
+
+      const res = await service.cleanupStaleKycDrafts();
+      expect(mockTx.channelPartner.delete).not.toHaveBeenCalled();
+      expect(mockTx.kycSubmission.delete).toHaveBeenCalledWith({ where: { id: 'd4' } });
+      expect(res).toEqual({ deletedDrafts: 1, deletedPartners: 0 });
+    });
+
+    it('strengthened deleteSafe: a partner with a VISIBILITY SUBMISSION is NOT deleted', async () => {
+      mockPrisma.kycSubmission.findMany
+        .mockResolvedValueOnce([{ id: 'd5' }])
+        .mockResolvedValue([]);
+      mockTx.kycSubmission.findUnique.mockResolvedValueOnce({
+        id: 'd5',
+        status: 'DRAFT',
+        partnerId: 'p5',
+        proposedPartner: null,
+        createdAt: OLD,
+      });
+      mockTx.channelPartner.findUnique.mockResolvedValueOnce({
+        ...freshPartner('p5'),
+        visibilitySubmissions: [{ id: 'vs-1' }],
+      });
+      mockTx.kycSubmission.delete.mockResolvedValueOnce({});
+
+      const res = await service.cleanupStaleKycDrafts();
+      expect(mockTx.channelPartner.delete).not.toHaveBeenCalled();
+      expect(res).toEqual({ deletedDrafts: 1, deletedPartners: 0 });
     });
   });
 
@@ -2241,6 +2835,151 @@ describe('KycService', () => {
     });
   });
 
+  // ─── RE-KYC APPLY AT APPROVAL (stage-at-approval model) ──────────────────────
+  describe('approve — re-KYC proposedPartner apply', () => {
+    const CURRENT_PHONE = '9000011111';
+
+    /**
+     * Seed approve() for a re-KYC where `proposedPartner` is staged on the submission. The apply
+     * block runs inside applyBridgeOutcome BEFORE the login-phone-sync + wallet/activation.
+     * `opts.appliedPhone` = what a fresh partnerRow read returns after the apply (drives login-sync).
+     */
+    const seedReKycApprove = (
+      proposed: Record<string, unknown>,
+      opts: { appliedPhone?: string } = {},
+    ) => {
+      const partner = {
+        userId: 'owner-9',
+        clientId: 'deoleo',
+        isParent: false,
+        ownerName: 'Old Owner',
+        phone: CURRENT_PHONE,
+        outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: null, reKycFlags: null }],
+      };
+      const subRow = {
+        id: 's1', userId: 'user1', status: 'PENDING_GIFSY', partnerId: 'p1',
+        proposedPartner: proposed, user: { name: 'n', phone: 'p' }, partner,
+      };
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(subRow); // outer pre-tx load
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(subRow);     // in-tx re-assert
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
+      mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 }); // status flip wins
+      // login-phone-sync reads (only consumed once the apply succeeds).
+      mockTx.user.findUnique.mockResolvedValueOnce({ phone: CURRENT_PHONE, clientId: 'deoleo' });
+      mockTx.channelPartner.findUnique.mockResolvedValueOnce({ phone: opts.appliedPhone ?? CURRENT_PHONE });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({ id: 'w1' });
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.outlet.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+    };
+
+    it('APPLIES the proposed identity patch to the live partner at approval', async () => {
+      seedReKycApprove({ gstNumber: '29ABCDE1234F1Z5', panNumber: 'ABCDE1234F', bankName: 'HDFC' });
+      mockTx.channelPartner.findMany.mockResolvedValue([]); // group-uniqueness → clean
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' }); // the apply
+
+      await service.approve(gifsy, 's1');
+
+      // The ONE channelPartner.update is the apply of the proposed values onto the live partner.
+      expect(mockTx.channelPartner.update).toHaveBeenCalledWith({
+        where: { id: 'p1' },
+        data: expect.objectContaining({
+          gstNumber: '29ABCDE1234F1Z5',
+          panNumber: 'ABCDE1234F',
+          bankName: 'HDFC',
+        }),
+      });
+    });
+
+    it('APPLIES the staged outlet ADDRESS to the PRIMARY outlet at approval (same tx as the identity apply)', async () => {
+      seedReKycApprove({ addressLine1: 'New Addr 42', city: 'Pune', state: 'MH', pincode: '411001' });
+      mockTx.channelPartner.findMany.mockResolvedValue([]); // group-uniqueness → clean
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' }); // identity apply (no-op values)
+      mockTx.outlet.update.mockResolvedValueOnce({}); // the address apply
+
+      await service.approve(gifsy, 's1');
+
+      // The staged address is written to the PRIMARY outlet (partner.outlets[0]) in the SAME tx.
+      expect(mockTx.outlet.update).toHaveBeenCalledWith({
+        where: { id: 'outlet-1' },
+        data: { addressLine1: 'New Addr 42', city: 'Pune', state: 'MH', pincode: '411001' },
+      });
+    });
+
+    it('does NOT write the outlet when the staged patch carries NO address fields (no no-op update)', async () => {
+      seedReKycApprove({ gstNumber: '29ABCDE1234F1Z5' }); // identity-only re-KYC
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' });
+
+      await service.approve(gifsy, 's1');
+
+      // No address staged → the primary-outlet address write is skipped entirely.
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+    });
+
+    it('REJECTS approval on a group-uniqueness violation → partner untouched, no activation', async () => {
+      // Stage BOTH a conflicting identity AND an address change so the "outlet untouched" assertion
+      // below proves atomicity (the throw precedes the address apply), not just the empty-guard skip.
+      seedReKycApprove({ gstNumber: '29ABCDE1234F1Z5', addressLine1: 'Rolled Back Addr', city: 'Nowhere' });
+      // An outlet OUTSIDE the group already holds this GST → checkGroupUniqueness violation.
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) =>
+        args?.where?.partnerCode ? [] : [{ id: 'outsider', isParent: false, outlets: [{ parentId: null }] }],
+      );
+
+      await expect(service.approve(gifsy, 's1')).rejects.toBeInstanceOf(ConflictException);
+      // The live partner is NEVER mutated, and activation never happened (tx rolled back).
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+      // Atomic: the uniqueness check throws BEFORE the identity apply, so the staged address is
+      // never written to the outlet either — a rollback leaves partner AND outlet untouched.
+      expect(mockTx.outlet.update).not.toHaveBeenCalled();
+      expect(mockTx.user.update).not.toHaveBeenCalled();
+      expect(mockTx.wallet.create).not.toHaveBeenCalled();
+      expect(mockNotifications.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('re-KYC phone change to a number TAKEN since draft → approval fails cleanly, partner unchanged', async () => {
+      seedReKycApprove({ phone: '9000088888' }); // proposed phone differs from CURRENT_PHONE
+      // assertPhoneAvailable finds the new number already on another outlet → clean 400.
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({ businessName: 'Someone Else' });
+
+      await expect(service.approve(gifsy, 's1')).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockTx.user.update).not.toHaveBeenCalled();
+      expect(mockNotifications.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('re-KYC phone change to a FREE number → applied + login-phone-synced + sessions revoked', async () => {
+      seedReKycApprove({ phone: '9000088888' }, { appliedPhone: '9000088888' });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // assertPhoneAvailable: free
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);      // not an employee
+      mockTx.channelPartner.findMany.mockResolvedValue([]);            // group-uniqueness clean
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' }); // apply
+      mockTx.user.findFirst.mockResolvedValueOnce(null);               // login-sync: no other user holds it
+      mockTx.userSession.updateMany.mockResolvedValueOnce({ count: 3 });
+
+      await service.approve(gifsy, 's1');
+
+      // Contact phone applied to the partner…
+      expect(mockTx.channelPartner.update).toHaveBeenCalledWith({
+        where: { id: 'p1' },
+        data: expect.objectContaining({ phone: '9000088888' }),
+      });
+      // …and the login phone synced on the SAME owner row + old sessions revoked.
+      expect(mockTx.user.update).toHaveBeenCalledWith({
+        where: { id: 'owner-9' },
+        data: { status: 'ACTIVE', phone: '9000088888' },
+      });
+      const revokeArg = mockTx.userSession.updateMany.mock.calls[0][0];
+      expect(revokeArg.where).toMatchObject({ userId: 'owner-9', revokedAt: null });
+      expect(revokeArg.data.revokedAt).toBeInstanceOf(Date);
+    });
+  });
+
   describe('verifyField (POST /v1/kyc/:id/verify)', () => {
     /** Seed a in-tx PENDING_GIFSY re-assert. */
     const seedVerifyTx = (overrides?: Partial<{ outlets: unknown[] }>) => {
@@ -2858,6 +3597,73 @@ describe('KycService', () => {
       expect(res.submission.partner?.panNumber).toBe('ABCDE1234F');
       expect(res.submission.partner?.gstNumber).toBe('27AABCU9603R1ZM');
     });
+
+    it('surfaces the re-KYC proposedPartner (full for Gifsy) alongside the current live partner', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'user1',
+        partner: fullPartner, // current (approved) live values
+        proposedPartner: { gstNumber: 'NEWGST1234Z', panNumber: 'NEWPAN1234', bankAccountNumber: '999888777' },
+        documents: [],
+        statusHistory: [],
+        user: { id: 'user1', name: 'Kumar', phone: '9000000001', role: 'RETAILER' },
+      });
+      const res = await service.getOne(gifsy, 's1') as { submission: { proposedPartner: Record<string, unknown> | null; partner: Record<string, unknown> | null } };
+      // Current partner unchanged; proposed surfaced in full for a privileged (Gifsy) reviewer.
+      expect(res.submission.partner?.gstNumber).toBe('27AABCU9603R1ZM');
+      expect(res.submission.proposedPartner).toMatchObject({
+        gstNumber: 'NEWGST1234Z',
+        panNumber: 'NEWPAN1234',
+        bankAccountNumber: '999888777',
+      });
+    });
+
+    it('surfaces the staged OUTLET ADDRESS on proposedPartner (not PII-masked) alongside the current outlet address', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'other',
+        // Current (approved) outlet address lives on the live partner's primary outlet.
+        partner: { ...fullPartner, outlets: [{ id: 'outlet-1', isPrimary: true, addressLine1: 'Old Addr 1', city: 'Mumbai', state: 'MH', pincode: '400058' }] },
+        // Proposed re-KYC patch carries the new address (+ an identity field to prove masking still runs).
+        proposedPartner: { addressLine1: 'New Addr 42', city: 'Pune', state: 'MH', pincode: '411001', panNumber: 'ABCDE1234F' },
+        documents: [],
+        statusHistory: [],
+        user: { id: 'other', name: 'X', phone: '9', role: 'RETAILER' },
+      });
+      // A masked (MIS) reader: address passes through unchanged; PAN is still last-4 masked.
+      const res = await service.getOne(mis, 's1') as {
+        submission: {
+          proposedPartner: Record<string, unknown> | null;
+          partner: { outlets: Array<Record<string, unknown>> } | null;
+        };
+      };
+      // Proposed address surfaced in full (not PII) for the reviewer to diff.
+      expect(res.submission.proposedPartner).toMatchObject({
+        addressLine1: 'New Addr 42', city: 'Pune', state: 'MH', pincode: '411001',
+      });
+      // Non-address PII on the proposed patch is still masked.
+      expect(res.submission.proposedPartner?.panNumber).toBe('****234F');
+      // The live outlet address is UNCHANGED (still the current/approved value) — the proposed
+      // address lives only on proposedPartner.
+      expect(res.submission.partner?.outlets[0].addressLine1).toBe('Old Addr 1');
+    });
+
+    it('MASKS the proposedPartner sensitive fields for a masked (non-owner, non-admin) reader', async () => {
+      // A read-only MIS observer must not see full proposed PAN/GST/bank in the raw scalar either.
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'other',
+        partner: fullPartner,
+        proposedPartner: { gstNumber: '27AABCU9603R1ZM', panNumber: 'ABCDE1234F', bankAccountNumber: '123456789012' },
+        documents: [],
+        statusHistory: [],
+        user: { id: 'other', name: 'X', phone: '9', role: 'RETAILER' },
+      });
+      const res = await service.getOne(mis, 's1') as { submission: { proposedPartner: Record<string, unknown> | null } };
+      expect(res.submission.proposedPartner?.panNumber).toBe('****234F');
+      expect(res.submission.proposedPartner?.gstNumber).toBe('****R1ZM');
+      expect(res.submission.proposedPartner?.bankAccountNumber).toBe('****9012');
+    });
   });
 
   // ── Task 3.4d: review-queue ──────────────────────────────────────────────────
@@ -2926,6 +3732,46 @@ describe('KycService', () => {
       // PAYMENT is APPROVED (from verificationItems)
       expect(entry.fields['PAYMENT'].decision).toBe('APPROVED');
       expect(entry.fields['PAYMENT'].source).toBe('PORTAL');
+    });
+
+    it('re-KYC: OVERLAYS the staged proposedPartner values over the stale live partner', async () => {
+      // Stage-at-approval: the live partner still holds OLD gst/pan; the PROPOSED values under
+      // review live on proposedPartner. The reviewer queue must show what is being approved.
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
+        {
+          id: 'SUB-Q-RK',
+          boardPhotoLat: null,
+          boardPhotoLng: null,
+          proposedPartner: { gstNumber: 'NEWGST999', panNumber: 'NEWPAN999', upiId: 'new@upi', addressLine1: 'New Addr 42', city: 'Pune', state: 'MH', pincode: '411001' },
+          user: { name: 'Owner A', phone: '9820100001', clientId: 'deoleo' },
+          partner: {
+            businessName: 'Kumar Store',
+            ownerName: 'Kumar',
+            phone: '9820100001',
+            gstNumber: 'OLDGST000', // stale live value
+            panNumber: 'OLDPAN000', // stale live value
+            bankName: 'HDFC',
+            bankAccountNumber: '50100',
+            bankAccountHolder: 'Kumar',
+            ifscCode: 'HDFC0001',
+            upiId: null,
+            paymentMode: 'bank',
+            outlets: [{ outletCode: 'OUT-Q-RK', name: 'Kumar Store', addressLine1: 'x', addressLine2: null, city: 'M', state: 'MH', pincode: '400058', programName: 'Gold', outletType: { name: 'SSS' } }],
+          },
+          verificationItems: [],
+        },
+      ]);
+
+      const result = await service.reviewQueue(gifsy);
+      const entry = result.entries[0];
+      // The reviewer sees the PROPOSED (pending-approval) identity, not the stale live values.
+      expect(entry.gstNumber).toBe('NEWGST999');
+      expect(entry.panNumber).toBe('NEWPAN999');
+      expect(entry.upiId).toBe('new@upi');
+      // ...AND the proposed ADDRESS (overlaid onto outlets[0]), not the stale 'x' — reviewer must
+      // not approve an address change against the old address on the bulk/queue surface.
+      expect(entry.address).toContain('New Addr 42');
+      expect(entry.address).not.toContain('x');
     });
 
     it('defaults missing verification fields to PENDING', async () => {

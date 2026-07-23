@@ -36,6 +36,15 @@ import {
   applyReKycTextLock,
   type ReKycFlags,
 } from '../common/rekyc-fields';
+// Partner-child owner GROUP uniqueness (docs/plans/PARTNER-MULTI-OUTLET.md). The shared
+// contract: PAN identical-within-group + GST/bank/UPI unique-except-within-group per policy.
+// `acquireIdentityLocks` serializes concurrent same-value writers (advisory xact-lock);
+// `normalizeIdentityValue` is the canonical form for BOTH the check and the persisted value.
+import {
+  checkGroupUniqueness,
+  acquireIdentityLocks,
+  normalizeIdentityValue,
+} from '../common/partner-group.helper';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { KYC_FIELD_KEYS, BridgeResult } from './kyc-verification.helper';
@@ -265,32 +274,68 @@ export class KycService {
   }
 
   /**
+   * Canonical last-10-digit phone form — strips +91/91/punctuation. The SINGLE source
+   * of truth used by every phone match/uniqueness path (assertPhoneAvailable,
+   * checkPhoneAvailable, and the sibling-login `existingUser` lookup in create()), so a
+   * format variant (e.g. `91xxxxxxxxxx` vs `xxxxxxxxxx`) can never slip past one guard
+   * while another normalizes it (F2). Empty when the input has no digits.
+   */
+  private phoneLast10(raw: string | null | undefined): string {
+    return (raw ?? '').replace(/\D/g, '').slice(-10);
+  }
+
+  /**
    * Guard the outlet-owner mobile entered for KYC: it must NOT already belong to
    * another enrolled partner/outlet in the tenant, and must NOT be a sales
    * employee's number. Format-tolerant match on the last 10 digits.
    * `exceptPartnerId` skips the partner being (re-)enrolled so Re-KYC of the same
    * outlet doesn't self-collide.
    */
-  private async assertPhoneAvailable(clientId: string, rawMobile: string, exceptPartnerId?: string | null): Promise<void> {
-    const mobile = (rawMobile ?? '').replace(/\D/g, '').slice(-10);
+  private async assertPhoneAvailable(
+    clientId: string,
+    rawMobile: string,
+    exceptPartnerId?: string | null,
+    // Group context (partner-child owner groups). `ourParentId` = the group of the outlet
+    // under KYC (null = ungrouped). `phoneEnforced` = the tenant policy's phone flag.
+    // Both default to today's strict behavior for any caller that doesn't pass them.
+    opts?: { ourParentId?: string | null; phoneEnforced?: boolean },
+  ): Promise<void> {
+    const mobile = this.phoneLast10(rawMobile);
     if (mobile.length !== 10) {
       throw new BadRequestException('Enter a valid 10-digit mobile number');
     }
 
-    const partnerClash = await this.prisma.channelPartner.findFirst({
-      where: {
-        clientId,
-        phone: { endsWith: mobile },
-        ...(exceptPartnerId ? { id: { not: exceptPartnerId } } : {}),
-      },
-      select: { businessName: true },
-    });
-    if (partnerClash) {
-      throw new BadRequestException(
-        `This number is already registered to another outlet${partnerClash.businessName ? ` (${partnerClash.businessName})` : ''}. Each outlet must have a unique contact number.`,
-      );
+    const ourParentId = opts?.ourParentId ?? null;
+    const phoneEnforced = opts?.phoneEnforced ?? true;
+
+    // Outlet↔outlet phone uniqueness — tenant-policy gated + GROUP-AWARE. When the tenant
+    // disables phone uniqueness (`phoneEnforced=false`) we skip this entirely. When the
+    // outlet under KYC is GROUPED (`ourParentId` set), a phone shared with a SAME-GROUP
+    // sibling does NOT block — the `NOT { outlets.some.parentId == ourParentId }` filter
+    // excludes any partner that is a member of our group (the group shares one login).
+    // A phone on an outlet OUTSIDE the group still blocks. Parents (isParent) and
+    // soft-deleted partners never participate in the outlet-clash.
+    if (phoneEnforced) {
+      const partnerClash = await this.prisma.channelPartner.findFirst({
+        where: {
+          clientId,
+          phone: { endsWith: mobile },
+          isParent: false,
+          deletedAt: null,
+          ...(exceptPartnerId ? { id: { not: exceptPartnerId } } : {}),
+          ...(ourParentId ? { NOT: { outlets: { some: { parentId: ourParentId } } } } : {}),
+        },
+        select: { businessName: true },
+      });
+      if (partnerClash) {
+        throw new BadRequestException(
+          `This number is already registered to another outlet${partnerClash.businessName ? ` (${partnerClash.businessName})` : ''}. Each outlet must have a unique contact number.`,
+        );
+      }
     }
 
+    // Sales-employee phone clash is ALWAYS blocked, regardless of policy/grouping — an
+    // outlet KYC can never reuse a team member's number.
     const employeeClash = await this.prisma.salesUser.findFirst({
       where: { deletedAt: null, user: { clientId, phone: { endsWith: mobile } } },
       select: { user: { select: { name: true } } },
@@ -323,7 +368,7 @@ export class KycService {
     user: JwtPayload,
     rawPhone: string,
   ): Promise<{ available: boolean; conflictType: 'EMPLOYEE' | null }> {
-    const mobile = (rawPhone ?? '').replace(/\D/g, '').slice(-10);
+    const mobile = this.phoneLast10(rawPhone);
     if (mobile.length !== 10) {
       throw new BadRequestException('Enter a valid 10-digit mobile number');
     }
@@ -351,7 +396,25 @@ export class KycService {
     });
     if (!submission) throw new NotFoundException('KYC submission not found');
 
-    await this.assertPhoneAvailable(user.clientId, dto.mobile, submission.partnerId);
+    // Group-aware phone re-validation (partner-child owner groups): a grouped sibling
+    // that legitimately shares the group phone was ALLOWED at create() time — this gate
+    // must not now block it (that would strand the sibling before consent). Resolve the
+    // outlet's group + the tenant phone policy so assertPhoneAvailable is consistent with
+    // create(). Ungrouped/unconfigured tenants keep today's strict behavior.
+    const { uniquenessPolicy } = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    let ourParentId: string | null = null;
+    if (submission.partnerId) {
+      const grp = await this.prisma.outlet.findFirst({
+        where: { partnerId: submission.partnerId, clientId: user.clientId },
+        select: { parentId: true },
+      });
+      ourParentId = grp?.parentId ?? null;
+    }
+
+    await this.assertPhoneAvailable(user.clientId, dto.mobile, submission.partnerId, {
+      ourParentId,
+      phoneEnforced: uniquenessPolicy.phone,
+    });
 
     const mobile = dto.mobile.replace(/\D/g, '').slice(-10);
     const otp = this.generateOtpCode();
@@ -473,6 +536,9 @@ export class KycService {
    * "****<last4>" on the partner object. Full values are never stored differently —
    * the mask is applied at the response layer only.
    * Privileged callers (GIFSY_ADMIN / CLIENT_ADMIN) receive the unmasked values.
+   * NB: every OTHER field (incl. a re-KYC's staged OUTLET ADDRESS on proposedPartner —
+   * addressLine1/city/state/pincode) passes through UNCHANGED via the spread — address is
+   * not PII (not PAN/bank/GST), so the reviewer always sees the proposed address in full.
    */
   private maskPartnerSensitiveFields<T extends Record<string, unknown>>(partner: T, mask: boolean): T {
     if (!mask) return partner;
@@ -486,6 +552,63 @@ export class KycService {
       panNumber: last4(partner.panNumber),
       gstNumber: last4(partner.gstNumber),
     };
+  }
+
+  /**
+   * Reviewer-facing EFFECTIVE identity/payout values (stage-at-approval model). A re-KYC stages its
+   * PROPOSED values on `KycSubmission.proposedPartner` and does NOT write them to the live
+   * ChannelPartner until approval — so a reviewer queue/export must OVERLAY those proposed values
+   * over the (still-current) live partner values, else the reviewer would see + approve STALE data.
+   * `proposedPartner` null (brand-new KYC / no re-KYC) → the live partner passes through unchanged.
+   * An absent proposed key falls back to the live value (matches the apply's "undefined = untouched").
+   * Overlays the identity/payout scalars AND the staged outlet ADDRESS (onto the PRIMARY outlet,
+   * `outlets[0]` — the same outlet the approval applies the address to), so a reviewer queue/export
+   * that reads `outlets[0].address*` sees the PROPOSED address, not stale. Other outlets + fields preserved.
+   */
+  private overlayProposedIdentity<T extends object>(
+    partner: T | null,
+    proposedPartner: Prisma.JsonValue | null | undefined,
+  ): T | null {
+    if (!partner || !proposedPartner || typeof proposedPartner !== 'object' || Array.isArray(proposedPartner)) {
+      return partner;
+    }
+    const prop = proposedPartner as Record<string, unknown>;
+    const cur = partner as Record<string, unknown>;
+    const pick = (k: string): unknown =>
+      typeof prop[k] === 'string' && (prop[k] as string).length > 0 ? prop[k] : cur[k];
+
+    // Overlay the staged address onto the PRIMARY outlet (outlets[0]) so bulk/queue/Excel review
+    // surfaces (which read outlets[0].address*) show what's being approved, not the stale address.
+    const outlets = cur.outlets;
+    const overlaidOutlets =
+      Array.isArray(outlets) && outlets.length > 0
+        ? [
+            {
+              ...(outlets[0] as Record<string, unknown>),
+              addressLine1: pick('addressLine1'),
+              city: pick('city'),
+              state: pick('state'),
+              pincode: pick('pincode'),
+            },
+            ...outlets.slice(1),
+          ]
+        : outlets;
+
+    return {
+      ...cur,
+      ...(overlaidOutlets !== undefined ? { outlets: overlaidOutlets } : {}),
+      businessName: pick('businessName'),
+      ownerName: pick('ownerName'),
+      phone: pick('phone'),
+      gstNumber: pick('gstNumber'),
+      panNumber: pick('panNumber'),
+      bankName: pick('bankName'),
+      bankAccountNumber: pick('bankAccountNumber'),
+      bankAccountHolder: pick('bankAccountHolder'),
+      ifscCode: pick('ifscCode'),
+      upiId: pick('upiId'),
+      paymentMode: pick('paymentMode'),
+    } as T;
   }
 
   /**
@@ -813,13 +936,26 @@ export class KycService {
    * (CP-<outletCode>) and a numeric suffix is appended on a P2002 collision.
    * A P2002 on the (clientId, gstNumber) unique is surfaced as a clean
    * BadRequestException (never a 500).
+   *
+   * `userId` may be NULL — a grouped sibling that reuses the group's shared phone is
+   * login-less (its owner login is the group's existing User, reached via the picker),
+   * so it must NOT create a second User (User @@unique([clientId, phone])).
+   *
+   * GST group-aware uniqueness is now enforced up-front by checkGroupUniqueness in
+   * create() (the old bare (clientId, gstNumber) pre-check was removed from here — it was
+   * NOT group-aware and would wrongly block a legitimate sibling-shared GST). The P2002
+   * catch below is retained ONLY as a race/DB-constraint safety net so a collision never
+   * surfaces as a tx-aborting 500.
    */
   private async createPartnerWithUniqueCode(
     tx: Prisma.TransactionClient,
     args: {
       clientId: string;
-      userId: string;
+      userId: string | null;
       outletCode: string;
+      // DERIVED group key, set inline at create to avoid a NULL window before the outlets
+      // trigger fires (null = ungrouped → hosts the (clientId,gst/pan) partial-unique index).
+      groupId: string | null;
       details: {
         businessName: string;
         ownerName: string;
@@ -835,25 +971,12 @@ export class KycService {
       };
     },
   ): Promise<string> {
-    // PRE-RESOLVE every unique BEFORE the insert. A create that P2002s INSIDE a
+    // PRE-RESOLVE the partnerCode unique BEFORE the insert. A create that P2002s INSIDE a
     // $transaction aborts the WHOLE tx, so the old "retry on the next suffix" loop
     // could not work — the retry hit "current transaction is aborted" and surfaced
     // as a 500. We also must NOT branch on `e.meta.target` (empty/unreliable under
-    // the Prisma pg driver adapter — that's why gst collisions became 500s). So we
-    // resolve a collision-free code + reject a duplicate GST up front instead.
-
-    // (clientId, gstNumber) unique → clean 400 rather than a tx-aborting insert.
-    if (args.details.gstNumber) {
-      const gstOwner = await tx.channelPartner.findFirst({
-        where: { clientId: args.clientId, gstNumber: args.details.gstNumber },
-        select: { id: true },
-      });
-      if (gstOwner) {
-        throw new BadRequestException(
-          'This GST number is already registered to another partner in this tenant.',
-        );
-      }
-    }
+    // the Prisma pg driver adapter). So we resolve a collision-free code up front.
+    // (GST uniqueness is now handled group-aware by checkGroupUniqueness in create().)
 
     // (clientId, partnerCode) unique → pick the first free CP-<outletCode>[-N].
     const base = `CP-${args.outletCode}`;
@@ -875,6 +998,7 @@ export class KycService {
           userId: args.userId,
           partnerCode,
           isActive: true,
+          groupId: args.groupId,
           ...args.details,
         },
         select: { id: true },
@@ -911,9 +1035,14 @@ export class KycService {
       escalatedFrom: string | null;
       partnerId: string;
       inFlightStatuses: string[];
+      // PROPOSED (new) identity/payout values PLUS the OUTLET ADDRESS {addressLine1, city, state,
+      // pincode} for a re-KYC draft (undefined for a brand-new-outlet draft → column stays NULL).
+      // Under the stage-at-approval model these are staged here and NOT written to the live
+      // ChannelPartner/Outlet until Gifsy approval (applyBridgeOutcome).
+      proposedPartner?: Prisma.InputJsonValue;
     },
   ) {
-    const { user, dto, status, escalatedFrom, partnerId, inFlightStatuses } = args;
+    const { user, dto, status, escalatedFrom, partnerId, inFlightStatuses, proposedPartner } = args;
 
     const existing = await tx.kycSubmission.findFirst({
       where: {
@@ -934,6 +1063,8 @@ export class KycService {
         escalatedFrom: escalatedFrom ?? null,
         reviewerNotes: dto.reviewerNotes ?? null,
         addressNameMismatch: dto.addressNameMismatch ?? false,
+        // undefined → Prisma omits the column → stays NULL (brand-new-outlet draft).
+        proposedPartner: proposedPartner,
         submittedAt: new Date(),
 
         boardPhotoLat: dto.boardPhotoGeo?.lat ?? null,
@@ -968,12 +1099,24 @@ export class KycService {
     });
     if (!outlet) throw new NotFoundException('Outlet not found');
 
+    // Tenant uniqueness policy + this outlet's GROUP (parentId) drive the identity/phone
+    // uniqueness gates below (partner-child owner groups — PARTNER-MULTI-OUTLET.md).
+    // Fetched once here (cached) and reused for the payout-mandate guard's salesApp too.
+    // `ourParentId` = null for the ~2,900 ungrouped Deoleo outlets → strict, current behavior.
+    const settings = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    const { salesApp, uniquenessPolicy } = settings;
+    const ourParentId = outlet.parentId ?? null;
+
     // Guard the owner phone BEFORE any write (H1): it must not belong to a sales
-    // EMPLOYEE or to a DIFFERENT existing partner/outlet. `exceptPartnerId` skips this
-    // outlet's own partner so Re-KYC of the same outlet doesn't self-collide. This
-    // prevents attaching the outlet's wallet/payouts (and the on-approval activation)
+    // EMPLOYEE or to a DIFFERENT existing partner/outlet OUTSIDE this group. `exceptPartnerId`
+    // skips this outlet's own partner so Re-KYC of the same outlet doesn't self-collide; the
+    // group context lets a same-group sibling legitimately share the phone (tenant-policy gated).
+    // This prevents attaching the outlet's wallet/payouts (and the on-approval activation)
     // to the wrong account. Throws a clean 400.
-    await this.assertPhoneAvailable(user.clientId, dto.mobile, outlet.partnerId ?? undefined);
+    await this.assertPhoneAvailable(user.clientId, dto.mobile, outlet.partnerId ?? undefined, {
+      ourParentId,
+      phoneEnforced: uniquenessPolicy.phone,
+    });
 
     // Map outlet type code → owner UserRole. Unknown/other → SSS (default).
     const OUTLET_TYPE_TO_ROLE: Record<string, 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST'> = {
@@ -1061,7 +1204,7 @@ export class KycService {
     // satisfies the guard.
     const requiredType = outlet.requiredPaymentType;
     // Tenant UPI gate: UPI is never usable when salesApp.upiEnabled is false.
-    const { salesApp } = await this.tenantSettings.getEffectiveSettings(user.clientId);
+    // (`salesApp` was resolved once from getEffectiveSettings above.)
     const upiEnabled = salesApp.upiEnabled;
 
     // Resolve the effective payout mode: prefer the DTO's explicit mode (the FE always
@@ -1120,24 +1263,42 @@ export class KycService {
       throw new BadRequestException('UPI payout requires a upiId.');
     }
 
-    // Common ChannelPartner detail patch (bank + identity) from the LOCKED text.
+    // WRITE-SIDE NORMALIZATION (F5). The uniqueness fields (gst/pan/bank/upi) are persisted
+    // through the SAME `normalizeIdentityValue` the helper uses to compare/lock — PAN & GST
+    // upper-cased+trimmed, bank/UPI trimmed. This guarantees the stored value equals its
+    // canonical form, so a whitespace/case variant can never slip a duplicate past the check
+    // (audit finding). A normalized-empty value maps to `undefined` (not null) to preserve the
+    // established semantics: on a re-KYC UPDATE `undefined` leaves the stored value untouched
+    // (never clobbers an existing GST/PAN), and on create it stores NULL — never '' (an empty
+    // string is a real value that would collide the partial-unique index; NULLs do not).
+    const persistIdentity = (
+      field: 'gst' | 'pan' | 'bank' | 'upi',
+      v: unknown,
+    ): string | undefined => normalizeIdentityValue(field, v as string | null | undefined) ?? undefined;
+
     const partnerDetails = {
       businessName: text.partnerName as string,
       ownerName: text.partnerName as string,
       phone: text.mobile as string,
-      // Normalise a blank/whitespace GST to undefined → stored as NULL, never ''.
-      // The column is `@@unique([clientId, gstNumber])`; an empty string is a real
-      // value that collides, so a SECOND outlet with no GST would hit P2002. NULLs
-      // do not collide. (undefined also avoids clobbering an existing GST on update.)
-      gstNumber: (text.gstNumber as string | undefined)?.trim() || undefined,
-      panNumber: (text.panNumber as string | undefined) ?? undefined,
+      gstNumber: persistIdentity('gst', text.gstNumber),
+      panNumber: persistIdentity('pan', text.panNumber),
       bankName: (text.bankName as string | undefined) ?? undefined,
-      bankAccountNumber: (text.accountNumber as string | undefined) ?? undefined,
+      bankAccountNumber: persistIdentity('bank', text.accountNumber),
       bankAccountHolder: (text.accountHolderName as string | undefined) ?? undefined,
       ifscCode: (text.ifscCode as string | undefined) ?? undefined,
-      upiId: (text.upiId as string | undefined) ?? undefined,
+      upiId: persistIdentity('upi', text.upiId),
       // paymentMode is not a re-KYC-flagged field → always taken from the DTO.
       paymentMode: dto.paymentMode ?? undefined,
+    };
+
+    // Identity details for the GROUP-AWARE uniqueness gate — built from the LOCKED/effective
+    // values actually being persisted (so a re-KYC resubmit that pins non-flagged fields to
+    // stored is validated against those, not the raw payload).
+    const groupUniquenessDetails = {
+      gstNumber: partnerDetails.gstNumber ?? null,
+      panNumber: partnerDetails.panNumber ?? null,
+      bankAccountNumber: partnerDetails.bankAccountNumber ?? null,
+      upiId: partnerDetails.upiId ?? null,
     };
 
     // 2. The submission is SAVED as DRAFT here and NOT yet routed to an approver.
@@ -1164,101 +1325,212 @@ export class KycService {
     // 3. All resolve-or-create + submission writes in ONE transaction so a partial
     //    failure can't orphan a User without a ChannelPartner.
     const submission = await this.prisma.$transaction(async (tx) => {
+      // 3a-(-1). ADVISORY LOCK (partner-child owner groups). Serialize concurrent writers of the
+      //   SAME identity value BEFORE the read-then-write uniqueness check below, so two txns
+      //   inserting the same GST/PAN/bank/UPI can't both pass the check and race a duplicate in.
+      //   The lock is transaction-scoped (auto-released on commit/rollback) and keyed on the SAME
+      //   normalized values the check + write use. For PAN/GST it backstops the partial-unique DB
+      //   index; for bank/UPI (no DB rule — tenant-configurable) it is the ONLY race guard.
+      await acquireIdentityLocks(tx, {
+        clientId: user.clientId,
+        details: groupUniquenessDetails,
+        policy: uniquenessPolicy,
+      });
+
+      // 3a-0. GROUP-AWARE IDENTITY UNIQUENESS (partner-child owner groups). For the BRAND-NEW branch
+      //   this is the AUTHORITATIVE reservation (the partner is created here). For a re-KYC (stage-at-
+      //   approval) it is a NON-AUTHORITATIVE EARLY-UX pre-check only — a helpful 400 for the rep — as
+      //   the re-KYC no longer writes the partner here; the authoritative lock + check + apply run at
+      //   approval (applyBridgeOutcome). Either way it REPLACES the old bare (clientId, gstNumber)
+      //   single-field pre-checks (NOT group-aware). Enforces: PAN identical-within-group + absent-
+      //   outside; GST/bank/UPI unique-except-within-group (per tenant policy). `exceptPartnerId` =
+      //   this outlet's existing partner so a re-KYC of the SAME partner never clashes with itself. An
+      //   UNGROUPED outlet (ourParentId=null) → every clash is "outside" → today's strict behavior.
+      const violation = await checkGroupUniqueness(tx, {
+        clientId: user.clientId,
+        ourParentId,
+        details: groupUniquenessDetails,
+        policy: uniquenessPolicy,
+        exceptPartnerId: outlet.partnerId ?? null,
+      });
+      if (violation) throw new BadRequestException(violation.message);
+
       // 3a. Resolve-or-create the ChannelPartner that OWNS this outlet.
       let partnerId: string;
+      // PROPOSED (new) identity/payout + OUTLET ADDRESS patch for a re-KYC draft, staged on this
+      // DRAFT's `proposedPartner` JSON. Under the STAGE-AT-APPROVAL model a re-KYC never overwrites
+      // the live, already-approved ChannelPartner OR its Outlet at draft time — the proposed values
+      // are applied ONLY at Gifsy approval (applyBridgeOutcome). A brand-new-outlet draft leaves
+      // this undefined (column NULL) — it reserves its identity by CREATING the partner + writing
+      // the outlet address directly (nothing is staged; the brand-new entity IS the draft).
+      // Shape (re-KYC only): identity/payout scalars {businessName, ownerName, phone, gstNumber,
+      //   panNumber, bankName, bankAccountNumber, bankAccountHolder, ifscCode, upiId, paymentMode}
+      //   + the OUTLET ADDRESS {addressLine1, city, state, pincode} (the four fields the live
+      //   outlet.update writes; addressLine2 isn't captured separately by the form → omitted).
+      let proposedSnapshot: Prisma.InputJsonValue | undefined;
 
       if (outlet.partnerId) {
-        // Re-KYC / already-owned outlet → update the existing partner's details.
-        // PRE-CHECK the (clientId, gstNumber) unique against OTHER partners so a
-        // collision returns a clean 400 instead of aborting the tx (a P2002 inside
-        // the tx would abort it, and `e.meta.target` is unreliable under the pg
-        // driver adapter, so we must not depend on it).
-        if (partnerDetails.gstNumber) {
-          const gstOwner = await tx.channelPartner.findFirst({
-            where: {
-              clientId: user.clientId,
-              gstNumber: partnerDetails.gstNumber,
-              id: { not: outlet.partnerId },
-            },
-            select: { id: true },
-          });
-          if (gstOwner) {
-            throw new BadRequestException(
-              'This GST number is already registered to another partner in this tenant.',
-            );
-          }
-        }
-        try {
-          const updated = await tx.channelPartner.update({
-            where: { id: outlet.partnerId },
-            data: partnerDetails,
-            select: { id: true },
-          });
-          partnerId = updated.id;
-        } catch (e) {
-          // Race safety net — surface any residual unique collision as a clean 400,
-          // never a 500. Do NOT retry (the tx is aborted after a failed statement).
-          if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-            throw new BadRequestException(
-              'This GST number is already registered to another partner in this tenant.',
-            );
-          }
-          throw e;
-        }
-      } else {
-        // Partner-less (brand-new) outlet → create the owner User + its partner.
-        // assertPhoneAvailable() above already blocked the phone if it belongs to a
-        // sales employee or an existing partner, so any user STILL found by this
-        // phone is some OTHER account (e.g. an admin) and must NOT be repurposed as
-        // an outlet owner (H1). Skip soft-deleted rows (M2). Reject cleanly.
-        const existingUser = await tx.user.findFirst({
-          where: { clientId: user.clientId, phone: dto.mobile, deletedAt: null },
-          select: { id: true },
-        });
-        if (existingUser) {
-          throw new BadRequestException(
-            'This number is already registered to another account and cannot be used for an outlet.',
-          );
-        }
-
-        // Create the owner User in PENDING_VERIFICATION (NOT a usable login until
-        // GIFSY approval flips it to ACTIVE), then its ChannelPartner.
-        const created = await tx.user.create({
-          data: {
-            clientId: user.clientId,
-            phone: dto.mobile,
-            name: dto.partnerName,
-            role: ownerRole,
-            status: 'PENDING_VERIFICATION',
-          },
-          select: { id: true },
-        });
-        partnerId = await this.createPartnerWithUniqueCode(tx, {
-          clientId: user.clientId,
-          userId: created.id,
-          outletCode: outlet.outletCode,
-          details: partnerDetails,
-        });
-      }
-
-      // 3b. Link the outlet to the resolved partner (if needed) AND persist the
-      //     KYC-captured address onto the OUTLET. The submitted address lives on
-      //     Outlet, not ChannelPartner (schema: `addressLine1 // captured at KYC`),
-      //     and was previously never written — so the reviewer saw a blank address.
-      //     Always write the address so the latest submission's address is shown.
-      await tx.outlet.update({
-        where: { id: outlet.id },
-        data: {
-          ...(outlet.partnerId !== partnerId ? { partnerId } : {}),
-          // Address fields come from the LOCKED text (pinned to stored when not re-KYC-flagged).
+        // Re-KYC / already-owned outlet → STAGE the proposed changes; do NOT touch the partner OR
+        // the outlet address. The top-of-tx acquireIdentityLocks + checkGroupUniqueness above ran as
+        // a non-authoritative EARLY-UX pre-check (helpful error for the rep) — the AUTHORITATIVE lock
+        // + uniqueness check + apply happen at approval, so an approved partner/outlet never carries
+        // unverified re-KYC values.
+        // TODO(wave4): PAN-change-to-leave-group ordering — see PARTNER-MULTI-OUTLET.md §4.5; resolve with owner before enabling group-leave via re-KYC
+        partnerId = outlet.partnerId;
+        // Stage the normalized, re-KYC-lock-applied identity patch (identity fields already
+        // normalized via normalizeIdentityValue in partnerDetails) PLUS the KYC-captured outlet
+        // address (pinned to stored for non-flagged fields by the re-KYC text lock above). `undefined`
+        // values are dropped by the JSON serialization → at apply time an absent key means "leave
+        // that field untouched" (preserving the exact semantics of the old in-place partner+outlet
+        // updates). Address is applied to the PRIMARY outlet at approval (applyBridgeOutcome).
+        proposedSnapshot = {
+          ...partnerDetails,
           addressLine1: text.address as string,
           city: text.city as string,
           state: text.state as string,
           pincode: text.pincode as string,
-        },
-      });
+        } as unknown as Prisma.InputJsonValue;
+      } else {
+        // Partner-less (brand-new) outlet → resolve the owner login, then create the partner.
+        // assertPhoneAvailable() above already blocked the phone if it belongs to a sales
+        // employee or an existing partner OUTSIDE this group.
+        //
+        // Match by the LAST-10 digits (F2), the SAME normalization assertPhoneAvailable uses.
+        // A raw `phone: dto.mobile` exact-match would MISS a same-digits User stored in a
+        // different format (e.g. `91xxxxxxxxxx` vs `xxxxxxxxxx`), and — because
+        // User @@unique([clientId, phone]) keys on the FULL string — would then create a
+        // SECOND login for the same number instead of reusing the group's login-less sibling.
+        const existingUser = await tx.user.findFirst({
+          where: { clientId: user.clientId, phone: { endsWith: this.phoneLast10(dto.mobile) }, deletedAt: null },
+          select: { id: true, status: true, role: true },
+        });
 
-      // 3c. Create the submission (duplicate guard scoped to THIS partner).
+        // Owner login for the new partner. Null = LOGIN-LESS (a grouped sibling that reuses
+        // the group's shared phone; its login is the group's existing User, reached via the
+        // picker — Stream D). User @@unique([clientId, phone]) means we must NOT create a
+        // second User for a phone that already has one.
+        let ownerUserId: string | null;
+        if (existingUser) {
+          // A User already carries this phone. For a GROUPED outlet whose group-aware phone
+          // check PASSED, this existing User should be the group's single login. We confirm
+          // it genuinely belongs to a SAME-GROUP sibling before reusing it as login-less;
+          // otherwise it's some OTHER account (e.g. an admin) and must NOT be repurposed as
+          // an outlet owner (H1).
+          const sameGroupSibling =
+            ourParentId != null
+              ? await tx.channelPartner.findFirst({
+                  where: {
+                    clientId: user.clientId,
+                    userId: existingUser.id,
+                    isParent: false,
+                    deletedAt: null,
+                    outlets: { some: { parentId: ourParentId, clientId: user.clientId } },
+                  },
+                  select: { id: true },
+                })
+              : null;
+
+          if (sameGroupSibling) {
+            // Login-less sibling: reuse the group's existing login (do NOT create a 2nd User).
+            ownerUserId = null;
+          } else {
+            // SAFE-ORPHAN REUSE (approach B). For an UNGROUPED outlet, this phone may belong to an
+            // ORPHANED owner-login left behind when the 48h stale-draft cleanup HARD-DELETED an
+            // abandoned brand-new partner: the partner row is gone but its PENDING_VERIFICATION
+            // owner `User` survives, still holding the phone via User @@unique([clientId, phone]).
+            // Without reuse a fresh KYC on the SAME outlet+phone would be permanently rejected here
+            // (that User can never own the outlet → the outlet is un-KYC-able). assertPhoneAvailable()
+            // has already blocked any phone belonging to a sales EMPLOYEE or a live partner OUTSIDE
+            // this scope (for an ungrouped outlet that means ANY live partner), so a User reaching
+            // here that owns NO ChannelPartner is provably the SAME owner → REUSE it as the new
+            // partner's owner login instead of rejecting. All guards must hold: the outlet is
+            // ungrouped, the User is still PENDING_VERIFICATION, its role is an OUTLET-OWNER role
+            // (never an admin/sales login — H1), and it owns NO ChannelPartner (even a soft-deleted
+            // one — userId is @unique on ChannelPartner, so a surviving row would P2002 the create).
+            const isOwnerRole =
+              existingUser.role === 'SSS' ||
+              existingUser.role === 'WHOLESALER' ||
+              existingUser.role === 'SUB_STOCKIST';
+            const orphanEligible =
+              ourParentId == null && existingUser.status === 'PENDING_VERIFICATION' && isOwnerRole;
+            // Only pay for the "owns a partner?" read once the cheap gates pass.
+            const existingPartner = orphanEligible
+              ? await tx.channelPartner.findFirst({
+                  where: { userId: existingUser.id },
+                  select: { id: true },
+                })
+              : null;
+
+            if (orphanEligible && !existingPartner) {
+              // Reuse the orphan as THIS outlet's owner login. Refresh its name/role to the current
+              // submission (a brand-new partner for this outlet); approval later flips it ACTIVE.
+              // No 2nd User is created (User @@unique([clientId, phone])).
+              await tx.user.update({
+                where: { id: existingUser.id },
+                data: { name: dto.partnerName, role: ownerRole },
+              });
+              ownerUserId = existingUser.id;
+            } else {
+              // A real, DIFFERENT account (owns a partner, or is a non-owner/non-pending login) →
+              // never repurpose it as an outlet owner (H1).
+              throw new BadRequestException(
+                'This number is already registered to another account and cannot be used for an outlet.',
+              );
+            }
+          }
+        } else {
+          // Create the owner User in PENDING_VERIFICATION (NOT a usable login until
+          // GIFSY approval flips it to ACTIVE), then its ChannelPartner.
+          const created = await tx.user.create({
+            data: {
+              clientId: user.clientId,
+              phone: dto.mobile,
+              name: dto.partnerName,
+              role: ownerRole,
+              status: 'PENDING_VERIFICATION',
+            },
+            select: { id: true },
+          });
+          ownerUserId = created.id;
+        }
+        partnerId = await this.createPartnerWithUniqueCode(tx, {
+          clientId: user.clientId,
+          userId: ownerUserId,
+          outletCode: outlet.outletCode,
+          details: partnerDetails,
+          // Set the DERIVED group key inline at CREATE so a grouped-before-KYC sibling enters
+          // already-grouped — excluded from the (clientId,gst/pan) partial-unique index
+          // (WHERE groupId IS NULL) with NO NULL window (the outlets trigger would otherwise
+          // only set it moments later). Ungrouped outlet → null → strict partial index applies.
+          groupId: outlet.parentId ?? null,
+        });
+      }
+
+      // 3b. Link the outlet to its partner AND persist the KYC-captured address — for a BRAND-NEW
+      //     outlet ONLY. The submitted address lives on Outlet, not ChannelPartner (schema:
+      //     `addressLine1 // captured at KYC`). Under the STAGE-AT-APPROVAL model a RE-KYC no longer
+      //     writes the address to the live Outlet here — it is staged on proposedPartner (above) and
+      //     applied to the primary outlet ONLY at Gifsy approval (applyBridgeOutcome), exactly like
+      //     the identity/payout fields, so an approved outlet never carries an unverified address.
+      //     For a re-KYC the partnerId is unchanged (partnerId === outlet.partnerId), so there is
+      //     nothing to write → the outlet.update is skipped entirely.
+      if (!outlet.partnerId) {
+        await tx.outlet.update({
+          where: { id: outlet.id },
+          data: {
+            partnerId,
+            // Address fields come from the LOCKED text (full form editable on a brand-new outlet).
+            addressLine1: text.address as string,
+            city: text.city as string,
+            state: text.state as string,
+            pincode: text.pincode as string,
+          },
+        });
+      }
+
+      // 3c. Create the submission (duplicate guard scoped to THIS partner). The re-KYC
+      //     PROPOSED patch (undefined for a brand-new-outlet draft) rides along as
+      //     `proposedPartner` — the values applied to the live partner only at approval.
       return this.createSubmissionRow(tx, {
         user,
         dto,
@@ -1266,6 +1538,7 @@ export class KycService {
         escalatedFrom,
         partnerId,
         inFlightStatuses: [...IN_FLIGHT_STATUSES],
+        proposedPartner: proposedSnapshot,
       });
     });
 
@@ -1404,6 +1677,157 @@ export class KycService {
     // "submitted" message must follow that confirmation, not this (pre-consent) create.
 
     return { submissionId: submission.id, status, escalatedFrom };
+  }
+
+  // ─── 48h STALE-DRAFT CLEANUP (partner-child owner groups) ────────────────────
+  /**
+   * Reclaim identity values (PAN/GST/bank/UPI) reserved by KYC DRAFTs that were started
+   * but never completed. A DRAFT create() already writes the partner's identity fields (and,
+   * for a brand-new outlet, creates the partner), so an abandoned DRAFT keeps "holding" those
+   * values against the group-uniqueness engine. After 48h we release them:
+   *
+   *   • Brand-new-outlet draft (partner created FOR this KYC, never routed/onboarded, no wallet)
+   *     → HARD-DELETE the partner, then delete the draft. A HARD delete (not a soft delete) is
+   *     required because it SetNulls the outlet's partnerId (onDelete: SetNull) so the outlet is
+   *     free to be re-KYC'd fresh (and its surviving owner login can be reused — see create()'s
+   *     safe-orphan branch). Freeing the partial-unique GST/PAN slot alone would NOT need a hard
+   *     delete: that index is `WHERE deletedAt IS NULL`, so a soft delete already drops the row
+   *     out of it — the outlet re-link is the real reason for the hard delete.
+   *   • Re-KYC draft (`proposedPartner` present) → the STAGE-AT-APPROVAL model means the live,
+   *     already-approved partner was NEVER overwritten at draft time (the proposed values live only
+   *     on the DRAFT's `proposedPartner` JSON and are applied to the partner ONLY at Gifsy approval).
+   *     So an abandoned re-KYC draft reserves NOTHING on the partner → we simply DELETE the draft;
+   *     there is no partner to revert, delete, or lock.
+   *
+   * The two cases are discriminated by `proposedPartner` (set only on a re-KYC create). The
+   * brand-new (partner-delete) path carries a delete-safety guard — no wallet, no non-DRAFT
+   * submission, and no downstream redemption/payout/visibility/leaderboard data of any kind — so a
+   * partner that became real between draft-create and cleanup is never destroyed.
+   *
+   * Idempotent + chunked: each draft is handled in its OWN small transaction (never one giant
+   * tx → avoids an at-scale statement-timeout 500), re-reading state inside the tx so a draft
+   * that routed/resubmitted in the meantime is left alone. A re-run simply finds fewer drafts.
+   *
+   * Invoked by an internal, secret-gated, Cloud-Scheduler-driven endpoint (see KycController.
+   * cleanupStaleDrafts) — Cloud Run throttles in-process timers, so it must be an HTTP hit.
+   */
+  async cleanupStaleKycDrafts(): Promise<{
+    deletedDrafts: number;
+    deletedPartners: number;
+  }> {
+    const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const PAGE = 200;
+    let deletedDrafts = 0;
+    let deletedPartners = 0;
+
+    // Page over stale DRAFTs. Every processed draft is deleted, so the matching set strictly
+    // shrinks — we just re-fetch the first page until it's empty. `progressed` guards against
+    // an infinite loop if a whole page fails to process (they'd otherwise be re-fetched forever).
+    for (;;) {
+      const page = await this.prisma.kycSubmission.findMany({
+        where: { status: 'DRAFT', createdAt: { lt: cutoff } },
+        select: { id: true },
+        take: PAGE,
+      });
+      if (page.length === 0) break;
+
+      let progressed = false;
+      for (const { id } of page) {
+        try {
+          const r = await this.cleanupOneStaleDraft(id, cutoff);
+          if (r.deletedDraft) {
+            deletedDrafts++;
+            progressed = true;
+          }
+          if (r.deletedPartner) deletedPartners++;
+        } catch (e) {
+          // One bad draft must never abort the whole sweep. Log + continue; it is retried on
+          // the next scheduled run (idempotent). Not counted as progress → guards termination.
+          this.logger.warn(`[kyc-cleanup] draft ${id} skipped: ${e}`);
+        }
+      }
+
+      if (!progressed) break; // nothing deletable this page → stop (avoid re-fetching forever)
+    }
+
+    this.logger.log(
+      `[kyc-cleanup] done: deletedDrafts=${deletedDrafts} deletedPartners=${deletedPartners}`,
+    );
+    return { deletedDrafts, deletedPartners };
+  }
+
+  /** Handle ONE stale draft in its own transaction (tenant-safe: keyed by the draft's own id). */
+  private async cleanupOneStaleDraft(
+    draftId: string,
+    cutoff: Date,
+  ): Promise<{ deletedDraft: boolean; deletedPartner: boolean }> {
+    const noop = { deletedDraft: false, deletedPartner: false };
+    return this.prisma.$transaction(async (tx) => {
+      // Re-read INSIDE the tx (race/idempotency guard): the draft may have been routed,
+      // deleted, or resubmitted since it was listed by the paging query above.
+      const draft = await tx.kycSubmission.findUnique({
+        where: { id: draftId },
+        select: { id: true, status: true, partnerId: true, proposedPartner: true, createdAt: true },
+      });
+      if (!draft) return noop; // already gone
+      // Only act on a row that is STILL a stale DRAFT (a status flip means it routed → keep it).
+      if (draft.status !== 'DRAFT' || draft.createdAt >= cutoff) return noop;
+
+      let deletedPartner = false;
+
+      // A re-KYC draft (`proposedPartner` present) NEVER overwrote its live partner — the proposed
+      // values are staged on the DRAFT and only applied at approval (stage-at-approval model). So an
+      // abandoned re-KYC reserves nothing → there is no partner to revert/delete; just drop the draft.
+      // Only a BRAND-NEW-outlet draft (no proposedPartner) owns a throwaway partner to reclaim.
+      if (draft.partnerId && !draft.proposedPartner) {
+        const partner = await tx.channelPartner.findUnique({
+          where: { id: draft.partnerId },
+          select: {
+            id: true,
+            wallets: { select: { id: true }, take: 1 },
+            // Any OTHER submission that ever routed beyond DRAFT ⇒ a real partner → never delete.
+            kycSubmissions: {
+              where: { id: { not: draft.id }, status: { not: 'DRAFT' } },
+              select: { id: true },
+              take: 1,
+            },
+            // "Provably never became real" delete-safety: ANY downstream row of these kinds means
+            // the partner is live (money / points / history) and must never be hard-deleted.
+            redemptionOrders: { select: { id: true }, take: 1 },
+            payoutTransactions: { select: { id: true }, take: 1 },
+            visibilitySubmissions: { select: { id: true }, take: 1 },
+            leaderboardEntries: { select: { id: true }, take: 1 },
+          },
+        });
+
+        if (partner) {
+          // Delete the throwaway partner (freeing the reserved GST/PAN/bank + SetNulling
+          // outlet.partnerId) ONLY when it PROVABLY never became real: no wallet, no OTHER
+          // submission past DRAFT, and NO downstream redemption/payout/visibility/leaderboard row.
+          // NOTE: the old `onboardedAt == null` clause was DEAD — KYC approval activates the outlet
+          // + creates the wallet but never sets ChannelPartner.onboardedAt, so it was always null for
+          // an outlet partner and gated nothing. `isActive` is intentionally NOT a gate either —
+          // brand-new KYC partners are created isActive:true, so requiring isActive=false frees nothing.
+          const deleteSafe =
+            partner.wallets.length === 0 &&
+            partner.kycSubmissions.length === 0 &&
+            partner.redemptionOrders.length === 0 &&
+            partner.payoutTransactions.length === 0 &&
+            partner.visibilitySubmissions.length === 0 &&
+            partner.leaderboardEntries.length === 0;
+          if (deleteSafe) {
+            // HARD delete: SetNulls outlet.partnerId + any other kycSubmission.partnerId
+            // (onDelete: SetNull) and cascades the (absent) wallet — releasing the reserved
+            // GST/PAN/bank for a fresh KYC on the same outlet.
+            await tx.channelPartner.delete({ where: { id: partner.id } });
+            deletedPartner = true;
+          }
+        }
+      }
+
+      await tx.kycSubmission.delete({ where: { id: draft.id } });
+      return { deletedDraft: true, deletedPartner };
+    });
   }
 
   // ─── GET /v1/kyc ─────────────────────────────────────────────────────────────
@@ -1603,7 +2027,25 @@ export class KycService {
         | (Record<string, boolean> & { remarks?: string })
         | null) ?? null;
 
-    return { submission: { ...submission, partner, documents, reKycFlags } };
+    // Re-KYC (stage-at-approval): the live `partner` above still holds the CURRENT (approved) values;
+    // the PROPOSED (pending-review) identity/payout values — AND the proposed OUTLET ADDRESS
+    // {addressLine1, city, state, pincode} — live on submission.proposedPartner and are applied only at
+    // approval. Surface them explicitly (masked like the partner) so the reviewer detail page can show
+    // WHAT they're approving ALONGSIDE the current values. The proposed ADDRESS is NOT PII-masked
+    // (it's not PAN/bank/GST) — maskPartnerSensitiveFields passes it through unchanged (spread), so the
+    // FE can diff it against the CURRENT outlet address on the still-current `partner.outlets[0]`
+    // (which is deliberately left as the approved address here). This also OVERRIDES the raw
+    // `proposedPartner` scalar carried by `...submission` — which would otherwise leak the unmasked
+    // proposed PAN/GST/bank to a masked (sales-reviewer) caller. Null for a brand-new KYC.
+    // FE follow-up (orchestrator): the KYC detail page should render this `proposedPartner` diff for a
+    // re-KYC (current vs proposed) — the live `partner` no longer reflects the pending change at draft time.
+    const proposedRaw = submission.proposedPartner;
+    const proposedPartner =
+      proposedRaw && typeof proposedRaw === 'object' && !Array.isArray(proposedRaw)
+        ? this.maskPartnerSensitiveFields(proposedRaw as Record<string, unknown>, masked)
+        : null;
+
+    return { submission: { ...submission, partner, proposedPartner, documents, reKycFlags } };
   }
 
   /** A browser-renderable read URL for a single KYC document. Fails CLOSED:
@@ -2846,18 +3288,29 @@ export class KycService {
       id: string;
       userId: string;
       partnerId: string | null;
+      // Re-KYC PROPOSED patch (stage-at-approval model): present only for a re-KYC draft; the live
+      // partner AND the primary outlet's ADDRESS {addressLine1, city, state, pincode} are mutated
+      // with these values HERE (approval) and nowhere else. Null for brand-new.
+      proposedPartner?: Prisma.JsonValue | null;
       user: { name: string | null; phone: string | null };
       partner: {
         // Nullable since parent owners may be login-less; a real operating partner
         // (the only kind that reaches this approval path) always has one.
         userId: string | null;
         clientId: string;
+        // Defense-in-depth: a PARENT owner (isParent) is approved via ParentsService and
+        // never owns a KycSubmission, so it structurally never reaches here — but the
+        // wallet/outlet-activation block below is gated on !isParent as money-path insurance.
+        isParent: boolean;
         // The OUTLET OWNER's KYC contact identity (set from dto at submit) — the
         // WhatsApp recipient on approval. Distinct from `user` (the submitting rep).
         ownerName: string | null;
         phone: string | null;
         outlets: Array<{
           id: string;
+          // The outlet's GROUP key — its owner group (parentId) for the re-KYC apply's
+          // group-aware uniqueness check at approval. Null = ungrouped.
+          parentId: string | null;
           reKycFlags: Prisma.JsonValue | null;
           programName?: string | null;
         }>;
@@ -2880,6 +3333,95 @@ export class KycService {
       });
       if (count === 0) {
         return { outcome: 'skipped' };
+      }
+
+      // ── RE-KYC APPLY (stage-at-approval model) ────────────────────────────
+      // A re-KYC stages its proposed identity/payout changes on KycSubmission.proposedPartner and
+      // NEVER mutates the live ChannelPartner at draft time. APPROVAL is the ONLY place those
+      // proposed values are written to the partner — so an already-approved partner never carries
+      // unverified re-KYC values, even briefly. The AUTHORITATIVE lock + group-uniqueness run HERE
+      // (create()'s check was a non-authoritative early-UX hint); any violation THROWS → the whole
+      // approval tx rolls back → the re-KYC is NOT approved and the partner is left untouched.
+      // Runs BEFORE the login-phone-sync below so that block reads the freshly-applied contact phone.
+      if (submission.partnerId && submission.partner && submission.proposedPartner) {
+        const proposed = submission.proposedPartner as Record<string, unknown>;
+        const asStr = (v: unknown): string | undefined =>
+          typeof v === 'string' && v.length > 0 ? v : undefined;
+        const clientId = submission.partner.clientId;
+        // The outlet's group (parentId) for the group-aware uniqueness check. A re-KYC partner owns
+        // exactly the outlet under review; the loaded primary outlet carries its group key.
+        const ourParentId = submission.partner.outlets[0]?.parentId ?? null;
+        const { uniquenessPolicy } = await this.tenantSettings.getEffectiveSettings(clientId);
+
+        // (i) PHONE re-validation. checkGroupUniqueness does NOT cover phone. If the proposed
+        // contact phone changed since the draft, re-assert availability at approval (another KYC
+        // could have claimed it in the window) so applying a now-taken number fails CLEANLY (a
+        // 400 → tx rollback → re-KYC not approved, partner untouched) instead of a raw error.
+        const proposedPhone = asStr(proposed.phone);
+        if (
+          proposedPhone &&
+          this.phoneLast10(proposedPhone) !== this.phoneLast10(submission.partner.phone ?? '')
+        ) {
+          await this.assertPhoneAvailable(clientId, proposedPhone, submission.partnerId, {
+            ourParentId,
+            phoneEnforced: uniquenessPolicy.phone,
+          });
+        }
+
+        // (ii) AUTHORITATIVE identity lock + group-uniqueness on the PROPOSED values.
+        const identityDetails = {
+          gstNumber: asStr(proposed.gstNumber) ?? null,
+          panNumber: asStr(proposed.panNumber) ?? null,
+          bankAccountNumber: asStr(proposed.bankAccountNumber) ?? null,
+          upiId: asStr(proposed.upiId) ?? null,
+        };
+        await acquireIdentityLocks(tx, { clientId, details: identityDetails, policy: uniquenessPolicy });
+        const violation = await checkGroupUniqueness(tx, {
+          clientId,
+          ourParentId,
+          details: identityDetails,
+          policy: uniquenessPolicy,
+          exceptPartnerId: submission.partnerId,
+        });
+        if (violation) throw new ConflictException(violation.message);
+
+        // (iii) APPLY the proposed patch to the live partner. `undefined` (an absent JSON key) leaves
+        // that field untouched — the exact semantics of the old draft-time in-place update.
+        await tx.channelPartner.update({
+          where: { id: submission.partnerId },
+          data: {
+            businessName: asStr(proposed.businessName),
+            ownerName: asStr(proposed.ownerName),
+            phone: asStr(proposed.phone),
+            gstNumber: asStr(proposed.gstNumber),
+            panNumber: asStr(proposed.panNumber),
+            bankName: asStr(proposed.bankName),
+            bankAccountNumber: asStr(proposed.bankAccountNumber),
+            bankAccountHolder: asStr(proposed.bankAccountHolder),
+            ifscCode: asStr(proposed.ifscCode),
+            upiId: asStr(proposed.upiId),
+            paymentMode: asStr(proposed.paymentMode),
+          },
+        });
+
+        // (iv) APPLY the staged OUTLET ADDRESS (stage-at-approval, same model as the identity/payout
+        // fields above). The submitted address lives on the Outlet, not the ChannelPartner; a re-KYC
+        // stages it on proposedPartner at draft and it is written to the PRIMARY outlet ONLY here.
+        // outlets[0] is the primary outlet (loaded isPrimary-first). This runs in the SAME tx as —
+        // and AFTER — the identity apply, so a uniqueness violation above (which throws before the
+        // partner update) rolls the whole tx back and leaves the address untouched too (atomic). An
+        // absent/empty proposed key leaves that column untouched (asStr → undefined), matching the
+        // identity apply's "undefined = untouched" semantics; a brand-new outlet stages no address.
+        const addressData = {
+          addressLine1: asStr(proposed.addressLine1),
+          city: asStr(proposed.city),
+          state: asStr(proposed.state),
+          pincode: asStr(proposed.pincode),
+        };
+        const primaryOutletId = submission.partner.outlets[0]?.id;
+        if (primaryOutletId && Object.values(addressData).some((v) => v !== undefined)) {
+          await tx.outlet.update({ where: { id: primaryOutletId }, data: addressData });
+        }
       }
 
       // Activate the OUTLET OWNER — NOT the submitter. For sales-assisted KYC the
@@ -2940,7 +3482,10 @@ export class KycService {
       }
 
       // Create wallet if not exists.
-      if (submission.partnerId) {
+      // Gated on !isParent (defense-in-depth): a parent owner never gets a spendable
+      // wallet or an activated outlet. Parents are approved via ParentsService and never
+      // reach this path, so this is insurance, not a live branch.
+      if (submission.partnerId && !submission.partner?.isParent) {
         const existingWallet = await tx.wallet.findFirst({
           where: { partnerId: submission.partnerId },
         });
@@ -3275,7 +3820,9 @@ export class KycService {
     });
 
     const entries = submissions.map((s) => {
-      const p = s.partner;
+      // Overlay the re-KYC PROPOSED values (stage-at-approval) so the queue shows what's UNDER
+      // REVIEW, not the stale live-partner values (which a re-KYC only overwrites at approval).
+      const p = this.overlayProposedIdentity(s.partner, s.proposedPartner);
       const o = p?.outlets[0];
       const holder = p?.bankAccountHolder?.trim().toLowerCase();
       const owner = p?.ownerName?.trim().toLowerCase();
@@ -3366,7 +3913,9 @@ export class KycService {
 
     const entries: KycReviewDumpEntry[] = [];
     for (const s of submissions) {
-      const p = s.partner;
+      // Overlay the re-KYC PROPOSED values (stage-at-approval) so the export reflects what's UNDER
+      // REVIEW, not the stale live-partner values (a re-KYC only overwrites the partner at approval).
+      const p = this.overlayProposedIdentity(s.partner, s.proposedPartner);
       const o = p?.outlets[0];
       const holder = p?.bankAccountHolder?.trim().toLowerCase();
       const owner = p?.ownerName?.trim().toLowerCase();
@@ -3475,7 +4024,9 @@ export class KycService {
     const actorName = new Map(actors.map((a) => [a.id, a.name]));
 
     const rows: RejectedKycRow[] = submissions.map((s) => {
-      const p = s.partner;
+      // A rejected re-KYC's proposed values were never applied to the live partner; the reviewer
+      // rejected the PROPOSED payload, so overlay it here to show what was actually submitted/rejected.
+      const p = this.overlayProposedIdentity(s.partner, s.proposedPartner);
       const o = p?.outlets[0];
       const hist = s.statusHistory[0];
       const rejectedAt = hist?.createdAt ?? s.reviewedAt ?? null;

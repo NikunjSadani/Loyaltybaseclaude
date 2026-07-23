@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type ReactNode } from 'react';
 import { use } from 'react';
 import {
   ArrowLeft,
@@ -105,11 +105,24 @@ interface ApiKycDetail {
     phone?: string;
     gstNumber?: string | null; panNumber?: string | null;
     address?: string | null; city?: string | null; state?: string | null; pincode?: string | null;
-    bankName?: string | null; bankAccountNumber?: string | null; ifscCode?: string | null; upiId?: string | null;
+    bankName?: string | null; bankAccountNumber?: string | null; bankAccountHolder?: string | null;
+    ifscCode?: string | null; upiId?: string | null; paymentMode?: string | null;
     outlets?: { name?: string; outletCode: string; phone?: string;
       requiredPaymentType?: 'BANK' | 'UPI' | 'ANY' | null;
       addressLine1?: string | null; addressLine2?: string | null;
       city?: string | null; state?: string | null; pincode?: string | null }[];
+  } | null;
+  // Re-KYC (stage-at-approval): the PROPOSED (new) identity/payout values staged on the
+  // submission and applied to the live partner only at Gifsy approval. Present ONLY for a
+  // re-KYC that staged changes (else null/absent). Same field names + masking as `partner`.
+  proposedPartner?: {
+    businessName?: string | null; ownerName?: string | null; phone?: string | null;
+    gstNumber?: string | null; panNumber?: string | null;
+    bankName?: string | null; bankAccountNumber?: string | null; bankAccountHolder?: string | null;
+    ifscCode?: string | null; upiId?: string | null; paymentMode?: string | null;
+    // Outlet address is staged the same way and applied to the live outlet only at approval.
+    addressLine1?: string | null; addressLine2?: string | null;
+    city?: string | null; state?: string | null; pincode?: string | null;
   } | null;
   documents?: { id: string; documentType: string; fileUrl?: string; viewUrl?: string | null; status: string }[];
   verificationItems?: { fieldKey: string; decision: string; remark?: string | null; source?: string | null }[];
@@ -135,7 +148,121 @@ type KycDetailShape = {
   verificationItems: Array<{ fieldKey: string; decision: string; remark?: string | null; source?: string | null }>;
   reKycFlags: ReKycFlags;
   addressNameMismatch: boolean;
+  // Re-KYC staged identity/payout changes (proposed vs current), or undefined when none.
+  proposedChanges?: ProposedChanges;
 };
+
+/* ─── Re-KYC proposed-change diff (stage-at-approval) ─────────────────────────── */
+
+/** Identity/payout scalars a re-KYC can stage on `proposedPartner`, plus the synthetic
+ *  `address` (composed from the staged outlet address components — see computeAddressChange). */
+type ProposedFieldKey =
+  | 'businessName' | 'ownerName' | 'phone' | 'gstNumber' | 'panNumber'
+  | 'bankName' | 'bankAccountNumber' | 'bankAccountHolder' | 'ifscCode' | 'upiId' | 'paymentMode'
+  | 'address';
+
+interface ProposedFieldChange { proposed: string; current: string }
+type ProposedChanges = Partial<Record<ProposedFieldKey, ProposedFieldChange>>;
+
+/** Partner SCALAR keys diffed field-for-field (address is handled separately, below). */
+const PROPOSED_FIELD_KEYS: Exclude<ProposedFieldKey, 'address'>[] = [
+  'businessName', 'ownerName', 'phone', 'gstNumber', 'panNumber',
+  'bankName', 'bankAccountNumber', 'bankAccountHolder', 'ifscCode', 'upiId', 'paymentMode',
+];
+
+const PROPOSED_FIELD_LABELS: Record<ProposedFieldKey, string> = {
+  businessName: 'Firm Name', ownerName: 'Owner Name', phone: 'Mobile',
+  gstNumber: 'GSTIN', panNumber: 'PAN', bankName: 'Bank',
+  bankAccountNumber: 'Account No.', bankAccountHolder: 'Account Holder',
+  ifscCode: 'IFSC', upiId: 'UPI ID', paymentMode: 'Payment Mode', address: 'Address',
+};
+
+/** Outlet address components a re-KYC can stage on `proposedPartner`. The live values live
+ *  on `partner.outlets[0]` (NOT the partner scalars) and are applied to the outlet at approval. */
+const ADDRESS_PARTS = ['addressLine1', 'addressLine2', 'city', 'state', 'pincode'] as const;
+
+/** Compose the page's single Address string (same order the rows render). */
+function composeAddress(src: Record<string, unknown> | null | undefined): string {
+  if (!src) return '';
+  return ADDRESS_PARTS
+    .map((k) => (typeof src[k] === 'string' ? (src[k] as string) : ''))
+    .filter(Boolean)
+    .join(', ');
+}
+
+/**
+ * Diff the PROPOSED outlet address (staged on `proposedPartner`) against the current outlet
+ * address (`partner.outlets[0]`). Absent proposed component = keep current (apply semantics),
+ * so the proposed value is the OVERLAID full address the reviewer is approving. Address is not
+ * PII-masked — rendered as-is. Returns undefined when no address staged / nothing changed.
+ */
+function computeAddressChange(
+  currentOutlet: Record<string, unknown> | null | undefined,
+  proposed: Record<string, unknown> | null | undefined,
+): ProposedFieldChange | undefined {
+  if (!proposed) return undefined;
+  const staged = ADDRESS_PARTS.some((k) => typeof proposed[k] === 'string' && (proposed[k] as string).length > 0);
+  if (!staged) return undefined;
+  const overlaid: Record<string, unknown> = { ...(currentOutlet ?? {}) };
+  for (const k of ADDRESS_PARTS) {
+    const pv = proposed[k];
+    if (typeof pv === 'string' && pv.length > 0) overlaid[k] = pv;
+  }
+  const proposedAddr = composeAddress(overlaid);
+  const currentAddr = composeAddress(currentOutlet);
+  if (proposedAddr && proposedAddr !== currentAddr) return { proposed: proposedAddr, current: currentAddr };
+  return undefined;
+}
+
+/**
+ * Diff the PROPOSED (re-KYC-staged) identity/payout values against the still-live
+ * partner values. Only a field whose proposed value is a non-empty string AND differs
+ * from the current value is returned (an absent/empty proposed key = "untouched", matching
+ * the backend apply semantics). Both sides are already role-masked by the backend, so a
+ * masked caller only sees a diff when the unmasked-last-4 differs — acceptable; the Gifsy
+ * admin (unmasked) sees the full diff. Returns undefined when nothing changed / no re-KYC.
+ */
+function computeProposedChanges(
+  partner: Record<string, unknown> | null | undefined,
+  proposed: Record<string, unknown> | null | undefined,
+): ProposedChanges | undefined {
+  if (!proposed) return undefined;
+  const out: ProposedChanges = {};
+  for (const k of PROPOSED_FIELD_KEYS) {
+    const pv = proposed[k];
+    if (typeof pv !== 'string' || pv.length === 0) continue;
+    const cv = partner?.[k];
+    const cur = typeof cv === 'string' ? cv : '';
+    if (pv !== cur) out[k] = { proposed: pv, current: cur };
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Render a field value. When `change` is present the PROPOSED (new) value the reviewer is
+ * approving is shown as the primary value with a "Proposed change" badge and the old value
+ * beneath ("was: …"). When absent, the field renders exactly as before (no visual noise).
+ */
+function ProposedFieldValue({
+  change, children, mono = false,
+}: { change?: ProposedFieldChange; children: ReactNode; mono?: boolean }): ReactNode {
+  if (!change) return children;
+  return (
+    <span className="flex flex-col gap-0.5" data-testid="proposed-change">
+      <span className="flex items-center gap-1.5 flex-wrap">
+        <span className={`text-gray-900 font-semibold ${mono ? 'font-mono' : ''}`}>
+          {change.proposed || '—'}
+        </span>
+        <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full whitespace-nowrap">
+          Proposed change
+        </span>
+      </span>
+      <span className="text-[10px] text-gray-400">
+        was: <span className={mono ? 'font-mono' : ''}>{change.current || '—'}</span>
+      </span>
+    </span>
+  );
+}
 
 /** Coerce a KYC-captured lat/lng pair (Prisma Decimal → JSON string) into numbers.
  *  Returns null unless BOTH are present and finite. */
@@ -154,10 +281,23 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
   const docStatusMap: Record<string, 'pending' | 'verified' | 'rejected'> = {
     SUBMITTED: 'pending', APPROVED: 'verified', REJECTED: 'rejected',
   };
+  // Re-KYC staged changes: scalar identity/payout diff + the outlet-address diff (current
+  // address lives on outlets[0], not the partner scalars → diffed separately).
+  const proposedRaw = s.proposedPartner as Record<string, unknown> | null | undefined;
+  const scalarChanges = computeProposedChanges(s.partner as Record<string, unknown> | null | undefined, proposedRaw);
+  const addressChange = computeAddressChange(
+    s.partner?.outlets?.[0] as Record<string, unknown> | null | undefined,
+    proposedRaw,
+  );
+  const proposedChanges: ProposedChanges | undefined =
+    scalarChanges || addressChange
+      ? { ...(scalarChanges ?? {}), ...(addressChange ? { address: addressChange } : {}) }
+      : undefined;
   return {
     id:               s.id,
     reKycFlags:       s.reKycFlags ?? null,
     addressNameMismatch: s.addressNameMismatch === true,
+    proposedChanges,
     verificationItems: s.verificationItems ?? [],
     // Human outlet ID for the header (KYC is partner-keyed → the enrolled outlet's code).
     // Prefer the real Outlet code; fall back to the partner code if no outlet is linked yet.
@@ -552,6 +692,29 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
         </div>
       )}
 
+      {/* Re-KYC staged changes: the live partner fields still hold the OLD values; the NEW
+          (proposed) values below are what approval will apply. Surface up-front so the
+          reviewer never approves stale identity/payout data. */}
+      {kyc.proposedChanges && (
+        <div
+          data-testid="proposed-changes-banner"
+          className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-2 text-sm"
+        >
+          <RefreshCw className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <p className="font-semibold text-amber-800">Re-KYC — proposed changes awaiting approval</p>
+            <p className="text-amber-700 text-xs mt-0.5">
+              The values below marked <span className="font-medium">Proposed change</span> are the NEW values
+              approval will apply (the previous value is shown as &ldquo;was …&rdquo;). Changed:{' '}
+              <span className="font-medium">
+                {(Object.keys(kyc.proposedChanges) as ProposedFieldKey[])
+                  .map((k) => PROPOSED_FIELD_LABELS[k]).join(', ')}
+              </span>
+            </p>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Left column */}
         <div className="space-y-4">
@@ -564,11 +727,15 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
             <div className="space-y-2.5 text-xs">
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">Firm Name</span>
-                <span className="text-gray-800 font-medium">{kyc.firmName}</span>
+                <span className="text-gray-800 font-medium">
+                  <ProposedFieldValue change={kyc.proposedChanges?.businessName}>{kyc.firmName}</ProposedFieldValue>
+                </span>
               </div>
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">Owner Name</span>
-                <span className="text-gray-800 font-medium">{kyc.ownerName || '—'}</span>
+                <span className="text-gray-800 font-medium">
+                  <ProposedFieldValue change={kyc.proposedChanges?.ownerName}>{kyc.ownerName || '—'}</ProposedFieldValue>
+                </span>
               </div>
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">Class</span>
@@ -577,7 +744,8 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
               <div className="flex gap-2 items-center">
                 <span className="text-gray-500 w-24 flex-shrink-0">Mobile</span>
                 <span className="flex items-center gap-1 text-gray-800">
-                  <Phone className="w-3 h-3" /> {kyc.mobile}
+                  <Phone className="w-3 h-3" />
+                  <ProposedFieldValue change={kyc.proposedChanges?.phone}>{kyc.mobile}</ProposedFieldValue>
                 </span>
               </div>
               <div className="flex gap-2">
@@ -587,7 +755,9 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
               <div className="flex gap-2 items-start">
                 <span className="text-gray-500 w-24 flex-shrink-0">Address</span>
                 <span className="text-gray-800">
-                  {[kyc.address, kyc.city, kyc.state, kyc.pincode].filter(Boolean).join(', ') || '—'}
+                  <ProposedFieldValue change={kyc.proposedChanges?.address}>
+                    {[kyc.address, kyc.city, kyc.state, kyc.pincode].filter(Boolean).join(', ') || '—'}
+                  </ProposedFieldValue>
                 </span>
               </div>
               {(() => {
@@ -619,11 +789,15 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
             <div className="space-y-2 text-xs">
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">PAN</span>
-                <span className="font-mono text-gray-800 font-medium">{kyc.panNumber || '—'}</span>
+                <span className="font-mono text-gray-800 font-medium">
+                  <ProposedFieldValue change={kyc.proposedChanges?.panNumber} mono>{kyc.panNumber || '—'}</ProposedFieldValue>
+                </span>
               </div>
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">GSTIN</span>
-                <span className="font-mono text-gray-800 font-medium">{kyc.gstNumber || '—'}</span>
+                <span className="font-mono text-gray-800 font-medium">
+                  <ProposedFieldValue change={kyc.proposedChanges?.gstNumber} mono>{kyc.gstNumber || '—'}</ProposedFieldValue>
+                </span>
               </div>
             </div>
 
@@ -698,20 +872,46 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
             <div className="space-y-2 text-xs">
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">Bank</span>
-                <span className="text-gray-800 font-medium">{kyc.bankName}</span>
+                <span className="text-gray-800 font-medium">
+                  <ProposedFieldValue change={kyc.proposedChanges?.bankName}>{kyc.bankName}</ProposedFieldValue>
+                </span>
               </div>
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">Account No.</span>
-                <span className="font-mono text-gray-800">{kyc.accountNumber}</span>
+                <span className="font-mono text-gray-800">
+                  <ProposedFieldValue change={kyc.proposedChanges?.bankAccountNumber} mono>{kyc.accountNumber}</ProposedFieldValue>
+                </span>
               </div>
+              {/* Account Holder — no standing row; surfaced only when a re-KYC stages a change. */}
+              {kyc.proposedChanges?.bankAccountHolder && (
+                <div className="flex gap-2">
+                  <span className="text-gray-500 w-24 flex-shrink-0">Acct Holder</span>
+                  <span className="text-gray-800">
+                    <ProposedFieldValue change={kyc.proposedChanges.bankAccountHolder}>—</ProposedFieldValue>
+                  </span>
+                </div>
+              )}
               <div className="flex gap-2">
                 <span className="text-gray-500 w-24 flex-shrink-0">IFSC</span>
-                <span className="font-mono text-gray-800">{kyc.ifscCode}</span>
+                <span className="font-mono text-gray-800">
+                  <ProposedFieldValue change={kyc.proposedChanges?.ifscCode} mono>{kyc.ifscCode}</ProposedFieldValue>
+                </span>
               </div>
-              {kyc.upiId && (
+              {(kyc.upiId || kyc.proposedChanges?.upiId) && (
                 <div className="flex gap-2">
                   <span className="text-gray-500 w-24 flex-shrink-0">UPI ID</span>
-                  <span className="font-mono text-gray-800">{kyc.upiId}</span>
+                  <span className="font-mono text-gray-800">
+                    <ProposedFieldValue change={kyc.proposedChanges?.upiId} mono>{kyc.upiId}</ProposedFieldValue>
+                  </span>
+                </div>
+              )}
+              {/* Payment Mode — no standing row; surfaced only when a re-KYC stages a change. */}
+              {kyc.proposedChanges?.paymentMode && (
+                <div className="flex gap-2">
+                  <span className="text-gray-500 w-24 flex-shrink-0">Payment Mode</span>
+                  <span className="text-gray-800">
+                    <ProposedFieldValue change={kyc.proposedChanges.paymentMode}>—</ProposedFieldValue>
+                  </span>
                 </div>
               )}
               <div className="flex gap-2 items-center">

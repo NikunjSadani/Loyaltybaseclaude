@@ -99,6 +99,20 @@ export class OutletUploadRowDto {
   @IsOptional()
   @IsString()
   payoutMethod?: string = '';
+
+  // Parent-child owner group link (docs/plans/PARTNER-MULTI-OUTLET.md §4.4). The admin-facing
+  // PARENT identifier = the parent ChannelPartner's partnerCode (e.g. "CPP01"), resolved to the
+  // parent's id and written to Outlet.parentId. Deliberately has NO `= ''` default so the three
+  // intents stay distinguishable:
+  //   - column ABSENT for the row  → `undefined` → leave grouping UNCHANGED (the common
+  //     case for a routine re-upload that omits the column — avoids mass-un-grouping).
+  //   - present but BLANK ("")      → NO-OP. A blank cell NEVER un-groups; un-grouping is a
+  //     separate explicit action (POST /admin/outlets/:outletCode/ungroup, §4.5) so a routine
+  //     re-upload can't silently dissolve a group.
+  //   - a partnerCode ("CPP01")     → LINK / add-to-parent (guarded — §4.4).
+  @IsOptional()
+  @IsString()
+  parentId?: string;
 }
 
 /** POST /upsert — persists the Outlet Master upload (max 500 rows/request). */

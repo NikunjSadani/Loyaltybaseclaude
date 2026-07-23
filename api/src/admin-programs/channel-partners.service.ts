@@ -33,6 +33,9 @@ export class ChannelPartnersService {
     const where: Prisma.ChannelPartnerWhereInput = {
       isActive: true,
       clientId: user.clientId,
+      // Parents (owner-group anchors) live in ChannelPartner but are non-operating — exclude
+      // them from the operating-partner list/count (docs/plans/PARTNER-MULTI-OUTLET.md §9).
+      isParent: false,
     };
     if (q.search) {
       where.OR = [
@@ -63,7 +66,10 @@ export class ChannelPartnersService {
   /** GET /v1/admin/channel-partners/:id */
   async getOne(user: JwtPayload, id: string) {
     const partner = await this.prisma.channelPartner.findFirst({
-      where: { id, clientId: user.clientId },
+      // A PARENT (owner-group anchor) is non-operating — it is NOT an operating partner, so it
+      // must not resolve on this operating-partner endpoint (consistent with list/count's
+      // isParent:false filter; docs/plans/PARTNER-MULTI-OUTLET.md §9). Returns NotFound below.
+      where: { id, clientId: user.clientId, isParent: false },
       include: {
         user: { select: { id: true, name: true, phone: true, email: true, status: true } },
         wallets: true,
@@ -77,9 +83,11 @@ export class ChannelPartnersService {
 
   /** PATCH /v1/admin/channel-partners/:id */
   async update(user: JwtPayload, id: string, dto: UpdateChannelPartnerDto) {
-    // Verify ownership (tenant scope) before update.
+    // Verify ownership (tenant scope) before update — and REJECT a parent: a parent is a
+    // non-operating owner-group anchor, not an operating partner, so it is not mutable through
+    // this endpoint (consistent with list/count/getOne; §9). Excluding it here yields NotFound.
     const existing = await this.prisma.channelPartner.findFirst({
-      where: { id, clientId: user.clientId },
+      where: { id, clientId: user.clientId, isParent: false },
     });
     if (!existing) throw new NotFoundException('Channel partner not found');
 

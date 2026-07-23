@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { KycStatus, OutletKycIntent, OutletPaymentType, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
@@ -6,6 +6,14 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
 import { parseOutletPaymentType } from '../common/payment-type.helper';
+import {
+  acquireIdentityLocks,
+  checkGroupUniqueness,
+  normalizeIdentityValue,
+  type PartnerIdentityDetails,
+  type UniquenessField,
+  type UniquenessPolicy,
+} from '../common/partner-group.helper';
 import {
   BulkDeleteOutletsDto,
   ListOutletsQueryDto,
@@ -138,6 +146,25 @@ function nullIfBlank(v: string | undefined): string | null {
   return t === '' ? null : t;
 }
 
+/**
+ * The tenant-uniqueness policy applied when the tenant settings blob carries none — today's
+ * behaviour (GST + phone enforced; PAN is always on inside the helper; bank/UPI off). Shared by
+ * the upload's add-to-parent check and the dedicated un-group action so the two never diverge.
+ */
+const DEFAULT_UNIQUENESS_POLICY: UniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+
+/**
+ * Last-10-digit normalisation for phone comparison. Phones are stored in varying formats
+ * (spaces, +91, 0-prefix, dashes), so a raw string compare misses real matches. We strip every
+ * non-digit and keep the trailing 10 (the subscriber number). Empty / <10 digits → '' (never
+ * matches). Used ONLY by the un-group share-check — the exact-match identity fields (PAN/GST/
+ * bank/UPI) compare on their trimmed value, not this.
+ */
+function lastTenDigits(v: string | null | undefined): string {
+  const digits = (v ?? '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : '';
+}
+
 /** Map a validated upload row + resolved OutletType id to the Outlet column data. */
 function mapRowToOutletData(row: OutletUploadRowDto, outletTypeId: string): OutletWriteData {
   return {
@@ -156,24 +183,40 @@ function mapRowToOutletData(row: OutletUploadRowDto, outletTypeId: string): Outl
 }
 
 /** create payload for a new Outlet — partnerId omitted (NULL); created PENDING.
- *  A CREATE always persists a payout mandate — a blank cell defaults to BANK. */
+ *  A CREATE always persists a payout mandate — a blank cell defaults to BANK.
+ *  parentId (owner-group link) is written only when a Parent ID resolved to a parent. */
 function buildOutletCreate(
   clientId: string,
   outletCode: string,
   data: OutletWriteData,
   requiredPaymentType: OutletPaymentType,
+  parentId?: string | null,
 ): Prisma.OutletUncheckedCreateInput {
-  return { clientId, outletCode, isActive: false, requiredPaymentType, ...data };
+  return {
+    clientId,
+    outletCode,
+    isActive: false,
+    requiredPaymentType,
+    ...(parentId ? { parentId } : {}),
+    ...data,
+  };
 }
 
 /** update payload for an existing Outlet — identity + isActive left untouched. The payout
  *  mandate is overwritten ONLY when the column was present/non-blank (null = leave as-is),
- *  so a blank cell never wipes an outlet's existing requiredPaymentType. */
+ *  so a blank cell never wipes an outlet's existing requiredPaymentType.
+ *  parentIdChange: `undefined` = leave grouping unchanged; a string = link to that parent;
+ *  `null` = un-map (un-group) — only reached after the un-group guard passed. */
 function buildOutletUpdate(
   data: OutletWriteData,
   requiredPaymentType: OutletPaymentType | null,
+  parentIdChange?: string | null,
 ): Prisma.OutletUncheckedUpdateInput {
-  return { ...data, ...(requiredPaymentType !== null ? { requiredPaymentType } : {}) };
+  return {
+    ...data,
+    ...(requiredPaymentType !== null ? { requiredPaymentType } : {}),
+    ...(parentIdChange !== undefined ? { parentId: parentIdChange } : {}),
+  };
 }
 
 /** The 20 Re-KYC field flags persisted onto Outlet.reKycFlags (+ remarks). */
@@ -262,6 +305,15 @@ export interface ReKycRowResult {
   action: 'FLAGGED' | 'CLEARED';
   errors: string[];
 }
+
+/**
+ * Thrown INSIDE the per-row upsert transaction when the add-to-parent group-uniqueness check
+ * (run under the advisory lock) fails, so the failed check aborts the row's transaction rather
+ * than committing a bad link. Caught by upsert() and turned into a per-row ERROR result — it
+ * never escapes the batch. A plain marker class so `instanceof` can distinguish it from a real
+ * DB error (which must still surface).
+ */
+class RowGroupingError extends Error {}
 
 /**
  * Admin · Outlets — ported from platform/src/app/api/admin/outlets/* onto /v1.
@@ -667,10 +719,83 @@ export class AdminOutletsService {
       if (c.outletType.isActive) typeIdByCode.set(c.outletType.code.toUpperCase(), c.outletType.id);
     }
 
-    // The tenant's UPI gate — the AUTHORITATIVE guard for the payout-mandate column. A UPI
-    // row is rejected (not silently coerced) when the tenant has UPI disabled; ANY is allowed
-    // (it just degrades to bank-only downstream). Read once for the whole batch.
-    const upiEnabled = (await this.tenantSettings.getEffectiveSettings(clientId)).salesApp.upiEnabled === true;
+    // The tenant's UPI gate + owner-group uniqueness policy — read once for the whole batch.
+    // The UPI gate is the AUTHORITATIVE guard for the payout-mandate column (a UPI row is
+    // rejected, not silently coerced, when the tenant has UPI disabled; ANY degrades to
+    // bank-only downstream). The policy drives the add-to-parent / un-group checks below.
+    const settings = await this.tenantSettings.getEffectiveSettings(clientId);
+    const upiEnabled = settings.salesApp.upiEnabled === true;
+    // Fall back to today's-behaviour default if a partial settings object is returned.
+    const policy: UniquenessPolicy = settings.uniquenessPolicy ?? DEFAULT_UNIQUENESS_POLICY;
+
+    // ── Owner-group PRELOADS (batched over the LINK rows only) ────────────────────
+    // A Parent ID cell only ever does work when it carries a partnerCode (LINK / add-to-parent).
+    // A blank cell is a NO-OP (un-grouping is a separate explicit action — ungroupOutlet — so a
+    // routine re-upload can never silently un-group). An absent column is likewise untouched.
+    // These two lookups are the only BATCHED (set-based) reads; the per-row uniqueness check
+    // below is delegated to the frozen helper (checkGroupUniqueness), which issues its own
+    // bounded reads per link row — that part is inherently per-row and runs INSIDE the row's
+    // transaction so it is race-proof (advisory-locked), not N+1-free.
+    const linkRows = dto.rows.filter(
+      (r) => r.parentId !== undefined && r.parentId.trim() !== '',
+    );
+    // parentCode → the resolved PARENT ChannelPartner (must have isParent=true; not soft-deleted).
+    const parentByCode = new Map<string, { id: string; isParent: boolean }>();
+    // outletCode → the link outlet's current owner details (the add-to-parent uniqueness input).
+    const existingByCode = new Map<
+      string,
+      {
+        id: string;
+        // The outlet's CURRENT owner group — used to BLOCK a bulk-upload move between groups
+        // (un-grouping is a dedicated action only; a re-upload must never silently re-link A→B).
+        parentId: string | null;
+        partner: {
+          id: string;
+          panNumber: string | null;
+          gstNumber: string | null;
+          bankAccountNumber: string | null;
+          upiId: string | null;
+        } | null;
+      }
+    >();
+    if (linkRows.length > 0) {
+      const parentCodes = [
+        ...new Set(linkRows.map((r) => (r.parentId ?? '').trim()).filter(Boolean)),
+      ];
+      if (parentCodes.length > 0) {
+        const parents = await this.prisma.channelPartner.findMany({
+          // A SOFT-DELETED parent is not a valid link target (F8) — mirror listParents' filter.
+          where: { clientId, partnerCode: { in: parentCodes }, deletedAt: null },
+          select: { partnerCode: true, id: true, isParent: true },
+        });
+        for (const p of parents) parentByCode.set(p.partnerCode, { id: p.id, isParent: p.isParent });
+      }
+      const linkOutletCodes = [
+        ...new Set(linkRows.map((r) => r.outletId.trim()).filter(Boolean)),
+      ];
+      if (linkOutletCodes.length > 0) {
+        const existingOutlets = await this.prisma.outlet.findMany({
+          where: { clientId, outletCode: { in: linkOutletCodes }, deletedAt: null },
+          select: {
+            id: true,
+            outletCode: true,
+            parentId: true,
+            partner: {
+              select: {
+                id: true,
+                panNumber: true,
+                gstNumber: true,
+                bankAccountNumber: true,
+                upiId: true,
+              },
+            },
+          },
+        });
+        for (const o of existingOutlets) {
+          existingByCode.set(o.outletCode, { id: o.id, parentId: o.parentId, partner: o.partner });
+        }
+      }
+    }
 
     const rowResults: UpsertRowResult[] = [];
     let created = 0;
@@ -720,6 +845,31 @@ export class AdminOutletsService {
         }
       }
 
+      // 2c. Resolve the Parent ID column (owner-group link). Three intents:
+      //       - column ABSENT (undefined)  → leave grouping UNCHANGED (routine re-upload).
+      //       - present but BLANK ("")      → NO-OP. Un-grouping is a SEPARATE explicit action
+      //         (ungroupOutlet); a blank upload cell NEVER un-groups, so a routine re-upload
+      //         that clears the column by accident can't silently dissolve a group.
+      //       - a partnerCode ("CPP01")     → LINK / add-to-parent (§4.4). Parent existence /
+      //         kind is resolved here from the batched preload; the group-uniqueness check runs
+      //         INSIDE the row transaction below (advisory-locked) so a concurrent cross-group
+      //         link can't race the read-then-write.
+      let linkParentId: string | undefined = undefined;
+      if (row.parentId !== undefined) {
+        const rawParent = row.parentId.trim();
+        if (rawParent) {
+          const parent = parentByCode.get(rawParent);
+          if (!parent) {
+            errors.push(`Parent ID "${rawParent}" not found`);
+          } else if (!parent.isParent) {
+            errors.push(`"${rawParent}" is not a parent owner — it cannot group outlets`);
+          } else {
+            linkParentId = parent.id;
+          }
+        }
+        // blank cell → no-op (never un-groups).
+      }
+
       if (errors.length > 0 || !outletTypeId) {
         rowResults.push({ rowNum: row.rowNum, outletId: outletCode, status: 'ERROR', action: 'CREATE', errors });
         continue;
@@ -727,52 +877,119 @@ export class AdminOutletsService {
 
       const data = mapRowToOutletData(row, outletTypeId);
 
-      // 3. Upsert the outlet + (re)tag to the XSR in one transaction.
-      const action = await this.prisma.$transaction(async (tx) => {
-        const existing = await tx.outlet.findUnique({
-          where: { clientId_outletCode: { clientId, outletCode } },
-          select: { id: true, isActive: true, deactivatedAt: true },
-        });
+      // 3. Upsert the outlet + (re)tag to the XSR in one transaction. When the row LINKS to a
+      //    parent, the add-to-parent uniqueness check runs HERE — inside the same tx, AFTER
+      //    acquiring the per-value advisory lock — so the check→write is atomic and race-proof.
+      //    A group-fit violation throws RowGroupingError, which is caught below and turned into
+      //    a per-row ERROR (keeping the report shape); any other error still aborts the batch.
+      let action: 'CREATE' | 'UPDATE' | 'REACTIVATE';
+      try {
+        action = await this.prisma.$transaction(async (tx) => {
+          if (linkParentId !== undefined) {
+            // §4.5 GUARD — un-grouping / moving between groups is a DEDICATED action only. An outlet
+            // ALREADY grouped under a DIFFERENT parent must NOT be silently moved A→B by a bulk
+            // upload; the admin has to un-group it via the dedicated action first. Re-affirming the
+            // SAME parent falls through (harmless no-op); linking an ungrouped outlet is allowed.
+            const currentParentId = existingByCode.get(outletCode)?.parentId ?? null;
+            if (currentParentId && currentParentId !== linkParentId) {
+              throw new RowGroupingError(
+                'Outlet is already grouped under another parent; un-group it via the dedicated action first',
+              );
+            }
 
-        // Re-uploading a previously-DEACTIVATED outlet (it was active, then turned
-        // off → deactivatedAt set) REACTIVATES it. A still-PENDING outlet (created
-        // inactive, never deactivated → deactivatedAt null) is NOT activated here —
-        // only KYC approval activates a pending outlet, so a re-upload can't bypass
-        // KYC. (buildOutletUpdate deliberately leaves isActive untouched.)
-        const reactivate = !!existing && !existing.isActive && existing.deactivatedAt != null;
+            // The outlet's OWN owner details must fit the target group — PAN identical to the
+            // group + no enforced field colliding with an outlet outside it. A pre-KYC outlet
+            // (no partner yet) has no details → passes trivially.
+            const cp = existingByCode.get(outletCode)?.partner ?? null;
+            const details: PartnerIdentityDetails = {
+              gstNumber: cp?.gstNumber ?? null,
+              panNumber: cp?.panNumber ?? null,
+              bankAccountNumber: cp?.bankAccountNumber ?? null,
+              upiId: cp?.upiId ?? null,
+            };
+            // Advisory-lock the enforced values FIRST, then re-check inside the lock so a
+            // concurrent writer of the same value serializes behind us (helper §acquireIdentityLocks).
+            await acquireIdentityLocks(tx, { clientId, details, policy });
+            const violation = await checkGroupUniqueness(tx, {
+              clientId,
+              ourParentId: linkParentId,
+              details,
+              policy,
+              exceptPartnerId: cp?.id ?? null,
+            });
+            if (violation) {
+              throw new RowGroupingError(
+                violation.reason === 'pan-group-mismatch'
+                  ? `${violation.message} Re-KYC the outlet to align its PAN before adding it to this group.`
+                  : violation.message,
+              );
+            }
+          }
 
-        const outlet = await tx.outlet.upsert({
-          where: { clientId_outletCode: { clientId, outletCode } },
-          // CREATE always writes a mandate (blank cell → BANK).
-          create: buildOutletCreate(clientId, outletCode, data, requiredPaymentType ?? OutletPaymentType.BANK),
-          // UPDATE only overwrites the mandate when the column was present/non-blank.
-          update: reactivate
-            ? {
-                ...buildOutletUpdate(data, requiredPaymentType),
-                isActive: true,
-                reactivatedAt: now,
-                deactivatedAt: null,
-                // Re-opening an outlet for enrollment clears the not-interested intent.
-                kycIntent: null,
-                kycIntentBy: null,
-                kycIntentAt: null,
-              }
-            : buildOutletUpdate(data, requiredPaymentType),
-        });
-
-        // Re-tag: close any active assignment for this outlet, then attach the XSR.
-        if (salesUserId) {
-          await tx.salesUserAssignment.updateMany({
-            where: { outletId: outlet.id, unassignedAt: null },
-            data: { unassignedAt: now },
+          const existing = await tx.outlet.findUnique({
+            where: { clientId_outletCode: { clientId, outletCode } },
+            select: { id: true, isActive: true, deactivatedAt: true },
           });
-          await tx.salesUserAssignment.create({
-            data: { salesUserId, outletId: outlet.id, assignedAt: now },
+
+          // Re-uploading a previously-DEACTIVATED outlet (it was active, then turned
+          // off → deactivatedAt set) REACTIVATES it. A still-PENDING outlet (created
+          // inactive, never deactivated → deactivatedAt null) is NOT activated here —
+          // only KYC approval activates a pending outlet, so a re-upload can't bypass
+          // KYC. (buildOutletUpdate deliberately leaves isActive untouched.)
+          const reactivate = !!existing && !existing.isActive && existing.deactivatedAt != null;
+
+          const outlet = await tx.outlet.upsert({
+            where: { clientId_outletCode: { clientId, outletCode } },
+            // CREATE always writes a mandate (blank cell → BANK); parentId only when linked.
+            create: buildOutletCreate(
+              clientId,
+              outletCode,
+              data,
+              requiredPaymentType ?? OutletPaymentType.BANK,
+              linkParentId,
+            ),
+            // UPDATE only overwrites the mandate when the column was present/non-blank, and
+            // only touches parentId when a Parent ID column resolved to a link.
+            update: reactivate
+              ? {
+                  ...buildOutletUpdate(data, requiredPaymentType, linkParentId),
+                  isActive: true,
+                  reactivatedAt: now,
+                  deactivatedAt: null,
+                  // Re-opening an outlet for enrollment clears the not-interested intent.
+                  kycIntent: null,
+                  kycIntentBy: null,
+                  kycIntentAt: null,
+                }
+              : buildOutletUpdate(data, requiredPaymentType, linkParentId),
           });
+
+          // Re-tag: close any active assignment for this outlet, then attach the XSR.
+          if (salesUserId) {
+            await tx.salesUserAssignment.updateMany({
+              where: { outletId: outlet.id, unassignedAt: null },
+              data: { unassignedAt: now },
+            });
+            await tx.salesUserAssignment.create({
+              data: { salesUserId, outletId: outlet.id, assignedAt: now },
+            });
+          }
+
+          return !existing ? ('CREATE' as const) : reactivate ? ('REACTIVATE' as const) : ('UPDATE' as const);
+        });
+      } catch (e) {
+        if (e instanceof RowGroupingError) {
+          rowResults.push({
+            rowNum: row.rowNum,
+            outletId: outletCode,
+            status: 'ERROR',
+            action: 'CREATE',
+            errors: [e.message],
+          });
+          continue;
         }
-
-        return !existing ? ('CREATE' as const) : reactivate ? ('REACTIVATE' as const) : ('UPDATE' as const);
-      });
+        throw e;
+      }
 
       if (action === 'CREATE') created++;
       else if (action === 'REACTIVATE') reactivated++;
@@ -798,6 +1015,176 @@ export class AdminOutletsService {
       rows: rowResults,
       message: `${created} created, ${updated} updated${reactivated ? `, ${reactivated} reactivated` : ''}${errorRows.length ? `, ${errorRows.length} row(s) failed` : ''}`,
     };
+  }
+
+  /**
+   * Un-group guard (§4.5): does the child still share ANY enforced identity detail with a
+   * REMAINING member of its owner group (the parent itself + its sibling child outlets)?
+   * PAN is always checked (the group golden key); GST/bank/UPI/PHONE only when the tenant policy
+   * enforces them. Exact-match fields (PAN/GST/bank/UPI) compare on the trimmed value; PHONE (F4)
+   * compares on last-10-digit normalisation, since phones are stored in varying formats. A
+   * pre-KYC child (no owner yet) has no details → shares nothing → un-map is allowed. Bounded
+   * reads (2 queries) — only ever called for an actual un-group attempt.
+   */
+  private async childSharesDetailWithGroup(
+    clientId: string,
+    parentId: string,
+    childOutletId: string,
+    childPartner: {
+      id: string;
+      phone: string | null;
+      panNumber: string | null;
+      gstNumber: string | null;
+      bankAccountNumber: string | null;
+      upiId: string | null;
+    } | null,
+    policy: UniquenessPolicy,
+  ): Promise<boolean> {
+    if (!childPartner) return false; // no owner details to share
+
+    const memberSelect = {
+      phone: true,
+      panNumber: true,
+      gstNumber: true,
+      bankAccountNumber: true,
+      upiId: true,
+    } as const;
+    const parent = await this.prisma.channelPartner.findUnique({
+      where: { id: parentId },
+      select: memberSelect,
+    });
+    const siblingOutlets = await this.prisma.outlet.findMany({
+      where: {
+        clientId,
+        parentId,
+        id: { not: childOutletId },
+        deletedAt: null,
+        // Exclude by the child's PARTNER too, not just the child OUTLET: if the child's own
+        // ChannelPartner owns a SECOND outlet in this group, that outlet would otherwise load as a
+        // "sibling" and self-match on every field → wrongly BLOCK the un-group.
+        partner: { isParent: false, deletedAt: null, id: { not: childPartner.id } },
+      },
+      select: { partner: { select: memberSelect } },
+    });
+
+    const members = [parent, ...siblingOutlets.map((s) => s.partner)].filter(
+      (m): m is NonNullable<typeof m> => m != null,
+    );
+
+    // Exact-match identity fields — compare on the CANONICAL value (PAN/GST upper-cased) so a
+    // case-variant share is not under-detected (which would wrongly allow the un-group).
+    const fields: { field: UniquenessField; key: keyof PartnerIdentityDetails; enforced: boolean }[] = [
+      { field: 'pan', key: 'panNumber', enforced: true }, // PAN is always the group golden-key
+      { field: 'gst', key: 'gstNumber', enforced: policy.gst },
+      { field: 'bank', key: 'bankAccountNumber', enforced: policy.bank },
+      { field: 'upi', key: 'upiId', enforced: policy.upi },
+    ];
+    for (const f of fields) {
+      if (!f.enforced) continue;
+      const childValue = normalizeIdentityValue(f.field, childPartner[f.key]);
+      if (!childValue) continue;
+      for (const m of members) {
+        const memberValue = normalizeIdentityValue(f.field, m[f.key]);
+        if (memberValue && memberValue === childValue) return true;
+      }
+    }
+
+    // PHONE (F4) — enforced per policy, compared on last-10 digits (format-insensitive).
+    if (policy.phone) {
+      const childPhone = lastTenDigits(childPartner.phone);
+      if (childPhone) {
+        for (const m of members) {
+          if (lastTenDigits(m.phone) === childPhone) return true; // both non-empty & equal
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Resolve the tenant's owner-group uniqueness policy (which of GST/phone/bank/UPI are enforced;
+   * PAN is always on inside the helper). Falls back to today's-behaviour default for a partial
+   * settings object. Shared by the dedicated un-group action.
+   */
+  private async uniquenessPolicy(clientId: string): Promise<UniquenessPolicy> {
+    const settings = await this.tenantSettings.getEffectiveSettings(clientId);
+    return settings.uniquenessPolicy ?? DEFAULT_UNIQUENESS_POLICY;
+  }
+
+  /**
+   * POST /v1/admin/outlets/:outletCode/ungroup — the DEDICATED, explicit un-group action (§4.5).
+   * Removes ONE outlet from its owner group. Un-grouping is NEVER triggered by a blank upload
+   * cell (that is a no-op) — only by this action — so a routine re-upload can't dissolve a group.
+   *
+   * Blocked while the child still shares ANY enforced identity detail (PAN always + GST/bank/UPI/
+   * phone per tenant policy) with a REMAINING group member: the admin must re-KYC the child to
+   * make its details distinct first (else the DB partial-unique backstop would reject it anyway,
+   * with a far uglier error). On pass, clears Outlet.parentId — the `outlets` trigger then clears
+   * the partner's derived `groupId` automatically (we NEVER write groupId ourselves).
+   * GIFSY_ADMIN / CLIENT_ADMIN only (controller @Roles), tenant-scoped by the outlet's own clientId.
+   */
+  async ungroupOutlet(user: JwtPayload, outletCode: string) {
+    const clientId = user.clientId;
+    const code = (outletCode ?? '').trim();
+
+    const outlet = await this.prisma.outlet.findFirst({
+      where: { clientId, outletCode: code, deletedAt: null },
+      select: {
+        id: true,
+        parentId: true,
+        partner: {
+          select: {
+            id: true,
+            phone: true,
+            panNumber: true,
+            gstNumber: true,
+            bankAccountNumber: true,
+            upiId: true,
+          },
+        },
+      },
+    });
+    if (!outlet) throw new NotFoundException(`Outlet ${code} not found`);
+
+    // Already ungrouped → idempotent no-op (nothing to clear, nothing to check).
+    if (!outlet.parentId) {
+      return { outletCode: code, ungrouped: false, alreadyUngrouped: true };
+    }
+
+    const policy = await this.uniquenessPolicy(clientId);
+    const shares = await this.childSharesDetailWithGroup(
+      clientId,
+      outlet.parentId,
+      outlet.id,
+      outlet.partner,
+      policy,
+    );
+    if (shares) {
+      throw new BadRequestException(
+        `Cannot un-group ${code} — it still shares identity details with its owner group. Make its details distinct via re-KYC first.`,
+      );
+    }
+
+    const previousParentId = outlet.parentId;
+    await this.prisma.$transaction(async (tx) => {
+      // Only Outlet.parentId is cleared — the DB trigger on `outlets` mirrors this into the
+      // partner's derived groupId. We never touch channel_partners.groupId directly.
+      await tx.outlet.update({ where: { id: outlet.id }, data: { parentId: null } });
+      await tx.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entityType: 'OUTLET',
+          entityId: outlet.id,
+          actorId: user.sub,
+          oldValues: { parentId: previousParentId },
+          newValues: { parentId: null },
+          metadata: { action: 'ungroup', outletCode: code },
+        },
+      });
+    });
+
+    return { outletCode: code, ungrouped: true };
   }
 
   /**

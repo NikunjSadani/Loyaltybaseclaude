@@ -1,7 +1,9 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
+  Headers,
   Param,
   Patch,
   Post,
@@ -11,6 +13,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
+import { timingSafeEqual } from 'crypto';
 import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { KycService } from './kyc.service';
@@ -205,6 +208,42 @@ export class KycController {
     @Query() query: BulkVerifyQueryDto,
   ) {
     return this.kyc.bulkVerify(user, file, query.apply === 'true');
+  }
+
+  /**
+   * POST /v1/kyc/cleanup-stale-drafts — Cloud-Scheduler-triggered 48h stale-draft cleanup.
+   *
+   * Reclaims PAN/GST/bank/UPI values reserved by KYC DRAFTs that were started but never
+   * completed. Brand-new-outlet drafts delete their throwaway partner; re-KYC drafts (which,
+   * under the stage-at-approval model, never overwrote the live partner) are simply deleted.
+   * See KycService.cleanupStaleKycDrafts.
+   *
+   * Cloud Run throttles CPU between requests, so an in-process @Cron/@Interval timer does not
+   * fire reliably while the instance is idle; a Cloud Scheduler job pings this endpoint (the
+   * request itself un-throttles the CPU). Mirrors the push /drain security pattern.
+   *
+   * @Public (Cloud Scheduler carries no JWT) but gated by a shared secret in the
+   * `x-cleanup-secret` header matched against KYC_CLEANUP_SECRET. FAIL-CLOSED: if the env
+   * secret is unset the endpoint refuses, so it is never an open trigger. Constant-time compare.
+   * Static path declared before the `:id` route so Nest does not match it as an :id param.
+   *
+   * NOTE (infra — orchestrator): a Cloud Scheduler job must be created to hit this endpoint
+   * daily with the `x-cleanup-secret` header; it does NOT exist yet.
+   */
+  @Public()
+  @Post('cleanup-stale-drafts')
+  async cleanupStaleDrafts(
+    @Headers('x-cleanup-secret') secret?: string,
+  ): Promise<{ deletedDrafts: number; deletedPartners: number }> {
+    const expected = process.env.KYC_CLEANUP_SECRET;
+    // Fail-closed: no configured secret → never an open trigger.
+    if (!expected) throw new ForbiddenException('Cleanup disabled');
+    const got = Buffer.from(secret ?? '');
+    const want = Buffer.from(expected);
+    if (got.length !== want.length || !timingSafeEqual(got, want)) {
+      throw new ForbiddenException('Invalid cleanup secret');
+    }
+    return this.kyc.cleanupStaleKycDrafts();
   }
 
   @Get(':id')

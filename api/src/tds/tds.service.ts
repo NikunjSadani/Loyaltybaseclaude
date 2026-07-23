@@ -189,7 +189,9 @@ export class TdsService {
     const partnerIds = [...new Set(outlets.map((o) => o.partnerId).filter(Boolean))] as string[];
     const partners = partnerIds.length
       ? await this.prisma.channelPartner.findMany({
-          where: { id: { in: partnerIds } },
+          // isParent:false — parents never own outlets so are never in partnerIds; defensive
+          // (docs/plans/PARTNER-MULTI-OUTLET.md §9).
+          where: { id: { in: partnerIds }, isParent: false },
           select: { id: true, panNumber: true },
         })
       : [];
@@ -378,7 +380,8 @@ export class TdsService {
         const partnerIds = [...new Set(outlets.map((o) => o.partnerId).filter(Boolean))] as string[];
         const partners = partnerIds.length
           ? await this.prisma.channelPartner.findMany({
-              where: { id: { in: partnerIds } },
+              // isParent:false — defensive (parents own no outlets → never in partnerIds).
+              where: { id: { in: partnerIds }, isParent: false },
               select: { id: true, panNumber: true, entityType: true },
             })
           : [];
@@ -752,6 +755,10 @@ export class TdsService {
           where: {
             clientId,
             panNumber: { in: onPlatformPans },
+            // isParent:false — REAL: a parent SHARES the group PAN with its children, so
+            // without this it could win the PAN→name lookup and misattribute the payee name
+            // (docs/plans/PARTNER-MULTI-OUTLET.md §9).
+            isParent: false,
           },
           select: { panNumber: true, ownerName: true, businessName: true },
         })
@@ -852,7 +859,9 @@ export class TdsService {
 
     const partners = onPlatformPans.length
       ? await this.prisma.channelPartner.findMany({
-          where: { panNumber: { in: onPlatformPans } },
+          // isParent:false — REAL: a parent shares the group PAN, so exclude it from the
+          // PAN→name lookup to avoid misattributing the payee name (§9).
+          where: { panNumber: { in: onPlatformPans }, isParent: false },
           select: { panNumber: true, ownerName: true, businessName: true },
         })
       : [];

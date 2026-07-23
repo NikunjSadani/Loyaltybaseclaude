@@ -66,10 +66,33 @@ type Db = Pick<Prisma.TransactionClient, 'channelPartner' | 'outlet'>;
 
 // ── PURE predicates (unit-tested; no DB) ─────────────────────────────────────────────────
 
-/** Whether a policy-gated field is enforced (PAN is always enforced, ignores policy). */
+/**
+ * Whether a field is enforced unique. PAN AND GST are ALWAYS enforced — both are backed by a
+ * hard partial-unique DB index (`WHERE groupId IS NULL`), so the tenant `gst` policy flag can't
+ * turn GST off (the app check MUST agree with the DB index, else a policy-off tenant would let
+ * the app skip GST while the DB still rejects it — a raw 500 / silent cross-group dup). Bank/UPI
+ * have no DB index and remain tenant-configurable. (`policy.gst` is now informational only.)
+ */
 export function isFieldEnforced(field: UniquenessField, policy: UniquenessPolicy): boolean {
-  if (field === 'pan') return true; // PAN is always the group golden-key
+  if (field === 'pan' || field === 'gst') return true; // always-on DB-backed golden keys
   return policy[field] === true;
+}
+
+/**
+ * Canonical form used for comparison, advisory-locking, AND persistence — the three MUST agree
+ * or a whitespace/case variant can slip a duplicate past the check (audit finding). PAN and GST
+ * are case-insensitive legal IDs → upper-cased; bank/UPI are trimmed only. Empty → null.
+ * The caller (kyc.service) persists this exact value, so a stored value always equals its
+ * normalized form and the equality query below matches.
+ */
+export function normalizeIdentityValue(
+  field: UniquenessField,
+  value: string | null | undefined,
+): string | null {
+  if (typeof value !== 'string') return value ?? null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return field === 'pan' || field === 'gst' ? trimmed.toUpperCase() : trimmed;
 }
 
 /**
@@ -105,7 +128,7 @@ export async function resolveGroupPan(
   exceptPartnerId?: string | null,
 ): Promise<string | null> {
   const parent = await db.channelPartner.findUnique({ where: { id: parentId }, select: { panNumber: true } });
-  if (parent?.panNumber) return parent.panNumber.trim();
+  if (parent?.panNumber) return normalizeIdentityValue('pan', parent.panNumber);
 
   const sibling = await db.outlet.findFirst({
     where: {
@@ -121,7 +144,7 @@ export async function resolveGroupPan(
     },
     select: { partner: { select: { panNumber: true } } },
   });
-  return sibling?.partner?.panNumber?.trim() ?? null;
+  return normalizeIdentityValue('pan', sibling?.partner?.panNumber);
 }
 
 /**
@@ -134,7 +157,7 @@ export async function checkPanMatchesGroup(
 ): Promise<UniquenessViolation | null> {
   const { clientId, ourParentId, pan, exceptPartnerId } = params;
   if (ourParentId == null) return null; // ungrouped → no group PAN to match
-  const value = typeof pan === 'string' ? pan.trim() : pan;
+  const value = normalizeIdentityValue('pan', pan);
   if (!value) return null; // no PAN yet → nothing to match
   const groupPan = await resolveGroupPan(db, clientId, ourParentId, exceptPartnerId);
   if (groupPan && groupPan !== value) {
@@ -175,21 +198,24 @@ export async function checkGroupUniqueness(
   for (const field of ['pan', 'gst', 'bank', 'upi'] as UniquenessField[]) {
     if (!isFieldEnforced(field, policy)) continue;
     const column = FIELD_COLUMN[field];
-    const rawValue = details[column];
-    const value = typeof rawValue === 'string' ? rawValue.trim() : rawValue;
+    const value = normalizeIdentityValue(field, details[column]);
     if (!value) continue; // nothing to check for an empty value
 
-    const where: Record<string, unknown> = { clientId, [column]: value, isParent: false, deletedAt: null };
+    // Include PARENTS in the clash search — a parent MAY carry its own GST/PAN/bank/UPI, and
+    // bank/UPI have NO DB index, so excluding parents would let a parent + an unrelated outlet
+    // silently share a tenant-enforced bank/UPI. A parent anchors its OWN group (id = the parentId
+    // its children point at), so its group-membership is `[cand.id]`, not its (empty) owned outlets.
+    const where: Record<string, unknown> = { clientId, [column]: value, deletedAt: null };
     if (exceptPartnerId) where.id = { not: exceptPartnerId };
 
     const candidates = await db.channelPartner.findMany({
       where: where as Prisma.ChannelPartnerWhereInput,
-      select: { id: true, outlets: { select: { parentId: true } } },
+      select: { id: true, isParent: true, outlets: { select: { parentId: true } } },
     });
 
     for (const cand of candidates) {
-      const candParentIds = cand.outlets.map((o) => o.parentId);
-      if (!clashIsOutsideGroup(ourParentId, candParentIds)) continue; // same-group clash is allowed
+      const candGroupIds = cand.isParent ? [cand.id] : cand.outlets.map((o) => o.parentId);
+      if (!clashIsOutsideGroup(ourParentId, candGroupIds)) continue; // same-group clash is allowed
 
       const message =
         field === 'pan'
@@ -206,4 +232,36 @@ export async function checkGroupUniqueness(
   }
 
   return null;
+}
+
+/**
+ * Serialize concurrent writers of the SAME identity value so the read-then-write in
+ * `checkGroupUniqueness` can't race. Takes a transaction-scoped Postgres advisory lock per
+ * enforced (clientId, field, value) — auto-released when the tx commits/rolls back (never orphaned).
+ *
+ * MUST be called INSIDE the same interactive `$transaction` as the uniqueness check + the write,
+ * BEFORE `checkGroupUniqueness`. Two txns writing the same value take turns: the first commits its
+ * row, the second re-runs its check, sees it, and is rejected. For PAN/GST this backstops the
+ * partial-unique DB index (belt-and-suspenders); for bank/UPI (no DB rule) it is the ONLY race guard.
+ *
+ * Keys are locked in deterministic (sorted) order so two txns locking multiple fields can't deadlock.
+ */
+export async function acquireIdentityLocks(
+  tx: Prisma.TransactionClient,
+  params: { clientId: string; details: PartnerIdentityDetails; policy: UniquenessPolicy },
+): Promise<void> {
+  const { clientId, details, policy } = params;
+  const keys: string[] = [];
+  for (const field of ['pan', 'gst', 'bank', 'upi'] as UniquenessField[]) {
+    if (!isFieldEnforced(field, policy)) continue;
+    const value = normalizeIdentityValue(field, details[FIELD_COLUMN[field]]);
+    if (!value) continue;
+    keys.push(`${clientId}:${field}:${value}`);
+  }
+  keys.sort(); // stable lock order → no deadlock between concurrent multi-field writers
+  for (const key of keys) {
+    // hashtext → int4 → widened to the bigint pg_advisory_xact_lock expects. A hash collision only
+    // means two unrelated values occasionally share a lock (a harmless extra serialization).
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key})::bigint)`;
+  }
 }

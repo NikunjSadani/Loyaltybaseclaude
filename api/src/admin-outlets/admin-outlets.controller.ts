@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { AdminOutletsService } from './admin-outlets.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -75,5 +75,18 @@ export class AdminOutletsController {
   @RequirePermission('partners:manage_outlets')
   reactivate(@CurrentUser() user: JwtPayload, @Body() dto: OutletCodesDto) {
     return this.outlets.reactivate(user, dto);
+  }
+
+  /**
+   * POST /:outletCode/ungroup — the DEDICATED, explicit un-group action (owner groups, §4.5).
+   * Removes ONE outlet from its owner group; blocked while it still shares an enforced identity
+   * detail (incl. phone) with the group. Un-grouping is NEVER a side effect of a blank upload
+   * cell — only this endpoint. Same admin gate as grouping (partners:manage_outlets); the static
+   * POST routes above are single-segment so this two-segment param route can't shadow them.
+   */
+  @Post(':outletCode/ungroup')
+  @RequirePermission('partners:manage_outlets')
+  ungroup(@CurrentUser() user: JwtPayload, @Param('outletCode') outletCode: string) {
+    return this.outlets.ungroupOutlet(user, outletCode);
   }
 }

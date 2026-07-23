@@ -703,6 +703,13 @@ model ChannelPartner {
   // (via Outlet.parentId) + provides the consolidated read-only view. Excluded from all
   // partner-facing lists/KPIs by an `isParent:false` filter.
   isParent            Boolean              @default(false)
+  // DERIVED group key (see docs/plans/PARTNER-MULTI-OUTLET.md §"uniqueness engine"). Mirrors
+  // this owner's outlet `parentId` (the single source of truth). Written by KYC-create and
+  // kept in lockstep by a DB trigger on `outlets` — never edited independently. Hosts the
+  // PARTIAL UNIQUE indexes on (clientId,gstNumber)/(clientId,panNumber) WHERE groupId IS NULL:
+  // a hard, race-proof DB rule for UNGROUPED owners, while grouped siblings (groupId set) are
+  // excepted so they may share GST/PAN. Cross-group is app-enforced (checkGroupUniqueness + lock).
+  groupId             String?
   onboardedAt         DateTime?
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
@@ -721,11 +728,15 @@ model ChannelPartner {
   leaderboardEntries    LeaderboardEntry[]
 
   @@unique([clientId, partnerCode])
-  @@unique([clientId, gstNumber])
+  // NOTE: the old `@@unique([clientId, gstNumber])` is REPLACED by a PARTIAL unique index
+  // `WHERE groupId IS NULL` (grouped siblings may share GST) — defined in the migration, not
+  // here (Prisma can't express partial indexes). A matching partial unique exists for panNumber.
+  // Cross-group uniqueness is app-enforced (checkGroupUniqueness) with an advisory lock.
   @@index([clientId])
   @@index([userId])
   @@index([partnerCode])
   @@index([gstNumber])
+  @@index([groupId])
   @@index([isActive])
   @@index([deletedAt])
   @@map("channel_partners")
@@ -759,6 +770,13 @@ model KycSubmission {
   // the durable audit trail that a reviewer sees ("address proof waived — names differ").
   // Distinct from the review-dump's bank-holder-vs-owner `nameMismatch` (a computed value).
   addressNameMismatch Boolean @default(false)
+
+  // PROPOSED owner identity/detail changes for a re-KYC, staged here and applied to the live
+  // ChannelPartner ONLY at Gifsy APPROVAL (never at draft) — so an already-approved partner never
+  // carries unverified payout/identity details. Set only on a re-KYC create (existing partner);
+  // null for a brand-new-outlet draft (that draft creates the partner directly). Holds the full
+  // normalized patch (businessName/ownerName/phone/gst/pan/bank/upi/paymentMode).
+  proposedPartner Json?
 
   // ── Geo capture #1 — taken when the outlet board photo is shot ──────────────
   boardPhotoLat         Decimal?  @db.Decimal(10, 8)

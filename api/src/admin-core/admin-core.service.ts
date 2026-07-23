@@ -886,7 +886,9 @@ export class AdminCoreService {
     const [activePartners, pendingKyc, pendingVisibilityRaw, walletAggregate, payoutGroups, visibilityEnabled] =
       await Promise.all([
         this.prisma.channelPartner.count({
-          where: { clientId, isActive: true, deletedAt: null },
+          // isParent:false — parents (owner-group anchors) are non-operating; they must not
+          // inflate the active-partners KPI (docs/plans/PARTNER-MULTI-OUTLET.md §9).
+          where: { clientId, isActive: true, deletedAt: null, isParent: false },
         }),
 
         this.prisma.kycSubmission.count({

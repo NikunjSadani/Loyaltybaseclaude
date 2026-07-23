@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useState, useEffect, useCallback } from 'react';
+import { use, useState, useEffect, useCallback, type ReactNode } from 'react';
 import Link from 'next/link';
 import {
   ArrowLeft, Building2, Phone, MapPin, User,
@@ -61,6 +61,8 @@ interface KYCDetail {
   accountNumber?: string;
   ifscCode?: string;
   upiId?: string;
+  // Re-KYC staged identity/payout changes (proposed vs current), or undefined when none.
+  proposedChanges?: ProposedChanges;
   documents: KYCDoc[];
   photos: { label: string; url: string; documentType: string }[];
   approvalHistory: ApprovalEvent[];
@@ -138,13 +140,26 @@ interface ApiSalesKYC {
     state: string;
     bankName?: string;
     bankAccountNumber?: string;
+    bankAccountHolder?: string;
     ifscCode?: string;
     upiId?: string;
+    paymentMode?: string;
     phone?: string;
     outlets?: { id: string; name: string; outletCode: string; phone?: string;
       addressLine1?: string | null; addressLine2?: string | null;
       city?: string | null; state?: string | null; pincode?: string | null }[];
   };
+  // Re-KYC (stage-at-approval): the PROPOSED (new) identity/payout values, applied to the
+  // live partner only at Gifsy approval. Present ONLY for a re-KYC that staged changes.
+  proposedPartner?: {
+    businessName?: string | null; ownerName?: string | null; phone?: string | null;
+    gstNumber?: string | null; panNumber?: string | null;
+    bankName?: string | null; bankAccountNumber?: string | null; bankAccountHolder?: string | null;
+    ifscCode?: string | null; upiId?: string | null; paymentMode?: string | null;
+    // Outlet address is staged the same way and applied to the live outlet only at approval.
+    addressLine1?: string | null; addressLine2?: string | null;
+    city?: string | null; state?: string | null; pincode?: string | null;
+  } | null;
   documents?: { id?: string; documentType: string; status?: string; viewUrl?: string | null }[];
 }
 
@@ -210,6 +225,127 @@ function parseGeo(lat: unknown, lng: unknown): { lat: number; lng: number } | nu
   return { lat: la, lng: ln };
 }
 
+/* ─── Re-KYC proposed-change diff (stage-at-approval) ─────────────────────────── */
+
+/** Identity/payout scalars a re-KYC can stage on `proposedPartner`, plus the synthetic
+ *  `address` (composed from the staged outlet address components — see computeAddressChange). */
+type ProposedFieldKey =
+  | 'businessName' | 'ownerName' | 'phone' | 'gstNumber' | 'panNumber'
+  | 'bankName' | 'bankAccountNumber' | 'bankAccountHolder' | 'ifscCode' | 'upiId' | 'paymentMode'
+  | 'address';
+
+interface ProposedFieldChange { proposed: string; current: string }
+type ProposedChanges = Partial<Record<ProposedFieldKey, ProposedFieldChange>>;
+
+/** Partner SCALAR keys diffed field-for-field (address is handled separately, below). */
+const PROPOSED_FIELD_KEYS: Exclude<ProposedFieldKey, 'address'>[] = [
+  'businessName', 'ownerName', 'phone', 'gstNumber', 'panNumber',
+  'bankName', 'bankAccountNumber', 'bankAccountHolder', 'ifscCode', 'upiId', 'paymentMode',
+];
+
+const PROPOSED_FIELD_LABELS: Record<ProposedFieldKey, string> = {
+  businessName: 'Firm Name', ownerName: 'Owner Name', phone: 'Mobile',
+  gstNumber: 'GST', panNumber: 'PAN', bankName: 'Bank',
+  bankAccountNumber: 'Account', bankAccountHolder: 'Account Holder',
+  ifscCode: 'IFSC', upiId: 'UPI ID', paymentMode: 'Payment Mode', address: 'Address',
+};
+
+/** Outlet address components a re-KYC can stage on `proposedPartner`. The live values live
+ *  on `partner.outlets[0]` (NOT the partner scalars) and are applied to the outlet at approval. */
+const ADDRESS_PARTS = ['addressLine1', 'addressLine2', 'city', 'state', 'pincode'] as const;
+
+/** Compose the page's single Address string (same order the rows render). */
+function composeAddress(src: Record<string, unknown> | null | undefined): string {
+  if (!src) return '';
+  return ADDRESS_PARTS
+    .map((k) => (typeof src[k] === 'string' ? (src[k] as string) : ''))
+    .filter(Boolean)
+    .join(', ');
+}
+
+/**
+ * Diff the PROPOSED outlet address (staged on `proposedPartner`) against the current outlet
+ * address (`partner.outlets[0]`). Absent proposed component = keep current (apply semantics),
+ * so the proposed value is the OVERLAID full address the reviewer is approving. Address is not
+ * PII-masked — rendered as-is. Returns undefined when no address staged / nothing changed.
+ */
+function computeAddressChange(
+  currentOutlet: Record<string, unknown> | null | undefined,
+  proposed: Record<string, unknown> | null | undefined,
+): ProposedFieldChange | undefined {
+  if (!proposed) return undefined;
+  const staged = ADDRESS_PARTS.some((k) => typeof proposed[k] === 'string' && (proposed[k] as string).length > 0);
+  if (!staged) return undefined;
+  const overlaid: Record<string, unknown> = { ...(currentOutlet ?? {}) };
+  for (const k of ADDRESS_PARTS) {
+    const pv = proposed[k];
+    if (typeof pv === 'string' && pv.length > 0) overlaid[k] = pv;
+  }
+  const proposedAddr = composeAddress(overlaid);
+  const currentAddr = composeAddress(currentOutlet);
+  if (proposedAddr && proposedAddr !== currentAddr) return { proposed: proposedAddr, current: currentAddr };
+  return undefined;
+}
+
+/** Build the merged proposed-change map (scalar identity/payout + the outlet-address diff). */
+function buildProposedChanges(
+  partner: Record<string, unknown> | null | undefined,
+  outlet: Record<string, unknown> | null | undefined,
+  proposed: Record<string, unknown> | null | undefined,
+): ProposedChanges | undefined {
+  const scalar = computeProposedChanges(partner, proposed);
+  const address = computeAddressChange(outlet, proposed);
+  if (!scalar && !address) return undefined;
+  return { ...(scalar ?? {}), ...(address ? { address } : {}) };
+}
+
+/**
+ * Diff the PROPOSED (re-KYC-staged) identity/payout values against the still-live partner
+ * values. Only a field whose proposed value is a non-empty string AND differs from the
+ * current value is returned (absent/empty proposed key = "untouched", matching the backend
+ * apply semantics). Both sides are already role-masked by the backend, so a sales reviewer
+ * (masked to last-4) only sees a PAN/GST/account diff when the last-4 differs — the
+ * always-visible fields (name/phone/bank/IFSC/UPI/holder/mode) diff in full. Returns
+ * undefined when nothing changed / no re-KYC.
+ */
+function computeProposedChanges(
+  partner: Record<string, unknown> | null | undefined,
+  proposed: Record<string, unknown> | null | undefined,
+): ProposedChanges | undefined {
+  if (!proposed) return undefined;
+  const out: ProposedChanges = {};
+  for (const k of PROPOSED_FIELD_KEYS) {
+    const pv = proposed[k];
+    if (typeof pv !== 'string' || pv.length === 0) continue;
+    const cv = partner?.[k];
+    const cur = typeof cv === 'string' ? cv : '';
+    if (pv !== cur) out[k] = { proposed: pv, current: cur };
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Render a field value. When `change` is present the PROPOSED (new) value the reviewer is
+ * approving is shown as the primary value with a "Proposed change" badge and the old value
+ * beneath ("was: …"). When absent, the field renders exactly as before (no visual noise).
+ */
+function ProposedFieldValue({
+  change, children,
+}: { change?: ProposedFieldChange; children: ReactNode }): ReactNode {
+  if (!change) return children;
+  return (
+    <span className="flex flex-col gap-0.5" data-testid="proposed-change">
+      <span className="flex items-center gap-1.5 flex-wrap">
+        <span className="text-gray-900 font-semibold">{change.proposed || '—'}</span>
+        <span className="text-[10px] font-semibold text-amber-700 bg-amber-100 border border-amber-200 px-1.5 py-0.5 rounded-full whitespace-nowrap">
+          Proposed change
+        </span>
+      </span>
+      <span className="text-[10px] text-gray-400 font-sans">was: {change.current || '—'}</span>
+    </span>
+  );
+}
+
 function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
   // Address lives on the OUTLET (captured at KYC), not ChannelPartner.
   const o = s.partner.outlets?.[0];
@@ -238,6 +374,11 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
     accountNumber: s.partner.bankAccountNumber,
     ifscCode: s.partner.ifscCode,
     upiId: s.partner.upiId,
+    proposedChanges: buildProposedChanges(
+      s.partner as unknown as Record<string, unknown>,
+      s.partner.outlets?.[0] as Record<string, unknown> | null | undefined,
+      s.proposedPartner as Record<string, unknown> | null | undefined,
+    ),
     documents: (s.documents ?? []).map(mapDoc),
     photos: (s.documents ?? [])
       .filter(d => PHOTO_DOC_TYPES.has(d.documentType) && d.viewUrl)
@@ -645,6 +786,10 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           accountNumber:   s.partner?.bankAccountNumber,
           ifscCode:        s.partner?.ifscCode,
           upiId:           s.partner?.upiId,
+          // Re-KYC (stage-at-approval): the live partner above still holds the OLD values;
+          // diff the proposed patch so the reviewer sees WHAT they are approving (§ money path).
+          // Address is diffed against the outlet (outlets[0]), not the partner scalars.
+          proposedChanges: buildProposedChanges(s.partner, s.partner?.outlets?.[0], s.proposedPartner),
           documents:       (s.documents ?? []).map(mapDoc),
           // Store/owner photos are rendered as images; everything else lists as a doc row.
           photos:          (s.documents ?? [])
@@ -666,6 +811,12 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   }, [id]);
 
   useEffect(() => { void loadKyc(); }, [loadKyc]);
+
+  // A re-KYC with staged identity/payout changes: auto-open the (default-closed) details
+  // panel so the reviewer sees the proposed-vs-current values without hunting for them.
+  useEffect(() => {
+    if (kyc?.proposedChanges) setDetailsOpen(true);
+  }, [kyc?.proposedChanges]);
 
   if (loadingKyc) {
     return (
@@ -848,6 +999,29 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
         </div>
       )}
 
+      {/* Re-KYC staged changes: the live partner fields still hold the OLD values; the NEW
+          (proposed) values are what approval applies. Surface up-front + auto-open details so
+          the reviewer never approves stale identity/payout data. */}
+      {kyc.proposedChanges && (
+        <div
+          data-testid="proposed-changes-banner"
+          className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-2"
+        >
+          <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-amber-800">Proposed identity / payout changes</p>
+            <p className="text-xs text-amber-700 mt-0.5">
+              This re-KYC proposes new values (shown in Store Information with the old value as
+              &ldquo;was …&rdquo;). Changed:{' '}
+              <span className="font-medium">
+                {(Object.keys(kyc.proposedChanges) as ProposedFieldKey[])
+                  .map((k) => PROPOSED_FIELD_LABELS[k]).join(', ')}
+              </span>
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Approval Timeline — hidden for approved outlets (no longer actionable) */}
       {!isApproved && <ApprovalTimeline kyc={kyc} />}
 
@@ -929,9 +1103,9 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
               <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Partner Details</p>
               <div className="space-y-2.5">
                 {[
-                  { icon: <User className="h-3.5 w-3.5" />,   label: 'Owner Name', value: kyc.ownerName },
-                  { icon: <Phone className="h-3.5 w-3.5" />,  label: 'Mobile',  value: `+91 ${kyc.outletPhone}` },
-                  { icon: <MapPin className="h-3.5 w-3.5" />, label: 'Address', value: [kyc.address, kyc.city, kyc.state, kyc.pincode].filter(Boolean).join(', ') || '—' },
+                  { icon: <User className="h-3.5 w-3.5" />,   label: 'Owner Name', value: <ProposedFieldValue change={kyc.proposedChanges?.ownerName}>{kyc.ownerName}</ProposedFieldValue> },
+                  { icon: <Phone className="h-3.5 w-3.5" />,  label: 'Mobile',  value: <ProposedFieldValue change={kyc.proposedChanges?.phone}>{`+91 ${kyc.outletPhone}`}</ProposedFieldValue> },
+                  { icon: <MapPin className="h-3.5 w-3.5" />, label: 'Address', value: <ProposedFieldValue change={kyc.proposedChanges?.address}>{[kyc.address, kyc.city, kyc.state, kyc.pincode].filter(Boolean).join(', ') || '—'}</ProposedFieldValue> },
                 ].map(row => (
                   <div key={row.label} className="flex items-start gap-2">
                     <span className="text-gray-400 mt-0.5 shrink-0">{row.icon}</span>
@@ -968,16 +1142,20 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                     <span data-testid="kyc-store-outlet-code" className="text-sm font-mono text-gray-800">{kyc.outletCode}</span>
                   </div>
                 )}
-                {kyc.gstNumber && (
+                {(kyc.gstNumber || kyc.proposedChanges?.gstNumber) && (
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-gray-400">GST</span>
-                    <span data-testid="kyc-store-gst" className="text-sm font-mono text-gray-800">{kyc.gstNumber}</span>
+                    <span data-testid="kyc-store-gst" className="text-sm font-mono text-gray-800">
+                      <ProposedFieldValue change={kyc.proposedChanges?.gstNumber}>{kyc.gstNumber}</ProposedFieldValue>
+                    </span>
                   </div>
                 )}
-                {kyc.panNumber && (
+                {(kyc.panNumber || kyc.proposedChanges?.panNumber) && (
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-gray-400">PAN</span>
-                    <span data-testid="kyc-store-pan" className="text-sm font-mono text-gray-800">{kyc.panNumber}</span>
+                    <span data-testid="kyc-store-pan" className="text-sm font-mono text-gray-800">
+                      <ProposedFieldValue change={kyc.proposedChanges?.panNumber}>{kyc.panNumber}</ProposedFieldValue>
+                    </span>
                   </div>
                 )}
               </div>
@@ -1106,38 +1284,48 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
               </div>
             )}
 
-            {/* Payment Details — the KYC form captures bank OR UPI; show whichever was given. */}
-            {(kyc.bankName || kyc.upiId) && (
-              <>
-                <div className="border-t border-gray-100" />
-                <div>
-                  <div className="flex items-center gap-2 mb-2">
-                    <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Payment Details</p>
-                    {kyc.requiredPaymentType && REQUIRED_PAYMENT_LABELS[kyc.requiredPaymentType] && (
-                      <span
-                        data-testid="required-payout-pill"
-                        className="text-[10px] font-semibold text-gray-500 bg-gray-100 border border-gray-200 px-1.5 py-0.5 rounded-full"
-                      >
-                        Required payout: {REQUIRED_PAYMENT_LABELS[kyc.requiredPaymentType]}
-                      </span>
-                    )}
+            {/* Payment Details — the KYC form captures bank OR UPI; show whichever was given.
+                Also shows when a re-KYC stages a payment change even if the live value is empty. */}
+            {(() => {
+              const c = kyc.proposedChanges;
+              const paymentRows = [
+                { label: 'Bank',           value: kyc.bankName as ReactNode, change: c?.bankName          },
+                { label: 'Account',        value: kyc.accountNumber as ReactNode, change: c?.bankAccountNumber },
+                { label: 'Account Holder', value: undefined as ReactNode, change: c?.bankAccountHolder  },
+                { label: 'IFSC',           value: kyc.ifscCode as ReactNode, change: c?.ifscCode          },
+                { label: 'UPI ID',         value: kyc.upiId as ReactNode, change: c?.upiId             },
+                { label: 'Payment Mode',   value: undefined as ReactNode, change: c?.paymentMode       },
+              ].filter(row => row.value || row.change);
+              if (paymentRows.length === 0) return null;
+              return (
+                <>
+                  <div className="border-t border-gray-100" />
+                  <div>
+                    <div className="flex items-center gap-2 mb-2">
+                      <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Payment Details</p>
+                      {kyc.requiredPaymentType && REQUIRED_PAYMENT_LABELS[kyc.requiredPaymentType] && (
+                        <span
+                          data-testid="required-payout-pill"
+                          className="text-[10px] font-semibold text-gray-500 bg-gray-100 border border-gray-200 px-1.5 py-0.5 rounded-full"
+                        >
+                          Required payout: {REQUIRED_PAYMENT_LABELS[kyc.requiredPaymentType]}
+                        </span>
+                      )}
+                    </div>
+                    <div className="space-y-1.5">
+                      {paymentRows.map(row => (
+                        <div key={row.label} className="flex items-center justify-between">
+                          <span className="text-xs text-gray-400">{row.label}</span>
+                          <span className="text-sm font-medium text-gray-800 font-mono">
+                            <ProposedFieldValue change={row.change}>{row.value}</ProposedFieldValue>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  <div className="space-y-1.5">
-                    {[
-                      { label: 'Bank',    value: kyc.bankName       },
-                      { label: 'Account', value: kyc.accountNumber  },
-                      { label: 'IFSC',    value: kyc.ifscCode       },
-                      { label: 'UPI ID',  value: kyc.upiId          },
-                    ].filter(row => row.value).map(row => (
-                      <div key={row.label} className="flex items-center justify-between">
-                        <span className="text-xs text-gray-400">{row.label}</span>
-                        <span className="text-sm font-medium text-gray-800 font-mono">{row.value}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
+                </>
+              );
+            })()}
           </div>
         )}
       </div>
