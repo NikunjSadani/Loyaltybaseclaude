@@ -20,14 +20,17 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
   jest 1745 · nest 0 · FE vitest 1984 · tsc 0**; adversarial-audited (no HIGH; MED-1 orphan-sibling + LOW-3 fixed). **NOT in
   prod.** Full as-built + cutover checklist = `platform/docs/plans/PARTNER-MULTI-OUTLET.md` §9; memory **[[partner-multi-outlet]]**;
   the detailed ACTIVE-WORK block is under START THE SESSION below.
-  - **🛑 CUTOVER ATTEMPTED 2026-07-23 → BLOCKED on prod dup-PAN (owner decision needed; nothing merged to main — prod untouched).**
-    Prod is pre-Wave-1 so ALL **4 additive migrations** apply. Guarded prod read (`gifsy-oneoff-prodcheck`): scheme-orphans **0**,
-    but **2 dup-PAN pairs among 4 UNAPPROVED go-live SMOKE-TEST partners** (`AAACT9811F`×2 + placeholder `ABCDE1234F`×2; Deoleo has
-    no real partners yet) → the W2 PAN index would fail. **▶ owner: confirm test → guarded prod cleanup (soft-delete all 4 / null
-    dup PANs) → re-run read→0 → merge develop→main + owner GitHub approval → 4 migrations → verify → post-cutover Cloud Scheduler
-    → `POST /v1/kyc/cleanup-stale-drafts` daily + `KYC_CLEANUP_SECRET`.** (3) sweep dup bank/UPI **before** ever flipping a tenant's
-    `uniquenessPolicy.bank`/`upi` to true (no DB index reveals them). *(§4.5 PAN-change-to-leave-group is now IMPLEMENTED in W4 — no
-    longer a TODO.)*
+  - **✅ CUTOVER PROCEEDING (2026-07-24) — the prod dup-PAN blocker is RESOLVED.** Prod is pre-Wave-1 so ALL **4 additive
+    migrations** apply. Guarded prod read (`gifsy-oneoff-prodcheck`) had found scheme-orphans **0** but **2 dup-PAN pairs among 4
+    UNAPPROVED go-live SMOKE-TEST partners** (`AAACT9811F`×2 + placeholder `ABCDE1234F`×2; Deoleo had no real partners). **RESOLVED
+    2026-07-24 via a guarded prod write (backup + shown SQL + owner OK): SOFT-DELETED all 4 partners + 4 outlets + 4 login users
+    (reversible via `deletedAt=null`) + PURGED the 4 test phones (freed for reuse — `User.phone` NOT NULL → sentinel `DEL-<id>`;
+    `ORIG_NUMBERS_STILL_HELD=0`). DUP_PAN now 0; prod has 0 active partners — clean slate.** Backups in this session's transcript
+    (partner/outlet/user ids + original phones). **▶ REMAINING cutover steps: merge develop→main + push (I do it) → owner approves
+    the GitHub "Deploy — Production" gate → CI applies the 4 migrations → verify prod SHA/`/health/ready`/smoke → post-cutover:
+    create Cloud Scheduler → `POST /v1/kyc/cleanup-stale-drafts` daily + set `KYC_CLEANUP_SECRET` on prod.** ⚠️ flaky-CI: re-run
+    failed jobs if the prod test job flakes so the gate appears. Also: sweep dup bank/UPI **before** ever flipping a tenant's
+    `uniquenessPolicy.bank`/`upi` to true (no DB index reveals them). *(§4.5 PAN-change-to-leave-group is IMPLEMENTED in W4.)*
 - **✅ CUTOVER #12 (`d028566`, live 2026-07-22) shipped BOTH develop features + the infra-workflow changes to prod:**
   (1) **PER-OUTLET PAYOUT MANDATE** — `Outlet.requiredPaymentType BANK|UPI|ANY` (migration `..._add_outlet_required_payment_type`),
   **fully LIVE, needs no flag** (defaults BANK); (2) **KYC ADDRESS-PROOF WAIVER** (migration `..._add_kyc_address_name_mismatch`);

@@ -383,11 +383,10 @@ next develop push.
    exist yet, so OMIT that filter — no parents exist pre-migration anyway):
    `SELECT "clientId","panNumber", count(*) FROM channel_partners WHERE "deletedAt" IS NULL AND "panNumber" IS NOT NULL GROUP BY "clientId","panNumber" HAVING count(*)>1`.
    ⚠️ **RAN 2026-07-23 via `gifsy-oneoff-prodcheck` (GUARD gifsy_prod): FOUND 2 dup pairs — `AAACT9811F`×2
-   (CP-OUT-2026-001 "Payel Ghosh", CP-OUT-2026-002 "St hukke") + `ABCDE1234F`×2 (CP-Testoutlet "niinj",
-   CP-Test23 "nikunj").** All 4 prod partners are UNAPPROVED (`onboardedAt=null`) go-live SMOKE-TEST entries
-   (placeholder PAN `ABCDE1234F`; test outlet codes) — Deoleo has NO real partners yet. **BLOCKS the cutover
-   → owner must confirm test → guarded prod write (backup + shown SQL + owner OK) to soft-delete all 4
-   (recommended; reversible via `deletedAt=null`) OR null the dup PANs; then re-run the read → 0 → proceed.**
+   (CP-OUT-2026-001, CP-OUT-2026-002) + `ABCDE1234F`×2 (CP-Testoutlet, CP-Test23), all 4 UNAPPROVED go-live
+   SMOKE-TEST entries. ✅ RESOLVED 2026-07-24 (owner OK'd): guarded prod write SOFT-DELETED all 4 partners +
+   4 outlets + 4 login users (reversible via `deletedAt=null`) + PURGED the 4 test phones (freed for reuse —
+   `User.phone` NOT NULL → sentinel `DEL-<id>`). DUP_PAN now 0; prod has 0 active partners — clean slate.**
    (Staging had 9 UAT-junk dups; nulled under guarded write 2026-07-23.)
 2. **PROD scheme-enrollment orphan pre-check** — the W3 `scheme_enrollment_by_partner` migration **self-aborts**
    (RAISE EXCEPTION, no silent delete) if any enrollment's `userId` maps to no ChannelPartner. Run the pre-check
