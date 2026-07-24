@@ -1,7 +1,7 @@
 # Partner → Multiple Outlets (Parent-Child Owner Groups)
 
-> **Status (2026-07-23):** ✅ **Wave 1 + 2 + 3 + 4 ALL DONE — the FULL feature is complete on develop, gate
-> green, adversarial-audited.** (W3 flows runtime-verified on staging; W4 staging-verify runs on the develop push.) W1+W2 migrations verified on STAGING; W3 added two
+> **Status (2026-07-23):** ✅ **Wave 1 + 2 + 3 + 4 ALL DONE — the FULL feature is complete on develop (HEAD
+> `04008d0`), gate green, adversarial-audited, staging-verified.** (W3 + W4 flows runtime-verified on the live staging group.) W1+W2 migrations verified on STAGING; W3 added two
 > additive migrations (OTP order-binding + scheme-enrollment-by-shop, now applied on staging); W4 adds NO
 > migrations. **NOT in prod (owner-gated cutover pending).** W3 = login picker + group overview + child KYC
 > pre-fill/badge + scheme-enrollment re-key. W4 = group-leave via re-KYC (Option A) + Phase-2 roll-ups
@@ -396,8 +396,11 @@ next develop push.
 
 ### ✅ Wave 4 — DONE (2026-07-23, on develop; gate green: api jest 1745 · nest 0 · FE vitest 1984 · tsc 0)
 The final wave — three additive workstreams, then a full independent adversarial audit (money/identity focus on
-group-leave). Additive/opt-in; NO new migrations. **Staging runtime-verify pending the develop push** (the Wave-3
-picker/switch/overview/sibling-enroll flows are already verified on the live `w3test-*` staging group).
+group-leave; no HIGH, MED-1 orphan-sibling + LOW-3 fixed). Additive/opt-in; NO new migrations. **✅ Staging-verified
+on `04008d0`:** the Phase-2 endpoints (`group/targets`, `group/visibility` correctly flag-gated OFF for Deoleo,
+`group/leaderboard`), the scheme-catalog opt-in fix (partner catalog `0→2` ACTIVE schemes), and the own-group guard
+(a non-group phone → `available:false`) all confirmed live. Group-leave (re-KYC→Gifsy-approval) is covered by 223
+kyc unit tests + the audit — its full end-to-end flow is part of the owner's UAT.
 - **Group-leave via re-KYC (Option A):** §4.5 — a re-KYC PAN-change-away-from-group is an atomic Gifsy-approval
   departure (standalone-uniqueness or rollback; clears `parentId` in-tx; `willLeaveGroup` reviewer banner on both
   KYC detail pages). Resolves the old `TODO(wave4)`.
