@@ -1,10 +1,11 @@
 # Partner → Multiple Outlets (Parent-Child Owner Groups)
 
-> **Status (2026-07-23):** ✅ **Wave 1 + Wave 2 + Wave 3 ALL DONE — on develop, gate green, 3-lens
-> adversarial audit + fixes applied.** W1+W2 migrations verified on STAGING; W3 adds two more additive
-> migrations (OTP order-binding + scheme-enrollment-by-shop) that apply on the next develop push. **NOT in
-> prod (owner-gated cutover pending).** Wave 3 = login picker + read-only group overview + child KYC
-> pre-fill/badge + scheme-enrollment re-key. Next = owner UAT on staging, then the owner-gated cutover.
+> **Status (2026-07-23):** ✅ **Wave 1 + 2 + 3 + 4 ALL DONE — the FULL feature is complete on develop, gate
+> green, adversarial-audited.** (W3 flows runtime-verified on staging; W4 staging-verify runs on the develop push.) W1+W2 migrations verified on STAGING; W3 added two
+> additive migrations (OTP order-binding + scheme-enrollment-by-shop, now applied on staging); W4 adds NO
+> migrations. **NOT in prod (owner-gated cutover pending).** W3 = login picker + group overview + child KYC
+> pre-fill/badge + scheme-enrollment re-key. W4 = group-leave via re-KYC (Option A) + Phase-2 roll-ups
+> (targets/visibility/leaderboard) + scheme-catalog eligibility fix. Next = owner UAT on staging → owner-gated cutover.
 >
 > ⚠️ **§9 "BUILD STATUS" is the AUTHORITATIVE AS-BUILT record.** The design EVOLVED substantially
 > during Wave 2 (owner decisions on DB-vs-app enforcement, single-source-of-truth, re-KYC
@@ -65,8 +66,8 @@ detail with the group — the admin must re-KYC the child to make its details di
   the outlet **leaves the group**. PAN can pre-fill from the parent **or** a sibling child.
 - **⟪Wave-2 as-built⟫** PAN is enforced by a **hard partial-unique DB index** `(clientId,panNumber)
   WHERE groupId IS NULL` (always-on; unique for ungrouped owners, grouped siblings share) + the app
-  check. The **PAN-change-to-leave-group ordering is NOT yet enabled** — a `TODO(wave4)` in
-  `kyc.service`; resolve with the owner before allowing group-leave via re-KYC.
+  check. ⟪Wave-4 as-built⟫ **Changing PAN via re-KYC now LEAVES the group** (Option A — atomic at Gifsy
+  approval; see §4.5). The old `TODO(wave4)` is resolved.
 
 ### 2.5 The other identity fields
 - **GST, phone, bank, UPI:** **unique-except-within-group** — may repeat or differ among a group's
@@ -194,11 +195,25 @@ When an admin re-upload sets a Parent ID on an already-approved outlet:
 - No enforced field may collide with a **different** group / outside outlet.
 - On pass → link; on fail → error, no link.
 
-### 4.5 Un-group / leave a group
-- Removing a child from a parent (re-upload with Parent ID blank) is **blocked** while the child still
-  shares **any** detail with the group → error: "make shared details distinct via re-KYC first."
-- To truly leave: **re-KYC** the child to a **new unique PAN** (+ distinct GST/phone/bank/UPI as
-  needed) → it becomes an independent entity → then the un-map succeeds.
+### 4.5 Un-group / leave a group  ⟪Wave-4 as-built — Option A, owner-approved⟫
+Two ways a shop leaves:
+- **Dedicated admin un-group** (`POST /admin/outlets/:outletCode/ungroup`) is **blocked** while the child
+  still shares **any** enforced detail with the group — for a shop that just needs detaching but whose
+  details are already distinct.
+- **Leave via re-KYC (the real "different owner now" path) — ✅ IMPLEMENTED (Wave 4, Option A).** A re-KYC
+  whose **proposed PAN differs from the group's canonical PAN** is treated as an explicit **group-departure
+  request** — because a group is defined by one shared PAN, a PAN moving away from it *necessarily* means
+  leaving. It is applied **atomically at Gifsy approval**: the proposed identity is validated as a
+  **STANDALONE** shop (`effectiveParentId = null` → must not collide with any outlet outside; a collision
+  throws `ConflictException` → the whole approval rolls back, never a half-apply), the new identity/payout/
+  address is applied, and the outlet's `parentId` is cleared **in the same transaction** (the
+  `outlet_group_id_sync` trigger clears the derived `groupId`; the `WHERE groupId IS NULL` partial-unique
+  index then subjects the departed shop to full standalone PAN/GST uniqueness). Gifsy-gated (only the
+  second-stage Gifsy approval reaches this apply). Every reviewer surface shows an explicit **"approving this
+  removes the shop from its group"** banner (`willLeaveGroup` on getOne — a boolean; the group PAN is never
+  shipped). A departing shop that also changes its phone is re-validated standalone too. If the last child
+  leaves, the parent simply becomes a **dormant childless parent** (not deleted). A non-departure re-KYC is
+  byte-identical to before.
 
 ---
 
@@ -244,8 +259,9 @@ gates, does the independent adversarial audit, and staging-runtime-verifies each
 ---
 
 ## 7. Phasing
-- **Phase 1 (this plan):** §2.1–2.8 + wallet roll-up. The full owner-group capability.
-- **Phase 2 (later, optional):** parent roll-ups for targets / visibility / leaderboard (§2.9).
+- **Phase 1 (Waves 1–3):** §2.1–2.8 + wallet roll-up. The full owner-group capability. ✅ DONE.
+- **Phase 2 (Wave 4):** ✅ DONE — parent roll-ups for targets / visibility / leaderboard (§2.9) + group-leave
+  via re-KYC (§4.5). The feature is now complete end-to-end.
 
 ---
 
@@ -353,10 +369,8 @@ outlet. **On develop; migrations applied on staging via CI; NOT in prod (owner-g
 - **Redemption OTP is now order-bound** (`OtpCode.referenceId`, migration `20260723130000_otp_reference_id`) —
   a login can hold concurrent PENDING orders across outlets, so the confirm OTP is scoped to its order.
 
-**Known minor Wave-3 gap (owner-aware, not a blocker):** the scheme LIST eligibility filter is still keyed by the
-login (`SchemeEligibility.specificPartnerId = user.sub`), so a switched login-less sibling may not see its
-specific-eligibility schemes in the catalog list — but `submitEnrollment` does NOT gate on eligibility, so the
-sibling can still enroll. Thread the active partner into the list eligibility if this becomes a real UX need.
+**(Wave-3 scheme-list gap — ✅ RESOLVED in Wave 4:** the eligibility filter was a dead `id IN ()` that hid ALL
+schemes from ALL partners; it is now an opt-in allowlist threaded through the picker — see the Wave 4 section.)
 
 **Migrations this feature adds (all additive / forward-only):** `20260722100000_partner_multi_outlet_foundation`
 (W1) · `20260723120000_partner_group_uniqueness` (W2) · `20260723130000_otp_reference_id` (W3) ·
@@ -378,8 +392,23 @@ next develop push.
    env/secret set on prod (and staging) — else the 48h cleanup never runs (endpoint fail-closes).
 4. **Before ever flipping a tenant's `uniquenessPolicy.bank`/`upi` to true on prod:** sweep for existing
    duplicate bank/UPI among ungrouped active partners (no DB index to reveal them) and group them first.
-5. **The §4.5 PAN-change-to-leave-group ordering is a TODO (`TODO(wave4)` in kyc.service)** — resolve with the
-   owner before enabling group-leave via re-KYC.
+5. *(Resolved in Wave 4 — group-leave via re-KYC is implemented, Option A. No pre-check needed.)*
+
+### ✅ Wave 4 — DONE (2026-07-23, on develop; gate green: api jest 1745 · nest 0 · FE vitest 1984 · tsc 0)
+The final wave — three additive workstreams, then a full independent adversarial audit (money/identity focus on
+group-leave). Additive/opt-in; NO new migrations. **Staging runtime-verify pending the develop push** (the Wave-3
+picker/switch/overview/sibling-enroll flows are already verified on the live `w3test-*` staging group).
+- **Group-leave via re-KYC (Option A):** §4.5 — a re-KYC PAN-change-away-from-group is an atomic Gifsy-approval
+  departure (standalone-uniqueness or rollback; clears `parentId` in-tx; `willLeaveGroup` reviewer banner on both
+  KYC detail pages). Resolves the old `TODO(wave4)`.
+- **Phase-2 group roll-ups:** the read-only group overview now also rolls up **targets** (`GET /partner/group/
+  targets`), **visibility** (`/visibility`, gated on the tenant `visibilityEnabled` flag — fail-closed), and
+  **leaderboard** (`/leaderboard`, the group's shops' tenant-wide ranks). Same own-group guard + `outlet.parentId`
+  source-of-truth scoping as the wallet roll-up. FE: three new sections on `/partner/group`.
+- **Scheme-catalog eligibility fix:** `SchemeEligibility` is now an **OPT-IN allowlist** — with no rows configured
+  (the default; nothing writes it today) a partner sees every ACTIVE tenant scheme (was a dead `id IN ()` that hid
+  ALL schemes from ALL partners — a pre-existing bug). Threaded through the login picker (matches on active partner
+  id AND user id) so a switched login-less sibling sees its catalog too. ACTIVE-only default preserved.
 
 ### ▶ REMAINING — owner UAT on staging (real OTP) then the owner-gated cutover
 Owner exercises the full flow on staging: multi-outlet login → picker → switch → wallet/redeem per outlet →

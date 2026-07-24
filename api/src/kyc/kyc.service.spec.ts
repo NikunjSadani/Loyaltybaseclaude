@@ -47,7 +47,9 @@ const mockTx = {
   wallet: { findFirst: jest.fn(), create: jest.fn() },
   // outlet.findFirst is used inside the tx by the partner-group helper's resolveGroupPan
   // (PAN golden-key resolution for a GROUPED outlet whose parent carries no PAN).
-  outlet: { update: jest.fn(), updateMany: jest.fn(), findFirst: jest.fn() },
+  // findUnique added for the W4 group-leave login-provisioning (reads the outlet's outletType.code
+  // to derive the departing shop's owner role).
+  outlet: { update: jest.fn(), updateMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn() },
   // $executeRaw is the advisory-lock primitive acquireIdentityLocks issues inside create()'s
   // tx (partner-child owner groups) BEFORE the uniqueness check. A no-op mock here.
   $executeRaw: jest.fn(),
@@ -1340,6 +1342,33 @@ describe('KycService', () => {
       mockPrisma.kycDocument.create.mockResolvedValue({});
     };
 
+    /**
+     * Prime a GROUPED RE-KYC create (existing partner `cp-existing` + parentId `parent-1`) up to the
+     * tx writes. Used for the Wave-4 group-LEAVE-via-re-KYC path: a grouped child re-KYC whose PAN
+     * differs from the group PAN is a DEPARTURE (validated standalone + staged, not blocked).
+     * `parentPan` = the group's canonical PAN that resolveGroupPan reads off the parent.
+     */
+    const primeGroupedReKycCreate = (parentPan: string) => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-2',
+        clientId: 'deoleo',
+        partnerId: 'cp-existing', // re-KYC branch (existing partner → stage-at-approval)
+        parentId: 'parent-1', // grouped
+        outletCode: 'OUT-2',
+        outletType: { code: 'SSS' },
+        requiredPaymentType: 'BANK',
+        reKycFlags: null,
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null); // phone partner-clash
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);      // employee-clash
+      // resolveGroupPan (inside isGroupDeparture) reads the group's canonical PAN off the parent.
+      mockTx.channelPartner.findUnique.mockResolvedValue({ panNumber: parentPan });
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-dep' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockPrisma.kycDocument.create.mockResolvedValue({});
+    };
+
     it('allows a grouped sibling to SHARE GST / bank / UPI with an in-group sibling', async () => {
       mockUniquenessPolicy = { gst: true, phone: true, bank: true, upi: true }; // all enforced
       primeGroupedCreate();
@@ -1397,13 +1426,49 @@ describe('KycService', () => {
       expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
     });
 
-    it('BLOCKS a PAN that MISMATCHES the group PAN (golden-key, always enforced)', async () => {
+    it('BLOCKS a PAN that MISMATCHES the group PAN for a BRAND-NEW outlet JOINING a group (golden-key)', async () => {
+      // A partner-LESS grouped outlet is a brand-new outlet being onboarded INTO a group — it must
+      // SHARE the group PAN (it isn't "leaving", it's joining). Departure (group-LEAVE) applies only
+      // to a re-KYC of an EXISTING partner (next test); a brand-new grouped outlet still BLOCKS.
       mockUniquenessPolicy = { gst: false, phone: true, bank: false, upi: false };
       primeGroupedCreate({ parentPan: 'GROUPPAN01F' }); // the group's canonical PAN
       await expect(
         service.create(so, { ...groupedDto, panNumber: 'DIFFERENT9F' } as never),
       ).rejects.toThrow(/group already uses PAN GROUPPAN01F/i);
       expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
+    });
+
+    it('re-KYC of a grouped child proposing a PAN != the group PAN STAGES a DEPARTURE (standalone, not blocked)', async () => {
+      // Wave-4 group-LEAVE via re-KYC (Option A): a grouped child whose re-KYC proposes a PAN
+      // different from the group PAN is an explicit request to LEAVE the group. It is NO LONGER
+      // blocked with "group already uses PAN…"; instead the proposed identity is validated as a
+      // STANDALONE shop and STAGED on proposedPartner (the parentId detach happens at approval).
+      mockUniquenessPolicy = { gst: false, phone: true, bank: false, upi: false };
+      primeGroupedReKycCreate('GROUPPAN01F'); // group PAN on record
+      // Standalone uniqueness scan finds NO outside outlet holding the departing (new) identity.
+      mockTx.channelPartner.findMany.mockImplementation(async () => []);
+      const res = await service.create(so, { ...groupedDto, panNumber: 'DIFFERENT9F' } as never);
+      expect(res).toMatchObject({ submissionId: 'sub-dep', status: 'DRAFT' });
+      // Re-KYC never mutates the live partner at draft time — it only STAGES the departing identity.
+      expect(mockTx.channelPartner.create).not.toHaveBeenCalled();
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+      const staged = mockTx.kycSubmission.create.mock.calls[0][0].data.proposedPartner;
+      expect(staged).toMatchObject({ panNumber: 'DIFFERENT9F' }); // the NEW (departing) PAN is staged
+    });
+
+    it('re-KYC DEPARTURE whose new PAN collides with an OUTSIDE outlet → BLOCKED (standalone uniqueness)', async () => {
+      // A departure must STILL pass STANDALONE uniqueness: if the proposed PAN already belongs to an
+      // outlet outside any group, the create-time early-UX pre-check rejects it (the authoritative
+      // check re-runs at approval). Proves the standalone validation isn't a blanket bypass.
+      mockUniquenessPolicy = { gst: false, phone: true, bank: false, upi: false };
+      primeGroupedReKycCreate('GROUPPAN01F');
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) =>
+        args?.where?.partnerCode ? [] : [{ id: 'outsider', isParent: false, outlets: [{ parentId: null }] }],
+      );
+      await expect(
+        service.create(so, { ...groupedDto, panNumber: 'DIFFERENT9F' } as never),
+      ).rejects.toThrow(/already registered to another outlet/i);
+      expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
     });
 
     it('allows a PAN that MATCHES the group PAN', async () => {
@@ -2978,6 +3043,215 @@ describe('KycService', () => {
       expect(revokeArg.where).toMatchObject({ userId: 'owner-9', revokedAt: null });
       expect(revokeArg.data.revokedAt).toBeInstanceOf(Date);
     });
+
+    // ── Wave-4: group-LEAVE via re-KYC (Option A) at approval ────────────────────
+    /**
+     * Seed approve() for a GROUPED child re-KYC (primary outlet parentId `parent-1`). `groupPan` is
+     * the group's canonical PAN (read off the parent by resolveGroupPan). A `proposed.panNumber` that
+     * DIFFERS from `groupPan` is a DEPARTURE. Mirrors seedReKycApprove but ROUTES channelPartner
+     * .findUnique by `where.id` (parent → group PAN; the partner `p1` → applied phone for login-sync)
+     * so BOTH the departure detection and the login-phone read resolve correctly.
+     */
+    const seedGroupedReKycApprove = (proposed: Record<string, unknown>, groupPan: string) => {
+      const partner = {
+        userId: 'owner-9', clientId: 'deoleo', isParent: false,
+        ownerName: 'Old Owner', phone: CURRENT_PHONE,
+        outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: 'parent-1', reKycFlags: null }],
+      };
+      const subRow = {
+        id: 's1', userId: 'user1', status: 'PENDING_GIFSY', partnerId: 'p1',
+        proposedPartner: proposed, user: { name: 'n', phone: 'p' }, partner,
+      };
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(subRow);
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(subRow);
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
+      mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      // findUnique routed by id: parent → group PAN (resolveGroupPan); the partner → applied phone.
+      mockTx.channelPartner.findUnique.mockImplementation(async (args: any) =>
+        args?.where?.id === 'parent-1' ? { panNumber: groupPan } : { phone: CURRENT_PHONE },
+      );
+      mockTx.user.findUnique.mockResolvedValueOnce({ phone: CURRENT_PHONE, clientId: 'deoleo' });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({ id: 'w1' });
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.outlet.update.mockResolvedValue({});     // detach (+ address, if any)
+      mockTx.outlet.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+    };
+
+    it('DEPARTURE approval: proposed PAN != group PAN → applies identity AND clears outlet.parentId (same tx)', async () => {
+      seedGroupedReKycApprove({ panNumber: 'NEWSTANDALONE9F', gstNumber: '29ABCDE1234F1Z5' }, 'GROUPPAN01F');
+      mockTx.channelPartner.findMany.mockResolvedValue([]); // standalone uniqueness → no outside clash
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' });
+
+      await service.approve(gifsy, 's1');
+
+      // The new (standalone) identity is applied to the live partner…
+      expect(mockTx.channelPartner.update).toHaveBeenCalledWith({
+        where: { id: 'p1' },
+        data: expect.objectContaining({ panNumber: 'NEWSTANDALONE9F', gstNumber: '29ABCDE1234F1Z5' }),
+      });
+      // …and the primary outlet is DETACHED from the group in the SAME tx (parentId → null). The
+      // DB trigger clears groupId, so no manual groupId write is expected.
+      expect(mockTx.outlet.update).toHaveBeenCalledWith({
+        where: { id: 'outlet-1' },
+        data: { parentId: null },
+      });
+    });
+
+    it('DEPARTURE approval whose new PAN COLLIDES with an outside outlet → ConflictException, parentId NOT cleared', async () => {
+      seedGroupedReKycApprove({ panNumber: 'TAKEN9F' }, 'GROUPPAN01F');
+      // The proposed (standalone) PAN already belongs to an outlet OUTSIDE any group → violation.
+      mockTx.channelPartner.findMany.mockImplementation(async (args: any) =>
+        args?.where?.partnerCode ? [] : [{ id: 'outsider', isParent: false, outlets: [{ parentId: null }] }],
+      );
+
+      await expect(service.approve(gifsy, 's1')).rejects.toBeInstanceOf(ConflictException);
+      // Atomic rollback: identity NOT applied AND the group detach NEVER runs (it is AFTER the check).
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalled();
+      expect(mockTx.outlet.update).not.toHaveBeenCalledWith({
+        where: { id: 'outlet-1' },
+        data: { parentId: null },
+      });
+    });
+
+    it('NON-departure grouped re-KYC (proposed PAN == group PAN) applies identity but leaves parentId INTACT', async () => {
+      seedGroupedReKycApprove({ panNumber: 'GROUPPAN01F', bankName: 'HDFC' }, 'GROUPPAN01F');
+      mockTx.channelPartner.findMany.mockResolvedValue([]); // in-group PAN match → clean
+      mockTx.channelPartner.update.mockResolvedValueOnce({ id: 'p1' });
+
+      await service.approve(gifsy, 's1');
+
+      // Identity applied, but the outlet is NOT detached — the PAN still equals the group PAN.
+      expect(mockTx.channelPartner.update).toHaveBeenCalled();
+      expect(mockTx.outlet.update).not.toHaveBeenCalledWith({
+        where: { id: 'outlet-1' },
+        data: { parentId: null },
+      });
+    });
+
+    // ── Wave-4 MED-1: a LOGIN-LESS departing sibling must get its own login ───────
+    /**
+     * Seed approve() for a LOGIN-LESS (userId=null) grouped sibling departing. Mirrors
+     * seedGroupedReKycApprove but partner.userId=null and primes the login-provisioning reads:
+     * the User-distinctness check (`tx.user.findFirst`), the standalone assertPhoneAvailable
+     * (`this.prisma.channelPartner/salesUser.findFirst`), the outlet-type read, `user.create`, and
+     * the userId-link `channelPartner.update`. `phoneTakenBy` non-null → the effective phone is
+     * already held by a User (the shared group phone case) → the provisioning must fail-closed.
+     */
+    const seedLoginlessDepartureApprove = (
+      proposed: Record<string, unknown>,
+      opts: { groupPan?: string; phoneTakenBy?: { id: string } | null; partnerPhone?: string } = {},
+    ) => {
+      const groupPan = opts.groupPan ?? 'GROUPPAN01F';
+      const partnerPhone = opts.partnerPhone ?? CURRENT_PHONE;
+      const effectivePhone = (proposed.phone as string | undefined) ?? partnerPhone;
+      const partner = {
+        userId: null, // LOGIN-LESS sibling (reachable only via the group login's picker)
+        clientId: 'deoleo', isParent: false,
+        ownerName: 'Old Owner', phone: partnerPhone,
+        outlets: [{ id: 'outlet-1', isPrimary: true, deletedAt: null, parentId: 'parent-1', reKycFlags: null }],
+      };
+      const subRow = {
+        id: 's1', userId: 'user1', status: 'PENDING_GIFSY', partnerId: 'p1',
+        proposedPartner: proposed, user: { name: 'n', phone: 'p' }, partner,
+      };
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(subRow);
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(subRow);
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce([]);
+      mockTx.kycVerificationItem.updateMany.mockResolvedValueOnce({ count: 0 });
+      mockTx.kycVerificationItem.createMany.mockResolvedValueOnce({ count: 7 });
+      mockTx.kycVerificationItem.findMany.mockResolvedValueOnce(ALL_APPROVED);
+      mockTx.kycSubmission.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.channelPartner.findMany.mockResolvedValue([]); // standalone uniqueness → clean
+      // findUnique routed by id: parent → group PAN; the partner (login-sync) → effective phone.
+      mockTx.channelPartner.findUnique.mockImplementation(async (args: any) =>
+        args?.where?.id === 'parent-1' ? { panNumber: groupPan } : { phone: effectivePhone },
+      );
+      // Login-provisioning: the User @@unique distinctness check.
+      mockTx.user.findFirst.mockResolvedValueOnce(opts.phoneTakenBy ?? null);
+      // Standalone assertPhoneAvailable reads (this.prisma, outside the tx) — clean.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+      mockTx.outlet.findUnique.mockResolvedValueOnce({ outletType: { code: 'SSS' } });
+      mockTx.user.create.mockResolvedValueOnce({ id: 'new-owner' });
+      mockTx.channelPartner.update.mockResolvedValue({ id: 'p1' }); // identity apply + userId link
+      mockTx.outlet.update.mockResolvedValue({}); // detach (+ address, if any)
+      // login-sync (targets the newly-provisioned owner via the mutated in-memory partner.userId).
+      mockTx.user.findUnique.mockResolvedValueOnce({ phone: effectivePhone, clientId: 'deoleo' });
+      mockTx.wallet.findFirst.mockResolvedValueOnce(null);
+      mockTx.wallet.create.mockResolvedValueOnce({ id: 'w1' });
+      mockTx.user.update.mockResolvedValueOnce({});
+      mockTx.outlet.updateMany.mockResolvedValueOnce({ count: 1 });
+      mockTx.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockTx.auditLog.create.mockResolvedValueOnce({});
+    };
+
+    it('LOGIN-LESS sibling DEPARTURE with a distinct new phone → provisions its OWN login (userId set)', async () => {
+      seedLoginlessDepartureApprove({ panNumber: 'NEWSTANDALONE9F', phone: '9000099999' });
+
+      await service.approve(gifsy, 's1');
+
+      // A new owner User is created ACTIVE on the distinct phone, with the outlet-type-derived role…
+      expect(mockTx.user.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            clientId: 'deoleo', phone: '9000099999', role: 'SSS', status: 'ACTIVE',
+          }),
+        }),
+      );
+      // …and the departing partner is LINKED to it (channelPartner.userId set to the new login)…
+      expect(mockTx.channelPartner.update).toHaveBeenCalledWith({
+        where: { id: 'p1' },
+        data: { userId: 'new-owner' },
+      });
+      // …and the outlet is detached from the group in the same tx.
+      expect(mockTx.outlet.update).toHaveBeenCalledWith({
+        where: { id: 'outlet-1' },
+        data: { parentId: null },
+      });
+    });
+
+    it('LOGIN-LESS sibling DEPARTURE keeping the shared group phone → BLOCKED (no login possible), tx rolls back', async () => {
+      // The effective (unchanged) contact phone is still held by the group's login User → giving this
+      // departing shop its own login is impossible → fail-closed with the clear, actionable error.
+      seedLoginlessDepartureApprove({ panNumber: 'NEWSTANDALONE9F' }, { phoneTakenBy: { id: 'group-login-user' } });
+
+      await expect(service.approve(gifsy, 's1')).rejects.toBeInstanceOf(ConflictException);
+      // No login provisioned and the outlet is NOT detached (whole approval rolled back).
+      expect(mockTx.user.create).not.toHaveBeenCalled();
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalledWith({
+        where: { id: 'p1' },
+        data: { userId: expect.anything() },
+      });
+      expect(mockTx.outlet.update).not.toHaveBeenCalledWith({
+        where: { id: 'outlet-1' },
+        data: { parentId: null },
+      });
+    });
+
+    it('OWN-LOGIN partner DEPARTURE → keeps its existing login (no new User, userId unchanged)', async () => {
+      seedGroupedReKycApprove({ panNumber: 'NEWSTANDALONE9F' }, 'GROUPPAN01F'); // userId='owner-9'
+      mockTx.channelPartner.findMany.mockResolvedValue([]);
+      mockTx.channelPartner.update.mockResolvedValue({ id: 'p1' });
+
+      await service.approve(gifsy, 's1');
+
+      // An own-login partner is never re-provisioned: no User created and no userId re-link…
+      expect(mockTx.user.create).not.toHaveBeenCalled();
+      expect(mockTx.channelPartner.update).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ userId: expect.anything() }) }),
+      );
+      // …but the outlet is still detached from the group.
+      expect(mockTx.outlet.update).toHaveBeenCalledWith({
+        where: { id: 'outlet-1' },
+        data: { parentId: null },
+      });
+    });
   });
 
   describe('verifyField (POST /v1/kyc/:id/verify)', () => {
@@ -3803,6 +4077,70 @@ describe('KycService', () => {
       expect(mockPrisma.channelPartner.findFirst).toHaveBeenCalledTimes(1);
       expect(res.submission.parentVerified.panNumber).toBe(false);
       expect(res.submission.parentVerified.gstNumber).toBe(false);
+    });
+  });
+
+  // ── Wave-4: group-LEAVE via re-KYC — getOne preview flag ─────────────────────
+  describe('willLeaveGroup (group-leave preview) in getOne()', () => {
+    // A grouped child (primary outlet parentId set) with a STAGED re-KYC on proposedPartner.
+    const groupedChildPartner = {
+      id: 'child-p1', clientId: 'deoleo',
+      businessName: 'Ravi Traders', ownerName: 'Ravi Kumar', phone: '9820011111',
+      gstNumber: '27AABCU9603R1ZM', panNumber: 'GROUPPAN01F',
+      bankName: 'HDFC', bankAccountNumber: '123456789012', bankAccountHolder: 'Ravi Kumar',
+      ifscCode: 'HDFC0000123', upiId: 'ravi@upi',
+      outlets: [{ id: 'o1', isPrimary: true, parentId: 'parent-1', reKycFlags: null }],
+    };
+    const submissionWith = (
+      proposedPartner: unknown,
+      partner: Record<string, unknown> = groupedChildPartner,
+    ) => ({
+      id: 's1', userId: 'other', partnerId: 'child-p1',
+      partner, proposedPartner,
+      documents: [], statusHistory: [],
+      user: { id: 'other', name: 'Ravi', phone: '9820011111', role: 'RETAILER' },
+    });
+
+    it('is TRUE when the outlet is grouped and the proposed PAN differs from the group PAN', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(submissionWith({ panNumber: 'DIFFERENT9F' }));
+      // resolveGroupPan reads the group's canonical PAN off the parent (findUnique by parentId).
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'GROUPPAN01F' });
+      const res = (await service.getOne(mis, 's1')) as { submission: { willLeaveGroup: boolean } };
+      expect(res.submission.willLeaveGroup).toBe(true);
+    });
+
+    it('is FALSE when the proposed PAN EQUALS the group PAN (non-departure re-KYC)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(submissionWith({ panNumber: 'GROUPPAN01F' }));
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'GROUPPAN01F' });
+      const res = (await service.getOne(mis, 's1')) as { submission: { willLeaveGroup: boolean } };
+      expect(res.submission.willLeaveGroup).toBe(false);
+    });
+
+    it('is FALSE for an UNGROUPED outlet (no parentId) — never queries the group PAN', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(
+        submissionWith({ panNumber: 'ANYTHING9F' }, {
+          ...groupedChildPartner,
+          outlets: [{ id: 'o1', isPrimary: true, parentId: null, reKycFlags: null }],
+        }),
+      );
+      const res = (await service.getOne(mis, 's1')) as { submission: { willLeaveGroup: boolean } };
+      expect(res.submission.willLeaveGroup).toBe(false);
+      expect(mockPrisma.channelPartner.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('is FALSE when there is NO proposedPartner (brand-new / non-re-KYC submission)', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(submissionWith(null));
+      const res = (await service.getOne(mis, 's1')) as { submission: { willLeaveGroup: boolean } };
+      expect(res.submission.willLeaveGroup).toBe(false);
+    });
+
+    it('ships ONLY the boolean — the group PAN never appears in the payload', async () => {
+      mockPrisma.kycSubmission.findFirst.mockResolvedValueOnce(submissionWith({ panNumber: 'DIFFERENT9F' }));
+      // A distinctive sentinel group PAN that appears nowhere else in the fixture.
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'ZZLEAKSENTINEL9F' });
+      const res = (await service.getOne(mis, 's1')) as { submission: Record<string, unknown> };
+      expect(res.submission.willLeaveGroup).toBe(true);
+      expect(JSON.stringify(res.submission)).not.toContain('ZZLEAKSENTINEL9F');
     });
   });
 

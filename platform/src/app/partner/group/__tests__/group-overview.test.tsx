@@ -54,12 +54,74 @@ const AVAILABLE_PAYLOAD = {
   ],
 };
 
-function stubFetch(payload: unknown) {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-    ok: true,
-    json: () => Promise.resolve({ success: true, data: payload }),
+/** Per-endpoint payloads. Wallet is required (gates the shell); the three new
+    sections default to "hidden" unless a test overrides them, so the pre-existing
+    wallet tests keep asserting exactly the wallet slice. */
+interface RouteOverrides {
+  targets?:     unknown;
+  visibility?:  unknown;
+  leaderboard?: unknown;
+}
+
+function stubFetch(wallet: unknown, opts: RouteOverrides = {}) {
+  const routes: Record<string, unknown> = {
+    '/api/partner/group/wallet':      wallet,
+    '/api/partner/group/targets':     opts.targets     ?? { available: false },
+    '/api/partner/group/visibility':  opts.visibility  ?? { available: true, visibilityEnabled: false },
+    '/api/partner/group/leaderboard': opts.leaderboard ?? { available: false },
+  };
+  vi.stubGlobal('fetch', vi.fn((input: unknown) => {
+    const url = String(input);
+    const key = Object.keys(routes).find((k) => url.includes(k));
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: key ? routes[key] : { available: false } }),
+    });
   }));
 }
+
+/* ─── Section payload fixtures ──────────────────────────────────────────────── */
+
+const TARGETS_PAYLOAD = {
+  available: true,
+  parent: { businessName: 'Sunrise Group', ownerName: 'Meera Shah' },
+  period: '2026-07',
+  kpiTotals: [
+    { code: 'VOL', name: 'Volume', target: 1000, achieved: 850, pace: 0.85, unit: 'cases', isPrimary: true },
+    { code: 'NEW', name: 'New Outlets', target: 20, achieved: null, pace: null, unit: '', isPrimary: false },
+  ],
+  outlets: [
+    {
+      outletCode: 'OUT-001', outletName: 'Sunrise Central', outletType: 'RETAIL',
+      kpis: [{ code: 'VOL', name: 'Volume', target: 600, achieved: 540, pace: 0.9, unit: 'cases', isPrimary: true }],
+    },
+    {
+      outletCode: 'OUT-002', outletName: 'Sunrise North', outletType: 'RETAIL',
+      kpis: [{ code: 'VOL', name: 'Volume', target: 400, achieved: 310, pace: 0.775, unit: 'cases', isPrimary: true }],
+    },
+  ],
+};
+
+const VISIBILITY_ON_PAYLOAD = {
+  available: true,
+  visibilityEnabled: true,
+  month: '2026-07',
+  counts: { total: 2, approved: 1, underReview: 1, pending: 0, noRecord: 0 },
+  outlets: [
+    { outletCode: 'OUT-001', outletName: 'Sunrise Central', status: 'APPROVED', dateOfCapture: '2026-07-10', approvedBy: 'ISR-1' },
+    { outletCode: 'OUT-002', outletName: 'Sunrise North', status: 'UNDER_REVIEW', dateOfCapture: '2026-07-12', approvedBy: null },
+  ],
+};
+
+const LEADERBOARD_PAYLOAD = {
+  available: true,
+  parent: { businessName: 'Sunrise Group', ownerName: 'Meera Shah' },
+  snapshot: { snapshotDate: '2026-07-15', periodStartDate: '2026-07-01', periodEndDate: '2026-07-31' },
+  entries: [
+    { rank: 3, partnerId: 'p1', partnerName: 'Sunrise Central', score: 8500, rankChange: 2 },
+    { rank: 7, partnerId: 'p2', partnerName: 'Sunrise North', score: 5200, rankChange: -1 },
+  ],
+};
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -109,7 +171,7 @@ describe('GO — Partner Group Overview (read-only)', () => {
     await waitFor(() =>
       expect(screen.getByTestId('read-only-badge')).toBeInTheDocument(),
     );
-    expect(screen.getByText(/redemption happens per outlet/i)).toBeInTheDocument();
+    expect(screen.getByText(/happen per outlet/i)).toBeInTheDocument();
     // Never any action controls on this read-only view.
     expect(screen.queryByRole('button', { name: /redeem/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /payout|withdraw/i })).not.toBeInTheDocument();
@@ -127,5 +189,109 @@ describe('GO — Partner Group Overview (read-only)', () => {
     expect(link).toHaveAttribute('href', '/partner/dashboard');
     // No totals card / outlet rows when there's no group.
     expect(screen.queryByTestId('group-totals-card')).not.toBeInTheDocument();
+  });
+});
+
+/* ─── Targets section ───────────────────────────────────────────────────────── */
+
+describe('GO Targets — consolidated group KPI roll-up (read-only)', () => {
+  it('renders the group KPI totals + a per-outlet target row for each outlet', async () => {
+    stubFetch(AVAILABLE_PAYLOAD, { targets: TARGETS_PAYLOAD });
+    render(<GroupOverviewPage />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('group-targets-section')).toBeInTheDocument(),
+    );
+    // One group total chip per KPI.
+    expect(screen.getAllByTestId('group-kpi-total')).toHaveLength(2);
+    const section = screen.getByTestId('group-targets-section');
+    // Primary KPI's group pace (0.85 → 85%) + achieved/target rendered.
+    expect(section).toHaveTextContent('85%');
+    expect(section).toHaveTextContent('850');
+    // A row per outlet.
+    expect(screen.getAllByTestId('group-target-outlet-row')).toHaveLength(2);
+    // A null-pace KPI degrades to a dash rather than crashing.
+    expect(section).toHaveTextContent('—');
+  });
+
+  it('hides the targets section entirely when available:false', async () => {
+    stubFetch(AVAILABLE_PAYLOAD, { targets: { available: false } });
+    render(<GroupOverviewPage />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('group-totals-card')).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('group-targets-section')).not.toBeInTheDocument();
+  });
+});
+
+/* ─── Visibility section ────────────────────────────────────────────────────── */
+
+describe('GO Visibility — per-outlet capture status (read-only, flag-gated)', () => {
+  it('hides the visibility section when visibilityEnabled is false', async () => {
+    stubFetch(AVAILABLE_PAYLOAD, { visibility: { available: true, visibilityEnabled: false } });
+    render(<GroupOverviewPage />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('group-totals-card')).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('group-visibility-section')).not.toBeInTheDocument();
+  });
+
+  it('renders the counts summary + a status row per outlet when visibilityEnabled', async () => {
+    stubFetch(AVAILABLE_PAYLOAD, { visibility: VISIBILITY_ON_PAYLOAD });
+    render(<GroupOverviewPage />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('group-visibility-section')).toBeInTheDocument(),
+    );
+    expect(screen.getAllByTestId('group-visibility-row')).toHaveLength(2);
+    const section = screen.getByTestId('group-visibility-section');
+    expect(section).toHaveTextContent('Approved');
+    expect(section).toHaveTextContent('Under review');
+  });
+});
+
+/* ─── Leaderboard section ───────────────────────────────────────────────────── */
+
+describe('GO Leaderboard — group shops with tenant-wide rank (read-only)', () => {
+  it('renders a ranked row for each of the group’s shops', async () => {
+    stubFetch(AVAILABLE_PAYLOAD, { leaderboard: LEADERBOARD_PAYLOAD });
+    render(<GroupOverviewPage />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('group-leaderboard-section')).toBeInTheDocument(),
+    );
+    expect(screen.getAllByTestId('group-leaderboard-row')).toHaveLength(2);
+    const section = screen.getByTestId('group-leaderboard-section');
+    expect(section).toHaveTextContent('#3');
+    expect(section).toHaveTextContent('Sunrise Central');
+    expect(section).toHaveTextContent('8,500');
+    // No published-yet empty state when there are entries.
+    expect(screen.queryByTestId('group-leaderboard-empty')).not.toBeInTheDocument();
+  });
+
+  it('shows the friendly empty state (not hidden) when snapshot is null', async () => {
+    stubFetch(AVAILABLE_PAYLOAD, {
+      leaderboard: { available: true, parent: { businessName: 'Sunrise Group', ownerName: 'Meera Shah' }, snapshot: null, entries: [] },
+    });
+    render(<GroupOverviewPage />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('group-leaderboard-section')).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('group-leaderboard-empty')).toBeInTheDocument();
+    expect(screen.getByText(/no published leaderboard yet/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('group-leaderboard-row')).not.toBeInTheDocument();
+  });
+
+  it('hides the leaderboard section entirely when available:false', async () => {
+    stubFetch(AVAILABLE_PAYLOAD, { leaderboard: { available: false } });
+    render(<GroupOverviewPage />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('group-totals-card')).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('group-leaderboard-section')).not.toBeInTheDocument();
   });
 });

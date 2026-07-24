@@ -47,24 +47,36 @@ describe('SchemesService', () => {
       expect(mockPrisma.schemeEligibility.findMany).not.toHaveBeenCalled();
     });
 
-    it('restricts non-admins to schemes they are eligible for', async () => {
+    it('Wave 4 opt-in: shows ALL active tenant schemes when NO eligibility rows are configured', async () => {
+      // The default state (no code writes SchemeEligibility today): a partner sees every ACTIVE
+      // tenant scheme — NOT an empty catalog. Regression guard for the dead-mechanism bug.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'p1', groupId: null });
+      mockPrisma.schemeEligibility.findMany.mockResolvedValue([]); // none configured
+      mockPrisma.scheme.findMany.mockResolvedValue([]);
+      mockPrisma.scheme.count.mockResolvedValue(0);
+      await service.list(partner, {});
+      const where = mockPrisma.scheme.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ clientId: 'deoleo', status: 'ACTIVE', deletedAt: null }); // NO id restriction
+      // Eligibility is matched on BOTH the active partner id and the login user id.
+      expect(mockPrisma.schemeEligibility.findMany).toHaveBeenCalledWith({
+        where: { specificPartnerId: { in: ['p1', 'user1'] } },
+        select: { schemeId: true },
+      });
+    });
+
+    it('restricts non-admins to their eligibility rows WHEN configured (opt-in allowlist)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'p1', groupId: null });
       mockPrisma.schemeEligibility.findMany.mockResolvedValue([{ schemeId: 's1' }, { schemeId: 's2' }]);
       mockPrisma.scheme.findMany.mockResolvedValue([]);
       mockPrisma.scheme.count.mockResolvedValue(0);
       await service.list(partner, {});
-      expect(mockPrisma.schemeEligibility.findMany).toHaveBeenCalledWith({
-        where: { specificPartnerId: 'user1' },
-        select: { schemeId: true },
-      });
       const where = mockPrisma.scheme.findMany.mock.calls[0][0].where;
-      // Non-admins keep the ACTIVE-only default (partner/sales enrollment views).
       expect(where).toEqual({ clientId: 'deoleo', status: 'ACTIVE', deletedAt: null, id: { in: ['s1', 's2'] } });
     });
 
     it('IGNORES an explicit ?status for a non-admin — forced to ACTIVE (no draft/expired leak)', async () => {
-      // Security: a partner/sales caller hand-crafting ?status=EXPIRED must NOT bypass the
-      // ACTIVE-only default (their eligibility rows could otherwise expose an unpublished
-      // scheme's name/code/dates). The status filter is admin-gated.
+      // Security: a partner/sales caller hand-crafting ?status=EXPIRED must NOT bypass the ACTIVE-only default.
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'p1', groupId: null });
       mockPrisma.schemeEligibility.findMany.mockResolvedValue([{ schemeId: 's1' }]);
       mockPrisma.scheme.findMany.mockResolvedValue([]);
       mockPrisma.scheme.count.mockResolvedValue(0);
@@ -72,6 +84,14 @@ describe('SchemesService', () => {
       const where = mockPrisma.scheme.findMany.mock.calls[0][0].where;
       expect(where.status).toBe('ACTIVE'); // NOT 'EXPIRED'
       expect(where.id).toEqual({ in: ['s1'] });
+    });
+
+    it('rejects a forged x-active-partner-id selector (not in the operable set) → Forbidden', async () => {
+      // own partner exists (grouped) but the requested sibling id resolves to nothing → forbidden.
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'p1', groupId: 'PAR' }) // own lookup
+        .mockResolvedValueOnce(null); // sibling authorize lookup → not operable
+      await expect(service.list(partner, {}, 'w3test-evil')).rejects.toBeInstanceOf(ForbiddenException);
     });
 
     it('applies status + type filters when supplied', async () => {

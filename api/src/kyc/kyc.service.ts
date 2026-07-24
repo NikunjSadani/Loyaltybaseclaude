@@ -44,6 +44,7 @@ import {
   checkGroupUniqueness,
   acquireIdentityLocks,
   normalizeIdentityValue,
+  resolveGroupPan,
 } from '../common/partner-group.helper';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -1119,12 +1120,7 @@ export class KycService {
     });
 
     // Map outlet type code → owner UserRole. Unknown/other → SSS (default).
-    const OUTLET_TYPE_TO_ROLE: Record<string, 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST'> = {
-      SSS: 'SSS',
-      WHOLESALER: 'WHOLESALER',
-      SUB_STOCKIST: 'SUB_STOCKIST',
-    };
-    const ownerRole = OUTLET_TYPE_TO_ROLE[outlet.outletType?.code ?? ''] ?? 'SSS';
+    const ownerRole = this.deriveOwnerRole(outlet.outletType?.code);
 
     // ── RE-KYC LOCK (text fields) ──────────────────────────────────────────────
     // When the admin flagged specific fields for re-capture (Outlet.reKycFlags), a
@@ -1346,9 +1342,30 @@ export class KycService {
       //   outside; GST/bank/UPI unique-except-within-group (per tenant policy). `exceptPartnerId` =
       //   this outlet's existing partner so a re-KYC of the SAME partner never clashes with itself. An
       //   UNGROUPED outlet (ourParentId=null) → every clash is "outside" → today's strict behavior.
+      //   GROUP-LEAVE via re-KYC (Wave-4, Option A). A grouped child re-KYC that proposes a PAN
+      //   DIFFERENT from the group's canonical PAN is an explicit request to LEAVE the group. For
+      //   such a departure we validate the proposed identity as a STANDALONE (ungrouped) shop:
+      //   `effectiveParentId = null`. This both (a) skips the pan-group-mismatch throw (the whole
+      //   point — a changed PAN is now allowed, staged as a departure) AND (b) checks the new
+      //   PAN/GST/bank/UPI don't collide with any outlet OUTSIDE (every outlet is "outside" when
+      //   ungrouped). The actual `parentId` detach happens atomically at Gifsy approval; here we only
+      //   STAGE the proposal (proposedPartner) exactly as any re-KYC. Gated on `outlet.partnerId`
+      //   (re-KYC only) so a brand-new (grouped-before-KYC) outlet's behavior is byte-identical to
+      //   today. A NON-departure re-KYC keeps `ourParentId` → identical to today.
+      const isDeparture = outlet.partnerId
+        ? await this.isGroupDeparture(
+            tx,
+            user.clientId,
+            ourParentId,
+            groupUniquenessDetails.panNumber,
+            outlet.partnerId,
+          )
+        : false;
+      const effectiveParentId = isDeparture ? null : ourParentId;
+
       const violation = await checkGroupUniqueness(tx, {
         clientId: user.clientId,
-        ourParentId,
+        ourParentId: effectiveParentId,
         details: groupUniquenessDetails,
         policy: uniquenessPolicy,
         exceptPartnerId: outlet.partnerId ?? null,
@@ -1375,7 +1392,11 @@ export class KycService {
         // a non-authoritative EARLY-UX pre-check (helpful error for the rep) — the AUTHORITATIVE lock
         // + uniqueness check + apply happen at approval, so an approved partner/outlet never carries
         // unverified re-KYC values.
-        // TODO(wave4): PAN-change-to-leave-group ordering — see PARTNER-MULTI-OUTLET.md §4.5; resolve with owner before enabling group-leave via re-KYC
+        // GROUP-LEAVE via re-KYC (Wave-4, Option A — now implemented, PARTNER-MULTI-OUTLET.md §4.5).
+        // A grouped child re-KYC proposing a PAN != the group PAN is a departure: it's validated as a
+        // STANDALONE shop here (effectiveParentId=null above) and, at Gifsy approval, the identity is
+        // applied AND `outlet.parentId` cleared ATOMICALLY (the DB trigger clears groupId). Nothing is
+        // detached at draft time — the departure is only STAGED on proposedPartner, like any re-KYC.
         partnerId = outlet.partnerId;
         // Stage the normalized, re-KYC-lock-applied identity patch (identity fields already
         // normalized via normalizeIdentityValue in partnerDetails) PLUS the KYC-captured outlet
@@ -1963,7 +1984,11 @@ export class KycService {
           requiredPaymentType: true,
           // Order primary-first so the reviewer pages' outlets[0] (detail header, outletCode,
           // outletType AND the required-payout pill) is the PRIMARY outlet, not arbitrary DB order.
-        }, orderBy: { isPrimary: 'desc' } } } },
+          // The `createdAt:'asc'` tiebreak MUST match the approval load's order
+          // ([{isPrimary:'desc'},{createdAt:'asc'}]) so a multi-outlet child with NO primary flag
+          // resolves the SAME outlet[0] here (willLeaveGroup preview) as at approval (authoritative
+          // detach) — otherwise the preview could key off a different outlet than the one detached.
+        }, orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }] } } },
         // 3.4d: the detail-page field panel seeds its current state from these.
         verificationItems: {
           select: { fieldKey: true, decision: true, remark: true, source: true, verifiedAt: true },
@@ -2088,7 +2113,33 @@ export class KycService {
       approvedParent,
     );
 
-    return { submission: { ...submission, partner, proposedPartner, documents, reKycFlags, parentVerified } };
+    // ── Wave-4: group-leave-via-re-KYC preview flag ──────────────────────────
+    // `willLeaveGroup` = true iff this submission STAGES a group departure: the outlet is currently
+    // grouped (primary outlet's parentId set) AND the re-KYC proposes a PAN that DIFFERS from the
+    // group's canonical PAN. At Gifsy approval such a submission detaches the outlet from its group
+    // (see applyBridgeOutcome). The reviewer UI uses this to warn "approving this removes the outlet
+    // from its owner group". Reuses the SAME isGroupDeparture predicate the create/approval paths use
+    // (reading the RAW — pre-mask — proposed PAN so the compare is against the real value). Ships ONLY
+    // the boolean — the group PAN is masked PII and never leaves this method. False for a brand-new /
+    // ungrouped / same-PAN submission.
+    const rawProposedForLeave = submission.proposedPartner;
+    const willLeaveGroup =
+      submission.partner &&
+      rawProposedForLeave &&
+      typeof rawProposedForLeave === 'object' &&
+      !Array.isArray(rawProposedForLeave)
+        ? await this.isGroupDeparture(
+            this.prisma,
+            submission.partner.clientId,
+            detailOutlets[0]?.parentId ?? null,
+            (rawProposedForLeave as Record<string, unknown>).panNumber as string | null | undefined,
+            submission.partnerId,
+          )
+        : false;
+
+    return {
+      submission: { ...submission, partner, proposedPartner, documents, reKycFlags, parentVerified, willLeaveGroup },
+    };
   }
 
   /**
@@ -2135,6 +2186,52 @@ export class KycService {
       result[key] = verified;
     }
     return result;
+  }
+
+  /**
+   * GROUP DEPARTURE detection (Wave-4 "group-leave via re-KYC", Option A). A grouped child whose
+   * re-KYC proposes a PAN DIFFERENT from the group's canonical PAN is treated as an explicit request
+   * to LEAVE the group — the departing shop is then validated as a STANDALONE (ungrouped) entity and
+   * detached from the group atomically at Gifsy approval. Returns true iff ALL hold:
+   *   (a) the outlet is currently grouped (`ourParentId != null`),
+   *   (b) the proposed PAN normalizes to a non-empty value, AND
+   *   (c) the group has a canonical PAN on record AND the proposed PAN != that group PAN.
+   * When the group has no PAN yet (resolveGroupPan → null) it is NOT a departure — there is no group
+   * identity to diverge from (the standard uniqueness path handles it). `exceptPartnerId` excludes the
+   * departing partner from the group-PAN resolution so a group of one (child == only member) reads the
+   * PARENT's PAN, not the child's own about-to-change value.
+   */
+  private async isGroupDeparture(
+    // Same DB shape resolveGroupPan accepts — satisfied by both a `$transaction` client AND
+    // the base PrismaService, so create/approval pass `tx` and getOne passes `this.prisma`.
+    db: Parameters<typeof resolveGroupPan>[0],
+    clientId: string,
+    ourParentId: string | null,
+    proposedPanRaw: string | null | undefined,
+    exceptPartnerId?: string | null,
+  ): Promise<boolean> {
+    if (ourParentId == null) return false;
+    const proposedPan = normalizeIdentityValue('pan', proposedPanRaw);
+    if (!proposedPan) return false;
+    const groupPan = await resolveGroupPan(db, clientId, ourParentId, exceptPartnerId ?? null);
+    return groupPan != null && groupPan !== proposedPan;
+  }
+
+  /**
+   * Map an outlet-type code → the owner-login UserRole. Unknown/absent → SSS (default). The single
+   * source of truth for the owner role, used by BOTH create() (brand-new owner-User provisioning) and
+   * the Wave-4 departure apply (provisioning a departing login-less shop's own login) — so the two
+   * paths can never drift to different role mappings.
+   */
+  private deriveOwnerRole(
+    outletTypeCode: string | null | undefined,
+  ): 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST' {
+    const OUTLET_TYPE_TO_ROLE: Record<string, 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST'> = {
+      SSS: 'SSS',
+      WHOLESALER: 'WHOLESALER',
+      SUB_STOCKIST: 'SUB_STOCKIST',
+    };
+    return OUTLET_TYPE_TO_ROLE[outletTypeCode ?? ''] ?? 'SSS';
   }
 
   /** A browser-renderable read URL for a single KYC document. Fails CLOSED:
@@ -3442,6 +3539,23 @@ export class KycService {
         const ourParentId = submission.partner.outlets[0]?.parentId ?? null;
         const { uniquenessPolicy } = await this.tenantSettings.getEffectiveSettings(clientId);
 
+        // GROUP-LEAVE via re-KYC (Wave-4, Option A) — recomputed AUTHORITATIVELY here against the
+        // LIVE group PAN (not the draft-time value): a grouped child whose proposed PAN != the group's
+        // canonical PAN is departing. When departing we validate the proposed identity as a STANDALONE
+        // shop (`effectiveParentId = null`) — this skips the pan-group-mismatch throw AND still enforces
+        // that the new PAN/GST/bank/UPI don't collide with any outlet OUTSIDE (a collision throws
+        // ConflictException → the whole approval tx rolls back → never a half-apply). We then DETACH the
+        // outlet from the group (parentId=null) in this SAME tx after applying the identity/address (the
+        // `outlet_group_id_sync` DB trigger clears groupId). A NON-departure approval is unchanged.
+        const isDeparture = await this.isGroupDeparture(
+          tx,
+          clientId,
+          ourParentId,
+          asStr(proposed.panNumber),
+          submission.partnerId,
+        );
+        const effectiveParentId = isDeparture ? null : ourParentId;
+
         // (i) PHONE re-validation. checkGroupUniqueness does NOT cover phone. If the proposed
         // contact phone changed since the draft, re-assert availability at approval (another KYC
         // could have claimed it in the window) so applying a now-taken number fails CLEANLY (a
@@ -3451,8 +3565,11 @@ export class KycService {
           proposedPhone &&
           this.phoneLast10(proposedPhone) !== this.phoneLast10(submission.partner.phone ?? '')
         ) {
+          // Use effectiveParentId so a DEPARTING shop that also changes its phone is validated
+          // STANDALONE (a phone shared with the group it is leaving must now be distinct), not
+          // against the group it is exiting.
           await this.assertPhoneAvailable(clientId, proposedPhone, submission.partnerId, {
-            ourParentId,
+            ourParentId: effectiveParentId,
             phoneEnforced: uniquenessPolicy.phone,
           });
         }
@@ -3467,7 +3584,9 @@ export class KycService {
         await acquireIdentityLocks(tx, { clientId, details: identityDetails, policy: uniquenessPolicy });
         const violation = await checkGroupUniqueness(tx, {
           clientId,
-          ourParentId,
+          // Departure → validate as STANDALONE (effectiveParentId=null) so the changed PAN is allowed
+          // AND the new identity is proven collision-free against every outlet outside the group.
+          ourParentId: effectiveParentId,
           details: identityDetails,
           policy: uniquenessPolicy,
           exceptPartnerId: submission.partnerId,
@@ -3510,6 +3629,84 @@ export class KycService {
         const primaryOutletId = submission.partner.outlets[0]?.id;
         if (primaryOutletId && Object.values(addressData).some((v) => v !== undefined)) {
           await tx.outlet.update({ where: { id: primaryOutletId }, data: addressData });
+        }
+
+        // (v) GROUP DETACH (Wave-4, Option A). When this re-KYC is a departure, clear the outlet's
+        // parentId in the SAME tx — AFTER the standalone identity + address apply above — so the new
+        // identity and the group-leave commit ATOMICALLY (a uniqueness violation earlier threw before
+        // this point → the whole tx rolls back → the outlet stays grouped with its old identity). The
+        // `outlet_group_id_sync` DB trigger auto-clears channel_partners.groupId when parentId→NULL, so
+        // we do NOT touch groupId manually. If the departing child was the group's last member, its
+        // parent simply becomes a childless (dormant) parent — no special handling (never deleted).
+        if (isDeparture && primaryOutletId) {
+          // (v.a) LOGIN PROVISIONING for a LOGIN-LESS departing shop (audit MED-1). A group's siblings
+          // are login-less (`ChannelPartner.userId = null`), reachable ONLY via the group login's
+          // picker (filtered by `groupId = own.groupId`). Once such a sibling LEAVES the group, no login
+          // can reach it — not the old group's login (it left), and not its own (it has none). So a
+          // login-less departing shop MUST get its OWN login here, or it becomes an orphaned standalone
+          // outlet with a live wallet and no way in. An own-login partner (`userId != null`) keeps its
+          // login unchanged — no provisioning.
+          if (submission.partner.userId == null) {
+            // Effective contact phone after the identity apply (proposed phone if it changed, else the
+            // current partner phone — matching what step (iii) actually wrote).
+            const departurePhone = asStr(proposed.phone) ?? submission.partner.phone ?? '';
+
+            // A login-less shop can only get a login on a phone NO OTHER User holds — `User @@unique
+            // ([clientId, phone])` means the SHARED group phone can never back a second login. This is
+            // the PRIMARY guard and gives the clear, actionable error. It ALSO closes the phone-policy-
+            // OFF gap: step (i)'s phone re-check is skipped when the phone is unchanged, so a login-less
+            // sibling departing while KEEPING the shared group phone would otherwise slip through — but
+            // that phone is still held by the group's login User, so this catches it. Fail-closed → the
+            // whole approval tx rolls back, the shop stays grouped and reachable.
+            const phoneTaken = await tx.user.findFirst({
+              where: { clientId, phone: { endsWith: this.phoneLast10(departurePhone) }, deletedAt: null },
+              select: { id: true },
+            });
+            if (phoneTaken) {
+              throw new ConflictException(
+                'A shop leaving its group needs its own contact number to sign in — change the phone in this re-KYC.',
+              );
+            }
+            // Belt-and-suspenders: also run the STANDALONE (ourParentId=null) availability check — the
+            // same gate a genuinely-standalone outlet's phone passes (employee-clash always blocks;
+            // no group-sibling exemption). After the User check above passes this never blocks a valid
+            // distinct phone, but keeps the departing shop held to the exact standalone phone contract.
+            await this.assertPhoneAvailable(clientId, departurePhone, submission.partnerId, {
+              ourParentId: null,
+              phoneEnforced: uniquenessPolicy.phone,
+            });
+
+            // Provision the departing shop's OWN login IN THIS TX — mirrors create()'s owner-User
+            // creation + the shared outlet-type→owner-role derivation (deriveOwnerRole). The KYC is
+            // being APPROVED right now, so the login is created ACTIVE (create()'s brand-new owner
+            // starts PENDING and is flipped ACTIVE by the login-sync block below; here we start ACTIVE
+            // directly since there is no prior PENDING owner row to flip).
+            const typeRow = await tx.outlet.findUnique({
+              where: { id: primaryOutletId },
+              select: { outletType: { select: { code: true } } },
+            });
+            const departingOwner = await tx.user.create({
+              data: {
+                clientId,
+                phone: departurePhone,
+                name: submission.partner.ownerName ?? '',
+                role: this.deriveOwnerRole(typeRow?.outletType?.code),
+                status: 'ACTIVE',
+              },
+              select: { id: true },
+            });
+            await tx.channelPartner.update({
+              where: { id: submission.partnerId },
+              data: { userId: departingOwner.id },
+            });
+            // Keep the in-memory partner coherent so the login-sync block BELOW targets the NEW owner
+            // (not the submitting rep via its `userId ?? submission.userId` fallback) and sees the
+            // phone as already in sync (no spurious session-revoke). The user was created ACTIVE, so
+            // that block's `user.update({ status: 'ACTIVE' })` is a harmless no-op.
+            submission.partner.userId = departingOwner.id;
+          }
+
+          await tx.outlet.update({ where: { id: primaryOutletId }, data: { parentId: null } });
         }
       }
 

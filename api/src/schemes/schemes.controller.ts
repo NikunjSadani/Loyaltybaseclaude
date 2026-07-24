@@ -25,8 +25,12 @@ export class SchemesController {
   // Open to all in-tenant roles: tenant scheme browsing; service tenant-scopes.
   @Get()
   @RequirePermission('schemes:read')
-  list(@CurrentUser() user: JwtPayload, @Query() query: ListSchemesQueryDto) {
-    return this.schemes.list(user, query);
+  list(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: ListSchemesQueryDto,
+    @Headers('x-active-partner-id') activePartnerId?: string,
+  ) {
+    return this.schemes.list(user, query, activePartnerId);
   }
 
   @Post()

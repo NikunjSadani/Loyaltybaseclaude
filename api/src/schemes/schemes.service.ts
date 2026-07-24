@@ -31,7 +31,7 @@ export class SchemesService {
     return user.role === 'GIFSY_ADMIN' || user.role === 'CLIENT_ADMIN';
   }
 
-  async list(user: JwtPayload, q: ListSchemesQueryDto) {
+  async list(user: JwtPayload, q: ListSchemesQueryDto, requestedPartnerId?: string) {
     const page = q.page ?? 1;
     const limit = q.limit ?? 20;
     const skip = (page - 1) * limit;
@@ -71,13 +71,37 @@ export class SchemesService {
       ];
     }
 
-    // Non-admins only see schemes they are explicitly eligible for.
+    // Non-admin (partner / sales-enrollment) catalog visibility.
+    //
+    // Wave 4: `SchemeEligibility` is an OPT-IN allowlist — it restricts what a partner sees ONLY
+    // when rows are configured for that subject. With none configured (the default: no code path in
+    // the platform writes SchemeEligibility today) a partner sees every ACTIVE tenant scheme it can
+    // enrol in. This fixes a pre-existing dead-mechanism bug where the old unconditional
+    // `id IN (eligible)` collapsed to `IN ()` and hid EVERY scheme from EVERY partner.
+    //
+    // Threaded through the Wave-3 login picker: resolve the ACTIVE partner (own, or an authorized
+    // login-less same-group sibling via `x-active-partner-id`) and match eligibility on BOTH the
+    // active partner id AND the login user id — so it works whether rows are partner- or user-scoped
+    // (the column is historically keyed off `user.sub`), and so a switched login-less sibling (which
+    // has no user id of its own) is still matched by its partner id.
     if (!isAdmin) {
+      const { partnerId, forbidden } = await resolveActivePartnerId(this.prisma, {
+        clientId: user.clientId,
+        userSub: user.sub,
+        phone: user.phone,
+        requestedPartnerId,
+      });
+      if (forbidden) throw new ForbiddenException('You cannot act on that outlet.');
+
+      const subjects = [partnerId, user.sub].filter((s): s is string => Boolean(s));
       const eligibilities = await this.prisma.schemeEligibility.findMany({
-        where: { specificPartnerId: user.sub },
+        where: { specificPartnerId: { in: subjects } },
         select: { schemeId: true },
       });
-      where.id = { in: eligibilities.map((e) => e.schemeId) };
+      // Opt-in: only narrow the catalog when this subject actually has eligibility rows.
+      if (eligibilities.length > 0) {
+        where.id = { in: eligibilities.map((e) => e.schemeId) };
+      }
     }
 
     const [schemes, total] = await Promise.all([

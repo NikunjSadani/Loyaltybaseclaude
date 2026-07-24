@@ -177,3 +177,35 @@ describe('SPV — Sales KYC verified-on-parent badge', () => {
     expect(screen.queryByTestId('verified-on-parent-badge')).not.toBeInTheDocument();
   });
 });
+
+/**
+ * SGL — Sales KYC detail: group-leave warning banner (Wave-4 "group-leave via re-KYC")
+ *
+ * A re-KYC on a grouped shop proposing a PAN different from its group's PAN detaches the shop
+ * from its owner group at approval. The backend flags `submission.willLeaveGroup`; the sales
+ * approver must see an explicit warning. The warning is ADDITIVE — it renders alongside (never
+ * replaces) the amber proposed-changes banner.
+ */
+describe('SGL — Sales KYC group-leave banner', () => {
+  it('SGL1: willLeaveGroup true → the group-leave warning banner renders', async () => {
+    stubFetch({ ...REKYC, willLeaveGroup: true });
+    await renderPage();
+    const banner = await screen.findByTestId('group-leave-banner');
+    expect(banner).toHaveTextContent(/remove it from its owner group/i);
+  });
+
+  it('SGL2: willLeaveGroup false/absent → no group-leave banner', async () => {
+    stubFetch({ ...REKYC, willLeaveGroup: false });
+    await renderPage();
+    await screen.findByTestId('proposed-changes-banner');
+    expect(screen.queryByTestId('group-leave-banner')).not.toBeInTheDocument();
+  });
+
+  it('SGL3: both apply → group-leave banner renders ALONGSIDE the proposed-changes banner', async () => {
+    stubFetch({ ...REKYC, willLeaveGroup: true });
+    await renderPage();
+    // Both banners present — the group-leave warning does not replace the proposed-changes one.
+    expect(await screen.findByTestId('group-leave-banner')).toBeInTheDocument();
+    expect(screen.getByTestId('proposed-changes-banner')).toBeInTheDocument();
+  });
+});

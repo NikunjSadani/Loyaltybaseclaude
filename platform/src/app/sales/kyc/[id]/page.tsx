@@ -67,6 +67,10 @@ interface KYCDetail {
   // server-computed pre-mask. Keyed on panNumber/gstNumber/bankAccountNumber/ifscCode/
   // upiId/bankName/bankAccountHolder/ownerName/businessName/phone. Undefined when none.
   parentVerified?: Record<string, boolean>;
+  // Wave-4 "group-leave via re-KYC" (Option A): server-computed — true iff this re-KYC's
+  // proposed PAN differs from the group PAN, so approving DETACHES the outlet from its owner
+  // group. Default false / absent = normal.
+  willLeaveGroup?: boolean;
   documents: KYCDoc[];
   photos: { label: string; url: string; documentType: string }[];
   approvalHistory: ApprovalEvent[];
@@ -134,6 +138,8 @@ interface ApiSalesKYC {
   reKycFlags?: ReKycFlags;
   // Wave-3 grouped child: per-field match-with-approved-parent flags (server pre-mask).
   parentVerified?: Record<string, boolean>;
+  // Wave-4: server-computed — approving this re-KYC detaches the outlet from its owner group.
+  willLeaveGroup?: boolean;
   user: { id: string; name: string; phone: string; role: string };
   partner: {
     id: string;
@@ -405,6 +411,7 @@ function mapApiSalesKYC(s: ApiSalesKYC): KYCDetail {
       s.proposedPartner as Record<string, unknown> | null | undefined,
     ),
     parentVerified: s.parentVerified ?? undefined,
+    willLeaveGroup: s.willLeaveGroup === true,
     documents: (s.documents ?? []).map(mapDoc),
     photos: (s.documents ?? [])
       .filter(d => PHOTO_DOC_TYPES.has(d.documentType) && d.viewUrl)
@@ -818,6 +825,9 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           proposedChanges: buildProposedChanges(s.partner, s.partner?.outlets?.[0], s.proposedPartner),
           // Wave-3 grouped child: per-field match-with-approved-parent flags (drives the badge).
           parentVerified:  s.parentVerified ?? undefined,
+          // Wave-4 group-leave: approving this re-KYC's differing PAN detaches the outlet
+          // from its owner group (drives the group-leave warning banner).
+          willLeaveGroup:  s.willLeaveGroup === true,
           documents:       (s.documents ?? []).map(mapDoc),
           // Store/owner photos are rendered as images; everything else lists as a doc row.
           photos:          (s.documents ?? [])
@@ -845,6 +855,13 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   useEffect(() => {
     if (kyc?.proposedChanges) setDetailsOpen(true);
   }, [kyc?.proposedChanges]);
+
+  // Wave-4 group-leave: a re-KYC whose approval detaches the outlet from its owner group
+  // (proposed PAN differs from the group PAN) — auto-open the details panel too so the
+  // reviewer sees the PAN change driving the detach.
+  useEffect(() => {
+    if (kyc?.willLeaveGroup) setDetailsOpen(true);
+  }, [kyc?.willLeaveGroup]);
 
   if (loadingKyc) {
     return (
@@ -1045,6 +1062,26 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
                 {(Object.keys(kyc.proposedChanges) as ProposedFieldKey[])
                   .map((k) => PROPOSED_FIELD_LABELS[k]).join(', ')}
               </span>
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Wave-4 group-leave (Option A): the proposed PAN differs from the outlet's owner-group
+          PAN, so approving this re-KYC DETACHES the shop from its group. Distinct red warning —
+          clearly separate from the amber proposed-changes banner above. */}
+      {kyc.willLeaveGroup && (
+        <div
+          data-testid="group-leave-banner"
+          className="bg-red-50 border border-red-300 rounded-xl px-4 py-3 flex items-start gap-2"
+        >
+          <AlertTriangle className="h-4 w-4 text-red-500 shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-red-800">Approving this re-KYC removes the shop from its owner group</p>
+            <p className="text-xs text-red-700 mt-0.5">
+              The proposed PAN differs from the group&rsquo;s PAN. Approving changes the shop&rsquo;s PAN
+              and will <span className="font-semibold">remove it from its owner group</span>, re-establishing
+              it as an independent shop.
             </p>
           </div>
         </div>

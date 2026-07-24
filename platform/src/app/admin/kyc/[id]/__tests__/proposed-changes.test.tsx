@@ -188,3 +188,35 @@ describe('KYCPV — Admin KYC verified-on-parent badge', () => {
     expect(screen.queryByTestId('verified-on-parent-badge')).not.toBeInTheDocument();
   });
 });
+
+/**
+ * KYCGL — Admin KYC detail: group-leave warning banner (Wave-4 "group-leave via re-KYC")
+ *
+ * When a re-KYC on a grouped shop proposes a PAN different from its group's PAN, approving it
+ * REMOVES the shop from its owner group. The backend flags this on `submission.willLeaveGroup`;
+ * the reviewer must see an explicit warning that approval detaches the shop. The warning is
+ * ADDITIVE — it renders alongside (never replaces) the amber proposed-changes banner.
+ */
+describe('KYCGL — Admin KYC group-leave banner', () => {
+  it('KYCGL1: willLeaveGroup true → the group-leave warning banner renders', async () => {
+    stubFetch({ ...REKYC_SUBMISSION, willLeaveGroup: true });
+    render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
+    const banner = await screen.findByTestId('group-leave-banner');
+    expect(banner).toHaveTextContent(/remove it from its owner group/i);
+  });
+
+  it('KYCGL2: willLeaveGroup false/absent → no group-leave banner', async () => {
+    stubFetch({ ...REKYC_SUBMISSION, willLeaveGroup: false });
+    render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
+    await screen.findByText('29ZZZZZ9999Z9Z9');
+    expect(screen.queryByTestId('group-leave-banner')).not.toBeInTheDocument();
+  });
+
+  it('KYCGL3: both apply → group-leave banner renders ALONGSIDE the proposed-changes banner', async () => {
+    stubFetch({ ...REKYC_SUBMISSION, willLeaveGroup: true });
+    render(<KYCDetailPage params={Promise.resolve({ id: 'KYC001' })} />);
+    // Both banners present — the group-leave warning does not replace the proposed-changes one.
+    expect(await screen.findByTestId('group-leave-banner')).toBeInTheDocument();
+    expect(screen.getByTestId('proposed-changes-banner')).toBeInTheDocument();
+  });
+});

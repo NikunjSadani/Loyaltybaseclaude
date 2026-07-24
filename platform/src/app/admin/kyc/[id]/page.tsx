@@ -100,6 +100,10 @@ interface ApiKycDetail {
   // server-computed PRE-MASK (safe under PII masking). Keyed on panNumber/gstNumber/
   // bankAccountNumber/ifscCode/upiId/bankName/bankAccountHolder/ownerName/businessName/phone.
   parentVerified?: Record<string, boolean>;
+  // Wave-4 "group-leave via re-KYC" (Option A): server-computed — true iff this re-KYC's
+  // proposed PAN differs from the group PAN, so approving DETACHES the outlet from its owner
+  // group (re-establishes it as an independent shop). Default false / absent = normal.
+  willLeaveGroup?: boolean;
   // KYC-captured geo (Prisma Decimal → JSON string on the wire).
   boardPhotoLat?: string | number | null; boardPhotoLng?: string | number | null;
   paymentLat?: string | number | null; paymentLng?: string | number | null;
@@ -156,6 +160,9 @@ type KycDetailShape = {
   proposedChanges?: ProposedChanges;
   // Wave-3: per-field "matches the approved parent" flags (grouped child), or undefined.
   parentVerified?: Record<string, boolean>;
+  // Wave-4: true iff approving this re-KYC detaches the outlet from its owner group
+  // (proposed PAN differs from the group PAN). Drives the group-leave warning banner.
+  willLeaveGroup: boolean;
 };
 
 /* ─── Re-KYC proposed-change diff (stage-at-approval) ─────────────────────────── */
@@ -324,6 +331,7 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     addressNameMismatch: s.addressNameMismatch === true,
     proposedChanges,
     parentVerified:   s.parentVerified ?? undefined,
+    willLeaveGroup:   s.willLeaveGroup === true,
     verificationItems: s.verificationItems ?? [],
     // Human outlet ID for the header (KYC is partner-keyed → the enrolled outlet's code).
     // Prefer the real Outlet code; fall back to the partner code if no outlet is linked yet.
@@ -736,6 +744,27 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
                 {(Object.keys(kyc.proposedChanges) as ProposedFieldKey[])
                   .map((k) => PROPOSED_FIELD_LABELS[k]).join(', ')}
               </span>
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Wave-4 group-leave (Option A): the proposed PAN differs from the outlet's owner-group
+          PAN, so approving this re-KYC DETACHES the shop from its group. Distinct red/amber
+          warning — clearly separate from the amber "Proposed change" banner above — so the
+          reviewer knows the approval re-establishes the shop as an independent outlet. */}
+      {kyc.willLeaveGroup && (
+        <div
+          data-testid="group-leave-banner"
+          className="bg-red-50 border border-red-300 rounded-xl p-4 flex items-start gap-2 text-sm"
+        >
+          <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <p className="font-semibold text-red-800">Approving this re-KYC removes the shop from its owner group</p>
+            <p className="text-red-700 text-xs mt-0.5">
+              The proposed PAN differs from the group&rsquo;s PAN. Approving changes the shop&rsquo;s PAN
+              and will <span className="font-semibold">remove it from its owner group</span>, re-establishing
+              it as an independent shop.
             </p>
           </div>
         </div>

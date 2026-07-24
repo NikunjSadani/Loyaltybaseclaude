@@ -400,9 +400,15 @@ the owner's choice among the leftovers below).
 
 **🏗️ ACTIVE WORK — PARTNER → MULTIPLE OUTLETS (parent-child owner groups). Full AS-BUILT + cutover checklist =
 `platform/docs/plans/PARTNER-MULTI-OUTLET.md` §9; memory [[partner-multi-outlet]] (READ BOTH FIRST).** Owner-driven, multi-wave
-orchestrated build. **✅ WAVE 1 + 2 + 3 ALL DONE — on develop (verify HEAD via `git log`), gate GREEN (api jest 1718 · nest 0 ·
-FE vitest 1971 · tsc 0), 3-lens adversarial audit [auth-boundary/money/regression] + full audit-fix pass. NOT in prod —
-owner-gated cutover pending; owner UAT on staging next.** W1+W2 as-built (design evolved — §9 authoritative): single-source-of-truth
+orchestrated build. **✅ WAVE 1 + 2 + 3 + 4 ALL DONE — the FULL feature is complete on develop (verify HEAD via `git log`),
+gate GREEN (api jest 1745 · nest 0 · FE vitest 1984 · tsc 0), adversarial-audited. NOT in
+prod — owner-gated cutover pending; owner UAT on staging next.** **W4 (final, additive, NO new migrations):** group-leave
+via re-KYC (Option A — a PAN-change-away-from-group is an atomic Gifsy-approval departure: standalone-uniqueness-or-rollback,
+clears `parentId` in-tx, `willLeaveGroup` reviewer banner) + Phase-2 group roll-ups (`GET /partner/group/{targets,visibility,
+leaderboard}`, own-group-guarded, visibility gated on the tenant flag) + scheme-catalog eligibility fix (opt-in allowlist —
+was a dead `id IN ()` hiding ALL schemes from ALL partners; threaded through the picker). **W3 flows runtime-verified on the
+staging `w3test-*` group (picker/switch/overview/sibling-enroll all green); W4 roll-ups/group-leave/eligibility staging-verify
+runs on the develop push.** W1+W2 as-built (design evolved — §9 authoritative): single-source-of-truth
 `Outlet.parentId` + trigger-derived `ChannelPartner.groupId`; PAN+GST hard partial-unique DB indexes, bank/UPI app+advisory-lock;
 parent entity + admin Parent-ID upload + dedicated un-group; **re-KYC STAGE-AT-APPROVAL** (proposed identity/payout+address staged
 on `KycSubmission.proposedPartner`, applied only at Gifsy approval); reserve-at-submit + 48h cleanup. **W3 as-built:** **login picker**
