@@ -1,7 +1,10 @@
 # Partner → Multiple Outlets (Parent-Child Owner Groups)
 
-> **Status (2026-07-23):** ✅ **Wave 1 + 2 + 3 + 4 ALL DONE — the FULL feature is complete on develop (HEAD
-> `04008d0`), gate green, adversarial-audited, staging-verified.** (W3 + W4 flows runtime-verified on the live staging group.) W1+W2 migrations verified on STAGING; W3 added two
+> **Status (2026-07-24):** 🎉 **LIVE IN PROD — CUTOVER #14 (`eca351e`).** Waves 1–4 ALL DONE and shipped; all 4
+> migrations verified applied on prod + every DB object confirmed; prod smoke green. Gate at cutover: api jest 1745 ·
+> nest 0 · FE vitest 1984 · tsc 0; adversarial-audited; staging-verified. **Additive + opt-in — DORMANT until an admin
+> sets a parentId** (zero impact on live Deoleo). ⚠️ **Post-cutover TODO: `KYC_CLEANUP_SECRET` + Cloud Scheduler** for the
+> 48h stale-draft sweep (see §9 checklist). W1+W2 migrations verified on STAGING; W3 added two
 > additive migrations (OTP order-binding + scheme-enrollment-by-shop, now applied on staging); W4 adds NO
 > migrations. **NOT in prod (owner-gated cutover pending).** W3 = login picker + group overview + child KYC
 > pre-fill/badge + scheme-enrollment re-key. W4 = group-leave via re-KYC (Option A) + Phase-2 roll-ups

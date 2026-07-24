@@ -11,15 +11,27 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-- **prod == main == `2187498`** (CUTOVER #12 `d028566` + #13 `2187498`, both LIVE 2026-07-22). **develop = `a7fca57`**
-  (verify via `git log`; docs `a7fca57` on feature `04008d0`) = prod + **🏗️ PARTNER→MULTI-OUTLET Waves 1–4 — the FULL
-  feature COMPLETE** (uniqueness engine + parent entity + admin grouping + re-KYC stage-at-approval + login picker + group
-  overview + child-KYC pre-fill/badge + scheme re-key + order-bound OTP + **W4** group-leave-via-re-KYC + Phase-2 roll-ups +
-  scheme-catalog fix). Additive+opt-in (dormant until an admin sets a parentId → zero impact on live Deoleo). **✅ ON STAGING
-  + runtime-verified** (W1+W2 migrations verified; W3+W4 flows verified on the `w3test-*` group). Gate at `04008d0`: **api
-  jest 1745 · nest 0 · FE vitest 1984 · tsc 0**; adversarial-audited (no HIGH; MED-1 orphan-sibling + LOW-3 fixed). **NOT in
-  prod.** Full as-built + cutover checklist = `platform/docs/plans/PARTNER-MULTI-OUTLET.md` §9; memory **[[partner-multi-outlet]]**;
-  the detailed ACTIVE-WORK block is under START THE SESSION below.
+- **prod == main == develop == `eca351e`** — **✅ CUTOVER #14 LIVE (2026-07-24): 🏗️ PARTNER→MULTI-OUTLET Waves 1–4 are
+  FULLY IN PROD.** (Prior: #12 `d028566` + #13 `2187498`, LIVE 2026-07-22.) Shipped: uniqueness engine + parent entity +
+  admin grouping + re-KYC stage-at-approval + login picker + group overview + child-KYC pre-fill/badge + scheme re-key +
+  order-bound OTP + **W4** group-leave-via-re-KYC + Phase-2 roll-ups + scheme-catalog fix. Additive+**opt-in — DORMANT
+  until an admin sets a parentId** → zero impact on live Deoleo. Gate at cutover: **api jest 1745 · nest 0 · FE vitest 1984
+  · tsc 0**; adversarial-audited (no HIGH; MED-1 orphan-sibling + LOW-3 fixed); staging-verified on the `w3test-*` group.
+  **PROD VERIFIED post-deploy:** both services serve `eca351e`, `/health/ready` `{db:up}`, Deoleo login 200, and ALL 4
+  migrations applied (`_partner_multi_outlet_foundation`, `_partner_group_uniqueness`, `_otp_reference_id`,
+  `_scheme_enrollment_by_partner`) + every DB object confirmed (isParent/groupId/parentId/proposedPartner/otp.referenceId/
+  scheme_enrollments.partnerId cols; PAN+GST partial-unique + scheme partnerId unique indexes; `outlet_group_id_sync`
+  trigger). Full as-built = `PARTNER-MULTI-OUTLET.md` §9; memory **[[partner-multi-outlet]]**.
+  - **Pre-cutover prod cleanup (owner-OK'd guarded write, 2026-07-24):** prod had 4 UNAPPROVED go-live SMOKE-TEST partners
+    with 2 dup-PAN pairs that would have FAILED the W2 PAN index → **soft-deleted all 4 partners + outlets + logins
+    (reversible via `deletedAt=null`) + purged their 4 test phones** (`User.phone` NOT NULL → sentinel `DEL-<id>`; numbers
+    freed). Prod now has **0 active partners** — clean slate for real onboarding.
+  - **⚠️ POST-CUTOVER TODO (not yet done): `KYC_CLEANUP_SECRET` + Cloud Scheduler** for the 48h stale-KYC-draft cleanup
+    (`POST /v1/kyc/cleanup-stale-drafts` fail-closes without the secret, so the sweep does NOT run today). Needs: create the
+    Secret-Manager secret, add it to the api `--set-secrets` in `deploy.yml` (do NOT set it via a manual `gcloud run update`
+    — `--set-env-vars` REPLACES the whole env set and would wipe it), redeploy prod, then create the scheduler job (follow
+    `expire-sweep-prod` / `push-drain-prod`). Harmless while the feature is dormant; do it before real KYC volume.
+  - Also: sweep dup bank/UPI **before** ever flipping a tenant's `uniquenessPolicy.bank`/`upi` to true (no DB index reveals them).
   - **✅ CUTOVER PROCEEDING (2026-07-24) — the prod dup-PAN blocker is RESOLVED.** Prod is pre-Wave-1 so ALL **4 additive
     migrations** apply. Guarded prod read (`gifsy-oneoff-prodcheck`) had found scheme-orphans **0** but **2 dup-PAN pairs among 4
     UNAPPROVED go-live SMOKE-TEST partners** (`AAACT9811F`×2 + placeholder `ABCDE1234F`×2; Deoleo had no real partners). **RESOLVED
@@ -394,7 +406,8 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 | 10 | `437045a` | (2026-07-19) — wallet-surfacing (credit payouts in partner wallet) + §A-DOMAIN P1/P2/P4/P4b + `client_domains` migration; verified live |
 | 11 | `e8de31a` | (2026-07-20) — §A-DOMAIN COMPLETE: sales-ledger payout unification + D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6 (S1 edge-secret NOW ENFORCING on prod + proxy/worker tests + favicon-from-DB-branding + 2nd-tenant E2E + 2 finding-fixes `58ce1ab`). 24 commits, CODE-ONLY (no migrations); verified live. Backup `1784547142461` |
 | 12 | `d028566` | (2026-07-22) — per-outlet PAYOUT MANDATE (`Outlet.requiredPaymentType`, live no-flag) + KYC address-proof WAIVER + infra-workflow (Direct-VPC-egress + `/health/ready` startup probe + `REDIS_URL` removal). 33 commits, **2 additive migrations** (`..._add_outlet_required_payment_type`, `..._add_kyc_address_name_mismatch`) verified applied; both services `/health/ready` 200. Rollback ref `e8de31a` |
-| 13 | `2187498` | **CURRENT PROD** (2026-07-22) — waiver SEMANTICS-FIX (drops ONLY the self-declaration; Address Proof stays required) + prod deoleo `clients.features.kycAddressProofWaiver=true` SET (guarded write, keycount 10→11, rbac untouched). 1 commit, CODE-ONLY (no migrations); verified live (SHA, /health/ready). Waiver now LIVE for Deoleo. Rollback ref `d028566` |
+| 14 | `eca351e` | **CURRENT PROD** (2026-07-24) — **PARTNER→MULTI-OUTLET Waves 1–4 COMPLETE** (uniqueness engine + parent entity + admin grouping + re-KYC stage-at-approval + login picker + group overview + child-KYC pre-fill/badge + scheme re-key + order-bound OTP + group-leave-via-re-KYC + Phase-2 roll-ups + scheme-catalog fix). 9 commits, **4 additive migrations** all verified applied + every DB object confirmed. Pre-cutover: guarded prod cleanup of 4 smoke-test partners (2 dup-PAN pairs) that would have failed the PAN index. Additive+opt-in → DORMANT until an admin sets a parentId. Verified live (SHA, `/health/ready`, Deoleo login 200). ⚠️ post-cutover TODO: `KYC_CLEANUP_SECRET` + Cloud Scheduler. Rollback ref `2187498` |
+| 13 | `2187498` | (2026-07-22) — waiver SEMANTICS-FIX (drops ONLY the self-declaration; Address Proof stays required) + prod deoleo `clients.features.kycAddressProofWaiver=true` SET (guarded write, keycount 10→11, rbac untouched). 1 commit, CODE-ONLY (no migrations); verified live (SHA, /health/ready). Waiver now LIVE for Deoleo. Rollback ref `d028566` |
 
 ## START THE SESSION
 Greet. State current status, then present the open pickups and ask which to take (do NOT hard-lead one — the next move is
