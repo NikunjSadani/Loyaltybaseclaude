@@ -11,24 +11,23 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-- **prod == main == `2187498`** (CUTOVER #12 `d028566` + #13 `2187498`, both LIVE 2026-07-22). **develop `1e2e4eb`**
-  (verify via `git log`) = prod + **🏗️ PARTNER→MULTI-OUTLET Wave 1 + Wave 2** (uniqueness engine + parent entity + admin
-  grouping + re-KYC stage-at-approval). Additive+opt-in (dormant until an admin sets a parentId → zero impact on live
-  Deoleo). **✅ ON STAGING: migration `20260723120000_partner_group_uniqueness` applied + every DB object verified**
-  (groupId col, PAN+GST partial-unique indexes, trigger, proposedPartner col, old GST @@unique dropped); both services
-  serve `1e2e4eb`, `/health/ready` db:up. Gate at `1e2e4eb`: **api jest 1650 · nest 0 · FE vitest 1940 · tsc 0**; 3
-  adversarial audits reconciled. **NOT in prod — owner-gated cutover pending** (see the CUTOVER CHECKLIST below).
-  **NEXT = Wave 3** (login picker + parent portal + wallet roll-up). Full as-built + cutover checklist =
-  `platform/docs/plans/PARTNER-MULTI-OUTLET.md` §9; memory **[[partner-multi-outlet]]**.
-  - **⚠️ PARTNER-MULTI-OUTLET CUTOVER CHECKLIST (before prod):** (1) **PROD dup-PAN guarded read BEFORE `migrate deploy`**
-    — the PAN partial-unique index FAILS over ungrouped duplicate PANs; group/clear them first (`SELECT "panNumber",
-    count(*) FROM channel_partners WHERE "deletedAt" IS NULL AND "panNumber" IS NOT NULL AND "isParent"=false GROUP BY
-    "clientId","panNumber" HAVING count(*)>1`). Prod likely clean (no outlets onboarded) but VERIFY. *(Staging had 9
-    UAT-junk dups → nulled under a guarded, independently-audited write 2026-07-23; backup in scratchpad.)* (2) create a
-    **Cloud Scheduler** job → `POST /v1/kyc/cleanup-stale-drafts` daily + set **`KYC_CLEANUP_SECRET`** (else the 48h
-    stale-draft cleanup never runs). (3) sweep dup bank/UPI **before** ever flipping a tenant's `uniquenessPolicy.bank`/
-    `upi` to true (no DB index reveals them). (4) The **§4.5 PAN-change-to-leave-group ordering is `TODO(wave4)`** in
-    kyc.service — resolve with owner before enabling group-leave via re-KYC.
+- **prod == main == `2187498`** (CUTOVER #12 `d028566` + #13 `2187498`, both LIVE 2026-07-22). **develop = `a7fca57`**
+  (verify via `git log`; docs `a7fca57` on feature `04008d0`) = prod + **🏗️ PARTNER→MULTI-OUTLET Waves 1–4 — the FULL
+  feature COMPLETE** (uniqueness engine + parent entity + admin grouping + re-KYC stage-at-approval + login picker + group
+  overview + child-KYC pre-fill/badge + scheme re-key + order-bound OTP + **W4** group-leave-via-re-KYC + Phase-2 roll-ups +
+  scheme-catalog fix). Additive+opt-in (dormant until an admin sets a parentId → zero impact on live Deoleo). **✅ ON STAGING
+  + runtime-verified** (W1+W2 migrations verified; W3+W4 flows verified on the `w3test-*` group). Gate at `04008d0`: **api
+  jest 1745 · nest 0 · FE vitest 1984 · tsc 0**; adversarial-audited (no HIGH; MED-1 orphan-sibling + LOW-3 fixed). **NOT in
+  prod.** Full as-built + cutover checklist = `platform/docs/plans/PARTNER-MULTI-OUTLET.md` §9; memory **[[partner-multi-outlet]]**;
+  the detailed ACTIVE-WORK block is under START THE SESSION below.
+  - **🛑 CUTOVER ATTEMPTED 2026-07-23 → BLOCKED on prod dup-PAN (owner decision needed; nothing merged to main — prod untouched).**
+    Prod is pre-Wave-1 so ALL **4 additive migrations** apply. Guarded prod read (`gifsy-oneoff-prodcheck`): scheme-orphans **0**,
+    but **2 dup-PAN pairs among 4 UNAPPROVED go-live SMOKE-TEST partners** (`AAACT9811F`×2 + placeholder `ABCDE1234F`×2; Deoleo has
+    no real partners yet) → the W2 PAN index would fail. **▶ owner: confirm test → guarded prod cleanup (soft-delete all 4 / null
+    dup PANs) → re-run read→0 → merge develop→main + owner GitHub approval → 4 migrations → verify → post-cutover Cloud Scheduler
+    → `POST /v1/kyc/cleanup-stale-drafts` daily + `KYC_CLEANUP_SECRET`.** (3) sweep dup bank/UPI **before** ever flipping a tenant's
+    `uniquenessPolicy.bank`/`upi` to true (no DB index reveals them). *(§4.5 PAN-change-to-leave-group is now IMPLEMENTED in W4 — no
+    longer a TODO.)*
 - **✅ CUTOVER #12 (`d028566`, live 2026-07-22) shipped BOTH develop features + the infra-workflow changes to prod:**
   (1) **PER-OUTLET PAYOUT MANDATE** — `Outlet.requiredPaymentType BANK|UPI|ANY` (migration `..._add_outlet_required_payment_type`),
   **fully LIVE, needs no flag** (defaults BANK); (2) **KYC ADDRESS-PROOF WAIVER** (migration `..._add_kyc_address_name_mismatch`);
@@ -400,9 +399,24 @@ the owner's choice among the leftovers below).
 
 **🏗️ ACTIVE WORK — PARTNER → MULTIPLE OUTLETS (parent-child owner groups). Full AS-BUILT + cutover checklist =
 `platform/docs/plans/PARTNER-MULTI-OUTLET.md` §9; memory [[partner-multi-outlet]] (READ BOTH FIRST).** Owner-driven, multi-wave
-orchestrated build. **✅ WAVE 1 + 2 + 3 + 4 ALL DONE — the FULL feature is complete on develop (verify HEAD via `git log`),
-gate GREEN (api jest 1745 · nest 0 · FE vitest 1984 · tsc 0), adversarial-audited + staging-verified (HEAD `04008d0`). NOT in
-prod — owner-gated cutover pending; owner UAT on staging next.** **W4 (final, additive, NO new migrations):** group-leave
+orchestrated build. **✅ WAVE 1 + 2 + 3 + 4 ALL DONE — the FULL feature is complete on develop (verify HEAD via `git log`;
+develop HEAD = docs `a7fca57` on top of feature `04008d0`), gate GREEN (api jest 1745 · nest 0 · FE vitest 1984 · tsc 0),
+adversarial-audited + staging-verified. NOT in prod — owner-gated cutover pending.**
+
+> 🛑 **CUTOVER ATTEMPTED 2026-07-23 → BLOCKED on the prod dup-PAN pre-check (owner decision needed).** The cutover ships 6
+> commits (`origin/main..origin/develop`) + **4 additive migrations** (`_partner_multi_outlet_foundation`, `_partner_group_uniqueness`,
+> `20260723130000_otp_reference_id`, `20260723140000_scheme_enrollment_by_partner`) — ALL FOUR apply to prod (prod == `2187498`
+> is pre-Wave-1). Guarded prod read (`gifsy-oneoff-prodcheck`, GUARD current_database=gifsy_prod) found: scheme-orphans **0** (W3
+> migration safe), but **2 duplicate-PAN pairs among the 4 (unapproved, `onboardedAt=null`) prod partners** → the W2 PAN
+> partial-unique index would FAIL to build. All 4 are **go-live SMOKE-TEST entries** (names Payel Ghosh / St hukke / niinj /
+> nikunj; PAN `ABCDE1234F` is a placeholder; outlet codes `Testoutlet`/`Test23`/`OUT-2026-001/002`): `AAACT9811F`×2
+> (CP-OUT-2026-001, CP-OUT-2026-002) + `ABCDE1234F`×2 (CP-Testoutlet, CP-Test23). Deoleo has **no real partners yet**.
+> **▶ RESOLUTION NEEDED (owner): confirm these are test → then a guarded prod write (backup + shown SQL + owner OK) to
+> soft-delete all 4 (recommended — cleans prod for real onboarding; reversible via `deletedAt=null`) OR null the dup PANs.**
+> Then re-run the prod dup-PAN read → 0 → **merge `develop`→`main` + push (I do the merge-push; owner approves the GitHub
+> "Deploy — Production" gate)** → CI applies the 4 migrations → verify prod SHA/`/health/ready`/smoke → **post-cutover: create
+> the Cloud Scheduler job → `POST /v1/kyc/cleanup-stale-drafts` daily + set `KYC_CLEANUP_SECRET` on prod.** (⚠️ flaky-CI: if the
+> prod `test` job flakes, "Re-run failed jobs" so the approval gate appears.) NOTHING has been merged to main — prod untouched. **W4 (final, additive, NO new migrations):** group-leave
 via re-KYC (Option A — a PAN-change-away-from-group is an atomic Gifsy-approval departure: standalone-uniqueness-or-rollback,
 clears `parentId` in-tx, `willLeaveGroup` reviewer banner) + Phase-2 group roll-ups (`GET /partner/group/{targets,visibility,
 leaderboard}`, own-group-guarded, visibility gated on the tenant flag) + scheme-catalog eligibility fix (opt-in allowlist —
@@ -420,11 +434,12 @@ cookie — a stale/shared-device cookie never bricks the portal); **read-only gr
 new GroupService, sum of Int POINTS + per-outlet drill-down + own-group cross-check); **Stream C** child KYC parent pre-fill (PAN
 locked to group PAN) + verified-on-parent badge (server booleans, pre-mask, PII-safe); **scheme enrollment RE-KEYED by shop**
 (`@@unique[schemeId,partnerId]`, userId nullable) so login-less siblings self-enroll; **order-bound redemption OTP** (`OtpCode.referenceId`).
-**4 additive migrations** (`_partner_multi_outlet_foundation`·`_partner_group_uniqueness` on staging; `20260723130000_otp_reference_id`·
-`20260723140000_scheme_enrollment_by_partner` apply on the develop push). **▶ NEXT = owner UAT on staging (real OTP) → owner-gated
-cutover.** **⚠️ CUTOVER CHECKLIST (prod dup-PAN + scheme-enrollment-orphan pre-checks · Cloud Scheduler + `KYC_CLEANUP_SECRET` ·
-bank/UPI dup sweep before flipping policy · §4.5 `TODO(wave4)`) — see PARTNER-MULTI-OUTLET.md §9.** Owner decisions locked this session:
-scheme-enrollment re-keyed by shop (built); `parentPrefill` kept in the sales-outlet list (authorized staff only, not tightened).
+**4 additive migrations** (all on staging; ALL FOUR apply to prod at cutover — prod is pre-Wave-1). **▶ NEXT = resolve the CUTOVER
+BLOCKER (prod dup-PAN test data — see the 🛑 note in CURRENT STATE) → owner UAT on staging (real OTP) → owner-gated cutover.**
+**⚠️ CUTOVER CHECKLIST (prod dup-PAN [FOUND: 4 test partners, 2 dup pairs — clean first] + scheme-orphan [0] pre-checks · Cloud
+Scheduler + `KYC_CLEANUP_SECRET` post-cutover · bank/UPI dup sweep before flipping policy) — see PARTNER-MULTI-OUTLET.md §9.**
+Owner decisions locked this session: Option-A group-leave (built, §4.5 `TODO(wave4)` now RESOLVED); scheme-enrollment re-keyed by
+shop (built); `parentPrefill` kept in the sales-outlet list (authorized staff only, not tightened).
 
 **STATE (prior work, all LIVE):** prod == main == `2187498` (CUTOVERS #12 `d028566` + #13 `2187498`, LIVE 2026-07-22). Both develop
 features LIVE in prod: PER-OUTLET PAYOUT MANDATE (no flag) + KYC ADDRESS-PROOF WAIVER (semantics-corrected + prod flag SET). Only

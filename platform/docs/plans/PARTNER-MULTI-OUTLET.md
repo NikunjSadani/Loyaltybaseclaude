@@ -379,10 +379,16 @@ next develop push.
 
 ### ⚠️ CUTOVER CHECKLIST (owner-gated; the migrations are NOT yet in prod)
 1. **PROD dup-PAN pre-check BEFORE `migrate deploy`** — the PAN partial-unique index FAILS to build if two
-   ungrouped active partners already share a PAN. Guarded read (same as staging):
-   `SELECT "panNumber", count(*) FROM channel_partners WHERE "deletedAt" IS NULL AND "panNumber" IS NOT NULL AND "isParent"=false GROUP BY "clientId","panNumber" HAVING count(*)>1`.
-   If non-empty → GROUP those real multi-outlet owners (or clear) first. (Deoleo prod is likely clean — no
-   outlets onboarded yet — but VERIFY. Staging had 9 UAT-junk dups; nulled under guarded write 2026-07-23.)
+   ungrouped active partners already share a PAN. Guarded read (prod is PRE-Wave-1 → `isParent` col does NOT
+   exist yet, so OMIT that filter — no parents exist pre-migration anyway):
+   `SELECT "clientId","panNumber", count(*) FROM channel_partners WHERE "deletedAt" IS NULL AND "panNumber" IS NOT NULL GROUP BY "clientId","panNumber" HAVING count(*)>1`.
+   ⚠️ **RAN 2026-07-23 via `gifsy-oneoff-prodcheck` (GUARD gifsy_prod): FOUND 2 dup pairs — `AAACT9811F`×2
+   (CP-OUT-2026-001 "Payel Ghosh", CP-OUT-2026-002 "St hukke") + `ABCDE1234F`×2 (CP-Testoutlet "niinj",
+   CP-Test23 "nikunj").** All 4 prod partners are UNAPPROVED (`onboardedAt=null`) go-live SMOKE-TEST entries
+   (placeholder PAN `ABCDE1234F`; test outlet codes) — Deoleo has NO real partners yet. **BLOCKS the cutover
+   → owner must confirm test → guarded prod write (backup + shown SQL + owner OK) to soft-delete all 4
+   (recommended; reversible via `deletedAt=null`) OR null the dup PANs; then re-run the read → 0 → proceed.**
+   (Staging had 9 UAT-junk dups; nulled under guarded write 2026-07-23.)
 2. **PROD scheme-enrollment orphan pre-check** — the W3 `scheme_enrollment_by_partner` migration **self-aborts**
    (RAISE EXCEPTION, no silent delete) if any enrollment's `userId` maps to no ChannelPartner. Run the pre-check
    so the deploy doesn't abort:
