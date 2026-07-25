@@ -11,8 +11,12 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-- **prod == main == develop == `eca351e`** — **✅ CUTOVER #14 LIVE (2026-07-24): 🏗️ PARTNER→MULTI-OUTLET Waves 1–4 are
-  FULLY IN PROD.** (Prior: #12 `d028566` + #13 `2187498`, LIVE 2026-07-22.) Shipped: uniqueness engine + parent entity +
+- **prod SERVES `eca351e` (api rev `00031-w9k`); main == develop == `51c2461`** (= `eca351e` app code + CI-config + docs, no
+  app-code diff → prod is functionally current). ⚠️ **The prod CI redeploy to `51c2461` FLAKED (test job) and is left to
+  SELF-HEAL on the next prod deploy — AFTER THE NEXT PROD CUTOVER, VERIFY prod api image tag == the merged main SHA AND
+  `KYC_CLEANUP_SECRET` is still bound** (proves the self-heal landed; the secret is durable via `deploy.yml` `--set-secrets`,
+  but confirm). Cosmetic only — no feature/secret depends on it. — **✅ CUTOVER #14 LIVE (2026-07-24): 🏗️ PARTNER→MULTI-OUTLET
+  Waves 1–4 are FULLY IN PROD.** (Prior: #12 `d028566` + #13 `2187498`, LIVE 2026-07-22.) Shipped: uniqueness engine + parent entity +
   admin grouping + re-KYC stage-at-approval + login picker + group overview + child-KYC pre-fill/badge + scheme re-key +
   order-bound OTP + **W4** group-leave-via-re-KYC + Phase-2 roll-ups + scheme-catalog fix. Additive+**opt-in — DORMANT
   until an admin sets a parentId** → zero impact on live Deoleo. Gate at cutover: **api jest 1745 · nest 0 · FE vitest 1984
@@ -31,8 +35,8 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
     `deploy.yml` / `deploy-staging.yml` `--set-secrets` (**durable** across future deploys — NOT a manual `gcloud run update`,
     which the next deploy's `--set-env-vars` would wipe). Prod got the secret **immediately** via an ADDITIVE
     `gcloud run services update gifsy-api --update-secrets=KYC_CLEANUP_SECRET=…` (rev `00031-w9k`, same `eca351e` image; the
-    flaky-CI `d1bbf59` prod redeploy is now optional-cosmetic — deploy.yml keeps it durable). Staging got it via its CI deploy
-    (`staging-d1bbf59`). Both Cloud Scheduler jobs CREATED + ENABLED (`kyc-cleanup-prod` / `kyc-cleanup-staging`, daily 01:00 IST
+    prod CI redeploy of the deploy.yml wiring FLAKED — left to SELF-HEAL, see the ⚠️ note in the CURRENT-STATE header above).
+    Staging got it via its CI deploy. Both Cloud Scheduler jobs CREATED + ENABLED (`kyc-cleanup-prod` / `kyc-cleanup-staging`, daily 01:00 IST
     → `POST /v1/kyc/cleanup-stale-drafts` with `x-cleanup-secret`). **VERIFIED:** prod correct-secret → `{deletedDrafts:2,
     deletedPartners:1}` (reclaimed leftover stale test drafts), prod wrong-secret → 403 fail-closed, staging → `{0,0}`, both
     schedulers ran OK.
