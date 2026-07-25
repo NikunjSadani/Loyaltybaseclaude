@@ -26,11 +26,16 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
     with 2 dup-PAN pairs that would have FAILED the W2 PAN index → **soft-deleted all 4 partners + outlets + logins
     (reversible via `deletedAt=null`) + purged their 4 test phones** (`User.phone` NOT NULL → sentinel `DEL-<id>`; numbers
     freed). Prod now has **0 active partners** — clean slate for real onboarding.
-  - **⚠️ POST-CUTOVER TODO (not yet done): `KYC_CLEANUP_SECRET` + Cloud Scheduler** for the 48h stale-KYC-draft cleanup
-    (`POST /v1/kyc/cleanup-stale-drafts` fail-closes without the secret, so the sweep does NOT run today). Needs: create the
-    Secret-Manager secret, add it to the api `--set-secrets` in `deploy.yml` (do NOT set it via a manual `gcloud run update`
-    — `--set-env-vars` REPLACES the whole env set and would wipe it), redeploy prod, then create the scheduler job (follow
-    `expire-sweep-prod` / `push-drain-prod`). Harmless while the feature is dormant; do it before real KYC volume.
+  - **✅ KYC-cleanup 48h stale-draft sweep — DONE + VERIFIED both envs (2026-07-24).** Secret-Manager secrets
+    `KYC_CLEANUP_SECRET` (prod) + `KYC_CLEANUP_SECRET_STAGING` (staging) CREATED + granted to `gifsy-api-sa`; both wired into
+    `deploy.yml` / `deploy-staging.yml` `--set-secrets` (**durable** across future deploys — NOT a manual `gcloud run update`,
+    which the next deploy's `--set-env-vars` would wipe). Prod got the secret **immediately** via an ADDITIVE
+    `gcloud run services update gifsy-api --update-secrets=KYC_CLEANUP_SECRET=…` (rev `00031-w9k`, same `eca351e` image; the
+    flaky-CI `d1bbf59` prod redeploy is now optional-cosmetic — deploy.yml keeps it durable). Staging got it via its CI deploy
+    (`staging-d1bbf59`). Both Cloud Scheduler jobs CREATED + ENABLED (`kyc-cleanup-prod` / `kyc-cleanup-staging`, daily 01:00 IST
+    → `POST /v1/kyc/cleanup-stale-drafts` with `x-cleanup-secret`). **VERIFIED:** prod correct-secret → `{deletedDrafts:2,
+    deletedPartners:1}` (reclaimed leftover stale test drafts), prod wrong-secret → 403 fail-closed, staging → `{0,0}`, both
+    schedulers ran OK.
   - Also: sweep dup bank/UPI **before** ever flipping a tenant's `uniquenessPolicy.bank`/`upi` to true (no DB index reveals them).
   - **✅ CUTOVER PROCEEDING (2026-07-24) — the prod dup-PAN blocker is RESOLVED.** Prod is pre-Wave-1 so ALL **4 additive
     migrations** apply. Guarded prod read (`gifsy-oneoff-prodcheck`) had found scheme-orphans **0** but **2 dup-PAN pairs among 4

@@ -3,8 +3,9 @@
 > **Status (2026-07-24):** 🎉 **LIVE IN PROD — CUTOVER #14 (`eca351e`).** Waves 1–4 ALL DONE and shipped; all 4
 > migrations verified applied on prod + every DB object confirmed; prod smoke green. Gate at cutover: api jest 1745 ·
 > nest 0 · FE vitest 1984 · tsc 0; adversarial-audited; staging-verified. **Additive + opt-in — DORMANT until an admin
-> sets a parentId** (zero impact on live Deoleo). ⚠️ **Post-cutover TODO: `KYC_CLEANUP_SECRET` + Cloud Scheduler** for the
-> 48h stale-draft sweep (see §9 checklist). W1+W2 migrations verified on STAGING; W3 added two
+> sets a parentId** (zero impact on live Deoleo). ✅ **Post-cutover KYC-cleanup DONE + verified (2026-07-24):**
+> `KYC_CLEANUP_SECRET`(+`_STAGING`) secrets + `deploy.yml` wiring + `kyc-cleanup-prod`/`-staging` schedulers (daily 01:00 IST);
+> endpoints verified both envs. The feature is fully live + operationally complete. W1+W2 migrations verified on STAGING; W3 added two
 > additive migrations (OTP order-binding + scheme-enrollment-by-shop, now applied on staging); W4 adds NO
 > migrations. **NOT in prod (owner-gated cutover pending).** W3 = login picker + group overview + child KYC
 > pre-fill/badge + scheme-enrollment re-key. W4 = group-leave via re-KYC (Option A) + Phase-2 roll-ups
@@ -326,7 +327,7 @@ Deoleo). **Pushed to develop; migration applied on staging (after a guarded stag
 - **Reserve-at-form-submit + 48h stale-draft cleanup:** identity is reserved when the rep submits the
   form (create writes the DRAFT partner). An abandoned brand-new draft is reclaimed after 48h (scheduler
   endpoint `POST /v1/kyc/cleanup-stale-drafts`, secret-gated) — deletes the throwaway partner (+ reuses
-  the orphan owner-User on retry). ⚠️ **Needs a Cloud Scheduler job + `KYC_CLEANUP_SECRET` env per env.**
+  the orphan owner-User on retry). ✅ **Cloud Scheduler + `KYC_CLEANUP_SECRET` DONE both envs (2026-07-24) — see §9 checklist.**
 - **Re-KYC = STAGE-AT-APPROVAL** (an approved partner NEVER carries unverified values, even briefly): a
   re-KYC stages its proposed identity/payout **+ outlet ADDRESS** on `KycSubmission.proposedPartner` and
   applies them to the live ChannelPartner/Outlet ONLY at Gifsy approval — atomically, with the uniqueness
@@ -396,8 +397,9 @@ next develop push.
    so the deploy doesn't abort:
    `SELECT count(*) FROM scheme_enrollments e WHERE NOT EXISTS (SELECT 1 FROM channel_partners cp WHERE cp."userId"=e."userId")`.
    Expect 0 on prod (real enrollments always came from a partner login). If >0, inspect + resolve before migrating.
-3. **Cloud Scheduler job** hitting `POST /v1/kyc/cleanup-stale-drafts` daily + the `KYC_CLEANUP_SECRET`
-   env/secret set on prod (and staging) — else the 48h cleanup never runs (endpoint fail-closes).
+3. ✅ **DONE (2026-07-24): Cloud Scheduler `kyc-cleanup-prod`/`-staging`** (daily 01:00 IST → `POST /v1/kyc/cleanup-stale-drafts`
+   + `x-cleanup-secret`) + `KYC_CLEANUP_SECRET`(+`_STAGING`) secrets wired into `deploy.yml`/`deploy-staging.yml` `--set-secrets`
+   (durable) and live on both envs; endpoints verified (prod→`{2,1}`, wrong-secret→403, staging→`{0,0}`).
 4. **Before ever flipping a tenant's `uniquenessPolicy.bank`/`upi` to true on prod:** sweep for existing
    duplicate bank/UPI among ungrouped active partners (no DB index to reveal them) and group them first.
 5. *(Resolved in Wave 4 — group-leave via re-KYC is implemented, Option A. No pre-check needed.)*
