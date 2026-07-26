@@ -11,6 +11,22 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
+- **🏗️ ACTIVE BUILD — SCHEME DATA-COLLECTION (started 2026-07-25):** the dormant "scheme" feature is being
+  reworked into a **temporary, Gifsy-admin-built data-collection instrument** — enrollment/registration +
+  fully-custom form capture ONLY (**no reward/points engine**; rewards stay on the target/achievement/credit
+  path). Full frozen contract + decisions **D1–D30** + **§11 schema spec** = `platform/docs/plans/SCHEME-DATA-COLLECTION-DESIGN.md`;
+  memory **[[scheme-data-collection]]** (read BOTH first for any scheme work). **Owner UATs only once LIVE → I
+  own bug-free delivery** (money-path-grade dual audit + full role-matrix runtime-verify). **W0–W3 BUILD
+  COMPLETE + gated GREEN (api `nest build` 0 / jest 1826 · FE `tsc` 0 / vitest 1941) + TWICE dual-audited
+  (W1 backend + W3 sales-slice/FE — all GO-WITH-FIXES, every finding fixed) — NOT PUSHED.** Migration
+  `20260725120000_scheme_data_collection` (roster remodel + `OtpPurpose ADD VALUE`; abort-guard asserts
+  0 `scheme_enrollments`) canonical-diff-verified + independently audited GO. **⚠️ Owner-gated remaining
+  (Wave-3 cutover):** (1) ✅ **DONE 2026-07-26** — guarded staging pre-check + cleanup (deleted 1 `w3test-cpB`
+  residue row, backup-logged; `scheme_enrollments`=0, **push-ready**); (2) **NEXT = push `develop`** (staging
+  applies the guarded destructive migration — owner said "go ahead"); (3) my staging runtime-verify (role
+  matrix, FIXED_OTP 123456; camera/geo via injected stream + mocked geolocation + a ~10-min real-phone smoke);
+  (4) prod cutover. Full as-built =
+  `SCHEME-DATA-COLLECTION-DESIGN.md` §11–§15; memory [[scheme-data-collection]]. Supersedes P4 tasks #22–29.
 - **prod SERVES `eca351e` (api rev `00031-w9k`); main == develop == `51c2461`** (= `eca351e` app code + CI-config + docs, no
   app-code diff → prod is functionally current). ⚠️ **The prod CI redeploy to `51c2461` FLAKED (test job) and is left to
   SELF-HEAL on the next prod deploy — AFTER THE NEXT PROD CUTOVER, VERIFY prod api image tag == the merged main SHA AND

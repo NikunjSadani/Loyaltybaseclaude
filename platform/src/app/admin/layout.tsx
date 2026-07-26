@@ -83,6 +83,9 @@ const ALL_NAV_ITEMS = [
     ],
   },
   { href: '/admin/schemes',  label: 'Scheme Management',icon: Tag,          featureFlag: null, gifsyOnly: true  },
+  // Tenant read-only scheme coverage reports (D2/D26). Shown to tenant admins
+  // (CLIENT_ADMIN / MIS_USER) only — GIFSY manages + reports from /admin/schemes.
+  { href: '/admin/scheme-reports', label: 'Scheme Reports', icon: FileBarChart2, featureFlag: null, tenantReportOnly: true },
   { href: '/admin/visibility', label: 'Visibility Approval', icon: Eye,     featureFlag: null },
   {
     href: '/admin/invoices',
@@ -157,6 +160,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       ALL_NAV_ITEMS.filter((item) => {
         // gifsyOnly items (e.g. Scheme Management) are hidden from CLIENT_ADMIN
         if ((item as { gifsyOnly?: boolean }).gifsyOnly && !adminSession.canManageSchemes) return false;
+        // tenantReportOnly items (Scheme Reports) are hidden from GIFSY_ADMIN, who
+        // gets the full management + report surface under Scheme Management instead.
+        if ((item as { tenantReportOnly?: boolean }).tenantReportOnly && adminSession.canManageSchemes) return false;
         // Master Visibility switch gates the Visibility Approval page AND (ANDed with its own
         // featureFlag) the Visibility Invoices group — both hidden when Visibility is OFF.
         if (item.href === '/admin/visibility') return visibilityEnabled;

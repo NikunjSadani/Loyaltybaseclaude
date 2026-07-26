@@ -1,0 +1,79 @@
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { SchemeReportService } from './scheme-report.service';
+import { SchemeNotifyService } from './scheme-notify.service';
+import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
+import { RequirePermission } from '../common/decorators/require-permission.decorator';
+import { BroadcastDto } from './dto/scheme-notify.dto';
+
+/**
+ * Scheme notifications + reports surface (Wave-0 data-collection).
+ *
+ * Shares the `schemes` base path with SchemesController (Nest registers routes
+ * across controllers; the paths here are distinct sub-paths, no collision):
+ *   - broadcast/broadcasts/report        → GIFSY_ADMIN only (D2/D29). RolesGuard
+ *                                           is always-on, independent of the RBAC
+ *                                           master flag.
+ *   - report/tenant + enrollments/export → tenant admin read-only (D26/D30),
+ *                                           permission-gated (schemes:read/export).
+ * All service methods tenant-scope by the caller's clientId.
+ */
+@Controller('schemes')
+export class SchemeReportController {
+  constructor(
+    private readonly reports: SchemeReportService,
+    private readonly notify: SchemeNotifyService,
+  ) {}
+
+  // ── Notifications (D29) — GIFSY_ADMIN only ────────────────────────────────
+
+  /** POST /v1/schemes/:id/broadcast — send an ad-hoc broadcast + log it. */
+  @Post(':id/broadcast')
+  @Roles('GIFSY_ADMIN')
+  broadcast(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: BroadcastDto,
+  ) {
+    return this.notify.broadcast(id, user.clientId, user.sub, dto);
+  }
+
+  /** GET /v1/schemes/:id/broadcasts — broadcast send history. */
+  @Get(':id/broadcasts')
+  @Roles('GIFSY_ADMIN')
+  listBroadcasts(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.notify.listBroadcasts(id, user.clientId);
+  }
+
+  // ── Reports (D26) ─────────────────────────────────────────────────────────
+
+  /** GET /v1/schemes/:id/report — full Gifsy admin report. */
+  @Get(':id/report')
+  @Roles('GIFSY_ADMIN')
+  gifsyReport(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.reports.gifsyReport(id, user.clientId);
+  }
+
+  /** GET /v1/schemes/:id/report/tenant — tenant admin read-only report (D26). */
+  @Get(':id/report/tenant')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('schemes:read')
+  tenantReport(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.reports.tenantReport(id, user.clientId);
+  }
+
+  /**
+   * GET /v1/schemes/:id/report/export — xlsx with auth-gated media links (D30).
+   *
+   * Mounted under `:id/report/...` (NOT `:id/enrollments/...`) so it never shadows
+   * the enrollment stream's `:id/enrollments/:enrollmentId` param route. GIFSY-only:
+   * this export surfaces raw captured values + media links; tenant admins use the
+   * aggregate `:id/report/tenant` (no raw media/formValues).
+   */
+  @Get(':id/report/export')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:export')
+  exportEnrollments(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.reports.exportEnrollments(id, user.clientId);
+  }
+}

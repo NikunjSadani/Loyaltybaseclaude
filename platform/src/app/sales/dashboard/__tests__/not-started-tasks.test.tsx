@@ -22,7 +22,9 @@ vi.mock('@/lib/banner', () => ({
   getActiveSalesBanners: () => [],
   getBgStyle: () => ({}),
 }));
-vi.mock('@/lib/schemes', () => ({ fetchAllSchemes: () => Promise.resolve([]) }));
+vi.mock('@/lib/schemes', () => ({
+  schemeApi: { listSalesEligible: () => Promise.resolve({ success: true, data: { schemes: [] } }) },
+}));
 
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);

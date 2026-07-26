@@ -3,8 +3,8 @@
 import React, { useState, useEffect } from 'react';
 import {
   TrendingUp, Gift, Wallet, Target,
-  HeadphonesIcon, CheckCircle,
-  ChevronRight, X, Megaphone, ArrowRight, Sparkles, ListChecks,
+  HeadphonesIcon,
+  ChevronRight, X, Megaphone, ArrowRight, Sparkles,
 } from 'lucide-react';
 import Link from 'next/link';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
@@ -22,14 +22,7 @@ import { buildCasesToGoMsg, classifyPaceGap } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import type { OutletType } from '@/lib/partner-session';
 import { pct, currentPeriod } from '@/lib/targets';
-import {
-  fetchPendingSchemes, acceptScheme, formatDeadline,
-  hasEnrollmentForm, getEnrollmentFields,
-  type Scheme,
-} from '@/lib/schemes';
-import { applyPrefillValues } from '@/lib/campaign';
-import { seedOutletData, getOutletPrefillData } from '@/lib/outlet-data';
-import { EnrollmentFormRenderer } from '@/components/partner/enrollment-form-renderer';
+import { loadPortalSchemes, statusOf } from '@/app/partner/schemes/portal-api';
 import { formatLastUpdated, getLastSalesUploadDate } from '@/lib/sales-upload-utils';
 import { authHeader } from '@/lib/api-client';
 
@@ -463,292 +456,63 @@ function MTHero({
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   SCHEME ACCEPTANCE
+   ACTIVATIONS (SCHEMES) — dashboard entry card
+   Replaces the old single-scheme acceptance banner + bottom-sheet. The full
+   list + form-rendering self-enrol flow now lives at /partner/schemes (D27);
+   this card is just the home-screen entry point, shown for EVERY outlet type
+   (the MT/SSS_TOT exclusion is removed — D22). It surfaces the count of eligible
+   activations this outlet has NOT yet enrolled in.
 ══════════════════════════════════════════════════════════════════════════ */
 
-/* ─── Scheme detail + acceptance bottom sheet ────────────────────────────── */
-
-function SchemeSheet({
-  scheme,
-  outletId,
-  isLoyaltyMember,
-  onAccept,
-  onClose,
-}: {
-  scheme: Scheme;
-  outletId: string;
-  isLoyaltyMember: boolean;
-  onAccept: (id: string) => void;
-  onClose: () => void;
-}) {
-  const [agreed,      setAgreed]      = useState(false);
-  const [submitting,  setSubmitting]  = useState(false);
-  const [success,     setSuccess]     = useState(false);
-  const [enrollError, setEnrollError] = useState<string | null>(null);
-  const [formValues,  setFormValues]  = useState<Record<string, unknown>>({});
-  const [prefillData, setPrefillData] = useState<Record<string, string>>({});
-
-  // Determine if this scheme has an enrollment form
-  // (Scheme type doesn't carry enrollmentFormConfig directly — we pull from the
-  //  admin-published scheme. For now we check the fields cast via the extended type.)
-  const schemeAsAdmin = scheme as unknown as import('@/lib/schemes').AdminPublishedScheme;
-  const enrollFields  = getEnrollmentFields(schemeAsAdmin);
-  const needsForm     = hasEnrollmentForm(schemeAsAdmin);
-
-  // On mount: seed outlet data, load prefill, compute initial form values
-  useEffect(() => {
-    seedOutletData();
-    const prefill = getOutletPrefillData(outletId);
-    setPrefillData(prefill);
-    if (enrollFields.length > 0) {
-      setFormValues(applyPrefillValues(enrollFields, prefill));
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [outletId]);
-
-  const handleAccept = async (submittedValues?: Record<string, unknown>) => {
-    setSubmitting(true);
-    setEnrollError(null);
-    try {
-      await acceptScheme(scheme.id, outletId, submittedValues ?? {});
-      onAccept(scheme.id);
-      setSuccess(true);
-    } catch (err) {
-      setEnrollError(err instanceof Error ? err.message : 'Enrollment failed. Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end">
-      <div className="absolute inset-0 bg-black/50" onClick={!success ? onClose : undefined} />
-      <div className="relative bg-white rounded-t-2xl max-h-[88vh] flex flex-col shadow-2xl">
-        {/* Handle */}
-        <div className="flex justify-center pt-3 pb-0 shrink-0">
-          <div className="w-10 h-1 bg-gray-200 rounded-full" />
-        </div>
-        <button onClick={onClose}
-          className="absolute top-4 right-4 w-8 h-8 bg-gray-100 hover:bg-gray-200 rounded-full flex items-center justify-center transition-colors">
-          <X className="h-4 w-4 text-gray-600" />
-        </button>
-
-        {success ? (
-          /* ── Success state ── */
-          <div className="flex flex-col items-center justify-center py-12 px-6 gap-4 text-center">
-            <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center">
-              <CheckCircle className="h-8 w-8 text-emerald-600" />
-            </div>
-            <div>
-              <h3 className="text-lg font-bold text-gray-900">You're enrolled!</h3>
-              <p className="text-sm text-gray-500 mt-1">
-                You have successfully joined <span className="font-semibold text-gray-800">{scheme.name}</span>.
-              </p>
-              <p className="text-xs text-gray-400 mt-1">
-                Targets will be visible on your Targets page once the scheme begins on {new Date(scheme.startDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}.
-              </p>
-            </div>
-            <button onClick={onClose}
-              className="w-full py-3 bg-[var(--brand-primary)] text-white rounded-xl text-sm font-bold hover:bg-[var(--brand-primary-dark)] transition-colors">
-              Done
-            </button>
-          </div>
-        ) : (
-          <>
-            <div className="overflow-y-auto flex-1 px-5 pt-4 pb-2 space-y-5">
-              {/* Header */}
-              <div className="flex items-start gap-3">
-                <div className="w-11 h-11 rounded-2xl bg-emerald-100 flex items-center justify-center shrink-0">
-                  <Sparkles className="h-5 w-5 text-emerald-600" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-gray-400 font-medium">New Activation · {scheme.period}</p>
-                  <h2 className="text-base font-bold text-gray-900 leading-snug mt-0.5">{scheme.name}</h2>
-                </div>
-              </div>
-
-              {/* Description */}
-              <p className="text-sm text-gray-600 leading-relaxed">{scheme.description}</p>
-
-              {/* KPIs tracked */}
-              <div>
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-                  Parameters tracked
-                </p>
-                <div className="space-y-2">
-                  {scheme.kpis.map((kpi, i) => (
-                    <div key={i} className="flex items-center gap-2.5 bg-gray-50 rounded-xl px-3 py-2.5">
-                      <ListChecks className="h-3.5 w-3.5 text-[var(--brand-primary)] shrink-0" />
-                      <p className="text-sm text-gray-800 font-medium">{kpi.label}</p>
-                      <span className="ml-auto text-xs text-gray-400">{kpi.unit}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Reward note */}
-              <div className="bg-amber-50 border border-amber-100 rounded-xl px-4 py-3">
-                <p className="text-xs text-amber-800 font-semibold">About rewards</p>
-                <p className="text-xs text-amber-700 mt-0.5 leading-relaxed">
-                  Incentive amounts are determined by Deoleo internally and will reflect in your wallet after the cycle ends and achievements are verified.
-                </p>
-              </div>
-
-              {/* Deadline */}
-              <p className="text-xs text-gray-400 text-center">
-                Accept by <span className="font-semibold text-gray-600">{formatDeadline(scheme.acceptDeadline)}</span> to participate
-              </p>
-
-              {/* ── Enrollment form (when admin has configured fields) ── */}
-              {needsForm && (
-                <div className="border-t border-gray-100 pt-4">
-                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
-                    Enrollment Details
-                  </p>
-                  <EnrollmentFormRenderer
-                    fields={enrollFields}
-                    isLoyaltyMember={isLoyaltyMember}
-                    prefillData={prefillData}
-                    values={formValues}
-                    onChange={(fieldId, value) =>
-                      setFormValues((prev) => ({ ...prev, [fieldId]: value }))
-                    }
-                    onSubmit={(vals) => handleAccept(vals)}
-                    submitLabel="Accept & Enrol"
-                  />
-                </div>
-              )}
-            </div>
-
-            {/* Footer — only for simple (no-form) flow */}
-            {!needsForm && (
-              <div className="px-5 pb-6 pt-3 border-t border-gray-100 space-y-3 shrink-0">
-                <label className="flex items-start gap-3 cursor-pointer">
-                  <div className="mt-0.5 shrink-0">
-                    <input
-                      type="checkbox"
-                      className="w-4 h-4 rounded accent-[var(--brand-primary)] cursor-pointer"
-                      checked={agreed}
-                      onChange={(e) => setAgreed(e.target.checked)}
-                    />
-                  </div>
-                  <p className="text-xs text-gray-600 leading-relaxed">
-                    I confirm that I have read the scheme details and agree to participate in{' '}
-                    <span className="font-semibold">{scheme.name}</span>.
-                  </p>
-                </label>
-
-                {enrollError && (
-                  <p className="text-xs text-red-600 font-medium text-center">{enrollError}</p>
-                )}
-
-                <button
-                  onClick={() => handleAccept()}
-                  disabled={!agreed || submitting}
-                  className="w-full py-3 rounded-xl text-sm font-bold transition-all
-                    disabled:opacity-40 disabled:cursor-not-allowed
-                    bg-[var(--brand-primary)] text-white hover:bg-[var(--brand-primary-dark)] active:scale-[0.98]
-                    flex items-center justify-center gap-2"
-                >
-                  {submitting ? (
-                    <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                  ) : (
-                    <CheckCircle className="h-4 w-4" />
-                  )}
-                  {submitting ? 'Enrolling…' : 'Accept & Enrol'}
-                </button>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ─── Scheme acceptance banner (home screen) ─────────────────────────────── */
-
-function SchemeAcceptanceBanner({
-  outletType,
-  outletId,
-  isLoyaltyMember,
-}: {
-  outletType: string;
-  outletId: string;
-  isLoyaltyMember: boolean;
-}) {
-  const [pending,      setPending]      = useState<Scheme[]>([]);
-  const [active,       setActive]       = useState<Scheme | null>(null);
-  const [schemeError,  setSchemeError]  = useState(false);
+function SchemesCard() {
+  const [availableCount, setAvailableCount] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    setSchemeError(false);
-    fetchPendingSchemes(outletType, outletId)
-      .then((schemes) => { if (!cancelled) setPending(schemes); })
-      .catch(() => { if (!cancelled) setSchemeError(true); });
+    loadPortalSchemes()
+      .then((list) => {
+        if (cancelled) return;
+        setAvailableCount(list.filter((i) => statusOf(i) === 'NOT_ENROLLED').length);
+      })
+      .catch(() => {
+        // Non-critical home-screen widget — stay hidden on error.
+        if (!cancelled) setAvailableCount(0);
+      });
     return () => { cancelled = true; };
-  }, [outletType, outletId]);
+  }, []);
 
-  const handleAccepted = (id: string) => {
-    setPending((prev) => prev.filter((s) => s.id !== id));
-  };
-
-  // On fetch error: silently suppress the banner (non-critical feature; the
-  // partner can still use the rest of the dashboard).
-  if (schemeError || pending.length === 0) return null;
-
-  const first = pending[0];
+  // Only surface the card when there is at least one activation to enrol in.
+  if (!availableCount) return null;
 
   return (
-    <>
-      <div
-        onClick={() => setActive(first)}
-        className="relative overflow-hidden rounded-2xl cursor-pointer active:scale-[0.98] transition-transform"
-        style={{ background: 'linear-gradient(135deg, #064e3b 0%, #065f46 50%, #047857 100%)' }}
-      >
-        {/* Decorative glow */}
-        <div className="absolute -top-6 -right-6 w-24 h-24 rounded-full bg-white/5" />
-        <div className="absolute -bottom-4 -left-4 w-16 h-16 rounded-full bg-white/5" />
+    <Link
+      href="/partner/schemes"
+      className="relative overflow-hidden rounded-2xl block active:scale-[0.98] transition-transform"
+      style={{ background: 'linear-gradient(135deg, #064e3b 0%, #065f46 50%, #047857 100%)' }}
+    >
+      <div className="absolute -top-6 -right-6 w-24 h-24 rounded-full bg-white/5" />
+      <div className="absolute -bottom-4 -left-4 w-16 h-16 rounded-full bg-white/5" />
 
-        <div className="relative px-4 py-4 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
-            <Sparkles className="h-5 w-5 text-emerald-300" />
-          </div>
+      <div className="relative px-4 py-4 flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+          <Sparkles className="h-5 w-5 text-emerald-300" />
+        </div>
 
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-0.5">
-              <span className="text-[10px] font-bold uppercase tracking-wide text-emerald-300">
-                New Activation
-              </span>
-              {pending.length > 1 && (
-                <span className="text-[9px] font-bold bg-white/20 text-white px-1.5 py-0.5 rounded-full">
-                  +{pending.length - 1} more
-                </span>
-              )}
-            </div>
-            <p className="text-sm font-bold text-white leading-tight truncate">{first.name}</p>
-            <p className="text-[11px] text-white/60 mt-0.5">
-              {first.period} · Accept by {formatDeadline(first.acceptDeadline)}
-            </p>
-          </div>
+        <div className="flex-1 min-w-0">
+          <span className="text-[10px] font-bold uppercase tracking-wide text-emerald-300">
+            New Activation
+          </span>
+          <p className="text-sm font-bold text-white leading-tight mt-0.5">
+            {availableCount} activation{availableCount !== 1 ? 's' : ''} available to enrol
+          </p>
+          <p className="text-[11px] text-white/60 mt-0.5">Tap to view &amp; enrol your outlet</p>
+        </div>
 
-          <div className="flex items-center gap-1.5 shrink-0 bg-white text-[#065f46] text-xs font-bold px-3 py-1.5 rounded-lg">
-            View <ChevronRight className="h-3 w-3" />
-          </div>
+        <div className="flex items-center gap-1.5 shrink-0 bg-white text-[#065f46] text-xs font-bold px-3 py-1.5 rounded-lg">
+          View <ChevronRight className="h-3 w-3" />
         </div>
       </div>
-
-      {active && (
-        <SchemeSheet
-          scheme={active}
-          outletId={outletId}
-          isLoyaltyMember={isLoyaltyMember}
-          onAccept={handleAccepted}
-          onClose={() => setActive(null)}
-        />
-      )}
-    </>
+    </Link>
   );
 }
 
@@ -766,7 +530,6 @@ export default function PartnerDashboard() {
   // ── Real data: aggregated targets + wallet ──────────────────────────────
   const [aggKpis,      setAggKpis]      = useState<AggKpi[]>([]);
   const [outletType,   setOutletType]   = useState<OutletType>('SSS');
-  const [firstOutletCode, setFirstOutletCode] = useState<string>('');
   const [walletPoints, setWalletPoints] = useState<number | null>(null);
 
   // Touch / swipe state
@@ -829,7 +592,6 @@ export default function PartnerDashboard() {
         }
         setAggKpis(order.map(c => byCode.get(c)!));
         setOutletType((outlets[0]?.outletType as OutletType) ?? 'SSS');
-        setFirstOutletCode(outlets[0]?.outletCode ?? '');
       })
       .catch(() => {}); // honest empty state — heroes render "No targets yet"
 
@@ -964,14 +726,8 @@ export default function PartnerDashboard() {
       {isMT         && <MTHero aggKpis={aggKpis} lastUpdatedLabel={lastUpdatedLabel} />}
       {!isWholesaler && !isMT && <RetailerHero primary={primary} lastUpdatedLabel={lastUpdatedLabel} />}
 
-      {/* ── 1b. SCHEME ACCEPTANCE BANNER (non-MT only) ── */}
-      {!isMT && (
-        <SchemeAcceptanceBanner
-          outletType={outletType}
-          outletId={firstOutletCode}
-          isLoyaltyMember={outletType !== 'WHOLESALER'}
-        />
-      )}
+      {/* ── 1b. ACTIVATIONS (SCHEMES) ENTRY — all outlet types (D22) ── */}
+      <SchemesCard />
 
       {/* ── 2. SALES vs TARGET CHART ── */}
       <PerformanceChart primary={primary} />

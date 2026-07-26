@@ -22,9 +22,9 @@ vi.mock('@/lib/sales-role', () => ({
 }));
 vi.mock('@/lib/gifsy-settings', () => ({ getGifsySettings: () => ({ visibilityEnabled: false }) }));
 vi.mock('@/lib/schemes', () => ({
-  fetchAllSchemes: () => Promise.resolve([]),
-  saveSalesEnrollment: vi.fn(),
-  formatDeadline: (d: string) => d,
+  // New roster-based client (§13.4). No eligible schemes here so the KYC groups
+  // are what's asserted; the retired mock-OTP/saveSalesEnrollment shims are gone.
+  schemeApi: { listSalesEligible: () => Promise.resolve({ success: true, data: { schemes: [] } }) },
 }));
 vi.mock('@/lib/task-config', () => ({
   fetchTaskConfig: () => Promise.resolve({ customTaskLabel: 'HO', customTaskItems: [] }),

@@ -17,7 +17,8 @@ import { classifyPaceGap, buildCasesToGoMsg } from '@/lib/pace';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
 import { fetchBanners, getActiveSalesBanners, getBgStyle, type Banner } from '@/lib/banner';
-import { fetchAllSchemes, type Scheme } from '@/lib/schemes';
+import { schemeApi } from '@/lib/schemes';
+import type { EligibleScheme } from '@/lib/scheme-types';
 import { fetchOutletVisibilityStatuses, VISIBILITY_ELIGIBLE_OUTLET_TYPES } from '@/lib/visibility-upload';
 import { buildKycSubRows, buildVisibilityTaskItems, type KycSubRow } from '@/lib/sales-tasks';
 
@@ -202,13 +203,15 @@ export default function SalesDashboard() {
   const [role,          setRoleState]     = useState<SalesRole>('SO');
   const [taskConfig,    setTaskConfig]    = useState<TaskConfig | null>(null);
   const [salesBanners,  setSalesBanners]  = useState<Banner[]>([]);
-  const [pendingSchemes, setPendingSchemes] = useState<Scheme[]>([]);
+  const [schemes, setSchemes] = useState<EligibleScheme[]>([]);
 
   useEffect(() => {
     setRoleState(getRole());
 
-    // Real backend schemes (no localStorage demo data on this live surface).
-    void fetchAllSchemes().then(setPendingSchemes).catch(() => setPendingSchemes([]));
+    // Real eligible schemes (roster-based §13.4; no localStorage demo data here).
+    void schemeApi.listSalesEligible()
+      .then((r) => setSchemes(r.success ? (r.data.schemes ?? []) : []))
+      .catch(() => setSchemes([]));
 
     Promise.all([
       fetchTaskConfig(),
@@ -243,7 +246,9 @@ export default function SalesDashboard() {
   useEffect(() => {
     const onStorage = () => {
       setRoleState(getRole());
-      void fetchAllSchemes().then(setPendingSchemes).catch(() => setPendingSchemes([]));
+      void schemeApi.listSalesEligible()
+        .then((r) => setSchemes(r.success ? (r.data.schemes ?? []) : []))
+        .catch(() => setSchemes([]));
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
@@ -470,7 +475,7 @@ export default function SalesDashboard() {
   }, [outlets, kycSubs, visibilityItems, taskConfig, role]);
 
   const isFieldRole = canEnroll(role);
-  const schemeCount = isFieldRole ? pendingSchemes.length : 0;
+  const schemeCount = isFieldRole ? schemes.length : 0;
   const totalTasks  = taskGroups.reduce((s, g) => s + g.items.length, 0) + schemeCount;
 
   return (

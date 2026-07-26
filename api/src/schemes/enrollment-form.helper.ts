@@ -31,8 +31,35 @@ export const FORM_FIELD_TYPES = [
   'UPI_QR_SCAN',
   'DATA_DISPLAY',
   'CALCULATED',
+  // ── Wave-0 scheme data-collection net-new field types (D12 / §13.1) ──────────
+  'EMAIL',
+  'MULTI_SELECT',
+  'TOGGLE',
+  'PHONE_OTP',
+  'LOOKUP',
+  'SECTION',
+  'SIGNATURE',
 ] as const;
 export type FormFieldType = (typeof FORM_FIELD_TYPES)[number];
+
+/** GPS capture trigger (D15). */
+export const GPS_CAPTURE_TRIGGERS = ['ON_SUBMIT', 'ON_PHOTO', 'MANUAL'] as const;
+export type GpsCaptureTrigger = (typeof GPS_CAPTURE_TRIGGERS)[number];
+
+/**
+ * Field types that are pure display / structural — never carry a captured value,
+ * never required, never validated. SECTION is the Wave-0 addition (D12).
+ */
+const DISPLAY_ONLY_TYPES: ReadonlySet<string> = new Set(['DATA_DISPLAY', 'SECTION']);
+
+/** Field types whose value is a stored GCS object key (media). */
+export const MEDIA_FIELD_TYPES: ReadonlySet<string> = new Set([
+  'DOCUMENT',
+  'IMAGE',
+  'CAMERA',
+  'UPI_QR_SCAN',
+  'SIGNATURE',
+]);
 
 export const FIELD_AUDIENCES = ['ALL', 'LOYALTY_MEMBERS', 'NON_LOYALTY_MEMBERS'] as const;
 export type FieldAudience = (typeof FIELD_AUDIENCES)[number];
@@ -62,6 +89,29 @@ export interface FormField {
   formula?: string;
   visibleWhen?: VisibleWhen;
   order: number;
+
+  // ── Wave-0 scheme data-collection additions (§13.1) ────────────────────────
+  /**
+   * Conditional-required (D12b). Same clause shape as `visibleWhen`; when present
+   * the field becomes required only while the clause evaluates true (and the field
+   * is itself visible). A `required: true` field is always required when visible,
+   * regardless of `requiredWhen`.
+   */
+  requiredWhen?: VisibleWhen;
+  /** Per-field prefill lock (D13a): a prefilled value the filler cannot edit. */
+  locked?: boolean;
+  /** Excel variable column this field prefills from (D13 / Mode B). */
+  prefillKey?: string;
+  /** LOOKUP: the field whose selected option value is mapped through `lookupMap`. */
+  lookupSourceFieldId?: string;
+  /** LOOKUP: option value → shown/derived value map (D12a). */
+  lookupMap?: Record<string, string>;
+  /** PHONE_OTP: require a verified consent OTP before submit (D16). */
+  otpRequired?: boolean;
+  /** GPS_POINT: when the location fix is captured (D15). */
+  captureTrigger?: GpsCaptureTrigger;
+  /** CAMERA: suppress the gallery fallback — native rear-camera capture only (D14). */
+  noGallery?: boolean;
 }
 
 export interface EnrollmentFormSchema {
@@ -209,17 +259,45 @@ export function validateFormSchema(rawSchema: unknown): string[] {
       }
     }
 
-    // options — required for DROPDOWN
-    if (f.type === 'DROPDOWN') {
+    // options — required for DROPDOWN and MULTI_SELECT (D12).
+    if (f.type === 'DROPDOWN' || f.type === 'MULTI_SELECT') {
       if (!Array.isArray(f.options) || f.options.length === 0) {
-        const lbl = isString(f.label) && f.label.trim() ? f.label : 'Dropdown';
-        errors.push(`${pos} ("${lbl}"): DROPDOWN must have at least one option.`);
+        const lbl = isString(f.label) && f.label.trim() ? f.label : f.type;
+        errors.push(`${pos} ("${lbl}"): ${f.type} must have at least one option.`);
       } else {
         const badOption = (f.options as unknown[]).find((o) => !isString(o));
         if (badOption !== undefined) {
           errors.push(`${pos}: all options must be strings.`);
         }
       }
+    }
+
+    // captureTrigger (optional) — GPS_POINT capture mode (D15).
+    if (f.captureTrigger !== undefined) {
+      if (
+        !isString(f.captureTrigger) ||
+        !(GPS_CAPTURE_TRIGGERS as readonly string[]).includes(f.captureTrigger)
+      ) {
+        errors.push(
+          `${pos}: captureTrigger must be one of: ${GPS_CAPTURE_TRIGGERS.join(', ')}.`,
+        );
+      }
+    }
+
+    // otpRequired (optional) — PHONE_OTP verify-before-submit flag (D16).
+    if (f.otpRequired !== undefined && !isBoolean(f.otpRequired)) {
+      errors.push(`${pos}: otpRequired must be a boolean.`);
+    }
+
+    // locked / noGallery (optional) — must be booleans when present (D13a / D14).
+    if (f.locked !== undefined && !isBoolean(f.locked)) {
+      errors.push(`${pos}: locked must be a boolean.`);
+    }
+    if (f.noGallery !== undefined && !isBoolean(f.noGallery)) {
+      errors.push(`${pos}: noGallery must be a boolean.`);
+    }
+    if (f.prefillKey !== undefined && !isString(f.prefillKey)) {
+      errors.push(`${pos}: prefillKey must be a string.`);
     }
   }
 
@@ -282,6 +360,82 @@ export function validateFormSchema(rawSchema: unknown): string[] {
         errors.push(`${pos}: visibleWhen.value must be a string.`);
       }
     }
+
+    // requiredWhen (optional) — conditional-required (D12b). Same clause shape +
+    // reference rules as visibleWhen (a field cannot conditionally-require on itself).
+    if (f.requiredWhen !== undefined) {
+      const rw = f.requiredWhen;
+      if (!isObject(rw)) {
+        errors.push(`${pos}: requiredWhen must be an object.`);
+      } else {
+        if (!isString(rw.fieldId) || rw.fieldId.trim() === '') {
+          errors.push(`${pos}: requiredWhen.fieldId must be a non-empty string.`);
+        } else if (isString(f.id) && rw.fieldId === f.id) {
+          errors.push(`${pos} ("${label}"): requiredWhen cannot depend on itself.`);
+        } else if (!fieldIds.has(rw.fieldId as string)) {
+          errors.push(
+            `${pos} ("${label}"): requiredWhen references unknown field id "${rw.fieldId}".`,
+          );
+        }
+        if (!isString(rw.op) || !(VISIBLE_WHEN_OPS as readonly string[]).includes(rw.op as string)) {
+          errors.push(`${pos}: requiredWhen.op must be one of: ${VISIBLE_WHEN_OPS.join(', ')}.`);
+        }
+        if (!isString(rw.value)) {
+          errors.push(`${pos}: requiredWhen.value must be a string.`);
+        }
+      }
+    }
+
+    // LOOKUP (D12a): lookupSourceFieldId must resolve to ANOTHER field, and
+    // lookupMap must be a non-empty object of string→string entries. The value is
+    // server-resolved at submit time from the source field's selected option.
+    if (f.type === 'LOOKUP') {
+      if (!isString(f.lookupSourceFieldId) || (f.lookupSourceFieldId as string).trim() === '') {
+        errors.push(`${pos} ("${label}"): LOOKUP must set lookupSourceFieldId.`);
+      } else if (isString(f.id) && f.lookupSourceFieldId === f.id) {
+        errors.push(`${pos} ("${label}"): LOOKUP cannot source from itself.`);
+      } else if (!fieldIds.has(f.lookupSourceFieldId as string)) {
+        errors.push(
+          `${pos} ("${label}"): LOOKUP references unknown source field id "${f.lookupSourceFieldId}".`,
+        );
+      }
+      if (!isObject(f.lookupMap) || Object.keys(f.lookupMap as object).length === 0) {
+        errors.push(`${pos} ("${label}"): LOOKUP must have a non-empty lookupMap.`);
+      } else {
+        const badVal = Object.values(f.lookupMap as Record<string, unknown>).find(
+          (v) => !isString(v),
+        );
+        if (badVal !== undefined) {
+          errors.push(`${pos} ("${label}"): all lookupMap values must be strings.`);
+        }
+      }
+    }
+  }
+
+  // GPS coherence: a submit-time GPS capture (`captureGpsOnSubmit`) needs a GPS_POINT
+  // field to store the fix into — after the schema-field-id projection there is no
+  // fieldless storage, so the flag would silently capture nothing. Reject such a form.
+  if (rawSchema.captureGpsOnSubmit === true) {
+    const hasGpsField = fields.some((f) => isObject(f) && f.type === 'GPS_POINT');
+    if (!hasGpsField) {
+      errors.push(
+        'formSchema.captureGpsOnSubmit is true but the form has no GPS_POINT field to store the fix.',
+      );
+    }
+  }
+
+  // Consent integrity (A-LOW-2): a `requireOtp` form MUST carry a PHONE_OTP field with
+  // `otpRequired` — otherwise the top-level flag promises a consent gate that nothing on
+  // the form actually enforces (fail-open). Reject such a form outright.
+  if (rawSchema.requireOtp === true) {
+    const hasOtpField = fields.some(
+      (f) => isObject(f) && f.type === 'PHONE_OTP' && f.otpRequired === true,
+    );
+    if (!hasOtpField) {
+      errors.push(
+        'formSchema.requireOtp is true but the form has no PHONE_OTP field with otpRequired.',
+      );
+    }
   }
 
   return errors;
@@ -304,13 +458,16 @@ export function validateFormSchema(rawSchema: unknown): string[] {
  *   gt / lt  — numeric comparison (non-numeric operands → false)
  *   contains — substring match
  */
-export function evaluateVisibleWhen(
-  field: FormField,
+/**
+ * Evaluate a single `{fieldId, op, value}` condition clause against the submitted
+ * values. Shared by `evaluateVisibleWhen` (visibility) and the conditional-required
+ * (`requiredWhen`) logic so both use identical operator semantics.
+ */
+export function evaluateClause(
+  clause: VisibleWhen,
   submittedValues: Record<string, unknown>,
 ): boolean {
-  if (!field.visibleWhen) return true;
-
-  const { fieldId, op, value: condValue } = field.visibleWhen;
+  const { fieldId, op, value: condValue } = clause;
   const raw = submittedValues[fieldId];
   const rawStr = raw !== null && raw !== undefined ? String(raw) : '';
 
@@ -336,54 +493,99 @@ export function evaluateVisibleWhen(
   }
 }
 
+export function evaluateVisibleWhen(
+  field: FormField,
+  submittedValues: Record<string, unknown>,
+): boolean {
+  if (!field.visibleWhen) return true;
+  return evaluateClause(field.visibleWhen, submittedValues);
+}
+
 /**
- * Evaluates a simple arithmetic formula of the form `{fieldId} op {fieldId}`.
+ * Whether a (visible) field must have a value on this submission. A `required:true`
+ * field is always required; a field with a `requiredWhen` clause becomes required
+ * only while that clause evaluates true (conditional-required, D12b).
+ */
+export function isFieldRequired(
+  field: FormField,
+  submittedValues: Record<string, unknown>,
+): boolean {
+  if (field.required) return true;
+  if (field.requiredWhen) return evaluateClause(field.requiredWhen, submittedValues);
+  return false;
+}
+
+/** An operand token is either a `{fieldId}` ref or a numeric literal (optional leading `-`). */
+const FORMULA_OPERAND_RE = /^(-?\d+(?:\.\d+)?|\{[^}]+\})/;
+const FORMULA_OPERATOR_RE = /^[+\-*/]/;
+
+/** Resolve one operand token (a `{ref}` or a numeric literal) to a number, or null if unresolvable. */
+function resolveFormulaOperand(
+  token: string,
+  submittedValues: Record<string, unknown>,
+): number | null {
+  const ref = /^\{([^}]+)\}$/.exec(token);
+  if (ref) {
+    const val = submittedValues[ref[1]];
+    if (val === null || val === undefined || val === '') return null;
+    const n = Number(val);
+    return isNaN(n) ? null : n;
+  }
+  const n = Number(token);
+  return isNaN(n) ? null : n;
+}
+
+/**
+ * Evaluates an arithmetic formula over `{fieldId}` refs / numeric literals.
  *
  * Formula grammar (subset — matches the FE renderer):
- *   - `{id}` tokens are replaced with the numeric value of that submitted field.
- *   - Only + - * / operators between exactly two operands are supported.
- *   - If any referenced value is non-numeric or the formula is malformed the
- *     result is null (server writes null; client-sent value is discarded).
- *
- * This intentionally supports only the formula shapes used by the platform FE
- * (e.g. `{f1} * 2`, `{f1} + {f2}`). Extend if richer expressions are required.
+ *   - `{id}` tokens resolve to the numeric value of that submitted field; bare
+ *     numeric literals are allowed too (e.g. `{f1} * 2`).
+ *   - `+ - * /` operators between operands, N-ary and evaluated STRICTLY
+ *     LEFT-TO-RIGHT (no operator precedence — mirrors a simple field-sum, so
+ *     `{a} + {b} * {c}` is `(({a} + {b}) * {c})`).
+ *   - If any referenced value is non-numeric/unresolved, the formula is malformed,
+ *     or a division-by-zero occurs, the result is null (server writes null; the
+ *     client-sent value is discarded).
  */
 export function evaluateFormula(
   formula: string,
   submittedValues: Record<string, unknown>,
 ): number | null {
-  // Replace {fieldId} with the submitted numeric value.
-  const resolved = formula.replace(/\{([^}]+)\}/g, (_match, id: string) => {
-    const val = submittedValues[id];
-    if (val === null || val === undefined || val === '') return 'NaN';
-    const n = Number(val);
-    return isNaN(n) ? 'NaN' : String(n);
-  });
-
-  // If any replacement produced NaN the formula is not evaluable.
-  if (resolved.includes('NaN')) return null;
-
-  // Evaluate a simple two-operand arithmetic expression.
-  // We deliberately avoid eval(); instead parse manually.
-  const match = resolved.match(/^\s*(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*$/);
-  if (!match) {
-    // Also accept a bare number (formula with no operator, just a ref).
-    const bare = resolved.trim();
-    const n = Number(bare);
-    return isNaN(n) ? null : n;
+  // Tokenize into a strict operand (operator operand)* sequence — no eval().
+  const tokens: string[] = [];
+  let rest = formula.trim();
+  let expectOperand = true;
+  while (rest.length > 0) {
+    rest = rest.replace(/^\s+/, '');
+    if (rest.length === 0) break;
+    const re = expectOperand ? FORMULA_OPERAND_RE : FORMULA_OPERATOR_RE;
+    const m = re.exec(rest);
+    if (!m) return null; // parse error
+    tokens.push(m[0]);
+    rest = rest.slice(m[0].length);
+    expectOperand = !expectOperand;
   }
+  // After consuming an operand `expectOperand` flips to false; after an operator it
+  // flips to true. A well-formed expression therefore ends with `expectOperand`
+  // false. If it is still true, the last token was a dangling operator (or empty).
+  if (tokens.length === 0 || expectOperand) return null;
 
-  const [, leftStr, op, rightStr] = match;
-  const left = Number(leftStr);
-  const right = Number(rightStr);
-
-  switch (op) {
-    case '+': return left + right;
-    case '-': return left - right;
-    case '*': return left * right;
-    case '/': return right === 0 ? null : left / right;
-    default:  return null;
+  let acc = resolveFormulaOperand(tokens[0], submittedValues);
+  if (acc === null) return null;
+  for (let i = 1; i < tokens.length; i += 2) {
+    const op = tokens[i];
+    const operand = resolveFormulaOperand(tokens[i + 1], submittedValues);
+    if (operand === null) return null;
+    switch (op) {
+      case '+': acc += operand; break;
+      case '-': acc -= operand; break;
+      case '*': acc *= operand; break;
+      case '/': if (operand === 0) return null; acc /= operand; break;
+      default: return null;
+    }
   }
+  return acc;
 }
 
 /**
@@ -396,7 +598,44 @@ export function evaluateFormula(
  */
 export interface SubmissionValidationResult {
   errors: string[];
+  /** CALCULATED field values recomputed server-side (client value discarded). */
   recomputedValues: Record<string, number | null>;
+  /** LOOKUP field values server-resolved from their source field (client value discarded). */
+  resolvedValues: Record<string, string | null>;
+}
+
+/** RFC-5322-lite email check — good enough to reject obvious garbage without false-rejecting real addresses. */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Truthy/falsy tokens accepted for a TOGGLE (yes/no) field. */
+const TRUE_TOKENS = new Set(['true', '1', 'yes', 'on']);
+const FALSE_TOKENS = new Set(['false', '0', 'no', 'off']);
+
+/**
+ * Server-resolve a LOOKUP field: map the SOURCE field's submitted option value
+ * through the field's `lookupMap`. Returns the mapped string, or null when the
+ * source value is empty / unmapped. Never trusts a client-sent lookup value.
+ */
+export function resolveLookup(
+  field: FormField,
+  submittedValues: Record<string, unknown>,
+): string | null {
+  if (!field.lookupSourceFieldId || !field.lookupMap) return null;
+  const src = submittedValues[field.lookupSourceFieldId];
+  if (src === null || src === undefined || src === '') return null;
+  const key = String(src);
+  const mapped = field.lookupMap[key];
+  return typeof mapped === 'string' ? mapped : null;
+}
+
+/** Is a MULTI_SELECT/TOGGLE-aware "empty" — false and empty arrays handled per-type below. */
+function isBlank(v: unknown): boolean {
+  return (
+    v === null ||
+    v === undefined ||
+    (typeof v === 'string' && v.trim() === '') ||
+    (Array.isArray(v) && v.length === 0)
+  );
 }
 
 /**
@@ -425,60 +664,112 @@ export function validateSubmittedValues(
 ): SubmissionValidationResult {
   const errors: string[] = [];
   const recomputedValues: Record<string, number | null> = {};
+  const resolvedValues: Record<string, string | null> = {};
   const values: Record<string, unknown> = submitted ?? {};
 
   for (const field of schema.fields) {
-    // DATA_DISPLAY: read-only, skip entirely.
-    if (field.type === 'DATA_DISPLAY') continue;
+    // DATA_DISPLAY / SECTION: read-only display / structural, skip entirely.
+    if (DISPLAY_ONLY_TYPES.has(field.type)) continue;
 
     // CALCULATED: server-side recompute; ignore client value.
     if (field.type === 'CALCULATED') {
-      const computed = field.formula
-        ? evaluateFormula(field.formula, values)
-        : null;
+      const computed = field.formula ? evaluateFormula(field.formula, values) : null;
       recomputedValues[field.id] = computed;
       continue;
     }
 
-    // Determine visibility.
-    const visible = evaluateVisibleWhen(field, values);
+    // LOOKUP: server-resolve from the source field; ignore client value.
+    if (field.type === 'LOOKUP') {
+      resolvedValues[field.id] = resolveLookup(field, values);
+      continue;
+    }
 
-    // Hidden fields are never validated.
-    if (!visible) continue;
+    // Determine visibility. Hidden fields are never validated or required.
+    if (!evaluateVisibleWhen(field, values)) continue;
 
     const rawValue = values[field.id];
-    const isEmpty =
-      rawValue === null ||
-      rawValue === undefined ||
-      (typeof rawValue === 'string' && rawValue.trim() === '');
 
-    // autoFillFromExcel: value may arrive pre-filled; accepted if present,
-    // but still required if required=true and the field is visible.
-    if (field.required && isEmpty) {
+    // TOGGLE: `false` is a real answer, not "empty". A TOGGLE is only blank when
+    // the key is missing/null. Everything else is required-check-exempt from isBlank.
+    const empty = field.type === 'TOGGLE' ? rawValue === null || rawValue === undefined : isBlank(rawValue);
+
+    // Effective required = base required OR a satisfied requiredWhen (D12b).
+    if (isFieldRequired(field, values) && empty) {
       errors.push(`Field "${field.label}" (${field.id}) is required.`);
       continue;
     }
 
     // Type validation — only when a value is present.
-    if (!isEmpty) {
-      const strVal = String(rawValue);
+    if (empty) continue;
 
-      if (field.type === 'NUMBER') {
-        const n = Number(strVal);
+    switch (field.type) {
+      case 'NUMBER': {
+        const n = Number(String(rawValue));
         if (!isFinite(n) || isNaN(n)) {
           errors.push(`Field "${field.label}" (${field.id}) must be a valid number.`);
         }
-      } else if (field.type === 'DATE') {
-        // Accept YYYY-MM-DD or full ISO 8601. Reject invalid strings.
-        const d = new Date(strVal);
+        break;
+      }
+      case 'DATE': {
+        const d = new Date(String(rawValue));
         if (isNaN(d.getTime())) {
           errors.push(`Field "${field.label}" (${field.id}) must be a valid date.`);
         }
+        break;
       }
-      // DROPDOWN, TEXT, GPS_POINT, IMAGE, CAMERA, DOCUMENT, UPI_QR_SCAN:
-      // any non-empty string is accepted (content validation is out-of-scope).
+      case 'EMAIL': {
+        if (!EMAIL_RE.test(String(rawValue).trim())) {
+          errors.push(`Field "${field.label}" (${field.id}) must be a valid email address.`);
+        }
+        break;
+      }
+      case 'PHONE_OTP': {
+        // Structural: a 10-digit mobile (last-10, punctuation-tolerant). Whether a
+        // VERIFIED OTP is required is enforced by the service (needs DB + the resolved
+        // target number) — the pure helper only checks the value's shape.
+        const digits = String(rawValue).replace(/\D/g, '').slice(-10);
+        if (digits.length !== 10) {
+          errors.push(`Field "${field.label}" (${field.id}) must be a valid 10-digit mobile number.`);
+        }
+        break;
+      }
+      case 'TOGGLE': {
+        const ok =
+          typeof rawValue === 'boolean' ||
+          TRUE_TOKENS.has(String(rawValue).toLowerCase()) ||
+          FALSE_TOKENS.has(String(rawValue).toLowerCase());
+        if (!ok) {
+          errors.push(`Field "${field.label}" (${field.id}) must be yes/no.`);
+        }
+        break;
+      }
+      case 'DROPDOWN': {
+        if (Array.isArray(field.options) && field.options.length > 0) {
+          if (!field.options.map(String).includes(String(rawValue))) {
+            errors.push(`Field "${field.label}" (${field.id}) has an invalid selection.`);
+          }
+        }
+        break;
+      }
+      case 'MULTI_SELECT': {
+        // Accept an array of option values, or a comma-separated string. Each entry
+        // must be one of the configured options.
+        const arr = Array.isArray(rawValue)
+          ? rawValue.map(String)
+          : String(rawValue).split(',').map((s) => s.trim()).filter(Boolean);
+        const allowed = new Set((field.options ?? []).map(String));
+        const bad = arr.find((v) => !allowed.has(v));
+        if (bad !== undefined) {
+          errors.push(`Field "${field.label}" (${field.id}) contains an invalid option "${bad}".`);
+        }
+        break;
+      }
+      // TEXT, GPS_POINT, IMAGE, CAMERA, DOCUMENT, UPI_QR_SCAN, SIGNATURE:
+      // any non-empty value accepted (media = a stored object key; geo = a JSON blob).
+      default:
+        break;
     }
   }
 
-  return { errors, recomputedValues };
+  return { errors, recomputedValues, resolvedValues };
 }

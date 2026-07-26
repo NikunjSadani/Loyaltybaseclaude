@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import {
   Home, Wallet, Gift, User, Bell, CheckCircle,
   Coins, Trophy, X, HeadphonesIcon, Target, Banknote, Medal,
-  Store, Users, ChevronDown, Check,
+  Store, Users, ChevronDown, Check, ClipboardList,
 } from 'lucide-react';
 import { setActivePartner } from '@/lib/active-partner-actions';
 import { NavBottom } from '@/components/layout/nav-bottom';
@@ -184,6 +184,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
         ...(rewardsOn     ? [{ href: '/partner/rewards',     label: 'Rewards',    icon: Gift   }] : []),
         { href: '/partner/targets',      label: 'Targets',      icon: Target        },
         ...(leaderboardOn ? [{ href: '/partner/leaderboard', label: 'Leaderboard', icon: Medal  }] : []),
+        { href: '/partner/schemes',      label: 'Activations',  icon: ClipboardList },
         { href: '/partner/support',      label: 'Support',      icon: HeadphonesIcon },
         { href: '/partner/profile',      label: 'Profile',      icon: User          },
       ],

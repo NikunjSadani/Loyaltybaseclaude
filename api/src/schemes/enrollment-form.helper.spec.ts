@@ -62,7 +62,7 @@ describe('validateFormSchema', () => {
   it('accepts a full schema with DROPDOWN, CALCULATED, and visibleWhen', () => {
     const schema = {
       captureGpsOnSubmit: true,
-      requireOtp: true,
+      requireOtp: false,
       fields: [
         {
           id: 'f-name',

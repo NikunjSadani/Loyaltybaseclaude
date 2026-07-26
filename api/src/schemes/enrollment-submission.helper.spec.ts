@@ -171,6 +171,32 @@ describe('evaluateFormula', () => {
   it('returns null for an empty field value', () => {
     expect(evaluateFormula('{qty} * 2', { qty: '' })).toBeNull();
   });
+
+  // ── N-ary LEFT-TO-RIGHT evaluation (B-LOW-1) ──────────────────────────────
+  it('sums three field refs left-to-right', () => {
+    expect(evaluateFormula('{a} + {b} + {c}', { a: '1', b: '2', c: '3' })).toBe(6);
+  });
+
+  it('evaluates a mixed multi-operator formula strictly left-to-right (no precedence)', () => {
+    // ({a} * {b}) - {c} = (2 * 3) - 4 = 2
+    expect(evaluateFormula('{a} * {b} - {c}', { a: '2', b: '3', c: '4' })).toBe(2);
+    // No operator precedence: ({a} + {b}) * {c} = (1 + 2) * 4 = 12 (NOT 1 + 8).
+    expect(evaluateFormula('{a} + {b} * {c}', { a: '1', b: '2', c: '4' })).toBe(12);
+  });
+
+  it('returns null when any ref in a multi-operator formula is unresolved', () => {
+    expect(evaluateFormula('{a} + {b} + {c}', { a: '1', b: '2' })).toBeNull();
+    expect(evaluateFormula('{a} + {b} + {missing}', { a: '1', b: '2', missing: 'x' })).toBeNull();
+  });
+
+  it('returns null on a dangling operator / malformed n-ary formula', () => {
+    expect(evaluateFormula('{a} + {b} +', { a: '1', b: '2' })).toBeNull();
+    expect(evaluateFormula('{a} {b}', { a: '1', b: '2' })).toBeNull();
+  });
+
+  it('returns null on divide-by-zero mid-chain', () => {
+    expect(evaluateFormula('{a} + {b} / {c}', { a: '5', b: '10', c: '0' })).toBeNull();
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

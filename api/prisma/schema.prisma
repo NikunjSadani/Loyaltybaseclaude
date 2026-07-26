@@ -39,6 +39,10 @@ enum OtpPurpose {
   WITHDRAWAL
   PROFILE_UPDATE
   REDEMPTION_CONFIRM
+  // Wave-0 scheme data-collection: phone-OTP consent field (D16). OtpCode.referenceId is
+  // bound to the SchemeOutlet roster row so concurrent outlets can't consume each other's OTP.
+  // NB: needs an `ALTER TYPE "OtpPurpose" ADD VALUE 'SCHEME_ENROLL_CONSENT'` migration line.
+  SCHEME_ENROLL_CONSENT
 }
 
 enum AuditAction {
@@ -181,6 +185,15 @@ enum SchemeStatus {
   PAUSED
   EXPIRED
   CANCELLED
+}
+
+// Lifecycle of a scheme ENROLLMENT / submission (Wave-0 scheme data-collection).
+// Live on submit (no approval gate — D10); admin can REJECT with a reason, the
+// outlet/rep resubmits the whole form → a new version supersedes. See
+// docs/plans/SCHEME-DATA-COLLECTION-DESIGN.md §11.
+enum SchemeEnrollmentStatus {
+  SUBMITTED
+  REJECTED
 }
 
 enum RewardType {
@@ -487,26 +500,30 @@ model User {
   deletedAt         DateTime?
 
   // Relations
-  sessions           UserSession[]
-  otpCodes           OtpCode[]
-  auditLogs          AuditLog[]          @relation("AuditActor")
-  affectedAuditLogs  AuditLog[]          @relation("AuditTarget")
-  salesUser          SalesUser?
-  channelPartner     ChannelPartner?
-  kycSubmissions     KycSubmission[]
-  tickets            Ticket[]            @relation("TicketCreator")
-  assignedTickets    Ticket[]            @relation("TicketAssignee")
-  ticketMessages     TicketMessage[]
-  notificationQueue  NotificationQueue[]
-  dataRequests       DataRequest[]
-  consentRecords     ConsentRecord[]
-  scheduledReports   ScheduledReport[]
-  reportDeliveryLogs ReportDeliveryLog[]
-  schemeEnrollments  SchemeEnrollment[]
-  loginLogs          LoginLog[]
-  pushSubscriptions  PushSubscription[]
-  pwaInstalls        PwaInstall[]
-  activityDays       UserActivityDay[]
+  sessions                   UserSession[]
+  otpCodes                   OtpCode[]
+  auditLogs                  AuditLog[]          @relation("AuditActor")
+  affectedAuditLogs          AuditLog[]          @relation("AuditTarget")
+  salesUser                  SalesUser?
+  channelPartner             ChannelPartner?
+  kycSubmissions             KycSubmission[]
+  tickets                    Ticket[]            @relation("TicketCreator")
+  assignedTickets            Ticket[]            @relation("TicketAssignee")
+  ticketMessages             TicketMessage[]
+  notificationQueue          NotificationQueue[]
+  dataRequests               DataRequest[]
+  consentRecords             ConsentRecord[]
+  scheduledReports           ScheduledReport[]
+  reportDeliveryLogs         ReportDeliveryLog[]
+  // Wave-0 scheme data-collection audit back-relations (§11). The submitter of an enrollment
+  // is now audit-only (nullable, SetNull); full history + broadcasts are also attributed.
+  schemeEnrollmentsSubmitted SchemeEnrollment[]  @relation("SchemeEnrollmentSubmitter")
+  schemeSubmissions          SchemeSubmission[]  @relation("SchemeSubmissionSubmitter")
+  schemeBroadcasts           SchemeBroadcast[]   @relation("SchemeBroadcastSender")
+  loginLogs                  LoginLog[]
+  pushSubscriptions          PushSubscription[]
+  pwaInstalls                PwaInstall[]
+  activityDays               UserActivityDay[]
 
   @@unique([clientId, phone]) // same phone can exist across different clients
   @@unique([clientId, email]) // email scoped per client (nullable handled by Postgres partial index)
@@ -636,11 +653,13 @@ model SalesUser {
   updatedAt        DateTime  @updatedAt
   deletedAt        DateTime?
 
-  user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  hierarchyLevel SalesHierarchyLevel   @relation(fields: [hierarchyLevelId], references: [id])
-  reportingTo    SalesUser?            @relation("SalesUserReporting", fields: [reportingToId], references: [id])
-  subordinates   SalesUser[]           @relation("SalesUserReporting")
-  assignments    SalesUserAssignment[]
+  user             User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  hierarchyLevel   SalesHierarchyLevel   @relation(fields: [hierarchyLevelId], references: [id])
+  reportingTo      SalesUser?            @relation("SalesUserReporting", fields: [reportingToId], references: [id])
+  subordinates     SalesUser[]           @relation("SalesUserReporting")
+  assignments      SalesUserAssignment[]
+  // Wave-0 scheme data-collection: roster rows tagging this employee (Mode B Excel).
+  schemeRosterTags SchemeOutlet[]        @relation("SchemeRosterSalesUser")
 
   @@unique([clientId, employeeCode])
   @@index([clientId])
@@ -732,9 +751,8 @@ model ChannelPartner {
   redemptionOrders      RedemptionOrder[]
   payoutTransactions    PayoutTransaction[]
   leaderboardEntries    LeaderboardEntry[]
-  // Scheme enrollments are keyed by the SHOP (this partner), not the login — so a
-  // login-less sibling can self-enroll via the Wave-3 picker.
-  schemeEnrollments     SchemeEnrollment[]
+  // Wave-0 scheme data-collection: roster rows whose matched (linked) owner is this partner.
+  schemeRosterEntries   SchemeOutlet[]         @relation("SchemeRosterPartner")
 
   @@unique([clientId, partnerCode])
   // NOTE: the old `@@unique([clientId, gstNumber])` is REPLACED by a PARTIAL unique index
@@ -1029,6 +1047,8 @@ model Outlet {
   geoHistory            OutletGeoHistory[]
   salesAssignments      SalesUserAssignment[]
   visibilitySubmissions VisibilitySubmission[]
+  // Wave-0 scheme data-collection: roster rows that matched (linked to) this outlet.
+  schemeRosterEntries   SchemeOutlet[]         @relation("SchemeRosterOutlet")
 
   @@unique([clientId, outletCode])
   @@index([clientId])
@@ -1091,6 +1111,11 @@ model Scheme {
   priority           Int          @default(0)
   imageUrl           String?
   metadata           Json?
+  // Wave-0 scheme data-collection audience config (D5/D17/D18). Shape:
+  // { mode:'FILTER'|'EXCEL', filter?:{ outletTypeIds?, programNames?, programCategories?,
+  //   zones?, states?, kycApprovedOnly:boolean }, frozen:boolean, selfEnrollAllowed:boolean,
+  //   notify?:{...} }. See docs/plans/SCHEME-DATA-COLLECTION-DESIGN.md §11.
+  audienceConfig     Json?
   createdByUserId    String?
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
@@ -1100,6 +1125,11 @@ model Scheme {
   pointsLedger   PointsLedger[]
   enrollments    SchemeEnrollment[]
   enrollmentForm SchemeEnrollmentForm?
+  // Wave-0 scheme data-collection back-relations (see §11).
+  roster         SchemeOutlet[]
+  submissions    SchemeSubmission[]
+  formVersions   SchemeEnrollmentFormVersion[]
+  broadcasts     SchemeBroadcast[]
 
   @@index([clientId])
   @@index([status])
@@ -2107,34 +2137,112 @@ model ReportDeliveryLog {
   @@map("report_delivery_log")
 }
 
+// Wave-0 scheme data-collection: the CURRENT enrollment/submission for one roster row.
+// The enrollment SUBJECT is now the roster row (SchemeOutlet), NOT a ChannelPartner —
+// superseding the 20260723140000 partner re-key. A roster row may be a matched (linked)
+// outlet or a standalone id+name data point (D4/D9). One CURRENT submission per roster
+// row per scheme (schemeOutletId is globally @unique → a 1:1 anchor); full history lives in
+// SchemeSubmission. See docs/plans/SCHEME-DATA-COLLECTION-DESIGN.md §11.
 model SchemeEnrollment {
-  id       String @id @default(cuid())
-  schemeId String
-  // The enrollment SUBJECT is the SHOP (ChannelPartner), NOT the login — so a login-less
-  // same-group sibling (a child outlet with no login of its own, reached via the Wave-3
-  // login picker) can self-enroll. Keyed @@unique([schemeId, partnerId]).
-  partnerId String
-  // The login that PERFORMED the enrollment, for audit only. Nullable: null when a
-  // login-less sibling is enrolled (SELF via the picker) or a login-less partner is the
-  // SALES target. The User relation is optional + SetNull so deleting the login keeps the
-  // shop's enrollment intact.
-  userId         String?
-  status         String   @default("ACTIVE")
-  enrollmentMode String   @default("SELF")
-  formValues     Json?
-  enrolledAt     DateTime @default(now())
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id                String                 @id @default(cuid())
+  schemeId          String
+  schemeOutletId    String                 @unique
+  status            SchemeEnrollmentStatus @default(SUBMITTED)
+  enrollmentMode    String                 @default("SELF")
+  // Latest submission snapshot (media/geo live INSIDE per field — §11 "Media & geo").
+  formValues        Json?
+  // Version of THIS current submission (bumped on each resubmit after a rejection, D10).
+  currentVersion    Int                    @default(1)
+  // The SchemeEnrollmentForm version this submission was captured against (D11).
+  formVersion       Int
+  // Reason the admin last rejected (D10); null unless status = REJECTED.
+  rejectionReason   String?
+  // The login that PERFORMED the enrollment, for AUDIT only. Nullable: null when a
+  // login-less sibling self-enrolls via the picker, or a standalone rep-filled row.
+  // Optional + SetNull so deleting the login keeps the captured data intact.
+  submittedByUserId String?
+  enrolledAt        DateTime               @default(now())
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
 
-  scheme  Scheme         @relation(fields: [schemeId], references: [id], onDelete: Cascade)
-  partner ChannelPartner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
-  user    User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  scheme       Scheme             @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  schemeOutlet SchemeOutlet       @relation(fields: [schemeOutletId], references: [id], onDelete: Cascade)
+  submittedBy  User?              @relation("SchemeEnrollmentSubmitter", fields: [submittedByUserId], references: [id], onDelete: SetNull)
+  submissions  SchemeSubmission[]
 
-  @@unique([schemeId, partnerId])
-  @@index([partnerId])
-  @@index([userId])
   @@index([schemeId])
+  @@index([submittedByUserId])
+  @@index([status])
   @@map("scheme_enrollments")
+}
+
+// Wave-0 scheme data-collection: the roster / enrollment subject (D3/D4). Each row is one
+// enrollable subject for one scheme — either a matched (linked) tenant outlet or a
+// standalone id+name data point (no app access, no KYC). Created by an Excel upload
+// (Mode B), a Mode-A frozen snapshot, or lazily on first enroll (Mode-A live-rule).
+// See docs/plans/SCHEME-DATA-COLLECTION-DESIGN.md §11.
+model SchemeOutlet {
+  id                String   @id @default(cuid())
+  clientId          String
+  schemeId          String
+  // The supplied outlet id (may or may not match a tenant outlet) + its display name.
+  outletRef         String
+  outletName        String
+  // Set when outletRef matches a tenant outlet/owner (linked); null = standalone data point.
+  matchedOutletId   String?
+  matchedPartnerId  String?
+  // Tagged employee from the Excel (Mode B); null in filter mode (reach falls back to the
+  // outlet's global sales assignment + up-hierarchy).
+  taggedSalesUserId String?
+  // Per-outlet prefill variable values from the Excel (Mode B).
+  prefillValues     Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  scheme          Scheme             @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  matchedOutlet   Outlet?            @relation("SchemeRosterOutlet", fields: [matchedOutletId], references: [id], onDelete: SetNull)
+  matchedPartner  ChannelPartner?    @relation("SchemeRosterPartner", fields: [matchedPartnerId], references: [id], onDelete: SetNull)
+  taggedSalesUser SalesUser?         @relation("SchemeRosterSalesUser", fields: [taggedSalesUserId], references: [id], onDelete: SetNull)
+  enrollment      SchemeEnrollment?
+  submissions     SchemeSubmission[]
+
+  @@unique([schemeId, outletRef])
+  @@index([schemeId])
+  @@index([matchedOutletId])
+  @@index([matchedPartnerId])
+  @@index([taggedSalesUserId])
+  @@index([clientId])
+  @@map("scheme_outlets")
+}
+
+// Wave-0 scheme data-collection: append-only, IMMUTABLE submission history (D10/D11).
+// Every submit/resubmit appends a frozen snapshot; prior versions are always retained.
+// See docs/plans/SCHEME-DATA-COLLECTION-DESIGN.md §11.
+model SchemeSubmission {
+  id                String                 @id @default(cuid())
+  schemeId          String
+  schemeOutletId    String
+  enrollmentId      String
+  version           Int
+  status            SchemeEnrollmentStatus
+  // Frozen snapshot of the captured values (media/geo live inside per field).
+  formValues        Json
+  formVersion       Int
+  enrollmentMode    String
+  submittedByUserId String?
+  rejectionReason   String?
+  createdAt         DateTime               @default(now())
+
+  scheme       Scheme           @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  schemeOutlet SchemeOutlet     @relation(fields: [schemeOutletId], references: [id], onDelete: Cascade)
+  enrollment   SchemeEnrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  submittedBy  User?            @relation("SchemeSubmissionSubmitter", fields: [submittedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([enrollmentId, version])
+  @@index([schemeId])
+  @@index([schemeOutletId])
+  @@index([enrollmentId])
+  @@map("scheme_submissions")
 }
 
 // Configurable enrollment form (P4.2) — 1:1 with a Scheme. The rich form schema
@@ -2146,12 +2254,59 @@ model SchemeEnrollmentForm {
   schemeId     String   @unique
   campaignType String   @default("LOYALTY_ONLY")
   formSchema   Json
+  // Current form version (D11). Bumped on each post-launch edit; every append-only snapshot
+  // is kept in SchemeEnrollmentFormVersion so old submissions render coherently.
+  version      Int      @default(1)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   scheme Scheme @relation(fields: [schemeId], references: [id], onDelete: Cascade)
 
   @@map("scheme_enrollment_forms")
+}
+
+// Wave-0 scheme data-collection: append-only form snapshots (D11), so a submission captured
+// against an earlier form version still renders coherently after the form is edited.
+// See docs/plans/SCHEME-DATA-COLLECTION-DESIGN.md §11.
+model SchemeEnrollmentFormVersion {
+  id           String   @id @default(cuid())
+  schemeId     String
+  version      Int
+  campaignType String
+  formSchema   Json
+  createdAt    DateTime @default(now())
+
+  scheme Scheme @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+
+  @@unique([schemeId, version])
+  @@index([schemeId])
+  @@map("scheme_enrollment_form_versions")
+}
+
+// Wave-0 scheme data-collection: notification broadcast send-log (D29). The Gifsy admin can
+// trigger MSG91 WhatsApp/SMS sends multiple times during a scheme's life; each send is logged.
+// See docs/plans/SCHEME-DATA-COLLECTION-DESIGN.md §11.
+model SchemeBroadcast {
+  id              String   @id @default(cuid())
+  clientId        String
+  schemeId        String
+  channel         String
+  templateId      String
+  // OUTLETS | SALES | BOTH — who the message targeted.
+  recipientScope  String
+  // Optional filter narrowing the recipient set (type/program/zone/state/…).
+  recipientFilter Json?
+  sentCount       Int
+  failedCount     Int      @default(0)
+  sentByUserId    String?
+  createdAt       DateTime @default(now())
+
+  scheme Scheme @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  sentBy User?  @relation("SchemeBroadcastSender", fields: [sentByUserId], references: [id], onDelete: SetNull)
+
+  @@index([schemeId])
+  @@index([clientId])
+  @@map("scheme_broadcasts")
 }
 
 model LoginLog {

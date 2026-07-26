@@ -12,7 +12,6 @@ import { ChannelPartnersService } from './channel-partners.service';
 import { VisibilityService } from './visibility.service';
 import { BannersService } from './banners.service';
 import { BannerConfigService } from './banner-config.service';
-import { SchemesService } from './schemes.service';
 import { ReportsService } from './reports.service';
 import { KycService } from '../kyc/kyc.service';
 
@@ -202,21 +201,6 @@ describe('BannerConfigService', () => {
   it('blocks partner roles from reading config', async () => {
     const service = await build(BannerConfigService);
     await expect(service.get(partner)).rejects.toBeInstanceOf(ForbiddenException);
-  });
-});
-
-describe('SchemesService', () => {
-  it('throws NotFound when the scheme is outside the tenant', async () => {
-    const service = await build(SchemesService);
-    mockPrisma.scheme.findFirst.mockResolvedValue(null);
-    await expect(service.exportEnrollments(gifsy, 's1')).rejects.toBeInstanceOf(NotFoundException);
-  });
-
-  it('throws NotFound when the scheme has no enrollments', async () => {
-    const service = await build(SchemesService);
-    mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SCH1' });
-    mockPrisma.schemeEnrollment.findMany.mockResolvedValue([]);
-    await expect(service.exportEnrollments(gifsy, 's1')).rejects.toBeInstanceOf(NotFoundException);
   });
 });
 

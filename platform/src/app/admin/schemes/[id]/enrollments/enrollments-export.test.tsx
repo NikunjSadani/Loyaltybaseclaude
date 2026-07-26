@@ -1,139 +1,88 @@
 /**
- * enrollments-export.test.tsx
+ * enrollments.test.tsx
  *
- * Tests for the enrollment dashboard's xlsx export button.
- *
- * Verifies:
- *  1. Clicking "Export Excel" calls GET /api/admin/schemes/:id/enrollments/export
- *     (RAW blob — does NOT JSON-parse the response body).
- *  2. A download anchor is created and clicked on success.
- *  3. An error message is shown when the backend returns non-OK.
+ * Tests for the real per-scheme Enrollments view (D25):
+ *  1. Loads the report + enrollment list on mount; renders live stat tiles
+ *     (no more hardcoded "—").
+ *  2. Clicking "Export Excel" calls schemeApi.downloadExport.
+ *  3. Surfaces an export error when the download fails.
  */
 
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 
-// ─── Mocks ────────────────────────────────────────────────────────────────────
-
 vi.mock('next/link', () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode; [k: string]: unknown }) =>
     React.createElement('a', { href, ...rest }, children),
 }));
 
-// React.use() is used for params — mock it to return { id: 'sch-test' }
+// react `use(params)` → { id: 'sch-test' }
 vi.mock('react', async () => {
   const actual = await vi.importActual<typeof import('react')>('react');
   return {
     ...actual,
     use: (val: unknown) => {
-      // If it looks like a promise (thenable), resolve synchronously to the params value
-      if (val && typeof (val as Promise<unknown>).then === 'function') {
-        return { id: 'sch-test' };
-      }
+      if (val && typeof (val as Promise<unknown>).then === 'function') return { id: 'sch-test' };
       return val;
     },
   };
 });
 
-const mockFetch = vi.fn();
-const mockClick = vi.fn();
-const mockRevokeObjectURL = vi.fn();
+// Mock the canonical scheme client.
+const listEnrollments = vi.fn();
+const getReport = vi.fn();
+const downloadExport = vi.fn();
+vi.mock('@/lib/schemes', () => ({
+  schemeApi: {
+    listEnrollments: (...a: unknown[]) => listEnrollments(...a),
+    getReport: (...a: unknown[]) => getReport(...a),
+    downloadExport: (...a: unknown[]) => downloadExport(...a),
+    getEnrollment: vi.fn(),
+    reject: vi.fn(),
+  },
+  rewriteMediaViewPath: (p: string) => p.replace(/^\/v1\//, '/api/'),
+}));
+
+const REPORT = {
+  scheme: { id: 'sch-test', code: 'C', name: 'Visibility Audit', status: 'ACTIVE' },
+  summary: { rosterCount: 12, enrolledCount: 8, submittedCount: 7, rejectedCount: 1, notEnrolledCount: 4, coveragePct: 67 },
+};
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', mockFetch);
-  vi.stubGlobal('localStorage', {
-    getItem: vi.fn(() => 'test-token'),
-    setItem: vi.fn(),
-  });
-
-  // Stub URL.createObjectURL and revokeObjectURL
-  vi.stubGlobal('URL', {
-    createObjectURL: vi.fn(() => 'blob:mock-url'),
-    revokeObjectURL: mockRevokeObjectURL,
-  });
-
-  // Stub document.createElement to intercept anchor click
-  const origCreate = document.createElement.bind(document);
-  vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
-    const el = origCreate(tag);
-    if (tag === 'a') {
-      // Override click so we can track it without navigating
-      Object.defineProperty(el, 'click', { value: mockClick, configurable: true });
-    }
-    return el;
-  });
+  listEnrollments.mockResolvedValue({ success: true, data: { enrollments: [], pagination: { page: 1, limit: 25, total: 0, pages: 0 } } });
+  getReport.mockResolvedValue({ success: true, data: REPORT });
+  downloadExport.mockResolvedValue({ success: true });
 });
-
-afterEach(() => {
-  vi.restoreAllMocks();
-});
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+afterEach(() => { vi.clearAllMocks(); });
 
 async function renderPage() {
-  const { default: EnrollmentDashboardPage } = await import('./page');
-  const fakeParams = Promise.resolve({ id: 'sch-test' }) as Promise<{ id: string }>;
-  return render(<EnrollmentDashboardPage params={fakeParams} />);
+  const { default: EnrollmentsPage } = await import('./page');
+  return render(<EnrollmentsPage params={Promise.resolve({ id: 'sch-test' }) as Promise<{ id: string }>} />);
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
-describe('Enrollment Dashboard — Export Excel', () => {
-  it('GETs /api/admin/schemes/:id/enrollments/export and triggers blob download on success', async () => {
-    const fakeBlob = new Blob(['xlsx-bytes'], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      blob: async () => fakeBlob,
-    } as unknown as Response);
-
+describe('Enrollments view', () => {
+  it('renders live report stat tiles + empty list state', async () => {
     await act(async () => { await renderPage(); });
-
-    const exportBtn = screen.getByRole('button', { name: /export excel/i });
-    await act(async () => { fireEvent.click(exportBtn); });
-
     await waitFor(() => {
-      // AF-6: auth rides the httpOnly cookie (same-origin fetch sends it); no Authorization header.
-      expect(mockFetch).toHaveBeenCalledWith(
-        '/api/admin/schemes/sch-test/enrollments/export',
-        expect.any(Object),
-      );
+      expect(screen.getByText('Visibility Audit', { exact: false })).toBeInTheDocument();
+      expect(screen.getByText('67%')).toBeInTheDocument();
+      expect(screen.getByText(/no enrollments/i)).toBeInTheDocument();
     });
-
-    // Anchor click should have been invoked (download triggered)
-    await waitFor(() => expect(mockClick).toHaveBeenCalled());
-
-    // URL.revokeObjectURL should be called to clean up
-    await waitFor(() => expect(mockRevokeObjectURL).toHaveBeenCalledWith('blob:mock-url'));
   });
 
-  it('page source no longer references MOCK enrollment constants (#57 mock-data removal)', async () => {
-    const fs = await import('node:fs/promises');
-    const path = await import('node:path');
-    const src = await fs.readFile(path.resolve(__dirname, 'page.tsx'), 'utf8');
-    expect(src).not.toMatch(/MOCK_ENROLLMENTS/);
-    expect(src).not.toMatch(/MOCK_CAMPAIGN_OUTLETS/);
-    expect(src).not.toMatch(/DEMO_FORM_FIELDS/);
+  it('calls schemeApi.downloadExport when Export Excel is clicked', async () => {
+    await act(async () => { await renderPage(); });
+    const btn = screen.getByRole('button', { name: /export excel/i });
+    await act(async () => { fireEvent.click(btn); });
+    await waitFor(() => expect(downloadExport).toHaveBeenCalledWith('sch-test'));
   });
 
-  it('shows an error message when the backend returns non-OK', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      statusText: 'Forbidden',
-      json: async () => ({ error: 'Insufficient permissions' }),
-    } as unknown as Response);
-
+  it('shows an error when the export fails', async () => {
+    downloadExport.mockResolvedValueOnce({ success: false, error: 'Insufficient permissions' });
     await act(async () => { await renderPage(); });
-
-    const exportBtn = screen.getByRole('button', { name: /export excel/i });
-    await act(async () => { fireEvent.click(exportBtn); });
-
-    await waitFor(() => {
-      expect(screen.getByText(/export failed/i)).toBeInTheDocument();
-    });
-
-    // No download should have been triggered
-    expect(mockClick).not.toHaveBeenCalled();
+    const btn = screen.getByRole('button', { name: /export excel/i });
+    await act(async () => { fireEvent.click(btn); });
+    await waitFor(() => expect(screen.getByText(/insufficient permissions/i)).toBeInTheDocument());
   });
 });

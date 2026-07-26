@@ -1,12 +1,12 @@
-﻿'use client';
+'use client';
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import {
   FileCheck, XCircle, ChevronRight, Clock, Bell, Tag,
-  RefreshCw, Layers,
+  RefreshCw,
   CheckCircle2, ArrowLeft, ListTodo,
-  UserCheck, X, MessageSquare, ChevronLeft, Loader2,
+  UserCheck, Loader2,
 } from 'lucide-react';
 import { KYCStatus } from '@/types';
 import { fetchTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig } from '@/lib/task-config';
@@ -16,12 +16,13 @@ import {
   type VisibilityStatusMap,
 } from '@/lib/visibility-upload';
 import { getRole, canEnroll, type SalesRole } from '@/lib/sales-role';
+import { schemeApi } from '@/lib/schemes';
+import type { EligibleScheme } from '@/lib/scheme-types';
 import {
-  fetchAllSchemes,
-  saveSalesEnrollment,
-  formatDeadline,
-  type Scheme,
-} from '@/lib/schemes';
+  SchemeEnrollSheet,
+  type SchemeEnrolledMap,
+  type SchemeEnrolledStatus,
+} from './SchemeEnrollSheet';
 import { authHeader } from '@/lib/api-client';
 import { buildKycSubRows, buildVisibilityTaskItems, type KycSubRow } from '@/lib/sales-tasks';
 import { getGifsySettings } from '@/lib/gifsy-settings';
@@ -82,13 +83,19 @@ function ageInDays(dateStr?: string): number {
   return Math.floor((Date.now() - new Date(dateStr).getTime()) / 86_400_000);
 }
 
-function maskMobile(mobile: string): string {
-  return `+91 ${mobile.slice(0, 2)}·····${mobile.slice(-3)}`;
+const SCHEME_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** "Jun '26 – Aug '26" scheme window label (replaces the reward-era deadline shim). */
+function formatSchemeWindow(startIso: string, endIso: string): string {
+  const fmt = (iso: string) => {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    return `${SCHEME_MONTHS[d.getUTCMonth()]} '${String(d.getUTCFullYear()).slice(2)}`;
+  };
+  const s = fmt(startIso);
+  const e = fmt(endIso);
+  if (!s && !e) return '';
+  return s === e ? s : `${s} – ${e}`;
 }
-
-const OUTLET_TYPE_LABEL: Record<OutletType, string> = {
-  SSS: 'SSS', WHOLESALER: 'Wholesaler', SUB_STOCKIST: 'Sub-Stockist',
-};
 
 /* ─── Priority dot ───────────────────────────────────────────────────────────── */
 
@@ -178,340 +185,20 @@ function TaskGroupRow({ group }: { group: TaskGroup }) {
   );
 }
 
-/* ─── Scheme Enrollment Sheet ────────────────────────────────────────────────── */
+/* ─── Scheme Enrollment Task Group (real sales-assisted enrollment, D28) ──────── */
 
-type EnrollView = 'list' | 'otp' | 'success';
-
-function SchemeEnrollmentSheet({
-  scheme,
-  outlets,
-  onClose,
+function SchemeEnrollmentGroup({
+  schemes,
+  enrolled,
+  onEnrolled,
 }: {
-  scheme: Scheme;
-  outlets: OutletRow[];
-  onClose: () => void;
+  schemes: EligibleScheme[];
+  /** schemeId → (targetKey → status) — fresh-enroll read-back for the badge count. */
+  enrolled: Record<string, SchemeEnrolledMap>;
+  onEnrolled: (schemeId: string, targetKey: string, status: SchemeEnrolledStatus) => void;
 }) {
-  const [view, setView]                   = useState<EnrollView>('list');
-  const [selectedOutlet, setSelectedOutlet] = useState<OutletRow | null>(null);
-  const [otp, setOtp]                     = useState(['', '', '', '', '', '']);
-  const [otpError, setOtpError]           = useState(false);
-  const [verifying, setVerifying]         = useState(false);
-  const [enrollError, setEnrollError]     = useState<string | null>(null);
-
-  /* Track which outlet IDs got enrolled this session.
-     Seeded empty — no localStorage fallback; the backend is the source of truth.
-     After a successful saveSalesEnrollment call the outletId is pushed here so
-     the sheet renders the "Enrolled" badge without a page reload. */
-  const [enrolledIds, setEnrolledIds] = useState<string[]>([]);
-
-  const isEnrolled = (outletId: string) => enrolledIds.includes(outletId);
-
-  /* Outlets eligible for this scheme — enrolled ones pushed to bottom */
-  const eligibleOutlets = outlets
-    .filter((o) => scheme.eligibility.includes('ALL') || scheme.eligibility.includes(o.type as any))
-    .sort((a, b) => Number(isEnrolled(a.id)) - Number(isEnrolled(b.id)));
-
-  /* OTP input refs */
-  const r0 = useRef<HTMLInputElement>(null);
-  const r1 = useRef<HTMLInputElement>(null);
-  const r2 = useRef<HTMLInputElement>(null);
-  const r3 = useRef<HTMLInputElement>(null);
-  const r4 = useRef<HTMLInputElement>(null);
-  const r5 = useRef<HTMLInputElement>(null);
-  const inputRefs = [r0, r1, r2, r3, r4, r5];
-
-  const handleOtpChange = (idx: number, value: string) => {
-    if (!/^\d*$/.test(value)) return;
-    const next = [...otp];
-    next[idx] = value.slice(-1);
-    setOtp(next);
-    setOtpError(false);
-    if (value && idx < 5) inputRefs[idx + 1].current?.focus();
-  };
-
-  const handleOtpKeyDown = (idx: number, e: React.KeyboardEvent) => {
-    if (e.key === 'Backspace' && !otp[idx] && idx > 0) {
-      inputRefs[idx - 1].current?.focus();
-    }
-  };
-
-  const handleVerifyOtp = async () => {
-    const code = otp.join('');
-    if (code.length < 6) { setOtpError(true); return; }
-    setEnrollError(null);
-    setVerifying(true);
-    /* OTP is verified out-of-band (sent to the outlet owner's mobile).
-       On confirmation, enroll the outlet via the backend SALES route.
-       targetPartnerId is the ChannelPartner.id from the outlet row. */
-    try {
-      await saveSalesEnrollment(scheme.id, selectedOutlet!.partnerId);
-      setEnrolledIds((prev) => [...prev, selectedOutlet!.id]);
-      setView('success');
-    } catch (err) {
-      setEnrollError(err instanceof Error ? err.message : 'Enrollment failed. Please try again.');
-    } finally {
-      setVerifying(false);
-    }
-  };
-
-  const handleDone = () => {
-    setView('list');
-    setSelectedOutlet(null);
-    setOtp(['', '', '', '', '', '']);
-    setOtpError(false);
-  };
-
-  /* Focus first OTP box when view transitions */
-  useEffect(() => {
-    if (view === 'otp') {
-      setTimeout(() => r0.current?.focus(), 120);
-    }
-  }, [view]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end">
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-
-      {/* Sheet */}
-      <div className="relative bg-white rounded-t-3xl max-h-[90dvh] flex flex-col overflow-hidden shadow-2xl">
-
-        {/* ── VIEW: Outlet list ────────────────────────────────────────────── */}
-        {view === 'list' && (
-          <>
-            {/* Header */}
-            <div className="px-5 pt-5 pb-4 border-b border-gray-100 shrink-0">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex-1 min-w-0">
-                  <p className="text-[10px] font-semibold text-emerald-600 uppercase tracking-widest mb-0.5">Activation Enrollment</p>
-                  <h2 className="text-base font-bold text-gray-900 leading-snug">{scheme.name}</h2>
-                  <p className="text-[12px] text-gray-400 mt-0.5">{scheme.period} · Accept by {formatDeadline(scheme.acceptDeadline)}</p>
-                </div>
-                <button onClick={onClose} className="p-2 -mr-1 rounded-xl hover:bg-gray-100 text-gray-400 transition-colors shrink-0">
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
-              {/* Eligible types */}
-              <div className="flex flex-wrap gap-1.5 mt-3">
-                {scheme.eligibility.map((e) => (
-                  <span key={e} className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">
-                    {e === 'ALL' ? 'All outlets' : OUTLET_TYPE_LABEL[e as OutletType] ?? e}
-                  </span>
-                ))}
-              </div>
-            </div>
-
-            {/* Outlet list */}
-            <div className="overflow-y-auto flex-1">
-              {eligibleOutlets.length === 0 ? (
-                <div className="flex flex-col items-center gap-2 py-12 text-gray-400">
-                  <UserCheck className="h-8 w-8" />
-                  <p className="text-sm">No eligible outlets on your beat</p>
-                </div>
-              ) : (
-                <div className="divide-y divide-gray-50">
-                  {eligibleOutlets.map((outlet) => {
-                    const enrolled = isEnrolled(outlet.id);
-                    return (
-                      <div key={outlet.id} className="flex items-center gap-3 px-5 py-4">
-                        {/* Outlet info */}
-                        <div className="flex-1 min-w-0">
-                          <p className="text-[13px] font-semibold text-gray-800 truncate">{outlet.name}</p>
-                          <p className="text-[11px] text-gray-400 mt-0.5">
-                            {outlet.location} · {OUTLET_TYPE_LABEL[outlet.type]}
-                          </p>
-                          <p className="text-[11px] text-gray-400">{maskMobile(outlet.mobile)}</p>
-                        </div>
-                        {/* Action */}
-                        {enrolled ? (
-                          <span className="shrink-0 flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1.5 rounded-full bg-emerald-50 text-emerald-700">
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                            Enrolled
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => { setSelectedOutlet(outlet); setOtp(['','','','','','']); setOtpError(false); setView('otp'); }}
-                            className="shrink-0 text-[12px] font-semibold px-3.5 py-1.5 rounded-xl bg-emerald-600 text-white active:bg-emerald-700 transition-colors"
-                          >
-                            Enroll
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </>
-        )}
-
-        {/* ── VIEW: OTP verification ───────────────────────────────────────── */}
-        {view === 'otp' && selectedOutlet && (
-          <div className="flex flex-col flex-1 overflow-hidden">
-            {/* Header */}
-            <div className="px-5 pt-5 pb-4 border-b border-gray-100 shrink-0">
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => { setView('list'); setOtp(['','','','','','']); setOtpError(false); }}
-                  className="p-2 -ml-1 rounded-xl hover:bg-gray-100 text-gray-500 transition-colors"
-                >
-                  <ChevronLeft className="h-5 w-5" />
-                </button>
-                <div className="flex-1">
-                  <p className="text-[10px] font-semibold text-emerald-600 uppercase tracking-widest">OTP Verification</p>
-                  <h2 className="text-base font-bold text-gray-900">{selectedOutlet.name}</h2>
-                </div>
-                <button onClick={onClose} className="p-2 -mr-1 rounded-xl hover:bg-gray-100 text-gray-400 transition-colors">
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Body */}
-            <div className="flex-1 overflow-y-auto px-5 pt-6 pb-8">
-              {/* OTP sent notice */}
-              <div className="flex items-start gap-3 p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 mb-7">
-                <MessageSquare className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-[12px] font-semibold text-emerald-800">OTP sent to outlet owner</p>
-                  <p className="text-[12px] text-emerald-700 mt-0.5">{maskMobile(selectedOutlet.mobile)}</p>
-                </div>
-              </div>
-
-              {/* OTP boxes */}
-              <p className="text-[13px] font-semibold text-gray-700 mb-3 text-center">Enter 6-digit OTP</p>
-              <div className="flex justify-center gap-3 mb-2">
-                {otp.map((digit, idx) => (
-                  <input
-                    key={idx}
-                    ref={inputRefs[idx]}
-                    type="tel"
-                    inputMode="numeric"
-                    maxLength={1}
-                    value={digit}
-                    onChange={(e) => handleOtpChange(idx, e.target.value)}
-                    onKeyDown={(e) => handleOtpKeyDown(idx, e)}
-                    className={`w-14 h-14 text-center text-2xl font-bold rounded-2xl border-2 outline-none transition-colors
-                      ${otpError
-                        ? 'border-red-400 bg-red-50 text-red-600'
-                        : digit
-                          ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
-                          : 'border-gray-200 bg-gray-50 text-gray-800'
-                      } focus:border-emerald-500 focus:bg-white`}
-                  />
-                ))}
-              </div>
-
-              {otpError && (
-                <p className="text-center text-[12px] text-red-500 font-medium mt-1">
-                  Incorrect OTP. Please try again.
-                </p>
-              )}
-
-              {enrollError && (
-                <p className="text-center text-[12px] text-red-500 font-medium mt-1">
-                  {enrollError}
-                </p>
-              )}
-
-              {/* Verify button */}
-              <button
-                onClick={handleVerifyOtp}
-                disabled={otp.join('').length < 6 || verifying}
-                className="w-full mt-7 py-3.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold
-                  disabled:opacity-40 active:bg-emerald-700 transition-colors
-                  flex items-center justify-center gap-2"
-              >
-                {verifying && (
-                  <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                )}
-                {verifying ? 'Enrolling…' : 'Verify & Enroll'}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ── VIEW: Success + WhatsApp mock ────────────────────────────────── */}
-        {view === 'success' && selectedOutlet && (
-          <div className="flex flex-col flex-1 overflow-hidden">
-            <div className="flex-1 overflow-y-auto px-5 pt-8 pb-8">
-              {/* Success icon */}
-              <div className="flex flex-col items-center gap-3 mb-7">
-                <div className="w-16 h-16 rounded-full bg-emerald-100 flex items-center justify-center">
-                  <CheckCircle2 className="h-9 w-9 text-emerald-600" />
-                </div>
-                <div className="text-center">
-                  <h2 className="text-lg font-bold text-gray-900">Enrolled Successfully!</h2>
-                  <p className="text-[13px] text-gray-500 mt-1">
-                    <span className="font-semibold text-gray-700">{selectedOutlet.name}</span> is now registered
-                    in {scheme.name}.
-                  </p>
-                </div>
-              </div>
-
-              {/* WhatsApp confirmation mock */}
-              <div className="rounded-2xl border border-gray-100 overflow-hidden shadow-sm">
-                {/* WhatsApp header bar */}
-                <div className="flex items-center gap-2.5 px-4 py-3 bg-[#075e54]">
-                  <div className="w-7 h-7 rounded-full bg-white/20 flex items-center justify-center">
-                    <MessageSquare className="h-3.5 w-3.5 text-white" />
-                  </div>
-                  <div>
-                    <p className="text-white text-[12px] font-semibold leading-none">Deoleo Loyalty</p>
-                    <p className="text-white/60 text-[10px] mt-0.5">Official notification</p>
-                  </div>
-                </div>
-
-                {/* Chat area */}
-                <div className="bg-[#ece5dd] px-4 py-4">
-                  {/* Received bubble (outlet owner) */}
-                  <div className="flex justify-start mb-2">
-                    <div className="bg-white rounded-2xl rounded-tl-sm px-4 py-3 shadow-sm max-w-[90%]">
-                      <p className="text-[12px] text-gray-800 leading-relaxed">
-                        ✅ Dear <strong>{selectedOutlet.name}</strong>,<br /><br />
-                        You have been successfully enrolled in the{' '}
-                        <strong>{scheme.name}</strong> scheme ({scheme.period}).<br /><br />
-                        Track your progress and rewards on the Deoleo Loyalty portal.
-                        <br /><br />
-                        — Deoleo India Trade Team
-                      </p>
-                      <div className="flex items-center justify-end gap-1 mt-1.5">
-                        <p className="text-[10px] text-gray-400">
-                          {new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}
-                        </p>
-                        <span className="text-[10px] text-[#53bdeb] font-bold">✓✓</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <p className="text-[11px] text-gray-400 text-center mt-3">
-                Confirmation sent to {maskMobile(selectedOutlet.mobile)}
-              </p>
-            </div>
-
-            {/* Done button */}
-            <div className="px-5 pb-6 pt-2 shrink-0 border-t border-gray-100">
-              <button
-                onClick={handleDone}
-                className="w-full py-3.5 rounded-2xl bg-emerald-600 text-white text-sm font-bold active:bg-emerald-700 transition-colors"
-              >
-                Done
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ─── Scheme Enrollment Task Group ───────────────────────────────────────────── */
-
-function SchemeEnrollmentGroup({ schemes, outlets }: { schemes: Scheme[]; outlets: OutletRow[] }) {
-  const [open, setOpen]               = useState(false);
-  const [activeScheme, setActiveScheme] = useState<Scheme | null>(null);
+  const [open, setOpen]         = useState(false);
+  const [active, setActive]     = useState<EligibleScheme | null>(null);
 
   return (
     <>
@@ -523,7 +210,7 @@ function SchemeEnrollmentGroup({ schemes, outlets }: { schemes: Scheme[]; outlet
           <div className="p-2 rounded-xl bg-emerald-50 shrink-0">
             <Tag className="h-4 w-4 text-emerald-600" />
           </div>
-          <p className="text-sm font-semibold text-gray-800 flex-1 text-left leading-snug">Activation Enrollment</p>
+          <p className="text-sm font-semibold text-gray-800 flex-1 text-left leading-snug">Scheme Enrollment</p>
           <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 shrink-0">
             {schemes.length}
           </span>
@@ -532,37 +219,43 @@ function SchemeEnrollmentGroup({ schemes, outlets }: { schemes: Scheme[]; outlet
 
         {open && (
           <div className="mx-4 mb-4 rounded-xl border border-emerald-200 overflow-hidden">
-            {schemes.map((scheme, i) => (
-              <div
-                key={scheme.id}
-                className={`px-4 py-3 bg-white ${i < schemes.length - 1 ? 'border-b border-gray-100' : ''}`}
-              >
-                <div className="flex items-center gap-3">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[13px] font-semibold text-gray-800 leading-snug truncate">{scheme.name}</p>
-                    <p className="text-[11px] text-gray-400 mt-0.5">
-                      {scheme.period} · Accept by {formatDeadline(scheme.acceptDeadline)}
-                    </p>
+            {schemes.map((scheme, i) => {
+              const map = enrolled[scheme.id] ?? {};
+              const enrolledCount = Object.values(map).filter((s) => s === 'SUBMITTED').length;
+              return (
+                <div
+                  key={scheme.id}
+                  className={`px-4 py-3 bg-white ${i < schemes.length - 1 ? 'border-b border-gray-100' : ''}`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[13px] font-semibold text-gray-800 leading-snug truncate">{scheme.name}</p>
+                      <p className="text-[11px] text-gray-400 mt-0.5">
+                        {formatSchemeWindow(scheme.startDate, scheme.endDate)}
+                        {enrolledCount > 0 ? ` · ${enrolledCount} enrolled` : ''}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setActive(scheme)}
+                      className="shrink-0 flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-xl bg-emerald-600 text-white active:bg-emerald-700 transition-colors"
+                    >
+                      <UserCheck className="h-3.5 w-3.5" />
+                      Enroll
+                    </button>
                   </div>
-                  <button
-                    onClick={() => setActiveScheme(scheme)}
-                    className="shrink-0 flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-xl bg-emerald-600 text-white active:bg-emerald-700 transition-colors"
-                  >
-                    <UserCheck className="h-3.5 w-3.5" />
-                    Enroll
-                  </button>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
 
-      {activeScheme && (
-        <SchemeEnrollmentSheet
-          scheme={activeScheme}
-          outlets={outlets}
-          onClose={() => setActiveScheme(null)}
+      {active && (
+        <SchemeEnrollSheet
+          scheme={active}
+          enrolled={enrolled[active.id] ?? {}}
+          onEnrolled={(key, status) => onEnrolled(active.id, key, status)}
+          onClose={() => setActive(null)}
         />
       )}
     </>
@@ -576,9 +269,18 @@ export default function TasksPage() {
   const [kycSubs,         setKycSubs]          = useState<KycSubRow[]>([]);
   const [taskConfig,      setTaskConfig]       = useState<TaskConfig | null>(null);
   const [role,            setRoleState]        = useState<SalesRole>('SO');
-  const [pendingSchemes,  setPendingSchemes]   = useState<Scheme[]>([]);
+  const [schemes,         setSchemes]          = useState<EligibleScheme[]>([]);
+  const [schemeEnrolled,  setSchemeEnrolled]   = useState<Record<string, SchemeEnrolledMap>>({});
   const [visibilityItems, setVisibilityItems]  = useState<TaskItem[]>([]);
   const [loading,         setLoading]          = useState(true);
+
+  /* Record a real backend enrollment so the badge count updates without a reload. */
+  const handleSchemeEnrolled = (schemeId: string, targetKey: string, status: SchemeEnrolledStatus) => {
+    setSchemeEnrolled((prev) => ({
+      ...prev,
+      [schemeId]: { ...(prev[schemeId] ?? {}), [targetKey]: status },
+    }));
+  };
 
   useEffect(() => {
     setRoleState(getRole());
@@ -586,10 +288,12 @@ export default function TasksPage() {
     const headers = authHeader();
     const currentMonth = new Date().toISOString().slice(0, 7);
 
-    // Fetch schemes, outlets, and task config in parallel.
-    // fetchAllSchemes() uses the api client (authHeader() internally) — no raw token read.
+    // Fetch eligible schemes (real, roster-based §13.4), outlets, and task config in
+    // parallel. schemeApi.listSalesEligible() uses the api client (cookie auth) — no token read.
     Promise.all([
-      fetchAllSchemes().then((s) => { setPendingSchemes(s); return s; }).catch(() => { setPendingSchemes([]); return []; }),
+      schemeApi.listSalesEligible()
+        .then((r) => { const list = r.success ? (r.data.schemes ?? []) : []; setSchemes(list); return list; })
+        .catch(() => { setSchemes([]); return []; }),
       fetch('/api/sales/outlets', { headers }).then((r) => r.json()),
       fetchTaskConfig(),
       // Approval/Rejected counts derive from SUBMISSIONS (shared buildKycSubRows)
@@ -615,8 +319,10 @@ export default function TasksPage() {
   useEffect(() => {
     const onStorage = () => {
       setRoleState(getRole());
-      // Re-fetch real schemes on storage events (e.g. role switch in another tab).
-      fetchAllSchemes().then(setPendingSchemes).catch(() => {});
+      // Re-fetch real eligible schemes on storage events (e.g. role switch in another tab).
+      schemeApi.listSalesEligible()
+        .then((r) => setSchemes(r.success ? (r.data.schemes ?? []) : []))
+        .catch(() => {});
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
@@ -798,7 +504,7 @@ export default function TasksPage() {
   }, [outlets, kycSubs, taskConfig, role, visibilityItems]);
 
   const isFieldRole  = canEnroll(role);
-  const schemeCount  = pendingSchemes.length;
+  const schemeCount  = schemes.length;
   const totalTasks   = taskGroups.reduce((s, g) => s + g.items.length, 0) + (isFieldRole ? schemeCount : 0);
 
   return (
@@ -839,7 +545,11 @@ export default function TasksPage() {
           ))}
           {/* Dynamic scheme enrollment — field roles only */}
           {isFieldRole && schemeCount > 0 && (
-            <SchemeEnrollmentGroup schemes={pendingSchemes} outlets={outlets} />
+            <SchemeEnrollmentGroup
+              schemes={schemes}
+              enrolled={schemeEnrolled}
+              onEnrolled={handleSchemeEnrolled}
+            />
           )}
         </div>
       )}

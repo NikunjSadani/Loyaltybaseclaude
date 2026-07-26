@@ -1,536 +1,508 @@
-import type { EnrollmentFormConfig, FormField } from '@/lib/campaign';
-import { api } from '@/lib/api-client';
+/**
+ * lib/schemes.ts — CANONICAL typed client for the Scheme Data-Collection feature.
+ *
+ * Covers the entire §13.4 API surface (admin authoring + enrollee capture + reports
+ * + notifications). Every method returns the shared `ApiResponse<T>` from api-client
+ * (`{ success, data }`), typed against the backend response shapes mirrored in
+ * `lib/scheme-types.ts`. The browser calls same-origin `/api/schemes/*`, which the
+ * Next rewrite forwards to the backend's `/v1/schemes/*` (see next.config.ts).
+ *
+ * AUTH / ACTIVE PARTNER: the edge proxy injects the Bearer (from the httpOnly `token`
+ * cookie) and the `x-active-partner-id` header (from the httpOnly `active_partner_id`
+ * cookie) on every `/api/*` request, and STRIPS any client-supplied value first. The
+ * FE therefore CANNOT and MUST NOT set those headers — the active partner is chosen
+ * via the picker (setActivePartner in lib/active-partner-actions.ts). `context.
+ * activePartnerId` in the renderer is informational only.
+ *
+ * The reward-era demo/mock/localStorage exports (DEMO_SEED_SCHEMES, seedAdminSchemes,
+ * getPendingSchemes, …) and the transitional `@deprecated LEGACY-COMPAT` shims
+ * (fetchAllSchemes, saveSalesEnrollment, formatDeadline, hasEnrollmentForm, …) are
+ * RETIRED — every partner/sales/admin page now codes against `schemeApi` directly.
+ */
 
-/* ─── Scheme types ───────────────────────────────────────────────────────────── */
+import { api, type ApiResponse } from '@/lib/api-client';
+import type {
+  AudienceConfig,
+  AudienceFilter,
+  AudienceMode,
+  CampaignType,
+  EligibleScheme,
+  EnrollmentFormSchema,
+  EnrollmentMediaRef,
+  EnrollmentGeoRef,
+  EnrollmentMode,
+  EnrollResult,
+  PartnerEligibleScheme,
+  SalesTarget,
+  SalesTargetStatus,
+  SchemeEnrollment,
+  SchemeRecord,
+  SchemeStatus,
+  SchemeSubmission,
+} from '@/lib/scheme-types';
 
-export type SchemeStatus   = 'PENDING_ACCEPTANCE' | 'ACTIVE' | 'ENROLLED' | 'EXPIRED';
-export type SchemeEligibility = 'WHOLESALER' | 'SSS' | 'SUB_STOCKIST' | 'ALL';
+const BASE = '/api/schemes';
 
-export interface SchemeKpiLabel {
-  label: string;   // e.g. "Monthly Volume", "Focus Product 1"
-  unit:  string;   // e.g. "cases", "SKUs"
-}
-
-export interface Scheme {
-  id:          string;
-  name:        string;
-  description: string;
-  period:      string;          // e.g. "Jun '26 – Aug '26"
-  startDate:   string;          // ISO
-  endDate:     string;          // ISO
-  eligibility: SchemeEligibility[];
-  kpis:        SchemeKpiLabel[];
-  status:      SchemeStatus;
-  createdAt:   string;
-  acceptDeadline: string;       // ISO — last date to self-register
-}
-
-/* ─── Admin-published scheme (written by SchemeBuilder on publish) ────────── */
-
-export interface AdminPublishedScheme {
-  id:                       string;
-  name:                     string;
-  description:              string;
-  period:                   string;
-  startDate:                string;
-  endDate:                  string;
-  acceptDeadline:           string;
-  outletTargeting:          'ALL' | 'SPECIFIC';
-  targetedOutletIds:        string[];
-  requiresSelfRegistration: boolean;
-  publishedAt:              string;
-  // Enriched display fields (set by scheme builder on publish / seed data)
-  status:                   'ACTIVE' | 'DRAFT' | 'UPCOMING' | 'ARCHIVED' | 'EXPIRED';
-  incentiveType?:           string;
-  calculationMethod?:       string;
-  applicableClasses?:       string[];
-  partnersEnrolled?:        number;
-  totalPayout?:             string;
-  createdBy?:               string;
-  // Partner-facing fields
-  eligibility?:             SchemeEligibility[];
-  kpis?:                    SchemeKpiLabel[];
-  /** Enrollment form configured by admin in SchemeBuilder */
-  enrollmentFormConfig?:    EnrollmentFormConfig;
-}
-
-/* ─── Backend API response shapes ────────────────────────────────────────── */
+/* ─── Multipart helper (FormData — cannot use api.post which forces JSON) ────── */
 
 /**
- * Shape returned by GET /api/schemes (proxied from GET /v1/schemes).
- * The backend always returns ACTIVE schemes; includes eligibility relation.
+ * POST a multipart/form-data body. We must NOT set Content-Type manually — the
+ * browser adds the multipart boundary. Same-origin fetch carries the auth cookie,
+ * and the proxy injects the Bearer, so no auth header is needed here. Returns the
+ * same `{ success, data }` envelope shape as api-client.
  */
-interface BackendScheme {
-  id:             string;
-  clientId:       string;
-  code:           string;
-  name:           string;
-  description?:   string;
-  schemeType:     string;
-  status:         string;
-  startDate:      string;
-  endDate:        string;
-  holdingPeriodDays: number;
-  rewardType:     string;
-  budgetPaise?:   number;
-  termsAndConditions?: string;
-  isStackable:    boolean;
-  priority:       number;
-  imageUrl?:      string;
-  metadata?:      Record<string, unknown>;
-  createdByUserId?: string;
-  createdAt:      string;
-  updatedAt:      string;
-  deletedAt?:     string | null;
-  /** Included via the `include: { eligibility: true }` in service.list() */
-  eligibility:    Array<{
-    id:                string;
-    schemeId:          string;
-    specificPartnerId?: string | null;
-    stateCode?:        string | null;
-    cityCode?:         string | null;
-    pincodePattern?:   string | null;
-    isExclusion:       boolean;
-    createdAt:         string;
-    updatedAt:         string;
+async function postMultipart<T>(url: string, form: FormData): Promise<ApiResponse<T>> {
+  try {
+    const res = await fetch(url, { method: 'POST', body: form });
+    const body = await res.json();
+    if (!res.ok) return { success: false, error: body?.error ?? res.statusText };
+    return body as ApiResponse<T>;
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : 'Network error' };
+  }
+}
+
+/* ─── Request payload shapes (§13.4) ─────────────────────────────────────────── */
+
+export interface CreateSchemeInput {
+  code: string;
+  name: string;
+  description?: string;
+  startDate: string; // ISO
+  endDate: string; // ISO
+  imageUrl?: string;
+  metadata?: Record<string, unknown>;
+  /** DRAFT (default) or ACTIVE (D6). */
+  status?: 'DRAFT' | 'ACTIVE';
+}
+
+export interface UpdateSchemeInput {
+  name?: string;
+  description?: string;
+  startDate?: string;
+  endDate?: string;
+  imageUrl?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface UpsertEnrollmentFormInput {
+  campaignType: CampaignType;
+  formSchema: EnrollmentFormSchema;
+}
+
+export interface SetAudienceInput {
+  mode: AudienceMode;
+  /** Applies to matched real outlets only (D21). */
+  selfEnrollAllowed: boolean;
+  /** FILTER only: true → snapshot roster at save; false → live-rule (lazy rows). */
+  frozen: boolean;
+  /** Required in FILTER mode; ignored in EXCEL mode. */
+  filter?: AudienceFilter;
+}
+
+export interface RosterUploadOptions {
+  idColumn?: string;
+  nameColumn?: string;
+  taggedEmployeeColumn?: string;
+}
+
+export type { EnrollResult } from './scheme-types';
+
+export interface AdminListEnrollmentsQuery {
+  status?: 'SUBMITTED' | 'REJECTED';
+  outletTypeId?: string;
+  programName?: string;
+  zone?: string;
+  state?: string;
+  from?: string; // ISO date
+  to?: string; // ISO date
+  page?: number;
+  limit?: number;
+}
+
+/** Query for the rep's reachable-targets list (GET .../sales-targets). */
+export interface SalesTargetsQuery {
+  status?: SalesTargetStatus;
+  page?: number;
+  limit?: number;
+}
+
+export type BroadcastChannel = 'WHATSAPP' | 'SMS';
+export type BroadcastScope = 'OUTLETS' | 'SALES' | 'BOTH';
+
+export interface BroadcastRecipientFilter {
+  zones?: string[];
+  programNames?: string[];
+  programCategories?: string[];
+  outletTypeIds?: string[];
+  states?: string[];
+  taggedSalesUserIds?: string[];
+}
+
+export interface BroadcastInput {
+  channel: BroadcastChannel;
+  templateId: string;
+  recipientScope: BroadcastScope;
+  recipientFilter?: BroadcastRecipientFilter;
+  bodyValues?: string[];
+}
+
+/** Common subject-resolution fields for enroll / OTP (§13.4). */
+export interface SchemeSubject {
+  enrollmentMode?: EnrollmentMode;
+  /** An existing roster row (Excel Mode B / frozen snapshot / prior lazy row). */
+  targetSchemeOutletId?: string;
+  /** A live-rule outlet id to lazily add + enroll (SALES matched outlet). */
+  targetOutletRef?: string;
+}
+
+export interface EnrollInput extends SchemeSubject {
+  formValues?: Record<string, unknown>;
+  /** The typed mobile for an editable PHONE_OTP field (ignored for pinned outlets). */
+  mobile?: string;
+}
+
+export interface ResubmitInput {
+  formValues?: Record<string, unknown>;
+  mobile?: string;
+}
+
+export interface SendOtpInput extends SchemeSubject {
+  mobile?: string;
+}
+
+export interface VerifyOtpInput extends SchemeSubject {
+  mobile?: string;
+  otp: string;
+}
+
+/* ─── Response payload shapes (§13.4) ────────────────────────────────────────── */
+
+export interface Pagination {
+  page: number;
+  limit: number;
+  total: number;
+  pages: number;
+}
+
+export interface RosterRow {
+  id: string;
+  clientId: string;
+  schemeId: string;
+  outletRef: string;
+  outletName: string;
+  matchedOutletId: string | null;
+  matchedPartnerId: string | null;
+  taggedSalesUserId: string | null;
+  prefillValues: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  enrollment?: { id: string; status: string; currentVersion: number } | null;
+}
+
+export interface RosterUploadResult {
+  totalRows: number;
+  upserted: number;
+  matchedCount: number;
+  standaloneCount: number;
+  duplicateRefs: string[];
+  unmatchedEmployeeCodes: string[];
+}
+
+export interface AudienceResult {
+  audienceConfig: AudienceConfig;
+  materializedCount: number;
+}
+
+/** One shaped roster row in the admin captured-data list (§ shapeRosterRow). */
+export interface AdminEnrollmentRow {
+  schemeOutletId: string;
+  outletRef: string;
+  outletName: string;
+  standalone: boolean;
+  matchedOutlet: {
+    id: string;
+    name: string;
+    outletCode: string;
+    outletTypeId: string | null;
+    programName: string | null;
+    programCategory: string | null;
+    zone: string | null;
+    state: string | null;
+    latitude: number | null;
+    longitude: number | null;
+  } | null;
+  matchedPartner: { id: string; businessName: string | null; phone: string | null } | null;
+  taggedSalesUser: { id: string; employeeCode: string } | null;
+  prefillValues: Record<string, unknown> | null;
+  enrollment: SchemeEnrollment | null;
+}
+
+export interface AdminEnrollmentDetail extends SchemeEnrollment {
+  schemeOutlet: AdminEnrollmentRow['matchedOutlet'] & Record<string, unknown>;
+  submissions: SchemeSubmission[];
+  media: EnrollmentMediaRef[];
+  geo: EnrollmentGeoRef[];
+}
+
+export interface OtpSendResult {
+  success: boolean;
+  expiresIn: number;
+  /** true → the field is pinned to the approved outlet owner's number (D16). */
+  locked: boolean;
+  schemeOutletId: string;
+  phoneMasked: string;
+}
+
+export interface MediaUploadResult {
+  key: string;
+  fileUrl: string;
+  mimeType: string;
+  fileSizeBytes: number;
+}
+
+export interface ReportBucket {
+  key: string;
+  rosterCount: number;
+  enrolledCount: number;
+}
+
+export interface SchemeReport {
+  scheme: { id: string; code: string; name: string; status: string };
+  audienceMode: AudienceMode | null;
+  frozen: boolean;
+  coverageDenominator: number;
+  summary: {
+    rosterCount: number;
+    enrolledCount: number;
+    submittedCount: number;
+    rejectedCount: number;
+    notEnrolledCount: number;
+    coveragePct: number;
+  };
+  byStatus: { SUBMITTED: number; REJECTED: number; NOT_ENROLLED: number };
+  byZone: ReportBucket[];
+  byProgram: ReportBucket[];
+  byOutletType: ReportBucket[];
+}
+
+export interface TenantSchemeReport extends SchemeReport {
+  rows: Array<{
+    outletRef: string;
+    outletName: string;
+    matched: boolean;
+    zone: string | null;
+    program: string | null;
+    outletType: string | null;
+    status: string;
   }>;
 }
 
-/* ─── Month abbreviation helper ───────────────────────────────────────────── */
-
-const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-function fmtMonthYear(iso: string): string {
-  const d = new Date(iso);
-  return `${MONTH_ABBR[d.getUTCMonth()]} '${String(d.getUTCFullYear()).slice(2)}`;
+export interface SchemeBroadcastRow {
+  id: string;
+  clientId: string;
+  schemeId: string;
+  channel: string;
+  templateId: string;
+  recipientScope: string;
+  recipientFilter: BroadcastRecipientFilter | null;
+  sentCount: number;
+  failedCount: number;
+  sentByUserId: string | null;
+  createdAt: string;
 }
 
-/** Format start–end as "Jun '26 – Aug '26" (or "Jun '26" when same month). */
-function formatPeriod(startIso: string, endIso: string): string {
-  const s = fmtMonthYear(startIso);
-  const e = fmtMonthYear(endIso);
-  return s === e ? s : `${s} – ${e}`;
+export interface BroadcastResult {
+  broadcast: SchemeBroadcastRow;
+  recipientCount: number;
+  sentCount: number;
+  failedCount: number;
 }
 
-/* ─── Map BackendScheme → Scheme (partner/sales-facing type) ─────────────── */
+/* ─── Media view-path helpers (D30 — auth-gated app route, NOT a signed URL) ─── */
 
-/**
- * Maps a backend Scheme record to the Scheme display type consumed by partner
- * and sales UIs. Fields the backend doesn't provide are omitted rather than
- * fabricated:
- *
- *   - period       → derived from startDate + endDate
- *   - acceptDeadline → mapped from endDate (backend has no separate deadline)
- *   - eligibility  → derived from eligibility relation: if the scheme has any
- *                    non-exclusion eligibility rows whose specificPartnerId is
- *                    null (i.e. geo/open rows, not partner-specific targeting)
- *                    we cannot infer outlet-type eligibility from the schema,
- *                    so we default to ['ALL']. The backend already pre-filters
- *                    the list for non-admin callers via specificPartnerId checks,
- *                    so every scheme returned is already eligible for the caller.
- *   - kpis         → omitted (field absent from backend Scheme model)
- *   - description  → mapped from backend description (may be empty string)
- *   - status       → set to 'PENDING_ACCEPTANCE' (all listed schemes are ACTIVE
- *                    and not yet accepted by this user — enrollment check is
- *                    done separately in fetchPendingSchemes)
- */
-function backendToScheme(s: BackendScheme): Scheme {
-  return {
-    id:             s.id,
-    name:           s.name,
-    description:    s.description ?? '',
-    period:         formatPeriod(s.startDate, s.endDate),
-    startDate:      s.startDate,
-    endDate:        s.endDate,
-    // acceptDeadline: backend has no dedicated field — map to endDate so
-    // formatDeadline() shows the scheme end date as the participation cutoff.
-    acceptDeadline: s.endDate,
-    eligibility:    ['ALL'],   // see note above — backend pre-filters per-partner
-    kpis:           [],        // not modelled on the backend Scheme; omitted
-    status:         'PENDING_ACCEPTANCE',
-    createdAt:      s.createdAt,
-  };
-}
-
-/* ─── fetchSchemes() — real backend catalog read ─────────────────────────── */
-
-/**
- * Fetches ALL active schemes from the backend for the calling user's tenant.
- * For non-admin callers (partners/sales) the backend pre-filters to schemes
- * the caller is eligible for via SchemeEligibility.specificPartnerId rows.
- *
- * Returns the mapped Scheme[] or throws on network/auth error.
- */
-export async function fetchSchemes(): Promise<Scheme[]> {
-  const result = await api.get<{ schemes: BackendScheme[]; pagination: unknown }>(
-    '/api/schemes',
-  );
-  if (!result.success) throw new Error(result.error);
-  const schemes = result.data.schemes ?? [];
-  return schemes.map(backendToScheme);
-}
-
-/* ─── Enrollment API response shape ─────────────────────────────────────────── */
-
-export interface EnrollmentResult {
-  enrollment: {
-    id:        string;
-    schemeId:  string;
-    userId:    string;
-    status:    string;
-    createdAt: string;
-  };
-}
-
-/* ─── Self-enrollment (SELF mode) ───────────────────────────────────────────── */
-
-/**
- * Accept a scheme from the partner app — persists enrollment to the backend.
- *
- * POST /api/schemes/:id/enroll  { enrollmentMode: 'SELF', formValues? }
- * The backend identifies the calling partner from the JWT; outletId is kept as
- * a parameter for the caller's convenience but is NOT sent in the request body
- * (the backend derives the partner from the JWT, not from outletId).
- *
- * formValues is optional — pass {} or omit when there is no enrollment form.
- */
-export async function acceptScheme(
-  schemeId: string,
-  _outletId: string,
-  formValues: Record<string, unknown> = {},
-): Promise<EnrollmentResult> {
-  const result = await api.post<EnrollmentResult>(
-    `/api/schemes/${schemeId}/enroll`,
-    { enrollmentMode: 'SELF', formValues },
-  );
-  if (!result.success) throw new Error(result.error);
-  return result.data;
-}
-
-/* ─── Sales-team enrollment (SALES mode) ─────────────────────────────────── */
-
-/**
- * Enroll an outlet on behalf of a partner (sales-assisted flow).
- *
- * POST /api/schemes/:id/enroll  { enrollmentMode: 'SALES', targetPartnerId, formValues? }
- * targetPartnerId is the ChannelPartner.id of the outlet being enrolled (NOT the
- * outletId). The backend checks the caller has an active assignment to that partner.
- *
- * formValues is optional — pass {} or omit when there is no enrollment form.
- */
-export async function saveSalesEnrollment(
-  schemeId: string,
-  targetPartnerId: string,
-  formValues: Record<string, unknown> = {},
-): Promise<EnrollmentResult> {
-  const result = await api.post<EnrollmentResult>(
-    `/api/schemes/${schemeId}/enroll`,
-    { enrollmentMode: 'SALES', targetPartnerId, formValues },
-  );
-  if (!result.success) throw new Error(result.error);
-  return result.data;
+/** Build the browser-facing auth-gated media view URL for a stored object key. */
+export function mediaViewUrl(schemeId: string, key: string): string {
+  return `${BASE}/${schemeId}/enrollments/media?key=${encodeURIComponent(key)}`;
 }
 
 /**
- * Check whether the calling user is enrolled in a given scheme.
- *
- * GET /api/schemes/:id/my-enrollment — returns 404 if not enrolled.
- * Returns true if enrolled, false if not enrolled. Throws on other errors.
- *
- * Note: for the sales flow this checks the calling SALES user's own enrollment,
- * not the target outlet's. See SchemeEnrollmentSheet for how session-local
- * enrollment state is tracked after a successful saveSalesEnrollment call.
+ * Rewrite a backend-provided `viewPath` (`/v1/schemes/…/media?key=…`) to the
+ * browser-facing `/api/…` origin. Idempotent for already-`/api/` paths.
  */
-export async function isEnrolledInScheme(schemeId: string): Promise<boolean> {
-  const result = await api.get<{ enrollment: unknown }>(
-    `/api/schemes/${schemeId}/my-enrollment`,
-  );
-  if (!result.success) {
-    // The backend returns a non-ok response for 404 (not enrolled).
-    // The api-client captures the HTTP status in the error body's error field.
-    // Accept any non-ok response as "not enrolled" — any real auth error will
-    // be caught because the scheme list fetch itself would have already failed.
-    return false;
+export function rewriteMediaViewPath(viewPath: string): string {
+  return viewPath.replace(/^\/v1\//, '/api/');
+}
+
+/* ─── The canonical client ───────────────────────────────────────────────────── */
+
+export const schemeApi = {
+  // ── Admin authoring (GIFSY_ADMIN) ──────────────────────────────────────────
+  create(input: CreateSchemeInput) {
+    return api.post<{ scheme: SchemeRecord }>(BASE, input);
+  },
+  update(schemeId: string, input: UpdateSchemeInput) {
+    return api.patch<{ scheme: SchemeRecord }>(`${BASE}/${schemeId}`, input);
+  },
+  setStatus(schemeId: string, status: SchemeStatus) {
+    return api.patch<{ scheme: SchemeRecord }>(`${BASE}/${schemeId}/status`, { status });
+  },
+  upsertEnrollmentForm(schemeId: string, input: UpsertEnrollmentFormInput) {
+    return api.put<{ enrollmentForm: unknown; formVersion: unknown }>(
+      `${BASE}/${schemeId}/enrollment-form`,
+      input,
+    );
+  },
+  setAudience(schemeId: string, input: SetAudienceInput) {
+    return api.post<AudienceResult>(`${BASE}/${schemeId}/audience`, input);
+  },
+  /** Mode-B roster Excel upload (multipart `file` + optional column-name overrides). */
+  uploadRoster(schemeId: string, file: File, opts: RosterUploadOptions = {}) {
+    const form = new FormData();
+    form.append('file', file);
+    if (opts.idColumn) form.append('idColumn', opts.idColumn);
+    if (opts.nameColumn) form.append('nameColumn', opts.nameColumn);
+    if (opts.taggedEmployeeColumn) form.append('taggedEmployeeColumn', opts.taggedEmployeeColumn);
+    return postMultipart<RosterUploadResult>(`${BASE}/${schemeId}/roster/upload`, form);
+  },
+  getRoster(schemeId: string, query: { page?: number; limit?: number } = {}) {
+    return api.get<{ roster: RosterRow[]; pagination: Pagination }>(
+      `${BASE}/${schemeId}/roster${qs(query)}`,
+    );
+  },
+  listEnrollments(schemeId: string, query: AdminListEnrollmentsQuery = {}) {
+    return api.get<{ enrollments: AdminEnrollmentRow[]; pagination: Pagination }>(
+      `${BASE}/${schemeId}/enrollments${qs(query as Record<string, unknown>)}`,
+    );
+  },
+  getEnrollment(schemeId: string, enrollmentId: string) {
+    return api.get<{ enrollment: AdminEnrollmentDetail }>(
+      `${BASE}/${schemeId}/enrollments/${enrollmentId}`,
+    );
+  },
+  reject(schemeId: string, enrollmentId: string, reason: string) {
+    return api.post<{ enrollment: SchemeEnrollment }>(
+      `${BASE}/${schemeId}/enrollments/${enrollmentId}/reject`,
+      { reason },
+    );
+  },
+
+  // ── Notifications (GIFSY_ADMIN, D29) ───────────────────────────────────────
+  broadcast(schemeId: string, input: BroadcastInput) {
+    return api.post<BroadcastResult>(`${BASE}/${schemeId}/broadcast`, input);
+  },
+  listBroadcasts(schemeId: string) {
+    return api.get<{ broadcasts: SchemeBroadcastRow[] }>(`${BASE}/${schemeId}/broadcasts`);
+  },
+
+  // ── Reports (GIFSY_ADMIN + tenant read-only, D26/D30) ──────────────────────
+  getReport(schemeId: string) {
+    return api.get<SchemeReport>(`${BASE}/${schemeId}/report`);
+  },
+  getTenantReport(schemeId: string) {
+    return api.get<TenantSchemeReport>(`${BASE}/${schemeId}/report/tenant`);
+  },
+  /** Browser-facing URL of the xlsx export (auth-gated; navigate/anchor to download). */
+  exportUrl(schemeId: string): string {
+    return `${BASE}/${schemeId}/report/export`;
+  },
+  /** Fetch the xlsx export as a blob and trigger a browser download. */
+  async downloadExport(schemeId: string): Promise<{ success: true } | { success: false; error: string }> {
+    try {
+      const res = await fetch(this.exportUrl(schemeId));
+      if (!res.ok) {
+        let error = res.statusText;
+        try {
+          const body = await res.json();
+          error = body?.error ?? error;
+        } catch {
+          /* non-JSON error body */
+        }
+        return { success: false, error };
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') ?? '';
+      const match = /filename="?([^"]+)"?/.exec(disposition);
+      const filename = match?.[1] ?? `scheme_${schemeId}_enrollments.xlsx`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Download failed' };
+    }
+  },
+
+  // ── Enrollee: eligible list + read-back ────────────────────────────────────
+  /**
+   * Eligible ACTIVE schemes for the active partner (x-active-partner-id set server-side).
+   * Each scheme carries `mySchemeOutletId` — the matched fixed-roster row id (self-enroll
+   * target) or null for a live-rule scheme.
+   */
+  listEligible() {
+    return api.get<{ schemes: PartnerEligibleScheme[] }>(`${BASE}/enroll/eligible`);
+  },
+
+  // ── Sales rep: discovery (active in-window schemes + per-scheme reachable targets) ──
+  /** Active, in-window schemes a rep can enroll into (form summary per scheme). */
+  listSalesEligible() {
+    return api.get<{ schemes: EligibleScheme[] }>(`${BASE}/sales/eligible`);
+  },
+  /** The rep's reachable targets for one scheme, each with its current enrollment status. */
+  getSalesTargets(schemeId: string, query: SalesTargetsQuery = {}) {
+    return api.get<{ targets: SalesTarget[]; pagination: Pagination }>(
+      `${BASE}/${schemeId}/sales-targets${qs(query as Record<string, unknown>)}`,
+    );
+  },
+  getMyEnrollment(schemeId: string) {
+    return api.get<{
+      schemeOutlet: { id: string; outletName: string };
+      enrollment: SchemeEnrollment;
+    }>(`${BASE}/${schemeId}/enrollment`);
+  },
+
+  // ── Enrollee: phone-OTP consent sub-flow (D16) ─────────────────────────────
+  sendOtp(schemeId: string, input: SendOtpInput) {
+    return api.post<OtpSendResult>(`${BASE}/${schemeId}/enrollment/otp-send`, input);
+  },
+  verifyOtp(schemeId: string, input: VerifyOtpInput) {
+    return api.post<{ verified: boolean; phone: string }>(
+      `${BASE}/${schemeId}/enrollment/otp-verify`,
+      input,
+    );
+  },
+
+  // ── Enrollee: media upload (multipart → stored object key) ──────────────────
+  uploadMedia(schemeId: string, file: File | Blob, filename?: string) {
+    const form = new FormData();
+    form.append('file', file, filename ?? (file instanceof File ? file.name : 'capture'));
+    return postMultipart<MediaUploadResult>(`${BASE}/${schemeId}/enrollment/media`, form);
+  },
+
+  // ── Enrollee: enroll + resubmit (versioned) ────────────────────────────────
+  enroll(schemeId: string, input: EnrollInput) {
+    return api.post<EnrollResult>(`${BASE}/${schemeId}/enrollment`, input);
+  },
+  resubmit(schemeId: string, enrollmentId: string, input: ResubmitInput) {
+    return api.post<EnrollResult>(
+      `${BASE}/${schemeId}/enrollments/${enrollmentId}/resubmit`,
+      input,
+    );
+  },
+};
+
+/* ─── Query-string builder (drops undefined/empty) ───────────────────────────── */
+
+function qs(params: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === '') continue;
+    parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
   }
-  return true;
-}
-
-/**
- * @deprecated Use isEnrolledInScheme() instead.
- * Retained for callers that still pass _outletId; outletId is ignored because
- * the backend derives partner identity from the JWT.
- */
-export async function isOutletEnrolledInScheme(
-  schemeId: string,
-  _outletId: string,
-): Promise<boolean> {
-  return isEnrolledInScheme(schemeId);
-}
-
-/* ─── fetchPendingSchemes() — partner self-enrollment catalog ─────────────── */
-
-/**
- * Fetches schemes pending self-acceptance for the calling partner.
- *
- * Strategy:
- *   1. GET /api/schemes — returns all ACTIVE schemes eligible for this caller
- *      (backend pre-filters by tenant + ACTIVE status).
- *   2. For each scheme, GET /api/schemes/:id/my-enrollment to check if already
- *      enrolled. Runs the checks in parallel (Promise.allSettled) to keep
- *      latency proportional to scheme count, not sequential.
- *   3. Returns only unenrolled schemes.
- *
- * After enrolling + reloading, an already-enrolled scheme will NOT reappear
- * because step 2 excludes it. The banner component calls this on mount; after
- * onAccept() the banner filters locally (removes accepted scheme from pending[]),
- * and on the next mount the backend enrollment check confirms exclusion.
- *
- * outletType and outletId parameters are retained for call-site compatibility
- * but are not used to filter — the backend already scopes the list correctly.
- */
-export async function fetchPendingSchemes(
-  _outletType?: string,
-  _outletId?: string,
-): Promise<Scheme[]> {
-  const schemes = await fetchSchemes();
-  if (schemes.length === 0) return [];
-
-  // Parallel enrollment checks — one per scheme
-  const enrollmentChecks = await Promise.allSettled(
-    schemes.map((s) => isEnrolledInScheme(s.id)),
-  );
-
-  return schemes.filter((_, i) => {
-    const check = enrollmentChecks[i];
-    // If the check settled as fulfilled with true → already enrolled → exclude.
-    // If rejected or false → not enrolled → include.
-    if (check.status === 'fulfilled' && check.value === true) return false;
-    return true;
-  });
-}
-
-/* ─── Deadline helpers (internal) ────────────────────────────────────────── */
-
-function isDeadlineValid(acceptDeadline: string): boolean {
-  return !acceptDeadline || new Date(acceptDeadline) >= new Date();
-}
-
-/* ─── Map AdminPublishedScheme → Scheme (for localStorage-based paths) ─────── */
-
-function toScheme(s: AdminPublishedScheme): Scheme {
-  return {
-    id:             s.id,
-    name:           s.name,
-    description:    s.description,
-    period:         s.period,
-    startDate:      s.startDate,
-    endDate:        s.endDate,
-    eligibility:    s.eligibility ?? ['ALL'],
-    kpis:           s.kpis ?? [],
-    status:         'PENDING_ACCEPTANCE',
-    createdAt:      s.publishedAt,
-    acceptDeadline: s.acceptDeadline,
-  };
-}
-
-/**
- * Synchronous localStorage-based getPendingSchemes — retained for test
- * compatibility and admin-builder use. The live PARTNER catalog no longer calls
- * this; it uses fetchPendingSchemes() (async, real backend).
- *
- * Returns schemes from localStorage filtered by eligibility, deadline, targeting,
- * and the supplied enrolledSchemeIds list.
- */
-export function getPendingSchemes(
-  outletType: SchemeEligibility | string,
-  outletId?: string,
-  enrolledSchemeIds: string[] = [],
-): Scheme[] {
-  return loadAdminSchemes()
-    .filter((s) => {
-      if (!s.requiresSelfRegistration) return false;
-      if (enrolledSchemeIds.includes(s.id)) return false;
-      if (!isDeadlineValid(s.acceptDeadline)) return false;
-      if (s.outletTargeting === 'SPECIFIC') {
-        if (!outletId || !s.targetedOutletIds.includes(outletId)) return false;
-      }
-      const eligibility = s.eligibility ?? ['ALL'];
-      if (!eligibility.includes('ALL') && !eligibility.includes(outletType as SchemeEligibility)) {
-        return false;
-      }
-      return true;
-    })
-    .map(toScheme);
-}
-
-/* ─── fetchAllSchemes() — sales team view ────────────────────────────────── */
-
-/**
- * Fetches ALL active schemes for the sales team enrollment view.
- * No enrollment-state filtering — the sales sheet tracks enrolled outlets
- * locally within the session (backend is source of truth; local state prevents
- * re-showing already-enrolled outlets in the same sheet open).
- *
- * Equivalent to the old getAllPendingSchemes() but reads from the real backend.
- */
-export async function fetchAllSchemes(): Promise<Scheme[]> {
-  return fetchSchemes();
-}
-
-/**
- * Synchronous localStorage-based getAllPendingSchemes — retained for test
- * compatibility, admin-builder use, and the sales/dashboard page import.
- * The live SALES TASKS catalog no longer calls this; it uses fetchAllSchemes()
- * (async, real backend).
- *
- * Returns ALL non-expired admin-published schemes from localStorage.
- */
-export function getAllPendingSchemes(): Scheme[] {
-  return loadAdminSchemes()
-    .filter((s) => isDeadlineValid(s.acceptDeadline))
-    .map(toScheme);
-}
-
-/* ─── Admin localStorage helpers (retained for SchemeBuilder + tests) ────── */
-
-/*
- * The partner/sales catalog no longer uses localStorage demo data — it reads
- * from the real backend via fetchPendingSchemes() / fetchAllSchemes(). The
- * localStorage helpers below are retained for:
- *   - The admin SchemeBuilder page (out of scope of this pass)
- *   - Unit tests (platform/src/lib/__tests__/schemes-enrollment.test.ts)
- * seedAdminSchemes() seeds DEMO_SEED_SCHEMES for tests only; those seeds
- * never appear on live partner/sales surfaces.
- */
-
-const ADMIN_SCHEMES_KEY = 'loyaltybase_admin_schemes_v1';
-
-function loadAdminSchemes(): AdminPublishedScheme[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    return JSON.parse(localStorage.getItem(ADMIN_SCHEMES_KEY) ?? '[]') as AdminPublishedScheme[];
-  } catch { return []; }
-}
-
-function saveAllAdminSchemes(schemes: AdminPublishedScheme[]): void {
-  if (typeof window === 'undefined') return;
-  localStorage.setItem(ADMIN_SCHEMES_KEY, JSON.stringify(schemes));
-}
-
-/** Returns admin-created schemes from localStorage (for SchemeBuilder admin page). */
-export function getAdminSchemes(): AdminPublishedScheme[] {
-  return loadAdminSchemes();
-}
-
-/**
- * Seeds demo schemes into localStorage if the key is empty.
- * Safe to call on every mount — will not overwrite existing data.
- *
- * NOTE: The demo seed data is intentionally NOT used by the live partner/sales
- * catalog (which reads from the real backend via fetchPendingSchemes /
- * fetchAllSchemes). This export is retained for:
- *   - Unit tests (platform/src/lib/__tests__/schemes-enrollment.test.ts)
- *   - Any admin-builder page that calls it to pre-populate its local view
- * The SEED data below is test/demo-only; it never drives live partner UI.
- */
-export function seedAdminSchemes(): void {
-  const existing = loadAdminSchemes();
-  if (existing.length > 0) return;   // already seeded — no-op
-  saveAllAdminSchemes(DEMO_SEED_SCHEMES);
-}
-
-/**
- * Demo seed schemes — used ONLY by seedAdminSchemes() for unit tests and the
- * admin SchemeBuilder local-preview. Never rendered on live partner/sales surfaces.
- */
-const DEMO_SEED_SCHEMES: AdminPublishedScheme[] = [
-  {
-    id:                       'sch_q2_2026',
-    name:                     'Summer Push Q2 FY26',
-    description:              'Quarterly growth scheme focused on Bertolli and Figaro range expansion across all general trade outlets.',
-    period:                   "Jun '26 – Aug '26",
-    startDate:                '2026-06-01',
-    endDate:                  '2026-08-31',
-    acceptDeadline:           '2026-06-30T23:59:59',
-    outletTargeting:          'ALL',
-    targetedOutletIds:        [],
-    requiresSelfRegistration: true,
-    publishedAt:              '2026-05-20T09:00:00',
-    status:                   'ACTIVE',
-    eligibility:              ['WHOLESALER', 'SSS', 'SUB_STOCKIST'],
-    kpis: [
-      { label: 'Monthly Volume',   unit: 'cases' },
-      { label: 'Focus Product 1',  unit: 'cases' },
-    ],
-  },
-  {
-    id:                       'sch_visibility_jun',
-    name:                     'Visibility Drive — June 2026',
-    description:              'Monthly scheme rewarding outlet visibility compliance.',
-    period:                   "Jun '26",
-    startDate:                '2026-06-01',
-    endDate:                  '2026-06-30',
-    acceptDeadline:           '2026-06-15T23:59:59',
-    outletTargeting:          'ALL',
-    targetedOutletIds:        [],
-    requiresSelfRegistration: true,
-    publishedAt:              '2026-05-22T11:00:00',
-    status:                   'ACTIVE',
-    eligibility:              ['SSS', 'SUB_STOCKIST'],
-    kpis: [
-      { label: 'Shelf Compliance', unit: 'submissions' },
-    ],
-  },
-  {
-    id:                       'sch_wholesale_drive_q2',
-    name:                     'Wholesale Drive Q2 FY26',
-    description:              'Exclusive scheme for wholesale partners.',
-    period:                   "Jun '26 – Jul '26",
-    startDate:                '2026-06-01',
-    endDate:                  '2026-07-31',
-    acceptDeadline:           '2026-06-20T23:59:59',
-    outletTargeting:          'ALL',
-    targetedOutletIds:        [],
-    requiresSelfRegistration: true,
-    publishedAt:              '2026-05-24T10:00:00',
-    status:                   'ACTIVE',
-    eligibility:              ['WHOLESALER'],
-    kpis: [
-      { label: 'Monthly Volume',   unit: 'cases' },
-    ],
-  },
-];
-
-/** Save (upsert) a single scheme published via the admin builder. */
-export function saveAdminScheme(scheme: AdminPublishedScheme): void {
-  const existing = loadAdminSchemes();
-  const idx = existing.findIndex((s) => s.id === scheme.id);
-  if (idx >= 0) existing[idx] = scheme; else existing.unshift(scheme);
-  saveAllAdminSchemes(existing);
-}
-
-/* ─── Deadline helpers ────────────────────────────────────────────────────── */
-
-export function formatDeadline(iso: string): string {
-  return new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
-}
-
-/* ─── Enrollment form helpers ─────────────────────────────────────────────── */
-
-/**
- * Returns true when the scheme has an enrollment form with at least one field.
- * Used to decide whether to render EnrollmentFormRenderer in SchemeSheet.
- */
-export function hasEnrollmentForm(scheme: AdminPublishedScheme): boolean {
-  return (scheme.enrollmentFormConfig?.fields?.length ?? 0) > 0;
-}
-
-/**
- * Returns the scheme's enrollment form fields sorted by their `order` property.
- * Returns an empty array when there is no enrollment form configured.
- */
-export function getEnrollmentFields(scheme: AdminPublishedScheme): FormField[] {
-  const fields = scheme.enrollmentFormConfig?.fields;
-  if (!fields || fields.length === 0) return [];
-  return [...fields].sort((a, b) => a.order - b.order);
+  return parts.length ? `?${parts.join('&')}` : '';
 }
