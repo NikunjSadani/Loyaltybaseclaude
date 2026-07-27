@@ -288,20 +288,14 @@ enum FundLedgerType {
   REVERSAL
 }
 
-enum VisibilityStatus {
-  DRAFT
+// Visibility (POSM) photo-capture status. A window is satisfied ONLY by an APPROVED capture
+// (D7). SUBMITTED = awaiting Gifsy approval; REJECTED = re-opens the window for recapture (D11).
+// (The legacy VisibilityStatus/VisibilityProgramStatus enums for the dead partner-photo path
+// were removed with the VISIBILITY-POSM rebuild — see docs/plans/VISIBILITY-POSM-DESIGN.md §8.)
+enum VisibilityCaptureStatus {
   SUBMITTED
-  UNDER_REVIEW
   APPROVED
   REJECTED
-  FLAGGED
-}
-
-enum VisibilityProgramStatus {
-  DRAFT
-  ACTIVE
-  PAUSED
-  EXPIRED
 }
 
 enum TicketStatus {
@@ -520,6 +514,8 @@ model User {
   schemeEnrollmentsSubmitted SchemeEnrollment[]  @relation("SchemeEnrollmentSubmitter")
   schemeSubmissions          SchemeSubmission[]  @relation("SchemeSubmissionSubmitter")
   schemeBroadcasts           SchemeBroadcast[]   @relation("SchemeBroadcastSender")
+  // Visibility (POSM) captures this Gifsy admin approved/rejected.
+  visibilityCapturesApproved VisibilityCapture[] @relation("VisibilityCaptureApprover")
   loginLogs                  LoginLog[]
   pushSubscriptions          PushSubscription[]
   pwaInstalls                PwaInstall[]
@@ -660,6 +656,9 @@ model SalesUser {
   assignments      SalesUserAssignment[]
   // Wave-0 scheme data-collection: roster rows tagging this employee (Mode B Excel).
   schemeRosterTags SchemeOutlet[]        @relation("SchemeRosterSalesUser")
+  // Visibility (POSM) captures/submissions performed by this sales rep (D8).
+  visibilityCaptures    VisibilityCapture[]           @relation("VisibilityCaptureSubmitter")
+  visibilityCaptureSubs VisibilityCaptureSubmission[] @relation("VisibilityCaptureSubmissionSubmitter")
 
   @@unique([clientId, employeeCode])
   @@index([clientId])
@@ -747,7 +746,6 @@ model ChannelPartner {
   kycSubmissions        KycSubmission[]
   wallets               Wallet[]
   salesAssignments      SalesUserAssignment[]
-  visibilitySubmissions VisibilitySubmission[]
   redemptionOrders      RedemptionOrder[]
   payoutTransactions    PayoutTransaction[]
   leaderboardEntries    LeaderboardEntry[]
@@ -1046,7 +1044,8 @@ model Outlet {
   outletType            OutletType             @relation(fields: [outletTypeId], references: [id])
   geoHistory            OutletGeoHistory[]
   salesAssignments      SalesUserAssignment[]
-  visibilitySubmissions VisibilitySubmission[]
+  // Visibility (POSM) photo-captures anchored to this outlet, one current row per window.
+  visibilityCaptures    VisibilityCapture[]
   // Wave-0 scheme data-collection: roster rows that matched (linked to) this outlet.
   schemeRosterEntries   SchemeOutlet[]         @relation("SchemeRosterOutlet")
 
@@ -1381,116 +1380,129 @@ model RedemptionStatusHistory {
 // MODULE 11: VISIBILITY
 // ============================================================
 
-model VisibilityProgram {
+// Per-tenant configurable capture form (1:1 with a tenant), VERSIONED so a capture taken
+// against an earlier form still renders coherently after an edit (mirrors SchemeEnrollmentForm).
+model VisibilityForm {
+  id         String   @id @default(cuid())
+  clientId   String   @unique
+  formSchema Json
+  version    Int      @default(1)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("visibility_forms")
+}
+
+model VisibilityFormVersion {
+  id         String   @id @default(cuid())
+  clientId   String
+  version    Int
+  formSchema Json
+  createdAt  DateTime @default(now())
+
+  @@unique([clientId, version])
+  @@index([clientId])
+  @@map("visibility_form_versions")
+}
+
+// Current visibility capture per (outlet, window). A window is satisfied only by an APPROVED
+// capture (D7); reject re-opens it (D11). One current row per (clientId, outletId, windowKey);
+// full version history lives in VisibilityCaptureSubmission. See docs/plans/VISIBILITY-POSM-DESIGN.md.
+model VisibilityCapture {
   id                     String                  @id @default(cuid())
   clientId               String
-  code                   String
-  name                   String
-  description            String?
-  status                 VisibilityProgramStatus @default(DRAFT)
-  startDate              DateTime
-  endDate                DateTime
-  pointsPerSubmission    Int
-  maxSubmissionsPerMonth Int?
-  checklistItems         Json?
-  imageRequirements      Json?
-  createdByUserId        String?
+  outletId               String
+  // Denormalised for report/queue display + stable if the outlet code later changes.
+  outletCode             String
+  outletName             String
+  // Frequency window key: YYYY-MM-Pn, computed once at capture time in IST (D6).
+  windowKey              String
+  status                 VisibilityCaptureStatus @default(SUBMITTED)
+  // Current submission snapshot (photo keys + geo + fields live inside per field).
+  formValues             Json?
+  currentVersion         Int                     @default(1)
+  // The VisibilityForm version this capture was taken against (D11).
+  formVersion            Int
+  // Capture geo + accuracy (device GPS at submit) + server-computed geo-fence result (D10).
+  captureLat             Decimal?                @db.Decimal(10, 8)
+  captureLng             Decimal?                @db.Decimal(11, 8)
+  captureAccuracy        Decimal?                @db.Decimal(8, 2)
+  // Distance (m) from the outlet's KYC board-photo reference geo; null if no reference geo.
+  distanceMeters         Decimal?                @db.Decimal(10, 2)
+  // true = within tenant radius; false = outside (blocked at submit unless fence off);
+  // null = reference geo unavailable → ALLOWED but FLAGGED (D10).
+  geoFenceOk             Boolean?
+  // Client-reported capture instant vs server receive instant — large skew is flagged.
+  capturedAt             DateTime?
+  receivedAt             DateTime                @default(now())
+  // The capturing sales rep (D8 — visibility is sales-captured only).
+  submittedBySalesUserId String?
+  // The Gifsy admin who last approved/rejected.
+  approvedByUserId       String?
+  reviewedAt             DateTime?
+  rejectionReason        String?
+  // Controlled rejection reason code (free text stays in rejectionReason).
+  rejectionReasonCode    String?
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
-  deletedAt              DateTime?
 
-  submissions VisibilitySubmission[]
+  outlet      Outlet                        @relation(fields: [outletId], references: [id], onDelete: Cascade)
+  submittedBy SalesUser?                    @relation("VisibilityCaptureSubmitter", fields: [submittedBySalesUserId], references: [id], onDelete: SetNull)
+  approvedBy  User?                         @relation("VisibilityCaptureApprover", fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  submissions VisibilityCaptureSubmission[]
+  imageHashes VisibilityImageHash[]
 
-  @@index([clientId])
-  @@index([status])
-  @@index([startDate, endDate])
-  @@index([deletedAt])
-  @@map("visibility_programs")
-}
-
-model VisibilitySubmission {
-  id               String           @id @default(cuid())
-  programId        String
-  partnerId        String
-  outletId         String
-  status           VisibilityStatus @default(DRAFT)
-  submittedAt      DateTime?
-  imageUrls        Json?
-  checklistData    Json?
-  latitude         Decimal?         @db.Decimal(10, 8)
-  longitude        Decimal?         @db.Decimal(11, 8)
-  deviceInfo       String?
-  pointsAwarded    Int?
-  reviewedByUserId String?
-  reviewedAt       DateTime?
-  rejectionReason  String?
-  isFraudFlagged   Boolean          @default(false)
-  fraudScore       Decimal?         @db.Decimal(5, 2)
-  createdAt        DateTime         @default(now())
-  updatedAt        DateTime         @updatedAt
-
-  program   VisibilityProgram    @relation(fields: [programId], references: [id])
-  partner   ChannelPartner       @relation(fields: [partnerId], references: [id], onDelete: Cascade)
-  outlet    Outlet               @relation(fields: [outletId], references: [id])
-  approvals VisibilityApproval[]
-  fraudLogs VisibilityFraudLog[]
-
-  @@index([programId])
-  @@index([partnerId])
+  @@unique([clientId, outletId, windowKey])
+  @@index([clientId, windowKey])
+  @@index([clientId, status])
   @@index([outletId])
-  @@index([status])
-  @@index([submittedAt])
-  @@map("visibility_submissions")
+  @@index([submittedBySalesUserId])
+  @@map("visibility_captures")
 }
 
-model VisibilityApproval {
-  id             String            @id @default(cuid())
-  submissionId   String
-  reviewerUserId String
-  fromStatus     VisibilityStatus?
-  toStatus       VisibilityStatus
-  notes          String?
-  createdAt      DateTime          @default(now())
+// Append-only, immutable capture history (D11): every submit/resubmit appends a frozen snapshot.
+model VisibilityCaptureSubmission {
+  id                     String                  @id @default(cuid())
+  clientId               String
+  captureId              String
+  outletId               String
+  windowKey              String
+  version                Int
+  status                 VisibilityCaptureStatus
+  formValues             Json
+  formVersion            Int
+  captureLat             Decimal?                @db.Decimal(10, 8)
+  captureLng             Decimal?                @db.Decimal(11, 8)
+  captureAccuracy        Decimal?                @db.Decimal(8, 2)
+  distanceMeters         Decimal?                @db.Decimal(10, 2)
+  geoFenceOk             Boolean?
+  submittedBySalesUserId String?
+  rejectionReason        String?
+  rejectionReasonCode    String?
+  createdAt              DateTime                @default(now())
 
-  submission VisibilitySubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  capture     VisibilityCapture @relation(fields: [captureId], references: [id], onDelete: Cascade)
+  submittedBy SalesUser?        @relation("VisibilityCaptureSubmissionSubmitter", fields: [submittedBySalesUserId], references: [id], onDelete: SetNull)
 
-  @@index([submissionId])
-  @@index([reviewerUserId])
-  @@map("visibility_approvals")
+  @@unique([captureId, version])
+  @@index([clientId, windowKey])
+  @@index([captureId])
+  @@map("visibility_capture_submissions")
 }
 
-model VisibilityFraudLog {
-  id           String    @id @default(cuid())
-  submissionId String
-  flagType     String
-  flagDetails  Json?
-  fraudScore   Decimal   @db.Decimal(5, 2)
-  isConfirmed  Boolean   @default(false)
-  reviewedAt   DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-
-  submission VisibilitySubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
-
-  @@index([submissionId])
-  @@index([flagType])
-  @@index([isConfirmed])
-  @@map("visibility_fraud_log")
-}
-
+// Per-image content hash for duplicate-photo detection: flag when the same photo reappears
+// across outlets/windows within a tenant (flag-not-block; surfaced in the Gifsy queue).
 model VisibilityImageHash {
-  id            String   @id @default(cuid())
-  submissionId  String
-  imageUrl      String
-  imageHash     String
-  hashAlgorithm String   @default("phash")
-  isDuplicate   Boolean  @default(false)
-  duplicateOf   String?
-  createdAt     DateTime @default(now())
+  id        String   @id @default(cuid())
+  clientId  String
+  captureId String
+  hash      String
+  createdAt DateTime @default(now())
 
-  @@unique([imageHash])
-  @@index([submissionId])
-  @@index([imageHash])
+  capture VisibilityCapture @relation(fields: [captureId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, hash])
+  @@index([captureId])
   @@map("visibility_image_hashes")
 }
 

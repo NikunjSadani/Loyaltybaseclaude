@@ -15,7 +15,7 @@
  */
 
 /** IST is a fixed UTC+5:30 offset (India observes no DST). */
-const IST_OFFSET_MIN = 5 * 60 + 30;
+export const IST_OFFSET_MIN = 5 * 60 + 30;
 
 const MONTHS_LONG = [
   'January', 'February', 'March', 'April', 'May', 'June',

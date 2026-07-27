@@ -520,6 +520,24 @@ export interface GifsySettings {
    * Default: ['Premium', 'Standard', 'Economy'].
    */
   outletCategories?: string[];
+  /**
+   * Visibility (POSM) capture configuration (design D5/D6/D8/D10). GIFSY_ADMIN-only write.
+   * REPLACE-WHOLE nested key — always send the COMPLETE object when saving.
+   *   - outletScope:        OutletType.code list in scope (e.g. ['SSS','SSS_TOT']); [] = none yet.
+   *   - frequencyPerMonth:  captures required per month (1..4).
+   *   - allowedSalesLevels: SalesHierarchyLevel.code list allowed to capture (e.g. ['XSR','SO']).
+   *   - geoFence:           { enabled, radiusMeters (1..5000, default 50) }.
+   * Default: { outletScope: [], frequencyPerMonth: 1, allowedSalesLevels: [], geoFence: { enabled: false, radiusMeters: 50 } }.
+   */
+  visibilityConfig?: {
+    outletScope:        string[];
+    frequencyPerMonth:  number;
+    allowedSalesLevels: string[];
+    geoFence: {
+      enabled:      boolean;
+      radiusMeters: number;
+    };
+  };
 }
 
 // ─── INR Payout Ledger Entry (Retailer / Sub-Stockist / MT) ──────────────────

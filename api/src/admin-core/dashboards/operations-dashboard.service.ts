@@ -5,7 +5,7 @@ import {
   TicketCategory,
   TicketPriority,
   TicketStatus,
-  VisibilityStatus,
+  VisibilityCaptureStatus,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { TenantService } from '../../tenant/tenant.service';
@@ -351,38 +351,35 @@ export class OperationsDashboardService {
     const enabled = await this.tenantSettings.getVisibilityEnabledUncached(clientId);
     if (!enabled) return null;
 
-    // VisibilitySubmission scopes via partner.clientId (denormalised on ChannelPartner).
-    const subFilter: Prisma.VisibilitySubmissionWhereInput = { partner: { clientId } };
+    // Visibility (POSM) captures are keyed by (outlet, window); clientId is a direct column.
+    // The new status model is SUBMITTED | APPROVED | REJECTED (no DRAFT/UNDER_REVIEW/FLAGGED).
+    // Dup-photo + geo-fence signals surface per-capture in the Gifsy review queue + the coverage
+    // report (visibility-report.service), not as an aggregate on this operations funnel.
+    const subFilter: Prisma.VisibilityCaptureWhereInput = { clientId };
 
-    const byStatus = await this.prisma.visibilitySubmission.groupBy({
+    const byStatus = await this.prisma.visibilityCapture.groupBy({
       by: ['status'],
       where: subFilter,
       _count: { _all: true },
     });
-    const statusCount = (s: VisibilityStatus): number =>
+    const statusCount = (s: VisibilityCaptureStatus): number =>
       byStatus.find((r) => r.status === s)?._count._all ?? 0;
 
-    // "submitted" = total in any non-DRAFT review/terminal state (the funnel entry point).
+    // "submitted" = total captures in any state (the funnel entry point).
     const submitted =
-      statusCount('SUBMITTED') +
-      statusCount('UNDER_REVIEW') +
-      statusCount('APPROVED') +
-      statusCount('REJECTED') +
-      statusCount('FLAGGED');
+      statusCount('SUBMITTED') + statusCount('APPROVED') + statusCount('REJECTED');
     const approved = statusCount('APPROVED');
     const rejected = statusCount('REJECTED');
-    const flagged = statusCount('FLAGGED');
+    const flagged = 0; // no separate FLAGGED capture state; dup/geo flags live per-capture.
 
     const total = byStatus.reduce((sum, r) => sum + r._count._all, 0);
 
-    const fraudFlaggedCount = await this.prisma.visibilitySubmission.count({
-      where: { ...subFilter, isFraudFlagged: true },
-    });
+    const fraudFlaggedCount = 0; // surfaced per-capture (dup-hash/geo) in the review queue.
 
-    // participation = distinct outletIds with ≥1 submission ÷ addressable outlets.
+    // participation = distinct outletIds with ≥1 capture ÷ addressable outlets.
     // Addressable = the SAME universe filter AdminCoreService.kycDashboard uses.
     const [submittingOutlets, addressable] = await Promise.all([
-      this.prisma.visibilitySubmission.findMany({
+      this.prisma.visibilityCapture.findMany({
         where: subFilter,
         select: { outletId: true },
         distinct: ['outletId'],

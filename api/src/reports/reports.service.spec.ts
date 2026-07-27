@@ -12,7 +12,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ReportFormat } from './dto/reports.dto';
 
 const mockPrisma = {
-  visibilitySubmission: { findMany: jest.fn() },
+  visibilityCapture: { findMany: jest.fn() },
   scheme: { findMany: jest.fn() },
   tdsRecord: { findMany: jest.fn() },
   payoutTransaction: { findMany: jest.fn() },
@@ -45,31 +45,34 @@ describe('ReportsService', () => {
   });
 
   describe('visibilityStatus', () => {
-    it('scopes the query to the caller clientId via the partner relation', async () => {
-      mockPrisma.visibilitySubmission.findMany.mockResolvedValue([]);
+    it('scopes the query to the caller clientId', async () => {
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
       await service.visibilityStatus(gifsy, {});
-      const where = mockPrisma.visibilitySubmission.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ partner: { clientId: 'deoleo' } });
+      const where = mockPrisma.visibilityCapture.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ clientId: 'deoleo' });
     });
 
-    it('403s a tenant MIS user when visibility is OFF — no submission read', async () => {
+    it('403s a tenant MIS user when visibility is OFF — no capture read', async () => {
       mockTenant.resolveVisibilityEnabled.mockResolvedValue(false);
       const mis: JwtPayload = { sub: 'm1', role: 'MIS_USER', clientId: 'deoleo', phone: '', name: '' };
       await expect(service.visibilityStatus(mis, {})).rejects.toBeInstanceOf(ForbiddenException);
-      expect(mockPrisma.visibilitySubmission.findMany).not.toHaveBeenCalled();
+      expect(mockPrisma.visibilityCapture.findMany).not.toHaveBeenCalled();
     });
 
-    it('maps a submission row into the report shape', async () => {
-      mockPrisma.visibilitySubmission.findMany.mockResolvedValue([
+    it('maps a capture row into the report shape', async () => {
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([
         {
           id: 'v1',
-          programId: 'p1',
+          outletCode: 'OUT-1',
+          outletName: 'Acme Store',
+          windowKey: '2026-01',
           status: 'APPROVED',
-          latitude: { toString: () => '12.34' },
-          longitude: { toString: () => '56.78' },
+          captureLat: { toString: () => '12.34' },
+          captureLng: { toString: () => '56.78' },
+          geoFenceOk: true,
           createdAt: new Date('2026-01-15T10:00:00.000Z'),
-          partner: { businessName: 'Acme' },
           outlet: { name: 'Acme Store', city: 'Pune' },
+          submittedBy: { employeeCode: 'E-1', user: { name: 'Rep One' } },
         },
       ]);
       const res = await service.visibilityStatus(gifsy, {});
@@ -80,14 +83,16 @@ describe('ReportsService', () => {
           data: [
             {
               'S.No': 1,
-              'Submission ID': 'v1',
-              'Partner Name': 'Acme',
+              'Capture ID': 'v1',
+              'Outlet Code': 'OUT-1',
               'Outlet Name': 'Acme Store',
               City: 'Pune',
-              'Program ID': 'p1',
+              Window: '2026-01',
               Status: 'APPROVED',
+              'Captured By': 'Rep One',
               Latitude: '12.34',
               Longitude: '56.78',
+              'Geo-fence': 'ok',
               'Submitted On': '2026-01-15',
             },
           ],
@@ -96,7 +101,7 @@ describe('ReportsService', () => {
     });
 
     it('returns an xlsx buffer when format=xlsx', async () => {
-      mockPrisma.visibilitySubmission.findMany.mockResolvedValue([]);
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
       const res = await service.visibilityStatus(gifsy, { format: ReportFormat.XLSX });
       expect(res.kind).toBe('xlsx');
       if (res.kind === 'xlsx') {

@@ -86,7 +86,10 @@ const ALL_NAV_ITEMS = [
   // Tenant read-only scheme coverage reports (D2/D26). Shown to tenant admins
   // (CLIENT_ADMIN / MIS_USER) only — GIFSY manages + reports from /admin/schemes.
   { href: '/admin/scheme-reports', label: 'Scheme Reports', icon: FileBarChart2, featureFlag: null, tenantReportOnly: true },
-  { href: '/admin/visibility', label: 'Visibility Approval', icon: Eye,     featureFlag: null },
+  // Visibility (POSM) capture management is GIFSY-only (config / form / approve-reject queue).
+  { href: '/admin/visibility', label: 'Visibility (POSM)', icon: Eye, featureFlag: null, gifsyOnly: true },
+  // Tenant read-only POSM coverage reports — shown to tenant admins (CLIENT_ADMIN / MIS_USER) only.
+  { href: '/admin/visibility-reports', label: 'Visibility Reports', icon: FileBarChart2, featureFlag: null, tenantReportOnly: true },
   {
     href: '/admin/invoices',
     label: 'Visibility Invoices',
@@ -166,6 +169,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         // Master Visibility switch gates the Visibility Approval page AND (ANDed with its own
         // featureFlag) the Visibility Invoices group — both hidden when Visibility is OFF.
         if (item.href === '/admin/visibility') return visibilityEnabled;
+        if (item.href === '/admin/visibility-reports') return visibilityEnabled;
         if (item.href === '/admin/invoices' && !visibilityEnabled) return false;
         if (!item.featureFlag) return true;
         return !!(features as unknown as Record<string, boolean>)[item.featureFlag];

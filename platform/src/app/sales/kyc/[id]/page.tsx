@@ -15,6 +15,8 @@ import { Button } from '@/components/ui/button';
 import { KYCStatus, type ApprovalEvent, type KYCSubmitterRole } from '@/types';
 import { getRole } from '@/lib/sales-role';
 import { useGifsySettings } from '@/lib/gifsy-settings';
+import { visibilityApi } from '@/lib/visibility';
+import type { CaptureUiState, OutletStatusWindow } from '@/lib/visibility-types';
 import { hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags } from '@/lib/rekyc-fields';
 import { RejectionModal } from './RejectionModal';
 
@@ -725,6 +727,94 @@ function ApprovalTimeline({ kyc }: { kyc: KYCDetail }) {
   );
 }
 
+/* ─── Visibility — this period (POSM) card (D13) ──────────────────────────────── */
+
+const VIS_STATE_LABEL: Record<CaptureUiState, { label: string; cls: string }> = {
+  due:      { label: 'Due',       cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  awaiting: { label: 'In review', cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+  approved: { label: 'Approved',  cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  rejected: { label: 'Rejected',  cls: 'bg-red-50 text-red-700 border-red-200' },
+  late:     { label: 'Overdue',   cls: 'bg-orange-50 text-orange-700 border-orange-200' },
+};
+
+const VIS_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function visWindowLabel(w: OutletStatusWindow): string {
+  const m = /^(\d{4})-(\d{2})-P\d+$/.exec(w.windowKey);
+  const abbr = m ? (VIS_MONTHS[Number(m[2]) - 1] ?? '') : '';
+  return `${w.startDay}–${w.endDay}${abbr ? ` ${abbr}` : ''}`;
+}
+
+/** A window still needs a capture when it is due / rejected / late (D7). */
+function visNeedsCapture(state: CaptureUiState): boolean {
+  return state === 'due' || state === 'rejected' || state === 'late';
+}
+
+/**
+ * "Visibility — this period" card (VISIBILITY-POSM-DESIGN.md D13): the outlet's windows
+ * this month, each with its status, plus a Capture CTA (redirect preselected to this
+ * outlet) when a current window is due / missing / rejected. Self-hides when the outlet
+ * is not in visibility scope, when the feature/photo-mode is off, or before data loads.
+ */
+function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled: boolean }) {
+  const [windows, setWindows] = useState<OutletStatusWindow[] | null>(null);
+  const [inScope, setInScope] = useState(false);
+  const [canCapture, setCanCapture] = useState(false);
+
+  useEffect(() => {
+    if (!enabled || !outletId) { setWindows(null); return; }
+    let cancelled = false;
+    visibilityApi.getOutletStatus(outletId)
+      .then((r) => {
+        if (cancelled) return;
+        if (r.success) {
+          setInScope(r.data.inScope);
+          setCanCapture(r.data.canCapture);
+          setWindows(r.data.windows ?? []);
+        } else {
+          setWindows(null);
+        }
+      })
+      .catch(() => { if (!cancelled) setWindows(null); });
+    return () => { cancelled = true; };
+  }, [outletId, enabled]);
+
+  // Hide until we have a positive in-scope answer with windows.
+  if (!enabled || !inScope || !windows || windows.length === 0) return null;
+
+  const needsCapture = canCapture && windows.some((w) => !w.closed && visNeedsCapture(w.state));
+
+  return (
+    <Card data-testid="visibility-period-card">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Camera className="h-4 w-4 text-[var(--brand-primary)]" /> Visibility — this period
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0 pb-3 space-y-2">
+        {windows.map((w) => {
+          const cfg = VIS_STATE_LABEL[w.state];
+          return (
+            <div key={w.windowKey} className="flex items-center gap-2">
+              <span className="text-xs text-gray-600 flex-1">{visWindowLabel(w)}</span>
+              <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${cfg.cls}`}>
+                {cfg.label}
+              </span>
+            </div>
+          );
+        })}
+        {needsCapture && (
+          <Link href={`/sales/visibility?outletId=${encodeURIComponent(outletId)}`} className="block pt-1">
+            <Button variant="primary" className="w-full justify-center gap-2 py-2.5 text-sm" data-testid="visibility-capture-cta">
+              <Camera className="h-4 w-4" />
+              Capture Visibility
+            </Button>
+          </Link>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 /* ─── Rejection modal ────────────────────────────────────────────────────────── */
 
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
@@ -1145,6 +1235,16 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
         </Link>
       )}
 
+      {/* Visibility — this period (POSM). Photo-capture tenants only (D13); self-hides
+          when the outlet is out of visibility scope. Uses the authoritative captureMode
+          + master switch (same gates as the quick action below). */}
+      {kyc.outletId && (
+        <VisibilityPeriodCard
+          outletId={kyc.outletId}
+          enabled={settings.visibilityEnabled === true && captureMode === 'PHOTO_APPROVAL'}
+        />
+      )}
+
       {/* ─── Partner + Document + Bank details (collapsible for all, default closed) ── */}
       <div className="rounded-xl border border-gray-200 overflow-hidden">
         <button
@@ -1435,7 +1535,7 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
           const showVis     = settings.visibilityEnabled === true && captureMode === 'PHOTO_APPROVAL' && settings.visibilityPhotoEnabled === true;
           const actions = [
             { href: `/sales/kyc/${id}/ledger`,         icon: <BookOpen       className="h-4 w-4 text-blue-500" />,    bg: 'bg-blue-50',       title: ledgerLabel,              sub: 'Transaction history & balance',             show: true      },
-            { href: '/sales/visibility',               icon: <Camera         className="h-4 w-4 text-[#16a34a]" />,   bg: 'bg-[#16a34a]/10',  title: 'Submit Visibility Photo',sub: 'Earn points for branding photos',           show: showVis    },
+            { href: `/sales/visibility?outletId=${id}`, icon: <Camera         className="h-4 w-4 text-[#16a34a]" />,   bg: 'bg-[#16a34a]/10',  title: 'Capture Visibility',     sub: 'Take the POSM photo for this outlet',       show: showVis    },
             { href: '/sales/support',                  icon: <HeadphonesIcon className="h-4 w-4 text-rose-500" />,    bg: 'bg-rose-50',       title: 'Raise Support Ticket',  sub: 'Report an issue on behalf of this outlet',  show: true      },
           ];
           return actions.filter(a => a.show).map(action => (

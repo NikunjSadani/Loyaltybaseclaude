@@ -1,4 +1,5 @@
 import { KYCStatus } from '@/types';
+import type { SalesEligibleResponse } from '@/lib/visibility-types';
 
 /**
  * Shared sales-task derivation — consumed by BOTH the sales dashboard
@@ -68,10 +69,12 @@ export interface VisibilityTaskItem {
   priority: 'high' | 'medium' | 'low';
 }
 
-/** Build the per-outlet Visibility task items: visibility-eligible outlets whose
- *  capture for the month is NOT yet APPROVED. UNDER_REVIEW → medium priority
- *  ("awaiting approval"); anything else → high ("capture pending"). Shared so the
- *  dashboard + Tasks page show the same Visibility count. */
+/** Build the per-outlet Visibility task items for the AMOUNT_UPLOAD capture mode:
+ *  visibility-eligible outlets whose OutletVisibilityRecord for the month is NOT yet
+ *  APPROVED. UNDER_REVIEW → medium priority ("awaiting approval"); anything else → high
+ *  ("capture pending"). Shared so the dashboard + Tasks page show the same Visibility
+ *  count. The mode-aware PHOTO_APPROVAL path is `buildPhotoCaptureTaskItems` below —
+ *  both live here so the two surfaces can never drift. */
 export function buildVisibilityTaskItems(
   eligibleOutlets: VisibilityOutlet[],
   statusMap: Record<string, { status?: string } | undefined>,
@@ -91,6 +94,44 @@ export function buildVisibilityTaskItems(
           : `${o.location} · Visibility capture pending this month`,
         href:     '/sales/visibility',
         priority: s === 'UNDER_REVIEW' ? 'medium' : 'high',
+      };
+    });
+}
+
+/**
+ * Build the per-outlet Visibility task items for the PHOTO_APPROVAL capture mode
+ * (VISIBILITY-POSM-DESIGN.md D14). Source = the rep's current-window `getSalesEligible`
+ * response: an outlet is a pending capture TASK only when THIS rep may capture it
+ * (`canCapture`) AND the window is not satisfied — windowState `due` / `rejected` /
+ * `late`. An `awaiting` (SUBMITTED) or `approved` window, and any view-only outlet
+ * (`canCapture:false`, D8), are NOT tasks. Each item deep-links to the capture sheet
+ * preselected on the outlet (`/sales/visibility?outletId=`). Returns [] for a null
+ * response (endpoint disabled / 403 / not photo-mode) so the caller renders no group.
+ *
+ * Shared with `buildVisibilityTaskItems` (amount-upload) so the dashboard + Tasks page
+ * derive the SAME Visibility count from one place; the page picks the builder by the
+ * tenant's `visibilityCaptureMode`.
+ */
+export function buildPhotoCaptureTaskItems(
+  eligible: SalesEligibleResponse | null | undefined,
+): VisibilityTaskItem[] {
+  if (!eligible || !Array.isArray(eligible.outlets)) return [];
+  const ACTIONABLE = new Set(['due', 'rejected', 'late']);
+  return eligible.outlets
+    .filter((o) => o.canCapture && ACTIONABLE.has(o.windowState))
+    .map((o) => {
+      const subtitle =
+        o.windowState === 'rejected'
+          ? `Capture rejected — recapture required${o.rejectionReason ? `: ${o.rejectionReason}` : ''}`
+          : o.windowState === 'late'
+            ? 'Visibility capture overdue for this window'
+            : 'Visibility capture due this window';
+      return {
+        id:       `vis-${o.outletId}`,
+        title:    o.outletName,
+        subtitle,
+        href:     `/sales/visibility?outletId=${encodeURIComponent(o.outletId)}`,
+        priority: 'high' as const,
       };
     });
 }

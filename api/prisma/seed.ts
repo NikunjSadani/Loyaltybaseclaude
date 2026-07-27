@@ -38,7 +38,6 @@ import {
   PayoutBatchStatus,
   FundLedgerType,
   RewardCatalogStatus,
-  VisibilityProgramStatus,
   TicketCategory,
 } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
@@ -219,6 +218,10 @@ async function seedDeoleoDemo() {
     // Behaviour flag (not a module): waive the KYC Address Proof upload when the rep
     // ticks "shop board name and address proof name do not match". Deoleo-only.
     kycAddressProofWaiver: true,
+    // Visibility (POSM) capture mode — PHOTO_APPROVAL (the new sales photo-capture flow).
+    // PHOTO_APPROVAL is also the default when the field is absent; set explicitly here so
+    // the visibility STREAM-A admin authoring + capture surfaces are exercisable in dev.
+    visibilityCaptureMode: 'PHOTO_APPROVAL',
   } as const;
   await prisma.client.upsert({
     where: { id: DEOLEO_CLIENT_ID },
@@ -665,6 +668,87 @@ async function seedDeoleoDemo() {
   }
   console.log('   ✓ ProgramSetting [visibilityEnabled=true] for deoleo + clientb (E2E visibility flows)');
 
+  // Visibility (POSM) STREAM-A config + capture form for Deoleo — the tenant that has
+  // SSS/SSS_TOT outlet types + a sales hierarchy (SO front-line reporting to ASM). This
+  // makes the photo-approval authoring + capture flow exercisable in dev. gifsy_dev TEST
+  // DATA only (the seed never runs on staging/prod). Idempotent (upsert).
+  await prisma.programSetting.upsert({
+    where: { clientId_settingKey: { clientId: DEOLEO_CLIENT_ID, settingKey: 'visibilityConfig' } },
+    update: {
+      settingValue: {
+        outletScope: ['SSS', 'SSS_TOT'],
+        frequencyPerMonth: 2,
+        allowedSalesLevels: ['SO'], // the front-line SalesHierarchyLevel code present in the seed
+        geoFence: { enabled: true, radiusMeters: 50 },
+      },
+    },
+    create: {
+      clientId: DEOLEO_CLIENT_ID,
+      settingKey: 'visibilityConfig',
+      settingValue: {
+        outletScope: ['SSS', 'SSS_TOT'],
+        frequencyPerMonth: 2,
+        allowedSalesLevels: ['SO'],
+        geoFence: { enabled: true, radiusMeters: 50 },
+      },
+    },
+  });
+  console.log('   ✓ ProgramSetting [visibilityConfig] for deoleo (SSS/SSS_TOT · 2×/mo · SO · geo-fence 50m)');
+
+  // VisibilityForm v1 — two camera fields (each with a shoot instruction), a GPS_POINT with
+  // captureGpsOnSubmit, and a "POSM condition" dropdown (Good/Damaged/Missing). Structurally
+  // valid per visibility-form.helper.validateFormSchema (≥1 camera + GPS field for the flag).
+  const visibilityFormSchemaV1 = {
+    captureGpsOnSubmit: true,
+    fields: [
+      {
+        id: 'shelf_photo',
+        type: 'CAMERA',
+        label: 'Shelf / display photo',
+        required: true,
+        order: 1,
+        noGallery: true,
+        instruction: 'Stand ~2m back and capture the full branded shelf / display head-on.',
+      },
+      {
+        id: 'board_photo',
+        type: 'CAMERA',
+        label: 'Store board / signage photo',
+        required: true,
+        order: 2,
+        noGallery: true,
+        instruction: 'Capture the store board / signage with the POSM material clearly visible.',
+      },
+      {
+        id: 'geo',
+        type: 'GPS_POINT',
+        label: 'Capture location',
+        required: false,
+        order: 3,
+        captureTrigger: 'ON_SUBMIT',
+      },
+      {
+        id: 'posm_condition',
+        type: 'DROPDOWN',
+        label: 'POSM condition',
+        required: true,
+        order: 4,
+        options: ['Good', 'Damaged', 'Missing'],
+      },
+    ],
+  };
+  await prisma.visibilityForm.upsert({
+    where: { clientId: DEOLEO_CLIENT_ID },
+    update: { formSchema: visibilityFormSchemaV1, version: 1 },
+    create: { clientId: DEOLEO_CLIENT_ID, formSchema: visibilityFormSchemaV1, version: 1 },
+  });
+  await prisma.visibilityFormVersion.upsert({
+    where: { clientId_version: { clientId: DEOLEO_CLIENT_ID, version: 1 } },
+    update: { formSchema: visibilityFormSchemaV1 },
+    create: { clientId: DEOLEO_CLIENT_ID, version: 1, formSchema: visibilityFormSchemaV1 },
+  });
+  console.log('   ✓ VisibilityForm v1 for deoleo (2 camera + gps + POSM-condition dropdown)');
+
   // 3.4a Assign the SO to the first partner's outlet (CP001 / O001).
   const firstOutletId = createdPartners[0]?.outletId;
   const firstPartnerId = createdPartners[0]?.partnerId;
@@ -833,24 +917,10 @@ async function seedDeoleoDemo() {
     console.log(`   ✓ KycSubmission ${k.id} (${k.status})`);
   }
 
-  // 3.7 Visibility program — one ACTIVE program so the partner photo-submit flow
-  // (POST /v1/visibility/submit) has a valid target. Keyed on fixed id seed-vp-1.
-  const visibilityProgram = await prisma.visibilityProgram.upsert({
-    where: { id: 'seed-vp-1' },
-    update: {},
-    create: {
-      id: 'seed-vp-1',
-      clientId: DEOLEO_CLIENT_ID,
-      code: 'VP001',
-      name: 'Storefront Branding — Q1',
-      description: 'Demo visibility program — submit a storefront branding photo.',
-      status: VisibilityProgramStatus.ACTIVE,
-      startDate: new Date('2026-01-01'),
-      endDate: new Date('2026-12-31'),
-      pointsPerSubmission: 200,
-    },
-  });
-  console.log(`   ✓ VisibilityProgram [${visibilityProgram.code}] (${visibilityProgram.status})`);
+  // 3.7 (retired) — the legacy partner-photo VisibilityProgram seed was removed with the
+  // VISIBILITY-POSM rebuild (the VisibilityProgram model + its dead partner photo path were
+  // dropped from the schema; see docs/plans/VISIBILITY-POSM-DESIGN.md §2/§8). The new
+  // photo-approval config + capture form are seeded above (visibilityConfig + VisibilityForm).
 
   // 3.8 Populated-path source data (B2 invoices · #53 enrollment). A THIRD partner with
   // APPROVED KYC + PAN + bank (invoice generation requires an approved-KYC partner), a

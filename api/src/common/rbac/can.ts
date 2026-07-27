@@ -118,6 +118,17 @@ const MIS_USER_PERMISSIONS: Permission[] = [
  */
 const EMPTY_PERMISSIONS: Permission[] = [];
 
+/**
+ * SALES capture roles get the two Visibility (POSM) capture permissions by default.
+ *
+ * Sales reps legitimately hit the @RequirePermission('visibility:read'|'visibility:write')
+ * capture/upload/media-readback routes (visibility is sales-captured, D8). Without this,
+ * a future `RBAC_ENFORCEMENT` flip would 403 sales on their own capture flow even though
+ * the per-route @Roles gate allows them. Kept minimal (visibility only) so no other
+ * admin-portal access is conferred by role alone; a tenant override can still replace it.
+ */
+const SALES_VISIBILITY_PERMISSIONS: Permission[] = ['visibility:read', 'visibility:write'];
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DEFAULT_ROLE_PERMISSIONS — the canonical default map
 // ─────────────────────────────────────────────────────────────────────────────
@@ -126,12 +137,13 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   GIFSY_ADMIN:       GIFSY_ADMIN_PERMISSIONS,
   CLIENT_ADMIN:      CLIENT_ADMIN_PERMISSIONS,
   MIS_USER:          MIS_USER_PERMISSIONS,
-  // Sales roles — empty by default (see rationale above)
-  SALES_HO:          EMPTY_PERMISSIONS,
-  SALES_STATE_HEAD:  EMPTY_PERMISSIONS,
-  SALES_ASM:         EMPTY_PERMISSIONS,
-  SALES_SO:          EMPTY_PERMISSIONS,
-  SALES_ISR:         EMPTY_PERMISSIONS,
+  // Sales roles — only the Visibility (POSM) capture permissions by default (see rationale
+  // above + SALES_VISIBILITY_PERMISSIONS); everything else stays proxy/hierarchy-governed.
+  SALES_HO:          SALES_VISIBILITY_PERMISSIONS,
+  SALES_STATE_HEAD:  SALES_VISIBILITY_PERMISSIONS,
+  SALES_ASM:         SALES_VISIBILITY_PERMISSIONS,
+  SALES_SO:          SALES_VISIBILITY_PERMISSIONS,
+  SALES_ISR:         SALES_VISIBILITY_PERMISSIONS,
   // Partner/channel roles — empty by default (see rationale above)
   SSS:               EMPTY_PERMISSIONS,
   WHOLESALER:        EMPTY_PERMISSIONS,

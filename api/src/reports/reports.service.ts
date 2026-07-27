@@ -74,31 +74,32 @@ export class ReportsService {
     const dateFrom = this.parseDate(q.dateFrom);
     const dateTo = this.parseDate(q.dateTo);
 
-    const where: Prisma.VisibilitySubmissionWhereInput = {
-      partner: { clientId: user.clientId },
-    };
+    // Visibility (POSM) captures are keyed by (outlet, window); clientId is a direct column.
+    const where: Prisma.VisibilityCaptureWhereInput = { clientId: user.clientId };
     const createdAt = this.createdAtRange(dateFrom, dateTo);
     if (createdAt) where.createdAt = createdAt;
 
-    const submissions = await this.prisma.visibilitySubmission.findMany({
+    const submissions = await this.prisma.visibilityCapture.findMany({
       where,
       include: {
-        partner: { select: { businessName: true } },
         outlet: { select: { name: true, city: true } },
+        submittedBy: { select: { employeeCode: true, user: { select: { name: true } } } },
       },
       orderBy: { createdAt: 'desc' },
     });
 
     const data = submissions.map((s, i) => ({
       'S.No': i + 1,
-      'Submission ID': s.id,
-      'Partner Name': s.partner?.businessName ?? '',
-      'Outlet Name': s.outlet?.name ?? '',
+      'Capture ID': s.id,
+      'Outlet Code': s.outletCode,
+      'Outlet Name': s.outlet?.name ?? s.outletName,
       City: s.outlet?.city ?? '',
-      'Program ID': s.programId,
+      Window: s.windowKey,
       Status: s.status,
-      Latitude: s.latitude?.toString() ?? '',
-      Longitude: s.longitude?.toString() ?? '',
+      'Captured By': s.submittedBy?.user?.name ?? '',
+      Latitude: s.captureLat?.toString() ?? '',
+      Longitude: s.captureLng?.toString() ?? '',
+      'Geo-fence': s.geoFenceOk === null ? 'unverifiable' : s.geoFenceOk ? 'ok' : 'outside',
       'Submitted On': s.createdAt.toISOString().split('T')[0],
     }));
 

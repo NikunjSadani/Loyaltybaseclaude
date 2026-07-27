@@ -46,6 +46,12 @@ export const DEFAULT_SETTINGS: GifsySettings = {
   },
   outletPrograms:   ['Trade Loyalty', 'Gold Programme'],
   outletCategories: ['Premium', 'Standard', 'Economy'],
+  visibilityConfig: {
+    outletScope:        [],
+    frequencyPerMonth:  1,
+    allowedSalesLevels: [],
+    geoFence:           { enabled: false, radiusMeters: 50 },
+  },
 };
 
 /** Server `EffectiveSettings` shape (GET /v1/settings / me.settings). */
@@ -63,6 +69,7 @@ interface ServerSettings {
   creditsPayouts?:        GifsySettings['creditsPayouts'];
   outletPrograms:         string[];
   outletCategories:       string[];
+  visibilityConfig?:      GifsySettings['visibilityConfig'];
 }
 
 // ── in-memory store (seeded synchronously from the localStorage cache) ────────
@@ -108,6 +115,7 @@ function fromServer(srv: ServerSettings, prev: GifsySettings): GifsySettings {
     creditsPayouts:         srv.creditsPayouts         ?? prev.creditsPayouts,
     outletPrograms:         srv.outletPrograms         ?? prev.outletPrograms,
     outletCategories:       srv.outletCategories       ?? prev.outletCategories,
+    visibilityConfig:       srv.visibilityConfig       ?? prev.visibilityConfig,
   };
 }
 
@@ -161,6 +169,8 @@ const SAVE_KEY_MAP: Partial<Record<keyof GifsySettings, string>> = {
   // Allow-lists saved as whole arrays (REPLACE-WHOLE — correct for a list editor).
   outletPrograms:         'outletPrograms',
   outletCategories:       'outletCategories',
+  // Visibility (POSM) config — nested REPLACE-WHOLE key; always PUT the complete object.
+  visibilityConfig:       'visibilityConfig',
 };
 
 /**

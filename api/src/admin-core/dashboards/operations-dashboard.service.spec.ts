@@ -30,9 +30,8 @@ const mockPrisma = {
     groupBy: jest.fn(),
     findMany: jest.fn(),
   },
-  visibilitySubmission: {
+  visibilityCapture: {
     groupBy: jest.fn(),
-    count: jest.fn(),
     findMany: jest.fn(),
   },
   outlet: { count: jest.fn() },
@@ -226,21 +225,18 @@ describe('OperationsDashboardService', () => {
   it('returns visibility:null when the tenant has visibility disabled', async () => {
     const res = await service.operations(user);
     expect(res.visibility).toBeNull();
-    // when disabled we must NOT query submissions
-    expect(mockPrisma.visibilitySubmission.groupBy).not.toHaveBeenCalled();
+    // when disabled we must NOT query captures
+    expect(mockPrisma.visibilityCapture.groupBy).not.toHaveBeenCalled();
   });
 
   it('returns the visibility funnel when enabled', async () => {
     mockTenantSettings.getVisibilityEnabledUncached.mockResolvedValue(true);
-    mockPrisma.visibilitySubmission.groupBy.mockResolvedValue([
-      { status: 'DRAFT', _count: { _all: 5 } },
+    mockPrisma.visibilityCapture.groupBy.mockResolvedValue([
       { status: 'SUBMITTED', _count: { _all: 4 } },
       { status: 'APPROVED', _count: { _all: 6 } },
       { status: 'REJECTED', _count: { _all: 3 } },
-      { status: 'FLAGGED', _count: { _all: 1 } },
     ]);
-    mockPrisma.visibilitySubmission.count.mockResolvedValue(2); // fraud flagged
-    mockPrisma.visibilitySubmission.findMany.mockResolvedValue([
+    mockPrisma.visibilityCapture.findMany.mockResolvedValue([
       { outletId: 'o1' },
       { outletId: 'o2' },
     ]);
@@ -250,15 +246,16 @@ describe('OperationsDashboardService', () => {
     expect(res.visibility).not.toBeNull();
     const v = res.visibility!;
     expect(v.enabled).toBe(true);
-    // submitted = SUBMITTED+APPROVED+REJECTED+FLAGGED (+UNDER_REVIEW) = 4+6+3+1 = 14
-    expect(v.submitted).toBe(14);
+    // submitted = SUBMITTED+APPROVED+REJECTED = 4+6+3 = 13
+    expect(v.submitted).toBe(13);
     expect(v.approved).toBe(6);
     expect(v.rejected).toBe(3);
-    expect(v.flagged).toBe(1);
-    // approvalRate = 6 / (6+3+1) = 60%
-    expect(v.approvalRatePct).toBe(60);
-    // total = 19; fraud 2 → 10.5%
-    expect(v.fraudFlagPct).toBeCloseTo(10.5, 1);
+    // no separate FLAGGED capture state
+    expect(v.flagged).toBe(0);
+    // approvalRate = 6 / (6+3+0) = 66.67%
+    expect(v.approvalRatePct).toBeCloseTo(66.67, 1);
+    // fraud is surfaced per-capture, never aggregated here → always 0
+    expect(v.fraudFlagPct).toBe(0);
     // participation = 2 distinct / 10 addressable = 20%
     expect(v.participationPct).toBe(20);
   });

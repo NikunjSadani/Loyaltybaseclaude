@@ -8,8 +8,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildKycSubRows, buildVisibilityTaskItems } from '../sales-tasks';
+import { buildKycSubRows, buildVisibilityTaskItems, buildPhotoCaptureTaskItems } from '../sales-tasks';
 import { KYCStatus } from '@/types';
+import type { SalesEligibleResponse } from '@/lib/visibility-types';
 
 describe('ST — buildKycSubRows', () => {
   it('ST1: dedupes to the LATEST submission per outletCode', () => {
@@ -69,5 +70,40 @@ describe('ST — buildVisibilityTaskItems', () => {
     expect(buildVisibilityTaskItems(outlets, statusMap)).toEqual([]);
     // Explicit false → OFF.
     expect(buildVisibilityTaskItems(outlets, statusMap, false)).toEqual([]);
+  });
+});
+
+describe('ST — buildPhotoCaptureTaskItems (PHOTO_APPROVAL mode)', () => {
+  const outlet = (over: Partial<SalesEligibleResponse['outlets'][number]>) => ({
+    outletId: 'x', outletCode: 'C', outletName: 'N', zone: null, state: null,
+    outletType: null, captureId: null, status: null, currentVersion: null,
+    rejectionReason: null, windowState: 'due' as const, canCapture: true,
+    ...over,
+  });
+  const resp = (outlets: SalesEligibleResponse['outlets']): SalesEligibleResponse => ({
+    windowKey: '2026-07-P1', window: { startDay: 1, endDay: 15 }, levelAllowed: true, outlets,
+  });
+
+  it('ST6: includes only canCapture outlets in due/rejected/late; excludes awaiting/approved + view-only', () => {
+    const items = buildPhotoCaptureTaskItems(resp([
+      outlet({ outletId: 'due',    windowState: 'due' }),
+      outlet({ outletId: 'rej',    windowState: 'rejected', captureId: 'c1', rejectionReason: 'Blurry' }),
+      outlet({ outletId: 'late',   windowState: 'late' }),
+      outlet({ outletId: 'await',  windowState: 'awaiting' }),   // excluded (submitted)
+      outlet({ outletId: 'appr',   windowState: 'approved' }),   // excluded (satisfied)
+      outlet({ outletId: 'viewer', windowState: 'due', canCapture: false }), // excluded (D8 view-only)
+    ]));
+    expect(items.map((i) => i.id)).toEqual(['vis-due', 'vis-rej', 'vis-late']);
+    // Deep-links preselect the outlet on the capture list.
+    expect(items[0].href).toBe('/sales/visibility?outletId=due');
+    // Rejection reason surfaces in the subtitle.
+    expect(items.find((i) => i.id === 'vis-rej')?.subtitle).toContain('Blurry');
+    expect(items.every((i) => i.priority === 'high')).toBe(true);
+  });
+
+  it('ST7: null / empty response → no items', () => {
+    expect(buildPhotoCaptureTaskItems(null)).toEqual([]);
+    expect(buildPhotoCaptureTaskItems(undefined)).toEqual([]);
+    expect(buildPhotoCaptureTaskItems(resp([]))).toEqual([]);
   });
 });

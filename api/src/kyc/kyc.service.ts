@@ -1816,7 +1816,8 @@ export class KycService {
             // the partner is live (money / points / history) and must never be hard-deleted.
             redemptionOrders: { select: { id: true }, take: 1 },
             payoutTransactions: { select: { id: true }, take: 1 },
-            visibilitySubmissions: { select: { id: true }, take: 1 },
+            // (visibility is now keyed per-OUTLET, not per-partner — no partner-scoped
+            // visibility relation to guard on here since the VISIBILITY-POSM rebuild.)
             leaderboardEntries: { select: { id: true }, take: 1 },
           },
         });
@@ -1834,7 +1835,6 @@ export class KycService {
             partner.kycSubmissions.length === 0 &&
             partner.redemptionOrders.length === 0 &&
             partner.payoutTransactions.length === 0 &&
-            partner.visibilitySubmissions.length === 0 &&
             partner.leaderboardEntries.length === 0;
           if (deleteSafe) {
             // HARD delete: SetNulls outlet.partnerId + any other kycSubmission.partnerId

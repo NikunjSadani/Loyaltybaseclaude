@@ -20,7 +20,10 @@ import { fetchBanners, getActiveSalesBanners, getBgStyle, type Banner } from '@/
 import { schemeApi } from '@/lib/schemes';
 import type { EligibleScheme } from '@/lib/scheme-types';
 import { fetchOutletVisibilityStatuses, VISIBILITY_ELIGIBLE_OUTLET_TYPES } from '@/lib/visibility-upload';
-import { buildKycSubRows, buildVisibilityTaskItems, type KycSubRow } from '@/lib/sales-tasks';
+import {
+  buildKycSubRows, buildVisibilityTaskItems, buildPhotoCaptureTaskItems, type KycSubRow,
+} from '@/lib/sales-tasks';
+import { visibilityApi } from '@/lib/visibility';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -195,6 +198,7 @@ export default function SalesDashboard() {
   const [outlets,      setOutlets]      = useState<OutletRow[]>([]);
   const [kycSubs,      setKycSubs]      = useState<KycSubRow[]>([]);
   const [visibilityItems, setVisibilityItems] = useState<TaskItem[]>([]);
+  const [visibilityMode, setVisibilityMode] = useState<'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD'>('PHOTO_APPROVAL');
   const [loading,      setLoading]      = useState(true);
   const [search,       setSearch]       = useState('');
   const [searchOpen,   setSearchOpen]   = useState(false);
@@ -258,13 +262,29 @@ export default function SalesDashboard() {
        so the dashboard's "Visibility" count matches /sales/tasks. Enroll roles only. ── */
   useEffect(() => {
     const isFieldRole = canEnroll(role);
-    const visibilityEnabled = getGifsySettings().visibilityEnabled === true;
+    const gs = getGifsySettings();
+    const visibilityEnabled = gs.visibilityEnabled === true;
+    const captureMode = gs.visibilityCaptureMode ?? 'PHOTO_APPROVAL';
+    setVisibilityMode(captureMode);
+    // Master Visibility switch OFF → no visibility task group.
+    if (!visibilityEnabled) { setVisibilityItems([]); return; }
+    let cancelled = false;
+    // Mode-aware (D3/D14): PHOTO_APPROVAL sources pending captures from the sales-eligible
+    // window, driven by the backend's `canCapture` — so ANY capturer (incl. RSM/ZNM/NSM
+    // managers via allowedSalesLevels / downline) gets the nudge, NOT just field roles.
+    // AMOUNT_UPLOAD keeps the OutletVisibilityRecord path and stays field-role only.
+    // Shared builders keep this count identical to the Tasks page.
+    if (captureMode === 'PHOTO_APPROVAL') {
+      visibilityApi.getSalesEligible()
+        .then((r) => { if (!cancelled) setVisibilityItems(buildPhotoCaptureTaskItems(r.success ? r.data : null)); })
+        .catch(() => { if (!cancelled) setVisibilityItems([]); });
+      return () => { cancelled = true; };
+    }
+    if (!isFieldRole) { setVisibilityItems([]); return; }
     const eligible = outlets.filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type));
     const codes = eligible.map((o) => o.outletCode).filter(Boolean);
-    // Master Visibility switch OFF (or non-field role / no outlets) → no visibility task group.
-    if (!visibilityEnabled || !isFieldRole || codes.length === 0) { setVisibilityItems([]); return; }
+    if (codes.length === 0) { setVisibilityItems([]); return; }
     const month = new Date().toISOString().slice(0, 7);
-    let cancelled = false;
     fetchOutletVisibilityStatuses(codes, month)
       .then((map) => { if (!cancelled) setVisibilityItems(buildVisibilityTaskItems(eligible, map, visibilityEnabled)); })
       .catch(() => { if (!cancelled) setVisibilityItems([]); });
@@ -438,18 +458,22 @@ export default function SalesDashboard() {
         });
       }
 
-      // Visibility — outlets whose monthly capture isn't APPROVED yet (shared
-      // derivation with the Tasks page). Shown when > 0 (owner request).
-      if (visibilityItems.length > 0) {
-        groups.push({
-          id: 'visibility', label: 'Visibility',
-          icon: <FileCheck className="h-4 w-4 text-blue-600" />,
-          items: visibilityItems,
-          accentBg: 'bg-blue-50', accentBorder: 'border-blue-200',
-          accentText: 'text-blue-700', badgeBg: 'bg-blue-100',
-          href: '/sales/visibility',
-        });
-      }
+    }
+
+    // Visibility — outlets whose monthly capture isn't APPROVED yet (shared derivation
+    // with the Tasks page). Mode-aware (D8/D14): PHOTO_APPROVAL surfaces to ANY capturer
+    // (incl. managers, driven by canCapture) — NOT gated on isFieldRole; AMOUNT_UPLOAD
+    // stays field-role only. visibilityItems is empty for a non-capturer either way.
+    const showVisibilityGroup = visibilityMode === 'PHOTO_APPROVAL' || canEnroll(role);
+    if (showVisibilityGroup && visibilityItems.length > 0) {
+      groups.push({
+        id: 'visibility', label: 'Visibility',
+        icon: <FileCheck className="h-4 w-4 text-blue-600" />,
+        items: visibilityItems,
+        accentBg: 'bg-blue-50', accentBorder: 'border-blue-200',
+        accentText: 'text-blue-700', badgeBg: 'bg-blue-100',
+        href: '/sales/visibility',
+      });
     }
 
     // HO Notifications / Reminders (admin-configurable via Settings → Task Configuration)
@@ -472,7 +496,7 @@ export default function SalesDashboard() {
     }
 
     return groups;
-  }, [outlets, kycSubs, visibilityItems, taskConfig, role]);
+  }, [outlets, kycSubs, visibilityItems, visibilityMode, taskConfig, role]);
 
   const isFieldRole = canEnroll(role);
   const schemeCount = isFieldRole ? schemes.length : 0;

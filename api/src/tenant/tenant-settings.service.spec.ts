@@ -266,6 +266,121 @@ describe('TenantSettingsService', () => {
     });
   });
 
+  describe('visibilityConfig (POSM capture config)', () => {
+    it('defaults to a dormant config (empty scope/levels, freq 1, geo-fence off @ 50m)', async () => {
+      const s = await new TenantSettingsService(makePrisma([])).getEffectiveSettings('deoleo');
+      expect(s.visibilityConfig).toEqual({
+        outletScope:        [],
+        frequencyPerMonth:  1,
+        allowedSalesLevels: [],
+        geoFence:           { enabled: false, radiusMeters: 50 },
+      });
+    });
+
+    it('overlays a full valid config', async () => {
+      const svc = new TenantSettingsService(makePrisma([
+        {
+          settingKey: 'visibilityConfig',
+          settingValue: {
+            outletScope:        ['SSS', 'SSS_TOT'],
+            frequencyPerMonth:  4,
+            allowedSalesLevels: ['XSR', 'SO', 'ASM'],
+            geoFence:           { enabled: true, radiusMeters: 200 },
+          },
+        },
+      ]));
+      const s = await svc.getEffectiveSettings('deoleo');
+      expect(s.visibilityConfig).toEqual({
+        outletScope:        ['SSS', 'SSS_TOT'],
+        frequencyPerMonth:  4,
+        allowedSalesLevels: ['XSR', 'SO', 'ASM'],
+        geoFence:           { enabled: true, radiusMeters: 200 },
+      });
+    });
+
+    it('dedupes/trims the code allow-lists but ALLOWS empty (no default backfill)', async () => {
+      const svc = new TenantSettingsService(makePrisma([
+        {
+          settingKey: 'visibilityConfig',
+          settingValue: {
+            outletScope:        ['  SSS ', 'SSS', '', 5, 'SSS_TOT'],
+            allowedSalesLevels: [], // explicitly empty → stays empty (no default list to fall back to)
+          },
+        },
+      ]));
+      const s = await svc.getEffectiveSettings('deoleo');
+      expect(s.visibilityConfig.outletScope).toEqual(['SSS', 'SSS_TOT']);
+      expect(s.visibilityConfig.allowedSalesLevels).toEqual([]);
+    });
+
+    it('rejects frequencyPerMonth 0 and 5 → default 1; accepts 1..4', async () => {
+      const zero = await new TenantSettingsService(makePrisma([
+        { settingKey: 'visibilityConfig', settingValue: { frequencyPerMonth: 0 } },
+      ])).getEffectiveSettings('deoleo');
+      expect(zero.visibilityConfig.frequencyPerMonth).toBe(1);
+
+      const five = await new TenantSettingsService(makePrisma([
+        { settingKey: 'visibilityConfig', settingValue: { frequencyPerMonth: 5 } },
+      ])).getEffectiveSettings('deoleo');
+      expect(five.visibilityConfig.frequencyPerMonth).toBe(1);
+
+      const three = await new TenantSettingsService(makePrisma([
+        { settingKey: 'visibilityConfig', settingValue: { frequencyPerMonth: 3 } },
+      ])).getEffectiveSettings('deoleo');
+      expect(three.visibilityConfig.frequencyPerMonth).toBe(3);
+    });
+
+    it('clamps geoFence.radiusMeters: negative/zero/6000 → default 50; keeps a valid value', async () => {
+      const cases: [unknown, number][] = [[-10, 50], [0, 50], [6000, 50], [1, 1], [5000, 5000], [50, 50]];
+      for (const [radius, expected] of cases) {
+        const s = await new TenantSettingsService(makePrisma([
+          { settingKey: 'visibilityConfig', settingValue: { geoFence: { enabled: true, radiusMeters: radius } } },
+        ])).getEffectiveSettings('deoleo');
+        expect(s.visibilityConfig.geoFence.radiusMeters).toBe(expected);
+      }
+    });
+
+    it('coerces a non-array outletScope → [] and a non-boolean geoFence.enabled → default false', async () => {
+      const svc = new TenantSettingsService(makePrisma([
+        {
+          settingKey: 'visibilityConfig',
+          settingValue: { outletScope: 'SSS', geoFence: { enabled: 'yes', radiusMeters: 100 } },
+        },
+      ]));
+      const s = await svc.getEffectiveSettings('deoleo');
+      expect(s.visibilityConfig.outletScope).toEqual([]);
+      expect(s.visibilityConfig.geoFence.enabled).toBe(false);
+      expect(s.visibilityConfig.geoFence.radiusMeters).toBe(100);
+    });
+
+    it('is REPLACE-WHOLE: a partial PUT rebuilds the entire block from defaults (omitted siblings reset)', async () => {
+      // A writer that PUTs only frequencyPerMonth resets scope/levels/geoFence to DEFAULTS,
+      // not to any previously-stored value — the nested-key contract.
+      const svc = new TenantSettingsService(makePrisma([
+        { settingKey: 'visibilityConfig', settingValue: { frequencyPerMonth: 2 } },
+      ]));
+      const s = await svc.getEffectiveSettings('deoleo');
+      expect(s.visibilityConfig).toEqual({
+        outletScope:        [],
+        frequencyPerMonth:  2,
+        allowedSalesLevels: [],
+        geoFence:           { enabled: false, radiusMeters: 50 },
+      });
+    });
+
+    it('ignores a non-object visibilityConfig row (keeps default)', async () => {
+      const s = await new TenantSettingsService(makePrisma([
+        { settingKey: 'visibilityConfig', settingValue: 'nope' },
+      ])).getEffectiveSettings('deoleo');
+      expect(s.visibilityConfig).toEqual({
+        outletScope:        [],
+        frequencyPerMonth:  1,
+        allowedSalesLevels: [],
+        geoFence:           { enabled: false, radiusMeters: 50 },
+      });
+    });
+  });
+
   it('falls back to defaults if the settings read throws (never crashes a money path)', async () => {
     const prisma = { programSetting: { findMany: jest.fn().mockRejectedValue(new Error('db down')) } } as any;
     const svc = new TenantSettingsService(prisma);

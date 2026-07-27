@@ -898,9 +898,10 @@ export class AdminCoreService {
           },
         }),
 
-        this.prisma.visibilitySubmission.count({
+        // Visibility (POSM) captures awaiting Gifsy approval (keyed per-outlet, clientId direct).
+        this.prisma.visibilityCapture.count({
           where: {
-            partner: { clientId },
+            clientId,
             status: 'SUBMITTED',
           },
         }),

@@ -1793,7 +1793,6 @@ describe('KycService', () => {
       kycSubmissions: [],
       redemptionOrders: [],
       payoutTransactions: [],
-      visibilitySubmissions: [],
       leaderboardEntries: [],
     });
 
@@ -1884,7 +1883,7 @@ describe('KycService', () => {
       expect(res).toEqual({ deletedDrafts: 1, deletedPartners: 0 });
     });
 
-    it('strengthened deleteSafe: a partner with a VISIBILITY SUBMISSION is NOT deleted', async () => {
+    it('strengthened deleteSafe: a partner with a REDEMPTION ORDER is NOT deleted', async () => {
       mockPrisma.kycSubmission.findMany
         .mockResolvedValueOnce([{ id: 'd5' }])
         .mockResolvedValue([]);
@@ -1897,7 +1896,7 @@ describe('KycService', () => {
       });
       mockTx.channelPartner.findUnique.mockResolvedValueOnce({
         ...freshPartner('p5'),
-        visibilitySubmissions: [{ id: 'vs-1' }],
+        redemptionOrders: [{ id: 'ro-1' }],
       });
       mockTx.kycSubmission.delete.mockResolvedValueOnce({});
 

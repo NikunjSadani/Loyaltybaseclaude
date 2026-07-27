@@ -24,8 +24,11 @@ import {
   type SchemeEnrolledStatus,
 } from './SchemeEnrollSheet';
 import { authHeader } from '@/lib/api-client';
-import { buildKycSubRows, buildVisibilityTaskItems, type KycSubRow } from '@/lib/sales-tasks';
+import {
+  buildKycSubRows, buildVisibilityTaskItems, buildPhotoCaptureTaskItems, type KycSubRow,
+} from '@/lib/sales-tasks';
 import { getGifsySettings } from '@/lib/gifsy-settings';
+import { visibilityApi } from '@/lib/visibility';
 
 /* ─── Types ──────────────────────────────────────────────────────────────────── */
 
@@ -272,6 +275,7 @@ export default function TasksPage() {
   const [schemes,         setSchemes]          = useState<EligibleScheme[]>([]);
   const [schemeEnrolled,  setSchemeEnrolled]   = useState<Record<string, SchemeEnrolledMap>>({});
   const [visibilityItems, setVisibilityItems]  = useState<TaskItem[]>([]);
+  const [visibilityMode,  setVisibilityMode]   = useState<'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD'>('PHOTO_APPROVAL');
   const [loading,         setLoading]          = useState(true);
 
   /* Record a real backend enrollment so the badge count updates without a reload. */
@@ -308,7 +312,20 @@ export default function TasksPage() {
       const visibleOutlets = apiOutlets.filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type));
       const codes = visibleOutlets.map((o) => o.outletCode);
 
-      const visibilityEnabled = getGifsySettings().visibilityEnabled === true;
+      // Mode-aware Visibility tasks (VISIBILITY-POSM-DESIGN.md D3/D14). PHOTO_APPROVAL
+      // tenants source pending captures from the sales-eligible window (photo capture);
+      // AMOUNT_UPLOAD tenants keep the OutletVisibilityRecord (Excel) path. Both build
+      // items via the shared sales-tasks derivation so this + the dashboard stay in sync.
+      const gs = getGifsySettings();
+      const visibilityEnabled = gs.visibilityEnabled === true;
+      const captureMode = gs.visibilityCaptureMode ?? 'PHOTO_APPROVAL';
+      setVisibilityMode(captureMode);
+      if (!visibilityEnabled) { setVisibilityItems([]); return; }
+      if (captureMode === 'PHOTO_APPROVAL') {
+        return visibilityApi.getSalesEligible()
+          .then((r) => setVisibilityItems(buildPhotoCaptureTaskItems(r.success ? r.data : null)))
+          .catch(() => setVisibilityItems([]));
+      }
       return fetchOutletVisibilityStatuses(codes, currentMonth).then((apiMap) => {
         const merged: VisibilityStatusMap = apiMap;
         setVisibilityItems(buildVisibilityTaskItems(visibleOutlets, merged, visibilityEnabled));
@@ -470,17 +487,23 @@ export default function TasksPage() {
         });
       }
 
-      // visibilityItems: dynamically fetched each session.
-      // APPROVED outlets are excluded. New month → all outlets reappear.
-      if (visibilityItems.length > 0) {
-        groups.push({
-          id: 'visibility', label: 'Visibility',
-          icon: <FileCheck className="h-4 w-4 text-blue-600" />,
-          items: visibilityItems,
-          accentBg: 'bg-blue-50', accentBorder: 'border-blue-200',
-          accentText: 'text-blue-700', badgeBg: 'bg-blue-100',
-        });
-      }
+    }
+
+    // Visibility (mode-aware, D8/D14). PHOTO_APPROVAL is driven by the backend's
+    // `canCapture` (buildPhotoCaptureTaskItems already filters on it), so ANY capturer —
+    // including RSM/ZNM/NSM managers whose level ∈ allowedSalesLevels or who own the
+    // outlet's downline — gets the nudge (NOT gated on isFieldRole). AMOUNT_UPLOAD stays
+    // field-role only (its Excel back-office path). visibilityItems is empty for a
+    // non-capturer, so the group simply doesn't appear then.
+    const showVisibilityGroup = visibilityMode === 'PHOTO_APPROVAL' || isFieldRole;
+    if (showVisibilityGroup && visibilityItems.length > 0) {
+      groups.push({
+        id: 'visibility', label: 'Visibility',
+        icon: <FileCheck className="h-4 w-4 text-blue-600" />,
+        items: visibilityItems,
+        accentBg: 'bg-blue-50', accentBorder: 'border-blue-200',
+        accentText: 'text-blue-700', badgeBg: 'bg-blue-100',
+      });
     }
 
     // HO Notifications / Reminders (admin-configurable, date-filtered)
@@ -501,7 +524,7 @@ export default function TasksPage() {
     }
 
     return groups;
-  }, [outlets, kycSubs, taskConfig, role, visibilityItems]);
+  }, [outlets, kycSubs, taskConfig, role, visibilityItems, visibilityMode]);
 
   const isFieldRole  = canEnroll(role);
   const schemeCount  = schemes.length;

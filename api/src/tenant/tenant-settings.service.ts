@@ -75,6 +75,31 @@ export interface CreditsPayoutsSettings {
   notifyEmails:    string[];
 }
 
+/** Visibility (POSM) geo-fence sub-config (design D10). */
+export interface GeoFenceSettings {
+  /** When true, a capture beyond `radiusMeters` from the outlet's reference geo is blocked. */
+  enabled:      boolean;
+  /** Geo-fence radius in metres. Positive integer, clamped/validated to 1..5000. Default 50. */
+  radiusMeters: number;
+}
+
+/**
+ * Visibility (POSM) configuration (docs/plans/VISIBILITY-POSM-DESIGN.md §1, D5/D6/D8/D10).
+ * GIFSY_ADMIN-only write; tenant admins read-only. The Visibility master switch
+ * (`visibilityEnabled`) and capture-mode selector live elsewhere — this holds the
+ * photo-approval capture parameters.
+ */
+export interface VisibilityConfigSettings {
+  /** Outlet scope = list of OutletType.code (e.g. ["SSS","SSS_TOT"]); empty = no outlets in scope yet. */
+  outletScope:        string[];
+  /** Captures required per calendar month → windows. Integer 1..4; default 1. */
+  frequencyPerMonth:  number;
+  /** Which SalesHierarchyLevel.code values may capture (e.g. ["XSR","SO","ASM"]); empty = none. */
+  allowedSalesLevels: string[];
+  /** Geo-fence policy on capture (D10). */
+  geoFence:           GeoFenceSettings;
+}
+
 export interface EffectiveSettings {
   /** Points→₹ rate. Default = POINTS_CONVERSION_RATE env (preserves prior behaviour). */
   conversionRate:         number;
@@ -119,6 +144,12 @@ export interface EffectiveSettings {
    * unique-except-within-group. PAN is always enforced separately (group golden-key).
    */
   uniquenessPolicy:       UniquenessPolicySettings;
+  /**
+   * Visibility (POSM) capture configuration — outlet scope, monthly frequency, allowed
+   * sales levels + geo-fence (design D5/D6/D8/D10). REPLACE-WHOLE nested key (see contract
+   * below). Default = empty scope + empty levels + freq 1 + geo-fence off (radius 50m).
+   */
+  visibilityConfig:       VisibilityConfigSettings;
 }
 
 /**
@@ -146,7 +177,8 @@ type SettingKey =
   | 'otpTemplates'
   | 'outletPrograms'
   | 'outletCategories'
-  | 'uniquenessPolicy';
+  | 'uniquenessPolicy'
+  | 'visibilityConfig';
 
 const NESTED_KEYS: ReadonlySet<SettingKey> = new Set([
   'redemptionChannels',
@@ -154,6 +186,7 @@ const NESTED_KEYS: ReadonlySet<SettingKey> = new Set([
   'creditsPayouts',
   'otpTemplates',
   'uniquenessPolicy',
+  'visibilityConfig',
 ]);
 
 @Injectable()
@@ -219,6 +252,15 @@ export class TenantSettingsService {
       // Uniqueness policy — default preserves today's behaviour (GST + phone enforced;
       // bank/UPI were never checked). Deoleo turns bank/UPI on via a per-tenant override.
       uniquenessPolicy: { gst: true, phone: true, bank: false, upi: false },
+      // Visibility (POSM) config — default is dormant: no outlets in scope, no allowed
+      // levels, one window/month, geo-fence off (suggested 50m radius). A GIFSY admin
+      // configures scope/levels/geo before the feature is meaningful for a tenant.
+      visibilityConfig: {
+        outletScope:        [],
+        frequencyPerMonth:  1,
+        allowedSalesLevels: [],
+        geoFence:           { enabled: false, radiusMeters: 50 },
+      },
     };
   }
 
@@ -320,6 +362,13 @@ export class TenantSettingsService {
       creditsPayouts:     { ...base.creditsPayouts },
       otpTemplates:       { ...base.otpTemplates },
       uniquenessPolicy:   { ...base.uniquenessPolicy },
+      visibilityConfig: {
+        ...base.visibilityConfig,
+        // Copy the arrays + nested geoFence — never share the reference held by the cached default.
+        outletScope:        [...base.visibilityConfig.outletScope],
+        allowedSalesLevels: [...base.visibilityConfig.allowedSalesLevels],
+        geoFence:           { ...base.visibilityConfig.geoFence },
+      },
     };
 
     for (const row of rows) {
@@ -433,6 +482,28 @@ export class TenantSettingsService {
           out.outletCategories = this.stringList(v, base.outletCategories);
           break;
         }
+        case 'visibilityConfig': {
+          // REPLACE-WHOLE nested key: a stored object rebuilds the complete block from
+          // defaults, so a partial/malformed PUT still yields a valid, complete config.
+          if (this.isObj(v)) {
+            const d = base.visibilityConfig;
+            const geo = this.isObj(v.geoFence) ? v.geoFence : {};
+            out.visibilityConfig = {
+              // Code allow-lists: dedupe/trim, but ALLOW empty here (empty scope just means
+              // "no outlets in scope yet") — so pass [] as the fallback, not the default.
+              outletScope:        this.stringList(v.outletScope,        []),
+              allowedSalesLevels: this.stringList(v.allowedSalesLevels, []),
+              // Frequency = integer 1..4 else default (1).
+              frequencyPerMonth:  this.intInRange(v.frequencyPerMonth, 1, 4, d.frequencyPerMonth),
+              geoFence: {
+                enabled:      this.bool(geo.enabled, d.geoFence.enabled),
+                // Radius = positive integer 1..5000 else default (50).
+                radiusMeters: this.intInRange(geo.radiusMeters, 1, 5000, d.geoFence.radiusMeters),
+              },
+            };
+          }
+          break;
+        }
         default:
           break; // unknown key — ignore (admin settings store holds other keys too)
       }
@@ -473,6 +544,17 @@ export class TenantSettingsService {
   private dayOr(v: unknown, fallback: number): number {
     const n = this.num(v);
     return n != null && n >= 1 && n <= 31 ? Math.floor(n) : fallback;
+  }
+  /**
+   * An integer clamped to an inclusive [min,max] range: floors a finite numeric value and
+   * accepts it only if it lands within [min,max]; otherwise returns the fallback default.
+   * (Used by visibilityConfig for frequencyPerMonth 1..4 and geoFence.radiusMeters 1..5000.)
+   */
+  private intInRange(v: unknown, min: number, max: number, fallback: number): number {
+    const n = this.num(v);
+    if (n == null) return fallback;
+    const i = Math.floor(n);
+    return i >= min && i <= max ? i : fallback;
   }
   private bool(v: unknown, fallback: boolean): boolean {
     return typeof v === 'boolean' ? v : fallback;
