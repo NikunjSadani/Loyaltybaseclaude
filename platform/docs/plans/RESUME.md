@@ -27,10 +27,12 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
   `deoleoloyalty.gifsy.in/auth/login` 200, `GET /v1/schemes` 401 (wired, not 404). **Additive + DORMANT** — no prod
   schemes until a Gifsy admin creates one → zero impact on live Deoleo. **REMAINING = owner UAT + a ~10-min real-phone
   camera/geo + phone-OTP-owner-pin smoke** (the one device path I can't verify). Supersedes P4 tasks #22–29.
-  ⚠️ **Non-blocker (CI hygiene):** `ci.yml`'s api `tsc --noEmit` step is red on a **pre-existing** tsconfig
-  `rootDir`/`include` mismatch (pulls in `prisma.config.ts`/`prisma/*.ts`/`test/*.ts`, outside `rootDir:src`) —
-  unrelated to scheme code, does **NOT gate any deploy** (deploy workflows run `npm test` only; prod builds via
-  `nest build`/`tsconfig.build.json`). Worth fixing so the api CI job is a real signal again.
+  ✅ **CI-hygiene fix DONE (`e46dd51`, 2026-07-27):** `ci.yml`'s api `tsc --noEmit` step was red on a pre-existing
+  tsconfig `rootDir`/`include` mismatch (bare `tsc` used `tsconfig.json` rootDir=src + default include=`**/*` →
+  TS6059 on out-of-src `prisma.config.ts`/`prisma/*.ts`/`test/*.ts`). Repointed the step to
+  `tsc --noEmit -p tsconfig.build.json` (the deployable set `nest build` compiles; excludes prisma/+test/). Was
+  never gating (deploy workflows run `npm test` only; prod builds via `nest build`); unit specs still type-checked
+  by ts-jest. Verified `tsc --noEmit -p tsconfig.build.json` exit 0 + platform tsc 0 + jest 1826 + vitest 1941.
 - **prod SERVES `bda9bf3` (api rev `00032-sgx` · fe `00024-vgp`); main == develop == `bda9bf3`.**
   ✅ **Cutover-#14 SELF-HEAL WATCH CLEARED (2026-07-27):** the prod api rev now serves the merged main SHA `bda9bf3`
   AND `KYC_CLEANUP_SECRET` is confirmed bound on the serving revision (verified during cutover #15) — the flaked
