@@ -11,28 +11,30 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-- **🏗️ ACTIVE BUILD — SCHEME DATA-COLLECTION (started 2026-07-25):** the dormant "scheme" feature is being
+- **✅ SCHEME DATA-COLLECTION — LIVE IN PROD (cutover #15 `bda9bf3`, 2026-07-27):** the dormant "scheme" feature
   reworked into a **temporary, Gifsy-admin-built data-collection instrument** — enrollment/registration +
   fully-custom form capture ONLY (**no reward/points engine**; rewards stay on the target/achievement/credit
-  path). Full frozen contract + decisions **D1–D30** + **§11 schema spec** = `platform/docs/plans/SCHEME-DATA-COLLECTION-DESIGN.md`;
-  memory **[[scheme-data-collection]]** (read BOTH first for any scheme work). **Owner UATs only once LIVE → I
-  own bug-free delivery** (money-path-grade dual audit + full role-matrix runtime-verify). **W0–W3 BUILD
-  COMPLETE + gated GREEN (api `nest build` 0 / jest 1826 · FE `tsc` 0 / vitest 1941) + TWICE dual-audited
-  (W1 backend + W3 sales-slice/FE — all GO-WITH-FIXES, every finding fixed) — NOT PUSHED.** Migration
-  `20260725120000_scheme_data_collection` (roster remodel + `OtpPurpose ADD VALUE`; abort-guard asserts
-  0 `scheme_enrollments`) canonical-diff-verified + independently audited GO. **⚠️ Owner-gated remaining
-  (Wave-3 cutover):** (1) ✅ **DONE 2026-07-26** — guarded staging pre-check + cleanup (deleted 1 `w3test-cpB`
-  residue row, backup-logged; `scheme_enrollments`=0, **push-ready**); (2)(3) ✅ **DONE 2026-07-26** — pushed
-  `29e44f0`; staging deployed (`staging-29e44f0`, db:up) + migration verified applied + **STAGING
-  RUNTIME-VERIFIED** (real cross-role logins: create ACTIVE scheme → form v1 → outlet self-enroll → sales
-  slice eligible=3/targets=7 → admin reject → partner resubmit v2 → admin sees captured note cross-session);
-  (4) **REMAINING = prod cutover (owner-gated)** + a ~10-min real-phone camera/geo + phone-OTP smoke. Full as-built =
-  `SCHEME-DATA-COLLECTION-DESIGN.md` §11–§15; memory [[scheme-data-collection]]. Supersedes P4 tasks #22–29.
-- **prod SERVES `eca351e` (api rev `00031-w9k`); main == develop == `51c2461`** (= `eca351e` app code + CI-config + docs, no
-  app-code diff → prod is functionally current). ⚠️ **The prod CI redeploy to `51c2461` FLAKED (test job) and is left to
-  SELF-HEAL on the next prod deploy — AFTER THE NEXT PROD CUTOVER, VERIFY prod api image tag == the merged main SHA AND
-  `KYC_CLEANUP_SECRET` is still bound** (proves the self-heal landed; the secret is durable via `deploy.yml` `--set-secrets`,
-  but confirm). Cosmetic only — no feature/secret depends on it. — **✅ CUTOVER #14 LIVE (2026-07-24): 🏗️ PARTNER→MULTI-OUTLET
+  path). Full frozen contract + decisions **D1–D30** + **§11 schema spec** + **§15 as-built** = `platform/docs/plans/SCHEME-DATA-COLLECTION-DESIGN.md`;
+  memory **[[scheme-data-collection]]** (read BOTH first for any scheme work). Built W0–W3 + gated GREEN
+  (api `nest build` 0 / jest 1826 · FE `tsc` 0 / vitest 1941) + TWICE dual-audited (all fixed) + staging
+  runtime-verified. **Migration `20260725120000_scheme_data_collection`** (roster remodel + `OtpPurpose ADD VALUE`;
+  abort-guard asserts 0 `scheme_enrollments`). **✅ PROD CUTOVER DONE + VERIFIED:** guarded prod pre-check
+  (`scheme_enrollments`=0, `scheme_outlets` absent, partnerId col+unique index present → abort-guard clears) →
+  FF-merge `develop`→`main` → owner-approved gate → CI `gifsy-migrate` applied the migration (`--wait`) →
+  **PROD VERIFIED:** both services serve `bda9bf3` @100% (api `00032-sgx`, fe `00024-vgp`), `/health/ready` db:up,
+  migration `done:true` + all 4 new tables + `partnerId` dropped + `schemeOutletId`/`submittedByUserId`/`SchemeEnrollmentStatus`
+  enum + `OtpPurpose.SCHEME_ENROLL_CONSENT` + `schemes.audienceConfig` + `scheme_enrollment_forms.version` present,
+  `deoleoloyalty.gifsy.in/auth/login` 200, `GET /v1/schemes` 401 (wired, not 404). **Additive + DORMANT** — no prod
+  schemes until a Gifsy admin creates one → zero impact on live Deoleo. **REMAINING = owner UAT + a ~10-min real-phone
+  camera/geo + phone-OTP-owner-pin smoke** (the one device path I can't verify). Supersedes P4 tasks #22–29.
+  ⚠️ **Non-blocker (CI hygiene):** `ci.yml`'s api `tsc --noEmit` step is red on a **pre-existing** tsconfig
+  `rootDir`/`include` mismatch (pulls in `prisma.config.ts`/`prisma/*.ts`/`test/*.ts`, outside `rootDir:src`) —
+  unrelated to scheme code, does **NOT gate any deploy** (deploy workflows run `npm test` only; prod builds via
+  `nest build`/`tsconfig.build.json`). Worth fixing so the api CI job is a real signal again.
+- **prod SERVES `bda9bf3` (api rev `00032-sgx` · fe `00024-vgp`); main == develop == `bda9bf3`.**
+  ✅ **Cutover-#14 SELF-HEAL WATCH CLEARED (2026-07-27):** the prod api rev now serves the merged main SHA `bda9bf3`
+  AND `KYC_CLEANUP_SECRET` is confirmed bound on the serving revision (verified during cutover #15) — the flaked
+  `51c2461` redeploy has self-healed. — **✅ CUTOVER #14 LIVE (2026-07-24): 🏗️ PARTNER→MULTI-OUTLET
   Waves 1–4 are FULLY IN PROD.** (Prior: #12 `d028566` + #13 `2187498`, LIVE 2026-07-22.) Shipped: uniqueness engine + parent entity +
   admin grouping + re-KYC stage-at-approval + login picker + group overview + child-KYC pre-fill/badge + scheme re-key +
   order-bound OTP + **W4** group-leave-via-re-KYC + Phase-2 roll-ups + scheme-catalog fix. Additive+**opt-in — DORMANT
@@ -432,7 +434,8 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 | 10 | `437045a` | (2026-07-19) — wallet-surfacing (credit payouts in partner wallet) + §A-DOMAIN P1/P2/P4/P4b + `client_domains` migration; verified live |
 | 11 | `e8de31a` | (2026-07-20) — §A-DOMAIN COMPLETE: sales-ledger payout unification + D-1 (resolveClient→clients) + P5 (registry-code retire, features from /me) + P6 (S1 edge-secret NOW ENFORCING on prod + proxy/worker tests + favicon-from-DB-branding + 2nd-tenant E2E + 2 finding-fixes `58ce1ab`). 24 commits, CODE-ONLY (no migrations); verified live. Backup `1784547142461` |
 | 12 | `d028566` | (2026-07-22) — per-outlet PAYOUT MANDATE (`Outlet.requiredPaymentType`, live no-flag) + KYC address-proof WAIVER + infra-workflow (Direct-VPC-egress + `/health/ready` startup probe + `REDIS_URL` removal). 33 commits, **2 additive migrations** (`..._add_outlet_required_payment_type`, `..._add_kyc_address_name_mismatch`) verified applied; both services `/health/ready` 200. Rollback ref `e8de31a` |
-| 14 | `eca351e` | **CURRENT PROD** (2026-07-24) — **PARTNER→MULTI-OUTLET Waves 1–4 COMPLETE** (uniqueness engine + parent entity + admin grouping + re-KYC stage-at-approval + login picker + group overview + child-KYC pre-fill/badge + scheme re-key + order-bound OTP + group-leave-via-re-KYC + Phase-2 roll-ups + scheme-catalog fix). 9 commits, **4 additive migrations** all verified applied + every DB object confirmed. Pre-cutover: guarded prod cleanup of 4 smoke-test partners (2 dup-PAN pairs) that would have failed the PAN index. Additive+opt-in → DORMANT until an admin sets a parentId. Verified live (SHA, `/health/ready`, Deoleo login 200). ⚠️ post-cutover TODO: `KYC_CLEANUP_SECRET` + Cloud Scheduler. Rollback ref `2187498` |
+| 15 | `bda9bf3` | **CURRENT PROD** (2026-07-27) — **SCHEME DATA-COLLECTION LIVE** (dormant "scheme" feature rebuilt as a Gifsy-admin data-collection instrument: roster model, immutable versioned submissions, full form-builder incl camera/geo/phone-OTP, audience filter-or-Excel, GIFSY-only create + tenant read-only reports; NO reward engine). 3 commits (`29e44f0` build + `bda9bf3` docs FF), **1 destructive-but-guarded migration** `20260725120000_scheme_data_collection` (roster remodel: `scheme_enrollments` re-anchored partnerId→schemeOutletId + 4 new tables + `OtpPurpose ADD VALUE`). Prod pre-check `scheme_enrollments`=0 → abort-guard cleared. **Additive + DORMANT** (no prod schemes until a Gifsy admin creates one). Verified live: both services `bda9bf3` @100%, `/health/ready` db:up, migration `done:true` + all schema objects, `KYC_CLEANUP_SECRET` bound (#14 self-heal CLEARED), deoleo login 200, `/v1/schemes` 401-wired. REMAINING = owner UAT + ~10-min real-phone smoke. Rollback ref `eca351e` |
+| 14 | `eca351e` | (2026-07-24) — **PARTNER→MULTI-OUTLET Waves 1–4 COMPLETE** (uniqueness engine + parent entity + admin grouping + re-KYC stage-at-approval + login picker + group overview + child-KYC pre-fill/badge + scheme re-key + order-bound OTP + group-leave-via-re-KYC + Phase-2 roll-ups + scheme-catalog fix). 9 commits, **4 additive migrations** all verified applied + every DB object confirmed. Pre-cutover: guarded prod cleanup of 4 smoke-test partners (2 dup-PAN pairs) that would have failed the PAN index. Additive+opt-in → DORMANT until an admin sets a parentId. Verified live (SHA, `/health/ready`, Deoleo login 200). ⚠️ post-cutover TODO: `KYC_CLEANUP_SECRET` + Cloud Scheduler. Rollback ref `2187498` |
 | 13 | `2187498` | (2026-07-22) — waiver SEMANTICS-FIX (drops ONLY the self-declaration; Address Proof stays required) + prod deoleo `clients.features.kycAddressProofWaiver=true` SET (guarded write, keycount 10→11, rbac untouched). 1 commit, CODE-ONLY (no migrations); verified live (SHA, /health/ready). Waiver now LIVE for Deoleo. Rollback ref `d028566` |
 
 ## START THE SESSION
