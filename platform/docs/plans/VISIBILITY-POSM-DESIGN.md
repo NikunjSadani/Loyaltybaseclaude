@@ -1,9 +1,8 @@
 # Visibility (POSM) — Design Doc (locked pre-build)
 
-> Status: **✅ BUILT (W0–W3) + dual-audited + fully gated + committed `2e28ac4` on develop — NOT pushed.**
-> Next step after this doc: guarded staging cleanup of 1 legacy `visibility_programs` row (owner-OK'd) → push
-> develop → staging deploys + migration applies → full role-matrix runtime-verify → owner UAT → prod cutover.
-> See **§16 AS-BUILT + STATUS** (the authoritative current-state record) at the bottom.
+> Status: **✅ LIVE ON STAGING (pushed `6e3b897`, migration applied+verified, API-surface runtime-verified) — NOT in prod.**
+> Next step: optional synthetic-capture write-path proof → **~10-min owner phone smoke** (camera/geo/push) → owner UAT →
+> prod cutover. See **§16 AS-BUILT + STATUS** (the authoritative current-state record) at the bottom.
 > Feature-name (user-facing + internal): **Visibility** (proof of POSM — point-of-sale material).
 > This REPLACES the half-built photo-capture scaffolding in the existing `visibility` module and grafts on the
 > proven **Scheme** capture instrument. See §8 (audit) for what exists today.
@@ -262,13 +261,28 @@ geo-fence per-tenant on/off + radius (ref = outlet KYC board-photo geo, no-ref =
 codes + downline reach, others view-only; **weekly reminder IN v1 = in-app web-push + Tasks badge, capturing reps
 only**; AMOUNT_UPLOAD Excel mode kept as the alternate `visibilityCaptureMode`.
 
+### ✅ STAGING DONE (2026-07-27) — pushed `6e3b897`, migration applied+verified, API-surface runtime-verified
+1. **Guarded staging cleanup DONE** — the 1 legacy `visibility_programs` row backed up to job logs + deleted (guard
+   `current_database='gifsy_staging'`; all 4 child/hash tables re-counted 0 first per the audit condition).
+2. **Pushed develop → staging DONE** — both `gifsy-api-staging`/`gifsy-frontend-staging` serve `6e3b897`;
+   `/health/ready` db:up. **Migration verified:** `finished_at` set / not rolled back; 5 new tables created, 4 dead
+   dropped, 3 AMOUNT_UPLOAD tables kept, `visibility_image_hashes` re-columned, enum `{SUBMITTED,APPROVED,REJECTED}`.
+3. **API-surface runtime-verified LIVE** (GIFSY-assumed-deoleo + XSR sales `9900000011` + deoleo CLIENT_ADMIN
+   `6289864191`): master-switch gate (off→403), config round-trip, form round-trip (validator contract
+   `captureGpsOnSubmit⇒GPS_POINT`), admin outlets-in-scope (denominator **694** SSS+SSS_TOT), **IST window `2026-07-P2`
+   =[16-31]**, sales eligibility + level-gating (`levelAllowed:true`, `outlets:[]`), tenant report + export
+   (CLIENT_ADMIN), full RBAC negative matrix (sales→config 403, CLIENT_ADMIN→gifsy-config/report 403), weekly-reminder
+   fail-closed (wrong + no secret → 403). Deoleo **left ENABLED + configured** on staging (SSS/SSS_TOT · freq 2 ·
+   XSR/SO/ASM · geoFence 50m) — ready for the owner's smoke.
+   - ⚠️ **NOT exercised live:** the capture→approve/reject/resubmit **DB write** state machine — no capture-level rep on
+     staging reaches an ACTIVE in-scope outlet (the XSR test rep reaches only 2 inactive WHOLESALER outlets, no
+     partner/KYC-geo). It IS jest-covered + is the owner's phone smoke. **Offered the owner a synthetic staging capture**
+     (assign a test rep to an active SSS outlet) to prove the write path + the `sales/media` route live before the smoke.
+
 ### REMAINING (owner-gated)
-1. **Guarded staging cleanup** — staging has **1 legacy `visibility_programs` row** (dead scaffolding) that trips the
-   migration abort-guard; back it up + delete (owner-OK'd staging write) BEFORE pushing.
-2. **Push develop → staging** deploys + migration applies (creates the new tables) → verify migration + serving SHA.
-3. **Full role-matrix staging runtime-verify** (Gifsy config→form→sales capture w/ geo-fence→approve→reject→
-   recapture→coverage/export; the weekly-reminder job by hand) + a **~10-min real-phone smoke** (camera/geo/push).
-4. **Owner UAT** (owner UATs only once live → I own bug-free).
-5. **Prod cutover** — merge develop→main + owner-approved gate; prod pre-check the legacy visibility tables (prod
+1. *(optional)* synthetic staging capture to prove the write state machine live — owner to choose.
+2. **~10-min owner phone smoke** (camera / real-GPS geo-fence / web-push — the one device path).
+3. **Owner UAT** (owner UATs only once live → I own bug-free).
+4. **Prod cutover** — merge develop→main + owner-approved gate; prod pre-check the legacy visibility tables (prod
    dead-scaffolding may have rows — pre-check like scheme). Post-cutover **infra**: Cloud Scheduler for the weekly
    reminder + `VISIBILITY_REMINDER_SECRET`; the `visibility-media/` GCS lifecycle (Standard 4mo → Archive → delete 7y).
