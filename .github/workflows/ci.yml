@@ -35,7 +35,12 @@ jobs:
         run: npx prisma generate
 
       - name: TypeScript check
-        run: npx tsc --noEmit
+        # Type-check the deployable set (same fileset `nest build` compiles to ship),
+        # without emitting. The default tsconfig.json sets rootDir=./src + declaration,
+        # so a bare `tsc --noEmit` (default include=**/*) errors TS6059 on the out-of-src
+        # prisma one-off scripts + e2e spec; tsconfig.build.json excludes those. Unit
+        # specs are still type-checked by ts-jest in the test step below.
+        run: npx tsc --noEmit -p tsconfig.build.json
 
       - name: Run tests
         run: npm test -- --forceExit --no-coverage
