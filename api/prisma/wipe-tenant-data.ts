@@ -231,67 +231,55 @@ function buildSteps(clientIds: string[]): Step[] {
         tx.dataRequest.deleteMany({ where: viaUser }).then((r) => r.count),
     },
 
-    // ── Visibility tree ────────────────────────────────────────────────────
-    // VisibilitySubmission → partner.clientId (partner is a required relation).
+    // ── Visibility (POSM) tree ─────────────────────────────────────────────
+    // Rebuilt by 20260727120000_visibility_posm_rebuild: the old partner-photo
+    // models (VisibilityProgram/Submission/Approval/FraudLog) are DROPPED. Every
+    // model below carries clientId directly, so all scopes are direct — no
+    // parent-chain traversal. Order is children-first (hash/submission → capture
+    // → form version → form) to respect the FKs.
     {
-      model: 'VisibilityApproval',
-      scope: 'submission.partner.clientId in tenants',
-      count: (tx) =>
-        tx.visibilityApproval.count({
-          where: { submission: viaPartnerClient },
-        }),
-      del: (tx) =>
-        tx.visibilityApproval
-          .deleteMany({ where: { submission: viaPartnerClient } })
-          .then((r) => r.count),
-    },
-    {
-      model: 'VisibilityFraudLog',
-      scope: 'submission.partner.clientId in tenants',
-      count: (tx) =>
-        tx.visibilityFraudLog.count({
-          where: { submission: viaPartnerClient },
-        }),
-      del: (tx) =>
-        tx.visibilityFraudLog
-          .deleteMany({ where: { submission: viaPartnerClient } })
-          .then((r) => r.count),
-    },
-    {
-      // VisibilityImageHash has NO Prisma relation field but stores submissionId.
-      // Scope by submissionId ∈ (the tenants' submissions). Collected at run time.
       model: 'VisibilityImageHash',
-      scope: 'submissionId in (tenant VisibilitySubmission ids)',
-      count: async (tx) => {
-        const ids = await tenantSubmissionIds(tx, clientIds);
-        if (ids.length === 0) return 0;
-        return tx.visibilityImageHash.count({
-          where: { submissionId: { in: ids } },
-        });
-      },
-      del: async (tx) => {
-        const ids = await tenantSubmissionIds(tx, clientIds);
-        if (ids.length === 0) return 0;
-        return tx.visibilityImageHash
-          .deleteMany({ where: { submissionId: { in: ids } } })
-          .then((r) => r.count);
-      },
-    },
-    {
-      model: 'VisibilitySubmission',
-      scope: 'partner.clientId in tenants',
-      count: (tx) => tx.visibilitySubmission.count({ where: viaPartnerClient }),
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.visibilityImageHash.count({ where: { clientId: In } }),
       del: (tx) =>
-        tx.visibilitySubmission
-          .deleteMany({ where: viaPartnerClient })
+        tx.visibilityImageHash
+          .deleteMany({ where: { clientId: In } })
           .then((r) => r.count),
     },
     {
-      model: 'VisibilityProgram',
+      model: 'VisibilityCaptureSubmission',
       scope: 'clientId in tenants (direct)',
-      count: (tx) => tx.visibilityProgram.count({ where: { clientId: In } }),
+      count: (tx) =>
+        tx.visibilityCaptureSubmission.count({ where: { clientId: In } }),
       del: (tx) =>
-        tx.visibilityProgram
+        tx.visibilityCaptureSubmission
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'VisibilityCapture',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.visibilityCapture.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.visibilityCapture
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'VisibilityFormVersion',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.visibilityFormVersion.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.visibilityFormVersion
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'VisibilityForm',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.visibilityForm.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.visibilityForm
           .deleteMany({ where: { clientId: In } })
           .then((r) => r.count),
     },
@@ -852,7 +840,7 @@ function buildSteps(clientIds: string[]): Step[] {
     },
     {
       // Outlet → clientId. Partner FK is SetNull; salesAssignments + geoHistory +
-      // visibilitySubmissions gone above. Delete before ChannelPartner/OutletType.
+      // visibilityCaptures gone above. Delete before ChannelPartner/OutletType.
       model: 'Outlet',
       scope: 'clientId in tenants (direct)',
       count: (tx) => tx.outlet.count({ where: { clientId: In } }),
@@ -971,18 +959,6 @@ function buildSteps(clientIds: string[]): Step[] {
   ];
 
   return steps;
-}
-
-/** Collect the ids of every VisibilitySubmission owned by the target tenants. */
-async function tenantSubmissionIds(
-  tx: Prisma.TransactionClient,
-  clientIds: string[],
-): Promise<string[]> {
-  const rows = await tx.visibilitySubmission.findMany({
-    where: { partner: { clientId: { in: clientIds } } },
-    select: { id: true },
-  });
-  return rows.map((r) => r.id);
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
