@@ -11,6 +11,25 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
+- **🏗️ VISIBILITY (POSM) — BUILT + DUAL-AUDITED + FULLY GATED, committed `2e28ac4` on develop — NOT PUSHED (2026-07-27).**
+  The dead "visibility" photo scaffolding reworked into a recurring, per-window, **sales-captured, geo-fenced,
+  Gifsy-approved proof of point-of-sale material**, on the Scheme instrument (reward-free). Full contract + decisions
+  **D1–D17** + **§16 AS-BUILT** = `platform/docs/plans/VISIBILITY-POSM-DESIGN.md`; memory **[[visibility-posm]]** (read
+  BOTH first for any visibility/POSM work). **Owner UATs only once live → I own bug-free** (money-path-grade dual audit
+  DONE). Gate: **api nest 0 / jest 1931 · FE tsc 0 / vitest 2014.** Migration `20260727120000_visibility_posm_rebuild`
+  (destructive: drops the 4 dead photo tables + re-columns `visibility_image_hashes`; **abort-guard asserts 0 legacy
+  rows**; kept Excel `OutletVisibilityRecord` AMOUNT_UPLOAD path; repointed 4 live consumers). Dual adversarial audit
+  → **2 HIGH (geo-fence fail-OPEN→now fail-closed; no sales media-upload route→added `POST sales/media`) + 5 MED + LOWs
+  ALL FIXED.** Config in `program_settings.visibilityConfig`; **weekly web-push reminder + Tasks badge (reps only, owner-
+  confirmed)**; `visibility-media/` retention decided (Std-4mo→Archive→del-7y). **⚠️ REMAINING (owner-gated, resume HERE):**
+  (1) **guarded staging cleanup** — staging has **1 legacy `visibility_programs` row** (dead) that would trip the
+  migration abort-guard → back up + delete (owner-OK'd staging write) BEFORE push [pre-checked via `gifsy-oneoff-staging`,
+  guard `current_database='gifsy_staging'`]; (2) **push develop → staging** + migration applies + verify serving SHA/
+  migration; (3) **full role-matrix staging runtime-verify** (Gifsy config→form→sales capture w/ geo-fence→approve→reject→
+  recapture→coverage/export; weekly-reminder by hand) + **~10-min real-phone smoke** (camera/geo/push); (4) **owner UAT**;
+  (5) **prod cutover** (merge→main + owner gate; prod pre-check legacy visibility tables) + post-cutover infra (Cloud
+  Scheduler + `VISIBILITY_REMINDER_SECRET`; the GCS lifecycle). Built via ~10 orchestrated sub-agents. **NEXT = owner OK
+  for the 1-row staging cleanup → push.**
 - **✅ SCHEME DATA-COLLECTION — LIVE IN PROD (cutover #15 `bda9bf3`, 2026-07-27):** the dormant "scheme" feature
   reworked into a **temporary, Gifsy-admin-built data-collection instrument** — enrollment/registration +
   fully-custom form capture ONLY (**no reward/points engine**; rewards stay on the target/achievement/credit

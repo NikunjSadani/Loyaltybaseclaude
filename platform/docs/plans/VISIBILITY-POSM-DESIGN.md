@@ -1,6 +1,9 @@
 # Visibility (POSM) — Design Doc (locked pre-build)
 
-> Status: **DESIGN — decisions locked with owner 2026-07-27. Awaiting final sign-off on the wave plan before code.**
+> Status: **✅ BUILT (W0–W3) + dual-audited + fully gated + committed `2e28ac4` on develop — NOT pushed.**
+> Next step after this doc: guarded staging cleanup of 1 legacy `visibility_programs` row (owner-OK'd) → push
+> develop → staging deploys + migration applies → full role-matrix runtime-verify → owner UAT → prod cutover.
+> See **§16 AS-BUILT + STATUS** (the authoritative current-state record) at the bottom.
 > Feature-name (user-facing + internal): **Visibility** (proof of POSM — point-of-sale material).
 > This REPLACES the half-built photo-capture scaffolding in the existing `visibility` module and grafts on the
 > proven **Scheme** capture instrument. See §8 (audit) for what exists today.
@@ -200,3 +203,72 @@ Sales: `GET /sales/eligible` (in-scope outlets + current-window status, reach+le
 
 Retire the dead scaffolding as part of W0/W2 (no separate wave). Money-path-grade discipline throughout (owner UATs
 only once live).
+
+---
+
+## 16. AS-BUILT + STATUS (authoritative — 2026-07-27)
+
+**✅ BUILT + dual-audited + fully gated. Committed `2e28ac4` on develop. NOT pushed.**
+Gate: **api `nest build` 0 · jest 86 suites / 1931 · FE `tsc` 0 · vitest 207 files / 2014.**
+
+### DB (migration `20260727120000_visibility_posm_rebuild`, guarded destructive)
+New models: `VisibilityForm`(+`VisibilityFormVersion`) — per-tenant versioned capture form; `VisibilityCapture`
+— current capture per `@@unique([clientId, outletId, windowKey])` (status `VisibilityCaptureStatus` = SUBMITTED|
+APPROVED|REJECTED); `VisibilityCaptureSubmission` — append-only version history; `VisibilityImageHash` — dup
+detection. **Dropped** the dead photo tables (`visibility_programs`/`_submissions`/`_approvals`/`_fraud_log`) +
+re-columned `visibility_image_hashes`; abort-guard asserts 0 legacy rows. **Kept** the Excel `OutletVisibilityRecord`
+(AMOUNT_UPLOAD) path untouched. Repointed 4 live consumers off the dropped model (ops dashboard, tenant report,
+KYC delete-safety, admin pending-count).
+
+### Backend (`api/src/visibility/`)
+`visibility-window.helper.ts` (IST `windowKeyForDate`/`windowsForMonth`/`isWindowClosed` — reuses `IST_OFFSET_MIN`),
+`visibility-form.helper.ts` (trimmed field engine + `parseGpsPoint` range-validation), `visibility-media.service.ts`
+(upload/auth-gated view + sha256 dup-hash), `visibility-admin.service.ts` (config/versioned-form/scope), capture/
+review/report/notify services, 5 controllers. Config in `program_settings.visibilityConfig` {outletScope,
+frequencyPerMonth, allowedSalesLevels, geoFence:{enabled,radiusMeters}} via `TenantSettingsService`.
+**Endpoints** (base `/v1/visibility`): admin `GET/PUT config`, `GET/PUT form`, `GET outlets`, `POST media`,
+auth-gated `GET captures/media?key=` (GIFSY+CLIENT_ADMIN+sales, tenant-pinned); sales `GET sales/eligible`,
+`GET sales/form`, `POST sales/media`, `GET outlet/:id/status`, `POST capture`, `POST captures/:id/resubmit`;
+review `GET captures`, `GET captures/:id`, `POST captures/:id/{approve,reject}`; report `GET report`,
+`GET report/tenant`, `GET report/export`; `@Public POST weekly-reminder` (secret-gated, fail-closed).
+
+### Frontend (`platform/src/`)
+`lib/visibility.ts` (`visibilityApi`) + `lib/visibility-types.ts` + `lib/visibility-window.ts`;
+`components/visibility/VisibilityCaptureForm.tsx` (camera `capture` + per-shot instruction/sample + GPS-on-submit +
+client-side JPEG compression); admin `VisibilityConfigEditor`/`VisibilityFormBuilder`/`VisibilityCaptureQueue`
+(geo-pin, dup-matches, controlled reject reasons)/`VisibilityReportView`/`VisibilityAmountUploadPanel`;
+`app/admin/visibility/**` (mode-branched: PHOTO_APPROVAL tabs vs AMOUNT_UPLOAD Excel) + `admin/visibility-reports/**`
+(tenant read-only); `app/sales/visibility/**` (list + `VisibilityCaptureSheet`); sales Tasks badge (mode-aware,
+`canCapture`-driven so manager reach-levels get it) + `sales/kyc/[id]` "Visibility — this period" card + capture
+redirect. Retired `partner/visibility/**`.
+
+### Dual adversarial audit (W3) — ALL FIXED
+2 HIGH: **geo-fence fail-OPEN** (garbage/absent client GPS → now fail-CLOSED block when fence-on + reference exists;
+`parseGpsPoint` range-validates; missing *reference* geo still allow-but-flag) · **no sales media upload route**
+(added `POST sales/media`). 5 MED: resubmit-across-window → 409 window-guard · coverage numerator now
+scope-intersected (≤100%) + submit tightened to deactivated-excluded · geo reference confirmed per-outlet
+(owner-group Option-B: each outlet keeps its own ChannelPartner, so KYC board-geo is per-outlet — non-issue) ·
+CLIENT_ADMIN can open export photo links (method-level role override, tenant-pinned) · export N+1 batched. LOWs:
+cross-tenant CAMERA-key rejected at submit · reminder null-userId guard · sales granted `visibility:read/write`
+perms (future RBAC_ENFORCEMENT-safe). VERIFIED CLEAN: cross-tenant isolation, first-approved-wins/versioning races,
+reach+level scoping, IST windows, dup-hash, media path-traversal, reminder secret gate, media RBAC (auth-gated
+app routes only — no public GCS URLs), XSS.
+
+### Owner decisions folded in
+Reward-free; single per-tenant config (D17); window splits 1–4× (2×=[1-15][16-end], 3×/4× equal-day remainder-last);
+approved-capture satisfies the window, reject re-opens (versioned), late allowed same-month/flagged, no roll-over;
+geo-fence per-tenant on/off + radius (ref = outlet KYC board-photo geo, no-ref = allow-but-flag);
+**multi-photo with per-shot instructions + sample images (v1)**; capture gated to configured `SalesHierarchyLevel`
+codes + downline reach, others view-only; **weekly reminder IN v1 = in-app web-push + Tasks badge, capturing reps
+only**; AMOUNT_UPLOAD Excel mode kept as the alternate `visibilityCaptureMode`.
+
+### REMAINING (owner-gated)
+1. **Guarded staging cleanup** — staging has **1 legacy `visibility_programs` row** (dead scaffolding) that trips the
+   migration abort-guard; back it up + delete (owner-OK'd staging write) BEFORE pushing.
+2. **Push develop → staging** deploys + migration applies (creates the new tables) → verify migration + serving SHA.
+3. **Full role-matrix staging runtime-verify** (Gifsy config→form→sales capture w/ geo-fence→approve→reject→
+   recapture→coverage/export; the weekly-reminder job by hand) + a **~10-min real-phone smoke** (camera/geo/push).
+4. **Owner UAT** (owner UATs only once live → I own bug-free).
+5. **Prod cutover** — merge develop→main + owner-approved gate; prod pre-check the legacy visibility tables (prod
+   dead-scaffolding may have rows — pre-check like scheme). Post-cutover **infra**: Cloud Scheduler for the weekly
+   reminder + `VISIBILITY_REMINDER_SECRET`; the `visibility-media/` GCS lifecycle (Standard 4mo → Archive → delete 7y).
