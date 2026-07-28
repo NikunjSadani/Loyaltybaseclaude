@@ -11,6 +11,25 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
+- **🏗️ ACTIVE / NEXT BUILD — VISIBILITY-LED PAYOUTS: 194C AUTO-INVOICING + CONFIGURABLE TDS. Design ✅ COMPLETE + owner-signed
+  (decisions D1–D14); NO code yet. Full spec = `platform/docs/plans/VISIBILITY-PAYOUT-TDS-INVOICING-DESIGN.md`; memory
+  [[visibility-payout-tds-invoicing]] — READ BOTH FIRST.** Reconciled against current code via a 3-stream audit: **most is
+  already built** (the `api/src/tds/*` 194C engine — platform-wide PAN aggregation, ₹30k/₹1L thresholds, 1/2/20% rates,
+  retroactive jump; the `api/src/invoices/*` self-billed AutoInvoice — GST CGST/SGST-vs-IGST from GSTIN-vs-WB19, editable
+  number, partner FE view/edit, client PDF). **GAPS to build:** (1) per-tenant **config** `{visibilityPayoutSection 194R|194C,
+  tdsMethodology DEDUCT|GROSS_UP}` **Gifsy-set** + explicit `payoutStream=VISIBILITY|INCENTIVE` on the credit field (replaces
+  overloaded `isSeparatePayout`); (2) **DEDUCT** method + per-PAN **carry-forward** ledger (currently gross-up-only); (3)
+  **GROSS-UP** = at-threshold **"TDS invoice"** (retailer's name, GST applies, body NOT paid → deposited as TDS, settles the
+  invoice) + **pro-rata tenant recovery** ledger ("in lieu of TDS" — dashboard only, never on invoice); (4) invoice trigger →
+  **at payout-Excel CONFIRM** (before payout), **lock at UTR-entry** (not PAID); (5) **GST HOLDBACK** — pay base now, hold GST,
+  release on retailer's deposit-proof via a **Gifsy-only GST-reimbursement screen**; (6) legend *"This is an automated invoice.
+  No Signature is required."* + narration *"Payment for Marketing and support services for the month of <Month, Year>"*; (7)
+  reports (GST-reg-type, **unregistered/RCM** invoice list, tenant recovery). **194R = separate later workstream** (config +
+  routing built now). Portal split: 194C-engine/config/recovery/GST-reimbursement/RCM = **Gifsy portal**; payout-Excel-upload +
+  read-only own invoices/reports/own-recovery-liability = **tenant portal**; invoice view+number-edit = **retailer portal**.
+  **▶ NEXT = Wave 0 (schema + migration + frozen contracts) — bring migration SQL to owner before any DB touch.** Phase plan +
+  ETAs (~4.5–5.5d, W0 serial → W1/W2 3-parallel-streams each → W3 dual money-path audit+gate+staging → W4 cutover) in §8 of the
+  spec. Money path → **dual adversarial audit mandatory** [[audit-every-build-item]].
 - **🚀 VISIBILITY (POSM) — ✅ LIVE IN PROD — cutover #16 `4ebf12c` (2026-07-28), DORMANT + post-cutover infra DONE.**
   Prod migration `20260727120000_visibility_posm_rebuild` applied (0 legacy rows → abort-guard passed), 5 new tables, `/v1/visibility`
   401-wired, Deoleo login 200, 0 captures/forms → zero Deoleo impact until a Gifsy admin sets `visibilityConfig`. Full write
@@ -477,8 +496,17 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 Greet. State current status, then present the open pickups and ask which to take (do NOT hard-lead one — the next move is
 the owner's choice among the leftovers below).
 
-**🏗️ ACTIVE WORK — PARTNER → MULTIPLE OUTLETS (parent-child owner groups). Full AS-BUILT + cutover checklist =
-`platform/docs/plans/PARTNER-MULTI-OUTLET.md` §9; memory [[partner-multi-outlet]] (READ BOTH FIRST).** Owner-driven, multi-wave
+**🏗️ ACTIVE / NEXT BUILD — VISIBILITY-LED PAYOUTS: 194C AUTO-INVOICING + CONFIGURABLE TDS.** Design ✅ COMPLETE + owner-signed
+(D1–D14); **NO code yet — resume at Wave 0.** Full spec = `platform/docs/plans/VISIBILITY-PAYOUT-TDS-INVOICING-DESIGN.md`;
+memory [[visibility-payout-tds-invoicing]] — **READ BOTH FIRST.** Summary + gaps + phase-plan/ETAs are in the CURRENT STATE
+bullet at the top of this file. **▶ Wave 0 = schema + migration + frozen contracts; bring the migration SQL to the owner
+BEFORE any DB touch.** Money path → **dual adversarial money-path audit mandatory** before done. (Orchestrate: W1/W2 are
+3-parallel-streams each.)
+
+---
+
+**✅ SHIPPED — PARTNER → MULTIPLE OUTLETS (parent-child owner groups) — LIVE IN PROD (cutover #14 `eca351e`, 2026-07-24).**
+Full AS-BUILT + cutover record = `platform/docs/plans/PARTNER-MULTI-OUTLET.md` §9; memory [[partner-multi-outlet]]. Owner-driven, multi-wave
 orchestrated build. **✅ WAVE 1 + 2 + 3 + 4 ALL DONE — the FULL feature is complete on develop (verify HEAD via `git log`;
 develop HEAD = docs `a7fca57` on top of feature `04008d0`), gate GREEN (api jest 1745 · nest 0 · FE vitest 1984 · tsc 0),
 adversarial-audited + staging-verified. NOT in prod — owner-gated cutover pending.**
