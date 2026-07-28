@@ -143,6 +143,7 @@ jobs:
               PUSH_DRAIN_SECRET=PUSH_DRAIN_SECRET_STAGING:latest,\
               EXPIRE_SWEEP_SECRET=EXPIRE_SWEEP_SECRET_STAGING:latest,\
               KYC_CLEANUP_SECRET=KYC_CLEANUP_SECRET_STAGING:latest,\
+              VISIBILITY_REMINDER_SECRET=VISIBILITY_REMINDER_SECRET_STAGING:latest,\
               CORS_ORIGINS=CORS_ORIGINS_STAGING:latest"
 
   # ── Build & Deploy Frontend (staging) ────────────────────────────────────────

@@ -167,7 +167,8 @@ jobs:
               VAPID_PRIVATE_KEY=VAPID_PRIVATE_KEY:latest,\
               PUSH_DRAIN_SECRET=PUSH_DRAIN_SECRET:latest,\
               EXPIRE_SWEEP_SECRET=EXPIRE_SWEEP_SECRET:latest,\
-              KYC_CLEANUP_SECRET=KYC_CLEANUP_SECRET:latest"
+              KYC_CLEANUP_SECRET=KYC_CLEANUP_SECRET:latest,\
+              VISIBILITY_REMINDER_SECRET=VISIBILITY_REMINDER_SECRET:latest"
 
   # ── Build & Deploy Frontend ──────────────────────────────────────────────────
   deploy-frontend:

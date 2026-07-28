@@ -91,17 +91,24 @@ the Scheme decision; the dead reward columns in the current module are removed, 
   per-tenant (visibilityEnabled + PHOTO_APPROVAL) the current window's in-scope outlets NOT approved-captured →
   one aggregated push per rep with a click-URL to the visibility Tasks. Sample push:
   "Deoleo Visibility: {N} outlet(s) still need a photo this period (due {date}). Tap to capture."
-- **Go-live infra (owner-gated at cutover):** create the weekly Cloud Scheduler job + a `VISIBILITY_REMINDER_SECRET`
-  secret bound on the api service (mirrors the KYC-cleanup scheduler setup). A rep with no push subscription simply
-  gets nothing pushed — the Tasks badge is the always-visible fallback.
-- **Photo retention lifecycle — DECIDED (owner, 2026-07-27): Standard 4 months → Archive → delete at 7 years.**
-  GCS Object Lifecycle scoped to the `visibility-media/` prefix (NOT the whole bucket — KYC/invoices/logos
-  untouched): **age 120d → SetStorageClass ARCHIVE; age 2555d (7y) → Delete.** (Archive's 365-day min-duration is
-  satisfied — objects sit in Archive ~120d→2555d. Archived photos stay instantly viewable via the same auth-gated
-  link; only a tiny per-view retrieval fee, no restore step.) All images today live in the single private bucket
-  `gifsy-platform-files`, served via an auth-gated backend stream; visibility photos → `visibility-media/<clientId>/`.
-  No lifecycle exists today. **Apply via terraform at/near go-live (owner-gated infra; harmless to pre-create since
-  the prefix has no objects yet). NOTE separately: KYC docs have no retention policy — a future compliance decision.**
+- **Go-live infra — ✅ DONE 2026-07-28 (post cutover #16):** `VISIBILITY_REMINDER_SECRET` (prod) +
+  `VISIBILITY_REMINDER_SECRET_STAGING` Secret-Manager secrets created + granted to `gifsy-api-sa` + bound
+  additively on both api services + wired DURABLY into `deploy.yml`/`deploy-staging.yml` `--set-secrets`
+  (KYC-cleanup lesson: a manual `gcloud run update` is wiped by the next `--set-secrets` deploy). Weekly
+  Cloud Scheduler `visibility-reminder-prod` / `-staging` (Mon 09:00 IST, header-gated `x-visibility-reminder-secret`,
+  no OIDC — mirrors `kyc-cleanup-*`). VERIFIED: prod correct-secret → `201 {tenants:0,...}` (dormant), wrong/no
+  secret → 403 fail-closed; staging correct-secret → `201 {tenants:1,repsNotified:141,outletsPending:694}` (proves
+  the compute+enqueue path end-to-end). A rep with no push subscription simply gets nothing pushed — the Tasks
+  badge is the always-visible fallback.
+- **Photo retention lifecycle — ✅ DONE 2026-07-28 (owner "now"): Standard → Archive → delete at 7 years.**
+  GCS Object Lifecycle on `gifsy-platform-files` scoped to the `visibility-media/` prefix: **age 120d →
+  SetStorageClass ARCHIVE; age 2555d (7y) → Delete** (added ALONGSIDE the 2 pre-existing rules — whole-bucket
+  NEARLINE@90d + tmp/ Delete@730d — both preserved; terraform `gcs-memorystore.tf` synced to match, no drift).
+  ⚠️ NUANCE: the pre-existing whole-bucket NEARLINE@90d ALSO applies to visibility-media (GCS lifecycle has no
+  prefix-exclusion), so visibility photos actually flow **Standard → NEARLINE@90d → ARCHIVE@120d → Delete@2555d** —
+  cheaper than the literal "Standard 4mo" but functionally equivalent (all classes instant-access; ARCHIVE min-
+  duration 365d satisfied 120d→2555d). Archived photos stay instantly viewable via the same auth-gated link (tiny
+  per-view retrieval fee, no restore step). NOTE separately: KYC docs have no retention policy — future compliance.
 
 ---
 
