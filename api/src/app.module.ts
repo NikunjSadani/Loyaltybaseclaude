@@ -40,6 +40,7 @@ import { AdminProgramsModule } from './admin-programs/admin-programs.module';
 import { TargetsModule }      from './targets/targets.module';
 import { InvoicesModule }     from './invoices/invoices.module';
 import { TdsModule }          from './tds/tds.module';
+import { TdsInvoicingModule } from './tds-invoicing/tds-invoicing.module';
 import { PushModule }         from './push/push.module';
 import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
 // Phase S (S1): World-A domain modules deleted. The real domain (users, partners,
@@ -95,6 +96,7 @@ import { TenantRoutingModule } from './tenant-routing/tenant-routing.module';
     TargetsModule,
     InvoicesModule,
     TdsModule,
+    TdsInvoicingModule,
     PushModule,
     TenantRoutingModule,
   ],

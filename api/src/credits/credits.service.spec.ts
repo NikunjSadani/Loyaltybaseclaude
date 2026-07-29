@@ -4,7 +4,7 @@
 // Run: npx jest src/credits/credits.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -15,6 +15,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
+import { InvoicesService } from '../invoices/invoices.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   CreateBatchDto,
@@ -42,16 +43,29 @@ const mockTx = {
     update: jest.fn(),
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     findFirst: jest.fn(),
+    // createBatch now generates the code + creates UNDER a per-(clientId, period) advisory lock in a tx.
+    count: jest.fn().mockResolvedValue(0),
+    create: jest.fn(),
   },
   creditPayoutEntry: { createMany: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
-  creditPayoutDownload: { create: jest.fn(), update: jest.fn() },
+  // downloadCode is now generated INSIDE the download tx (tx.creditPayoutDownload.count) under PDLOCK.
+  creditPayoutDownload: { create: jest.fn(), update: jest.fn(), count: jest.fn().mockResolvedValue(0) },
   creditReversal: {
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     findFirst: jest.fn(),
     update: jest.fn().mockResolvedValue({}),
   },
-  outlet: { findFirst: jest.fn() },
+  // FIX-8: the visibility TDS plan now reads INSIDE the download $transaction (tx), so the
+  // cross-tenant PAN aggregation runs behind the per-PAN advisory lock (tx.$executeRaw).
+  outlet: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+  channelPartner: { findMany: jest.fn().mockResolvedValue([]) },
   wallet: { findFirst: jest.fn(), upsert: jest.fn().mockResolvedValue({ id: 'w1' }) },
+  // Visibility-payout TDS read + write targets (atomic with the download / confirm).
+  tdsDeductionEntry: { createMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+  tdsRecoveryEntry: { createMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+  autoInvoice: { updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+  // FIX-8 advisory lock — pg_advisory_xact_lock(hashtextextended(...)).
+  $executeRaw: jest.fn().mockResolvedValue(0),
 };
 
 const mockPrisma = {
@@ -61,12 +75,15 @@ const mockPrisma = {
   creditPayoutDownload: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn() },
   creditReversal: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn(), count: jest.fn() },
   // Post-commit PUSH loop resolves each credited partner's userId to enqueue a WALLET_POINTS_EARNED push.
-  // (Also resolves ownerName+phone for the deoleo_points_credit WhatsApp.)
-  channelPartner: { findFirst: jest.fn() },
+  // (Also resolves ownerName+phone for the deoleo_points_credit WhatsApp.) findMany = TDS PAN resolution.
+  channelPartner: { findFirst: jest.fn(), findMany: jest.fn() },
   // Post-commit points-credit WhatsApp reads the partner's redeemable balance AFTER the credit.
   wallet: { findFirst: jest.fn() },
   outlet: { findMany: jest.fn() },
   outletTypeClientConfig: { findMany: jest.fn() },
+  // Visibility-payout TDS reads (cross-tenant PAN aggregation + carry-forward + one-per-PAN/FY).
+  tdsDeductionEntry: { findMany: jest.fn() },
+  autoInvoice: { findMany: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
 };
 
@@ -91,6 +108,14 @@ let mockCreditsPayouts: {
 };
 const mockTenantSettings = {
   getEffectiveSettings: jest.fn(async () => ({ creditsPayouts: mockCreditsPayouts })),
+  // Per-tenant TDS policy resolved once at confirm + frozen onto each entry (W0-B).
+  resolveTdsPolicy: jest.fn(async () => ({ section: 'SEC_194C', methodology: 'GROSS_UP' })),
+};
+
+// Stream B: SERVICE invoice-at-confirm + gross-up TDS invoice-at-download are delegated here.
+const mockInvoicesService = {
+  generateForBatch: jest.fn(async () => ({ generated: 0, linked: 0, skipped: [] })),
+  createTdsInvoice: jest.fn(async () => ({ invoiceId: 'tds1', gstPaise: 0n, gstApplicable: false })),
 };
 
 const admin: JwtPayload = {
@@ -132,11 +157,40 @@ describe('CreditsService', () => {
     mockTx.wallet.findFirst.mockResolvedValue(null);
     // Default: no matching payout entries for PAYOUT-reversal path (tests override per case).
     mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
+    // FIX-7: the guarded PROCESSING claim reads claimed.count — echo the where.id.in length so the
+    // happy path claims exactly what it selected (a race test overrides this to a smaller count).
+    // FIX-C: uploadUtr flips a SINGLE entry per call (where.id is a string) — return count 1 so the
+    // guarded flip is treated as transitioned (a concurrent-race test overrides this to 0).
+    mockTx.creditPayoutEntry.updateMany.mockImplementation(
+      async (arg: { where?: { id?: { in?: string[] } | string } }) => {
+        const id = arg?.where?.id;
+        if (id && typeof id === 'object' && Array.isArray(id.in)) return { count: id.in.length };
+        if (typeof id === 'string') return { count: 1 };
+        return { count: 0 };
+      },
+    );
+    // FIX-8: tx-scoped plan reads default to empty (TDS-engine tests override per case).
+    mockTx.outlet.findMany.mockResolvedValue([]);
+    mockTx.channelPartner.findMany.mockResolvedValue([]);
+    mockTx.tdsDeductionEntry.findMany.mockResolvedValue([]);
+    mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]);
+    mockTx.autoInvoice.findMany.mockResolvedValue([]);
+    mockTx.$executeRaw.mockResolvedValue(0);
 
     // Default: partner resolves for the post-commit PUSH + WhatsApp; wallet balance read.
     mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'partnerUser1', ownerName: 'Ravi Traders', phone: '9900000041' });
     mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 500 });
     mockMsg91.sendWhatsappTemplate.mockResolvedValue(undefined);
+
+    // Visibility-payout TDS defaults: no visibility fields / no PAN history / no prior TDS —
+    // so the legacy confirm + payout-download tests run the engine as a no-op.
+    mockPrisma.creditField.findMany.mockResolvedValue([]);
+    mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+    mockPrisma.tdsDeductionEntry.findMany.mockResolvedValue([]);
+    mockPrisma.autoInvoice.findMany.mockResolvedValue([]);
+    mockTenantSettings.resolveTdsPolicy.mockResolvedValue({ section: 'SEC_194C', methodology: 'GROSS_UP' });
+    mockInvoicesService.generateForBatch.mockResolvedValue({ generated: 0, linked: 0, skipped: [] });
+    mockInvoicesService.createTdsInvoice.mockResolvedValue({ invoiceId: 'tds1', gstPaise: 0n, gstApplicable: false });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -146,6 +200,7 @@ describe('CreditsService', () => {
         { provide: Msg91Service, useValue: mockMsg91 },
         { provide: WalletService, useValue: mockWalletService },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
+        { provide: InvoicesService, useValue: mockInvoicesService },
       ],
     }).compile();
     service = module.get(CreditsService);
@@ -214,8 +269,9 @@ describe('CreditsService', () => {
 
   describe('createBatch', () => {
     it('generates a CB code from the per-client count and persists rows', async () => {
-      mockPrisma.creditBatch.count.mockResolvedValue(2);
-      mockPrisma.creditBatch.create.mockResolvedValue({ id: 'b1' });
+      // Code gen + create now run inside a per-(clientId, period) advisory-locked tx.
+      mockTx.creditBatch.count.mockResolvedValue(2);
+      mockTx.creditBatch.create.mockResolvedValue({ id: 'b1' });
       const dto: CreateBatchDto = {
         period: '2026-05',
         totalOutlets: 1,
@@ -224,7 +280,8 @@ describe('CreditsService', () => {
         rows: [],
       };
       await service.createBatch(admin, dto);
-      const data = mockPrisma.creditBatch.create.mock.calls[0][0].data;
+      expect(mockTx.$executeRaw).toHaveBeenCalled(); // per-(clientId, period) advisory lock acquired
+      const data = mockTx.creditBatch.create.mock.calls[0][0].data;
       expect(data.clientId).toBe('deoleo');
       expect(data.batchCode).toBe('CB-2026-05-003');
       expect(data.uploadedBy).toBe('admin1');
@@ -1176,6 +1233,10 @@ describe('CreditsService', () => {
         entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) }],
       });
       mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      // FIX-C: entries re-read inside the tx.
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: BigInt(10000), tdsDeductedPaise: 0n, tdsSection: null, period: '2026-05' },
+      ]);
       // FIX C: the recipient is now the KYC-verified partner phone, not outlet.phone.
       mockPrisma.outlet.findMany.mockResolvedValue([
         { outletCode: 'O1', name: 'A', partnerId: 'p1', partner: { ownerName: 'Ravi Traders', phone: '9900000041' } },
@@ -1188,8 +1249,9 @@ describe('CreditsService', () => {
       };
       expect(res.applied).toBe(true);
       expect(res.paidCount).toBe(1);
-      expect(mockTx.creditPayoutEntry.update).toHaveBeenCalledWith({
-        where: { id: 'e1' },
+      // FIX-C: the flip is a GUARDED updateMany (status:'PROCESSING'), not an unconditional update.
+      expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+        where: { id: 'e1', status: 'PROCESSING' },
         data: { status: 'PAID', utr: 'UTR123456', paidAt: expect.any(Date) },
       });
       expect(mockTx.creditPayoutDownload.update.mock.calls[0][0].data.status).toBe('PAID');
@@ -1211,6 +1273,10 @@ describe('CreditsService', () => {
           entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(15000) }],
         });
         mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+        // FIX-C: entries re-read inside the tx.
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: BigInt(15000), tdsDeductedPaise: 0n, tdsSection: null, period: '2026-05' },
+        ]);
         // FIX C: recipient = partner.phone (the KYC contact mobile), not outlet.phone.
         mockPrisma.outlet.findMany.mockResolvedValue([
           { outletCode: 'O1', name: 'A', partnerId: 'p1', partner: { ownerName: 'Ravi Traders', phone: '9900000041' } },
@@ -1366,7 +1432,7 @@ describe('CreditsService', () => {
       it('allows rows within both caps', async () => {
         mockCreditsPayouts.safetyCapPoints = 50000;
         mockCreditsPayouts.safetyCapInr = 100000;
-        mockPrisma.creditBatch.create.mockResolvedValue({ id: 'b1' });
+        mockTx.creditBatch.create.mockResolvedValue({ id: 'b1' });
         pinDate('2026-06-10T08:00:00.000Z');
         const dto = batchDto('2026-06', CreditAwardType.POINTS, 50000); // exactly at the cap
         dto.rows.push({
@@ -1381,12 +1447,12 @@ describe('CreditsService', () => {
           status: 'OK',
         } as unknown as CreateBatchDto['rows'][number]);
         await expect(service.createBatch(admin, dto)).resolves.toBeDefined();
-        expect(mockPrisma.creditBatch.create).toHaveBeenCalledTimes(1);
+        expect(mockTx.creditBatch.create).toHaveBeenCalledTimes(1);
       });
 
       it('ignores non-OK rows when checking caps', async () => {
         mockCreditsPayouts.safetyCapPoints = 50000;
-        mockPrisma.creditBatch.create.mockResolvedValue({ id: 'b1' });
+        mockTx.creditBatch.create.mockResolvedValue({ id: 'b1' });
         pinDate('2026-06-10T08:00:00.000Z');
         const dto = batchDto('2026-06', CreditAwardType.POINTS, 999999); // over cap…
         (dto.rows[0] as unknown as { status: string }).status = 'ERROR'; // …but not OK
@@ -1411,17 +1477,17 @@ describe('CreditsService', () => {
 
       it('allows a PRIOR-month batch created ON/BEFORE the cutoff day', async () => {
         mockCreditsPayouts.monthCutoffDay = 28;
-        mockPrisma.creditBatch.create.mockResolvedValue({ id: 'b1' });
+        mockTx.creditBatch.create.mockResolvedValue({ id: 'b1' });
         // Today = 28 June (== cutoff, still open); batch period = May.
         pinDate('2026-06-28T08:00:00.000Z');
         const dto = batchDto('2026-05', CreditAwardType.POINTS, 100);
         await expect(service.createBatch(admin, dto)).resolves.toBeDefined();
-        expect(mockPrisma.creditBatch.create).toHaveBeenCalledTimes(1);
+        expect(mockTx.creditBatch.create).toHaveBeenCalledTimes(1);
       });
 
       it('does NOT gate a CURRENT-month batch even after the cutoff day', async () => {
         mockCreditsPayouts.monthCutoffDay = 5;
-        mockPrisma.creditBatch.create.mockResolvedValue({ id: 'b1' });
+        mockTx.creditBatch.create.mockResolvedValue({ id: 'b1' });
         // Today = 29 June (past cutoff 5) but the batch period IS the current month.
         pinDate('2026-06-29T08:00:00.000Z');
         const dto = batchDto('2026-06', CreditAwardType.POINTS, 100);
@@ -1490,6 +1556,565 @@ describe('CreditsService', () => {
         expect(emailCalls).toHaveLength(1);
         expect(emailCalls[0].recipientEmail).toBe('ops@gifsy.in');
       });
+    });
+  });
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // Stream B — Visibility-led payouts: stamp+invoice at confirm, DEDUCT/GROSS-UP at
+  // download, lock at UTR. Money is BigInt paise; every write is idempotent.
+  // ════════════════════════════════════════════════════════════════════════════
+
+  describe('visibility-payout TDS (Stream B)', () => {
+    // ── Stamp + invoice at CONFIRM ──────────────────────────────────────────────
+    describe.each([
+      ['SEC_194C', 'DEDUCT'],
+      ['SEC_194C', 'GROSS_UP'],
+      ['SEC_194R', 'DEDUCT'],
+      ['SEC_194R', 'GROSS_UP'],
+    ])('confirm freezes the TDS treatment (%s / %s)', (section, methodology) => {
+      it('stamps tdsSection (VISIBILITY→section, INCENTIVE→194R) + tdsMethodology by value', async () => {
+        mockTenantSettings.resolveTdsPolicy.mockResolvedValue({ section, methodology });
+        mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+        mockPrisma.creditBatch.findFirst.mockResolvedValue({
+          id: 'b1', status: 'PENDING_CONFIRM', period: '2026-05', uploadedBy: 'admin1',
+          totalOutlets: 2, totalPoints: 0, totalPayoutPaise: BigInt(0),
+          rows: [
+            { outletId: 'O1', outletName: 'A', fieldId: 'f-vis', fieldName: 'Visibility', amount: 10000, narration: '', awardType: 'PAYOUT', status: 'OK' },
+            { outletId: 'O2', outletName: 'B', fieldId: 'f-inc', fieldName: 'Incentive', amount: 20000, narration: '', awardType: 'PAYOUT', status: 'OK' },
+          ],
+        });
+
+        await service.confirmBatch(admin, 'b1');
+
+        const data = mockTx.creditPayoutEntry.createMany.mock.calls[0][0].data as Array<{
+          fieldId: string; tdsSection: string; tdsMethodology: string;
+        }>;
+        const vis = data.find((d) => d.fieldId === 'f-vis')!;
+        const inc = data.find((d) => d.fieldId === 'f-inc')!;
+        expect(vis.tdsSection).toBe(section);
+        expect(inc.tdsSection).toBe('SEC_194R'); // INCENTIVE is always a benefit-in-kind
+        expect(vis.tdsMethodology).toBe(methodology);
+        expect(inc.tdsMethodology).toBe(methodology);
+        // Invoice-at-confirm delegated for the visibility field(s) only.
+        expect(mockInvoicesService.generateForBatch).toHaveBeenCalledWith(
+          mockTx,
+          expect.objectContaining({ clientId: 'deoleo', period: '2026-05', batchId: 'b1', visibilityFieldIds: ['f-vis'] }),
+        );
+      });
+    });
+
+    it('confirm does NOT invoice when the tenant has no visibility fields', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([]);
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', status: 'PENDING_CONFIRM', period: '2026-05', uploadedBy: 'admin1',
+        totalOutlets: 1, totalPoints: 0, totalPayoutPaise: BigInt(0),
+        rows: [
+          { outletId: 'O1', outletName: 'A', fieldId: 'f-inc', fieldName: 'Incentive', amount: 10000, narration: '', awardType: 'PAYOUT', status: 'OK' },
+        ],
+      });
+      await service.confirmBatch(admin, 'b1');
+      expect(mockInvoicesService.generateForBatch).not.toHaveBeenCalled();
+    });
+
+    it('a malformed tdsPolicy fails the confirm CLOSED before any write (resolveTdsPolicy throws)', async () => {
+      mockTenantSettings.resolveTdsPolicy.mockRejectedValue(new BadRequestException('bad policy'));
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', status: 'PENDING_CONFIRM', period: '2026-05', uploadedBy: 'admin1',
+        totalOutlets: 1, totalPoints: 0, totalPayoutPaise: BigInt(0), rows: [],
+      });
+      await expect(service.confirmBatch(admin, 'b1')).rejects.toBeInstanceOf(BadRequestException);
+      // The atomic money tx never ran.
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    // ── DEDUCT at download ──────────────────────────────────────────────────────
+    /** A KYC-approved, active outlet with the given tax profile. */
+    function bankOutlet(entityType: string, gstRegistrationType = 'UNREGISTERED', gstNumber: string | null = null) {
+      return {
+        outletCode: 'O1', name: 'A', state: 'West Bengal', phone: '', isActive: true,
+        partner: {
+          id: 'p1', bankName: 'HDFC', bankAccountNumber: '1', ifscCode: 'I', upiId: '',
+          isActive: true, deletedAt: null,
+          panNumber: 'PAN1', entityType, gstNumber, gstRegistrationType,
+          businessName: 'A Ent', ownerName: 'A Owner', phone: '9',
+          kycSubmissions: [{ id: 'ks1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }],
+        },
+      };
+    }
+    function visEntry(amountPaise: bigint, methodology: string) {
+      return { id: 'e1', outletId: 'O1', outletName: 'A', amountPaise, fieldId: 'f-vis', tdsSection: 'SEC_194C', tdsMethodology: methodology, batch: { batchCode: 'CB-1' } };
+    }
+
+    it('DEDUCT: withholds TDS, reduces the bank line to NET, writes the ledger + entry', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      // ₹50,000 single payment (> ₹30k single threshold) → crosses; 1% (INDIVIDUAL) = ₹500.
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([visEntry(5000000n, 'DEDUCT')]); // MAIN query
+      mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL')]); // MAIN bank/KYC query
+      // FIX-8: plan reads run inside the tx.
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([]); // prior committed (none)
+      mockTx.outlet.findMany.mockResolvedValue([{ outletCode: 'O1', clientId: 'deoleo', partnerId: 'p1' }]); // prior-outlet resolution
+      mockTx.channelPartner.findMany.mockResolvedValue([{ id: 'p1', panNumber: 'PAN1' }]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-001' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+
+      // Ledger row: TDS due = ₹500 = 50000 paise; nothing carried; net bank line = ₹49,500.
+      const ledger = mockTx.tdsDeductionEntry.createMany.mock.calls[0][0].data[0];
+      expect(ledger.panNumber).toBe('PAN1');
+      expect(ledger.section).toBe('SEC_194C');
+      expect(ledger.eventBasePaise).toBe(5000000n);
+      expect(ledger.cumulativeBasePaise).toBe(5000000n);
+      expect(ledger.tdsDeductedThisPaise).toBe(50000n);
+      expect(ledger.tdsDeductedPriorPaise).toBe(0n);
+      expect(ledger.carryForwardPaise).toBe(0n);
+      // Per-entry withheld amount stamped.
+      expect(mockTx.creditPayoutEntry.update).toHaveBeenCalledWith({
+        where: { id: 'e1' }, data: { tdsDeductedPaise: 50000n },
+      });
+      // The download total is NET of the withholding (5,000,000 − 50,000).
+      expect(mockTx.creditPayoutDownload.create.mock.calls[0][0].data.totalAmountPaise).toBe(BigInt(4950000));
+      // GROSS-UP artefacts never created for a DEDUCT tenant.
+      expect(mockInvoicesService.createTdsInvoice).not.toHaveBeenCalled();
+    });
+
+    it('DEDUCT: carries the un-withheld remainder forward when the catch-up exceeds the payout', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      // OTHERS → 2%. Prior FY base ₹99,000 (below ₹1L, no single > ₹30k), this payout ₹2,000
+      // crosses ₹1L → due 2% of ₹1,01,000 = ₹2,020; only ₹2,000 fits → ₹20 carried forward.
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([visEntry(200000n, 'DEDUCT')]); // MAIN query
+      mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('OTHERS')]); // MAIN bank/KYC
+      // FIX-8: plan reads inside the tx — prior committed ₹99,000 for this PAN.
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ clientId: 'deoleo', outletId: 'O1', amountPaise: 9900000n, tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT' }]);
+      mockTx.outlet.findMany.mockResolvedValue([{ outletCode: 'O1', clientId: 'deoleo', partnerId: 'p1' }]);
+      mockTx.channelPartner.findMany.mockResolvedValue([{ id: 'p1', panNumber: 'PAN1' }]);
+      // priorDeducted mocked to 0 to isolate the carry-forward arithmetic.
+      mockTx.tdsDeductionEntry.findMany.mockResolvedValue([]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-002' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+
+      const ledger = mockTx.tdsDeductionEntry.createMany.mock.calls[0][0].data[0];
+      expect(ledger.cumulativeBasePaise).toBe(10100000n); // ₹1,01,000
+      expect(ledger.tdsDueCumulativePaise).toBe(202000n); // ₹2,020
+      expect(ledger.tdsDeductedThisPaise).toBe(200000n); // only ₹2,000 fits
+      expect(ledger.carryForwardPaise).toBe(2000n); // ₹20 carried forward
+      // Entire ₹2,000 payout withheld → net line is ₹0.
+      expect(mockTx.creditPayoutDownload.create.mock.calls[0][0].data.totalAmountPaise).toBe(BigInt(0));
+    });
+
+    // ── GROSS-UP at download ────────────────────────────────────────────────────
+    it('GROSS-UP: pays full, raises the ANCHOR (seq=1) top-up invoice + delta recovery at first crossing', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      // ₹1,10,000 crosses ₹1L; 1% grossed-up TDS = ₹1,111 = 111100 paise.
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([visEntry(11000000n, 'GROSS_UP')]); // MAIN query
+      mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL')]); // MAIN bank/KYC
+      // FIX-8 plan reads (tx): no prior committed, no prior recovery, no prior TDS invoice.
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
+      mockTx.outlet.findMany.mockResolvedValue([{ outletCode: 'O1', clientId: 'deoleo', partnerId: 'p1' }]);
+      mockTx.channelPartner.findMany.mockResolvedValue([{ id: 'p1', panNumber: 'PAN1' }]);
+      mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]); // alreadyInvoiced = 0
+      mockTx.autoInvoice.findMany.mockResolvedValue([]); // no prior top-up → seq=1 anchor
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-003' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+
+      expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(
+        mockTx,
+        // FIX-1: DELTA body = grossUp(cumulative) − alreadyInvoiced(0) = 111100; seq=1 anchor.
+        expect.objectContaining({ clientId: 'deoleo', panNumber: 'PAN1', fyLabel: '2026-27', bodyPaise: 111100n, seq: 1, isAnchor: true }),
+      );
+      const recovery = mockTx.tdsRecoveryEntry.createMany.mock.calls[0][0].data;
+      expect(recovery).toHaveLength(1);
+      expect(recovery[0]).toMatchObject({
+        clientId: 'deoleo', tenantSharePaise: 111100n, panTdsTotalPaise: 111100n,
+        tenantBasePaise: 11000000n, panBasePaise: 11000000n, tdsInvoiceId: 'tds1', section: 'SEC_194C',
+      });
+      // Retailer paid FULL (no deduction) — the bank total is the gross amount.
+      expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+      expect(mockTx.creditPayoutDownload.create.mock.calls[0][0].data.totalAmountPaise).toBe(BigInt(11000000));
+    });
+
+    it('FIX-1: monthly-incremental — period-2 top-up raises only the DELTA; the two bodies sum to grossUp(full base)', async () => {
+      // Period 2 pays another ₹1,10,000 (cumulative ₹2,20,000). Period-1 already invoiced 111100
+      // (recovery ledger). dueNow = grossUp(₹2.2L, 1/99) = 222200; delta = 222200 − 111100 = 111100.
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([visEntry(11000000n, 'GROSS_UP')]); // this event
+      mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL')]);
+      // Prior committed ₹1,10,000 (period 1), same PAN.
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ clientId: 'deoleo', outletId: 'O1', amountPaise: 11000000n, tdsSection: 'SEC_194C', tdsMethodology: 'GROSS_UP' }]);
+      mockTx.outlet.findMany.mockResolvedValue([{ outletCode: 'O1', clientId: 'deoleo', partnerId: 'p1' }]);
+      mockTx.channelPartner.findMany.mockResolvedValue([{ id: 'p1', panNumber: 'PAN1' }]);
+      // Period-1 already recovered 111100; a period-1 anchor TDS invoice exists (different period).
+      mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([{ panNumber: 'PAN1', section: 'SEC_194C', clientId: 'deoleo', tenantSharePaise: 111100n }]);
+      mockTx.autoInvoice.findMany.mockResolvedValue([{ period: '2026-05' }]); // seq=2, different period → not idempotent-skip
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(1);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd2', downloadCode: 'PD-2026-06-001' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-06', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+
+      // The period-2 body is the DELTA (111100), NOT the cumulative dueNow (222200); seq=2, not anchor.
+      expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(
+        mockTx,
+        expect.objectContaining({ bodyPaise: 111100n, seq: 2, isAnchor: false, period: '2026-06' }),
+      );
+      // Across the FY: period-1 body (111100) + period-2 body (111100) = 222200 = grossUp(₹2.2L).
+    });
+
+    it('FIX-1: idempotent per (PAN, FY, period) — a same-period re-run does NOT double-raise', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([visEntry(11000000n, 'GROSS_UP')]);
+      mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL')]);
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
+      mockTx.outlet.findMany.mockResolvedValue([{ outletCode: 'O1', clientId: 'deoleo', partnerId: 'p1' }]);
+      mockTx.channelPartner.findMany.mockResolvedValue([{ id: 'p1', panNumber: 'PAN1' }]);
+      // A top-up for THIS PAN/FY/period already exists → skip (no double-raise).
+      mockTx.autoInvoice.findMany.mockResolvedValue([{ period: '2026-05' }]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-004' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+
+      expect(mockInvoicesService.createTdsInvoice).not.toHaveBeenCalled();
+      expect(mockTx.tdsRecoveryEntry.createMany).not.toHaveBeenCalled();
+    });
+
+    it('FIX-A (D10): recovery is split PRO-RATA by each tenant’s share of the FY AGGREGATE base', async () => {
+      // deoleo pays ₹40k now; tenant "other" already paid ₹70k this FY → aggregate ₹1.1L crosses.
+      // D10: the grossed-up TDS is recovered PRO-RATA by base share (NOT all to the triggering
+      // tenant). ₹1,111 (111100 paise) split by 40k:70k → deoleo 40400 / other 70700.
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([visEntry(4000000n, 'GROSS_UP')]); // MAIN
+      mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL')]);
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ clientId: 'other', outletId: 'OX', amountPaise: 7000000n, tdsSection: 'SEC_194C', tdsMethodology: 'GROSS_UP' }]);
+      mockTx.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O1', clientId: 'deoleo', partnerId: 'p1' },
+        { outletCode: 'OX', clientId: 'other', partnerId: 'p2' },
+      ]);
+      mockTx.channelPartner.findMany.mockResolvedValue([
+        { id: 'p1', panNumber: 'PAN1' },
+        { id: 'p2', panNumber: 'PAN1' },
+      ]);
+      mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]);
+      mockTx.autoInvoice.findMany.mockResolvedValue([]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-005' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+
+      // Body = 1% grossed-up on ₹1.1L cumulative = 111100 paise; panBase = the FY aggregate.
+      expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(
+        mockTx, expect.objectContaining({ bodyPaise: 111100n, panNumber: 'PAN1' }),
+      );
+      const recovery = mockTx.tdsRecoveryEntry.createMany.mock.calls[0][0].data as Array<{
+        clientId: string; tenantSharePaise: bigint; tenantBasePaise: bigint; panBasePaise: bigint;
+      }>;
+      // Pro-rata by FY aggregate: two rows, summing to the body.
+      expect(recovery).toHaveLength(2);
+      const byTenant = Object.fromEntries(recovery.map((r) => [r.clientId, r.tenantSharePaise]));
+      expect(byTenant['deoleo']).toBe(40400n);
+      expect(byTenant['other']).toBe(70700n);
+      expect(recovery.reduce((s, r) => s + r.tenantSharePaise, 0n)).toBe(111100n);
+      // panBase is the cross-tenant FY aggregate (₹1.1L), not just this event's base.
+      expect(recovery[0].panBasePaise).toBe(11000000n);
+    });
+
+    it('FIX-A (D10): cumulative recovery is pro-rata by FY aggregate REGARDLESS of payment order', async () => {
+      // Malign order: X pays ₹25k in P1 (sub-threshold → NO recovery), then Y pays ₹80k in P2
+      // (aggregate ₹1,05,000 crosses ₹1L). OTHERS entity → 2/98. TDS = ₹2,143 (214300 paise).
+      // D10 (pro-rata by FY aggregate): X 25k/105k → 51024, Y 80k/105k → 163276 (sum 214300).
+      // The bug was Y ₹2,143 / X ₹0 (whole delta to the triggering tenant).
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+
+      // ── P1: tenant X pays ₹25,000 (sub-threshold) → no invoice, no recovery. ──
+      const xOutlet = bankOutlet('OTHERS');
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([visEntry(2500000n, 'GROSS_UP')]);
+      mockPrisma.outlet.findMany.mockResolvedValue([xOutlet]);
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([]); // no prior committed
+      mockTx.outlet.findMany.mockResolvedValue([{ outletCode: 'O1', clientId: 'X', partnerId: 'p1' }]);
+      mockTx.channelPartner.findMany.mockResolvedValue([{ id: 'p1', panNumber: 'PAN1' }]);
+      mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]);
+      mockTx.autoInvoice.findMany.mockResolvedValue([]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-020' });
+
+      await service.createPayoutDownload({ ...gifsy, clientId: 'X' }, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+      // Sub-threshold → nothing raised.
+      expect(mockInvoicesService.createTdsInvoice).not.toHaveBeenCalled();
+      expect(mockTx.tdsRecoveryEntry.createMany).not.toHaveBeenCalled();
+
+      // ── P2: tenant Y pays ₹80,000 → aggregate crosses; recovery split pro-rata X/Y. ──
+      // (No clearAllMocks: P1 raised neither an invoice nor a recovery row, so the P2 calls below
+      // are still index 0 in each mock's history.)
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([{ id: 'e2', outletId: 'O2', outletName: 'B', amountPaise: 8000000n, fieldId: 'f-vis', tdsSection: 'SEC_194C', tdsMethodology: 'GROSS_UP', batch: { batchCode: 'CB-2' } }]);
+      const yOutlet = { ...bankOutlet('OTHERS'), outletCode: 'O2', name: 'B', partner: { ...bankOutlet('OTHERS').partner, id: 'p2' } };
+      mockPrisma.outlet.findMany.mockResolvedValue([yOutlet]);
+      // X's ₹25k is now PRIOR committed (PROCESSING) under tenant X, same PAN.
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ clientId: 'X', outletId: 'O1', amountPaise: 2500000n, tdsSection: 'SEC_194C', tdsMethodology: 'GROSS_UP' }]);
+      mockTx.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O2', clientId: 'Y', partnerId: 'p2' },
+        { outletCode: 'O1', clientId: 'X', partnerId: 'p1' },
+      ]);
+      mockTx.channelPartner.findMany.mockResolvedValue([
+        { id: 'p2', panNumber: 'PAN1' },
+        { id: 'p1', panNumber: 'PAN1' },
+      ]);
+      mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]); // no recovery yet (P1 was sub-threshold)
+      mockTx.autoInvoice.findMany.mockResolvedValue([]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(1);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd2', downloadCode: 'PD-2026-06-020' });
+
+      await service.createPayoutDownload({ ...gifsy, clientId: 'Y' }, { period: '2026-06', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+
+      expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(
+        mockTx, expect.objectContaining({ bodyPaise: 214300n, panNumber: 'PAN1' }),
+      );
+      const recovery = mockTx.tdsRecoveryEntry.createMany.mock.calls[0][0].data as Array<{
+        clientId: string; tenantSharePaise: bigint;
+      }>;
+      const byTenant = Object.fromEntries(recovery.map((r) => [r.clientId, r.tenantSharePaise]));
+      // D10 final cumulative: X ₹510 (51024p), Y ₹1,633 (163276p) — NOT Y ₹2,143 / X ₹0.
+      expect(byTenant['X']).toBe(51024n);
+      expect(byTenant['Y']).toBe(163276n);
+      expect(recovery.reduce((s, r) => s + r.tenantSharePaise, 0n)).toBe(214300n);
+    });
+
+    // ── Lock at UTR ─────────────────────────────────────────────────────────────
+    it('UTR apply locks the linked SERVICE invoice (lockedAt) for the paid outlets', async () => {
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+        id: 'd1', downloadCode: 'PD-2026-05-001', period: '2026-05', downloadedBy: 'g1',
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(10000) }],
+      });
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]); // used-UTR dedup query
+      // FIX-C: entries re-read inside the tx.
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: BigInt(10000), tdsDeductedPaise: 0n, tdsSection: null, period: '2026-05' },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O1', name: 'A', partnerId: 'p1', partner: { ownerName: 'Ravi', phone: '9900000041' } },
+      ]);
+
+      const aoa = [['title'], ['Batch ID', 'Outlet ID', 'UTR', 'Success/Failure', 'Remarks'], ['PD-2026-05-001', 'O1', 'UTR999999', 'Success', '']];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Payout');
+      const file = { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+
+      await service.uploadUtr(gifsy, 'd1', file, true);
+
+      const lockCall = mockTx.autoInvoice.updateMany.mock.calls[0][0];
+      expect(lockCall.where).toMatchObject({
+        clientId: 'deoleo', period: '2026-05', invoiceKind: 'SERVICE', lockedAt: null,
+      });
+      expect(lockCall.where.outletCode.in).toEqual(['O1']);
+      expect(lockCall.data.lockedAt).toBeInstanceOf(Date);
+    });
+
+    // ── FIX-3: FAILED payout reverses its DEDUCT withholding ─────────────────────
+    it('FIX-3: a FAILED payout reverses its DEDUCT withholding (entry reset to 0 + negative ledger row)', async () => {
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+        id: 'd1', downloadCode: 'PD-2026-05-001', period: '2026-05', downloadedBy: 'g1',
+        entries: [{
+          id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: 5000000n,
+          tdsDeductedPaise: 50000n, tdsSection: 'SEC_194C', period: '2026-05',
+        }],
+      });
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]); // used-UTR dedup query
+      // FIX-C: entries are re-read INSIDE the tx (fresh status + tdsDeductedPaise).
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{
+        id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: 5000000n,
+        tdsDeductedPaise: 50000n, tdsSection: 'SEC_194C', period: '2026-05',
+      }]);
+      // FIX-C: the reversal resolves PAN from the ORIGINAL TdsDeductionEntry (by creditPayoutEntryId),
+      // NOT a fresh partner lookup — so a mid-flight re-KYC reverses against the deducted PAN.
+      mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'e1', panNumber: 'PAN1' }]);
+
+      const aoa = [['title'], ['Batch ID', 'Outlet ID', 'UTR', 'Success/Failure', 'Remarks'], ['PD-2026-05-001', 'O1', '', 'Failure', 'bounced']];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Payout');
+      const file = { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+
+      await service.uploadUtr(gifsy, 'd1', file, true);
+
+      // FIX-C: the entry flips via a GUARDED updateMany (status:'PROCESSING'); a failed payout
+      // withheld nothing → tdsDeductedPaise cleared.
+      expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+        where: { id: 'e1', status: 'PROCESSING' },
+        data: { status: 'FAILED', utr: null, paidAt: null, tdsDeductedPaise: 0n },
+      });
+      // Compensating NEGATIVE ledger row (PAN from the original deduction) so the next event's
+      // priorDeducted drops the un-withheld ₹500; linked back to the entry via creditPayoutEntryId.
+      const rev = mockTx.tdsDeductionEntry.createMany.mock.calls[0][0].data[0];
+      expect(rev.panNumber).toBe('PAN1');
+      expect(rev.section).toBe('SEC_194C');
+      expect(rev.fyLabel).toBe('2026-27'); // FY of period 2026-05
+      expect(rev.creditPayoutEntryId).toBe('e1');
+      expect(rev.tdsDeductedThisPaise).toBe(-50000n);
+    });
+
+    // ── FIX-C: concurrent apply — the guarded PROCESSING flip prevents a double reversal ─────────
+    it('FIX-C: a concurrent apply that already transitioned the entry writes NO second reversal', async () => {
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+        id: 'd1', downloadCode: 'PD-2026-05-001', period: '2026-05', downloadedBy: 'g1',
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: 5000000n, tdsDeductedPaise: 50000n, tdsSection: 'SEC_194C', period: '2026-05' }],
+      });
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]); // used-UTR dedup
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{
+        id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: 5000000n,
+        tdsDeductedPaise: 50000n, tdsSection: 'SEC_194C', period: '2026-05',
+      }]);
+      mockTx.tdsDeductionEntry.findMany.mockResolvedValue([{ creditPayoutEntryId: 'e1', panNumber: 'PAN1' }]);
+      // Simulate a concurrent apply having ALREADY flipped e1 out of PROCESSING → guarded claim = 0.
+      mockTx.creditPayoutEntry.updateMany.mockResolvedValue({ count: 0 });
+
+      const aoa = [['title'], ['Batch ID', 'Outlet ID', 'UTR', 'Success/Failure', 'Remarks'], ['PD-2026-05-001', 'O1', '', 'Failure', 'bounced']];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Payout');
+      const file = { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer } as Express.Multer.File;
+
+      await service.uploadUtr(gifsy, 'd1', file, true);
+
+      // The advisory lock was taken and the flip attempted, but count=0 → NO compensating reversal.
+      expect(mockTx.$executeRaw).toHaveBeenCalled();
+      expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+    });
+
+    // ── FIX-7: guarded PROCESSING claim ──────────────────────────────────────────
+    it('FIX-7: aborts (ConflictException) when the guarded PROCESSING claim comes up short', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'e1', outletId: 'O1', outletName: 'A', amountPaise: BigInt(10000), batch: { batchCode: 'CB-1' } },
+        { id: 'e2', outletId: 'O2', outletName: 'B', amountPaise: BigInt(5000), batch: { batchCode: 'CB-1' } },
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'O1', name: 'A', phone: '', isActive: true,
+          partner: { bankName: '', bankAccountNumber: '', ifscCode: '', upiId: '', isActive: true, deletedAt: null, kycSubmissions: [{ id: 'k1', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }] },
+        },
+        {
+          outletCode: 'O2', name: 'B', phone: '', isActive: true,
+          partner: { bankName: '', bankAccountNumber: '', ifscCode: '', upiId: '', isActive: true, deletedAt: null, kycSubmissions: [{ id: 'k2', status: 'APPROVED', createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01') }] },
+        },
+      ]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-009' });
+      // A concurrent download already claimed one of the two entries → only 1 flipped (expected 2).
+      mockTx.creditPayoutEntry.updateMany.mockResolvedValue({ count: 1 });
+
+      await expect(
+        service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.STANDARD }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      // The guarded claim carries the PENDING/FAILED status predicate.
+      const claim = mockTx.creditPayoutEntry.updateMany.mock.calls[0][0];
+      expect(claim.where.status).toEqual({ in: ['PENDING', 'FAILED'] });
+    });
+
+    // ── FIX-8: per-PAN advisory lock before the cumulative read ───────────────────
+    it('FIX-8: takes a per-PAN advisory lock (sorted key) before building the plan', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([visEntry(5000000n, 'DEDUCT')]);
+      mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL')]);
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([]);
+      mockTx.outlet.findMany.mockResolvedValue([{ outletCode: 'O1', clientId: 'deoleo', partnerId: 'p1' }]);
+      mockTx.channelPartner.findMany.mockResolvedValue([{ id: 'p1', panNumber: 'PAN1' }]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-011' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+
+      // The advisory lock is acquired via tx.$executeRaw with the PAN|<PAN>|<FY> key.
+      expect(mockTx.$executeRaw).toHaveBeenCalled();
+      expect(mockTx.$executeRaw.mock.calls[0][1]).toBe('PAN|PAN1|2026-27');
+    });
+
+    // ── FIX-9: no-PAN visibility recovery (paid full, tenant recovery, no invoice) ──
+    it('FIX-9: a no-PAN visibility payout is paid FULL but accrues a 20% tenant recovery once it crosses', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      // ₹40,000 single (> ₹30k single threshold) with NO PAN → paid full; 20% grossed-up recovery.
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([visEntry(4000000n, 'GROSS_UP')]);
+      const noPanOutlet = bankOutlet('INDIVIDUAL');
+      (noPanOutlet.partner as { panNumber: string | null }).panNumber = null; // no PAN on file
+      mockPrisma.outlet.findMany.mockResolvedValue([noPanOutlet]);
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([]); // no prior no-PAN base
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-010' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+
+      // No deduction, no per-PAN TDS invoice — paid in full.
+      expect(mockInvoicesService.createTdsInvoice).not.toHaveBeenCalled();
+      expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
+      expect(mockTx.creditPayoutDownload.create.mock.calls[0][0].data.totalAmountPaise).toBe(BigInt(4000000));
+      // Recovery row: __NO_PAN__:<outlet> encoded sentinel, 20% grossed-up on ₹40,000 = 1000000, no invoice.
+      const rec = mockTx.tdsRecoveryEntry.createMany.mock.calls[0][0].data[0];
+      expect(rec.panNumber).toBe('__NO_PAN__:O1');
+      expect(rec.clientId).toBe('deoleo');
+      expect(rec.section).toBe('SEC_194C');
+      expect(rec.tenantSharePaise).toBe(1000000n);
+      expect(rec.tdsInvoiceId).toBeNull();
+    });
+
+    // ── FIX-B: no-PAN recovery telescopes off the ledger (FAIL→re-bank = single recovery) ─────────
+    it('FIX-B: a no-PAN FAIL→re-bank of the same base yields a ZERO recovery delta (no double 20%)', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      // Re-bank of the SAME ₹40,000 no-PAN base: the failed entry re-enters as this event, but the
+      // first attempt's recovery (₹10,000 = 1000000p) is already recorded in the ledger.
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([visEntry(4000000n, 'GROSS_UP')]);
+      const noPanOutlet = bankOutlet('INDIVIDUAL');
+      (noPanOutlet.partner as { panNumber: string | null }).panNumber = null;
+      mockPrisma.outlet.findMany.mockResolvedValue([noPanOutlet]);
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([]); // failed base excluded from prior
+      // The first attempt already recorded 1000000p recovery for THIS outlet/FY (telescope source).
+      mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([
+        { panNumber: '__NO_PAN__:O1', section: 'SEC_194C', tenantSharePaise: 1000000n },
+      ]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(1);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd2', downloadCode: 'PD-2026-05-012' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+
+      // grossUp20(₹40k) − alreadyRecovered(₹10k) = 0 → NO new recovery row (total stays ₹10,000).
+      expect(mockTx.tdsRecoveryEntry.createMany).not.toHaveBeenCalled();
+    });
+
+    // ── FIX-D: MIXED cross-tenant PAN (DEDUCT + GROSS_UP) partitions the base by methodology ──────
+    it('FIX-D: a MIXED PAN withholds DEDUCT only on the DEDUCT base (threshold on the combined base)', async () => {
+      // Prior GROSS_UP base ₹80,000 (tenant "other") + this event DEDUCT ₹40,000 (deoleo), same PAN.
+      // Combined ₹1,20,000 crosses ₹1L. FIX-D: DEDUCT withholding is on the DEDUCT base (₹40,000)
+      // ONLY, NOT the combined base — 2% (OTHERS) × ₹40,000 = ₹800 (80000 paise), not 2% × ₹1.2L.
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([visEntry(4000000n, 'DEDUCT')]);
+      mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('OTHERS')]);
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { clientId: 'other', outletId: 'OX', amountPaise: 8000000n, tdsSection: 'SEC_194C', tdsMethodology: 'GROSS_UP' },
+      ]);
+      mockTx.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O1', clientId: 'deoleo', partnerId: 'p1' },
+        { outletCode: 'OX', clientId: 'other', partnerId: 'p2' },
+      ]);
+      mockTx.channelPartner.findMany.mockResolvedValue([
+        { id: 'p1', panNumber: 'PAN1' },
+        { id: 'p2', panNumber: 'PAN1' },
+      ]);
+      mockTx.tdsDeductionEntry.findMany.mockResolvedValue([]); // no prior withholding
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(1);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-013' });
+
+      await service.createPayoutDownload(gifsy, { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' });
+
+      const ledger = mockTx.tdsDeductionEntry.createMany.mock.calls[0][0].data[0];
+      // Cumulative base for the DEDUCT ledger = the DEDUCT portion only (₹40,000), threshold met.
+      expect(ledger.cumulativeBasePaise).toBe(4000000n);
+      expect(ledger.tdsDueCumulativePaise).toBe(80000n); // 2% × ₹40,000 = ₹800 (NOT 2% × ₹1.2L)
+      expect(ledger.tdsDeductedThisPaise).toBe(80000n);
+      expect(ledger.carryForwardPaise).toBe(0n);
+      // Net bank line = ₹40,000 − ₹800 = ₹39,200. The GROSS_UP portion is not this download's concern.
+      expect(mockTx.creditPayoutDownload.create.mock.calls[0][0].data.totalAmountPaise).toBe(BigInt(3920000));
     });
   });
 });

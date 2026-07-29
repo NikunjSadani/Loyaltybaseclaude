@@ -79,12 +79,14 @@ export function formatPeriodLabel(period: string): string {
 }
 
 /**
- * Build the fixed invoice description for a period.
+ * Build the fixed invoice narration for a period (design D14 — EXACT wording).
+ * Used identically on SERVICE (visibility) invoices and GROSS-UP TDS invoices.
  *
- * @example buildInvoiceDescription('January 2025') → 'Marketing visibility services — January 2025'
+ * @example buildInvoiceDescription('January 2025')
+ *   → 'Payment for Marketing and support services for the month of January 2025'
  */
 export function buildInvoiceDescription(periodLabel: string): string {
-  return `Marketing visibility services — ${periodLabel}`;
+  return `Payment for Marketing and support services for the month of ${periodLabel}`;
 }
 
 /**

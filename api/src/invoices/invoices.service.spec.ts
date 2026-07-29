@@ -134,9 +134,9 @@ describe('formatPeriodLabel', () => {
 });
 
 describe('buildInvoiceDescription', () => {
-  it('formats the description string', () => {
+  it('formats the EXACT narration string (design D14)', () => {
     expect(buildInvoiceDescription('January 2025')).toBe(
-      'Marketing visibility services — January 2025',
+      'Payment for Marketing and support services for the month of January 2025',
     );
   });
 });
@@ -289,7 +289,12 @@ const mockTx = {
     upsert: jest.fn(),
     findFirst: jest.fn(),
     update: jest.fn(),
+    count: jest.fn().mockResolvedValue(0),
+    create: jest.fn().mockResolvedValue({ id: 'inv-new' }),
   },
+  creditPayoutEntry: { findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn() },
+  outlet: { findMany: jest.fn().mockResolvedValue([]) },
+  gstReimbursement: { create: jest.fn() },
 };
 
 // ── Mock Prisma ────────────────────────────────────────────────────────────────
@@ -706,16 +711,45 @@ describe('InvoicesService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('throws 409 when status is PAID (locked)', async () => {
+    it('throws 409 once locked at UTR entry (lockedAt != null) — design D12', async () => {
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({
+        id: 'inv1',
+        clientId: 'deoleo',
+        partnerId: 'p1',
+        status: 'GENERATED',
+        lockedAt: new Date('2026-05-10T00:00:00Z'),
+      });
+      await expect(
+        service.updateInvoiceNumber(admin, 'inv1', dto),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('FIX-5: a TDS-kind invoice number is IMMUTABLE (409) even when not lockedAt — for admin', async () => {
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({
+        id: 'inv-tds',
+        clientId: 'deoleo',
+        partnerId: 'p1',
+        status: 'GENERATED',
+        invoiceKind: 'TDS',
+        lockedAt: null,
+      });
+      await expect(
+        service.updateInvoiceNumber(admin, 'inv-tds', dto),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(mockPrisma.autoInvoice.update).not.toHaveBeenCalled();
+    });
+
+    it('a manually-PAID but NOT-yet-locked invoice stays editable (lock moved to UTR)', async () => {
       mockPrisma.autoInvoice.findFirst.mockResolvedValue({
         id: 'inv1',
         clientId: 'deoleo',
         partnerId: 'p1',
         status: 'PAID',
+        lockedAt: null,
       });
-      await expect(
-        service.updateInvoiceNumber(admin, 'inv1', dto),
-      ).rejects.toBeInstanceOf(ConflictException);
+      mockPrisma.autoInvoice.update.mockResolvedValue({ id: 'inv1', invoiceNumberEdited: true });
+      const result = await service.updateInvoiceNumber(admin, 'inv1', dto);
+      expect(result.invoiceNumberEdited).toBe(true);
     });
 
     it('throws 409 when invoice number already in use (P2002)', async () => {
@@ -766,6 +800,239 @@ describe('InvoicesService', () => {
     });
   });
 
+  // ── generateForBatch (invoice-at-CONFIRM) ─────────────────────────────────────
+
+  describe('generateForBatch', () => {
+    const visEntries = [
+      { id: 'e1', outletId: 'O1', outletName: 'Test Store', amountPaise: 500000n },
+    ];
+
+    it('creates a SERVICE invoice + GST holdback and links the entries (WB REGULAR)', async () => {
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue(visEntries);
+      mockTx.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'O1',
+          name: 'Test Store',
+          state: 'West Bengal',
+          partner: {
+            id: 'p1',
+            businessName: 'Test Enterprises',
+            ownerName: 'Rajesh',
+            phone: '9999999999',
+            panNumber: 'ABCDE1234F',
+            gstNumber: '19ABCDE1234F1Z5',
+            entityType: 'INDIVIDUAL',
+            gstRegistrationType: 'REGULAR',
+            bankName: 'SBI',
+            bankAccountNumber: '123',
+            ifscCode: 'SBIN0001234',
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      mockTx.autoInvoice.findFirst.mockResolvedValue(null); // no existing SERVICE invoice
+      mockTx.autoInvoice.count.mockResolvedValue(0);
+      mockTx.autoInvoice.create.mockResolvedValue({ id: 'inv-svc' });
+
+      const res = await service.generateForBatch(mockTx as never, {
+        clientId: 'deoleo',
+        period: '2026-05',
+        batchId: 'b1',
+        visibilityFieldIds: ['f-vis'],
+      });
+
+      expect(res.generated).toBe(1);
+      const created = mockTx.autoInvoice.create.mock.calls[0][0].data;
+      expect(created.invoiceKind).toBe('SERVICE');
+      expect(created.subtotalPaise).toBe(500000n);
+      expect(created.gstType).toBe('CGST_SGST');
+      expect(created.gstPaise).toBe(90000n);
+      // Narration = the exact D14 wording.
+      expect(created.snapshot.description).toBe(
+        'Payment for Marketing and support services for the month of May 2026',
+      );
+      // GST holdback created (D5) for the GST-registered retailer.
+      expect(mockTx.gstReimbursement.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'HELD', gstPaise: 90000n, autoInvoiceId: 'inv-svc' }),
+        }),
+      );
+      // Entries linked to the new invoice.
+      expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['e1'] } },
+        data: { autoInvoiceId: 'inv-svc' },
+      });
+    });
+
+    it('is idempotent: an existing SERVICE invoice is re-linked, never duplicated', async () => {
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue(visEntries);
+      mockTx.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'O1', name: 'Test Store', state: 'West Bengal',
+          partner: {
+            id: 'p1', businessName: 'Test', ownerName: 'R', phone: '9', panNumber: 'ABCDE1234F',
+            gstNumber: '19ABCDE1234F1Z5', entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR',
+            bankName: '', bankAccountNumber: '', ifscCode: '',
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      mockTx.autoInvoice.findFirst.mockResolvedValue({ id: 'inv-existing' });
+
+      const res = await service.generateForBatch(mockTx as never, {
+        clientId: 'deoleo', period: '2026-05', batchId: 'b1', visibilityFieldIds: ['f-vis'],
+      });
+
+      expect(res.generated).toBe(0);
+      expect(res.linked).toBe(1);
+      expect(mockTx.autoInvoice.create).not.toHaveBeenCalled();
+      expect(mockTx.gstReimbursement.create).not.toHaveBeenCalled();
+      expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['e1'] } },
+        data: { autoInvoiceId: 'inv-existing' },
+      });
+    });
+
+    it('creates NO GST holdback for an UNREGISTERED retailer', async () => {
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue(visEntries);
+      mockTx.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'O1', name: 'Test Store', state: 'West Bengal',
+          partner: {
+            id: 'p1', businessName: 'Test', ownerName: 'R', phone: '9', panNumber: 'ABCDE1234F',
+            gstNumber: null, entityType: 'INDIVIDUAL', gstRegistrationType: 'UNREGISTERED',
+            bankName: '', bankAccountNumber: '', ifscCode: '',
+            kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      mockTx.autoInvoice.findFirst.mockResolvedValue(null);
+      mockTx.autoInvoice.count.mockResolvedValue(0);
+      mockTx.autoInvoice.create.mockResolvedValue({ id: 'inv-svc' });
+
+      const res = await service.generateForBatch(mockTx as never, {
+        clientId: 'deoleo', period: '2026-05', batchId: 'b1', visibilityFieldIds: ['f-vis'],
+      });
+
+      expect(res.generated).toBe(1);
+      expect(mockTx.autoInvoice.create.mock.calls[0][0].data.gstType).toBeNull();
+      expect(mockTx.gstReimbursement.create).not.toHaveBeenCalled();
+    });
+
+    it('skips a not-KYC-approved outlet (no invoice, entries left unlinked)', async () => {
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue(visEntries);
+      mockTx.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'O1', name: 'Test Store', state: 'West Bengal',
+          partner: {
+            id: 'p1', businessName: 'Test', ownerName: 'R', phone: '9', panNumber: 'ABCDE1234F',
+            gstNumber: '19ABCDE1234F1Z5', entityType: 'INDIVIDUAL', gstRegistrationType: 'REGULAR',
+            bankName: '', bankAccountNumber: '', ifscCode: '',
+            kycSubmissions: [{ status: 'PENDING_GIFSY' }],
+          },
+        },
+      ]);
+
+      const res = await service.generateForBatch(mockTx as never, {
+        clientId: 'deoleo', period: '2026-05', batchId: 'b1', visibilityFieldIds: ['f-vis'],
+      });
+
+      expect(res.generated).toBe(0);
+      expect(res.skipped[0].reason).toMatch(/KYC not approved/i);
+      expect(mockTx.autoInvoice.create).not.toHaveBeenCalled();
+    });
+
+    it('no-ops when there are no visibility fields', async () => {
+      const res = await service.generateForBatch(mockTx as never, {
+        clientId: 'deoleo', period: '2026-05', batchId: 'b1', visibilityFieldIds: [],
+      });
+      expect(res).toEqual({ generated: 0, linked: 0, skipped: [] });
+      expect(mockTx.creditPayoutEntry.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── createTdsInvoice (GROSS-UP at-threshold) ───────────────────────────────────
+
+  describe('createTdsInvoice', () => {
+    const baseParams = {
+      clientId: 'deoleo',
+      period: '2026-05',
+      panNumber: 'ABCDE1234F',
+      fyLabel: '2026-27',
+      bodyPaise: 110000n,
+      partnerId: 'p1',
+      outletCode: 'O1',
+      outletName: 'Test Store',
+      retailerState: 'West Bengal',
+      businessName: 'Test Enterprises',
+      ownerName: 'Rajesh',
+      phone: '9999999999',
+      entityType: 'INDIVIDUAL',
+      bankName: 'SBI',
+      accountNumber: '123',
+      ifscCode: 'SBIN0001234',
+      // FIX-1: monthly-incremental top-up seq + anchor flag.
+      seq: 1,
+      isAnchor: true,
+    };
+
+    it('creates an ANCHOR (seq=1) TDS-kind invoice with the linked tuple, born LOCKED, + GST holdback', async () => {
+      mockTx.autoInvoice.create.mockResolvedValue({ id: 'inv-tds' });
+
+      const res = await service.createTdsInvoice(mockTx as never, {
+        ...baseParams,
+        gstRegistrationType: 'REGULAR',
+        gstNumber: '19ABCDE1234F1Z5',
+      });
+
+      const data = mockTx.autoInvoice.create.mock.calls[0][0].data;
+      expect(data.invoiceKind).toBe('TDS');
+      // Anchor carries the linked (PAN, FY) tuple that satisfies the partial unique.
+      expect(data.linkedPanNumber).toBe('ABCDE1234F');
+      expect(data.linkedFyLabel).toBe('2026-27');
+      expect(data.subtotalPaise).toBe(110000n);
+      // FIX-1: number now carries the monthly top-up seq.
+      expect(data.invoiceNumber).toBe('TGSL-TDS-ABCDE1234F-202627-001');
+      // FIX-5: a TDS invoice is born LOCKED (number immutable).
+      expect(data.lockedAt).toBeInstanceOf(Date);
+      expect(data.snapshot.description).toBe(
+        'Payment for Marketing and support services for the month of May 2026',
+      );
+      // GST on the TDS invoice follows the normal holdback (D9).
+      expect(mockTx.gstReimbursement.create).toHaveBeenCalled();
+      expect(res).toMatchObject({ invoiceId: 'inv-tds', gstApplicable: true });
+    });
+
+    it('FIX-1: a TOP-UP (seq>1, isAnchor=false) leaves the linked tuple NULL so it coexists under the partial unique', async () => {
+      mockTx.autoInvoice.create.mockResolvedValue({ id: 'inv-tds-topup' });
+      await service.createTdsInvoice(mockTx as never, {
+        ...baseParams,
+        seq: 2,
+        isAnchor: false,
+        gstRegistrationType: 'UNREGISTERED',
+        gstNumber: null,
+      });
+      const data = mockTx.autoInvoice.create.mock.calls[0][0].data;
+      // Non-anchor top-up: linked tuple NULL (distinct in the partial unique → coexists), number seq=002.
+      expect(data.linkedPanNumber).toBeNull();
+      expect(data.linkedFyLabel).toBeNull();
+      expect(data.invoiceNumber).toBe('TGSL-TDS-ABCDE1234F-202627-002');
+      // Still born locked.
+      expect(data.lockedAt).toBeInstanceOf(Date);
+    });
+
+    it('no GST holdback when the retailer is UNREGISTERED', async () => {
+      mockTx.autoInvoice.create.mockResolvedValue({ id: 'inv-tds2' });
+      const res = await service.createTdsInvoice(mockTx as never, {
+        ...baseParams,
+        gstRegistrationType: 'UNREGISTERED',
+        gstNumber: null,
+      });
+      expect(mockTx.gstReimbursement.create).not.toHaveBeenCalled();
+      expect(res.gstApplicable).toBe(false);
+    });
+  });
+
   // ── markPaid ─────────────────────────────────────────────────────────────────
 
   describe('markPaid', () => {
@@ -784,6 +1051,19 @@ describe('InvoicesService', () => {
       expect(result.status).toBe('PAID');
       const updateData = mockPrisma.autoInvoice.update.mock.calls[0][0].data;
       expect(updateData.status).toBe('PAID');
+      // FIX-6: marking PAID also LOCKS the number (so a manual PAID outside the UTR flow is not
+      // left editable).
+      expect(updateData.lockedAt).toBeInstanceOf(Date);
+    });
+
+    it('FIX-6: markPaid preserves an existing lockedAt (idempotent lock)', async () => {
+      const existingLock = new Date('2026-05-01T00:00:00Z');
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({
+        id: 'inv1', clientId: 'deoleo', status: 'GENERATED', lockedAt: existingLock,
+      });
+      mockPrisma.autoInvoice.update.mockResolvedValue({ id: 'inv1', status: 'PAID' });
+      await service.markPaid(gifsy, 'inv1');
+      expect(mockPrisma.autoInvoice.update.mock.calls[0][0].data.lockedAt).toBe(existingLock);
     });
 
     it('is idempotent: re-calling on a PAID invoice returns no-op result', async () => {

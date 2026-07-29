@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { TdsMethodology, TdsSection } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 /**
@@ -100,6 +101,25 @@ export interface VisibilityConfigSettings {
   geoFence:           GeoFenceSettings;
 }
 
+/**
+ * Per-tenant TDS treatment for VISIBILITY-stream payouts (docs/plans/
+ * VISIBILITY-PAYOUT-TDS-WAVE0-SCHEMA.md §5, W0-A). Resolved once at payout-confirm and
+ * FROZEN by value onto each CreditPayoutEntry (never re-read live afterwards).
+ *   - section     — which statutory section the visibility payout is treated under.
+ *   - methodology — DEDUCT (withhold from payout, carry-forward) vs GROSS_UP (payer-borne
+ *                   at-threshold TDS invoice + pro-rata recovery).
+ * INCENTIVE-stream payouts ignore `section` — they are always 194R (see deriveFrozenSection).
+ *
+ * ⚠️ VALIDATION IS FAIL-CLOSED, not merge-to-default. An ABSENT tdsPolicy key resolves to the
+ * default-on default {SEC_194C, GROSS_UP}. A PRESENT-but-malformed value THROWS (never
+ * silently coerces) — a bad section/methodology must not silently mis-route tax on the
+ * money path. See overlay()/validateTdsPolicy.
+ */
+export interface TdsPolicySettings {
+  section:     TdsSection;
+  methodology: TdsMethodology;
+}
+
 export interface EffectiveSettings {
   /** Points→₹ rate. Default = POINTS_CONVERSION_RATE env (preserves prior behaviour). */
   conversionRate:         number;
@@ -150,6 +170,12 @@ export interface EffectiveSettings {
    * below). Default = empty scope + empty levels + freq 1 + geo-fence off (radius 50m).
    */
   visibilityConfig:       VisibilityConfigSettings;
+  /**
+   * Per-tenant TDS treatment for VISIBILITY-stream payouts. Absent → default-on default
+   * {SEC_194C, GROSS_UP}; a present-but-malformed value FAILS CLOSED (throws) rather than
+   * silently coercing — money-path hardening (W0-A). Resolved via resolveTdsPolicy().
+   */
+  tdsPolicy:              TdsPolicySettings;
 }
 
 /**
@@ -178,7 +204,8 @@ type SettingKey =
   | 'outletPrograms'
   | 'outletCategories'
   | 'uniquenessPolicy'
-  | 'visibilityConfig';
+  | 'visibilityConfig'
+  | 'tdsPolicy';
 
 const NESTED_KEYS: ReadonlySet<SettingKey> = new Set([
   'redemptionChannels',
@@ -261,6 +288,13 @@ export class TenantSettingsService {
         allowedSalesLevels: [],
         geoFence:           { enabled: false, radiusMeters: 50 },
       },
+      // TDS policy — DEFAULT-ON (owner decision W0-E): a tenant with no explicit tdsPolicy
+      // row applies 194C + gross-up at confirm. (A present-but-malformed row throws — see
+      // overlay/validateTdsPolicy — so this default only ever applies to a genuinely ABSENT key.)
+      tdsPolicy: {
+        section:     TdsSection.SEC_194C,
+        methodology: TdsMethodology.GROSS_UP,
+      },
     };
   }
 
@@ -292,6 +326,23 @@ export class TenantSettingsService {
   /** Convenience for the money path. */
   async getConversionRate(clientId: string): Promise<number> {
     return (await this.getEffectiveSettings(clientId)).conversionRate;
+  }
+
+  /**
+   * Resolve the per-tenant TDS policy {section, methodology} used by the payout engine at
+   * confirm-time to freeze each entry's treatment. UNCACHED strict read (mirrors
+   * getVisibilityEnabledUncached): absent → default-on {SEC_194C, GROSS_UP}; a present-but-malformed
+   * stored value THROWS here — fail-closed SCOPED to the money path. Deliberately does NOT route
+   * through getEffectiveSettings/overlay: a bad tdsPolicy must block a payout confirm WITHOUT
+   * breaking unrelated settings reads (conversionRate/channels/visibility) for the tenant.
+   */
+  async resolveTdsPolicy(clientId: string): Promise<TdsPolicySettings> {
+    const row = await this.prisma.programSetting.findUnique({
+      where: { clientId_settingKey: { clientId, settingKey: 'tdsPolicy' } },
+      select: { settingValue: true },
+    });
+    if (!row) return { ...this.defaults().tdsPolicy }; // absent → default-on default
+    return this.validateTdsPolicy(row.settingValue); // present → strict (throws on malformed)
   }
 
   /**
@@ -369,6 +420,7 @@ export class TenantSettingsService {
         allowedSalesLevels: [...base.visibilityConfig.allowedSalesLevels],
         geoFence:           { ...base.visibilityConfig.geoFence },
       },
+      tdsPolicy:          { ...base.tdsPolicy },
     };
 
     for (const row of rows) {
@@ -504,12 +556,54 @@ export class TenantSettingsService {
           }
           break;
         }
+        case 'tdsPolicy': {
+          // getEffectiveSettings must stay robust for EVERY consumer — this is the cached,
+          // broad, hot-path read. A malformed tdsPolicy here falls back to the default for the
+          // (informational) effective-settings view rather than throwing and taking down
+          // conversionRate/channels/visibility for the tenant. The MONEY path does not use this
+          // value: the payout engine calls resolveTdsPolicy(), which strict-validates + fails
+          // closed. So the tax-safety guarantee is preserved, scoped to where it matters.
+          try {
+            out.tdsPolicy = this.validateTdsPolicy(v);
+          } catch (e) {
+            this.logger.warn(
+              `malformed tdsPolicy in effective-settings view; showing default (payout confirm still fails closed via resolveTdsPolicy): ${e}`,
+            );
+          }
+          break;
+        }
         default:
           break; // unknown key — ignore (admin settings store holds other keys too)
       }
     }
 
     return out;
+  }
+
+  /**
+   * Validate a stored tdsPolicy value against the exact Prisma enum literals. Returns the
+   * typed policy or THROWS (BadRequestException) — deliberately fail-closed for the money
+   * path: a bad value must surface loudly, never resolve to a silent default. Only reached
+   * when a tdsPolicy row is actually present (an absent key keeps the default).
+   */
+  private validateTdsPolicy(v: unknown): TdsPolicySettings {
+    if (!this.isObj(v)) {
+      throw new BadRequestException('tdsPolicy must be an object { section, methodology }.');
+    }
+    const validSections = Object.values(TdsSection) as string[];
+    const validMethodologies = Object.values(TdsMethodology) as string[];
+    const { section, methodology } = v;
+    if (typeof section !== 'string' || !validSections.includes(section)) {
+      throw new BadRequestException(
+        `tdsPolicy.section must be one of ${validSections.join(', ')} (got ${JSON.stringify(section)}).`,
+      );
+    }
+    if (typeof methodology !== 'string' || !validMethodologies.includes(methodology)) {
+      throw new BadRequestException(
+        `tdsPolicy.methodology must be one of ${validMethodologies.join(', ')} (got ${JSON.stringify(methodology)}).`,
+      );
+    }
+    return { section: section as TdsSection, methodology: methodology as TdsMethodology };
   }
 
   /**

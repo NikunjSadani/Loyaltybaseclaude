@@ -28,6 +28,8 @@ const mockPrisma = {
   redemptionOrder: { findMany: jest.fn() },
   tdsOffPlatformEntry: { findMany: jest.fn(), createMany: jest.fn() },
   tdsDeposit: { findMany: jest.fn(), createMany: jest.fn() },
+  tdsDeductionEntry: { findMany: jest.fn() },
+  tdsRecoveryEntry: { findMany: jest.fn() },
 };
 
 // ─── Xlsx builder helper for tests ───────────────────────────────────────────
@@ -551,6 +553,8 @@ describe('TdsService — getLiability (liability tracker)', () => {
     mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
     mockPrisma.tdsOffPlatformEntry.findMany.mockResolvedValue([]);
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([]);
+    mockPrisma.tdsDeductionEntry.findMany.mockResolvedValue([]);
+    mockPrisma.tdsRecoveryEntry.findMany.mockResolvedValue([]);
   });
 
   it('194R: returns per-PAN rows with paise as strings (BigInt serialized)', async () => {

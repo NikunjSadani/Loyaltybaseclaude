@@ -11,12 +11,21 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-- **🏗️ ACTIVE / NEXT BUILD — VISIBILITY-LED PAYOUTS: 194C AUTO-INVOICING + CONFIGURABLE TDS. Design ✅ COMPLETE + owner-signed
-  (decisions D1–D14); NO code yet. Full spec = `platform/docs/plans/VISIBILITY-PAYOUT-TDS-INVOICING-DESIGN.md`; memory
-  [[visibility-payout-tds-invoicing]] — READ BOTH FIRST.** Reconciled against current code via a 3-stream audit: **most is
-  already built** (the `api/src/tds/*` 194C engine — platform-wide PAN aggregation, ₹30k/₹1L thresholds, 1/2/20% rates,
-  retroactive jump; the `api/src/invoices/*` self-billed AutoInvoice — GST CGST/SGST-vs-IGST from GSTIN-vs-WB19, editable
-  number, partner FE view/edit, client PDF). **GAPS to build:** (1) per-tenant **config** `{visibilityPayoutSection 194R|194C,
+- **🏗️ VISIBILITY-LED PAYOUTS: 194C AUTO-INVOICING + CONFIGURABLE TDS — W0+W0.5+W1 BACKEND + W2 FRONTEND ✅ BUILT + verified + gate-green; ▶ NEXT = W3 (staging runtime-verify — migrations apply there).** W2 = 5 admin pages (tds-config·tds-payouts·tds-recovery·tds-rcm·gst-reimbursements) under a "TDS & Invoicing" nav parent + admin/invoices tenant-read-only + partner-copy D13/D14 fix; RBAC gates nav AND fetch; FE gate tsc 0 / vitest 2039. *(orig W2 pointer below is now DONE.)*
+  Full spec = `platform/docs/plans/VISIBILITY-PAYOUT-TDS-INVOICING-DESIGN.md` + as-built/fix-log = `VISIBILITY-PAYOUT-TDS-WAVE0-SCHEMA.md`;
+  memory [[visibility-payout-tds-invoicing]] — READ ALL THREE FIRST. **Built:** W0 schema+migration `20260728120000_visibility_payout_tds_foundation`
+  (ADDITIVE — 4 enums, `payoutStream` on CreditField, frozen-stamp/link cols on CreditPayoutEntry, kind/lock/PAN-FY on AutoInvoice, +3 typed
+  tables TdsDeductionEntry/TdsRecoveryEntry/GstReimbursement) → W0.5 shared contracts (`tdsPolicy` in TenantSettingsService — **fail-closed scoped
+  to `resolveTdsPolicy`**; freeze-on-confirm; `tds-methodology.helper.ts`; 4 `isSeparatePayout`→`payoutStream` reads) → W1 3 parallel streams
+  (A tds-compute · B credits+invoices write-orchestration · C `api/src/tds-invoicing/*` reimbursement+reports+config) → integrated + **DUAL money
+  audit (8) → fix → DUAL re-audit (4) → fix cycle 2 (6) → FINAL re-audit CLEAN (0)**. **Gate: api nest 0 / jest 2023 · FE tsc 0.** **Owner decisions
+  (this session):** config store = JSON-hardened (not typed table — industry-checked vs Stripe/Fowler; freeze section+methodology onto each payout
+  by value); **gross-up = MONTHLY-INCREMENTAL** top-up invoices `TGSL-TDS-<PAN>-<FY>-<seq>` (D-i); **no-PAN = pay full + 20% TENANT recovery + report**
+  (D-ii); **default-ON** rollout (D-iii); **D10 recovery = pro-rata by FY-aggregate** (honored). Deoleo live path (incentive/194R) **byte-identical** —
+  the TDS engine is a no-op for single-tenant/single-methodology/incentive. ⚠️ **migrations NOT applied to any DB** (local Postgres down → apply +
+  runtime-verify on staging at W3): `20260728120000_visibility_payout_tds_foundation` + `20260728130000_credit_code_per_tenant_unique`. **✅ FIXED
+  this wave (owner "fold it in"):** the batchCode/downloadCode global-unique collision → now `@@unique([clientId,code])` per-tenant + per-(clientId,period)
+  advisory-lock code-gen. **Still parked (2nd-tenant checklist):** a low-sev double-reversal edge. NOTHING pushed/merged. *(historical GAPS now built:)* (1) per-tenant **config** `{visibilityPayoutSection 194R|194C,
   tdsMethodology DEDUCT|GROSS_UP}` **Gifsy-set** + explicit `payoutStream=VISIBILITY|INCENTIVE` on the credit field (replaces
   overloaded `isSeparatePayout`); (2) **DEDUCT** method + per-PAN **carry-forward** ledger (currently gross-up-only); (3)
   **GROSS-UP** = at-threshold **"TDS invoice"** (retailer's name, GST applies, body NOT paid → deposited as TDS, settles the
@@ -27,8 +36,10 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
   reports (GST-reg-type, **unregistered/RCM** invoice list, tenant recovery). **194R = separate later workstream** (config +
   routing built now). Portal split: 194C-engine/config/recovery/GST-reimbursement/RCM = **Gifsy portal**; payout-Excel-upload +
   read-only own invoices/reports/own-recovery-liability = **tenant portal**; invoice view+number-edit = **retailer portal**.
-  **▶ NEXT = Wave 0 (schema + migration + frozen contracts) — bring migration SQL to owner before any DB touch.** Phase plan +
-  ETAs (~4.5–5.5d, W0 serial → W1/W2 3-parallel-streams each → W3 dual money-path audit+gate+staging → W4 cutover) in §8 of the
+  **▶ NEXT = Wave 2 (frontend): Gifsy config-UI (section+methodology per tenant) + Gifsy dashboards (TDS liability/recovery/attribution, GST-reimbursement
+  screen, unregistered/RCM report) + tenant read-only views (invoices, payout report, own recovery liability) + retailer invoice-copy tweaks — consume
+  the `isNoPan` boolean, NOT the raw `__NO_PAN__` string. W0/W0.5/W1 backend DONE + dual-audited + gate-green.** Phase plan +
+  ETAs (W0/W0.5/W1 done → W2 3-parallel-streams → W3 full-gate+staging-runtime-verify → W4 cutover) in §8 of the
   spec. Money path → **dual adversarial audit mandatory** [[audit-every-build-item]].
 - **🚀 VISIBILITY (POSM) — ✅ LIVE IN PROD — cutover #16 `4ebf12c` (2026-07-28), DORMANT + post-cutover infra DONE.**
   Prod migration `20260727120000_visibility_posm_rebuild` applied (0 legacy rows → abort-guard passed), 5 new tables, `/v1/visibility`
@@ -496,12 +507,15 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[emplo
 Greet. State current status, then present the open pickups and ask which to take (do NOT hard-lead one — the next move is
 the owner's choice among the leftovers below).
 
-**🏗️ ACTIVE / NEXT BUILD — VISIBILITY-LED PAYOUTS: 194C AUTO-INVOICING + CONFIGURABLE TDS.** Design ✅ COMPLETE + owner-signed
-(D1–D14); **NO code yet — resume at Wave 0.** Full spec = `platform/docs/plans/VISIBILITY-PAYOUT-TDS-INVOICING-DESIGN.md`;
-memory [[visibility-payout-tds-invoicing]] — **READ BOTH FIRST.** Summary + gaps + phase-plan/ETAs are in the CURRENT STATE
-bullet at the top of this file. **▶ Wave 0 = schema + migration + frozen contracts; bring the migration SQL to the owner
-BEFORE any DB touch.** Money path → **dual adversarial money-path audit mandatory** before done. (Orchestrate: W1/W2 are
-3-parallel-streams each.)
+**🏗️ VISIBILITY-LED PAYOUTS: 194C AUTO-INVOICING + CONFIGURABLE TDS — W0+W0.5+W1 BACKEND + W2 FRONTEND ✅ BUILT + verified + gate-green; ▶ NEXT = W3 (staging runtime-verify — migrations apply there, local DB down).**
+Full spec = `VISIBILITY-PAYOUT-TDS-INVOICING-DESIGN.md`, as-built + fix-log = `VISIBILITY-PAYOUT-TDS-WAVE0-SCHEMA.md`, memory
+[[visibility-payout-tds-invoicing]] — **READ ALL THREE FIRST.** Backend built + integrated + **dual money-audit (8) → fix → dual re-audit (4)
+→ fix cycle 2 (6) → FINAL re-audit CLEAN (0)**; **gate api nest 0 / jest 2023 · FE tsc 0.** Owner decisions: config=JSON-hardened+freeze-on-confirm,
+gross-up=MONTHLY-INCREMENTAL top-ups, no-PAN=pay-full+20%-tenant-recovery+report, default-ON, D10 pro-rata. Deoleo live path byte-identical (engine
+no-op). ⚠️ migration `20260728120000_visibility_payout_tds_foundation` NOT applied to any DB (local Postgres down → applies + runtime-verifies on
+staging at W3). NOTHING pushed/merged. **▶ W2 = frontend (Gifsy config-UI + dashboards + tenant read-only + retailer copy)** → W3 full-gate +
+staging-runtime-verify + docs → W4 owner-gated cutover. Full detail in the CURRENT STATE bullet at the top of this file. Money path → **dual
+adversarial audit already done + clean** (re-run on any further money-logic change).
 
 ---
 

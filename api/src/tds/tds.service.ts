@@ -31,11 +31,14 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   fyFromLabel,
+  fyLabelForPeriod,
+  periodWindowForFy,
   grossUpTdsPaise,
   rate194R,
   rate194C,
   roundToRupeePaise,
   sectionParamToEnum,
+  effectiveEntrySection,
   parseOffPlatformUpload,
   parseDepositUpload,
   buildOffPlatformTemplate,
@@ -44,6 +47,7 @@ import {
   depositFileHash,
   cellSafe,
 } from './tds.helpers';
+import { withholdingTdsPaise } from './tds-methodology.helper';
 import type { UploadResult } from './dto/tds.dto';
 import { buildXlsx } from '../common/xlsx';
 import { paiseToRupees } from '../common/money';
@@ -61,6 +65,15 @@ export interface TdsRow194R {
   outstandingPaise: bigint;
 }
 
+/** GROSS-UP "in lieu of TDS" recovery attributed to one contributing tenant (report-only). */
+export interface TdsRecoveryAttribution {
+  clientId: string;
+  tenantSharePaise: bigint;
+}
+
+/** Which methodology(-ies) the PAN's 194C entries were FROZEN with. */
+export type TdsMethodologyLabel = 'DEDUCT' | 'GROSS_UP' | 'MIXED' | null;
+
 export interface TdsRow194C {
   panNumber: string;
   entityType: string;
@@ -71,7 +84,12 @@ export interface TdsRow194C {
   liabilityPaise: bigint;           // (a) with-threshold
   liabilityNoThresholdPaise: bigint; // (b) no-threshold
   depositedPaise: bigint;
-  outstandingPaise: bigint; // based on with-threshold liability
+  outstandingPaise: bigint; // liability − (deposited + withheld); can be negative
+  // ── Methodology-aware fields (reflect the DEDUCT / GROSS-UP ledgers) ──
+  methodology: TdsMethodologyLabel; // frozen methodology on the PAN's entries (MIXED if both)
+  withheldPaise: bigint;   // DEDUCT: sum of TdsDeductionEntry.tdsDeductedThisPaise (already collected)
+  recoveredPaise: bigint;  // GROSS-UP: sum of TdsRecoveryEntry.tenantSharePaise (report-only attribution)
+  recoveryByTenant: TdsRecoveryAttribution[]; // GROSS-UP per-tenant recovery split (report-only)
 }
 
 export interface TdsSummary194R {
@@ -90,6 +108,8 @@ export interface TdsSummary194C {
   totalLiabilityPaise: bigint;
   totalLiabilityNoThresholdPaise: bigint;
   totalDepositedPaise: bigint;
+  totalWithheldPaise: bigint;   // DEDUCT collected via withholding (ledger)
+  totalRecoveredPaise: bigint;  // GROSS-UP recovered attribution (ledger, report-only)
   totalOutstandingPaise: bigint;
   rowCount: number;
 }
@@ -108,6 +128,11 @@ interface PanAccum194C {
   entityType: string;
   totalPaise: bigint;
   maxSinglePaise: bigint;
+  methodologies: Set<'DEDUCT' | 'GROSS_UP'>; // frozen methodologies seen on this PAN's entries
+  // FIX-2: base split by frozen methodology so liability uses the CORRECT statutory basis —
+  // DEDUCT → withholding (base×rate/100); GROSS_UP (and null/legacy) → gross-up (base×rate/den).
+  deductBasePaise: bigint;
+  grossUpBasePaise: bigint;
 }
 
 // ─── Thresholds (paise) ──────────────────────────────────────────────────────
@@ -132,6 +157,9 @@ export class TdsService {
   async compute194R(clientId: string, fyLabel: string): Promise<TdsRow194R[]> {
     const fy = fyFromLabel(fyLabel);
     const { start, endExclusive } = fy;
+    // FIX-4: VISIBILITY entries frozen 194R are anchored by their payout PERIOD's FY (matching
+    // the ledger); INCENTIVE (non-visibility) 194R keeps its paidAt anchor.
+    const { startPeriod, endPeriod } = periodWindowForFy(fyLabel);
 
     // Accumulate per PAN
     const accum = new Map<string, PanAccum194R>();
@@ -147,35 +175,50 @@ export class TdsService {
       }
     };
 
-    // ── Source 1: Non-visibility CreditPayoutEntry (status=PAID, paidAt in FY) ──
-    // Exclude entries where the field has isSeparatePayout=true (those are 194C).
-    // Join: entry.outletId → Outlet.outletCode → Outlet.partnerId → ChannelPartner.panNumber
-    const payoutEntries = await this.prisma.creditPayoutEntry.findMany({
-      where: {
-        clientId,
-        status: 'PAID',
-        paidAt: { gte: start, lt: endExclusive },
-        // Filter out visibility (isSeparatePayout) fields
-        // We fetch the field via fieldId and filter post-query (no FK in CPE → CreditField).
-      },
-      select: {
-        amountPaise: true,
-        fieldId: true,
-        outletId: true,
-      },
-    });
-
-    // Fetch all visibility field IDs for this client to exclude them
+    // Visibility field IDs (the explicit classifier) — needed both to widen the query by
+    // period and to resolve the FROZEN-null fallback classification (effectiveEntrySection).
     const visibilityFields = await this.prisma.creditField.findMany({
-      where: { clientId, isSeparatePayout: true },
+      where: { clientId, payoutStream: 'VISIBILITY' },
       select: { id: true },
     });
     const visibilityFieldIds = new Set(visibilityFields.map((f) => f.id));
+    const visFieldIdArr = [...visibilityFieldIds];
 
-    // Gather outlet codes for non-visibility entries.
+    // ── Source 1: CreditPayoutEntry whose EFFECTIVE section is 194R ──────────────
+    // Two windows, unioned by id (a visibility row can satisfy both):
+    //   A) paidAt in FY  — covers INCENTIVE (paidAt anchor) + visibility paid within the FY
+    //   B) period in FY  — covers VISIBILITY frozen-194R whose PERIOD (not paidAt) lands in FY
+    // Each row is then re-checked with its correct anchor so a visibility row whose PERIOD is
+    // in a DIFFERENT FY (but whose paidAt happened to fall in this one) is dropped.
     // NOTE: CreditPayoutEntry.outletId stores the outletCode (string code), NOT the Outlet PK.
-    const nonVisEntries = payoutEntries.filter((e) => !visibilityFieldIds.has(e.fieldId));
-    const outletCodes = [...new Set(nonVisEntries.map((e) => e.outletId))];
+    const paidAtEntries = await this.prisma.creditPayoutEntry.findMany({
+      where: { clientId, status: 'PAID', paidAt: { gte: start, lt: endExclusive } },
+      select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
+    });
+    const periodVisEntries = visFieldIdArr.length
+      ? await this.prisma.creditPayoutEntry.findMany({
+          where: {
+            clientId,
+            status: 'PAID',
+            period: { gte: startPeriod, lte: endPeriod },
+            fieldId: { in: visFieldIdArr },
+          },
+          select: { id: true, amountPaise: true, fieldId: true, outletId: true, tdsSection: true, period: true },
+        })
+      : [];
+
+    const unionById = new Map<string, (typeof paidAtEntries)[number]>();
+    for (const e of [...paidAtEntries, ...periodVisEntries]) unionById.set(e.id, e);
+
+    const section194REntries = [...unionById.values()].filter((e) => {
+      const isVis = visibilityFieldIds.has(e.fieldId);
+      // Visibility rows belong to THIS FY only if their period's FY matches (period anchor);
+      // non-visibility rows came from the paidAt window so are already in-FY.
+      const inFy = isVis ? fyLabelForPeriod(e.period) === fyLabel : true;
+      if (!inFy) return false;
+      return effectiveEntrySection(e.tdsSection, isVis) === 'SEC_194R';
+    });
+    const outletCodes = [...new Set(section194REntries.map((e) => e.outletId))];
 
     // Resolve outletCode → partnerId → PAN
     const outlets = outletCodes.length
@@ -197,7 +240,7 @@ export class TdsService {
       : [];
     const partnerToPan = new Map(partners.map((p) => [p.id, p.panNumber]));
 
-    for (const entry of nonVisEntries) {
+    for (const entry of section194REntries) {
       const partnerId = outletToPartnerId.get(entry.outletId) ?? null;
       const pan = partnerId ? (partnerToPan.get(partnerId) ?? null) : null;
       addToPan(pan, entry.amountPaise);
@@ -308,12 +351,30 @@ export class TdsService {
 
   /**
    * Compute 194C rows (platform-wide, no clientId scope).
-   * Sources: visibility CreditPayoutEntry (isSeparatePayout=true) across ALL tenants.
-   * Two liability columns: (a) with-threshold, (b) no-threshold.
+   *
+   * Sources: CreditPayoutEntry whose EFFECTIVE section is 194C, across ALL tenants —
+   * bucketed by the FROZEN tdsSection stamp (W0-B) when present; a null stamp
+   * (legacy) falls back to the live payoutStream=VISIBILITY classification. See
+   * effectiveEntrySection. Frozen 194C is only ever derived for a VISIBILITY payout,
+   * so we query (fieldId ∈ current visibility fields) OR (tdsSection = SEC_194C) to
+   * catch both the fallback rows and any entry frozen 194C even if its field's live
+   * payoutStream later changed.
+   *
+   * Two liability columns: (a) with-threshold, (b) no-threshold. The gross-up
+   * liability number is unchanged by methodology; methodology only affects what is
+   * already-COLLECTED (DEDUCT withholding) and the report-only recovery attribution
+   * (GROSS-UP), both read from the typed ledgers.
    */
   async compute194C(fyLabel: string): Promise<TdsRow194C[]> {
-    const fy = fyFromLabel(fyLabel);
-    const { start, endExclusive } = fy;
+    // FIX-4: VISIBILITY 194C entries are anchored by their payout PERIOD's FY (matching the
+    // credits ledger WRITE), NOT paidAt — so a period=2026-03 payout banked in April 2026
+    // still lands in FY 2025-26 on both the base READ and the DEDUCT/recovery ledger. All
+    // 194C entries are visibility-regime (INCENTIVE is always 194R), so the whole source uses
+    // the period window.
+    const { startPeriod, endPeriod } = periodWindowForFy(fyLabel);
+    // Deposits keep their own depositDate anchor (a deposit MADE in the FY), independent of
+    // the payout period anchor above.
+    const { start, endExclusive } = fyFromLabel(fyLabel);
 
     // Accumulate per PAN (platform-wide)
     const accum = new Map<string, PanAccum194C>();
@@ -322,76 +383,103 @@ export class TdsService {
       pan: string | null | undefined,
       amountPaise: bigint,
       entityType: string | null | undefined,
+      methodology: 'DEDUCT' | 'GROSS_UP' | null | undefined,
     ) => {
       const key = pan && pan.trim() ? pan.trim().toUpperCase() : NO_PAN_KEY;
       const hasPan = key !== NO_PAN_KEY;
       const effEntityType = entityType ?? 'OTHERS';
+      // DEDUCT → withholding basis; GROSS_UP or null(legacy) → gross-up basis (preserves the
+      // pre-FIX-2 behaviour for unstamped rows, which were always grossed up).
+      const isDeduct = methodology === 'DEDUCT';
       const existing = accum.get(key);
       if (existing) {
         existing.totalPaise += amountPaise;
         if (amountPaise > existing.maxSinglePaise) {
           existing.maxSinglePaise = amountPaise;
         }
+        if (methodology) existing.methodologies.add(methodology);
+        if (isDeduct) existing.deductBasePaise += amountPaise;
+        else existing.grossUpBasePaise += amountPaise;
       } else {
+        const methodologies = new Set<'DEDUCT' | 'GROSS_UP'>();
+        if (methodology) methodologies.add(methodology);
         accum.set(key, {
           panNumber: key,
           hasPan,
           entityType: effEntityType,
           totalPaise: amountPaise,
           maxSinglePaise: amountPaise,
+          methodologies,
+          deductBasePaise: isDeduct ? amountPaise : 0n,
+          grossUpBasePaise: isDeduct ? 0n : amountPaise,
         });
       }
     };
 
-    // ── Source: visibility CreditPayoutEntry (isSeparatePayout=true fields), all clients ──
-    // Get all visibility field IDs across all tenants
+    // ── Source: CreditPayoutEntry effective-194C (payoutStream=VISIBILITY fields), all clients ──
+    // Get all visibility field IDs across all tenants (payoutStream is the explicit classifier;
+    // isSeparatePayout is its deprecated boolean mirror, dropped in W3) — used both to widen the
+    // query and to resolve the FROZEN-null fallback classification (effectiveEntrySection).
     const visibilityFields = await this.prisma.creditField.findMany({
-      where: { isSeparatePayout: true },
+      where: { payoutStream: 'VISIBILITY' },
       select: { id: true, clientId: true },
     });
     const visFieldIds = new Set(visibilityFields.map((f) => f.id));
 
-    if (visFieldIds.size > 0) {
-      const visEntries = await this.prisma.creditPayoutEntry.findMany({
-        where: {
-          fieldId: { in: [...visFieldIds] },
-          status: 'PAID',
-          paidAt: { gte: start, lt: endExclusive },
-        },
-        select: {
-          amountPaise: true,
-          outletId: true,
-          clientId: true,
-        },
+    // Match current-visibility-field entries OR any entry FROZEN as SEC_194C (covers a field
+    // whose live payoutStream changed after confirm). Each fetched row is then re-checked with
+    // effectiveEntrySection so a VISIBILITY-field entry frozen SEC_194R is correctly dropped here.
+    const visEntries = await this.prisma.creditPayoutEntry.findMany({
+      where: {
+        status: 'PAID',
+        // FIX-4: bucket by payout PERIOD's FY (matches the ledger), not paidAt.
+        period: { gte: startPeriod, lte: endPeriod },
+        OR: [
+          { fieldId: { in: [...visFieldIds] } },
+          { tdsSection: 'SEC_194C' },
+        ],
+      },
+      select: {
+        amountPaise: true,
+        outletId: true,
+        clientId: true,
+        fieldId: true,
+        tdsSection: true,
+        tdsMethodology: true,
+      },
+    });
+
+    // Keep only rows whose EFFECTIVE section is 194C (frozen stamp wins; null falls back).
+    const c194Entries = visEntries.filter(
+      (e) => effectiveEntrySection(e.tdsSection, visFieldIds.has(e.fieldId)) === 'SEC_194C',
+    );
+
+    if (c194Entries.length > 0) {
+      // CreditPayoutEntry.outletId stores the outletCode (NOT the Outlet PK).
+      // For 194C we need to resolve across all tenants (clientId already on outlet row).
+      const outletCodes194C = [...new Set(c194Entries.map((e) => e.outletId))];
+      const outlets = await this.prisma.outlet.findMany({
+        where: { outletCode: { in: outletCodes194C } },
+        select: { outletCode: true, partnerId: true, clientId: true },
       });
+      // outletCode is unique only WITHIN a tenant (@@unique([clientId, outletCode])); 194C is
+      // platform-wide, so key by clientId:outletCode to avoid cross-tenant PAN misattribution.
+      const outletToPartnerId = new Map(outlets.map((o) => [`${o.clientId}:${o.outletCode}`, o.partnerId]));
 
-      if (visEntries.length > 0) {
-        // CreditPayoutEntry.outletId stores the outletCode (NOT the Outlet PK).
-        // For 194C we need to resolve across all tenants (clientId already on outlet row).
-        const outletCodes194C = [...new Set(visEntries.map((e) => e.outletId))];
-        const outlets = await this.prisma.outlet.findMany({
-          where: { outletCode: { in: outletCodes194C } },
-          select: { outletCode: true, partnerId: true, clientId: true },
-        });
-        // outletCode is unique only WITHIN a tenant (@@unique([clientId, outletCode])); 194C is
-        // platform-wide, so key by clientId:outletCode to avoid cross-tenant PAN misattribution.
-        const outletToPartnerId = new Map(outlets.map((o) => [`${o.clientId}:${o.outletCode}`, o.partnerId]));
+      const partnerIds = [...new Set(outlets.map((o) => o.partnerId).filter(Boolean))] as string[];
+      const partners = partnerIds.length
+        ? await this.prisma.channelPartner.findMany({
+            // isParent:false — defensive (parents own no outlets → never in partnerIds).
+            where: { id: { in: partnerIds }, isParent: false },
+            select: { id: true, panNumber: true, entityType: true },
+          })
+        : [];
+      const partnerMap = new Map(partners.map((p) => [p.id, p]));
 
-        const partnerIds = [...new Set(outlets.map((o) => o.partnerId).filter(Boolean))] as string[];
-        const partners = partnerIds.length
-          ? await this.prisma.channelPartner.findMany({
-              // isParent:false — defensive (parents own no outlets → never in partnerIds).
-              where: { id: { in: partnerIds }, isParent: false },
-              select: { id: true, panNumber: true, entityType: true },
-            })
-          : [];
-        const partnerMap = new Map(partners.map((p) => [p.id, p]));
-
-        for (const entry of visEntries) {
-          const partnerId = outletToPartnerId.get(`${entry.clientId}:${entry.outletId}`) ?? null; // outletId = outletCode
-          const partner = partnerId ? partnerMap.get(partnerId) : null;
-          addToC(partner?.panNumber, entry.amountPaise, partner?.entityType ?? null);
-        }
+      for (const entry of c194Entries) {
+        const partnerId = outletToPartnerId.get(`${entry.clientId}:${entry.outletId}`) ?? null; // outletId = outletCode
+        const partner = partnerId ? partnerMap.get(partnerId) : null;
+        addToC(partner?.panNumber, entry.amountPaise, partner?.entityType ?? null, entry.tdsMethodology);
       }
     }
 
@@ -412,6 +500,51 @@ export class TdsService {
       deposited.set(key, (deposited.get(key) ?? 0n) + d.amountPaise);
     }
 
+    // ── DEDUCT already-collected: SUM TdsDeductionEntry.tdsDeductedThisPaise (section 194C, FY) ──
+    // The DEDUCT ledger is keyed by fyLabel (IST FY string) + section, platform-wide (all tenants
+    // contributing to the PAN). This is TDS withheld from payouts, counted as already-collected in
+    // addition to TdsDeposit. See the money-path note: Stream B must NOT ALSO upload these withheld
+    // amounts as TdsDeposit rows, or deposited+withheld would double-count against the liability.
+    const deductions = await this.prisma.tdsDeductionEntry.findMany({
+      where: { section: 'SEC_194C', fyLabel },
+      select: { panNumber: true, tdsDeductedThisPaise: true },
+    });
+
+    const withheld = new Map<string, bigint>();
+    for (const d of deductions) {
+      const key = d.panNumber && d.panNumber.trim()
+        ? d.panNumber.trim().toUpperCase()
+        : NO_PAN_KEY;
+      withheld.set(key, (withheld.get(key) ?? 0n) + d.tdsDeductedThisPaise);
+    }
+
+    // ── GROSS-UP recovery attribution: SUM TdsRecoveryEntry.tenantSharePaise (section 194C, FY) ──
+    // Report-only ("in lieu of TDS"): per-PAN total + a per-tenant split. Does NOT change the
+    // liability or outstanding number — purely surfaces what has been recovered from each tenant.
+    const recoveries = await this.prisma.tdsRecoveryEntry.findMany({
+      where: { section: 'SEC_194C', fyLabel },
+      select: { panNumber: true, clientId: true, tenantSharePaise: true },
+    });
+
+    const recovered = new Map<string, bigint>();
+    const recoveryByTenant = new Map<string, Map<string, bigint>>();
+    for (const r of recoveries) {
+      // FIX-B: no-PAN recovery encodes the outlet into panNumber ('__NO_PAN__:<outlet>') so it can
+      // telescope per outlet at write time. Collapse ALL such rows back to the single NO_PAN_KEY
+      // bucket here so the platform-wide 194C recovery total aligns with the no-PAN base bucket.
+      const raw = r.panNumber?.trim();
+      const key = !raw || raw.toUpperCase().startsWith(NO_PAN_KEY)
+        ? NO_PAN_KEY
+        : raw.toUpperCase();
+      recovered.set(key, (recovered.get(key) ?? 0n) + r.tenantSharePaise);
+      let tenantMap = recoveryByTenant.get(key);
+      if (!tenantMap) {
+        tenantMap = new Map<string, bigint>();
+        recoveryByTenant.set(key, tenantMap);
+      }
+      tenantMap.set(r.clientId, (tenantMap.get(r.clientId) ?? 0n) + r.tenantSharePaise);
+    }
+
     // ── Build result rows ──
     const rows: TdsRow194C[] = [];
     for (const [key, a] of accum) {
@@ -422,16 +555,39 @@ export class TdsService {
 
       const rateForPan = rate194C(a.hasPan, a.entityType);
 
-      // (a) with-threshold
-      const liabilityPaise = thresholdMet
-        ? grossUpTdsPaise(fyTotal, rateForPan)
-        : 0n;
+      // FIX-2: liability is METHODOLOGY-AWARE. A DEDUCT PAN's statutory TDS is WITHHOLDING
+      // (base × rate/100); a GROSS_UP (or legacy/unstamped) PAN's is the payer-borne GROSS-UP
+      // (base × rate/den). A MIXED PAN sums each portion on its own basis. Using gross-up for a
+      // fully-withheld DEDUCT PAN left a phantom residue (liability > withheld) — now
+      // liability(DEDUCT) = withheld once fully collected ⇒ outstanding reconciles to 0.
+      const withholdingPortionPaise = withholdingTdsPaise(a.deductBasePaise, rateForPan);
+      const grossUpPortionPaise = grossUpTdsPaise(a.grossUpBasePaise, rateForPan);
 
-      // (b) no-threshold: TDS on everything regardless
-      const liabilityNoThresholdPaise = grossUpTdsPaise(fyTotal, rateForPan);
+      // (b) no-threshold: TDS on everything regardless of the ₹30k/₹1L gate.
+      const liabilityNoThresholdPaise = withholdingPortionPaise + grossUpPortionPaise;
+
+      // (a) with-threshold — only due once the cumulative crosses the threshold.
+      const liabilityPaise = thresholdMet ? liabilityNoThresholdPaise : 0n;
 
       const depositedPaise = deposited.get(key) ?? 0n;
-      const outstandingPaise = liabilityPaise - depositedPaise;
+      const withheldPaise = withheld.get(key) ?? 0n;
+      const recoveredPaise = recovered.get(key) ?? 0n;
+      // Outstanding nets BOTH deposited AND DEDUCT-withheld against the liability.
+      const outstandingPaise = liabilityPaise - depositedPaise - withheldPaise;
+
+      // Which frozen methodologies did this PAN's entries carry? (null = all legacy/unstamped.)
+      const methSet = a.methodologies;
+      const methodology: TdsMethodologyLabel =
+        methSet.size === 0 ? null : methSet.size === 1 ? [...methSet][0] : 'MIXED';
+
+      const tenantMap = recoveryByTenant.get(key);
+      const recoveryList: TdsRecoveryAttribution[] = tenantMap
+        ? [...tenantMap.entries()]
+            .map(([clientId, tenantSharePaise]) => ({ clientId, tenantSharePaise }))
+            .sort((x, y) =>
+              y.tenantSharePaise > x.tenantSharePaise ? 1 : y.tenantSharePaise < x.tenantSharePaise ? -1 : 0,
+            )
+        : [];
 
       rows.push({
         panNumber: a.panNumber,
@@ -444,6 +600,10 @@ export class TdsService {
         liabilityNoThresholdPaise,
         depositedPaise,
         outstandingPaise,
+        methodology,
+        withheldPaise,
+        recoveredPaise,
+        recoveryByTenant: recoveryList,
       });
     }
 
@@ -466,6 +626,8 @@ export class TdsService {
       totalLiabilityPaise: rows.reduce((s, r) => s + r.liabilityPaise, 0n),
       totalLiabilityNoThresholdPaise: rows.reduce((s, r) => s + r.liabilityNoThresholdPaise, 0n),
       totalDepositedPaise: rows.reduce((s, r) => s + r.depositedPaise, 0n),
+      totalWithheldPaise: rows.reduce((s, r) => s + r.withheldPaise, 0n),
+      totalRecoveredPaise: rows.reduce((s, r) => s + r.recoveredPaise, 0n),
       totalOutstandingPaise: rows.reduce((s, r) => s + r.outstandingPaise, 0n),
       rowCount: rows.length,
     };
@@ -841,9 +1003,17 @@ export class TdsService {
    * One row per PAN. Name resolution: look up ChannelPartner by PAN across
    * all tenants (first match wins).
    *
-   * Columns: S.No · Deductee Name · PAN · Entity Type · Section · Amount Paid (₹)
-   *          · TDS Rate % · TDS — With Threshold (₹) · TDS — No Threshold (₹)
-   *          · Threshold Met (Y/N) · Already Deposited (₹) · Outstanding (₹) · FY
+   * Columns: S.No · Deductee Name · PAN · Entity Type · Section · Methodology
+   *          · Amount Paid (₹) · TDS Rate % · TDS — With Threshold (₹)
+   *          · TDS — No Threshold (₹) · Threshold Met (Y/N) · Already Deposited (₹)
+   *          · TDS Withheld (Deduct) (₹) · TDS Recovered (Gross-Up) (₹)
+   *          · Outstanding (₹) · FY
+   *
+   * The Methodology + Withheld/Recovered columns make the DEDUCT-vs-GROSS_UP split
+   * CA-visible: DEDUCT PANs show withholding already collected (folded into
+   * Outstanding); GROSS_UP PANs show the "in lieu of TDS" recovery (report-only,
+   * NOT netted against liability). A second "Gross-Up Recovery by Tenant" sheet
+   * carries the per-tenant recovery attribution.
    *
    * @returns { buffer: Buffer, filename: string }
    */
@@ -896,19 +1066,37 @@ export class TdsService {
         PAN: cellSafe(hasPan ? r.panNumber : ''),
         'Entity Type': cellSafe(r.entityType),
         Section: '194C',
+        Methodology: cellSafe(r.methodology ?? ''),
         'Amount Paid (₹)': paiseToRupees(r.baseFyTotalPaise).toFixed(2),
         'TDS Rate %': tdsRatePct,
         'TDS — With Threshold (₹)': paiseToRupees(r.liabilityPaise).toFixed(2),
         'TDS — No Threshold (₹)': paiseToRupees(r.liabilityNoThresholdPaise).toFixed(2),
         'Threshold Met (Y/N)': r.thresholdMet ? 'Y' : 'N',
         'Already Deposited (₹)': paiseToRupees(r.depositedPaise).toFixed(2),
+        'TDS Withheld (Deduct) (₹)': paiseToRupees(r.withheldPaise).toFixed(2),
+        'TDS Recovered (Gross-Up) (₹)': paiseToRupees(r.recoveredPaise).toFixed(2),
         'Outstanding (₹)': paiseToRupees(r.outstandingPaise).toFixed(2),
         FY: fyLabel,
       };
     });
 
+    // Second sheet: the GROSS-UP per-tenant recovery attribution ("in lieu of TDS"),
+    // flattened one row per (PAN, tenant). Report-only — never netted against liability.
+    const recoveryRows = rows.flatMap((r) => {
+      const hasPan = r.panNumber !== '__NO_PAN__';
+      const deducteeName = hasPan ? (panToName.get(r.panNumber) ?? '') : 'NO PAN ON FILE';
+      return r.recoveryByTenant.map((rec) => ({
+        PAN: cellSafe(hasPan ? r.panNumber : ''),
+        'Deductee Name': cellSafe(deducteeName),
+        'Recovered From (Client)': cellSafe(rec.clientId),
+        'Recovery Amount (₹)': paiseToRupees(rec.tenantSharePaise).toFixed(2),
+        FY: fyLabel,
+      }));
+    });
+
     const buffer = buildXlsx([
       { name: 'TDS 194C Details', rows: detailRows },
+      { name: 'Gross-Up Recovery by Tenant', rows: recoveryRows },
     ]);
 
     return { buffer, filename: `tds-194c-${fyLabel}.xlsx` };
@@ -936,11 +1124,19 @@ export class TdsService {
       liabilityPaise: string;
       depositedPaise: string;
       outstandingPaise: string;
+      // 194C only — methodology-aware split (undefined for 194R):
+      methodology?: TdsMethodologyLabel;
+      withheldPaise?: string;
+      recoveredPaise?: string;
+      recoveryByTenant?: Array<{ clientId: string; tenantSharePaise: string }>;
     }>;
     totals: {
       liabilityPaise: string;
       depositedPaise: string;
       outstandingPaise: string;
+      // 194C only:
+      withheldPaise?: string;
+      recoveredPaise?: string;
     };
   }> {
     if (section === '194R') {
@@ -970,6 +1166,8 @@ export class TdsService {
     const rows = await this.compute194C(fyLabel);
     const totalLiability = rows.reduce((s, r) => s + r.liabilityPaise, 0n);
     const totalDeposited = rows.reduce((s, r) => s + r.depositedPaise, 0n);
+    const totalWithheld = rows.reduce((s, r) => s + r.withheldPaise, 0n);
+    const totalRecovered = rows.reduce((s, r) => s + r.recoveredPaise, 0n);
     const totalOutstanding = rows.reduce((s, r) => s + r.outstandingPaise, 0n);
 
     return {
@@ -980,11 +1178,20 @@ export class TdsService {
         liabilityPaise: r.liabilityPaise.toString(),
         depositedPaise: r.depositedPaise.toString(),
         outstandingPaise: r.outstandingPaise.toString(),
+        methodology: r.methodology,
+        withheldPaise: r.withheldPaise.toString(),
+        recoveredPaise: r.recoveredPaise.toString(),
+        recoveryByTenant: r.recoveryByTenant.map((rec) => ({
+          clientId: rec.clientId,
+          tenantSharePaise: rec.tenantSharePaise.toString(),
+        })),
       })),
       totals: {
         liabilityPaise: totalLiability.toString(),
         depositedPaise: totalDeposited.toString(),
         outstandingPaise: totalOutstanding.toString(),
+        withheldPaise: totalWithheld.toString(),
+        recoveredPaise: totalRecovered.toString(),
       },
     };
   }

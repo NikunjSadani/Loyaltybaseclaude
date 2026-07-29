@@ -13,12 +13,29 @@
  * ADMI9: "Generate Invoices" button is present in the header
  * ADMI12: list request sends ?page&limit (server pagination)
  * ADMI13: Prev/Next controls render + Next advances the page (server refetch)
+ * ADMI14: CLIENT_ADMIN sees the list but NOT Generate/Mark-Paid (read-only, portal §5)
+ * ADMI15: CLIENT_ADMIN keeps the Export Excel control (read-only export allowed)
  */
 
 import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { vi, describe, it, expect, afterEach } from 'vitest';
+import { vi, describe, it, expect, afterEach, beforeEach } from 'vitest';
 import AdminInvoiceListPage from '../page';
+
+// RBAC gate: the page reads useAdminSession to hide the write actions for a
+// CLIENT_ADMIN. Default the mock to GIFSY_ADMIN so the existing write-action
+// assertions hold; individual read-only tests override the role.
+let mockRole: 'GIFSY_ADMIN' | 'CLIENT_ADMIN' = 'GIFSY_ADMIN';
+vi.mock('@/lib/admin-session', () => ({
+  useAdminSession: () => ({
+    role: mockRole,
+    clientId: mockRole === 'GIFSY_ADMIN' ? 'gifsy' : 'deoleo',
+    name: 'Test Admin',
+    userId: 'u1',
+    canManageSchemes: mockRole === 'GIFSY_ADMIN',
+  }),
+}));
+beforeEach(() => { mockRole = 'GIFSY_ADMIN'; });
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock('next/link', () => ({
@@ -292,5 +309,30 @@ describe('ADMI — Admin Invoice list API wiring', () => {
       (c) => typeof c[0] === 'string' && (c[0] as string).includes('/api/admin/invoices/export'),
     );
     expect(calledExport).toBe(true);
+  });
+
+  it('ADMI14: CLIENT_ADMIN sees the list but NOT Generate/Mark-Paid (read-only)', async () => {
+    mockRole = 'CLIENT_ADMIN';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: wrap(MOCK_BACKEND_INVOICES) }),
+    }));
+    render(<AdminInvoiceListPage />);
+    // The list itself renders (invoice 1 is GENERATED).
+    await screen.findByText('TGSL-VIS-OUT001-202604-001');
+    // Write actions are hidden for a tenant admin.
+    expect(screen.queryByText(/generate invoices/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/mark paid/i)).not.toBeInTheDocument();
+  });
+
+  it('ADMI15: CLIENT_ADMIN keeps the Export Excel control (read-only export)', async () => {
+    mockRole = 'CLIENT_ADMIN';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: wrap(MOCK_BACKEND_INVOICES) }),
+    }));
+    render(<AdminInvoiceListPage />);
+    await screen.findByText('TGSL-VIS-OUT001-202604-001');
+    expect(screen.getByText(/export excel/i)).toBeInTheDocument();
   });
 });

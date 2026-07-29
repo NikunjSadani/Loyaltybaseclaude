@@ -40,7 +40,11 @@ import { resolveActivePartnerId } from '../common/partner-group.helper';
  * The upsert create path catches Prisma P2002 (unique violation) and skips, so a
  * second run for the same period returns the same result without double-issuing.
  *
- * TDS: OUT OF SCOPE (deferred to P6.5). Not computed here.
+ * TDS (visibility-payout waves): the SERVICE invoice is now generated at payout-Excel
+ * CONFIRM (generateForBatch, called inside the credits confirm $transaction) rather than
+ * via a separate admin per-period run; generateForPeriod is kept as the idempotent
+ * admin/backfill path. GROSS-UP threshold crossings raise a separate TDS-kind invoice
+ * (createTdsInvoice) at payout download. Both reuse the same GST/snapshot/number logic.
  * PDF generation: OUT OF SCOPE (P6.8). pdfUrl stays null.
  * Email delivery: OUT OF SCOPE (P6.9). emailSentAt stays null.
  */
@@ -68,8 +72,10 @@ export class InvoicesService {
     const { period } = dto;
 
     // ── Step 1: resolve separate-payout field IDs ───────────────────────────
+    // payoutStream=VISIBILITY is the explicit classifier (isSeparatePayout is its
+    // deprecated boolean mirror, dropped in W3).
     const separateFields = await this.prisma.creditField.findMany({
-      where: { clientId, isSeparatePayout: true, isActive: true },
+      where: { clientId, payoutStream: 'VISIBILITY', isActive: true },
       select: { id: true },
     });
     const separateFieldIds = separateFields.map((f) => f.id);
@@ -330,6 +336,335 @@ export class InvoicesService {
     return { generated, skipped };
   }
 
+  // ── generateForBatch (visibility-payout: invoice-at-CONFIRM) ────────────────
+
+  /**
+   * Generate the SERVICE (visibility) AutoInvoice for each outlet in a freshly-confirmed
+   * credit batch, INSIDE the caller's confirm $transaction (design D4/D5/D12). This is the
+   * new trigger point — replacing the manual admin per-period run for the confirm path;
+   * generateForPeriod stays as the idempotent backfill.
+   *
+   * For each outlet with a positive visibility base (summed GST-exclusive amountPaise over
+   * this batch's visibility-field entries):
+   *   1. KYC/PAN/GST guard (same as generateForPeriod) → skip with a reason if incomplete;
+   *      the entries stay unlinked and can be invoiced later via generateForPeriod.
+   *   2. Idempotency: if a SERVICE invoice already exists for (clientId, outletCode, period)
+   *      we DO NOT create a second — we just (re)link this batch's entries to it. The
+   *      @@unique([clientId,outletCode,period,invoiceKind]) is the authority; we pre-check
+   *      rather than catch P2002 because a P2002 inside a Postgres tx poisons the whole
+   *      transaction. A genuinely concurrent cross-batch create is the only path that could
+   *      still raise P2002 — that safely rolls the confirm back for a clean retry.
+   *   3. GST holdback (D5): a GstReimbursement(HELD) is created for GST-registered retailers
+   *      only, once, alongside the new invoice.
+   *   4. The batch's visibility entries for the outlet are stamped with autoInvoiceId.
+   *
+   * Money stays integer paise (BigInt). No P2002 catch — see (2).
+   */
+  async generateForBatch(
+    tx: Prisma.TransactionClient,
+    params: { clientId: string; period: string; batchId: string; visibilityFieldIds: string[] },
+  ): Promise<{ generated: number; linked: number; skipped: { outletCode: string; reason: string }[] }> {
+    const { clientId, period, batchId, visibilityFieldIds } = params;
+    const skipped: { outletCode: string; reason: string }[] = [];
+    if (visibilityFieldIds.length === 0) return { generated: 0, linked: 0, skipped };
+
+    // This batch's visibility entries (created moments ago in this same tx).
+    const entries = await tx.creditPayoutEntry.findMany({
+      where: { clientId, batchId, fieldId: { in: visibilityFieldIds } },
+      select: { id: true, outletId: true, outletName: true, amountPaise: true },
+    });
+    if (entries.length === 0) return { generated: 0, linked: 0, skipped };
+
+    // Group by outletCode → { basePaise, entryIds, outletName }.
+    const outletMap = new Map<string, { basePaise: bigint; entryIds: string[]; outletName: string }>();
+    for (const e of entries) {
+      const cur = outletMap.get(e.outletId);
+      if (cur) {
+        cur.basePaise += e.amountPaise;
+        cur.entryIds.push(e.id);
+      } else {
+        outletMap.set(e.outletId, { basePaise: e.amountPaise, entryIds: [e.id], outletName: e.outletName });
+      }
+    }
+    const outletCodes = [...outletMap.keys()];
+
+    const outlets = await tx.outlet.findMany({
+      where: { clientId, outletCode: { in: outletCodes } },
+      select: {
+        outletCode: true,
+        name: true,
+        state: true,
+        partner: {
+          select: {
+            id: true,
+            businessName: true,
+            ownerName: true,
+            phone: true,
+            panNumber: true,
+            gstNumber: true,
+            entityType: true,
+            gstRegistrationType: true,
+            bankName: true,
+            bankAccountNumber: true,
+            ifscCode: true,
+            kycSubmissions: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true } },
+          },
+        },
+      },
+    });
+    const outletDbMap = new Map(outlets.map((o) => [o.outletCode, o]));
+
+    let existingCount = await tx.autoInvoice.count({ where: { clientId, period } });
+    const periodLabel = formatPeriodLabel(period);
+    const description = buildInvoiceDescription(periodLabel);
+    const invoiceDate = new Date();
+
+    let generated = 0;
+    let linked = 0;
+
+    for (const outletCode of outletCodes) {
+      const info = outletMap.get(outletCode)!;
+      if (info.basePaise <= 0n) continue; // never invoice a zero/negative base
+
+      const outletDb = outletDbMap.get(outletCode);
+      if (!outletDb) {
+        skipped.push({ outletCode, reason: 'Outlet not found in master' });
+        continue;
+      }
+      const partner = outletDb.partner;
+      if (!partner) {
+        skipped.push({ outletCode, reason: 'Outlet has no linked partner (KYC not started)' });
+        continue;
+      }
+      const latestKyc = partner.kycSubmissions[0];
+      if (!latestKyc || latestKyc.status !== 'APPROVED') {
+        skipped.push({ outletCode, reason: `Partner KYC not approved (status: ${latestKyc?.status ?? 'none'})` });
+        continue;
+      }
+      if (!partner.panNumber) {
+        skipped.push({ outletCode, reason: 'Partner missing panNumber' });
+        continue;
+      }
+      if (!partner.businessName && !partner.ownerName) {
+        skipped.push({ outletCode, reason: 'Partner missing businessName and ownerName' });
+        continue;
+      }
+      if (partner.gstRegistrationType === 'REGULAR' && !partner.gstNumber) {
+        skipped.push({ outletCode, reason: 'REGULAR GST retailer missing gstNumber' });
+        continue;
+      }
+
+      // Idempotency: a SERVICE invoice for this outlet+period already exists → relink only.
+      const existing = await tx.autoInvoice.findFirst({
+        where: { clientId, outletCode, period, invoiceKind: 'SERVICE' },
+        select: { id: true },
+      });
+      if (existing) {
+        await tx.creditPayoutEntry.updateMany({
+          where: { id: { in: info.entryIds } },
+          data: { autoInvoiceId: existing.id },
+        });
+        linked += 1;
+        continue;
+      }
+
+      const gst = computeGST(info.basePaise, partner.gstRegistrationType, partner.gstNumber);
+      const snapshot = {
+        outletCode,
+        outletName: outletDb.name,
+        firmName: partner.businessName,
+        partnerName: partner.ownerName,
+        mobile: partner.phone,
+        retailerState: outletDb.state,
+        retailerGstin: partner.gstNumber ?? null,
+        panNumber: partner.panNumber,
+        entityType: partner.entityType ?? null,
+        gstRegistrationType: partner.gstRegistrationType ?? null,
+        bankName: partner.bankName ?? null,
+        accountNumber: partner.bankAccountNumber ?? null,
+        ifscCode: partner.ifscCode ?? null,
+        recipient: TECH_GIFSY,
+        sacCode: TECH_GIFSY.sacCode,
+        description,
+      };
+      const lineItems = [
+        { description, sacCode: TECH_GIFSY.sacCode, amountPaise: Number(info.basePaise) },
+      ];
+
+      existingCount += 1;
+      const invoiceNumber = generateInvoiceNumber(outletCode, period, existingCount);
+      const created = await tx.autoInvoice.create({
+        data: {
+          clientId,
+          invoiceNumber,
+          partnerId: partner.id,
+          outletCode,
+          period,
+          invoiceDate,
+          status: 'GENERATED',
+          invoiceKind: 'SERVICE',
+          invoiceNumberEdited: false,
+          lineItems: lineItems as unknown as Prisma.InputJsonValue,
+          subtotalPaise: info.basePaise,
+          gstPaise: gst.gstPaise,
+          gstType: gst.gstType ?? null,
+          totalPaise: gst.totalPaise,
+          snapshot: snapshot as unknown as Prisma.InputJsonValue,
+        },
+        select: { id: true },
+      });
+
+      // GST holdback (D5) — GST-registered retailers only.
+      if (gst.gstApplicable) {
+        await tx.gstReimbursement.create({
+          data: {
+            clientId,
+            autoInvoiceId: created.id,
+            partnerId: partner.id,
+            outletCode,
+            gstPaise: gst.gstPaise,
+            status: 'HELD',
+          },
+        });
+      }
+
+      await tx.creditPayoutEntry.updateMany({
+        where: { id: { in: info.entryIds } },
+        data: { autoInvoiceId: created.id },
+      });
+      generated += 1;
+    }
+
+    return { generated, linked, skipped };
+  }
+
+  // ── createTdsInvoice (GROSS-UP: at-threshold TDS invoice, design D9) ─────────
+
+  /**
+   * Create the ONE GROSS-UP "TDS invoice" for a PAN crossing the section threshold,
+   * INSIDE the caller's payout-download $transaction (design D9/D11). Reuses the same
+   * GST/snapshot/narration as the service invoice; the "in lieu of TDS" tag is NEVER on
+   * the invoice face (dashboard-only — the caller writes that to the recovery ledger).
+   *
+   * Idempotency is the CALLER's responsibility: it must confirm no TDS invoice for the
+   * PAN/FY exists before calling (a cross-tenant pre-check — one TDS invoice per PAN/FY,
+   * TGSL being the single deductor). We do NOT catch P2002 here (it would poison the tx);
+   * the per-(clientId,PAN,FY) partial unique is the last-resort guard and a rare race
+   * simply rolls the download back for a clean retry.
+   *
+   * @returns the created invoice id + its GST (so the caller can attach recovery rows).
+   */
+  async createTdsInvoice(
+    tx: Prisma.TransactionClient,
+    params: {
+      clientId: string;
+      period: string;
+      panNumber: string;
+      fyLabel: string;
+      bodyPaise: bigint;
+      partnerId: string;
+      outletCode: string;
+      outletName: string;
+      retailerState: string | null;
+      businessName: string | null;
+      ownerName: string | null;
+      phone: string | null;
+      entityType: string | null;
+      gstRegistrationType: string | null;
+      gstNumber: string | null;
+      bankName: string | null;
+      accountNumber: string | null;
+      ifscCode: string | null;
+      /**
+       * 1-based sequence of this TOP-UP for the (PAN, FY) (FIX-1 monthly-incremental).
+       * seq=1 is the first-ever crossing; seq>1 are subsequent monthly top-ups.
+       */
+      seq: number;
+      /**
+       * Only the seq=1 anchor carries the (linkedPanNumber, linkedFyLabel) tuple, so the
+       * migration-only partial unique `auto_invoices_tds_pan_fy_key`
+       * (clientId, linkedPanNumber, linkedFyLabel WHERE invoiceKind='TDS') still permits
+       * exactly one anchor per (clientId, PAN, FY) while later top-ups (linked tuple null →
+       * distinct in the unique index) coexist. The PAN/FY is always on the snapshot + the
+       * self-documenting number + the recovery ledger, so no read depends on the tuple.
+       */
+      isAnchor: boolean;
+    },
+  ): Promise<{ invoiceId: string; gstPaise: bigint; gstApplicable: boolean }> {
+    const { clientId, period, panNumber, fyLabel, bodyPaise, seq, isAnchor } = params;
+    const periodLabel = formatPeriodLabel(period);
+    const description = buildInvoiceDescription(periodLabel);
+
+    const gst = computeGST(bodyPaise, params.gstRegistrationType, params.gstNumber);
+    const snapshot = {
+      outletCode: params.outletCode,
+      outletName: params.outletName,
+      firmName: params.businessName,
+      partnerName: params.ownerName,
+      mobile: params.phone,
+      retailerState: params.retailerState,
+      retailerGstin: params.gstNumber ?? null,
+      panNumber,
+      entityType: params.entityType ?? null,
+      gstRegistrationType: params.gstRegistrationType ?? null,
+      bankName: params.bankName ?? null,
+      accountNumber: params.accountNumber ?? null,
+      ifscCode: params.ifscCode ?? null,
+      recipient: TECH_GIFSY,
+      sacCode: TECH_GIFSY.sacCode,
+      description,
+    };
+    const lineItems = [
+      { description, sacCode: TECH_GIFSY.sacCode, amountPaise: Number(bodyPaise) },
+    ];
+    // A globally-unique, self-documenting number keyed to the PAN/FY + monthly-top-up seq
+    // (FIX-1: one TDS invoice per (PAN, FY, crossing-period) — the seq disambiguates top-ups).
+    const invoiceNumber = `TGSL-TDS-${panNumber.toUpperCase()}-${fyLabel.replace(/-/g, '')}-${String(seq).padStart(3, '0')}`;
+
+    const created = await tx.autoInvoice.create({
+      data: {
+        clientId,
+        invoiceNumber,
+        partnerId: params.partnerId,
+        outletCode: params.outletCode,
+        period,
+        invoiceDate: new Date(),
+        status: 'GENERATED',
+        invoiceKind: 'TDS',
+        // FIX-1: only the anchor (seq=1) carries the linked tuple (satisfies the partial
+        // unique); monthly top-ups leave it null so they coexist without a migration change.
+        linkedPanNumber: isAnchor ? panNumber : null,
+        linkedFyLabel: isAnchor ? fyLabel : null,
+        // FIX-5: a TDS invoice is a deposited-tax artefact → BORN LOCKED (number immutable).
+        lockedAt: new Date(),
+        invoiceNumberEdited: false,
+        lineItems: lineItems as unknown as Prisma.InputJsonValue,
+        subtotalPaise: bodyPaise,
+        gstPaise: gst.gstPaise,
+        gstType: gst.gstType ?? null,
+        totalPaise: gst.totalPaise,
+        snapshot: snapshot as unknown as Prisma.InputJsonValue,
+      },
+      select: { id: true },
+    });
+
+    // GST on the TDS invoice follows the normal holdback/settlement (D9).
+    if (gst.gstApplicable) {
+      await tx.gstReimbursement.create({
+        data: {
+          clientId,
+          autoInvoiceId: created.id,
+          partnerId: params.partnerId,
+          outletCode: params.outletCode,
+          gstPaise: gst.gstPaise,
+          status: 'HELD',
+        },
+      });
+    }
+
+    return { invoiceId: created.id, gstPaise: gst.gstPaise, gstApplicable: gst.gstApplicable };
+  }
+
   // ── list ───────────────────────────────────────────────────────────────────
 
   /**
@@ -465,7 +800,10 @@ export class InvoicesService {
   /**
    * PATCH invoice number (#8).
    * - Trim + uppercase the value (caller sends raw; we normalise here).
-   * - Status must be GENERATED; PAID → 409 "locked once PAID".
+   * - Locked once lockedAt != null → 409 (design D12). lockedAt is stamped when the payout UTR/
+   *   date is recorded (uploadUtr) OR when the invoice is marked paid (markPaid, FIX-6) — so a
+   *   SERVICE invoice freezes at the FIRST of those events. (This replaces the older
+   *   status===PAID string check; the number is editable only while GENERATED and unlocked.)
    * - Enforce uniqueness via catch P2002 → 409.
    * - Partner may edit only their own invoice.
    * - Sets invoiceNumberEdited = true.
@@ -492,8 +830,15 @@ export class InvoicesService {
       }
     }
 
-    if (invoice.status === 'PAID') {
-      throw new ConflictException('Invoice number is locked once PAID');
+    // FIX-5: a TDS-kind invoice is a deposited-tax artefact — its number is IMMUTABLE for
+    // everyone (admin + partner), independent of lockedAt (it is also born locked). Guard it
+    // explicitly so the intent is unmistakable even if lockedAt were ever cleared.
+    if (invoice.invoiceKind === 'TDS') {
+      throw new ConflictException('A TDS invoice number cannot be edited (deposited-tax artefact).');
+    }
+
+    if (invoice.lockedAt != null) {
+      throw new ConflictException('Invoice number is locked once the payout UTR is recorded');
     }
 
     try {
@@ -518,7 +863,8 @@ export class InvoicesService {
 
   /**
    * Transition GENERATED → PAID (idempotent: PAID → no-op).
-   * Locks the invoice number.
+   * Locks the invoice number (FIX-6: a SERVICE invoice marked paid outside the UTR flow
+   * must not stay number-editable — set lockedAt at PAID too, mirroring the UTR lock).
    * Admin-only (enforced on controller via @Roles).
    */
   async markPaid(user: JwtPayload, id: string) {
@@ -536,7 +882,8 @@ export class InvoicesService {
 
     return this.prisma.autoInvoice.update({
       where: { id },
-      data: { status: 'PAID' },
+      // FIX-6: lock the number at PAID too (idempotent — never clears an existing lock).
+      data: { status: 'PAID', lockedAt: invoice.lockedAt ?? new Date() },
     });
   }
 

@@ -128,7 +128,22 @@ const ALL_NAV_ITEMS = [
       { href: '/admin/credits-payouts/fields',  label: 'Field Configuration' },
     ],
   },
-  { href: '/admin/tds',      label: 'TDS',               icon: Landmark,      featureFlag: null },
+  {
+    href: '/admin/tds',
+    label: 'TDS & Invoicing',
+    icon: Landmark,
+    featureFlag: null,
+    children: [
+      // List more-specific paths before '/admin/tds' so the header-title resolver
+      // (startsWith(child.href + '/')) resolves each page correctly.
+      { href: '/admin/tds-config',         label: 'TDS Treatment'       }, // section+methodology; tenant read-only
+      { href: '/admin/tds-payouts',        label: 'Payout Report'       }, // role-scoped (own tenant for CLIENT_ADMIN)
+      { href: '/admin/tds-recovery',       label: 'Recovery / Attribution' }, // role-scoped (own recovery liability)
+      { href: '/admin/tds-rcm',            label: 'RCM (Unregistered)', gifsyOnly: true },
+      { href: '/admin/gst-reimbursements', label: 'GST Reimbursements', gifsyOnly: true },
+      { href: '/admin/tds',                label: 'TDS Ledger (194R/194C)' }, // existing 194R/194C compute+export
+    ],
+  },
   { href: '/admin/tickets',  label: 'Tickets',          icon: TicketCheck,   featureFlag: null },
   { href: '/admin/banners',  label: 'Banners',          icon: Megaphone,     featureFlag: null },
   { href: '/admin/reports',  label: 'Reports',          icon: FileBarChart2, featureFlag: null },

@@ -602,6 +602,18 @@ export class AdminCoreService {
       dto.value = n;
     }
 
+    // For the TDS policy (a money-path config), capture the PRIOR value BEFORE the write so
+    // the dedicated audit row below records the exact old→new transition (W0-C).
+    const isTdsPolicyWrite = dto.key === 'tdsPolicy' || dto.key === 'tds';
+    let priorTdsPolicyValue: unknown = null;
+    if (isTdsPolicyWrite) {
+      const prior = await this.prisma.programSetting.findUnique({
+        where: { clientId_settingKey: { clientId, settingKey: dto.key } },
+        select: { settingValue: true },
+      });
+      priorTdsPolicyValue = prior?.settingValue ?? null;
+    }
+
     const setting = await this.prisma.programSetting.upsert({
       where: { clientId_settingKey: { clientId, settingKey: dto.key } },
       update: { settingValue: dto.value, updatedById: user.sub },
@@ -624,6 +636,22 @@ export class AdminCoreService {
         metadata: { key: dto.key, value: dto.value },
       },
     });
+
+    // W0-C — dedicated TDS-policy audit: entityId = clientId (the policy is per-tenant, not
+    // per-settings-row), oldValues/newValues = the prior/next policy. Additive to the generic
+    // PROGRAM_SETTINGS row above so the money-path config change is traceable on its own.
+    if (isTdsPolicyWrite) {
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entityType: 'TdsPolicy',
+          entityId: clientId,
+          actorId: user.sub,
+          oldValues: (priorTdsPolicyValue ?? undefined) as Prisma.InputJsonValue | undefined,
+          newValues: (dto.value ?? undefined) as Prisma.InputJsonValue | undefined,
+        },
+      });
+    }
 
     // Bust the typed settings cache so the new value is visible immediately on the money
     // path (conversionRate) and everywhere else — not after the 5-min TTL.

@@ -381,6 +381,59 @@ describe('TenantSettingsService', () => {
     });
   });
 
+  describe('tdsPolicy + resolveTdsPolicy', () => {
+    it('defaults to the default-on policy {SEC_194C, GROSS_UP} when absent', async () => {
+      const s = await new TenantSettingsService(makePrisma([])).getEffectiveSettings('deoleo');
+      expect(s.tdsPolicy).toEqual({ section: 'SEC_194C', methodology: 'GROSS_UP' });
+    });
+
+    it('resolveTdsPolicy returns the default-on policy when absent', async () => {
+      const p = await new TenantSettingsService(makePrisma([])).resolveTdsPolicy('deoleo');
+      expect(p).toEqual({ section: 'SEC_194C', methodology: 'GROSS_UP' });
+    });
+
+    it('passes through every valid section × methodology combination', async () => {
+      const combos: Array<{ section: string; methodology: string }> = [
+        { section: 'SEC_194R', methodology: 'DEDUCT' },
+        { section: 'SEC_194R', methodology: 'GROSS_UP' },
+        { section: 'SEC_194C', methodology: 'DEDUCT' },
+        { section: 'SEC_194C', methodology: 'GROSS_UP' },
+      ];
+      for (const combo of combos) {
+        const p = await new TenantSettingsService(
+          makePrisma([{ settingKey: 'tdsPolicy', settingValue: combo }]),
+        ).resolveTdsPolicy('deoleo');
+        expect(p).toEqual(combo);
+      }
+    });
+
+    it('resolveTdsPolicy THROWS (fail-closed, SCOPED to the money path) on a malformed value', async () => {
+      const bad: unknown[] = [
+        { section: 'SEC_194X', methodology: 'GROSS_UP' }, // bad section literal
+        { section: 'SEC_194C', methodology: 'NET' },       // bad methodology literal
+        { section: 'SEC_194C' },                            // missing methodology
+        { methodology: 'DEDUCT' },                          // missing section
+        { section: 194, methodology: 'DEDUCT' },            // non-string section
+        'SEC_194C',                                         // non-object
+        null,                                               // non-object
+      ];
+      for (const settingValue of bad) {
+        const svc = new TenantSettingsService(makePrisma([{ settingKey: 'tdsPolicy', settingValue }]));
+        await expect(svc.resolveTdsPolicy('deoleo')).rejects.toThrow(/tdsPolicy/);
+      }
+    });
+
+    it('getEffectiveSettings STAYS ROBUST on a malformed tdsPolicy — falls back to default, never throws (blast-radius scoping)', async () => {
+      const svc = new TenantSettingsService(
+        makePrisma([{ settingKey: 'tdsPolicy', settingValue: { section: 'SEC_194X', methodology: 'NOPE' } }]),
+      );
+      const s = await svc.getEffectiveSettings('deoleo');
+      // A bad TDS value must NOT take down conversionRate/channels/visibility for the tenant.
+      expect(s.tdsPolicy).toEqual({ section: 'SEC_194C', methodology: 'GROSS_UP' });
+      expect(s.conversionRate).toBeGreaterThan(0);
+    });
+  });
+
   it('falls back to defaults if the settings read throws (never crashes a money path)', async () => {
     const prisma = { programSetting: { findMany: jest.fn().mockRejectedValue(new Error('db down')) } } as any;
     const svc = new TenantSettingsService(prisma);

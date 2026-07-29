@@ -74,6 +74,10 @@ const ROW_194C_INDIVIDUAL: TdsRow194C = {
   liabilityNoThresholdPaise: 121200n,
   depositedPaise: 0n,
   outstandingPaise: 121200n,
+  methodology: 'GROSS_UP',
+  withheldPaise: 0n,
+  recoveredPaise: 0n,
+  recoveryByTenant: [],
 };
 
 const ROW_194C_COMPANY: TdsRow194C = {
@@ -86,7 +90,11 @@ const ROW_194C_COMPANY: TdsRow194C = {
   liabilityPaise: 63300n,           // 2/98
   liabilityNoThresholdPaise: 63300n,
   depositedPaise: 50_000n,
-  outstandingPaise: 13300n,
+  outstandingPaise: 13300n,         // 63300 − 50000 − 0
+  methodology: 'DEDUCT',
+  withheldPaise: 0n,
+  recoveredPaise: 0n,
+  recoveryByTenant: [],
 };
 
 const ROW_194C_NOPAN: TdsRow194C = {
@@ -100,6 +108,49 @@ const ROW_194C_NOPAN: TdsRow194C = {
   liabilityNoThresholdPaise: 1_000_000n,
   depositedPaise: 0n,
   outstandingPaise: 1_000_000n,
+  methodology: null,
+  withheldPaise: 0n,
+  recoveredPaise: 0n,
+  recoveryByTenant: [],
+};
+
+// DEDUCT PAN with real withholding collected (₹500 withheld, ₹1,000 deposited).
+const ROW_194C_DEDUCT: TdsRow194C = {
+  panNumber: 'DED0033333C',
+  entityType: 'COMPANY',
+  fyLabel: FY,
+  baseFyTotalPaise: 12_000_000n,
+  maxSinglePaise: 6_000_000n,
+  thresholdMet: true,
+  liabilityPaise: 244900n,
+  liabilityNoThresholdPaise: 244900n,
+  depositedPaise: 100_000n,
+  outstandingPaise: 94900n,         // 244900 − 100000 − 50000
+  methodology: 'DEDUCT',
+  withheldPaise: 50_000n,
+  recoveredPaise: 0n,
+  recoveryByTenant: [],
+};
+
+// GROSS-UP PAN with per-tenant recovery attribution (report-only, not netted).
+const ROW_194C_GROSSUP: TdsRow194C = {
+  panNumber: 'GRS0044444D',
+  entityType: 'COMPANY',
+  fyLabel: FY,
+  baseFyTotalPaise: 12_000_000n,
+  maxSinglePaise: 6_000_000n,
+  thresholdMet: true,
+  liabilityPaise: 244900n,
+  liabilityNoThresholdPaise: 244900n,
+  depositedPaise: 0n,
+  outstandingPaise: 244900n,        // recovery does NOT reduce outstanding
+  methodology: 'GROSS_UP',
+  withheldPaise: 0n,
+  recoveredPaise: 244_900n,
+  recoveryByTenant: [
+    { clientId: 'deoleo', tenantSharePaise: 150_000n },
+    { clientId: 'britannia', tenantSharePaise: 94_900n },
+  ],
 };
 
 // ─── Tests ─────────────────────────────────────────────────────────────────────
@@ -338,12 +389,15 @@ describe('TdsService — export194C (P6.5c)', () => {
     expect(keys).toContain('PAN');
     expect(keys).toContain('Entity Type');
     expect(keys).toContain('Section');
+    expect(keys).toContain('Methodology');
     expect(keys).toContain('Amount Paid (₹)');
     expect(keys).toContain('TDS Rate %');
     expect(keys).toContain('TDS — With Threshold (₹)');
     expect(keys).toContain('TDS — No Threshold (₹)');
     expect(keys).toContain('Threshold Met (Y/N)');
     expect(keys).toContain('Already Deposited (₹)');
+    expect(keys).toContain('TDS Withheld (Deduct) (₹)');
+    expect(keys).toContain('TDS Recovered (Gross-Up) (₹)');
     expect(keys).toContain('Outstanding (₹)');
     expect(keys).toContain('FY');
   });
@@ -478,5 +532,52 @@ describe('TdsService — export194C (P6.5c)', () => {
     const { buffer } = await service.export194C(FY);
     const rows = parseXlsx(buffer, 0);
     expect(rows[0]['Deductee Name']).toBe(`'=WEBSERVICE("http://evil")`);
+  });
+
+  it('writes the Methodology column (DEDUCT / GROSS_UP / blank)', async () => {
+    jest.spyOn(service, 'compute194C').mockResolvedValue([ROW_194C_DEDUCT, ROW_194C_GROSSUP, ROW_194C_NOPAN]);
+    mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+
+    const { buffer } = await service.export194C(FY);
+    const rows = parseXlsx(buffer, 0);
+    expect(rows[0]['Methodology']).toBe('DEDUCT');
+    expect(rows[1]['Methodology']).toBe('GROSS_UP');
+    // null methodology → blank cell (sheet_to_json omits empty strings)
+    expect(rows[2]['Methodology'] ?? '').toBe('');
+  });
+
+  it('writes the DEDUCT-withheld vs GROSS-UP-recovered split (paise÷100)', async () => {
+    jest.spyOn(service, 'compute194C').mockResolvedValue([ROW_194C_DEDUCT, ROW_194C_GROSSUP]);
+    mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+
+    const { buffer } = await service.export194C(FY);
+    const rows = parseXlsx(buffer, 0);
+    // DEDUCT row: withheld ₹500, recovered ₹0, outstanding ₹949 (244900 − 100000 − 50000)
+    expect(rows[0]['TDS Withheld (Deduct) (₹)']).toBe('500.00');
+    expect(rows[0]['TDS Recovered (Gross-Up) (₹)']).toBe('0.00');
+    expect(rows[0]['Outstanding (₹)']).toBe('949.00');
+    // GROSS-UP row: withheld ₹0, recovered ₹2,449, outstanding UNCHANGED at ₹2,449
+    expect(rows[1]['TDS Withheld (Deduct) (₹)']).toBe('0.00');
+    expect(rows[1]['TDS Recovered (Gross-Up) (₹)']).toBe('2449.00');
+    expect(rows[1]['Outstanding (₹)']).toBe('2449.00');
+  });
+
+  it('emits a "Gross-Up Recovery by Tenant" sheet with per-tenant attribution', async () => {
+    jest.spyOn(service, 'compute194C').mockResolvedValue([ROW_194C_GROSSUP]);
+    mockPrisma.channelPartner.findMany.mockResolvedValue([
+      { panNumber: 'GRS0044444D', ownerName: 'Grocers United', businessName: '' },
+    ]);
+
+    const { buffer } = await service.export194C(FY);
+    const wb = XLSX.read(buffer, { type: 'buffer' });
+    expect(wb.SheetNames).toContain('Gross-Up Recovery by Tenant');
+
+    const recRows = parseXlsx(buffer, wb.SheetNames.indexOf('Gross-Up Recovery by Tenant'));
+    expect(recRows).toHaveLength(2);
+    expect(recRows[0]['Recovered From (Client)']).toBe('deoleo');
+    expect(recRows[0]['Recovery Amount (₹)']).toBe('1500.00');
+    expect(recRows[1]['Recovered From (Client)']).toBe('britannia');
+    expect(recRows[1]['Recovery Amount (₹)']).toBe('949.00');
+    expect(recRows[0]['PAN']).toBe('GRS0044444D');
   });
 });

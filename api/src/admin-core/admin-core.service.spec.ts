@@ -40,7 +40,7 @@ const mockPrisma = {
   outlet: { findMany: jest.fn(), count: jest.fn() },
   kycSubmission: { count: jest.fn() },
   kycStatusHistory: { findMany: jest.fn() },
-  programSetting: { findMany: jest.fn(), findFirst: jest.fn(), upsert: jest.fn() },
+  programSetting: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), upsert: jest.fn() },
   pointExpiryConfig: {
     findFirst: jest.fn(),
     update: jest.fn(),
@@ -605,6 +605,44 @@ describe('AdminCoreService', () => {
       await service.upsertSetting(gifsy, { key: 'programName', value: 'My Program' });
       const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
       expect(call.update.settingValue).toBe('My Program');
+    });
+
+    it('appends a dedicated TdsPolicy audit (old→new, entityId=clientId) on a tdsPolicy write', async () => {
+      mockPrisma.programSetting.findUnique.mockResolvedValue({
+        settingValue: { section: 'SEC_194R', methodology: 'DEDUCT' },
+      });
+      const next = { section: 'SEC_194C', methodology: 'GROSS_UP' };
+      await service.upsertSetting(gifsy, { key: 'tdsPolicy', value: next });
+
+      // Prior value was read BEFORE the upsert (from the same clientId+key row).
+      expect(mockPrisma.programSetting.findUnique).toHaveBeenCalledWith({
+        where: { clientId_settingKey: { clientId: 'deoleo', settingKey: 'tdsPolicy' } },
+        select: { settingValue: true },
+      });
+      // Two audit rows: the generic PROGRAM_SETTINGS + the dedicated TdsPolicy one.
+      const tdsAudit = mockPrisma.auditLog.create.mock.calls
+        .map((c) => c[0].data)
+        .find((d) => d.entityType === 'TdsPolicy');
+      expect(tdsAudit).toBeDefined();
+      expect(tdsAudit.action).toBe('UPDATE');
+      expect(tdsAudit.entityId).toBe('deoleo');
+      expect(tdsAudit.actorId).toBe('admin1');
+      expect(tdsAudit.oldValues).toEqual({ section: 'SEC_194R', methodology: 'DEDUCT' });
+      expect(tdsAudit.newValues).toEqual(next);
+      // Cache bust still fires.
+      expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
+    });
+
+    it('records oldValues=undefined when there was no prior tdsPolicy row (first write)', async () => {
+      mockPrisma.programSetting.findUnique.mockResolvedValue(null);
+      const next = { section: 'SEC_194C', methodology: 'DEDUCT' };
+      await service.upsertSetting(gifsy, { key: 'tdsPolicy', value: next });
+      const tdsAudit = mockPrisma.auditLog.create.mock.calls
+        .map((c) => c[0].data)
+        .find((d) => d.entityType === 'TdsPolicy');
+      expect(tdsAudit).toBeDefined();
+      expect(tdsAudit.oldValues).toBeUndefined();
+      expect(tdsAudit.newValues).toEqual(next);
     });
   });
 

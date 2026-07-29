@@ -16,17 +16,43 @@ const mockPrisma = {
   redemptionOrder: { findMany: jest.fn() },
   tdsOffPlatformEntry: { findMany: jest.fn() },
   tdsDeposit: { findMany: jest.fn() },
+  tdsDeductionEntry: { findMany: jest.fn() },
+  tdsRecoveryEntry: { findMany: jest.fn() },
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Build a CreditPayoutEntry stub. */
-const mkEntry = (outletId: string, fieldId: string, amountPaise: bigint, paidAt = new Date('2025-08-01')) => ({
+let _entrySeq = 0;
+/**
+ * Build a CreditPayoutEntry stub. `extra` carries the FROZEN TDS stamp
+ * (tdsSection/tdsMethodology); omitted → null (legacy row → live fallback).
+ * FIX-4: each stub gets a unique `id` (compute194R unions/dedups by id) and a
+ * `period` derived from paidAt (the VISIBILITY FY anchor is the payout period).
+ */
+const mkEntry = (
+  outletId: string,
+  fieldId: string,
+  amountPaise: bigint,
+  paidAt = new Date('2025-08-01'),
+  extra: {
+    tdsSection?: 'SEC_194R' | 'SEC_194C' | null;
+    tdsMethodology?: 'DEDUCT' | 'GROSS_UP' | null;
+    clientId?: string;
+    period?: string;
+  } = {},
+) => ({
+  id: `e${++_entrySeq}`,
   amountPaise,
   fieldId,
   outletId,
   paidAt,
+  period:
+    extra.period ??
+    `${paidAt.getUTCFullYear()}-${String(paidAt.getUTCMonth() + 1).padStart(2, '0')}`,
   status: 'PAID',
+  clientId: extra.clientId,
+  tdsSection: extra.tdsSection ?? null,
+  tdsMethodology: extra.tdsMethodology ?? null,
 });
 
 const CLIENT_ID = 'deoleo';
@@ -53,6 +79,8 @@ describe('TdsService', () => {
     mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
     mockPrisma.tdsOffPlatformEntry.findMany.mockResolvedValue([]);
     mockPrisma.tdsDeposit.findMany.mockResolvedValue([]);
+    mockPrisma.tdsDeductionEntry.findMany.mockResolvedValue([]);
+    mockPrisma.tdsRecoveryEntry.findMany.mockResolvedValue([]);
   });
 
   // ─── 194R: below threshold ────────────────────────────────────────────────
@@ -411,6 +439,231 @@ describe('TdsService', () => {
       expect(summary.rowCount).toBe(2);
       expect(summary.clientId).toBe(CLIENT_ID);
       expect(summary.fyLabel).toBe(FY);
+    });
+  });
+
+  // ─── Frozen-section bucketing (W0-B): frozen stamp wins over live classifier ──
+
+  describe('frozen tdsSection bucketing', () => {
+    it('frozen SEC_194R on a VISIBILITY field → counted in 194R, NOT 194C', async () => {
+      // VISIBILITY field, but the entry was FROZEN as 194R (tenant configured section=194R).
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        mkEntry('outlet1', 'vis-field', 2_100_000n, new Date('2025-08-01'), { tdsSection: 'SEC_194R' }),
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1' }]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([
+        { id: 'cp1', panNumber: 'ABCDE1234F', entityType: 'COMPANY' },
+      ]);
+
+      // 194R INCLUDES it (frozen wins over the visibility field's live classification)
+      const r194 = await service.compute194R(CLIENT_ID, FY);
+      expect(r194).toHaveLength(1);
+      expect(r194[0].panNumber).toBe('ABCDE1234F');
+      expect(r194[0].baseFyTotalPaise).toBe(2_100_000n);
+
+      // 194C EXCLUDES it
+      const c194 = await service.compute194C(FY);
+      expect(c194).toHaveLength(0);
+    });
+
+    it('frozen SEC_194C on a NON-visibility field → counted in 194C, NOT 194R', async () => {
+      // No visibility fields at all; the entry carries a frozen SEC_194C stamp.
+      mockPrisma.creditField.findMany.mockResolvedValue([]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        mkEntry('outlet1', 'field-normal', 3_100_000n, new Date('2025-08-01'), {
+          tdsSection: 'SEC_194C',
+        }),
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1' }]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([
+        { id: 'cp1', panNumber: 'ABCDE1234F', entityType: 'COMPANY' },
+      ]);
+
+      // 194R EXCLUDES it
+      const r194 = await service.compute194R(CLIENT_ID, FY);
+      expect(r194).toHaveLength(0);
+
+      // 194C INCLUDES it (single payment > ₹30k → threshold met)
+      const c194 = await service.compute194C(FY);
+      expect(c194).toHaveLength(1);
+      expect(c194[0].panNumber).toBe('ABCDE1234F');
+      expect(c194[0].baseFyTotalPaise).toBe(3_100_000n);
+    });
+
+    it('null frozen section falls back to the live classifier (visibility→194C, else→194R)', async () => {
+      // Two null-stamped (legacy) entries: one on a visibility field, one not.
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        mkEntry('outlet1', 'field-normal', 2_100_000n), // null stamp → 194R
+        mkEntry('outlet1', 'vis-field', 3_100_000n),     // null stamp → 194C
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1' }]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([
+        { id: 'cp1', panNumber: 'ABCDE1234F', entityType: 'COMPANY' },
+      ]);
+
+      const r194 = await service.compute194R(CLIENT_ID, FY);
+      expect(r194).toHaveLength(1);
+      expect(r194[0].baseFyTotalPaise).toBe(2_100_000n); // only the non-vis legacy entry
+
+      const c194 = await service.compute194C(FY);
+      expect(c194).toHaveLength(1);
+      expect(c194[0].baseFyTotalPaise).toBe(3_100_000n); // only the vis legacy entry
+    });
+  });
+
+  // ─── FIX-4: VISIBILITY FY anchor = payout PERIOD (not paidAt) ─────────────────
+
+  describe('FIX-4 FY anchor (visibility bucketed by period)', () => {
+    it('a period=2026-03 visibility-194R entry PAID in April 2026 stays in FY 2025-26', async () => {
+      // Two visibility-194R entries for the SAME PAN, both PAID in April 2026 (FY 2026-27 by
+      // paidAt) but with DIFFERENT payout periods: 2026-03 (FY 2025-26) and 2026-04 (FY 2026-27).
+      // For FY 2025-26 only the period=2026-03 row belongs — proving the PERIOD anchor, not paidAt.
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        mkEntry('outlet1', 'vis-field', 2_100_000n, new Date('2026-04-15'), {
+          tdsSection: 'SEC_194R',
+          period: '2026-03',
+        }),
+        mkEntry('outlet1', 'vis-field', 5_000_000n, new Date('2026-04-15'), {
+          tdsSection: 'SEC_194R',
+          period: '2026-04',
+        }),
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1' }]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'cp1', panNumber: 'ABCDE1234F' }]);
+
+      const rows = await service.compute194R(CLIENT_ID, '2025-26');
+      expect(rows).toHaveLength(1);
+      // Only the period=2026-03 payout (₹21,000) is in FY 2025-26; the 2026-04 one is next FY.
+      expect(rows[0].baseFyTotalPaise).toBe(2_100_000n);
+    });
+  });
+
+  // ─── 194C DEDUCT: withheld folds into already-collected → reduces outstanding ──
+
+  describe('compute194C — DEDUCT withholding', () => {
+    it('adds TdsDeductionEntry.tdsDeductedThisPaise to collected; outstanding = liability − deposited − withheld', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        mkEntry('outlet1', 'vis-field', 12_000_000n, new Date('2025-08-01'), {
+          tdsSection: 'SEC_194C',
+          tdsMethodology: 'DEDUCT',
+        }),
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1' }]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([
+        { id: 'cp1', panNumber: 'ABCDE1234F', entityType: 'COMPANY' },
+      ]);
+      // ₹1,000 deposited + ₹500 withheld from payouts
+      mockPrisma.tdsDeposit.findMany.mockResolvedValue([
+        { panNumber: 'ABCDE1234F', amountPaise: 100_000n },
+      ]);
+      mockPrisma.tdsDeductionEntry.findMany.mockResolvedValue([
+        { panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 50_000n },
+      ]);
+
+      const rows = await service.compute194C(FY);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].methodology).toBe('DEDUCT');
+      expect(rows[0].withheldPaise).toBe(50_000n);
+      expect(rows[0].recoveredPaise).toBe(0n);
+      // FIX-2: a DEDUCT PAN's statutory liability is WITHHOLDING (base × rate/100), NOT gross-up.
+      // COMPANY 2% on 12,000,000 = 240,000 (was mis-computed as gross-up 244,900).
+      expect(rows[0].liabilityPaise).toBe(240000n);
+      // outstanding = 240000 − 100000 deposited − 50000 withheld = 90000
+      expect(rows[0].outstandingPaise).toBe(90000n);
+    });
+
+    it('FIX-2: a FULLY-withheld DEDUCT PAN reconciles to outstanding = 0 (no phantom residue)', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        mkEntry('outlet1', 'vis-field', 12_000_000n, new Date('2025-08-01'), {
+          tdsSection: 'SEC_194C',
+          tdsMethodology: 'DEDUCT',
+        }),
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1' }]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([
+        { id: 'cp1', panNumber: 'ABCDE1234F', entityType: 'COMPANY' },
+      ]);
+      // Nothing deposited; the FULL statutory withholding (240,000) was collected via payouts.
+      mockPrisma.tdsDeductionEntry.findMany.mockResolvedValue([
+        { panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 240_000n },
+      ]);
+
+      const rows = await service.compute194C(FY);
+      expect(rows[0].liabilityPaise).toBe(240000n);
+      expect(rows[0].withheldPaise).toBe(240000n);
+      // liability − deposited(0) − withheld(240000) = 0 — the whole obligation is collected.
+      expect(rows[0].outstandingPaise).toBe(0n);
+    });
+  });
+
+  // ─── 194C GROSS_UP: recovery surfaced (report-only, does NOT change liability) ──
+
+  describe('compute194C — GROSS_UP recovery surfacing', () => {
+    it('surfaces per-PAN + per-tenant recovery without changing liability/outstanding', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        mkEntry('outlet1', 'vis-field', 12_000_000n, new Date('2025-08-01'), {
+          tdsSection: 'SEC_194C',
+          tdsMethodology: 'GROSS_UP',
+        }),
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1' }]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([
+        { id: 'cp1', panNumber: 'ABCDE1234F', entityType: 'COMPANY' },
+      ]);
+      // Recovered pro-rata from two tenants against the same PAN
+      mockPrisma.tdsRecoveryEntry.findMany.mockResolvedValue([
+        { panNumber: 'ABCDE1234F', clientId: 'deoleo', tenantSharePaise: 150_000n },
+        { panNumber: 'ABCDE1234F', clientId: 'britannia', tenantSharePaise: 94_900n },
+      ]);
+
+      const rows = await service.compute194C(FY);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].methodology).toBe('GROSS_UP');
+      // liability UNCHANGED by recovery (gross-up number is methodology-independent)
+      expect(rows[0].liabilityPaise).toBe(244900n);
+      // recovery surfaced but NOT netted against outstanding (deposited 0, withheld 0)
+      expect(rows[0].outstandingPaise).toBe(244900n);
+      expect(rows[0].recoveredPaise).toBe(244_900n); // 150000 + 94900
+      expect(rows[0].recoveryByTenant).toHaveLength(2);
+      // sorted desc by share
+      expect(rows[0].recoveryByTenant[0]).toEqual({ clientId: 'deoleo', tenantSharePaise: 150_000n });
+      expect(rows[0].recoveryByTenant[1]).toEqual({ clientId: 'britannia', tenantSharePaise: 94_900n });
+    });
+  });
+
+  // ─── 194C mixed-methodology PAN ───────────────────────────────────────────────
+
+  describe('compute194C — mixed methodology PAN', () => {
+    it('labels a PAN with both DEDUCT and GROSS_UP entries as MIXED', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'vis-field', clientId: CLIENT_ID }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([
+        mkEntry('outlet1', 'vis-field', 6_000_000n, new Date('2025-08-01'), {
+          tdsSection: 'SEC_194C',
+          tdsMethodology: 'DEDUCT',
+        }),
+        mkEntry('outlet1', 'vis-field', 6_000_000n, new Date('2025-09-01'), {
+          tdsSection: 'SEC_194C',
+          tdsMethodology: 'GROSS_UP',
+        }),
+      ]);
+      mockPrisma.outlet.findMany.mockResolvedValue([{ outletCode: 'outlet1', partnerId: 'cp1' }]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([
+        { id: 'cp1', panNumber: 'ABCDE1234F', entityType: 'COMPANY' },
+      ]);
+
+      const rows = await service.compute194C(FY);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].baseFyTotalPaise).toBe(12_000_000n);
+      expect(rows[0].methodology).toBe('MIXED');
     });
   });
 });

@@ -276,6 +276,12 @@ enum TdsSection {
   SEC_194C // visibility service (deductor = Gifsy)
 }
 
+// Per-tenant TDS methodology (also FROZEN onto each CreditPayoutEntry at confirm).
+enum TdsMethodology {
+  DEDUCT // deduct-then-pay: retailer bears TDS; at-threshold catch-up deducted from the crossing payout, overflow carried forward
+  GROSS_UP // pay full: TGSL deposits TDS against the retailer PAN + recovers pro-rata from tenants (raises a TDS invoice)
+}
+
 enum TdsDepositorType {
   CLIENT
   GIFSY
@@ -1692,6 +1698,54 @@ model TdsDeposit {
   @@map("tds_deposits")
 }
 
+/// DEDUCT-method carry-forward ledger (append-only). Running carry-forward for a payee =
+/// the latest row's carryForwardPaise per (panNumber, section, fyLabel). One row per payout
+/// event where the deduct engine runs. Reproducible frozen record of what was withheld.
+model TdsDeductionEntry {
+  id                    String     @id @default(cuid())
+  clientId              String
+  panNumber             String
+  section               TdsSection
+  fyLabel               String
+  creditPayoutEntryId   String?
+  outletCode            String?
+  eventBasePaise        BigInt // the payout base at this event
+  cumulativeBasePaise   BigInt // PAN FY cumulative base after this event
+  tdsRate               Decimal    @db.Decimal(5, 2)
+  tdsDueCumulativePaise BigInt // TDS due on the cumulative base
+  tdsDeductedPriorPaise BigInt // sum deducted before this event
+  tdsDeductedThisPaise  BigInt // deducted from THIS payout
+  carryForwardPaise     BigInt // remaining un-deducted after this event
+  createdAt             DateTime   @default(now())
+
+  @@index([panNumber, section, fyLabel])
+  @@index([clientId])
+  @@index([creditPayoutEntryId])
+  @@map("tds_deduction_entries")
+}
+
+/// GROSS-UP pro-rata tenant recovery / attribution ledger ("in lieu of TDS deduction"),
+/// append-only. Dashboard/report only — NEVER surfaced on the invoice face. Splits the TDS
+/// deposited for a PAN across its contributing tenants by base share.
+model TdsRecoveryEntry {
+  id               String     @id @default(cuid())
+  clientId         String // tenant recovered from
+  panNumber        String
+  section          TdsSection
+  fyLabel          String
+  tdsInvoiceId     String? // the AutoInvoice(kind=TDS) this recovery settles
+  panTdsTotalPaise BigInt // total TDS deposited for the PAN at this event
+  tenantBasePaise  BigInt // this tenant's contribution (pro-rata numerator)
+  panBasePaise     BigInt // PAN aggregate base (denominator)
+  tenantSharePaise BigInt // pro-rata recovery amount
+  createdAt        DateTime   @default(now())
+
+  @@index([clientId, fyLabel])
+  @@index([panNumber, section, fyLabel])
+  @@index([tdsInvoiceId])
+  @@map("tds_recovery_entries")
+}
+
 model AutoInvoice {
   id                  String            @id @default(cuid())
   clientId            String
@@ -1703,6 +1757,7 @@ model AutoInvoice {
   periodStartDate     DateTime?
   periodEndDate       DateTime?
   status              AutoInvoiceStatus @default(GENERATED)
+  invoiceKind         AutoInvoiceKind   @default(SERVICE) // SERVICE = visibility service invoice; TDS = gross-up TDS invoice
   invoiceNumberEdited Boolean           @default(false)
   lineItems           Json
   subtotalPaise       BigInt
@@ -1714,19 +1769,65 @@ model AutoInvoice {
   snapshot            Json              @default("{}")
   pdfUrl              String?
   emailSentAt         DateTime?
+  // Lock at UTR entry (set when the linked payout's UTR/date is recorded) — decoupled
+  // from the manual PAID status. Edits (invoice-number) gate on lockedAt != null.
+  lockedAt            DateTime?
+  // TDS invoices (invoiceKind=TDS): the retailer PAN + FY they settle (one per client/PAN/FY).
+  linkedPanNumber     String?
+  linkedFyLabel       String?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
-  @@unique([clientId, outletCode, period]) // automatic generation: one invoice per outlet per month
+  creditEntries CreditPayoutEntry[]
+  reimbursement GstReimbursement?
+
+  @@unique([clientId, outletCode, period, invoiceKind]) // one SERVICE invoice per outlet/month; a TDS row can coexist
   @@index([clientId])
   @@index([partnerId])
   @@index([invoiceDate])
+  @@index([linkedPanNumber])
   @@map("auto_invoices")
 }
 
 enum AutoInvoiceStatus {
   GENERATED // editable (incl. invoice number); not yet paid
   PAID // locked — invoice number can no longer change
+}
+
+enum AutoInvoiceKind {
+  SERVICE // the visibility marketing-and-support service invoice
+  TDS // the gross-up "TDS invoice" (body = TDS deposited against the retailer PAN)
+}
+
+/// GST HOLDBACK: the SERVICE invoice's base is paid to the retailer immediately, but the GST
+/// is held back and released only on the retailer's proof of GST deposit, via a Gifsy-admin-only
+/// GST-reimbursement screen. One per GST-bearing SERVICE invoice.
+model GstReimbursement {
+  id               String                 @id @default(cuid())
+  clientId         String
+  autoInvoiceId    String                 @unique
+  partnerId        String
+  outletCode       String
+  gstPaise         BigInt
+  status           GstReimbursementStatus @default(HELD)
+  proofUrl         String?
+  releasePayoutRef String?
+  releasedAt       DateTime?
+  releasedById     String?
+  notes            String?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+
+  autoInvoice AutoInvoice @relation(fields: [autoInvoiceId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
+  @@index([status])
+  @@map("gst_reimbursements")
+}
+
+enum GstReimbursementStatus {
+  HELD // GST withheld pending the retailer's deposit proof
+  RELEASED // reimbursed to the retailer after proof
 }
 
 // ============================================================
@@ -2552,16 +2653,25 @@ enum CreditEntryStatus {
   REVERSED
 }
 
+/// Classifies a credit field's payout stream. VISIBILITY = 194C-eligible marketing/support
+/// services (self-billed invoice + TDS engine); INCENTIVE = 194R-style benefit/other.
+/// Replaces the overloaded isSeparatePayout boolean (kept as a deprecated mirror until W3).
+enum PayoutStream {
+  VISIBILITY
+  INCENTIVE
+}
+
 model CreditField {
-  id               String   @id @default(cuid())
+  id               String       @id @default(cuid())
   clientId         String
   name             String
-  isActive         Boolean  @default(true)
-  isSeparatePayout Boolean  @default(false)
+  isActive         Boolean      @default(true)
+  isSeparatePayout Boolean      @default(false) // DEPRECATED mirror of payoutStream=VISIBILITY — dropped in W3
+  payoutStream     PayoutStream @default(INCENTIVE)
   outletTypeAwards Json
   order            Int
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
 
   @@unique([clientId, name])
   @@index([clientId])
@@ -2572,7 +2682,9 @@ model CreditField {
 model CreditBatch {
   id               String            @id @default(cuid())
   clientId         String
-  batchCode        String            @unique
+  // batchCode is per-tenant-sequential (CB-<period>-NNN via a per-clientId count) → unique PER
+  // TENANT, not globally. A global @unique collides the moment a 2nd tenant reuses the same code.
+  batchCode        String
   period           String
   status           CreditBatchStatus @default(PENDING_CONFIRM)
   uploadedBy       String
@@ -2590,44 +2702,54 @@ model CreditBatch {
   reversals     CreditReversal[]
 
   @@index([clientId])
+  @@unique([clientId, batchCode], name: "clientId_batchCode")
   @@index([period])
   @@index([status])
   @@map("credit_batches")
 }
 
 model CreditPayoutEntry {
-  id          String            @id @default(cuid())
-  clientId    String
-  batchId     String
-  downloadId  String?
-  outletId    String
-  outletName  String
-  fieldId     String
-  fieldName   String
-  period      String
-  amountPaise BigInt
-  narration   String            @default("")
-  status      CreditEntryStatus @default(PENDING)
-  utr         String?
-  paidAt      DateTime?
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
+  id             String            @id @default(cuid())
+  clientId       String
+  batchId        String
+  downloadId     String?
+  outletId       String
+  outletName     String
+  fieldId        String
+  fieldName      String
+  period         String
+  amountPaise    BigInt
+  narration      String            @default("")
+  status         CreditEntryStatus @default(PENDING)
+  utr            String?
+  paidAt         DateTime?
+  // Visibility-payout linkage + FROZEN TDS treatment (stamped by value at confirm — never a
+  // live config re-lookup). tdsSection/tdsMethodology null = legacy / not-applicable.
+  autoInvoiceId    String?
+  tdsSection       TdsSection?
+  tdsMethodology   TdsMethodology?
+  tdsDeductedPaise BigInt          @default(0) // DEDUCT-method net withheld at download; 0 for gross-up/incentive
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
 
-  batch    CreditBatch           @relation(fields: [batchId], references: [id])
-  download CreditPayoutDownload? @relation(fields: [downloadId], references: [id])
+  batch       CreditBatch           @relation(fields: [batchId], references: [id])
+  download    CreditPayoutDownload? @relation(fields: [downloadId], references: [id])
+  autoInvoice AutoInvoice?          @relation(fields: [autoInvoiceId], references: [id], onDelete: SetNull)
 
   @@index([clientId])
   @@index([batchId])
   @@index([outletId])
   @@index([period])
   @@index([status])
+  @@index([autoInvoiceId])
   @@map("credit_payout_entries")
 }
 
 model CreditPayoutDownload {
   id               String   @id @default(cuid())
   clientId         String
-  downloadCode     String   @unique
+  // downloadCode is per-tenant-sequential (PD-<period>-NNN) → unique PER TENANT, not globally.
+  downloadCode     String
   period           String
   groupType        String
   fieldId          String?
@@ -2642,6 +2764,7 @@ model CreditPayoutDownload {
 
   entries CreditPayoutEntry[]
 
+  @@unique([clientId, downloadCode], name: "clientId_downloadCode")
   @@index([clientId])
   @@index([period])
   @@index([status])

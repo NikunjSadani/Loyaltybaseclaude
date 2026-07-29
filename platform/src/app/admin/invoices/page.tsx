@@ -1,7 +1,11 @@
 'use client';
 
 /**
- * /admin/invoices  — GIFSY_ADMIN only
+ * /admin/invoices
+ *   - GIFSY_ADMIN  — full control: list + filters + Generate + Mark Paid + export.
+ *   - CLIENT_ADMIN — READ-ONLY view of their own tenant's invoices (portal split §5):
+ *                    list + filters + export are kept; the write actions (Generate,
+ *                    Mark Paid) are hidden. The API scopes the list to their tenant.
  * Full invoice list with filters, "Generate invoices" action, Mark Paid, and CSV export.
  *
  * Backend:
@@ -35,6 +39,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { api, authHeader } from '@/lib/api-client';
 import { formatINR } from '@/lib/money';
 import { formatPeriodLabel } from '@/lib/invoice';
+import { useAdminSession } from '@/lib/admin-session';
 
 /** Trigger a browser download of an xlsx blob from a backend endpoint. */
 async function downloadXlsx(url: string, fallbackName: string): Promise<string | null> {
@@ -159,6 +164,11 @@ const STATUS_ICONS: Record<InvoiceRow['status'], React.ReactNode> = {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function AdminInvoiceListPage() {
+  // RBAC: only GIFSY_ADMIN may run the write actions (Generate, Mark Paid). A
+  // CLIENT_ADMIN gets a read-only view (list + filters + export) of its own tenant.
+  const session = useAdminSession();
+  const isGifsy = session.role === 'GIFSY_ADMIN';
+
   const [invoices, setInvoices] = useState<InvoiceRow[]>([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState<string | null>(null);
@@ -349,12 +359,14 @@ export default function AdminInvoiceListPage() {
               : <Download className="w-3.5 h-3.5" />}
             Export Excel
           </button>
-          <button
-            onClick={() => { setShowGenerate(true); setGenerateResult(null); setGenerateError(null); }}
-            className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 transition-colors"
-          >
-            <Zap className="w-3.5 h-3.5" /> Generate Invoices
-          </button>
+          {isGifsy && (
+            <button
+              onClick={() => { setShowGenerate(true); setGenerateResult(null); setGenerateError(null); }}
+              className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 transition-colors"
+            >
+              <Zap className="w-3.5 h-3.5" /> Generate Invoices
+            </button>
+          )}
           <Link
             href="/admin/invoices/upload"
             className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg bg-[var(--brand-primary)] text-white font-semibold hover:bg-green-700 transition-colors"
@@ -364,8 +376,8 @@ export default function AdminInvoiceListPage() {
         </div>
       </div>
 
-      {/* ── Generate invoices panel ─────────────────────────────────────────── */}
-      {showGenerate && (
+      {/* ── Generate invoices panel (GIFSY only) ────────────────────────────── */}
+      {isGifsy && showGenerate && (
         <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
           <div className="flex items-center justify-between">
             <p className="text-xs font-semibold text-blue-800">Generate invoices for a month</p>
@@ -553,7 +565,7 @@ export default function AdminInvoiceListPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
-                        {inv.status === 'GENERATED' && (
+                        {isGifsy && inv.status === 'GENERATED' && (
                           <button
                             onClick={() => handleMarkPaid(inv.id)}
                             disabled={markingPaid === inv.id}

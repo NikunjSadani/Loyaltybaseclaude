@@ -342,6 +342,33 @@ export function sectionParamToEnum(section: '194R' | '194C'): 'SEC_194R' | 'SEC_
   return section === '194R' ? 'SEC_194R' : 'SEC_194C';
 }
 
+/**
+ * The EFFECTIVE 194 section a payout entry is aggregated under, honouring the
+ * FROZEN stamp (W0-B).
+ *
+ * At confirm each CreditPayoutEntry is stamped with `tdsSection` BY VALUE, so
+ * compute buckets by that frozen stamp — the treatment is reproducible even if
+ * the tenant's `tdsPolicy` is later edited (a config change never retroactively
+ * re-classifies an already-confirmed payout).
+ *
+ *   - frozen SEC_194R  → 194R (bucketed by the stamp, even on a VISIBILITY field
+ *                        whose tenant configured section=194R)
+ *   - frozen SEC_194C  → 194C (bucketed by the stamp)
+ *   - null (legacy / pre-migration rows) → fall back to the LIVE classification:
+ *        VISIBILITY-field payout → SEC_194C (Gifsy-deducted service)
+ *        any other field         → SEC_194R (benefit-in-kind)
+ *     which preserves the pre-freeze behaviour exactly.
+ */
+export function effectiveEntrySection(
+  frozenSection: 'SEC_194R' | 'SEC_194C' | null | undefined,
+  isVisibilityField: boolean,
+): 'SEC_194R' | 'SEC_194C' {
+  if (frozenSection === 'SEC_194R' || frozenSection === 'SEC_194C') {
+    return frozenSection;
+  }
+  return isVisibilityField ? 'SEC_194C' : 'SEC_194R';
+}
+
 /** One rate expressed as an irreducible integer fraction num/den. */
 export interface TdsRate {
   num: number; // e.g. 10
@@ -436,6 +463,30 @@ export function financialYear(date: Date): FyInfo {
 /** Returns FyInfo for the current system date (UTC). */
 export function fyOfToday(): FyInfo {
   return financialYear(new Date());
+}
+
+/**
+ * The "YYYY-YY" FY label a payout PERIOD ("YYYY-MM") belongs to (IST FY: Apr→Mar).
+ * This is the FY anchor for VISIBILITY CreditPayoutEntry rows — it MUST match
+ * credits.service.fyForPeriod so the 194C/194R base READ reconciles exactly with
+ * the DEDUCT/recovery ledger WRITE (shared contract; fixes the Mar-paid-in-Apr drift).
+ */
+export function fyLabelForPeriod(period: string): string {
+  const [y, m] = period.split('-').map((s) => parseInt(s, 10));
+  const startYear = m >= 4 ? y : y - 1;
+  return `${startYear}-${String((startYear + 1) % 100).padStart(2, '0')}`;
+}
+
+/**
+ * The inclusive PERIOD window ("YYYY-MM" strings) for an FY label — the range a
+ * VISIBILITY payout entry's `period` must fall in to belong to that FY. Mirrors
+ * credits.service.fyForPeriod's startPeriod/endPeriod. e.g. "2026-27" → {04 2026 … 03 2027}.
+ */
+export function periodWindowForFy(fyLabel: string): { startPeriod: string; endPeriod: string } {
+  const m = /^(\d{4})-(\d{2})$/.exec(fyLabel);
+  if (!m) throw new Error(`Invalid FY label: "${fyLabel}". Expected "YYYY-YY", e.g. "2025-26"`);
+  const startYear = parseInt(m[1], 10);
+  return { startPeriod: `${startYear}-04`, endPeriod: `${startYear + 1}-03` };
 }
 
 /**
