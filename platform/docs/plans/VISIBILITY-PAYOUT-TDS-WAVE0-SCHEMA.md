@@ -371,14 +371,13 @@ outlet under each. Every number the live engine produced matched hand-calc to th
   **₹10,000** (B2 below per-outlet threshold). The **₹4,000 gap = exactly B2's un-recovered slice** — the platform-aggregate
   vs. operational-per-outlet difference a CA should sign off on. No code defect found; behavior is as designed.
 
-**DD-4 — GST charged on the gross-up TDS invoice for a GST-REGISTERED retailer — ⚠️ OBSERVATION, flag for CA review (2026-07-29, from the synthetic run).**
-For a `gstRegistrationType=REGULAR` retailer, the **TDS invoice** (`invoiceKind=TDS`, gross-up) is created **with GST** applied
-(observed: PAN AAAPA3333C TDS invoice subtotal ₹404 + **GST ₹72.72** = ₹476.72, and a matching `GstReimbursement(HELD)` of ₹72.72),
-in addition to the retailer's SERVICE invoice GST (₹7,200 held). Whether a TDS-deposit invoice should itself carry (and hold) GST
-is a genuine tax-treatment question — surfaced here so a CA confirms it before a 2nd live 194C tenant. For an UNREGISTERED retailer
-the TDS invoice correctly carried `gst=0`. Not a blocker for Deoleo (single-tenant 194R/incentive path unaffected). If the CA says
-TDS invoices should not carry GST, the fix is in `invoices.service.ts createTdsInvoice` (skip `computeGST` / GstReimbursement for
-`invoiceKind=TDS`).
+**DD-4 — GST on the gross-up TDS invoice — ✅ CONFIRMED CORRECT AS DESIGNED (2026-07-29). Not an open item.**
+Initially flagged as an observation, then confirmed correct against the design + owner: GST applicability follows the retailer's
+**GST registration**, exactly as coded. **Unregistered retailer → NO GST on any invoice** (SERVICE *and* TDS) — design **D6**
+("no GST on invoice; it is effectively the RCM self-invoice"), owner-confirmed 2026-07-29; verified live in the synthetic run (every
+unregistered retailer invoice came back `gst=0`). **GST-registered retailer → GST applies on the TDS invoice** — design **D-i**
+("the TDS invoice… GST applies as normal — CA-blessed as additional service consideration"); verified live (PAN AAAPA3333C TDS
+invoice ₹404 + GST ₹72.72, matching `GstReimbursement(HELD)`). No code change needed; behaviour matches D6 + D-i on both sides.
 
 > **How exercised:** a self-contained synthetic 2-tenant run on staging (clients `synthtdsa`/`synthtdsb`, 6 outlets, PANs
 > `AAAP*`), driven entirely through the real HTTP API (tdsPolicy → visibility field → batch → confirm → payout-download →
