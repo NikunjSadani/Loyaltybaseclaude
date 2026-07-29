@@ -350,5 +350,37 @@ aggregation needs a PAN; MIXED cross-tenant methodology is a live multi-tenant s
   keep them for the GIFSY platform-wide view (`scope.clientId` undefined). Add a CLIENT_ADMIN-scoped test asserting the two
   fields are absent. No schema/migration change.
 
-**DD-2 — Double-reversal edge** (already parked): a low-severity re-record of an already-reversed PAID entry's receivable → 2nd-tenant checklist.
-**DD-3 — No-PAN threshold is per-(clientId, outletCode)** and **MIXED cross-tenant methodology** (DEDUCT under one 194C tenant + GROSS_UP under another, same PAN) — both handled but unexercised live; flag for CA review at the multi-tenant milestone.
+**DD-2 — Double-reversal edge — ✅ EXERCISED + CLOSED (2026-07-29, synthetic 2-tenant staging run).**
+Drove a DEDUCT payout (outlet SYNTH-B3, ₹40,000, PAN AAAPB3333C) to PROCESSING via a real payout-download (withheld
+₹400 = 40000 paise), then a UTR upload marking it **FAILED** → the guarded `PROCESSING→FAILED` flip zeroed `tdsDeductedPaise`
+and appended **one** compensating `TdsDeductionEntry` of **−40000 paise**. **Re-applied the identical UTR file** (`apply=true`)
+→ response `{paidCount:0, skippedCount:2, failedCount:1}` and, at the DB, the deduct ledger for AAAPB3333C held **exactly 2
+rows (+40000, −40000), net 0** — the re-apply added **no** third row (the entry was already FAILED, not PROCESSING, so
+`flip.count===0 → continue`). **Idempotent; no double reversal on the guarded path.** No code change needed.
+
+**DD-3 — No-PAN per-(clientId, outletCode) + MIXED cross-tenant methodology — ✅ EXERCISED + CA-READY (2026-07-29, synthetic run).**
+Two synthetic 194C tenants — `synthtdsa` (GROSS_UP) + `synthtdsb` (DEDUCT) — sharing retailer PAN `AAAPS1234C`, plus a no-PAN
+outlet under each. Every number the live engine produced matched hand-calc to the paise:
+- **MIXED shared PAN** `AAAPS1234C`: platform 194C row base **₹90,000**, `methodology` effectively MIXED, liability **₹904**
+  (= ₹500 withheld from B1 [DEDUCT] + ₹404 gross-up TDS invoice from A1 [GROSS_UP]); the two methods computed on their own
+  base with no contamination (frozen-per-entry stamp).
+- **No-PAN per-(clientId, outletCode):** A2 (no-PAN, ₹40,000 > ₹30k) → recovery **₹10,000** written (`__NO_PAN__:SYNTH-A2`);
+  B2 (no-PAN, ₹20,000 < ₹30k) → **NO recovery** (below the per-outlet line) — proving no-PAN is NOT pooled across tenants/outlets.
+- **The CA artifact (quantified live):** the read-side `compute194C` pools all no-PAN into one `__NO_PAN__` bucket
+  (base ₹60,000 → theoretical liability **₹14,000** = ₹10k gross-up A2 + ₹4k withhold B2), while the write-side recovers only
+  **₹10,000** (B2 below per-outlet threshold). The **₹4,000 gap = exactly B2's un-recovered slice** — the platform-aggregate
+  vs. operational-per-outlet difference a CA should sign off on. No code defect found; behavior is as designed.
+
+**DD-4 — GST charged on the gross-up TDS invoice for a GST-REGISTERED retailer — ⚠️ OBSERVATION, flag for CA review (2026-07-29, from the synthetic run).**
+For a `gstRegistrationType=REGULAR` retailer, the **TDS invoice** (`invoiceKind=TDS`, gross-up) is created **with GST** applied
+(observed: PAN AAAPA3333C TDS invoice subtotal ₹404 + **GST ₹72.72** = ₹476.72, and a matching `GstReimbursement(HELD)` of ₹72.72),
+in addition to the retailer's SERVICE invoice GST (₹7,200 held). Whether a TDS-deposit invoice should itself carry (and hold) GST
+is a genuine tax-treatment question — surfaced here so a CA confirms it before a 2nd live 194C tenant. For an UNREGISTERED retailer
+the TDS invoice correctly carried `gst=0`. Not a blocker for Deoleo (single-tenant 194R/incentive path unaffected). If the CA says
+TDS invoices should not carry GST, the fix is in `invoices.service.ts createTdsInvoice` (skip `computeGST` / GstReimbursement for
+`invoiceKind=TDS`).
+
+> **How exercised:** a self-contained synthetic 2-tenant run on staging (clients `synthtdsa`/`synthtdsb`, 6 outlets, PANs
+> `AAAP*`), driven entirely through the real HTTP API (tdsPolicy → visibility field → batch → confirm → payout-download →
+> UTR), verified via guarded `gifsy_staging` reads, then **fully deleted** (0 rows remain; platform 194C view clean). Isolated
+> from Deoleo/uatbajaj/all real data throughout.
