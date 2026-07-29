@@ -63,19 +63,21 @@ export class TdsReportsController {
   // ─── Unregistered-retailer / RCM report (GIFSY-only) ───────────────────────
   @Get('unregistered')
   @Roles('GIFSY_ADMIN')
-  unregistered(@Query() q: UnregisteredReportQueryDto) {
-    // GIFSY-only: clientId is a straight operator filter (no tenant claim to defend against).
-    const scope: ReportScope = { clientId: q.clientId, period: q.period };
+  unregistered(@CurrentUser() user: JwtPayload, @Query() q: UnregisteredReportQueryDto) {
+    // GIFSY-only, but an ASSUMED operator is pinned to their assumed tenant (resolveClientId
+    // ignores ?clientId= when assumed); un-assumed GIFSY uses ?clientId= as a platform filter.
+    const scope: ReportScope = { clientId: this.resolveClientId(user, q.clientId), period: q.period };
     return this.reports.unregisteredReport(scope);
   }
 
   @Get('unregistered/export')
   @Roles('GIFSY_ADMIN')
   async unregisteredExport(
+    @CurrentUser() user: JwtPayload,
     @Query() q: UnregisteredReportQueryDto,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const scope: ReportScope = { clientId: q.clientId, period: q.period };
+    const scope: ReportScope = { clientId: this.resolveClientId(user, q.clientId), period: q.period };
     const { buffer, filename } = await this.reports.unregisteredReportXlsx(scope);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     return new StreamableFile(buffer, { type: XLSX_MIME });

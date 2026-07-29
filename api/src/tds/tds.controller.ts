@@ -80,9 +80,15 @@ export class TdsController {
   @Get('194c')
   @Roles('GIFSY_ADMIN')
   async get194C(
-    @CurrentUser() _user: JwtPayload,
+    @CurrentUser() user: JwtPayload,
     @Query('fy') fy?: string,
   ) {
+    // 194C is TGSL's platform-wide obligation (aggregated by PAN across ALL tenants). It is a
+    // platform view only — an operator who has ASSUMED a tenant must not see it (owner decision:
+    // hide 194C when assumed). Un-assumed GIFSY at home sees it.
+    if (!platformWide(user)) {
+      throw new ForbiddenException('194C is a platform-level view — exit the assumed tenant to access it.');
+    }
     const fyLabel = fy ?? fyOfToday().fyLabel;
     const [rows, summary] = await Promise.all([
       this.tds.compute194C(fyLabel),
@@ -142,9 +148,13 @@ export class TdsController {
   @Get('194c/export')
   @Roles('GIFSY_ADMIN')
   async export194C(
-    @CurrentUser() _user: JwtPayload,
+    @CurrentUser() user: JwtPayload,
     @Query('fy') fy?: string,
   ): Promise<StreamableFile> {
+    // Platform-level 194C export — un-assumed GIFSY only (owner decision: hide 194C when assumed).
+    if (!platformWide(user)) {
+      throw new ForbiddenException('194C is a platform-level view — exit the assumed tenant to access it.');
+    }
     const fyLabel = fy ?? fyOfToday().fyLabel;
     const { buffer, filename } = await this.tds.export194C(fyLabel);
     return new StreamableFile(buffer, {
@@ -254,8 +264,10 @@ export class TdsController {
     const section = query.section;
     if (!section) throw new BadRequestException('?section=194R|194C is required');
 
-    if (section === '194C' && user.role !== 'GIFSY_ADMIN') {
-      throw new ForbiddenException('194C liability is accessible to GIFSY_ADMIN only');
+    // 194C liability is the platform-wide (cross-tenant, PAN-aggregated) figure — un-assumed
+    // GIFSY only. An assumed operator (or a tenant admin) gets 403; 194R below stays clientId-scoped.
+    if (section === '194C' && !platformWide(user)) {
+      throw new ForbiddenException('194C liability is a platform-level view — exit the assumed tenant to access it.');
     }
 
     const fyLabel = query.fy ?? fyOfToday().fyLabel;

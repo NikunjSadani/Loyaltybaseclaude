@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { GstReimbursementService } from './gst-reimbursement.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
+import { platformWide } from '../common/tenant-scope';
 import { ListGstReimbursementQueryDto, ReleaseGstReimbursementDto } from './dto/gst-reimbursement.dto';
 
 /**
@@ -19,8 +20,11 @@ export class GstReimbursementController {
   constructor(private readonly reimbursements: GstReimbursementService) {}
 
   @Get()
-  list(@Query() query: ListGstReimbursementQueryDto) {
-    return this.reimbursements.list(query);
+  list(@CurrentUser() user: JwtPayload, @Query() query: ListGstReimbursementQueryDto) {
+    // GIFSY-only, but an ASSUMED operator is pinned to their assumed tenant — the ?clientId=
+    // filter is honoured only for an un-assumed GIFSY at platform home.
+    const clientId = platformWide(user) ? query.clientId : user.clientId;
+    return this.reimbursements.list({ ...query, clientId });
   }
 
   @Post(':id/release')

@@ -46,12 +46,19 @@ describe('GstReimbursementController', () => {
     );
   });
 
-  it('delegates list + release to the service', async () => {
+  it('delegates list + release to the service (un-assumed GIFSY honours ?clientId=)', async () => {
     svc.list.mockResolvedValue({ count: 0 });
     svc.release.mockResolvedValue({ status: 'RELEASED' });
-    await controller.list({ status: 'HELD' });
+    await controller.list(GIFSY, { status: 'HELD', clientId: 'clientb' } as never);
     await controller.release(GIFSY, 'r1', { proofUrl: 'u', releasePayoutRef: 'x' });
-    expect(svc.list).toHaveBeenCalledWith({ status: 'HELD' });
+    expect(svc.list).toHaveBeenCalledWith({ status: 'HELD', clientId: 'clientb' });
     expect(svc.release).toHaveBeenCalledWith(GIFSY, 'r1', { proofUrl: 'u', releasePayoutRef: 'x' });
+  });
+
+  it('an ASSUMED operator is pinned to their assumed tenant — ?clientId= is ignored', async () => {
+    svc.list.mockResolvedValue({ count: 0 });
+    const assumed: JwtPayload = { ...GIFSY, clientId: 'deoleo', assumed: true };
+    await controller.list(assumed, { status: 'HELD', clientId: 'clientb' } as never);
+    expect(svc.list).toHaveBeenCalledWith({ status: 'HELD', clientId: 'deoleo' });
   });
 });
