@@ -388,6 +388,13 @@ fixes + next.config are tsc-clean & vitest-green. The E2E harness itself is a SE
   `x-edge-secret` matches; **env-gated** (`EDGE_SECRET` unset → inert). The CI frontend `--set-env-vars` REPLACES the
   whole env set → `EDGE_SECRET` must live in the workflow (GitHub secret), never a manual `gcloud run update` (wiped next
   deploy). Activation order: worker must send the secret BEFORE the frontend env is set, else legit login breaks.
+- **(ASSUME-TENANT-SCOPE) GIFSY operator reads scope to the ASSUMED tenant.** A GIFSY_ADMIN assumed into a tenant
+  (JWT `assumed:true`) is READ-scoped to that tenant; un-assumed GIFSY at home stays platform-wide. **Invariant:** any
+  new GIFSY-wide read MUST use `api/src/common/tenant-scope.ts` `platformWide(user) = role==='GIFSY_ADMIN' && !assumed`
+  (NOT a bare `role==='GIFSY_ADMIN'` check — that ignores assume-tenant and leaks the platform view to the operator's
+  scoped context). `compute194C`/`summary194C` stay platform-wide (correctness); write-auth (`isGifsyAdmin`) untouched;
+  194C views are un-assumed-GIFSY-only. LIVE develop `706efd1`+`12045db`, runtime-proven. Full detail: memory
+  [[gifsy-assume-tenant-scoping]]. (Owner found it onboarding a 2nd staging tenant `uatbajaj`; NOT a tenant leak.)
 
 ## META-LESSONS (baked into CLAUDE.md agreements 1 & 2)
 1. A fix is DONE only when **EVERY consumer + alternate data path + scale case** is traced (grep all
