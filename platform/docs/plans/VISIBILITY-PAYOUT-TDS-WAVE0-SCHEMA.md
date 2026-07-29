@@ -329,4 +329,26 @@ checklist):** a low-severity double-reversal edge on an already-reversed PAID en
 threshold is per-(clientId, outletCode) since cross-tenant
 aggregation needs a PAN; MIXED cross-tenant methodology is a live multi-tenant scenario now handled but unexercised.
 
-**▶ NEXT = W2 frontend** (Gifsy config-UI + dashboards + tenant read-only + retailer copy) → W3 → W4 cutover.
+**STATUS: LIVE ON STAGING (`500eaf9`) + runtime-verified. ▶ NEXT = owner UAT → W4 owner-gated prod cutover.**
+
+## 10. DEFERRED DECISIONS — pending, pick up later (owner-parked)
+
+**DD-1 — Tenant recovery report exposes the cross-tenant PAN aggregate (privacy). PARKED "keep as-is" 2026-07-29 (owner).**
+- **What:** `tds-reports.service.ts` `recoveryReport()` (and `recoveryReportXlsx()`) return `panBase` (the PAN's base
+  aggregated across ALL 194C tenants) and `panTdsTotal` (the PAN's total TDS) on **every row, including a tenant-scoped
+  (CLIENT_ADMIN) call** — alongside the tenant's own `tenantBase`/`tenantShare`. The row set is correctly clientId-filtered,
+  but each row still carries the platform-wide totals.
+- **Consequence:** when the SAME retailer PAN is paid under ≥2 different 194C tenants, a tenant admin can compute
+  `others' total = panBase − my tenantBase` — learning the EXACT amount other brands paid that shared retailer. It reveals
+  **amounts only for one shared PAN** — never the other tenant's identity, outlets, employees, or business. Weaker inference
+  (that a shared retailer exists elsewhere) is unavoidable anyway, because a sub-threshold tenant still gets a recovery bill.
+- **Scope/severity:** LOW + DORMANT. Only triggers with a 2nd live 194C tenant sharing a retailer PAN; never for Deoleo alone.
+- **Owner decision (2026-07-29):** **KEEP AS-IS for now** (arguably useful "here's why you're charged" transparency);
+  revisit later, likely with CA input.
+- **Fix when picked up (small/surgical):** in `recoveryReport()` + `recoveryReportXlsx()`, when `scope.clientId` is set
+  (tenant call), OMIT `panBase` + `panTdsTotal` from the row DTO and the xlsx columns ("PAN Base (₹)", "PAN TDS Total (₹)");
+  keep them for the GIFSY platform-wide view (`scope.clientId` undefined). Add a CLIENT_ADMIN-scoped test asserting the two
+  fields are absent. No schema/migration change.
+
+**DD-2 — Double-reversal edge** (already parked): a low-severity re-record of an already-reversed PAID entry's receivable → 2nd-tenant checklist.
+**DD-3 — No-PAN threshold is per-(clientId, outletCode)** and **MIXED cross-tenant methodology** (DEDUCT under one 194C tenant + GROSS_UP under another, same PAN) — both handled but unexercised live; flag for CA review at the multi-tenant milestone.

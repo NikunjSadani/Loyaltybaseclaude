@@ -32,6 +32,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { TdsService } from './tds.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
+import { platformWide } from '../common/tenant-scope';
 import { Roles } from '../common/decorators/roles.decorator';
 import { fyOfToday } from './tds.helpers';
 import { DepositUploadQueryDto, LiabilityQueryDto, UploadQueryDto } from './dto/tds.dto';
@@ -52,9 +53,10 @@ export class TdsController {
     @Query('fy') fy?: string,
     @Query('clientId') queryClientId?: string,
   ) {
-    // CLIENT_ADMIN is always their own tenant; GIFSY_ADMIN can cross-scope via ?clientId=
+    // CLIENT_ADMIN — and an ASSUMED GIFSY operator — are pinned to their own (assumed)
+    // tenant; only an un-assumed GIFSY may cross-scope via ?clientId=.
     const clientId =
-      user.role === 'GIFSY_ADMIN' && queryClientId ? queryClientId : user.clientId;
+      platformWide(user) && queryClientId ? queryClientId : user.clientId;
 
     const fyLabel = fy ?? fyOfToday().fyLabel;
     const [rows, summary] = await Promise.all([
@@ -117,7 +119,7 @@ export class TdsController {
     @Query('clientId') queryClientId?: string,
   ): Promise<StreamableFile> {
     const clientId =
-      user.role === 'GIFSY_ADMIN' && queryClientId ? queryClientId : user.clientId;
+      platformWide(user) && queryClientId ? queryClientId : user.clientId;
     const fyLabel = fy ?? fyOfToday().fyLabel;
     const { buffer, filename } = await this.tds.export194R(clientId, fyLabel);
     return new StreamableFile(buffer, {

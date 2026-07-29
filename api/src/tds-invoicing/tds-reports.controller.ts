@@ -2,6 +2,7 @@ import { Controller, Get, Query, Res, StreamableFile } from '@nestjs/common';
 import type { Response } from 'express';
 import { TdsReportsService, ReportScope } from './tds-reports.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
+import { platformWide } from '../common/tenant-scope';
 import { Roles } from '../common/decorators/roles.decorator';
 import {
   PayoutReportQueryDto,
@@ -33,7 +34,9 @@ export class TdsReportsController {
    * rule so a tenant admin is structurally incapable of reading cross-tenant.
    */
   private resolveClientId(user: JwtPayload, queryClientId?: string): string | undefined {
-    return user.role === 'GIFSY_ADMIN' ? queryClientId : user.clientId;
+    // Only an un-assumed GIFSY may honour ?clientId= (or go platform-wide). A tenant admin
+    // OR an ASSUMED operator is forced to their own (assumed) clientId — query ignored.
+    return platformWide(user) ? queryClientId : user.clientId;
   }
 
   // ─── Payout report (GST reg type + frozen TDS treatment) ───────────────────

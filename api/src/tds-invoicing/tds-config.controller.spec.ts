@@ -22,6 +22,8 @@ const tenantSettings = { resolveTdsPolicy: jest.fn() };
 
 const GIFSY: JwtPayload = { sub: 'op', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '9', name: 'Op' };
 const CLIENT: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '8', name: 'CA' };
+// An ASSUMED GIFSY operator is pinned to the assumed tenant — ?clientId= is ignored.
+const ASSUMED: JwtPayload = { sub: 'op', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '9', name: 'Op', assumed: true };
 
 describe('TdsConfigController', () => {
   let controller: TdsConfigController;
@@ -45,6 +47,12 @@ describe('TdsConfigController', () => {
     it('GIFSY_ADMIN may read any tenant via ?clientId=', async () => {
       await controller.get(GIFSY, { clientId: 'deoleo' });
       expect(tenantSettings.resolveTdsPolicy).toHaveBeenCalledWith('deoleo');
+    });
+
+    it('an ASSUMED GIFSY operator is pinned to the assumed tenant (ignores ?clientId=)', async () => {
+      const res = await controller.get(ASSUMED, { clientId: 'other-tenant' });
+      expect(tenantSettings.resolveTdsPolicy).toHaveBeenCalledWith('deoleo');
+      expect(res).toEqual({ clientId: 'deoleo', section: 'SEC_194C', methodology: 'GROSS_UP' });
     });
   });
 

@@ -5,6 +5,7 @@ import { TenantSettingsService } from '../../tenant/tenant-settings.service';
 import { PayoutsService } from '../../payouts/payouts.service';
 import { TdsService } from '../../tds/tds.service';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
+import { platformWide } from '../../common/tenant-scope';
 import { fyOfToday } from '../../tds/tds.helpers';
 import { paiseToRupees } from '../../common/money';
 
@@ -125,11 +126,23 @@ export class FinanceDashboardService {
         : 0;
 
     // ── TDS: reuse TdsService summaries (BigInt paise totals → ₹) ────────────────
-    // 194R is tenant-scoped (clientId); 194C is platform-wide BY DESIGN (no clientId).
+    // 194R is tenant-scoped (clientId). 194C is a PLATFORM-WIDE cross-tenant total
+    // (Gifsy deductor) — it must be surfaced ONLY to an un-assumed GIFSY operator. A
+    // tenant admin (CLIENT_ADMIN/MIS_USER) OR an ASSUMED operator must NOT see the
+    // cross-tenant figure, so we skip the aggregate entirely and emit a zeroed block
+    // (keeps the DTO shape → FE renders ₹0.00 instead of crashing on a null section).
+    const isPlatform = platformWide(user);
     const [summary194R, summary194C] = await Promise.all([
       this.tds.summary194R(clientId, fyLabel),
-      this.tds.summary194C(fyLabel),
+      isPlatform ? this.tds.summary194C(fyLabel) : Promise.resolve(null),
     ]);
+    const sec194C = isPlatform && summary194C
+      ? {
+          liabilityRupees: FinanceDashboardService.round2(paiseToRupees(summary194C.totalLiabilityPaise)),
+          depositedRupees: FinanceDashboardService.round2(paiseToRupees(summary194C.totalDepositedPaise)),
+          outstandingRupees: FinanceDashboardService.round2(paiseToRupees(summary194C.totalOutstandingPaise)),
+        }
+      : { liabilityRupees: 0, depositedRupees: 0, outstandingRupees: 0 };
 
     // ── Fund: reuse PayoutsService.getFundSummary (already paise→₹ mapped) ───────
     const fundSummary = await this.payouts.getFundSummary(user);
@@ -157,11 +170,7 @@ export class FinanceDashboardService {
           depositedRupees: FinanceDashboardService.round2(paiseToRupees(summary194R.totalDepositedPaise)),
           outstandingRupees: FinanceDashboardService.round2(paiseToRupees(summary194R.totalOutstandingPaise)),
         },
-        sec194C: {
-          liabilityRupees: FinanceDashboardService.round2(paiseToRupees(summary194C.totalLiabilityPaise)),
-          depositedRupees: FinanceDashboardService.round2(paiseToRupees(summary194C.totalDepositedPaise)),
-          outstandingRupees: FinanceDashboardService.round2(paiseToRupees(summary194C.totalOutstandingPaise)),
-        },
+        sec194C,
       },
       fund: {
         totalReceivedRupees: FinanceDashboardService.round2(fundSummary.totalReceived),

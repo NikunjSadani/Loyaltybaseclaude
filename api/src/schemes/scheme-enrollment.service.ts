@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { platformWide } from '../common/tenant-scope';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { descendantSalesUserIds, SalesUserEdge } from '../sales/sales-hierarchy-access.helper';
 import { generateNumericOtp } from '../common/otp';
@@ -113,7 +114,9 @@ export class SchemeEnrollmentService {
 
   /** Tenant filter — a GIFSY_ADMIN is the cross-tenant operator; everyone else is pinned. */
   private schemeTenant(user: JwtPayload): { clientId?: string } {
-    return this.isGifsyAdmin(user) ? {} : { clientId: user.clientId };
+    // platformWide (un-assumed GIFSY) → all tenants; an ASSUMED operator is pinned to
+    // the assumed tenant (cross-tenant read boundary). WRITE gates still use isGifsyAdmin.
+    return platformWide(user) ? {} : { clientId: user.clientId };
   }
 
   /** Load a non-deleted scheme in the caller's tenant. */
@@ -1221,7 +1224,9 @@ export class SchemeEnrollmentService {
 
     const keyClientId = key.split('/')[1];
     if (!keyClientId) throw deny();
-    if (!this.isGifsyAdmin(user) && keyClientId !== user.clientId) throw deny();
+    // Un-assumed GIFSY reads any tenant's media; every other caller — incl. an ASSUMED
+    // operator — is pinned to its (assumed) tenant folder.
+    if (!platformWide(user) && keyClientId !== user.clientId) throw deny();
 
     const file = await this.storage.downloadBytes(key);
     if (!file) throw deny();

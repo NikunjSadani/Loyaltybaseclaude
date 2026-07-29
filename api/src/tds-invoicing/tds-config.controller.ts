@@ -3,6 +3,7 @@ import { AdminCoreService } from '../admin-core/admin-core.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { UpsertSettingDto } from '../admin-core/dto/settings.dto';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
+import { platformWide } from '../common/tenant-scope';
 import { Roles } from '../common/decorators/roles.decorator';
 import { GetTdsConfigQueryDto, SetTdsConfigDto } from './dto/tds-config.dto';
 
@@ -37,7 +38,9 @@ export class TdsConfigController {
   @Get()
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   async get(@CurrentUser() user: JwtPayload, @Query() q: GetTdsConfigQueryDto) {
-    const clientId = user.role === 'GIFSY_ADMIN' && q.clientId ? q.clientId : user.clientId;
+    // Only an un-assumed GIFSY may read another tenant via ?clientId=; a tenant admin OR
+    // an ASSUMED operator is pinned to their own (assumed) clientId.
+    const clientId = platformWide(user) && q.clientId ? q.clientId : user.clientId;
     const policy = await this.tenantSettings.resolveTdsPolicy(clientId);
     return { clientId, section: policy.section, methodology: policy.methodology };
   }

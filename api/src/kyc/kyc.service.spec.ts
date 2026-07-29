@@ -4157,6 +4157,16 @@ describe('KycService', () => {
       expect(where.user).toBeUndefined(); // GIFSY is cross-tenant (#38) — no caller-tenant filter
     });
 
+    it('an ASSUMED GIFSY operator scopes the review queue to the assumed tenant (no cross-tenant leak)', async () => {
+      const assumedGifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '', assumed: true };
+      mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
+      await service.reviewQueue(assumedGifsy);
+      const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
+      expect(where.status).toBe('PENDING_GIFSY');
+      // assumed → pinned to the assumed clientId, not platform-wide.
+      expect(where.user).toEqual({ clientId: 'deoleo' });
+    });
+
     it('returns entries array with submissionId, identity, and 7-field state', async () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([
         {
@@ -4290,6 +4300,28 @@ describe('KycService', () => {
       mockPrisma.kycSubmission.findMany.mockResolvedValueOnce([]);
       const result = await service.reviewQueue(gifsy);
       expect(result.entries).toEqual([]);
+    });
+  });
+
+  // ── Cross-tenant read boundary: the KYC tenant filter (A1). Feeds ~27 consumers. ──
+  describe('kycTenantFilter (assumed-vs-unassumed)', () => {
+    // Private; the returned where-fragment IS the whole cross-tenant contract.
+    const kycTenantFilter = (u: JwtPayload) =>
+      (service as unknown as { kycTenantFilter(user: JwtPayload): unknown }).kycTenantFilter(u);
+
+    const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
+    const assumedGifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '', assumed: true };
+
+    it('(a) un-assumed GIFSY → {} (all tenants)', () => {
+      expect(kycTenantFilter(gifsy)).toEqual({});
+    });
+
+    it('(b) ASSUMED GIFSY → { user: { clientId: <assumed> } } (scoped, no leak)', () => {
+      expect(kycTenantFilter(assumedGifsy)).toEqual({ user: { clientId: 'deoleo' } });
+    });
+
+    it('(c) CLIENT_ADMIN → scoped to own clientId', () => {
+      expect(kycTenantFilter(clientAdmin)).toEqual({ user: { clientId: 'deoleo' } });
     });
   });
 

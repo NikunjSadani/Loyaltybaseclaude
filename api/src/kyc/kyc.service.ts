@@ -48,6 +48,7 @@ import {
 } from '../common/partner-group.helper';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { platformWide } from '../common/tenant-scope';
 import { KYC_FIELD_KEYS, BridgeResult } from './kyc-verification.helper';
 import { evaluateSubmission } from './kyc-verification.helper';
 import {
@@ -528,7 +529,9 @@ export class KycService {
    * Owner decision: Gifsy sees all tenants (DATA-VISIBILITY §3.1).
    */
   private kycTenantFilter(user: JwtPayload): Prisma.KycSubmissionWhereInput {
-    return user.role === 'GIFSY_ADMIN' ? {} : { user: { clientId: user.clientId } };
+    // platformWide (un-assumed GIFSY) → all tenants; a tenant admin OR an ASSUMED
+    // GIFSY operator is pinned to their (assumed) clientId — no cross-tenant leak.
+    return platformWide(user) ? {} : { user: { clientId: user.clientId } };
   }
 
   /**

@@ -546,4 +546,48 @@ describe('SchemeEnrollmentService', () => {
       await expect(service.getSalesTargets(salesUser, 'sX', {})).rejects.toBeInstanceOf(NotFoundException);
     });
   });
+
+  // ── Cross-tenant read boundary: assumed-vs-unassumed GIFSY (tenant-scope helper) ──
+  describe('schemeTenant (cross-tenant scope)', () => {
+    // schemeTenant is private; the where-fragment it returns is the whole scoping contract.
+    const schemeTenant = (u: JwtPayload): { clientId?: string } =>
+      (service as unknown as { schemeTenant(user: JwtPayload): { clientId?: string } }).schemeTenant(u);
+
+    const assumedGifsy: JwtPayload = { sub: 'u-admin', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '', assumed: true };
+
+    it('un-assumed GIFSY → all tenants ({})', () => {
+      expect(schemeTenant(adminUser)).toEqual({});
+    });
+
+    it('ASSUMED GIFSY → pinned to the assumed clientId', () => {
+      expect(schemeTenant(assumedGifsy)).toEqual({ clientId: 'deoleo' });
+    });
+
+    it('CLIENT_ADMIN / tenant user → pinned to own clientId', () => {
+      expect(schemeTenant(partnerUser)).toEqual({ clientId: 'deoleo' });
+    });
+  });
+
+  describe('viewMedia (tenant-from-key) — assumed operator is pinned', () => {
+    const assumedGifsy: JwtPayload = { sub: 'u-admin', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '', assumed: true };
+
+    it('404s a cross-tenant key for an ASSUMED operator (no downloadBytes)', async () => {
+      await expect(
+        service.viewMedia(assumedGifsy, 'scheme-media/other-tenant/2026-07/a.jpg'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+    });
+
+    it('serves the assumed tenant’s own media to an ASSUMED operator', async () => {
+      mockStorage.downloadBytes.mockResolvedValue({ bytes: Buffer.from([0xff, 0xd8, 0xff]), contentType: 'image/jpeg' });
+      const out = await service.viewMedia(assumedGifsy, 'scheme-media/deoleo/2026-07/a.jpg');
+      expect(out.contentType).toBe('image/jpeg');
+    });
+
+    it('lets an un-assumed GIFSY read any tenant key (cross-tenant operator)', async () => {
+      mockStorage.downloadBytes.mockResolvedValue({ bytes: Buffer.from([0xff, 0xd8, 0xff]), contentType: 'image/jpeg' });
+      const out = await service.viewMedia(adminUser, 'scheme-media/other-tenant/2026-07/a.jpg');
+      expect(out.contentType).toBe('image/jpeg');
+    });
+  });
 });

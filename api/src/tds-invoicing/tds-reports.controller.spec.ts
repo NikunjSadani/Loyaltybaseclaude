@@ -21,6 +21,9 @@ const svc = {
 
 const GIFSY: JwtPayload = { sub: 'op', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '9', name: 'Op' };
 const CLIENT: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '8', name: 'CA' };
+// An ASSUMED GIFSY operator (working inside Deoleo) is pinned to the assumed tenant — a
+// cross-scope ?clientId= must be ignored exactly as it is for a CLIENT_ADMIN.
+const ASSUMED: JwtPayload = { sub: 'op', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '9', name: 'Op', assumed: true };
 
 function ctxForHandler(user: JwtPayload, handler: unknown, cls: unknown) {
   return {
@@ -57,6 +60,11 @@ describe('TdsReportsController', () => {
     it('payouts: GIFSY_ADMIN with no ?clientId= is platform-wide (undefined scope)', async () => {
       await controller.payouts(GIFSY, {});
       expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: undefined, period: undefined });
+    });
+
+    it('payouts: an ASSUMED GIFSY operator is pinned to the assumed tenant (?clientId= ignored)', async () => {
+      await controller.payouts(ASSUMED, { clientId: 'other-tenant', period: '2026-06' });
+      expect(svc.payoutReport).toHaveBeenCalledWith({ clientId: 'deoleo', period: '2026-06' });
     });
   });
 

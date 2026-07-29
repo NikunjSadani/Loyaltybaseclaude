@@ -28,6 +28,14 @@ const mockTds = { summary194R: jest.fn(), summary194C: jest.fn() };
 const admin: JwtPayload = {
   sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '',
 };
+// A tenant admin (never platform-wide) and an ASSUMED GIFSY operator (pinned to the
+// assumed tenant) — both must be denied the platform-wide 194C cross-tenant total.
+const clientAdmin: JwtPayload = {
+  sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '',
+};
+const assumedGifsy: JwtPayload = {
+  sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '', assumed: true,
+};
 
 /** Wire happy-path defaults; each test overrides what it asserts on. */
 function primeDefaults() {
@@ -132,6 +140,36 @@ describe('FinanceDashboardService', () => {
     });
     // 194R is called tenant-scoped; 194C is platform-wide (no clientId arg).
     expect(mockTds.summary194R).toHaveBeenCalledWith('deoleo', expect.any(String));
+    expect(mockTds.summary194C).toHaveBeenCalledWith(expect.any(String));
+  });
+
+  // ── C1: the platform-wide 194C total is GIFSY-home-only (no cross-tenant leak) ──
+  it('C1: OMITS the platform 194C figure for a CLIENT_ADMIN (zeroed block, summary194C not queried)', async () => {
+    const out = await service.finance(clientAdmin);
+    expect(out.tds.sec194C).toEqual({
+      liabilityRupees: 0, depositedRupees: 0, outstandingRupees: 0,
+    });
+    // 194R (tenant) is still surfaced; only the cross-tenant 194C is withheld.
+    expect(out.tds.sec194R).toEqual({
+      liabilityRupees: 10_000, depositedRupees: 4_000, outstandingRupees: 6_000,
+    });
+    expect(mockTds.summary194C).not.toHaveBeenCalled();
+    expect(mockTds.summary194R).toHaveBeenCalledWith('deoleo', expect.any(String));
+  });
+
+  it('C1: OMITS the platform 194C figure for an ASSUMED GIFSY operator (assumed:true)', async () => {
+    const out = await service.finance(assumedGifsy);
+    expect(out.tds.sec194C).toEqual({
+      liabilityRupees: 0, depositedRupees: 0, outstandingRupees: 0,
+    });
+    expect(mockTds.summary194C).not.toHaveBeenCalled();
+  });
+
+  it('C1: RETAINS the platform 194C figure for an un-assumed GIFSY operator', async () => {
+    const out = await service.finance(admin);
+    expect(out.tds.sec194C).toEqual({
+      liabilityRupees: 25_000, depositedRupees: 5_000, outstandingRupees: 20_000,
+    });
     expect(mockTds.summary194C).toHaveBeenCalledWith(expect.any(String));
   });
 

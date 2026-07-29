@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { platformWide } from '../common/tenant-scope';
 import { sniffFileType } from '../common/file-signature';
 
 /** Media types allowed to render inline; anything else is forced to a download. */
@@ -31,10 +32,6 @@ const MEDIA_FOLDER_PREFIX = 'visibility-media/';
 @Injectable()
 export class VisibilityMediaService {
   constructor(private readonly storage: StorageService) {}
-
-  private isGifsyAdmin(user: JwtPayload): boolean {
-    return user.role === 'GIFSY_ADMIN';
-  }
 
   // ───────────────────────────────────────────────────────────────────────────
   // Upload (magic-byte guarded) + auth-gated view
@@ -83,7 +80,9 @@ export class VisibilityMediaService {
 
     const keyClientId = key.split('/')[1];
     if (!keyClientId) throw deny();
-    if (!this.isGifsyAdmin(user) && keyClientId !== user.clientId) throw deny();
+    // Un-assumed GIFSY reads any tenant; every other caller — incl. an ASSUMED
+    // operator — is pinned to its (assumed) tenant folder.
+    if (!platformWide(user) && keyClientId !== user.clientId) throw deny();
 
     const file = await this.storage.downloadBytes(key);
     if (!file) throw deny();
