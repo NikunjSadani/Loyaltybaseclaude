@@ -80,6 +80,11 @@ interface MockOutlet {
   isActive:        boolean;
   addedDate:       string;
   phone?:          string;
+  // Owner-group linkage (from GET /api/admin/outlets). parentCode is the parent's
+  // partnerCode (e.g. "CPP01"); undefined/blank → outlet is standalone (ungrouped).
+  parentId?:           string;
+  parentCode?:         string;
+  parentBusinessName?: string;
 }
 
 // ─── KYC status config ─────────────────────────────────────────────────────────
@@ -116,6 +121,7 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
   errorReport,
   submitting,
   submitNote,
+  parentIdByRow,
 }: {
   testId:        string;
   result:        { headerError: string | null; rows: R[]; hasErrors: boolean; canProceed: boolean; summary: Record<string, number> };
@@ -128,6 +134,10 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
    *  buttons and shows the progress note. */
   submitting?:   boolean;
   submitNote?:   string | null;
+  /** Optional per-row Parent ID lookup (keyed by rowNum). When provided (outlet
+   *  master upload), a "Parent ID" preview column is shown so the admin can see
+   *  which outlets will be linked to an owner group before confirming. */
+  parentIdByRow?: Record<number, string>;
 }) {
   if (result.headerError) {
     return (
@@ -165,6 +175,7 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
                 <tr>
                   <th className="px-3 py-2 text-left font-medium text-gray-500">Row</th>
                   <th className="px-3 py-2 text-left font-medium text-gray-500">Outlet ID</th>
+                  {parentIdByRow && <th className="px-3 py-2 text-left font-medium text-gray-500">Parent ID</th>}
                   <th className="px-3 py-2 text-left font-medium text-gray-500">Status</th>
                   <th className="px-3 py-2 text-left font-medium text-gray-500">Errors</th>
                 </tr>
@@ -174,6 +185,7 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
                   <tr key={r.rowNum} className={r.status === 'ERROR' ? 'bg-red-50' : 'bg-white'}>
                     <td className="px-3 py-2 text-gray-500">{r.rowNum}</td>
                     <td className="px-3 py-2 font-mono text-gray-700">{r.outletId || '—'}</td>
+                    {parentIdByRow && <td className="px-3 py-2 font-mono text-gray-600">{parentIdByRow[r.rowNum] || '—'}</td>}
                     <td className="px-3 py-2">
                       {r.status === 'OK'
                         ? <span className="text-green-700 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" />OK</span>
@@ -265,6 +277,7 @@ function UploadSection({
   uploadDisabledReason,
   submitting,
   submitNote,
+  parentIdByRow,
 }: {
   testIdInput:       string;
   testIdPanel:       string;
@@ -284,6 +297,9 @@ function UploadSection({
   /** When set, the upload is blocked (tenant config still loading / failed /
    *  no types enabled) and this reason is shown instead of the dropzone. */
   uploadDisabledReason?: string | null;
+  /** Optional per-row Parent ID lookup (keyed by rowNum) — outlet master only.
+   *  Passed through to the ValidationPanel to render the Parent ID preview column. */
+  parentIdByRow?: Record<number, string>;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileError, setFileError] = useState('');
@@ -376,6 +392,7 @@ function UploadSection({
             errorReport={errorReport}
             submitting={submitting}
             submitNote={submitNote}
+            parentIdByRow={parentIdByRow}
           />
         )
       )}
@@ -865,6 +882,7 @@ export default function OutletsPage() {
                 <li><strong>Existing inactive Outlet ID</strong> → outlet is reactivated; any filled fields are also updated</li>
                 <li><strong>Outlet Name cannot be changed here</strong> — use Re-KYC Flagging to request a name correction</li>
                 <li><strong>XSR ID</strong> must be an ISR-level employee if provided</li>
+                <li><strong>Parent ID</strong> links an outlet to an owner group — blank = standalone; a parent code (e.g. CPP01) = link to that group</li>
               </ul>
             </div>
 
@@ -872,6 +890,7 @@ export default function OutletsPage() {
               testIdInput="outlet-upload-input"
               testIdPanel="outlet-validation-panel"
               errorReportFilename="outlet-upload-errors.xlsx"
+              parentIdByRow={Object.fromEntries(outletParsedRows.map(r => [r.rowNum, r.parentId]))}
               uploadDisabledReason={outletUploadDisabledReason}
               errorReport={outletValidation ? buildOutletUploadErrorReport(outletValidation, outletParsedRows) : undefined}
               onFileChange={handleOutletFile}
@@ -985,6 +1004,7 @@ export default function OutletsPage() {
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Outlet</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Type</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Program</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Group</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Location</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Assigned ISR</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">KYC Status</th>
@@ -994,7 +1014,7 @@ export default function OutletsPage() {
                 <tbody className="divide-y divide-gray-50">
                   {outlets.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="px-4 py-16 text-center">
+                      <td colSpan={8} className="px-4 py-16 text-center">
                         <Store className="w-8 h-8 text-gray-200 mx-auto mb-2" />
                         <p className="text-sm text-gray-400">No outlets match your filters</p>
                       </td>
@@ -1023,6 +1043,16 @@ export default function OutletsPage() {
                         <td className="px-4 py-3">
                           <p className="text-xs font-medium text-gray-700">{o.programName}</p>
                           <p className="text-[11px] text-gray-400">{o.programCategory || '—'}</p>
+                        </td>
+                        <td className="px-4 py-3">
+                          {o.parentCode
+                            ? <span
+                                title={o.parentBusinessName || undefined}
+                                className="inline-block text-xs font-mono font-medium text-gray-700 bg-gray-100 px-2 py-0.5 rounded-full"
+                              >
+                                {o.parentCode}
+                              </span>
+                            : <span className="text-xs text-gray-300">—</span>}
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex items-start gap-1">

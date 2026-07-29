@@ -44,6 +44,7 @@ export const OUTLET_UPLOAD_HEADERS = [
   'Zone',
   'XSR ID',
   'Payout Method',
+  'Parent ID',
 ] as const;
 
 /**
@@ -131,8 +132,9 @@ function isBlankOutletRow(row: OutletUploadRow): boolean {
 
 /** Columns that may be absent from the upload (still shipped in the template so users
  *  CAN fill them, but not compulsory). Owner 2026-06-25: Beat + Metro are optional.
- *  Payout Method is optional too — a blank cell defaults the outlet mandate to BANK. */
-export const OPTIONAL_OUTLET_HEADERS = ['Beat', 'Metro', 'Payout Method'] as const;
+ *  Payout Method is optional too — a blank cell defaults the outlet mandate to BANK.
+ *  Parent ID is optional — grouping is opt-in, so a blank cell must never be a "required" error. */
+export const OPTIONAL_OUTLET_HEADERS = ['Beat', 'Metro', 'Payout Method', 'Parent ID'] as const;
 
 export function validateOutletUploadHeaders(headers: readonly string[]): string | null {
   const optional = new Set<string>(OPTIONAL_OUTLET_HEADERS);
@@ -176,6 +178,10 @@ export function parseOutletUploadRows(rawRows: Record<string, unknown>[]): Outle
     zone:            cell(raw['Zone']),
     xsrId:           cell(raw['XSR ID']),
     payoutMethod:    cell(raw['Payout Method']),
+    // Parent ID = the parent's partnerCode (e.g. CPP01) linking this outlet to an owner group.
+    // A blank cell yields '' — the backend treats '' as a no-op (grouping unchanged), so a
+    // routine re-upload that leaves the column blank never un-groups. Always emit the key.
+    parentId:        cell(raw['Parent ID']),
   }));
 }
 
@@ -575,8 +581,8 @@ export function getOutletAdditionTemplateData(
     : 'No outlet types are enabled for this tenant yet — ask Gifsy to enable outlet types before adding outlets';
 
   const exampleRows: string[][] = [
-    ['OUT-2026-001', 'Verma Traders', validPrograms[0] ?? 'Trade Loyalty', validCategories[0] ?? 'Standard', exType1, 'Andheri Beat',  'DIST-01', 'ABC Distributors', 'Yes', 'Mumbai', 'Maharashtra', 'West Zone',   `${leafRoleCode}-M001`, 'BANK'],
-    ['OUT-2026-002', 'Patel Kirana',  validPrograms[0] ?? 'Trade Loyalty', validCategories[1] ?? 'Premium',  exType2, 'Borivali Beat', 'DIST-02', 'XYZ Distributors', 'No',  'Pune',   'Maharashtra', '',            `${leafRoleCode}-P001`, 'ANY'],
+    ['OUT-2026-001', 'Verma Traders', validPrograms[0] ?? 'Trade Loyalty', validCategories[0] ?? 'Standard', exType1, 'Andheri Beat',  'DIST-01', 'ABC Distributors', 'Yes', 'Mumbai', 'Maharashtra', 'West Zone',   `${leafRoleCode}-M001`, 'BANK', 'CPP01'],
+    ['OUT-2026-002', 'Patel Kirana',  validPrograms[0] ?? 'Trade Loyalty', validCategories[1] ?? 'Premium',  exType2, 'Borivali Beat', 'DIST-02', 'XYZ Distributors', 'No',  'Pune',   'Maharashtra', '',            `${leafRoleCode}-P001`, 'ANY',  ''],
   ];
 
   const dosAndDonts: string[][] = [
@@ -597,6 +603,7 @@ export function getOutletAdditionTemplateData(
     ['Zone',              'Geographic sales zone this outlet belongs to (e.g. "West Zone", "North Zone"). Leave blank if not applicable.'],
     ['XSR ID',            `Employee ID of the ${leafRoleCode} (field sales rep) this outlet is assigned to. Must exist in the Employee Hierarchy.`],
     ['Payout Method',     'Optional — BANK, UPI, or ANY (case-insensitive). Blank defaults to BANK. UPI only if UPI payouts are enabled for your tenant, else the row is rejected.'],
+    ['Parent ID',         'Optional — the Owner Group / Parent ID (parent code) to link this outlet to an owner group. Leave blank if the outlet is standalone.'],
     ['', ''],
     ['✓ DOs', ''],
     ['DO',  'Use whatever Outlet ID coding scheme you like — any characters are accepted, just keep each ID unique'],
@@ -608,7 +615,7 @@ export function getOutletAdditionTemplateData(
     ['✗ DON\'Ts', ''],
     ['DON\'T', 'Re-upload an existing Outlet ID — it will be rejected. This upload is for new outlets only.'],
     ['DON\'T', 'Enter an XSR ID that belongs to a non-field role (SO, ASM, RSM, ZNM, NSM) — only ISR-level IDs are accepted'],
-    ['DON\'T', 'Leave Outlet ID, Outlet Name, Program Name, Program Category, Outlet Type, City, State, or XSR ID blank (Beat, Metro and Payout Method may be left blank)'],
+    ['DON\'T', 'Leave Outlet ID, Outlet Name, Program Name, Program Category, Outlet Type, City, State, or XSR ID blank (Beat, Metro, Payout Method and Parent ID may be left blank)'],
     ['DON\'T', 'Enter UPI in Payout Method when UPI payouts are not enabled for your tenant — the row will be rejected'],
     ['', ''],
     ['COMMON MISTAKES', ''],
@@ -903,6 +910,7 @@ export function generateOutletGuideHtml(validOutletTypes: string[] = []): string
   <tr><td><code>State</code></td><td><span class="badge badge-red">Required</span></td><td></td></tr>
   <tr><td><code>XSR ID</code></td><td><span class="badge badge-red">Required</span></td><td>Must be a valid ISR-level employee ID in the Employee Hierarchy</td></tr>
   <tr><td><code>Payout Method</code></td><td><span class="badge badge-green">Optional</span></td><td>Per-outlet payout mandate — <code>BANK</code>, <code>UPI</code>, or <code>ANY</code> (case-insensitive). Blank defaults to <code>BANK</code>. <code>UPI</code> is only accepted when UPI payouts are enabled for your tenant, otherwise the row is rejected.</td></tr>
+  <tr><td><code>Parent ID</code></td><td><span class="badge badge-green">Optional</span></td><td>The Owner Group / Parent ID (parent code) to link this outlet to an owner group. Leave blank if the outlet is standalone.</td></tr>
 </table>
 
 <div class="warn">⚠ <strong>Outlet IDs are permanent.</strong> This upload only creates new outlets. If an Outlet ID already exists in the system, that row is rejected. To reassign an outlet to a different ISR, use the Re-tagging Upload.</div>
@@ -1041,7 +1049,7 @@ export interface UploadErrorReport {
   errorHeader: string;
 }
 
-/** Outlet Master (Addition/Upsert) error report — full 14-column file + Remarks. */
+/** Outlet Master (Addition/Upsert) error report — full 15-column file + Remarks. */
 export function buildOutletUploadErrorReport(
   result: OutletUploadValidationResult,
   parsed: OutletUploadRow[],
@@ -1065,6 +1073,7 @@ export function buildOutletUploadErrorReport(
       'Zone':             p?.zone ?? '',
       'XSR ID':           p?.xsrId ?? '',
       'Payout Method':    p?.payoutMethod ?? '',
+      'Parent ID':        p?.parentId ?? '',
       __errors:           r.errors,
     } as Record<string, unknown>;
   });

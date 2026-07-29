@@ -30,13 +30,13 @@ describe('buildOutletUploadErrorReport', () => {
       rowNum: 2, outletId: 'OUT-1', outletName: 'Alpha Store', programName: 'Prog A',
       programCategory: 'Cat A', outletType: 'SSS', beat: 'Beat 1', distributorId: 'D1',
       distributorName: 'Dist One', metro: 'Yes', city: 'Mumbai', state: 'MH',
-      zone: 'West Zone', xsrId: 'XSR-9', payoutMethod: 'BANK',
+      zone: 'West Zone', xsrId: 'XSR-9', payoutMethod: 'BANK', parentId: 'CPP01',
     },
     {
       rowNum: 3, outletId: 'OUT-2', outletName: 'Beta Store', programName: 'Prog B',
       programCategory: 'Cat B', outletType: 'SSS', beat: 'Beat 2', distributorId: 'D2',
       distributorName: 'Dist Two', metro: 'No', city: 'Pune', state: 'MH',
-      zone: 'West Zone', xsrId: 'XSR-9', payoutMethod: 'UPI',
+      zone: 'West Zone', xsrId: 'XSR-9', payoutMethod: 'UPI', parentId: '',
     },
   ];
   const result: OutletUploadValidationResult = {
@@ -70,6 +70,7 @@ describe('buildOutletUploadErrorReport', () => {
     expect(errRow['City']).toBe('Mumbai');
     expect(errRow['XSR ID']).toBe('XSR-9');
     expect(errRow['Payout Method']).toBe('BANK');
+    expect(errRow['Parent ID']).toBe('CPP01');
   });
 
   it('carries the ERROR row errors and leaves the OK row errors empty', () => {

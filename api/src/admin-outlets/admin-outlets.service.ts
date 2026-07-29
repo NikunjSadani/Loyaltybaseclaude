@@ -9,9 +9,9 @@ import { parseOutletPaymentType } from '../common/payment-type.helper';
 import {
   acquireIdentityLocks,
   checkGroupUniqueness,
-  normalizeIdentityValue,
+  childSharesDetailWithGroup,
+  resolveUniquenessPolicy,
   type PartnerIdentityDetails,
-  type UniquenessField,
   type UniquenessPolicy,
 } from '../common/partner-group.helper';
 import {
@@ -44,7 +44,7 @@ import {
  * shows through, not RE_KYC_REQUIRED. (The approver highlight reads the flags directly,
  * so it still shows what was flagged during review.)
  */
-function deriveKycStatus(
+export function deriveKycStatus(
   reKycFlags: unknown,
   kycIntent: OutletKycIntent | null,
   partnerId: string | null,
@@ -151,19 +151,6 @@ function nullIfBlank(v: string | undefined): string | null {
  * behaviour (GST + phone enforced; PAN is always on inside the helper; bank/UPI off). Shared by
  * the upload's add-to-parent check and the dedicated un-group action so the two never diverge.
  */
-const DEFAULT_UNIQUENESS_POLICY: UniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
-
-/**
- * Last-10-digit normalisation for phone comparison. Phones are stored in varying formats
- * (spaces, +91, 0-prefix, dashes), so a raw string compare misses real matches. We strip every
- * non-digit and keep the trailing 10 (the subscriber number). Empty / <10 digits → '' (never
- * matches). Used ONLY by the un-group share-check — the exact-match identity fields (PAN/GST/
- * bank/UPI) compare on their trimmed value, not this.
- */
-function lastTenDigits(v: string | null | undefined): string {
-  const digits = (v ?? '').replace(/\D/g, '');
-  return digits.length >= 10 ? digits.slice(-10) : '';
-}
 
 /** Map a validated upload row + resolved OutletType id to the Outlet column data. */
 function mapRowToOutletData(row: OutletUploadRowDto, outletTypeId: string): OutletWriteData {
@@ -462,6 +449,14 @@ export class AdminOutletsService {
     // ── Base tenant scope (unchanged: the outlet's OWN clientId, never a partner join). ──
     const baseWhere: Prisma.OutletWhereInput = { deletedAt: null, clientId: user.clientId };
 
+    // ── Owner-group filter — narrow to one parent's group (the admin grouping UI's drill-in). ──
+    // `parentId` is the parent ChannelPartner's CUID (exact match, not the partnerCode). Absent =
+    // unchanged behaviour. Combined into baseWhere so it applies to both the search and the kycStatus
+    // paths (kycStatus wraps AND[baseWhere, bucket]).
+    if (q.parentId && q.parentId.trim()) {
+      baseWhere.parentId = q.parentId.trim();
+    }
+
     // ── Text search across the same fields the FE searched (case-insensitive). ──
     // ISR name lives on the active SalesUserAssignment → salesUser → user.name;
     // it is expressed as a relation filter so search still spans it server-side.
@@ -565,6 +560,10 @@ export class AdminOutletsService {
           partnerId: true,
           reKycFlags: true,
           kycIntent: true,
+          // Owner-group link (the admin grouping UI): the raw parent FK + the parent's
+          // partnerCode/businessName (via the OutletParent relation, flattened below).
+          parentId: true,
+          parent: { select: { partnerCode: true, businessName: true } },
           salesAssignments: {
             where: { unassignedAt: null },
             take: 1,
@@ -624,6 +623,10 @@ export class AdminOutletsService {
         kycStatus: deriveKycStatus(o.reKycFlags, o.kycIntent, o.partnerId, latestStatusByPartnerId),
         isActive: o.isActive,
         addedDate: o.createdAt.toISOString().slice(0, 10),
+        // Owner-group grouping fields (null when the outlet is ungrouped).
+        parentId: o.parentId ?? null,
+        parentCode: o.parent?.partnerCode ?? null,
+        parentBusinessName: o.parent?.businessName ?? null,
       };
     });
 
@@ -726,7 +729,7 @@ export class AdminOutletsService {
     const settings = await this.tenantSettings.getEffectiveSettings(clientId);
     const upiEnabled = settings.salesApp.upiEnabled === true;
     // Fall back to today's-behaviour default if a partial settings object is returned.
-    const policy: UniquenessPolicy = settings.uniquenessPolicy ?? DEFAULT_UNIQUENESS_POLICY;
+    const policy: UniquenessPolicy = resolveUniquenessPolicy(settings);
 
     // ── Owner-group PRELOADS (batched over the LINK rows only) ────────────────────
     // A Parent ID cell only ever does work when it carries a partnerCode (LINK / add-to-parent).
@@ -1018,98 +1021,13 @@ export class AdminOutletsService {
   }
 
   /**
-   * Un-group guard (§4.5): does the child still share ANY enforced identity detail with a
-   * REMAINING member of its owner group (the parent itself + its sibling child outlets)?
-   * PAN is always checked (the group golden key); GST/bank/UPI/PHONE only when the tenant policy
-   * enforces them. Exact-match fields (PAN/GST/bank/UPI) compare on the trimmed value; PHONE (F4)
-   * compares on last-10-digit normalisation, since phones are stored in varying formats. A
-   * pre-KYC child (no owner yet) has no details → shares nothing → un-map is allowed. Bounded
-   * reads (2 queries) — only ever called for an actual un-group attempt.
-   */
-  private async childSharesDetailWithGroup(
-    clientId: string,
-    parentId: string,
-    childOutletId: string,
-    childPartner: {
-      id: string;
-      phone: string | null;
-      panNumber: string | null;
-      gstNumber: string | null;
-      bankAccountNumber: string | null;
-      upiId: string | null;
-    } | null,
-    policy: UniquenessPolicy,
-  ): Promise<boolean> {
-    if (!childPartner) return false; // no owner details to share
-
-    const memberSelect = {
-      phone: true,
-      panNumber: true,
-      gstNumber: true,
-      bankAccountNumber: true,
-      upiId: true,
-    } as const;
-    const parent = await this.prisma.channelPartner.findUnique({
-      where: { id: parentId },
-      select: memberSelect,
-    });
-    const siblingOutlets = await this.prisma.outlet.findMany({
-      where: {
-        clientId,
-        parentId,
-        id: { not: childOutletId },
-        deletedAt: null,
-        // Exclude by the child's PARTNER too, not just the child OUTLET: if the child's own
-        // ChannelPartner owns a SECOND outlet in this group, that outlet would otherwise load as a
-        // "sibling" and self-match on every field → wrongly BLOCK the un-group.
-        partner: { isParent: false, deletedAt: null, id: { not: childPartner.id } },
-      },
-      select: { partner: { select: memberSelect } },
-    });
-
-    const members = [parent, ...siblingOutlets.map((s) => s.partner)].filter(
-      (m): m is NonNullable<typeof m> => m != null,
-    );
-
-    // Exact-match identity fields — compare on the CANONICAL value (PAN/GST upper-cased) so a
-    // case-variant share is not under-detected (which would wrongly allow the un-group).
-    const fields: { field: UniquenessField; key: keyof PartnerIdentityDetails; enforced: boolean }[] = [
-      { field: 'pan', key: 'panNumber', enforced: true }, // PAN is always the group golden-key
-      { field: 'gst', key: 'gstNumber', enforced: policy.gst },
-      { field: 'bank', key: 'bankAccountNumber', enforced: policy.bank },
-      { field: 'upi', key: 'upiId', enforced: policy.upi },
-    ];
-    for (const f of fields) {
-      if (!f.enforced) continue;
-      const childValue = normalizeIdentityValue(f.field, childPartner[f.key]);
-      if (!childValue) continue;
-      for (const m of members) {
-        const memberValue = normalizeIdentityValue(f.field, m[f.key]);
-        if (memberValue && memberValue === childValue) return true;
-      }
-    }
-
-    // PHONE (F4) — enforced per policy, compared on last-10 digits (format-insensitive).
-    if (policy.phone) {
-      const childPhone = lastTenDigits(childPartner.phone);
-      if (childPhone) {
-        for (const m of members) {
-          if (lastTenDigits(m.phone) === childPhone) return true; // both non-empty & equal
-        }
-      }
-    }
-
-    return false;
-  }
-
-  /**
    * Resolve the tenant's owner-group uniqueness policy (which of GST/phone/bank/UPI are enforced;
    * PAN is always on inside the helper). Falls back to today's-behaviour default for a partial
    * settings object. Shared by the dedicated un-group action.
    */
   private async uniquenessPolicy(clientId: string): Promise<UniquenessPolicy> {
     const settings = await this.tenantSettings.getEffectiveSettings(clientId);
-    return settings.uniquenessPolicy ?? DEFAULT_UNIQUENESS_POLICY;
+    return resolveUniquenessPolicy(settings);
   }
 
   /**
@@ -1153,13 +1071,15 @@ export class AdminOutletsService {
     }
 
     const policy = await this.uniquenessPolicy(clientId);
-    const shares = await this.childSharesDetailWithGroup(
+    // SAME shared code path as the group-detail endpoint's `canUngroup` flag (ParentsService.getParent)
+    // — the guard and the flag can never diverge.
+    const shares = await childSharesDetailWithGroup(this.prisma, {
       clientId,
-      outlet.parentId,
-      outlet.id,
-      outlet.partner,
+      parentId: outlet.parentId,
+      childOutletId: outlet.id,
+      childPartner: outlet.partner,
       policy,
-    );
+    });
     if (shares) {
       throw new BadRequestException(
         `Cannot un-group ${code} — it still shares identity details with its owner group. Make its details distinct via re-KYC first.`,

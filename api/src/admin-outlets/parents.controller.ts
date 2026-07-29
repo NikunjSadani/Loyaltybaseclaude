@@ -22,6 +22,13 @@ export class ParentsController {
     return this.parents.listParents(user);
   }
 
+  @Get(':id')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER')
+  @RequirePermission('partners:read')
+  getOne(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.parents.getParent(user, id);
+  }
+
   @Post()
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('partners:manage_outlets')
@@ -34,5 +41,12 @@ export class ParentsController {
   @RequirePermission('kyc:gifsy_approve')
   approve(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.parents.approveParent(user, id);
+  }
+
+  @Post(':id/deactivate')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('partners:manage_outlets')
+  deactivate(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.parents.deactivateParent(user, id);
   }
 }

@@ -78,6 +78,11 @@ const ALL_NAV_ITEMS = [
       // of '/admin/users/outlets' — putting User Accounts last keeps the outlets page's
       // title correct while still exact-matching '/admin/users' for itself.
       { href: '/admin/users/outlets', label: 'Outlet Management'   },
+      // Owner Groups (parent multi-outlet management) — usable by GIFSY_ADMIN AND
+      // CLIENT_ADMIN (create/list/ungroup are partners:manage_outlets), so NOT gifsyOnly.
+      // Listed before the bare '/admin/users' so the header-title resolver's
+      // startsWith(child.href + '/') match stays correct.
+      { href: '/admin/users/parents', label: 'Owner Groups'        },
       { href: '/admin/hierarchy',     label: 'Employee Hierarchy'  },
       { href: '/admin/users',         label: 'User Accounts'       },
     ],

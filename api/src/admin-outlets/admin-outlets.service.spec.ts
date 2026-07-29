@@ -286,6 +286,88 @@ describe('AdminOutletsService', () => {
     });
   });
 
+  describe('list — owner-group fields + parentId filter', () => {
+    it('projects parentId/parentCode/parentBusinessName from the OutletParent relation', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'OUT-1',
+          name: 'Verma Traders',
+          outletTypeId: 'type1',
+          city: 'Mumbai',
+          state: 'MH',
+          isActive: true,
+          createdAt: new Date('2026-05-01T09:00:00Z'),
+          distributorCode: 'DIST-01',
+          beat: 'Andheri',
+          metro: null,
+          programName: null,
+          programCategory: null,
+          partnerId: null,
+          reKycFlags: null,
+          kycIntent: null,
+          parentId: 'parent1',
+          parent: { partnerCode: 'CPP01', businessName: 'Verma Group' },
+          salesAssignments: [],
+        },
+      ]);
+      const res = await service.list(admin);
+      expect(res.outlets[0]).toMatchObject({
+        outletId: 'OUT-1',
+        parentId: 'parent1',
+        parentCode: 'CPP01',
+        parentBusinessName: 'Verma Group',
+      });
+      // The projection pulls the parent relation.
+      expect(mockPrisma.outlet.findMany.mock.calls[0][0].select.parent).toEqual({
+        select: { partnerCode: true, businessName: true },
+      });
+    });
+
+    it('nulls the grouping fields for an ungrouped outlet (no parent relation)', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'OUT-2',
+          name: 'Solo Store',
+          outletTypeId: 'type1',
+          city: 'Pune',
+          state: 'MH',
+          isActive: true,
+          createdAt: new Date('2026-05-01T09:00:00Z'),
+          distributorCode: null,
+          beat: null,
+          metro: null,
+          programName: null,
+          programCategory: null,
+          partnerId: null,
+          reKycFlags: null,
+          kycIntent: null,
+          parentId: null,
+          parent: null,
+          salesAssignments: [],
+        },
+      ]);
+      const res = await service.list(admin);
+      expect(res.outlets[0]).toMatchObject({ parentId: null, parentCode: null, parentBusinessName: null });
+    });
+
+    it('?parentId narrows the where (and the parallel count) to that group; exact-match on the FK', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      mockPrisma.outlet.count.mockResolvedValue(0);
+      await service.list(admin, { parentId: 'parent1' });
+      const findWhere = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      const countWhere = mockPrisma.outlet.count.mock.calls[0][0].where;
+      expect(findWhere).toMatchObject({ clientId: TENANT_A, deletedAt: null, parentId: 'parent1' });
+      expect(countWhere).toEqual(findWhere); // pagination stays over the filtered set
+    });
+
+    it('an ABSENT parentId query leaves the where without a parentId key (unchanged behaviour)', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      await service.list(admin, {});
+      const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      expect(where.parentId).toBeUndefined();
+    });
+  });
+
   describe('listIds', () => {
     it('returns the FULL tenant list UNPAGINATED, scoped by clientId + deletedAt null, projected to the 3 FE fields', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([

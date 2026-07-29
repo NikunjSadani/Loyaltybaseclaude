@@ -427,3 +427,28 @@ kyc unit tests + the audit — its full end-to-end flow is part of the owner's U
 Owner exercises the full flow on staging: multi-outlet login → picker → switch → wallet/redeem per outlet →
 group overview; grouped-child KYC pre-fill + verified-on-parent; login-less sibling scheme self-enroll; the
 re-KYC stage-at-approval. Then the owner-gated prod cutover per the checklist above.
+
+---
+
+## 10. FE BUILD — the admin grouping UI (2026-07-29, IN PROGRESS)
+
+**Why:** cutover #14 shipped the grouping BACKEND (live in prod, additive + dormant), but the **admin FRONTEND to drive it was never built** — the outlet-master upload has no "Parent ID" column, and there is no parents-management / un-group / group-overview screen. So today a parent-child relationship can only be set via a direct API/DB call. This section is the plan to build the admin FE (owner-approved **Complete** scope, 2026-07-29). Additive, **no DB migration**, dormant-safe (zero impact on live Deoleo until an admin creates a parent). Lands on `develop`/staging; owner-gated for prod.
+
+**Backend contract (already live, proxy-reachable):** `GET /v1/admin/parents` (list — has `childOutletCount`, `pendingApproval`), `POST /v1/admin/parents` (create; `partnerCode` required + optional identity/bank), `POST /v1/admin/parents/:id/approve` (GIFSY-only), `POST /v1/admin/outlets/upsert` (row `parentId` = parent's **partnerCode**; 3 intents: absent=unchanged / blank=no-op / code=link), `POST /v1/admin/outlets/:outletCode/ungroup` (blocked while the child still shares an enforced detail).
+
+### Wave 0 — backend slice (closes the 3 gaps the UI needs; small, additive, no migration)
+1. `GET /v1/admin/parents/:id` → parent detail + child-outlet rows, each with `canUngroup` (the EXACT inverse of the un-group guard `childSharesDetailWithGroup` — refactored to ONE shared code path so the button state and the server guard can never diverge) + `ungroupBlockReason`.
+2. `GET /v1/admin/outlets` — add `parentId`/`parentCode` to the projection + an optional `?parentId=` filter (so the outlets table shows a "Group" column + filter).
+3. `POST /v1/admin/parents/:id/deactivate` → soft-delete a parent, **guarded to block if it still has child outlets**.
+   + jest specs for all three; existing `parents.service.spec.ts` / `admin-outlets.service.spec.ts` stay green.
+
+### Wave 1 — frontend (3 parallel streams)
+- **A — Parent ID upload column:** `platform/src/lib/outlet-upload.ts` — add `'Parent ID'` to `OUTLET_UPLOAD_HEADERS` + `OPTIONAL_OUTLET_HEADERS`, `parseOutletUploadRows`, template, ops-guide, error-report; add `parentId` to the `OutletUploadRow` type. The outlets page passes parsed rows straight through → **no POST change**. Add a preview column + info-box note.
+- **B — `/admin/users/parents` page (NEW):** list parents (childOutletCount + pending badge) · Create-Parent modal · GIFSY-only Approve (gated on `adminSession.canManageSchemes`) · expand a parent → its child outlets (from the W0 group-detail endpoint) → per-child **Un-group** (surfacing the "still shares a detail" block) · **Deactivate** parent. Mirrors `admin/gifts/page.tsx` (authHeader, envelope unwrap, useAdminSession).
+- **C — Nav + outlets-list Group column/filter:** add an "Owner Groups" child under **User Management** in `admin/layout.tsx` (create/list/ungroup = GIFSY+CLIENT_ADMIN; approve = GIFSY-only inline) + a "Group" column + `?parentId` filter on the outlets table.
+
+### Wave 2 — integrate + full gates + independent adversarial audit + staging runtime-verify + doc fix
+Full jest/vitest/tsc; independent audit (grouping = identity/uniqueness-adjacent, not money → single audit pass); prove the real flow on staging (create parent → upload outlets with Parent ID → view group → un-group happy + blocked → deactivate happy + blocked-with-children); then **correct the record** — this doc §9 + memory `[[partner-multi-outlet]]` currently over-claim "admin grouping shipped" at #14 (backend only).
+
+### Design-vs-reality note
+The design (§2.2/§2.3/§4.5) specifies the Parent-ID column, parent create/approve, and the un-group action — all backend-built, none FE-exposed until this wave. An admin group-overview is NOT explicitly spec-mandated (the roll-up overview is partner-scoped) → the expandable-child view on the parents page is the lightweight net-new admin view.

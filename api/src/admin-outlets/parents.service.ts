@@ -1,15 +1,18 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { KycStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   acquireIdentityLocks,
   checkGroupUniqueness,
+  childSharesDetailWithGroup,
   normalizeIdentityValue,
+  resolveUniquenessPolicy,
   type PartnerIdentityDetails,
   type UniquenessPolicy,
 } from '../common/partner-group.helper';
+import { deriveKycStatus } from './admin-outlets.service';
 import { CreateParentDto } from './dto/admin-parents.dto';
 
 /** "" / whitespace → null so blank inputs don't persist empty strings. */
@@ -40,7 +43,7 @@ export class ParentsService {
 
   private async policy(clientId: string): Promise<UniquenessPolicy> {
     const settings = await this.tenantSettings.getEffectiveSettings(clientId);
-    return settings.uniquenessPolicy ?? { gst: true, phone: true, bank: false, upi: false };
+    return resolveUniquenessPolicy(settings);
   }
 
   /**
@@ -63,7 +66,7 @@ export class ParentsService {
         upiId: true,
         isActive: true,
         onboardedAt: true,
-        _count: { select: { childOutlets: true } },
+        _count: { select: { childOutlets: { where: { deletedAt: null } } } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -76,6 +79,134 @@ export class ParentsService {
           pendingApproval: hasDetails && p.onboardedAt == null,
         };
       }),
+    };
+  }
+
+  /**
+   * GET /v1/admin/parents/:id — one owner group's detail (the admin grouping drill-in).
+   * Tenant-scoped EXACTLY like listParents (the caller's clientId; a parent from another tenant
+   * → 404). Returns the same parent field-set as a list row + the group's child outlets, each with
+   * its derived KYC status and whether it may be un-grouped.
+   *
+   * `canUngroup` is the EXACT inverse of the un-group block — it calls the SAME shared
+   * `childSharesDetailWithGroup` the dedicated un-group action (AdminOutletsService.ungroupOutlet)
+   * uses, so the flag the UI shows and the guard the action enforces can never diverge. Groups are
+   * small; the per-child share-check (2 bounded reads each) runs concurrently.
+   */
+  async getParent(user: JwtPayload, parentId: string) {
+    const clientId = user.clientId;
+
+    const parent = await this.prisma.channelPartner.findFirst({
+      where: { id: parentId, clientId, isParent: true, deletedAt: null },
+      select: {
+        id: true,
+        partnerCode: true,
+        businessName: true,
+        ownerName: true,
+        phone: true,
+        gstNumber: true,
+        panNumber: true,
+        bankAccountNumber: true,
+        upiId: true,
+        isActive: true,
+        onboardedAt: true,
+        _count: { select: { childOutlets: { where: { deletedAt: null } } } },
+      },
+    });
+    if (!parent) throw new NotFoundException('Parent owner not found');
+
+    // The group's child outlets (Outlet.parentId = this parent) + the owner details the share-check
+    // reads + the fields deriveKycStatus needs. Ordered oldest-first for a stable UI list.
+    const childOutlets = await this.prisma.outlet.findMany({
+      where: { clientId, parentId: parent.id, deletedAt: null },
+      select: {
+        id: true,
+        outletCode: true,
+        name: true,
+        isActive: true,
+        partnerId: true,
+        reKycFlags: true,
+        kycIntent: true,
+        partner: {
+          select: {
+            id: true,
+            phone: true,
+            panNumber: true,
+            gstNumber: true,
+            bankAccountNumber: true,
+            upiId: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    // Latest KycStatus per child partner (batched, no N+1) — the SAME derivation the admin outlet
+    // list uses (shared deriveKycStatus), so the two never disagree.
+    const partnerIds = [
+      ...new Set(childOutlets.map((o) => o.partnerId).filter((id): id is string => id !== null)),
+    ];
+    const latestStatusByPartnerId = new Map<string, KycStatus>();
+    if (partnerIds.length > 0) {
+      const subs = await this.prisma.kycSubmission.findMany({
+        where: { partnerId: { in: partnerIds } },
+        select: { partnerId: true, status: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      for (const sub of subs) {
+        if (sub.partnerId && !latestStatusByPartnerId.has(sub.partnerId)) {
+          latestStatusByPartnerId.set(sub.partnerId, sub.status);
+        }
+      }
+    }
+
+    const policy = await this.policy(clientId);
+
+    const children = await Promise.all(
+      childOutlets.map(async (o) => {
+        const shares = await childSharesDetailWithGroup(this.prisma, {
+          clientId,
+          parentId: parent.id,
+          childOutletId: o.id,
+          childPartner: o.partner,
+          policy,
+        });
+        return {
+          outletCode: o.outletCode,
+          name: o.name,
+          kycStatus: deriveKycStatus(o.reKycFlags, o.kycIntent, o.partnerId, latestStatusByPartnerId),
+          isActive: o.isActive,
+          canUngroup: !shares,
+          ungroupBlockReason: shares
+            ? 'Shares identity details with the group — make them distinct via re-KYC first.'
+            : null,
+        };
+      }),
+    );
+
+    const hasDetails = !!(
+      parent.gstNumber ||
+      parent.panNumber ||
+      parent.bankAccountNumber ||
+      parent.upiId
+    );
+    return {
+      parent: {
+        id: parent.id,
+        partnerCode: parent.partnerCode,
+        businessName: parent.businessName,
+        ownerName: parent.ownerName,
+        phone: parent.phone,
+        gstNumber: parent.gstNumber,
+        panNumber: parent.panNumber,
+        bankAccountNumber: parent.bankAccountNumber,
+        upiId: parent.upiId,
+        isActive: parent.isActive,
+        onboardedAt: parent.onboardedAt,
+        childOutletCount: parent._count.childOutlets,
+        pendingApproval: hasDetails && parent.onboardedAt == null,
+      },
+      children,
     };
   }
 
@@ -289,5 +420,54 @@ export class ParentsService {
     });
 
     return { parent: updated, approved: true };
+  }
+
+  /**
+   * POST /v1/admin/parents/:id/deactivate — dissolve (soft-delete) an owner group's parent.
+   * Tenant-scoped like the others. GUARDED: refuses while the group still has ANY child outlet
+   * (Outlet.parentId = this parent, not soft-deleted) — the admin must un-group them first. Does
+   * NOT cascade. Soft-deletes only (deletedAt + isActive=false); the `outlets` trigger keeps the
+   * derived groupId in lockstep (we never write it here).
+   */
+  async deactivateParent(user: JwtPayload, parentId: string) {
+    const clientId = user.clientId;
+
+    const parent = await this.prisma.channelPartner.findFirst({
+      where: { id: parentId, clientId, isParent: true, deletedAt: null },
+      select: { id: true },
+    });
+    if (!parent) throw new NotFoundException('Parent owner not found');
+
+    const now = new Date();
+    await this.prisma.$transaction(async (tx) => {
+      // A parent that still groups outlets cannot be dissolved — un-grouping is a dedicated action,
+      // so we never orphan or silently un-link children by deactivating their parent. The count runs
+      // INSIDE the tx (not before it) so the guard and the soft-delete commit together — a concurrent
+      // add-to-parent link can't slip a live child in between a pre-tx check and the delete (TOCTOU).
+      const childCount = await tx.outlet.count({
+        where: { clientId, parentId: parent.id, deletedAt: null },
+      });
+      if (childCount > 0) {
+        throw new BadRequestException(
+          `Cannot deactivate — this owner group still has ${childCount} child outlet(s). Un-group them first.`,
+        );
+      }
+      await tx.channelPartner.update({
+        where: { id: parent.id },
+        data: { deletedAt: now, isActive: false },
+      });
+      await tx.auditLog.create({
+        data: {
+          action: 'DELETE',
+          entityType: 'CHANNEL_PARTNER',
+          entityId: parent.id,
+          actorId: user.sub,
+          newValues: { deletedAt: now.toISOString(), isActive: false },
+          metadata: { kind: 'PARENT_OWNER', action: 'deactivate' },
+        },
+      });
+    });
+
+    return { id: parent.id, deactivated: true };
   }
 }

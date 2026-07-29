@@ -79,6 +79,7 @@ function makeRow(overrides: Partial<OutletUploadRow> = {}): OutletUploadRow {
     zone:            '',
     xsrId:           'ISR-M001',  // must be a leaf in MOCK_EMPLOYEES
     payoutMethod:    '',
+    parentId:        '',
     ...overrides,
   };
 }
@@ -219,7 +220,7 @@ describe('outlet master row validation — happy paths (CREATE)', () => {
     const blankRow: OutletUploadRow = {
       rowNum: 2, outletId: '', outletName: '', programName: '', programCategory: '',
       outletType: '', beat: '', distributorId: '', distributorName: '', metro: '',
-      city: '', state: '', zone: '', xsrId: '', payoutMethod: '',
+      city: '', state: '', zone: '', xsrId: '', payoutMethod: '', parentId: '',
     };
     const result = validateOutletUpload([blankRow], [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE);
     expect(result.rows).toHaveLength(0);
@@ -741,7 +742,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
         rowNum: 2, outletId: 'OUT-ACTIVE-01', outletName: '',
         programName: '', programCategory: '', outletType: '',
         beat: '', distributorId: '', distributorName: '',
-        metro: '', city: '', state: '', zone: '', xsrId: '', payoutMethod: '',
+        metro: '', city: '', state: '', zone: '', xsrId: '', payoutMethod: '', parentId: '',
       }],
       OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
@@ -755,7 +756,7 @@ describe('outlet master — UPDATE existing active outlet', () => {
         rowNum: 2, outletId: 'OUT-INACTIVE-01', outletName: '',
         programName: '', programCategory: '', outletType: '',
         beat: '', distributorId: '', distributorName: '',
-        metro: '', city: '', state: '', zone: '', xsrId: '', payoutMethod: '',
+        metro: '', city: '', state: '', zone: '', xsrId: '', payoutMethod: '', parentId: '',
       }],
       OUTLET_UPLOAD_EXISTING, VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
     );
@@ -902,7 +903,7 @@ describe('O82–O87 — Zone column in outlet addition template', () => {
       outletType: 'SSS', beat: 'Test Beat', distributorId: '', distributorName: '',
       metro: 'Yes', city: 'Mumbai', state: 'Maharashtra',
       zone: '',   // intentionally blank
-      xsrId: 'ISR-M001', payoutMethod: '',
+      xsrId: 'ISR-M001', payoutMethod: '', parentId: '',
     };
     const result = validateOutletUpload(
       [row], EXISTING, ['Trade Loyalty'], ['Standard'], VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
@@ -925,5 +926,80 @@ describe('O82–O87 — Zone column in outlet addition template', () => {
     );
     expect(clean[0][2]).toBe('Trade Loyalty');
     expect(clean[0][3]).toBe('Premium');
+  });
+});
+
+// ─── O90–O97: Parent ID column in outlet addition (owner-group linking) ────────
+// Parent ID carries the parent's partnerCode (e.g. "CPP01"). It is the ONLY sanctioned
+// way to form the parent-child owner-group link at upload time. Grouping is opt-in, so the
+// column is OPTIONAL and a blank cell must yield '' (backend treats '' as a no-op).
+
+describe('O90–O97 — Parent ID column in outlet addition', () => {
+  it('O90 — OUTLET_UPLOAD_HEADERS contains "Parent ID"', () => {
+    expect(OUTLET_UPLOAD_HEADERS).toContain('Parent ID');
+  });
+
+  it('O91 — "Parent ID" is the last (15th) column', () => {
+    const headers = [...OUTLET_UPLOAD_HEADERS];
+    expect(headers[headers.length - 1]).toBe('Parent ID');
+    expect(headers).toHaveLength(15);
+  });
+
+  it('O92 — validateOutletUploadHeaders accepts headers WITHOUT Parent ID (optional column)', () => {
+    const without = OUTLET_UPLOAD_HEADERS.filter(h => h !== 'Parent ID');
+    expect(validateOutletUploadHeaders(without)).toBeNull();
+  });
+
+  it('O93 — parseOutletUploadRows reads a filled Parent ID cell into row.parentId', () => {
+    const raw = [{
+      'Outlet ID': 'OUT-001', 'Outlet Name': 'Test Shop', 'Program Name': 'Trade Loyalty',
+      'Program Category': 'Standard', 'Outlet Type': 'SSS', 'Beat': 'Andheri Beat',
+      'Distributor ID': 'D1', 'Distributor Name': 'Dist 1', 'Metro': 'Yes',
+      'City': 'Mumbai', 'State': 'Maharashtra', 'Zone': 'West Zone', 'XSR ID': 'ISR-M001',
+      'Payout Method': 'BANK', 'Parent ID': 'CPP01',
+    }];
+    const rows = parseOutletUploadRows(raw);
+    expect(rows[0].parentId).toBe('CPP01');
+  });
+
+  it('O94 — parseOutletUploadRows emits parentId = "" for a BLANK Parent ID cell (no-op intent)', () => {
+    const raw = [{
+      'Outlet ID': 'OUT-001', 'Outlet Name': 'Test Shop', 'Program Name': 'Trade Loyalty',
+      'Program Category': 'Standard', 'Outlet Type': 'SSS', 'City': 'Mumbai',
+      'State': 'Maharashtra', 'XSR ID': 'ISR-M001', 'Parent ID': '',
+    }];
+    const rows = parseOutletUploadRows(raw);
+    // Key must be present (never dropped) and equal to '' so the backend treats it as a no-op.
+    expect(rows[0]).toHaveProperty('parentId');
+    expect(rows[0].parentId).toBe('');
+  });
+
+  it('O95 — parseOutletUploadRows emits parentId = "" when the Parent ID column is ABSENT', () => {
+    const raw = [{
+      'Outlet ID': 'OUT-001', 'Outlet Name': 'Test Shop', 'Program Name': 'Trade Loyalty',
+      'Program Category': 'Standard', 'Outlet Type': 'SSS', 'City': 'Mumbai',
+      'State': 'Maharashtra', 'XSR ID': 'ISR-M001',
+      // No 'Parent ID' key at all
+    }];
+    const rows = parseOutletUploadRows(raw);
+    expect(rows[0].parentId).toBe('');
+  });
+
+  it('O96 — getOutletAdditionTemplateData headers include "Parent ID" + a column-reference line', () => {
+    const { headers, dosAndDonts } = getOutletAdditionTemplateData(
+      ['Trade Loyalty'], ['Standard'], ['RETAILER', 'WHOLESALER'], 'XSR',
+    );
+    expect(headers).toContain('Parent ID');
+    const ref = dosAndDonts.find(r => r[0] === 'Parent ID')?.[1] ?? '';
+    expect(ref).toMatch(/owner group/i);
+    expect(ref).toMatch(/optional/i);
+  });
+
+  it('O97 — a row with a blank Parent ID still passes validation (grouping is optional)', () => {
+    const result = validateOutletUpload(
+      [makeRow({ outletId: 'OUT-PID-1', parentId: '' })],
+      [], VALID_PROGRAMS, VALID_CATEGORIES, VALID_OUTLET_TYPES, MOCK_EMPLOYEES, LEAF_ROLE_CODE,
+    );
+    expect(result.rows[0].status).toBe('OK');
   });
 });

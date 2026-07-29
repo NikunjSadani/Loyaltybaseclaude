@@ -217,4 +217,13 @@ export class ListOutletsQueryDto {
   @IsOptional()
   @IsIn(OUTLET_KYC_FILTER_VALUES)
   kycStatus?: OutletKycFilter;
+
+  /**
+   * Owner-group drill-in: filter the list to the outlets whose Outlet.parentId equals this value.
+   * This is the parent ChannelPartner's CUID (exact match) — NOT the partnerCode — so the admin
+   * grouping UI can list exactly one group's members. Absent = the full tenant list (unchanged).
+   */
+  @IsOptional()
+  @IsString()
+  parentId?: string;
 }

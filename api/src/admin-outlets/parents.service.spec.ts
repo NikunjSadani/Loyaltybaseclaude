@@ -19,12 +19,15 @@ const mockPrisma = {
     create: jest.fn(),
     update: jest.fn(),
   },
-  outlet: { findFirst: jest.fn() },
+  // getParent reads the group's child outlets; deactivateParent counts remaining children; the
+  // shared childSharesDetailWithGroup scans siblings (outlet.findMany) + the parent (findUnique).
+  outlet: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn() },
+  kycSubmission: { findMany: jest.fn() },
   user: { update: jest.fn() },
   auditLog: { create: jest.fn() },
   // acquireIdentityLocks issues a raw advisory-lock statement inside the tx.
   $executeRaw: jest.fn(),
-  // createParent/approveParent wrap the uniqueness check + write in one interactive tx.
+  // createParent/approveParent/deactivateParent wrap their write(s) in one interactive tx.
   // The mock runs the callback with mockPrisma itself as the tx client (same model methods).
   $transaction: jest.fn(),
 };
@@ -53,6 +56,9 @@ describe('ParentsService', () => {
     mockPrisma.channelPartner.findMany.mockResolvedValue([]); // no uniqueness clashes by default
     mockPrisma.channelPartner.findUnique.mockResolvedValue(null);
     mockPrisma.outlet.findFirst.mockResolvedValue(null);
+    mockPrisma.outlet.findMany.mockResolvedValue([]); // no child outlets / no siblings by default
+    mockPrisma.outlet.count.mockResolvedValue(0); // no remaining children by default
+    mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
     mockPrisma.$executeRaw.mockResolvedValue(1);
     // Run the interactive-tx callback with mockPrisma acting as the tx client.
     mockPrisma.$transaction.mockImplementation(async (fn: (tx: typeof mockPrisma) => unknown) =>
@@ -264,6 +270,146 @@ describe('ParentsService', () => {
     it('throws NotFound for an unknown parent', async () => {
       mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
       await expect(service.approveParent(admin, 'nope')).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('getParent', () => {
+    const parentRow = {
+      id: 'parent1',
+      partnerCode: 'CPP01',
+      businessName: 'Verma Group',
+      ownerName: 'Verma',
+      phone: '9830011252',
+      gstNumber: null,
+      panNumber: 'GROUPPAN99Z',
+      bankAccountNumber: null,
+      upiId: null,
+      isActive: true,
+      onboardedAt: new Date('2026-07-01T00:00:00Z'),
+      _count: { childOutlets: 1 },
+    };
+
+    it('returns the parent (list-row shape) + children with canUngroup=true when nothing is shared', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(parentRow);
+      // The group's child outlets (step 2). Subsequent outlet.findMany (sibling scans) default to [].
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        {
+          id: 'o1',
+          outletCode: 'OUT-1',
+          name: 'Verma Traders',
+          isActive: true,
+          partnerId: 'cp1',
+          reKycFlags: null,
+          kycIntent: null,
+          // child owner details DISTINCT from the parent → no share → un-group allowed
+          partner: { id: 'cp1', phone: '9000000001', panNumber: 'CHILDPAN01Z', gstNumber: null, bankAccountNumber: null, upiId: null },
+        },
+      ]);
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([{ partnerId: 'cp1', status: 'APPROVED' }]);
+      // childSharesDetailWithGroup: the parent member (distinct PAN + phone) → shares nothing.
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({
+        phone: '9830011252', panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null,
+      });
+
+      const res = await service.getParent(admin, 'parent1');
+
+      // parent field-set mirrors a list row (+ childOutletCount + pendingApproval).
+      expect(res.parent).toMatchObject({
+        id: 'parent1',
+        partnerCode: 'CPP01',
+        childOutletCount: 1,
+        pendingApproval: false, // has PAN but already onboarded
+      });
+      expect(res.children).toHaveLength(1);
+      expect(res.children[0]).toMatchObject({
+        outletCode: 'OUT-1',
+        kycStatus: 'APPROVED',
+        canUngroup: true,
+        ungroupBlockReason: null,
+      });
+      // Tenant scope mirrors listParents.
+      expect(mockPrisma.channelPartner.findFirst.mock.calls[0][0].where).toMatchObject({
+        id: 'parent1', clientId: TENANT_A, isParent: true, deletedAt: null,
+      });
+    });
+
+    it('marks canUngroup=false (+reason) for a child that still SHARES a detail (same PAN as the parent)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(parentRow);
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([
+        {
+          id: 'o1',
+          outletCode: 'OUT-1',
+          name: 'Verma Traders',
+          isActive: true,
+          partnerId: 'cp1',
+          reKycFlags: null,
+          kycIntent: null,
+          // child PAN EQUALS the group PAN → shares → cannot un-group
+          partner: { id: 'cp1', phone: null, panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null },
+        },
+      ]);
+      // parent member shares the same PAN.
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({
+        phone: null, panNumber: 'GROUPPAN99Z', gstNumber: null, bankAccountNumber: null, upiId: null,
+      });
+
+      const res = await service.getParent(admin, 'parent1');
+
+      expect(res.children[0].canUngroup).toBe(false);
+      expect(res.children[0].ungroupBlockReason).toMatch(/re-KYC/i);
+    });
+
+    it('returns an empty children array for a parent with no child outlets', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ ...parentRow, _count: { childOutlets: 0 } });
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([]); // no children
+      const res = await service.getParent(admin, 'parent1');
+      expect(res.children).toEqual([]);
+      expect(res.parent.childOutletCount).toBe(0);
+      // No child partners → no submission lookup.
+      expect(mockPrisma.kycSubmission.findMany).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFound for a non-parent / cross-tenant id (scoped like listParents)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      await expect(service.getParent(admin, 'nope')).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('deactivateParent', () => {
+    it('soft-deletes (deletedAt + isActive=false) when the group has 0 children', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'parent1' });
+      mockPrisma.outlet.count.mockResolvedValue(0);
+      mockPrisma.channelPartner.update.mockResolvedValue({ id: 'parent1' });
+
+      const res = await service.deactivateParent(admin, 'parent1');
+
+      expect(res).toEqual({ id: 'parent1', deactivated: true });
+      const data = mockPrisma.channelPartner.update.mock.calls[0][0].data;
+      expect(data.deletedAt).toBeInstanceOf(Date);
+      expect(data.isActive).toBe(false);
+      // Child count is scoped to live children of THIS parent.
+      expect(mockPrisma.outlet.count.mock.calls[0][0].where).toMatchObject({
+        clientId: TENANT_A, parentId: 'parent1', deletedAt: null,
+      });
+      expect(mockPrisma.auditLog.create).toHaveBeenCalled();
+    });
+
+    it('throws 400 (does NOT cascade) when the group still has child outlets', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'parent1' });
+      mockPrisma.outlet.count.mockResolvedValue(3);
+
+      await expect(service.deactivateParent(admin, 'parent1')).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.deactivateParent(admin, 'parent1')).rejects.toThrow(/still has 3 child outlet/i);
+      expect(mockPrisma.channelPartner.update).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFound for a non-parent / cross-tenant id', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
+      await expect(service.deactivateParent(admin, 'nope')).rejects.toBeInstanceOf(NotFoundException);
+      // Scope mirrors the others.
+      expect(mockPrisma.channelPartner.findFirst.mock.calls[0][0].where).toMatchObject({
+        id: 'nope', clientId: TENANT_A, isParent: true, deletedAt: null,
+      });
     });
   });
 });

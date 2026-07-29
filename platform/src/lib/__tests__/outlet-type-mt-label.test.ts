@@ -39,6 +39,7 @@ function makeRow(overrides: Record<string, string>) {
     zone:            '',
     xsrId:           'EMP-001',
     payoutMethod:    '',
+    parentId:        '',
     ...overrides,
   };
 }

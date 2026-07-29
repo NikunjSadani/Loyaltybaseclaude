@@ -30,6 +30,20 @@ export interface UniquenessPolicy {
   upi: boolean;
 }
 
+/**
+ * Today's-behaviour default owner-group uniqueness policy (which of GST/phone/bank/UPI are
+ * enforced across groups; PAN is always on inside the share-check). Single source of truth so the
+ * un-group guard, the add-to-parent check, and the `canUngroup` flag can never desync on a partial
+ * settings object. */
+export const DEFAULT_UNIQUENESS_POLICY: UniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+
+/** Resolve a tenant's uniqueness policy from its effective settings, falling back to the default. */
+export function resolveUniquenessPolicy(settings: {
+  uniquenessPolicy?: UniquenessPolicy | null;
+}): UniquenessPolicy {
+  return settings.uniquenessPolicy ?? DEFAULT_UNIQUENESS_POLICY;
+}
+
 /** The candidate detail values being validated for one outlet's owner. */
 export interface PartnerIdentityDetails {
   gstNumber?: string | null;
@@ -264,6 +278,108 @@ export async function acquireIdentityLocks(
     // means two unrelated values occasionally share a lock (a harmless extra serialization).
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key})::bigint)`;
   }
+}
+
+// ── Un-group SHARE check (the un-group guard ⇔ the group-detail canUngroup flag) ────────────
+
+/** The identity columns of one group member (parent or a sibling's owner) the share-check reads. */
+export interface GroupMemberDetails {
+  phone: string | null;
+  panNumber: string | null;
+  gstNumber: string | null;
+  bankAccountNumber: string | null;
+  upiId: string | null;
+}
+
+/** The child outlet's own owner details under an un-group check (carries the partner id). */
+export interface ChildOwnerDetails extends GroupMemberDetails {
+  id: string;
+}
+
+/**
+ * Un-group guard (docs/plans/PARTNER-MULTI-OUTLET.md §4.5): does the child still share ANY
+ * enforced identity detail with a REMAINING member of its owner group (the parent itself + its
+ * sibling child outlets)? PAN is always checked (the group golden key); GST/bank/UPI/PHONE only
+ * when the tenant policy enforces them. Exact-match fields (PAN/GST/bank/UPI) compare on the
+ * CANONICAL value (PAN/GST upper-cased) so a case-variant share is not under-detected; PHONE
+ * compares on last-10-digit normalisation, since phones are stored in varying formats. A pre-KYC
+ * child (no owner yet) has no details → shares nothing → un-map is allowed. Bounded reads (2 queries).
+ *
+ * SHARED so the dedicated un-group action (AdminOutletsService.ungroupOutlet) and the group-detail
+ * endpoint's `canUngroup` flag (ParentsService.getParent) are the SAME code path and can never diverge:
+ * `canUngroup` is exactly `!childSharesDetailWithGroup(...)`.
+ */
+export async function childSharesDetailWithGroup(
+  db: Db,
+  params: {
+    clientId: string;
+    parentId: string;
+    childOutletId: string;
+    childPartner: ChildOwnerDetails | null;
+    policy: UniquenessPolicy;
+  },
+): Promise<boolean> {
+  const { clientId, parentId, childOutletId, childPartner, policy } = params;
+  if (!childPartner) return false; // no owner details to share
+
+  const memberSelect = {
+    phone: true,
+    panNumber: true,
+    gstNumber: true,
+    bankAccountNumber: true,
+    upiId: true,
+  } as const;
+  const parent = await db.channelPartner.findUnique({
+    where: { id: parentId },
+    select: memberSelect,
+  });
+  const siblingOutlets = await db.outlet.findMany({
+    where: {
+      clientId,
+      parentId,
+      id: { not: childOutletId },
+      deletedAt: null,
+      // Exclude by the child's PARTNER too, not just the child OUTLET: if the child's own
+      // ChannelPartner owns a SECOND outlet in this group, that outlet would otherwise load as a
+      // "sibling" and self-match on every field → wrongly BLOCK the un-group.
+      partner: { isParent: false, deletedAt: null, id: { not: childPartner.id } },
+    },
+    select: { partner: { select: memberSelect } },
+  });
+
+  const members = [parent, ...siblingOutlets.map((s) => s.partner)].filter(
+    (m): m is NonNullable<typeof m> => m != null,
+  );
+
+  // Exact-match identity fields — compare on the CANONICAL value (PAN/GST upper-cased) so a
+  // case-variant share is not under-detected (which would wrongly allow the un-group).
+  const fields: { field: UniquenessField; key: keyof PartnerIdentityDetails; enforced: boolean }[] = [
+    { field: 'pan', key: 'panNumber', enforced: true }, // PAN is always the group golden-key
+    { field: 'gst', key: 'gstNumber', enforced: policy.gst },
+    { field: 'bank', key: 'bankAccountNumber', enforced: policy.bank },
+    { field: 'upi', key: 'upiId', enforced: policy.upi },
+  ];
+  for (const f of fields) {
+    if (!f.enforced) continue;
+    const childValue = normalizeIdentityValue(f.field, childPartner[f.key]);
+    if (!childValue) continue;
+    for (const m of members) {
+      const memberValue = normalizeIdentityValue(f.field, m[f.key]);
+      if (memberValue && memberValue === childValue) return true;
+    }
+  }
+
+  // PHONE (F4) — enforced per policy, compared on last-10 digits (format-insensitive).
+  if (policy.phone) {
+    const childPhone = normalizePhoneLast10(childPartner.phone);
+    if (childPhone) {
+      for (const m of members) {
+        if (normalizePhoneLast10(m.phone) === childPhone) return true; // both non-empty & equal
+      }
+    }
+  }
+
+  return false;
 }
 
 // ── Wave 3: operable-context resolution (login picker + read-only parent overview) ──────────

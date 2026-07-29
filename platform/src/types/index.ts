@@ -778,6 +778,7 @@ export interface OutletUploadRow {
   zone:             string;   // optional geographic zone, e.g. "West Zone" — blank is accepted
   xsrId:            string;
   payoutMethod:     string;   // per-outlet payout MANDATE — "BANK"/"UPI"/"ANY" (case-insensitive); blank → BANK
+  parentId:         string;   // parent's partnerCode (e.g. "CPP01") linking this outlet to an owner group; blank → grouping unchanged (backend no-op)
 }
 
 /** Validation result for one row in the outlet addition upload */
