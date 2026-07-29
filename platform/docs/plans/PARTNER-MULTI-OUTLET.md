@@ -3,7 +3,11 @@
 > **Status (2026-07-24):** 🎉 **LIVE IN PROD — CUTOVER #14 (`eca351e`).** Waves 1–4 ALL DONE and shipped; all 4
 > migrations verified applied on prod + every DB object confirmed; prod smoke green. Gate at cutover: api jest 1745 ·
 > nest 0 · FE vitest 1984 · tsc 0; adversarial-audited; staging-verified. **Additive + opt-in — DORMANT until an admin
-> sets a parentId** (zero impact on live Deoleo). ✅ **Post-cutover KYC-cleanup DONE + verified (2026-07-24):**
+> sets a parentId** (zero impact on live Deoleo).
+> **⚠️ CORRECTION (2026-07-29):** cutover #14 shipped only the grouping **BACKEND** — the **admin FRONTEND** to drive it
+> (the "Parent ID" upload column, a parents-management page, the un-group control) was **NOT built**, so until now a
+> parent-child link could only be set via a direct API/DB call. That admin FE is now **BUILT + staging-verified on develop
+> `ab61b63`** (see **§10**), riding the next owner-gated cutover. "Fully live" below refers to the backend + dormancy only. ✅ **Post-cutover KYC-cleanup DONE + verified (2026-07-24):**
 > `KYC_CLEANUP_SECRET`(+`_STAGING`) secrets + `deploy.yml` wiring + `kyc-cleanup-prod`/`-staging` schedulers (daily 01:00 IST);
 > endpoints verified both envs. The feature is fully live + operationally complete. W1+W2 migrations verified on STAGING; W3 added two
 > additive migrations (OTP order-binding + scheme-enrollment-by-shop, now applied on staging); W4 adds NO
@@ -430,7 +434,14 @@ re-KYC stage-at-approval. Then the owner-gated prod cutover per the checklist ab
 
 ---
 
-## 10. FE BUILD — the admin grouping UI (2026-07-29, IN PROGRESS)
+## 10. FE BUILD — the admin grouping UI (2026-07-29, ✅ BUILT + STAGING-VERIFIED on develop `ab61b63`; owner-gated for prod)
+
+> **STATUS:** the admin FE below is **BUILT, gate-green (api nest 0/jest 2067 · FE tsc 0/vitest 2047), independently
+> adversarial-audited (3 findings fixed), and runtime-proven end-to-end on staging** (create bare + detailed parent →
+> GIFSY approve → link an outlet via the Parent ID upsert path → group detail w/ `canUngroup` → `?parentId` filter →
+> **blank-cell re-upload = proven no-op, no mass-ungroup** → deactivate-with-child 400 → un-group → deactivate). Ran on a
+> synthetic `synthgrp` tenant, then fully deleted. **Additive, no migration, dormant-safe → rides the next owner-gated
+> cutover; NOT yet in prod.** The plan/spec below is the as-built record.
 
 **Why:** cutover #14 shipped the grouping BACKEND (live in prod, additive + dormant), but the **admin FRONTEND to drive it was never built** — the outlet-master upload has no "Parent ID" column, and there is no parents-management / un-group / group-overview screen. So today a parent-child relationship can only be set via a direct API/DB call. This section is the plan to build the admin FE (owner-approved **Complete** scope, 2026-07-29). Additive, **no DB migration**, dormant-safe (zero impact on live Deoleo until an admin creates a parent). Lands on `develop`/staging; owner-gated for prod.
 
