@@ -1005,10 +1005,12 @@ export function validateSubmittedValues(
         break;
       }
       case 'GPS_POINT': {
-        // Accuracy gate (D15): when the field caps accuracy and the fix REPORTS a
-        // numeric accuracy worse than the cap, reject it (a low-accuracy fix is not
-        // trustworthy proof-of-location). A fix with no reported accuracy is accepted
-        // (can't prove it fails) — this stays opt-in + back-compatible.
+        // Accuracy gate (D15): a DATA-QUALITY filter (NOT an anti-fraud control — lat/lng/
+        // accuracy are all client-attested, unverifiable server-side). When the field caps
+        // accuracy and the fix REPORTS a numeric accuracy worse than the cap, reject it to
+        // drop honest low-quality fixes. A fix with no reported accuracy is accepted (can't
+        // prove it fails). Opt-in + back-compatible. For true proof-of-location use the
+        // separate fail-closed visibility/POSM geo-fence, not this cap.
         if (typeof field.gpsMaxAccuracy === 'number' && field.gpsMaxAccuracy > 0 &&
             rawValue !== null && typeof rawValue === 'object') {
           const acc = Number((rawValue as { accuracy?: unknown }).accuracy);

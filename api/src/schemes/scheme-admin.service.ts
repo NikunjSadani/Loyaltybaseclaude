@@ -69,13 +69,19 @@ export class SchemeAdminService {
   private async assertActivatable(schemeId: string) {
     const [scheme, form] = await Promise.all([
       this.prisma.scheme.findUnique({ where: { id: schemeId }, select: { audienceConfig: true } }),
-      this.prisma.schemeEnrollmentForm.findUnique({ where: { schemeId }, select: { id: true } }),
+      this.prisma.schemeEnrollmentForm.findUnique({ where: { schemeId }, select: { formSchema: true } }),
     ]);
-    if (!scheme?.audienceConfig) {
-      throw new BadRequestException('Set the scheme audience before activating.');
+    // Audience must parse to a REAL mode (FILTER/EXCEL) — a truthy-but-garbage config
+    // (e.g. `{}`) silently falls back to "visible to all", defeating the gate (audit F4).
+    const ac = scheme?.audienceConfig as { mode?: unknown } | null;
+    if (!ac || typeof ac !== 'object' || (ac.mode !== 'FILTER' && ac.mode !== 'EXCEL')) {
+      throw new BadRequestException('Set a valid scheme audience before activating.');
     }
-    if (!form) {
-      throw new BadRequestException('Add an enrollment form before activating.');
+    // The form must exist AND capture at least one field — an empty-fields form captures
+    // nothing, which is exactly what H3 exists to prevent (audit F4).
+    const fields = (form?.formSchema as { fields?: unknown } | null)?.fields;
+    if (!Array.isArray(fields) || fields.length === 0) {
+      throw new BadRequestException('Add an enrollment form with at least one field before activating.');
     }
   }
 

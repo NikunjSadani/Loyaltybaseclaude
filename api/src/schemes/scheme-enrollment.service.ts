@@ -970,32 +970,42 @@ export class SchemeEnrollmentService {
     // distinct trail version (the [enrollmentId, version] unique) and the next resubmit
     // (`prev.currentVersion + 1`) continues past it without colliding.
     const rejectVersion = enrollment.currentVersion + 1;
-    return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.schemeEnrollment.update({
-        where: { id: enrollment.id },
-        data: {
-          status: 'REJECTED',
-          rejectionReason: dto.reason,
-          currentVersion: rejectVersion,
-          updatedAt: new Date(),
-        },
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const updated = await tx.schemeEnrollment.update({
+          where: { id: enrollment.id },
+          data: {
+            status: 'REJECTED',
+            rejectionReason: dto.reason,
+            currentVersion: rejectVersion,
+            updatedAt: new Date(),
+          },
+        });
+        const submission = await tx.schemeSubmission.create({
+          data: {
+            schemeId: enrollment.schemeId,
+            schemeOutletId: enrollment.schemeOutletId,
+            enrollmentId: enrollment.id,
+            version: rejectVersion,
+            status: 'REJECTED',
+            formValues: (enrollment.formValues ?? {}) as Prisma.InputJsonValue,
+            formVersion: enrollment.formVersion,
+            enrollmentMode: enrollment.enrollmentMode,
+            submittedByUserId: user.sub ?? null,
+            rejectionReason: dto.reason,
+          },
+        });
+        return { enrollment: updated, submission };
       });
-      const submission = await tx.schemeSubmission.create({
-        data: {
-          schemeId: enrollment.schemeId,
-          schemeOutletId: enrollment.schemeOutletId,
-          enrollmentId: enrollment.id,
-          version: rejectVersion,
-          status: 'REJECTED',
-          formValues: (enrollment.formValues ?? {}) as Prisma.InputJsonValue,
-          formVersion: enrollment.formVersion,
-          enrollmentMode: enrollment.enrollmentMode,
-          submittedByUserId: user.sub ?? null,
-          rejectionReason: dto.reason,
-        },
-      });
-      return { enrollment: updated, submission };
-    });
+    } catch (e) {
+      // A concurrent double-reject (or a reject racing a resubmit) computes the same
+      // [enrollmentId, version] → P2002. The tx rolls back atomically (no partial write);
+      // surface a clean 409 rather than a raw 500 (mirrors submit()'s guard).
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ConflictException('A concurrent update occurred — please retry.');
+      }
+      throw e;
+    }
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -1329,7 +1339,22 @@ export class SchemeEnrollmentService {
       }
     }
 
-    let all = [...rosterTargets, ...liveTargets];
+    // Privacy (audit F3): a rep listing targets must NOT be able to bulk-read every
+    // downline outlet's PAN/GST. Strip those sensitive keys from the rep-facing prefill
+    // payload; the owner (SELF) portal keeps them, and submit() still pins a locked
+    // PAN/GST field server-side (it re-resolves the full map) — so this only removes the
+    // rep's DISPLAY visibility, never the pin.
+    const stripSensitive = (v: Record<string, string> | null): Record<string, string> | null => {
+      if (!v) return v;
+      const { panNumber, gstNumber, ...rest } = v;
+      void panNumber;
+      void gstNumber;
+      return Object.keys(rest).length > 0 ? rest : null;
+    };
+    let all = [...rosterTargets, ...liveTargets].map((t) => ({
+      ...t,
+      outletFieldValues: stripSensitive(t.outletFieldValues),
+    }));
     if (q.status) all = all.filter((t) => t.status === q.status);
 
     const page = q.page ?? 1;

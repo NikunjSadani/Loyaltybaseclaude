@@ -87,6 +87,32 @@ export type GpsCaptureTrigger = (typeof GPS_CAPTURE_TRIGGERS)[number];
 export const FIELD_AUDIENCES = ['ALL', 'LOYALTY_MEMBERS', 'NON_LOYALTY_MEMBERS'] as const;
 export type FieldAudience = (typeof FIELD_AUDIENCES)[number];
 
+/**
+ * Curated Outlet-master fields a form field can prefill FROM (dual-source prefill) —
+ * mirrors OUTLET_FIELD_CATALOG in api/src/schemes/enrollment-form.helper.ts. The builder's
+ * "Prefill from → Outlet field" dropdown offers these; the backend `:id/prefill-sources`
+ * endpoint returns the same list at runtime (this is the compile-time client mirror).
+ */
+export const OUTLET_FIELD_CATALOG = [
+  { key: 'businessName', label: 'Business name' },
+  { key: 'ownerName', label: 'Owner name' },
+  { key: 'phone', label: 'Owner / outlet phone' },
+  { key: 'outletCode', label: 'Outlet code' },
+  { key: 'outletName', label: 'Outlet name' },
+  { key: 'addressLine1', label: 'Address line 1' },
+  { key: 'addressLine2', label: 'Address line 2' },
+  { key: 'city', label: 'City' },
+  { key: 'state', label: 'State' },
+  { key: 'pincode', label: 'Pincode' },
+  { key: 'zone', label: 'Zone' },
+  { key: 'programName', label: 'Program' },
+  { key: 'programCategory', label: 'Program category' },
+  { key: 'panNumber', label: 'PAN' },
+  { key: 'gstNumber', label: 'GST' },
+] as const;
+export type OutletFieldKey = (typeof OUTLET_FIELD_CATALOG)[number]['key'];
+export const OUTLET_FIELD_KEYS: ReadonlySet<string> = new Set(OUTLET_FIELD_CATALOG.map((f) => f.key));
+
 export const VISIBLE_WHEN_OPS = ['eq', 'neq', 'gt', 'lt', 'contains'] as const;
 export type VisibleWhenOp = (typeof VISIBLE_WHEN_OPS)[number];
 
@@ -104,7 +130,6 @@ export interface FormField {
   required: boolean;
   placeholder?: string;
   helpText?: string;
-  audience?: FieldAudience;
   options?: string[];
   dataDisplayKey?: string;
   /** Required when type === 'CALCULATED'. */
@@ -119,6 +144,14 @@ export interface FormField {
   locked?: boolean;
   /** Excel variable column this field prefills from (D13 / Mode B). */
   prefillKey?: string;
+  /**
+   * Outlet-master field this field prefills from for a MATCHED loyalty outlet
+   * (dual-source prefill, UX-hardening). One of OUTLET_FIELD_KEYS. Resolution at enroll:
+   * outletField (matched-outlet DB value) wins → else prefillKey (Excel column).
+   */
+  outletField?: string;
+  /** GPS_POINT: reject a fix whose reported accuracy (metres) exceeds this cap (D15); unset = no cap. */
+  gpsMaxAccuracy?: number;
   /** LOOKUP: the field whose selected option value is mapped through `lookupMap`. */
   lookupSourceFieldId?: string;
   /** LOOKUP: option value → shown/derived value map (D12a). */
@@ -217,6 +250,12 @@ export interface PartnerEligibleScheme extends EligibleScheme {
    * `mySchemeOutletId`.
    */
   prefillValues?: Record<string, string> | null;
+  /** Dual-source prefill: the matched outlet's Outlet-master field values, keyed by `outletField` (projected to bound fields). */
+  outletFieldValues?: Record<string, string> | null;
+  /** True when the matched outlet's owner is KYC-approved (renderer pre-pins the owner phone). */
+  outletApproved?: boolean;
+  /** Masked on-file owner phone for a KYC-approved matched outlet; null otherwise. */
+  ownerPhoneMasked?: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -313,6 +352,12 @@ export interface SalesTarget {
    * (non-rostered) targets have no prefill.
    */
   prefillValues?: Record<string, string> | null;
+  /** Dual-source prefill: the matched outlet's Outlet-master field values, keyed by `outletField` (projected to bound fields). */
+  outletFieldValues?: Record<string, string> | null;
+  /** True when the matched outlet's owner is KYC-approved (renderer pre-pins the owner phone). */
+  outletApproved?: boolean;
+  /** Masked on-file owner phone for a KYC-approved matched outlet; null otherwise. */
+  ownerPhoneMasked?: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

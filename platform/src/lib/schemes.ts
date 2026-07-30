@@ -258,6 +258,34 @@ export interface AdminEnrollmentDetail extends SchemeEnrollment {
   submissions: SchemeSubmission[];
   media: EnrollmentMediaRef[];
   geo: EnrollmentGeoRef[];
+  /**
+   * Field id → label/type for the form version this submission was captured against
+   * (H5). Lets the admin drawer render human labels for captured values instead of raw
+   * field ids. Optional — absent when captured against a form with no snapshot.
+   */
+  formFields?: Array<{ id: string; label: string; type: string }>;
+}
+
+/** GET :id/prefill-sources — the form-builder "Prefill from" dropdown options (H1). */
+export interface PrefillSources {
+  /** Distinct roster Excel prefill columns present on this scheme's roster. */
+  excelColumns: string[];
+  /** The curated Outlet-master fields (dual-source prefill for matched loyalty outlets). */
+  outletFields: Array<{ key: string; label: string }>;
+}
+
+/** GET :id/facet-values — distinct outlet-master facets for the audience + report pickers. */
+export interface FacetValues {
+  zones: string[];
+  programNames: string[];
+  programCategories: string[];
+  states: string[];
+  outletTypes: Array<{ id: string; name: string }>;
+}
+
+/** POST :id/broadcast/preview — the recipient count for a broadcast, WITHOUT sending. */
+export interface BroadcastPreview {
+  recipientCount: number;
 }
 
 export interface OtpSendResult {
@@ -385,6 +413,14 @@ export const schemeApi = {
       `${BASE}/${schemeId}/roster${qs(query)}`,
     );
   },
+  /** The form-builder "Prefill from" dropdown options: roster Excel columns + outlet-field catalog (H1). */
+  getPrefillSources(schemeId: string) {
+    return api.get<PrefillSources>(`${BASE}/${schemeId}/prefill-sources`);
+  },
+  /** Distinct outlet-master facet values for the audience builder + report filters. */
+  getFacetValues(schemeId: string) {
+    return api.get<FacetValues>(`${BASE}/${schemeId}/facet-values`);
+  },
   listEnrollments(schemeId: string, query: AdminListEnrollmentsQuery = {}) {
     return api.get<{ enrollments: AdminEnrollmentRow[]; pagination: Pagination }>(
       `${BASE}/${schemeId}/enrollments${qs(query as Record<string, unknown>)}`,
@@ -408,6 +444,10 @@ export const schemeApi = {
   },
   listBroadcasts(schemeId: string) {
     return api.get<{ broadcasts: SchemeBroadcastRow[] }>(`${BASE}/${schemeId}/broadcasts`);
+  },
+  /** Dry-run a broadcast: the de-duped recipient count for a confirm dialog (no send). */
+  previewBroadcast(schemeId: string, input: BroadcastInput) {
+    return api.post<BroadcastPreview>(`${BASE}/${schemeId}/broadcast/preview`, input);
   },
 
   // ── Reports (GIFSY_ADMIN + tenant read-only, D26/D30) ──────────────────────
@@ -485,7 +525,17 @@ export const schemeApi = {
          * absent/null when the row carries no prefill; the renderer then prefills nothing.
          */
         prefillValues?: Record<string, string> | null;
+        /**
+         * Dual-source prefill (UX-hardening): the matched outlet's Outlet-master field
+         * values, keyed by each field's `outletField`, projected to the form's bound
+         * outlet fields. Absent/null when the form binds none.
+         */
+        outletFieldValues?: Record<string, string> | null;
       };
+      /** True when the matched outlet's owner is KYC-approved (renderer pre-pins the owner phone). */
+      outletApproved?: boolean;
+      /** Masked on-file owner phone for a KYC-approved matched outlet; null otherwise. */
+      ownerPhoneMasked?: string | null;
       enrollment: SchemeEnrollment;
     }>(`${BASE}/${schemeId}/enrollment`);
   },
