@@ -27,6 +27,7 @@ import {
   pickBoundOutletFields,
   pickBoundPrefill,
   validateSubmittedValues,
+  withRosterIdentity,
 } from './enrollment-form.helper';
 import {
   AdminListEnrollmentsQueryDto,
@@ -1070,7 +1071,7 @@ export class SchemeEnrollmentService {
             schemeId: scheme.id,
             OR: [{ matchedPartnerId: partnerId }, { matchedOutletId: { in: [...outletIds] } }],
           },
-          select: { id: true, prefillValues: true, matchedOutletId: true, matchedPartnerId: true },
+          select: { id: true, outletRef: true, outletName: true, prefillValues: true, matchedOutletId: true, matchedPartnerId: true },
           // Deterministic pick for a multi-outlet partner (A-LOW-1): the portal one-tap
           // self-enroll must always target the same roster row.
           orderBy: { createdAt: 'asc' },
@@ -1089,7 +1090,11 @@ export class SchemeEnrollmentService {
             // Project to ONLY the columns the form binds to — unbound admin columns
             // (PAN, internal notes, …) are never shipped to the enroller (MED-1).
             prefillValues: pickBoundPrefill(
-              rostered.prefillValues as Record<string, string> | null,
+              withRosterIdentity(
+                rostered.outletRef,
+                rostered.outletName,
+                rostered.prefillValues as Record<string, string> | null,
+              ),
               scheme.enrollmentForm?.formSchema,
             ),
             outletFieldValues: ctx.outletFieldValues,
@@ -1160,7 +1165,7 @@ export class SchemeEnrollmentService {
         // prefills locked/editable fields from these. Only the enroller's own row, and
         // only the columns the form binds to (MED-1 data minimisation).
         prefillValues: pickBoundPrefill(
-          row.prefillValues as Record<string, string> | null,
+          withRosterIdentity(row.outletRef, row.outletName, row.prefillValues as Record<string, string> | null),
           scheme.enrollmentForm?.formSchema,
         ),
         // Dual-source (D13): Outlet-master field values for this matched outlet, projected
@@ -1272,9 +1277,10 @@ export class SchemeEnrollmentService {
       rejectionReason: r.enrollment?.rejectionReason ?? null,
       enrollmentId: r.enrollment?.id ?? null,
       currentVersion: r.enrollment?.currentVersion ?? null,
-      // Only the columns the form binds to (MED-1 data minimisation).
+      // Only the columns the form binds to (MED-1 data minimisation) + the roster's own
+      // Outlet ID/Name so a DATA_DISPLAY bound to them resolves (matched OR standalone).
       prefillValues: pickBoundPrefill(
-        r.prefillValues as Record<string, string> | null,
+        withRosterIdentity(r.outletRef, r.outletName, r.prefillValues as Record<string, string> | null),
         scheme.enrollmentForm?.formSchema,
       ),
       ...(rosterCtx.get(r.matchedOutletId ?? r.matchedPartnerId ?? '') ?? NO_MATCH),

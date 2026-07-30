@@ -321,6 +321,26 @@ export function pickBoundOutletFields(
 }
 
 /**
+ * Reserved prefill keys for the roster row's OWN identity (its supplied Outlet ID +
+ * Name). The parser consumes those two fixed columns into `outletRef`/`outletName`, so
+ * they never land in `prefillValues` — yet a DATA_DISPLAY (or prefill) field naturally
+ * wants to show them. This merges them in under stable labels so they resolve for EVERY
+ * row (matched OR standalone), without clobbering a same-named variable column.
+ */
+export const ROSTER_IDENTITY_COLUMNS = ['Outlet ID', 'Outlet Name'] as const;
+
+export function withRosterIdentity(
+  outletRef: string,
+  outletName: string,
+  prefillValues: Record<string, string> | null | undefined,
+): Record<string, string> {
+  const base = prefillValues && typeof prefillValues === 'object' ? { ...prefillValues } : {};
+  if (base['Outlet ID'] === undefined && outletRef) base['Outlet ID'] = outletRef;
+  if (base['Outlet Name'] === undefined && outletName) base['Outlet Name'] = outletName;
+  return base;
+}
+
+/**
  * Project a roster row's `prefillValues` to only the columns the form binds to.
  * Returns null when there is nothing to expose (no roster values, no bound keys, or
  * no overlap) — the enrollee endpoints hand this to the FE instead of the raw blob.

@@ -15,6 +15,7 @@ import {
   pickBoundOutletFields,
   validateFormSchema,
   validateSubmittedValues,
+  withRosterIdentity,
   EnrollmentFormSchema,
   FormField,
 } from './enrollment-form.helper';
@@ -123,6 +124,23 @@ describe('validateFormSchema — outletField + gpsMaxAccuracy + dropped audience
       schemaOf([{ ...field({ id: 'a', type: 'TEXT' }), audience: 'NONSENSE' } as unknown as FormField]),
     );
     expect(errors).toEqual([]);
+  });
+});
+
+describe('withRosterIdentity — expose the roster row Outlet ID/Name for DATA_DISPLAY', () => {
+  it('merges Outlet ID + Name over the variable columns', () => {
+    const out = withRosterIdentity('DKOL0401', 'Ambey Stores', { Slab: '400-499', Reward: 'Gold Coin' });
+    expect(out).toEqual({ Slab: '400-499', Reward: 'Gold Coin', 'Outlet ID': 'DKOL0401', 'Outlet Name': 'Ambey Stores' });
+  });
+
+  it('works for a standalone row with no variable columns', () => {
+    expect(withRosterIdentity('EXT-1', 'Ghost Kirana', null)).toEqual({ 'Outlet ID': 'EXT-1', 'Outlet Name': 'Ghost Kirana' });
+  });
+
+  it('does not clobber a same-named variable column (defensive)', () => {
+    const out = withRosterIdentity('X', 'Y', { 'Outlet ID': 'FROM_VAR' });
+    expect(out['Outlet ID']).toBe('FROM_VAR');
+    expect(out['Outlet Name']).toBe('Y');
   });
 });
 

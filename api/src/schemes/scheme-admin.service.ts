@@ -22,7 +22,7 @@ import {
   parseRosterUploadBuffer,
   OutletMatch,
 } from './scheme-roster.helper';
-import { OUTLET_FIELD_CATALOG } from './enrollment-form.helper';
+import { OUTLET_FIELD_CATALOG, ROSTER_IDENTITY_COLUMNS } from './enrollment-form.helper';
 
 /**
  * SchemeAdminService — Wave-0 scheme data-collection ADMIN authoring (GIFSY only).
@@ -437,8 +437,14 @@ export class SchemeAdminService {
         for (const k of Object.keys(pv)) if (k.trim() !== '') cols.add(k);
       }
     }
+    // The roster's own identity columns are consumed into outletRef/outletName (not stored
+    // in prefillValues), but a DATA_DISPLAY/prefill field can still bind to them — the enroll
+    // payloads inject them via withRosterIdentity. Offer them first in the dropdown.
+    const variableCols = [...cols]
+      .filter((c) => !ROSTER_IDENTITY_COLUMNS.includes(c as (typeof ROSTER_IDENTITY_COLUMNS)[number]))
+      .sort((a, b) => a.localeCompare(b));
     return {
-      excelColumns: [...cols].sort((a, b) => a.localeCompare(b)),
+      excelColumns: [...ROSTER_IDENTITY_COLUMNS, ...variableCols],
       outletFields: OUTLET_FIELD_CATALOG.map((f) => ({ key: f.key, label: f.label })),
     };
   }
