@@ -1,7 +1,7 @@
-// Unit tests for ReportsService.outletMaster — the 56-column Outlet Master export.
+// Unit tests for ReportsService.outletMaster — the 57-column Outlet Master export.
 // Run: npx jest src/admin-programs/reports-outlet-master.service.spec.ts
 //
-// Asserts: the 56 header strings in exact order; the hierarchy-rung mapping by
+// Asserts: the 57 header strings in exact order; the hierarchy-rung mapping by
 // hierarchyLevel.code (a skipped level leaves blanks, not a shift); Profile Status
 // Active/Deactivated; and that a doc cell carries a /api/kyc/documents/view link.
 
@@ -17,7 +17,7 @@ const admin: JwtPayload = { sub: 'a1', role: 'CLIENT_ADMIN', clientId: 'deoleo',
 
 const EXPECTED_HEADERS = [
   'Zone', 'Outlet Code', 'Outlet Name', 'Outlet Type', 'Program Name', 'Program Category',
-  'Distributor Code', 'Distributor Name', 'Metro', 'Beat',
+  'Distributor Code', 'Distributor Name', 'Metro', 'Beat', 'Parent ID',
   'XSR ID', 'XSR Name', 'XSR Phone Number',
   'SO ID', 'SO Name', 'SO Phone Number',
   'ASM ID', 'ASM Name', 'ASM Phone Number',
@@ -62,7 +62,7 @@ async function readSheet(file: StreamableFile): Promise<unknown[][]> {
   return XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as unknown[][];
 }
 
-describe('ReportsService.outletMaster (56 columns)', () => {
+describe('ReportsService.outletMaster (57 columns)', () => {
   let service: ReportsService;
 
   beforeEach(async () => {
@@ -77,7 +77,7 @@ describe('ReportsService.outletMaster (56 columns)', () => {
     service = module.get(ReportsService);
   });
 
-  it('emits exactly the 56 headers in order even when there are no outlets', async () => {
+  it('emits exactly the 57 headers in order even when there are no outlets', async () => {
     mockPrisma.outlet.findMany.mockResolvedValue([]);
     mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
     mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
@@ -86,7 +86,7 @@ describe('ReportsService.outletMaster (56 columns)', () => {
     const file = await service.outletMaster(admin);
     const aoa = await readSheet(file);
     expect(aoa[0]).toEqual(EXPECTED_HEADERS);
-    expect(aoa[0]).toHaveLength(56);
+    expect(aoa[0]).toHaveLength(57);
   });
 
   it('maps rungs by hierarchyLevel.code (a skipped level leaves its cells blank, not shifted) and sets doc links + status', async () => {
@@ -112,6 +112,7 @@ describe('ReportsService.outletMaster (56 columns)', () => {
         addressLine1: 'A1', addressLine2: 'A2', city: 'Pune', state: 'MH', pincode: '411001',
         phone: '8000000000', isActive: true, deactivatedAt: null,
         partner: { ownerName: 'Owner One', phone: '7000000000', gstNumber: 'GST123', panNumber: 'PAN123' },
+        parent: { partnerCode: 'CPP01' },
       },
       {
         id: 'o2', partnerId: null, zone: null, outletCode: 'OUT002', name: 'Shop Two',
@@ -120,6 +121,7 @@ describe('ReportsService.outletMaster (56 columns)', () => {
         addressLine1: null, addressLine2: null, city: 'Pune', state: 'MH', pincode: null,
         phone: null, isActive: false, deactivatedAt: new Date('2026-06-01T00:00:00Z'),
         partner: null,
+        parent: null,
       },
     ]);
 
@@ -172,6 +174,10 @@ describe('ReportsService.outletMaster (56 columns)', () => {
     expect(r1[idx('ZNM ID')]).toBe('');
     expect(r1[idx('NSM ID')]).toBe('');
     expect(r1[idx('RSM Name')]).toBe('Rsm Name');
+
+    // Parent ID = the owner-group parent's partnerCode (round-trips through the upload).
+    expect(r1[idx('Parent ID')]).toBe('CPP01');
+    expect(r2[idx('Parent ID')]).toBe(''); // no parent group
 
     // Profile status.
     expect(r1[idx('Profile Status')]).toBe('Active');

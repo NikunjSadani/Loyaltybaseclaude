@@ -25,7 +25,7 @@ const DEFAULT_STATUSES = ['OPEN', 'IN_PROGRESS', 'PENDING_USER', 'ESCALATED'];
 
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-// ── Outlet Master (56-column) types & helpers ─────────────────────────────────
+// ── Outlet Master (57-column) types & helpers ─────────────────────────────────
 const RUNGS = ['XSR', 'SO', 'ASM', 'RSM', 'ZNM', 'NSM'] as const;
 type Rung = (typeof RUNGS)[number];
 
@@ -47,10 +47,10 @@ function dateOnly(d: Date | null | undefined): string {
   return d ? new Date(d).toISOString().split('T')[0] : '';
 }
 
-/** The 56 header keys in exact order — used to seed an empty sheet so headers persist. */
+/** The 57 header keys in exact order — used to seed an empty sheet so headers persist. */
 const OUTLET_MASTER_HEADERS: string[] = [
   'Zone', 'Outlet Code', 'Outlet Name', 'Outlet Type', 'Program Name', 'Program Category',
-  'Distributor Code', 'Distributor Name', 'Metro', 'Beat',
+  'Distributor Code', 'Distributor Name', 'Metro', 'Beat', 'Parent ID',
   ...RUNGS.flatMap((r) => [`${r} ID`, `${r} Name`, `${r} Phone Number`]),
   'Owner Name', 'Phone Number', 'Address', 'City', 'State', 'Pincode',
   'Latitude of Outlet Board', 'Longitude of Outlet Board',
@@ -62,7 +62,7 @@ const OUTLET_MASTER_HEADERS: string[] = [
   'Remarks', 'GST', 'PAN', 'GST Certificate', 'Address Proof', 'Self-Declaration', 'Deactivated At',
 ];
 
-/** A single all-empty row carrying every header key, so an empty export still has the 56 columns. */
+/** A single all-empty row carrying every header key, so an empty export still has the 57 columns. */
 function emptyOutletMasterRow(): Record<string, unknown> {
   return Object.fromEntries(OUTLET_MASTER_HEADERS.map((h) => [h, ''] as const));
 }
@@ -89,10 +89,10 @@ export class ReportsService {
     return /^\d{4}-(0[1-9]|1[0-2])$/.test(s);
   }
 
-  // ── Outlet Master (56 columns) ──────────────────────────────────────────────
+  // ── Outlet Master (57 columns) ──────────────────────────────────────────────
   /**
    * GET /v1/admin/reports/outlet-master — tenant-scoped xlsx with the full
-   * 56-column outlet master. Batch-loaded (no N+1): one outlets+partner query,
+   * 57-column outlet master. Batch-loaded (no N+1): one outlets+partner query,
    * one active-assignment query (with the SalesUser reportingTo chain), one
    * submissions+documents+statusHistory query — then assembled in memory.
    *
@@ -134,6 +134,12 @@ export class ReportsService {
             gstNumber: true,
             panNumber: true,
           },
+        },
+        // Owner-group parent (Outlet.parentId → parent ChannelPartner) — emit its
+        // partnerCode so the "Parent ID" column round-trips through the upload (which
+        // keys the outlet to a group by the parent's partnerCode).
+        parent: {
+          select: { partnerCode: true },
         },
       },
       orderBy: { outletCode: 'asc' },
@@ -243,8 +249,10 @@ export class ReportsService {
       row['Distributor Name'] = o.distributorName ?? '';
       row['Metro'] = o.metro ?? '';
       row['Beat'] = o.beat ?? '';
+      // Owner-group parent code (round-trips through the outlet-master upload's "Parent ID").
+      row['Parent ID'] = o.parent?.partnerCode ?? '';
 
-      // 11-28 sales-hierarchy rungs, mapped by hierarchyLevel.code.
+      // sales-hierarchy rungs, mapped by hierarchyLevel.code.
       const byRung = this.resolveRungs(assignmentByOutlet.get(o.id));
       for (const rung of RUNGS) {
         const su = byRung[rung];
@@ -316,7 +324,7 @@ export class ReportsService {
       return row;
     });
 
-    // Guarantee the 56 headers exist (and in order) even when outlets is empty:
+    // Guarantee the 57 headers exist (and in order) even when outlets is empty:
     // buildXlsx derives the header row from the first object's keys.
     const sheetRows = rows.length ? rows : [emptyOutletMasterRow()];
 
