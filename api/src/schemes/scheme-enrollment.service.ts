@@ -23,6 +23,7 @@ import {
   FormField,
   applyPrefillPins,
   evaluateVisibleWhen,
+  pickBoundPrefill,
   validateSubmittedValues,
 } from './enrollment-form.helper';
 import {
@@ -836,7 +837,9 @@ export class SchemeEnrollmentService {
 
     const schemes = await this.prisma.scheme.findMany({
       where: { clientId: user.clientId, status: 'ACTIVE', deletedAt: null },
-      include: { enrollmentForm: { select: { campaignType: true, version: true } } },
+      // formSchema is included ONLY to project prefillValues to form-bound keys
+      // (pickBoundPrefill); it is trimmed off the response below (not shipped in the list).
+      include: { enrollmentForm: { select: { campaignType: true, version: true, formSchema: true } } },
       orderBy: { createdAt: 'desc' },
     });
     if (!partnerId) return { schemes: [] };
@@ -884,7 +887,12 @@ export class SchemeEnrollmentService {
           eligible.push({
             ...scheme,
             mySchemeOutletId: rostered.id,
-            prefillValues: (rostered.prefillValues as Record<string, string> | null) ?? null,
+            // Project to ONLY the columns the form binds to — unbound admin columns
+            // (PAN, internal notes, …) are never shipped to the enroller (MED-1).
+            prefillValues: pickBoundPrefill(
+              rostered.prefillValues as Record<string, string> | null,
+              scheme.enrollmentForm?.formSchema,
+            ),
           });
         }
       } else {
@@ -894,12 +902,20 @@ export class SchemeEnrollmentService {
         }
       }
     }
-    return { schemes: eligible };
+    // Trim formSchema back off enrollmentForm — it was included only to project
+    // prefillValues; the list response keeps its original {campaignType, version} shape.
+    const schemesOut = eligible.map(({ enrollmentForm, ...rest }) => ({
+      ...rest,
+      enrollmentForm: enrollmentForm
+        ? { campaignType: enrollmentForm.campaignType, version: enrollmentForm.version }
+        : null,
+    }));
+    return { schemes: schemesOut };
   }
 
   /** Current enrollment for the active partner's roster row within a scheme (or 404). */
   async getMyEnrollment(user: JwtPayload, schemeId: string, requestedPartnerId?: string) {
-    const scheme = await this.loadScheme(user, schemeId);
+    const scheme = await this.loadSchemeWithForm(user, schemeId);
     const { partnerId, forbidden } = await resolveActivePartnerId(this.prisma, {
       clientId: user.clientId,
       userSub: user.sub,
@@ -929,8 +945,12 @@ export class SchemeEnrollmentService {
         id: row.id,
         outletName: row.outletName,
         // Excel prefill variables for THIS matched roster row (D13) — the outlet portal
-        // prefills locked/editable fields from these. Only the enroller's own row.
-        prefillValues: (row.prefillValues ?? null) as Record<string, string> | null,
+        // prefills locked/editable fields from these. Only the enroller's own row, and
+        // only the columns the form binds to (MED-1 data minimisation).
+        prefillValues: pickBoundPrefill(
+          row.prefillValues as Record<string, string> | null,
+          scheme.enrollmentForm?.formSchema,
+        ),
       },
       enrollment: row.enrollment,
     };
@@ -982,7 +1002,7 @@ export class SchemeEnrollmentService {
    */
   async getSalesTargets(user: JwtPayload, schemeId: string, q: SalesTargetsQueryDto = {}) {
     const caller = await this.requireCallerSalesUser(user);
-    const scheme = await this.loadScheme(user, schemeId);
+    const scheme = await this.loadSchemeWithForm(user, schemeId);
 
     const edges = await this.loadSalesEdges(scheme.clientId);
     const reach = descendantSalesUserIds(caller.id, edges); // includes self
@@ -1024,7 +1044,11 @@ export class SchemeEnrollmentService {
       rejectionReason: r.enrollment?.rejectionReason ?? null,
       enrollmentId: r.enrollment?.id ?? null,
       currentVersion: r.enrollment?.currentVersion ?? null,
-      prefillValues: (r.prefillValues ?? null) as Record<string, string> | null,
+      // Only the columns the form binds to (MED-1 data minimisation).
+      prefillValues: pickBoundPrefill(
+        r.prefillValues as Record<string, string> | null,
+        scheme.enrollmentForm?.formSchema,
+      ),
     }));
 
     // Live-rule targets — reachable outlets matching the filter, not already rostered.

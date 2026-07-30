@@ -27,6 +27,7 @@
 import {
   validateFormSchema,
   applyPrefillPins,
+  pickBoundPrefill,
   CAMPAIGN_TYPES,
   type EnrollmentFormSchema,
   type FormField,
@@ -399,19 +400,87 @@ describe('applyPrefillPins', () => {
     expect(out.calc).toBe('5');
   });
 
-  it('pins DROPDOWN / NUMBER / TOGGLE value-type fields', () => {
+  it('pins DROPDOWN / NUMBER as raw strings', () => {
     const schema = mkSchema(
       mkField({ id: 'd', type: 'DROPDOWN', locked: true, prefillKey: 'D', options: ['A', 'B'] }),
       mkField({ id: 'n', type: 'NUMBER', locked: true, prefillKey: 'N' }),
-      mkField({ id: 't', type: 'TOGGLE', locked: true, prefillKey: 'T' }),
     );
-    const out = applyPrefillPins(schema, {}, { D: 'B', N: '42', T: 'true' });
-    expect(out).toMatchObject({ d: 'B', n: '42', t: 'true' });
+    const out = applyPrefillPins(schema, {}, { D: 'B', N: '42' });
+    expect(out).toMatchObject({ d: 'B', n: '42' });
+  });
+
+  it('coerces a pinned TOGGLE to a real boolean (matches an editable submission shape)', () => {
+    const schema = mkSchema(mkField({ id: 't', type: 'TOGGLE', locked: true, prefillKey: 'T' }));
+    expect(applyPrefillPins(schema, {}, { T: 'true' }).t).toBe(true);
+    expect(applyPrefillPins(schema, {}, { T: 'yes' }).t).toBe(true);
+    expect(applyPrefillPins(schema, {}, { T: 'no' }).t).toBe(false);
+    expect(applyPrefillPins(schema, {}, { T: '0' }).t).toBe(false);
+  });
+
+  it('coerces a pinned MULTI_SELECT to an array of trimmed options', () => {
+    const schema = mkSchema(
+      mkField({ id: 'm', type: 'MULTI_SELECT', locked: true, prefillKey: 'M', options: ['A', 'B', 'C'] }),
+    );
+    expect(applyPrefillPins(schema, {}, { M: 'A, B ,C' }).m).toEqual(['A', 'B', 'C']);
   });
 
   it('is a no-op when prefillValues is null/undefined', () => {
     const schema = mkSchema(mkField({ id: 'slab', type: 'TEXT', locked: true, prefillKey: 'Slab' }));
     expect(applyPrefillPins(schema, { slab: 'x' }, null)).toEqual({ slab: 'x' });
     expect(applyPrefillPins(schema, { slab: 'x' }, undefined)).toEqual({ slab: 'x' });
+  });
+});
+
+describe('pickBoundPrefill (MED-1 data minimisation)', () => {
+  const schema = {
+    captureGpsOnSubmit: false,
+    requireOtp: false,
+    fields: [
+      { id: 'slab', type: 'TEXT', label: 'Slab', required: false, order: 0, prefillKey: 'Slab' },
+      { id: 'ph', type: 'PHONE_OTP', label: 'Ph', required: false, order: 1, prefillKey: 'Phone', otpRequired: true },
+    ],
+  };
+
+  it('returns ONLY the columns the form binds to (drops unbound admin columns)', () => {
+    const out = pickBoundPrefill(
+      { Slab: 'Gold', Phone: '9000000000', PAN: 'ABCDE1234F', internal_notes: 'secret' },
+      schema,
+    );
+    expect(out).toEqual({ Slab: 'Gold', Phone: '9000000000' });
+  });
+
+  it('returns null when no bound key has a value, or the schema binds nothing', () => {
+    expect(pickBoundPrefill({ PAN: 'X' }, schema)).toBeNull();
+    expect(pickBoundPrefill({ Slab: 'Gold' }, { fields: [] })).toBeNull();
+    expect(pickBoundPrefill(null, schema)).toBeNull();
+    expect(pickBoundPrefill({ Slab: '' }, schema)).toBeNull(); // empty value dropped
+  });
+});
+
+describe('validateFormSchema — locked PHONE_OTP consent (MED-2)', () => {
+  const base = (over: Record<string, unknown>) => ({
+    captureGpsOnSubmit: false,
+    requireOtp: false,
+    fields: [
+      {
+        id: 'ph', type: 'PHONE_OTP', label: 'Phone', required: false, order: 0,
+        ...over,
+      },
+    ],
+  });
+
+  it('rejects a locked, Excel-prefilled PHONE_OTP that is not otpRequired', () => {
+    const errs = validateFormSchema(base({ locked: true, prefillKey: 'Phone', otpRequired: false }));
+    expect(errs.some((e) => /otpRequired enabled/.test(e))).toBe(true);
+  });
+
+  it('accepts a locked, Excel-prefilled PHONE_OTP when otpRequired is true', () => {
+    const errs = validateFormSchema(base({ locked: true, prefillKey: 'Phone', otpRequired: true }));
+    expect(errs.some((e) => /otpRequired enabled/.test(e))).toBe(false);
+  });
+
+  it('does not require otpRequired for an EDITABLE (unlocked) prefilled phone', () => {
+    const errs = validateFormSchema(base({ locked: false, prefillKey: 'Phone' }));
+    expect(errs.some((e) => /otpRequired enabled/.test(e))).toBe(false);
   });
 });

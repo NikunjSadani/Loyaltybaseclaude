@@ -368,7 +368,14 @@ function FieldRenderer(props: FieldRendererProps) {
   const { field, values, setValue, prefill } = props;
   const val = values[field.id];
   const req = isFieldRequired(field, values);
-  const locked = Boolean(field.locked);
+  // A LOCKED field disables its input ONLY when a roster prefill value actually exists
+  // for it — matching the backend, where a blank roster cell falls back to editable and
+  // never pins (so a required locked field with a blank cell can't brick the form).
+  // `prefill` carries only form-bound, non-empty columns (server-projected).
+  const prefillVal =
+    prefill?.[field.id] ?? (field.prefillKey ? prefill?.[field.prefillKey] : undefined);
+  const hasPrefill = prefillVal !== undefined && prefillVal !== null && prefillVal !== '';
+  const locked = Boolean(field.locked) && hasPrefill;
 
   switch (field.type) {
     // ── Structural / display ──────────────────────────────────────────────────
@@ -805,7 +812,7 @@ function GpsField({ field, values, setValue, captureGps, req }: FieldRendererPro
 // ── Phone-OTP field (D16) ─────────────────────────────────────────────────────
 
 function PhoneOtpField({
-  field, values, setValue, context, subject, otpVerified, setOtpVerified, ownerPhoneMasked, req,
+  field, values, setValue, context, subject, otpVerified, setOtpVerified, ownerPhoneMasked, req, prefill,
 }: FieldRendererProps & { req: boolean }) {
   const { schemeId, outletApproved } = context;
   const [otp, setOtp] = useState('');
@@ -815,13 +822,20 @@ function PhoneOtpField({
   const [locked, setLocked] = useState(outletApproved);
   const [phoneMasked, setPhoneMasked] = useState(ownerPhoneMasked ?? '');
   const [error, setError] = useState('');
-  // Pinned outlets never edit the number; everyone else types it.
-  const editable = !outletApproved && !field.locked;
+  // A per-field LOCKED phone is enforced ONLY when a roster number actually exists for
+  // this row (matches the backend: no roster value → falls back to an editable typed
+  // number, never a disabled empty input that would dead-end the OTP send).
+  const prefillVal =
+    prefill?.[field.id] ?? (field.prefillKey ? prefill?.[field.prefillKey] : undefined);
+  const hasPrefill = prefillVal !== undefined && prefillVal !== null && prefillVal !== '';
+  // Pinned outlets never edit the number; a locked-with-roster-value field is read-only;
+  // everyone else (incl. locked-but-no-roster-value) types it.
+  const editable = !outletApproved && (!field.locked || !hasPrefill);
   const typed = String(values[field.id] ?? '');
-  // A per-field LOCKED phone (D13a) on a non-approved row: show the roster-prefilled
-  // number read-only. The backend authoritatively OTPs that number on send, so the
-  // filler must not be able to type a different one.
-  const fieldLocked = !outletApproved && Boolean(field.locked);
+  // A per-field LOCKED phone (D13a) on a non-approved row WITH a roster number: show it
+  // read-only. The backend authoritatively OTPs that number on send, so the filler must
+  // not be able to type a different one.
+  const fieldLocked = !outletApproved && Boolean(field.locked) && hasPrefill;
 
   const send = async () => {
     setSending(true);

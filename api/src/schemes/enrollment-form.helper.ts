@@ -172,10 +172,70 @@ export function applyPrefillPins(
 
     const pin = prefillValues[field.prefillKey];
     if (typeof pin === 'string' && pin !== '') {
-      out[field.id] = pin;
+      out[field.id] = coercePinnedValue(field.type, pin);
     }
   }
   return out;
+}
+
+/**
+ * Coerce a pinned roster string into the SHAPE a normal client submission stores for
+ * that field type, so a locked value and an editable value of the same field are
+ * indistinguishable downstream (report/export):
+ *   • MULTI_SELECT → array of trimmed option values (roster stores "A,B" → ["A","B"]).
+ *   • TOGGLE       → real boolean (roster "yes"/"1"/"true" → true).
+ *   • everything else → the raw string (TEXT/NUMBER/EMAIL/DATE/DROPDOWN validate as-is).
+ */
+function coercePinnedValue(type: string, pin: string): unknown {
+  if (type === 'MULTI_SELECT') {
+    return pin.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  if (type === 'TOGGLE') {
+    const t = pin.trim().toLowerCase();
+    if (TRUE_TOKENS.has(t)) return true;
+    if (FALSE_TOKENS.has(t)) return false;
+    return pin; // leave odd values for the validator to reject
+  }
+  return pin;
+}
+
+/**
+ * The set of Excel-column keys a form actually BINDS to (every field's non-empty
+ * `prefillKey`). Used to project a roster row's `prefillValues` down to only the
+ * columns the form surfaces — so unbound admin columns (PAN, internal notes, …) are
+ * never shipped to the enroller's browser (data minimisation).
+ */
+export function collectPrefillKeys(schema: unknown): Set<string> {
+  const keys = new Set<string>();
+  const fields = isObject(schema) && Array.isArray((schema as { fields?: unknown }).fields)
+    ? ((schema as { fields: unknown[] }).fields)
+    : [];
+  for (const f of fields) {
+    if (isObject(f) && typeof f.prefillKey === 'string' && f.prefillKey.trim() !== '') {
+      keys.add(f.prefillKey);
+    }
+  }
+  return keys;
+}
+
+/**
+ * Project a roster row's `prefillValues` to only the columns the form binds to.
+ * Returns null when there is nothing to expose (no roster values, no bound keys, or
+ * no overlap) — the enrollee endpoints hand this to the FE instead of the raw blob.
+ */
+export function pickBoundPrefill(
+  prefillValues: Record<string, string> | null | undefined,
+  schema: unknown,
+): Record<string, string> | null {
+  if (!prefillValues || typeof prefillValues !== 'object') return null;
+  const keys = collectPrefillKeys(schema);
+  if (keys.size === 0) return null;
+  const out: Record<string, string> = {};
+  for (const k of keys) {
+    const v = prefillValues[k];
+    if (typeof v === 'string' && v !== '') out[k] = v;
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -347,6 +407,24 @@ export function validateFormSchema(rawSchema: unknown): string[] {
     }
     if (f.prefillKey !== undefined && !isString(f.prefillKey)) {
       errors.push(`${pos}: prefillKey must be a string.`);
+    }
+
+    // Consent integrity (D13a/D16): a LOCKED, Excel-bound PHONE_OTP field is pinned to
+    // its roster number ONLY through the OTP path, which engages solely when the field
+    // is `otpRequired`. A locked+prefillKey PHONE_OTP without otpRequired would show the
+    // filler a disabled input while the backend never pins it (the client value would
+    // persist) — the "Locked" promise would be silently unenforced. Reject that combo.
+    if (
+      f.type === 'PHONE_OTP' &&
+      f.locked === true &&
+      isString(f.prefillKey) &&
+      (f.prefillKey as string).trim() !== '' &&
+      f.otpRequired !== true
+    ) {
+      const lbl = isString(f.label) && f.label.trim() ? f.label : 'PHONE_OTP';
+      errors.push(
+        `${pos} ("${lbl}"): a locked, Excel-prefilled phone field must have otpRequired enabled (else the lock is not enforced).`,
+      );
     }
   }
 
