@@ -223,7 +223,8 @@ export class SchemeReportService {
     });
 
     const enrollments = await this.prisma.schemeEnrollment.findMany({
-      where: { schemeId },
+      // Soft-deleted enrollments are excluded from coverage/counts (they read as NOT_ENROLLED).
+      where: { schemeId, deletedAt: null },
       select: { schemeOutletId: true, status: true },
     });
 
@@ -376,6 +377,7 @@ export class SchemeReportService {
             formValues: true,
             enrolledAt: true,
             rejectionReason: true,
+            deletedAt: true,
             submittedBy: { select: { name: true, phone: true } },
           },
         },
@@ -402,7 +404,9 @@ export class SchemeReportService {
       programCategory: r.matchedOutlet?.programCategory ?? null,
       outletType: r.matchedOutlet?.outletType?.name ?? null,
       taggedEmployeeCode: r.taggedSalesUser?.employeeCode ?? null,
-      enrollment: r.enrollment
+      // A soft-deleted enrollment reads as absent (NOT_ENROLLED) in the export — its captured
+      // values must never leak into the xlsx.
+      enrollment: r.enrollment && r.enrollment.deletedAt == null
         ? {
             status: r.enrollment.status,
             currentVersion: r.enrollment.currentVersion,

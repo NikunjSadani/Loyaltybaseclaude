@@ -66,6 +66,8 @@ interface AudienceConfig {
   mode: 'FILTER' | 'EXCEL';
   selfEnrollAllowed: boolean;
   frozen: boolean;
+  /** Admin-set per-scheme flag: an enroller may edit a live SUBMITTED enrollment (default false). */
+  allowEnrollerEdit: boolean;
   filter?: AudienceFilter;
 }
 
@@ -170,6 +172,7 @@ export class SchemeEnrollmentService {
       mode: cfg.mode,
       selfEnrollAllowed: cfg.selfEnrollAllowed === true,
       frozen: cfg.frozen === true,
+      allowEnrollerEdit: cfg.allowEnrollerEdit === true,
       filter: cfg.filter,
     };
   }
@@ -762,10 +765,12 @@ export class SchemeEnrollmentService {
 
     const row = await this.resolveRoster(user, scheme, mode, dto, requestedPartnerId);
 
-    // Immutability (D10): a live (SUBMITTED) enrollment cannot be silently overwritten —
-    // it is superseded only via reject → resubmit. A REJECTED enrollment re-enrolls fresh.
+    // Immutability (D10): a LIVE (deletedAt == null) SUBMITTED enrollment cannot be silently
+    // overwritten — it is superseded only via reject → resubmit. A REJECTED enrollment
+    // re-enrolls fresh. A SOFT-DELETED enrollment (deletedAt != null) is re-enrollable: the
+    // SAME row is reset (submit() clears deletedAt + appends a new version), keeping the 1:1.
     const existing = await this.prisma.schemeEnrollment.findUnique({ where: { schemeOutletId: row.id } });
-    if (existing && existing.status === 'SUBMITTED') {
+    if (existing && existing.status === 'SUBMITTED' && existing.deletedAt == null) {
       throw new BadRequestException('This outlet is already enrolled. Use resubmit after a rejection.');
     }
 
@@ -787,14 +792,26 @@ export class SchemeEnrollmentService {
       include: { schemeOutlet: true },
     });
     if (!enrollment) throw new NotFoundException('Enrollment not found.');
-    // Resubmit is the post-rejection correction path (D10).
-    if (enrollment.status !== 'REJECTED') {
+    // A soft-deleted enrollment reads as absent — it is not an editable live enrollment.
+    if (enrollment.deletedAt != null) throw new NotFoundException('Enrollment not found.');
+    // Resubmit is the post-rejection correction path (D10). It ALSO doubles as the enroller
+    // EDIT path for a live SUBMITTED enrollment — but only when the scheme's admin-set
+    // audienceConfig.allowEnrollerEdit flag is on (otherwise a live submission is immutable
+    // to the enroller and only an admin can edit it).
+    const audience = this.parseAudience(scheme);
+    if (enrollment.status === 'REJECTED') {
+      // always allowed
+    } else if (enrollment.status === 'SUBMITTED') {
+      if (!audience?.allowEnrollerEdit) {
+        throw new BadRequestException('Editing a submitted enrollment is not enabled for this scheme.');
+      }
+    } else {
       throw new BadRequestException('Only a rejected enrollment can be resubmitted.');
     }
 
     const mode = (enrollment.enrollmentMode as EnrollmentMode) ?? 'SELF';
     // Re-authorize the caller against the roster row before accepting a new version.
-    await this.authorizeRoster(user, scheme, this.parseAudience(scheme), mode, enrollment.schemeOutlet, requestedPartnerId);
+    await this.authorizeRoster(user, scheme, audience, mode, enrollment.schemeOutlet, requestedPartnerId);
 
     return this.submit(user, scheme, enrollment.schemeOutlet, mode, dto.formValues, dto.mobile, enrollment.id);
   }
@@ -908,6 +925,8 @@ export class SchemeEnrollmentService {
               currentVersion: version,
               formVersion,
               rejectionReason: null,
+              // Re-enroll / edit un-deletes the row (soft-delete reset) as well as un-rejecting it.
+              deletedAt: null,
               submittedByUserId,
               enrolledAt: now,
               updatedAt: now,
@@ -980,6 +999,8 @@ export class SchemeEnrollmentService {
       where: { id: enrollmentId, schemeId: scheme.id },
     });
     if (!enrollment) throw new NotFoundException('Enrollment not found.');
+    // A soft-deleted enrollment reads as absent — it cannot be rejected.
+    if (enrollment.deletedAt != null) throw new NotFoundException('Enrollment not found.');
 
     // Status → REJECTED + reason, AND append an immutable REJECTED event to the submission
     // trail (D10). Without the appended row, a later resubmit (which nulls the live
@@ -1025,6 +1046,79 @@ export class SchemeEnrollmentService {
       }
       throw e;
     }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Admin edit / delete / restore (GIFSY_ADMIN)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Admin edit (GIFSY_ADMIN) — always allowed, from any live state (SUBMITTED or REJECTED).
+   * Re-runs the SAME validate → version → persist path as resubmit (submit() with the
+   * existing enrollment id), so it appends a new immutable SchemeSubmission version and
+   * updates the live values. A soft-deleted enrollment is un-deleted by submit() (deletedAt
+   * cleared) as a side effect — an admin editing a deleted row restores it, which is fine.
+   */
+  async adminEditEnrollment(
+    user: JwtPayload,
+    schemeId: string,
+    enrollmentId: string,
+    dto: ResubmitEnrollmentDto,
+  ) {
+    if (!this.isGifsyAdmin(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    const scheme = await this.loadSchemeWithForm(user, schemeId);
+
+    const enrollment = await this.prisma.schemeEnrollment.findFirst({
+      where: { id: enrollmentId, schemeId: scheme.id },
+      include: { schemeOutlet: true },
+    });
+    if (!enrollment) throw new NotFoundException('Enrollment not found.');
+
+    const mode = (enrollment.enrollmentMode as EnrollmentMode) ?? 'SELF';
+    return this.submit(user, scheme, enrollment.schemeOutlet, mode, dto.formValues, dto.mobile, enrollment.id);
+  }
+
+  /**
+   * Soft-delete (GIFSY_ADMIN) — set deletedAt so the enrollment reads as absent everywhere
+   * (the outlet re-enrolls into the SAME row). Idempotent: deleting an already-deleted
+   * enrollment is a no-op. History (SchemeSubmission rows) is always retained.
+   */
+  async deleteEnrollment(user: JwtPayload, schemeId: string, enrollmentId: string) {
+    if (!this.isGifsyAdmin(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    const scheme = await this.loadScheme(user, schemeId);
+    const enrollment = await this.prisma.schemeEnrollment.findFirst({
+      where: { id: enrollmentId, schemeId: scheme.id },
+    });
+    if (!enrollment) throw new NotFoundException('Enrollment not found.');
+    if (enrollment.deletedAt != null) {
+      return { enrollment }; // already deleted — idempotent no-op
+    }
+    const updated = await this.prisma.schemeEnrollment.update({
+      where: { id: enrollment.id },
+      data: { deletedAt: new Date(), updatedAt: new Date() },
+    });
+    return { enrollment: updated };
+  }
+
+  /**
+   * Restore (GIFSY_ADMIN) — clear deletedAt on a soft-deleted enrollment so it reads as live
+   * again (recovery path). Idempotent on an already-live enrollment.
+   */
+  async restoreEnrollment(user: JwtPayload, schemeId: string, enrollmentId: string) {
+    if (!this.isGifsyAdmin(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    const scheme = await this.loadScheme(user, schemeId);
+    const enrollment = await this.prisma.schemeEnrollment.findFirst({
+      where: { id: enrollmentId, schemeId: scheme.id },
+    });
+    if (!enrollment) throw new NotFoundException('Enrollment not found.');
+    if (enrollment.deletedAt == null) {
+      return { enrollment }; // already live — idempotent no-op
+    }
+    const updated = await this.prisma.schemeEnrollment.update({
+      where: { id: enrollment.id },
+      data: { deletedAt: null, updatedAt: new Date() },
+    });
+    return { enrollment: updated };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -1164,7 +1258,10 @@ export class SchemeEnrollmentService {
       },
       include: { enrollment: true },
     });
-    if (!row || !row.enrollment) throw new NotFoundException('Enrollment not found.');
+    // A soft-deleted enrollment reads as absent (→ 404), so the row is re-enrollable.
+    if (!row || !row.enrollment || row.enrollment.deletedAt != null) {
+      throw new NotFoundException('Enrollment not found.');
+    }
     const ctxMap = await this.loadOutletFieldContext(
       user.clientId,
       [row],
@@ -1271,7 +1368,7 @@ export class SchemeEnrollmentService {
     const rosterRows = await this.prisma.schemeOutlet.findMany({
       where: { schemeId: scheme.id, clientId: scheme.clientId, OR: rosterOr },
       include: {
-        enrollment: { select: { id: true, status: true, rejectionReason: true, currentVersion: true } },
+        enrollment: { select: { id: true, status: true, rejectionReason: true, currentVersion: true, deletedAt: true } },
       },
     });
 
@@ -1284,17 +1381,21 @@ export class SchemeEnrollmentService {
     );
     const NO_MATCH = { outletFieldValues: null, outletApproved: false, ownerPhoneMasked: null } as const;
 
-    const rosterTargets: SalesTargetRow[] = rosterRows.map((r) => ({
+    const rosterTargets: SalesTargetRow[] = rosterRows.map((r) => {
+      // A soft-deleted enrollment reads as absent → the row surfaces as NOT_ENROLLED so the
+      // rep can re-enroll (into the same row, which submit() resets).
+      const liveEnrollment = r.enrollment && r.enrollment.deletedAt == null ? r.enrollment : null;
+      return {
       schemeOutletId: r.id,
       targetOutletRef: null,
       outletRef: r.outletRef,
       outletName: r.outletName,
       matched: Boolean(r.matchedOutletId),
       standalone: !r.matchedOutletId,
-      status: (r.enrollment?.status as SalesTargetRow['status']) ?? 'NOT_ENROLLED',
-      rejectionReason: r.enrollment?.rejectionReason ?? null,
-      enrollmentId: r.enrollment?.id ?? null,
-      currentVersion: r.enrollment?.currentVersion ?? null,
+      status: (liveEnrollment?.status as SalesTargetRow['status']) ?? 'NOT_ENROLLED',
+      rejectionReason: liveEnrollment?.rejectionReason ?? null,
+      enrollmentId: liveEnrollment?.id ?? null,
+      currentVersion: liveEnrollment?.currentVersion ?? null,
       // Only the columns the form binds to (MED-1 data minimisation) + the roster's own
       // Outlet ID/Name so a DATA_DISPLAY bound to them resolves (matched OR standalone).
       prefillValues: pickBoundPrefill(
@@ -1302,7 +1403,8 @@ export class SchemeEnrollmentService {
         scheme.enrollmentForm?.formSchema,
       ),
       ...(rosterCtx.get(r.matchedOutletId ?? r.matchedPartnerId ?? '') ?? NO_MATCH),
-    }));
+      };
+    });
 
     // Live-rule targets — reachable outlets matching the filter, not already rostered.
     const audience = this.parseAudience(scheme);
@@ -1414,7 +1516,9 @@ export class SchemeEnrollmentService {
     };
 
     // Filter to rows that actually have an enrollment (roster rows without one are shown too,
-    // but a status/date filter narrows to enrolled rows).
+    // but a status/date filter narrows to enrolled rows). A soft-deleted enrollment never
+    // satisfies a status/date filter (deletedAt: null on the relation filter), and is nulled
+    // out of the shaped row below so a deleted capture never appears in the admin list.
     const enrollmentWhere: Prisma.SchemeEnrollmentWhereInput = {};
     if (q.status) enrollmentWhere.status = q.status;
     if (q.from || q.to) {
@@ -1424,7 +1528,7 @@ export class SchemeEnrollmentService {
       };
     }
     if (Object.keys(enrollmentWhere).length > 0) {
-      where.enrollment = { is: enrollmentWhere };
+      where.enrollment = { is: { ...enrollmentWhere, deletedAt: null } };
     }
 
     const [rows, total] = await Promise.all([
@@ -1449,7 +1553,14 @@ export class SchemeEnrollmentService {
     ]);
 
     return {
-      enrollments: rows.map((r) => this.shapeRosterRow(r)),
+      // A soft-deleted enrollment is nulled out — the roster row shows as NOT_ENROLLED, never
+      // as captured data (mirrors the status-filter exclusion above).
+      enrollments: rows.map((r) =>
+        this.shapeRosterRow({
+          ...r,
+          enrollment: r.enrollment && r.enrollment.deletedAt == null ? r.enrollment : null,
+        }),
+      ),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     };
   }
@@ -1458,7 +1569,8 @@ export class SchemeEnrollmentService {
     if (!this.isGifsyAdmin(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
     const scheme = await this.loadScheme(user, schemeId);
     const enrollment = await this.prisma.schemeEnrollment.findFirst({
-      where: { id: enrollmentId, schemeId: scheme.id },
+      // A soft-deleted enrollment reads as absent (→ 404) in the admin detail view.
+      where: { id: enrollmentId, schemeId: scheme.id, deletedAt: null },
       include: {
         schemeOutlet: {
           include: {

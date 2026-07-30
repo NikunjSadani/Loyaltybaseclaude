@@ -98,6 +98,11 @@ export interface SetAudienceInput {
   frozen: boolean;
   /** Required in FILTER mode; ignored in EXCEL mode. */
   filter?: AudienceFilter;
+  /**
+   * Allow the enroller (outlet self / sales rep) to EDIT their own SUBMITTED submission
+   * via the resubmit path. Persisted into `audienceConfig.allowEnrollerEdit`. Default off.
+   */
+  allowEnrollerEdit?: boolean;
 }
 
 export interface RosterUploadOptions {
@@ -487,6 +492,30 @@ export const schemeApi = {
     return api.post<{ enrollment: SchemeEnrollment }>(
       `${BASE}/${schemeId}/enrollments/${enrollmentId}/reject`,
       { reason },
+    );
+  },
+  /**
+   * GIFSY admin EDITS a filled enrollment — persisted as a NEW version. Body reuses
+   * the resubmit shape (`{ formValues?, mobile? }`). Returns the updated enrollment +
+   * the new submission snapshot.
+   */
+  adminEditEnrollment(schemeId: string, enrollmentId: string, input: ResubmitInput) {
+    return api.put<{ enrollment: SchemeEnrollment; submission: SchemeSubmission }>(
+      `${BASE}/${schemeId}/enrollments/${enrollmentId}`,
+      input,
+    );
+  },
+  /** GIFSY admin soft-deletes a filled enrollment (frees the roster row to re-enroll; recoverable). */
+  deleteEnrollment(schemeId: string, enrollmentId: string) {
+    return api.del<{ enrollment: SchemeEnrollment }>(
+      `${BASE}/${schemeId}/enrollments/${enrollmentId}`,
+    );
+  },
+  /** GIFSY admin un-deletes a soft-deleted enrollment. */
+  restoreEnrollment(schemeId: string, enrollmentId: string) {
+    return api.post<{ enrollment: SchemeEnrollment }>(
+      `${BASE}/${schemeId}/enrollments/${enrollmentId}/restore`,
+      {},
     );
   },
 

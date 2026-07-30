@@ -243,6 +243,8 @@ export class SchemeAdminService {
       mode: dto.mode,
       selfEnrollAllowed: dto.selfEnrollAllowed,
       frozen: dto.frozen,
+      // Per-scheme enroller-edit flag (default false) — only persisted when explicitly set.
+      ...(dto.allowEnrollerEdit !== undefined ? { allowEnrollerEdit: dto.allowEnrollerEdit } : {}),
       ...(dto.filter ? { filter: dto.filter as unknown as Prisma.InputJsonValue } : {}),
     };
 
@@ -407,13 +409,20 @@ export class SchemeAdminService {
         orderBy: { createdAt: 'asc' },
         include: {
           taggedSalesUser: { select: { employeeCode: true } },
-          enrollment: { select: { id: true, status: true, currentVersion: true } },
+          enrollment: { select: { id: true, status: true, currentVersion: true, deletedAt: true } },
         },
       }),
       this.prisma.schemeOutlet.count({ where }),
     ]);
 
-    return { roster, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+    // A soft-deleted enrollment reads as no enrollment (the roster row shows NOT_ENROLLED),
+    // so the outlet can be re-enrolled into the same row.
+    const shaped = roster.map((r) => ({
+      ...r,
+      enrollment: r.enrollment && r.enrollment.deletedAt == null ? r.enrollment : null,
+    }));
+
+    return { roster: shaped, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
   }
 
   // ── Roster export (full xlsx download — no pagination) ─────────────────────
@@ -438,7 +447,7 @@ export class SchemeAdminService {
       include: {
         matchedOutlet: { select: { outletCode: true } },
         taggedSalesUser: { select: { employeeCode: true } },
-        enrollment: { select: { status: true, currentVersion: true, enrolledAt: true } },
+        enrollment: { select: { status: true, currentVersion: true, enrolledAt: true, deletedAt: true } },
       },
       orderBy: { createdAt: 'asc' },
     });
@@ -452,7 +461,14 @@ export class SchemeAdminService {
         for (const k of Object.keys(pv)) prefillKeys.add(k);
       }
     }
-    const prefillCols = [...prefillKeys];
+    // Exclude any prefill key that collides with a fixed base-column header, so an
+    // uploaded variable column literally named e.g. "Version" or "Outlet ID" can never
+    // clobber the base column's value in the export (audit LOW — base column wins).
+    const RESERVED_EXPORT_COLS = new Set([
+      'Outlet ID', 'Outlet Name', 'Linkage', 'Matched Outlet Code',
+      'Tagged Employee', 'Enrollment Status', 'Version', 'Enrolled At',
+    ]);
+    const prefillCols = [...prefillKeys].filter((k) => !RESERVED_EXPORT_COLS.has(k));
 
     // The fixed base columns — always present so an empty roster still has a header row.
     const baseRow = (): Record<string, unknown> => ({
@@ -470,15 +486,17 @@ export class SchemeAdminService {
     const rows: Record<string, unknown>[] = roster.map((r) => {
       const pv = (r.prefillValues as Record<string, unknown> | null) ?? {};
       const row = baseRow();
+      // A soft-deleted enrollment reads as NOT_ENROLLED in the roster export.
+      const enr = r.enrollment && r.enrollment.deletedAt == null ? r.enrollment : null;
       row['Outlet ID'] = r.outletRef;
       row['Outlet Name'] = r.outletName;
       row['Linkage'] = r.matchedOutletId ? 'Matched' : 'Standalone';
       row['Matched Outlet Code'] = r.matchedOutlet?.outletCode ?? '';
       row['Tagged Employee'] = r.taggedSalesUser?.employeeCode ?? '';
-      row['Enrollment Status'] = r.enrollment?.status ?? 'NOT_ENROLLED';
-      row['Version'] = r.enrollment?.currentVersion ?? '';
-      row['Enrolled At'] = r.enrollment?.enrolledAt
-        ? r.enrollment.enrolledAt.toISOString().split('T')[0]
+      row['Enrollment Status'] = enr?.status ?? 'NOT_ENROLLED';
+      row['Version'] = enr?.currentVersion ?? '';
+      row['Enrolled At'] = enr?.enrolledAt
+        ? enr.enrolledAt.toISOString().split('T')[0]
         : '';
       for (const k of prefillCols) {
         const v = pv[k];

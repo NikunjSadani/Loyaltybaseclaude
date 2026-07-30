@@ -4,7 +4,7 @@ import { use, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   ArrowLeft, Download, ClipboardList, AlertCircle, X, Loader2, MapPin, FileText,
-  Image as ImageIcon, XCircle, Filter, ExternalLink, History,
+  Image as ImageIcon, XCircle, Filter, ExternalLink, History, Pencil, Trash2, Save, Undo2,
 } from 'lucide-react';
 import {
   schemeApi, rewriteMediaViewPath,
@@ -47,6 +47,12 @@ export default function EnrollmentsPage({ params }: { params: Promise<{ id: stri
   const [exporting, setExporting]   = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [openId, setOpenId]         = useState<string | null>(null);
+  // After a soft-delete the drawer closes and this "deleted — Undo" toast appears; Undo
+  // restores the enrollment (the admin list hides deleted rows, so this is the primary
+  // way back). Auto-dismisses.
+  const [undoToast, setUndoToast]   = useState<{ enrollmentId: string } | null>(null);
+  const [restoring, setRestoring]   = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   const query = useMemo<AdminListEnrollmentsQuery>(() => ({
     page,
@@ -79,6 +85,30 @@ export default function EnrollmentsPage({ params }: { params: Promise<{ id: stri
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { setPage(1); }, [status, programName, zone, stateF, outletTypeId, from, to]);
+
+  // Auto-dismiss the undo toast after 8s.
+  useEffect(() => {
+    if (!undoToast) return;
+    const t = setTimeout(() => setUndoToast(null), 8000);
+    return () => clearTimeout(t);
+  }, [undoToast]);
+
+  const handleDeleted = useCallback((enrollmentId: string) => {
+    setOpenId(null);
+    setRestoreError(null);
+    setUndoToast({ enrollmentId });
+    void load();
+  }, [load]);
+
+  const handleUndo = useCallback(async () => {
+    if (!undoToast) return;
+    setRestoring(true);
+    setRestoreError(null);
+    const res = await schemeApi.restoreEnrollment(schemeId, undoToast.enrollmentId);
+    setRestoring(false);
+    if (res.success) { setUndoToast(null); void load(); }
+    else setRestoreError(res.error);
+  }, [undoToast, schemeId, load]);
 
   const handleExport = async () => {
     setExporting(true);
@@ -209,11 +239,36 @@ export default function EnrollmentsPage({ params }: { params: Promise<{ id: stri
       )}
 
       {openId && (
-        <EnrollmentDrawer schemeId={schemeId} enrollmentId={openId} onClose={() => setOpenId(null)} onChanged={load} />
+        <EnrollmentDrawer schemeId={schemeId} enrollmentId={openId} onClose={() => setOpenId(null)} onChanged={load} onDeleted={handleDeleted} />
+      )}
+
+      {/* Deleted — Undo toast (soft-delete recovery) */}
+      {undoToast && (
+        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[60] flex flex-col items-center gap-1">
+          <div className="flex items-center gap-3 bg-gray-900 text-white text-sm rounded-xl shadow-lg px-4 py-2.5">
+            <Trash2 className="w-4 h-4 text-gray-300" />
+            <span>Enrollment deleted</span>
+            <button onClick={handleUndo} disabled={restoring}
+              className="flex items-center gap-1.5 text-[var(--brand-primary)] font-semibold hover:underline disabled:opacity-60">
+              {restoring ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Undo2 className="w-3.5 h-3.5" />} Undo
+            </button>
+            <button onClick={() => setUndoToast(null)} className="ml-1 text-gray-400 hover:text-white"><X className="w-3.5 h-3.5" /></button>
+          </div>
+          {restoreError && <p className="text-xs text-red-500 bg-white rounded px-2 py-0.5 shadow">{restoreError}</p>}
+        </div>
       )}
     </div>
   );
 }
+
+const editInputCls = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]';
+
+// Field types the admin cannot edit inline — their captured value (media object key,
+// GPS fix, computed/display) is preserved untouched on the new version.
+const UNEDITABLE_FIELD_TYPES = new Set<string>([
+  'DOCUMENT', 'IMAGE', 'CAMERA', 'UPI_QR_SCAN', 'SIGNATURE', 'GPS_POINT',
+  'CALCULATED', 'LOOKUP', 'SECTION', 'DATA_DISPLAY',
+]);
 
 const selCls = 'border border-gray-300 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]';
 
@@ -239,8 +294,8 @@ function StatTile({ label, value, tone }: { label: string; value: number | strin
 // ── Detail drawer ─────────────────────────────────────────────────────────────
 
 function EnrollmentDrawer({
-  schemeId, enrollmentId, onClose, onChanged,
-}: { schemeId: string; enrollmentId: string; onClose: () => void; onChanged: () => void }) {
+  schemeId, enrollmentId, onClose, onChanged, onDeleted,
+}: { schemeId: string; enrollmentId: string; onClose: () => void; onChanged: () => void; onDeleted: (enrollmentId: string) => void }) {
   const [detail, setDetail] = useState<AdminEnrollmentDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -248,6 +303,10 @@ function EnrollmentDrawer({
   const [reason, setReason] = useState('');
   const [rejecting, setRejecting] = useState(false);
   const [rejectError, setRejectError] = useState<string | null>(null);
+  const [mode, setMode] = useState<'view' | 'edit'>('view');
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -269,6 +328,17 @@ function EnrollmentDrawer({
     if (res.success) { setRejectOpen(false); setReason(''); await load(); onChanged(); }
     else setRejectError(res.error);
   };
+
+  const submitDelete = async () => {
+    setDeleting(true);
+    setDeleteError(null);
+    const res = await schemeApi.deleteEnrollment(schemeId, enrollmentId);
+    setDeleting(false);
+    if (res.success) onDeleted(enrollmentId); // parent closes drawer + refreshes + shows Undo toast
+    else setDeleteError(res.error);
+  };
+
+  const onEditSaved = async () => { setMode('view'); await load(); onChanged(); };
 
   const outlet = detail?.schemeOutlet;
   const captured = (detail?.formValues ?? {}) as Record<string, unknown>;
@@ -307,6 +377,43 @@ function EnrollmentDrawer({
                   <strong>Rejected:</strong> {detail.rejectionReason}
                 </div>
               )}
+            </div>
+
+            {mode === 'edit' ? (
+              <EnrollmentEditForm
+                schemeId={schemeId}
+                enrollmentId={enrollmentId}
+                detail={detail}
+                onSaved={onEditSaved}
+                onCancel={() => setMode('view')}
+              />
+            ) : (
+             <>
+            {/* Admin actions — Edit / Delete (Reject stays below) */}
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button onClick={() => { setMode('edit'); setConfirmDelete(false); }}
+                  className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50">
+                  <Pencil className="w-3.5 h-3.5" /> Edit
+                </button>
+                {!confirmDelete ? (
+                  <button onClick={() => { setConfirmDelete(true); setDeleteError(null); }}
+                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-red-200 text-red-600 rounded-lg hover:bg-red-50">
+                    <Trash2 className="w-3.5 h-3.5" /> Delete
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs text-gray-600">Delete this enrollment? It frees the roster row to re-enroll.</span>
+                    <button onClick={submitDelete} disabled={deleting}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-60">
+                      {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />} Confirm
+                    </button>
+                    <button onClick={() => setConfirmDelete(false)} disabled={deleting}
+                      className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-60">Cancel</button>
+                  </div>
+                )}
+              </div>
+              {deleteError && <p className="text-xs text-red-500 flex items-center gap-1"><AlertCircle className="w-3 h-3" />{deleteError}</p>}
             </div>
 
             {/* Captured values */}
@@ -410,8 +517,116 @@ function EnrollmentDrawer({
                 )}
               </div>
             )}
+             </>
+            )}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── Admin inline edit form (minimal field editor from formFields + formValues) ──
+//
+// A lightweight editor — NOT the full SchemeFormRenderer, which submits via the
+// enrollee `enroll` path. This edits scalar captured values and PUTs them via
+// `adminEditEnrollment` (saved as a new version). Media / GPS / computed fields are
+// shown read-only; the payload starts from the FULL current formValues so those
+// untouched values are preserved on the new version.
+
+function EnrollmentEditForm({
+  schemeId, enrollmentId, detail, onSaved, onCancel,
+}: {
+  schemeId: string;
+  enrollmentId: string;
+  detail: AdminEnrollmentDetail;
+  onSaved: () => void | Promise<void>;
+  onCancel: () => void;
+}) {
+  const fields = useMemo(
+    () =>
+      detail.formFields ??
+      Object.keys((detail.formValues ?? {}) as Record<string, unknown>).map((id) => ({ id, label: id, type: 'TEXT' })),
+    [detail],
+  );
+  const [values, setValues] = useState<Record<string, unknown>>(() => ({ ...((detail.formValues ?? {}) as Record<string, unknown>) }));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const set = (id: string, v: unknown) => setValues((p) => ({ ...p, [id]: v }));
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    const res = await schemeApi.adminEditEnrollment(schemeId, enrollmentId, { formValues: values });
+    setSaving(false);
+    if (res.success) await onSaved();
+    else setError(res.error);
+  };
+
+  const isOn = (v: unknown) => v === true || v === 'true' || v === 'yes' || v === '1';
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start gap-2 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 text-[11px] text-blue-700">
+        <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+        Saving creates a NEW version of this enrollment. Photos, signatures and location can’t be edited here — their captured values are kept.
+      </div>
+
+      <div className="space-y-3">
+        {fields.map((f) => {
+          const v = values[f.id];
+          if (UNEDITABLE_FIELD_TYPES.has(f.type)) {
+            const isObj = v != null && typeof v === 'object';
+            return (
+              <div key={f.id}>
+                <label className="block text-xs font-medium text-gray-700 mb-1">{f.label}</label>
+                <div className="text-xs text-gray-400 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                  {isObj ? 'Captured value kept (not editable here)' : v == null || v === '' ? '—' : String(v)}
+                </div>
+              </div>
+            );
+          }
+          if (f.type === 'TOGGLE') {
+            return (
+              <div key={f.id}>
+                <label htmlFor={`edit-${f.id}`} className="block text-xs font-medium text-gray-700 mb-1">{f.label}</label>
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <input id={`edit-${f.id}`} type="checkbox" checked={isOn(v)} onChange={(e) => set(f.id, e.target.checked)} />
+                  {isOn(v) ? 'Yes' : 'No'}
+                </label>
+              </div>
+            );
+          }
+          if (f.type === 'MULTI_SELECT') {
+            return (
+              <div key={f.id}>
+                <label htmlFor={`edit-${f.id}`} className="block text-xs font-medium text-gray-700 mb-1">{f.label}</label>
+                <input id={`edit-${f.id}`} type="text" className={editInputCls} placeholder="comma-separated"
+                  value={Array.isArray(v) ? (v as string[]).join(', ') : String(v ?? '')}
+                  onChange={(e) => set(f.id, e.target.value.split(',').map((s) => s.trim()).filter(Boolean))} />
+              </div>
+            );
+          }
+          const inputType = f.type === 'NUMBER' ? 'number' : f.type === 'DATE' ? 'date' : f.type === 'EMAIL' ? 'email' : 'text';
+          return (
+            <div key={f.id}>
+              <label htmlFor={`edit-${f.id}`} className="block text-xs font-medium text-gray-700 mb-1">{f.label}</label>
+              <input id={`edit-${f.id}`} type={inputType} className={editInputCls}
+                value={v == null ? '' : String(v)} onChange={(e) => set(f.id, e.target.value)} />
+            </div>
+          );
+        })}
+      </div>
+
+      {error && <p className="text-xs text-red-500 flex items-center gap-1"><AlertCircle className="w-3 h-3" />{error}</p>}
+
+      <div className="flex gap-2 justify-end border-t border-gray-100 pt-3">
+        <button onClick={onCancel} disabled={saving}
+          className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-60">Cancel</button>
+        <button onClick={save} disabled={saving}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-[var(--brand-primary)] text-white rounded-lg hover:bg-[var(--brand-primary-dark)] disabled:opacity-60">
+          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />} Save changes
+        </button>
       </div>
     </div>
   );

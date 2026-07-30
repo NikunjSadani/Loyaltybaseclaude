@@ -164,6 +164,11 @@ export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onS
   const [selfEnrollAllowed, setSelfEnrollAllowed] = useState(audienceConfig?.selfEnrollAllowed ?? false);
   const [frozen, setFrozen] = useState(audienceConfig?.frozen ?? false);
   const [filter, setFilter] = useState<AudienceFilter>(audienceConfig?.filter ?? EMPTY_FILTER);
+  // `allowEnrollerEdit` is a new audienceConfig key not yet on the shared AudienceConfig
+  // type (owned by scheme-types.ts, off-limits here) — read it via a local widening cast.
+  const [allowEnrollerEdit, setAllowEnrollerEdit] = useState(
+    (audienceConfig as (AudienceConfig & { allowEnrollerEdit?: boolean }) | null)?.allowEnrollerEdit ?? false,
+  );
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -217,6 +222,7 @@ export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onS
       selfEnrollAllowed,
       frozen: mode === 'FILTER' ? frozen : false,
       filter: mode === 'FILTER' ? filter : undefined,
+      allowEnrollerEdit,
     });
     setSaving(false);
     if (res.success) {
@@ -268,9 +274,11 @@ export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onS
       )}
 
       {/* Self-enroll (both modes) */}
-      <div className="bg-white border border-gray-200 rounded-xl p-4">
+      <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-4">
         <ToggleRow value={selfEnrollAllowed} onChange={setSelfEnrollAllowed}
           label="Allow outlet self-enrollment" description="Matched real outlets can enroll themselves from the outlet portal (D21). Standalone rows are always rep-filled." />
+        <ToggleRow value={allowEnrollerEdit} onChange={setAllowEnrollerEdit}
+          label="Allow enroller to edit their own submission" description="On = the outlet (or the sales rep) can re-open and correct their own SUBMITTED enrollment. Off = a submitted enrollment is locked to them (only a Gifsy admin can edit it)." />
       </div>
 
       {/* FILTER facets */}

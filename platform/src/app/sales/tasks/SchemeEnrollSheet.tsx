@@ -36,7 +36,7 @@ import {
 import { api } from '@/lib/api-client';
 import { schemeApi } from '@/lib/schemes';
 import type {
-  EligibleScheme, EnrollmentFormSchema, EnrollResult, SalesTarget,
+  AudienceConfig, EligibleScheme, EnrollmentFormSchema, EnrollResult, SalesTarget,
 } from '@/lib/scheme-types';
 import { SchemeFormRenderer } from '@/components/schemes/SchemeFormRenderer';
 
@@ -87,6 +87,21 @@ export function SchemeEnrollSheet({
   // Whether this scheme has a form at all (from the eligible summary — avoids a fetch
   // for formless schemes). `enrollmentForm` is null/undefined when none is configured.
   const hasForm = Boolean(scheme.enrollmentForm);
+
+  // Enroller self-edit (audienceConfig.allowEnrollerEdit — a new key not yet on the
+  // shared AudienceConfig type; read via a widening cast). When on, a rep can re-open
+  // an already-SUBMITTED target to correct it. See the report for the best-effort caveat:
+  // this reuses the pickTarget→form flow (submits via the shared renderer's enroll
+  // supersede, like the existing REJECTED "Resubmit"), and the form re-opens with roster
+  // prefill only — getSalesTargets carries no per-target formValues to pre-fill.
+  // NOTE: sales-rep self-edit is intentionally DISABLED. This sheet re-opens the form via
+  // pickTarget → the shared renderer, which carries only roster PREFILL (getSalesTargets
+  // returns no prior formValues), so an "edit" here would risk overwriting a good submission
+  // with blanks. The audienceConfig.allowEnrollerEdit flag still drives the OUTLET self-edit
+  // (partner portal, which pre-fills from the full prior values via resubmit); a GIFSY admin
+  // can edit any sales-filled enrollment. A safe rep-side edit needs a per-target formValues
+  // source — deferred. See owner note.
+  const allowEnrollerEdit = false;
 
   useEffect(() => {
     let cancelled = false;
@@ -284,10 +299,20 @@ export function SchemeEnrollSheet({
                           )}
                         </div>
                         {status === 'SUBMITTED' ? (
-                          <span className="shrink-0 flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1.5 rounded-full bg-emerald-50 text-emerald-700">
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                            Enrolled
-                          </span>
+                          <div className="shrink-0 flex items-center gap-2">
+                            <span className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1.5 rounded-full bg-emerald-50 text-emerald-700">
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              Enrolled
+                            </span>
+                            {allowEnrollerEdit && (
+                              <button
+                                onClick={() => pickTarget(t)}
+                                className="text-[12px] font-semibold px-3 py-1.5 rounded-xl bg-gray-100 text-gray-700 border border-gray-200 active:bg-gray-200 transition-colors"
+                              >
+                                Edit
+                              </button>
+                            )}
+                          </div>
                         ) : status === 'REJECTED' ? (
                           <button
                             onClick={() => pickTarget(t)}

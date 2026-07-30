@@ -2275,6 +2275,11 @@ model SchemeEnrollment {
   // Optional + SetNull so deleting the login keeps the captured data intact.
   submittedByUserId String?
   enrolledAt        DateTime               @default(now())
+  // Soft-delete (admin "delete a filled enrollment"): hidden from every list/report/read.
+  // The 1:1 on schemeOutletId is kept — re-enrolling the outlet RESETS this same row
+  // (clears deletedAt + appends a new version), so the row is freed to re-enroll while the
+  // submission history is retained and the delete stays recoverable. Null = live.
+  deletedAt         DateTime?
   createdAt         DateTime               @default(now())
   updatedAt         DateTime               @updatedAt
 
@@ -2286,6 +2291,7 @@ model SchemeEnrollment {
   @@index([schemeId])
   @@index([submittedByUserId])
   @@index([status])
+  @@index([deletedAt])
   @@map("scheme_enrollments")
 }
 

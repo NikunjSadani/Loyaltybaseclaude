@@ -234,6 +234,16 @@ export class SetAudienceDto {
   @ValidateNested()
   @Type(() => AudienceFilterDto)
   filter?: AudienceFilterDto;
+
+  /**
+   * Per-scheme flag: when `true`, an enroller (SELF/SALES) may EDIT a live SUBMITTED
+   * enrollment via resubmit (append a new version), not just correct a REJECTED one.
+   * Absent/false → an enroller can only resubmit after a rejection (admin edit is always
+   * allowed regardless). Persisted into the stored audienceConfig JSON.
+   */
+  @IsOptional()
+  @IsBoolean()
+  allowEnrollerEdit?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

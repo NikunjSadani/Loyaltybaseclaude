@@ -1,10 +1,12 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Param,
   Post,
+  Put,
   Query,
   Res,
   StreamableFile,
@@ -215,5 +217,42 @@ export class SchemeEnrollmentController {
     @Body() dto: RejectEnrollmentDto,
   ) {
     return this.enrollment.reject(user, id, enrollmentId, dto);
+  }
+
+  // ── Admin: edit a filled enrollment (append a new version) ──────────────────
+  @Put(':id/enrollments/:enrollmentId')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:write')
+  adminEdit(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('enrollmentId') enrollmentId: string,
+    @Body() dto: ResubmitEnrollmentDto,
+  ) {
+    return this.enrollment.adminEditEnrollment(user, id, enrollmentId, dto);
+  }
+
+  // ── Admin: soft-delete a filled enrollment ─────────────────────────────────
+  @Delete(':id/enrollments/:enrollmentId')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:write')
+  adminDelete(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('enrollmentId') enrollmentId: string,
+  ) {
+    return this.enrollment.deleteEnrollment(user, id, enrollmentId);
+  }
+
+  // ── Admin: restore a soft-deleted enrollment ───────────────────────────────
+  @Post(':id/enrollments/:enrollmentId/restore')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:write')
+  adminRestore(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Param('enrollmentId') enrollmentId: string,
+  ) {
+    return this.enrollment.restoreEnrollment(user, id, enrollmentId);
   }
 }
