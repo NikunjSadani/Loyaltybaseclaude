@@ -49,6 +49,10 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
   const [audience, setAudience] = useState<AudienceConfig | null>(null);
   const [campaignType, setCampaignType] = useState<CampaignType>('OPEN_CAMPAIGN');
   const [formSchema, setFormSchema] = useState<EnrollmentFormSchema>(EMPTY_FORM);
+  // The PERSISTED form's field count (from the last hydrate/save) — drives the badges +
+  // activation gate. Kept separate from `formSchema`, which the builder mutates LIVE as
+  // the admin types (before Save); the gate must reflect what is stored, not the draft.
+  const [savedFormFieldCount, setSavedFormFieldCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('details');
@@ -66,13 +70,16 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
     if (formRes.success && formRes.data.enrollmentForm) {
       setCampaignType((formRes.data.enrollmentForm.campaignType as CampaignType) ?? 'OPEN_CAMPAIGN');
       const fs = formRes.data.enrollmentForm.formSchema;
+      const fields = Array.isArray(fs?.fields) ? fs.fields : [];
       setFormSchema({
         captureGpsOnSubmit: !!fs?.captureGpsOnSubmit,
         requireOtp: !!fs?.requireOtp,
-        fields: Array.isArray(fs?.fields) ? fs.fields : [],
+        fields,
       });
+      setSavedFormFieldCount(fields.length);
     } else {
       setFormSchema(EMPTY_FORM);
+      setSavedFormFieldCount(0);
     }
     setLoading(false);
   }, [schemeId]);
@@ -99,7 +106,9 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
   // carries ≥1 field. Both drive the tab badges, the Form-tab banner and the
   // activation gate (H3).
   const hasAudience = !!audience && (audience.mode === 'FILTER' || audience.mode === 'EXCEL');
-  const hasForm = formSchema.fields.length > 0;
+  // Persisted (saved) form, NOT the live builder draft — so the badge/gate reflect what
+  // is stored. `onSaved={hydrate}` refreshes this after every form save.
+  const hasForm = savedFormFieldCount > 0;
 
   return (
     <div className="space-y-4">

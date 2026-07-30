@@ -316,8 +316,8 @@ export default function PartnerSchemeDetailPage() {
               schema={form.schema}
               initialValues={enrollment.formValues ?? undefined}
               prefill={{
-                ...(scheme.outletFieldValues ?? {}),
                 ...(scheme.prefillValues ?? {}),
+                ...(scheme.outletFieldValues ?? {}),
               }}
               context={{
                 schemeId,

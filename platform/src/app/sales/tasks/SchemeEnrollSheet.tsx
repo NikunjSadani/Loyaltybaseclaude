@@ -322,12 +322,14 @@ export function SchemeEnrollSheet({
             ) : schema ? (
               <SchemeFormRenderer
                 schema={schema}
-                // Dual-source prefill (D13 + outletField): Excel roster columns override the
-                // matched-outlet master-field values on a key clash. The renderer resolves each
-                // field via id → outletField → prefillKey against this merged map.
+                // Dual-source prefill (D13 + outletField): the matched-outlet master-field
+                // values WIN over an Excel roster column of the same name (outletField beats
+                // Excel — matches the backend pin precedence). The renderer resolves each field
+                // via id → outletField → prefillKey against this merged map. (A form binding
+                // BOTH prefillKey and outletField to the identical key name is not a real config.)
                 prefill={{
-                  ...(selected.outletFieldValues ?? {}),
                   ...(selected.prefillValues ?? {}),
+                  ...(selected.outletFieldValues ?? {}),
                 }}
                 context={{
                   schemeId: scheme.id,
