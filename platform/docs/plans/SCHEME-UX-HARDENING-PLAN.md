@@ -1,10 +1,12 @@
 # Scheme Data-Collection — UX Hardening Plan (2026-07-30)
 
-> ✅ **BUILT + DUAL-AUDITED + STAGING-VERIFIED (21/21) on `develop` 273a4b2 — awaiting owner-gated prod cutover. Code-only, no migration.**
-> Commits (develop, pushed): c43304e (W0 backend) · 0da1859 (W0 audit fixes + FE contract) · ed4a577 (Parent ID export) ·
-> 16358a7 (W1 FE) · 273a4b2 (W1 FE audit fixes). main/prod still daa4f3f (cutover #19). Gate green: api jest 2104 · nest 0 ·
-> FE tsc 0 · vitest 2049. REMAINING = merge develop→main + approve prod gate + a ~5–10 min real-phone smoke (signature canvas,
-> camera/geo, dual-source locked prefill on a live enroll). Row/phase annotations below mark what shipped.
+> ✅ **LIVE IN PROD — cutover #20 `8c08af3` (2026-07-30), verified. Code-only, no migration. Additive + dormant.**
+> prod = main = develop = `8c08af3` (both services verified; `/health/ready` db:up; new reads `/v1/schemes/:id/prefill-sources`
+> + `/facet-values` + `/broadcast/preview` + outlet-master export with Parent ID all 401-wired; deoleo login 200). Commits:
+> c43304e (W0 backend) · 0da1859 (W0 audit fixes + FE contract) · ed4a577 (Parent ID export) · 16358a7 (W1 FE) ·
+> 273a4b2 (W1 FE audit fixes) — FF-merged develop→main. Dual-audited (BE + FE) + staging-verified 21/21. Gate green:
+> api jest 2104 · nest 0 · FE tsc 0 · vitest 2049. Rollback ref daa4f3f (#19). Remaining: owner ~5–10 min real-phone smoke
+> (signature canvas, camera/geo, dual-source locked prefill on a live enroll). Row/phase annotations below mark what shipped.
 
 Consolidated from a full 4-slice review of the LIVE scheme feature (admin authoring, form builder,
 enrollment/capture, reporting/lifecycle) against the frozen design (`SCHEME-DATA-COLLECTION-DESIGN.md`
