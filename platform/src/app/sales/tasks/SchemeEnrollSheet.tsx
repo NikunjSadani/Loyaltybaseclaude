@@ -21,12 +21,12 @@
  * The renderer owns the real OTP send/verify, media/GPS capture, and validation —
  * this file only drives target selection + the schema fetch + success/read-back.
  *
- * NOTE (flagged to the orchestrator): `getSalesTargets` does not return per-target
- * KYC-approval / owner-phone, so `outletApproved` is passed `false` here. Any
- * PHONE_OTP field is therefore shown editable; for a KYC-approved matched outlet the
- * backend still RE-PINS the OTP to the owner's on-file number on send (`otp-send`
- * returns `locked` + `phoneMasked`) and ignores the typed value — so it is
- * fail-safe, just a slightly less pre-pinned UX than the outlet portal's self-enroll.
+ * DUAL-SOURCE + APPROVAL: `getSalesTargets` now returns each target's `prefillValues`
+ * (Excel roster) + `outletFieldValues` (matched-outlet master fields) + `outletApproved`
+ * + `ownerPhoneMasked`. This sheet merges the two prefill maps and threads the real
+ * approval/owner-phone into the renderer, so a KYC-approved matched outlet pre-pins the
+ * PHONE_OTP to the owner up-front. The backend still RE-PINS the OTP on send
+ * (`otp-send` returns `locked` + `phoneMasked`) regardless — so it is fail-safe.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -322,13 +322,21 @@ export function SchemeEnrollSheet({
             ) : schema ? (
               <SchemeFormRenderer
                 schema={schema}
-                prefill={selected.prefillValues ?? undefined}
+                // Dual-source prefill (D13 + outletField): Excel roster columns override the
+                // matched-outlet master-field values on a key clash. The renderer resolves each
+                // field via id → outletField → prefillKey against this merged map.
+                prefill={{
+                  ...(selected.outletFieldValues ?? {}),
+                  ...(selected.prefillValues ?? {}),
+                }}
                 context={{
                   schemeId: scheme.id,
                   mode: 'SALES',
-                  // The rep flow can't know KYC-approval here; the backend re-pins a
-                  // PHONE_OTP to the owner on send for an approved matched outlet (D16).
-                  outletApproved: false,
+                  // Real per-target KYC-approval / owner phone from getSalesTargets — an approved
+                  // matched outlet pre-pins the PHONE_OTP to the owner on file (D16); the backend
+                  // still re-pins on send regardless.
+                  outletApproved: selected.outletApproved ?? false,
+                  ownerPhoneMasked: selected.ownerPhoneMasked ?? undefined,
                   ...targetSubject(selected),
                 }}
                 onSubmitted={handleSubmitted}

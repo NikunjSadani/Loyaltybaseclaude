@@ -110,7 +110,10 @@ function resolveInitialValues(
     // GPS fix, signature, CALCULATED, LOOKUP, SECTION or DATA_DISPLAY field must never
     // receive a raw prefill string — it would corrupt that field's value shape.
     if (!PREFILLABLE_VALUE_FIELD_TYPES.has(f.type)) continue;
+    // Dual-source resolution (D13 + outletField): the field-id-keyed value wins, then the
+    // matched-outlet master field (`outletField`), then the Excel column (`prefillKey`).
     if (prefill[f.id] !== undefined) out[f.id] = prefill[f.id];
+    else if (f.outletField && prefill[f.outletField] !== undefined) out[f.id] = prefill[f.outletField];
     else if (f.prefillKey && prefill[f.prefillKey] !== undefined) out[f.id] = prefill[f.prefillKey];
   }
   return out;
@@ -136,6 +139,7 @@ export function SchemeFormRenderer({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<string[]>([]);
+  const [errorFieldId, setErrorFieldId] = useState<string | null>(null);
   const [uploading, setUploading] = useState<Record<string, boolean>>({});
   const [otpVerified, setOtpVerified] = useState(false);
 
@@ -213,6 +217,7 @@ export function SchemeFormRenderer({
   const handleSubmit = useCallback(async () => {
     setSubmitError(null);
     setFieldErrors([]);
+    setErrorFieldId(null);
 
     // 1) capture GPS at submit. Two triggers land a single fix into empty GPS fields:
     //    - a field whose own captureTrigger === 'ON_SUBMIT', and
@@ -239,6 +244,19 @@ export function SchemeFormRenderer({
     if (errs.length > 0) {
       setFieldErrors(errs);
       onError?.(errs[0]);
+      // Scroll to / highlight the first field the errors point at. Field-level messages
+      // embed the field label in quotes ("<label>" is required.) — map that back to a
+      // rendered field id so the user lands on the exact input that needs attention.
+      const m = /"([^"]+)"/.exec(errs[0]);
+      const firstField = m ? fields.find((f) => f.label === m[1]) : undefined;
+      setErrorFieldId(firstField?.id ?? null);
+      if (firstField && typeof document !== 'undefined') {
+        requestAnimationFrame(() =>
+          document
+            .getElementById(firstField.id)
+            ?.scrollIntoView({ behavior: 'smooth', block: 'center' }),
+        );
+      }
       return;
     }
 
@@ -302,6 +320,7 @@ export function SchemeFormRenderer({
             otpVerified={otpVerified}
             setOtpVerified={setOtpVerified}
             ownerPhoneMasked={ownerPhoneMasked}
+            errorFieldId={errorFieldId}
           />
         );
       })}
@@ -362,20 +381,39 @@ interface FieldRendererProps {
   otpVerified: boolean;
   setOtpVerified: (v: boolean) => void;
   ownerPhoneMasked?: string;
+  /** Field id the last failed submit pointed at — highlighted + scrolled into view. */
+  errorFieldId?: string | null;
+}
+
+/**
+ * Resolve the effective prefill value for a field across the dual sources: the field-id
+ * key, the matched-outlet master field (`outletField`), then the Excel column
+ * (`prefillKey`). Mirrors the enroll-time resolution order (outletField beats Excel).
+ */
+function resolvePrefillValue(
+  field: FormField,
+  prefill: Record<string, unknown> | undefined,
+): unknown {
+  return (
+    prefill?.[field.id] ??
+    (field.outletField ? prefill?.[field.outletField] : undefined) ??
+    (field.prefillKey ? prefill?.[field.prefillKey] : undefined)
+  );
 }
 
 function FieldRenderer(props: FieldRendererProps) {
-  const { field, values, setValue, prefill } = props;
+  const { field, values, setValue, prefill, errorFieldId } = props;
   const val = values[field.id];
   const req = isFieldRequired(field, values);
-  // A LOCKED field disables its input ONLY when a roster prefill value actually exists
-  // for it — matching the backend, where a blank roster cell falls back to editable and
-  // never pins (so a required locked field with a blank cell can't brick the form).
-  // `prefill` carries only form-bound, non-empty columns (server-projected).
-  const prefillVal =
-    prefill?.[field.id] ?? (field.prefillKey ? prefill?.[field.prefillKey] : undefined);
+  // A LOCKED field disables its input ONLY when a prefill value actually exists for it
+  // (roster Excel column OR the matched-outlet master field) — matching the backend,
+  // where a blank source falls back to editable and never pins (so a required locked
+  // field with a blank source can't brick the form). `prefill` carries only form-bound,
+  // non-empty values (server-projected).
+  const prefillVal = resolvePrefillValue(field, prefill);
   const hasPrefill = prefillVal !== undefined && prefillVal !== null && prefillVal !== '';
   const locked = Boolean(field.locked) && hasPrefill;
+  const highlight = errorFieldId != null && field.id === errorFieldId;
 
   switch (field.type) {
     // ── Structural / display ──────────────────────────────────────────────────
@@ -389,7 +427,11 @@ function FieldRenderer(props: FieldRendererProps) {
 
     case 'DATA_DISPLAY': {
       const key = field.dataDisplayKey ?? field.prefillKey ?? field.label;
-      const shown = prefill?.[field.id] ?? prefill?.[key] ?? val;
+      const shown =
+        prefill?.[field.id] ??
+        (field.outletField ? prefill?.[field.outletField] : undefined) ??
+        prefill?.[key] ??
+        val;
       return (
         <Labeled field={field} req={false}>
           <div className="flex items-center gap-2 px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl">
@@ -433,7 +475,7 @@ function FieldRenderer(props: FieldRendererProps) {
     // be authored or submitted. No case is rendered for it. Flagged in the build report.
     case 'NUMBER':
       return (
-        <Labeled field={field} req={req}>
+        <Labeled field={field} req={req} locked={locked} highlight={highlight}>
           <input
             id={field.id}
             type="number"
@@ -448,7 +490,7 @@ function FieldRenderer(props: FieldRendererProps) {
 
     case 'EMAIL':
       return (
-        <Labeled field={field} req={req}>
+        <Labeled field={field} req={req} locked={locked} highlight={highlight}>
           <input
             id={field.id}
             type="email"
@@ -465,7 +507,7 @@ function FieldRenderer(props: FieldRendererProps) {
 
     case 'DATE':
       return (
-        <Labeled field={field} req={req}>
+        <Labeled field={field} req={req} locked={locked} highlight={highlight}>
           <input
             id={field.id}
             type="date"
@@ -479,7 +521,7 @@ function FieldRenderer(props: FieldRendererProps) {
 
     case 'DROPDOWN':
       return (
-        <Labeled field={field} req={req}>
+        <Labeled field={field} req={req} locked={locked} highlight={highlight}>
           <select
             id={field.id}
             className={inputCls}
@@ -506,7 +548,7 @@ function FieldRenderer(props: FieldRendererProps) {
         setValue(field.id, next);
       };
       return (
-        <Labeled field={field} req={req}>
+        <Labeled field={field} req={req} locked={locked} highlight={highlight}>
           <div className="space-y-1.5">
             {(field.options ?? []).map((opt) => (
               <label key={opt} className="flex items-center gap-2 text-sm text-gray-700">
@@ -528,7 +570,7 @@ function FieldRenderer(props: FieldRendererProps) {
     case 'TOGGLE': {
       const on = val === true || val === 'true' || val === 'yes' || val === '1';
       return (
-        <Labeled field={field} req={req}>
+        <Labeled field={field} req={req} locked={locked} highlight={highlight}>
           <label className="flex items-center gap-2 text-sm text-gray-700">
             <input
               type="checkbox"
@@ -567,7 +609,7 @@ function FieldRenderer(props: FieldRendererProps) {
     // ── TEXT (default) ───────────────────────────────────────────────────────
     default:
       return (
-        <Labeled field={field} req={req}>
+        <Labeled field={field} req={req} locked={locked} highlight={highlight}>
           <input
             id={field.id}
             type="text"
@@ -585,20 +627,28 @@ function FieldRenderer(props: FieldRendererProps) {
 // ── Shared label wrapper ──────────────────────────────────────────────────────
 
 function Labeled({
-  field, req, children,
+  field, req, children, locked, highlight,
 }: {
   field: FormField;
   req: boolean;
   children: React.ReactNode;
+  /**
+   * Whether this field is genuinely prefill-locked (field.locked AND a resolved source
+   * value). Gating the pill on this — rather than raw `field.locked` — avoids a
+   * misleading "Locked" badge on a field whose source cell is blank (still editable).
+   */
+  locked?: boolean;
+  /** The last failed submit pointed at this field — draw an attention ring. */
+  highlight?: boolean;
 }) {
   return (
-    <div>
+    <div className={highlight ? 'ring-2 ring-red-400 rounded-xl p-2 -m-2' : undefined}>
       <div className="flex items-center justify-between mb-1">
         <label htmlFor={field.id} className={labelCls}>
           {field.label}
           <RequiredStar show={req} />
         </label>
-        {field.locked && (
+        {locked && (
           <span
             data-testid={`lock-icon-${field.id}`}
             className="flex items-center gap-1 text-[10px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full"
@@ -616,7 +666,7 @@ function Labeled({
 // ── Media field (CAMERA / IMAGE / DOCUMENT / UPI_QR_SCAN) ──────────────────────
 
 function MediaField({
-  field, values, uploading, uploadFile, req, accept, capture, icon,
+  field, values, uploading, uploadFile, req, accept, capture, icon, errorFieldId,
 }: FieldRendererProps & {
   req: boolean;
   accept: string;
@@ -625,6 +675,7 @@ function MediaField({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const key = typeof values[field.id] === 'string' ? (values[field.id] as string) : '';
+  const highlight = errorFieldId != null && field.id === errorFieldId;
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -636,7 +687,7 @@ function MediaField({
   const Icon = icon === 'camera' ? Camera : FileText;
 
   return (
-    <Labeled field={field} req={req}>
+    <Labeled field={field} req={req} highlight={highlight}>
       {key ? (
         <div className="flex items-center gap-2 px-3 py-2.5 bg-green-50 border border-green-200 rounded-xl">
           <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
@@ -676,15 +727,23 @@ function MediaField({
 
 // ── Signature field (canvas draw → upload PNG → media key) ─────────────────────
 
-function SignatureField({ field, values, uploading, uploadFile, req }: FieldRendererProps & { req: boolean }) {
+function SignatureField({ field, values, uploading, uploadFile, req, errorFieldId }: FieldRendererProps & { req: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
   const dirty = useRef(false);
   const key = typeof values[field.id] === 'string' ? (values[field.id] as string) : '';
+  const highlight = errorFieldId != null && field.id === errorFieldId;
 
+  // H6: the canvas is drawn at a fixed bitmap size (320×120) but stretched by CSS
+  // (`w-full`). Map the pointer from CSS pixels into bitmap pixels by scaling on each
+  // axis — otherwise the ink lands offset from the cursor at any width ≠ 320px.
   const pos = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const canvas = e.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (canvas.width / rect.width),
+      y: (e.clientY - rect.top) * (canvas.height / rect.height),
+    };
   };
   const start = (e: React.PointerEvent<HTMLCanvasElement>) => {
     drawing.current = true;
@@ -722,7 +781,7 @@ function SignatureField({ field, values, uploading, uploadFile, req }: FieldRend
   };
 
   return (
-    <Labeled field={field} req={req}>
+    <Labeled field={field} req={req} highlight={highlight}>
       {key ? (
         <div className="flex items-center gap-2 px-3 py-2.5 bg-green-50 border border-green-200 rounded-xl">
           <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
@@ -765,11 +824,12 @@ function SignatureField({ field, values, uploading, uploadFile, req }: FieldRend
 
 // ── GPS field ─────────────────────────────────────────────────────────────────
 
-function GpsField({ field, values, setValue, captureGps, req }: FieldRendererProps & { req: boolean }) {
+function GpsField({ field, values, setValue, captureGps, req, errorFieldId }: FieldRendererProps & { req: boolean }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const v = values[field.id] as GpsCapture | undefined;
   const auto = (field.captureTrigger ?? 'MANUAL') === 'ON_SUBMIT';
+  const highlight = errorFieldId != null && field.id === errorFieldId;
 
   const capture = async () => {
     setLoading(true);
@@ -781,7 +841,7 @@ function GpsField({ field, values, setValue, captureGps, req }: FieldRendererPro
   };
 
   return (
-    <Labeled field={field} req={req}>
+    <Labeled field={field} req={req} highlight={highlight}>
       {v && typeof v.lat === 'number' ? (
         <div className="flex items-center gap-2 px-3 py-2.5 bg-green-50 border border-green-200 rounded-xl">
           <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
@@ -812,9 +872,10 @@ function GpsField({ field, values, setValue, captureGps, req }: FieldRendererPro
 // ── Phone-OTP field (D16) ─────────────────────────────────────────────────────
 
 function PhoneOtpField({
-  field, values, setValue, context, subject, otpVerified, setOtpVerified, ownerPhoneMasked, req, prefill,
+  field, values, setValue, context, subject, otpVerified, setOtpVerified, ownerPhoneMasked, req, prefill, errorFieldId,
 }: FieldRendererProps & { req: boolean }) {
   const { schemeId, outletApproved } = context;
+  const highlight = errorFieldId != null && field.id === errorFieldId;
   const [otp, setOtp] = useState('');
   const [sending, setSending] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -825,8 +886,7 @@ function PhoneOtpField({
   // A per-field LOCKED phone is enforced ONLY when a roster number actually exists for
   // this row (matches the backend: no roster value → falls back to an editable typed
   // number, never a disabled empty input that would dead-end the OTP send).
-  const prefillVal =
-    prefill?.[field.id] ?? (field.prefillKey ? prefill?.[field.prefillKey] : undefined);
+  const prefillVal = resolvePrefillValue(field, prefill);
   const hasPrefill = prefillVal !== undefined && prefillVal !== null && prefillVal !== '';
   // Pinned outlets never edit the number; a locked-with-roster-value field is read-only;
   // everyone else (incl. locked-but-no-roster-value) types it.
@@ -873,7 +933,7 @@ function PhoneOtpField({
   };
 
   return (
-    <Labeled field={field} req={req}>
+    <Labeled field={field} req={req} locked={Boolean(field.locked) && hasPrefill} highlight={highlight}>
       {outletApproved || locked ? (
         <div className="flex items-center gap-2 px-3 py-2.5 bg-blue-50 border border-blue-200 rounded-xl">
           <Lock className="h-3.5 w-3.5 text-blue-500 shrink-0" />

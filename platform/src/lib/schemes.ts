@@ -254,7 +254,20 @@ export interface AdminEnrollmentRow {
 }
 
 export interface AdminEnrollmentDetail extends SchemeEnrollment {
-  schemeOutlet: AdminEnrollmentRow['matchedOutlet'] & Record<string, unknown>;
+  /**
+   * The roster row, with its master relations NESTED (matchedOutlet/matchedPartner/…) —
+   * NOT flattened. The drawer reads outlet name/code + geo from `schemeOutlet.matchedOutlet`
+   * (H5: the prior `matchedOutlet & Record` type wrongly implied those keys sat on schemeOutlet).
+   */
+  schemeOutlet: {
+    id: string;
+    outletRef: string;
+    outletName: string;
+    matchedOutlet: AdminEnrollmentRow['matchedOutlet'];
+    matchedPartner: AdminEnrollmentRow['matchedPartner'];
+    taggedSalesUser: AdminEnrollmentRow['taggedSalesUser'];
+    prefillValues: Record<string, unknown> | null;
+  } & Record<string, unknown>;
   submissions: SchemeSubmission[];
   media: EnrollmentMediaRef[];
   geo: EnrollmentGeoRef[];

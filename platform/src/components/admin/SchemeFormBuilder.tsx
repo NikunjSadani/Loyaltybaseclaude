@@ -15,7 +15,7 @@
  * GPS captureTrigger). Renders every §13.1 field type.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Plus, Trash2, ChevronUp, ChevronDown, ChevronRight, Type, Hash, List,
   Calendar, FileText, Camera, MapPin, Smartphone, Info, AlertCircle, QrCode,
@@ -25,6 +25,8 @@ import {
 import {
   DISPLAY_ONLY_FIELD_TYPES,
   GPS_CAPTURE_TRIGGERS,
+  OUTLET_FIELD_KEYS,
+  evaluateFormula,
   type EnrollmentFormSchema,
   type FormField,
   type FormFieldType,
@@ -33,6 +35,7 @@ import {
   type VisibleWhenOp,
 } from '@/lib/scheme-types';
 import type { CampaignType } from '@/lib/scheme-types';
+import { schemeApi } from '@/lib/schemes';
 
 // ── Field-type metadata ─────────────────────────────────────────────────────
 
@@ -124,8 +127,9 @@ export function validateSchemeFormSchema(schema: EnrollmentFormSchema): string[]
     if (f.type === 'SECTION' && !f.label.trim()) errors.push(`${pos}: section heading cannot be empty.`);
 
     if (CHOICE_TYPES.has(f.type)) {
-      const opts = (f.options ?? []).filter((o) => o.trim());
+      const opts = (f.options ?? []).map((o) => o.trim()).filter(Boolean);
       if (opts.length === 0) errors.push(`${pos} ("${name}"): add at least one option.`);
+      else if (new Set(opts).size !== opts.length) errors.push(`${pos} ("${name}"): options must be unique — remove the duplicate.`);
     }
     if (f.type === 'CALCULATED') {
       if (!(f.formula ?? '').trim()) errors.push(`${pos} ("${name}"): formula cannot be empty.`);
@@ -138,11 +142,26 @@ export function validateSchemeFormSchema(schema: EnrollmentFormSchema): string[]
     if (f.type === 'LOOKUP') {
       if (!f.lookupSourceFieldId) errors.push(`${pos} ("${name}"): pick a source dropdown.`);
       else if (!ids.has(f.lookupSourceFieldId)) errors.push(`${pos} ("${name}"): lookup source no longer exists.`);
+      const mapped = Object.values(f.lookupMap ?? {}).filter((v) => (v ?? '').trim());
+      if (mapped.length === 0) errors.push(`${pos} ("${name}"): add at least one lookup mapping.`);
     }
     for (const [key, clause] of [['visibleWhen', f.visibleWhen], ['requiredWhen', f.requiredWhen]] as const) {
       if (!clause) continue;
       if (clause.fieldId === f.id) errors.push(`${pos} ("${name}"): ${key} cannot depend on itself.`);
       else if (!ids.has(clause.fieldId)) errors.push(`${pos} ("${name}"): ${key} references an unknown field.`);
+    }
+
+    // Dual-source prefill: an outletField binding must be a recognised Outlet-master key.
+    if (f.outletField !== undefined && f.outletField !== '' && !OUTLET_FIELD_KEYS.has(f.outletField)) {
+      errors.push(`${pos} ("${name}"): outlet-field prefill is not a recognised outlet field.`);
+    }
+    // GPS accuracy cap (D15): when set, must be a positive number.
+    if (f.gpsMaxAccuracy !== undefined && f.gpsMaxAccuracy !== null && !(Number(f.gpsMaxAccuracy) > 0)) {
+      errors.push(`${pos} ("${name}"): GPS accuracy cap must be a positive number.`);
+    }
+    // A locked, Excel-prefilled phone field must verify consent via OTP (D16).
+    if (f.type === 'PHONE_OTP' && f.locked && (f.prefillKey ?? '').trim() && !f.otpRequired) {
+      errors.push(`${pos} ("${name}"): a locked, Excel-prefilled phone field must have otpRequired enabled.`);
     }
   });
 
@@ -306,21 +325,43 @@ function PreviewField({ field }: { field: FormField }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
+interface PrefillSourcesState {
+  excelColumns: string[];
+  outletFields: { key: string; label: string }[];
+}
+
 interface Props {
   value: EnrollmentFormSchema;
   campaignType: CampaignType;
   onChange: (schema: EnrollmentFormSchema) => void;
   onCampaignTypeChange: (t: CampaignType) => void;
+  /** The scheme being authored — its roster columns + outlet-field catalog seed the prefill pickers (H1). */
+  schemeId: string;
   /** Show Excel prefill controls (Mode B roster is active). */
   showPrefill?: boolean;
 }
 
 export function SchemeFormBuilder({
-  value, campaignType, onChange, onCampaignTypeChange, showPrefill = false,
+  value, campaignType, onChange, onCampaignTypeChange, schemeId, showPrefill = false,
 }: Props) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showPicker, setShowPicker] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
+  const [prefillSources, setPrefillSources] = useState<PrefillSourcesState>({ excelColumns: [], outletFields: [] });
+
+  // H1: load this scheme's prefill sources (roster Excel columns + curated outlet fields)
+  // to populate the "Prefill from" source pickers. Defaults stay empty on any failure.
+  useEffect(() => {
+    let cancelled = false;
+    schemeApi.getPrefillSources(schemeId).then((res) => {
+      if (cancelled || !res.success) return;
+      setPrefillSources({
+        excelColumns: res.data.excelColumns ?? [],
+        outletFields: res.data.outletFields ?? [],
+      });
+    });
+    return () => { cancelled = true; };
+  }, [schemeId]);
 
   const fields = value.fields;
 
@@ -516,7 +557,9 @@ export function SchemeFormBuilder({
                       <div className="space-y-1.5">
                         {(field.options ?? []).map((opt, oi) => (
                           <div key={oi} className="flex items-center gap-2">
-                            <input type="text" value={opt} onChange={(e) => setOption(field.id, oi, e.target.value)} placeholder={`Option ${oi + 1}`}
+                            <input type="text" value={opt} onChange={(e) => setOption(field.id, oi, e.target.value)}
+                              onBlur={(e) => { const t = e.target.value.trim(); if (t !== e.target.value) setOption(field.id, oi, t); }}
+                              placeholder={`Option ${oi + 1}`}
                               className="flex-1 text-xs border border-gray-200 rounded-lg px-2.5 py-1.5" />
                             <button type="button" onClick={() => removeOption(field.id, oi)} disabled={(field.options?.length ?? 0) <= 1}
                               className="text-gray-300 hover:text-red-500 disabled:opacity-20"><Trash2 className="w-3.5 h-3.5" /></button>
@@ -542,6 +585,18 @@ export function SchemeFormBuilder({
                           </select>
                         )}
                       </div>
+                      {/* Live sample evaluation — every referenced field set to 1 (author-time sanity check). */}
+                      {(field.formula ?? '').trim() && (() => {
+                        const refs = Array.from((field.formula ?? '').matchAll(/\{([^}]+)\}/g)).map((m) => m[1]);
+                        const sample: Record<string, unknown> = {};
+                        refs.forEach((r) => { sample[r] = 1; });
+                        const result = evaluateFormula(field.formula ?? '', sample);
+                        return result === null ? (
+                          <p className="text-[10px] text-amber-600 flex items-center gap-1"><AlertCircle className="w-3 h-3" /> formula error</p>
+                        ) : (
+                          <p className="text-[10px] text-orange-600">= {result} <span className="text-gray-400">(sample: each input = 1)</span></p>
+                        );
+                      })()}
                     </div>
                   )}
 
@@ -598,6 +653,17 @@ export function SchemeFormBuilder({
                     </div>
                   )}
 
+                  {/* GPS accuracy cap (D15) — reject fixes reporting worse accuracy than this */}
+                  {field.type === 'GPS_POINT' && (
+                    <div>
+                      <label className="block text-[10px] text-gray-500 mb-1">Max accuracy (metres)</label>
+                      <input type="number" min="1" value={field.gpsMaxAccuracy ?? ''}
+                        onChange={(e) => { const n = Number(e.target.value); patch(field.id, { gpsMaxAccuracy: n > 0 ? n : undefined }); }}
+                        placeholder="blank = no cap" className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5" />
+                      <p className="text-[9px] text-gray-400 mt-0.5">Reject a location fix whose reported accuracy is worse than this. Leave blank for no cap.</p>
+                    </div>
+                  )}
+
                   {/* CAMERA note (D14) */}
                   {field.type === 'CAMERA' && (
                     <div className="flex items-start gap-2 bg-pink-50 border border-pink-100 rounded-lg px-3 py-2">
@@ -614,35 +680,59 @@ export function SchemeFormBuilder({
                       onChange={(c) => patch(field.id, { requiredWhen: c })} />
                   )}
 
-                  {/* Prefill (Mode B) — value fields only */}
-                  {showPrefill && PREFILLABLE_FIELD_TYPES.has(field.type) && (
-                    <div className="pt-1 border-t border-gray-100 space-y-2">
-                      <div>
-                        <label className="block text-[10px] text-gray-500 mb-1">Prefill from Excel column</label>
-                        <input type="text" value={field.prefillKey ?? ''} onChange={(e) => patch(field.id, { prefillKey: e.target.value || undefined })}
-                          placeholder="e.g. owner_phone (roster variable)" className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5" />
-                      </div>
-                      {field.prefillKey && (
-                        <div className="space-y-1.5">
-                          <label className="flex items-start gap-2 cursor-pointer text-[11px] text-gray-600">
-                            <input type="radio" name={`prefill-lock-${field.id}`} checked={!field.locked} onChange={() => patch(field.id, { locked: false })}
-                              className="w-3.5 h-3.5 accent-[var(--brand-primary)] mt-0.5" />
-                            <span>Editable — prefilled from Excel, the filler can change it</span>
-                          </label>
-                          <label className="flex items-start gap-2 cursor-pointer text-[11px] text-gray-600">
-                            <input type="radio" name={`prefill-lock-${field.id}`} checked={!!field.locked} onChange={() => patch(field.id, { locked: true })}
-                              className="w-3.5 h-3.5 accent-[var(--brand-primary)] mt-0.5" />
-                            <span>Locked — value comes from Excel, the filler cannot change it</span>
-                          </label>
-                          {field.type === 'PHONE_OTP' && (
-                            <p className="text-[10px] text-gray-400 pl-6">
-                              Locked = the OTP is sent to the Excel number and can&apos;t be changed (except for KYC-approved matched outlets, which always use the owner&apos;s on-file number).
-                            </p>
+                  {/* Prefill (Mode B) — value fields only. Dual-source picker (H1): an Excel roster
+                      column and/or a matched-outlet field; the lock applies when either is bound. */}
+                  {showPrefill && PREFILLABLE_FIELD_TYPES.has(field.type) && (() => {
+                    const { excelColumns, outletFields } = prefillSources;
+                    const columnMissing = !!field.prefillKey && !excelColumns.includes(field.prefillKey);
+                    const hasBinding = !!field.prefillKey || !!field.outletField;
+                    return (
+                      <div className="pt-1 border-t border-gray-100 space-y-2">
+                        <div>
+                          <label className="block text-[10px] text-gray-500 mb-1">Prefill from Excel column</label>
+                          <select value={field.prefillKey ?? ''} onChange={(e) => patch(field.id, { prefillKey: e.target.value || undefined })}
+                            className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white">
+                            <option value="">— none —</option>
+                            {columnMissing && <option value={field.prefillKey}>{field.prefillKey}</option>}
+                            {excelColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                          {excelColumns.length === 0 && (
+                            <p className="text-[10px] text-gray-400 mt-1">Upload a roster to list its columns.</p>
+                          )}
+                          {columnMissing && (
+                            <p className="text-[10px] text-amber-500 mt-1">column not in current roster</p>
                           )}
                         </div>
-                      )}
-                    </div>
-                  )}
+                        <div>
+                          <label className="block text-[10px] text-gray-500 mb-1">Prefill from Outlet field (matched loyalty outlets)</label>
+                          <select value={field.outletField ?? ''} onChange={(e) => patch(field.id, { outletField: e.target.value || undefined })}
+                            className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white">
+                            <option value="">— none —</option>
+                            {outletFields.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+                          </select>
+                        </div>
+                        {hasBinding && (
+                          <div className="space-y-1.5">
+                            <label className="flex items-start gap-2 cursor-pointer text-[11px] text-gray-600">
+                              <input type="radio" name={`prefill-lock-${field.id}`} checked={!field.locked} onChange={() => patch(field.id, { locked: false })}
+                                className="w-3.5 h-3.5 accent-[var(--brand-primary)] mt-0.5" />
+                              <span>Editable — prefilled, the filler can change it</span>
+                            </label>
+                            <label className="flex items-start gap-2 cursor-pointer text-[11px] text-gray-600">
+                              <input type="radio" name={`prefill-lock-${field.id}`} checked={!!field.locked} onChange={() => patch(field.id, { locked: true })}
+                                className="w-3.5 h-3.5 accent-[var(--brand-primary)] mt-0.5" />
+                              <span>Locked — value comes from the source, the filler cannot change it</span>
+                            </label>
+                            {field.type === 'PHONE_OTP' && (
+                              <p className="text-[10px] text-gray-400 pl-6">
+                                Locked = the OTP is sent to the Excel number and can&apos;t be changed (except for KYC-approved matched outlets, which always use the owner&apos;s on-file number).
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>

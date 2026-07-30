@@ -570,6 +570,20 @@ export function validateSchemeValues(
         if (bad !== undefined) errors.push(`"${field.label}" contains an invalid option "${bad}".`);
         break;
       }
+      case 'GPS_POINT': {
+        // D15 accuracy cap — mirror the backend so a too-imprecise fix is blocked client-side.
+        // The captured value is a GpsCapture object; a fix that reports NO numeric accuracy is
+        // accepted (matches the backend, which can't reject what it can't measure).
+        if (typeof field.gpsMaxAccuracy === 'number' && raw && typeof raw === 'object') {
+          const acc = (raw as { accuracy?: unknown }).accuracy;
+          if (typeof acc === 'number' && acc > field.gpsMaxAccuracy) {
+            errors.push(
+              `"${field.label}" location accuracy (±${Math.round(acc)}m) exceeds the ±${field.gpsMaxAccuracy}m limit — re-capture in the open.`,
+            );
+          }
+        }
+        break;
+      }
       default:
         break;
     }

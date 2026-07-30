@@ -12,7 +12,7 @@
  * saves are in-place and status transitions use valid SchemeStatus values only.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Save, AlertCircle, CheckCircle, Loader2, Play, Pause, XCircle, Settings2,
   Users, ClipboardList,
@@ -30,7 +30,7 @@ import type {
   SchemeStatus,
 } from '@/lib/scheme-types';
 import { SchemeAudienceEditor } from './SchemeAudienceEditor';
-import { SchemeFormBuilder } from './SchemeFormBuilder';
+import { SchemeFormBuilder, validateSchemeFormSchema } from './SchemeFormBuilder';
 
 const EMPTY_FORM: EnrollmentFormSchema = { captureGpsOnSubmit: false, requireOtp: false, fields: [] };
 
@@ -95,23 +95,32 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
     );
   }
 
+  // Completion state — an audience exists once a mode is persisted; a form once it
+  // carries ≥1 field. Both drive the tab badges, the Form-tab banner and the
+  // activation gate (H3).
+  const hasAudience = !!audience && (audience.mode === 'FILTER' || audience.mode === 'EXCEL');
+  const hasForm = formSchema.fields.length > 0;
+
   return (
     <div className="space-y-4">
       {/* Tabs */}
       <div className="flex gap-1 border-b border-gray-200">
         {([
-          { key: 'details' as Tab, label: 'Details', Icon: Settings2 },
-          { key: 'audience' as Tab, label: 'Audience', Icon: Users },
-          { key: 'form' as Tab, label: 'Enrollment form', Icon: ClipboardList },
-        ]).map(({ key, label, Icon }) => (
+          { key: 'details' as Tab, label: 'Details', Icon: Settings2, done: false },
+          { key: 'audience' as Tab, label: 'Audience', Icon: Users, done: hasAudience },
+          { key: 'form' as Tab, label: 'Enrollment form', Icon: ClipboardList, done: hasForm },
+        ]).map(({ key, label, Icon, done }) => (
           <button key={key} onClick={() => setTab(key)}
             className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${tab === key ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
             <Icon className="w-4 h-4" /> {label}
+            {done && <CheckCircle className="w-3.5 h-3.5 text-green-500" aria-label="configured" />}
           </button>
         ))}
       </div>
 
-      {tab === 'details' && <DetailsTab scheme={scheme} onChanged={setScheme} />}
+      {tab === 'details' && (
+        <DetailsTab scheme={scheme} onChanged={setScheme} hasAudience={hasAudience} hasForm={hasForm} />
+      )}
       {tab === 'audience' && (
         <SchemeAudienceEditor schemeId={schemeId} schemeName={scheme.name} audienceConfig={audience} onSaved={hydrate} />
       )}
@@ -121,6 +130,7 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
           campaignType={campaignType}
           formSchema={formSchema}
           showPrefill={audience?.mode === 'EXCEL'}
+          audienceSet={hasAudience}
           onCampaignTypeChange={setCampaignType}
           onSchemaChange={setFormSchema}
           onSaved={hydrate}
@@ -140,7 +150,12 @@ const STATUS_META: Record<SchemeStatus, { label: string; cls: string }> = {
   CANCELLED: { label: 'Cancelled', cls: 'bg-red-100 text-red-600' },
 };
 
-function DetailsTab({ scheme, onChanged }: { scheme: SchemeRecord; onChanged: (s: SchemeRecord) => void }) {
+function DetailsTab({ scheme, onChanged, hasAudience, hasForm }: {
+  scheme: SchemeRecord;
+  onChanged: (s: SchemeRecord) => void;
+  hasAudience: boolean;
+  hasForm: boolean;
+}) {
   const [name, setName] = useState(scheme.name);
   const [description, setDescription] = useState(scheme.description ?? '');
   const [startDate, setStartDate] = useState(scheme.startDate.slice(0, 10));
@@ -188,6 +203,16 @@ function DetailsTab({ scheme, onChanged }: { scheme: SchemeRecord; onChanged: (s
     }
   })();
 
+  // H3 — a scheme may go ACTIVE only once it has BOTH a real audience and a form
+  // with ≥1 field. Block the Activate control (with an explanatory tooltip) otherwise.
+  const activateBlocked = !hasAudience || !hasForm;
+  const activateReason =
+    !hasAudience && !hasForm
+      ? 'Set the audience / roster and add at least one enrollment-form field before activating.'
+      : !hasAudience
+      ? 'Set the audience / roster before activating.'
+      : 'Add at least one enrollment-form field before activating.';
+
   const TRANSITION_ICON: Partial<Record<SchemeStatus, React.ReactNode>> = {
     ACTIVE: <Play className="w-3.5 h-3.5" />,
     PAUSED: <Pause className="w-3.5 h-3.5" />,
@@ -208,14 +233,24 @@ function DetailsTab({ scheme, onChanged }: { scheme: SchemeRecord; onChanged: (s
           <span className="text-xs text-gray-400 font-mono ml-2">{scheme.code}</span>
         </div>
         <div className="flex flex-wrap gap-2">
-          {transitions.map((t) => (
-            <button key={t} onClick={() => changeStatus(t)} disabled={statusSaving !== null}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors disabled:opacity-50 ${t === 'ACTIVE' ? 'border-green-300 text-green-700 hover:bg-green-50' : t === 'CANCELLED' || t === 'EXPIRED' ? 'border-red-200 text-red-600 hover:bg-red-50' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
-              {statusSaving === t ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : TRANSITION_ICON[t]}
-              {t === 'ACTIVE' ? 'Activate' : t === 'PAUSED' ? 'Pause' : t === 'EXPIRED' ? 'Expire' : t === 'CANCELLED' ? 'Cancel' : 'Reopen as draft'}
-            </button>
-          ))}
+          {transitions.map((t) => {
+            const blocked = t === 'ACTIVE' && activateBlocked;
+            return (
+              <button key={t} onClick={() => changeStatus(t)}
+                disabled={statusSaving !== null || blocked}
+                title={blocked ? activateReason : undefined}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${t === 'ACTIVE' ? 'border-green-300 text-green-700 hover:bg-green-50' : t === 'CANCELLED' || t === 'EXPIRED' ? 'border-red-200 text-red-600 hover:bg-red-50' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+                {statusSaving === t ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : TRANSITION_ICON[t]}
+                {t === 'ACTIVE' ? 'Activate' : t === 'PAUSED' ? 'Pause' : t === 'EXPIRED' ? 'Expire' : t === 'CANCELLED' ? 'Cancel' : 'Reopen as draft'}
+              </button>
+            );
+          })}
         </div>
+        {transitions.includes('ACTIVE') && activateBlocked && (
+          <p className="w-full text-[11px] text-amber-600 flex items-center gap-1.5">
+            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" /> {activateReason}
+          </p>
+        )}
       </div>
 
       {/* Basic info */}
@@ -262,12 +297,13 @@ function DetailsTab({ scheme, onChanged }: { scheme: SchemeRecord; onChanged: (s
 // ── Form tab (build + versioned persist) ─────────────────────────────────────
 
 function FormTab({
-  schemeId, campaignType, formSchema, showPrefill, onCampaignTypeChange, onSchemaChange, onSaved,
+  schemeId, campaignType, formSchema, showPrefill, audienceSet, onCampaignTypeChange, onSchemaChange, onSaved,
 }: {
   schemeId: string;
   campaignType: CampaignType;
   formSchema: EnrollmentFormSchema;
   showPrefill: boolean;
+  audienceSet: boolean;
   onCampaignTypeChange: (t: CampaignType) => void;
   onSchemaChange: (s: EnrollmentFormSchema) => void;
   onSaved: () => void;
@@ -275,8 +311,13 @@ function FormTab({
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
+  // H4 — never persist an invalid schema. The save is gated on the same validation
+  // the builder surfaces; the button is disabled and the errors are listed inline.
+  const errors = useMemo(() => validateSchemeFormSchema(formSchema), [formSchema]);
+
   const save = async () => {
     setMsg(null);
+    if (errors.length > 0) return;
     setSaving(true);
     const res = await schemeApi.upsertEnrollmentForm(schemeId, { campaignType, formSchema });
     setSaving(false);
@@ -286,21 +327,39 @@ function FormTab({
 
   return (
     <div className="space-y-4">
+      {!audienceSet && (
+        <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <AlertCircle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
+          <p className="text-xs text-amber-700">Set the audience / roster first — the prefill dropdowns are populated from the roster.</p>
+        </div>
+      )}
       <SchemeFormBuilder
         value={formSchema}
+        schemeId={schemeId}
         campaignType={campaignType}
         onChange={onSchemaChange}
         onCampaignTypeChange={onCampaignTypeChange}
         showPrefill={showPrefill}
       />
+      {errors.length > 0 && (
+        <div className="border border-red-200 bg-red-50 rounded-lg px-3 py-2 space-y-1">
+          <p className="text-xs font-semibold text-red-600 flex items-center gap-1.5">
+            <AlertCircle className="w-3.5 h-3.5" /> Fix {errors.length === 1 ? 'this' : 'these'} before saving:
+          </p>
+          <ul className="list-disc list-inside text-xs text-red-600 space-y-0.5">
+            {errors.map((e, i) => <li key={i}>{e}</li>)}
+          </ul>
+        </div>
+      )}
       {msg && (
         <p className={`text-xs flex items-center gap-1.5 ${msg.kind === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
           {msg.kind === 'ok' ? <CheckCircle className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}{msg.text}
         </p>
       )}
       <div className="flex justify-end">
-        <button onClick={save} disabled={saving}
-          className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-[var(--brand-primary)] text-white rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60">
+        <button onClick={save} disabled={saving || errors.length > 0}
+          title={errors.length > 0 ? 'Resolve the form errors above to save.' : undefined}
+          className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-[var(--brand-primary)] text-white rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
           {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
           {saving ? 'Saving…' : 'Save form'}
         </button>

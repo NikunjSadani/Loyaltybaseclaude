@@ -38,8 +38,11 @@ export default function BroadcastPage({ params }: { params: Promise<{ id: string
   const [showFilter, setShowFilter] = useState(false);
 
   const [sending, setSending] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sendResult, setSendResult] = useState<BroadcastResult | null>(null);
+  // Billable send — a preview-gated confirm holds the dry-run count + the exact input to send.
+  const [pending, setPending] = useState<{ count: number; input: BroadcastInput } | null>(null);
 
   const [history, setHistory] = useState<SchemeBroadcastRow[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
@@ -53,6 +56,8 @@ export default function BroadcastPage({ params }: { params: Promise<{ id: string
 
   useEffect(() => { void loadHistory(); }, [loadHistory]);
 
+  // Step 1 — dry-run the recipient count (no send) and open the confirm dialog. Broadcasting
+  // is billable, so we never call broadcast() until the reviewer confirms the resolved count.
   const send = async () => {
     setSendError(null);
     setSendResult(null);
@@ -67,6 +72,18 @@ export default function BroadcastPage({ params }: { params: Promise<{ id: string
       bodyValues: bodyValues.map((v) => v.trim()).filter(Boolean),
       recipientFilter: showFilter && Object.keys(cleanFilter).length > 0 ? cleanFilter : undefined,
     };
+    setPreviewing(true);
+    const res = await schemeApi.previewBroadcast(schemeId, input);
+    setPreviewing(false);
+    if (res.success) setPending({ count: res.data.recipientCount, input });
+    else setSendError(res.error);
+  };
+
+  // Step 2 — the reviewer confirmed; send exactly the previewed input.
+  const confirmSend = async () => {
+    if (!pending) return;
+    const input = pending.input;
+    setPending(null);
     setSending(true);
     const res = await schemeApi.broadcast(schemeId, input);
     setSending(false);
@@ -194,13 +211,41 @@ export default function BroadcastPage({ params }: { params: Promise<{ id: string
         )}
 
         <div className="flex justify-end">
-          <button onClick={send} disabled={sending}
+          <button onClick={send} disabled={sending || previewing}
             className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-[var(--brand-primary)] text-white rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60">
-            {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-            {sending ? 'Sending…' : 'Send broadcast'}
+            {sending || previewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+            {previewing ? 'Checking recipients…' : sending ? 'Sending…' : 'Send broadcast'}
           </button>
         </div>
       </div>
+
+      {/* Billable-send confirm (preview-gated) */}
+      {pending && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/30" onClick={() => setPending(null)} aria-hidden />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-sm p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-full bg-amber-50 flex items-center justify-center shrink-0">
+                <Megaphone className="w-4.5 h-4.5 text-amber-500" />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-gray-900">Send broadcast?</p>
+                <p className="text-xs text-gray-600 mt-1">
+                  This will message <strong className="text-gray-900">{pending.count}</strong> recipient{pending.count === 1 ? '' : 's'}. Send?
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setPending(null)}
+                className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50">Cancel</button>
+              <button onClick={confirmSend} disabled={pending.count === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-[var(--brand-primary)] text-white rounded-lg hover:bg-[var(--brand-primary-dark)] disabled:opacity-60">
+                <Send className="w-3.5 h-3.5" /> Send now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* History */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">

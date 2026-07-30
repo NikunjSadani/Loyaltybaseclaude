@@ -274,6 +274,8 @@ function EnrollmentDrawer({
   const captured = (detail?.formValues ?? {}) as Record<string, unknown>;
   // Field ids surfaced as media/geo — so the raw-values list can skip them.
   const specialIds = new Set<string>([...(detail?.media ?? []).map((m) => m.fieldId), ...(detail?.geo ?? []).map((g) => g.fieldId)]);
+  // Field id → human label for the captured form version (H5) — fall back to the raw id.
+  const labelFor = (id: string) => detail?.formFields?.find((f) => f.id === id)?.label ?? id;
 
   return (
     <div className="fixed inset-0 z-50 flex">
@@ -293,10 +295,10 @@ function EnrollmentDrawer({
             {/* Outlet + status */}
             <div>
               <div className="flex items-center justify-between">
-                <p className="text-base font-bold text-gray-900">{(outlet?.name as string) ?? 'Outlet'}</p>
+                <p className="text-base font-bold text-gray-900">{outlet?.matchedOutlet?.name ?? outlet?.outletName ?? 'Outlet'}</p>
                 <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[detail.status] ?? 'bg-gray-100 text-gray-600'}`}>{detail.status}</span>
               </div>
-              <p className="text-xs text-gray-400 font-mono">{(outlet?.outletCode as string) ?? ''}</p>
+              <p className="text-xs text-gray-400 font-mono">{outlet?.matchedOutlet?.outletCode ?? ''}</p>
               <p className="text-xs text-gray-500 mt-1">
                 Mode {detail.enrollmentMode} · v{detail.currentVersion} · {new Date(detail.enrolledAt).toLocaleString('en-IN')}
               </p>
@@ -315,7 +317,7 @@ function EnrollmentDrawer({
                 <dl className="space-y-1.5">
                   {Object.entries(captured).filter(([k]) => !specialIds.has(k)).map(([k, v]) => (
                     <div key={k} className="flex justify-between gap-3 text-xs">
-                      <dt className="text-gray-500 font-mono truncate">{k}</dt>
+                      <dt className="text-gray-500 truncate">{labelFor(k)}</dt>
                       <dd className="text-gray-800 font-medium text-right break-words">{formatValue(v)}</dd>
                     </div>
                   ))}
@@ -356,7 +358,7 @@ function EnrollmentDrawer({
               <Section title="Location">
                 {detail.geo.map((g) => (
                   <GeoPin key={g.fieldId} label={g.label} value={g.value}
-                    registered={typeof outlet?.latitude === 'number' && typeof outlet?.longitude === 'number' ? { lat: outlet.latitude as number, lng: outlet.longitude as number } : null} />
+                    registered={typeof outlet?.matchedOutlet?.latitude === 'number' && typeof outlet?.matchedOutlet?.longitude === 'number' ? { lat: outlet.matchedOutlet.latitude, lng: outlet.matchedOutlet.longitude } : null} />
                 ))}
               </Section>
             )}
@@ -372,7 +374,9 @@ function EnrollmentDrawer({
                         <span className="font-medium text-gray-700">v{s.version}</span>
                         <span className={`ml-2 px-1.5 py-0.5 rounded-full ${STATUS_STYLES[s.status] ?? 'bg-gray-100 text-gray-600'}`}>{s.status}</span>
                         <span className="ml-2 text-gray-400">{new Date(s.createdAt).toLocaleString('en-IN')}</span>
-                        {s.rejectionReason && <p className="text-red-500 mt-0.5">{s.rejectionReason}</p>}
+                        {s.status === 'REJECTED' && s.rejectionReason && (
+                          <p className="text-red-500 mt-0.5"><span className="font-medium">Reason:</span> {s.rejectionReason}</p>
+                        )}
                       </div>
                     </li>
                   ))}

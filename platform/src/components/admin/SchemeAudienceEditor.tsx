@@ -14,42 +14,90 @@
  * scheme) and re-fetches it after a save.
  */
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
-  Filter, Upload, X, AlertCircle, CheckCircle, Users, FileSpreadsheet, Loader2,
-  Info, Download,
+  Filter, Upload, X, AlertCircle, AlertTriangle, Check, CheckCircle, Users,
+  FileSpreadsheet, Loader2, Info, Download,
 } from 'lucide-react';
-import { schemeApi, type RosterUploadResult, type AudienceResult } from '@/lib/schemes';
+import * as XLSX from 'xlsx';
+import { schemeApi, type RosterUploadResult, type AudienceResult, type FacetValues } from '@/lib/schemes';
 import { downloadRosterReport } from '@/lib/scheme-roster-report';
+import { aoaToSheetSafe } from '@/lib/xlsx-safe';
+import { downloadBlob } from '@/lib/download';
 import type { AudienceConfig, AudienceFilter, AudienceMode } from '@/lib/scheme-types';
 
-// ── Tag input for a filter facet ──────────────────────────────────────────────
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-function TagInput({
-  label, values, onChange, placeholder,
+/**
+ * A minimal roster template (.xlsx) — the three required columns plus a couple of
+ * example prefill variable columns and one sample data row. Built through
+ * `aoaToSheetSafe` so no cell can be a formula-injection sink (AF-5b).
+ */
+function downloadRosterTemplate(): void {
+  const aoa: (string | number)[][] = [
+    ['Outlet ID', 'Outlet Name', 'Tagged Employee Code', 'owner_phone', 'last_month_sales'],
+    ['OUT-1001', 'Sharma Kirana Store', 'EMP-204', '9876543210', 125000],
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheetSafe(aoa), 'Roster');
+  const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+  downloadBlob(new Blob([buf], { type: XLSX_MIME }), 'scheme-roster-template.xlsx');
+}
+
+// ── Facet multi-select (master values as a checklist + free-text fallback) ─────
+//
+// Offers the known Outlet-master values (from getFacetValues) as a toggleable
+// checklist, while keeping a free-text input so a value not present in the master
+// is never hard-blocked. `options[].value` is what's stored (an outlet-type id, or
+// the string itself for zones/programs/states); `options[].name` is what's shown.
+
+function FacetMultiSelect({
+  label, options, values, onChange, placeholder,
 }: {
   label: string;
+  options: { value: string; name: string }[];
   values: string[];
   onChange: (v: string[]) => void;
   placeholder: string;
 }) {
   const [text, setText] = useState('');
+  const toggle = (v: string) =>
+    onChange(values.includes(v) ? values.filter((x) => x !== v) : [...values, v]);
   const add = (raw: string) => {
     const v = raw.trim();
     if (v && !values.includes(v)) onChange([...values, v]);
     setText('');
   };
+  const known = new Set(options.map((o) => o.value));
+  const customValues = values.filter((v) => !known.has(v));
+  const nameOf = (v: string) => options.find((o) => o.value === v)?.name ?? v;
+
   return (
     <div>
       <label className="block text-xs font-medium text-gray-700 mb-1">{label}</label>
-      <div className="flex flex-wrap gap-1.5 mb-1.5">
-        {values.map((v) => (
-          <span key={v} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 text-xs font-medium">
-            {v}
-            <button type="button" onClick={() => onChange(values.filter((x) => x !== v))} className="text-gray-400 hover:text-red-500"><X className="w-3 h-3" /></button>
-          </span>
-        ))}
-      </div>
+      {options.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-2 max-h-32 overflow-y-auto">
+          {options.map((o) => {
+            const on = values.includes(o.value);
+            return (
+              <button key={o.value} type="button" onClick={() => toggle(o.value)}
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border transition-colors ${on ? 'bg-[var(--brand-primary)] text-white border-[var(--brand-primary)]' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}>
+                {on && <Check className="w-3 h-3" />}{o.name}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {customValues.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-1.5">
+          {customValues.map((v) => (
+            <span key={v} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 text-xs font-medium">
+              {nameOf(v)}
+              <button type="button" onClick={() => toggle(v)} className="text-gray-400 hover:text-red-500"><X className="w-3 h-3" /></button>
+            </span>
+          ))}
+        </div>
+      )}
       <div className="flex gap-2">
         <input
           type="text"
@@ -115,8 +163,38 @@ export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onS
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveResult, setSaveResult] = useState<AudienceResult | null>(null);
 
+  // Master facet values for the FILTER checklists (free-text fallback if unavailable).
+  const [facets, setFacets] = useState<FacetValues | null>(null);
+  // Mode-switch guard: switching FILTER↔EXCEL after rows exist strands them.
+  const [pendingMode, setPendingMode] = useState<AudienceMode | null>(null);
+  const [rosterUploaded, setRosterUploaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void schemeApi.getFacetValues(schemeId).then((res) => {
+      if (!cancelled && res.success) setFacets(res.data);
+    });
+    return () => { cancelled = true; };
+  }, [schemeId]);
+
   const setFilterKey = <K extends keyof AudienceFilter>(k: K, v: AudienceFilter[K]) =>
     setFilter((f) => ({ ...f, [k]: v }));
+
+  // A persisted audience, a just-materialized snapshot, or a roster upload this
+  // session all mean a mode switch would strand existing rows.
+  const hasStrandableRows = !!audienceConfig || !!saveResult || rosterUploaded;
+  const requestMode = (next: AudienceMode) => {
+    if (next === mode) return;
+    if (hasStrandableRows) { setPendingMode(next); return; }
+    setMode(next);
+  };
+  const confirmModeSwitch = () => {
+    if (!pendingMode) return;
+    setMode(pendingMode);
+    setPendingMode(null);
+    setSaveResult(null);
+    setSaveError(null);
+  };
 
   const saveAudience = async () => {
     setSaveError(null);
@@ -149,7 +227,7 @@ export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onS
           { value: 'FILTER' as AudienceMode, Icon: Filter, label: 'Filter tenant outlets', desc: 'Target by type / program / category / zone / state.' },
           { value: 'EXCEL' as AudienceMode, Icon: FileSpreadsheet, label: 'Upload a roster (Excel)', desc: 'One row per outlet id + name + tagged employee + variables.' },
         ]).map(({ value, Icon, label, desc }) => (
-          <button key={value} type="button" onClick={() => setMode(value)}
+          <button key={value} type="button" onClick={() => requestMode(value)}
             className={`flex items-start gap-3 p-3.5 rounded-xl border-2 text-left transition-all ${mode === value ? 'border-[var(--brand-primary)] bg-green-50' : 'border-gray-200 hover:border-gray-300'}`}>
             <div className={`p-1.5 rounded-lg shrink-0 ${mode === value ? 'bg-[var(--brand-primary)] text-white' : 'bg-gray-100 text-gray-500'}`}><Icon className="w-4 h-4" /></div>
             <div>
@@ -159,6 +237,27 @@ export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onS
           </button>
         ))}
       </div>
+
+      {/* Mode-switch warning — switching strands the existing roster / snapshot */}
+      {pendingMode && (
+        <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3.5">
+          <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-amber-800">
+              Switch to {pendingMode === 'EXCEL' ? 'roster upload' : 'filter'} mode?
+            </p>
+            <p className="text-xs text-amber-700 mt-0.5">
+              This scheme already has {mode === 'EXCEL' ? 'a roster' : 'a filter audience'}. Switching modes strands the existing roster / snapshot rows — they no longer match the new audience definition. You will need to re-save the audience{pendingMode === 'EXCEL' ? ' and upload a fresh roster' : ''} after switching.
+            </p>
+            <div className="flex gap-2 mt-2">
+              <button type="button" onClick={confirmModeSwitch}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-amber-500 text-white hover:bg-amber-600">Switch anyway</button>
+              <button type="button" onClick={() => setPendingMode(null)}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Self-enroll (both modes) */}
       <div className="bg-white border border-gray-200 rounded-xl p-4">
@@ -174,11 +273,21 @@ export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onS
             <p className="text-[11px] text-blue-700">Inclusions only — add one or more facets. Values are matched against the Outlet master (type id / program name / category / zone / state).</p>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <TagInput label="Outlet type ids" values={filter.outletTypeIds ?? []} onChange={(v) => setFilterKey('outletTypeIds', v)} placeholder="type id, then Enter" />
-            <TagInput label="Program names" values={filter.programNames ?? []} onChange={(v) => setFilterKey('programNames', v)} placeholder="program, then Enter" />
-            <TagInput label="Program categories" values={filter.programCategories ?? []} onChange={(v) => setFilterKey('programCategories', v)} placeholder="category, then Enter" />
-            <TagInput label="Zones" values={filter.zones ?? []} onChange={(v) => setFilterKey('zones', v)} placeholder="zone, then Enter" />
-            <TagInput label="States" values={filter.states ?? []} onChange={(v) => setFilterKey('states', v)} placeholder="state, then Enter" />
+            <FacetMultiSelect label="Outlet type" placeholder="add a custom type id, then Enter"
+              options={(facets?.outletTypes ?? []).map((t) => ({ value: t.id, name: t.name }))}
+              values={filter.outletTypeIds ?? []} onChange={(v) => setFilterKey('outletTypeIds', v)} />
+            <FacetMultiSelect label="Program names" placeholder="add a custom program, then Enter"
+              options={(facets?.programNames ?? []).map((s) => ({ value: s, name: s }))}
+              values={filter.programNames ?? []} onChange={(v) => setFilterKey('programNames', v)} />
+            <FacetMultiSelect label="Program categories" placeholder="add a custom category, then Enter"
+              options={(facets?.programCategories ?? []).map((s) => ({ value: s, name: s }))}
+              values={filter.programCategories ?? []} onChange={(v) => setFilterKey('programCategories', v)} />
+            <FacetMultiSelect label="Zones" placeholder="add a custom zone, then Enter"
+              options={(facets?.zones ?? []).map((s) => ({ value: s, name: s }))}
+              values={filter.zones ?? []} onChange={(v) => setFilterKey('zones', v)} />
+            <FacetMultiSelect label="States" placeholder="add a custom state, then Enter"
+              options={(facets?.states ?? []).map((s) => ({ value: s, name: s }))}
+              values={filter.states ?? []} onChange={(v) => setFilterKey('states', v)} />
           </div>
           <div className="border-t border-gray-100 pt-4 space-y-3">
             <ToggleRow value={filter.kycApprovedOnly} onChange={(v) => setFilterKey('kycApprovedOnly', v)}
@@ -212,14 +321,16 @@ export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onS
       )}
 
       {/* EXCEL roster upload */}
-      {mode === 'EXCEL' && <RosterUploadPanel schemeId={schemeId} schemeName={schemeName} />}
+      {mode === 'EXCEL' && (
+        <RosterUploadPanel schemeId={schemeId} schemeName={schemeName} onUploaded={() => setRosterUploaded(true)} />
+      )}
     </div>
   );
 }
 
 // ── Roster upload panel (Mode B) ──────────────────────────────────────────────
 
-function RosterUploadPanel({ schemeId, schemeName }: { schemeId: string; schemeName?: string }) {
+function RosterUploadPanel({ schemeId, schemeName, onUploaded }: { schemeId: string; schemeName?: string; onUploaded?: () => void }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -240,7 +351,7 @@ function RosterUploadPanel({ schemeId, schemeName }: { schemeId: string; schemeN
       taggedEmployeeColumn: taggedEmployeeColumn.trim() || undefined,
     });
     setUploading(false);
-    if (res.success) setResult(res.data);
+    if (res.success) { setResult(res.data); onUploaded?.(); }
     else setError(res.error);
   };
 
@@ -248,9 +359,14 @@ function RosterUploadPanel({ schemeId, schemeName }: { schemeId: string; schemeN
     <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-sm font-semibold text-gray-800 flex items-center gap-2"><Users className="w-4 h-4 text-gray-500" /> Roster upload</p>
-        <button type="button" onClick={() => setShowCols((s) => !s)} className="text-xs text-[var(--brand-primary)] hover:underline">
-          {showCols ? 'Hide column overrides' : 'Column overrides'}
-        </button>
+        <div className="flex items-center gap-3">
+          <button type="button" onClick={downloadRosterTemplate} className="inline-flex items-center gap-1.5 text-xs text-[var(--brand-primary)] hover:underline">
+            <Download className="w-3.5 h-3.5" /> Download template (.xlsx)
+          </button>
+          <button type="button" onClick={() => setShowCols((s) => !s)} className="text-xs text-[var(--brand-primary)] hover:underline">
+            {showCols ? 'Hide column overrides' : 'Column overrides'}
+          </button>
+        </div>
       </div>
 
       {showCols && (

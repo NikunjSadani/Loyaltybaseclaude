@@ -315,11 +315,15 @@ export default function PartnerSchemeDetailPage() {
             <SchemeFormRenderer
               schema={form.schema}
               initialValues={enrollment.formValues ?? undefined}
-              prefill={scheme.prefillValues ?? undefined}
+              prefill={{
+                ...(scheme.outletFieldValues ?? {}),
+                ...(scheme.prefillValues ?? {}),
+              }}
               context={{
                 schemeId,
                 mode: 'SELF',
-                outletApproved: false,
+                outletApproved: scheme.outletApproved ?? false,
+                ownerPhoneMasked: scheme.ownerPhoneMasked ?? undefined,
                 activePartnerId: activePartnerId ?? undefined,
                 targetSchemeOutletId,
               }}
@@ -347,11 +351,15 @@ export default function PartnerSchemeDetailPage() {
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Enrolment details</p>
               <SchemeFormRenderer
                 schema={form.schema}
-                prefill={scheme.prefillValues ?? undefined}
+                prefill={{
+                  ...(scheme.outletFieldValues ?? {}),
+                  ...(scheme.prefillValues ?? {}),
+                }}
                 context={{
                   schemeId,
                   mode: 'SELF',
-                  outletApproved: false,
+                  outletApproved: scheme.outletApproved ?? false,
+                  ownerPhoneMasked: scheme.ownerPhoneMasked ?? undefined,
                   activePartnerId: activePartnerId ?? undefined,
                   targetSchemeOutletId,
                 }}
