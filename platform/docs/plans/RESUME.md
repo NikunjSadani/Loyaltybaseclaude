@@ -53,8 +53,7 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
   Gifsy-approved proof of point-of-sale material**, on the Scheme instrument (reward-free). Full contract + decisions
   **D1–D17** + **§16 AS-BUILT** = `platform/docs/plans/VISIBILITY-POSM-DESIGN.md`; memory **[[visibility-posm]]** (read
   BOTH first for any visibility/POSM work). **Owner UATs only once live → I own bug-free** (money-path-grade dual audit
-  DONE). develop HEAD **`6e3b897`** (feature `2e28ac4` + docs `5ac29ae` + wipe-fix `6e3b897`); origin/develop=`6e3b897`.
-  Gate: **api nest 0 / jest 1931 · FE tsc 0 / vitest 2014.** Migration `20260727120000_visibility_posm_rebuild`
+  DONE). POSM feature commits `2e28ac4`+`5ac29ae`+`6e3b897` (shipped to prod at cutover #16 `4ebf12c`; gate at build **api nest 0 / jest 1931 · FE tsc 0 / vitest 2014**). Migration `20260727120000_visibility_posm_rebuild`
   (destructive: drops the 4 dead photo tables + re-columns `visibility_image_hashes`; **abort-guard asserts 0 legacy
   rows**; kept Excel `OutletVisibilityRecord` AMOUNT_UPLOAD path; repointed 4 live consumers). Dual adversarial audit
   → **2 HIGH (geo-fence fail-OPEN→now fail-closed; no sales media-upload route→added `POST sales/media`) + 5 MED + LOWs
