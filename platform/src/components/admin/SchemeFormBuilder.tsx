@@ -80,6 +80,16 @@ const NON_REQUIRABLE: ReadonlySet<FormFieldType> = new Set<FormFieldType>([
 
 const CHOICE_TYPES: ReadonlySet<FormFieldType> = new Set<FormFieldType>(['DROPDOWN', 'MULTI_SELECT']);
 
+/**
+ * Value fields that can be prefilled from an Excel/roster column. Media
+ * (IMAGE/CAMERA/DOCUMENT/UPI_QR_SCAN/SIGNATURE), GPS_POINT, CALCULATED, LOOKUP,
+ * SECTION and DATA_DISPLAY are excluded — a photo/GPS/signature/computed value
+ * cannot come from an Excel cell.
+ */
+const PREFILLABLE_FIELD_TYPES: ReadonlySet<FormFieldType> = new Set<FormFieldType>([
+  'TEXT', 'NUMBER', 'EMAIL', 'DATE', 'DROPDOWN', 'MULTI_SELECT', 'TOGGLE', 'PHONE_OTP',
+]);
+
 function uid() { return Math.random().toString(36).slice(2, 9); }
 
 function defaultField(type: FormFieldType, order: number): FormField {
@@ -95,8 +105,6 @@ function defaultField(type: FormFieldType, order: number): FormField {
     lookupMap: type === 'LOOKUP' ? {} : undefined,
     captureTrigger: type === 'GPS_POINT' ? 'MANUAL' : undefined,
     otpRequired: type === 'PHONE_OTP' ? true : undefined,
-    autoFillFromExcel: false,
-    autoFillEditable: false,
     order,
   };
 }
@@ -606,8 +614,8 @@ export function SchemeFormBuilder({
                       onChange={(c) => patch(field.id, { requiredWhen: c })} />
                   )}
 
-                  {/* Prefill (Mode B) */}
-                  {showPrefill && !isDisplayOnly && field.type !== 'CALCULATED' && field.type !== 'LOOKUP' && (
+                  {/* Prefill (Mode B) — value fields only */}
+                  {showPrefill && PREFILLABLE_FIELD_TYPES.has(field.type) && (
                     <div className="pt-1 border-t border-gray-100 space-y-2">
                       <div>
                         <label className="block text-[10px] text-gray-500 mb-1">Prefill from Excel column</label>
@@ -615,11 +623,23 @@ export function SchemeFormBuilder({
                           placeholder="e.g. owner_phone (roster variable)" className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5" />
                       </div>
                       {field.prefillKey && (
-                        <label className="flex items-center gap-2 cursor-pointer text-[11px] text-gray-600">
-                          <input type="checkbox" checked={field.locked ?? false} onChange={(e) => patch(field.id, { locked: e.target.checked })}
-                            className="w-3.5 h-3.5 accent-[var(--brand-primary)]" />
-                          Lock — the filler cannot edit the prefilled value (D13a)
-                        </label>
+                        <div className="space-y-1.5">
+                          <label className="flex items-start gap-2 cursor-pointer text-[11px] text-gray-600">
+                            <input type="radio" name={`prefill-lock-${field.id}`} checked={!field.locked} onChange={() => patch(field.id, { locked: false })}
+                              className="w-3.5 h-3.5 accent-[var(--brand-primary)] mt-0.5" />
+                            <span>Editable — prefilled from Excel, the filler can change it</span>
+                          </label>
+                          <label className="flex items-start gap-2 cursor-pointer text-[11px] text-gray-600">
+                            <input type="radio" name={`prefill-lock-${field.id}`} checked={!!field.locked} onChange={() => patch(field.id, { locked: true })}
+                              className="w-3.5 h-3.5 accent-[var(--brand-primary)] mt-0.5" />
+                            <span>Locked — value comes from Excel, the filler cannot change it</span>
+                          </label>
+                          {field.type === 'PHONE_OTP' && (
+                            <p className="text-[10px] text-gray-400 pl-6">
+                              Locked = the OTP is sent to the Excel number and can&apos;t be changed (except for KYC-approved matched outlets, which always use the owner&apos;s on-file number).
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
                   )}

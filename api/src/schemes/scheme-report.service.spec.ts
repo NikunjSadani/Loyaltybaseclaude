@@ -21,8 +21,6 @@ import {
 const field = (over: Partial<FormField> & Pick<FormField, 'id' | 'type'>): FormField => ({
   label: over.id,
   required: false,
-  autoFillFromExcel: false,
-  autoFillEditable: false,
   order: 0,
   ...over,
 });

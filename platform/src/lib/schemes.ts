@@ -461,7 +461,16 @@ export const schemeApi = {
   },
   getMyEnrollment(schemeId: string) {
     return api.get<{
-      schemeOutlet: { id: string; outletName: string };
+      schemeOutlet: {
+        id: string;
+        outletName: string;
+        /**
+         * Roster Excel prefill (D13 / Mode B) for this matched roster row, keyed by
+         * each field's `prefillKey` (Excel column header) and/or field id. Optional —
+         * absent/null when the row carries no prefill; the renderer then prefills nothing.
+         */
+        prefillValues?: Record<string, string> | null;
+      };
       enrollment: SchemeEnrollment;
     }>(`${BASE}/${schemeId}/enrollment`);
   },

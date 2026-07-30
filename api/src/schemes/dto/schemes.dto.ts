@@ -208,7 +208,9 @@ export type EnrollmentMode = (typeof ENROLLMENT_MODES)[number];
  * formValues — the submitted form field values (keyed by formField.id).
  *   May be omitted / empty if the scheme has no enrollment form configured.
  *   CALCULATED fields may be present but are ignored — the server recomputes.
- *   autoFillFromExcel fields may arrive pre-filled and are accepted.
+ *   Prefilled fields may arrive pre-filled and are accepted; a LOCKED prefill field
+ *   is re-pinned server-side to its authoritative roster value (any client value is
+ *   discarded).
  */
 export class SubmitEnrollmentDto {
   @IsOptional()

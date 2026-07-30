@@ -29,8 +29,6 @@ function makeField(overrides: Partial<FormField>): FormField {
     type: 'TEXT',
     label: 'Test',
     required: false,
-    autoFillFromExcel: false,
-    autoFillEditable: false,
     order: 0,
     ...overrides,
   };

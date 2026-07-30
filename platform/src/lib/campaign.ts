@@ -60,10 +60,6 @@ export interface FormField {
   audience?: FieldAudience;
   /** Options list — only for DROPDOWN */
   options?: string[];
-  /** Pre-fill value from the outlet targeting Excel */
-  autoFillFromExcel: boolean;
-  /** If pre-filled, can the enrolling employee edit it? */
-  autoFillEditable: boolean;
   /**
    * For DATA_DISPLAY fields — the key used to look up the outlet's
    * Excel-uploaded data point (e.g. 'last_month_sales', 'outlet_score').
@@ -619,31 +615,6 @@ export function validateFieldValues(
   }
 
   return { valid: missingFieldIds.length === 0, missingFieldIds };
-}
-
-/**
- * Computes the initial controlled values map by reading `prefillValues`
- * (outlet's Excel data, keyed by column label) for any field marked
- * `autoFillFromExcel: true`.
- *
- * DATA_DISPLAY fields are NOT included — they are rendered from the raw
- * outlet data directly, never as form values.
- *
- * Returns a partial Record: only fields that have autoFillFromExcel set.
- */
-export function applyPrefillValues(
-  fields: FormField[],
-  prefillValues: Record<string, string>,
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-
-  for (const field of fields) {
-    if (!field.autoFillFromExcel) continue;
-    if (field.type === 'DATA_DISPLAY') continue;
-    result[field.id] = prefillValues[field.label] ?? '';
-  }
-
-  return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

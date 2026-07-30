@@ -13,8 +13,6 @@ function field(type: FormFieldType, over: Partial<FormField> = {}): FormField {
     type,
     label: over.label ?? 'Label',
     required: over.required ?? false,
-    autoFillFromExcel: false,
-    autoFillEditable: false,
     order: over.order ?? 0,
     ...over,
   };

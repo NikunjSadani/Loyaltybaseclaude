@@ -315,6 +315,7 @@ export default function PartnerSchemeDetailPage() {
             <SchemeFormRenderer
               schema={form.schema}
               initialValues={enrollment.formValues ?? undefined}
+              prefill={scheme.prefillValues ?? undefined}
               context={{
                 schemeId,
                 mode: 'SELF',
@@ -346,6 +347,7 @@ export default function PartnerSchemeDetailPage() {
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Enrolment details</p>
               <SchemeFormRenderer
                 schema={form.schema}
+                prefill={scheme.prefillValues ?? undefined}
                 context={{
                   schemeId,
                   mode: 'SELF',

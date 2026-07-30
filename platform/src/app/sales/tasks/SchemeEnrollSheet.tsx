@@ -322,6 +322,7 @@ export function SchemeEnrollSheet({
             ) : schema ? (
               <SchemeFormRenderer
                 schema={schema}
+                prefill={selected.prefillValues ?? undefined}
                 context={{
                   schemeId: scheme.id,
                   mode: 'SALES',

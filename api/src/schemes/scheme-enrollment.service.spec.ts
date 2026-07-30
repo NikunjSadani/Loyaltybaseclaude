@@ -45,7 +45,7 @@ const makeScheme = (over: Record<string, unknown> = {}) => ({
       captureGpsOnSubmit: false,
       requireOtp: false,
       fields: [
-        { id: 'f1', type: 'TEXT', label: 'Shop', required: true, autoFillFromExcel: false, autoFillEditable: false, order: 0 },
+        { id: 'f1', type: 'TEXT', label: 'Shop', required: true, order: 0 },
       ],
     },
   },
@@ -213,7 +213,7 @@ describe('SchemeEnrollmentService', () => {
             captureGpsOnSubmit: false,
             requireOtp: false,
             fields: [
-              { id: 'ph', type: 'PHONE_OTP', label: 'Phone', required: true, otpRequired: true, autoFillFromExcel: false, autoFillEditable: false, order: 0 },
+              { id: 'ph', type: 'PHONE_OTP', label: 'Phone', required: true, otpRequired: true, order: 0 },
             ],
           },
         },
@@ -263,6 +263,178 @@ describe('SchemeEnrollmentService', () => {
     });
   });
 
+  // ── Prefilled Excel variables + Editable/Locked (D13 / D13a) ────────────────
+  describe('prefill pins (Locked)', () => {
+    const lockedTextScheme = () =>
+      makeScheme({
+        enrollmentForm: {
+          version: 1,
+          campaignType: 'MIXED',
+          formSchema: {
+            captureGpsOnSubmit: false,
+            requireOtp: false,
+            fields: [
+              { id: 'f1', type: 'TEXT', label: 'Shop', required: true, order: 0 },
+              { id: 'slab', type: 'TEXT', label: 'Slab', required: true, locked: true, prefillKey: 'Slab', order: 1 },
+            ],
+          },
+        },
+      });
+
+    const primeSalesStandalone = (row: Record<string, unknown>) => {
+      mockPrisma.schemeOutlet.findFirst.mockResolvedValue(row);
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su-caller' }); // requireCallerSalesUser
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'su-caller', reportingToId: null },
+        { id: 'su-child', reportingToId: 'su-caller' },
+      ]);
+    };
+
+    it('pins a LOCKED prefill field to its roster value in persisted formValues (client value discarded)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(lockedTextScheme());
+      primeSalesStandalone({
+        id: 'ro9', schemeId: 's1', clientId: 'deoleo', outletRef: 'EXT-42', outletName: 'Kirana',
+        matchedOutletId: null, matchedPartnerId: null, taggedSalesUserId: 'su-child',
+        prefillValues: { Slab: 'Gold' },
+      });
+      mockPrisma.schemeEnrollment.findUnique.mockResolvedValue(null);
+      mockPrisma.schemeEnrollment.create.mockResolvedValue({ id: 'enr9', schemeId: 's1', schemeOutletId: 'ro9', currentVersion: 1 });
+      mockPrisma.schemeSubmission.create.mockResolvedValue({ id: 'sub9' });
+
+      await service.enroll(salesUser, 's1', {
+        enrollmentMode: 'SALES', targetSchemeOutletId: 'ro9',
+        formValues: { f1: 'Kirana', slab: 'Bronze (client typed)' },
+      });
+
+      const persisted = mockPrisma.schemeEnrollment.create.mock.calls[0][0].data.formValues as Record<string, unknown>;
+      expect(persisted.slab).toBe('Gold'); // pinned — the client value is discarded
+      expect(persisted.f1).toBe('Kirana');
+    });
+
+    it('does NOT pin (and does not block) a locked field when the roster has no value for the key', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(lockedTextScheme());
+      primeSalesStandalone({
+        id: 'ro9', schemeId: 's1', clientId: 'deoleo', outletRef: 'EXT-42', outletName: 'Kirana',
+        matchedOutletId: null, matchedPartnerId: null, taggedSalesUserId: 'su-child',
+        prefillValues: { Other: 'x' }, // no "Slab" key
+      });
+      mockPrisma.schemeEnrollment.findUnique.mockResolvedValue(null);
+      mockPrisma.schemeEnrollment.create.mockResolvedValue({ id: 'enr9', schemeId: 's1', schemeOutletId: 'ro9', currentVersion: 1 });
+      mockPrisma.schemeSubmission.create.mockResolvedValue({ id: 'sub9' });
+
+      await service.enroll(salesUser, 's1', {
+        enrollmentMode: 'SALES', targetSchemeOutletId: 'ro9',
+        formValues: { f1: 'Kirana', slab: 'Editable client value' },
+      });
+
+      const persisted = mockPrisma.schemeEnrollment.create.mock.calls[0][0].data.formValues as Record<string, unknown>;
+      expect(persisted.slab).toBe('Editable client value'); // graceful fall-back — not forced
+    });
+  });
+
+  // ── Locked PHONE_OTP → roster-number OTP target (D13a + D16) ────────────────
+  describe('locked PHONE_OTP → roster number', () => {
+    const lockedPhoneScheme = () =>
+      makeScheme({
+        enrollmentForm: {
+          version: 1,
+          campaignType: 'MIXED',
+          formSchema: {
+            captureGpsOnSubmit: false,
+            requireOtp: false,
+            fields: [
+              { id: 'ph', type: 'PHONE_OTP', label: 'Phone', required: true, otpRequired: true, locked: true, prefillKey: 'Owner Phone', order: 0 },
+            ],
+          },
+        },
+      });
+
+    const primeSalesStandalone = (row: Record<string, unknown>) => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(lockedPhoneScheme());
+      mockPrisma.schemeOutlet.findFirst.mockResolvedValue(row);
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su-caller' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'su-caller', reportingToId: null },
+        { id: 'su-child', reportingToId: 'su-caller' },
+      ]);
+    };
+
+    it('send OTP targets the roster number, ignoring the client-typed mobile', async () => {
+      primeSalesStandalone({
+        id: 'ro9', schemeId: 's1', clientId: 'deoleo', outletRef: 'EXT-42', outletName: 'Kirana',
+        matchedOutletId: null, matchedPartnerId: null, taggedSalesUserId: 'su-child',
+        prefillValues: { 'Owner Phone': '9812345678' },
+      });
+      mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otpX' });
+      mockMsg91.sendOtp.mockResolvedValue(undefined);
+
+      const res = await service.sendEnrollOtp(salesUser, 's1', {
+        enrollmentMode: 'SALES', targetSchemeOutletId: 'ro9', mobile: '8000000000',
+      });
+
+      expect(res.locked).toBe(true);
+      expect(mockPrisma.otpCode.create.mock.calls[0][0].data.phone).toBe('9812345678');
+      expect(res.phoneMasked).toBe('******5678');
+    });
+
+    it('submit records the roster number (a client-typed field/mobile is ignored)', async () => {
+      primeSalesStandalone({
+        id: 'ro9', schemeId: 's1', clientId: 'deoleo', outletRef: 'EXT-42', outletName: 'Kirana',
+        matchedOutletId: null, matchedPartnerId: null, taggedSalesUserId: 'su-child',
+        prefillValues: { 'Owner Phone': '9812345678' },
+      });
+      mockPrisma.schemeEnrollment.findUnique.mockResolvedValue(null);
+      // hasVerifiedOtp checks a verified OTP for (row, '9812345678') — a verified rec exists.
+      mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'otp1' });
+      mockPrisma.schemeEnrollment.create.mockResolvedValue({ id: 'enr9', schemeId: 's1', schemeOutletId: 'ro9', currentVersion: 1 });
+      mockPrisma.schemeSubmission.create.mockResolvedValue({ id: 'sub9' });
+
+      await service.enroll(salesUser, 's1', {
+        enrollmentMode: 'SALES', targetSchemeOutletId: 'ro9',
+        formValues: { ph: '8000000000' }, mobile: '8000000000',
+      });
+
+      const persisted = mockPrisma.schemeEnrollment.create.mock.calls[0][0].data.formValues as Record<string, unknown>;
+      expect(persisted.ph).toBe('9812345678'); // server-authoritative roster number
+    });
+
+    it('falls back to the typed number when the field is EDITABLE (locked !== true)', async () => {
+      const editableScheme = makeScheme({
+        enrollmentForm: {
+          version: 1, campaignType: 'MIXED',
+          formSchema: {
+            captureGpsOnSubmit: false, requireOtp: false,
+            fields: [
+              { id: 'ph', type: 'PHONE_OTP', label: 'Phone', required: true, otpRequired: true, order: 0 },
+            ],
+          },
+        },
+      });
+      mockPrisma.scheme.findFirst.mockResolvedValue(editableScheme);
+      mockPrisma.schemeOutlet.findFirst.mockResolvedValue({
+        id: 'ro9', schemeId: 's1', clientId: 'deoleo', outletRef: 'EXT-42', outletName: 'Kirana',
+        matchedOutletId: null, matchedPartnerId: null, taggedSalesUserId: 'su-child',
+        prefillValues: { 'Owner Phone': '9812345678' },
+      });
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su-caller' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'su-caller', reportingToId: null },
+        { id: 'su-child', reportingToId: 'su-caller' },
+      ]);
+      mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otpX' });
+      mockMsg91.sendOtp.mockResolvedValue(undefined);
+
+      const res = await service.sendEnrollOtp(salesUser, 's1', {
+        enrollmentMode: 'SALES', targetSchemeOutletId: 'ro9', mobile: '8000000000',
+      });
+
+      expect(res.locked).toBe(false);
+      expect(mockPrisma.otpCode.create.mock.calls[0][0].data.phone).toBe('8000000000'); // typed number
+    });
+  });
+
   // ── A-LOW-6: unknown keys are projected out before persist ──────────────────
   it('drops client-sent keys that are not in the form schema (A-LOW-6)', async () => {
     mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
@@ -292,8 +464,8 @@ describe('SchemeEnrollmentService', () => {
           captureGpsOnSubmit: false,
           requireOtp: false,
           fields: [
-            { id: 'f1', type: 'TEXT', label: 'Mode', required: true, autoFillFromExcel: false, autoFillEditable: false, order: 0 },
-            { id: 'f2', type: 'TEXT', label: 'Detail', required: false, autoFillFromExcel: false, autoFillEditable: false, order: 1, visibleWhen: { fieldId: 'f1', op: 'eq', value: 'SHOW' } },
+            { id: 'f1', type: 'TEXT', label: 'Mode', required: true, order: 0 },
+            { id: 'f2', type: 'TEXT', label: 'Detail', required: false, order: 1, visibleWhen: { fieldId: 'f1', op: 'eq', value: 'SHOW' } },
           ],
         },
       },

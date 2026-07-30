@@ -37,6 +37,7 @@ import {
 import { schemeApi, type EnrollInput, type EnrollResult } from '@/lib/schemes';
 import {
   DISPLAY_ONLY_FIELD_TYPES,
+  PREFILLABLE_VALUE_FIELD_TYPES,
   evaluateFormula,
   isFieldRequired,
   isFieldVisible,
@@ -102,12 +103,15 @@ function resolveInitialValues(
   prefill: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...(initialValues ?? {}) };
+  if (!prefill) return out;
   for (const f of schema.fields) {
     if (out[f.id] !== undefined) continue;
-    if (prefill) {
-      if (prefill[f.id] !== undefined) out[f.id] = prefill[f.id];
-      else if (f.prefillKey && prefill[f.prefillKey] !== undefined) out[f.id] = prefill[f.prefillKey];
-    }
+    // Only inject a prefill string into a VALUE field. A media (stored object key),
+    // GPS fix, signature, CALCULATED, LOOKUP, SECTION or DATA_DISPLAY field must never
+    // receive a raw prefill string — it would corrupt that field's value shape.
+    if (!PREFILLABLE_VALUE_FIELD_TYPES.has(f.type)) continue;
+    if (prefill[f.id] !== undefined) out[f.id] = prefill[f.id];
+    else if (f.prefillKey && prefill[f.prefillKey] !== undefined) out[f.id] = prefill[f.prefillKey];
   }
   return out;
 }
@@ -256,8 +260,10 @@ export function SchemeFormRenderer({
       targetOutletRef: context.targetOutletRef,
       formValues,
     };
-    // The editable-field typed mobile (ignored for a pinned/approved outlet).
-    if (phoneOtpField && !outletApproved) {
+    // The editable-field typed mobile (ignored for a pinned/approved outlet, and for a
+    // LOCKED phone field — the backend authoritatively OTPs the roster-prefilled number,
+    // so we must not let a client value override it).
+    if (phoneOtpField && !outletApproved && !phoneOtpField.locked) {
       const m = working[phoneOtpField.id];
       if (typeof m === 'string' && m) payload.mobile = m;
     }
@@ -812,6 +818,10 @@ function PhoneOtpField({
   // Pinned outlets never edit the number; everyone else types it.
   const editable = !outletApproved && !field.locked;
   const typed = String(values[field.id] ?? '');
+  // A per-field LOCKED phone (D13a) on a non-approved row: show the roster-prefilled
+  // number read-only. The backend authoritatively OTPs that number on send, so the
+  // filler must not be able to type a different one.
+  const fieldLocked = !outletApproved && Boolean(field.locked);
 
   const send = async () => {
     setSending(true);
@@ -857,6 +867,18 @@ function PhoneOtpField({
             OTP to owner on file{phoneMasked ? ` (${phoneMasked})` : ''}
           </span>
         </div>
+      ) : fieldLocked ? (
+        // Locked, roster-prefilled number — read-only. Backend OTPs this number on send.
+        <input
+          id={field.id}
+          type="tel"
+          inputMode="numeric"
+          className={inputCls}
+          value={typed}
+          disabled
+          placeholder={field.placeholder ?? '10-digit mobile'}
+          aria-label={field.label}
+        />
       ) : (
         <input
           id={field.id}

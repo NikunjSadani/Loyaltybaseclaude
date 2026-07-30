@@ -29,8 +29,6 @@ function textField(id: string, required = false, order = 0): FormField {
     type: 'TEXT',
     label: `Label ${id}`,
     required,
-    autoFillFromExcel: false,
-    autoFillEditable: false,
     order,
   };
 }
@@ -45,8 +43,6 @@ function calcField(id: string, formula: string, order = 0): FormField {
     type: 'CALCULATED',
     label: `Calc ${id}`,
     required: false,
-    autoFillFromExcel: false,
-    autoFillEditable: false,
     formula,
     order,
   };
@@ -333,22 +329,25 @@ describe('validateSubmittedValues', () => {
     expect(errors).toHaveLength(0);
   });
 
-  // ── autoFillFromExcel: pre-filled values accepted ─────────────────────
-  it('accepts a required autoFillFromExcel field that arrives pre-filled', () => {
+  // ── Prefilled (locked) values validate like any other value ────────────
+  it('accepts a required locked-prefill field that arrives pre-filled', () => {
     const prefilled: FormField = {
       ...textField('shopCode', true),
-      autoFillFromExcel: true,
+      locked: true,
+      prefillKey: 'Shop Code',
     };
     const s = schema(prefilled);
     const { errors } = validateSubmittedValues(s, { shopCode: 'SH001' });
     expect(errors).toHaveLength(0);
   });
 
-  it('still requires a required autoFillFromExcel field if not provided', () => {
-    // autoFillFromExcel means "allowed to be pre-filled", not "optional".
+  it('still requires a required prefill field if no value is present', () => {
+    // A locked prefill field is "allowed to be pre-filled", not "optional" — a row with
+    // no roster value leaves it required (applyPrefillPins never pins it in that case).
     const prefilled: FormField = {
       ...textField('shopCode', true),
-      autoFillFromExcel: true,
+      locked: true,
+      prefillKey: 'Shop Code',
     };
     const s = schema(prefilled);
     const { errors } = validateSubmittedValues(s, {});

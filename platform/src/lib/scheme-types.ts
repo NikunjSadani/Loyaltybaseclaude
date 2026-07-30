@@ -59,6 +59,25 @@ export const DISPLAY_ONLY_FIELD_TYPES: ReadonlySet<FormFieldType> = new Set<Form
   'SECTION',
 ]);
 
+/**
+ * Value field types that may be prefilled from a roster/Excel column (D13 / Mode B).
+ * Media (DOCUMENT/IMAGE/CAMERA/UPI_QR_SCAN/SIGNATURE), GPS_POINT, CALCULATED, LOOKUP,
+ * SECTION and DATA_DISPLAY are EXCLUDED — a stored object key / GPS fix / computed /
+ * structural value can never come from an Excel cell, and injecting a prefill string
+ * into a media field id would corrupt it. Mirrors the backend + the admin builder's
+ * prefillable-type gate.
+ */
+export const PREFILLABLE_VALUE_FIELD_TYPES: ReadonlySet<FormFieldType> = new Set<FormFieldType>([
+  'TEXT',
+  'NUMBER',
+  'EMAIL',
+  'DATE',
+  'DROPDOWN',
+  'MULTI_SELECT',
+  'TOGGLE',
+  'PHONE_OTP',
+]);
+
 export const CAMPAIGN_TYPES = ['LOYALTY_ONLY', 'OPEN_CAMPAIGN', 'MIXED'] as const;
 export type CampaignType = (typeof CAMPAIGN_TYPES)[number];
 
@@ -87,8 +106,6 @@ export interface FormField {
   helpText?: string;
   audience?: FieldAudience;
   options?: string[];
-  autoFillFromExcel: boolean;
-  autoFillEditable: boolean;
   dataDisplayKey?: string;
   /** Required when type === 'CALCULATED'. */
   formula?: string;
@@ -192,6 +209,14 @@ export interface EligibleScheme extends SchemeRecord {
  */
 export interface PartnerEligibleScheme extends EligibleScheme {
   mySchemeOutletId: string | null;
+  /**
+   * Roster Excel prefill (D13 / Mode B) for the active partner's MATCHED roster row,
+   * keyed by each field's `prefillKey` (the Excel column header) and/or field id.
+   * Absent/null when the scheme has no roster prefill for this outlet — the renderer
+   * then prefills nothing. Backend-surfaced on the eligible list alongside
+   * `mySchemeOutletId`.
+   */
+  prefillValues?: Record<string, string> | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -281,6 +306,13 @@ export interface SalesTarget {
   rejectionReason: string | null;
   enrollmentId: string | null;
   currentVersion: number | null;
+  /**
+   * Roster Excel prefill (D13 / Mode B) for this target's roster row, keyed by each
+   * field's `prefillKey` (the Excel column header) and/or field id. Absent/null when
+   * the roster row carries no prefill — the renderer then prefills nothing. Live-rule
+   * (non-rostered) targets have no prefill.
+   */
+  prefillValues?: Record<string, string> | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

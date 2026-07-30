@@ -21,6 +21,7 @@ import { sniffFileType } from '../common/file-signature';
 import {
   EnrollmentFormSchema,
   FormField,
+  applyPrefillPins,
   evaluateVisibleWhen,
   validateSubmittedValues,
 } from './enrollment-form.helper';
@@ -80,6 +81,8 @@ export interface SalesTargetRow {
   rejectionReason: string | null;
   enrollmentId: string | null;
   currentVersion: number | null;
+  /** Excel prefill variables for a materialized roster row (D13); null for a live-rule outlet (no row yet). */
+  prefillValues: Record<string, string> | null;
 }
 
 /**
@@ -450,15 +453,26 @@ export class SchemeEnrollmentService {
   }
 
   /**
-   * Resolve the consent-OTP target for a roster row (D16). A KYC-APPROVED matched
-   * outlet with a verified owner number on file → the field is PINNED (locked) to the
-   * owner's number; everyone else → the typed number.
+   * Resolve the consent-OTP target for a roster row (D16). Precedence:
+   *   1. KYC-APPROVED matched outlet with a verified owner number on file → PINNED to
+   *      the owner's number (locked). This ALWAYS wins — even when the phone-OTP field
+   *      is bound to a roster column — the on-file approved number is the owner decision.
+   *   2. Else, a LOCKED phone-OTP field bound to a non-empty roster column
+   *      (`prefillValues[prefillKey]`) → server-authoritative Excel number (locked); the
+   *      client-sent `typedMobile` is IGNORED (a rep cannot substitute a different one).
+   *   3. Else → the typed number (editable, locked:false — unchanged behaviour).
+   *
+   * A locked column that carries no value (missing/blank) is NOT forced (graceful
+   * fall-back to editable); a locked column that carries a non-10-digit value is an
+   * admin mis-config and surfaces a clear error.
    */
   private async resolveOtpTarget(
     clientId: string,
     row: RosterRow,
     typedMobile?: string,
+    otpField?: FormField | null,
   ): Promise<{ phone: string; locked: boolean }> {
+    // (1) Approved-matched on-file number — always wins.
     if (row.matchedPartnerId) {
       const partner = await this.prisma.channelPartner.findFirst({
         where: { id: row.matchedPartnerId, clientId },
@@ -473,6 +487,24 @@ export class SchemeEnrollmentService {
         return { phone: onFile, locked: true }; // consent guarantee — cannot be redirected
       }
     }
+
+    // (2) Locked phone-OTP field bound to a roster column → the Excel number is authoritative.
+    if (otpField?.locked === true && otpField.prefillKey) {
+      const prefill = (row.prefillValues ?? null) as Record<string, string> | null;
+      const rosterRaw = prefill && typeof prefill === 'object' ? prefill[otpField.prefillKey] : undefined;
+      if (typeof rosterRaw === 'string' && rosterRaw !== '') {
+        const rosterPhone = this.phoneLast10(rosterRaw);
+        if (rosterPhone.length === 10) {
+          return { phone: rosterPhone, locked: true }; // server-authoritative — typed number ignored
+        }
+        throw new BadRequestException(
+          'The roster phone number for this outlet is not a valid 10-digit mobile.',
+        );
+      }
+      // Roster has no value for the locked column → fall through to the typed number.
+    }
+
+    // (3) Editable — the typed number.
     const typed = this.phoneLast10(typedMobile);
     if (typed.length !== 10) {
       throw new BadRequestException('Enter a valid 10-digit mobile number for OTP.');
@@ -486,7 +518,8 @@ export class SchemeEnrollmentService {
     this.assertSchemeOpen(scheme);
     const row = await this.resolveRoster(user, scheme, mode, dto, requestedPartnerId);
 
-    const { phone, locked } = await this.resolveOtpTarget(user.clientId, row, dto.mobile);
+    const otpField = this.phoneOtpField(scheme.enrollmentForm);
+    const { phone, locked } = await this.resolveOtpTarget(user.clientId, row, dto.mobile, otpField);
     const otp = generateNumericOtp();
 
     // One active OTP per (phone, purpose, roster row) — the referenceId binding keeps
@@ -520,7 +553,8 @@ export class SchemeEnrollmentService {
     const mode = dto.enrollmentMode ?? 'SELF';
     const scheme = await this.loadSchemeWithForm(user, schemeId);
     const row = await this.resolveRoster(user, scheme, mode, dto, requestedPartnerId);
-    const { phone } = await this.resolveOtpTarget(user.clientId, row, dto.mobile);
+    const otpField = this.phoneOtpField(scheme.enrollmentForm);
+    const { phone } = await this.resolveOtpTarget(user.clientId, row, dto.mobile, otpField);
 
     const rec = await this.prisma.otpCode.findFirst({
       where: {
@@ -635,12 +669,20 @@ export class SchemeEnrollmentService {
 
     if (form) {
       const schema = form.formSchema as unknown as EnrollmentFormSchema;
-      const submitted = { ...(submittedRaw ?? {}) };
+
+      // Prefill pins (D13a): overwrite every LOCKED Excel-prefill field with its
+      // authoritative roster value BEFORE validation, so required/type/option checks
+      // run against the pinned value and it flows into finalFormValues below.
+      const submitted = applyPrefillPins(
+        schema,
+        { ...(submittedRaw ?? {}) },
+        (row.prefillValues ?? null) as unknown as Record<string, string> | null,
+      );
 
       // PHONE-OTP consent gate (D16): pin the number + require a verified OTP.
       const otpField = this.phoneOtpField(form);
       if (otpField) {
-        const { phone } = await this.resolveOtpTarget(scheme.clientId, row, typedMobile);
+        const { phone } = await this.resolveOtpTarget(scheme.clientId, row, typedMobile, otpField);
         if (!(await this.hasVerifiedOtp(row.id, phone))) {
           throw new ForbiddenException('Phone OTP not verified for this enrollment.');
         }
@@ -812,12 +854,19 @@ export class SchemeEnrollmentService {
     // id when the scheme has a FIXED roster (EXCEL / FILTER-frozen) — so the outlet portal can
     // self-enroll straight into that fixed row (targetSchemeOutletId). A live-rule scheme has no
     // pre-materialized row (the server lazy-creates on enroll) → null.
-    type EligibleScheme = (typeof schemes)[number] & { mySchemeOutletId: string | null };
+    // `prefillValues` (D13): the matched roster row's Excel variables, so the enroll
+    // form can prefill/lock fields. Only the partner's OWN matched row is exposed; a
+    // live-rule / no-audience scheme has no pre-materialized row → null.
+    type EligibleScheme = (typeof schemes)[number] & {
+      mySchemeOutletId: string | null;
+      prefillValues: Record<string, string> | null;
+    };
     const eligible: EligibleScheme[] = [];
     for (const scheme of schemes) {
       const audience = this.parseAudience(scheme);
       if (!audience) {
-        eligible.push({ ...scheme, mySchemeOutletId: null }); // opt-in default: visible to all ACTIVE
+        // opt-in default: visible to all ACTIVE (no fixed roster row → no prefill)
+        eligible.push({ ...scheme, mySchemeOutletId: null, prefillValues: null });
         continue;
       }
       if (audience.mode === 'EXCEL' || audience.frozen) {
@@ -826,16 +875,22 @@ export class SchemeEnrollmentService {
             schemeId: scheme.id,
             OR: [{ matchedPartnerId: partnerId }, { matchedOutletId: { in: [...outletIds] } }],
           },
-          select: { id: true },
+          select: { id: true, prefillValues: true },
           // Deterministic pick for a multi-outlet partner (A-LOW-1): the portal one-tap
           // self-enroll must always target the same roster row.
           orderBy: { createdAt: 'asc' },
         });
-        if (rostered) eligible.push({ ...scheme, mySchemeOutletId: rostered.id });
+        if (rostered) {
+          eligible.push({
+            ...scheme,
+            mySchemeOutletId: rostered.id,
+            prefillValues: (rostered.prefillValues as Record<string, string> | null) ?? null,
+          });
+        }
       } else {
         // Live-rule FILTER: any of the partner's outlets matches the filter.
         if (outlets.some((o) => this.outletMatchesFilter(o, audience.filter))) {
-          eligible.push({ ...scheme, mySchemeOutletId: null });
+          eligible.push({ ...scheme, mySchemeOutletId: null, prefillValues: null });
         }
       }
     }
@@ -869,7 +924,16 @@ export class SchemeEnrollmentService {
       include: { enrollment: true },
     });
     if (!row || !row.enrollment) throw new NotFoundException('Enrollment not found.');
-    return { schemeOutlet: { id: row.id, outletName: row.outletName }, enrollment: row.enrollment };
+    return {
+      schemeOutlet: {
+        id: row.id,
+        outletName: row.outletName,
+        // Excel prefill variables for THIS matched roster row (D13) — the outlet portal
+        // prefills locked/editable fields from these. Only the enroller's own row.
+        prefillValues: (row.prefillValues ?? null) as Record<string, string> | null,
+      },
+      enrollment: row.enrollment,
+    };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -960,6 +1024,7 @@ export class SchemeEnrollmentService {
       rejectionReason: r.enrollment?.rejectionReason ?? null,
       enrollmentId: r.enrollment?.id ?? null,
       currentVersion: r.enrollment?.currentVersion ?? null,
+      prefillValues: (r.prefillValues ?? null) as Record<string, string> | null,
     }));
 
     // Live-rule targets — reachable outlets matching the filter, not already rostered.
@@ -1008,6 +1073,7 @@ export class SchemeEnrollmentService {
             rejectionReason: null,
             enrollmentId: null,
             currentVersion: null,
+            prefillValues: null,
           }));
       }
     }

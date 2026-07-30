@@ -84,8 +84,6 @@ const textField: FormField = {
   label: 'Shop Name',
   required: true,
   placeholder: '',
-  autoFillFromExcel: false,
-  autoFillEditable: false,
   order: 0,
 };
 
@@ -95,8 +93,6 @@ const dropdownField: FormField = {
   label: 'Shop Type',
   required: true,
   options: ['Kirana', 'Supermarket', 'Medical'],
-  autoFillFromExcel: false,
-  autoFillEditable: false,
   order: 1,
 };
 
@@ -105,8 +101,6 @@ const gpsField: FormField = {
   type: 'GPS_POINT',
   label: 'Shop Location',
   required: false,
-  autoFillFromExcel: false,
-  autoFillEditable: false,
   order: 2,
 };
 
@@ -115,8 +109,6 @@ const imageField: FormField = {
   type: 'IMAGE',
   label: 'Shop Photo',
   required: true,
-  autoFillFromExcel: false,
-  autoFillEditable: false,
   order: 3,
 };
 

@@ -5,13 +5,11 @@
  * Tests cover:
  *   H) filterFieldsByAudience
  *   I) validateFieldValues
- *   J) applyPrefillValues
  */
 
 import {
   filterFieldsByAudience,
   validateFieldValues,
-  applyPrefillValues,
   type FormField,
   type FieldAudience,
 } from '../campaign';
@@ -23,16 +21,12 @@ const makeField = (
   audience: FieldAudience = 'ALL',
   required = false,
   type: FormField['type'] = 'TEXT',
-  autoFillFromExcel = false,
-  autoFillEditable = false,
 ): FormField => ({
   id,
   type,
   label: `Field ${id}`,
   required,
   audience,
-  autoFillFromExcel,
-  autoFillEditable,
   order: 0,
 });
 
@@ -174,91 +168,7 @@ describe('validateFieldValues', () => {
   });
 });
 
-// ── J) applyPrefillValues ─────────────────────────────────────────────────────
-
-describe('applyPrefillValues', () => {
-  it('returns empty record when no fields use auto-fill', () => {
-    const field = makeField('f1', 'ALL', false, 'TEXT', false);
-    const result = applyPrefillValues([field], { f1: 'ignored' });
-    expect(result).toEqual({});
-  });
-
-  it('pre-fills auto-fill fields with values keyed by label', () => {
-    const field: FormField = {
-      id: 'f2',
-      type: 'TEXT',
-      label: 'Shop Area',
-      required: false,
-      audience: 'ALL',
-      autoFillFromExcel: true,
-      autoFillEditable: false,
-      order: 0,
-    };
-    const result = applyPrefillValues([field], { 'Shop Area': '300 sqft' });
-    expect(result['f2']).toBe('300 sqft');
-  });
-
-  it('includes editable auto-fill fields', () => {
-    const field: FormField = {
-      id: 'f3',
-      type: 'TEXT',
-      label: 'Last Month Sales',
-      required: false,
-      audience: 'ALL',
-      autoFillFromExcel: true,
-      autoFillEditable: true,
-      order: 0,
-    };
-    const result = applyPrefillValues([field], { 'Last Month Sales': '₹1,24,500' });
-    expect(result['f3']).toBe('₹1,24,500');
-  });
-
-  it('does not include non-auto-fill fields', () => {
-    const regular = makeField('f4', 'ALL', false, 'TEXT', false);
-    const auto: FormField = {
-      id: 'f5',
-      type: 'TEXT',
-      label: 'GSTIN',
-      required: false,
-      audience: 'ALL',
-      autoFillFromExcel: true,
-      autoFillEditable: false,
-      order: 1,
-    };
-    const result = applyPrefillValues([regular, auto], { GSTIN: '27AAPFU0939F1ZV' });
-    expect(result['f4']).toBeUndefined();
-    expect(result['f5']).toBe('27AAPFU0939F1ZV');
-  });
-
-  it('uses empty string when prefill key is missing from outlet data', () => {
-    const field: FormField = {
-      id: 'f6',
-      type: 'TEXT',
-      label: 'Missing Key',
-      required: false,
-      audience: 'ALL',
-      autoFillFromExcel: true,
-      autoFillEditable: false,
-      order: 0,
-    };
-    const result = applyPrefillValues([field], {});
-    expect(result['f6']).toBe('');
-  });
-
-  it('does not pre-fill DATA_DISPLAY fields (they are handled separately)', () => {
-    const displayField: FormField = {
-      id: 'dd1',
-      type: 'DATA_DISPLAY',
-      label: 'Outlet Score',
-      required: false,
-      audience: 'ALL',
-      autoFillFromExcel: false,
-      autoFillEditable: false,
-      order: 0,
-      dataDisplayKey: 'outlet_score',
-    };
-    // DATA_DISPLAY fields don't use autoFillFromExcel — they read directly from outlet data
-    const result = applyPrefillValues([displayField], { outlet_score: '8.5' });
-    expect(result['dd1']).toBeUndefined();
-  });
-});
+// NOTE: the legacy `applyPrefillValues` (autoFill-gated, keyed by field label) was
+// removed with the `autoFillFromExcel`/`autoFillEditable` FormField fields — roster
+// prefill now flows through `prefillKey` + `PREFILLABLE_VALUE_FIELD_TYPES` in
+// scheme-types.ts / SchemeFormRenderer. Its tests were removed accordingly.

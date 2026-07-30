@@ -82,8 +82,6 @@ export interface FormField {
   helpText?: string;
   audience?: FieldAudience;
   options?: string[];
-  autoFillFromExcel: boolean;
-  autoFillEditable: boolean;
   dataDisplayKey?: string;
   /** Required when type === 'CALCULATED'. */
   formula?: string;
@@ -118,6 +116,66 @@ export interface EnrollmentFormSchema {
   captureGpsOnSubmit: boolean;
   requireOtp: boolean;
   fields: FormField[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Prefill pins (D13 / D13a) — Excel variables + Editable/Locked
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Value-type fields that a Mode-B Excel variable can prefill AND lock. Media
+ * (DOCUMENT/IMAGE/CAMERA/UPI_QR_SCAN/SIGNATURE), GPS_POINT, and structural/display
+ * types (SECTION/DATA_DISPLAY) cannot be Excel-prefilled. CALCULATED/LOOKUP are
+ * server-derived (their own overwrite wins), and PHONE_OTP owns its own pin (the
+ * consent-OTP path) — so all three are excluded here too.
+ */
+export const PREFILLABLE_FIELD_TYPES: ReadonlySet<string> = new Set([
+  'TEXT',
+  'NUMBER',
+  'EMAIL',
+  'DATE',
+  'DROPDOWN',
+  'MULTI_SELECT',
+  'TOGGLE',
+]);
+
+/**
+ * Overwrite every LOCKED prefill field with its authoritative roster value (D13a),
+ * returning a NEW object (never mutates `submitted`).
+ *
+ * A field is a "locked prefill" when `field.locked === true` AND `field.prefillKey`
+ * is a non-empty string. Its pin value is `prefillValues[field.prefillKey]`, applied
+ * ONLY when that roster value is itself a non-empty string:
+ *   • roster has a non-empty value → the field is FORCED to it (a client-sent value
+ *     for that field id is discarded — the rep/outlet cannot substitute it).
+ *   • roster has NO value for the key (missing/blank) → the field is NOT pinned and
+ *     NOT blocked; it gracefully falls back to editable behaviour.
+ * Only value-type fields (PREFILLABLE_FIELD_TYPES) are pinnable; PHONE_OTP,
+ * CALCULATED/LOOKUP, media, GPS, and structural types are never pinned here.
+ *
+ * Pure + unit-testable: no DB, no NestJS. The service applies this BEFORE
+ * `validateSubmittedValues` so required/type/option checks run against the pinned
+ * (server-authoritative) value.
+ */
+export function applyPrefillPins(
+  schema: EnrollmentFormSchema,
+  submitted: Record<string, unknown>,
+  prefillValues: Record<string, string> | null | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...submitted };
+  if (!prefillValues || typeof prefillValues !== 'object') return out;
+
+  for (const field of schema.fields ?? []) {
+    if (field.locked !== true) continue;
+    if (typeof field.prefillKey !== 'string' || field.prefillKey === '') continue;
+    if (!PREFILLABLE_FIELD_TYPES.has(field.type)) continue;
+
+    const pin = prefillValues[field.prefillKey];
+    if (typeof pin === 'string' && pin !== '') {
+      out[field.id] = pin;
+    }
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -163,7 +221,6 @@ function isObject(v: unknown): v is Record<string, unknown> {
  *     - type:      one of FormFieldType
  *     - label:     non-empty string
  *     - required:  boolean
- *     - autoFillFromExcel / autoFillEditable: boolean
  *     - order:     number
  *     - audience (optional): one of FieldAudience
  *     - options (DROPDOWN): must have at least one string entry
@@ -237,14 +294,6 @@ export function validateFormSchema(rawSchema: unknown): string[] {
     // required
     if (!isBoolean(f.required)) {
       errors.push(`${pos}: required must be a boolean.`);
-    }
-
-    // autoFillFromExcel / autoFillEditable
-    if (!isBoolean(f.autoFillFromExcel)) {
-      errors.push(`${pos}: autoFillFromExcel must be a boolean.`);
-    }
-    if (!isBoolean(f.autoFillEditable)) {
-      errors.push(`${pos}: autoFillEditable must be a boolean.`);
     }
 
     // order
@@ -644,7 +693,8 @@ function isBlank(v: unknown): boolean {
  * Rules (P4.3):
  *   1. Visible fields that are `required` must have a non-empty value.
  *   2. Fields hidden by `visibleWhen` are not required (even if required=true).
- *   3. `autoFillFromExcel` fields are always accepted as-is (pre-filled allowed).
+ *   3. A prefilled value (locked or editable) is validated like any other value —
+ *      locked pins are applied by `applyPrefillPins` before this runs.
  *   4. CALCULATED fields are server-recomputed; the client-sent value is ignored.
  *      The recomputed value is returned in `recomputedValues`.
  *   5. Type coercion checks:

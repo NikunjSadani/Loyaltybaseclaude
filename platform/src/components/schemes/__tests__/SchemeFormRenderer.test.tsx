@@ -33,8 +33,6 @@ import type { EnrollmentFormSchema, FormField } from '@/lib/scheme-types';
 const field = (o: Partial<FormField> & Pick<FormField, 'id' | 'type'>): FormField => ({
   label: `Field ${o.id}`,
   required: false,
-  autoFillFromExcel: false,
-  autoFillEditable: false,
   order: 0,
   ...o,
 });
