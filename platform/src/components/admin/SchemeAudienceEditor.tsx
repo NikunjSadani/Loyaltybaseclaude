@@ -98,12 +98,14 @@ function facetCount(f: AudienceFilter): number {
 
 interface Props {
   schemeId: string;
+  /** For the roster-upload report title + filename. */
+  schemeName?: string;
   audienceConfig: AudienceConfig | null;
   /** Called after a successful audience save so the parent re-hydrates. */
   onSaved?: () => void;
 }
 
-export function SchemeAudienceEditor({ schemeId, audienceConfig, onSaved }: Props) {
+export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onSaved }: Props) {
   const [mode, setMode] = useState<AudienceMode>(audienceConfig?.mode ?? 'FILTER');
   const [selfEnrollAllowed, setSelfEnrollAllowed] = useState(audienceConfig?.selfEnrollAllowed ?? false);
   const [frozen, setFrozen] = useState(audienceConfig?.frozen ?? false);
@@ -210,14 +212,14 @@ export function SchemeAudienceEditor({ schemeId, audienceConfig, onSaved }: Prop
       )}
 
       {/* EXCEL roster upload */}
-      {mode === 'EXCEL' && <RosterUploadPanel schemeId={schemeId} />}
+      {mode === 'EXCEL' && <RosterUploadPanel schemeId={schemeId} schemeName={schemeName} />}
     </div>
   );
 }
 
 // ── Roster upload panel (Mode B) ──────────────────────────────────────────────
 
-function RosterUploadPanel({ schemeId }: { schemeId: string }) {
+function RosterUploadPanel({ schemeId, schemeName }: { schemeId: string; schemeName?: string }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -291,7 +293,7 @@ function RosterUploadPanel({ schemeId }: { schemeId: string }) {
             <span className="text-gray-600">{result.standaloneCount} standalone</span>
             <button
               type="button"
-              onClick={() => downloadRosterReport(result)}
+              onClick={() => downloadRosterReport(result, schemeName)}
               className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-green-300 text-green-700 font-medium hover:bg-green-100 transition-colors"
             >
               <Download className="w-3.5 h-3.5" /> Download report (.xlsx)

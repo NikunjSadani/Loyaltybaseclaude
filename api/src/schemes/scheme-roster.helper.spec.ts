@@ -88,7 +88,7 @@ describe('parseRosterUploadBuffer', () => {
       ['OUT001', 'Shop One', 'EMP01', 'Gold', '100'],
       ['OUT002', 'Shop Two', 'EMP02', 'Silver', '50'],
     ]);
-    const rows = parseRosterUploadBuffer(buf);
+    const { rows } = parseRosterUploadBuffer(buf);
     expect(rows).toHaveLength(2);
     expect(rows[0]).toEqual({
       rowIndex: 2,
@@ -106,7 +106,7 @@ describe('parseRosterUploadBuffer', () => {
       ['Outlet ID', 'Outlet Name', 'Tagged Employee', 'Slab'],
       ['OUT001', 'Shop One', '', ''],
     ]);
-    const rows = parseRosterUploadBuffer(buf);
+    const { rows } = parseRosterUploadBuffer(buf);
     expect(rows[0].taggedEmployeeCode).toBeNull();
     expect(rows[0].prefillValues).toEqual({});
   });
@@ -119,8 +119,11 @@ describe('parseRosterUploadBuffer', () => {
       ['', 'Orphan name'],
       ['OUT002', 'Shop Two'],
     ]);
-    const rows = parseRosterUploadBuffer(buf);
+    const { rows, skippedRows } = parseRosterUploadBuffer(buf);
     expect(rows.map((r) => r.outletRef)).toEqual(['OUT001', 'OUT002']);
+    // The fully-blank [null,null] row is ignored; the data-but-no-id 'Orphan name'
+    // row is counted as skipped (so a reconciliation report can account for it).
+    expect(skippedRows).toBe(1);
   });
 
   it('recognises alternate default header spellings (Outlet Code / Employee Code)', () => {
@@ -128,7 +131,7 @@ describe('parseRosterUploadBuffer', () => {
       ['Outlet Code', 'Name', 'Employee Code'],
       ['OUT001', 'Shop One', 'EMP01'],
     ]);
-    const rows = parseRosterUploadBuffer(buf);
+    const { rows } = parseRosterUploadBuffer(buf);
     expect(rows[0].outletRef).toBe('OUT001');
     expect(rows[0].outletName).toBe('Shop One');
     expect(rows[0].taggedEmployeeCode).toBe('EMP01');
@@ -140,7 +143,7 @@ describe('parseRosterUploadBuffer', () => {
       ['Shop Ref', 'Shop', 'Rep', 'Extra'],
       ['OUT001', 'Shop One', 'EMP01', 'x'],
     ]);
-    const rows = parseRosterUploadBuffer(buf, {
+    const { rows } = parseRosterUploadBuffer(buf, {
       idColumn: 'Shop Ref',
       nameColumn: 'Shop',
       taggedEmployeeColumn: 'Rep',
@@ -164,7 +167,7 @@ describe('parseRosterUploadBuffer', () => {
       ['Outlet ID', 'Outlet Name'],
       [12345, 'Shop One'],
     ]);
-    const rows = parseRosterUploadBuffer(buf);
+    const { rows } = parseRosterUploadBuffer(buf);
     expect(rows[0].outletRef).toBe('12345');
   });
 });

@@ -113,7 +113,7 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
 
       {tab === 'details' && <DetailsTab scheme={scheme} onChanged={setScheme} />}
       {tab === 'audience' && (
-        <SchemeAudienceEditor schemeId={schemeId} audienceConfig={audience} onSaved={hydrate} />
+        <SchemeAudienceEditor schemeId={schemeId} schemeName={scheme.name} audienceConfig={audience} onSaved={hydrate} />
       )}
       {tab === 'form' && (
         <FormTab

@@ -259,12 +259,15 @@ export class SchemeAdminService {
     if (!file?.buffer) throw new BadRequestException('A roster .xlsx file is required.');
 
     let rawRows;
+    let skippedRows = 0;
     try {
-      rawRows = parseRosterUploadBuffer(file.buffer, {
+      const parsed = parseRosterUploadBuffer(file.buffer, {
         idColumn: dto.idColumn,
         nameColumn: dto.nameColumn,
         taggedEmployeeColumn: dto.taggedEmployeeColumn,
       });
+      rawRows = parsed.rows;
+      skippedRows = parsed.skippedRows;
     } catch {
       throw new BadRequestException('Invalid or corrupted roster xlsx file.');
     }
@@ -337,6 +340,9 @@ export class SchemeAdminService {
       standaloneCount: matched.standaloneCount,
       duplicateRefs: matched.duplicateRefs,
       unmatchedEmployeeCodes: matched.unmatchedEmployeeCodes,
+      // Non-blank rows dropped for a missing outlet id — surfaced so a reconciliation
+      // report can account for them (they appear in no other count/sheet).
+      skippedRows,
       // Per-input-row disposition for the downloadable upload report (D-report).
       rows: matched.rowReport,
     };

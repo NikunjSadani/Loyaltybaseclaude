@@ -125,10 +125,16 @@ export interface RawRosterRow {
  *   • Unknown/extra columns → prefillValues, keyed by the trimmed header text.
  *     A column whose header is blank is ignored.
  */
+export interface ParseRosterResult {
+  rows: RawRosterRow[];
+  /** Non-blank data rows dropped because they carried no outlet id (invisible otherwise). */
+  skippedRows: number;
+}
+
 export function parseRosterUploadBuffer(
   buffer: Buffer | ArrayBuffer,
   overrides: RosterColumnOverrides = {},
-): RawRosterRow[] {
+): ParseRosterResult {
   const wb = XLSX.read(buffer, { type: 'buffer' });
   if (wb.SheetNames.length === 0) {
     throw new Error('Unrecognized file: no worksheet found');
@@ -180,16 +186,20 @@ export function parseRosterUploadBuffer(
   }
 
   const rows: RawRosterRow[] = [];
+  let skippedRows = 0;
   for (let ri = 1; ri < aoa.length; ri++) {
     const row = aoa[ri] as (string | number | null | undefined)[];
     if (!row || row.every((c) => c === null || c === undefined || String(c).trim() === '')) {
-      continue; // fully-blank row
+      continue; // fully-blank row (spacer) — not counted
     }
 
     const cell = (ci: number): string => (ci >= 0 && ci < row.length ? String(row[ci] ?? '').trim() : '');
 
     const outletRef = cell(idCol);
-    if (!outletRef) continue; // no id → skip
+    if (!outletRef) {
+      skippedRows++; // a row with data but no outlet id → dropped (reported so it isn't invisible)
+      continue;
+    }
 
     const outletName = cell(nameCol);
     const taggedRaw = cell(taggedCol);
@@ -209,7 +219,7 @@ export function parseRosterUploadBuffer(
     });
   }
 
-  return rows;
+  return { rows, skippedRows };
 }
 
 // ── (c) Match + dedup ────────────────────────────────────────────────────────

@@ -22,7 +22,7 @@ describe('buildRosterReportWorkbook', () => {
     const wb = buildRosterReportWorkbook(base);
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets['Summary'], { header: 1 }) as unknown as (string | number)[][];
     const flat = Object.fromEntries(rows.filter((r) => r.length >= 2).map((r) => [r[0], r[1]]));
-    expect(flat['Total rows in file']).toBe(193);
+    expect(flat['Data rows read from file']).toBe(193);
     expect(flat['Rows saved']).toBe(121);
     expect(flat['Matched to a tenant outlet']).toBe(72);
     expect(flat['Standalone (no matching outlet)']).toBe(49);
@@ -66,5 +66,17 @@ describe('buildRosterReportWorkbook', () => {
   it('omits the Rows sheet when the backend did not return `rows` (older backend)', () => {
     const wb = buildRosterReportWorkbook(base);
     expect(wb.SheetNames).not.toContain('Rows');
+  });
+
+  it('shows the skipped-rows line only when the backend reports skippedRows', () => {
+    const withSkip = buildRosterReportWorkbook({ ...base, skippedRows: 4 });
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(withSkip.Sheets['Summary'], { header: 1 }) as unknown as (string | number)[][];
+    const flat = Object.fromEntries(rows.filter((r) => r.length >= 2).map((r) => [r[0], r[1]]));
+    expect(flat['Rows skipped (blank / missing outlet id)']).toBe(4);
+
+    // Older backend (no skippedRows) → line absent.
+    const withoutSkip = buildRosterReportWorkbook(base);
+    const rows2 = XLSX.utils.sheet_to_json<Record<string, unknown>>(withoutSkip.Sheets['Summary'], { header: 1 }) as unknown as (string | number)[][];
+    expect(rows2.some((r) => String(r[0]).startsWith('Rows skipped'))).toBe(false);
   });
 });

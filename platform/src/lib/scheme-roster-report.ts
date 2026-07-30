@@ -34,12 +34,16 @@ export function buildRosterReportWorkbook(
   const summary: (string | number)[][] = [
     ['Metric', 'Value'],
     ...(schemeName ? [['Scheme', schemeName]] : []),
-    ['Total rows in file', result.totalRows],
+    ['Data rows read from file', result.totalRows],
     ['Rows saved', result.upserted],
     ['Matched to a tenant outlet', result.matchedCount],
     ['Standalone (no matching outlet)', result.standaloneCount],
     ['Duplicate outlet ids de-duplicated', result.duplicateRefs.length],
     ['Tagged employee codes not found', result.unmatchedEmployeeCodes.length],
+    // Only shown when the backend reports it (older backends omit skippedRows).
+    ...(result.skippedRows !== undefined
+      ? [['Rows skipped (blank / missing outlet id)', result.skippedRows]]
+      : []),
   ];
   XLSX.utils.book_append_sheet(wb, aoaToSheetSafe(summary), 'Summary');
 

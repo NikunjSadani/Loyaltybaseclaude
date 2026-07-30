@@ -218,6 +218,8 @@ export interface RosterUploadResult {
   standaloneCount: number;
   duplicateRefs: string[];
   unmatchedEmployeeCodes: string[];
+  /** Non-blank rows dropped for a missing outlet id (accounted for in the report). */
+  skippedRows?: number;
   /** Per-input-row disposition (every file row) — drives the full report sheet. */
   rows?: RosterRowReport[];
 }
