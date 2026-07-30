@@ -353,3 +353,40 @@ Final `FORM_FIELD_TYPES` = existing (`TEXT, NUMBER, DROPDOWN, DATE, DOCUMENT, IM
 ### 13.5 Resolved audit notes
 - **LOW-1 (intentional):** `schemeOutletId` is single-col `@unique` (not the spec's composite `@@unique([schemeId,schemeOutletId])`) — functionally identical + stronger since a roster row belongs to one scheme. Do NOT "correct" it back.
 - **⚠️ Pre-push operational:** the migration's abort-guard halts `migrate deploy` if a target DB holds ANY `scheme_enrollments` rows from the partner-keyed era. **Before this migration reaches staging/prod, confirm `scheme_enrollments` is empty** (guarded read; staging may hold rows from the W3 `w3test` scheme testing — clean first).
+
+---
+
+## §16 — Prefill Editable/Locked (Excel variables) — develop `6f4358f` (2026-07-30, owner-gated cutover pending)
+
+**What:** every Excel-prefilled form field has a real, **backend-enforced** Editable / Locked control. Previously the
+`locked`/`prefillKey` config existed but was cosmetic outside PHONE_OTP, and the roster `prefillValues` were never even
+plumbed to the enroll forms. Now:
+
+- **Contract:** per field = `prefillKey` (Excel column it binds to) + `locked` boolean. The dead
+  `autoFillFromExcel`/`autoFillEditable` pair is DELETED from both type mirrors; `validateFormSchema` tolerates the
+  legacy keys on stored schemas but no longer requires them. Restricted to value fields
+  (TEXT/NUMBER/EMAIL/DATE/DROPDOWN/MULTI_SELECT/TOGGLE/PHONE_OTP); media/GPS/signature can't be Excel-prefilled.
+- **Locked = server-authoritative pin.** `applyPrefillPins(schema, submitted, row.prefillValues)` (pure, in
+  `enrollment-form.helper.ts`) overwrites each locked value field with its roster value, run in `submit()` BEFORE
+  `validateSubmittedValues` so type/required/option checks see the authoritative value. A client-sent value for a
+  locked field is discarded. **Editable** = prefilled default the filler may overwrite. A **blank** roster cell on a
+  locked field falls back to editable (never pins, never bricks a required field) — the renderer disables the input
+  only when a roster value actually exists.
+- **Locked PHONE_OTP:** `resolveOtpTarget` precedence — (1) matched + KYC-approved → on-file owner number (wins even
+  when locked); (2) else locked + roster value → OTP target = the **Excel** number (server-authoritative; the typed
+  `mobile` is ignored, so a rep can't substitute); (3) else → typed number (editable, unchanged). Enforced identically
+  across send/verify/submit. A locked+prefilled PHONE_OTP without `otpRequired` is REJECTED at form-save (else the lock
+  would be silently unenforced).
+- **Data minimisation (MED-1):** `pickBoundPrefill` projects a roster row's `prefillValues` to ONLY the columns the
+  form binds to, on all three enroll surfaces (`getEligibleSchemes` / `getMyEnrollment` / `getSalesTargets`). Unbound
+  admin columns (PAN, internal notes, …) are never shipped to the enroller's browser. (The admin report view keeps the
+  full column set — the admin uploaded it.)
+
+**Assurance:** built (3 parallel streams + integration) → gate green → **dual adversarial audit** (consent/OTP +
+correctness lenses) → 4 real findings fixed (HIGH blank-cell brick, MED-1 column over-exposure, MED-2 locked-phone
+consent gap, LOW-3 MULTI_SELECT/TOGGLE pinned shape) + unit tests for each → re-gated → **staging runtime-verified
+end-to-end** on a synthetic `LOCKPROOF` scheme (sales rep enroll): MED-1 dropped the unbound PAN column; MED-2 form
+rejected; locked TEXT pin discarded a tampered `HACKED` → persisted the roster `Gold`; locked PHONE_OTP sent/verified/
+recorded the roster `9812300011` while the rep typed `9999999999`; a blank-cell locked field fell back to editable and
+accepted the typed value. Synthetic data fully deleted afterward. **Additive + dormant** (no live schemes in prod).
+▶ REMAINING = owner-gated prod cutover.
