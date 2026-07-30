@@ -200,6 +200,17 @@ export interface RosterRow {
   enrollment?: { id: string; status: string; currentVersion: number } | null;
 }
 
+/** Per-input-row disposition for the downloadable upload report (Phase 2). */
+export interface RosterRowReport {
+  rowIndex: number;
+  outletRef: string;
+  outletName: string;
+  taggedEmployeeCode: string;
+  disposition: 'SAVED' | 'DUPLICATE_DROPPED';
+  linkage: 'MATCHED' | 'STANDALONE' | '';
+  taggedEmployeeFound: boolean | null;
+}
+
 export interface RosterUploadResult {
   totalRows: number;
   upserted: number;
@@ -207,6 +218,8 @@ export interface RosterUploadResult {
   standaloneCount: number;
   duplicateRefs: string[];
   unmatchedEmployeeCodes: string[];
+  /** Per-input-row disposition (every file row) — drives the full report sheet. */
+  rows?: RosterRowReport[];
 }
 
 export interface AudienceResult {

@@ -43,6 +43,22 @@ export function buildRosterReportWorkbook(
   ];
   XLSX.utils.book_append_sheet(wb, aoaToSheetSafe(summary), 'Summary');
 
+  // Full per-row disposition (Phase 2) — every input row with its outcome. Present
+  // only when the backend returned `rows`; older backends omit it (Summary-only file).
+  if (result.rows && result.rows.length) {
+    const rows = result.rows.map((r) => ({
+      'Row #': r.rowIndex,
+      'Outlet ID': r.outletRef,
+      'Outlet Name': r.outletName,
+      'Tagged Employee Code': r.taggedEmployeeCode,
+      Disposition: r.disposition === 'SAVED' ? 'Saved' : 'Duplicate — dropped',
+      Linkage: r.linkage === 'MATCHED' ? 'Matched' : r.linkage === 'STANDALONE' ? 'Standalone' : '—',
+      'Tagged Employee Found':
+        r.taggedEmployeeFound === null ? '—' : r.taggedEmployeeFound ? 'Yes' : 'No (not tagged)',
+    }));
+    XLSX.utils.book_append_sheet(wb, jsonToSheetSafe(rows), 'Rows');
+  }
+
   // Always include the issue sheets (empty-but-headed when there are none) so the
   // file's structure is predictable for whoever opens it.
   const dupes = result.duplicateRefs.map((ref) => ({ 'Duplicate Outlet ID': ref }));

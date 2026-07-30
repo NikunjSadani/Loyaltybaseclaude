@@ -337,6 +337,8 @@ export class SchemeAdminService {
       standaloneCount: matched.standaloneCount,
       duplicateRefs: matched.duplicateRefs,
       unmatchedEmployeeCodes: matched.unmatchedEmployeeCodes,
+      // Per-input-row disposition for the downloadable upload report (D-report).
+      rows: matched.rowReport,
     };
   }
 

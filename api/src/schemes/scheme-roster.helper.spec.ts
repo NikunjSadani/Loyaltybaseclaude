@@ -228,4 +228,21 @@ describe('matchRosterRows', () => {
     expect(res.rows[0].taggedSalesUserId).toBe('su1'); // kept the first
     expect(res.duplicateRefs).toEqual(['OUT001']);
   });
+
+  it('produces a per-input-row report (SAVED matched/standalone + DUPLICATE_DROPPED)', () => {
+    const res = matchRosterRows(
+      [
+        { rowIndex: 2, outletRef: 'OUT001', outletName: 'A', taggedEmployeeCode: 'EMP01', prefillValues: {} },
+        { rowIndex: 3, outletRef: 'OUT999', outletName: 'B', taggedEmployeeCode: 'EMP_X', prefillValues: {} },
+        { rowIndex: 4, outletRef: 'OUT001', outletName: 'A-dup', taggedEmployeeCode: null, prefillValues: {} },
+      ],
+      outlets,
+      salesUsers,
+    );
+    expect(res.rowReport).toEqual([
+      { rowIndex: 2, outletRef: 'OUT001', outletName: 'A', taggedEmployeeCode: 'EMP01', disposition: 'SAVED', linkage: 'MATCHED', taggedEmployeeFound: true },
+      { rowIndex: 3, outletRef: 'OUT999', outletName: 'B', taggedEmployeeCode: 'EMP_X', disposition: 'SAVED', linkage: 'STANDALONE', taggedEmployeeFound: false },
+      { rowIndex: 4, outletRef: 'OUT001', outletName: 'A-dup', taggedEmployeeCode: '', disposition: 'DUPLICATE_DROPPED', linkage: '', taggedEmployeeFound: null },
+    ]);
+  });
 });

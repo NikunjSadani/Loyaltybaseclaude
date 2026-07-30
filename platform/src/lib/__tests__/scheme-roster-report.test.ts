@@ -48,4 +48,23 @@ describe('buildRosterReportWorkbook', () => {
     expect(wb.SheetNames).toContain('Unmatched Employees');
     expect(XLSX.utils.sheet_to_json(wb.Sheets['Duplicates'])).toHaveLength(0);
   });
+
+  it('adds a Rows sheet with per-row disposition when the backend returns `rows` (Phase 2)', () => {
+    const wb = buildRosterReportWorkbook({
+      ...base,
+      rows: [
+        { rowIndex: 2, outletRef: 'DKOL0401', outletName: 'Shop A', taggedEmployeeCode: 'XSR-M010', disposition: 'SAVED', linkage: 'MATCHED', taggedEmployeeFound: true },
+        { rowIndex: 3, outletRef: 'DKOL0401', outletName: 'Shop A dup', taggedEmployeeCode: '', disposition: 'DUPLICATE_DROPPED', linkage: '', taggedEmployeeFound: null },
+      ],
+    });
+    expect(wb.SheetNames).toContain('Rows');
+    const rows = XLSX.utils.sheet_to_json<Record<string, string | number>>(wb.Sheets['Rows']);
+    expect(rows[0]).toMatchObject({ 'Row #': 2, Disposition: 'Saved', Linkage: 'Matched', 'Tagged Employee Found': 'Yes' });
+    expect(rows[1]).toMatchObject({ 'Row #': 3, Disposition: 'Duplicate — dropped', Linkage: '—' });
+  });
+
+  it('omits the Rows sheet when the backend did not return `rows` (older backend)', () => {
+    const wb = buildRosterReportWorkbook(base);
+    expect(wb.SheetNames).not.toContain('Rows');
+  });
 });

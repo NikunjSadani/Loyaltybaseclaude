@@ -233,6 +233,21 @@ export interface MatchedRosterRow {
   prefillValues: Record<string, string> | null;
 }
 
+/** Per-input-row disposition, for the downloadable upload report (one per file row). */
+export interface RosterRowReport {
+  /** 1-based row number in the uploaded sheet (matches RawRosterRow.rowIndex). */
+  rowIndex: number;
+  outletRef: string;
+  outletName: string;
+  taggedEmployeeCode: string;
+  /** SAVED = written to the roster; DUPLICATE_DROPPED = a repeat of an earlier row (D8). */
+  disposition: 'SAVED' | 'DUPLICATE_DROPPED';
+  /** MATCHED (linked to a tenant outlet) / STANDALONE (no match) — '' for a dropped duplicate. */
+  linkage: 'MATCHED' | 'STANDALONE' | '';
+  /** true/false when the row carried a tagged-employee code; null when it carried none. */
+  taggedEmployeeFound: boolean | null;
+}
+
 export interface MatchRosterResult {
   rows: MatchedRosterRow[];
   /** outletRefs seen more than once (only the FIRST occurrence is kept — D8). */
@@ -243,6 +258,8 @@ export interface MatchRosterResult {
   standaloneCount: number;
   /** tagged-employee codes that did not resolve to a SalesUser. */
   unmatchedEmployeeCodes: string[];
+  /** Per-input-row disposition (every file row, incl. dropped duplicates) for the report. */
+  rowReport: RosterRowReport[];
 }
 
 /**
@@ -268,12 +285,24 @@ export function matchRosterRows(
   const duplicateRefs: string[] = [];
   const unmatchedEmployeeCodes = new Set<string>();
   const out: MatchedRosterRow[] = [];
+  const rowReport: RosterRowReport[] = [];
   let matchedCount = 0;
   let standaloneCount = 0;
 
   for (const row of rows) {
+    const taggedCode = row.taggedEmployeeCode ?? '';
+
     if (seen.has(row.outletRef)) {
       duplicateRefs.push(row.outletRef);
+      rowReport.push({
+        rowIndex: row.rowIndex,
+        outletRef: row.outletRef,
+        outletName: row.outletName,
+        taggedEmployeeCode: taggedCode,
+        disposition: 'DUPLICATE_DROPPED',
+        linkage: '',
+        taggedEmployeeFound: null,
+      });
       continue;
     }
     seen.add(row.outletRef);
@@ -285,10 +314,16 @@ export function matchRosterRows(
     else standaloneCount++;
 
     let taggedSalesUserId: string | null = null;
+    let taggedEmployeeFound: boolean | null = null;
     if (row.taggedEmployeeCode) {
       const su = salesUsersByCode.get(row.taggedEmployeeCode);
-      if (su) taggedSalesUserId = su;
-      else unmatchedEmployeeCodes.add(row.taggedEmployeeCode);
+      if (su) {
+        taggedSalesUserId = su;
+        taggedEmployeeFound = true;
+      } else {
+        unmatchedEmployeeCodes.add(row.taggedEmployeeCode);
+        taggedEmployeeFound = false;
+      }
     }
 
     const hasPrefill = Object.keys(row.prefillValues).length > 0;
@@ -301,6 +336,15 @@ export function matchRosterRows(
       taggedSalesUserId,
       prefillValues: hasPrefill ? row.prefillValues : null,
     });
+    rowReport.push({
+      rowIndex: row.rowIndex,
+      outletRef: row.outletRef,
+      outletName: row.outletName,
+      taggedEmployeeCode: taggedCode,
+      disposition: 'SAVED',
+      linkage: matchedOutletId ? 'MATCHED' : 'STANDALONE',
+      taggedEmployeeFound,
+    });
   }
 
   return {
@@ -309,5 +353,6 @@ export function matchRosterRows(
     matchedCount,
     standaloneCount,
     unmatchedEmployeeCodes: Array.from(unmatchedEmployeeCodes),
+    rowReport,
   };
 }
