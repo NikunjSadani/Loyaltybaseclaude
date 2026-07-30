@@ -504,17 +504,35 @@ export class SchemeEnrollmentService {
     await this.assertSalesReachRoster(user, row);
   }
 
-  /** SALES reach for a roster row: tagged employee in the caller's downline, or an assignment. */
+  /**
+   * SALES reach for a roster row: the tagged employee is in the caller's downline, OR the
+   * matched outlet/partner is assigned to ANYONE in the caller's downline (not just the
+   * caller directly). This MUST mirror `getSalesTargets` (which surfaces the row) and
+   * `assertSalesReachOutlet` — otherwise a target that appears in the rep's task window is
+   * rejected at OTP/enroll with "not within your team" (a manager reaching a junior-assigned
+   * roster row was wrongly blocked; the assignment branch only checked the caller's own
+   * direct assignment).
+   */
   private async assertSalesReachRoster(user: JwtPayload, row: RosterRow): Promise<void> {
     const caller = await this.requireCallerSalesUser(user);
+    const edges = await this.loadSalesEdges(user.clientId);
+    const reach = descendantSalesUserIds(caller.id, edges); // caller + whole downline
 
-    if (row.taggedSalesUserId) {
-      const edges = await this.loadSalesEdges(user.clientId);
-      if (descendantSalesUserIds(caller.id, edges).has(row.taggedSalesUserId)) return;
+    // Tagged employee somewhere in the caller's downline.
+    if (row.taggedSalesUserId && reach.has(row.taggedSalesUserId)) return;
+
+    // OR the matched outlet/partner is actively assigned to anyone in the caller's downline.
+    const or: Prisma.SalesUserAssignmentWhereInput[] = [];
+    if (row.matchedOutletId) or.push({ outletId: row.matchedOutletId });
+    if (row.matchedPartnerId) or.push({ partnerId: row.matchedPartnerId });
+    if (or.length > 0) {
+      const assignment = await this.prisma.salesUserAssignment.findFirst({
+        where: { unassignedAt: null, salesUserId: { in: [...reach] }, OR: or },
+        select: { id: true },
+      });
+      if (assignment) return;
     }
-    if (row.matchedOutletId || row.matchedPartnerId) {
-      if (await this.hasActiveAssignment(caller.id, row.matchedPartnerId, row.matchedOutletId)) return;
-    }
+
     throw new ForbiddenException('This outlet is not within your team.');
   }
 
