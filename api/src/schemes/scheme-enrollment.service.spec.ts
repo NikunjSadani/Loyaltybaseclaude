@@ -555,6 +555,72 @@ describe('SchemeEnrollmentService', () => {
 
       await expect(service.resubmit(partnerUser, 's1', 'enr1', { formValues: { f1: 'x' } })).rejects.toBeInstanceOf(BadRequestException);
     });
+
+    it('ALLOWS a SELF enroller to edit a SUBMITTED enrollment when allowEnrollerEdit is on (bumps version)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(
+        makeScheme({ audienceConfig: { mode: 'FILTER', selfEnrollAllowed: true, frozen: false, allowEnrollerEdit: true } }),
+      );
+      mockPrisma.schemeEnrollment.findFirst.mockResolvedValue({
+        id: 'enr1', schemeId: 's1', status: 'SUBMITTED', enrollmentMode: 'SELF', currentVersion: 1,
+        formValues: { f1: 'Old' }, schemeOutlet: { id: 'ro1', schemeId: 's1', matchedPartnerId: 'cp1' },
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({ id: 'cp1', groupId: null }); // authorizeRoster SELF
+      mockPrisma.schemeEnrollment.findUnique.mockResolvedValue({ id: 'enr1', currentVersion: 1, schemeId: 's1', schemeOutletId: 'ro1' });
+      mockPrisma.schemeEnrollment.update.mockResolvedValue({ id: 'enr1', schemeId: 's1', schemeOutletId: 'ro1', currentVersion: 2 });
+      mockPrisma.schemeSubmission.create.mockResolvedValue({ id: 'sub2', version: 2 });
+
+      const res = await service.resubmit(partnerUser, 's1', 'enr1', { formValues: { f1: 'Corrected' } });
+      expect(res.enrollment.currentVersion).toBe(2);
+    });
+
+    it('BLOCKS an enroller edit of a SUBMITTED enrollment in SALES mode even when allowEnrollerEdit is on (MED-1)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(
+        makeScheme({ audienceConfig: { mode: 'FILTER', selfEnrollAllowed: true, frozen: false, allowEnrollerEdit: true } }),
+      );
+      mockPrisma.schemeEnrollment.findFirst.mockResolvedValue({
+        id: 'enr1', schemeId: 's1', status: 'SUBMITTED', enrollmentMode: 'SALES', currentVersion: 1,
+        formValues: { f1: 'Old' }, schemeOutlet: { id: 'ro1', schemeId: 's1', matchedPartnerId: 'cp1' },
+      });
+
+      await expect(service.resubmit(salesUser, 's1', 'enr1', { formValues: { f1: 'x' } })).rejects.toBeInstanceOf(BadRequestException);
+      // The SELF-mode gate fires BEFORE authorizeRoster — no roster re-auth query is reached.
+      expect(mockPrisma.schemeEnrollment.update).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Admin edit: consent carry-forward on a PHONE_OTP scheme (HIGH-1) ─────────
+  describe('adminEditEnrollment consent carry-forward', () => {
+    const otpEditScheme = () =>
+      makeScheme({
+        enrollmentForm: {
+          version: 1, campaignType: 'MIXED',
+          formSchema: {
+            captureGpsOnSubmit: false, requireOtp: false,
+            fields: [{ id: 'ph', type: 'PHONE_OTP', label: 'Phone', required: true, otpRequired: true, order: 0 }],
+          },
+        },
+      });
+
+    it('reuses the ORIGINALLY-verified phone (no fresh OTP) and ignores a client-substituted number', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(otpEditScheme());
+      mockPrisma.schemeEnrollment.findFirst.mockResolvedValue({
+        id: 'enr1', schemeId: 's1', status: 'SUBMITTED', enrollmentMode: 'SELF', currentVersion: 1,
+        formValues: { ph: '9812300099' }, // the phone OTP-verified at original capture
+        schemeOutlet: { id: 'ro1', schemeId: 's1', matchedPartnerId: 'cp1', matchedOutletId: 'o1' },
+      });
+      mockPrisma.otpCode.findFirst.mockResolvedValue(null); // NO fresh OTP on file
+      mockPrisma.schemeEnrollment.findUnique.mockResolvedValue({ id: 'enr1', currentVersion: 1, schemeId: 's1', schemeOutletId: 'ro1' });
+      mockPrisma.schemeEnrollment.update.mockResolvedValue({ id: 'enr1', schemeId: 's1', schemeOutletId: 'ro1', currentVersion: 2 });
+      mockPrisma.schemeSubmission.create.mockResolvedValue({ id: 'sub2', version: 2 });
+
+      // Admin edits with a DIFFERENT number typed into the field — it must be discarded.
+      const res = await service.adminEditEnrollment(adminUser, 's1', 'enr1', { formValues: { ph: '8000000000' } });
+      expect(res.enrollment.currentVersion).toBe(2);
+      const updData = mockPrisma.schemeEnrollment.update.mock.calls[0][0].data;
+      expect((updData.formValues as Record<string, unknown>).ph).toBe('9812300099'); // carried, not 8000000000
+      // Carry-forward must NOT consult a fresh OTP — the edit succeeds without one.
+      expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
+    });
   });
 
   // ── Admin list gate ────────────────────────────────────────────────────────

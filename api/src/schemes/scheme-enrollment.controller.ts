@@ -180,6 +180,18 @@ export class SchemeEnrollmentController {
     return this.enrollment.adminListEnrollments(user, id, query);
   }
 
+  // ── Admin: soft-deleted enrollments (the "Show deleted" recovery view) ─────
+  // NOTE: declared BEFORE :enrollmentId so the literal `deleted` segment wins the match.
+  @Get(':id/enrollments/deleted')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:read')
+  adminListDeleted(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+  ) {
+    return this.enrollment.adminListDeletedEnrollments(user, id);
+  }
+
   // ── Admin: single enrollment detail (values + media + geo + history) ───────
   @Get(':id/enrollments/:enrollmentId')
   @Roles('GIFSY_ADMIN')

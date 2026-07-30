@@ -9,7 +9,7 @@ import {
 import {
   schemeApi, rewriteMediaViewPath,
   type AdminEnrollmentRow, type AdminEnrollmentDetail, type AdminListEnrollmentsQuery,
-  type Pagination, type SchemeReport,
+  type Pagination, type SchemeReport, type DeletedEnrollmentRow,
 } from '@/lib/schemes';
 import type { GpsCapture } from '@/lib/scheme-types';
 
@@ -54,6 +54,14 @@ export default function EnrollmentsPage({ params }: { params: Promise<{ id: stri
   const [restoring, setRestoring]   = useState(false);
   const [restoreError, setRestoreError] = useState<string | null>(null);
 
+  // Persistent "Show deleted" recovery view — the durable path back for a soft-deleted enrollment
+  // (the 8s Undo toast is only for the just-deleted one). Fetches the dedicated deleted-only list.
+  const [showDeleted, setShowDeleted]     = useState(false);
+  const [deletedRows, setDeletedRows]     = useState<DeletedEnrollmentRow[]>([]);
+  const [deletedLoading, setDeletedLoading] = useState(false);
+  const [deletedError, setDeletedError]   = useState<string | null>(null);
+  const [restoringId, setRestoringId]     = useState<string | null>(null);
+
   const query = useMemo<AdminListEnrollmentsQuery>(() => ({
     page,
     limit: 25,
@@ -83,6 +91,15 @@ export default function EnrollmentsPage({ params }: { params: Promise<{ id: stri
     setLoading(false);
   }, [schemeId, query]);
 
+  const loadDeleted = useCallback(async () => {
+    setDeletedLoading(true);
+    setDeletedError(null);
+    const res = await schemeApi.listDeletedEnrollments(schemeId);
+    setDeletedLoading(false);
+    if (res.success) setDeletedRows(res.data.enrollments);
+    else setDeletedError(res.error);
+  }, [schemeId]);
+
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { setPage(1); }, [status, programName, zone, stateF, outletTypeId, from, to]);
 
@@ -98,7 +115,8 @@ export default function EnrollmentsPage({ params }: { params: Promise<{ id: stri
     setRestoreError(null);
     setUndoToast({ enrollmentId });
     void load();
-  }, [load]);
+    if (showDeleted) void loadDeleted();
+  }, [load, showDeleted, loadDeleted]);
 
   const handleUndo = useCallback(async () => {
     if (!undoToast) return;
@@ -106,9 +124,27 @@ export default function EnrollmentsPage({ params }: { params: Promise<{ id: stri
     setRestoreError(null);
     const res = await schemeApi.restoreEnrollment(schemeId, undoToast.enrollmentId);
     setRestoring(false);
-    if (res.success) { setUndoToast(null); void load(); }
+    if (res.success) { setUndoToast(null); void load(); if (showDeleted) void loadDeleted(); }
     else setRestoreError(res.error);
-  }, [undoToast, schemeId, load]);
+  }, [undoToast, schemeId, load, showDeleted, loadDeleted]);
+
+  const toggleDeleted = useCallback(() => {
+    setShowDeleted((prev) => {
+      const next = !prev;
+      if (next) void loadDeleted();
+      return next;
+    });
+  }, [loadDeleted]);
+
+  // Restore from the persistent deleted view: un-delete, then refresh both lists.
+  const handleRestoreRow = useCallback(async (enrollmentId: string) => {
+    setRestoringId(enrollmentId);
+    setDeletedError(null);
+    const res = await schemeApi.restoreEnrollment(schemeId, enrollmentId);
+    setRestoringId(null);
+    if (res.success) { await loadDeleted(); void load(); }
+    else setDeletedError(res.error);
+  }, [schemeId, loadDeleted, load]);
 
   const handleExport = async () => {
     setExporting(true);
@@ -133,14 +169,66 @@ export default function EnrollmentsPage({ params }: { params: Promise<{ id: stri
           </div>
         </div>
         <div className="flex flex-col items-end gap-1">
-          <button onClick={handleExport} disabled={exporting}
-            className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-medium rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60">
-            {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-            {exporting ? 'Exporting…' : 'Export Excel'}
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={toggleDeleted}
+              className={`flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg border transition-colors ${showDeleted ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
+              <Trash2 className="w-4 h-4" />
+              {showDeleted ? 'Hide deleted' : 'Show deleted'}
+            </button>
+            <button onClick={handleExport} disabled={exporting}
+              className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-medium rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60">
+              {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              {exporting ? 'Exporting…' : 'Export Excel'}
+            </button>
+          </div>
           {exportError && <p className="text-xs text-red-500 flex items-center gap-1 mt-1"><AlertCircle className="w-3 h-3" />{exportError}</p>}
         </div>
       </div>
+
+      {/* Deleted (recovery) panel — persistent path back for any soft-deleted enrollment */}
+      {showDeleted && (
+        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+          <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-200 flex items-center gap-2">
+            <Trash2 className="w-4 h-4 text-gray-400" />
+            <span className="text-xs font-semibold text-gray-700">Deleted enrollments</span>
+            <span className="text-xs text-gray-400">— restore to bring the captured data back</span>
+          </div>
+          {deletedError && <p className="text-xs text-red-500 flex items-center gap-1 px-4 py-2"><AlertCircle className="w-3 h-3" />{deletedError}</p>}
+          {deletedLoading ? (
+            <div className="flex items-center justify-center py-8"><Loader2 className="w-5 h-5 text-gray-300 animate-spin" /></div>
+          ) : deletedRows.length === 0 ? (
+            <p className="px-4 py-6 text-center text-xs text-gray-400">No deleted enrollments.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="bg-white border-b border-gray-100">
+                <tr>{['Outlet', 'Status', 'Deleted at', ''].map((h) => (
+                  <th key={h} className="px-4 py-2 text-left text-xs font-medium text-gray-500">{h}</th>
+                ))}</tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {deletedRows.map((d) => (
+                  <tr key={d.id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2.5">
+                      <p className="font-medium text-gray-900">{d.outletName || <span className="text-gray-400 italic">Unnamed</span>}</p>
+                      <p className="text-xs text-gray-400 font-mono">{d.outletRef ?? ''}</p>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[d.status] ?? 'bg-gray-100 text-gray-600'}`}>{d.status}{d.currentVersion > 1 ? ` · v${d.currentVersion}` : ''}</span>
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-gray-500">{d.deletedAt ? new Date(d.deletedAt).toLocaleString('en-IN') : '—'}</td>
+                    <td className="px-4 py-2.5 text-right">
+                      <button onClick={() => handleRestoreRow(d.id)} disabled={restoringId === d.id}
+                        className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--brand-primary)] hover:underline disabled:opacity-60">
+                        {restoringId === d.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Undo2 className="w-3.5 h-3.5" />} Restore
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
 
       {/* Stat tiles (live report — no more hardcoded —) */}
       {report && (
@@ -268,6 +356,8 @@ const editInputCls = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
 const UNEDITABLE_FIELD_TYPES = new Set<string>([
   'DOCUMENT', 'IMAGE', 'CAMERA', 'UPI_QR_SCAN', 'SIGNATURE', 'GPS_POINT',
   'CALCULATED', 'LOOKUP', 'SECTION', 'DATA_DISPLAY',
+  // PHONE_OTP is the consented number — server-pinned / carried-forward on edit, never editable here.
+  'PHONE_OTP',
 ]);
 
 const selCls = 'border border-gray-300 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]';
@@ -575,8 +665,12 @@ function EnrollmentEditForm({
       <div className="space-y-3">
         {fields.map((f) => {
           const v = values[f.id];
-          if (UNEDITABLE_FIELD_TYPES.has(f.type)) {
-            const isObj = v != null && typeof v === 'object';
+          // Any object-valued field (media key, GPS fix) is uneditable regardless of type — this
+          // also covers the `formFields`-absent fallback where every field is typed TEXT (B-LOW-1),
+          // so a captured media/GPS object never renders as an editable "[object Object]" text box.
+          const isObjectVal = v != null && typeof v === 'object';
+          if (UNEDITABLE_FIELD_TYPES.has(f.type) || isObjectVal) {
+            const isObj = isObjectVal;
             return (
               <div key={f.id}>
                 <label className="block text-xs font-medium text-gray-700 mb-1">{f.label}</label>

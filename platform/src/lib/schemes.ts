@@ -260,6 +260,18 @@ export interface AdminEnrollmentRow {
   enrollment: SchemeEnrollment | null;
 }
 
+/** A soft-deleted enrollment, as shown in the admin "Show deleted" recovery view. */
+export interface DeletedEnrollmentRow {
+  id: string;
+  schemeOutletId: string;
+  status: string;
+  currentVersion: number;
+  enrolledAt: string | null;
+  deletedAt: string | null;
+  outletRef: string | null;
+  outletName: string | null;
+}
+
 export interface AdminEnrollmentDetail extends SchemeEnrollment {
   /**
    * The roster row, with its master relations NESTED (matchedOutlet/matchedPartner/…) —
@@ -516,6 +528,12 @@ export const schemeApi = {
     return api.post<{ enrollment: SchemeEnrollment }>(
       `${BASE}/${schemeId}/enrollments/${enrollmentId}/restore`,
       {},
+    );
+  },
+  /** GIFSY admin lists soft-deleted enrollments (the "Show deleted" recovery view). */
+  listDeletedEnrollments(schemeId: string) {
+    return api.get<{ enrollments: DeletedEnrollmentRow[] }>(
+      `${BASE}/${schemeId}/enrollments/deleted`,
     );
   },
 

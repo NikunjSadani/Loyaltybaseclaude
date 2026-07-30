@@ -805,6 +805,14 @@ export class SchemeEnrollmentService {
       if (!audience?.allowEnrollerEdit) {
         throw new BadRequestException('Editing a submitted enrollment is not enabled for this scheme.');
       }
+      // Owner-locked: enroller self-edit of a LIVE submission is a SELF (partner/outlet) correction
+      // ONLY. A sales-assisted (SALES-mode) capture is corrected by a GIFSY admin, never re-edited by
+      // a rep (the sales sheet re-opens with roster prefill only → blank-overwrite risk). authorizeRoster
+      // already blocks a rep from a SELF-mode row (no partnerId), but this makes "SALES self-edit
+      // disabled" a server-enforced invariant, not FE-only, closing the non-OTP SALES-mode hole.
+      if (enrollment.enrollmentMode !== 'SELF') {
+        throw new BadRequestException('Editing a submitted enrollment is not available in sales-assisted mode.');
+      }
     } else {
       throw new BadRequestException('Only a rejected enrollment can be resubmitted.');
     }
@@ -813,7 +821,12 @@ export class SchemeEnrollmentService {
     // Re-authorize the caller against the roster row before accepting a new version.
     await this.authorizeRoster(user, scheme, audience, mode, enrollment.schemeOutlet, requestedPartnerId);
 
-    return this.submit(user, scheme, enrollment.schemeOutlet, mode, dto.formValues, dto.mobile, enrollment.id);
+    // A SUBMITTED-edit carries the original OTP consent forward (phone-OTP is read-only on the edit
+    // form); a REJECTED resubmit is a fresh re-capture and re-collects consent (no carry-forward).
+    const consentedEditFrom = enrollment.status === 'SUBMITTED' ? enrollment.formValues : null;
+    return this.submit(
+      user, scheme, enrollment.schemeOutlet, mode, dto.formValues, dto.mobile, enrollment.id, consentedEditFrom,
+    );
   }
 
   /**
@@ -830,6 +843,10 @@ export class SchemeEnrollmentService {
     submittedRaw: Record<string, unknown> | undefined,
     typedMobile: string | undefined,
     existingEnrollmentId: string | null,
+    // Consent carry-forward (edit paths only): the prior version's persisted formValues. When
+    // provided, a PHONE_OTP field reuses the already-verified number instead of demanding a
+    // fresh OTP (see the OTP gate below). null on fresh enroll / rejection-resubmit / re-enroll.
+    consentedEditFrom: Prisma.JsonValue | null = null,
   ) {
     // Invariant guard (defense-in-depth): the roster row must belong to this scheme.
     if (row.schemeId !== scheme.id) {
@@ -869,14 +886,30 @@ export class SchemeEnrollmentService {
       // PHONE-OTP consent gate (D16): pin the number + require a verified OTP.
       const otpField = this.phoneOtpField(form);
       if (otpField) {
-        const { phone } = await this.resolveOtpTarget(scheme.clientId, row, typedMobile, otpField);
-        if (!(await this.hasVerifiedOtp(row.id, phone))) {
-          throw new ForbiddenException('Phone OTP not verified for this enrollment.');
+        // Consent carry-forward (edit paths): an admin edit or an enroller edit of an already
+        // SUBMITTED enrollment reuses the phone that was OTP-verified at the ORIGINAL capture.
+        // The phone-OTP field is read-only on both edit forms, so the consented number cannot
+        // change on an edit — re-collecting a fresh OTP for a data correction is neither possible
+        // from those forms (no OTP step) nor meaningful (consent already given). This carries the
+        // original consent forward rather than re-pinning to a now-different on-file number, so a
+        // data edit never silently changes the consented phone. Fail-closed: if the prior version
+        // has no valid phone on file (e.g. the form gained the OTP field AFTER this enrollment was
+        // captured), fall through to the normal fresh-OTP gate — the edit is blocked, not bypassed.
+        const carried = consentedEditFrom
+          ? this.phoneLast10(String((consentedEditFrom as Record<string, unknown>)[otpField.id] ?? ''))
+          : '';
+        if (carried.length === 10) {
+          submitted[otpField.id] = carried;
+        } else {
+          const { phone } = await this.resolveOtpTarget(scheme.clientId, row, typedMobile, otpField);
+          if (!(await this.hasVerifiedOtp(row.id, phone))) {
+            throw new ForbiddenException('Phone OTP not verified for this enrollment.');
+          }
+          // Server ALWAYS writes the verified (and, for approved outlets, PINNED) number —
+          // the recorded phone-field value must equal the OTP-verified one, never whatever
+          // the client typed into the field (A-MED-1).
+          submitted[otpField.id] = phone;
         }
-        // Server ALWAYS writes the verified (and, for approved outlets, PINNED) number —
-        // the recorded phone-field value must equal the OTP-verified one, never whatever
-        // the client typed into the field (A-MED-1).
-        submitted[otpField.id] = phone;
       }
 
       const { errors, recomputedValues, resolvedValues } = validateSubmittedValues(schema, submitted);
@@ -1075,7 +1108,11 @@ export class SchemeEnrollmentService {
     if (!enrollment) throw new NotFoundException('Enrollment not found.');
 
     const mode = (enrollment.enrollmentMode as EnrollmentMode) ?? 'SELF';
-    return this.submit(user, scheme, enrollment.schemeOutlet, mode, dto.formValues, dto.mobile, enrollment.id);
+    // Admin edit reuses the enrollment's original OTP consent (a GIFSY operator cannot perform the
+    // outlet's OTP, and the phone-OTP field is read-only on the admin edit form) — carry it forward.
+    return this.submit(
+      user, scheme, enrollment.schemeOutlet, mode, dto.formValues, dto.mobile, enrollment.id, enrollment.formValues,
+    );
   }
 
   /**
@@ -1119,6 +1156,46 @@ export class SchemeEnrollmentService {
       data: { deletedAt: null, updatedAt: new Date() },
     });
     return { enrollment: updated };
+  }
+
+  /**
+   * List soft-deleted enrollments (GIFSY_ADMIN) — the recovery view behind the admin list's
+   * "Show deleted" toggle. Returns ONLY deletedAt != null rows with the outlet's identity + when
+   * it was deleted, so each can be restored via restoreEnrollment. Kept as a dedicated read (never
+   * folded into adminListEnrollments) so a soft-deleted row can never leak into the normal list.
+   */
+  async adminListDeletedEnrollments(user: JwtPayload, schemeId: string) {
+    if (!this.isGifsyAdmin(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    const scheme = await this.loadScheme(user, schemeId);
+    const rows = await this.prisma.schemeEnrollment.findMany({
+      where: { schemeId: scheme.id, deletedAt: { not: null } },
+      include: {
+        schemeOutlet: {
+          select: {
+            id: true, outletRef: true, outletName: true,
+            matchedOutlet: { select: { name: true, outletCode: true } },
+            matchedPartner: { select: { businessName: true } },
+          },
+        },
+      },
+      orderBy: { deletedAt: 'desc' },
+    });
+    return {
+      enrollments: rows.map((r) => ({
+        id: r.id,
+        schemeOutletId: r.schemeOutletId,
+        status: r.status,
+        currentVersion: r.currentVersion,
+        enrolledAt: r.enrolledAt,
+        deletedAt: r.deletedAt,
+        outletRef: r.schemeOutlet?.matchedOutlet?.outletCode ?? r.schemeOutlet?.outletRef ?? null,
+        outletName:
+          r.schemeOutlet?.matchedOutlet?.name ??
+          r.schemeOutlet?.matchedPartner?.businessName ??
+          r.schemeOutlet?.outletName ??
+          null,
+      })),
+    };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
