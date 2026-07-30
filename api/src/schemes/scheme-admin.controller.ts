@@ -131,4 +131,26 @@ export class SchemeAdminController {
   ) {
     return this.admin.getRoster(user, id, query);
   }
+
+  /**
+   * GET /v1/schemes/:id/prefill-sources — the form-builder "Prefill from" dropdown
+   * options: the scheme's distinct roster Excel columns + the curated outlet-field catalog (H1).
+   */
+  @Get(':id/prefill-sources')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:read')
+  getPrefillSources(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.admin.getPrefillSources(user, id);
+  }
+
+  /**
+   * GET /v1/schemes/:id/facet-values — distinct outlet-master facet values for the
+   * audience builder + report filters (zones/programs/categories/states/outlet types).
+   */
+  @Get(':id/facet-values')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:read')
+  getFacetValues(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.admin.getFacetValues(user, id);
+  }
 }

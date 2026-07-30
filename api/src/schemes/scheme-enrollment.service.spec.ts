@@ -59,7 +59,7 @@ const mockPrisma = {
   schemeSubmission: { create: jest.fn() },
   schemeEnrollmentForm: { findUnique: jest.fn() },
   schemeEnrollmentFormVersion: { findFirst: jest.fn() },
-  channelPartner: { findFirst: jest.fn() },
+  channelPartner: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUserAssignment: { findFirst: jest.fn(), findMany: jest.fn() },
   outlet: { findMany: jest.fn(), findFirst: jest.fn() },
@@ -81,6 +81,9 @@ describe('SchemeEnrollmentService', () => {
     jest.resetAllMocks();
     // Default: $transaction runs the callback against the same mock (tx === prisma).
     mockPrisma.$transaction.mockImplementation((cb: (tx: typeof mockPrisma) => unknown) => cb(mockPrisma));
+    // Dual-source prefill (loadOutletFieldContext) loads matched partners for the approval
+    // pre-pin hint; default to none unless a test primes it.
+    mockPrisma.channelPartner.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SchemeEnrollmentService,

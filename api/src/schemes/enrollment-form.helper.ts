@@ -61,8 +61,34 @@ export const MEDIA_FIELD_TYPES: ReadonlySet<string> = new Set([
   'SIGNATURE',
 ]);
 
-export const FIELD_AUDIENCES = ['ALL', 'LOYALTY_MEMBERS', 'NON_LOYALTY_MEMBERS'] as const;
-export type FieldAudience = (typeof FIELD_AUDIENCES)[number];
+/**
+ * Curated Outlet-master fields a form field can prefill FROM (dual-source prefill).
+ * For a MATCHED loyalty roster row these auto-fill from the outlet's existing DB
+ * record (owner fields from its ChannelPartner, outlet-native fields from Outlet);
+ * a standalone row has none. Keys are the stable contract shared by the FE builder
+ * dropdown, the backend resolver (scheme-enrollment.service), and this validator.
+ */
+export const OUTLET_FIELD_CATALOG = [
+  { key: 'businessName', label: 'Business name' },
+  { key: 'ownerName', label: 'Owner name' },
+  { key: 'phone', label: 'Owner / outlet phone' },
+  { key: 'outletCode', label: 'Outlet code' },
+  { key: 'outletName', label: 'Outlet name' },
+  { key: 'addressLine1', label: 'Address line 1' },
+  { key: 'addressLine2', label: 'Address line 2' },
+  { key: 'city', label: 'City' },
+  { key: 'state', label: 'State' },
+  { key: 'pincode', label: 'Pincode' },
+  { key: 'zone', label: 'Zone' },
+  { key: 'programName', label: 'Program' },
+  { key: 'programCategory', label: 'Program category' },
+  { key: 'panNumber', label: 'PAN' },
+  { key: 'gstNumber', label: 'GST' },
+] as const;
+export type OutletFieldKey = (typeof OUTLET_FIELD_CATALOG)[number]['key'];
+export const OUTLET_FIELD_KEYS: ReadonlySet<string> = new Set(
+  OUTLET_FIELD_CATALOG.map((f) => f.key),
+);
 
 export const VISIBLE_WHEN_OPS = ['eq', 'neq', 'gt', 'lt', 'contains'] as const;
 export type VisibleWhenOp = (typeof VISIBLE_WHEN_OPS)[number];
@@ -80,7 +106,6 @@ export interface FormField {
   required: boolean;
   placeholder?: string;
   helpText?: string;
-  audience?: FieldAudience;
   options?: string[];
   dataDisplayKey?: string;
   /** Required when type === 'CALCULATED'. */
@@ -100,6 +125,13 @@ export interface FormField {
   locked?: boolean;
   /** Excel variable column this field prefills from (D13 / Mode B). */
   prefillKey?: string;
+  /**
+   * Outlet-master field this field prefills from for a MATCHED loyalty outlet
+   * (dual-source prefill). One of OUTLET_FIELD_KEYS. Resolution at enroll: an
+   * `outletField` on a matched row wins (DB value); else `prefillKey` (Excel column);
+   * a standalone row has no outlet value → falls back to `prefillKey`.
+   */
+  outletField?: string;
   /** LOOKUP: the field whose selected option value is mapped through `lookupMap`. */
   lookupSourceFieldId?: string;
   /** LOOKUP: option value → shown/derived value map (D12a). */
@@ -108,6 +140,8 @@ export interface FormField {
   otpRequired?: boolean;
   /** GPS_POINT: when the location fix is captured (D15). */
   captureTrigger?: GpsCaptureTrigger;
+  /** GPS_POINT: reject a fix whose reported accuracy (metres) exceeds this cap (D15); unset = no cap. */
+  gpsMaxAccuracy?: number;
   /** CAMERA: suppress the gallery fallback — native rear-camera capture only (D14). */
   noGallery?: boolean;
 }
@@ -161,21 +195,48 @@ export function applyPrefillPins(
   schema: EnrollmentFormSchema,
   submitted: Record<string, unknown>,
   prefillValues: Record<string, string> | null | undefined,
+  outletFieldValues?: Record<string, string> | null | undefined,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...submitted };
-  if (!prefillValues || typeof prefillValues !== 'object') return out;
+  const excel = prefillValues && typeof prefillValues === 'object' ? prefillValues : null;
+  const outlet = outletFieldValues && typeof outletFieldValues === 'object' ? outletFieldValues : null;
+  if (!excel && !outlet) return out;
 
   for (const field of schema.fields ?? []) {
     if (field.locked !== true) continue;
-    if (typeof field.prefillKey !== 'string' || field.prefillKey === '') continue;
     if (!PREFILLABLE_FIELD_TYPES.has(field.type)) continue;
 
-    const pin = prefillValues[field.prefillKey];
+    // Dual-source precedence (D13): an outlet-master field on a MATCHED row wins
+    // (server-authoritative DB value); else the Excel roster column. A source that
+    // carries no value (missing/blank) is skipped — the field gracefully falls back
+    // to editable (no brick), matching the Excel-only behaviour.
+    const pin = resolveDualSourcePin(field, excel, outlet);
     if (typeof pin === 'string' && pin !== '') {
       out[field.id] = coercePinnedValue(field.type, pin);
     }
   }
   return out;
+}
+
+/**
+ * The pin STRING for a field under dual-source resolution, or undefined when neither
+ * source carries a non-empty value. `outletField` (matched-outlet DB value) wins over
+ * `prefillKey` (Excel column) — mirrors the enroll-time resolution the FE renders.
+ */
+function resolveDualSourcePin(
+  field: FormField,
+  excel: Record<string, string> | null,
+  outlet: Record<string, string> | null,
+): string | undefined {
+  if (outlet && typeof field.outletField === 'string' && field.outletField !== '') {
+    const v = outlet[field.outletField];
+    if (typeof v === 'string' && v !== '') return v;
+  }
+  if (excel && typeof field.prefillKey === 'string' && field.prefillKey !== '') {
+    const v = excel[field.prefillKey];
+    if (typeof v === 'string' && v !== '') return v;
+  }
+  return undefined;
 }
 
 /**
@@ -211,11 +272,52 @@ export function collectPrefillKeys(schema: unknown): Set<string> {
     ? ((schema as { fields: unknown[] }).fields)
     : [];
   for (const f of fields) {
-    if (isObject(f) && typeof f.prefillKey === 'string' && f.prefillKey.trim() !== '') {
-      keys.add(f.prefillKey);
+    if (!isObject(f)) continue;
+    // prefillKey (value fields, Mode B) AND dataDisplayKey (read-only DATA_DISPLAY) are
+    // BOTH Excel-roster columns the form surfaces — projecting only prefillKey stripped the
+    // DATA_DISPLAY column so it always rendered "—" (H2). Collect both.
+    if (typeof f.prefillKey === 'string' && f.prefillKey.trim() !== '') keys.add(f.prefillKey);
+    if (typeof f.dataDisplayKey === 'string' && f.dataDisplayKey.trim() !== '') keys.add(f.dataDisplayKey);
+  }
+  return keys;
+}
+
+/**
+ * The set of OUTLET-master field keys a form BINDS to (every field's non-empty
+ * `outletField`). Used to project a matched outlet's resolved DB values down to only
+ * the fields the form surfaces — the enroller never receives unbound outlet attributes
+ * (same data minimisation as `pickBoundPrefill` for Excel columns).
+ */
+export function collectOutletFieldKeys(schema: unknown): Set<string> {
+  const keys = new Set<string>();
+  const fields = isObject(schema) && Array.isArray((schema as { fields?: unknown }).fields)
+    ? ((schema as { fields: unknown[] }).fields)
+    : [];
+  for (const f of fields) {
+    if (isObject(f) && typeof f.outletField === 'string' && f.outletField.trim() !== '') {
+      keys.add(f.outletField);
     }
   }
   return keys;
+}
+
+/**
+ * Project a matched outlet's resolved field map to ONLY the outlet fields the form binds
+ * to. Returns null when nothing to expose. Mirrors `pickBoundPrefill` for outlet fields.
+ */
+export function pickBoundOutletFields(
+  outletFieldValues: Record<string, string> | null | undefined,
+  schema: unknown,
+): Record<string, string> | null {
+  if (!outletFieldValues || typeof outletFieldValues !== 'object') return null;
+  const keys = collectOutletFieldKeys(schema);
+  if (keys.size === 0) return null;
+  const out: Record<string, string> = {};
+  for (const k of keys) {
+    const v = outletFieldValues[k];
+    if (typeof v === 'string' && v !== '') out[k] = v;
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 /**
@@ -282,7 +384,6 @@ function isObject(v: unknown): v is Record<string, unknown> {
  *     - label:     non-empty string
  *     - required:  boolean
  *     - order:     number
- *     - audience (optional): one of FieldAudience
  *     - options (DROPDOWN): must have at least one string entry
  *     - formula (CALCULATED): required, non-empty; all {id} refs must resolve
  *     - visibleWhen (optional):
@@ -361,13 +462,6 @@ export function validateFormSchema(rawSchema: unknown): string[] {
       errors.push(`${pos}: order must be a number.`);
     }
 
-    // audience (optional)
-    if (f.audience !== undefined) {
-      if (!isString(f.audience) || !(FIELD_AUDIENCES as readonly string[]).includes(f.audience)) {
-        errors.push(`${pos}: audience must be one of: ${FIELD_AUDIENCES.join(', ')}.`);
-      }
-    }
-
     // options — required for DROPDOWN and MULTI_SELECT (D12).
     if (f.type === 'DROPDOWN' || f.type === 'MULTI_SELECT') {
       if (!Array.isArray(f.options) || f.options.length === 0) {
@@ -407,6 +501,24 @@ export function validateFormSchema(rawSchema: unknown): string[] {
     }
     if (f.prefillKey !== undefined && !isString(f.prefillKey)) {
       errors.push(`${pos}: prefillKey must be a string.`);
+    }
+
+    // outletField (optional) — the dual-source prefill from an Outlet-master field.
+    // Must be one of the curated OUTLET_FIELD_KEYS (a free-typed value would silently
+    // resolve to nothing — the same integrity gap the Excel prefill dropdown closes, H1).
+    if (f.outletField !== undefined) {
+      if (!isString(f.outletField) || !OUTLET_FIELD_KEYS.has(f.outletField)) {
+        errors.push(
+          `${pos}: outletField must be one of: ${[...OUTLET_FIELD_KEYS].join(', ')}.`,
+        );
+      }
+    }
+
+    // gpsMaxAccuracy (optional) — a positive metre cap for a GPS_POINT fix (D15).
+    if (f.gpsMaxAccuracy !== undefined) {
+      if (!isNumber(f.gpsMaxAccuracy) || !(f.gpsMaxAccuracy > 0)) {
+        errors.push(`${pos}: gpsMaxAccuracy must be a positive number (metres).`);
+      }
     }
 
     // Consent integrity (D13a/D16): a LOCKED, Excel-bound PHONE_OTP field is pinned to
@@ -892,7 +1004,23 @@ export function validateSubmittedValues(
         }
         break;
       }
-      // TEXT, GPS_POINT, IMAGE, CAMERA, DOCUMENT, UPI_QR_SCAN, SIGNATURE:
+      case 'GPS_POINT': {
+        // Accuracy gate (D15): when the field caps accuracy and the fix REPORTS a
+        // numeric accuracy worse than the cap, reject it (a low-accuracy fix is not
+        // trustworthy proof-of-location). A fix with no reported accuracy is accepted
+        // (can't prove it fails) — this stays opt-in + back-compatible.
+        if (typeof field.gpsMaxAccuracy === 'number' && field.gpsMaxAccuracy > 0 &&
+            rawValue !== null && typeof rawValue === 'object') {
+          const acc = Number((rawValue as { accuracy?: unknown }).accuracy);
+          if (isFinite(acc) && acc > field.gpsMaxAccuracy) {
+            errors.push(
+              `Field "${field.label}" (${field.id}) location accuracy (±${acc}m) exceeds the ${field.gpsMaxAccuracy}m limit — move to open sky and recapture.`,
+            );
+          }
+        }
+        break;
+      }
+      // TEXT, IMAGE, CAMERA, DOCUMENT, UPI_QR_SCAN, SIGNATURE:
       // any non-empty value accepted (media = a stored object key; geo = a JSON blob).
       default:
         break;

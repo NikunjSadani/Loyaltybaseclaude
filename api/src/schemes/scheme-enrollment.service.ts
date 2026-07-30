@@ -22,7 +22,9 @@ import {
   EnrollmentFormSchema,
   FormField,
   applyPrefillPins,
+  collectOutletFieldKeys,
   evaluateVisibleWhen,
+  pickBoundOutletFields,
   pickBoundPrefill,
   validateSubmittedValues,
 } from './enrollment-form.helper';
@@ -84,6 +86,12 @@ export interface SalesTargetRow {
   currentVersion: number | null;
   /** Excel prefill variables for a materialized roster row (D13); null for a live-rule outlet (no row yet). */
   prefillValues: Record<string, string> | null;
+  /** Outlet-master field values for a MATCHED row, projected to the form's bound outlet fields (dual-source, D13); null otherwise. */
+  outletFieldValues: Record<string, string> | null;
+  /** True when the matched outlet's owner is KYC-approved (renderer pre-pins the owner phone). */
+  outletApproved: boolean;
+  /** Masked on-file owner phone for a KYC-approved matched outlet (renderer pre-pin hint); null otherwise. */
+  ownerPhoneMasked: string | null;
 }
 
 /**
@@ -195,6 +203,134 @@ export class SchemeEnrollmentService {
       select: { kycSubmissions: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true } } },
     });
     return p?.kycSubmissions?.[0]?.status === 'APPROVED';
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Dual-source prefill (D13) — Outlet-master field values for a MATCHED row
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** Prisma `select` for the outlet-native columns the outlet-field catalog can expose. */
+  private static readonly OUTLET_FIELD_SELECT = {
+    outletCode: true, name: true, addressLine1: true, addressLine2: true,
+    city: true, state: true, pincode: true, zone: true, programName: true,
+    programCategory: true, ownerName: true, phone: true,
+  } as const;
+
+  /** Prisma `select` for the partner columns the outlet-field catalog can expose. */
+  private static readonly PARTNER_FIELD_SELECT = {
+    businessName: true, ownerName: true, phone: true, panNumber: true, gstNumber: true,
+  } as const;
+
+  /**
+   * Build the FULL Outlet-master field map (catalog key → value) for a matched roster
+   * row, merging the Outlet record (outlet-native fields) with its ChannelPartner
+   * (owner fields). Outlet values win for the two overlapping keys (ownerName/phone),
+   * falling back to the partner. Empty/null values are omitted. Pure once the records
+   * are loaded — the caller projects it to the form's bound outlet fields.
+   */
+  private buildOutletFieldMap(
+    outlet: Record<string, unknown> | null,
+    partner: Record<string, unknown> | null,
+  ): Record<string, string> {
+    const m: Record<string, string> = {};
+    const put = (k: string, v: unknown) => {
+      if (v !== null && v !== undefined && String(v) !== '') m[k] = String(v);
+    };
+    if (outlet) {
+      put('outletCode', outlet.outletCode);
+      put('outletName', outlet.name);
+      put('addressLine1', outlet.addressLine1);
+      put('addressLine2', outlet.addressLine2);
+      put('city', outlet.city);
+      put('state', outlet.state);
+      put('pincode', outlet.pincode);
+      put('zone', outlet.zone);
+      put('programName', outlet.programName);
+      put('programCategory', outlet.programCategory);
+      put('ownerName', outlet.ownerName);
+      put('phone', outlet.phone);
+    }
+    if (partner) {
+      if (!m.ownerName) put('ownerName', partner.ownerName);
+      if (!m.phone) put('phone', partner.phone);
+      put('businessName', partner.businessName);
+      put('panNumber', partner.panNumber);
+      put('gstNumber', partner.gstNumber);
+    }
+    return m;
+  }
+
+  /**
+   * Resolve the projected outlet-field values + KYC-approved owner-phone hints for a
+   * matched roster row — batched by outletId/partnerId so a many-row listing loads each
+   * outlet/partner once. Returns per-row: the outlet-field map projected to the form's
+   * bound `outletField`s (null when none bound / standalone), and, for a KYC-approved
+   * owner, the masked on-file phone (renderer pre-pin). No queries when the form binds
+   * no outlet fields AND we don't need approval hints.
+   */
+  private async loadOutletFieldContext(
+    clientId: string,
+    rows: { matchedOutletId: string | null; matchedPartnerId: string | null }[],
+    formSchema: unknown,
+    needApprovalHint = true,
+  ): Promise<
+    Map<string, { outletFieldValues: Record<string, string> | null; outletApproved: boolean; ownerPhoneMasked: string | null }>
+  > {
+    const result = new Map<
+      string,
+      { outletFieldValues: Record<string, string> | null; outletApproved: boolean; ownerPhoneMasked: string | null }
+    >();
+    const bindsOutletFields = collectOutletFieldKeys(formSchema).size > 0;
+
+    const outletIds = [...new Set(rows.map((r) => r.matchedOutletId).filter((v): v is string => Boolean(v)))];
+    const partnerIds = [...new Set(rows.map((r) => r.matchedPartnerId).filter((v): v is string => Boolean(v)))];
+
+    const outletsById = new Map<string, Record<string, unknown>>();
+    if (bindsOutletFields && outletIds.length > 0) {
+      const outlets = await this.prisma.outlet.findMany({
+        where: { id: { in: outletIds }, clientId },
+        select: { id: true, ...SchemeEnrollmentService.OUTLET_FIELD_SELECT },
+      });
+      for (const o of outlets) outletsById.set(o.id, o as Record<string, unknown>);
+    }
+
+    // Partners are needed for the outlet-field owner columns (only when the form binds
+    // outlet fields) AND the KYC-approval pre-pin hint (only for the enrollee payloads).
+    // submit() needs neither → passes needApprovalHint=false → zero extra queries when the
+    // form binds no outlet fields.
+    const partnersById = new Map<string, { fields: Record<string, unknown>; approved: boolean; phone: string | null }>();
+    if ((bindsOutletFields || needApprovalHint) && partnerIds.length > 0) {
+      const partners = await this.prisma.channelPartner.findMany({
+        where: { id: { in: partnerIds }, clientId },
+        select: {
+          id: true,
+          ...SchemeEnrollmentService.PARTNER_FIELD_SELECT,
+          kycSubmissions: { orderBy: { createdAt: 'desc' }, take: 1, select: { status: true } },
+        },
+      });
+      for (const p of partners) {
+        partnersById.set(p.id, {
+          fields: p as Record<string, unknown>,
+          approved: p.kycSubmissions?.[0]?.status === 'APPROVED',
+          phone: p.phone ?? null,
+        });
+      }
+    }
+
+    for (const r of rows) {
+      const outlet = r.matchedOutletId ? outletsById.get(r.matchedOutletId) ?? null : null;
+      const partnerRec = r.matchedPartnerId ? partnersById.get(r.matchedPartnerId) ?? null : null;
+      const outletFieldValues = bindsOutletFields
+        ? pickBoundOutletFields(this.buildOutletFieldMap(outlet, partnerRec?.fields ?? null), formSchema)
+        : null;
+      const approved = partnerRec?.approved ?? false;
+      const onFile = this.phoneLast10(partnerRec?.phone);
+      const ownerPhoneMasked = approved && onFile.length === 10 ? `******${onFile.slice(-4)}` : null;
+      // Key by outletId then partnerId (matched rows always have one); fall back to a blank.
+      const key = r.matchedOutletId ?? r.matchedPartnerId ?? '';
+      result.set(key, { outletFieldValues, outletApproved: approved, ownerPhoneMasked });
+    }
+    return result;
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -671,13 +807,27 @@ export class SchemeEnrollmentService {
     if (form) {
       const schema = form.formSchema as unknown as EnrollmentFormSchema;
 
-      // Prefill pins (D13a): overwrite every LOCKED Excel-prefill field with its
-      // authoritative roster value BEFORE validation, so required/type/option checks
-      // run against the pinned value and it flows into finalFormValues below.
+      // Dual-source outlet-field values (D13) for a matched row — resolved server-side
+      // from the outlet's OWN DB record so a LOCKED outlet-field is pinned to the source
+      // of record (a rep/outlet can never substitute it), same guarantee as Excel pins.
+      const outletCtx = await this.loadOutletFieldContext(
+        scheme.clientId,
+        [{ matchedOutletId: row.matchedOutletId, matchedPartnerId: row.matchedPartnerId }],
+        schema,
+        false, // submit needs only outletFieldValues, never the approval pre-pin hint
+      );
+      const boundOutletFields =
+        outletCtx.get(row.matchedOutletId ?? row.matchedPartnerId ?? '')?.outletFieldValues ?? null;
+
+      // Prefill pins (D13a): overwrite every LOCKED prefill field with its authoritative
+      // source value (outlet-master field for a matched row, else the Excel roster column)
+      // BEFORE validation, so required/type/option checks run against the pinned value and
+      // it flows into finalFormValues below.
       const submitted = applyPrefillPins(
         schema,
         { ...(submittedRaw ?? {}) },
         (row.prefillValues ?? null) as unknown as Record<string, string> | null,
+        boundOutletFields,
       );
 
       // PHONE-OTP consent gate (D16): pin the number + require a verified OTP.
@@ -812,13 +962,40 @@ export class SchemeEnrollmentService {
     });
     if (!enrollment) throw new NotFoundException('Enrollment not found.');
 
-    // Status → REJECTED + reason. Captured submission history is retained untouched (D10):
-    // the rep resubmits the whole form → a new version supersedes.
-    const updated = await this.prisma.schemeEnrollment.update({
-      where: { id: enrollment.id },
-      data: { status: 'REJECTED', rejectionReason: dto.reason, updatedAt: new Date() },
+    // Status → REJECTED + reason, AND append an immutable REJECTED event to the submission
+    // trail (D10). Without the appended row, a later resubmit (which nulls the live
+    // enrollment's rejectionReason) erases every trace that this version was rejected and
+    // why — the reviewer loses the audit trail. The event snapshots the rejected values +
+    // preserves the reason permanently. `currentVersion` advances so the reject occupies a
+    // distinct trail version (the [enrollmentId, version] unique) and the next resubmit
+    // (`prev.currentVersion + 1`) continues past it without colliding.
+    const rejectVersion = enrollment.currentVersion + 1;
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.schemeEnrollment.update({
+        where: { id: enrollment.id },
+        data: {
+          status: 'REJECTED',
+          rejectionReason: dto.reason,
+          currentVersion: rejectVersion,
+          updatedAt: new Date(),
+        },
+      });
+      const submission = await tx.schemeSubmission.create({
+        data: {
+          schemeId: enrollment.schemeId,
+          schemeOutletId: enrollment.schemeOutletId,
+          enrollmentId: enrollment.id,
+          version: rejectVersion,
+          status: 'REJECTED',
+          formValues: (enrollment.formValues ?? {}) as Prisma.InputJsonValue,
+          formVersion: enrollment.formVersion,
+          enrollmentMode: enrollment.enrollmentMode,
+          submittedByUserId: user.sub ?? null,
+          rejectionReason: dto.reason,
+        },
+      });
+      return { enrollment: updated, submission };
     });
-    return { enrollment: updated };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -863,13 +1040,18 @@ export class SchemeEnrollmentService {
     type EligibleScheme = (typeof schemes)[number] & {
       mySchemeOutletId: string | null;
       prefillValues: Record<string, string> | null;
+      // Dual-source prefill (D13) + approved-owner-phone pre-pin hints for the matched row.
+      outletFieldValues: Record<string, string> | null;
+      outletApproved: boolean;
+      ownerPhoneMasked: string | null;
     };
+    const NO_MATCH = { outletFieldValues: null, outletApproved: false, ownerPhoneMasked: null } as const;
     const eligible: EligibleScheme[] = [];
     for (const scheme of schemes) {
       const audience = this.parseAudience(scheme);
       if (!audience) {
         // opt-in default: visible to all ACTIVE (no fixed roster row → no prefill)
-        eligible.push({ ...scheme, mySchemeOutletId: null, prefillValues: null });
+        eligible.push({ ...scheme, mySchemeOutletId: null, prefillValues: null, ...NO_MATCH });
         continue;
       }
       if (audience.mode === 'EXCEL' || audience.frozen) {
@@ -878,12 +1060,19 @@ export class SchemeEnrollmentService {
             schemeId: scheme.id,
             OR: [{ matchedPartnerId: partnerId }, { matchedOutletId: { in: [...outletIds] } }],
           },
-          select: { id: true, prefillValues: true },
+          select: { id: true, prefillValues: true, matchedOutletId: true, matchedPartnerId: true },
           // Deterministic pick for a multi-outlet partner (A-LOW-1): the portal one-tap
           // self-enroll must always target the same roster row.
           orderBy: { createdAt: 'asc' },
         });
         if (rostered) {
+          // Dual-source outlet-field values + approved-owner hints for THIS matched row.
+          const ctxMap = await this.loadOutletFieldContext(
+            user.clientId,
+            [rostered],
+            scheme.enrollmentForm?.formSchema,
+          );
+          const ctx = ctxMap.get(rostered.matchedOutletId ?? rostered.matchedPartnerId ?? '') ?? NO_MATCH;
           eligible.push({
             ...scheme,
             mySchemeOutletId: rostered.id,
@@ -893,12 +1082,15 @@ export class SchemeEnrollmentService {
               rostered.prefillValues as Record<string, string> | null,
               scheme.enrollmentForm?.formSchema,
             ),
+            outletFieldValues: ctx.outletFieldValues,
+            outletApproved: ctx.outletApproved,
+            ownerPhoneMasked: ctx.ownerPhoneMasked,
           });
         }
       } else {
         // Live-rule FILTER: any of the partner's outlets matches the filter.
         if (outlets.some((o) => this.outletMatchesFilter(o, audience.filter))) {
-          eligible.push({ ...scheme, mySchemeOutletId: null, prefillValues: null });
+          eligible.push({ ...scheme, mySchemeOutletId: null, prefillValues: null, ...NO_MATCH });
         }
       }
     }
@@ -940,6 +1132,16 @@ export class SchemeEnrollmentService {
       include: { enrollment: true },
     });
     if (!row || !row.enrollment) throw new NotFoundException('Enrollment not found.');
+    const ctxMap = await this.loadOutletFieldContext(
+      user.clientId,
+      [row],
+      scheme.enrollmentForm?.formSchema,
+    );
+    const ctx = ctxMap.get(row.matchedOutletId ?? row.matchedPartnerId ?? '') ?? {
+      outletFieldValues: null,
+      outletApproved: false,
+      ownerPhoneMasked: null,
+    };
     return {
       schemeOutlet: {
         id: row.id,
@@ -951,7 +1153,14 @@ export class SchemeEnrollmentService {
           row.prefillValues as Record<string, string> | null,
           scheme.enrollmentForm?.formSchema,
         ),
+        // Dual-source (D13): Outlet-master field values for this matched outlet, projected
+        // to the form's bound outlet fields.
+        outletFieldValues: ctx.outletFieldValues,
       },
+      // Renderer pre-pin hints: an approved matched owner's number is server-authoritative
+      // for the phone-OTP consent (resolveOtpTarget) — the FE shows it locked.
+      outletApproved: ctx.outletApproved,
+      ownerPhoneMasked: ctx.ownerPhoneMasked,
       enrollment: row.enrollment,
     };
   }
@@ -1033,6 +1242,15 @@ export class SchemeEnrollmentService {
       },
     });
 
+    // Dual-source (D13): batch-resolve each matched row's outlet-field values + approved-
+    // owner hints (one query per outlet/partner across the whole page).
+    const rosterCtx = await this.loadOutletFieldContext(
+      scheme.clientId,
+      rosterRows.map((r) => ({ matchedOutletId: r.matchedOutletId, matchedPartnerId: r.matchedPartnerId })),
+      scheme.enrollmentForm?.formSchema,
+    );
+    const NO_MATCH = { outletFieldValues: null, outletApproved: false, ownerPhoneMasked: null } as const;
+
     const rosterTargets: SalesTargetRow[] = rosterRows.map((r) => ({
       schemeOutletId: r.id,
       targetOutletRef: null,
@@ -1049,6 +1267,7 @@ export class SchemeEnrollmentService {
         r.prefillValues as Record<string, string> | null,
         scheme.enrollmentForm?.formSchema,
       ),
+      ...(rosterCtx.get(r.matchedOutletId ?? r.matchedPartnerId ?? '') ?? NO_MATCH),
     }));
 
     // Live-rule targets — reachable outlets matching the filter, not already rostered.
@@ -1077,28 +1296,36 @@ export class SchemeEnrollmentService {
         const outlets = await this.prisma.outlet.findMany({
           where: { clientId: scheme.clientId, deletedAt: null, OR: outletOr },
           select: {
-            id: true, name: true, outletTypeId: true, programName: true,
+            id: true, name: true, partnerId: true, outletTypeId: true, programName: true,
             programCategory: true, zone: true, state: true,
           },
         });
-        liveTargets = outlets
+        const candidates = outlets
           // Exclude any outlet already surfaced as a roster row (the partner branch can
           // pull in a partner's outlet that is already rostered).
           .filter((o) => !alreadyRostered.has(o.id))
-          .filter((o) => this.outletMatchesFilter(o, audience?.filter))
-          .map((o) => ({
-            schemeOutletId: null,
-            targetOutletRef: o.id,
-            outletRef: o.id,
-            outletName: o.name,
-            matched: true,
-            standalone: false,
-            status: 'NOT_ENROLLED' as const,
-            rejectionReason: null,
-            enrollmentId: null,
-            currentVersion: null,
-            prefillValues: null,
-          }));
+          .filter((o) => this.outletMatchesFilter(o, audience?.filter));
+        // Live-rule matched outlets have no Excel roster — outletField prefill comes straight
+        // from the outlet DB record (dual-source, D13).
+        const liveCtx = await this.loadOutletFieldContext(
+          scheme.clientId,
+          candidates.map((o) => ({ matchedOutletId: o.id, matchedPartnerId: o.partnerId })),
+          scheme.enrollmentForm?.formSchema,
+        );
+        liveTargets = candidates.map((o) => ({
+          schemeOutletId: null,
+          targetOutletRef: o.id,
+          outletRef: o.id,
+          outletName: o.name,
+          matched: true,
+          standalone: false,
+          status: 'NOT_ENROLLED' as const,
+          rejectionReason: null,
+          enrollmentId: null,
+          currentVersion: null,
+          prefillValues: null,
+          ...(liveCtx.get(o.id) ?? NO_MATCH),
+        }));
       }
     }
 
@@ -1207,6 +1434,12 @@ export class SchemeEnrollmentService {
         ...enrollment,
         media: this.extractMedia(scheme.id, enrollment.formValues, formSnapshot),
         geo: this.extractGeo(enrollment.formValues, formSnapshot),
+        // Field id → label/type for the version the submission was captured against, so
+        // the admin drawer renders human labels for captured values instead of raw field
+        // ids (and can hide display/structural + media/geo fields). Ordered for display.
+        formFields: [...(formSnapshot?.fields ?? [])]
+          .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+          .map((f) => ({ id: f.id, label: f.label, type: f.type })),
       },
     };
   }

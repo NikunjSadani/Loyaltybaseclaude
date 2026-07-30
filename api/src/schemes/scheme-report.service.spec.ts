@@ -114,6 +114,11 @@ const mockPrisma = {
 describe('SchemeReportService', () => {
   let service: SchemeReportService;
 
+  // A non-GIFSY tenant user → platformWide false → stays hard-pinned to `clientId`,
+  // exercising the exact tenant-scoping the old `clientId` param did.
+  const asTenant = (clientId: string, sub = 'admin1') =>
+    ({ sub, clientId, role: 'CLIENT_ADMIN' } as any);
+
   beforeEach(async () => {
     jest.clearAllMocks();
     const module: TestingModule = await Test.createTestingModule({
@@ -127,7 +132,7 @@ describe('SchemeReportService', () => {
 
   describe('aggregation', () => {
     beforeEach(() => {
-      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1', name: 'Scheme 1', status: 'ACTIVE' });
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1', name: 'Scheme 1', status: 'ACTIVE', clientId: 'deoleo' });
       // 4 roster rows: 2 in zone W (1 enrolled), 1 zone E (rejected), 1 standalone (not enrolled).
       mockPrisma.schemeOutlet.findMany.mockResolvedValue([
         { id: 'r1', outletRef: 'A1', outletName: 'A1', matchedOutletId: 'o1', matchedOutlet: { zone: 'W', programName: 'P', outletType: { name: 'Retail' } } },
@@ -142,7 +147,7 @@ describe('SchemeReportService', () => {
     });
 
     it('gifsyReport computes counts, coverage %, and breakdowns', async () => {
-      const rep = await service.gifsyReport('s1', 'deoleo');
+      const rep = await service.gifsyReport(asTenant('deoleo'), 's1');
       expect(rep.summary).toEqual({
         rosterCount: 4,
         enrolledCount: 2,
@@ -159,7 +164,7 @@ describe('SchemeReportService', () => {
     });
 
     it('tenantReport returns aggregates + a row list with NO raw media/formValues', async () => {
-      const rep = await service.tenantReport('s1', 'deoleo');
+      const rep = await service.tenantReport(asTenant('deoleo'), 's1');
       expect(rep.summary.rosterCount).toBe(4);
       expect(rep.rows).toHaveLength(4);
       const r1 = rep.rows.find((r) => r.outletRef === 'A1');
@@ -172,7 +177,7 @@ describe('SchemeReportService', () => {
 
     it('throws NotFound for a cross-tenant scheme', async () => {
       mockPrisma.scheme.findFirst.mockResolvedValue(null);
-      await expect(service.gifsyReport('s1', 'other')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.gifsyReport(asTenant('other', 'x'), 's1')).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 
@@ -185,7 +190,7 @@ describe('SchemeReportService', () => {
 
     it('measures coverage against filter-eligible outlets, NOT the lazy roster', async () => {
       mockPrisma.scheme.findFirst.mockResolvedValue({
-        id: 's1', code: 'SC1', name: 'Scheme 1', status: 'ACTIVE',
+        id: 's1', code: 'SC1', name: 'Scheme 1', status: 'ACTIVE', clientId: 'deoleo',
         audienceConfig: { mode: 'FILTER', frozen: false, selfEnrollAllowed: true, filter: { zones: ['W'], kycApprovedOnly: false } },
       });
       // Only 2 lazy roster rows (both enrolled), but 10 outlets match the live filter.
@@ -196,7 +201,7 @@ describe('SchemeReportService', () => {
       ]);
       mockPrisma.outlet.count.mockResolvedValue(10);
 
-      const rep = await service.gifsyReport('s1', 'deoleo');
+      const rep = await service.gifsyReport(asTenant('deoleo'), 's1');
 
       expect(mockPrisma.outlet.count).toHaveBeenCalledTimes(1);
       // filter passed through to the outlet-count query
@@ -213,13 +218,13 @@ describe('SchemeReportService', () => {
 
     it('uses the roster count for a FILTER-FROZEN scheme (fixed roster)', async () => {
       mockPrisma.scheme.findFirst.mockResolvedValue({
-        id: 's1', code: 'SC1', name: 'Scheme 1', status: 'ACTIVE',
+        id: 's1', code: 'SC1', name: 'Scheme 1', status: 'ACTIVE', clientId: 'deoleo',
         audienceConfig: { mode: 'FILTER', frozen: true, selfEnrollAllowed: false, filter: { zones: ['W'], kycApprovedOnly: false } },
       });
       mockPrisma.schemeOutlet.findMany.mockResolvedValue(liveRuleRoster);
       mockPrisma.schemeEnrollment.findMany.mockResolvedValue([{ schemeOutletId: 'r1', status: 'SUBMITTED' }]);
 
-      const rep = await service.gifsyReport('s1', 'deoleo');
+      const rep = await service.gifsyReport(asTenant('deoleo'), 's1');
 
       expect(mockPrisma.outlet.count).not.toHaveBeenCalled();
       expect(rep.coverageDenominator).toBe(2);
@@ -230,7 +235,7 @@ describe('SchemeReportService', () => {
 
   describe('exportEnrollments (end-to-end xlsx)', () => {
     it('mints an auth-gated media link and cellSafe-escapes a formula-injection value', async () => {
-      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1' });
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1', clientId: 'deoleo' });
       mockPrisma.schemeOutlet.findMany.mockResolvedValue([
         {
           outletRef: 'A1', outletName: 'Shop', matchedOutletId: 'o1',
@@ -253,7 +258,7 @@ describe('SchemeReportService', () => {
         },
       });
 
-      const file = await service.exportEnrollments('s1', 'deoleo');
+      const file = await service.exportEnrollments(asTenant('deoleo'), 's1');
       expect(file).toBeInstanceOf(StreamableFile);
 
       const buf = await streamToBuffer(file);
@@ -262,16 +267,16 @@ describe('SchemeReportService', () => {
 
       // Media link points at the SESSION-gated scheme media-view route (NOT the raw
       // key, NOT a self-authenticating token) — identical to 1B's extractMedia path.
-      expect(rows[0]['Photo']).toBe('/v1/schemes/s1/enrollments/media?key=gcs%2Fshop.jpg');
+      expect(rows[0]['Photo']).toBe('/api/schemes/s1/enrollments/media?key=gcs%2Fshop.jpg');
       // cellSafe escaped the formula so Excel treats it as text (leading apostrophe).
       expect(rows[0]['Note']).toBe("'=SUM(A1)");
       expect(rows[0]['Tagged Employee']).toBe('E1');
     });
 
     it('throws NotFound when the scheme has no roster', async () => {
-      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1' });
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1', clientId: 'deoleo' });
       mockPrisma.schemeOutlet.findMany.mockResolvedValue([]);
-      await expect(service.exportEnrollments('s1', 'deoleo')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.exportEnrollments(asTenant('deoleo'), 's1')).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

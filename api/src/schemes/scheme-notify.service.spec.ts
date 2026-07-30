@@ -66,6 +66,12 @@ describe('ancestorSalesUserIds (pure)', () => {
 describe('SchemeNotifyService', () => {
   let service: SchemeNotifyService;
 
+  // A non-GIFSY tenant user → platformWide false → stays hard-pinned to `clientId`,
+  // exercising the exact tenant-scoping the old `clientId` param did. `sub` becomes
+  // the persisted sentByUserId (derived from user.sub inside the service).
+  const asTenant = (clientId: string, sub = 'admin1') =>
+    ({ sub, clientId, role: 'CLIENT_ADMIN' } as any);
+
   beforeEach(async () => {
     jest.clearAllMocks();
     const module: TestingModule = await Test.createTestingModule({
@@ -76,13 +82,14 @@ describe('SchemeNotifyService', () => {
       ],
     }).compile();
     service = module.get(SchemeNotifyService);
-    mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1' });
+    // The service now derives the tenant from the fetched scheme's own clientId.
+    mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', clientId: 'deoleo' });
     mockPrisma.schemeBroadcast.create.mockImplementation(({ data }) => Promise.resolve({ id: 'b1', ...data }));
   });
 
   it('throws NotFound when the scheme is not in the caller tenant', async () => {
     mockPrisma.scheme.findFirst.mockResolvedValue(null);
-    await expect(service.broadcast('s1', 'deoleo', 'admin1', wa('OUTLETS'))).rejects.toBeInstanceOf(
+    await expect(service.broadcast(asTenant('deoleo'), 's1',wa('OUTLETS'))).rejects.toBeInstanceOf(
       NotFoundException,
     );
     expect(mockPrisma.schemeBroadcast.create).not.toHaveBeenCalled();
@@ -99,7 +106,7 @@ describe('SchemeNotifyService', () => {
         { matchedOutletId: null, matchedPartner: null, matchedOutlet: null },
       ]);
 
-      const res = await service.broadcast('s1', 'deoleo', 'admin1', wa('OUTLETS'));
+      const res = await service.broadcast(asTenant('deoleo'), 's1',wa('OUTLETS'));
 
       const sentTo = mockMsg91.sendWhatsappTemplate.mock.calls.map((c) => c[0]).sort();
       expect(sentTo).toEqual(['9990000001', '9990000002']);
@@ -116,7 +123,7 @@ describe('SchemeNotifyService', () => {
         { matchedOutletId: 'o2', matchedPartner: { phone: '9990000002' }, matchedOutlet: { phone: null, zone: 'South', programName: null, programCategory: null, state: null, outletTypeId: null } },
       ]);
 
-      const res = await service.broadcast('s1', 'deoleo', 'admin1', wa('OUTLETS', { recipientFilter: { zones: ['North'] } }));
+      const res = await service.broadcast(asTenant('deoleo'), 's1',wa('OUTLETS', { recipientFilter: { zones: ['North'] } }));
 
       const sentTo = mockMsg91.sendWhatsappTemplate.mock.calls.map((c) => c[0]);
       expect(sentTo).toEqual(['9990000001']);
@@ -134,7 +141,7 @@ describe('SchemeNotifyService', () => {
       ]);
       mockPrisma.user.findMany.mockResolvedValue([{ phone: '9900000041' }, { phone: '9900000002' }]);
 
-      const res = await service.broadcast('s1', 'deoleo', 'admin1', wa('SALES'));
+      const res = await service.broadcast(asTenant('deoleo'), 's1',wa('SALES'));
 
       // Only isr + its ancestor so → their userIds queried (NOT 'other').
       const userWhere = mockPrisma.user.findMany.mock.calls[0][0].where;
@@ -144,7 +151,7 @@ describe('SchemeNotifyService', () => {
 
     it('returns zero recipients (still logs) when no roster row is tagged', async () => {
       mockPrisma.schemeOutlet.findMany.mockResolvedValue([]);
-      const res = await service.broadcast('s1', 'deoleo', 'admin1', wa('SALES'));
+      const res = await service.broadcast(asTenant('deoleo'), 's1',wa('SALES'));
       expect(res.recipientCount).toBe(0);
       expect(res.sentCount).toBe(0);
       expect(mockPrisma.schemeBroadcast.create).toHaveBeenCalled();
@@ -161,7 +168,7 @@ describe('SchemeNotifyService', () => {
       ]);
       mockPrisma.user.findMany.mockResolvedValue([{ phone: '9900000041' }, { phone: '9900000003' }]);
 
-      await service.broadcast('s1', 'deoleo', 'admin1', wa('SALES'));
+      await service.broadcast(asTenant('deoleo'), 's1',wa('SALES'));
 
       // edges loaded WITHOUT a deletedAt filter (so the walk can traverse the deleted node).
       expect(mockPrisma.salesUser.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
@@ -183,7 +190,7 @@ describe('SchemeNotifyService', () => {
       mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'isr', reportingToId: null, userId: 'u_isr' }]);
       mockPrisma.user.findMany.mockResolvedValue([{ phone: '9900000041' }]); // same phone as the outlet owner
 
-      const res = await service.broadcast('s1', 'deoleo', 'admin1', wa('BOTH'));
+      const res = await service.broadcast(asTenant('deoleo'), 's1',wa('BOTH'));
 
       expect(res.recipientCount).toBe(1); // deduped
       expect(res.sentCount).toBe(1);
@@ -202,7 +209,7 @@ describe('SchemeNotifyService', () => {
         .mockRejectedValueOnce(new Error('MSG91 down'))
         .mockResolvedValueOnce(undefined);
 
-      const res = await service.broadcast('s1', 'deoleo', 'admin1', wa('OUTLETS'));
+      const res = await service.broadcast(asTenant('deoleo'), 's1',wa('OUTLETS'));
 
       expect(res.sentCount).toBe(2);
       expect(res.failedCount).toBe(1);
@@ -225,7 +232,7 @@ describe('SchemeNotifyService', () => {
       mockPrisma.schemeOutlet.findMany.mockResolvedValue([
         { matchedOutletId: 'o1', matchedPartner: { phone: '9990000001' }, matchedOutlet: { phone: null, zone: null, programName: null, programCategory: null, state: null, outletTypeId: null } },
       ]);
-      await service.broadcast('s1', 'deoleo', 'admin1', { channel: 'SMS', templateId: 'sms_tpl', recipientScope: 'OUTLETS', bodyValues: ['CODE123'] });
+      await service.broadcast(asTenant('deoleo'), 's1',{ channel: 'SMS', templateId: 'sms_tpl', recipientScope: 'OUTLETS', bodyValues: ['CODE123'] });
       expect(mockMsg91.sendOtp).toHaveBeenCalledWith('9990000001', 'CODE123', 'SMS', 'sms_tpl');
       expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled();
     });
@@ -234,7 +241,7 @@ describe('SchemeNotifyService', () => {
   describe('listBroadcasts', () => {
     it('returns tenant-scoped history newest-first', async () => {
       mockPrisma.schemeBroadcast.findMany.mockResolvedValue([{ id: 'b2' }, { id: 'b1' }]);
-      const res = await service.listBroadcasts('s1', 'deoleo');
+      const res = await service.listBroadcasts(asTenant('deoleo'), 's1');
       expect(res.broadcasts).toHaveLength(2);
       expect(mockPrisma.schemeBroadcast.findMany).toHaveBeenCalledWith({
         where: { schemeId: 's1', clientId: 'deoleo' },
@@ -244,13 +251,13 @@ describe('SchemeNotifyService', () => {
 
     it('throws NotFound for a cross-tenant scheme', async () => {
       mockPrisma.scheme.findFirst.mockResolvedValue(null);
-      await expect(service.listBroadcasts('s1', 'other')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.listBroadcasts(asTenant('other', 'x'), 's1')).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 
   it('stores recipientFilter as JsonNull when absent', async () => {
     mockPrisma.schemeOutlet.findMany.mockResolvedValue([]);
-    await service.broadcast('s1', 'deoleo', 'admin1', wa('OUTLETS'));
+    await service.broadcast(asTenant('deoleo'), 's1',wa('OUTLETS'));
     const data = mockPrisma.schemeBroadcast.create.mock.calls[0][0].data;
     expect(data.recipientFilter).toBe(Prisma.JsonNull);
   });

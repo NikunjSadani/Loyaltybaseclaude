@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException, StreamableFile } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { buildXlsx } from '../common/xlsx';
+import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { platformWide } from '../common/tenant-scope';
 import { EnrollmentFormSchema, FormField } from './enrollment-form.helper';
 import { AudienceFilter, buildOutletWhereFromFilter } from './scheme-roster.helper';
 
@@ -55,6 +57,16 @@ export function renderExportValue(
   mintLink: (mediaKey: string) => string,
 ): string {
   if (value === null || value === undefined || value === '') return '';
+
+  // TOGGLE (boolean) → human "Yes"/"No" instead of the raw "true"/"false" string.
+  // A real `false` reaches here (it passes the null/'' guard above) and must render
+  // "No", never ''. Truthy = boolean true, or a truthy string form.
+  if (field.type === 'TOGGLE') {
+    const truthy =
+      value === true ||
+      (typeof value === 'string' && ['true', 'yes', '1', 'on'].includes(value.trim().toLowerCase()));
+    return truthy ? 'Yes' : 'No';
+  }
 
   if (MEDIA_FIELD_TYPES.has(field.type)) {
     const key = typeof value === 'string' ? value : String((value as { key?: string })?.key ?? '');
@@ -159,7 +171,11 @@ export class SchemeReportService {
    * from the object key's tenant folder (`scheme-media/<clientId>/…`).
    */
   private mediaViewLink(mediaKey: string, schemeId: string): string {
-    return `/v1/schemes/${schemeId}/enrollments/media?key=${encodeURIComponent(mediaKey)}`;
+    // App-PROXY path (/api/… → backend /v1/…), and fully-qualified when
+    // PUBLIC_APP_BASE_URL is set so the link is clickable from a downloaded .xlsx
+    // opened outside the browser. Env unset → proxy-relative (still the correct path).
+    const base = (process.env.PUBLIC_APP_BASE_URL ?? '').replace(/\/+$/, '');
+    return `${base}/api/schemes/${schemeId}/enrollments/media?key=${encodeURIComponent(mediaKey)}`;
   }
 
   /** Loose parse of the stored audienceConfig for the coverage-denominator decision. */
@@ -172,14 +188,22 @@ export class SchemeReportService {
     return { mode: cfg.mode, frozen: cfg.frozen === true, filter: cfg.filter };
   }
 
-  /** Load scheme (tenant-scoped) + its roster + enrollment statuses for aggregation. */
-  private async loadAggregation(schemeId: string, clientId: string) {
+  /**
+   * Load scheme + its roster + enrollment statuses for aggregation.
+   *
+   * The scheme lookup is platformWide-aware (an un-assumed GIFSY operator resolves
+   * ANY tenant's scheme; everyone else is hard-pinned to `user.clientId`). The
+   * scheme's OWN `clientId` is then threaded through every downstream tenant-scoped
+   * query — so an un-assumed GIFSY read is pinned to the scheme's tenant (no leak),
+   * and a tenant caller can never reach a scheme outside its own clientId.
+   */
+  private async loadAggregation(user: JwtPayload, schemeId: string) {
     const scheme = await this.prisma.scheme.findFirst({
-      where: { id: schemeId, clientId },
-      select: { id: true, code: true, name: true, status: true, audienceConfig: true },
+      where: { id: schemeId, ...(platformWide(user) ? {} : { clientId: user.clientId }) },
+      select: { id: true, code: true, name: true, status: true, audienceConfig: true, clientId: true },
     });
     if (!scheme) throw new NotFoundException('Scheme not found');
-    const { audienceConfig, ...schemePublic } = scheme;
+    const { audienceConfig, clientId, ...schemePublic } = scheme;
 
     const roster = await this.prisma.schemeOutlet.findMany({
       where: { schemeId, clientId },
@@ -269,8 +293,8 @@ export class SchemeReportService {
   }
 
   /** GIFSY admin report — aggregates + breakdowns (no row list needed here). */
-  async gifsyReport(schemeId: string, clientId: string) {
-    const a = await this.loadAggregation(schemeId, clientId);
+  async gifsyReport(user: JwtPayload, schemeId: string) {
+    const a = await this.loadAggregation(user, schemeId);
     return {
       scheme: a.scheme,
       audienceMode: a.audienceMode,
@@ -288,8 +312,8 @@ export class SchemeReportService {
    * Tenant admin read-only report (D26) — the same aggregates plus a per-outlet
    * row list, but NO raw media / formValues inline. Just status + master attrs.
    */
-  async tenantReport(schemeId: string, clientId: string) {
-    const a = await this.loadAggregation(schemeId, clientId);
+  async tenantReport(user: JwtPayload, schemeId: string) {
+    const a = await this.loadAggregation(user, schemeId);
     // Reuse the status map loadAggregation already built (B-LOW-4 — no second query).
     const rows = a.roster.map((r) => ({
       outletRef: r.outletRef,
@@ -320,12 +344,15 @@ export class SchemeReportService {
    * column per form field. Media fields render as auth-gated view links (D30).
    * Tenant-scoped.
    */
-  async exportEnrollments(schemeId: string, clientId: string): Promise<StreamableFile> {
+  async exportEnrollments(user: JwtPayload, schemeId: string): Promise<StreamableFile> {
     const scheme = await this.prisma.scheme.findFirst({
-      where: { id: schemeId, clientId },
-      select: { id: true, code: true },
+      where: { id: schemeId, ...(platformWide(user) ? {} : { clientId: user.clientId }) },
+      select: { id: true, code: true, clientId: true },
     });
     if (!scheme) throw new NotFoundException('Scheme not found');
+    // Pin every downstream tenant-scoped query to the scheme's OWN tenant (not the
+    // caller's), so an un-assumed GIFSY export stays inside the scheme's tenant.
+    const clientId = scheme.clientId;
 
     const roster = await this.prisma.schemeOutlet.findMany({
       where: { schemeId, clientId },

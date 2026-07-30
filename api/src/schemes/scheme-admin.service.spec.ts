@@ -80,16 +80,17 @@ describe('SchemeAdminService', () => {
       expect(data.createdByUserId).toBe('u1');
     });
 
-    it('honours an explicit ACTIVE status', async () => {
-      mockPrisma.scheme.create.mockResolvedValue({ id: 's1' });
-      await service.create(user, {
-        code: 'SCH1',
-        name: 'Scheme One',
-        startDate: '2026-08-01',
-        endDate: '2026-08-31',
-        status: 'ACTIVE',
-      });
-      expect(mockPrisma.scheme.create.mock.calls[0][0].data.status).toBe('ACTIVE');
+    it('rejects create-as-ACTIVE — a new scheme has no audience/form yet (H3)', async () => {
+      await expect(
+        service.create(user, {
+          code: 'SCH1',
+          name: 'Scheme One',
+          startDate: '2026-08-01',
+          endDate: '2026-08-31',
+          status: 'ACTIVE',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.scheme.create).not.toHaveBeenCalled();
     });
 
     it('rejects endDate <= startDate', async () => {

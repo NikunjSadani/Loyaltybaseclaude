@@ -35,14 +35,25 @@ export class SchemeReportController {
     @Param('id') id: string,
     @Body() dto: BroadcastDto,
   ) {
-    return this.notify.broadcast(id, user.clientId, user.sub, dto);
+    return this.notify.broadcast(user, id, dto);
+  }
+
+  /** POST /v1/schemes/:id/broadcast/preview — dry-run recipient count (no send, no log). */
+  @Post(':id/broadcast/preview')
+  @Roles('GIFSY_ADMIN')
+  previewBroadcast(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: BroadcastDto,
+  ) {
+    return this.notify.previewBroadcast(user, id, dto);
   }
 
   /** GET /v1/schemes/:id/broadcasts — broadcast send history. */
   @Get(':id/broadcasts')
   @Roles('GIFSY_ADMIN')
   listBroadcasts(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.notify.listBroadcasts(id, user.clientId);
+    return this.notify.listBroadcasts(user, id);
   }
 
   // ── Reports (D26) ─────────────────────────────────────────────────────────
@@ -51,7 +62,7 @@ export class SchemeReportController {
   @Get(':id/report')
   @Roles('GIFSY_ADMIN')
   gifsyReport(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.reports.gifsyReport(id, user.clientId);
+    return this.reports.gifsyReport(user, id);
   }
 
   /** GET /v1/schemes/:id/report/tenant — tenant admin read-only report (D26). */
@@ -59,7 +70,7 @@ export class SchemeReportController {
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('schemes:read')
   tenantReport(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.reports.tenantReport(id, user.clientId);
+    return this.reports.tenantReport(user, id);
   }
 
   /**
@@ -74,6 +85,6 @@ export class SchemeReportController {
   @Roles('GIFSY_ADMIN')
   @RequirePermission('schemes:export')
   exportEnrollments(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.reports.exportEnrollments(id, user.clientId);
+    return this.reports.exportEnrollments(user, id);
   }
 }

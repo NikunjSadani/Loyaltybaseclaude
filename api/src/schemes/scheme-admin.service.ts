@@ -22,6 +22,7 @@ import {
   parseRosterUploadBuffer,
   OutletMatch,
 } from './scheme-roster.helper';
+import { OUTLET_FIELD_CATALOG } from './enrollment-form.helper';
 
 /**
  * SchemeAdminService — Wave-0 scheme data-collection ADMIN authoring (GIFSY only).
@@ -59,12 +60,39 @@ export class SchemeAdminService {
     }
   }
 
+  /**
+   * A scheme may only go ACTIVE once it can actually collect data: it must have an
+   * audience (who can enroll) AND an enrollment form (what is captured). Activating an
+   * empty scheme silently produces a live scheme nothing can enroll into / that captures
+   * nothing (H3). Enforced at both create-as-ACTIVE and the setStatus→ACTIVE transition.
+   */
+  private async assertActivatable(schemeId: string) {
+    const [scheme, form] = await Promise.all([
+      this.prisma.scheme.findUnique({ where: { id: schemeId }, select: { audienceConfig: true } }),
+      this.prisma.schemeEnrollmentForm.findUnique({ where: { schemeId }, select: { id: true } }),
+    ]);
+    if (!scheme?.audienceConfig) {
+      throw new BadRequestException('Set the scheme audience before activating.');
+    }
+    if (!form) {
+      throw new BadRequestException('Add an enrollment form before activating.');
+    }
+  }
+
   // ── Create (DRAFT or ACTIVE — D6) ──────────────────────────────────────────
 
   async create(user: JwtPayload, dto: CreateSchemeAdminDto) {
     const startDate = new Date(dto.startDate);
     const endDate = new Date(dto.endDate);
     this.assertDateOrder(startDate, endDate);
+
+    // A brand-new scheme has no audience/form yet, so it can never be validly ACTIVE (H3).
+    // Force the DRAFT → (set audience + form) → activate flow.
+    if (dto.status === 'ACTIVE') {
+      throw new BadRequestException(
+        'Create the scheme as a draft, then activate it after setting its audience and enrollment form.',
+      );
+    }
 
     const scheme = await this.prisma.scheme.create({
       data: {
@@ -116,6 +144,10 @@ export class SchemeAdminService {
 
   async setStatus(user: JwtPayload, schemeId: string, dto: SetSchemeStatusDto) {
     await this.assertSchemeOwnership(user, schemeId);
+    // Gate activation on audience + form present (H3).
+    if (dto.status === 'ACTIVE') {
+      await this.assertActivatable(schemeId);
+    }
     const scheme = await this.prisma.scheme.update({
       where: { id: schemeId },
       data: { status: dto.status },
@@ -371,5 +403,69 @@ export class SchemeAdminService {
     ]);
 
     return { roster, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+  }
+
+  // ── Prefill sources (form-builder dropdown, H1) ────────────────────────────
+
+  /**
+   * The two prefill sources the form-builder's "Prefill from" dropdown offers (H1 —
+   * replaces the blind free-text input where a typo silently unlocked a Locked field):
+   *   - excelColumns — the DISTINCT roster prefill-variable columns actually present on
+   *     this scheme's uploaded roster (Mode B). Columns are homogeneous per upload, so a
+   *     bounded sample surfaces them all without scanning the whole roster at scale.
+   *   - outletFields — the curated Outlet-master fields (dual-source prefill for matched
+   *     loyalty outlets), a static contract shared with the backend resolver + validator.
+   */
+  async getPrefillSources(user: JwtPayload, schemeId: string) {
+    await this.assertSchemeOwnership(user, schemeId);
+    const rows = await this.prisma.schemeOutlet.findMany({
+      where: { schemeId, clientId: user.clientId },
+      select: { prefillValues: true },
+      take: 500,
+      orderBy: { createdAt: 'desc' },
+    });
+    const cols = new Set<string>();
+    for (const r of rows) {
+      const pv = r.prefillValues as Record<string, unknown> | null;
+      if (pv && typeof pv === 'object' && !Array.isArray(pv)) {
+        for (const k of Object.keys(pv)) if (k.trim() !== '') cols.add(k);
+      }
+    }
+    return {
+      excelColumns: [...cols].sort((a, b) => a.localeCompare(b)),
+      outletFields: OUTLET_FIELD_CATALOG.map((f) => ({ key: f.key, label: f.label })),
+    };
+  }
+
+  // ── Facet values (audience + report filter pickers) ────────────────────────
+
+  /**
+   * Distinct outlet-master attribute values across the tenant, so the audience builder
+   * and report filters can offer a MULTI-SELECT picker instead of blind free-text
+   * (mirrors H1 for facets). Scheme-scoped only to resolve the tenant; the values are the
+   * tenant's whole outlet master. `outletTypes` are the types actually in use (id+name).
+   */
+  async getFacetValues(user: JwtPayload, schemeId: string) {
+    await this.assertSchemeOwnership(user, schemeId);
+    const outlets = await this.prisma.outlet.findMany({
+      where: { clientId: user.clientId, deletedAt: null },
+      select: { zone: true, programName: true, programCategory: true, state: true, outletTypeId: true },
+    });
+    const uniq = (vals: (string | null)[]) =>
+      [...new Set(vals.filter((v): v is string => Boolean(v && v.trim())))].sort((a, b) => a.localeCompare(b));
+    const usedTypeIds = uniq(outlets.map((o) => o.outletTypeId));
+    const types = usedTypeIds.length
+      ? await this.prisma.outletType.findMany({
+          where: { id: { in: usedTypeIds } },
+          select: { id: true, name: true },
+        })
+      : [];
+    return {
+      zones: uniq(outlets.map((o) => o.zone)),
+      programNames: uniq(outlets.map((o) => o.programName)),
+      programCategories: uniq(outlets.map((o) => o.programCategory)),
+      states: uniq(outlets.map((o) => o.state)),
+      outletTypes: types.sort((a, b) => a.name.localeCompare(b.name)),
+    };
   }
 }

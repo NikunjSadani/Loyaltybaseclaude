@@ -2,6 +2,8 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { platformWide } from '../common/tenant-scope';
 import {
   BroadcastChannel,
   BroadcastDto,
@@ -70,32 +72,25 @@ export class SchemeNotifyService {
 
   /**
    * Send a broadcast for a scheme and log it. Returns the send-log row + counts.
-   * Tenant-scoped by `clientId` (the scheme must belong to the caller's tenant).
+   *
+   * platformWide-aware: an un-assumed GIFSY operator resolves ANY tenant's scheme,
+   * then EVERY downstream query (recipient resolution, the send-log row) is pinned to
+   * the scheme's OWN `clientId` — never the caller's `gifsy` clientId. Everyone else
+   * is hard-pinned to `user.clientId`, so a tenant caller can never reach another
+   * tenant's scheme.
    */
-  async broadcast(
-    schemeId: string,
-    clientId: string,
-    sentByUserId: string | null,
-    dto: BroadcastDto,
-  ) {
+  async broadcast(user: JwtPayload, schemeId: string, dto: BroadcastDto) {
     const scheme = await this.prisma.scheme.findFirst({
-      where: { id: schemeId, clientId },
-      select: { id: true },
+      where: { id: schemeId, ...(platformWide(user) ? {} : { clientId: user.clientId }) },
+      select: { id: true, clientId: true },
     });
     if (!scheme) throw new NotFoundException('Scheme not found');
+    const clientId = scheme.clientId;
+    const sentByUserId = user.sub ?? null;
 
     const filter = dto.recipientFilter;
 
-    // De-dup recipients across scopes on the canonical phone form so an outlet
-    // owner who is ALSO a resolved sales recipient (unlikely, but possible) is
-    // never messaged — or billed — twice.
-    const phones = new Set<string>();
-    if (dto.recipientScope === 'OUTLETS' || dto.recipientScope === 'BOTH') {
-      for (const p of await this.resolveOutletPhones(schemeId, clientId, filter)) phones.add(p);
-    }
-    if (dto.recipientScope === 'SALES' || dto.recipientScope === 'BOTH') {
-      for (const p of await this.resolveSalesPhones(schemeId, clientId, filter)) phones.add(p);
-    }
+    const phones = await this.resolveRecipientPhones(schemeId, clientId, dto);
 
     let sentCount = 0;
     let failedCount = 0;
@@ -132,24 +127,62 @@ export class SchemeNotifyService {
     return { broadcast, recipientCount: phones.size, sentCount, failedCount };
   }
 
-  /** Broadcast send history for a scheme (newest first). Tenant-scoped. */
-  async listBroadcasts(schemeId: string, clientId: string) {
+  /** Broadcast send history for a scheme (newest first). platformWide-aware. */
+  async listBroadcasts(user: JwtPayload, schemeId: string) {
     const scheme = await this.prisma.scheme.findFirst({
-      where: { id: schemeId, clientId },
-      select: { id: true },
+      where: { id: schemeId, ...(platformWide(user) ? {} : { clientId: user.clientId }) },
+      select: { id: true, clientId: true },
     });
     if (!scheme) throw new NotFoundException('Scheme not found');
 
     const broadcasts = await this.prisma.schemeBroadcast.findMany({
-      where: { schemeId, clientId },
+      where: { schemeId, clientId: scheme.clientId },
       orderBy: { createdAt: 'desc' },
     });
     return { broadcasts };
   }
 
+  /**
+   * Dry-run preview: resolve the recipient set for the given scope/filter and return
+   * ONLY the count. Sends nothing and writes NO SchemeBroadcast row. platformWide-aware
+   * (same scheme-resolution rules as `broadcast`).
+   */
+  async previewBroadcast(user: JwtPayload, schemeId: string, dto: BroadcastDto) {
+    const scheme = await this.prisma.scheme.findFirst({
+      where: { id: schemeId, ...(platformWide(user) ? {} : { clientId: user.clientId }) },
+      select: { id: true, clientId: true },
+    });
+    if (!scheme) throw new NotFoundException('Scheme not found');
+
+    const phones = await this.resolveRecipientPhones(schemeId, scheme.clientId, dto);
+    return { recipientCount: phones.size };
+  }
+
   // ───────────────────────────────────────────────────────────────────────────
   // Recipient resolution
   // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * The de-duped canonical-phone recipient set for a scheme + scope/filter. Shared by
+   * `broadcast` (the send path) and `previewBroadcast` (the dry-run count). De-dup is on
+   * the canonical phone form so an outlet owner who is ALSO a resolved sales recipient
+   * (unlikely, but possible) is never messaged — or billed — twice.
+   */
+  private async resolveRecipientPhones(
+    schemeId: string,
+    clientId: string,
+    dto: BroadcastDto,
+  ): Promise<Set<string>> {
+    const filter = dto.recipientFilter;
+    const phones = new Set<string>();
+    if (dto.recipientScope === 'OUTLETS' || dto.recipientScope === 'BOTH') {
+      for (const p of await this.resolveOutletPhones(schemeId, clientId, filter)) phones.add(p);
+    }
+    if (dto.recipientScope === 'SALES' || dto.recipientScope === 'BOTH') {
+      for (const p of await this.resolveSalesPhones(schemeId, clientId, filter)) phones.add(p);
+    }
+    return phones;
+  }
 
   /**
    * Phones for the OUTLETS scope: the matched outlet/owner phone of each roster
