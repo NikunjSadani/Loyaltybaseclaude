@@ -29,7 +29,7 @@
  * cannot set that header.
  */
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle, Calculator, Camera, CheckCircle, Eye, FileText, Lock, MapPin,
   Loader2, ShieldCheck, Upload, X,
@@ -587,8 +587,11 @@ function FieldRenderer(props: FieldRendererProps) {
     }
 
     // ── Media ────────────────────────────────────────────────────────────────
+    // CAMERA is a TRUE in-app live capture (webcam / rear camera) — NO gallery or
+    // file-picker fallback. DOCUMENT / IMAGE / UPI_QR_SCAN legitimately allow files
+    // and stay on the MediaField (file-input) path.
     case 'CAMERA':
-      return <MediaField {...props} req={req} accept="image/*" capture="environment" icon="camera" />;
+      return <CameraField {...props} req={req} />;
     case 'IMAGE':
       return <MediaField {...props} req={req} accept="image/*" icon="camera" />;
     case 'UPI_QR_SCAN':
@@ -721,6 +724,177 @@ function MediaField({
         aria-label={field.label}
         onChange={onFile}
       />
+    </Labeled>
+  );
+}
+
+// ── Camera field (CAMERA only — TRUE in-app live capture, NO file fallback) ────
+//
+// Unlike MediaField (a hidden <input type="file">), CAMERA opens the device camera
+// in-app via getUserMedia, shows the live stream, and captures the current frame to
+// a JPEG that is POSTed through the same `uploadFile` helper (→ stored object key in
+// values[field.id]). There is deliberately NO gallery / file-picker fallback — a
+// "Capture photo" field must prove a live photo, so on any camera failure we surface
+// an inline error + Retry, never a file input.
+//
+// NOTE: getUserMedia requires a SECURE CONTEXT (HTTPS or localhost). Staging and prod
+// are both served over HTTPS, so this is satisfied there and in local dev on localhost.
+function CameraField({
+  field, values, uploading, uploadFile, req, errorFieldId,
+}: FieldRendererProps & { req: boolean }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  const [live, setLive] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const key = typeof values[field.id] === 'string' ? (values[field.id] as string) : '';
+  const highlight = errorFieldId != null && field.id === errorFieldId;
+
+  // Stop every track so the camera indicator light turns off promptly.
+  const stopStream = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }, []);
+
+  // Always release the camera on unmount — never leave the light on.
+  useEffect(() => () => stopStream(), [stopStream]);
+
+  // Attach the live stream once the <video> is actually mounted (it only renders in
+  // the `live` state).
+  useEffect(() => {
+    if (live && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+  }, [live]);
+
+  const openCamera = useCallback(async () => {
+    setError(null);
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      setError('Camera access is required for this field — allow the camera and try again.');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      setLive(true);
+    } catch (e) {
+      const name = (e as DOMException)?.name;
+      if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'OverconstrainedError') {
+        setError('No camera found.');
+      } else {
+        setError('Camera access is required for this field — allow the camera and try again.');
+      }
+    }
+  }, []);
+
+  const cancel = useCallback(() => {
+    stopStream();
+    setLive(false);
+  }, [stopStream]);
+
+  const capture = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    // Size the canvas to the video's intrinsic frame so the stored image is full-res.
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // Frame is captured synchronously above — release the camera immediately.
+    stopStream();
+    setLive(false);
+    setCapturing(true);
+    canvas.toBlob(
+      async (blob) => {
+        if (blob) await uploadFile(field.id, blob, 'capture.jpg');
+        setCapturing(false);
+      },
+      'image/jpeg',
+      0.9,
+    );
+  }, [field.id, stopStream, uploadFile]);
+
+  const busy = uploading || capturing;
+
+  return (
+    <Labeled field={field} req={req} highlight={highlight}>
+      {key ? (
+        // Confirmed state — mirrors the other media fields. Retake re-opens the CAMERA
+        // (never a file dialog).
+        <div className="flex items-center gap-2 px-3 py-2.5 bg-green-50 border border-green-200 rounded-xl">
+          <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
+          <span className="text-xs text-green-700 font-medium truncate">Captured</span>
+          <button
+            type="button"
+            onClick={openCamera}
+            className="ml-auto text-[10px] text-green-600 underline"
+          >
+            Retake
+          </button>
+        </div>
+      ) : live ? (
+        <div className="space-y-2">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            aria-label={field.label}
+            className="w-full rounded-xl bg-black aspect-[3/4] object-cover"
+          />
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={capture}
+              disabled={busy}
+              className="flex-1 py-2 rounded-xl text-sm font-semibold bg-[var(--brand-primary)] text-white disabled:opacity-50 flex items-center justify-center gap-1.5"
+            >
+              <Camera className="h-4 w-4" /> Capture
+            </button>
+            <button
+              type="button"
+              onClick={cancel}
+              className="px-4 py-2 rounded-xl text-sm bg-gray-100 text-gray-600 flex items-center gap-1.5"
+            >
+              <X className="h-3.5 w-3.5" /> Cancel
+            </button>
+          </div>
+        </div>
+      ) : error ? (
+        <div className="space-y-2">
+          <p className="text-xs text-red-600 flex items-start gap-1.5 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
+            <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
+            {error}
+          </p>
+          <button
+            type="button"
+            onClick={openCamera}
+            className="w-full flex items-center justify-center gap-2 py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-500 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] transition-colors"
+          >
+            <Camera className="h-4 w-4" /> Retry
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={openCamera}
+          disabled={busy}
+          className="w-full flex items-center justify-center gap-2 py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-500 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:opacity-50 transition-colors"
+        >
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
+          {busy ? 'Uploading…' : 'Capture photo'}
+        </button>
+      )}
+      {/* Off-screen canvas — the capture target; never shown to the user. */}
+      <canvas ref={canvasRef} className="hidden" />
     </Labeled>
   );
 }

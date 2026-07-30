@@ -214,7 +214,7 @@ describe('media field → stored key', () => {
   it('uploads the picked file and submits the returned key as the field value', async () => {
     render(
       <SchemeFormRenderer
-        schema={schema([field({ id: 'shot', type: 'CAMERA', label: 'Shopfront', required: true })])}
+        schema={schema([field({ id: 'shot', type: 'IMAGE', label: 'Shopfront', required: true })])}
         context={baseCtx}
         onSubmitted={vi.fn()}
       />,
