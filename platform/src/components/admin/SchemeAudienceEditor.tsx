@@ -17,9 +17,10 @@
 import { useRef, useState } from 'react';
 import {
   Filter, Upload, X, AlertCircle, CheckCircle, Users, FileSpreadsheet, Loader2,
-  Info,
+  Info, Download,
 } from 'lucide-react';
 import { schemeApi, type RosterUploadResult, type AudienceResult } from '@/lib/schemes';
+import { downloadRosterReport } from '@/lib/scheme-roster-report';
 import type { AudienceConfig, AudienceFilter, AudienceMode } from '@/lib/scheme-types';
 
 // ── Tag input for a filter facet ──────────────────────────────────────────────
@@ -288,6 +289,13 @@ function RosterUploadPanel({ schemeId }: { schemeId: string }) {
             <span className="font-semibold text-green-800">{result.upserted} of {result.totalRows} rows saved</span>
             <span className="text-green-700">{result.matchedCount} matched</span>
             <span className="text-gray-600">{result.standaloneCount} standalone</span>
+            <button
+              type="button"
+              onClick={() => downloadRosterReport(result)}
+              className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-green-300 text-green-700 font-medium hover:bg-green-100 transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" /> Download report (.xlsx)
+            </button>
           </div>
           <div className="px-3 py-2 text-xs text-gray-600 space-y-1">
             {result.duplicateRefs.length > 0 && (
