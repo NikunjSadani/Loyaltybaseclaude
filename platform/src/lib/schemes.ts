@@ -194,6 +194,8 @@ export interface RosterRow {
   matchedOutletId: string | null;
   matchedPartnerId: string | null;
   taggedSalesUserId: string | null;
+  /** The tagged employee's human code (joined) — for display; null when not tagged. */
+  taggedSalesUser?: { employeeCode: string } | null;
   prefillValues: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
@@ -425,6 +427,43 @@ export const schemeApi = {
     return api.get<{ roster: RosterRow[]; pagination: Pagination }>(
       `${BASE}/${schemeId}/roster${qs(query)}`,
     );
+  },
+  /** Browser-facing URL of the full-roster xlsx export (auth-gated; navigate/anchor to download). */
+  rosterExportUrl(schemeId: string): string {
+    return `${BASE}/${schemeId}/roster/export`;
+  },
+  /** Fetch the full-roster xlsx export as a blob and trigger a browser download. */
+  async downloadRosterExport(
+    schemeId: string,
+  ): Promise<{ success: true } | { success: false; error: string }> {
+    try {
+      const res = await fetch(this.rosterExportUrl(schemeId));
+      if (!res.ok) {
+        let error = res.statusText;
+        try {
+          const body = await res.json();
+          error = body?.error ?? error;
+        } catch {
+          /* non-JSON error body */
+        }
+        return { success: false, error };
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') ?? '';
+      const match = /filename="?([^"]+)"?/.exec(disposition);
+      const filename = match?.[1] ?? `scheme_${schemeId}_roster.xlsx`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Download failed' };
+    }
   },
   /** The form-builder "Prefill from" dropdown options: roster Excel columns + outlet-field catalog (H1). */
   getPrefillSources(schemeId: string) {

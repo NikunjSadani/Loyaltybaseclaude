@@ -132,6 +132,14 @@ export class SchemeAdminController {
     return this.admin.getRoster(user, id, query);
   }
 
+  /** GET /v1/schemes/:id/roster/export — full roster as an xlsx download (no pagination). */
+  @Get(':id/roster/export')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:read')
+  getRosterExport(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.admin.getRosterExport(user, id);
+  }
+
   /**
    * GET /v1/schemes/:id/prefill-sources — the form-builder "Prefill from" dropdown
    * options: the scheme's distinct roster Excel columns + the curated outlet-field catalog (H1).

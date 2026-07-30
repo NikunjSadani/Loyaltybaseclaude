@@ -3,9 +3,11 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  StreamableFile,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { buildXlsx } from '../common/xlsx';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   CreateSchemeAdminDto,
@@ -403,12 +405,98 @@ export class SchemeAdminService {
         skip,
         take: limit,
         orderBy: { createdAt: 'asc' },
-        include: { enrollment: { select: { id: true, status: true, currentVersion: true } } },
+        include: {
+          taggedSalesUser: { select: { employeeCode: true } },
+          enrollment: { select: { id: true, status: true, currentVersion: true } },
+        },
       }),
       this.prisma.schemeOutlet.count({ where }),
     ]);
 
     return { roster, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+  }
+
+  // ── Roster export (full xlsx download — no pagination) ─────────────────────
+
+  /**
+   * Stream the CURRENT roster as an xlsx (D-roster-view). Unlike getRoster this is
+   * unpaginated — the whole roster in one file — so the admin can view/download it
+   * long after the upload (the upload result was the only prior surface). Tenant-scoped
+   * by (schemeId + clientId), ordered by createdAt asc to mirror the paginated list.
+   *
+   * Every row carries an IDENTICAL key set: buildXlsx derives the header row from the
+   * FIRST row's keys, so a fixed base-column set + the UNION of all prefillValues keys
+   * (missing keys filled with '') guarantees no column is silently dropped. An empty
+   * roster still emits a header-only sheet (one all-'' base row) rather than 404, so the
+   * admin always gets a well-formed (possibly empty) file.
+   */
+  async getRosterExport(user: JwtPayload, schemeId: string): Promise<StreamableFile> {
+    const scheme = await this.assertSchemeOwnership(user, schemeId);
+
+    const roster = await this.prisma.schemeOutlet.findMany({
+      where: { schemeId, clientId: user.clientId },
+      include: {
+        matchedOutlet: { select: { outletCode: true } },
+        taggedSalesUser: { select: { employeeCode: true } },
+        enrollment: { select: { status: true, currentVersion: true, enrolledAt: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    // UNION of every row's prefill-variable columns, so every row gets an identical
+    // column set regardless of which prefill keys it individually carries.
+    const prefillKeys = new Set<string>();
+    for (const r of roster) {
+      const pv = r.prefillValues as Record<string, unknown> | null;
+      if (pv && typeof pv === 'object' && !Array.isArray(pv)) {
+        for (const k of Object.keys(pv)) prefillKeys.add(k);
+      }
+    }
+    const prefillCols = [...prefillKeys];
+
+    // The fixed base columns — always present so an empty roster still has a header row.
+    const baseRow = (): Record<string, unknown> => ({
+      'Outlet ID': '',
+      'Outlet Name': '',
+      Linkage: '',
+      'Matched Outlet Code': '',
+      'Tagged Employee': '',
+      'Enrollment Status': '',
+      Version: '',
+      'Enrolled At': '',
+      ...Object.fromEntries(prefillCols.map((k) => [k, ''])),
+    });
+
+    const rows: Record<string, unknown>[] = roster.map((r) => {
+      const pv = (r.prefillValues as Record<string, unknown> | null) ?? {};
+      const row = baseRow();
+      row['Outlet ID'] = r.outletRef;
+      row['Outlet Name'] = r.outletName;
+      row['Linkage'] = r.matchedOutletId ? 'Matched' : 'Standalone';
+      row['Matched Outlet Code'] = r.matchedOutlet?.outletCode ?? '';
+      row['Tagged Employee'] = r.taggedSalesUser?.employeeCode ?? '';
+      row['Enrollment Status'] = r.enrollment?.status ?? 'NOT_ENROLLED';
+      row['Version'] = r.enrollment?.currentVersion ?? '';
+      row['Enrolled At'] = r.enrollment?.enrolledAt
+        ? r.enrollment.enrolledAt.toISOString().split('T')[0]
+        : '';
+      for (const k of prefillCols) {
+        const v = pv[k];
+        row[k] = v === undefined || v === null ? '' : v;
+      }
+      return row;
+    });
+
+    // Empty roster → one all-'' base row so buildXlsx still emits a header-only sheet.
+    if (rows.length === 0) rows.push(baseRow());
+
+    const buffer = buildXlsx([{ name: 'Roster', rows }]);
+    const filename = `scheme_${scheme.code ?? scheme.id}_roster_${new Date().toISOString().split('T')[0]}.xlsx`;
+
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${filename}"`,
+    });
   }
 
   // ── Prefill sources (form-builder dropdown, H1) ────────────────────────────

@@ -17,10 +17,16 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Filter, Upload, X, AlertCircle, AlertTriangle, Check, CheckCircle, Users,
-  FileSpreadsheet, Loader2, Info, Download,
+  FileSpreadsheet, Loader2, Info, Download, RefreshCw, ChevronLeft, ChevronRight, Table2,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { schemeApi, type RosterUploadResult, type AudienceResult, type FacetValues } from '@/lib/schemes';
+import {
+  schemeApi,
+  type RosterUploadResult,
+  type AudienceResult,
+  type FacetValues,
+  type RosterRow,
+} from '@/lib/schemes';
 import { downloadRosterReport } from '@/lib/scheme-roster-report';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import { downloadBlob } from '@/lib/download';
@@ -168,6 +174,8 @@ export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onS
   // Mode-switch guard: switching FILTER↔EXCEL after rows exist strands them.
   const [pendingMode, setPendingMode] = useState<AudienceMode | null>(null);
   const [rosterUploaded, setRosterUploaded] = useState(false);
+  // Bumped after each upload so the Current-roster table re-fetches.
+  const [rosterRefreshKey, setRosterRefreshKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -320,9 +328,150 @@ export function SchemeAudienceEditor({ schemeId, schemeName, audienceConfig, onS
         </p>
       )}
 
-      {/* EXCEL roster upload */}
+      {/* EXCEL roster upload + current-roster view/download */}
       {mode === 'EXCEL' && (
-        <RosterUploadPanel schemeId={schemeId} schemeName={schemeName} onUploaded={() => setRosterUploaded(true)} />
+        <>
+          <RosterUploadPanel
+            schemeId={schemeId}
+            schemeName={schemeName}
+            onUploaded={() => { setRosterUploaded(true); setRosterRefreshKey((k) => k + 1); }}
+          />
+          <CurrentRosterPanel schemeId={schemeId} refreshKey={rosterRefreshKey} />
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Current roster view + download (Mode B) ───────────────────────────────────
+
+function linkageLabel(row: RosterRow): 'Matched' | 'Standalone' {
+  return row.matchedOutletId ? 'Matched' : 'Standalone';
+}
+
+function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refreshKey: number }) {
+  const [rows, setRows] = useState<RosterRow[]>([]);
+  const [page, setPage] = useState(1);
+  const [pages, setPages] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  const LIMIT = 25;
+
+  const load = async (p: number) => {
+    setLoading(true);
+    setError(null);
+    const res = await schemeApi.getRoster(schemeId, { page: p, limit: LIMIT });
+    setLoading(false);
+    if (res.success) {
+      setRows(res.data.roster);
+      setPage(res.data.pagination.page);
+      setPages(res.data.pagination.pages);
+      setTotal(res.data.pagination.total);
+    } else {
+      setError(res.error);
+    }
+  };
+
+  // Refetch on mount, on scheme change, and after each upload (refreshKey bumps).
+  // A fresh upload resets to page 1.
+  useEffect(() => {
+    void load(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [schemeId, refreshKey]);
+
+  const doDownload = async () => {
+    setDownloading(true);
+    setDownloadError(null);
+    const res = await schemeApi.downloadRosterExport(schemeId);
+    setDownloading(false);
+    if (!res.success) setDownloadError(res.error);
+  };
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+          <Table2 className="w-4 h-4 text-gray-500" /> Current roster
+          {total > 0 && <span className="text-xs font-normal text-gray-400">({total} outlet{total === 1 ? '' : 's'})</span>}
+        </p>
+        <div className="flex items-center gap-3">
+          <button type="button" onClick={() => void load(page)} disabled={loading}
+            className="inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 disabled:opacity-60">
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh
+          </button>
+          <button type="button" onClick={doDownload} disabled={downloading}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[var(--brand-primary)] text-white text-xs font-medium hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60">
+            {downloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            {downloading ? 'Preparing…' : 'Download roster (.xlsx)'}
+          </button>
+        </div>
+      </div>
+
+      {downloadError && (
+        <p className="text-xs text-red-500 flex items-start gap-1.5"><AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />{downloadError}</p>
+      )}
+      {error && (
+        <p className="text-xs text-red-500 flex items-start gap-1.5"><AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />{error}</p>
+      )}
+
+      {!error && rows.length === 0 && !loading && (
+        <p className="text-xs text-gray-500 bg-gray-50 border border-gray-100 rounded-lg px-3 py-4 text-center">
+          No roster rows yet — upload a roster above.
+        </p>
+      )}
+
+      {rows.length > 0 && (
+        <div className="border border-gray-100 rounded-xl overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-gray-50 text-gray-500 text-left">
+                <th className="px-3 py-2 font-medium">Outlet ID</th>
+                <th className="px-3 py-2 font-medium">Outlet Name</th>
+                <th className="px-3 py-2 font-medium">Linkage</th>
+                <th className="px-3 py-2 font-medium">Tagged employee</th>
+                <th className="px-3 py-2 font-medium">Enrollment status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {rows.map((r) => {
+                const linkage = linkageLabel(r);
+                return (
+                  <tr key={r.id} className="text-gray-700">
+                    <td className="px-3 py-2 font-mono text-[11px]">{r.outletRef}</td>
+                    <td className="px-3 py-2">{r.outletName}</td>
+                    <td className="px-3 py-2">
+                      <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-medium ${linkage === 'Matched' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+                        {linkage}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-gray-500">{r.taggedSalesUser?.employeeCode ?? '—'}</td>
+                    <td className="px-3 py-2">{r.enrollment?.status ?? 'NOT_ENROLLED'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {pages > 1 && (
+        <div className="flex items-center justify-between text-xs text-gray-500">
+          <span>Page {page} of {pages}</span>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => void load(page - 1)} disabled={loading || page <= 1}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+              <ChevronLeft className="w-3.5 h-3.5" /> Prev
+            </button>
+            <button type="button" onClick={() => void load(page + 1)} disabled={loading || page >= pages}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+              Next <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
