@@ -541,14 +541,28 @@ export function SchemeFormBuilder({
                     </div>
                   )}
 
-                  {/* DATA_DISPLAY key */}
-                  {field.type === 'DATA_DISPLAY' && (
-                    <div>
-                      <label className="block text-[10px] text-gray-500 mb-1">Excel column key</label>
-                      <input type="text" value={field.dataDisplayKey ?? ''} onChange={(e) => patch(field.id, { dataDisplayKey: e.target.value })}
-                        placeholder="e.g. last_month_sales" className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5" />
-                    </div>
-                  )}
+                  {/* DATA_DISPLAY key — pick the Excel roster column to display (dropdown, like the prefill link). */}
+                  {field.type === 'DATA_DISPLAY' && (() => {
+                    const { excelColumns } = prefillSources;
+                    const columnMissing = !!field.dataDisplayKey && !excelColumns.includes(field.dataDisplayKey);
+                    return (
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-1">Excel column to display</label>
+                        <select value={field.dataDisplayKey ?? ''} onChange={(e) => patch(field.id, { dataDisplayKey: e.target.value || undefined })}
+                          className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white">
+                          <option value="">— none —</option>
+                          {columnMissing && <option value={field.dataDisplayKey}>{field.dataDisplayKey}</option>}
+                          {excelColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                        {excelColumns.length === 0 && (
+                          <p className="text-[10px] text-gray-400 mt-1">Upload a roster (Audience → Excel) to list its columns.</p>
+                        )}
+                        {columnMissing && (
+                          <p className="text-[10px] text-amber-500 mt-1">column not in current roster</p>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Choice options */}
                   {CHOICE_TYPES.has(field.type) && (
