@@ -41,7 +41,12 @@ export function jsonToSheetSafe(rows: Record<string, unknown>[]): XLSX.WorkSheet
   const safe = rows.map((row) => {
     const out: Record<string, unknown> = {};
     for (const [k, val] of Object.entries(row)) {
-      out[k] = typeof val === 'string' ? cellSafe(val) : val;
+      // cellSafe the KEY too: the object keys become the header row, and headers can be
+      // user-supplied (e.g. audience-Excel column names in the scheme enrollment export), so an
+      // unsanitised header like `=WEBSERVICE(...)` would be a live formula. cellSafe is a no-op
+      // for normal headers (only formula-leading strings are escaped), so existing headers are
+      // unchanged. Idempotent, so a pre-escaped header is left alone.
+      out[cellSafe(k)] = typeof val === 'string' ? cellSafe(val) : val;
     }
     return out;
   });

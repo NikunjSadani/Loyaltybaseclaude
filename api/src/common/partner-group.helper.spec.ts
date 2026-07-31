@@ -191,13 +191,18 @@ describe('partner-group.helper — checkPanMatchesGroup', () => {
 // ── Wave 3: operable-context resolution ───────────────────────────────────────────────────
 
 describe('partner-group.helper — resolveGroupIdentity', () => {
-  const idDb = (opts: { parent?: unknown; sibling?: unknown }) =>
-    ({
-      channelPartner: {
-        findUnique: jest.fn().mockResolvedValue(opts.parent ?? null),
-        findFirst: jest.fn().mockResolvedValue(opts.sibling ?? null),
-      },
-    }) as never;
+  // Both the parent read (where.id) and the sibling read (where.kycSubmissions) go through
+  // channelPartner.findFirst — route by the where shape.
+  const idDb = (opts: { parent?: unknown; sibling?: unknown }) => {
+    const findFirst = jest
+      .fn()
+      .mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(where.id ? (opts.parent ?? null) : (opts.sibling ?? null)),
+      );
+    return { channelPartner: { findFirst } } as never;
+  };
+  const sibWhere = (db: never, call = 1) =>
+    (db as unknown as { channelPartner: { findFirst: jest.Mock } }).channelPartner.findFirst.mock.calls[call][0].where;
 
   it('uses the APPROVED parent when it carries details (sibling never queried)', async () => {
     const db = idDb({
@@ -207,10 +212,11 @@ describe('partner-group.helper — resolveGroupIdentity', () => {
     const r = await resolveGroupIdentity(db, 'deoleo', 'PARENT1');
     expect(r?.businessName).toBe('ParentBiz');
     expect(r?.panNumber).toBe('PANP');
-    expect((db as { channelPartner: { findFirst: jest.Mock } }).channelPartner.findFirst).not.toHaveBeenCalled();
+    // Only the parent read ran — the sibling branch is short-circuited.
+    expect((db as unknown as { channelPartner: { findFirst: jest.Mock } }).channelPartner.findFirst).toHaveBeenCalledTimes(1);
   });
 
-  it('falls back to an APPROVED sibling when the parent is UNAPPROVED', async () => {
+  it('falls back to an APPROVED sibling when the parent is UNAPPROVED — gated on KYC APPROVED, not onboardedAt', async () => {
     const db = idDb({
       parent: { onboardedAt: null, businessName: 'ParentBiz', panNumber: 'PANP' },
       sibling: { businessName: 'SibBiz', ownerName: 'Owner S', panNumber: 'PANS', gstNumber: 'GSTS', bankName: 'HDFC', bankAccountNumber: '111', bankAccountHolder: 'S', ifscCode: 'IFS', upiId: 's@upi' },
@@ -219,6 +225,13 @@ describe('partner-group.helper — resolveGroupIdentity', () => {
     expect(r?.businessName).toBe('SibBiz');
     expect(r?.panNumber).toBe('PANS');
     expect(r?.upiId).toBe('s@upi');
+    // REGRESSION GUARD (audit HIGH): the sibling must gate on the real approval signal (KYC APPROVED),
+    // NOT ChannelPartner.onboardedAt (a parent-only marker → the branch would be dead in prod).
+    const w = sibWhere(db, 1);
+    expect(w.kycSubmissions).toEqual({ some: { status: 'APPROVED' } });
+    expect(w.onboardedAt).toBeUndefined();
+    expect(w.isParent).toBe(false);
+    expect(w.clientId).toBe('deoleo');
   });
 
   it('falls back to an APPROVED sibling when the approved parent has NO details', async () => {

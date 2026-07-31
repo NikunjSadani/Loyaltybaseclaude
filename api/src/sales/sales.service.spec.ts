@@ -634,15 +634,20 @@ describe('SalesService', () => {
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
         groupedOutlet({ onboardedAt: new Date('2024-01-01T00:00:00.000Z') }),
       ]);
-      // resolveGroupIdentity + resolveGroupPan both read the parent via findUnique — an APPROVED
-      // parent carrying details IS the pre-fill source, and its PAN is the group's canonical PAN.
-      mockPrisma.channelPartner.findUnique.mockResolvedValue({
-        onboardedAt: new Date('2024-01-01T00:00:00.000Z'),
-        businessName: 'Group Owner Co', ownerName: 'Group Owner',
-        gstNumber: '07AAACT9811F1Z9', panNumber: 'AAACT9811F',
-        bankName: 'HDFC', bankAccountNumber: '123456789', bankAccountHolder: 'Group Owner',
-        ifscCode: 'HDFC0000001', upiId: 'owner@upi',
-      });
+      // resolveGroupIdentity reads the parent via findFirst (where.id); an APPROVED parent carrying
+      // details IS the source. resolveGroupPan reads the parent's PAN via findUnique.
+      mockPrisma.channelPartner.findFirst.mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(where.id
+          ? {
+              onboardedAt: new Date('2024-01-01T00:00:00.000Z'),
+              businessName: 'Group Owner Co', ownerName: 'Group Owner',
+              gstNumber: '07AAACT9811F1Z9', panNumber: 'AAACT9811F',
+              bankName: 'HDFC', bankAccountNumber: '123456789', bankAccountHolder: 'Group Owner',
+              ifscCode: 'HDFC0000001', upiId: 'owner@upi',
+            }
+          : null),
+      );
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'AAACT9811F' });
 
       const res = await service.getMyOutlets(caller);
       const prefill = res.outlets[0].parentPrefill!;
@@ -664,29 +669,35 @@ describe('SalesService', () => {
     it('emits parentPrefill from an APPROVED SIBLING when the parent carries no details', async () => {
       primeCaller();
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([groupedOutlet({ onboardedAt: null })]);
-      // Parent has no details → resolveGroupIdentity falls to an approved sibling (findFirst).
-      mockPrisma.channelPartner.findUnique.mockResolvedValue({ onboardedAt: null, panNumber: null });
-      mockPrisma.channelPartner.findFirst.mockResolvedValue({
-        businessName: 'Sibling Store', ownerName: 'Sib Owner',
-        gstNumber: null, panNumber: 'AAACT9811F',
-        bankName: 'ICICI', bankAccountNumber: '999', bankAccountHolder: 'Sib Owner',
-        ifscCode: 'ICIC0000001', upiId: 'sib@upi',
-      });
+      // Parent unapproved/no details → resolveGroupIdentity's 2nd findFirst (the sibling, no where.id).
+      mockPrisma.channelPartner.findFirst.mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(where.id
+          ? { onboardedAt: null, panNumber: null }
+          : {
+              businessName: 'Sibling Store', ownerName: 'Sib Owner',
+              gstNumber: null, panNumber: 'AAACT9811F',
+              bankName: 'ICICI', bankAccountNumber: '999', bankAccountHolder: 'Sib Owner',
+              ifscCode: 'ICIC0000001', upiId: 'sib@upi',
+            }),
+      );
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: null }); // parent has no PAN
       // resolveGroupPan → parent PAN null → sibling PAN (findFirst on outlet returns the sibling PAN).
       mockPrisma.outlet.findFirst.mockResolvedValue({ partner: { panNumber: 'AAACT9811F' } });
 
       const res = await service.getMyOutlets(caller);
       const prefill = res.outlets[0].parentPrefill!;
       expect(prefill).toMatchObject({
-        businessName: 'Sibling Store', ownerName: 'Sib Owner', upiId: 'sib@upi', groupPan: 'AAACT9811F',
+        businessName: 'Sibling Store', ownerName: 'Sib Owner', upiId: 'sib@upi',
+        panNumber: 'AAACT9811F', groupPan: 'AAACT9811F',
       });
     });
 
     it('OMITS parentPrefill when the group has nothing verified (unapproved parent, no approved sibling)', async () => {
       primeCaller();
       mockPrisma.salesUserAssignment.findMany.mockResolvedValue([groupedOutlet({ onboardedAt: null })]);
-      mockPrisma.channelPartner.findUnique.mockResolvedValue({ onboardedAt: null, panNumber: null });
-      mockPrisma.channelPartner.findFirst.mockResolvedValue(null); // no approved sibling → no source
+      mockPrisma.channelPartner.findFirst.mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(where.id ? { onboardedAt: null, panNumber: null } : null),
+      );
       const res = await service.getMyOutlets(caller);
       expect(res.outlets[0].parentPrefill).toBeUndefined();
     });

@@ -1157,12 +1157,15 @@ export class SalesService {
                 businessName: groupInfo.identity.businessName ?? '',
                 ownerName: groupInfo.identity.ownerName ?? '',
                 gstNumber: groupInfo.identity.gstNumber ?? '',
-                panNumber: groupInfo.identity.panNumber ?? '',
                 bankName: groupInfo.identity.bankName ?? '',
                 bankAccountNumber: groupInfo.identity.bankAccountNumber ?? '',
                 bankAccountHolder: groupInfo.identity.bankAccountHolder ?? '',
                 ifscCode: groupInfo.identity.ifscCode ?? '',
                 upiId: groupInfo.identity.upiId ?? '',
+                // PAN = the authoritative group PAN (what the child's PAN is locked to + the backend
+                // enforces via checkPanMatchesGroup). Aligning the displayed PAN with the lock avoids a
+                // self-contradictory payload when the identity source carries no PAN but a sibling does.
+                panNumber: groupInfo.groupPan ?? groupInfo.identity.panNumber ?? '',
                 // The value the child PAN must equal (parent's PAN, else a grouped sibling's).
                 groupPan: groupInfo.groupPan,
               }

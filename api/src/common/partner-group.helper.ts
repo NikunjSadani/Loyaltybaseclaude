@@ -192,8 +192,9 @@ export async function resolveGroupIdentity(
   clientId: string,
   parentId: string,
 ): Promise<GroupIdentity | null> {
-  const parent = await db.channelPartner.findUnique({
-    where: { id: parentId },
+  // clientId on the parent read is defense-in-depth (parentId is already a same-tenant Outlet.parentId).
+  const parent = await db.channelPartner.findFirst({
+    where: { id: parentId, clientId },
     select: {
       onboardedAt: true, businessName: true, ownerName: true, gstNumber: true, panNumber: true,
       bankName: true, bankAccountNumber: true, bankAccountHolder: true, ifscCode: true, upiId: true,
@@ -202,21 +203,34 @@ export async function resolveGroupIdentity(
   const parentHasDetails = !!(
     parent && (parent.panNumber || parent.gstNumber || parent.bankAccountNumber || parent.upiId)
   );
+  // A PARENT's approval marker IS ChannelPartner.onboardedAt (set by ParentsService at approval).
   if (parent && parent.onboardedAt != null && parentHasDetails) {
     return pickGroupIdentity(parent);
   }
 
-  // Approved sibling: a non-parent partner with an outlet in this group whose KYC is approved.
-  // Order by approval time so the most-recently-verified sibling wins deterministically.
+  // Approved SIBLING: a non-parent partner with an outlet in this group whose KYC is APPROVED.
+  // ⚠️ An outlet-owner's approval is its KYC status = APPROVED — NOT ChannelPartner.onboardedAt,
+  // which is a PARENT-ONLY marker and is NEVER written for an outlet owner (kyc.service approves an
+  // outlet by activating it + KycSubmission.status=APPROVED, and never touches onboardedAt). Gating on
+  // onboardedAt here would match zero rows in prod (the sibling branch would be dead). Also require the
+  // sibling to actually carry identity details, so an approved-but-empty sibling never pre-fills blanks.
   const sibling = await db.channelPartner.findFirst({
     where: {
       clientId,
       isParent: false,
       deletedAt: null,
-      onboardedAt: { not: null },
+      kycSubmissions: { some: { status: 'APPROVED' } },
       outlets: { some: { parentId, clientId, deletedAt: null } },
+      OR: [
+        { panNumber: { not: null } },
+        { gstNumber: { not: null } },
+        { bankAccountNumber: { not: null } },
+        { upiId: { not: null } },
+      ],
     },
-    orderBy: { onboardedAt: 'desc' },
+    // Most-recently-updated approved sibling wins (approval bumps the partner row); ties are low-impact
+    // — every pre-filled field except PAN is editable on the child's form.
+    orderBy: { updatedAt: 'desc' },
     select: {
       businessName: true, ownerName: true, gstNumber: true, panNumber: true,
       bankName: true, bankAccountNumber: true, bankAccountHolder: true, ifscCode: true, upiId: true,
