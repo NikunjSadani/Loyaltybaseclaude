@@ -2,7 +2,7 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isReKycActionable } from '../common/kyc-rekyc.helper';
-import { resolveGroupPan } from '../common/partner-group.helper';
+import { resolveGroupPan, resolveGroupIdentity, type GroupIdentity } from '../common/partner-group.helper';
 import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-access.helper';
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 import { TenantService } from '../tenant/tenant.service';
@@ -1039,27 +1039,6 @@ export class SalesService {
         outlet: {
           include: {
             outletType: { select: { code: true } },
-            // Owner-GROUP parent (Outlet.parentId → an isParent ChannelPartner). Surfaced so a
-            // child outlet grouped-BEFORE-KYC can PRE-FILL the KYC form from the parent's approved
-            // identity/payout details AND lock the child PAN to the group. Only an APPROVED parent
-            // (onboardedAt != null) may pre-fill — an unapproved parent carries unverified values.
-            // (A parent has NO address columns — address lives on the Outlet — so none is pre-filled.)
-            parent: {
-              select: {
-                businessName: true,
-                ownerName: true,
-                phone: true,
-                email: true,
-                gstNumber: true,
-                panNumber: true,
-                bankName: true,
-                bankAccountNumber: true,
-                bankAccountHolder: true,
-                ifscCode: true,
-                upiId: true,
-                onboardedAt: true,
-              },
-            },
             partner: {
               select: {
                 id: true,
@@ -1098,22 +1077,23 @@ export class SalesService {
     // outlets; sales-assisted redeem (B1) is gated on an APPROVED partner FE-side.
     const filtered = assignments.filter((a) => a.outlet !== null);
 
-    // Resolve each APPROVED-parent group's canonical PAN once (dedupe by parentId). The child's
-    // KYC PAN must equal this value, so the FE locks the PAN field to it. resolveGroupPan falls
-    // back to a grouped sibling's PAN when the parent itself carries none. Only approved parents
-    // (onboardedAt != null) are resolved — an unapproved parent never pre-fills a child.
-    const approvedParentIds = [
-      ...new Set(
-        filtered
-          .filter((a) => a.outlet!.parentId && a.outlet!.parent?.onboardedAt != null)
-          .map((a) => a.outlet!.parentId!),
-      ),
+    // Resolve each group's canonical identity + PAN once (dedupe by parentId). A grouped child's
+    // KYC pre-fills the shared owner-identity (business/owner name, GST, bank, UPI — EDITABLE) and
+    // LOCKS its PAN to the group PAN. Source (resolveGroupIdentity) = the APPROVED parent's own
+    // details, else the most-recently-APPROVED grouped SIBLING — so the first child establishes the
+    // shared identity and the rest inherit it. Photos/address/location are NEVER inherited (captured
+    // per store). A group with nothing verified yet → no pre-fill (the child enters its own details).
+    const groupParentIds = [
+      ...new Set(filtered.filter((a) => a.outlet!.parentId).map((a) => a.outlet!.parentId!)),
     ];
-    const groupPanByParent = new Map<string, string | null>(
+    const groupInfoByParent = new Map<string, { identity: GroupIdentity; groupPan: string | null } | null>(
       await Promise.all(
-        approvedParentIds.map(
-          async (pid) => [pid, await resolveGroupPan(this.prisma, clientId, pid)] as const,
-        ),
+        groupParentIds.map(async (pid) => {
+          const identity = await resolveGroupIdentity(this.prisma, clientId, pid);
+          if (!identity) return [pid, null] as const;
+          const groupPan = await resolveGroupPan(this.prisma, clientId, pid);
+          return [pid, { identity, groupPan }] as const;
+        }),
       ),
     );
 
@@ -1165,25 +1145,26 @@ export class SalesService {
                 }
               : null;
 
-          // Owner-group PRE-FILL: when this child outlet is grouped under an APPROVED parent, the
-          // KYC form pre-fills the parent's identity/payout values and LOCKS the child PAN to the
-          // group's canonical PAN (`groupPan`). Omitted (undefined) when there is no parent or the
-          // parent is unapproved — an unapproved parent carries unverified values (never pre-fill).
-          // The parent has NO address columns (address lives on the Outlet), so none is pre-filled.
-          const parentApproved = !!(outlet.parentId && outlet.parent?.onboardedAt != null);
-          const parentPrefill = parentApproved
+          // Owner-group PRE-FILL: when this child outlet's group has a canonical identity (the
+          // approved parent's own details, else an approved grouped sibling — resolveGroupIdentity),
+          // the KYC form pre-fills the shared owner-identity/payout values (EDITABLE) and LOCKS the
+          // child PAN to the group's canonical PAN (`groupPan`). Omitted (undefined) when the outlet
+          // is ungrouped or the group has nothing verified yet. Photos, address and location are
+          // NEVER inherited — each store captures its own (the FE resets them per outlet change).
+          const groupInfo = outlet.parentId ? groupInfoByParent.get(outlet.parentId) ?? null : null;
+          const parentPrefill = groupInfo
             ? {
-                businessName: outlet.parent!.businessName ?? '',
-                ownerName: outlet.parent!.ownerName ?? '',
-                gstNumber: outlet.parent!.gstNumber ?? '',
-                panNumber: outlet.parent!.panNumber ?? '',
-                bankName: outlet.parent!.bankName ?? '',
-                bankAccountNumber: outlet.parent!.bankAccountNumber ?? '',
-                bankAccountHolder: outlet.parent!.bankAccountHolder ?? '',
-                ifscCode: outlet.parent!.ifscCode ?? '',
-                upiId: outlet.parent!.upiId ?? '',
+                businessName: groupInfo.identity.businessName ?? '',
+                ownerName: groupInfo.identity.ownerName ?? '',
+                gstNumber: groupInfo.identity.gstNumber ?? '',
+                panNumber: groupInfo.identity.panNumber ?? '',
+                bankName: groupInfo.identity.bankName ?? '',
+                bankAccountNumber: groupInfo.identity.bankAccountNumber ?? '',
+                bankAccountHolder: groupInfo.identity.bankAccountHolder ?? '',
+                ifscCode: groupInfo.identity.ifscCode ?? '',
+                upiId: groupInfo.identity.upiId ?? '',
                 // The value the child PAN must equal (parent's PAN, else a grouped sibling's).
-                groupPan: groupPanByParent.get(outlet.parentId!) ?? null,
+                groupPan: groupInfo.groupPan,
               }
             : undefined;
 

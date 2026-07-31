@@ -7,6 +7,7 @@ import {
   resolveOperableContexts,
   resolveActivePartnerId,
   resolveGroupParentByPhone,
+  resolveGroupIdentity,
   type UniquenessPolicy,
 } from './partner-group.helper';
 
@@ -188,6 +189,52 @@ describe('partner-group.helper — checkPanMatchesGroup', () => {
 });
 
 // ── Wave 3: operable-context resolution ───────────────────────────────────────────────────
+
+describe('partner-group.helper — resolveGroupIdentity', () => {
+  const idDb = (opts: { parent?: unknown; sibling?: unknown }) =>
+    ({
+      channelPartner: {
+        findUnique: jest.fn().mockResolvedValue(opts.parent ?? null),
+        findFirst: jest.fn().mockResolvedValue(opts.sibling ?? null),
+      },
+    }) as never;
+
+  it('uses the APPROVED parent when it carries details (sibling never queried)', async () => {
+    const db = idDb({
+      parent: { onboardedAt: new Date(), businessName: 'ParentBiz', ownerName: 'Owner P', panNumber: 'PANP', gstNumber: null, bankName: null, bankAccountNumber: null, bankAccountHolder: null, ifscCode: null, upiId: null },
+      sibling: { businessName: 'SibBiz', panNumber: 'PANS' },
+    });
+    const r = await resolveGroupIdentity(db, 'deoleo', 'PARENT1');
+    expect(r?.businessName).toBe('ParentBiz');
+    expect(r?.panNumber).toBe('PANP');
+    expect((db as { channelPartner: { findFirst: jest.Mock } }).channelPartner.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('falls back to an APPROVED sibling when the parent is UNAPPROVED', async () => {
+    const db = idDb({
+      parent: { onboardedAt: null, businessName: 'ParentBiz', panNumber: 'PANP' },
+      sibling: { businessName: 'SibBiz', ownerName: 'Owner S', panNumber: 'PANS', gstNumber: 'GSTS', bankName: 'HDFC', bankAccountNumber: '111', bankAccountHolder: 'S', ifscCode: 'IFS', upiId: 's@upi' },
+    });
+    const r = await resolveGroupIdentity(db, 'deoleo', 'PARENT1');
+    expect(r?.businessName).toBe('SibBiz');
+    expect(r?.panNumber).toBe('PANS');
+    expect(r?.upiId).toBe('s@upi');
+  });
+
+  it('falls back to an APPROVED sibling when the approved parent has NO details', async () => {
+    const db = idDb({
+      parent: { onboardedAt: new Date(), businessName: null, panNumber: null, gstNumber: null, bankAccountNumber: null, upiId: null },
+      sibling: { businessName: 'SibBiz', panNumber: 'PANS' },
+    });
+    const r = await resolveGroupIdentity(db, 'deoleo', 'PARENT1');
+    expect(r?.businessName).toBe('SibBiz');
+  });
+
+  it('returns null when nothing in the group is verified yet (no parent details, no approved sibling)', async () => {
+    const db = idDb({ parent: { onboardedAt: null }, sibling: null });
+    expect(await resolveGroupIdentity(db, 'deoleo', 'PARENT1')).toBeNull();
+  });
+});
 
 describe('partner-group.helper — normalizePhoneLast10', () => {
   it('reduces to the last 10 digits, stripping non-digits + country code', () => {

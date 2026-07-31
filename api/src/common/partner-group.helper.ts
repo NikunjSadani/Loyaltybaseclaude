@@ -161,6 +161,85 @@ export async function resolveGroupPan(
   return normalizeIdentityValue('pan', sibling?.partner?.panNumber);
 }
 
+/** The shared owner-identity block a grouped child's KYC pre-fills from (never photos/address). */
+export interface GroupIdentity {
+  businessName: string | null;
+  ownerName: string | null;
+  gstNumber: string | null;
+  panNumber: string | null;
+  bankName: string | null;
+  bankAccountNumber: string | null;
+  bankAccountHolder: string | null;
+  ifscCode: string | null;
+  upiId: string | null;
+}
+
+/**
+ * The group's canonical owner-identity — what a grouped child's KYC pre-fills (business/owner
+ * name, GST, PAN, bank, UPI). Source precedence (owner decision):
+ *   1. the PARENT's own details, but ONLY when the parent is APPROVED (`onboardedAt` set) AND
+ *      actually carries identity details (an un-approved / bare-anchor parent has unverified /
+ *      no values → never pre-fills);
+ *   2. else the most-recently-APPROVED grouped SIBLING (a non-parent partner with an outlet in
+ *      this group whose KYC is approved) — so the first child establishes the shared identity
+ *      and the rest inherit it;
+ *   3. else null (nothing verified yet → the child enters its own details).
+ * Returns identity TEXT only — store/owner photos, address and location are ALWAYS captured
+ * per-store and are never part of this block.
+ */
+export async function resolveGroupIdentity(
+  db: Db,
+  clientId: string,
+  parentId: string,
+): Promise<GroupIdentity | null> {
+  const parent = await db.channelPartner.findUnique({
+    where: { id: parentId },
+    select: {
+      onboardedAt: true, businessName: true, ownerName: true, gstNumber: true, panNumber: true,
+      bankName: true, bankAccountNumber: true, bankAccountHolder: true, ifscCode: true, upiId: true,
+    },
+  });
+  const parentHasDetails = !!(
+    parent && (parent.panNumber || parent.gstNumber || parent.bankAccountNumber || parent.upiId)
+  );
+  if (parent && parent.onboardedAt != null && parentHasDetails) {
+    return pickGroupIdentity(parent);
+  }
+
+  // Approved sibling: a non-parent partner with an outlet in this group whose KYC is approved.
+  // Order by approval time so the most-recently-verified sibling wins deterministically.
+  const sibling = await db.channelPartner.findFirst({
+    where: {
+      clientId,
+      isParent: false,
+      deletedAt: null,
+      onboardedAt: { not: null },
+      outlets: { some: { parentId, clientId, deletedAt: null } },
+    },
+    orderBy: { onboardedAt: 'desc' },
+    select: {
+      businessName: true, ownerName: true, gstNumber: true, panNumber: true,
+      bankName: true, bankAccountNumber: true, bankAccountHolder: true, ifscCode: true, upiId: true,
+    },
+  });
+  return sibling ? pickGroupIdentity(sibling) : null;
+}
+
+/** Project a partner row onto the GroupIdentity shape (identity text only). */
+function pickGroupIdentity(p: Partial<GroupIdentity>): GroupIdentity {
+  return {
+    businessName: p.businessName ?? null,
+    ownerName: p.ownerName ?? null,
+    gstNumber: p.gstNumber ?? null,
+    panNumber: p.panNumber ?? null,
+    bankName: p.bankName ?? null,
+    bankAccountNumber: p.bankAccountNumber ?? null,
+    bankAccountHolder: p.bankAccountHolder ?? null,
+    ifscCode: p.ifscCode ?? null,
+    upiId: p.upiId ?? null,
+  };
+}
+
 /**
  * Enforce that a grouped outlet's PAN equals the group's canonical PAN (identical-within-group).
  * No-op when ungrouped, when no PAN is supplied, or when the group has no PAN yet.
