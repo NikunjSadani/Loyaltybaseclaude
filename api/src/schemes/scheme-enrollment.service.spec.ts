@@ -772,6 +772,24 @@ describe('SchemeEnrollmentService', () => {
       expect(rosterWhere.OR[0]).toEqual({ taggedSalesUserId: { in: ['su-caller', 'su-child'] } });
     });
 
+    it('EXCLUDES admin-PARKED outlets from the rep scheme reach (regression: PARKED must stay fully hidden)', async () => {
+      // A PARKED outlet must never surface as an enrollment target. The reach assignment
+      // query carries NOT:{outlet:{kycIntent:'PARKED'}} — dropping parked outlets while
+      // keeping partner-only assignments (outletId null → relation predicate false → kept).
+      mockPrisma.scheme.findFirst.mockResolvedValue(
+        makeScheme({ audienceConfig: { mode: 'FILTER', selfEnrollAllowed: true, frozen: false } }),
+      );
+      primeReach();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([]);
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+
+      await service.getSalesTargets(salesUser, 's1', {});
+
+      const assignWhere = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
+      expect(assignWhere.NOT).toEqual({ outlet: { kycIntent: 'PARKED' } });
+    });
+
     it('surfaces a partner-only-assigned partner\'s filter-matching outlets as live-rule targets (A-MED-1)', async () => {
       mockPrisma.scheme.findFirst.mockResolvedValue(
         makeScheme({ audienceConfig: { mode: 'FILTER', selfEnrollAllowed: true, frozen: false } }),

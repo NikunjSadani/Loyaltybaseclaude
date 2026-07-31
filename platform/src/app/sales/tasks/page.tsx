@@ -213,7 +213,7 @@ function SchemeEnrollmentGroup({
           <div className="p-2 rounded-xl bg-emerald-50 shrink-0">
             <Tag className="h-4 w-4 text-emerald-600" />
           </div>
-          <p className="text-sm font-semibold text-gray-800 flex-1 text-left leading-snug">Scheme Enrollment</p>
+          <p className="text-sm font-semibold text-gray-800 flex-1 text-left leading-snug">Activations / Tasks</p>
           <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 shrink-0">
             {schemes.length}
           </span>

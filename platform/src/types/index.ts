@@ -884,6 +884,27 @@ export interface OutletDeactivateValidationResult {
   summary:     { total: number; deactivates: number; errors: number };
 }
 
+// ─── Outlet Park / Un-park (KYC-queue removal) ────────────────────────────────
+// Same single-column ('Outlet ID') upload shape as deactivation — reuses
+// OutletDeactivateRow / OutletDeactivateRowResult for parse + per-row results;
+// only the summary key differs (parked / unparked vs deactivates).
+
+export interface OutletParkValidationResult {
+  headerError: string | null;
+  rows:        OutletDeactivateRowResult[];
+  hasErrors:   boolean;
+  canProceed:  boolean;
+  summary:     { total: number; parked: number; errors: number };
+}
+
+export interface OutletUnparkValidationResult {
+  headerError: string | null;
+  rows:        OutletDeactivateRowResult[];
+  hasErrors:   boolean;
+  canProceed:  boolean;
+  summary:     { total: number; unparked: number; errors: number };
+}
+
 // ─── Credits & Payouts Bulk Upload Module ─────────────────────────────────────
 
 /** Award type a field gives to a given outlet type */

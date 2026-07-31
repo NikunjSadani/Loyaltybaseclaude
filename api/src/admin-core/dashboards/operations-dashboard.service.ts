@@ -389,7 +389,9 @@ export class OperationsDashboardService {
           clientId,
           deletedAt: null,
           deactivatedAt: null,
-          OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
+          // Exclude NOT_INTERESTED (declined) AND PARKED (admin-removed) from the
+          // participation denominator. notIn drops NULLs → keep them via the {null} branch.
+          OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
         },
       }),
     ]);

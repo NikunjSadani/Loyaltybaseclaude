@@ -1049,10 +1049,12 @@ export class AdminCoreService {
             clientId,
             deletedAt: null,
             deactivatedAt: null,
-            // Prisma's `{ not }` EXCLUDES NULL rows. Almost every outlet has
-            // kycIntent=NULL (only sales-marked ones are NOT_INTERESTED), so an
-            // explicit OR is required to keep them — otherwise addressable → 0.
-            OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
+            // Prisma's `{ notIn }` EXCLUDES NULL rows. Almost every outlet has
+            // kycIntent=NULL (only sales-marked ones are NOT_INTERESTED, admin-parked ones
+            // PARKED), so an explicit OR is required to keep them — otherwise addressable → 0.
+            // BOTH NOT_INTERESTED (declined) and PARKED (admin-removed from pipeline) are
+            // excluded from the addressable universe so coverage% isn't depressed by them.
+            OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
           },
           select: {
             id: true,
@@ -1090,7 +1092,7 @@ export class AdminCoreService {
             clientId,
             deletedAt: null,
             deactivatedAt: { not: null },
-            OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
+            OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
           },
         }),
 

@@ -78,6 +78,23 @@ export class AdminOutletsController {
   }
 
   /**
+   * POST /park — PARK KYC-pending outlets by outletCode so they are FULLY hidden from sales
+   * reps (reversible via /unpark). Mirrors the reactivate gate (partners:manage_outlets).
+   */
+  @Post('park')
+  @RequirePermission('partners:manage_outlets')
+  park(@CurrentUser() user: JwtPayload, @Body() dto: OutletCodesDto) {
+    return this.outlets.park(user, dto);
+  }
+
+  /** POST /unpark — clear the PARKED intent by outletCode (source: partners:manage_outlets). */
+  @Post('unpark')
+  @RequirePermission('partners:manage_outlets')
+  unpark(@CurrentUser() user: JwtPayload, @Body() dto: OutletCodesDto) {
+    return this.outlets.unpark(user, dto);
+  }
+
+  /**
    * POST /:outletCode/ungroup — the DEDICATED, explicit un-group action (owner groups, §4.5).
    * Removes ONE outlet from its owner group; blocked while it still shares an enforced identity
    * detail (incl. phone) with the group. Un-grouping is NEVER a side effect of a blank upload

@@ -172,6 +172,13 @@ export interface GroupIdentity {
   bankAccountHolder: string | null;
   ifscCode: string | null;
   upiId: string | null;
+  /**
+   * The APPROVED group member (parent or sibling ChannelPartner) this identity was resolved from —
+   * the SAME source used for DOCUMENT carry-forward (resolveGroupCarryForwardDocs). Null only when
+   * nothing verified exists yet (identity itself would then be null too). Never trust it as a document
+   * grant on its own: the carry-forward always re-checks that the child kept the value unchanged.
+   */
+  sourcePartnerId: string | null;
 }
 
 /**
@@ -205,7 +212,7 @@ export async function resolveGroupIdentity(
   );
   // A PARENT's approval marker IS ChannelPartner.onboardedAt (set by ParentsService at approval).
   if (parent && parent.onboardedAt != null && parentHasDetails) {
-    return pickGroupIdentity(parent);
+    return pickGroupIdentity(parent, parentId);
   }
 
   // Approved SIBLING: a non-parent partner with an outlet in this group whose KYC is APPROVED.
@@ -232,15 +239,16 @@ export async function resolveGroupIdentity(
     // — every pre-filled field except PAN is editable on the child's form.
     orderBy: { updatedAt: 'desc' },
     select: {
+      id: true,
       businessName: true, ownerName: true, gstNumber: true, panNumber: true,
       bankName: true, bankAccountNumber: true, bankAccountHolder: true, ifscCode: true, upiId: true,
     },
   });
-  return sibling ? pickGroupIdentity(sibling) : null;
+  return sibling ? pickGroupIdentity(sibling, sibling.id) : null;
 }
 
-/** Project a partner row onto the GroupIdentity shape (identity text only). */
-function pickGroupIdentity(p: Partial<GroupIdentity>): GroupIdentity {
+/** Project a partner row onto the GroupIdentity shape (identity text only) + its source partner id. */
+function pickGroupIdentity(p: Partial<GroupIdentity>, sourcePartnerId: string): GroupIdentity {
   return {
     businessName: p.businessName ?? null,
     ownerName: p.ownerName ?? null,
@@ -251,7 +259,59 @@ function pickGroupIdentity(p: Partial<GroupIdentity>): GroupIdentity {
     bankAccountHolder: p.bankAccountHolder ?? null,
     ifscCode: p.ifscCode ?? null,
     upiId: p.upiId ?? null,
+    sourcePartnerId,
   };
+}
+
+/** A carry-forwardable document from the group source's APPROVED submission (verified provenance). */
+export interface CarryForwardDoc {
+  fileUrl: string;
+  fileKey: string;
+  fileName: string | null;
+  mimeType: string | null;
+  fileSizeBytes: number | null;
+}
+
+/** The group source's approved GST certificate + cancelled cheque, for child carry-forward. */
+export interface GroupCarryForwardDocs {
+  gstCertificate: CarryForwardDoc | null;
+  cancelledCheque: CarryForwardDoc | null;
+}
+
+/** A Prisma client exposing the KycSubmission model (for the document carry-forward read). */
+type DbWithKyc = Pick<Prisma.TransactionClient, 'kycSubmission'>;
+
+/**
+ * Load the group SOURCE partner's APPROVED GST-certificate + cancelled-cheque documents — the docs a
+ * grouped child inherits when it keeps the group's (unchanged) GST number / bank account. The
+ * `sourcePartnerId` MUST come from `resolveGroupIdentity(...).sourcePartnerId`, so the DOCUMENT source
+ * is exactly the same APPROVED parent/sibling the IDENTITY prefill came from (they can never diverge).
+ *
+ * Only reads the source's most-recent APPROVED submission (verified provenance); a non-approved or
+ * doc-less source yields nulls → the child must upload its own (fail-safe). Tenant-scoped defense-in-
+ * depth via the submission's user.clientId. Returns the newest doc per type.
+ */
+export async function resolveGroupCarryForwardDocs(
+  db: DbWithKyc,
+  clientId: string,
+  sourcePartnerId: string,
+): Promise<GroupCarryForwardDocs> {
+  const sub = await db.kycSubmission.findFirst({
+    where: { partnerId: sourcePartnerId, status: 'APPROVED', user: { clientId } },
+    orderBy: { updatedAt: 'desc' },
+    select: {
+      documents: {
+        where: { documentType: { in: ['GST_CERTIFICATE', 'CANCELLED_CHEQUE'] } },
+        orderBy: { createdAt: 'desc' },
+        select: { documentType: true, fileUrl: true, fileKey: true, fileName: true, mimeType: true, fileSizeBytes: true },
+      },
+    },
+  });
+  const pick = (type: 'GST_CERTIFICATE' | 'CANCELLED_CHEQUE'): CarryForwardDoc | null => {
+    const d = sub?.documents.find((x) => x.documentType === type);
+    return d ? { fileUrl: d.fileUrl, fileKey: d.fileKey, fileName: d.fileName, mimeType: d.mimeType, fileSizeBytes: d.fileSizeBytes } : null;
+  };
+  return { gstCertificate: pick('GST_CERTIFICATE'), cancelledCheque: pick('CANCELLED_CHEQUE') };
 }
 
 /**

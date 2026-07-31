@@ -49,7 +49,9 @@ export class VisibilityReportService {
       clientId,
       deletedAt: null,
       deactivatedAt: null,
-      OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
+      // Exclude NOT_INTERESTED (declined) AND PARKED (admin-removed from pipeline) from the
+      // visibility universe. notIn drops NULLs → the {null} branch keeps normal outlets.
+      OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
       outletType: { code: { in: outletScope } },
     };
   }

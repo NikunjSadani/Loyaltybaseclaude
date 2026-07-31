@@ -6,7 +6,7 @@ import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import {
   Store, Search, Upload, Download, X, AlertCircle, CheckCircle2,
   Loader2, Building2, MapPin, Users, FileText, ArrowRightLeft,
-  RefreshCw, Eye, Clock, XCircle, CheckCircle,
+  RefreshCw, Eye, Clock, XCircle, CheckCircle, Archive,
 } from 'lucide-react';
 import {
   validateOutletUploadHeaders,
@@ -15,12 +15,16 @@ import {
   validateOutletUpload,
   validateReKYCFlagUpload,
   validateDeactivateUpload,
+  validateParkUpload,
+  validateUnparkUpload,
   parseOutletUploadRows,
   parseReKYCFlagRows,
   parseDeactivateRows,
   getOutletAdditionTemplateData,
   getReKYCFlagTemplateData,
   getDeactivateTemplateData,
+  getParkTemplateData,
+  getUnparkTemplateData,
   generateOutletGuideHtml,
   buildOutletUploadErrorReport,
   buildReKYCErrorReport,
@@ -38,6 +42,8 @@ import type {
   ReKYCFlagRow,
   ReKYCFlagValidationResult,
   OutletDeactivateValidationResult,
+  OutletParkValidationResult,
+  OutletUnparkValidationResult,
   KYCStatus,
 } from '@/types';
 
@@ -51,7 +57,7 @@ const DEFAULT_CATEGORIES = ['Premium', 'Standard', 'Economy'];
 
 // ─── Outlet master data ──────────────────────────────────────────────────────────
 
-type KYCStatusLocal = 'NOT_STARTED' | 'IN_PROGRESS' | 'SUBMITTED' | 'APPROVED' | 'REJECTED' | 'RE_KYC_REQUIRED';
+type KYCStatusLocal = 'NOT_STARTED' | 'IN_PROGRESS' | 'SUBMITTED' | 'APPROVED' | 'REJECTED' | 'RE_KYC_REQUIRED' | 'PARKED';
 
 // Server pagination envelope (mirrors channel-partners / admin users).
 interface Pagination {
@@ -96,6 +102,7 @@ const KYC_STATUS_CONFIG: Record<KYCStatusLocal, { label: string; badgeCls: strin
   APPROVED:         { label: 'KYC Approved',   badgeCls: 'bg-green-100 text-green-700',       icon: <CheckCircle  className="w-3 h-3" /> },
   REJECTED:         { label: 'Rejected',       badgeCls: 'bg-red-100 text-red-700',           icon: <XCircle      className="w-3 h-3" /> },
   RE_KYC_REQUIRED:  { label: 'Re-KYC Required',badgeCls: 'bg-amber-100 text-amber-700',       icon: <RefreshCw    className="w-3 h-3" /> },
+  PARKED:           { label: 'Parked',         badgeCls: 'bg-slate-100 text-slate-600',       icon: <Archive      className="w-3 h-3" /> },
 };
 
 const TYPE_COLORS: Record<string, string> = {
@@ -243,7 +250,7 @@ function ValidationPanel<R extends { rowNum: number; outletId: string; status: s
 
 // ─── Success panel ─────────────────────────────────────────────────────────────
 
-function SuccessPanel({ message, onDone }: { message: string; onDone: () => void }) {
+function SuccessPanel({ message, detail, onDone }: { message: string; detail?: React.ReactNode; onDone: () => void }) {
   return (
     <div className="flex flex-col items-center gap-4 py-8 text-center">
       <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
@@ -251,7 +258,9 @@ function SuccessPanel({ message, onDone }: { message: string; onDone: () => void
       </div>
       <div>
         <p className="text-sm font-semibold text-gray-900">{message}</p>
-        <p className="text-xs text-gray-500 mt-1">Data has been processed and the outlet list will reflect changes momentarily.</p>
+        {detail !== undefined
+          ? <div className="text-xs text-gray-500 mt-1">{detail}</div>
+          : <p className="text-xs text-gray-500 mt-1">Data has been processed and the outlet list will reflect changes momentarily.</p>}
       </div>
       <button onClick={onDone} className="px-5 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-lg hover:bg-[var(--brand-primary-dark)]">
         Done
@@ -278,12 +287,14 @@ function UploadSection({
   submitting,
   submitNote,
   parentIdByRow,
+  successMessage,
+  successDetail,
 }: {
   testIdInput:       string;
   testIdPanel:       string;
   errorReportFilename: string;
   onFileChange:      (file: File) => void;
-  validationResult:  OutletUploadValidationResult | ReKYCFlagValidationResult | OutletDeactivateValidationResult | null;
+  validationResult:  OutletUploadValidationResult | ReKYCFlagValidationResult | OutletDeactivateValidationResult | OutletParkValidationResult | OutletUnparkValidationResult | null;
   uploadState:       UploadState;
   onConfirm:         () => void;
   onClear:           () => void;
@@ -300,6 +311,10 @@ function UploadSection({
   /** Optional per-row Parent ID lookup (keyed by rowNum) — outlet master only.
    *  Passed through to the ValidationPanel to render the Parent ID preview column. */
   parentIdByRow?: Record<number, string>;
+  /** Optional custom success message + detail node (Park / Un-park surface the
+   *  backend {parked|unparked} count + any notFound codes). Defaults to the generic panel. */
+  successMessage?: string;
+  successDetail?:  React.ReactNode;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileError, setFileError] = useState('');
@@ -378,7 +393,8 @@ function UploadSection({
       {(uploadState === 'parsed' || uploadState === 'confirmed') && validationResult && (
         uploadState === 'confirmed' ? (
           <SuccessPanel
-            message="Upload processed successfully"
+            message={successMessage ?? 'Upload processed successfully'}
+            detail={successDetail}
             onDone={onClear}
           />
         ) : (
@@ -402,7 +418,10 @@ function UploadSection({
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
 
-type TabId = 'master' | 'rekyc' | 'deactivate';
+type TabId = 'master' | 'rekyc' | 'deactivate' | 'parked';
+
+/** Backend result of a park / un-park POST — count applied + codes the backend skipped. */
+interface ParkResult { count: number; notFound: string[]; }
 
 export default function OutletsPage() {
   const [activeTab, setActiveTab] = useState<TabId>('master');
@@ -444,6 +463,15 @@ export default function OutletsPage() {
   const [deactivateValidation, setDeactivateValidation] = useState<OutletDeactivateValidationResult | null>(null);
   const [deactivateUploadState, setDeactivateUploadState] = useState<UploadState>('idle');
 
+  // Park / Un-park upload state (Parked / Removed tab). Same single-column ('Outlet ID')
+  // upload shape as deactivate; two independent sub-actions on one tab.
+  const [parkValidation, setParkValidation] = useState<OutletParkValidationResult | null>(null);
+  const [parkUploadState, setParkUploadState] = useState<UploadState>('idle');
+  const [parkResult, setParkResult] = useState<ParkResult | null>(null);
+  const [unparkValidation, setUnparkValidation] = useState<OutletUnparkValidationResult | null>(null);
+  const [unparkUploadState, setUnparkUploadState] = useState<UploadState>('idle');
+  const [unparkResult, setUnparkResult] = useState<ParkResult | null>(null);
+
   // "Download Outlet Master" (server export) state — surfaced so a failure is
   // visible instead of the button silently doing nothing.
   const [masterDownloadState, setMasterDownloadState] = useState<'idle' | 'loading' | 'error'>('idle');
@@ -460,6 +488,8 @@ export default function OutletsPage() {
   const [outletSubmitError,     setOutletSubmitError]     = useState<string | null>(null);
   const [rekycSubmitError,      setRekycSubmitError]      = useState<string | null>(null);
   const [deactivateSubmitError, setDeactivateSubmitError] = useState<string | null>(null);
+  const [parkSubmitError,       setParkSubmitError]       = useState<string | null>(null);
+  const [unparkSubmitError,     setUnparkSubmitError]     = useState<string | null>(null);
 
   // Upload progress note (non-null while the master upsert is in flight). The backend
   // caps each request at 500 rows, so a large file is sent in sequential batches and
@@ -568,6 +598,8 @@ export default function OutletsPage() {
     setOutletValidation(null);    setOutletParsedRows([]); setOutletUploadState('idle');     setOutletSubmitError(null); setOutletUploadProgress(null);
     setRekycValidation(null);     setRekycParsedRows([]); setRekycUploadState('idle');         setRekycSubmitError(null);
     setDeactivateValidation(null); setDeactivateUploadState('idle');                          setDeactivateSubmitError(null);
+    setParkValidation(null);   setParkUploadState('idle');   setParkSubmitError(null);   setParkResult(null);
+    setUnparkValidation(null); setUnparkUploadState('idle'); setUnparkSubmitError(null); setUnparkResult(null);
   }, []);
 
   // The server now applies search + KYC filter + pagination, so the table renders
@@ -681,6 +713,50 @@ export default function OutletsPage() {
     }
   }, [allOutlets, parseXlsx]);
 
+  // ── Handle park upload ──
+  const handleParkFile = useCallback(async (file: File) => {
+    try {
+      const rows    = await parseXlsx(file);
+      const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
+      const headerErr = validateDeactivateHeaders(headers);
+      if (headerErr) {
+        setParkValidation({ headerError: headerErr, rows: [], hasErrors: true, canProceed: false, summary: { total: 0, parked: 0, errors: 0 } });
+        setParkUploadState('parsed');
+        return;
+      }
+      const parsed   = parseDeactivateRows(rows as Record<string, string>[]);
+      const existing = allOutlets.map(o => ({ outletId: o.outletId, kycStatus: o.kycStatus as unknown as string }));
+      const result   = validateParkUpload(parsed, existing);
+      setParkValidation(result);
+      setParkUploadState('parsed');
+    } catch {
+      setParkValidation({ headerError: 'Failed to read file — please ensure it is a valid XLSX file', rows: [], hasErrors: true, canProceed: false, summary: { total: 0, parked: 0, errors: 0 } });
+      setParkUploadState('parsed');
+    }
+  }, [allOutlets, parseXlsx]);
+
+  // ── Handle un-park upload ──
+  const handleUnparkFile = useCallback(async (file: File) => {
+    try {
+      const rows    = await parseXlsx(file);
+      const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
+      const headerErr = validateDeactivateHeaders(headers);
+      if (headerErr) {
+        setUnparkValidation({ headerError: headerErr, rows: [], hasErrors: true, canProceed: false, summary: { total: 0, unparked: 0, errors: 0 } });
+        setUnparkUploadState('parsed');
+        return;
+      }
+      const parsed   = parseDeactivateRows(rows as Record<string, string>[]);
+      const existing = allOutlets.map(o => ({ outletId: o.outletId, kycStatus: o.kycStatus as unknown as string }));
+      const result   = validateUnparkUpload(parsed, existing);
+      setUnparkValidation(result);
+      setUnparkUploadState('parsed');
+    } catch {
+      setUnparkValidation({ headerError: 'Failed to read file — please ensure it is a valid XLSX file', rows: [], hasErrors: true, canProceed: false, summary: { total: 0, unparked: 0, errors: 0 } });
+      setUnparkUploadState('parsed');
+    }
+  }, [allOutlets, parseXlsx]);
+
   // ── Download helpers ──
   function downloadXlsx(wb: XLSX.WorkBook, filename: string) {
     const buf   = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
@@ -726,6 +802,30 @@ export default function OutletsPage() {
     downloadXlsx(wb, 'outlet-deactivation-template.xlsx');
   }
 
+  function downloadParkTemplate() {
+    const { headers, exampleRows, dosAndDonts } = getParkTemplateData();
+    const wb = XLSX.utils.book_new();
+    const ddSheet = aoaToSheetSafe(dosAndDonts);
+    ddSheet['!cols'] = [{ wch: 28 }, { wch: 90 }];
+    XLSX.utils.book_append_sheet(wb, ddSheet, "Dos & Don'ts");
+    const dataSheet = aoaToSheetSafe([headers, ...exampleRows]);
+    dataSheet['!cols'] = [{ wch: 22 }];
+    XLSX.utils.book_append_sheet(wb, dataSheet, 'Park Upload');
+    downloadXlsx(wb, 'outlet-park-template.xlsx');
+  }
+
+  function downloadUnparkTemplate() {
+    const { headers, exampleRows, dosAndDonts } = getUnparkTemplateData();
+    const wb = XLSX.utils.book_new();
+    const ddSheet = aoaToSheetSafe(dosAndDonts);
+    ddSheet['!cols'] = [{ wch: 28 }, { wch: 90 }];
+    XLSX.utils.book_append_sheet(wb, ddSheet, "Dos & Don'ts");
+    const dataSheet = aoaToSheetSafe([headers, ...exampleRows]);
+    dataSheet['!cols'] = [{ wch: 22 }];
+    XLSX.utils.book_append_sheet(wb, dataSheet, 'Un-park Upload');
+    downloadXlsx(wb, 'outlet-unpark-template.xlsx');
+  }
+
   function downloadGuide() {
     const html = generateOutletGuideHtml(outletTypes);
     const blob = new Blob([html], { type: 'text/html' });
@@ -742,6 +842,7 @@ export default function OutletsPage() {
     { id: 'master',     label: 'Outlet Master',      icon: <Store className="w-4 h-4" />,    count: stats.total },
     { id: 'rekyc',      label: 'Re-KYC Flagging',    icon: <RefreshCw className="w-4 h-4" /> },
     { id: 'deactivate', label: 'Deactivate Outlets', icon: <XCircle className="w-4 h-4" />   },
+    { id: 'parked',     label: 'Parked / Removed',   icon: <Archive className="w-4 h-4" />   },
   ];
 
   const inputCls  = 'border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]';
@@ -1328,6 +1429,188 @@ export default function OutletsPage() {
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ═══════════════ PARKED / REMOVED TAB ═══════════════ */}
+      {activeTab === 'parked' && (
+        <div data-testid="parked-upload-section" className="space-y-5">
+
+          {/* Explainer */}
+          <div className="bg-white border border-gray-200 rounded-xl p-5">
+            <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+              <Archive className="w-4 h-4 text-slate-500" />
+              Parked / Removed Outlets
+            </h2>
+            <p className="text-sm text-gray-500 mt-1">
+              Parked outlets are fully removed from the sales team&apos;s KYC queue and hidden from reps. Use this to bulk-remove KYC-pending outlets you&apos;re not pursuing. Un-park to return them to the queue.
+            </p>
+          </div>
+
+          {/* Park block */}
+          <div className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                  <Archive className="w-4 h-4 text-slate-500" />
+                  Park Outlets
+                </h3>
+                <p className="text-sm text-gray-500 mt-1">
+                  Upload a list of Outlet IDs to park them — they are removed from the sales team&apos;s KYC queue. Only KYC-pending outlets are parked; any code that is already parked or no longer KYC-pending is reported back.
+                </p>
+              </div>
+              <button
+                data-testid="download-park-template"
+                onClick={downloadParkTemplate}
+                className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors shrink-0"
+              >
+                <Download className="w-4 h-4" /> Template
+              </button>
+            </div>
+
+            <UploadSection
+              testIdInput="park-upload-input"
+              testIdPanel="park-validation-panel"
+              errorReportFilename="outlet-park-errors.xlsx"
+              uploadDisabledReason={outletListDisabledReason}
+              errorReport={parkValidation ? buildDeactivateErrorReport(parkValidation) : undefined}
+              onFileChange={handleParkFile}
+              validationResult={parkValidation}
+              uploadState={parkUploadState}
+              successMessage={parkResult ? `${parkResult.count} outlet(s) parked` : undefined}
+              successDetail={parkResult ? (
+                parkResult.notFound.length > 0
+                  ? <span data-testid="park-notfound">{parkResult.notFound.length} code(s) were not parked (not found or no longer KYC-pending): {parkResult.notFound.join(', ')}</span>
+                  : <span>All uploaded outlets were parked and removed from the sales queue.</span>
+              ) : undefined}
+              onConfirm={async () => {
+                setParkSubmitError(null);
+                const codes = parkValidation?.rows.filter(r => r.status === 'OK').map(r => r.outletId) ?? [];
+                try {
+                  const res = await fetch('/api/admin/outlets/park', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ outletCodes: codes }),
+                  });
+                  if (!res.ok) {
+                    let msg = `Parking failed (${res.status})`;
+                    try { const j = await res.json(); msg = j?.error ?? j?.message ?? msg; } catch { /* non-JSON body */ }
+                    setParkSubmitError(msg);
+                    return;
+                  }
+                  const j = await res.json().catch(() => null);
+                  const d = j?.data ?? j ?? {};
+                  setParkResult({ count: Number(d.parked ?? 0), notFound: Array.isArray(d.notFound) ? d.notFound : [] });
+                  setParkUploadState('confirmed');
+                  // Refresh so the parked reference list + stats reflect the change.
+                  void loadOutlets();
+                  void loadAllOutlets();
+                } catch {
+                  setParkSubmitError('Network error — please try again');
+                }
+              }}
+              onClear={() => { setParkValidation(null); setParkUploadState('idle'); setParkSubmitError(null); setParkResult(null); }}
+              confirmLabel="Park Outlets"
+              submitError={parkSubmitError}
+            />
+          </div>
+
+          {/* Un-park block */}
+          <div className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                  <RefreshCw className="w-4 h-4 text-slate-500" />
+                  Un-park Outlets
+                </h3>
+                <p className="text-sm text-gray-500 mt-1">
+                  Upload a list of Outlet IDs to return them to the sales team&apos;s KYC queue. Only currently-parked outlets can be un-parked.
+                </p>
+              </div>
+              <button
+                data-testid="download-unpark-template"
+                onClick={downloadUnparkTemplate}
+                className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-semibold rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors shrink-0"
+              >
+                <Download className="w-4 h-4" /> Template
+              </button>
+            </div>
+
+            <UploadSection
+              testIdInput="unpark-upload-input"
+              testIdPanel="unpark-validation-panel"
+              errorReportFilename="outlet-unpark-errors.xlsx"
+              uploadDisabledReason={outletListDisabledReason}
+              errorReport={unparkValidation ? buildDeactivateErrorReport(unparkValidation) : undefined}
+              onFileChange={handleUnparkFile}
+              validationResult={unparkValidation}
+              uploadState={unparkUploadState}
+              successMessage={unparkResult ? `${unparkResult.count} outlet(s) un-parked` : undefined}
+              successDetail={unparkResult ? (
+                unparkResult.notFound.length > 0
+                  ? <span data-testid="unpark-notfound">{unparkResult.notFound.length} code(s) were not un-parked (not found or not currently parked): {unparkResult.notFound.join(', ')}</span>
+                  : <span>All uploaded outlets were returned to the sales queue.</span>
+              ) : undefined}
+              onConfirm={async () => {
+                setUnparkSubmitError(null);
+                const codes = unparkValidation?.rows.filter(r => r.status === 'OK').map(r => r.outletId) ?? [];
+                try {
+                  const res = await fetch('/api/admin/outlets/unpark', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ outletCodes: codes }),
+                  });
+                  if (!res.ok) {
+                    let msg = `Un-parking failed (${res.status})`;
+                    try { const j = await res.json(); msg = j?.error ?? j?.message ?? msg; } catch { /* non-JSON body */ }
+                    setUnparkSubmitError(msg);
+                    return;
+                  }
+                  const j = await res.json().catch(() => null);
+                  const d = j?.data ?? j ?? {};
+                  setUnparkResult({ count: Number(d.unparked ?? 0), notFound: Array.isArray(d.notFound) ? d.notFound : [] });
+                  setUnparkUploadState('confirmed');
+                  void loadOutlets();
+                  void loadAllOutlets();
+                } catch {
+                  setUnparkSubmitError('Network error — please try again');
+                }
+              }}
+              onClear={() => { setUnparkValidation(null); setUnparkUploadState('idle'); setUnparkSubmitError(null); setUnparkResult(null); }}
+              confirmLabel="Un-park Outlets"
+              submitError={unparkSubmitError}
+            />
+          </div>
+
+          {/* Currently parked outlets quick reference (from the full tenant list) */}
+          {allOutlets.some(o => o.kycStatus === 'PARKED') && (
+            <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-100 bg-slate-50">
+                <p className="text-xs font-semibold text-slate-600 flex items-center gap-2">
+                  <Archive className="w-3.5 h-3.5" />
+                  Currently parked ({allOutlets.filter(o => o.kycStatus === 'PARKED').length}) — these can be un-parked
+                </p>
+              </div>
+              <div className="divide-y divide-gray-50 max-h-64 overflow-y-auto">
+                {allOutlets.filter(o => o.kycStatus === 'PARKED').map(o => (
+                  <div key={o.outletId} className="px-4 py-3 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-7 h-7 bg-slate-100 rounded-full flex items-center justify-center shrink-0">
+                        <Building2 className="w-3.5 h-3.5 text-slate-600" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">{o.outletName}</p>
+                        <p className="text-xs text-gray-400 font-mono">{o.outletId}{o.city ? ` · ${o.city}` : ''}</p>
+                      </div>
+                    </div>
+                    <span className="text-xs text-slate-700 bg-slate-100 px-2 py-1 rounded-full font-medium flex items-center gap-1 shrink-0">
+                      <Archive className="w-3 h-3" /> Parked
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

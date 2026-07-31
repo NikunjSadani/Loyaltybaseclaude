@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { JwtModule } from '@nestjs/jwt';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../prisma/prisma.module';
 import { SchemesController } from './schemes.controller';
 import { SchemesService } from './schemes.service';
@@ -20,11 +22,24 @@ import { SchemeReportService } from './scheme-report.service';
  *
  * Msg91Service (notifications) and StorageService (storage) are @Global(), so
  * SchemeNotifyService / SchemeEnrollmentService pick them up without importing
- * those modules here (same pattern as KycModule). No JwtModule is needed — the
- * scheme media view is session-gated (no self-authenticating token).
+ * those modules here (same pattern as KycModule). JwtModule is registered (same
+ * secret as AuthModule) so SchemeReportService can mint + verify the PUBLIC
+ * media-view token for the D30 export links (bug 2).
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [
+    PrismaModule,
+    // Same JWT secret/registration as AuthModule so a scheme media-view token is
+    // signed (and verified) with the identical secret. We re-register rather than
+    // import AuthModule to avoid a module cycle (mirrors KycModule).
+    JwtModule.registerAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        secret: config.get('JWT_SECRET'),
+      }),
+    }),
+  ],
   controllers: [
     SchemesController,
     SchemeAdminController,

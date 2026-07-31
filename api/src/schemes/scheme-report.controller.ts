@@ -1,9 +1,19 @@
-import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
-import { Request } from 'express';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Query,
+  Req,
+  Res,
+  StreamableFile,
+} from '@nestjs/common';
+import { Request, Response } from 'express';
 import { SchemeReportService } from './scheme-report.service';
 import { SchemeNotifyService } from './scheme-notify.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
-import { Roles } from '../common/decorators/roles.decorator';
+import { Public, Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { BroadcastDto } from './dto/scheme-notify.dto';
 
@@ -25,6 +35,34 @@ export class SchemeReportController {
     private readonly reports: SchemeReportService,
     private readonly notify: SchemeNotifyService,
   ) {}
+
+  /**
+   * GET /v1/schemes/media/view?token=<jwt> — PUBLIC tokenized media view (bug 2).
+   *
+   * No JWT auth guard (@Public): the bearer of a valid, unexpired, typ:'schememedia'
+   * token may view exactly ONE enrollment-media object for one tenant. A link clicked
+   * from a downloaded .xlsx carries no session, so this MUST be public; the token is
+   * the sole authority. Streams image/pdf inline; any unsafe mime → octet-stream
+   * attachment. ANY failure → bare 404 (no info leak). See viewMediaByToken for the
+   * full security contract. Static path declared BEFORE the `:id` routes so Nest never
+   * matches 'media' as an :id param (mirrors kyc.controller's documents/view).
+   */
+  @Public()
+  @Get('media/view')
+  async viewMedia(
+    @Query('token') token: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { bytes, contentType, inline } = await this.reports.viewMediaByToken(token);
+    const disposition = inline ? 'inline' : 'attachment; filename="media"';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', disposition);
+    // Stop the browser from MIME-sniffing the body back into an executable type.
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // Private capture — never let an intermediary cache the media bytes.
+    res.setHeader('Cache-Control', 'no-store');
+    return new StreamableFile(bytes, { type: contentType, disposition });
+  }
 
   // ── Notifications (D29) — GIFSY_ADMIN only ────────────────────────────────
 

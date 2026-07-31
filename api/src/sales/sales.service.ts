@@ -2,11 +2,29 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isReKycActionable } from '../common/kyc-rekyc.helper';
-import { resolveGroupPan, resolveGroupIdentity, type GroupIdentity } from '../common/partner-group.helper';
+import {
+  resolveGroupPan,
+  resolveGroupIdentity,
+  resolveGroupCarryForwardDocs,
+  type GroupIdentity,
+} from '../common/partner-group.helper';
 import { isSelfOrDescendant, descendantSalesUserIds } from './sales-hierarchy-access.helper';
 import { kpiCodeKeys, currentMonthKey } from '../targets/targets.helpers';
 import { TenantService } from '../tenant/tenant.service';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
+
+/**
+ * Relation filter that FULLY hides admin-PARKED outlets from sales reps: an outlet whose
+ * `kycIntent === 'PARKED'` must never appear in a rep's outlet list, any derived count, or the
+ * dashboard. Applied to every `salesUserAssignment.findMany` that loads outlets for a rep.
+ *
+ * TRAP: Prisma `{ not: 'PARKED' }` DROPS rows whose kycIntent is NULL (SQL NULL semantics), so a
+ * normal outlet (kycIntent null) or a NOT_INTERESTED outlet would vanish too. The OR-wrap with
+ * `{ kycIntent: null }` KEEPS those and drops ONLY the PARKED ones.
+ */
+const NOT_PARKED_OUTLET = {
+  OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' as const } }],
+};
 
 /**
  * One row of the sales team leaderboard — the exact shape the FE
@@ -201,6 +219,9 @@ export class SalesService {
         salesUserId: { in: [...viewerSubtree] },
         unassignedAt: null,
         outletId: { not: null },
+        // Exclude admin-PARKED outlets so manager "KYC Pending" / "Outlets" counts never
+        // include a parked outlet (same null-safe OR-wrap as buildOutlets/getMember).
+        outlet: NOT_PARKED_OUTLET,
       },
       select: {
         salesUserId: true,
@@ -335,7 +356,9 @@ export class SalesService {
         hierarchyLevel: { select: { code: true, name: true, level: true } },
         _count: { select: { subordinates: true } },
         assignments: {
-          where: { outletId: { not: null }, unassignedAt: null },
+          // Exclude admin-PARKED outlets from the member-detail counts + list (same null-safe
+          // OR-wrap as buildOutlets), so a parked outlet is invisible in the team drill-in too.
+          where: { outletId: { not: null }, unassignedAt: null, outlet: NOT_PARKED_OUTLET },
           include: {
             outlet: {
               include: {
@@ -1030,6 +1053,9 @@ export class SalesService {
         salesUserId: { in: ids },
         outletId: { not: null },
         unassignedAt: null,
+        // FULLY hide admin-PARKED outlets from the rep (list, counts, dashboard). Null-safe
+        // OR-wrap keeps normal + NOT_INTERESTED outlets; drops only PARKED.
+        outlet: NOT_PARKED_OUTLET,
       },
       include: {
         // The assigned rep's login-User id — lets the FE KYC-list member filter match
@@ -1086,13 +1112,33 @@ export class SalesService {
     const groupParentIds = [
       ...new Set(filtered.filter((a) => a.outlet!.parentId).map((a) => a.outlet!.parentId!)),
     ];
-    const groupInfoByParent = new Map<string, { identity: GroupIdentity; groupPan: string | null } | null>(
+    // Also resolve, once per group, whether the group SOURCE has an approved GST certificate /
+    // cancelled cheque available to carry forward (resolveGroupCarryForwardDocs, same
+    // sourcePartnerId as the identity). The FE surfaces these booleans so a child that keeps the
+    // group's UNCHANGED GST/bank can skip re-uploading (the backend authoritatively attaches the
+    // inherited doc). Batched into this per-group map → one resolve per group, not per outlet.
+    const groupInfoByParent = new Map<
+      string,
+      { identity: GroupIdentity; groupPan: string | null; gstCertInheritable: boolean; chequeInheritable: boolean } | null
+    >(
       await Promise.all(
         groupParentIds.map(async (pid) => {
           const identity = await resolveGroupIdentity(this.prisma, clientId, pid);
           if (!identity) return [pid, null] as const;
           const groupPan = await resolveGroupPan(this.prisma, clientId, pid);
-          return [pid, { identity, groupPan }] as const;
+          // Only source docs when we have an approved source partner (else both false).
+          const carryDocs = identity.sourcePartnerId
+            ? await resolveGroupCarryForwardDocs(this.prisma, clientId, identity.sourcePartnerId)
+            : { gstCertificate: null, cancelledCheque: null };
+          return [
+            pid,
+            {
+              identity,
+              groupPan,
+              gstCertInheritable: !!carryDocs.gstCertificate,
+              chequeInheritable: !!carryDocs.cancelledCheque,
+            },
+          ] as const;
         }),
       ),
     );
@@ -1168,6 +1214,11 @@ export class SalesService {
                 panNumber: groupInfo.groupPan ?? groupInfo.identity.panNumber ?? '',
                 // The value the child PAN must equal (parent's PAN, else a grouped sibling's).
                 groupPan: groupInfo.groupPan,
+                // Whether the group source has an approved GST cert / cancelled cheque the child can
+                // INHERIT when it keeps the group's UNCHANGED GST / bank (the FE compares the current
+                // form values to the prefill above to decide "unchanged" and hides the upload).
+                gstCertInheritable: groupInfo.gstCertInheritable,
+                chequeInheritable: groupInfo.chequeInheritable,
               }
             : undefined;
 

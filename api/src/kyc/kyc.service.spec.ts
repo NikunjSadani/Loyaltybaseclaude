@@ -1542,9 +1542,13 @@ describe('KycService', () => {
       primeGroupedCreate();
       mockTx.channelPartner.findMany.mockResolvedValue([]);
       await service.create(so, { ...groupedDto } as never);
-      // With phone uniqueness disabled, the partner-clash query is never issued (the only
-      // channelPartner.findFirst call site in create() is assertPhoneAvailable's phone check).
-      expect(mockPrisma.channelPartner.findFirst).not.toHaveBeenCalled();
+      // With phone uniqueness disabled, the partner-clash PHONE query is never issued. (Other
+      // channelPartner.findFirst reads DO run for the group document carry-forward via
+      // resolveGroupIdentity — those are keyed on id/kycSubmissions, never on a `phone` filter.)
+      const phoneClashCalls = mockPrisma.channelPartner.findFirst.mock.calls.filter(
+        (c: any) => c[0]?.where && 'phone' in c[0].where,
+      );
+      expect(phoneClashCalls).toHaveLength(0);
     });
 
     it('ungrouped outlet keeps STRICT phone uniqueness — no NOT filter', async () => {
@@ -1601,6 +1605,161 @@ describe('KycService', () => {
       const lockOrder = Math.min(...mockTx.$executeRaw.mock.invocationCallOrder);
       const readOrder = Math.min(...mockTx.channelPartner.findMany.mock.invocationCallOrder);
       expect(lockOrder).toBeLessThan(readOrder);
+    });
+
+    // ── GROUP DOCUMENT CARRY-FORWARD (grouped-child KYC inherits the source's GST cert / cheque) ──
+    // A brand-new grouped child (parentId set, partnerId null) whose UNCHANGED GST / bank matches the
+    // APPROVED group source inherits that source's approved GST certificate / cancelled cheque
+    // server-side — the reviewer sees a complete, approved-provenance doc set even if the FE never
+    // sent the inherited doc. A CHANGED gst/bank, a rep-uploaded doc, or UPI mode → no carry.
+    const GROUP_SOURCE = {
+      onboardedAt: new Date('2024-01-01T00:00:00.000Z'),
+      businessName: 'Group Owner Co', ownerName: 'Group Owner',
+      gstNumber: '29ABCDE1234F1Z5', panNumber: 'ABCDE1234F',
+      bankName: 'HDFC', bankAccountNumber: '50100', bankAccountHolder: 'Group Owner',
+      ifscCode: 'HDFC0001', upiId: 'owner@upi',
+    };
+    const SOURCE_DOCS = {
+      documents: [
+        { documentType: 'GST_CERTIFICATE', fileUrl: 'gu', fileKey: 'kyc/deoleo/SRC/gst.pdf', fileName: 'g.pdf', mimeType: 'application/pdf', fileSizeBytes: 11 },
+        { documentType: 'CANCELLED_CHEQUE', fileUrl: 'cu', fileKey: 'kyc/deoleo/SRC/cheque.pdf', fileName: 'c.pdf', mimeType: 'application/pdf', fileSizeBytes: 22 },
+      ],
+    };
+    /** Prime a grouped brand-new child + an APPROVED-parent group source carrying both carry-forward docs. */
+    const primeCarryForward = (opts?: { requiredPaymentType?: string; sourceDocs?: unknown }) => {
+      mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+        id: 'outlet-2', clientId: 'deoleo', partnerId: null, parentId: 'parent-1',
+        outletCode: 'OUT-2', outletType: { code: 'SSS' },
+        requiredPaymentType: opts?.requiredPaymentType ?? 'BANK',
+      });
+      // channelPartner.findFirst: 1st call = phone-clash (null); every call after = the APPROVED
+      // group source read by resolveGroupIdentity (its parent branch → sourcePartnerId='parent-1').
+      // channelPartner.findFirst order matches create()'s real call sequence when phone
+      // uniqueness is enforced: (1) the phone-clash read in assertPhoneAvailable (runs BEFORE
+      // the carry block) → null; (2+) resolveGroupIdentity's APPROVED-parent read → GROUP_SOURCE
+      // (onboardedAt + details → parent branch → sourcePartnerId='parent-1').
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce(null);
+      mockPrisma.channelPartner.findFirst.mockResolvedValue(GROUP_SOURCE);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+      mockTx.channelPartner.findMany.mockResolvedValue([]); // no uniqueness clash + free partnerCode
+      // The carry tests assert a PAN (childPan != null is now required to inherit any doc). The in-tx
+      // checkPanMatchesGroup → resolveGroupPan reads the group's canonical PAN off the parent here;
+      // it must MATCH the asserted child PAN ('ABCDE1234F' = GROUP_SOURCE.panNumber) so create proceeds.
+      mockTx.channelPartner.findUnique.mockResolvedValue({ panNumber: 'ABCDE1234F' });
+      mockTx.user.findFirst.mockResolvedValueOnce(null);
+      mockTx.user.create.mockResolvedValueOnce({ id: 'owner-2' });
+      mockTx.channelPartner.create.mockResolvedValueOnce({ id: 'cp-2' });
+      mockTx.outlet.update.mockResolvedValueOnce({});
+      mockTx.kycSubmission.findFirst.mockResolvedValueOnce(null);
+      mockTx.kycSubmission.create.mockResolvedValueOnce({ id: 'sub-2' });
+      mockPrisma.kycStatusHistory.create.mockResolvedValueOnce({});
+      mockPrisma.kycDocument.create.mockResolvedValue({});
+      // resolveGroupCarryForwardDocs reads the source's approved submission docs (via this.prisma).
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue(opts?.sourceDocs ?? SOURCE_DOCS);
+    };
+    const createdDocs = (): Array<Record<string, unknown>> =>
+      mockPrisma.kycDocument.create.mock.calls.map((c: any) => c[0].data);
+
+    it('CARRIES FORWARD the group GST cert + cheque when GST + bank are UNCHANGED and no doc uploaded', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeCarryForward();
+      // Unchanged GST + bank (matches GROUP_SOURCE) + asserted group PAN, no incoming documents.
+      await service.create(so, { ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5' } as never);
+      const docs = createdDocs();
+      const gst = docs.find((d) => d.documentType === 'GST_CERTIFICATE');
+      expect(gst).toMatchObject({
+        kycSubmissionId: 'sub-2', documentType: 'GST_CERTIFICATE',
+        fileKey: 'kyc/deoleo/SRC/gst.pdf', status: 'PENDING',
+      });
+      const cheque = docs.find((d) => d.documentType === 'CANCELLED_CHEQUE');
+      expect(cheque).toMatchObject({
+        kycSubmissionId: 'sub-2', documentType: 'CANCELLED_CHEQUE',
+        fileKey: 'kyc/deoleo/SRC/cheque.pdf', status: 'PENDING',
+      });
+    });
+
+    it('REJECTS (child must upload its own) when the child CHANGED the GST number', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeCarryForward();
+      // Child changed its GST away from the group WHILE the group HAS an approved cert and the rep
+      // uploaded none → the cert cannot be inherited and the FE may have waived it → authoritative
+      // reject BEFORE any write (no orphaned submission). The rep must upload the child's own cert.
+      await expect(
+        service.create(so, { ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '27ZZZZE1234F1Z5' } as never),
+      ).rejects.toThrow(/GST certificate is required/i);
+      expect(createdDocs().find((d) => d.documentType === 'GST_CERTIFICATE')).toBeUndefined();
+    });
+
+    it('child CHANGED the GST + uploads its OWN GST cert → succeeds, the rep’s cert is used (not carried)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeCarryForward();
+      // Escape hatch: a child that diverged from the group GST can still onboard by uploading its own
+      // cert — providedTypes suppresses both the carry AND the authoritative "required" throw.
+      await service.create(so, {
+        ...groupedDto,
+        panNumber: 'ABCDE1234F',
+        gstNumber: '27ZZZZE1234F1Z5', // changed away from the group
+        documents: [{ type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/child-gst.pdf' }],
+      } as never);
+      const gstCerts = createdDocs().filter((d) => d.documentType === 'GST_CERTIFICATE');
+      expect(gstCerts).toHaveLength(1); // the rep’s own, NOT the group’s carried cert
+      expect(gstCerts[0].fileKey).toBe('kyc/deoleo/2026-06/child-gst.pdf');
+    });
+
+    it('does NOT overwrite a rep-uploaded GST cert (providedTypes guard)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeCarryForward();
+      await service.create(so, {
+        ...groupedDto,
+        panNumber: 'ABCDE1234F',
+        gstNumber: '29ABCDE1234F1Z5', // unchanged — but the rep uploaded their own cert
+        documents: [{ type: 'GST_CERTIFICATE', fileKey: 'kyc/deoleo/2026-06/rep-gst.pdf' }],
+      } as never);
+      const gstCerts = createdDocs().filter((d) => d.documentType === 'GST_CERTIFICATE');
+      expect(gstCerts).toHaveLength(1); // the rep's, not carried on top
+      expect(gstCerts[0].fileKey).toBe('kyc/deoleo/2026-06/rep-gst.pdf');
+    });
+
+    it('REJECTS (child must upload its own) when the child CHANGED the bank account number', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeCarryForward();
+      // GST kept unchanged (so no GST throw) but the bank account diverged WHILE the group HAS an
+      // approved cheque and the rep uploaded none → the cheque cannot be inherited → authoritative
+      // reject BEFORE any write. The rep must upload the child's own cancelled cheque.
+      await expect(
+        service.create(so, {
+          ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5', accountNumber: '99999', // different account
+        } as never),
+      ).rejects.toThrow(/Cancelled cheque is required/i);
+      expect(createdDocs().find((d) => d.documentType === 'CANCELLED_CHEQUE')).toBeUndefined();
+    });
+
+    it('child CHANGED the bank + uploads its OWN cancelled cheque → succeeds', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      primeCarryForward();
+      // Escape hatch: a child that diverged from the group bank can still onboard by uploading its own
+      // cheque — providedTypes suppresses both the carry AND the authoritative "required" throw.
+      await service.create(so, {
+        ...groupedDto,
+        panNumber: 'ABCDE1234F',
+        gstNumber: '29ABCDE1234F1Z5', // unchanged → no GST throw (group GST cert still carries)
+        accountNumber: '99999', // changed away from the group
+        documents: [{ type: 'CANCELLED_CHEQUE', fileKey: 'kyc/deoleo/2026-06/child-cheque.pdf' }],
+      } as never);
+      const cheques = createdDocs().filter((d) => d.documentType === 'CANCELLED_CHEQUE');
+      expect(cheques).toHaveLength(1); // the rep’s own, NOT the group’s carried cheque
+      expect(cheques[0].fileKey).toBe('kyc/deoleo/2026-06/child-cheque.pdf');
+    });
+
+    it('does NOT carry the cheque in UPI mode (cheque is a bank-mode doc)', async () => {
+      mockUniquenessPolicy = { gst: true, phone: true, bank: false, upi: false };
+      mockUpiEnabled = true;
+      primeCarryForward({ requiredPaymentType: 'UPI' });
+      await service.create(so, {
+        ...groupedDto, panNumber: 'ABCDE1234F', gstNumber: '29ABCDE1234F1Z5', paymentMode: 'upi', upiId: 'child@upi',
+      } as never);
+      expect(createdDocs().find((d) => d.documentType === 'CANCELLED_CHEQUE')).toBeUndefined();
+      mockUpiEnabled = false;
     });
 
     it('persists PAN/GST upper-cased + trimmed (write-side normalization, F5)', async () => {
@@ -2770,7 +2929,15 @@ describe('KycService', () => {
           // `{not}` would exclude NULL rows (the approval no-op BLOCKER).
           OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
         },
-        data: { isActive: true, reactivatedAt: expect.any(Date), reKycFlags: Prisma.DbNull },
+        data: {
+          isActive: true,
+          reactivatedAt: expect.any(Date),
+          reKycFlags: Prisma.DbNull,
+          // Approval un-parks: a PARKED outlet must not end up active-but-hidden.
+          kycIntent: null,
+          kycIntentBy: null,
+          kycIntentAt: null,
+        },
       });
     });
 

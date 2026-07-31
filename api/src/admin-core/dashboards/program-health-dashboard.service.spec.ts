@@ -307,7 +307,7 @@ describe('ProgramHealthDashboardService', () => {
     // kycIntent `not` is wrapped in OR so NULL-intent outlets survive (trap 2).
     expect(outletWhere.OR).toEqual([
       { kycIntent: null },
-      { kycIntent: { not: 'NOT_INTERESTED' } },
+      { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } },
     ]);
 
     // PointsLedger joins to the tenant via wallet→partner→user.clientId.

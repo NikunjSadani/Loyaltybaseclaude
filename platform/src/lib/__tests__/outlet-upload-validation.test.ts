@@ -37,10 +37,14 @@ import {
   validateOutletUpload,
   validateReKYCFlagUpload,
   validateDeactivateUpload,
+  validateParkUpload,
+  validateUnparkUpload,
   parseOutletUploadRows,
   parseReKYCFlagRows,
   parseDeactivateRows,
   getOutletAdditionTemplateData,
+  getParkTemplateData,
+  getUnparkTemplateData,
   isYes,
 } from '../outlet-upload';
 import type {
@@ -623,6 +627,99 @@ describe('outlet deactivation upload validation', () => {
     expect(rows[0].rowNum).toBe(2);
     expect(rows[1].rowNum).toBe(3);
     expect(rows[0].outletId).toBe('OUT-001');
+  });
+});
+
+// ─── O60–O69: Outlet park / un-park upload validation ────────────────────────
+// Same single-column upload as deactivation (reuses parseDeactivateRows). Park
+// requires the outlet to exist + not already be PARKED; un-park requires the outlet
+// to exist + currently be PARKED. Duplicates in-file are rejected for both.
+
+const PARK_OUTLETS = [
+  { outletId: 'OUT-PEND-1', kycStatus: 'NOT_STARTED' },
+  { outletId: 'OUT-PEND-2', kycStatus: 'NOT_STARTED' },
+  { outletId: 'OUT-PARKED-1', kycStatus: 'PARKED' },
+  { outletId: 'OUT-APPROVED-1', kycStatus: 'APPROVED' },
+];
+
+describe('outlet park upload validation', () => {
+  it('O60 — a KYC-pending outlet parks OK', () => {
+    const rows   = parseDeactivateRows([{ 'Outlet ID': 'OUT-PEND-1' }]);
+    const result = validateParkUpload(rows, PARK_OUTLETS);
+    expect(result.headerError).toBeNull();
+    expect(result.hasErrors).toBe(false);
+    expect(result.canProceed).toBe(true);
+    expect(result.rows[0].status).toBe('OK');
+    expect(result.summary.parked).toBe(1);
+    expect(result.summary.errors).toBe(0);
+  });
+
+  it('O61 — an outlet ID not in the system is an error', () => {
+    const rows   = parseDeactivateRows([{ 'Outlet ID': 'OUT-GHOST' }]);
+    const result = validateParkUpload(rows, PARK_OUTLETS);
+    expect(result.rows[0].status).toBe('ERROR');
+    expect(result.rows[0].errors[0]).toMatch(/not found/i);
+    expect(result.canProceed).toBe(false);
+  });
+
+  it('O62 — an already-parked outlet is an error', () => {
+    const rows   = parseDeactivateRows([{ 'Outlet ID': 'OUT-PARKED-1' }]);
+    const result = validateParkUpload(rows, PARK_OUTLETS);
+    expect(result.rows[0].status).toBe('ERROR');
+    expect(result.rows[0].errors[0]).toMatch(/already parked/i);
+  });
+
+  it('O63 — a non-KYC-pending (approved) outlet is allowed through the FE (backend reports notFound)', () => {
+    // The KYC-pending predicate is enforced server-side, so the FE does not block
+    // an approved outlet — it lets the backend decide + surface it via notFound.
+    const rows   = parseDeactivateRows([{ 'Outlet ID': 'OUT-APPROVED-1' }]);
+    const result = validateParkUpload(rows, PARK_OUTLETS);
+    expect(result.rows[0].status).toBe('OK');
+  });
+
+  it('O64 — a duplicate outlet ID within the upload is an error', () => {
+    const rows = parseDeactivateRows([
+      { 'Outlet ID': 'OUT-PEND-1' },
+      { 'Outlet ID': 'OUT-PEND-1' },
+    ]);
+    const result = validateParkUpload(rows, PARK_OUTLETS);
+    expect(result.rows[1].status).toBe('ERROR');
+    expect(result.rows[1].errors[0]).toMatch(/duplicate/i);
+  });
+
+  it('O65 — the park template is a single Outlet ID column', () => {
+    const { headers } = getParkTemplateData();
+    expect(headers).toEqual(['Outlet ID']);
+  });
+});
+
+describe('outlet un-park upload validation', () => {
+  it('O66 — a currently-parked outlet un-parks OK', () => {
+    const rows   = parseDeactivateRows([{ 'Outlet ID': 'OUT-PARKED-1' }]);
+    const result = validateUnparkUpload(rows, PARK_OUTLETS);
+    expect(result.hasErrors).toBe(false);
+    expect(result.canProceed).toBe(true);
+    expect(result.rows[0].status).toBe('OK');
+    expect(result.summary.unparked).toBe(1);
+  });
+
+  it('O67 — an outlet that is not parked is an error', () => {
+    const rows   = parseDeactivateRows([{ 'Outlet ID': 'OUT-PEND-1' }]);
+    const result = validateUnparkUpload(rows, PARK_OUTLETS);
+    expect(result.rows[0].status).toBe('ERROR');
+    expect(result.rows[0].errors[0]).toMatch(/not currently parked/i);
+  });
+
+  it('O68 — an outlet ID not in the system is an error', () => {
+    const rows   = parseDeactivateRows([{ 'Outlet ID': 'OUT-GHOST' }]);
+    const result = validateUnparkUpload(rows, PARK_OUTLETS);
+    expect(result.rows[0].status).toBe('ERROR');
+    expect(result.rows[0].errors[0]).toMatch(/not found/i);
+  });
+
+  it('O69 — the un-park template is a single Outlet ID column', () => {
+    const { headers } = getUnparkTemplateData();
+    expect(headers).toEqual(['Outlet ID']);
   });
 });
 

@@ -286,7 +286,15 @@ describe('KycService.bulkVerify (Task 3.4c)', () => {
           // null-intent (common case) OR not-declined — bare `{not}` excludes NULL rows.
           OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
         },
-        data: { isActive: true, reactivatedAt: expect.any(Date), reKycFlags: Prisma.DbNull },
+        data: {
+          isActive: true,
+          reactivatedAt: expect.any(Date),
+          reKycFlags: Prisma.DbNull,
+          // Approval un-parks (shared activation path): never active-but-PARKED.
+          kycIntent: null,
+          kycIntentBy: null,
+          kycIntentAt: null,
+        },
       });
     });
 

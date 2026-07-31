@@ -71,7 +71,10 @@ export class ProgramHealthDashboardService {
       clientId,
       deletedAt: null,
       deactivatedAt: null,
-      OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
+      // Exclude BOTH NOT_INTERESTED (sales-declined) and PARKED (admin-removed from the
+      // pipeline) from the addressable universe. notIn drops NULL rows, so the {null} OR
+      // branch keeps the common null-intent pending outlets.
+      OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
     };
   }
 

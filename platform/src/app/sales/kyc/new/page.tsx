@@ -74,6 +74,14 @@ interface AssignedOutlet {
     bankName?: string; bankAccountNumber?: string; bankAccountHolder?: string;
     ifscCode?: string; upiId?: string;
     groupPan?: string | null;
+    /** The APPROVED group source has a GST certificate the backend can attach
+     *  authoritatively → the child rep may keep the unchanged group GST without
+     *  re-uploading the cert (UX relaxation only; backend attaches the real doc). */
+    gstCertInheritable?: boolean;
+    /** The APPROVED group source has a cancelled cheque the backend can attach
+     *  authoritatively → the child rep may keep the unchanged group bank details
+     *  without re-uploading the cheque (UX relaxation only). */
+    chequeInheritable?: boolean;
   };
 }
 
@@ -455,6 +463,45 @@ export default function NewKYCPage() {
    *   locked). Backend `checkPanMatchesGroup` is the authoritative guard. */
   const groupPan = selectedOutlet?.parentPrefill?.groupPan ?? null;
   const groupPanLocked = !!groupPan;
+
+  /* ── Inherited-document relaxation (grouped child keeping the group's UNCHANGED
+   *   identity/payout) ──
+   *   When the approved group source has a GST certificate / cancelled cheque on file
+   *   (backend flags `gstCertInheritable` / `chequeInheritable`), the child rep does NOT
+   *   need to re-upload that doc *provided* the corresponding fields still match the group
+   *   source AND the rep hasn't uploaded a fresh doc. The backend attaches the inherited
+   *   doc authoritatively — this only relaxes the FE required-gate + shows an inherited
+   *   badge. Comparisons are normalised (GST/IFSC upper-cased + trimmed; account trimmed)
+   *   so a case/space variant never wrongly forces a re-upload nor wrongly waives it. If
+   *   the rep edits GST/bank away from the group value, or uploads a fresh doc, these
+   *   flags become false automatically and the gate reverts to required. */
+  const pf = selectedOutlet?.parentPrefill;
+  const normUpper = (s?: string | null) => (s ?? '').trim().toUpperCase();
+  const normTrim = (s?: string | null) => (s ?? '').trim();
+
+  /* FIRST-KYC only. The backend group carry-forward is scoped to a brand-new grouped child
+   * (`!outlet.partnerId`); a re-KYC / re-entry (existingKyc set) is handled by the per-outlet
+   * carry-forward and its flagged docs must be re-uploaded. The FE waiver MUST share that scope —
+   * otherwise a re-KYC child could be waived here while the backend attaches nothing, leaving it
+   * approved with a required (admin-flagged) document missing. Mirrors the group-prefill guard below. */
+  const isFreshKyc = !selectedOutlet?.existingKyc;
+
+  const gstCertInherited =
+    isFreshKyc &&
+    !!pf?.gstCertInheritable &&
+    normUpper(form.gstNumber) !== '' &&
+    normUpper(form.gstNumber) === normUpper(pf?.gstNumber) &&
+    !docs.businessDoc;
+
+  const chequeInherited =
+    isFreshKyc &&
+    !!pf?.chequeInheritable &&
+    paymentMode === 'bank' &&
+    normTrim(form.accountNumber) !== '' &&
+    normTrim(form.accountNumber) === normTrim(pf?.bankAccountNumber) &&
+    normUpper(form.ifscCode) !== '' &&
+    normUpper(form.ifscCode) === normUpper(pf?.ifscCode) &&
+    !docs.cheque;
 
   /* Keep the PAN FORM value pinned to the group PAN whenever locked, so submit always
    * sends the group's canonical PAN — even on a re-entry whose existingKyc PAN differs,
@@ -1999,6 +2046,11 @@ export default function NewKYCPage() {
                 )}
                 <FileUploadCard docKey="businessDoc" label="GST Certificate" required
                   hint="PDF or image · Max 5 MB · Auto-compressed" inputRef={businessDocRef} />
+                {gstCertInherited && (
+                  <p data-testid="gst-cert-inherited-note" className="text-[11px] text-emerald-600 flex items-center gap-1 mt-1.5">
+                    <Check className="h-3 w-3 shrink-0" /> Inherited from group (approved) — upload only if different.
+                  </p>
+                )}
               </div>
               <div className={isReKYCFlagged('ownerPhoto') ? 'rounded-xl border border-amber-300 p-2 bg-amber-50/40' : ''}>
                 {isReKYCFlagged('ownerPhoto') && (
@@ -2021,7 +2073,7 @@ export default function NewKYCPage() {
                   mobileCheck === 'employee_conflict' ||
                   mobileCheck === 'idle' ||
                   mobileCheck === 'checking' ||
-                  !docs.businessDoc ||
+                  (!docs.businessDoc && !gstCertInherited) ||
                   !docs.ownerPhoto ||
                   isDocUploading(docs.businessDoc) ||
                   isDocUploading(docs.ownerPhoto)
@@ -2300,6 +2352,11 @@ export default function NewKYCPage() {
                 <FileUploadCard docKey="cheque" label="Cancelled Cheque" required
                   hint="Upload a cancelled cheque leaf · PDF or image · Max 5 MB · Auto-compressed"
                   inputRef={chequeRef} />
+                {chequeInherited && (
+                  <p data-testid="cheque-inherited-note" className="text-[11px] text-emerald-600 flex items-center gap-1 mt-1.5">
+                    <Check className="h-3 w-3 shrink-0" /> Inherited from group (approved) — upload only if different.
+                  </p>
+                )}
               </div>
               <p className="text-xs text-gray-400 -mt-1">Used to verify bank account details before payout.</p>
             </BankOrUpiSection>
@@ -2434,7 +2491,7 @@ export default function NewKYCPage() {
               <Button variant="primary" className="flex-1" loading={submitting} onClick={handleSubmit}
                 disabled={
                   (paymentMode === 'bank'
-                    ? (!form.bankName || !form.accountNumber || !form.ifscCode || !docs.cheque)
+                    ? (!form.bankName || !form.accountNumber || !form.ifscCode || (!docs.cheque && !chequeInherited))
                     : (!form.upiId || !isValidUpiId(form.upiId))
                   ) || !agreedToTerms || !agreedToComms || !hasSigned ||
                   paymentGeoLoading ||

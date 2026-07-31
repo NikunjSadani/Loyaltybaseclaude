@@ -22,6 +22,8 @@ const mockPrisma = {
   // Used by resolveGroupPan (owner-group PAN resolution) for the KYC pre-fill in buildOutlets.
   channelPartner: { findUnique: jest.fn(), findFirst: jest.fn() },
   outlet: { findFirst: jest.fn() },
+  // Used by resolveGroupCarryForwardDocs (group GST-cert/cheque inheritability booleans).
+  kycSubmission: { findFirst: jest.fn() },
 };
 
 // TenantService.resolveClient feeds the DB-backed feature blob into /sales/me
@@ -202,9 +204,40 @@ describe('SalesService', () => {
       // under-count "Outlets" vs /sales/outlets and zero out "KYC Pending". Match
       // buildOutlets/getMember exactly (assignment-only scoping). O2 above is a
       // partner-less/NOT_STARTED outlet and STILL counts toward outlets(2)+kycPending(1).
-      expect(aWhere.outlet).toBeUndefined();
+      // The ONLY outlet filter permitted is the PARKED-exclusion OR-wrap (never isActive).
+      expect(aWhere.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }] });
+      expect(JSON.stringify(aWhere.outlet)).not.toContain('isActive');
       // Exactly ONE assignment query (in-memory rollup, not per-member).
       expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('rollup assignment query excludes admin-PARKED outlets (null-safe OR-wrap) so KYC-Pending counts skip them', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({
+        id: 'mgr1', employeeCode: 'E1', region: 'North', zone: null,
+        hierarchyLevel: { code: 'ASM', name: 'Area Sales Manager', level: 2 },
+        subordinates: [
+          {
+            id: 'sub1', employeeCode: 'E2', region: 'NCR', zone: null,
+            joinedAt: new Date('2024-01-01T00:00:00.000Z'),
+            user: { name: 'Sub One', phone: '9900000041' },
+            hierarchyLevel: { code: 'SO', name: 'Sales Officer', level: 1 },
+            _count: { subordinates: 0 },
+          },
+        ],
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'mgr1', reportingToId: null },
+        { id: 'sub1', reportingToId: 'mgr1' },
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+      await service.getTeam(caller);
+
+      const aWhere = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
+      // The DB drops PARKED via this null-safe wrap → they never reach the in-memory
+      // outlets/kycPending tally. Keeps null + NOT_INTERESTED (only PARKED is named).
+      expect(aWhere.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }] });
+      expect(JSON.stringify(aWhere.outlet)).not.toContain('NOT_INTERESTED');
     });
 
     it('tenant-scopes the rollup edge + target reads to the caller clientId', async () => {
@@ -426,7 +459,14 @@ describe('SalesService', () => {
       ]);
       const res = await service.getMyOutlets(caller);
       const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ salesUserId: { in: ['caller-su'] }, outletId: { not: null }, unassignedAt: null });
+      expect(where).toEqual({
+        salesUserId: { in: ['caller-su'] },
+        outletId: { not: null },
+        unassignedAt: null,
+        // PARKED outlets are FULLY hidden from reps via a null-safe OR-wrap (keeps null +
+        // NOT_INTERESTED, drops only PARKED).
+        outlet: { OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }] },
+      });
 
       expect(res.outlets).toHaveLength(3);
       expect(res.outlets[0]).toMatchObject({
@@ -607,6 +647,24 @@ describe('SalesService', () => {
       expect(existingKyc.pincode).toBe('');
     });
 
+    it('FULLY hides admin-PARKED outlets via a null-safe OR-wrap (drops PARKED, keeps null + NOT_INTERESTED)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'caller-su' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'caller-su', reportingToId: null }]);
+      // The DB applies the where — assert the query carries the exact null-safe exclusion so
+      // a PARKED outlet is dropped while a null-kycIntent (normal) and a NOT_INTERESTED outlet
+      // are KEPT (the OR-null-wrap that the Prisma `{not:'PARKED'}` NULL-drop trap requires).
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      await service.getMyOutlets(caller);
+
+      const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
+      expect(where.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }] });
+      // The wrap keeps null-kycIntent rows: the `{ kycIntent: null }` OR branch is present.
+      expect(where.outlet.OR).toContainEqual({ kycIntent: null });
+      // NOT_INTERESTED is NOT excluded — only PARKED is named in the `not`.
+      expect(JSON.stringify(where.outlet)).not.toContain('NOT_INTERESTED');
+      expect(JSON.stringify(where.outlet)).toContain('PARKED');
+    });
+
     // ── Stream C: owner-group KYC pre-fill (parentPrefill) ──────────────────────
     // A child outlet grouped-before-KYC (Outlet.parentId set) whose parent is APPROVED.
     const groupedOutlet = (parent: Record<string, unknown> | null) => ({
@@ -708,6 +766,63 @@ describe('SalesService', () => {
       const res = await service.getMyOutlets(caller);
       expect(res.outlets[0].parentPrefill).toBeUndefined();
       expect(mockPrisma.channelPartner.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('sets gstCertInheritable/chequeInheritable TRUE when the group source has both approved docs', async () => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        groupedOutlet({ onboardedAt: new Date('2024-01-01T00:00:00.000Z') }),
+      ]);
+      mockPrisma.channelPartner.findFirst.mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(where.id
+          ? {
+              onboardedAt: new Date('2024-01-01T00:00:00.000Z'),
+              businessName: 'Group Owner Co', ownerName: 'Group Owner',
+              gstNumber: '07AAACT9811F1Z9', panNumber: 'AAACT9811F',
+              bankName: 'HDFC', bankAccountNumber: '123456789', bankAccountHolder: 'Group Owner',
+              ifscCode: 'HDFC0000001', upiId: 'owner@upi',
+            }
+          : null),
+      );
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'AAACT9811F' });
+      // resolveGroupCarryForwardDocs: the source's approved submission carries BOTH docs.
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({
+        documents: [
+          { documentType: 'GST_CERTIFICATE', fileUrl: 'u1', fileKey: 'k1', fileName: 'g.pdf', mimeType: 'application/pdf', fileSizeBytes: 10 },
+          { documentType: 'CANCELLED_CHEQUE', fileUrl: 'u2', fileKey: 'k2', fileName: 'c.pdf', mimeType: 'application/pdf', fileSizeBytes: 20 },
+        ],
+      });
+
+      const res = await service.getMyOutlets(caller);
+      const prefill = res.outlets[0].parentPrefill!;
+      expect(prefill.gstCertInheritable).toBe(true);
+      expect(prefill.chequeInheritable).toBe(true);
+    });
+
+    it('sets both inheritability booleans FALSE when the group source has no approved docs', async () => {
+      primeCaller();
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+        groupedOutlet({ onboardedAt: new Date('2024-01-01T00:00:00.000Z') }),
+      ]);
+      mockPrisma.channelPartner.findFirst.mockImplementation(({ where }: { where: Record<string, unknown> }) =>
+        Promise.resolve(where.id
+          ? {
+              onboardedAt: new Date('2024-01-01T00:00:00.000Z'),
+              businessName: 'Group Owner Co', ownerName: 'Group Owner',
+              gstNumber: '07AAACT9811F1Z9', panNumber: 'AAACT9811F',
+              bankName: 'HDFC', bankAccountNumber: '123456789', bankAccountHolder: 'Group Owner',
+              ifscCode: 'HDFC0000001', upiId: 'owner@upi',
+            }
+          : null),
+      );
+      mockPrisma.channelPartner.findUnique.mockResolvedValue({ panNumber: 'AAACT9811F' });
+      // No approved submission → resolveGroupCarryForwardDocs returns both null.
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue(null);
+
+      const res = await service.getMyOutlets(caller);
+      const prefill = res.outlets[0].parentPrefill!;
+      expect(prefill.gstCertInheritable).toBe(false);
+      expect(prefill.chequeInheritable).toBe(false);
     });
   });
 

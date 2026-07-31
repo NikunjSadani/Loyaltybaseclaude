@@ -110,7 +110,9 @@ export class VisibilityNotifyService {
         clientId,
         deletedAt: null,
         deactivatedAt: null,
-        OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
+        // Don't nudge a rep about a NOT_INTERESTED (declined) or PARKED (admin-removed) outlet.
+        // notIn drops NULLs → the {null} branch keeps normal pending outlets.
+        OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
         outletType: { code: { in: outletScope } },
         NOT: { visibilityCaptures: { some: { windowKey, status: 'APPROVED' } } },
       } as Prisma.OutletWhereInput,

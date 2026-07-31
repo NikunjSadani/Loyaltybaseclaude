@@ -6,7 +6,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { AdminOutletsService } from './admin-outlets.service';
+import { AdminOutletsService, deriveKycStatus } from './admin-outlets.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
@@ -281,6 +281,38 @@ describe('AdminOutletsService', () => {
       expect(bucket.AND).toEqual(
         expect.arrayContaining([
           { OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }] },
+        ]),
+      );
+    });
+
+    it("kycStatus=PARKED filters on kycIntent='PARKED' (its own bucket, AND tenant scope)", async () => {
+      mockPrisma.outlet.findMany
+        .mockResolvedValueOnce([]) // (a) owned partners
+        .mockResolvedValueOnce([]) // (b) reKyc candidates
+        .mockResolvedValueOnce([]); // paginated page
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+      await service.list(admin, { kycStatus: 'PARKED' });
+
+      const where = mockPrisma.outlet.findMany.mock.calls[2][0].where;
+      expect(where.AND[0]).toMatchObject({ clientId: TENANT_A, deletedAt: null });
+      expect(where.AND[1]).toEqual({ kycIntent: 'PARKED' });
+    });
+
+    it('kycStatus=NOT_STARTED EXCLUDES PARKED outlets via a null-safe OR-wrap (keeps null-kycIntent pending outlets)', async () => {
+      // A pending PARKED outlet has partnerId:null, which would otherwise match the
+      // NOT_STARTED `{ partnerId: null }` branch. The bucket must AND-in a null-safe
+      // NOT-PARKED guard so PARKED never leaks into NOT_STARTED (but null/NOT_INTERESTED stay).
+      mockPrisma.outlet.findMany
+        .mockResolvedValueOnce([]) // (a) owned partners
+        .mockResolvedValueOnce([]) // (b) reKyc candidates
+        .mockResolvedValueOnce([]); // paginated page
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+      await service.list(admin, { kycStatus: 'NOT_STARTED' });
+
+      const bucket = mockPrisma.outlet.findMany.mock.calls[2][0].where.AND[1];
+      expect(bucket.AND).toEqual(
+        expect.arrayContaining([
+          { OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }] },
         ]),
       );
     });
@@ -1063,11 +1095,15 @@ describe('AdminOutletsService', () => {
       expect(mockTx.userSession.updateMany).not.toHaveBeenCalled();
     });
 
-    it('reactivate scopes by clientId + isActive false and flips them active', async () => {
+    it('reactivate scopes by clientId + isActive false + deactivatedAt!=null and flips them active', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletCode: 'OUT-1' }]);
       const res = await service.reactivate(admin, { outletCodes: ['OUT-1'] });
       const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
       expect(where).toMatchObject({ clientId: TENANT_A, isActive: false, deletedAt: null });
+      // SECURITY GUARD: only GENUINELY-DEACTIVATED outlets (deactivatedAt set) are
+      // eligible — a never-approved KYC-PENDING outlet (deactivatedAt null) must be
+      // excluded so reactivate cannot bypass the KYC-approval activation gate.
+      expect(where.deactivatedAt).toEqual({ not: null });
       expect(res.reactivated).toBe(1);
       expect(mockPrisma.outlet.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: { in: ['o1'] } }, data: expect.objectContaining({ isActive: true }) }),
@@ -1078,6 +1114,17 @@ describe('AdminOutletsService', () => {
           data: expect.objectContaining({ kycIntent: null, kycIntentBy: null, kycIntentAt: null }),
         }),
       );
+    });
+
+    it('reactivate REFUSES to activate a KYC-pending outlet (deactivatedAt null → no match → BadRequest, no write)', async () => {
+      // The pending outlet never matches the deactivatedAt!=null filter, so findMany
+      // returns [] and reactivate throws WITHOUT writing — proving a never-approved
+      // outlet cannot be flipped active through this endpoint.
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      await expect(service.reactivate(admin, { outletCodes: ['PENDING-1'] })).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(mockPrisma.outlet.updateMany).not.toHaveBeenCalled();
     });
 
     it('bulk-delete matches an ownerless (partnerId null) outlet via outlet.clientId and writes an audit log', async () => {
@@ -1097,5 +1144,84 @@ describe('AdminOutletsService', () => {
       mockPrisma.outlet.findMany.mockResolvedValue([]);
       await expect(service.bulkDelete(admin, { outletIds: ['nope'] })).rejects.toBeInstanceOf(BadRequestException);
     });
+  });
+
+  describe('park — hide KYC-pending outlets from reps (reversible)', () => {
+    it('sets kycIntent=PARKED (+ by/at) on matching pending outlets, scoped to the tenant, returning counts + notFound', async () => {
+      // Only OUT-1 is a pending (isActive:false) outlet in the tenant; OUT-X never matches.
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletCode: 'OUT-1' }]);
+      const res = await service.park(admin, { outletCodes: ['OUT-1', 'OUT-X'] });
+
+      // Match: TRUE KYC-pending only — isActive:false AND deactivatedAt:null (never-deactivated),
+      // non-deleted, tenant-scoped, by outletCode. deactivatedAt:null keeps Park out of the
+      // deactivate/reactivate lifecycle (a genuinely-deactivated outlet is not parkable here).
+      const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({
+        outletCode: { in: ['OUT-1', 'OUT-X'] },
+        clientId: TENANT_A,
+        deletedAt: null,
+        isActive: false,
+        deactivatedAt: null,
+        // Idempotency: already-PARKED outlets are skipped (null-safe OR-wrap).
+        OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }],
+      });
+      // Writes the PARKED intent stamp (by the actor, timestamped).
+      const upd = mockPrisma.outlet.updateMany.mock.calls[0][0];
+      expect(upd.where).toEqual({ id: { in: ['o1'] } });
+      expect(upd.data).toMatchObject({ kycIntent: 'PARKED', kycIntentBy: 'actor1' });
+      expect(upd.data.kycIntentAt).toBeInstanceOf(Date);
+      // Return shape: { parked, notFound } — notFound = unmatched codes.
+      expect(res).toEqual({ parked: 1, notFound: ['OUT-X'] });
+    });
+
+    it('SKIPS an approved/active outlet (isActive:true) — the isActive:false filter excludes it → BadRequest, no write', async () => {
+      // An active (approved) outlet never satisfies isActive:false, so findMany returns []
+      // and park throws WITHOUT writing — proving Park cannot hide a live outlet (use Deactivate).
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      await expect(service.park(admin, { outletCodes: ['ACTIVE-1'] })).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(mockPrisma.outlet.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequest with the frozen message when zero outlets match', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      await expect(service.park(admin, { outletCodes: ['NOPE'] })).rejects.toThrow(
+        'No pending outlets found for the given outlet codes',
+      );
+    });
+  });
+
+  describe('unpark — clear the PARKED intent', () => {
+    it('clears kycIntent/by/at where kycIntent=PARKED (tenant-scoped), returning { unparked, notFound }', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([{ id: 'o1', outletCode: 'OUT-1' }]);
+      const res = await service.unpark(admin, { outletCodes: ['OUT-1', 'OUT-Z'] });
+
+      // Only currently-PARKED rows in the tenant are matched (never touches NOT_INTERESTED).
+      const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({ outletCode: { in: ['OUT-1', 'OUT-Z'] }, clientId: TENANT_A, kycIntent: 'PARKED' });
+      const upd = mockPrisma.outlet.updateMany.mock.calls[0][0];
+      expect(upd.where).toEqual({ id: { in: ['o1'] } });
+      expect(upd.data).toEqual({ kycIntent: null, kycIntentBy: null, kycIntentAt: null });
+      expect(res).toEqual({ unparked: 1, notFound: ['OUT-Z'] });
+    });
+
+    it('throws BadRequest with the frozen message when no parked outlets match', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      await expect(service.unpark(admin, { outletCodes: ['NOPE'] })).rejects.toThrow(
+        'No parked outlets found for the given outlet codes',
+      );
+      expect(mockPrisma.outlet.updateMany).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('deriveKycStatus — PARKED bucket', () => {
+  it("returns 'PARKED' for a PARKED outlet (its own distinct display bucket, not NOT_STARTED)", () => {
+    expect(deriveKycStatus(null, 'PARKED', null, new Map())).toBe('PARKED');
+  });
+
+  it("still returns 'NOT_STARTED' for a NOT_INTERESTED outlet (PARKED branch does not disturb it)", () => {
+    expect(deriveKycStatus(null, 'NOT_INTERESTED', null, new Map())).toBe('NOT_STARTED');
   });
 });

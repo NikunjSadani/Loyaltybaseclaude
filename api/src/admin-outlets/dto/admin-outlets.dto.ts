@@ -26,6 +26,9 @@ export const OUTLET_KYC_FILTER_VALUES = [
   'APPROVED',
   'REJECTED',
   'RE_KYC_REQUIRED',
+  // Admin-PARKED outlets — their own distinct bucket (never folded into NOT_STARTED), so an
+  // admin can list + un-park them. Fully hidden from sales reps.
+  'PARKED',
 ] as const;
 export type OutletKycFilter = (typeof OUTLET_KYC_FILTER_VALUES)[number];
 

@@ -85,7 +85,7 @@ describe('VisibilityReportService', () => {
       deactivatedAt: null,
       outletType: { code: { in: ['SSS'] } },
     });
-    expect(where.outlet.OR).toEqual([{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }]);
+    expect(where.outlet.OR).toEqual([{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }]);
   });
 
   it('coveragePct never exceeds 100 even if approved captures are reported (M2 invariant)', async () => {
@@ -118,7 +118,7 @@ describe('VisibilityReportService', () => {
       deactivatedAt: null,
       outletType: { code: { in: ['SSS'] } },
     });
-    expect(where.OR).toEqual([{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }]);
+    expect(where.OR).toEqual([{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }]);
     expect(where.isActive).toBeUndefined();
   });
 

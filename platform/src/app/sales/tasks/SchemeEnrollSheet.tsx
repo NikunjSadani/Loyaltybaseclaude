@@ -224,7 +224,7 @@ export function SchemeEnrollSheet({
               )}
               <div className="min-w-0">
                 <p className="text-[10px] font-semibold text-[var(--brand-primary)] uppercase tracking-widest mb-0.5">
-                  Scheme Enrollment
+                  Activations / Tasks
                 </p>
                 <h2 className="text-base font-bold text-gray-900 leading-snug truncate">{scheme.name}</h2>
                 {selected && view !== 'pick' && (

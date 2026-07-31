@@ -1418,7 +1418,11 @@ export class SchemeEnrollmentService {
     const reach = descendantSalesUserIds(caller.id, edges); // includes self
     const reachArr = [...reach];
     const assignments = await this.prisma.salesUserAssignment.findMany({
-      where: { salesUserId: { in: reachArr }, unassignedAt: null },
+      // NOT: { outlet: { kycIntent: 'PARKED' } } — an admin-PARKED outlet is fully hidden
+      // from the rep's scheme reach (list + target picker), matching sales.service's
+      // NOT_PARKED_OUTLET. A partner-only assignment (outletId null → no related outlet) is
+      // KEPT: the relation predicate is false for it, so NOT(false) includes it.
+      where: { salesUserId: { in: reachArr }, unassignedAt: null, NOT: { outlet: { kycIntent: 'PARKED' } } },
       select: { outletId: true, partnerId: true },
     });
     const reachOutletIds = new Set<string>();
@@ -1491,7 +1495,11 @@ export class SchemeEnrollmentService {
     // The outlets/partners the rep's subtree currently holds an active assignment for —
     // bounds BOTH the assignment-reach roster query and the live-rule candidate set.
     const assignments = await this.prisma.salesUserAssignment.findMany({
-      where: { salesUserId: { in: reachArr }, unassignedAt: null },
+      // NOT: { outlet: { kycIntent: 'PARKED' } } — an admin-PARKED outlet is fully hidden
+      // from the rep's scheme reach (list + target picker), matching sales.service's
+      // NOT_PARKED_OUTLET. A partner-only assignment (outletId null → no related outlet) is
+      // KEPT: the relation predicate is false for it, so NOT(false) includes it.
+      where: { salesUserId: { in: reachArr }, unassignedAt: null, NOT: { outlet: { kycIntent: 'PARKED' } } },
       select: { outletId: true, partnerId: true },
     });
     const reachOutletIds = new Set<string>();

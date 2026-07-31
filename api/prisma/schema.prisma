@@ -80,6 +80,9 @@ enum KycStatus {
 /// Separate from KycStatus which tracks individual submission lifecycle.
 enum OutletKycIntent {
   NOT_INTERESTED
+  /// Admin PARKED a KYC-pending outlet — FULLY hidden from sales reps until un-parked.
+  /// Distinct from NOT_INTERESTED (a rep's decline). Reversible via the admin un-park action.
+  PARKED
 }
 
 // Per-outlet MANDATE for which payout details the outlet must provide at KYC.

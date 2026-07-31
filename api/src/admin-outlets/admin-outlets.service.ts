@@ -54,6 +54,11 @@ export function deriveKycStatus(
   if (isReKycPending(reKycFlags) && !isKycInFlight(latestForReKyc)) {
     return 'RE_KYC_REQUIRED';
   }
+  // Admin-PARKED outlet — its own distinct display bucket (NOT folded into NOT_STARTED), so
+  // the admin can see + un-park it. Checked BEFORE NOT_INTERESTED (PARKED is a separate state).
+  if (kycIntent === OutletKycIntent.PARKED) {
+    return 'PARKED';
+  }
   if (kycIntent === OutletKycIntent.NOT_INTERESTED) {
     return 'NOT_STARTED';
   }
@@ -112,10 +117,12 @@ const KYC_STATUS_BY_BUCKET: Record<OutletKycFilter, KycStatus[]> = {
     KycStatus.RESUBMISSION_REQUIRED,
     KycStatus.DRAFT,
   ],
-  // These two are derived (not a direct submission-status match) — never read from
-  // this table directly; buildKycStatusWhere handles them via partnerId sets.
+  // These are derived (not a direct submission-status match) — never read from
+  // this table directly; buildKycStatusWhere handles them via partnerId sets / kycIntent.
   RE_KYC_REQUIRED: [KycStatus.RE_KYC_REQUIRED],
   NOT_STARTED: [],
+  // PARKED is a pure kycIntent match (no submission involvement) — handled directly.
+  PARKED: [],
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -356,6 +363,23 @@ export class AdminOutletsService {
       ],
     };
 
+    // Null-safe "kycIntent is not PARKED". A PARKED outlet has its own display bucket
+    // (deriveKycStatus returns 'PARKED', ahead of every submission bucket), so it must be
+    // EXCLUDED from NOT_STARTED (a pending PARKED outlet is partnerId:null, which would
+    // otherwise match NOT_STARTED's `{ partnerId: null }` branch). `{ not: PARKED }` alone
+    // drops NULL-kycIntent rows (Prisma NULL semantics), so OR-in the null case.
+    const NOT_PARKED: Prisma.OutletWhereInput = {
+      OR: [
+        { kycIntent: null },
+        { kycIntent: { not: OutletKycIntent.PARKED } },
+      ],
+    };
+
+    // PARKED bucket = a pure kycIntent match (no partner/submission involvement).
+    if (bucket === 'PARKED') {
+      return { kycIntent: OutletKycIntent.PARKED };
+    }
+
     // Partner ids whose LATEST submission maps to the requested bucket.
     const wantedStatuses = new Set(KYC_STATUS_BY_BUCKET[bucket]);
     const partnerIdsInBucket: string[] = [];
@@ -409,6 +433,9 @@ export class AdminOutletsService {
       return {
         // Never re-KYC-flagged (those are RE_KYC_REQUIRED by priority 1).
         id: { notIn: reKycOutletIds },
+        // Never PARKED — a PARKED outlet has its own bucket (else its partnerId:null would
+        // match the `{ partnerId: null }` branch below and leak into NOT_STARTED).
+        AND: [NOT_PARKED],
         OR: [
           { kycIntent: OutletKycIntent.NOT_INTERESTED },
           { partnerId: null },
@@ -1286,20 +1313,42 @@ export class AdminOutletsService {
   }
 
   /**
-   * POST /v1/admin/outlets/reactivate — flip inactive (not soft-deleted) outlets
-   * back to active by outletCode.
+   * POST /v1/admin/outlets/reactivate — flip a genuinely-DEACTIVATED outlet back
+   * to active by outletCode.
+   *
+   * SECURITY: the match REQUIRES `deactivatedAt != null` — i.e. the outlet was once
+   * active and then turned off. A KYC-PENDING outlet (created `isActive:false` with
+   * `deactivatedAt:null`, never approved) MUST NOT be reachable here: activating it
+   * would bypass the KYC-approval gate that is the only intended activator of a
+   * pending outlet, inserting a never-vetted outlet into "active" counts and silently
+   * clearing a rep's NOT_INTERESTED mark. This mirrors the bulk-upsert reactivate
+   * guard (`!isActive && deactivatedAt != null`, see buildOutletUpdate).
    */
   async reactivate(user: JwtPayload, dto: OutletCodesDto) {
     const clientId = user.clientId;
     const { outletCodes } = dto;
 
     const outlets = await this.prisma.outlet.findMany({
-      where: { outletCode: { in: outletCodes }, isActive: false, deletedAt: null, clientId },
+      // `deactivatedAt: { not: null }` selects only rows that were explicitly
+      // deactivated (never-approved PENDING outlets have deactivatedAt=null and are
+      // excluded). Prisma's `{ not: null }` here is the intended NULL-exclusion,
+      // NOT the trap-2 NULL-drop — we WANT to drop the null (pending) rows.
+      where: {
+        outletCode: { in: outletCodes },
+        isActive: false,
+        deactivatedAt: { not: null },
+        deletedAt: null,
+        clientId,
+      },
       select: { id: true, outletCode: true },
     });
 
     if (outlets.length === 0) {
-      throw new BadRequestException('No inactive outlets found for the given outlet codes');
+      throw new BadRequestException(
+        'No deactivated outlets found for the given outlet codes. ' +
+          'A KYC-pending outlet that was never approved cannot be reactivated — ' +
+          'only outlets that were previously active and then deactivated.',
+      );
     }
 
     const inactiveIds = outlets.map((o) => o.id);
@@ -1327,5 +1376,86 @@ export class AdminOutletsService {
       notFound,
       message: `${outlets.length} outlet(s) reactivated${notFound.length > 0 ? `. ${notFound.length} code(s) not found or already active.` : '.'}`,
     };
+  }
+
+  /**
+   * POST /v1/admin/outlets/park — PARK KYC-pending outlets by outletCode so they are
+   * FULLY hidden from sales reps (sales.buildOutlets / rollups / getMember all exclude
+   * PARKED). Reversible via unpark(). PARKED is a NEW, distinct state — it does NOT touch
+   * the NOT_INTERESTED path.
+   *
+   * SECURITY: only NOT-YET-APPROVED pending outlets are eligible — a pending outlet is
+   * created `isActive:false` and only flips to `isActive:true` on KYC approval, so the
+   * `isActive:false` filter guarantees an approved/active outlet is SKIPPED (those are
+   * removed via Deactivate, not Park). No partner/login exists on a pending outlet, so no
+   * session-revoke is needed and a single updateMany suffices.
+   */
+  async park(user: JwtPayload, dto: OutletCodesDto) {
+    const clientId = user.clientId;
+    const { outletCodes } = dto;
+
+    // Match TRUE KYC-pending outlets only: non-deleted, not-yet-approved (isActive:false),
+    // and NEVER-deactivated (deactivatedAt:null). Approved/active outlets (isActive:true) are
+    // excluded → Park never hides a live outlet. Genuinely-deactivated outlets (deactivatedAt
+    // set) belong to the deactivate/reactivate lifecycle — keeping Park to deactivatedAt:null
+    // keeps the two lifecycles cleanly separate (a deactivated outlet is already hidden; its
+    // restore path is reactivate, which requires deactivatedAt!=null).
+    const outlets = await this.prisma.outlet.findMany({
+      where: {
+        outletCode: { in: outletCodes },
+        clientId,
+        deletedAt: null,
+        isActive: false,
+        deactivatedAt: null,
+        // Skip outlets ALREADY parked so a re-upload doesn't overwrite the original
+        // kycIntentBy/At (preserves who first parked it). {not:'PARKED'} drops NULLs, so
+        // the {null} OR-branch keeps the common null-intent pending outlets.
+        OR: [{ kycIntent: null }, { kycIntent: { not: OutletKycIntent.PARKED } }],
+      },
+      select: { id: true, outletCode: true },
+    });
+
+    if (outlets.length === 0) {
+      throw new BadRequestException('No pending outlets found for the given outlet codes');
+    }
+
+    const ids = outlets.map((o) => o.id);
+    await this.prisma.outlet.updateMany({
+      where: { id: { in: ids } },
+      data: { kycIntent: OutletKycIntent.PARKED, kycIntentBy: user.sub, kycIntentAt: new Date() },
+    });
+
+    const notFound = outletCodes.filter((c) => !outlets.some((o) => o.outletCode === c));
+
+    return { parked: outlets.length, notFound };
+  }
+
+  /**
+   * POST /v1/admin/outlets/unpark — reverse park(): clear the PARKED intent by outletCode
+   * so the outlet is visible to reps again. Only rows currently `kycIntent:'PARKED'` in the
+   * caller's tenant are matched, so a NOT_INTERESTED (or clean) outlet is never disturbed.
+   */
+  async unpark(user: JwtPayload, dto: OutletCodesDto) {
+    const clientId = user.clientId;
+    const { outletCodes } = dto;
+
+    const outlets = await this.prisma.outlet.findMany({
+      where: { outletCode: { in: outletCodes }, clientId, kycIntent: OutletKycIntent.PARKED },
+      select: { id: true, outletCode: true },
+    });
+
+    if (outlets.length === 0) {
+      throw new BadRequestException('No parked outlets found for the given outlet codes');
+    }
+
+    const ids = outlets.map((o) => o.id);
+    await this.prisma.outlet.updateMany({
+      where: { id: { in: ids } },
+      data: { kycIntent: null, kycIntentBy: null, kycIntentAt: null },
+    });
+
+    const notFound = outletCodes.filter((c) => !outlets.some((o) => o.outletCode === c));
+
+    return { unparked: outlets.length, notFound };
   }
 }

@@ -21,6 +21,8 @@ import type {
   OutletDeactivateRow,
   OutletDeactivateRowResult,
   OutletDeactivateValidationResult,
+  OutletParkValidationResult,
+  OutletUnparkValidationResult,
 } from '@/types';
 import type { HierarchyEmployee, TenantHierarchyLevel } from '@/types';
 import { KYCStatus } from '@/types';
@@ -815,6 +817,175 @@ export function getDeactivateTemplateData(): OutletTemplateData {
   return { headers, exampleRows, dosAndDonts };
 }
 
+// ─── Outlet Park / Un-park (KYC-queue removal) ────────────────────────────────
+//
+// "Parking" fully removes a KYC-pending outlet from the sales team's KYC queue
+// (hidden from reps) without deleting it; "un-parking" returns it to the queue.
+// The upload is the same single-column ('Outlet ID') shape as deactivation, so
+// the PARSER (parseDeactivateRows) and HEADER validator (validateDeactivateHeaders)
+// are reused verbatim — only the row-level rules + template copy differ.
+
+export const PARK_HEADERS = ['Outlet ID'] as const;
+
+/** Outlet must exist to be parked; already-PARKED outlets and duplicates are rejected.
+ *  The KYC-pending predicate (only KYC-pending outlets are actually parked) is enforced
+ *  server-side and surfaced back via the `notFound` list, so it is NOT re-guessed here. */
+export function validateParkUpload(
+  rows:    OutletDeactivateRow[],
+  outlets: Array<{ outletId: string; kycStatus: string }>,
+): OutletParkValidationResult {
+  const outletMap    = new Map(outlets.map(o => [o.outletId, o]));
+  const seenInUpload = new Map<string, number>();
+  const rowResults: OutletDeactivateRowResult[] = [];
+
+  for (const row of rows) {
+    const errors: string[] = [];
+
+    const existing = outletMap.get(row.outletId);
+    if (!existing) {
+      errors.push(`Outlet ID "${row.outletId}" not found in the system`);
+    } else if (existing.kycStatus === 'PARKED') {
+      errors.push(`Outlet ID "${row.outletId}" is already parked`);
+    }
+
+    if (seenInUpload.has(row.outletId)) {
+      errors.push(`Duplicate Outlet ID "${row.outletId}" — first seen at row ${seenInUpload.get(row.outletId)}`);
+    } else {
+      seenInUpload.set(row.outletId, row.rowNum);
+    }
+
+    rowResults.push({
+      rowNum:   row.rowNum,
+      outletId: row.outletId,
+      status:   errors.length > 0 ? 'ERROR' : 'OK',
+      errors,
+    });
+  }
+
+  const hasErrors  = rowResults.some(r => r.status === 'ERROR');
+  const parked     = rowResults.filter(r => r.status === 'OK').length;
+  const errorCount = rowResults.filter(r => r.status === 'ERROR').length;
+
+  return {
+    headerError: null,
+    rows:        rowResults,
+    hasErrors,
+    canProceed:  !hasErrors && rowResults.length > 0,
+    summary:     { total: rowResults.length, parked, errors: errorCount },
+  };
+}
+
+/** Outlet must exist AND currently be PARKED to be un-parked; duplicates are rejected. */
+export function validateUnparkUpload(
+  rows:    OutletDeactivateRow[],
+  outlets: Array<{ outletId: string; kycStatus: string }>,
+): OutletUnparkValidationResult {
+  const outletMap    = new Map(outlets.map(o => [o.outletId, o]));
+  const seenInUpload = new Map<string, number>();
+  const rowResults: OutletDeactivateRowResult[] = [];
+
+  for (const row of rows) {
+    const errors: string[] = [];
+
+    const existing = outletMap.get(row.outletId);
+    if (!existing) {
+      errors.push(`Outlet ID "${row.outletId}" not found in the system`);
+    } else if (existing.kycStatus !== 'PARKED') {
+      errors.push(`Outlet ID "${row.outletId}" is not currently parked`);
+    }
+
+    if (seenInUpload.has(row.outletId)) {
+      errors.push(`Duplicate Outlet ID "${row.outletId}" — first seen at row ${seenInUpload.get(row.outletId)}`);
+    } else {
+      seenInUpload.set(row.outletId, row.rowNum);
+    }
+
+    rowResults.push({
+      rowNum:   row.rowNum,
+      outletId: row.outletId,
+      status:   errors.length > 0 ? 'ERROR' : 'OK',
+      errors,
+    });
+  }
+
+  const hasErrors  = rowResults.some(r => r.status === 'ERROR');
+  const unparked   = rowResults.filter(r => r.status === 'OK').length;
+  const errorCount = rowResults.filter(r => r.status === 'ERROR').length;
+
+  return {
+    headerError: null,
+    rows:        rowResults,
+    hasErrors,
+    canProceed:  !hasErrors && rowResults.length > 0,
+    summary:     { total: rowResults.length, unparked, errors: errorCount },
+  };
+}
+
+export function getParkTemplateData(): OutletTemplateData {
+  const headers = [...PARK_HEADERS];
+
+  const exampleRows: string[][] = [
+    ['OUT-2026-001'],
+    ['OUT-2026-002'],
+  ];
+
+  const dosAndDonts: string[][] = [
+    ['OUTLET PARKING — Dos & Don\'ts', ''],
+    ['', ''],
+    ['WHAT THIS DOES', ''],
+    ['IMPORTANT', 'This upload PARKS the listed outlets — they are fully removed from the sales team\'s KYC queue and hidden from reps. Use it to bulk-remove KYC-pending outlets you are not pursuing. Parking is reversible: use the Un-park upload to return an outlet to the queue.'],
+    ['', ''],
+    ['COLUMN REFERENCE', ''],
+    ['Outlet ID', 'The exact Outlet ID to park — must exist in the system. Only KYC-pending outlets are parked; any outlet that is already parked or no longer KYC-pending is reported back as "not parked".'],
+    ['', ''],
+    ['✓ DOs', ''],
+    ['DO', 'Confirm the Outlet ID exists in the system before uploading'],
+    ['DO', 'Use this for KYC-pending outlets you have decided not to pursue right now'],
+    ['DO', 'Un-park later if you decide to pursue the outlet again'],
+    ['', ''],
+    ['✗ DON\'Ts', ''],
+    ['DON\'T', 'Include outlets that are already parked — those rows will be rejected'],
+    ['DON\'T', 'Use the same Outlet ID twice in one file'],
+    ['', ''],
+    ['COMMON MISTAKES', ''],
+    ['MISTAKE', 'Mis-typing the Outlet ID — it must match the stored ID exactly (including any spaces or special characters it was created with)'],
+  ];
+
+  return { headers, exampleRows, dosAndDonts };
+}
+
+export function getUnparkTemplateData(): OutletTemplateData {
+  const headers = [...PARK_HEADERS];
+
+  const exampleRows: string[][] = [
+    ['OUT-2026-001'],
+    ['OUT-2026-002'],
+  ];
+
+  const dosAndDonts: string[][] = [
+    ['OUTLET UN-PARKING — Dos & Don\'ts', ''],
+    ['', ''],
+    ['WHAT THIS DOES', ''],
+    ['IMPORTANT', 'This upload UN-PARKS the listed outlets — they are returned to the sales team\'s KYC queue and become visible to reps again.'],
+    ['', ''],
+    ['COLUMN REFERENCE', ''],
+    ['Outlet ID', 'The exact Outlet ID to un-park — must exist in the system and must currently be parked'],
+    ['', ''],
+    ['✓ DOs', ''],
+    ['DO', 'Confirm the outlet is currently parked before uploading'],
+    ['DO', 'Un-park an outlet when you decide to pursue its KYC again'],
+    ['', ''],
+    ['✗ DON\'Ts', ''],
+    ['DON\'T', 'Include outlets that are not currently parked — those rows will be rejected'],
+    ['DON\'T', 'Use the same Outlet ID twice in one file'],
+    ['', ''],
+    ['COMMON MISTAKES', ''],
+    ['MISTAKE', 'Mis-typing the Outlet ID — it must match the stored ID exactly (including any spaces or special characters it was created with)'],
+  ];
+
+  return { headers, exampleRows, dosAndDonts };
+}
+
 // ─── HTML Operations Guide ────────────────────────────────────────────────────
 
 export function generateOutletGuideHtml(validOutletTypes: string[] = []): string {
@@ -1105,9 +1276,11 @@ export function buildReKYCErrorReport(
   return { columns: ['Row', ...REKYC_FLAG_HEADERS], rows, errorHeader: 'Validation Errors' };
 }
 
-/** Deactivate error report — Outlet ID column + Remarks (its template has one column). */
+/** Deactivate error report — Outlet ID column + Remarks (its template has one column).
+ *  The param is widened to just `{ rows }` so the identical single-column error report
+ *  can be reused by the Park / Un-park flows (their result types share the row shape). */
 export function buildDeactivateErrorReport(
-  result: OutletDeactivateValidationResult,
+  result: { rows: OutletDeactivateRowResult[] },
 ): UploadErrorReport {
   const rows = result.rows.map(r => ({
     'Row':       r.rowNum,

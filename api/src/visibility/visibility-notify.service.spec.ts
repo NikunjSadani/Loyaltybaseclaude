@@ -84,7 +84,7 @@ describe('VisibilityNotifyService', () => {
       deactivatedAt: null,
       outletType: { code: { in: ['SSS'] } },
     });
-    expect(where.OR).toEqual([{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }]);
+    expect(where.OR).toEqual([{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }]);
     expect(where.NOT).toEqual({
       visibilityCaptures: { some: { windowKey: expect.any(String), status: 'APPROVED' } },
     });

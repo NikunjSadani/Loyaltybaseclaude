@@ -86,9 +86,29 @@ export interface RosterColumnOverrides {
   taggedEmployeeColumn?: string;
 }
 
+/**
+ * Broadened set of header spellings that name an outlet (case-insensitive). Shared
+ * by BOTH the roster parser (so a future upload captures the name into `outletName`
+ * directly) AND the enrollment export's Outlet Name fallback (so an already-uploaded
+ * roster that diverted its name into `prefillValues` under one of these headers still
+ * shows the name). Keeping ONE list keeps the two paths in lock-step (bug 1).
+ */
+export const OUTLET_NAME_HEADER_ALIASES = [
+  'outlet name',
+  'outletname',
+  'name',
+  'shop name',
+  'store name',
+  'party name',
+  'dealer name',
+  'customer name',
+  'firm name',
+  'business name',
+] as const;
+
 /** Default accepted header spellings for each fixed column (case-insensitive). */
 const DEFAULT_ID_HEADERS = ['outlet id', 'outlet code', 'outletcode', 'outlet_id', 'id'];
-const DEFAULT_NAME_HEADERS = ['outlet name', 'outletname', 'name'];
+const DEFAULT_NAME_HEADERS = [...OUTLET_NAME_HEADER_ALIASES];
 const DEFAULT_TAGGED_HEADERS = [
   'tagged employee',
   'tagged employee code',

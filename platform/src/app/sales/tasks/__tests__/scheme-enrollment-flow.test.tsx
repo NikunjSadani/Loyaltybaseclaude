@@ -109,7 +109,7 @@ describe('Sales Tasks — real sales-assisted scheme enrollment', () => {
     render(<TasksPage />);
 
     // The scheme group appears (from listSalesEligible, not fetchAllSchemes).
-    const group = await screen.findByText('Scheme Enrollment');
+    const group = await screen.findByText('Activations / Tasks');
     fireEvent.click(group);
     expect(await screen.findByText('Summer Activation')).toBeInTheDocument();
 
@@ -142,7 +142,7 @@ describe('Sales Tasks — real sales-assisted scheme enrollment', () => {
     mockRole = 'RSM';
     render(<TasksPage />);
     await screen.findByText('All clear!');
-    expect(screen.queryByText('Scheme Enrollment')).not.toBeInTheDocument();
+    expect(screen.queryByText('Activations / Tasks')).not.toBeInTheDocument();
   });
 });
 

@@ -1048,7 +1048,7 @@ describe('AdminCoreService', () => {
       // kycIntent exclusion uses an explicit OR so NULL rows (the vast majority)
       // are kept — Prisma's bare `{ not }` would drop them.
       expect(where.kycIntent).toBeUndefined();
-      expect(where.OR).toEqual([{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }]);
+      expect(where.OR).toEqual([{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }]);
     });
 
     it('empty tenant → no NaN / divide-by-zero (coverage 0, compliance 100, rate 0)', async () => {

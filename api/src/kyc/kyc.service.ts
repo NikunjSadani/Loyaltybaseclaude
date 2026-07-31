@@ -45,6 +45,9 @@ import {
   acquireIdentityLocks,
   normalizeIdentityValue,
   resolveGroupPan,
+  resolveGroupIdentity,
+  resolveGroupCarryForwardDocs,
+  type CarryForwardDoc,
 } from '../common/partner-group.helper';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -1300,6 +1303,99 @@ export class KycService {
       upiId: partnerDetails.upiId ?? null,
     };
 
+    // 2a. GROUP DOCUMENT CARRY-FORWARD — decided BEFORE the submission is created. The KycDocument
+    //     rows are written AFTER the tx commits, so we resolve + VALIDATE here (a post-tx throw would
+    //     orphan the submission) and stash the exact docs to attach. Resolving once means the
+    //     validation and the attach can never diverge — this closes the race where the FE waives the
+    //     upload on a STALE group value the backend would then decline to attach, leaving the child
+    //     approved with a missing required document. Scope: a BRAND-NEW grouped child only
+    //     (`parentId` set, no existing partner); a re-KYC uses the per-outlet carry inside the doc
+    //     section (guarded by `outlet.partnerId`).
+    let groupCarryGstCert: CarryForwardDoc | null = null;
+    let groupCarryCheque: CarryForwardDoc | null = null;
+    if (outlet.parentId && !outlet.partnerId) {
+      const providedTypes = new Set(
+        (dto.documents ?? []).filter((d) => d.type).map((d) => d.type as KycDocumentType),
+      );
+      const groupIdentity = await resolveGroupIdentity(this.prisma, user.clientId, outlet.parentId);
+      const srcDocs = groupIdentity?.sourcePartnerId
+        ? await resolveGroupCarryForwardDocs(this.prisma, user.clientId, groupIdentity.sourcePartnerId)
+        : { gstCertificate: null, cancelledCheque: null };
+
+      // Defense-in-depth (security audit): the child must ASSERT a PAN to inherit any doc. PAN is the
+      // group golden key and is validated == the group PAN inside the tx below; requiring it here
+      // blocks a PAN-less outlet from inheriting the group's cert/cheque on a bare GST/account match.
+      const childPan = normalizeIdentityValue('pan', partnerDetails.panNumber);
+
+      const childGst = normalizeIdentityValue('gst', partnerDetails.gstNumber);
+      const groupGst = normalizeIdentityValue('gst', groupIdentity?.gstNumber);
+      if (
+        childPan != null &&
+        !providedTypes.has('GST_CERTIFICATE') &&
+        childGst != null &&
+        groupGst != null &&
+        childGst === groupGst &&
+        srcDocs.gstCertificate
+      ) {
+        groupCarryGstCert = srcDocs.gstCertificate;
+      }
+
+      const trimOrNull = (v: string | null | undefined): string | null => {
+        const t = (v ?? '').trim();
+        return t ? t : null;
+      };
+      const upperOrNull = (v: string | null | undefined): string | null => {
+        const t = (v ?? '').trim().toUpperCase();
+        return t ? t : null;
+      };
+      const childAcct = trimOrNull(partnerDetails.bankAccountNumber);
+      const groupAcct = trimOrNull(groupIdentity?.bankAccountNumber);
+      const childIfsc = upperOrNull(partnerDetails.ifscCode);
+      const groupIfsc = upperOrNull(groupIdentity?.ifscCode);
+      if (
+        childPan != null &&
+        effectiveMode === 'bank' &&
+        !providedTypes.has('CANCELLED_CHEQUE') &&
+        childAcct != null &&
+        childAcct === groupAcct &&
+        childIfsc != null &&
+        childIfsc === groupIfsc &&
+        srcDocs.cancelledCheque
+      ) {
+        groupCarryCheque = srcDocs.cancelledCheque;
+      }
+
+      // AUTHORITATIVE safety net that makes the FE "waive the upload" decision safe — WITHOUT forcing
+      // a doc where none was ever inheritable. It fires ONLY when the group HAS an approved doc the
+      // child could have inherited (`srcDocs.*` present) but we are NOT attaching it (the child's
+      // GST / bank diverged from the group) AND the rep did not upload one. That is exactly the
+      // stale-prefill race: the FE waived the upload expecting the inheritance, but the child's value
+      // no longer matches the group's, so nothing gets attached → reject NOW (before any write, so no
+      // orphaned submission) and make the rep upload their own. When the group has NO inheritable doc,
+      // the FE never waived (the rep already uploads), so this never fires — leaving docs-optional
+      // paths untouched.
+      if (
+        srcDocs.gstCertificate &&
+        childGst != null &&
+        !groupCarryGstCert &&
+        !providedTypes.has('GST_CERTIFICATE')
+      ) {
+        throw new BadRequestException(
+          'GST certificate is required — it could not be inherited from the group because this outlet’s GST number differs from the group. Please upload the certificate.',
+        );
+      }
+      if (
+        effectiveMode === 'bank' &&
+        srcDocs.cancelledCheque &&
+        !groupCarryCheque &&
+        !providedTypes.has('CANCELLED_CHEQUE')
+      ) {
+        throw new BadRequestException(
+          'Cancelled cheque is required — it could not be inherited from the group because this outlet’s bank details differ from the group. Please upload the cheque.',
+        );
+      }
+    }
+
     // 2. The submission is SAVED as DRAFT here and NOT yet routed to an approver.
     //    Routing (→ the approver bucket) is deferred to consent(), AFTER the outlet
     //    owner verifies the consent OTP — the OTP sent to the outlet's own phone is the
@@ -1683,6 +1779,44 @@ export class KycService {
             fileKey: `kyc/${submission.id}/SIGNATURE/${Date.now()}`,
             fileName: 'signature.png',
             mimeType: 'image/png',
+            status: 'PENDING',
+          },
+        }),
+      );
+    }
+
+    // 8b. GROUP DOCUMENT CARRY-FORWARD (attach). The decision, validation, and PAN/unchanged checks
+    //     all happened pre-tx (§2a) — a single resolve stashed the exact source docs to attach, so the
+    //     validation and the attach can never diverge. Here we just create the KycDocument rows on the
+    //     new submission, reusing the source's fileKey (no GCS copy) exactly like the re-KYC carry
+    //     above, so the reviewer sees a complete, approved-provenance document set.
+    if (groupCarryGstCert) {
+      docPromises.push(
+        this.prisma.kycDocument.create({
+          data: {
+            kycSubmissionId: submission.id,
+            documentType: 'GST_CERTIFICATE',
+            fileUrl: groupCarryGstCert.fileUrl,
+            fileKey: groupCarryGstCert.fileKey,
+            fileName: groupCarryGstCert.fileName,
+            mimeType: groupCarryGstCert.mimeType,
+            fileSizeBytes: groupCarryGstCert.fileSizeBytes,
+            status: 'PENDING',
+          },
+        }),
+      );
+    }
+    if (groupCarryCheque) {
+      docPromises.push(
+        this.prisma.kycDocument.create({
+          data: {
+            kycSubmissionId: submission.id,
+            documentType: 'CANCELLED_CHEQUE',
+            fileUrl: groupCarryCheque.fileUrl,
+            fileKey: groupCarryCheque.fileKey,
+            fileName: groupCarryCheque.fileName,
+            mimeType: groupCarryCheque.mimeType,
+            fileSizeBytes: groupCarryCheque.fileSizeBytes,
             status: 'PENDING',
           },
         }),
@@ -3799,7 +3933,10 @@ export class KycService {
             // kycIntent is nullable — a freshly-created outlet awaiting KYC has it NULL.
             // Prisma's `{ not: 'X' }` compiles to `<> 'X'`, which is NULL (not TRUE) for
             // NULL rows, so a bare `not` would SILENTLY EXCLUDE the common null-intent
-            // outlets (approval no-op). Match null OR not-declined explicitly.
+            // outlets (approval no-op). Match null OR not-declined explicitly. NOTE: a
+            // PARKED outlet (admin bulk "removed from queue") DOES match here — approval is
+            // the authority, so approving its KYC promotes it to live AND clears the park
+            // (see the kycIntent clear below); it must never end up active-but-still-PARKED.
             OR: [{ kycIntent: null }, { kycIntent: { not: 'NOT_INTERESTED' } }],
           },
           // reKycFlags: DbNull — CLEAR any re-KYC request on approval. A re-KYC (bulk-flag
@@ -3807,7 +3944,19 @@ export class KycService {
           // the event that RESOLVES it. Without this, isReKycPending() stays true forever, so
           // the outlet would read as RE_KYC_REQUIRED post-approval and the wizard would stay
           // locked to the flagged fields permanently.
-          data: { isActive: true, reactivatedAt: now, reKycFlags: Prisma.DbNull },
+          // kycIntent/By/At cleared too: approval promotes a PARKED outlet to live and MUST
+          // un-park it — otherwise it would be active yet hidden from its rep (NOT_PARKED
+          // filter) and mislabeled "Parked". The matched set is only null- or PARKED-intent
+          // (NOT_INTERESTED is excluded above), so blanket-clearing to null is a no-op for
+          // normal outlets and an un-park for a parked one.
+          data: {
+            isActive: true,
+            reactivatedAt: now,
+            reKycFlags: Prisma.DbNull,
+            kycIntent: null,
+            kycIntentBy: null,
+            kycIntentAt: null,
+          },
         });
       }
 
