@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
+import { Request } from 'express';
 import { SchemeReportService } from './scheme-report.service';
 import { SchemeNotifyService } from './scheme-notify.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
@@ -84,7 +85,23 @@ export class SchemeReportController {
   @Get(':id/report/export')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('schemes:export')
-  exportEnrollments(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.reports.exportEnrollments(user, id);
+  exportEnrollments(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Req() req: Request,
+  ) {
+    // Resolve the host the admin downloaded from so media links come back absolute
+    // to the RIGHT tenant: edge-proxy `x-forwarded-host` (comma-list → first) →
+    // `host` → PUBLIC_APP_BASE_URL's host → '' (relative fallback). Not
+    // security-critical — the media endpoint re-authenticates; this only decides
+    // where the click goes.
+    const first = (h?: string) => (h ? h.split(',')[0].trim() : '');
+    const fwd = req.headers['x-forwarded-host'];
+    const host =
+      first(Array.isArray(fwd) ? fwd[0] : fwd) ||
+      first(req.headers.host) ||
+      (process.env.PUBLIC_APP_BASE_URL ?? '').replace(/^https?:\/\//, '').replace(/\/.*$/, '') ||
+      '';
+    return this.reports.exportEnrollments(user, id, host);
   }
 }

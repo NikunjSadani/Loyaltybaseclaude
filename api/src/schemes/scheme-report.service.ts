@@ -24,12 +24,16 @@ export const MEDIA_FIELD_TYPES = new Set<string>([
 export interface ExportRosterRow {
   outletRef: string;
   outletName: string;
+  /** Real name of the matched loyalty outlet — used as the Outlet Name fallback. */
+  matchedOutletName: string | null;
   matchedOutletId: string | null;
   zone: string | null;
   programName: string | null;
   programCategory: string | null;
   outletType: string | null;
   taggedEmployeeCode: string | null;
+  /** The uploaded audience-Excel columns for this row (original header → value). */
+  prefillValues: Record<string, unknown> | null;
   enrollment: {
     status: string;
     currentVersion: number;
@@ -38,7 +42,15 @@ export interface ExportRosterRow {
     rejectionReason: string | null;
     submittedByName: string | null;
     submittedByPhone: string | null;
+    /** Employee code of the submitting rep when they are a SalesUser (else null). */
+    submittedByEmployeeCode: string | null;
   } | null;
+}
+
+/** One export column + a human note on where its value comes from (legend sheet). */
+export interface ExportColumn {
+  name: string;
+  source: string;
 }
 
 /**
@@ -87,16 +99,27 @@ export function renderExportValue(
 }
 
 /**
- * Build the export rows (pure). Every row has an IDENTICAL key set — the fixed
- * base columns plus one column per form field — so buildXlsx (which derives the
- * header from the FIRST row's keys) never drops a column when the first roster
- * row has no enrollment. Media fields become auth-gated links via `mintLink`.
+ * Build the export rows + a self-documenting column legend (pure). Every row has
+ * an IDENTICAL key set — inserted in a FIXED grouped order (Identity → uploaded
+ * Excel columns → master attrs → status → captured form values) — so buildXlsx,
+ * which derives the header from the FIRST row's keys, never drops a column when
+ * the first roster row has no enrollment. Media fields become auth-gated links
+ * via `mintLink`. The returned `columns` drive a second "Columns" legend sheet.
+ *
+ * Column sourcing:
+ *   - Identity/master/status  → the roster row + matched loyalty outlet master.
+ *   - Uploaded-Excel columns  → the UNION of every row's `prefillValues` keys,
+ *                               emitted under their ORIGINAL header text; a header
+ *                               that clashes with a base/master/status/form-field
+ *                               column is de-collided with a ` (Excel)` suffix so
+ *                               it never overwrites the reserved base column.
+ *   - Captured form values    → one column per form field (`formValues[fieldId]`).
  */
 export function buildEnrollmentExportRows(
   roster: ExportRosterRow[],
   fields: FormField[],
   mintLink: (mediaKey: string) => string,
-): Record<string, unknown>[] {
+): { rows: Record<string, unknown>[]; columns: ExportColumn[] } {
   // De-collide duplicate field labels so no column silently overwrites another.
   const seen = new Map<string, number>();
   const columnFor = new Map<string, string>(); // fieldId → column header
@@ -107,29 +130,83 @@ export function buildEnrollmentExportRows(
     columnFor.set(f.id, n === 1 ? base : `${base} (${n})`);
   }
 
-  return roster.map((r) => {
+  // The reserved (non-Excel) headers: base identity, master attrs, status, and
+  // every form-field column. An uploaded Excel header colliding with any of these
+  // is suffixed ` (Excel)` rather than dropped (RESERVED-collision trap) so the
+  // base column value always wins and the Excel data is still surfaced.
+  const identityCols = ['Outlet Ref', 'Outlet Name', 'Matched', 'Tagged Employee', 'Submitted By (Employee)'];
+  const masterCols = ['Zone', 'Program', 'Program Category', 'Outlet Type'];
+  const statusCols = ['Status', 'Version', 'Enrolled At', 'Submitted By', 'Submitted By Phone', 'Rejection Reason'];
+  const reserved = new Set<string>([...identityCols, ...masterCols, ...statusCols, ...columnFor.values()]);
+
+  // UNION of every row's uploaded-Excel columns (first-seen order), de-collided
+  // against the reserved headers. `origKey` reads the value, `header` names the column.
+  const excelCols: { origKey: string; header: string }[] = [];
+  const excelSeen = new Set<string>();
+  for (const r of roster) {
+    const pv = r.prefillValues;
+    if (!pv || typeof pv !== 'object' || Array.isArray(pv)) continue;
+    for (const origKey of Object.keys(pv)) {
+      if (excelSeen.has(origKey)) continue;
+      excelSeen.add(origKey);
+      excelCols.push({ origKey, header: reserved.has(origKey) ? `${origKey} (Excel)` : origKey });
+    }
+  }
+
+  const rows = roster.map((r) => {
     const values = (r.enrollment?.formValues ?? {}) as Record<string, unknown>;
-    const row: Record<string, unknown> = {
-      'Outlet Ref': r.outletRef,
-      'Outlet Name': r.outletName,
-      Matched: r.matchedOutletId ? 'Yes' : 'No',
-      Zone: r.zone ?? '',
-      Program: r.programName ?? '',
-      'Program Category': r.programCategory ?? '',
-      'Outlet Type': r.outletType ?? '',
-      'Tagged Employee': r.taggedEmployeeCode ?? '',
-      Status: r.enrollment?.status ?? 'NOT_ENROLLED',
-      Version: r.enrollment?.currentVersion ?? '',
-      'Enrolled At': r.enrollment ? r.enrollment.enrolledAt.toISOString() : '',
-      'Submitted By': r.enrollment?.submittedByName ?? '',
-      'Submitted By Phone': r.enrollment?.submittedByPhone ?? '',
-      'Rejection Reason': r.enrollment?.rejectionReason ?? '',
-    };
+    const pv = (r.prefillValues ?? {}) as Record<string, unknown>;
+    const row: Record<string, unknown> = {};
+    // Identity
+    row['Outlet Ref'] = r.outletRef;
+    // Outlet Name: uploaded name if non-empty, else the matched outlet's real name, else ''.
+    row['Outlet Name'] = r.outletName?.trim() ? r.outletName : r.matchedOutletName ?? '';
+    row['Matched'] = r.matchedOutletId ? 'Yes' : 'No';
+    row['Tagged Employee'] = r.taggedEmployeeCode ?? '';
+    row['Submitted By (Employee)'] = r.enrollment?.submittedByEmployeeCode ?? '';
+    // Uploaded audience-Excel columns (blank where a row lacks that key).
+    for (const c of excelCols) row[c.header] = pv[c.origKey] ?? '';
+    // Master attrs (matched loyalty outlet)
+    row['Zone'] = r.zone ?? '';
+    row['Program'] = r.programName ?? '';
+    row['Program Category'] = r.programCategory ?? '';
+    row['Outlet Type'] = r.outletType ?? '';
+    // Status
+    row['Status'] = r.enrollment?.status ?? 'NOT_ENROLLED';
+    row['Version'] = r.enrollment?.currentVersion ?? '';
+    row['Enrolled At'] = r.enrollment ? r.enrollment.enrolledAt.toISOString() : '';
+    row['Submitted By'] = r.enrollment?.submittedByName ?? '';
+    row['Submitted By Phone'] = r.enrollment?.submittedByPhone ?? '';
+    row['Rejection Reason'] = r.enrollment?.rejectionReason ?? '';
+    // Captured form values
     for (const f of fields) {
       row[columnFor.get(f.id) as string] = renderExportValue(f, values[f.id], mintLink);
     }
     return row;
   });
+
+  // The legend, in the SAME column order as the rows.
+  const columns: ExportColumn[] = [
+    { name: 'Outlet Ref', source: 'Audience Excel upload (outlet reference)' },
+    { name: 'Outlet Name', source: 'Audience Excel upload, else matched loyalty outlet master' },
+    { name: 'Matched', source: 'Whether the roster row is linked to a loyalty outlet' },
+    { name: 'Tagged Employee', source: 'Audience Excel upload (tagged employee code)' },
+    { name: 'Submitted By (Employee)', source: "Submitting rep's employee code (sales user)" },
+    ...excelCols.map((c) => ({ name: c.header, source: 'Audience Excel upload' })),
+    { name: 'Zone', source: 'Matched loyalty outlet master' },
+    { name: 'Program', source: 'Matched loyalty outlet master' },
+    { name: 'Program Category', source: 'Matched loyalty outlet master' },
+    { name: 'Outlet Type', source: 'Matched loyalty outlet master' },
+    { name: 'Status', source: 'Enrollment record' },
+    { name: 'Version', source: 'Enrollment record' },
+    { name: 'Enrolled At', source: 'Enrollment record' },
+    { name: 'Submitted By', source: 'Enrollment record (submitting user)' },
+    { name: 'Submitted By Phone', source: 'Enrollment record (submitting user)' },
+    { name: 'Rejection Reason', source: 'Enrollment record' },
+    ...fields.map((f) => ({ name: columnFor.get(f.id) as string, source: 'Captured on the enrollment form' })),
+  ];
+
+  return { rows, columns };
 }
 
 /** Generic roster tally: rows + enrolled-count per bucket, sorted by size desc. */
@@ -170,12 +247,13 @@ export class SchemeReportService {
    * SchemeEnrollmentController's `GET :id/enrollments/media` enforces the tenant
    * from the object key's tenant folder (`scheme-media/<clientId>/…`).
    */
-  private mediaViewLink(mediaKey: string, schemeId: string): string {
-    // App-PROXY path (/api/… → backend /v1/…), and fully-qualified when
-    // PUBLIC_APP_BASE_URL is set so the link is clickable from a downloaded .xlsx
-    // opened outside the browser. Env unset → proxy-relative (still the correct path).
-    const base = (process.env.PUBLIC_APP_BASE_URL ?? '').replace(/\/+$/, '');
-    return `${base}/api/schemes/${schemeId}/enrollments/media?key=${encodeURIComponent(mediaKey)}`;
+  private mediaViewLink(mediaKey: string, schemeId: string, host: string): string {
+    // App-PROXY path (/api/… → backend /v1/…). Made ABSOLUTE against the tenant host
+    // the admin downloaded from (resolved by the controller, see exportEnrollments)
+    // so the link is clickable from a .xlsx opened outside the browser and points
+    // back to the right tenant. No host → proxy-relative (still the correct path).
+    const path = `/api/schemes/${schemeId}/enrollments/media?key=${encodeURIComponent(mediaKey)}`;
+    return host ? `https://${host}${path}` : path;
   }
 
   /** Loose parse of the stored audienceConfig for the coverage-denominator decision. */
@@ -345,7 +423,7 @@ export class SchemeReportService {
    * column per form field. Media fields render as auth-gated view links (D30).
    * Tenant-scoped.
    */
-  async exportEnrollments(user: JwtPayload, schemeId: string): Promise<StreamableFile> {
+  async exportEnrollments(user: JwtPayload, schemeId: string, host = ''): Promise<StreamableFile> {
     const scheme = await this.prisma.scheme.findFirst({
       where: { id: schemeId, ...(platformWide(user) ? {} : { clientId: user.clientId }) },
       select: { id: true, code: true, clientId: true },
@@ -361,9 +439,13 @@ export class SchemeReportService {
         outletRef: true,
         outletName: true,
         matchedOutletId: true,
+        // The whole uploaded audience-Excel row (original headers → values) so the
+        // export can surface every uploaded variable column (#1).
+        prefillValues: true,
         taggedSalesUser: { select: { employeeCode: true } },
         matchedOutlet: {
           select: {
+            name: true,
             zone: true,
             programName: true,
             programCategory: true,
@@ -378,7 +460,9 @@ export class SchemeReportService {
             enrolledAt: true,
             rejectionReason: true,
             deletedAt: true,
-            submittedBy: { select: { name: true, phone: true } },
+            // submittedBy is a User; its 1:1 SalesUser (if any) carries the employeeCode
+            // surfaced as "Submitted By (Employee)" — a clean optional relation, not a join.
+            submittedBy: { select: { name: true, phone: true, salesUser: { select: { employeeCode: true } } } },
           },
         },
       },
@@ -398,12 +482,14 @@ export class SchemeReportService {
     const mapped: ExportRosterRow[] = roster.map((r) => ({
       outletRef: r.outletRef,
       outletName: r.outletName,
+      matchedOutletName: r.matchedOutlet?.name ?? null,
       matchedOutletId: r.matchedOutletId,
       zone: r.matchedOutlet?.zone ?? null,
       programName: r.matchedOutlet?.programName ?? null,
       programCategory: r.matchedOutlet?.programCategory ?? null,
       outletType: r.matchedOutlet?.outletType?.name ?? null,
       taggedEmployeeCode: r.taggedSalesUser?.employeeCode ?? null,
+      prefillValues: (r.prefillValues as Record<string, unknown> | null) ?? null,
       // A soft-deleted enrollment reads as absent (NOT_ENROLLED) in the export — its captured
       // values must never leak into the xlsx.
       enrollment: r.enrollment && r.enrollment.deletedAt == null
@@ -415,15 +501,21 @@ export class SchemeReportService {
             rejectionReason: r.enrollment.rejectionReason,
             submittedByName: r.enrollment.submittedBy?.name ?? null,
             submittedByPhone: r.enrollment.submittedBy?.phone ?? null,
+            submittedByEmployeeCode: r.enrollment.submittedBy?.salesUser?.employeeCode ?? null,
           }
         : null,
     }));
 
-    const rows = buildEnrollmentExportRows(mapped, fields, (key) =>
-      this.mediaViewLink(key, schemeId),
+    const { rows, columns } = buildEnrollmentExportRows(mapped, fields, (key) =>
+      this.mediaViewLink(key, schemeId, host),
     );
 
-    const buffer = buildXlsx([{ name: 'Enrollments', rows }]);
+    // Second sheet: a legend documenting where every column's value comes from.
+    const legendRows = columns.map((c) => ({ Column: c.name, Source: c.source }));
+    const buffer = buildXlsx([
+      { name: 'Enrollments', rows },
+      { name: 'Columns', rows: legendRows },
+    ]);
     const filename = `scheme_${scheme.code}_enrollments_${new Date().toISOString().split('T')[0]}.xlsx`;
 
     return new StreamableFile(buffer, {

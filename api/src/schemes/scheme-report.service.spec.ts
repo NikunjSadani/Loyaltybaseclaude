@@ -77,16 +77,29 @@ describe('buildEnrollmentExportRows (pure)', () => {
   ];
   const link = (k: string) => `/media/${k}`;
 
+  // Roster-row factory — fills the fixed base fields so tests only vary what matters.
+  const row = (over: Partial<ExportRosterRow>): ExportRosterRow => ({
+    outletRef: 'r', outletName: 'r', matchedOutletName: null, matchedOutletId: null,
+    zone: null, programName: null, programCategory: null, outletType: null,
+    taggedEmployeeCode: null, prefillValues: null, enrollment: null, ...over,
+  });
+  const enrolled = (over: Partial<NonNullable<ExportRosterRow['enrollment']>> = {}) => ({
+    status: 'SUBMITTED', currentVersion: 1, enrolledAt: new Date('2026-07-25T00:00:00Z'),
+    rejectionReason: null, submittedByName: 'Rep', submittedByPhone: '9990000001',
+    submittedByEmployeeCode: null, formValues: {}, ...over,
+  });
+
   it('gives EVERY row an identical key set even when the first row has no enrollment', () => {
     const roster: ExportRosterRow[] = [
       // first row deliberately un-enrolled — header is derived from row[0] by buildXlsx
-      { outletRef: 'X2', outletName: 'Standalone', matchedOutletId: null, zone: null, programName: null, programCategory: null, outletType: null, taggedEmployeeCode: null, enrollment: null },
-      {
-        outletRef: 'X1', outletName: 'Shop One', matchedOutletId: 'o1', zone: 'W', programName: 'P', programCategory: 'C', outletType: 'Retail', taggedEmployeeCode: 'E1',
-        enrollment: { status: 'SUBMITTED', currentVersion: 1, enrolledAt: new Date('2026-07-25T00:00:00Z'), rejectionReason: null, submittedByName: 'Rep', submittedByPhone: '9990000001', formValues: { f_name: 'Ravi', f_photo: 'gcs/p.jpg' } },
-      },
+      row({ outletRef: 'X2', outletName: 'Standalone' }),
+      row({
+        outletRef: 'X1', outletName: 'Shop One', matchedOutletId: 'o1', zone: 'W', programName: 'P',
+        programCategory: 'C', outletType: 'Retail', taggedEmployeeCode: 'E1',
+        enrollment: enrolled({ formValues: { f_name: 'Ravi', f_photo: 'gcs/p.jpg' } }),
+      }),
     ];
-    const rows = buildEnrollmentExportRows(roster, fields, link);
+    const { rows } = buildEnrollmentExportRows(roster, fields, link);
     expect(Object.keys(rows[0])).toEqual(Object.keys(rows[1]));
     expect(rows[0]).toMatchObject({ Matched: 'No', Status: 'NOT_ENROLLED', Owner: '', Photo: '' });
     expect(rows[1]).toMatchObject({ Matched: 'Yes', Status: 'SUBMITTED', Owner: 'Ravi', Photo: '/media/gcs/p.jpg' });
@@ -94,12 +107,70 @@ describe('buildEnrollmentExportRows (pure)', () => {
 
   it('de-collides duplicate field labels', () => {
     const dup = [field({ id: 'a', type: 'TEXT', label: 'Qty' }), field({ id: 'b', type: 'TEXT', label: 'Qty' })];
-    const rows = buildEnrollmentExportRows(
-      [{ outletRef: 'r', outletName: 'r', matchedOutletId: null, zone: null, programName: null, programCategory: null, outletType: null, taggedEmployeeCode: null, enrollment: null }],
-      dup,
+    const { rows } = buildEnrollmentExportRows([row({})], dup, link);
+    expect(Object.keys(rows[0])).toEqual(expect.arrayContaining(['Qty', 'Qty (2)']));
+  });
+
+  it('emits the UNION of uploaded audience-Excel columns, filling blanks per row', () => {
+    const roster: ExportRosterRow[] = [
+      row({ outletRef: 'A', prefillValues: { Slab: 'Gold', Target: '100' } }),
+      row({ outletRef: 'B', prefillValues: { Slab: 'Silver', Region: 'West' } }), // no Target; adds Region
+    ];
+    const { rows, columns } = buildEnrollmentExportRows(roster, fields, link);
+    // Union across rows: Slab, Target, Region all present on BOTH rows.
+    expect(Object.keys(rows[0])).toEqual(expect.arrayContaining(['Slab', 'Target', 'Region']));
+    expect(Object.keys(rows[1])).toEqual(expect.arrayContaining(['Slab', 'Target', 'Region']));
+    expect(rows[0]).toMatchObject({ Slab: 'Gold', Target: '100', Region: '' }); // Region blank on row A
+    expect(rows[1]).toMatchObject({ Slab: 'Silver', Target: '', Region: 'West' }); // Target blank on row B
+    // Legend marks them as Excel-sourced.
+    expect(columns).toEqual(expect.arrayContaining([{ name: 'Slab', source: 'Audience Excel upload' }]));
+  });
+
+  it('de-collides an Excel header that clashes with a base column (does not drop or overwrite it)', () => {
+    // An uploaded column literally named "Status" must NOT clobber the enrollment Status base column.
+    const roster: ExportRosterRow[] = [
+      row({ outletRef: 'A', prefillValues: { Status: 'FROM_EXCEL' }, enrollment: enrolled({ status: 'REJECTED' }) }),
+    ];
+    const { rows } = buildEnrollmentExportRows(roster, fields, link);
+    expect(rows[0]['Status']).toBe('REJECTED'); // base column wins
+    expect(rows[0]['Status (Excel)']).toBe('FROM_EXCEL'); // Excel value preserved, de-collided
+  });
+
+  it('falls back Outlet Name to the matched outlet name when the uploaded name is blank', () => {
+    const roster: ExportRosterRow[] = [
+      row({ outletRef: 'A', outletName: '', matchedOutletName: 'Real Loyalty Outlet', matchedOutletId: 'o1' }),
+      row({ outletRef: 'B', outletName: 'Uploaded Name', matchedOutletName: 'Ignored' }),
+    ];
+    const { rows } = buildEnrollmentExportRows(roster, fields, link);
+    expect(rows[0]['Outlet Name']).toBe('Real Loyalty Outlet'); // fell back
+    expect(rows[1]['Outlet Name']).toBe('Uploaded Name'); // uploaded wins when present
+  });
+
+  it('renders a media field as an ABSOLUTE link when the mintLink resolves a host', () => {
+    const absLink = (k: string) => `https://deoleo.example.com/api/schemes/s1/enrollments/media?key=${encodeURIComponent(k)}`;
+    const roster: ExportRosterRow[] = [
+      row({ outletRef: 'A', enrollment: enrolled({ formValues: { f_photo: 'gcs/p.jpg' } }) }),
+    ];
+    const { rows } = buildEnrollmentExportRows(roster, fields, absLink);
+    expect(rows[0]['Photo']).toBe('https://deoleo.example.com/api/schemes/s1/enrollments/media?key=gcs%2Fp.jpg');
+  });
+
+  it('lists every column with its source in the legend, in column order', () => {
+    const { columns } = buildEnrollmentExportRows(
+      [row({ prefillValues: { Slab: 'Gold' } })],
+      fields,
       link,
     );
-    expect(Object.keys(rows[0])).toEqual(expect.arrayContaining(['Qty', 'Qty (2)']));
+    const names = columns.map((c) => c.name);
+    expect(names).toEqual([
+      'Outlet Ref', 'Outlet Name', 'Matched', 'Tagged Employee', 'Submitted By (Employee)',
+      'Slab',
+      'Zone', 'Program', 'Program Category', 'Outlet Type',
+      'Status', 'Version', 'Enrolled At', 'Submitted By', 'Submitted By Phone', 'Rejection Reason',
+      'Owner', 'Photo',
+    ]);
+    expect(columns.find((c) => c.name === 'Owner')?.source).toBe('Captured on the enrollment form');
+    expect(columns.find((c) => c.name === 'Zone')?.source).toBe('Matched loyalty outlet master');
   });
 });
 
@@ -239,11 +310,12 @@ describe('SchemeReportService', () => {
       mockPrisma.schemeOutlet.findMany.mockResolvedValue([
         {
           outletRef: 'A1', outletName: 'Shop', matchedOutletId: 'o1',
+          prefillValues: { Tier: 'Gold' },
           taggedSalesUser: { employeeCode: 'E1' },
-          matchedOutlet: { zone: 'W', programName: 'P', programCategory: 'C', outletType: { name: 'Retail' } },
+          matchedOutlet: { name: 'Shop', zone: 'W', programName: 'P', programCategory: 'C', outletType: { name: 'Retail' } },
           enrollment: {
             status: 'SUBMITTED', currentVersion: 1, enrolledAt: new Date('2026-07-25T00:00:00Z'), rejectionReason: null,
-            submittedBy: { name: 'Rep', phone: '9990000001' },
+            deletedAt: null, submittedBy: { name: 'Rep', phone: '9990000001', salesUser: null },
             // f_note carries a spreadsheet-injection payload; f_photo carries a media key.
             formValues: { f_note: '=SUM(A1)', f_photo: 'gcs/shop.jpg' },
           },
@@ -267,10 +339,84 @@ describe('SchemeReportService', () => {
 
       // Media link points at the SESSION-gated scheme media-view route (NOT the raw
       // key, NOT a self-authenticating token) — identical to 1B's extractMedia path.
+      // No host threaded in → proxy-RELATIVE form.
       expect(rows[0]['Photo']).toBe('/api/schemes/s1/enrollments/media?key=gcs%2Fshop.jpg');
       // cellSafe escaped the formula so Excel treats it as text (leading apostrophe).
       expect(rows[0]['Note']).toBe("'=SUM(A1)");
       expect(rows[0]['Tagged Employee']).toBe('E1');
+
+      // A second "Columns" legend sheet documents every column's source.
+      const legend = XLSX.utils.sheet_to_json<Record<string, string>>(wb.Sheets['Columns']);
+      expect(legend.find((c) => c.Column === 'Photo')?.Source).toBe('Captured on the enrollment form');
+      expect(legend.find((c) => c.Column === 'Tier')?.Source).toBe('Audience Excel upload');
+      // Uploaded audience-Excel column surfaced under its original header.
+      expect(rows[0]['Tier']).toBe('Gold');
+    });
+
+    it('makes media links ABSOLUTE against the resolved host', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1', clientId: 'deoleo' });
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        {
+          outletRef: 'A1', outletName: 'Shop', matchedOutletId: 'o1', prefillValues: null,
+          taggedSalesUser: { employeeCode: 'E1' },
+          matchedOutlet: { name: 'Shop', zone: 'W', programName: 'P', programCategory: 'C', outletType: { name: 'Retail' } },
+          enrollment: {
+            status: 'SUBMITTED', currentVersion: 1, enrolledAt: new Date('2026-07-25T00:00:00Z'), rejectionReason: null,
+            deletedAt: null, submittedBy: { name: 'Rep', phone: '9990000001', salesUser: null },
+            formValues: { f_photo: 'gcs/shop.jpg' },
+          },
+        },
+      ]);
+      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue({
+        formSchema: { fields: [{ id: 'f_photo', type: 'CAMERA', label: 'Photo', order: 1 }] },
+      });
+
+      const file = await service.exportEnrollments(asTenant('deoleo'), 's1', 'deoleo.gifsy.in');
+      const wb = XLSX.read(await streamToBuffer(file), { type: 'buffer' });
+      const rows = XLSX.utils.sheet_to_json<Record<string, string>>(wb.Sheets['Enrollments']);
+      expect(rows[0]['Photo']).toBe('https://deoleo.gifsy.in/api/schemes/s1/enrollments/media?key=gcs%2Fshop.jpg');
+    });
+
+    it('surfaces the submitting rep employee code + falls back Outlet Name; a soft-deleted enrollment leaks NOTHING', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1', clientId: 'deoleo' });
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        // Row 1: blank uploaded name → falls back to the matched outlet's real name; submitter is a SalesUser.
+        {
+          outletRef: 'A1', outletName: '', matchedOutletId: 'o1', prefillValues: { Tier: 'Gold' },
+          taggedSalesUser: { employeeCode: 'E1' },
+          matchedOutlet: { name: 'Real Outlet', zone: 'W', programName: 'P', programCategory: 'C', outletType: { name: 'Retail' } },
+          enrollment: {
+            status: 'SUBMITTED', currentVersion: 1, enrolledAt: new Date('2026-07-25T00:00:00Z'), rejectionReason: null,
+            deletedAt: null, submittedBy: { name: 'Rep', phone: '9990000001', salesUser: { employeeCode: 'EMP42' } },
+            formValues: { f_secret: 'VISIBLE' },
+          },
+        },
+        // Row 2: SOFT-DELETED enrollment — reads as NOT_ENROLLED; its captured value must never appear.
+        {
+          outletRef: 'A2', outletName: 'Shop Two', matchedOutletId: null, prefillValues: null,
+          taggedSalesUser: null, matchedOutlet: null,
+          enrollment: {
+            status: 'SUBMITTED', currentVersion: 1, enrolledAt: new Date('2026-07-25T00:00:00Z'), rejectionReason: null,
+            deletedAt: new Date('2026-07-26T00:00:00Z'), submittedBy: { name: 'Rep', phone: '9990000001', salesUser: null },
+            formValues: { f_secret: 'LEAKED_SECRET' },
+          },
+        },
+      ]);
+      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue({
+        formSchema: { fields: [{ id: 'f_secret', type: 'TEXT', label: 'Secret', order: 1 }] },
+      });
+
+      const file = await service.exportEnrollments(asTenant('deoleo'), 's1');
+      const buf = await streamToBuffer(file);
+      const wb = XLSX.read(buf, { type: 'buffer' });
+      const rows = XLSX.utils.sheet_to_json<Record<string, string>>(wb.Sheets['Enrollments']);
+
+      expect(rows[0]['Outlet Name']).toBe('Real Outlet'); // fell back to matched name
+      expect(rows[0]['Submitted By (Employee)']).toBe('EMP42');
+      expect(rows[0]['Secret']).toBe('VISIBLE');
+      // Soft-deleted row: NOT_ENROLLED, no captured value anywhere in the workbook.
+      expect(rows[1]).toMatchObject({ 'Outlet Ref': 'A2', Status: 'NOT_ENROLLED', Secret: '' });
+      expect(buf.toString('latin1')).not.toContain('LEAKED_SECRET');
     });
 
     it('throws NotFound when the scheme has no roster', async () => {
