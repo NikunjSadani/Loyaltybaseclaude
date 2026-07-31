@@ -5,15 +5,16 @@
 > nest 0 · FE vitest 1984 · tsc 0; adversarial-audited; staging-verified. **Additive + opt-in — DORMANT until an admin
 > sets a parentId** (zero impact on live Deoleo).
 > **⚠️ CORRECTION (2026-07-29):** cutover #14 shipped only the grouping **BACKEND** — the **admin FRONTEND** to drive it
-> (the "Parent ID" upload column, a parents-management page, the un-group control) was **NOT built**, so until now a
-> parent-child link could only be set via a direct API/DB call. That admin FE is now **BUILT + staging-verified on develop
-> `ab61b63`** (see **§10**), riding the next owner-gated cutover. "Fully live" below refers to the backend + dormancy only. ✅ **Post-cutover KYC-cleanup DONE + verified (2026-07-24):**
+> (the "Parent ID" upload column, a parents-management page, the un-group control) was **NOT built** at #14, so a
+> parent-child link could then only be set via a direct API/DB call. That admin FE is now **✅ LIVE IN PROD — cutover #17
+> (`52fc19f`, 2026-07-29)** (built on develop `ab61b63`; see **§10**). ✅ **Post-cutover KYC-cleanup DONE + verified (2026-07-24):**
 > `KYC_CLEANUP_SECRET`(+`_STAGING`) secrets + `deploy.yml` wiring + `kyc-cleanup-prod`/`-staging` schedulers (daily 01:00 IST);
-> endpoints verified both envs. The feature is fully live + operationally complete. W1+W2 migrations verified on STAGING; W3 added two
-> additive migrations (OTP order-binding + scheme-enrollment-by-shop, now applied on staging); W4 adds NO
-> migrations. **NOT in prod (owner-gated cutover pending).** W3 = login picker + group overview + child KYC
+> endpoints verified both envs. The feature is fully live + operationally complete. All 4 additive migrations
+> (`_partner_multi_outlet_foundation` W1 · `_partner_group_uniqueness` W2 · `_otp_reference_id` + `_scheme_enrollment_by_partner` W3;
+> W4 adds NO migrations) are **applied + verified on PROD** (cutover #14). W3 = login picker + group overview + child KYC
 > pre-fill/badge + scheme-enrollment re-key. W4 = group-leave via re-KYC (Option A) + Phase-2 roll-ups
-> (targets/visibility/leaderboard) + scheme-catalog eligibility fix. Next = owner UAT on staging → owner-gated cutover.
+> (targets/visibility/leaderboard) + scheme-catalog eligibility fix. **🆕 The child-KYC group-identity prefill (parent-or-approved-sibling)
+> + the Identity/Payout Uniqueness Settings toggle are LIVE at cutover #21 (`a83b2f4`, 2026-07-31) — see §11.**
 >
 > ⚠️ **§9 "BUILD STATUS" is the AUTHORITATIVE AS-BUILT record.** The design EVOLVED substantially
 > during Wave 2 (owner decisions on DB-vs-app enforcement, single-source-of-truth, re-KYC
@@ -434,16 +435,16 @@ re-KYC stage-at-approval. Then the owner-gated prod cutover per the checklist ab
 
 ---
 
-## 10. FE BUILD — the admin grouping UI (2026-07-29, ✅ BUILT + STAGING-VERIFIED on develop `ab61b63`; owner-gated for prod)
+## 10. FE BUILD — the admin grouping UI (✅ LIVE IN PROD — cutover #17 `52fc19f`, 2026-07-29; built on develop `ab61b63`)
 
-> **STATUS:** the admin FE below is **BUILT, gate-green (api nest 0/jest 2067 · FE tsc 0/vitest 2047), independently
-> adversarial-audited (3 findings fixed), and runtime-proven end-to-end on staging** (create bare + detailed parent →
+> **STATUS:** the admin FE below is **LIVE IN PROD (cutover #17 `52fc19f`, 2026-07-29)** — gate-green (api nest 0/jest 2067 · FE tsc 0/vitest 2047), independently
+> adversarial-audited (3 findings fixed), and runtime-proven end-to-end on staging pre-cutover (create bare + detailed parent →
 > GIFSY approve → link an outlet via the Parent ID upsert path → group detail w/ `canUngroup` → `?parentId` filter →
 > **blank-cell re-upload = proven no-op, no mass-ungroup** → deactivate-with-child 400 → un-group → deactivate). Ran on a
-> synthetic `synthgrp` tenant, then fully deleted. **Additive, no migration, dormant-safe → rides the next owner-gated
-> cutover; NOT yet in prod.** The plan/spec below is the as-built record.
+> synthetic `synthgrp` tenant, then fully deleted. **Additive, no migration, dormant-safe** (zero impact on live Deoleo
+> until an admin sets a parentId). The plan/spec below is the as-built record.
 
-**Why:** cutover #14 shipped the grouping BACKEND (live in prod, additive + dormant), but the **admin FRONTEND to drive it was never built** — the outlet-master upload has no "Parent ID" column, and there is no parents-management / un-group / group-overview screen. So today a parent-child relationship can only be set via a direct API/DB call. This section is the plan to build the admin FE (owner-approved **Complete** scope, 2026-07-29). Additive, **no DB migration**, dormant-safe (zero impact on live Deoleo until an admin creates a parent). Lands on `develop`/staging; owner-gated for prod.
+**Why:** cutover #14 shipped the grouping BACKEND (live in prod, additive + dormant), but the **admin FRONTEND to drive it was never built** — the outlet-master upload has no "Parent ID" column, and there is no parents-management / un-group / group-overview screen. So today a parent-child relationship can only be set via a direct API/DB call. This section is the plan to build the admin FE (owner-approved **Complete** scope, 2026-07-29). Additive, **no DB migration**, dormant-safe (zero impact on live Deoleo until an admin creates a parent). ✅ **LIVE IN PROD — cutover #17 (`52fc19f`).**
 
 **Backend contract (already live, proxy-reachable):** `GET /v1/admin/parents` (list — has `childOutletCount`, `pendingApproval`), `POST /v1/admin/parents` (create; `partnerCode` required + optional identity/bank), `POST /v1/admin/parents/:id/approve` (GIFSY-only), `POST /v1/admin/outlets/upsert` (row `parentId` = parent's **partnerCode**; 3 intents: absent=unchanged / blank=no-op / code=link), `POST /v1/admin/outlets/:outletCode/ungroup` (blocked while the child still shares an enforced detail).
 
@@ -463,3 +464,32 @@ Full jest/vitest/tsc; independent audit (grouping = identity/uniqueness-adjacent
 
 ### Design-vs-reality note
 The design (§2.2/§2.3/§4.5) specifies the Parent-ID column, parent create/approve, and the un-group action — all backend-built, none FE-exposed until this wave. An admin group-overview is NOT explicitly spec-mandated (the roll-up overview is partner-scoped) → the expandable-child view on the parents page is the lightweight net-new admin view.
+
+## 11. Child-KYC group-identity prefill + Identity/Payout Uniqueness Settings toggle — ✅ LIVE IN PROD, cutover #21 (`a83b2f4`, 2026-07-31)
+
+**✅ LIVE IN PROD — cutover #21 (`a83b2f4`, 2026-07-31).** Both items are additive + DORMANT (Deoleo live path
+byte-identical until used). Gate at cutover: api build 0 · jest 2124 · FE tsc 0 · vitest 2052. Rollback ref `8c08af3`.
+
+### 11.1 Child-KYC group-identity prefill (`6409003` + audit-fix `afb4a2f`)
+A grouped child's KYC now pre-fills the **shared owner identity** — business name, owner name, GST, bank details, UPI
+(all **EDITABLE**) + **PAN pre-filled AND LOCKED to the group PAN** — sourced from the **APPROVED parent's** details
+ELSE the **most-recently-APPROVED grouped SIBLING** (new `resolveGroupIdentity` helper). Photos (store/owner), address,
+city/state/pincode, and GPS/location are **NEVER inherited** (per-store). This supersedes the Wave-3 Stream-C prefill
+(§9), which only pulled from the approved PARENT.
+- ⚠️ **Key correctness fix (audit HIGH, `afb4a2f`):** the "approved child" signal is the sibling partner's **KYC being
+  APPROVED** (`kycSubmissions.some.status='APPROVED'`), NOT `ChannelPartner.onboardedAt` — `onboardedAt` is a
+  PARENT-only marker that is never set for an outlet owner, so gating the sibling branch on it made that branch DEAD.
+- MED fixes (`afb4a2f`): the prefilled `panNumber` is aligned to the authoritative `groupPan`; the sibling source is
+  gated on has-details.
+
+### 11.2 Identity & Payout Uniqueness Settings toggle (`a83b2f4`)
+A self-serve card in **Admin → Settings** for the per-tenant `uniquenessPolicy`: **PAN and GST are always-on and
+locked** (hard-enforced regardless); **Mobile, Bank account, and UPI are editable OFF/ON**. **GIFSY_ADMIN-only**; saves
+the whole `uniquenessPolicy` object via the existing settings PATCH. Uniqueness holds ACROSS owner groups (same-owner
+siblings may still share). The enforcement engine + golden-key model already existed (Waves 1–2) — this only exposes the
+policy to a UI.
+- **Policy state (do NOT overstate):** default `uniquenessPolicy = {gst:true, phone:true, bank:false, upi:false}` —
+  **bank/UPI OFF by default.** On STAGING only, deoleo's policy was flipped to `{gst,phone,bank,upi all true}` (guarded
+  write; a dup-sweep first found 2 test-data duplicate bank pairs, 0 UPI). **PROD deoleo policy is UNCHANGED — bank/UPI
+  still OFF.** The OWNER will flip prod ON via the new toggle (or ask) — this is an OPEN owner action, NOT done. Always
+  sweep dup bank/UPI before flipping a tenant's `uniquenessPolicy.bank`/`upi` to true (no DB index reveals them).

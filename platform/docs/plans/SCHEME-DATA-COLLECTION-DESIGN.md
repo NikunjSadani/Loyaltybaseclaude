@@ -356,7 +356,7 @@ Final `FORM_FIELD_TYPES` = existing (`TEXT, NUMBER, DROPDOWN, DATE, DOCUMENT, IM
 
 ---
 
-## §16 — Prefill Editable/Locked (Excel variables) — develop `6f4358f` (2026-07-30, owner-gated cutover pending)
+## §16 — Prefill Editable/Locked (Excel variables) — ✅ LIVE IN PROD, cutover #18 (`f193127`, 2026-07-30)
 
 **What:** every Excel-prefilled form field has a real, **backend-enforced** Editable / Locked control. Previously the
 `locked`/`prefillKey` config existed but was cosmetic outside PHONE_OTP, and the roster `prefillValues` were never even
@@ -389,4 +389,52 @@ end-to-end** on a synthetic `LOCKPROOF` scheme (sales rep enroll): MED-1 dropped
 rejected; locked TEXT pin discarded a tampered `HACKED` → persisted the roster `Gold`; locked PHONE_OTP sent/verified/
 recorded the roster `9812300011` while the rep typed `9999999999`; a blank-cell locked field fell back to editable and
 accepted the typed value. Synthetic data fully deleted afterward. **Additive + dormant** (no live schemes in prod).
-▶ REMAINING = owner-gated prod cutover.
+✅ **LIVE IN PROD — cutover #18 (`f193127`, 2026-07-30, code-only no migration).** ▶ REMAINING = owner UAT.
+
+## §17 — UAT round (Batch 1 + Batch 2) + sales-list scoping + Excel-report rebuild — ✅ LIVE IN PROD, cutover #21 (`a83b2f4`, 2026-07-31)
+
+**✅ LIVE IN PROD — cutover #21 (`a83b2f4`, 2026-07-31). prod = main = origin/develop = `a83b2f4`** (develop no
+longer ahead). All additive + DORMANT — Deoleo live path byte-identical until a Gifsy admin uses a scheme with these
+features. Gate at cutover: **api build 0 · jest 2124 · FE tsc 0 · vitest 2052.** Migration
+`20260730160000_scheme_enrollment_soft_delete` **APPLIED to prod** (guarded read: `done:true`, `rolled:false`,
+`scheme_enrollments.deletedAt` nullable column + `scheme_enrollments_deletedAt_idx` present; already on gifsy_staging).
+Prod-verified: both services `a83b2f4`, `/health/ready` db:up, `/v1/schemes` + `/v1/schemes/:id/enrollments/deleted`
+401-wired, `deoleoloyalty.gifsy.in/auth/login` 200. Rollback ref `8c08af3` (#20).
+
+**Batch 1 — "UAT fixes" (`86c1a99`,`2ae2c6b`,`21bcfdc`,`c510cc0`,`1eb6038`; code-only, no migration).** Five fixes:
+(1) **reach fix** — `assertSalesReachRoster` authorizes a SALES enroll/OTP when the tagged employee OR the matched
+outlet/partner is assigned to ANYONE in the caller's whole DOWNLINE (was direct-only) → kills the false "This outlet is
+not within your team"; (2) **camera-only live capture** — the CAMERA field is an in-app `getUserMedia` camera
+(webcam/rear-cam), capture/retake, NO gallery fallback, denied-permission error; DOCUMENT/IMAGE/UPI_QR keep the file
+picker; (3) **roster Outlet ID/Name in prefill** (`withRosterIdentity`) so a DATA_DISPLAY bound to them resolves
+(matched OR standalone); (4) **persistent roster view + Download roster .xlsx** (`GET :id/roster/export`, GIFSY-only,
+tenant-scoped; getRoster joins the tagged employee code); (5) **Data-Display "Excel column" → DROPDOWN** of roster
+columns. Gate-green + adversarially audited CLEAN.
+
+**Batch 2 — "C: edit/delete a filled enrollment" (`c807291`,`369df10`; CARRIES the migration).** Owner decisions
+(locked): admin edit → NEW version (append, trail kept); enroller edit → allowed ONLY when the admin turns on the
+per-scheme `audienceConfig.allowEnrollerEdit` flag (**SALES-rep self-edit DISABLED, server-enforced**); delete →
+soft-delete that FREES the roster row to re-enroll (recoverable). Design (avoids a risky change to the enrollment
+1:1-unique): additive `SchemeEnrollment.deletedAt` + "reset-on-reenroll" — delete sets `deletedAt` (hidden everywhere);
+re-enrolling that outlet RESETS the same row (clears `deletedAt` + appends a version); history retained, recoverable.
+Backend: admin edit `PUT :id/enrollments/:enrollmentId` · `DELETE …` soft-delete + `POST …/restore` · GIFSY-only
+`GET :id/enrollments/deleted` (`adminListDeletedEnrollments`, never folded into the normal list) · `enroll()` resets a
+soft-deleted row · `resubmit()` allows a SUBMITTED enrollment when `allowEnrollerEdit` · hide-soft-deleted in EVERY
+read/export. FE: admin drawer Edit/Delete/Undo + a persistent **"Show deleted"** restore panel · audience toggle ·
+partner self-edit WORKS · SALES-rep self-edit DISABLED. **Dual-audited + third-pass re-audit CLEAN:** the HIGH — both
+edit paths routed through `submit()`'s PHONE_OTP consent gate demanding a fresh OTP the edit forms can't supply → FIX =
+`submit()` `consentedEditFrom` REUSES the phone OTP-verified at the ORIGINAL capture (immutable; client phone
+discarded), never a fresh OTP; fail-closed (fresh enroll / rejection-resubmit / re-enroll byte-identical). MED —
+server-enforced SELF-mode gate on the enroller SUBMITTED-edit (was FE-only). MED — persistent GIFSY-only deleted-list +
+restore panel (was Undo-toast-only). Leak hunt: all 15 read/report/export/coverage sites filter `deletedAt` — clean.
+Staging-runtime-verified pre-cutover; migration applied to prod at #21.
+
+**Scheme sales-list visibility scoping (`7817de6`; code-only).** `getSalesEligibleSchemes` now shows a rep only
+schemes their reach (self + downline) has ≥1 target for; a no-audience scheme stays visible to all (owner decision).
+Mirrors `getSalesTargets`.
+
+**Enrollment Excel report rebuild (`e0c254d`; code-only).** The enrollment export now emits ALL uploaded audience-Excel
+columns (`SchemeOutlet.prefillValues`, unioned + de-collided), Outlet Name falling back to the matched outlet name,
+Tagged + a "Submitted By (Employee)" employeeCode column, ABSOLUTE media links (from `x-forwarded-host`) that open from
+the file, grouped columns + a "Columns" legend sheet. Backend `scheme-report.service.exportEnrollments` + controller
+`@Req`.
