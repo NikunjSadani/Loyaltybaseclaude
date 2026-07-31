@@ -1387,7 +1387,7 @@ export class SchemeEnrollmentService {
    * `getSalesTargets`) with the enrollment-form meta needed to render the picker.
    */
   async getSalesEligibleSchemes(user: JwtPayload) {
-    await this.requireCallerSalesUser(user);
+    const caller = await this.requireCallerSalesUser(user);
     const now = new Date();
     const schemes = await this.prisma.scheme.findMany({
       where: {
@@ -1400,7 +1400,71 @@ export class SchemeEnrollmentService {
       include: { enrollmentForm: { select: { campaignType: true, version: true } } },
       orderBy: { createdAt: 'desc' },
     });
-    return { schemes };
+    if (schemes.length === 0) return { schemes };
+
+    // Scope the LIST so a rep only sees schemes they actually have outlets to work on —
+    // otherwise every rep sees every scheme and taps into an empty target list (owner UX).
+    // Rule (owner decision): a NO-audience scheme (parseAudience == null; the opt-in
+    // "visible to all" default) stays visible to EVERYONE; a TAGGED/FILTER scheme
+    // (EXCEL/frozen or FILTER) shows ONLY when the rep's reach (self + downline) has >=1
+    // target — the SAME reach getSalesTargets uses, so the list never shows a scheme that
+    // would open to an empty list.
+    const audienceById = new Map(schemes.map((s) => [s.id, this.parseAudience(s)]));
+    const scoped = schemes.filter((s) => audienceById.get(s.id)); // EXCEL / FILTER only
+    if (scoped.length === 0) return { schemes }; // all no-audience → visible to all
+
+    // Reach (computed once) — mirrors getSalesTargets.
+    const edges = await this.loadSalesEdges(user.clientId);
+    const reach = descendantSalesUserIds(caller.id, edges); // includes self
+    const reachArr = [...reach];
+    const assignments = await this.prisma.salesUserAssignment.findMany({
+      where: { salesUserId: { in: reachArr }, unassignedAt: null },
+      select: { outletId: true, partnerId: true },
+    });
+    const reachOutletIds = new Set<string>();
+    const reachPartnerIds = new Set<string>();
+    for (const a of assignments) {
+      if (a.outletId) reachOutletIds.add(a.outletId);
+      if (a.partnerId) reachPartnerIds.add(a.partnerId);
+    }
+
+    // (1) Schemes with >=1 reachable ROSTER row — covers EXCEL/frozen AND any FILTER scheme
+    // that has materialized rows. One bulk query, distinct by scheme (never load whole roster).
+    const scopedIds = scoped.map((s) => s.id);
+    const rosterOr: Prisma.SchemeOutletWhereInput[] = [{ taggedSalesUserId: { in: reachArr } }];
+    if (reachOutletIds.size > 0) rosterOr.push({ matchedOutletId: { in: [...reachOutletIds] } });
+    if (reachPartnerIds.size > 0) rosterOr.push({ matchedPartnerId: { in: [...reachPartnerIds] } });
+    const rosterHits = await this.prisma.schemeOutlet.findMany({
+      where: { schemeId: { in: scopedIds }, clientId: user.clientId, OR: rosterOr },
+      select: { schemeId: true },
+      distinct: ['schemeId'],
+    });
+    const visibleIds = new Set(rosterHits.map((r) => r.schemeId));
+
+    // (2) FILTER live-rule schemes (not frozen, no materialized roster) not already visible:
+    // visible iff a reachable outlet matches the scheme filter. Load the rep's reachable
+    // outlets ONCE, then test each remaining live-rule scheme (mirrors getSalesTargets).
+    const liveRuleScoped = scoped.filter((s) => {
+      const a = audienceById.get(s.id);
+      return a && a.mode === 'FILTER' && !a.frozen && !visibleIds.has(s.id);
+    });
+    if (liveRuleScoped.length > 0 && (reachOutletIds.size > 0 || reachPartnerIds.size > 0)) {
+      const outletOr: Prisma.OutletWhereInput[] = [];
+      if (reachOutletIds.size > 0) outletOr.push({ id: { in: [...reachOutletIds] } });
+      if (reachPartnerIds.size > 0) outletOr.push({ partnerId: { in: [...reachPartnerIds] } });
+      const reachOutlets = await this.prisma.outlet.findMany({
+        where: { clientId: user.clientId, deletedAt: null, OR: outletOr },
+        select: { outletTypeId: true, programName: true, programCategory: true, zone: true, state: true },
+      });
+      for (const s of liveRuleScoped) {
+        const a = audienceById.get(s.id);
+        if (reachOutlets.some((o) => this.outletMatchesFilter(o, a?.filter))) visibleIds.add(s.id);
+      }
+    }
+
+    // A no-audience scheme is always visible; a scoped scheme only if it has a reachable target.
+    const visible = schemes.filter((s) => !audienceById.get(s.id) || visibleIds.has(s.id));
+    return { schemes: visible };
   }
 
   /**

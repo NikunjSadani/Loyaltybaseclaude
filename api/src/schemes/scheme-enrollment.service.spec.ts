@@ -673,6 +673,48 @@ describe('SchemeEnrollmentService', () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue(null);
       await expect(service.getSalesEligibleSchemes(salesUser)).rejects.toBeInstanceOf(ForbiddenException);
     });
+
+    it('scopes the list: no-audience visible to all; a tagged/EXCEL scheme only when the rep reach has a target', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su-caller' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'su-caller', reportingToId: null },
+        { id: 'su-child', reportingToId: 'su-caller' },
+      ]);
+      mockPrisma.scheme.findMany.mockResolvedValue([
+        { id: 'sNo', clientId: 'deoleo', status: 'ACTIVE', audienceConfig: null, enrollmentForm: null },
+        { id: 'sHit', clientId: 'deoleo', status: 'ACTIVE', audienceConfig: { mode: 'EXCEL', frozen: true }, enrollmentForm: null },
+        { id: 'sMiss', clientId: 'deoleo', status: 'ACTIVE', audienceConfig: { mode: 'EXCEL', frozen: true }, enrollmentForm: null },
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outletId: 'o1', partnerId: null }]);
+      // Only sHit has a roster row reachable by the rep's downline; sMiss has none.
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([{ schemeId: 'sHit' }]);
+
+      const res = await service.getSalesEligibleSchemes(salesUser);
+      const ids = res.schemes.map((s) => s.id).sort();
+      expect(ids).toEqual(['sHit', 'sNo']); // sMiss hidden
+      // The roster scan is scoped by reach (self + downline), bounded to the scoped scheme ids.
+      const w = mockPrisma.schemeOutlet.findMany.mock.calls[0][0].where;
+      expect(w.schemeId).toEqual({ in: ['sHit', 'sMiss'] });
+      expect(w.OR[0]).toEqual({ taggedSalesUserId: { in: ['su-caller', 'su-child'] } });
+    });
+
+    it('scopes a FILTER live-rule scheme: visible iff a reachable outlet matches the filter', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su-caller' });
+      mockPrisma.salesUser.findMany.mockResolvedValue([{ id: 'su-caller', reportingToId: null }]);
+      mockPrisma.scheme.findMany.mockResolvedValue([
+        { id: 'sNorth', clientId: 'deoleo', status: 'ACTIVE', audienceConfig: { mode: 'FILTER', frozen: false, filter: { zones: ['NORTH'] } }, enrollmentForm: null },
+        { id: 'sSouth', clientId: 'deoleo', status: 'ACTIVE', audienceConfig: { mode: 'FILTER', frozen: false, filter: { zones: ['SOUTH'] } }, enrollmentForm: null },
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outletId: 'o1', partnerId: null }]);
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([]); // no materialized roster rows
+      // The rep's one reachable outlet is in NORTH → matches sNorth, not sSouth.
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletTypeId: 't', programName: null, programCategory: null, zone: 'NORTH', state: null },
+      ]);
+
+      const res = await service.getSalesEligibleSchemes(salesUser);
+      expect(res.schemes.map((s) => s.id)).toEqual(['sNorth']); // sSouth hidden
+    });
   });
 
   // ── getSalesTargets ────────────────────────────────────────────────────────
