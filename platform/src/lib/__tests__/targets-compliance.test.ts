@@ -26,8 +26,10 @@ describe('A — isMonthLocked: current month is editable', () => {
   });
 
   it('A2: a month in the past is still locked', () => {
-    // Build a month that is definitely in the past: 2 months ago
+    // Build a month that is definitely in the past: 2 months ago. Anchor to day 1 BEFORE
+    // shifting months so an end-of-month run (e.g. the 31st) can't overflow into the wrong month.
     const d = new Date();
+    d.setDate(1);
     d.setMonth(d.getMonth() - 2);
     const past = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     expect(isMonthLocked(past)).toBe(true);
@@ -35,6 +37,7 @@ describe('A — isMonthLocked: current month is editable', () => {
 
   it('A3: one month before CURRENT_MONTH is locked', () => {
     const d = new Date();
+    d.setDate(1); // day-1 anchor: avoids the setMonth end-of-month overflow (e.g. Jul 31 → "Jun 31" → Jul 1)
     d.setMonth(d.getMonth() - 1);
     const prev = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     expect(isMonthLocked(prev)).toBe(true);
@@ -42,6 +45,7 @@ describe('A — isMonthLocked: current month is editable', () => {
 
   it('A4: the month after CURRENT_MONTH is not locked', () => {
     const d = new Date();
+    d.setDate(1); // day-1 anchor (same overflow guard as A3)
     d.setMonth(d.getMonth() + 1);
     const next = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     expect(isMonthLocked(next)).toBe(false);
