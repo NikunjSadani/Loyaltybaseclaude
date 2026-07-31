@@ -538,6 +538,23 @@ export interface GifsySettings {
       radiusMeters: number;
     };
   };
+  /**
+   * Per-tenant identity/payout uniqueness policy. GIFSY_ADMIN-only write. REPLACE-WHOLE nested
+   * key — always send the COMPLETE object when saving.
+   *   - gst:   ALWAYS enforced (hard DB golden key) — the flag is informational; kept true.
+   *   - phone: enforce phone unique ACROSS parent groups.
+   *   - bank:  enforce bank account unique ACROSS parent groups.
+   *   - upi:   enforce UPI id unique ACROSS parent groups.
+   * PAN (not in this object) is also always enforced. Uniqueness holds ACROSS groups — siblings
+   * of the same owner group may still share these values.
+   * Default: { gst: true, phone: true, bank: false, upi: false }.
+   */
+  uniquenessPolicy?: {
+    gst:   boolean;
+    phone: boolean;
+    bank:  boolean;
+    upi:   boolean;
+  };
 }
 
 // ─── INR Payout Ledger Entry (Retailer / Sub-Stockist / MT) ──────────────────

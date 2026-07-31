@@ -52,6 +52,9 @@ export const DEFAULT_SETTINGS: GifsySettings = {
     allowedSalesLevels: [],
     geoFence:           { enabled: false, radiusMeters: 50 },
   },
+  // Identity/payout uniqueness — default preserves today's behaviour (GST + phone enforced;
+  // bank/UPI were never checked). PAN + GST are always DB-enforced regardless of the flags.
+  uniquenessPolicy: { gst: true, phone: true, bank: false, upi: false },
 };
 
 /** Server `EffectiveSettings` shape (GET /v1/settings / me.settings). */
@@ -70,6 +73,7 @@ interface ServerSettings {
   outletPrograms:         string[];
   outletCategories:       string[];
   visibilityConfig?:      GifsySettings['visibilityConfig'];
+  uniquenessPolicy?:      GifsySettings['uniquenessPolicy'];
 }
 
 // ── in-memory store (seeded synchronously from the localStorage cache) ────────
@@ -116,6 +120,7 @@ function fromServer(srv: ServerSettings, prev: GifsySettings): GifsySettings {
     outletPrograms:         srv.outletPrograms         ?? prev.outletPrograms,
     outletCategories:       srv.outletCategories       ?? prev.outletCategories,
     visibilityConfig:       srv.visibilityConfig       ?? prev.visibilityConfig,
+    uniquenessPolicy:       srv.uniquenessPolicy       ?? prev.uniquenessPolicy,
   };
 }
 
@@ -171,6 +176,8 @@ const SAVE_KEY_MAP: Partial<Record<keyof GifsySettings, string>> = {
   outletCategories:       'outletCategories',
   // Visibility (POSM) config — nested REPLACE-WHOLE key; always PUT the complete object.
   visibilityConfig:       'visibilityConfig',
+  // Identity/payout uniqueness — nested REPLACE-WHOLE key; always PUT the complete object.
+  uniquenessPolicy:       'uniquenessPolicy',
 };
 
 /**

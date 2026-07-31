@@ -1,7 +1,7 @@
 ﻿'use client'
 
 import { useState, useEffect } from 'react'
-import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins, Lock } from 'lucide-react'
+import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins, Lock, Fingerprint } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
@@ -86,6 +86,57 @@ function SettingRow({ label, description, value, onChange, type = 'number', min,
       <input data-testid={testId} type={type} value={value} onChange={e => onChange(e.target.value)}
         min={min} max={max} step={step} disabled={disabled}
         className="w-28 text-sm border border-gray-200 rounded px-2 py-1.5 text-right focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed" />
+    </div>
+  )
+}
+
+/**
+ * One row in the Identity & Payout Uniqueness card. `locked` fields (PAN/GST) are DB-enforced
+ * golden keys that can never be turned off — they render an "Always on" pill instead of a toggle.
+ * Editable fields render a segmented OFF/ON control matching the other toggles on this page.
+ */
+function UniquenessToggleRow({ label, description, value, onChange, locked = false, disabled = false, testId }: {
+  label: string, description: string, value: boolean,
+  onChange?: (v: boolean) => void, locked?: boolean, disabled?: boolean, testId?: string
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 py-3 border-b border-gray-100 last:border-0">
+      <div className="flex-1">
+        <p className="text-sm font-medium text-gray-900 flex items-center gap-1.5">
+          {label}
+          {locked && <Lock className="h-3 w-3 text-gray-400" aria-label="Always on" />}
+        </p>
+        <p className="text-xs text-gray-500 mt-0.5">{description}</p>
+      </div>
+      {locked ? (
+        <span
+          data-testid={testId}
+          className="text-xs font-semibold text-gray-500 bg-gray-100 border border-gray-200 px-3 py-1.5 rounded-lg shrink-0"
+        >
+          Always on
+        </span>
+      ) : (
+        <div className="flex bg-gray-100 rounded-lg p-1 gap-1 shrink-0" role="radiogroup" aria-label={label}>
+          {([['OFF', false], ['ON', true]] as const).map(([lbl, val]) => (
+            <button
+              key={lbl}
+              type="button"
+              role="radio"
+              aria-checked={value === val}
+              data-testid={testId ? `${testId}-${lbl.toLowerCase()}` : undefined}
+              disabled={disabled}
+              onClick={() => value !== val && onChange?.(val)}
+              className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
+                value === val
+                  ? 'bg-white text-gray-900 shadow-sm border border-gray-200'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {lbl}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -382,6 +433,42 @@ export default function SettingsPage() {
     }
     setUpiEnabledSaved(true)
     setTimeout(() => setUpiEnabledSaved(false), 3000)
+  }
+
+  // ── Identity & payout uniqueness policy (per-tenant; saved via GifsySettings) ──
+  // saveGifsySettings PUTs to /v1/admin/settings (GIFSY_ADMIN-only), so the toggles are editable
+  // only for GIFSY_ADMIN. `uniquenessPolicy` is a REPLACE-WHOLE nested key — every save MUST send
+  // the COMPLETE {gst,phone,bank,upi} object, so a single-field save can't reset the siblings to
+  // their defaults. `gst` is kept true on every save: PAN + GST are hard DB-enforced golden keys
+  // regardless of the flag (backend isFieldEnforced), so the flag is informational and the UI
+  // shows them locked. Only phone/bank/upi are the real, policy-gated toggles.
+  const UNIQ_DEFAULT = { gst: true, phone: true, bank: false, upi: false }
+  const [uniqPolicy,      setUniqPolicy]      = useState<{ gst: boolean; phone: boolean; bank: boolean; upi: boolean }>(
+    () => ({ ...UNIQ_DEFAULT, ...getGifsySettings().uniquenessPolicy }),
+  )
+  const [uniqPolicySaved, setUniqPolicySaved] = useState(false)
+  const [uniqPolicyError, setUniqPolicyError] = useState<string | null>(null)
+
+  // Keep the displayed policy in sync once server settings hydrate (/me → cache).
+  useEffect(() => {
+    setUniqPolicy({ ...UNIQ_DEFAULT, ...getGifsySettings().uniquenessPolicy })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function handleUniqPolicyChange(field: 'phone' | 'bank' | 'upi', next: boolean) {
+    setUniqPolicyError(null)
+    const previous = uniqPolicy
+    // REPLACE-WHOLE: send the complete object; gst stays true (DB-enforced regardless).
+    const updated = { ...previous, [field]: next, gst: true }
+    setUniqPolicy(updated) // optimistic
+    const ok = await saveGifsySettings({ uniquenessPolicy: updated })
+    if (!ok) {
+      setUniqPolicy(previous) // revert
+      setUniqPolicyError('Could not save — the uniqueness policy can only be changed by a Gifsy Admin.')
+      return
+    }
+    setUniqPolicySaved(true)
+    setTimeout(() => setUniqPolicySaved(false), 3000)
   }
 
   // ── Outlet Programs & Categories allow-lists (per-tenant; saved via GifsySettings) ──
@@ -848,6 +935,61 @@ export default function SettingsPage() {
           )}
           {upiEnabledError && (
             <p className="text-xs text-red-600 mt-2">{upiEnabledError}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Identity & Payout Uniqueness (per-tenant; GIFSY_ADMIN only) ── */}
+      <Card data-testid="uniqueness-policy-card">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Fingerprint className="h-4 w-4 text-[var(--brand-primary)]" /> Identity &amp; Payout Uniqueness
+              </CardTitle>
+              <CardDescription className="mt-1">
+                Which identity/payout details must be unique across the tenant. Enforced ACROSS owner
+                groups — outlets of the SAME owner (one parent group) may still share these.
+              </CardDescription>
+            </div>
+            {uniqPolicySaved && (
+              <span className="text-xs text-green-600 font-medium shrink-0">Saved</span>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <UniquenessToggleRow
+            label="PAN" locked
+            description="Always enforced (golden key). One PAN per owner group; two different owners can never share a PAN."
+            value testId="uniq-pan"
+          />
+          <UniquenessToggleRow
+            label="GST" locked
+            description="Always enforced. Unique across the tenant except within one owner group."
+            value testId="uniq-gst"
+          />
+          <UniquenessToggleRow
+            label="Mobile number" value={uniqPolicy.phone}
+            description="When ON, a mobile number can't be reused by a different owner."
+            onChange={(v) => handleUniqPolicyChange('phone', v)} disabled={!isGifsyAdmin} testId="uniq-phone"
+          />
+          <UniquenessToggleRow
+            label="Bank account" value={uniqPolicy.bank}
+            description="When ON, a bank account can't be shared by outlets of DIFFERENT owners (same-group siblings still can)."
+            onChange={(v) => handleUniqPolicyChange('bank', v)} disabled={!isGifsyAdmin} testId="uniq-bank"
+          />
+          <UniquenessToggleRow
+            label="UPI ID" value={uniqPolicy.upi}
+            description="When ON, a UPI ID can't be shared by outlets of DIFFERENT owners (same-group siblings still can)."
+            onChange={(v) => handleUniqPolicyChange('upi', v)} disabled={!isGifsyAdmin} testId="uniq-upi"
+          />
+          {!isGifsyAdmin && (
+            <p className="text-xs text-gray-500 mt-3">
+              Uniqueness policy is a Gifsy-operated setting — only a Gifsy Admin can change it.
+            </p>
+          )}
+          {uniqPolicyError && (
+            <p className="text-xs text-red-600 mt-2">{uniqPolicyError}</p>
           )}
         </CardContent>
       </Card>
