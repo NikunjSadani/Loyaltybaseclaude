@@ -18,6 +18,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Filter, Upload, X, AlertCircle, AlertTriangle, Check, CheckCircle, Users,
   FileSpreadsheet, Loader2, Info, Download, RefreshCw, ChevronLeft, ChevronRight, Table2,
+  Trash2, Undo2,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import {
@@ -367,6 +368,22 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
+  // Row-remove (soft-delete) state: multi-select, a shared confirm banner, a
+  // busy flag, an error line, and a persistent success notice (warns when a
+  // filled enrollment was hidden). GIFSY-only — this panel is GIFSY-authoring context.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmIds, setConfirmIds] = useState<string[] | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [removeNotice, setRemoveNotice] = useState<string | null>(null);
+
+  // "Show removed" recovery sub-panel — the durable path back for a soft-deleted row.
+  const [showRemoved, setShowRemoved] = useState(false);
+  const [removedRows, setRemovedRows] = useState<RosterRow[]>([]);
+  const [removedLoading, setRemovedLoading] = useState(false);
+  const [removedError, setRemovedError] = useState<string | null>(null);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+
   const LIMIT = 25;
 
   const load = async (p: number) => {
@@ -379,9 +396,21 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
       setPage(res.data.pagination.page);
       setPages(res.data.pagination.pages);
       setTotal(res.data.pagination.total);
+      // Drop any selection no longer present on the freshly-loaded page.
+      const present = new Set(res.data.roster.map((r) => r.id));
+      setSelected((prev) => new Set([...prev].filter((id) => present.has(id))));
     } else {
       setError(res.error);
     }
+  };
+
+  const loadRemoved = async () => {
+    setRemovedLoading(true);
+    setRemovedError(null);
+    const res = await schemeApi.getRemovedRoster(schemeId, { page: 1, limit: LIMIT });
+    setRemovedLoading(false);
+    if (res.success) setRemovedRows(res.data.roster);
+    else setRemovedError(res.error);
   };
 
   // Refetch on mount, on scheme change, and after each upload (refreshKey bumps).
@@ -399,6 +428,68 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
     if (!res.success) setDownloadError(res.error);
   };
 
+  const toggleRow = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  const allOnPageSelected = rows.length > 0 && rows.every((r) => selected.has(r.id));
+  const toggleAll = () =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allOnPageSelected) rows.forEach((r) => next.delete(r.id));
+      else rows.forEach((r) => next.add(r.id));
+      return next;
+    });
+
+  const toggleRemoved = () => {
+    setShowRemoved((prev) => {
+      const next = !prev;
+      if (next) void loadRemoved();
+      return next;
+    });
+  };
+
+  // Remove the confirmed rows, then refresh the current list (and the removed
+  // sub-panel if it is open). Surfaces a notice that warns when a filled
+  // enrollment was hidden.
+  const doRemove = async () => {
+    if (!confirmIds || confirmIds.length === 0) return;
+    setRemoving(true);
+    setRemoveError(null);
+    const ids = confirmIds;
+    const res = await schemeApi.removeRosterRows(schemeId, ids);
+    setRemoving(false);
+    if (res.success) {
+      const { removed, removedWithEnrollment } = res.data;
+      setRemoveNotice(
+        removedWithEnrollment > 0
+          ? `Removed ${removed} outlet${removed === 1 ? '' : 's'} (${removedWithEnrollment} had a filled enrollment — now hidden; restore to recover).`
+          : `Removed ${removed} outlet${removed === 1 ? '' : 's'}.`,
+      );
+      setConfirmIds(null);
+      setSelected((prev) => { const next = new Set(prev); ids.forEach((id) => next.delete(id)); return next; });
+      // Reloading the current page can leave it empty when the last row on it was
+      // removed — step back a page in that case.
+      const nextPage = rows.length === ids.length && page > 1 ? page - 1 : page;
+      await load(nextPage);
+      if (showRemoved) void loadRemoved();
+    } else {
+      setRemoveError(res.error);
+    }
+  };
+
+  // Restore one removed row, then refresh both lists.
+  const doRestore = async (id: string) => {
+    setRestoringId(id);
+    setRemovedError(null);
+    const res = await schemeApi.restoreRosterRows(schemeId, [id]);
+    setRestoringId(null);
+    if (res.success) { await loadRemoved(); void load(page); }
+    else setRemovedError(res.error);
+  };
+
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -407,6 +498,10 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
           {total > 0 && <span className="text-xs font-normal text-gray-400">({total} outlet{total === 1 ? '' : 's'})</span>}
         </p>
         <div className="flex items-center gap-3">
+          <button type="button" onClick={toggleRemoved}
+            className={`inline-flex items-center gap-1.5 text-xs font-medium rounded-lg px-2.5 py-1 border transition-colors ${showRemoved ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
+            <Trash2 className="w-3.5 h-3.5" /> {showRemoved ? 'Hide removed' : 'Show removed'}
+          </button>
           <button type="button" onClick={() => void load(page)} disabled={loading}
             className="inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 disabled:opacity-60">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh
@@ -425,6 +520,56 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
       {error && (
         <p className="text-xs text-red-500 flex items-start gap-1.5"><AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />{error}</p>
       )}
+      {removeNotice && (
+        <p className="text-xs text-gray-600 flex items-start gap-1.5 bg-gray-50 border border-gray-100 rounded-lg px-3 py-2">
+          <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-gray-400" />
+          <span className="flex-1">{removeNotice}</span>
+          <button type="button" onClick={() => setRemoveNotice(null)} className="text-gray-400 hover:text-gray-600"><X className="w-3.5 h-3.5" /></button>
+        </p>
+      )}
+
+      {/* Removed (recovery) sub-panel — the durable path back for any soft-deleted row */}
+      {showRemoved && (
+        <div className="border border-gray-200 rounded-xl overflow-hidden">
+          <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-2">
+            <Trash2 className="w-3.5 h-3.5 text-gray-400" />
+            <span className="text-xs font-semibold text-gray-700">Removed rows</span>
+            <span className="text-xs text-gray-400">— restore to bring the outlet (and any hidden enrollment) back</span>
+          </div>
+          {removedError && <p className="text-xs text-red-500 flex items-center gap-1 px-3 py-2"><AlertCircle className="w-3.5 h-3.5" />{removedError}</p>}
+          {removedLoading ? (
+            <div className="flex items-center justify-center py-6"><Loader2 className="w-5 h-5 text-gray-300 animate-spin" /></div>
+          ) : removedRows.length === 0 ? (
+            <p className="px-3 py-5 text-center text-xs text-gray-400">No removed rows.</p>
+          ) : (
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-white text-gray-500 text-left border-b border-gray-100">
+                  <th className="px-3 py-2 font-medium">Outlet ID</th>
+                  <th className="px-3 py-2 font-medium">Outlet Name</th>
+                  <th className="px-3 py-2 font-medium">Removed at</th>
+                  <th className="px-3 py-2 font-medium"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {removedRows.map((r) => (
+                  <tr key={r.id} className="text-gray-700">
+                    <td className="px-3 py-2 font-mono text-[11px]">{r.outletRef}</td>
+                    <td className="px-3 py-2">{r.outletName}</td>
+                    <td className="px-3 py-2 text-gray-500">{r.deletedAt ? new Date(r.deletedAt).toLocaleString('en-IN') : '—'}</td>
+                    <td className="px-3 py-2 text-right">
+                      <button type="button" onClick={() => void doRestore(r.id)} disabled={restoringId === r.id}
+                        className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--brand-primary)] hover:underline disabled:opacity-60">
+                        {restoringId === r.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Undo2 className="w-3.5 h-3.5" />} Restore
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
 
       {!error && rows.length === 0 && !loading && (
         <p className="text-xs text-gray-500 bg-gray-50 border border-gray-100 rounded-lg px-3 py-4 text-center">
@@ -432,23 +577,71 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
         </p>
       )}
 
+      {/* Bulk-remove action bar (appears with a selection) */}
+      {selected.size > 0 && (
+        <div className="flex items-center justify-between gap-3 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+          <span className="text-xs text-red-700 font-medium">{selected.size} selected</span>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setSelected(new Set())}
+              className="text-xs text-gray-500 hover:text-gray-700">Clear</button>
+            <button type="button" onClick={() => setConfirmIds([...selected])} disabled={removing}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-red-500 text-white text-xs font-medium hover:bg-red-600 transition-colors disabled:opacity-60">
+              <Trash2 className="w-3.5 h-3.5" /> Remove selected
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Remove confirm banner (per-row or bulk) */}
+      {confirmIds && (
+        <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3.5">
+          <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-amber-800">
+              Remove {confirmIds.length} outlet{confirmIds.length === 1 ? '' : 's'} from the roster?
+            </p>
+            <p className="text-xs text-amber-700 mt-0.5">
+              The row is hidden from every list, export, report and enrollment reach. Any filled enrollment on it is hidden too. This is recoverable — use “Show removed” to restore.
+            </p>
+            {removeError && <p className="text-xs text-red-500 flex items-start gap-1.5 mt-1.5"><AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />{removeError}</p>}
+            <div className="flex gap-2 mt-2">
+              <button type="button" onClick={() => void doRemove()} disabled={removing}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-red-500 text-white hover:bg-red-600 disabled:opacity-60">
+                {removing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />} Remove
+              </button>
+              <button type="button" onClick={() => { setConfirmIds(null); setRemoveError(null); }} disabled={removing}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-60">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {rows.length > 0 && (
         <div className="border border-gray-100 rounded-xl overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-gray-50 text-gray-500 text-left">
+                <th className="px-3 py-2 font-medium w-8">
+                  <input type="checkbox" aria-label="Select all on page" checked={allOnPageSelected} onChange={toggleAll}
+                    className="align-middle accent-[var(--brand-primary)] cursor-pointer" />
+                </th>
                 <th className="px-3 py-2 font-medium">Outlet ID</th>
                 <th className="px-3 py-2 font-medium">Outlet Name</th>
                 <th className="px-3 py-2 font-medium">Linkage</th>
                 <th className="px-3 py-2 font-medium">Tagged employee</th>
                 <th className="px-3 py-2 font-medium">Enrollment status</th>
+                <th className="px-3 py-2 font-medium text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {rows.map((r) => {
                 const linkage = linkageLabel(r);
                 return (
-                  <tr key={r.id} className="text-gray-700">
+                  <tr key={r.id} className={`text-gray-700 ${selected.has(r.id) ? 'bg-red-50/40' : ''}`}>
+                    <td className="px-3 py-2">
+                      <input type="checkbox" aria-label={`Select ${r.outletRef}`} checked={selected.has(r.id)} onChange={() => toggleRow(r.id)}
+                        className="align-middle accent-[var(--brand-primary)] cursor-pointer" />
+                    </td>
                     <td className="px-3 py-2 font-mono text-[11px]">{r.outletRef}</td>
                     <td className="px-3 py-2">{r.outletName}</td>
                     <td className="px-3 py-2">
@@ -458,6 +651,13 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
                     </td>
                     <td className="px-3 py-2 text-gray-500">{r.taggedSalesUser?.employeeCode ?? '—'}</td>
                     <td className="px-3 py-2">{r.enrollment?.status ?? 'NOT_ENROLLED'}</td>
+                    <td className="px-3 py-2 text-right">
+                      <button type="button" onClick={() => { setConfirmIds([r.id]); setRemoveError(null); }} disabled={removing}
+                        title="Remove from roster"
+                        className="inline-flex items-center gap-1 text-gray-400 hover:text-red-500 disabled:opacity-60">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </td>
                   </tr>
                 );
               })}

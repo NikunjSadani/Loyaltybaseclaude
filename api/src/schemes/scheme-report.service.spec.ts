@@ -594,6 +594,16 @@ describe('SchemeReportService', () => {
       expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
     });
 
+    it('404s when the roster row was REMOVED (schemeOutlet soft-deleted → media fails closed)', async () => {
+      mockJwt.verify.mockReturnValue(goodPayload);
+      mockPrisma.schemeEnrollment.findUnique.mockResolvedValue({
+        ...liveEnrollment,
+        schemeOutlet: { deletedAt: new Date() },
+      });
+      await expect(service.viewMediaByToken('tok')).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockStorage.downloadBytes).not.toHaveBeenCalled();
+    });
+
     it('404s a cross-tenant token (enrollment tenant ≠ token clientId)', async () => {
       mockJwt.verify.mockReturnValue(goodPayload);
       mockPrisma.schemeEnrollment.findUnique.mockResolvedValue({ ...liveEnrollment, scheme: { clientId: 'other' } });

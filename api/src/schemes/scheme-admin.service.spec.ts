@@ -22,9 +22,11 @@ const mockPrisma = {
   schemeOutlet: {
     createMany: jest.fn(),
     upsert: jest.fn(),
+    updateMany: jest.fn(),
     findMany: jest.fn(),
     count: jest.fn(),
   },
+  schemeEnrollment: { count: jest.fn() },
   outlet: { findMany: jest.fn() },
   salesUser: { findMany: jest.fn() },
   // $transaction handles BOTH the callback form (form versioning) and the
@@ -273,6 +275,17 @@ describe('SchemeAdminService', () => {
       expect(firstRow.schemeId).toBe('s1');
       expect(firstRow.clientId).toBe('t1');
       expect(res.materializedCount).toBe(150);
+
+      // "Removed stays removed": a filter re-materialize does NOT resurrect a previously-removed
+      // row (no updateMany clearing deletedAt). Only Restore or an Excel re-upload brings it back.
+      expect(mockPrisma.schemeOutlet.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('does NOT run the resurrect updateMany for EXCEL mode (nothing materialized)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      mockPrisma.scheme.update.mockResolvedValue({ id: 's1' });
+      await service.setAudience(user, 's1', { mode: 'EXCEL', selfEnrollAllowed: true, frozen: false });
+      expect(mockPrisma.schemeOutlet.updateMany).not.toHaveBeenCalled();
     });
   });
 
@@ -318,6 +331,9 @@ describe('SchemeAdminService', () => {
       expect(mockPrisma.schemeOutlet.upsert.mock.calls[0][0].where).toEqual({
         schemeId_outletRef: { schemeId: 's1', outletRef: 'OUT001' },
       });
+      // Resurrect-on-re-upload: the update branch clears deletedAt so re-uploading a
+      // previously-removed outletRef brings the roster row back.
+      expect(mockPrisma.schemeOutlet.upsert.mock.calls[0][0].update.deletedAt).toBeNull();
     });
 
     it('rejects a file with no data rows', async () => {
@@ -346,7 +362,84 @@ describe('SchemeAdminService', () => {
       expect(mockPrisma.schemeOutlet.findMany.mock.calls[0][0].where).toEqual({
         schemeId: 's1',
         clientId: 't1',
+        deletedAt: null, // soft-removed rows excluded
       });
+      expect(res.pagination).toEqual({ page: 1, limit: 50, total: 1, pages: 1 });
+    });
+  });
+
+  // ── removeRoster / restoreRoster / getRemovedRoster (soft-delete) ─────────────
+  describe('removeRoster', () => {
+    it('soft-removes only own scheme+client rows, counts live enrollments + notFound', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      mockPrisma.schemeEnrollment.count.mockResolvedValue(2); // 2 of the removed rows had a live enrollment
+      mockPrisma.schemeOutlet.updateMany.mockResolvedValue({ count: 3 }); // 3 of 4 ids removed
+
+      const res = await service.removeRoster(user, 's1', {
+        schemeOutletIds: ['a', 'b', 'c', 'd'],
+      });
+
+      // update scoped to own scheme+client, only not-yet-removed ids
+      expect(mockPrisma.schemeOutlet.updateMany.mock.calls[0][0].where).toEqual({
+        schemeId: 's1',
+        clientId: 't1',
+        id: { in: ['a', 'b', 'c', 'd'] },
+        deletedAt: null,
+      });
+      expect(mockPrisma.schemeOutlet.updateMany.mock.calls[0][0].data.deletedAt).toBeInstanceOf(Date);
+      // live-enrollment count scoped through the (soon-to-be-removed) rows
+      expect(mockPrisma.schemeEnrollment.count.mock.calls[0][0].where).toEqual({
+        deletedAt: null,
+        schemeOutlet: { id: { in: ['a', 'b', 'c', 'd'] }, schemeId: 's1', clientId: 't1', deletedAt: null },
+      });
+      expect(res).toEqual({ removed: 3, removedWithEnrollment: 2, notFound: 1 });
+    });
+
+    it('is idempotent — an already-removed id falls out (deletedAt:null) and counts as notFound', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      mockPrisma.schemeEnrollment.count.mockResolvedValue(0);
+      mockPrisma.schemeOutlet.updateMany.mockResolvedValue({ count: 0 });
+      const res = await service.removeRoster(user, 's1', { schemeOutletIds: ['already-gone'] });
+      expect(res).toEqual({ removed: 0, removedWithEnrollment: 0, notFound: 1 });
+    });
+
+    it('404s a cross-tenant / deleted scheme (no write)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(null);
+      await expect(
+        service.removeRoster(user, 'sX', { schemeOutletIds: ['a'] }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockPrisma.schemeOutlet.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('restoreRoster', () => {
+    it('restores only currently-removed rows (deletedAt:{not:null}); live ids count as notFound', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      mockPrisma.schemeOutlet.updateMany.mockResolvedValue({ count: 1 }); // 1 of 2 was removed
+      const res = await service.restoreRoster(user, 's1', { schemeOutletIds: ['x', 'y'] });
+      expect(mockPrisma.schemeOutlet.updateMany.mock.calls[0][0]).toEqual({
+        where: { schemeId: 's1', clientId: 't1', id: { in: ['x', 'y'] }, deletedAt: { not: null } },
+        data: { deletedAt: null },
+      });
+      expect(res).toEqual({ restored: 1, notFound: 1 });
+    });
+  });
+
+  describe('getRemovedRoster', () => {
+    it('returns ONLY deletedAt != null rows, newest-removed first, same shape as getRoster', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(activeScheme);
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        { id: 'ro1', deletedAt: new Date('2026-08-01'), enrollment: null },
+      ]);
+      mockPrisma.schemeOutlet.count.mockResolvedValue(1);
+      const res = await service.getRemovedRoster(user, 's1', { page: 1, limit: 50 });
+      expect(mockPrisma.schemeOutlet.findMany.mock.calls[0][0].where).toEqual({
+        schemeId: 's1',
+        clientId: 't1',
+        deletedAt: { not: null },
+      });
+      expect(mockPrisma.schemeOutlet.findMany.mock.calls[0][0].orderBy).toEqual({ deletedAt: 'desc' });
+      expect(res.roster[0]).toMatchObject({ id: 'ro1' });
       expect(res.pagination).toEqual({ page: 1, limit: 50, total: 1, pages: 1 });
     });
   });

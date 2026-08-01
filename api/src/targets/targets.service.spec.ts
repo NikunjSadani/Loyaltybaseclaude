@@ -129,10 +129,25 @@ const kpiRow2 = {
   updatedAt: new Date(),
 };
 
+/**
+ * A WRITABLE target month, computed RELATIVE to now (the 1st of next month → always strictly in
+ * the future → never month-locked, regardless of the calendar date the suite runs on). Hardcoding
+ * a fixed month here was date-rot: once that month became the past, the upload month-lock skipped
+ * every row and the upload tests failed with 0 upserts. Label format matches the template group
+ * header: "<Mon> '<YY> Target" (e.g. "Sep '26 Target").
+ */
+const WRITABLE_MONTH = (() => {
+  const now = new Date();
+  const first = new Date(now.getFullYear(), now.getMonth() + 1, 1); // 1st of next month (rolls year in Dec)
+  const label = `${first.toLocaleString('en-US', { month: 'short' })} '${String(first.getFullYear()).slice(-2)} Target`;
+  const ym = `${first.getFullYear()}-${String(first.getMonth() + 1).padStart(2, '0')}`;
+  return { label, ym };
+})();
+
 /** Builds an xlsx buffer matching the template layout for tests. */
 function buildTestXlsx(dataRows: (string | number | null)[][]): Buffer {
-  // Row 1: group headers
-  const row1 = ['', '', '', "Jul '26 Target", ''];
+  // Row 1: group headers — a relative writable (future) month so the upload is never locked.
+  const row1 = ['', '', '', WRITABLE_MONTH.label, ''];
   // Row 2: col headers
   const row2 = ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1'];
   const wb = XLSX.utils.book_new();

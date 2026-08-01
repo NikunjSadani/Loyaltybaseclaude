@@ -425,11 +425,19 @@ export class SchemeReportService {
     // Load the enrollment + walk to its real tenant: SchemeEnrollment → scheme.clientId.
     const enrollment = await this.prisma.schemeEnrollment.findUnique({
       where: { id: enrollmentId },
-      select: { formValues: true, deletedAt: true, scheme: { select: { clientId: true } } },
+      select: {
+        formValues: true,
+        deletedAt: true,
+        schemeOutlet: { select: { deletedAt: true } },
+        scheme: { select: { clientId: true } },
+      },
     });
     if (!enrollment) throw deny();
     // A soft-deleted enrollment leaks nothing (parity with the export's own guard).
     if (enrollment.deletedAt != null) throw deny();
+    // A REMOVED roster row (soft-deleted outlet) fails the media link closed too — the
+    // enrollment is reached only through its row, so a removed row hides its media.
+    if (enrollment.schemeOutlet?.deletedAt != null) throw deny();
 
     // Cross-tenant guard: the enrollment's owning tenant MUST equal the token's clientId.
     const enrClientId = enrollment.scheme?.clientId;
@@ -485,7 +493,8 @@ export class SchemeReportService {
     const { audienceConfig, clientId, ...schemePublic } = scheme;
 
     const roster = await this.prisma.schemeOutlet.findMany({
-      where: { schemeId, clientId },
+      // A soft-removed roster row is excluded from every report aggregation.
+      where: { schemeId, clientId, deletedAt: null },
       select: {
         id: true,
         outletRef: true,
@@ -503,7 +512,9 @@ export class SchemeReportService {
 
     const enrollments = await this.prisma.schemeEnrollment.findMany({
       // Soft-deleted enrollments are excluded from coverage/counts (they read as NOT_ENROLLED).
-      where: { schemeId, deletedAt: null },
+      // A REMOVED roster row is excluded too (schemeOutlet.deletedAt) — the roster above already
+      // drops it, so its enrollment must not inflate the enrolled/submitted/rejected counts.
+      where: { schemeId, deletedAt: null, schemeOutlet: { deletedAt: null } },
       select: { schemeOutletId: true, status: true },
     });
 
@@ -635,7 +646,8 @@ export class SchemeReportService {
     const clientId = scheme.clientId;
 
     const roster = await this.prisma.schemeOutlet.findMany({
-      where: { schemeId, clientId },
+      // A soft-removed roster row is excluded from the captured-data export.
+      where: { schemeId, clientId, deletedAt: null },
       select: {
         outletRef: true,
         outletName: true,

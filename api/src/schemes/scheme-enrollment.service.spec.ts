@@ -120,6 +120,25 @@ describe('SchemeEnrollmentService', () => {
       // Invariant (§13.3): submission denormalizes schemeId/schemeOutletId/enrollmentId from the enrollment.
       const subData = mockPrisma.schemeSubmission.create.mock.calls[0][0].data;
       expect(subData).toMatchObject({ schemeId: 's1', schemeOutletId: 'ro1', enrollmentId: 'enr1', version: 1, status: 'SUBMITTED' });
+      // Lazy find-or-create has NO resurrecting side effect — `update: {}` leaves an existing
+      // (possibly admin-removed) row untouched. "Removed stays removed" (see the removed-row test).
+      expect(mockPrisma.schemeOutlet.upsert.mock.calls[0][0].update).toEqual({});
+    });
+
+    it('a REMOVED (soft-deleted) matched row is NOT enrollable via the lazy path (no side-effect resurrect)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
+      mockPrisma.channelPartner.findFirst.mockResolvedValueOnce({ id: 'cp1', groupId: null });
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { id: 'o1', name: 'Shop', partnerId: 'cp1', outletTypeId: 't', programName: null, programCategory: null, zone: null, state: null },
+      ]);
+      // The find-or-create returns the EXISTING, admin-removed row (deletedAt set) untouched.
+      mockPrisma.schemeOutlet.upsert.mockResolvedValue({ id: 'ro1', schemeId: 's1', clientId: 'deoleo', matchedPartnerId: 'cp1', matchedOutletId: 'o1', outletRef: 'o1', outletName: 'Shop', taggedSalesUserId: null, deletedAt: new Date() });
+
+      await expect(
+        service.enroll(partnerUser, 's1', { enrollmentMode: 'SELF', formValues: { f1: 'x' } }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      // Removal is durable: no enrollment was created for the removed outlet.
+      expect(mockPrisma.schemeEnrollment.create).not.toHaveBeenCalled();
     });
 
     it('rejects a missing required field', async () => {
@@ -183,6 +202,18 @@ describe('SchemeEnrollmentService', () => {
       const res = await service.enroll(salesUser, 's1', { enrollmentMode: 'SALES', targetSchemeOutletId: 'ro9', formValues: { f1: 'Kirana' } });
       expect(res.enrollment.id).toBe('enr9');
       expect(mockPrisma.schemeEnrollment.create.mock.calls[0][0].data.enrollmentMode).toBe('SALES');
+      // The roster-row lookup excludes soft-removed rows.
+      expect(mockPrisma.schemeOutlet.findFirst.mock.calls[0][0].where).toMatchObject({
+        id: 'ro9', schemeId: 's1', clientId: 'deoleo', deletedAt: null,
+      });
+    });
+
+    it('404s a targetSchemeOutletId whose roster row was REMOVED (soft-delete → findFirst null)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
+      mockPrisma.schemeOutlet.findFirst.mockResolvedValue(null); // removed row is filtered out
+      await expect(
+        service.enroll(salesUser, 's1', { enrollmentMode: 'SALES', targetSchemeOutletId: 'ro-removed', formValues: { f1: 'x' } }),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('forbids a caller who cannot reach the row', async () => {
@@ -556,6 +587,16 @@ describe('SchemeEnrollmentService', () => {
       await expect(service.resubmit(partnerUser, 's1', 'enr1', { formValues: { f1: 'x' } })).rejects.toBeInstanceOf(BadRequestException);
     });
 
+    it('404s resubmit when the roster row was REMOVED (enrollment hidden through its row)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
+      mockPrisma.schemeEnrollment.findFirst.mockResolvedValue({
+        id: 'enr1', schemeId: 's1', status: 'REJECTED', enrollmentMode: 'SELF',
+        schemeOutlet: { id: 'ro1', schemeId: 's1', matchedPartnerId: 'cp1', deletedAt: new Date() },
+      });
+
+      await expect(service.resubmit(partnerUser, 's1', 'enr1', { formValues: { f1: 'x' } })).rejects.toBeInstanceOf(NotFoundException);
+    });
+
     it('ALLOWS a SELF enroller to edit a SUBMITTED enrollment when allowEnrollerEdit is on (bumps version)', async () => {
       mockPrisma.scheme.findFirst.mockResolvedValue(
         makeScheme({ audienceConfig: { mode: 'FILTER', selfEnrollAllowed: true, frozen: false, allowEnrollerEdit: true } }),
@@ -628,6 +669,15 @@ describe('SchemeEnrollmentService', () => {
     await expect(service.adminListEnrollments(partnerUser, 's1', {})).rejects.toBeInstanceOf(ForbiddenException);
   });
 
+  it('adminListEnrollments scopes the roster where with deletedAt: null (removed rows excluded)', async () => {
+    mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
+    mockPrisma.schemeOutlet.findMany.mockResolvedValue([]);
+    mockPrisma.schemeOutlet.count.mockResolvedValue(0);
+    await service.adminListEnrollments(adminUser, 's1', {});
+    const where = mockPrisma.schemeOutlet.findMany.mock.calls[0][0].where;
+    expect(where).toMatchObject({ schemeId: 's1', clientId: 'deoleo', deletedAt: null });
+  });
+
   // ── getEligibleSchemes: mySchemeOutletId (frozen roster vs live-rule) ───────
   describe('getEligibleSchemes → mySchemeOutletId', () => {
     it('returns the matched roster-row id for a frozen/EXCEL scheme, null for a live-rule scheme', async () => {
@@ -695,6 +745,7 @@ describe('SchemeEnrollmentService', () => {
       // The roster scan is scoped by reach (self + downline), bounded to the scoped scheme ids.
       const w = mockPrisma.schemeOutlet.findMany.mock.calls[0][0].where;
       expect(w.schemeId).toEqual({ in: ['sHit', 'sMiss'] });
+      expect(w.deletedAt).toBeNull(); // removed roster rows never make a scheme visible
       expect(w.OR[0]).toEqual({ taggedSalesUserId: { in: ['su-caller', 'su-child'] } });
     });
 
@@ -769,6 +820,7 @@ describe('SchemeEnrollmentService', () => {
       // The roster query is scoped BY reach (never the whole roster): OR includes the reach ids.
       const rosterWhere = mockPrisma.schemeOutlet.findMany.mock.calls[0][0].where;
       expect(rosterWhere.schemeId).toBe('s1');
+      expect(rosterWhere.deletedAt).toBeNull(); // removed rows are not reachable targets
       expect(rosterWhere.OR[0]).toEqual({ taggedSalesUserId: { in: ['su-caller', 'su-child'] } });
     });
 

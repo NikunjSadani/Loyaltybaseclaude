@@ -196,7 +196,8 @@ export class SchemeNotifyService {
     filter?: BroadcastRecipientFilterDto,
   ): Promise<string[]> {
     const rows = await this.prisma.schemeOutlet.findMany({
-      where: { schemeId, clientId },
+      // A soft-removed roster row contributes no broadcast recipient.
+      where: { schemeId, clientId, deletedAt: null },
       select: {
         matchedOutletId: true,
         matchedPartner: { select: { phone: true } },
@@ -260,7 +261,8 @@ export class SchemeNotifyService {
     filter?: BroadcastRecipientFilterDto,
   ): Promise<string[]> {
     const tagRows = await this.prisma.schemeOutlet.findMany({
-      where: { schemeId, clientId, taggedSalesUserId: { not: null } },
+      // A soft-removed roster row contributes no tagged-employee recipient.
+      where: { schemeId, clientId, taggedSalesUserId: { not: null }, deletedAt: null },
       select: { taggedSalesUserId: true },
     });
 

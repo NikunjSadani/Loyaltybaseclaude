@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsDateString,
@@ -284,4 +285,16 @@ export class RosterQueryDto {
   @Min(1)
   @Max(200)
   limit?: number = 50;
+}
+
+/**
+ * Roster-row remove / restore (soft-delete, GIFSY-admin only). A bounded batch of
+ * SchemeOutlet ids to toggle `deletedAt` on; both endpoints are idempotent and scope
+ * every id to the caller's own scheme + tenant.
+ */
+export class RosterRemoveDto {
+  @IsArray()
+  @ArrayMaxSize(500)
+  @IsString({ each: true })
+  schemeOutletIds!: string[];
 }

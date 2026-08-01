@@ -204,7 +204,22 @@ export interface RosterRow {
   prefillValues: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
+  /** Soft-delete stamp — non-null only on rows returned by getRemovedRoster (the "Show removed" view). */
+  deletedAt?: string | null;
   enrollment?: { id: string; status: string; currentVersion: number } | null;
+}
+
+/** POST :id/roster/remove — how many rows were soft-deleted (and how many hid a filled enrollment). */
+export interface RosterRemoveResult {
+  removed: number;
+  removedWithEnrollment: number;
+  notFound: number;
+}
+
+/** POST :id/roster/restore — how many soft-deleted rows were brought back. */
+export interface RosterRestoreResult {
+  restored: number;
+  notFound: number;
 }
 
 /** Per-input-row disposition for the downloadable upload report (Phase 2). */
@@ -481,6 +496,20 @@ export const schemeApi = {
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : 'Download failed' };
     }
+  },
+  /** GIFSY admin soft-deletes roster rows (recoverable). Removing a row with a filled enrollment hides it too. */
+  removeRosterRows(schemeId: string, schemeOutletIds: string[]) {
+    return api.post<RosterRemoveResult>(`${BASE}/${schemeId}/roster/remove`, { schemeOutletIds });
+  },
+  /** GIFSY admin restores soft-deleted roster rows (and any enrollment reached through them). */
+  restoreRosterRows(schemeId: string, schemeOutletIds: string[]) {
+    return api.post<RosterRestoreResult>(`${BASE}/${schemeId}/roster/restore`, { schemeOutletIds });
+  },
+  /** GIFSY admin lists soft-deleted roster rows (the "Show removed" recovery view). Same shape as getRoster. */
+  getRemovedRoster(schemeId: string, query: { page?: number; limit?: number } = {}) {
+    return api.get<{ roster: RosterRow[]; pagination: Pagination }>(
+      `${BASE}/${schemeId}/roster/removed${qs(query)}`,
+    );
   },
   /** The form-builder "Prefill from" dropdown options: roster Excel columns + outlet-field catalog (H1). */
   getPrefillSources(schemeId: string) {

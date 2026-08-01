@@ -18,6 +18,7 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 import {
   CreateSchemeAdminDto,
   RosterQueryDto,
+  RosterRemoveDto,
   RosterUploadDto,
   SetAudienceDto,
   SetSchemeStatusDto,
@@ -160,5 +161,47 @@ export class SchemeAdminController {
   @RequirePermission('schemes:read')
   getFacetValues(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.admin.getFacetValues(user, id);
+  }
+
+  /**
+   * POST /v1/schemes/:id/roster/remove — soft-remove roster rows (set deletedAt) so
+   * each disappears from every read. Idempotent; returns { removed, removedWithEnrollment, notFound }.
+   */
+  @Post(':id/roster/remove')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:write')
+  removeRoster(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: RosterRemoveDto,
+  ) {
+    return this.admin.removeRoster(user, id, dto);
+  }
+
+  /**
+   * POST /v1/schemes/:id/roster/restore — restore soft-removed roster rows (clear deletedAt).
+   * Idempotent; returns { restored, notFound }.
+   */
+  @Post(':id/roster/restore')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:write')
+  restoreRoster(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: RosterRemoveDto,
+  ) {
+    return this.admin.restoreRoster(user, id, dto);
+  }
+
+  /** GET /v1/schemes/:id/roster/removed — paginated list of removed roster rows (restore panel). */
+  @Get(':id/roster/removed')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('schemes:read')
+  getRemovedRoster(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Query() query: RosterQueryDto,
+  ) {
+    return this.admin.getRemovedRoster(user, id, query);
   }
 }

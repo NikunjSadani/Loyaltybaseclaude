@@ -363,7 +363,8 @@ export class SchemeEnrollmentService {
     // ── Existing roster row (Excel Mode B, frozen snapshot, or prior lazy-create) ──
     if (dto.targetSchemeOutletId) {
       const row = await this.prisma.schemeOutlet.findFirst({
-        where: { id: dto.targetSchemeOutletId, schemeId: scheme.id, clientId: scheme.clientId },
+        // A soft-removed roster row is not enrollable (→ 404).
+        where: { id: dto.targetSchemeOutletId, schemeId: scheme.id, clientId: scheme.clientId, deletedAt: null },
       });
       if (!row) throw new NotFoundException('Roster row not found for this scheme.');
       await this.authorizeRoster(user, scheme, audience, mode, row, requestedPartnerId);
@@ -396,7 +397,11 @@ export class SchemeEnrollmentService {
     }
 
     // Find-or-create the roster row (idempotent on the [schemeId, outletRef] unique).
-    return this.prisma.schemeOutlet.upsert({
+    // IMPORTANT: this resolver is shared by enroll / sendEnrollOtp / verifyEnrollOtp, so it must
+    // have NO resurrecting side effect — `update: {}` leaves an existing row untouched. A row an
+    // admin REMOVED (deletedAt set) is NOT silently un-removed by a rep requesting an OTP or by a
+    // blocked dup-enroll; "removed stays removed" until an admin restores it or re-uploads it.
+    const row = await this.prisma.schemeOutlet.upsert({
       where: { schemeId_outletRef: { schemeId: scheme.id, outletRef: outlet.id } },
       update: {},
       create: {
@@ -408,6 +413,12 @@ export class SchemeEnrollmentService {
         matchedPartnerId: partnerId,
       },
     });
+    // A removed roster row is out of the audience — not enrollable (mirrors the FILTER-no-match
+    // ForbiddenException above), so a live-rule enroll can never resurrect it as a side effect.
+    if (row.deletedAt != null) {
+      throw new ForbiddenException('This outlet is not in the scheme audience.');
+    }
+    return row;
   }
 
   /** Resolve the outlet + owner partner for a lazy (live-rule) enroll, with reach auth. */
@@ -794,6 +805,9 @@ export class SchemeEnrollmentService {
     if (!enrollment) throw new NotFoundException('Enrollment not found.');
     // A soft-deleted enrollment reads as absent — it is not an editable live enrollment.
     if (enrollment.deletedAt != null) throw new NotFoundException('Enrollment not found.');
+    // A REMOVED roster row hides its enrollment — reached only through the row, it is not
+    // resubmittable until the row is restored.
+    if (enrollment.schemeOutlet.deletedAt != null) throw new NotFoundException('Enrollment not found.');
     // Resubmit is the post-rejection correction path (D10). It ALSO doubles as the enroller
     // EDIT path for a live SUBMITTED enrollment — but only when the scheme's admin-set
     // audienceConfig.allowEnrollerEdit flag is on (otherwise a live submission is immutable
@@ -1028,8 +1042,10 @@ export class SchemeEnrollmentService {
   async reject(user: JwtPayload, schemeId: string, enrollmentId: string, dto: RejectEnrollmentDto) {
     if (!this.isGifsyAdmin(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
     const scheme = await this.loadScheme(user, schemeId);
+    // schemeOutlet.deletedAt: null — a REMOVED roster row's enrollment reads as absent (it cannot be
+    // rejected), mirroring the soft-deleted-enrollment guard below.
     const enrollment = await this.prisma.schemeEnrollment.findFirst({
-      where: { id: enrollmentId, schemeId: scheme.id },
+      where: { id: enrollmentId, schemeId: scheme.id, schemeOutlet: { deletedAt: null } },
     });
     if (!enrollment) throw new NotFoundException('Enrollment not found.');
     // A soft-deleted enrollment reads as absent — it cannot be rejected.
@@ -1106,6 +1122,9 @@ export class SchemeEnrollmentService {
       include: { schemeOutlet: true },
     });
     if (!enrollment) throw new NotFoundException('Enrollment not found.');
+    // A REMOVED roster row's enrollment reads as absent — it cannot be admin-edited (which would
+    // otherwise resurrect it via submit()'s deletedAt-clear). Mirrors the reject/media guards.
+    if (enrollment.schemeOutlet.deletedAt != null) throw new NotFoundException('Enrollment not found.');
 
     const mode = (enrollment.enrollmentMode as EnrollmentMode) ?? 'SELF';
     // Admin edit reuses the enrollment's original OTP consent (a GIFSY operator cannot perform the
@@ -1125,8 +1144,12 @@ export class SchemeEnrollmentService {
     const scheme = await this.loadScheme(user, schemeId);
     const enrollment = await this.prisma.schemeEnrollment.findFirst({
       where: { id: enrollmentId, schemeId: scheme.id },
+      include: { schemeOutlet: { select: { deletedAt: true } } },
     });
     if (!enrollment) throw new NotFoundException('Enrollment not found.');
+    // A REMOVED roster row's enrollment reads as absent — not independently deletable (it is
+    // already hidden via the outlet, and acting on it would orphan it against restoreRoster).
+    if (enrollment.schemeOutlet.deletedAt != null) throw new NotFoundException('Enrollment not found.');
     if (enrollment.deletedAt != null) {
       return { enrollment }; // already deleted — idempotent no-op
     }
@@ -1146,8 +1169,12 @@ export class SchemeEnrollmentService {
     const scheme = await this.loadScheme(user, schemeId);
     const enrollment = await this.prisma.schemeEnrollment.findFirst({
       where: { id: enrollmentId, schemeId: scheme.id },
+      include: { schemeOutlet: { select: { deletedAt: true } } },
     });
     if (!enrollment) throw new NotFoundException('Enrollment not found.');
+    // A REMOVED roster row's enrollment is not independently restorable — restore the ROW
+    // (restoreRoster) to bring back its retained enrollment.
+    if (enrollment.schemeOutlet.deletedAt != null) throw new NotFoundException('Enrollment not found.');
     if (enrollment.deletedAt == null) {
       return { enrollment }; // already live — idempotent no-op
     }
@@ -1168,7 +1195,10 @@ export class SchemeEnrollmentService {
     if (!this.isGifsyAdmin(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
     const scheme = await this.loadScheme(user, schemeId);
     const rows = await this.prisma.schemeEnrollment.findMany({
-      where: { schemeId: scheme.id, deletedAt: { not: null } },
+      // schemeOutlet.deletedAt: null — a REMOVED roster row must vanish from EVERY read reached
+      // through the enrollment, including this GIFSY "Show deleted" recovery panel (else the
+      // removed row's outlet identity would leak once its enrollment is separately soft-deleted).
+      where: { schemeId: scheme.id, deletedAt: { not: null }, schemeOutlet: { deletedAt: null } },
       include: {
         schemeOutlet: {
           select: {
@@ -1258,6 +1288,7 @@ export class SchemeEnrollmentService {
         const rostered = await this.prisma.schemeOutlet.findFirst({
           where: {
             schemeId: scheme.id,
+            deletedAt: null, // a removed roster row is not self-enrollable
             OR: [{ matchedPartnerId: partnerId }, { matchedOutletId: { in: [...outletIds] } }],
           },
           select: { id: true, outletRef: true, outletName: true, prefillValues: true, matchedOutletId: true, matchedPartnerId: true },
@@ -1331,6 +1362,7 @@ export class SchemeEnrollmentService {
     const row = await this.prisma.schemeOutlet.findFirst({
       where: {
         schemeId: scheme.id,
+        deletedAt: null, // a removed roster row reads as no enrollment (→ 404)
         OR: [{ matchedPartnerId: partnerId }, { matchedOutletId: { in: outletIds } }],
       },
       include: { enrollment: true },
@@ -1439,7 +1471,8 @@ export class SchemeEnrollmentService {
     if (reachOutletIds.size > 0) rosterOr.push({ matchedOutletId: { in: [...reachOutletIds] } });
     if (reachPartnerIds.size > 0) rosterOr.push({ matchedPartnerId: { in: [...reachPartnerIds] } });
     const rosterHits = await this.prisma.schemeOutlet.findMany({
-      where: { schemeId: { in: scopedIds }, clientId: user.clientId, OR: rosterOr },
+      // A removed roster row never makes a scheme visible to the rep.
+      where: { schemeId: { in: scopedIds }, clientId: user.clientId, deletedAt: null, OR: rosterOr },
       select: { schemeId: true },
       distinct: ['schemeId'],
     });
@@ -1515,7 +1548,8 @@ export class SchemeEnrollmentService {
     if (reachPartnerIds.size > 0) rosterOr.push({ matchedPartnerId: { in: [...reachPartnerIds] } });
 
     const rosterRows = await this.prisma.schemeOutlet.findMany({
-      where: { schemeId: scheme.id, clientId: scheme.clientId, OR: rosterOr },
+      // A removed roster row is not a reachable target for the rep.
+      where: { schemeId: scheme.id, clientId: scheme.clientId, deletedAt: null, OR: rosterOr },
       include: {
         enrollment: { select: { id: true, status: true, rejectionReason: true, currentVersion: true, deletedAt: true } },
       },
@@ -1661,6 +1695,9 @@ export class SchemeEnrollmentService {
     const where: Prisma.SchemeOutletWhereInput = {
       schemeId: scheme.id,
       clientId: scheme.clientId,
+      // A soft-removed roster row never appears in the admin captured-data list (feeds
+      // both the findMany + count below).
+      deletedAt: null,
       ...(hasOutletFilter ? { matchedOutlet: outletFilter } : {}),
     };
 
@@ -1718,8 +1755,9 @@ export class SchemeEnrollmentService {
     if (!this.isGifsyAdmin(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
     const scheme = await this.loadScheme(user, schemeId);
     const enrollment = await this.prisma.schemeEnrollment.findFirst({
-      // A soft-deleted enrollment reads as absent (→ 404) in the admin detail view.
-      where: { id: enrollmentId, schemeId: scheme.id, deletedAt: null },
+      // A soft-deleted enrollment — or one whose roster row was REMOVED — reads as absent
+      // (→ 404) in the admin detail view (the enrollment is reached only through its row).
+      where: { id: enrollmentId, schemeId: scheme.id, deletedAt: null, schemeOutlet: { deletedAt: null } },
       include: {
         schemeOutlet: {
           include: {

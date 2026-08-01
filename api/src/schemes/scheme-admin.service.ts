@@ -12,6 +12,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   CreateSchemeAdminDto,
   RosterQueryDto,
+  RosterRemoveDto,
   RosterUploadDto,
   SetAudienceDto,
   SetSchemeStatusDto,
@@ -284,6 +285,10 @@ export class SchemeAdminService {
         });
         materializedCount += res.count;
       }
+      // NOTE: "removed stays removed" — a filter re-materialize does NOT resurrect a
+      // previously-removed row (createMany(skipDuplicates) skips it, and we deliberately do NOT
+      // clear its deletedAt). An admin's explicit removal survives an unrelated audience re-save;
+      // the only ways back are the Restore action or an Excel roster re-upload naming the outlet.
     }
 
     return { audienceConfig, materializedCount };
@@ -366,6 +371,9 @@ export class SchemeAdminService {
           matchedPartnerId: row.matchedPartnerId,
           taggedSalesUserId: row.taggedSalesUserId,
           prefillValues: (row.prefillValues ?? Prisma.JsonNull) as Prisma.InputJsonValue,
+          // Resurrect-on-re-upload: re-uploading a previously-removed outletRef brings the
+          // roster row back (clears the soft-delete). A live row is unaffected (already null).
+          deletedAt: null,
           updatedAt: new Date(),
         },
       }),
@@ -399,7 +407,8 @@ export class SchemeAdminService {
     const limit = q.limit ?? 50;
     const skip = (page - 1) * limit;
 
-    const where: Prisma.SchemeOutletWhereInput = { schemeId, clientId: user.clientId };
+    // deletedAt: null → a soft-removed roster row is excluded (shared by findMany + count).
+    const where: Prisma.SchemeOutletWhereInput = { schemeId, clientId: user.clientId, deletedAt: null };
 
     const [roster, total] = await Promise.all([
       this.prisma.schemeOutlet.findMany({
@@ -443,7 +452,8 @@ export class SchemeAdminService {
     const scheme = await this.assertSchemeOwnership(user, schemeId);
 
     const roster = await this.prisma.schemeOutlet.findMany({
-      where: { schemeId, clientId: user.clientId },
+      // A soft-removed roster row is excluded from the export.
+      where: { schemeId, clientId: user.clientId, deletedAt: null },
       include: {
         matchedOutlet: { select: { outletCode: true } },
         taggedSalesUser: { select: { employeeCode: true } },
@@ -531,7 +541,8 @@ export class SchemeAdminService {
   async getPrefillSources(user: JwtPayload, schemeId: string) {
     await this.assertSchemeOwnership(user, schemeId);
     const rows = await this.prisma.schemeOutlet.findMany({
-      where: { schemeId, clientId: user.clientId },
+      // Removed roster rows contribute no prefill columns to the form-builder dropdown.
+      where: { schemeId, clientId: user.clientId, deletedAt: null },
       select: { prefillValues: true },
       take: 500,
       orderBy: { createdAt: 'desc' },
@@ -585,5 +596,106 @@ export class SchemeAdminService {
       states: uniq(outlets.map((o) => o.state)),
       outletTypes: types.sort((a, b) => a.name.localeCompare(b.name)),
     };
+  }
+
+  // ── Roster-row remove / restore (soft-delete, GIFSY-admin only) ────────────
+
+  /**
+   * Soft-remove roster rows (set `deletedAt`) so each disappears from EVERY read —
+   * roster list/export, enrollment reach/visibility, reports, notify recipients, admin
+   * enrollments, sales eligibility, prefill/facet pickers. Removing a row with a LIVE
+   * enrollment is allowed and non-destructive: the enrollment is reached ONLY through the
+   * row, so it is hidden and fully restored when the row is restored (we NEVER touch the
+   * enrollment's own deletedAt — the single source of truth is SchemeOutlet.deletedAt).
+   * Idempotent: an already-removed id falls out via `deletedAt: null` and counts as notFound.
+   */
+  async removeRoster(user: JwtPayload, schemeId: string, dto: RosterRemoveDto) {
+    await this.assertSchemeOwnership(user, schemeId);
+    // Dedup so a repeated id can't inflate `notFound` (updateMany counts each row once).
+    const ids = [...new Set(dto.schemeOutletIds)];
+
+    // Count how many of the rows we are ABOUT to remove carry a live (non-deleted)
+    // enrollment — surfaced so the admin can be warned that captured data is being hidden.
+    // Scoped to the rows this call will actually remove (own scheme/client + not-yet-removed).
+    const removedWithEnrollment = await this.prisma.schemeEnrollment.count({
+      where: {
+        deletedAt: null,
+        schemeOutlet: { id: { in: ids }, schemeId, clientId: user.clientId, deletedAt: null },
+      },
+    });
+
+    const res = await this.prisma.schemeOutlet.updateMany({
+      where: { schemeId, clientId: user.clientId, id: { in: ids }, deletedAt: null },
+      data: { deletedAt: new Date() },
+    });
+
+    return {
+      removed: res.count,
+      removedWithEnrollment,
+      notFound: ids.length - res.count,
+    };
+  }
+
+  /**
+   * Restore soft-removed roster rows (clear `deletedAt`) — the recovery path behind the
+   * "Show removed / Restore" panel. Only rows currently removed are restored; a live id
+   * falls out via `deletedAt: { not: null }` and counts as notFound. Idempotent.
+   */
+  async restoreRoster(user: JwtPayload, schemeId: string, dto: RosterRemoveDto) {
+    await this.assertSchemeOwnership(user, schemeId);
+    // Dedup so a repeated id can't inflate `notFound` (updateMany counts each row once).
+    const ids = [...new Set(dto.schemeOutletIds)];
+
+    const res = await this.prisma.schemeOutlet.updateMany({
+      where: { schemeId, clientId: user.clientId, id: { in: ids }, deletedAt: { not: null } },
+      data: { deletedAt: null },
+    });
+
+    return { restored: res.count, notFound: ids.length - res.count };
+  }
+
+  // ── Removed-roster listing (paginated — the restore panel) ─────────────────
+
+  /**
+   * Paginated list of soft-removed roster rows (deletedAt != null) for the restore panel.
+   * Same shape as getRoster (roster[] + pagination), but every row is a removed one and
+   * carries its `deletedAt` (when it was removed). Kept as a dedicated read so a removed
+   * row can never leak into the normal roster list.
+   */
+  async getRemovedRoster(user: JwtPayload, schemeId: string, q: RosterQueryDto) {
+    await this.assertSchemeOwnership(user, schemeId);
+
+    const page = q.page ?? 1;
+    const limit = q.limit ?? 50;
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.SchemeOutletWhereInput = {
+      schemeId,
+      clientId: user.clientId,
+      deletedAt: { not: null },
+    };
+
+    const [roster, total] = await Promise.all([
+      this.prisma.schemeOutlet.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { deletedAt: 'desc' },
+        include: {
+          taggedSalesUser: { select: { employeeCode: true } },
+          enrollment: { select: { id: true, status: true, currentVersion: true, deletedAt: true } },
+        },
+      }),
+      this.prisma.schemeOutlet.count({ where }),
+    ]);
+
+    // A soft-deleted enrollment reads as no enrollment (mirrors getRoster), so a removed
+    // row that had a live enrollment still surfaces its status in the restore panel.
+    const shaped = roster.map((r) => ({
+      ...r,
+      enrollment: r.enrollment && r.enrollment.deletedAt == null ? r.enrollment : null,
+    }));
+
+    return { roster: shaped, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
   }
 }

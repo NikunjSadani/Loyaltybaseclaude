@@ -2318,6 +2318,10 @@ model SchemeOutlet {
   taggedSalesUserId String?
   // Per-outlet prefill variable values from the Excel (Mode B).
   prefillValues     Json?
+  // Soft-delete (roster-row remove/restore, GIFSY-admin only) — the SINGLE source of
+  // truth for a removed roster row. Set → the row (and any enrollment reached through
+  // it) is hidden from every read; cleared → fully restored. Non-destructive.
+  deletedAt         DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -2330,6 +2334,7 @@ model SchemeOutlet {
 
   @@unique([schemeId, outletRef])
   @@index([schemeId])
+  @@index([schemeId, deletedAt])
   @@index([matchedOutletId])
   @@index([matchedPartnerId])
   @@index([taggedSalesUserId])
