@@ -1,5 +1,14 @@
 # Scheme Roster-Row Remove (SchemeOutlet soft-delete) — build plan
 
+> **✅ BUILT + TRIPLE-AUDITED + STAGING-VERIFIED — on develop `378f795` (2026-08-01), awaiting owner-gated prod cutover.**
+> Gate: api jest 2174/0 · nest build 0 · FE tsc 0 · vitest 2066. Carries additive migration
+> `20260801120000_scheme_outlet_soft_delete` (deletedAt nullable + idx) — **APPLIED to gifsy_staging** (guarded,
+> `col=1 idx=1`, recorded, not rolled back); **NOT yet on prod** (applies at cutover via deploy.yml). Three
+> independent adversarial audits (leak-hunt + correctness + fix-diff): 1 HIGH (side-effect resurrect — fixed to
+> "removed stays removed") + 1 MED (deleted-enrollments-panel identity leak — guarded) + 3 LOW, all fixed + confirmed
+> clean. **Staging runtime-verify 16/16** (assumed-GIFSY synthetic scheme: upload 3 → remove/vanish/removed-list/
+> restore/bulk/idempotent/dedup/all-removed/re-upload-resurrect → scheme deleted, no residue). Additive + DORMANT.
+
 **Owner-approved (2026-08-01): Option A — soft-delete, mirroring the existing `SchemeEnrollment.deletedAt` pattern.**
 Zero-defect bar (owner will NOT re-test). Additive + DORMANT. GIFSY-admin only.
 
