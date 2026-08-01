@@ -467,9 +467,17 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
 - **✅ E2E HARNESS REVIVAL — DONE (test-only, zero prod impact) — `platform/docs/plans/E2E-HARNESS-REVIVAL.md`.**
   Revived + clean-baselined (`4b0d03f`+`f89697c`, 295/0/3, reproducible on a fresh gifsy_dev; runs against a local
   prod build, auto reset+seeds via `e2e/global-setup.ts`). ALL of (A) requestAs (was the run-target, not a bug),
-  (B) the stale specs, (C) operator-switch — resolved. Only optional remainder: the **STAGING run mode**
-  (`E2E_ENV=staging`, real subdomains, OTP-fetch) is a separate, not-yet-exercised path (there, no DB reset is
-  possible — the specs' robust assertions carry it) — do it only if wiring the harness into CI against staging.
+  (B) the stale specs, (C) operator-switch — resolved. **🆕 STAGING run-mode SPIKE DONE (2026-08-01, owner-requested):
+  verdict = LEAVE IT for now (evidence-backed).** Ran `E2E_ENV=staging` against the real deoleo staging host (fixed-OTP,
+  subdomain) → **5/5 role logins FAILED** at `waitForURL` (even `gifsy`/9830011252 which exists) → staging mode is NOT
+  merely "never run", it's **not wired to run**: a single `E2E_BASE_URL` for all role projects vs each tenant on its own
+  subdomain (the local per-role `x-forwarded-host` injection is correctly INERT on staging because EDGE_SECRET is set),
+  plus the OTP-fetch hook isn't deployed + seed/data drift. Making it runnable is a BUILD (per-tenant baseURL wiring +
+  OTP path + seed strategy), not a flip. **📌 TO-DO (owner-tracked, 2026-08-01): build the staging-E2E CI harness as a
+  FAST-FOLLOW to onboarding the 2nd tenant — NOT a prerequisite** (the 2nd tenant's own setup is hand-verified once during
+  onboarding; the harness guards the ONGOING multi-tenant surface — cross-tenant isolation + subdomain routing, the exact
+  seam local `hostHeader` mode stubs). Wire it **NON-blocking first** (a reporting check, never `needs: test` that can hide
+  the deploy button). With 1 tenant it's irrelevant; the 2nd tenant flips it to worth-building.
 - **§A-DOMAIN — ✅ COMPLETE + LIVE ON PROD** (cutover #11 `e8de31a`, 2026-07-20): DB routing (D-1) + features-from-`/me`
   (P5) + S1 edge-secret enforcing (verified). Nothing left except the owner's real-OTP prod smoke.
 - **Owner-gated Deoleo go-live: ✅ ALL CLEARED** (master data #76 loaded, both KYC WhatsApp templates
