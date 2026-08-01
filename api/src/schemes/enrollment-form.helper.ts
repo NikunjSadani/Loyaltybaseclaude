@@ -144,12 +144,60 @@ export interface FormField {
   gpsMaxAccuracy?: number;
   /** CAMERA: suppress the gallery fallback — native rear-camera capture only (D14). */
   noGallery?: boolean;
+  /** CAMERA: capture a GPS fix at this photo's shutter time, embedded in the media value (per-photo geotag). */
+  geotag?: boolean;
+  /** CAMERA (visibility geo-fenced forms): this photo must be inside the geo-fence. Every fence-required photo with a fix must be inside; a fence-required photo with no fix → GEO_UNVERIFIABLE (flag, not a hard-fail). */
+  geoFenceRequired?: boolean;
 }
 
 export interface EnrollmentFormSchema {
   captureGpsOnSubmit: boolean;
   requireOtp: boolean;
   fields: FormField[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Media value shape + per-photo geotag (per-photo-geotag, Stream 1 — shared contract)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A captured GPS fix. Mirrors the FE source-of-truth `GpsCapture` in
+ * platform/src/lib/scheme-types.ts (kept byte-identical in meaning).
+ */
+export interface GpsCapture {
+  lat: number;
+  lng: number;
+  accuracy?: number;
+  capturedAt?: string;
+}
+
+/**
+ * A stored media-field value: the legacy bare object-key string, OR a `{ key, geo? }`
+ * object carrying that photo's own shutter-time GPS fix (per-photo geotag). Both shapes
+ * are accepted everywhere for full backward-compat.
+ */
+export type MediaValue = string | { key: string; geo?: GpsCapture };
+
+/**
+ * Normalize a stored media-field value (bare key string OR `{key, geo}`) to a uniform
+ * shape. Backward-compatible: a bare string yields `{ key, geo: undefined }`. Returns
+ * `{ key: '' }` for empty/invalid input. A malformed `geo` is dropped (→ undefined)
+ * rather than throwing.
+ */
+export function readMediaValue(v: unknown): { key: string; geo?: GpsCapture } {
+  if (typeof v === 'string') return { key: v };
+  if (v && typeof v === 'object' && typeof (v as { key?: unknown }).key === 'string') {
+    return { key: (v as { key: string }).key, geo: normalizeGeo((v as { geo?: unknown }).geo) };
+  }
+  return { key: '' };
+}
+
+/** Loose geo validation: an object with numeric lat/lng → a GpsCapture; else undefined. */
+function normalizeGeo(g: unknown): GpsCapture | undefined {
+  if (!g || typeof g !== 'object' || Array.isArray(g)) return undefined;
+  const o = g as Record<string, unknown>;
+  if (typeof o.lat !== 'number' || typeof o.lng !== 'number') return undefined;
+  return o as unknown as GpsCapture;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -518,6 +566,20 @@ export function validateFormSchema(rawSchema: unknown): string[] {
     }
     if (f.noGallery !== undefined && !isBoolean(f.noGallery)) {
       errors.push(`${pos}: noGallery must be a boolean.`);
+    }
+
+    // geotag / geoFenceRequired (optional) — per-photo geotag flags. geoFenceRequired
+    // is only meaningful on a CAMERA field (a fence check needs a photo to bind to).
+    if (f.geotag !== undefined && !isBoolean(f.geotag)) {
+      errors.push(`${pos}: geotag must be a boolean.`);
+    }
+    if (f.geoFenceRequired !== undefined) {
+      if (!isBoolean(f.geoFenceRequired)) {
+        errors.push(`${pos}: geoFenceRequired must be a boolean.`);
+      }
+      if (f.type !== 'CAMERA') {
+        errors.push(`${pos}: geoFenceRequired is only valid on a CAMERA field.`);
+      }
     }
     if (f.prefillKey !== undefined && !isString(f.prefillKey)) {
       errors.push(`${pos}: prefillKey must be a string.`);
@@ -962,6 +1024,47 @@ export function validateSubmittedValues(
     // Type validation — only when a value is present.
     if (empty) continue;
 
+    // Media fields (DOCUMENT/IMAGE/CAMERA/UPI_QR_SCAN/SIGNATURE): the value is a bare
+    // object-key string OR a `{ key, geo? }` object carrying that photo's shutter-time
+    // GPS fix (per-photo geotag). Both shapes are accepted; a bare string stays valid
+    // (full back-compat). When a geo IS embedded, validate its shape/Earth-range and the
+    // per-field accuracy cap (D2). A photo with no embedded geo stays valid.
+    if (MEDIA_FIELD_TYPES.has(field.type)) {
+      const media = readMediaValue(rawValue);
+      if (!media.key) {
+        errors.push(`Field "${field.label}" (${field.id}) has an invalid media reference.`);
+        continue;
+      }
+      const rawGeo =
+        rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)
+          ? (rawValue as { geo?: unknown }).geo
+          : undefined;
+      if (rawGeo !== undefined && rawGeo !== null) {
+        // `readMediaValue` drops a non-object / non-numeric-lat-lng geo (→ media.geo
+        // undefined); an out-of-range but numeric geo survives → range-check it here.
+        const g = media.geo;
+        const inRange =
+          !!g &&
+          Number.isFinite(g.lat) && g.lat >= -90 && g.lat <= 90 &&
+          Number.isFinite(g.lng) && g.lng >= -180 && g.lng <= 180;
+        if (!inRange) {
+          errors.push(`Field "${field.label}" (${field.id}) has a malformed or out-of-range photo location.`);
+          continue;
+        }
+        // D2 accuracy cap for the embedded photo geo (data-quality filter, mirrors the
+        // GPS_POINT cap below). A fix with no reported accuracy is accepted.
+        if (typeof field.gpsMaxAccuracy === 'number' && field.gpsMaxAccuracy > 0) {
+          const acc = Number(media.geo?.accuracy);
+          if (isFinite(acc) && acc > field.gpsMaxAccuracy) {
+            errors.push(
+              `Field "${field.label}" (${field.id}) location accuracy (±${acc}m) exceeds the ${field.gpsMaxAccuracy}m limit — move to open sky and recapture.`,
+            );
+          }
+        }
+      }
+      continue;
+    }
+
     switch (field.type) {
       case 'NUMBER': {
         const n = Number(String(rawValue));
@@ -1042,8 +1145,10 @@ export function validateSubmittedValues(
         }
         break;
       }
-      // TEXT, IMAGE, CAMERA, DOCUMENT, UPI_QR_SCAN, SIGNATURE:
-      // any non-empty value accepted (media = a stored object key; geo = a JSON blob).
+      // TEXT (and any other non-cased value type): any non-empty value accepted.
+      // Media types (IMAGE/CAMERA/DOCUMENT/UPI_QR_SCAN/SIGNATURE) never reach here — they are
+      // validated + `continue`d by the MEDIA_FIELD_TYPES block above (which accepts a bare key
+      // string OR a `{ key, geo }` object and rejects a keyless value).
       default:
         break;
     }

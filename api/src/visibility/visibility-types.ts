@@ -74,8 +74,17 @@ export interface FormField {
   requiredWhen?: VisibleWhen;
   /** GPS_POINT: when the location fix is captured. */
   captureTrigger?: GpsCaptureTrigger;
+  /**
+   * Reject a fix whose reported accuracy (metres) exceeds this cap (D2/D15); unset = no
+   * cap. Applies to a GPS_POINT value AND to a CAMERA photo's embedded per-photo geo.
+   */
+  gpsMaxAccuracy?: number;
   /** CAMERA: suppress the gallery fallback — native camera capture only (D14). */
   noGallery?: boolean;
+  /** CAMERA: capture a GPS fix at this photo's shutter time, embedded in the media value (per-photo geotag). */
+  geotag?: boolean;
+  /** CAMERA (visibility geo-fenced forms): this photo must be inside the geo-fence. Every fence-required photo with a fix must be inside; a fence-required photo with no fix → GEO_UNVERIFIABLE (flag, not a hard-fail). */
+  geoFenceRequired?: boolean;
 
   // ── CAMERA extensions (D9 / D16) ───────────────────────────────────────────
   /** CAMERA: what/how to shoot — shown to the rep at capture time (D9). */
@@ -91,6 +100,50 @@ export interface FormField {
 export interface VisibilityFormSchema {
   captureGpsOnSubmit: boolean;
   fields: FormField[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Media value shape + per-photo geotag (per-photo-geotag, Stream 1 — shared contract)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A captured GPS fix. Mirrors the scheme/FE `GpsCapture` shape (kept byte-identical in
+ * meaning). Defined locally — visibility does not depend on the scheme feature.
+ */
+export interface GpsCapture {
+  lat: number;
+  lng: number;
+  accuracy?: number;
+  capturedAt?: string;
+}
+
+/**
+ * A stored media-field value: the legacy bare object-key string, OR a `{ key, geo? }`
+ * object carrying that photo's own shutter-time GPS fix (per-photo geotag). Both shapes
+ * are accepted everywhere for full backward-compat.
+ */
+export type MediaValue = string | { key: string; geo?: GpsCapture };
+
+/**
+ * Normalize a stored media-field value (bare key string OR `{key, geo}`) to a uniform
+ * shape. Backward-compatible: a bare string yields `{ key, geo: undefined }`. Returns
+ * `{ key: '' }` for empty/invalid input. A malformed `geo` is dropped (→ undefined)
+ * rather than throwing.
+ */
+export function readMediaValue(v: unknown): { key: string; geo?: GpsCapture } {
+  if (typeof v === 'string') return { key: v };
+  if (v && typeof v === 'object' && typeof (v as { key?: unknown }).key === 'string') {
+    return { key: (v as { key: string }).key, geo: normalizeGeo((v as { geo?: unknown }).geo) };
+  }
+  return { key: '' };
+}
+
+/** Loose geo validation: an object with numeric lat/lng → a GpsCapture; else undefined. */
+function normalizeGeo(g: unknown): GpsCapture | undefined {
+  if (!g || typeof g !== 'object' || Array.isArray(g)) return undefined;
+  const o = g as Record<string, unknown>;
+  if (typeof o.lat !== 'number' || typeof o.lng !== 'number') return undefined;
+  return o as unknown as GpsCapture;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

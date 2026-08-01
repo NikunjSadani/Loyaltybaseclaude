@@ -42,6 +42,7 @@ import {
   isFieldRequired,
   isFieldVisible,
   orderedFields,
+  readMediaValue,
   resolveLookup,
   validateSchemeValues,
   type EnrollmentFormSchema,
@@ -158,17 +159,26 @@ export function SchemeFormRenderer({
   );
 
   // ── Media upload (CAMERA / DOCUMENT / IMAGE / UPI_QR_SCAN / SIGNATURE) ───────
+  // Returns the uploaded object key (null on failure) so a geotag caller can attach a
+  // per-photo GPS fix and store `{ key, geo }` itself. By default it also stores the bare
+  // key string into the field value (unchanged behaviour for every non-geotag caller);
+  // pass `{ store: false }` to suppress that and take ownership of the stored shape.
   const uploadFile = useCallback(
-    async (fieldId: string, file: File | Blob, filename?: string) => {
+    async (
+      fieldId: string,
+      file: File | Blob,
+      filename?: string,
+      opts?: { store?: boolean },
+    ): Promise<string | null> => {
       setUploading((u) => ({ ...u, [fieldId]: true }));
       const res = await schemeApi.uploadMedia(schemeId, file, filename);
       setUploading((u) => ({ ...u, [fieldId]: false }));
       if (res.success) {
-        setValue(fieldId, res.data.key);
-        return true;
+        if (opts?.store !== false) setValue(fieldId, res.data.key);
+        return res.data.key;
       }
       reportError(res.error);
-      return false;
+      return null;
     },
     [schemeId, setValue, reportError],
   );
@@ -374,7 +384,12 @@ interface FieldRendererProps {
   setValue: (id: string, v: unknown) => void;
   prefill?: Record<string, unknown>;
   uploading: boolean;
-  uploadFile: (fieldId: string, file: File | Blob, filename?: string) => Promise<boolean>;
+  uploadFile: (
+    fieldId: string,
+    file: File | Blob,
+    filename?: string,
+    opts?: { store?: boolean },
+  ) => Promise<string | null>;
   captureGps: () => Promise<GpsCapture | null>;
   context: SchemeFormContext;
   subject: { enrollmentMode: 'SELF' | 'SALES'; targetSchemeOutletId?: string; targetOutletRef?: string };
@@ -740,7 +755,7 @@ function MediaField({
 // NOTE: getUserMedia requires a SECURE CONTEXT (HTTPS or localhost). Staging and prod
 // are both served over HTTPS, so this is satisfied there and in local dev on localhost.
 function CameraField({
-  field, values, uploading, uploadFile, req, errorFieldId,
+  field, values, setValue, uploading, uploadFile, captureGps, req, errorFieldId,
 }: FieldRendererProps & { req: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -750,7 +765,11 @@ function CameraField({
   const [capturing, setCapturing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const key = typeof values[field.id] === 'string' ? (values[field.id] as string) : '';
+  // Read back through readMediaValue so BOTH a legacy bare-key string and a per-photo
+  // `{ key, geo }` value resolve to the same shape (full backward-compat).
+  const media = readMediaValue(values[field.id]);
+  const key = media.key;
+  const geo = media.geo;
   const highlight = errorFieldId != null && field.id === errorFieldId;
 
   // Stop every track so the camera indicator light turns off promptly.
@@ -812,15 +831,47 @@ function CameraField({
     stopStream();
     setLive(false);
     setCapturing(true);
+    setError(null);
     canvas.toBlob(
       async (blob) => {
-        if (blob) await uploadFile(field.id, blob, 'capture.jpg');
-        setCapturing(false);
+        if (!blob) {
+          setCapturing(false);
+          return;
+        }
+        if (field.geotag) {
+          // Per-photo geotag: fetch a GPS fix AT SHUTTER TIME, concurrently with the
+          // upload. `store: false` — this caller owns the stored shape (`{ key, geo }`).
+          const [uploadedKey, fix] = await Promise.all([
+            uploadFile(field.id, blob, 'capture.jpg', { store: false }),
+            captureGps(),
+          ]);
+          setCapturing(false);
+          if (!uploadedKey) return; // upload failed — error already surfaced (submitError)
+          // D2 accuracy cap: a PRESENT-but-too-imprecise fix rejects the shot. A missing
+          // fix (denied / timed out) does NOT block — store `{ key }` and let the backend
+          // flag it (geo-fence unverifiable).
+          if (
+            fix &&
+            typeof field.gpsMaxAccuracy === 'number' &&
+            typeof fix.accuracy === 'number' &&
+            fix.accuracy > field.gpsMaxAccuracy
+          ) {
+            setError(
+              `Location too imprecise (±${Math.round(fix.accuracy)}m > ±${field.gpsMaxAccuracy}m) — move to open sky and re-capture.`,
+            );
+            return; // photo NOT stored → field stays uncaptured, Retry re-opens the camera
+          }
+          setValue(field.id, fix ? { key: uploadedKey, geo: fix } : { key: uploadedKey });
+        } else {
+          // Non-geotag CAMERA: unchanged — uploadFile stores the bare key string.
+          await uploadFile(field.id, blob, 'capture.jpg');
+          setCapturing(false);
+        }
       },
       'image/jpeg',
       0.9,
     );
-  }, [field.id, stopStream, uploadFile]);
+  }, [field.id, field.geotag, field.gpsMaxAccuracy, stopStream, uploadFile, captureGps, setValue]);
 
   const busy = uploading || capturing;
 
@@ -829,16 +880,24 @@ function CameraField({
       {key ? (
         // Confirmed state — mirrors the other media fields. Retake re-opens the CAMERA
         // (never a file dialog).
-        <div className="flex items-center gap-2 px-3 py-2.5 bg-green-50 border border-green-200 rounded-xl">
-          <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
-          <span className="text-xs text-green-700 font-medium truncate">Captured</span>
-          <button
-            type="button"
-            onClick={openCamera}
-            className="ml-auto text-[10px] text-green-600 underline"
-          >
-            Retake
-          </button>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 px-3 py-2.5 bg-green-50 border border-green-200 rounded-xl">
+            <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
+            <span className="text-xs text-green-700 font-medium truncate">Captured</span>
+            <button
+              type="button"
+              onClick={openCamera}
+              className="ml-auto text-[10px] text-green-600 underline"
+            >
+              Retake
+            </button>
+          </div>
+          {geo && (
+            <p className="flex items-center gap-1 text-[10px] text-green-600 font-medium">
+              <MapPin className="h-3 w-3 shrink-0" />
+              location tagged ✓{geo.accuracy != null ? ` ±${Math.round(geo.accuracy)}m` : ''}
+            </p>
+          )}
         </div>
       ) : live ? (
         <div className="space-y-2">

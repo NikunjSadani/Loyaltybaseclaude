@@ -21,11 +21,13 @@ import { sniffFileType } from '../common/file-signature';
 import {
   EnrollmentFormSchema,
   FormField,
+  GpsCapture,
   applyPrefillPins,
   collectOutletFieldKeys,
   evaluateVisibleWhen,
   pickBoundOutletFields,
   pickBoundPrefill,
+  readMediaValue,
   validateSubmittedValues,
   withRosterIdentity,
 } from './enrollment-form.helper';
@@ -1825,14 +1827,16 @@ export class SchemeEnrollmentService {
     schemeId: string,
     formValues: Prisma.JsonValue | null,
     schema: EnrollmentFormSchema | null,
-  ): Array<{ fieldId: string; label: string; type: string; key: string; viewPath: string }> {
+  ): Array<{ fieldId: string; label: string; type: string; key: string; viewPath: string; geo?: GpsCapture }> {
     if (!formValues || typeof formValues !== 'object' || !schema) return [];
     const vals = formValues as Record<string, unknown>;
-    const out: Array<{ fieldId: string; label: string; type: string; key: string; viewPath: string }> = [];
+    const out: Array<{ fieldId: string; label: string; type: string; key: string; viewPath: string; geo?: GpsCapture }> = [];
     for (const f of schema.fields ?? []) {
       if (!MEDIA_FIELD_SET.has(f.type)) continue;
-      const key = vals[f.id];
-      if (typeof key === 'string' && key) {
+      // A media value may be a bare object-key string OR `{ key, geo }` (per-photo geotag).
+      // readMediaValue normalises both; a bare string yields no geo (renders exactly as before).
+      const { key, geo } = readMediaValue(vals[f.id]);
+      if (key) {
         out.push({
           fieldId: f.id,
           label: f.label,
@@ -1840,6 +1844,8 @@ export class SchemeEnrollmentService {
           key,
           // D30: an auth-gated app route (NOT a raw/long-lived signed GCS URL).
           viewPath: `/v1/schemes/${schemeId}/enrollments/media?key=${encodeURIComponent(key)}`,
+          // Per-photo shutter-time GPS fix, when this photo carries one.
+          ...(geo ? { geo } : {}),
         });
       }
     }

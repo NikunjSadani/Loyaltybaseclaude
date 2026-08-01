@@ -162,6 +162,10 @@ export interface FormField {
   captureTrigger?: GpsCaptureTrigger;
   /** CAMERA: suppress the gallery fallback — native rear-camera capture only (D14). */
   noGallery?: boolean;
+  /** CAMERA: capture a GPS fix at this photo's shutter time, embedded in the media value (per-photo geotag). */
+  geotag?: boolean;
+  /** CAMERA (visibility geo-fenced forms): this photo must be inside the geo-fence. Every fence-required photo with a fix must be inside; a fence-required photo with no fix → GEO_UNVERIFIABLE (flag, not a hard-fail). */
+  geoFenceRequired?: boolean;
 }
 
 /** The stored enrollment-form schema — mirrors `EnrollmentFormSchema` (§13.1). */
@@ -177,6 +181,35 @@ export interface GpsCapture {
   lng: number;
   accuracy?: number;
   capturedAt?: string;
+}
+
+/**
+ * A stored media-field value: the legacy bare object-key string, OR a `{ key, geo? }`
+ * object carrying that photo's own shutter-time GPS fix (per-photo geotag). Both shapes
+ * are accepted everywhere for full backward-compat.
+ */
+export type MediaValue = string | { key: string; geo?: GpsCapture };
+
+/**
+ * Normalize a stored media-field value (bare key string OR `{key, geo}`) to a uniform
+ * shape. Backward-compatible: a bare string yields `{ key, geo: undefined }`. Returns
+ * `{ key: '' }` for empty/invalid input. A malformed `geo` is dropped (→ undefined)
+ * rather than throwing.
+ */
+export function readMediaValue(v: unknown): { key: string; geo?: GpsCapture } {
+  if (typeof v === 'string') return { key: v };
+  if (v && typeof v === 'object' && typeof (v as { key?: unknown }).key === 'string') {
+    return { key: (v as { key: string }).key, geo: normalizeGeo((v as { geo?: unknown }).geo) };
+  }
+  return { key: '' };
+}
+
+/** Loose geo validation: an object with numeric lat/lng → a GpsCapture; else undefined. */
+function normalizeGeo(g: unknown): GpsCapture | undefined {
+  if (!g || typeof g !== 'object' || Array.isArray(g)) return undefined;
+  const o = g as Record<string, unknown>;
+  if (typeof o.lat !== 'number' || typeof o.lng !== 'number') return undefined;
+  return o as unknown as GpsCapture;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -306,6 +339,8 @@ export interface EnrollmentMediaRef {
   key: string;
   /** Backend-provided auth-gated path (`/v1/...`); rewrite to `/api/...` for the browser. */
   viewPath: string;
+  /** Per-photo shutter-time GPS fix (per-photo geotag), when this photo carries one. */
+  geo?: GpsCapture;
 }
 
 export interface EnrollmentGeoRef {

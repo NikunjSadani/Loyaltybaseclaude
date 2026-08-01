@@ -33,6 +33,7 @@ import {
   isFieldRequired,
   isFieldVisible,
   orderedFields,
+  readMediaValue,
   validateVisibilityValues,
   type GpsCapture,
   type VisibilityFormField,
@@ -174,18 +175,26 @@ export function VisibilityCaptureForm({
   }, []);
 
   // ── Media upload (CAMERA) — compress then upload → store the object key ───────
+  // Returns the uploaded object key (null on failure) so a geotag caller can attach a
+  // per-photo GPS fix and store `{ key, geo }` itself. By default it also stores the bare
+  // key string (unchanged behaviour for a non-geotag CAMERA); pass `{ store: false }` to
+  // suppress that and take ownership of the stored shape.
   const uploadFile = useCallback(
-    async (fieldId: string, file: File) => {
+    async (
+      fieldId: string,
+      file: File,
+      opts?: { store?: boolean },
+    ): Promise<string | null> => {
       setUploading((u) => ({ ...u, [fieldId]: true }));
       const optimised = await imageCompression.compress(file);
       const res = await visibilityApi.uploadSalesMedia(optimised, `${fieldId}.jpg`);
       setUploading((u) => ({ ...u, [fieldId]: false }));
       if (res.success) {
-        setValue(fieldId, res.data.key);
-        return true;
+        if (opts?.store !== false) setValue(fieldId, res.data.key);
+        return res.data.key;
       }
       setSubmitError(res.error);
-      return false;
+      return null;
     },
     [setValue],
   );
@@ -332,7 +341,7 @@ interface FieldRendererProps {
   values: Record<string, unknown>;
   setValue: (id: string, v: unknown) => void;
   uploading: boolean;
-  uploadFile: (fieldId: string, file: File) => Promise<boolean>;
+  uploadFile: (fieldId: string, file: File, opts?: { store?: boolean }) => Promise<string | null>;
   captureGps: () => Promise<GpsCapture | null>;
 }
 
@@ -493,17 +502,51 @@ function Labeled({
 
 // ── Camera field (native rear-camera, instruction + sample thumbnail, D9/D16) ──
 
-function CameraField({ field, values, uploading, uploadFile, req }: FieldRendererProps & { req: boolean }) {
+function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, req }: FieldRendererProps & { req: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const key = typeof values[field.id] === 'string' ? (values[field.id] as string) : '';
+  // Read back through readMediaValue so BOTH a legacy bare-key string and a per-photo
+  // `{ key, geo }` value resolve to the same shape (full backward-compat).
+  const media = readMediaValue(values[field.id]);
+  const key = media.key;
+  const geo = media.geo;
   // Gallery is suppressed by default for visibility (native camera only); an authoring
   // `noGallery === false` re-enables the gallery fallback.
   const cameraOnly = field.noGallery !== false;
+  // Cap-violation message (D2) — a present-but-too-imprecise shutter fix rejects the shot.
+  const [capError, setCapError] = useState('');
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) await uploadFile(field.id, file);
     if (inputRef.current) inputRef.current.value = '';
+    if (!file) return;
+    setCapError('');
+    if (field.geotag) {
+      // Per-photo geotag: fetch a GPS fix AT SHUTTER TIME (the moment the photo is taken),
+      // concurrently with the upload. `store: false` — this caller owns the stored shape.
+      const [uploadedKey, fix] = await Promise.all([
+        uploadFile(field.id, file, { store: false }),
+        captureGps(),
+      ]);
+      if (!uploadedKey) return; // upload failed — error already surfaced (submitError)
+      // D2 accuracy cap: a PRESENT-but-too-imprecise fix rejects the shot. A missing fix
+      // (denied / timed out) does NOT block — store `{ key }` and let the backend flag it
+      // (geo-fence unverifiable).
+      if (
+        fix &&
+        typeof field.gpsMaxAccuracy === 'number' &&
+        typeof fix.accuracy === 'number' &&
+        fix.accuracy > field.gpsMaxAccuracy
+      ) {
+        setCapError(
+          `Location too imprecise (±${Math.round(fix.accuracy)}m > ±${field.gpsMaxAccuracy}m) — move to open sky and re-capture.`,
+        );
+        return; // photo NOT stored → field stays uncaptured, the rep can re-capture
+      }
+      setValue(field.id, fix ? { key: uploadedKey, geo: fix } : { key: uploadedKey });
+    } else {
+      // Non-geotag CAMERA: unchanged — uploadFile stores the bare key string.
+      await uploadFile(field.id, file);
+    }
   };
 
   return (
@@ -522,16 +565,24 @@ function CameraField({ field, values, uploading, uploadFile, req }: FieldRendere
         />
       )}
       {key ? (
-        <div className="flex items-center gap-2 px-3 py-2.5 bg-green-50 border border-green-200 rounded-xl">
-          <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
-          <span className="text-xs text-green-700 font-medium truncate">Photo captured</span>
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            className="ml-auto text-[10px] text-green-600 underline"
-          >
-            Retake
-          </button>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 px-3 py-2.5 bg-green-50 border border-green-200 rounded-xl">
+            <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
+            <span className="text-xs text-green-700 font-medium truncate">Photo captured</span>
+            <button
+              type="button"
+              onClick={() => inputRef.current?.click()}
+              className="ml-auto text-[10px] text-green-600 underline"
+            >
+              Retake
+            </button>
+          </div>
+          {geo && (
+            <p className="flex items-center gap-1 text-[10px] text-green-600 font-medium">
+              <MapPin className="h-3 w-3 shrink-0" />
+              location tagged ✓{geo.accuracy != null ? ` ±${Math.round(geo.accuracy)}m` : ''}
+            </p>
+          )}
         </div>
       ) : (
         <button
@@ -543,6 +594,12 @@ function CameraField({ field, values, uploading, uploadFile, req }: FieldRendere
           {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
           {uploading ? 'Uploading…' : 'Capture photo'}
         </button>
+      )}
+      {capError && (
+        <p className="text-xs text-red-600 flex items-start gap-1.5 mt-1.5 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
+          <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
+          {capError}
+        </p>
       )}
       <input
         ref={inputRef}

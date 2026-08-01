@@ -13,6 +13,7 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { VisibilityReviewService, VISIBILITY_REJECT_REASONS } from './visibility-review.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
@@ -20,9 +21,13 @@ const mockPrisma = {
   visibilityImageHash: { findMany: jest.fn() },
   visibilityFormVersion: { findUnique: jest.fn() },
   visibilityForm: { findUnique: jest.fn() },
+  // Per-photo geotag: the review resolves the outlet reference geo (outlet → partner KYC).
+  outlet: { findFirst: jest.fn() },
+  channelPartner: { findFirst: jest.fn() },
 };
 
 const mockTenant = { resolveVisibilityEnabled: jest.fn() };
+const mockSettings = { getEffectiveSettings: jest.fn() };
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 't1', phone: '9', name: 'Admin' };
 const notGifsy: JwtPayload = { sub: 'u2', role: 'CLIENT_ADMIN', clientId: 't1', phone: '9', name: 'CA' };
@@ -33,6 +38,12 @@ describe('VisibilityReviewService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockTenant.resolveVisibilityEnabled.mockResolvedValue(true);
+    // Per-photo geotag defaults: a fence radius + no outlet reference geo (→ 'unverifiable').
+    mockSettings.getEffectiveSettings.mockResolvedValue({
+      visibilityConfig: { geoFence: { enabled: true, radiusMeters: 50 } },
+    });
+    mockPrisma.outlet.findFirst.mockResolvedValue(null);
+    mockPrisma.channelPartner.findFirst.mockResolvedValue(null);
     mockPrisma.visibilityCapture.findFirst.mockResolvedValue({
       id: 'cap1',
       clientId: 't1',
@@ -47,6 +58,7 @@ describe('VisibilityReviewService', () => {
         VisibilityReviewService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TenantService, useValue: mockTenant },
+        { provide: TenantSettingsService, useValue: mockSettings },
       ],
     }).compile();
     service = module.get(VisibilityReviewService);

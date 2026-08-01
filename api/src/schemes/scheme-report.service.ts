@@ -6,7 +6,7 @@ import { StorageService } from '../storage/storage.service';
 import { buildXlsx, HyperlinkCell } from '../common/xlsx';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
-import { EnrollmentFormSchema, FormField } from './enrollment-form.helper';
+import { EnrollmentFormSchema, FormField, readMediaValue } from './enrollment-form.helper';
 import {
   AudienceFilter,
   buildOutletWhereFromFilter,
@@ -120,7 +120,10 @@ export function renderExportValue(
   }
 
   if (MEDIA_FIELD_TYPES.has(field.type)) {
-    const key = typeof value === 'string' ? value : String((value as { key?: string })?.key ?? '');
+    // A media value may be a bare object-key string OR `{ key, geo }` (per-photo geotag);
+    // readMediaValue normalises both. The geo (if any) is surfaced in a separate companion
+    // column by the row builder — here we only render the "View image" link.
+    const { key } = readMediaValue(value);
     if (!key) return '';
     // A clickable "View image" link that opens from a downloaded .xlsx. The target
     // is a self-authenticating tokenized URL (mintLink) — NOT the raw key.
@@ -138,6 +141,19 @@ export function renderExportValue(
   if (Array.isArray(value)) return value.map((v) => String(v)).join(', ');
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
+}
+
+/**
+ * Compact per-photo geotag cell for a media value: `lat, lng (±Nm)` when the stored
+ * value is `{ key, geo }`, else '' (a bare object-key string carries no geo — renders
+ * exactly as before, an empty companion cell). Injection-safety is applied downstream
+ * by buildXlsx, so we return a raw string.
+ */
+export function formatMediaGeo(value: unknown): string {
+  const { geo } = readMediaValue(value);
+  if (!geo) return '';
+  const acc = geo.accuracy != null ? ` (±${Math.round(geo.accuracy)}m)` : '';
+  return `${geo.lat}, ${geo.lng}${acc}`;
 }
 
 /**
@@ -196,6 +212,22 @@ export function buildEnrollmentExportRows(
     columnFor.set(f.id, n === 1 ? base : `${base} (${n})`);
   }
 
+  // Per-photo geotag (per-photo-geotag): a media field gets a companion "<col> (Geo)" cell
+  // ONLY when at least one enrolled row carries a `{ key, geo }` value for it — so a scheme
+  // whose media values are all bare-string keys exports byte-identically to before.
+  const mediaGeoFields = new Set<string>();
+  for (const f of fields) {
+    if (!MEDIA_FIELD_TYPES.has(f.type)) continue;
+    for (const r of roster) {
+      const v = (r.enrollment?.formValues as Record<string, unknown> | undefined)?.[f.id];
+      if (readMediaValue(v).geo) {
+        mediaGeoFields.add(f.id);
+        break;
+      }
+    }
+  }
+  const geoColFor = (fieldId: string): string => `${columnFor.get(fieldId) as string} (Geo)`;
+
   // The reserved (non-Excel) headers: base identity, master attrs, status, and
   // every form-field column. An uploaded Excel header colliding with any of these
   // is suffixed ` (Excel)` rather than dropped (RESERVED-collision trap) so the
@@ -203,7 +235,15 @@ export function buildEnrollmentExportRows(
   const identityCols = ['Outlet Ref', 'Outlet Name', 'Matched', 'Tagged Employee', 'Submitted By (Employee)'];
   const masterCols = ['Zone', 'Program', 'Program Category', 'Outlet Type'];
   const statusCols = ['Status', 'Version', 'Enrolled At', 'Submitted By', 'Submitted By Phone', 'Rejection Reason'];
-  const reserved = new Set<string>([...identityCols, ...masterCols, ...statusCols, ...columnFor.values()]);
+  const reserved = new Set<string>([
+    ...identityCols,
+    ...masterCols,
+    ...statusCols,
+    ...columnFor.values(),
+    // The per-photo geotag companion headers are reserved too, so an uploaded Excel
+    // column sharing a "<col> (Geo)" header is de-collided rather than overwriting it.
+    ...[...mediaGeoFields].map(geoColFor),
+  ]);
 
   // Bug 1: resolve the Outlet Name per row and remember WHICH prefill header (if any)
   // supplied it, so bug-3 can claim that header (avoid duplicating the name column).
@@ -290,6 +330,11 @@ export function buildEnrollmentExportRows(
       // value ONLY (empty cell when not captured), never the prefill.
       const effective = MEDIA_FIELD_TYPES.has(f.type) ? captured : captured ?? prefill;
       row[columnFor.get(f.id) as string] = renderExportValue(f, effective, () => rowMint(f.id));
+      // Companion per-photo geotag cell (media fields that carry geo on any row). Reads the
+      // CAPTURED value only — a bare-string key (no geo) yields an empty cell.
+      if (mediaGeoFields.has(f.id)) {
+        row[geoColFor(f.id)] = formatMediaGeo(captured);
+      }
     }
     return row;
   });
@@ -312,7 +357,12 @@ export function buildEnrollmentExportRows(
     { name: 'Submitted By', source: 'Enrollment record (submitting user)' },
     { name: 'Submitted By Phone', source: 'Enrollment record (submitting user)' },
     { name: 'Rejection Reason', source: 'Enrollment record' },
-    ...fields.map((f) => ({ name: columnFor.get(f.id) as string, source: 'Captured on the enrollment form' })),
+    ...fields.flatMap((f) => {
+      const base = { name: columnFor.get(f.id) as string, source: 'Captured on the enrollment form' };
+      return mediaGeoFields.has(f.id)
+        ? [base, { name: geoColFor(f.id), source: 'Per-photo GPS captured at photo time' }]
+        : [base];
+    }),
   ];
 
   return { rows, columns };
@@ -449,8 +499,11 @@ export class SchemeReportService {
         : null;
     if (!values) throw deny();
 
-    const key = values[fieldId];
-    if (typeof key !== 'string' || !key) throw deny();
+    // A geotagged CAMERA field stores `{ key, geo }` (not a bare string) — normalize so the
+    // tokenized report link resolves the object key for both shapes (audit HIGH: a raw
+    // `typeof key !== 'string'` 404'd every geotagged scheme photo linked from the Excel report).
+    const { key } = readMediaValue(values[fieldId]);
+    if (!key) throw deny();
     // Defense-in-depth: only ever serve THIS tenant's scheme-media objects, even if a
     // token's fieldId pointed at a non-media field storing an arbitrary string.
     if (!key.startsWith(`scheme-media/${tokenClientId}/`)) throw deny();

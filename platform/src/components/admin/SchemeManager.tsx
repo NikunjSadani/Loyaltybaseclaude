@@ -30,7 +30,7 @@ import type {
   SchemeStatus,
 } from '@/lib/scheme-types';
 import { SchemeAudienceEditor } from './SchemeAudienceEditor';
-import { SchemeFormBuilder, validateSchemeFormSchema } from './SchemeFormBuilder';
+import { SchemeFormBuilder, validateSchemeFormSchema, normalizeSchemeFormSchema } from './SchemeFormBuilder';
 
 const EMPTY_FORM: EnrollmentFormSchema = { captureGpsOnSubmit: false, requireOtp: false, fields: [] };
 
@@ -71,11 +71,12 @@ export function SchemeManager({ schemeId }: { schemeId: string }) {
       setCampaignType((formRes.data.enrollmentForm.campaignType as CampaignType) ?? 'OPEN_CAMPAIGN');
       const fs = formRes.data.enrollmentForm.formSchema;
       const fields = Array.isArray(fs?.fields) ? fs.fields : [];
-      setFormSchema({
+      // Coerce any persisted dead `ON_PHOTO` GPS trigger → `MANUAL` on load (per-photo geotag replaces it).
+      setFormSchema(normalizeSchemeFormSchema({
         captureGpsOnSubmit: !!fs?.captureGpsOnSubmit,
         requireOtp: !!fs?.requireOtp,
         fields,
-      });
+      }));
       setSavedFormFieldCount(fields.length);
     } else {
       setFormSchema(EMPTY_FORM);

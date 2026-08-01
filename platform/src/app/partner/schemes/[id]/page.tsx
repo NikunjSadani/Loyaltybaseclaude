@@ -26,6 +26,7 @@ import {
   DISPLAY_ONLY_FIELD_TYPES,
   MEDIA_FIELD_TYPES,
   orderedFields,
+  readMediaValue,
   type AudienceConfig,
   type EnrollResult,
   type FormField,
@@ -74,21 +75,33 @@ function EnrolledSummary({
             const v = (values as Record<string, unknown>)[f.id];
             const isMedia = MEDIA_FIELD_TYPES.has(f.type);
             const isGps = f.type === 'GPS_POINT';
+            // A media value may be a bare object-key string OR `{ key, geo }` (per-photo
+            // geotag). readMediaValue normalises both; a bare string carries no geo.
+            const media = isMedia ? readMediaValue(v) : null;
             return (
               <div key={f.id} className="flex items-start gap-3 px-3 py-2.5 bg-white">
                 <p className="text-xs text-gray-400 font-medium w-32 shrink-0">{f.label}</p>
                 <div className="flex-1 min-w-0 text-sm text-gray-800 break-words">
                   {v == null || v === '' ? (
                     <span className="text-gray-300">—</span>
-                  ) : isMedia && typeof v === 'string' ? (
-                    <a
-                      href={mediaViewUrl(schemeId, v)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[var(--brand-primary)] font-medium"
-                    >
-                      <Eye className="h-3.5 w-3.5" /> View
-                    </a>
+                  ) : media && media.key ? (
+                    <span className="inline-flex items-center gap-2 flex-wrap">
+                      <a
+                        href={mediaViewUrl(schemeId, media.key)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[var(--brand-primary)] font-medium"
+                      >
+                        <Eye className="h-3.5 w-3.5" /> View
+                      </a>
+                      {media.geo && (
+                        <span className="inline-flex items-center gap-1 text-xs text-gray-400">
+                          <MapPin className="h-3 w-3" />
+                          {media.geo.lat.toFixed(5)}, {media.geo.lng.toFixed(5)}
+                          {media.geo.accuracy != null ? ` ±${Math.round(media.geo.accuracy)}m` : ''}
+                        </span>
+                      )}
+                    </span>
                   ) : isGps && v && typeof v === 'object' ? (
                     <span className="inline-flex items-center gap-1">
                       <MapPin className="h-3.5 w-3.5 text-gray-400" />

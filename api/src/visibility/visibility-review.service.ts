@@ -7,9 +7,11 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
+import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { VisibilityFormSchema } from './visibility-types';
-import { MEDIA_FIELD_TYPES } from './visibility-form.helper';
+import { MEDIA_FIELD_TYPES, readMediaValue, GpsCapture } from './visibility-form.helper';
+import { evaluatePhotoFence, PhotoFenceStatus } from './geo-fence.helper';
 import {
   AdminListCapturesQueryDto,
   VISIBILITY_REJECT_REASON_CODES,
@@ -37,6 +39,7 @@ export class VisibilityReviewService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenant: TenantService,
+    private readonly tenantSettings: TenantSettingsService,
   ) {}
 
   private assertGifsy(user: JwtPayload): void {
@@ -180,7 +183,13 @@ export class VisibilityReviewService {
     await this.assertEnabled(capture.clientId);
 
     const schema = await this.resolveFormSnapshot(capture.clientId, capture.formVersion);
-    const media = this.extractMedia(capture.formValues, schema);
+    // Per-photo geo-fence: resolve the SAME outlet reference geo the aggregate fence uses
+    // (the outlet owner-partner's latest APPROVED KYC board-photo geo) + the tenant's
+    // current fence radius, so each fence-required photo gets its own inside/outside/
+    // unverifiable status vs that reference. Both are null/default-safe.
+    const config = (await this.tenantSettings.getEffectiveSettings(capture.clientId)).visibilityConfig;
+    const referenceGeo = await this.outletReferenceGeo(capture.clientId, capture.outletId);
+    const media = this.extractMedia(capture.formValues, schema, referenceGeo, config.geoFence.radiusMeters);
     const geo = this.extractGeo(capture.formValues, schema);
 
     const dupMatches = await this.findDuplicateMatches(
@@ -250,28 +259,101 @@ export class VisibilityReviewService {
     return current ? (current.formSchema as unknown as VisibilityFormSchema) : null;
   }
 
-  /** CAMERA fields whose value is a stored key → an auth-gated view path. */
+  /**
+   * CAMERA fields whose value is a stored key → an auth-gated view path.
+   *
+   * A stored value may be a bare object-key string OR `{ key, geo }` (per-photo geotag);
+   * readMediaValue normalises both, so a bare-string capture surfaces exactly as before
+   * (no geo, no status). Where a photo carries its own geo it is attached; a
+   * fence-required photo additionally gets its per-photo fence status
+   * (inside / outside / unverifiable) vs the outlet reference geo — computed by the
+   * shared `evaluatePhotoFence` (never a re-implemented haversine).
+   */
   private extractMedia(
     formValues: Prisma.JsonValue | null,
     schema: VisibilityFormSchema | null,
-  ): Array<{ fieldId: string; label: string; type: string; key: string; viewPath: string }> {
+    referenceGeo: { lat: number; lng: number } | null,
+    radiusMeters: number,
+  ): Array<{
+    fieldId: string;
+    label: string;
+    type: string;
+    key: string;
+    viewPath: string;
+    geo?: GpsCapture;
+    fenceStatus?: PhotoFenceStatus;
+  }> {
     if (!formValues || typeof formValues !== 'object' || !schema) return [];
     const vals = formValues as Record<string, unknown>;
-    const out: Array<{ fieldId: string; label: string; type: string; key: string; viewPath: string }> = [];
+    const out: Array<{
+      fieldId: string;
+      label: string;
+      type: string;
+      key: string;
+      viewPath: string;
+      geo?: GpsCapture;
+      fenceStatus?: PhotoFenceStatus;
+    }> = [];
     for (const f of schema.fields ?? []) {
       if (!MEDIA_FIELD_TYPES.has(f.type)) continue;
-      const key = vals[f.id];
-      if (typeof key === 'string' && key) {
-        out.push({
-          fieldId: f.id,
-          label: f.label,
-          type: f.type,
-          key,
-          viewPath: `/v1/visibility/captures/media?key=${encodeURIComponent(key)}`,
-        });
+      const { key, geo } = readMediaValue(vals[f.id]);
+      if (!key) continue;
+      const ref: {
+        fieldId: string;
+        label: string;
+        type: string;
+        key: string;
+        viewPath: string;
+        geo?: GpsCapture;
+        fenceStatus?: PhotoFenceStatus;
+      } = {
+        fieldId: f.id,
+        label: f.label,
+        type: f.type,
+        key,
+        viewPath: `/v1/visibility/captures/media?key=${encodeURIComponent(key)}`,
+      };
+      if (geo) ref.geo = geo;
+      // Only a fence-required photo gets a status; evaluatePhotoFence returns
+      // 'unverifiable' when the photo has no geo OR there is no reference geo.
+      if (f.geoFenceRequired === true) {
+        ref.fenceStatus = evaluatePhotoFence(geo ?? null, referenceGeo, radiusMeters);
       }
+      out.push(ref);
     }
     return out;
+  }
+
+  /**
+   * The outlet's reference geo for the per-photo fence — the SAME source the aggregate
+   * capture-time fence uses: the outlet owner-partner's latest APPROVED KYC board-photo
+   * geo (`Outlet.partnerId` → ChannelPartner.kycSubmissions.boardPhotoLat/Lng). Null when
+   * the outlet has no partner or no approved board-photo geo (→ photos read 'unverifiable').
+   */
+  private async outletReferenceGeo(
+    clientId: string,
+    outletId: string,
+  ): Promise<{ lat: number; lng: number } | null> {
+    const outlet = await this.prisma.outlet.findFirst({
+      where: { id: outletId, clientId },
+      select: { partnerId: true },
+    });
+    const partnerId = outlet?.partnerId ?? null;
+    if (!partnerId) return null;
+    const partner = await this.prisma.channelPartner.findFirst({
+      where: { id: partnerId, clientId },
+      select: {
+        kycSubmissions: {
+          where: { status: 'APPROVED', boardPhotoLat: { not: null }, boardPhotoLng: { not: null } },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { boardPhotoLat: true, boardPhotoLng: true },
+        },
+      },
+    });
+    const sub = partner?.kycSubmissions?.[0];
+    if (!sub || sub.boardPhotoLat == null || sub.boardPhotoLng == null) return null;
+    return { lat: Number(sub.boardPhotoLat), lng: Number(sub.boardPhotoLng) };
   }
 
   private extractGeo(

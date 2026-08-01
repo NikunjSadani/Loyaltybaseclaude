@@ -20,14 +20,17 @@ lat/lng/accuracy/timestamp of where + when it was actually shot (stronger POSM a
   "Bound to a photo" trigger is **removed** (its job is now the per-photo geotag on the CAMERA field).
 - Visibility **geo-fence** validates the per-photo geos (see D1).
 
-## DECISIONS (owner — before build)
-- **D1 — geo-fence rule with multiple photos:** (a) EVERY geotagged required photo must be inside the fence (strictest,
-  RECOMMENDED for POSM) · (b) at least ONE inside · (c) a designated "primary" photo inside. A photo whose device
-  refuses/returns no fix → treat as `GEO_UNVERIFIABLE` (existing flag), don't hard-fail (matches today's fail-soft).
-- **D2 — accuracy cap:** apply the existing per-field `gpsMaxAccuracy` cap (D15) to each photo's fix — reject a shot
-  whose reported accuracy exceeds the cap, prompt re-capture (mirrors the current GPS_POINT behaviour). RECOMMENDED yes.
-- **D3 — scope of "default ON":** default the CAMERA geotag ON for Visibility forms, OFF for generic Scheme forms
-  (admin can toggle per field). RECOMMENDED.
+## DECISIONS (owner — LOCKED 2026-08-01)
+- **D1 — geo-fence rule with multiple photos: ✅ (a) EVERY FENCE-REQUIRED photo must be inside the fence, AND the admin
+  CONFIGURES per camera-field WHICH photos are fence-required.** So a CAMERA field carries two related switches: capture
+  GPS at shutter (geotag) + (for a geo-fenced visibility form) whether that photo MUST be inside the fence. The fence
+  verdict = PASS only if every fence-required photo with a fix is inside `radiusMeters`; a fence-required photo whose
+  device returns no fix → `GEO_UNVERIFIABLE` (existing flag) — flag, do NOT hard-fail (matches today's fail-soft). A
+  photo that is geotagged but NOT marked fence-required carries its GPS for the record but does not gate the submission.
+- **D2 — accuracy cap: ✅ YES.** Apply the existing per-field `gpsMaxAccuracy` cap (D15) to each photo's fix — reject a
+  shot whose reported accuracy exceeds the cap, prompt re-capture (mirrors the current GPS_POINT behaviour).
+- **D3 — default ON: ✅ YES.** Default the CAMERA geotag + fence-required ON for Visibility forms, OFF for generic
+  Scheme forms (admin can toggle per field).
 
 ## BUILD (orchestrated; disjoint streams; gate + audit + verify)
 **FE-1 — Form-builder (`SchemeFormBuilder.tsx`):** CAMERA field gains a "Capture location with photo" toggle

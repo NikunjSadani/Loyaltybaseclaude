@@ -108,8 +108,28 @@ function defaultField(type: FormFieldType, order: number): FormField {
     lookupMap: type === 'LOOKUP' ? {} : undefined,
     captureTrigger: type === 'GPS_POINT' ? 'MANUAL' : undefined,
     otpRequired: type === 'PHONE_OTP' ? true : undefined,
+    // Per-photo geotag (D3): default OFF for generic Scheme CAMERA fields.
+    geotag: type === 'CAMERA' ? false : undefined,
     order,
   };
+}
+
+/**
+ * Coerce a loaded/imported schema to the current field-config contract: the dead GPS
+ * `ON_PHOTO` ("Bound to a photo") trigger has been removed from the builder — migrate any
+ * persisted field still carrying it to `MANUAL` so it round-trips cleanly (its job is now
+ * the per-photo geotag on the CAMERA field). Pure; returns the same object when nothing changes.
+ */
+export function normalizeSchemeFormSchema(schema: EnrollmentFormSchema): EnrollmentFormSchema {
+  let changed = false;
+  const fields = schema.fields.map((f) => {
+    if (f.captureTrigger === 'ON_PHOTO') {
+      changed = true;
+      return { ...f, captureTrigger: 'MANUAL' as GpsCaptureTrigger };
+    }
+    return f;
+  });
+  return changed ? { ...schema, fields } : schema;
 }
 
 // ── Client-side validation (mirrors the backend validateFormSchema subset) ────
@@ -307,7 +327,7 @@ function PreviewField({ field }: { field: FormField }) {
         <div className="border border-gray-200 rounded-lg h-10 bg-white flex items-center justify-center"><PenLine className="w-4 h-4 text-gray-300" /></div>
       )}
       {field.type === 'GPS_POINT' && (
-        <div className="border border-green-200 rounded-lg p-2 text-center bg-green-50"><MapPin className="w-4 h-4 text-green-500 mx-auto" /><p className="text-[9px] text-green-600">{field.captureTrigger === 'ON_SUBMIT' ? 'Auto on submit' : field.captureTrigger === 'ON_PHOTO' ? 'Tagged to photo' : 'Tap to capture'}</p></div>
+        <div className="border border-green-200 rounded-lg p-2 text-center bg-green-50"><MapPin className="w-4 h-4 text-green-500 mx-auto" /><p className="text-[9px] text-green-600">{field.captureTrigger === 'ON_SUBMIT' ? 'Auto on submit' : 'Tap to capture'}</p></div>
       )}
       {field.type === 'DATA_DISPLAY' && (
         <div className="flex items-center gap-2 px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-lg"><Eye className="w-3 h-3 text-slate-400" /><span className="text-[10px] text-slate-600">[{field.dataDisplayKey || field.prefillKey || 'Excel value'}]</span></div>
@@ -660,8 +680,8 @@ export function SchemeFormBuilder({
                       <label className="block text-[10px] text-gray-500 mb-1">Capture trigger</label>
                       <select value={field.captureTrigger ?? 'MANUAL'} onChange={(e) => patch(field.id, { captureTrigger: e.target.value as GpsCaptureTrigger })}
                         className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white">
-                        {GPS_CAPTURE_TRIGGERS.map((t) => (
-                          <option key={t} value={t}>{t === 'ON_SUBMIT' ? 'Automatically on submit' : t === 'ON_PHOTO' ? 'Bound to a photo' : 'Manual button'}</option>
+                        {GPS_CAPTURE_TRIGGERS.filter((t) => t !== 'ON_PHOTO').map((t) => (
+                          <option key={t} value={t}>{t === 'ON_SUBMIT' ? 'Automatically on submit' : 'Manual button'}</option>
                         ))}
                       </select>
                     </div>
@@ -678,11 +698,18 @@ export function SchemeFormBuilder({
                     </div>
                   )}
 
-                  {/* CAMERA note (D14) */}
+                  {/* CAMERA config (D14 + per-photo geotag D3) */}
                   {field.type === 'CAMERA' && (
-                    <div className="flex items-start gap-2 bg-pink-50 border border-pink-100 rounded-lg px-3 py-2">
-                      <Info className="w-3.5 h-3.5 text-pink-400 flex-shrink-0 mt-0.5" />
-                      <p className="text-[11px] text-pink-600">Opens the rear camera on field phones. GPS + a server-side watermark (time, geo, outlet code) are applied on capture.</p>
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-2 cursor-pointer text-[11px] text-gray-600">
+                        <input type="checkbox" checked={field.geotag ?? false} onChange={(e) => patch(field.id, { geotag: e.target.checked })}
+                          className="w-3.5 h-3.5 accent-[var(--brand-primary)]" />
+                        Capture location with this photo
+                      </label>
+                      <div className="flex items-start gap-2 bg-pink-50 border border-pink-100 rounded-lg px-3 py-2">
+                        <Info className="w-3.5 h-3.5 text-pink-400 flex-shrink-0 mt-0.5" />
+                        <p className="text-[11px] text-pink-600">Opens the rear camera on field phones. A server-side watermark (time, geo, outlet code) is applied on capture. When &ldquo;Capture location with this photo&rdquo; is on, each photo also embeds its own GPS fix taken at the moment it is shot.</p>
+                      </div>
                     </div>
                   )}
 

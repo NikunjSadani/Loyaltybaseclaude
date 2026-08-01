@@ -68,8 +68,14 @@ export interface VisibilityFormField {
   requiredWhen?: VisibleWhen;
   /** GPS_POINT: when the location fix is captured. */
   captureTrigger?: GpsCaptureTrigger;
+  /** GPS_POINT / geotag CAMERA: reject a fix whose reported accuracy (metres) exceeds this cap (D2); unset = no cap. */
+  gpsMaxAccuracy?: number;
   /** CAMERA: suppress the gallery fallback — native camera capture only (D14). */
   noGallery?: boolean;
+  /** CAMERA: capture a GPS fix at this photo's shutter time, embedded in the media value (per-photo geotag). */
+  geotag?: boolean;
+  /** CAMERA (visibility geo-fenced forms): this photo must be inside the geo-fence. Every fence-required photo with a fix must be inside; a fence-required photo with no fix → GEO_UNVERIFIABLE (flag, not a hard-fail). */
+  geoFenceRequired?: boolean;
   /** CAMERA: what/how to shoot — shown to the rep at capture time (D9). */
   instruction?: string;
   /** CAMERA: a GCS key for a reference / sample image the rep can compare against (D16). */
@@ -104,6 +110,35 @@ export interface GpsCapture {
   lng: number;
   accuracy?: number;
   capturedAt?: string;
+}
+
+/**
+ * A stored media-field value: the legacy bare object-key string, OR a `{ key, geo? }`
+ * object carrying that photo's own shutter-time GPS fix (per-photo geotag). Both shapes
+ * are accepted everywhere for full backward-compat.
+ */
+export type MediaValue = string | { key: string; geo?: GpsCapture };
+
+/**
+ * Normalize a stored media-field value (bare key string OR `{key, geo}`) to a uniform
+ * shape. Backward-compatible: a bare string yields `{ key, geo: undefined }`. Returns
+ * `{ key: '' }` for empty/invalid input. A malformed `geo` is dropped (→ undefined)
+ * rather than throwing.
+ */
+export function readMediaValue(v: unknown): { key: string; geo?: GpsCapture } {
+  if (typeof v === 'string') return { key: v };
+  if (v && typeof v === 'object' && typeof (v as { key?: unknown }).key === 'string') {
+    return { key: (v as { key: string }).key, geo: normalizeGeo((v as { geo?: unknown }).geo) };
+  }
+  return { key: '' };
+}
+
+/** Loose geo validation: an object with numeric lat/lng → a GpsCapture; else undefined. */
+function normalizeGeo(g: unknown): GpsCapture | undefined {
+  if (!g || typeof g !== 'object' || Array.isArray(g)) return undefined;
+  const o = g as Record<string, unknown>;
+  if (typeof o.lat !== 'number' || typeof o.lng !== 'number') return undefined;
+  return o as unknown as GpsCapture;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -321,6 +356,13 @@ export interface VisibilityCaptureListResponse {
   pagination: Pagination;
 }
 
+/**
+ * Per-photo geo-fence status vs the outlet reference geo (mirrors the backend
+ * `PhotoFenceStatus` in api/src/visibility/geo-fence.helper.ts). `unverifiable` =
+ * the photo has no geo OR the outlet has no reference geo.
+ */
+export type PhotoFenceStatus = 'inside' | 'outside' | 'unverifiable';
+
 /** A media ref surfaced in a capture detail (auth-gated view path). */
 export interface VisibilityMediaRef {
   fieldId: string;
@@ -329,6 +371,10 @@ export interface VisibilityMediaRef {
   key: string;
   /** Backend-provided auth-gated path (`/v1/...`); rewrite to `/api/...` for the browser. */
   viewPath: string;
+  /** Per-photo shutter-time GPS fix (per-photo geotag), when this photo carries one. */
+  geo?: GpsCapture;
+  /** Per-photo fence status vs the outlet reference geo — set only for fence-required photos. */
+  fenceStatus?: PhotoFenceStatus;
 }
 
 /** A geo ref (a GPS_POINT field's captured value) in a capture detail. */

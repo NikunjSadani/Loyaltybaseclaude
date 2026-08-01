@@ -27,6 +27,7 @@ import {
   FormField,
   VisibilityFormSchema,
   MEDIA_FIELD_TYPES,
+  readMediaValue,
 } from './visibility-types';
 
 // Re-export the shared types + constants so consumers can import everything the
@@ -36,8 +37,10 @@ export {
   GPS_CAPTURE_TRIGGERS,
   VISIBLE_WHEN_OPS,
   MEDIA_FIELD_TYPES,
+  readMediaValue,
 };
 export type { FormFieldType, VisibleWhen, FormField, VisibilityFormSchema };
+export type { MediaValue, GpsCapture } from './visibility-types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Structural type guards
@@ -162,6 +165,20 @@ export function validateFormSchema(rawSchema: unknown): string[] {
 
     if (f.noGallery !== undefined && !isBoolean(f.noGallery)) {
       errors.push(`${pos}: noGallery must be a boolean.`);
+    }
+
+    // geotag / geoFenceRequired (optional) — per-photo geotag flags. geoFenceRequired
+    // is only meaningful on a CAMERA field (a fence check needs a photo to bind to).
+    if (f.geotag !== undefined && !isBoolean(f.geotag)) {
+      errors.push(`${pos}: geotag must be a boolean.`);
+    }
+    if (f.geoFenceRequired !== undefined) {
+      if (!isBoolean(f.geoFenceRequired)) {
+        errors.push(`${pos}: geoFenceRequired must be a boolean.`);
+      }
+      if (f.type !== 'CAMERA') {
+        errors.push(`${pos}: geoFenceRequired is only valid on a CAMERA field.`);
+      }
     }
 
     // CAMERA per-field authoring extensions (D9 / D16) — strings when present.
@@ -434,7 +451,41 @@ export function validateSubmittedValues(
         }
         break;
       }
-      // TEXT, TEXTAREA, CAMERA — any non-empty value accepted.
+      case 'CAMERA': {
+        // A CAMERA value is a bare object-key string OR a `{ key, geo? }` object carrying
+        // that photo's shutter-time GPS fix (per-photo geotag). A bare string stays valid
+        // (full back-compat). When a geo IS embedded, validate its shape/Earth-range via
+        // parseGpsPoint + the per-field accuracy cap (D2). A photo with no geo stays valid.
+        const media = readMediaValue(rawValue);
+        if (!media.key) {
+          errors.push(`Field "${field.label}" (${field.id}) has an invalid media reference.`);
+          continue;
+        }
+        const rawGeo =
+          rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)
+            ? (rawValue as { geo?: unknown }).geo
+            : undefined;
+        if (rawGeo !== undefined && rawGeo !== null) {
+          const point = media.geo ? parseGpsPoint(media.geo) : null;
+          if (!point) {
+            errors.push(
+              `Field "${field.label}" (${field.id}) has a malformed or out-of-range photo location.`,
+            );
+            continue;
+          }
+          if (typeof field.gpsMaxAccuracy === 'number' && field.gpsMaxAccuracy > 0) {
+            const acc = Number(media.geo?.accuracy);
+            if (isFinite(acc) && acc > field.gpsMaxAccuracy) {
+              errors.push(
+                `Field "${field.label}" (${field.id}) location accuracy (±${acc}m) exceeds the ${field.gpsMaxAccuracy}m limit — move to open sky and recapture.`,
+              );
+              continue;
+            }
+          }
+        }
+        break;
+      }
+      // TEXT, TEXTAREA — any non-empty value accepted.
       default:
         break;
     }

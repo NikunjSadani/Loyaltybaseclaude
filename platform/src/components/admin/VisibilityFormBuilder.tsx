@@ -82,6 +82,9 @@ function defaultField(type: VisibilityFormFieldType, order: number): VisibilityF
     captureTrigger: type === 'GPS_POINT' ? 'MANUAL' : undefined,
     noGallery: type === 'CAMERA' ? true : undefined,
     instruction: type === 'CAMERA' ? '' : undefined,
+    // Per-photo geotag (D3): default ON for Visibility CAMERA fields (capture GPS + fence-check each photo).
+    geotag: type === 'CAMERA' ? true : undefined,
+    geoFenceRequired: type === 'CAMERA' ? true : undefined,
     order,
   };
 }
@@ -262,7 +265,7 @@ function PreviewField({ field }: { field: VisibilityFormField }) {
         </div>
       )}
       {field.type === 'GPS_POINT' && (
-        <div className="border border-green-200 rounded-lg p-2 text-center bg-green-50"><MapPin className="w-4 h-4 text-green-500 mx-auto" /><p className="text-[9px] text-green-600">{field.captureTrigger === 'ON_SUBMIT' ? 'Auto on submit' : field.captureTrigger === 'ON_PHOTO' ? 'Tagged to photo' : 'Tap to capture'}</p></div>
+        <div className="border border-green-200 rounded-lg p-2 text-center bg-green-50"><MapPin className="w-4 h-4 text-green-500 mx-auto" /><p className="text-[9px] text-green-600">{field.captureTrigger === 'ON_SUBMIT' ? 'Auto on submit' : 'Tap to capture'}</p></div>
       )}
       {field.helpText && <p className="text-[9px] text-gray-400 mt-0.5">{field.helpText}</p>}
     </div>
@@ -294,9 +297,13 @@ export function VisibilityFormBuilder() {
     ]);
     if (res.success) {
       const fs = res.data?.formSchema;
+      const rawFields = Array.isArray(fs?.fields) ? fs!.fields : [];
       setValue({
         captureGpsOnSubmit: !!fs?.captureGpsOnSubmit,
-        fields: Array.isArray(fs?.fields) ? fs!.fields : [],
+        // Coerce any persisted dead `ON_PHOTO` GPS trigger → `MANUAL` on load (per-photo geotag replaces it).
+        fields: rawFields.map((f) =>
+          f.captureTrigger === 'ON_PHOTO' ? { ...f, captureTrigger: 'MANUAL' as GpsCaptureTrigger } : f,
+        ),
       });
     } else {
       setLoadError(res.error);
@@ -503,8 +510,8 @@ export function VisibilityFormBuilder() {
                         <label className="block text-[10px] text-gray-500 mb-1">Capture trigger</label>
                         <select value={field.captureTrigger ?? 'MANUAL'} onChange={(e) => patch(field.id, { captureTrigger: e.target.value as GpsCaptureTrigger })}
                           className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white">
-                          {GPS_CAPTURE_TRIGGERS.map((t) => (
-                            <option key={t} value={t}>{t === 'ON_SUBMIT' ? 'Automatically on submit' : t === 'ON_PHOTO' ? 'Bound to a photo' : 'Manual button'}</option>
+                          {GPS_CAPTURE_TRIGGERS.filter((t) => t !== 'ON_PHOTO').map((t) => (
+                            <option key={t} value={t}>{t === 'ON_SUBMIT' ? 'Automatically on submit' : 'Manual button'}</option>
                           ))}
                         </select>
                       </div>
@@ -527,9 +534,23 @@ export function VisibilityFormBuilder() {
                             className="w-3.5 h-3.5 accent-[var(--brand-primary)]" />
                           Native camera only — disable gallery upload
                         </label>
+                        {/* Per-photo geotag + fence (D3) — fence-required depends on geotag (a photo can't be
+                            fence-checked without its own GPS), so clearing geotag also clears + disables it. */}
+                        <label className="flex items-center gap-2 cursor-pointer text-[11px] text-gray-600">
+                          <input type="checkbox" checked={field.geotag ?? false}
+                            onChange={(e) => patch(field.id, e.target.checked ? { geotag: true } : { geotag: false, geoFenceRequired: false })}
+                            className="w-3.5 h-3.5 accent-[var(--brand-primary)]" />
+                          Capture location with this photo
+                        </label>
+                        <label className={`flex items-center gap-2 pl-5 text-[11px] ${field.geotag ? 'cursor-pointer text-gray-600' : 'cursor-not-allowed text-gray-300'}`}>
+                          <input type="checkbox" checked={!!field.geoFenceRequired && !!field.geotag} disabled={!field.geotag}
+                            onChange={(e) => patch(field.id, { geoFenceRequired: e.target.checked })}
+                            className="w-3.5 h-3.5 accent-[var(--brand-primary)] disabled:opacity-40" />
+                          This photo must be inside the geo-fence
+                        </label>
                         <div className="flex items-start gap-2 bg-pink-50 border border-pink-100 rounded-lg px-3 py-2">
                           <Info className="w-3.5 h-3.5 text-pink-400 flex-shrink-0 mt-0.5" />
-                          <p className="text-[11px] text-pink-600">Opens the rear camera on field phones. Time, geo and outlet code are stored alongside the photo.</p>
+                          <p className="text-[11px] text-pink-600">Opens the rear camera on field phones. Time, geo and outlet code are stored alongside the photo. When &ldquo;Capture location with this photo&rdquo; is on, each photo embeds its own GPS fix taken when it is shot; mark it &ldquo;must be inside the geo-fence&rdquo; to reject a shot taken outside the outlet&rsquo;s fence.</p>
                         </div>
                       </div>
                     )}

@@ -31,6 +31,7 @@ import {
   VISIBILITY_REJECT_REASON_CODES,
   VISIBILITY_REJECT_REASON_LABELS,
   type Pagination,
+  type PhotoFenceStatus,
   type VisibilityCaptureDetail,
   type VisibilityCaptureRow,
   type VisibilityCaptureStatus,
@@ -189,6 +190,17 @@ function GeoBadge({ geoFenceOk, distanceMeters }: { geoFenceOk: boolean | null; 
   return <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-amber-50 text-amber-700 border border-amber-200">Unverifiable</span>;
 }
 
+/** Per-photo fence badge (per-photo geotag): inside / outside / unverifiable. */
+function PhotoFenceBadge({ status }: { status: PhotoFenceStatus }) {
+  if (status === 'inside') {
+    return <span className="px-1.5 py-0.5 rounded-full font-medium bg-green-50 text-green-700 border border-green-200">In fence</span>;
+  }
+  if (status === 'outside') {
+    return <span className="px-1.5 py-0.5 rounded-full font-medium bg-red-50 text-red-600 border border-red-200">Outside</span>;
+  }
+  return <span className="px-1.5 py-0.5 rounded-full font-medium bg-amber-50 text-amber-700 border border-amber-200">Unverifiable</span>;
+}
+
 // ── Detail drawer ─────────────────────────────────────────────────────────────
 
 function CaptureDrawer({
@@ -299,6 +311,22 @@ function CaptureDrawer({
                           <span className="truncate flex-1">{m.label}</span>
                           <ExternalLink className="w-3 h-3 text-gray-300 group-hover:text-[var(--brand-primary)]" />
                         </div>
+                        {/* Per-photo geotag: this photo's own GPS + its fence status (in
+                            addition to the aggregate geo-fence badge above). Absent for a
+                            legacy bare-string photo (no geo, no per-photo status). */}
+                        {(m.geo || m.fenceStatus) && (
+                          <div className="px-2 pb-1.5 flex items-center justify-between gap-1 text-[10px]">
+                            {m.geo ? (
+                              <span className="inline-flex items-center gap-0.5 text-gray-500">
+                                <MapPin className="w-2.5 h-2.5" />
+                                {m.geo.lat.toFixed(5)}, {m.geo.lng.toFixed(5)}
+                              </span>
+                            ) : (
+                              <span />
+                            )}
+                            {m.fenceStatus && <PhotoFenceBadge status={m.fenceStatus} />}
+                          </div>
+                        )}
                       </a>
                     );
                   })}

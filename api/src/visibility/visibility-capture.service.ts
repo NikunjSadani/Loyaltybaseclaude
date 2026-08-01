@@ -26,8 +26,14 @@ import {
   windowKeyForDate,
   windowsForMonth,
 } from './visibility-window.helper';
-import { validateSubmittedValues, parseGpsPoint, MEDIA_FIELD_TYPES } from './visibility-form.helper';
-import { VisibilityFormSchema } from './visibility-types';
+import {
+  validateSubmittedValues,
+  parseGpsPoint,
+  MEDIA_FIELD_TYPES,
+  readMediaValue,
+} from './visibility-form.helper';
+import { VisibilityFormSchema, GpsCapture } from './visibility-types';
+import { evaluatePhotoFence, isValidGeo } from './geo-fence.helper';
 import { SubmitCaptureDto, ResubmitCaptureDto } from './dto/visibility-capture.dto';
 
 /** Object-key tenant folder for all visibility media (mirrors VisibilityMediaService). */
@@ -468,41 +474,127 @@ export class VisibilityCaptureService {
     const freq = this.freqOf(config);
     const windowKey = windowKeyForDate(now, freq);
 
-    // Geo extracted from the GPS field of the VALIDATED values.
-    const geo = this.extractCaptureGeo(schema, values);
-
-    // Geo-fence (D10) against the outlet's KYC board-photo reference geo.
-    const { distanceMeters, geoFenceOk, referencePresent } = await this.evaluateGeoFence(
-      user.clientId,
-      outlet.partnerId,
-      config,
-      geo,
+    // Geo-fence — TWO paths, chosen by the form schema. A form with ≥1 CAMERA field
+    // flagged `geoFenceRequired` uses the NEW per-photo path (each such photo's embedded
+    // shutter-time geo is fenced); otherwise fall through to the LEGACY single-GPS_POINT
+    // path, byte-identical to before. Both fold into the same typed columns
+    // (geoFenceOk / distanceMeters / captureLat|Lng|Accuracy / capturedAt).
+    const fenceFields = (schema.fields ?? []).filter(
+      (f) => f.type === 'CAMERA' && f.geoFenceRequired === true,
     );
-    const captureGeoPresent = geo.lat != null && geo.lng != null;
-    if (config.geoFence.enabled) {
-      // H1 — FAIL-CLOSED when a reference geo EXISTS but the capture geo is
-      // missing/unparseable/out-of-range: a rep must not be able to defeat the fence by
-      // sending no/garbage GPS. (No reference geo → allow-but-flag GEO_UNVERIFIABLE below.)
-      if (referencePresent && !captureGeoPresent) {
-        throw new ForbiddenException(
-          'A valid GPS location is required to capture at this outlet (geo-fence is enabled).',
-        );
-      }
-      if (geoFenceOk === false) {
-        throw new ForbiddenException(
-          `Capture is outside the allowed ${config.geoFence.radiusMeters}m radius of the outlet.`,
-        );
-      }
-    }
 
-    // Advisory flags (non-blocking): clock skew + low GPS accuracy.
     const flags: string[] = [];
-    if (geo.capturedAt) {
-      const skew = Math.abs(now.getTime() - geo.capturedAt.getTime());
-      if (skew > CLOCK_SKEW_FLAG_MS) flags.push('CLOCK_SKEW');
+    let distanceMeters: number | null;
+    let geoFenceOk: boolean | null;
+    // `repGeo` = the representative photo used for the map-pin columns (the FIRST
+    // fence-required photo that had a fix; legacy path → the single GPS_POINT fix).
+    let repGeo: CaptureGeo;
+
+    if (fenceFields.length > 0) {
+      // ── NEW PER-PHOTO PATH ──────────────────────────────────────────────────────
+      // Resolve the outlet reference geo ONCE (latest APPROVED KYC board-photo geo).
+      const reference = await this.outletReferenceGeo(user.clientId, outlet.partnerId);
+      const radius = config.geoFence.radiusMeters;
+
+      let anyInside = false;
+      let anyOutside = false;
+      let anyUnverifiable = false;
+      let outsideLabel: string | null = null;
+      let worstDistance: number | null = null; // max distance among fence photos with a fix
+      let worstGeo: GpsCapture | null = null; // representative pin = the worst (farthest) fixed photo
+
+      for (const f of fenceFields) {
+        const g = readMediaValue(values[f.id]).geo ?? null;
+        const status = evaluatePhotoFence(g, reference, radius);
+        if (reference && isValidGeo(g)) {
+          const d = haversineMeters(g.lat, g.lng, reference.lat, reference.lng);
+          const rounded = Math.round(d * 100) / 100;
+          // Track the worst (farthest) fixed photo so the map pin (repGeo) and distanceMeters
+          // always reference the SAME photo (audit fix — a pin/distance mismatch misled the reviewer).
+          if (worstDistance === null || rounded > worstDistance) {
+            worstDistance = rounded;
+            worstGeo = g;
+          }
+        }
+        if (status === 'inside') anyInside = true;
+        else if (status === 'outside') {
+          anyOutside = true;
+          if (!outsideLabel) outsideLabel = f.label;
+        } else {
+          anyUnverifiable = true; // 'unverifiable'
+        }
+      }
+
+      // Aggregate verdict (audit HIGH fix — "geoFenceOk === true" must mean GENUINELY verified
+      // at the outlet, never "merely not caught outside"):
+      //   • fence DISABLED            → null  (nothing was enforced; mirror the legacy path)
+      //   • any photo OUTSIDE         → false (blocked below when enabled)
+      //   • EVERY fence photo inside  → true  (a real pass — no unverifiable, no outside)
+      //   • else (≥1 unverifiable, none outside) → null (surfaces UNVERIFIABLE to the approver;
+      //     an absent fix per owner D1 flags-but-doesn't-block, but must NOT read as a clean pass).
+      if (!config.geoFence.enabled) {
+        geoFenceOk = null;
+      } else if (anyOutside) {
+        geoFenceOk = false;
+      } else if (anyUnverifiable || !anyInside) {
+        geoFenceOk = null;
+      } else {
+        geoFenceOk = true;
+      }
+      distanceMeters = worstDistance;
+      repGeo = this.photoToCaptureGeo(worstGeo);
+
+      if (config.geoFence.enabled) {
+        if (anyOutside) {
+          throw new ForbiddenException(
+            `Capture is outside the allowed ${radius}m radius of the outlet` +
+              (outsideLabel ? ` — photo "${outsideLabel}" is out of range.` : '.'),
+          );
+        }
+        if (anyUnverifiable) flags.push('GEO_UNVERIFIABLE');
+      }
+
+      // Advisory flags (non-blocking) from the representative photo geo.
+      if (repGeo.capturedAt) {
+        const skew = Math.abs(now.getTime() - repGeo.capturedAt.getTime());
+        if (skew > CLOCK_SKEW_FLAG_MS) flags.push('CLOCK_SKEW');
+      }
+      if (repGeo.accuracy != null && repGeo.accuracy > LOW_ACCURACY_FLAG_M) {
+        flags.push('LOW_ACCURACY');
+      }
+    } else {
+      // ── LEGACY SINGLE-GPS_POINT PATH (unchanged) ────────────────────────────────
+      const geo = this.extractCaptureGeo(schema, values);
+      const res = await this.evaluateGeoFence(user.clientId, outlet.partnerId, config, geo);
+      distanceMeters = res.distanceMeters;
+      geoFenceOk = res.geoFenceOk;
+      repGeo = geo;
+
+      const captureGeoPresent = geo.lat != null && geo.lng != null;
+      if (config.geoFence.enabled) {
+        // H1 — FAIL-CLOSED when a reference geo EXISTS but the capture geo is
+        // missing/unparseable/out-of-range: a rep must not be able to defeat the fence by
+        // sending no/garbage GPS. (No reference geo → allow-but-flag GEO_UNVERIFIABLE below.)
+        if (res.referencePresent && !captureGeoPresent) {
+          throw new ForbiddenException(
+            'A valid GPS location is required to capture at this outlet (geo-fence is enabled).',
+          );
+        }
+        if (geoFenceOk === false) {
+          throw new ForbiddenException(
+            `Capture is outside the allowed ${config.geoFence.radiusMeters}m radius of the outlet.`,
+          );
+        }
+      }
+
+      // Advisory flags (non-blocking): clock skew + low GPS accuracy.
+      if (geo.capturedAt) {
+        const skew = Math.abs(now.getTime() - geo.capturedAt.getTime());
+        if (skew > CLOCK_SKEW_FLAG_MS) flags.push('CLOCK_SKEW');
+      }
+      if (geo.accuracy != null && geo.accuracy > LOW_ACCURACY_FLAG_M) flags.push('LOW_ACCURACY');
+      if (geoFenceOk === null && config.geoFence.enabled) flags.push('GEO_UNVERIFIABLE');
     }
-    if (geo.accuracy != null && geo.accuracy > LOW_ACCURACY_FLAG_M) flags.push('LOW_ACCURACY');
-    if (geoFenceOk === null && config.geoFence.enabled) flags.push('GEO_UNVERIFIABLE');
 
     // Hash the capture photos BEFORE the transaction (network I/O outside the tx).
     const hashes = await this.hashCaptureMedia(user.clientId, schema, values);
@@ -554,12 +646,12 @@ export class VisibilityCaptureService {
               formValues: jsonValues,
               currentVersion: 1,
               formVersion,
-              captureLat: geo.lat,
-              captureLng: geo.lng,
-              captureAccuracy: geo.accuracy,
+              captureLat: repGeo.lat,
+              captureLng: repGeo.lng,
+              captureAccuracy: repGeo.accuracy,
               distanceMeters,
               geoFenceOk,
-              capturedAt: geo.capturedAt,
+              capturedAt: repGeo.capturedAt,
               receivedAt: now,
               submittedBySalesUserId: caller.id,
             },
@@ -573,12 +665,12 @@ export class VisibilityCaptureService {
               formValues: jsonValues,
               currentVersion: version,
               formVersion,
-              captureLat: geo.lat,
-              captureLng: geo.lng,
-              captureAccuracy: geo.accuracy,
+              captureLat: repGeo.lat,
+              captureLng: repGeo.lng,
+              captureAccuracy: repGeo.accuracy,
               distanceMeters,
               geoFenceOk,
-              capturedAt: geo.capturedAt,
+              capturedAt: repGeo.capturedAt,
               receivedAt: now,
               submittedBySalesUserId: caller.id,
               // Re-open cleanly: clear the prior rejection + review attribution.
@@ -606,9 +698,9 @@ export class VisibilityCaptureService {
             status: 'SUBMITTED',
             formValues: jsonValues,
             formVersion,
-            captureLat: geo.lat,
-            captureLng: geo.lng,
-            captureAccuracy: geo.accuracy,
+            captureLat: repGeo.lat,
+            captureLng: repGeo.lng,
+            captureAccuracy: repGeo.accuracy,
             distanceMeters,
             geoFenceOk,
             submittedBySalesUserId: caller.id,
@@ -688,6 +780,21 @@ export class VisibilityCaptureService {
   }
 
   /**
+   * Project a per-photo `GpsCapture` (the embedded shutter-time fix) onto the internal
+   * CaptureGeo shape used for the map-pin columns. `null` (no representative photo) →
+   * all-null. Mirrors extractCaptureGeo's accuracy/capturedAt coercion.
+   */
+  private photoToCaptureGeo(g: GpsCapture | null): CaptureGeo {
+    if (!g) return { lat: null, lng: null, accuracy: null, capturedAt: null };
+    let capturedAt: Date | null = null;
+    if (typeof g.capturedAt === 'string' || typeof g.capturedAt === 'number') {
+      const d = new Date(g.capturedAt);
+      if (!isNaN(d.getTime())) capturedAt = d;
+    }
+    return { lat: g.lat, lng: g.lng, accuracy: this.toNum(g.accuracy), capturedAt };
+  }
+
+  /**
    * Compare the capture geo to the outlet's reference geo (latest APPROVED
    * KycSubmission.boardPhotoLat/Lng of the owner partner). Returns:
    *   geoFenceOk = true  → within radius; false → outside (caller BLOCKS on false);
@@ -764,7 +871,11 @@ export class VisibilityCaptureService {
       if (f.type !== 'CAMERA') continue;
       const v = values[f.id];
       if (v == null || v === '') continue; // absent/optional — required-ness already validated
-      if (typeof v !== 'string' || !v.startsWith(tenantPrefix)) {
+      // A value may be a bare key string OR a `{ key, geo }` object (per-photo geotag) —
+      // extract the object key BEFORE the tenant-ownership check so a geotagged capture
+      // is not rejected as "not a string".
+      const key = readMediaValue(v).key;
+      if (!key.startsWith(tenantPrefix)) {
         throw new BadRequestException(
           `Field "${f.label}" (${f.id}) references an invalid or cross-tenant media key.`,
         );
@@ -786,8 +897,10 @@ export class VisibilityCaptureService {
     const keys: string[] = [];
     for (const f of schema.fields ?? []) {
       if (!MEDIA_FIELD_TYPES.has(f.type)) continue;
-      const v = values[f.id];
-      if (typeof v === 'string' && v.startsWith(tenantPrefix)) keys.push(v);
+      // Extract `.key` via readMediaValue so the hash is stable whether the value is a
+      // bare key string or a `{ key, geo }` object (the embedded geo never affects it).
+      const key = readMediaValue(values[f.id]).key;
+      if (key.startsWith(tenantPrefix)) keys.push(key);
     }
     const hashes: string[] = [];
     for (const key of keys) {
