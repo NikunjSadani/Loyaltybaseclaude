@@ -514,6 +514,10 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
   const cameraOnly = field.noGallery !== false;
   // Cap-violation message (D2) — a present-but-too-imprecise shutter fix rejects the shot.
   const [capError, setCapError] = useState('');
+  // Busy across the WHOLE geotag capture (upload + GPS fix). `uploading` alone flips false the
+  // instant the upload finishes, while `captureGps()` can still be pending up to 10s — without
+  // this the button re-enables mid-fix (double-capture race) with no "getting location" feedback.
+  const [busy, setBusy] = useState(false);
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -523,26 +527,31 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
     if (field.geotag) {
       // Per-photo geotag: fetch a GPS fix AT SHUTTER TIME (the moment the photo is taken),
       // concurrently with the upload. `store: false` — this caller owns the stored shape.
-      const [uploadedKey, fix] = await Promise.all([
-        uploadFile(field.id, file, { store: false }),
-        captureGps(),
-      ]);
-      if (!uploadedKey) return; // upload failed — error already surfaced (submitError)
-      // D2 accuracy cap: a PRESENT-but-too-imprecise fix rejects the shot. A missing fix
-      // (denied / timed out) does NOT block — store `{ key }` and let the backend flag it
-      // (geo-fence unverifiable).
-      if (
-        fix &&
-        typeof field.gpsMaxAccuracy === 'number' &&
-        typeof fix.accuracy === 'number' &&
-        fix.accuracy > field.gpsMaxAccuracy
-      ) {
-        setCapError(
-          `Location too imprecise (±${Math.round(fix.accuracy)}m > ±${field.gpsMaxAccuracy}m) — move to open sky and re-capture.`,
-        );
-        return; // photo NOT stored → field stays uncaptured, the rep can re-capture
+      setBusy(true);
+      try {
+        const [uploadedKey, fix] = await Promise.all([
+          uploadFile(field.id, file, { store: false }),
+          captureGps(),
+        ]);
+        if (!uploadedKey) return; // upload failed — error already surfaced (submitError)
+        // D2 accuracy cap: a PRESENT-but-too-imprecise fix rejects the shot. A missing fix
+        // (denied / timed out) does NOT block — store `{ key }` and let the backend flag it
+        // (geo-fence unverifiable).
+        if (
+          fix &&
+          typeof field.gpsMaxAccuracy === 'number' &&
+          typeof fix.accuracy === 'number' &&
+          fix.accuracy > field.gpsMaxAccuracy
+        ) {
+          setCapError(
+            `Location too imprecise (±${Math.round(fix.accuracy)}m > ±${field.gpsMaxAccuracy}m) — move to open sky and re-capture.`,
+          );
+          return; // photo NOT stored → field stays uncaptured, the rep can re-capture
+        }
+        setValue(field.id, fix ? { key: uploadedKey, geo: fix } : { key: uploadedKey });
+      } finally {
+        setBusy(false);
       }
-      setValue(field.id, fix ? { key: uploadedKey, geo: fix } : { key: uploadedKey });
     } else {
       // Non-geotag CAMERA: unchanged — uploadFile stores the bare key string.
       await uploadFile(field.id, file);
@@ -577,22 +586,31 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
               Retake
             </button>
           </div>
-          {geo && (
-            <p className="flex items-center gap-1 text-[10px] text-green-600 font-medium">
+          {geo ? (
+            // Neutral tone — a captured fix is NOT "inside the fence" (the client can't know the
+            // verdict); avoid a green ✓ that reads as approval.
+            <p className="flex items-center gap-1 text-[10px] text-gray-500 font-medium">
               <MapPin className="h-3 w-3 shrink-0" />
-              location tagged ✓{geo.accuracy != null ? ` ±${Math.round(geo.accuracy)}m` : ''}
+              location captured{geo.accuracy != null ? ` · ±${Math.round(geo.accuracy)}m` : ''}
             </p>
-          )}
+          ) : field.geotag ? (
+            // Geotag requested but no fix obtained — tell the rep, since a fence-required photo
+            // with no location gets flagged for review.
+            <p className="flex items-center gap-1 text-[10px] text-amber-600 font-medium">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              saved without location — Retake to add it
+            </p>
+          ) : null}
         </div>
       ) : (
         <button
           type="button"
           onClick={() => inputRef.current?.click()}
-          disabled={uploading}
+          disabled={uploading || busy}
           className="w-full flex items-center justify-center gap-2 py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-500 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:opacity-50 transition-colors"
         >
-          {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
-          {uploading ? 'Uploading…' : 'Capture photo'}
+          {uploading || busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
+          {busy ? 'Getting location…' : uploading ? 'Uploading…' : 'Capture photo'}
         </button>
       )}
       {capError && (

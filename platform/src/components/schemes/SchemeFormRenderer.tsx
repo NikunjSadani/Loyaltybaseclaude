@@ -892,12 +892,21 @@ function CameraField({
               Retake
             </button>
           </div>
-          {geo && (
-            <p className="flex items-center gap-1 text-[10px] text-green-600 font-medium">
+          {geo ? (
+            // Neutral tone — a captured fix is NOT the same as "inside the fence" (the client
+            // can't know the fence verdict); avoid a green ✓ that reads as approval.
+            <p className="flex items-center gap-1 text-[10px] text-gray-500 font-medium">
               <MapPin className="h-3 w-3 shrink-0" />
-              location tagged ✓{geo.accuracy != null ? ` ±${Math.round(geo.accuracy)}m` : ''}
+              location captured{geo.accuracy != null ? ` · ±${Math.round(geo.accuracy)}m` : ''}
             </p>
-          )}
+          ) : field.geotag ? (
+            // Geotag was requested but no fix was obtained (denied / timed out) — tell the rep,
+            // since a fence-required photo with no location gets flagged for review.
+            <p className="flex items-center gap-1 text-[10px] text-amber-600 font-medium">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              saved without location — Retake to add it
+            </p>
+          ) : null}
         </div>
       ) : live ? (
         <div className="space-y-2">
@@ -949,7 +958,7 @@ function CameraField({
           className="w-full flex items-center justify-center gap-2 py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-500 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:opacity-50 transition-colors"
         >
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
-          {busy ? 'Uploading…' : 'Capture photo'}
+          {capturing && !uploading ? 'Tagging location…' : busy ? 'Uploading…' : 'Capture photo'}
         </button>
       )}
       {/* Off-screen canvas — the capture target; never shown to the user. */}

@@ -542,15 +542,18 @@ export function VisibilityFormBuilder() {
                             className="w-3.5 h-3.5 accent-[var(--brand-primary)]" />
                           Capture location with this photo
                         </label>
-                        <label className={`flex items-center gap-2 pl-5 text-[11px] ${field.geotag ? 'cursor-pointer text-gray-600' : 'cursor-not-allowed text-gray-300'}`}>
+                        <label
+                          title={field.geotag ? undefined : 'Turn on “Capture location with this photo” first'}
+                          className={`flex items-center gap-2 pl-5 text-[11px] ${field.geotag ? 'cursor-pointer text-gray-600' : 'cursor-not-allowed text-gray-300'}`}>
                           <input type="checkbox" checked={!!field.geoFenceRequired && !!field.geotag} disabled={!field.geotag}
+                            title={field.geotag ? undefined : 'Turn on “Capture location with this photo” first'}
                             onChange={(e) => patch(field.id, { geoFenceRequired: e.target.checked })}
                             className="w-3.5 h-3.5 accent-[var(--brand-primary)] disabled:opacity-40" />
                           This photo must be inside the geo-fence
                         </label>
                         <div className="flex items-start gap-2 bg-pink-50 border border-pink-100 rounded-lg px-3 py-2">
                           <Info className="w-3.5 h-3.5 text-pink-400 flex-shrink-0 mt-0.5" />
-                          <p className="text-[11px] text-pink-600">Opens the rear camera on field phones. Time, geo and outlet code are stored alongside the photo. When &ldquo;Capture location with this photo&rdquo; is on, each photo embeds its own GPS fix taken when it is shot; mark it &ldquo;must be inside the geo-fence&rdquo; to reject a shot taken outside the outlet&rsquo;s fence.</p>
+                          <p className="text-[11px] text-pink-600">Opens the rear camera on field phones. Time, geo and outlet code are stored alongside the photo. When &ldquo;Capture location with this photo&rdquo; is on, each photo embeds its own GPS fix taken when it is shot; mark it &ldquo;must be inside the geo-fence&rdquo; and photos taken outside the outlet&rsquo;s fence are flagged for the reviewer (and can be rejected).</p>
                         </div>
                       </div>
                     )}

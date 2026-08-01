@@ -324,7 +324,12 @@ function CaptureDrawer({
                             ) : (
                               <span />
                             )}
-                            {m.fenceStatus && <PhotoFenceBadge status={m.fenceStatus} />}
+                            {m.fenceStatus && (
+                              <span className="inline-flex items-center gap-1">
+                                <span className="text-gray-400">this photo</span>
+                                <PhotoFenceBadge status={m.fenceStatus} />
+                              </span>
+                            )}
                           </div>
                         )}
                       </a>
