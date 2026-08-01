@@ -1,8 +1,23 @@
 # Per-Photo Geotag — capture GPS at each photo (schemes + visibility) — plan
 
+> ## ✅ BUILT + GATED + DUAL-AUDITED — on develop `ee00dd2` (2026-08-01), awaiting staging data-path verify + owner real-phone smoke.
+> **NO DB migration** (per-photo geo `{key, geo:{lat,lng,accuracy,capturedAt}}` rides in the existing `formValues` JSON;
+> the visibility geo columns became aggregates). Backward-compatible (bare-string media values + legacy single-GPS captures
+> behave identically). Built as 6 disjoint streams (shared contract → FE capture / builders / backend geo-fence / review-report),
+> integrated, full gate GREEN (**api jest 2177 + 18 new geo-fence spec · nest 0 · FE tsc 0 · vitest 2066**). **Dual adversarial
+> audit** (anti-fraud + backward-compat) → **2 HIGH + 2 LOW all fixed:** (H1) `geoFenceOk` is `true` ONLY when a capture is
+> genuinely verified inside — all-unverifiable / fence-disabled → `null` (never a false "YES"); (H2) the tokenized report media
+> link (`viewMediaByToken`) no longer 404s geotagged scheme photos; (L) pin/distance aligned to the same (worst) photo; (L)
+> stale comment. New pure helper `api/src/visibility/geo-fence.helper.ts` (`evaluatePhotoFence`/`haversineMeters`/`isValidGeo`)
+> unit-spec'd (18 tests). **▶ REMAINING:** staging synthetic data-path verify (geo-fence pass/fail/unverifiable + admin display +
+> report) → **owner ~10-min real-phone smoke** (shoot 2 photos, confirm each geotagged + the fence verdict) → prod cutover.
+> **⚠️ OPEN owner posture decision (D1 residual):** a fence-required photo with NO GPS fix is flagged `GEO_UNVERIFIABLE` (surfaced
+> to the Gifsy approver), NOT hard-blocked — the legacy single-GPS path hard-blocks a missing fix. Owner to confirm keep-flag vs
+> tighten-to-hard-block (one-line change) at smoke.
+
 **Owner-approved (2026-08-01): Option A — each CAMERA capture embeds its own GPS at shutter time**, replacing the
 confusing single-field / never-wired "Bound to a photo" model. Shared form renderer → lands for BOTH the Scheme
-instrument and Visibility (POSM). Zero-bug bar. PLAN — awaiting approval before build.
+instrument and Visibility (POSM). Zero-bug bar. ✅ BUILT (see banner above).
 
 ## Why (the current gap)
 Today there is ONE device location per submission: with "Capture GPS on submit" ON, a single `getCurrentPosition`
