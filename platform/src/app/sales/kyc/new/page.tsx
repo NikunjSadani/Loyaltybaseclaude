@@ -36,6 +36,10 @@ interface AssignedOutlet {
   outletId: string;
   /** Human-readable outlet code (e.g. OUT-2026-003) — the value shown in the UI. */
   outletCode: string;
+  /** Owner-group key (Outlet.parentId) — null when ungrouped. Used to make the phone-conflict
+   *  check GROUP-AWARE: a phone shared with a SAME-GROUP sibling is NOT a conflict (a group shares
+   *  one owner phone / one login), mirroring the backend assertPhoneAvailable. */
+  parentId?: string | null;
   name: string;
   beat: string;
   type: 'SSS' | 'WHOLESALER' | 'SUB_STOCKIST';
@@ -233,7 +237,7 @@ export default function NewKYCPage() {
 
   /* Assigned outlets (from API) */
   const [assignedOutlets, setAssignedOutlets] = useState<AssignedOutlet[]>([]);
-  const [registeredPhones, setRegisteredPhones] = useState<Map<string, { name: string; outletCode: string }>>(new Map());
+  const [registeredPhones, setRegisteredPhones] = useState<Map<string, { name: string; outletCode: string; parentId: string | null }>>(new Map());
 
   /* Not Interested flow */
   const [confirmNotInterestedId, setConfirmNotInterestedId] = useState<string | null>(null);
@@ -344,6 +348,7 @@ export default function NewKYCPage() {
           const RE_ENTRY = ['RE_KYC_REQUIRED', 'REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED', 'DRAFT'];
           const outlets: AssignedOutlet[] = (body.data.outlets ?? []).map((o: any) => ({
             outletId:   o.id,
+            parentId:   o.parentId ?? null, // owner-group key → group-aware phone-conflict check
             outletCode: o.outletCode ?? o.id, // human code for display; fall back to id if ever absent
             name:       o.name,
             beat:       o.beat || o.district || '',
@@ -364,12 +369,14 @@ export default function NewKYCPage() {
             parentPrefill:   o.parentPrefill ?? undefined,
           }));
           setAssignedOutlets(outlets);
-          // Build registered phones map from outlet mobiles for conflict detection
-          const phones = new Map<string, { name: string; outletCode: string }>();
+          // Build registered phones map from outlet mobiles for conflict detection. Carry each
+          // outlet's owner-group key (parentId) so the conflict check can EXEMPT a phone shared
+          // with a same-group sibling (a group legitimately shares one owner phone / one login).
+          const phones = new Map<string, { name: string; outletCode: string; parentId: string | null }>();
           (body.data.outlets ?? []).forEach((o: any) => {
             if (o.mobile) {
               const normalized = String(o.mobile).replace(/^(\+91|91)/, '');
-              phones.set(normalized, { name: o.name, outletCode: o.outletCode ?? o.id });
+              phones.set(normalized, { name: o.name, outletCode: o.outletCode ?? o.id, parentId: o.parentId ?? null });
             }
           });
           setRegisteredPhones(phones);
@@ -787,7 +794,19 @@ export default function NewKYCPage() {
       setMobileCheck('checking');
       await new Promise((r) => setTimeout(r, 400));
       const existingOutlet = registeredPhones.get(val);
-      if (existingOutlet) {
+      // GROUP-AWARE exemption (the same same-group rule the backend assertPhoneAvailable applies):
+      // a phone shared with a SAME-GROUP sibling is NOT a conflict — an owner group legitimately
+      // shares one owner phone (one login; sibling shops reached via the picker). Only exempt when
+      // BOTH the outlet under KYC and the matched outlet carry the SAME non-null owner-group key
+      // (parentId). A phone on an outlet OUTSIDE the group still blocks. Without this the 2nd+ outlet
+      // of every group was hard-blocked at the mobile field (Continue stayed disabled regardless of docs).
+      // NOTE: this is a client-side UX pre-check over the rep's OWN outlet list; the backend
+      // (assertPhoneAvailable, tenant-wide + tenant-phone-policy-gated) remains the authority at submit.
+      const sameGroupSibling =
+        !!existingOutlet &&
+        !!selectedOutlet?.parentId &&
+        existingOutlet.parentId === selectedOutlet.parentId;
+      if (existingOutlet && !sameGroupSibling) {
         setMobileCheck('outlet_conflict');
         setMobileCheckMsg(`Already registered to ${existingOutlet.name} (${existingOutlet.outletCode}). Each outlet must have a unique contact number.`);
         return;

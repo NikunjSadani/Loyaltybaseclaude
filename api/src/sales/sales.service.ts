@@ -1224,6 +1224,12 @@ export class SalesService {
 
           return {
             id: outlet.id,
+            // The owner-group key (Outlet.parentId) — null when ungrouped. The KYC form uses it to
+            // make the client-side phone-conflict check GROUP-AWARE: a phone shared with a SAME-GROUP
+            // sibling must NOT be flagged as a conflict (a group shares one owner phone / one login),
+            // exactly as the backend assertPhoneAvailable already allows. Without it the FE re-flagged
+            // the shared owner phone and hard-disabled the wizard for every 2nd+ outlet in a group.
+            parentId: outlet.parentId ?? null,
             partnerId: partner?.id ?? null,
             // The rep this outlet is assigned to (login-User id) — the KYC-list member
             // filter keys on this for outlets with no submission yet.
