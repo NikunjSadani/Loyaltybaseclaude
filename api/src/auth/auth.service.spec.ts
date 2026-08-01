@@ -153,6 +153,9 @@ describe('AuthService', () => {
       } as any);
       // AF-10 per-phone window cap: default to "well under the cap" so existing tests pass.
       mockPrisma.otpCode.count.mockResolvedValue(0);
+      // Option-B registration gate: default to "account exists" so a clientId-scoped send proceeds;
+      // the unregistered case overrides this to null. Ignored when no clientId is passed.
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'seed-user' } as any);
     });
 
     it('should create an OTP record and return success', async () => {
@@ -233,6 +236,39 @@ describe('AuthService', () => {
 
       const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body);
       expect(body.template_id).toBe('test-template');
+    });
+
+    // ── Option B: check-first registration gate ──────────────────────────────
+    it('Option B: refuses to send (401) to a number with NO account under the tenant', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null as any); // unregistered under this tenant
+      await expect(service.sendOtp('9876543210', 'SMS', 'deoleo')).rejects.toMatchObject({
+        status: 401,
+      });
+      // Tenant-scoped, non-deleted lookup.
+      const where = (mockPrisma.user.findFirst as jest.Mock).mock.calls[0][0].where;
+      expect(where).toMatchObject({ phone: '9876543210', clientId: 'deoleo', deletedAt: null });
+      // No OTP created + no SMS sent for an unregistered number.
+      expect(mockPrisma.otpCode.create).not.toHaveBeenCalled();
+      expect(global.fetch as jest.Mock).not.toHaveBeenCalled();
+    });
+
+    it('Option B: sends to a REGISTERED number (tenant-scoped account exists)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue({ id: 'u1' } as any);
+      mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp_1' });
+      const result = await service.sendOtp('9876543210', 'SMS', 'deoleo');
+      expect(result.success).toBe(true);
+      expect(mockPrisma.otpCode.create).toHaveBeenCalled();
+    });
+
+    it('Option B: SKIPS the registration check when no clientId is passed (legacy/unbranded caller)', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null as any); // would reject IF the check ran
+      mockPrisma.otpCode.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.otpCode.create.mockResolvedValue({ id: 'otp_1' });
+      const result = await service.sendOtp('9876543210', 'SMS'); // no clientId
+      expect(result.success).toBe(true);
+      expect(mockPrisma.user.findFirst).not.toHaveBeenCalled();
+      expect(mockPrisma.otpCode.create).toHaveBeenCalled();
     });
   });
 

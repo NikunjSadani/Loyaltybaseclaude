@@ -137,6 +137,29 @@ export class AuthService {
 
     const cleanPhone = phone.replace(/\D/g, '');
 
+    // Registration gate (owner decision — "check first, refuse if unregistered"). For a tenant-scoped
+    // login (clientId resolved by the FE from the request Host), refuse to send an OTP to a number that
+    // has NO account under this tenant — the user gets immediate "no account" feedback instead of a
+    // silently-undelivered SMS to a mistyped number. Tenant-scoped so a phone registered under a
+    // DIFFERENT tenant is not treated as registered here (matches verifyOtp's `{phone, clientId}` lookup).
+    // Same status + message as verifyOtp's post-code check, so the "no account" outcome is identical
+    // whether surfaced at send or verify. Runs even under the FIXED_OTP bypass so the behaviour is
+    // testable on staging. Skipped only when clientId is absent (legacy/unbranded caller) → falls back to
+    // the prior send-then-check-at-verify behaviour. Enumeration note: this reveals which numbers are
+    // registered, an owner-accepted trade-off for the clearer UX on a closed KYC-only platform; the
+    // controller's per-IP @Throttle (5/60s) bounds probing (verifyOtp remains the authoritative gate).
+    if (clientId) {
+      const account = await this.prisma.user.findFirst({
+        where: { phone: cleanPhone, clientId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!account) {
+        throw new UnauthorizedException(
+          'No account found. Please contact your sales representative to complete KYC first.',
+        );
+      }
+    }
+
     // AF-10 — per-phone send cap over a rolling window, enforced in the DB so it holds
     // across ALL Cloud Run instances (the controller's @Throttle is per-IP AND
     // per-instance, so multi-instance distribution bypasses it). This is the real
