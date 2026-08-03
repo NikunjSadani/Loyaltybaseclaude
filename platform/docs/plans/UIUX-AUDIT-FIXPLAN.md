@@ -1,5 +1,14 @@
 # UI/UX audit — consolidated fix plan (recently-shipped frontend)
 
+> ## ✅ FULLY IMPLEMENTED + ON STAGING (2026-08-03) — ALL 52 findings shipped to `develop`, awaiting owner UAT + cutover
+> Built orchestrated (multi-agent) + **dual-audited (correctness + UI/UX) per phase** + full-gate-green + pushed to `develop`→staging. Commits:
+> **P1** roster-remove `3661a55` · **P2** prod-live HIGH `0e14bdb` · **P3** prod-live MED `6491f0f` · **P4+G1** LOW/a11y+geotag `c9d0f1e`. Gate at each: FE tsc 0 · vitest 2066 · api jest 2195 · nest 0. FE-only + one additive backend projection field (`formFields[].options`, ENR-M7) — **NO migration**.
+>
+> **The dual audit caught 3 HIGH defects a green gate would have hidden** (proof the UI/UX lane is mandatory): (1) P2 ENR-H4 raw-fetch dropped the `{data:{…}}` envelope → every form-bearing scheme would render formless; (2) P3 ENR-M7 checkbox editor was DEAD behind a pre-existing `isObjectVal` guard; (3) P3 KYC-M5 dup-submit guard silently DROPPED post-Back edits on the payout path. Plus a MED money-path a11y footgun (P4 SegmentedControl arrow-key auto-commit of the uniqueness toggle). All fixed + re-gated.
+>
+> **⚠️ REMAINING (owner-side, not blocking):** (a) staging runtime-verify — esp. a **form-bearing scheme enroll renders its form** (ENR-H4) + the MULTI_SELECT admin edit (ENR-M7); (b) **~10-min device smoke** (KYC camera/GPS/signature, OTP); (c) P2 gets its **own cutover**, P1 **rides #23**, P3/P4/G1 fold into whichever cutover the owner batches. **D1 DECIDED (see below): KYC geo stays a hard block + Retry.**
+> **⚠️ H1 behavior note (KYC-M5):** after the first submit the KYC form is now LOCKED (button relabeled "Continue to verification →"); a post-submit correction goes through admin re-KYC (no silent-edit path). If the owner instead wants post-submit editability, that's a separate enhancement (re-submit-as-update, needs backend upsert semantics) — surfaced, not built.
+
 **Generated 2026-08-01** from the new mandatory **UI/UX audit lane** ([[audit-every-build-item]]) run retroactively over
 recently-shipped FE: sales KYC wizard, scheme authoring + roster, scheme enrollment capture + edit/delete, admin settings +
 owner-group grouping. Four independent UX auditors; findings deduped + triaged below.
