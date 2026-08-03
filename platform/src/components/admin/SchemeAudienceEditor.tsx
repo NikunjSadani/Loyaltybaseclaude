@@ -578,7 +578,7 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
           <button type="button" onClick={doDownload} disabled={downloading}
             className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[var(--brand-primary)] text-white text-xs font-medium hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60">
             {downloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-            {downloading ? 'Preparing…' : 'Download roster (.xlsx)'}
+            {downloading ? 'Preparing…' : 'Download full roster (.xlsx)'}
           </button>
         </div>
       </div>
@@ -740,7 +740,10 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
                 </th>
                 <th className="px-3 py-2 font-medium">Outlet ID</th>
                 <th className="px-3 py-2 font-medium">Outlet Name</th>
-                <th className="px-3 py-2 font-medium">Linkage</th>
+                <th className="px-3 py-2 font-medium"
+                  title="Matched = this roster row is linked to a real loyalty outlet in the system. Standalone = a roster-only outlet with no system match (rep-filled, no loyalty account).">
+                  Linkage
+                </th>
                 <th className="px-3 py-2 font-medium">Tagged employee</th>
                 <th className="px-3 py-2 font-medium">Enrollment status</th>
                 <th className="px-3 py-2 font-medium text-right">Actions</th>
@@ -758,7 +761,11 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
                     <td className="px-3 py-2 font-mono text-[11px]">{r.outletRef}</td>
                     <td className="px-3 py-2">{r.outletName}</td>
                     <td className="px-3 py-2">
-                      <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-medium ${linkage === 'Matched' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+                      <span
+                        title={linkage === 'Matched'
+                          ? 'Linked to a real loyalty outlet in the system.'
+                          : 'Roster-only outlet with no system match — rep-filled, no loyalty account.'}
+                        className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-medium ${linkage === 'Matched' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
                         {linkage}
                       </span>
                     </td>
@@ -889,7 +896,7 @@ function RosterUploadPanel({ schemeId, schemeName, onUploaded }: { schemeId: str
               onClick={() => downloadRosterReport(result, schemeName)}
               className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-green-300 text-green-700 font-medium hover:bg-green-100 transition-colors"
             >
-              <Download className="w-3.5 h-3.5" /> Download report (.xlsx)
+              <Download className="w-3.5 h-3.5" /> Download upload report (.xlsx)
             </button>
           </div>
           <div className="px-3 py-2 text-xs text-gray-600 space-y-1">

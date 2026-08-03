@@ -287,6 +287,10 @@ function CaptureDrawer({
                 <GeoBadge geoFenceOk={detail.geoFence.geoFenceOk} distanceMeters={detail.geoFence.distanceMeters} />
                 {detail.geoFence.captureAccuracy != null && <span className="text-[11px] text-gray-500">±{Math.round(detail.geoFence.captureAccuracy)} m accuracy</span>}
               </div>
+              {/* Plain-language gloss (first place the reviewer meets these verdicts). */}
+              <p className="text-[11px] text-gray-400 mb-2 leading-relaxed">
+                In fence = the photo&apos;s location is within the outlet&apos;s allowed radius. Outside = it was taken too far away. Unverifiable = the phone couldn&apos;t confirm where the photo was taken.
+              </p>
               {detail.geo.map((g) => (
                 <GeoPin key={g.fieldId} geo={g} distanceMeters={detail.geoFence.distanceMeters} />
               ))}
@@ -301,6 +305,7 @@ function CaptureDrawer({
                 <div className="grid grid-cols-2 gap-2">
                   {detail.media.map((m) => {
                     const href = rewriteMediaViewPath(m.viewPath);
+                    const geo = m.geo;
                     return (
                       <a key={m.fieldId + m.key} href={href} target="_blank" rel="noopener noreferrer"
                         className="border border-gray-200 rounded-lg overflow-hidden hover:border-[var(--brand-primary)] transition-colors group">
@@ -316,10 +321,30 @@ function CaptureDrawer({
                             legacy bare-string photo (no geo, no per-photo status). */}
                         {(m.geo || m.fenceStatus) && (
                           <div className="px-2 pb-1.5 flex items-center justify-between gap-1 text-[10px]">
-                            {m.geo ? (
-                              <span className="inline-flex items-center gap-0.5 text-gray-500">
+                            {geo ? (
+                              // Coords open Google Maps in a new tab. This sits inside the
+                              // photo-card <a>, so we can't nest another <a>; open via
+                              // window.open (noopener) and stop the click bubbling to the card.
+                              <span
+                                role="link"
+                                tabIndex={0}
+                                title="Open in Google Maps"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  window.open(`https://www.google.com/maps?q=${geo.lat},${geo.lng}`, '_blank', 'noopener,noreferrer');
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    window.open(`https://www.google.com/maps?q=${geo.lat},${geo.lng}`, '_blank', 'noopener,noreferrer');
+                                  }
+                                }}
+                                className="inline-flex items-center gap-0.5 text-[var(--brand-primary)] hover:underline cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-1"
+                              >
                                 <MapPin className="w-2.5 h-2.5" />
-                                {m.geo.lat.toFixed(5)}, {m.geo.lng.toFixed(5)}
+                                {geo.lat.toFixed(5)}, {geo.lng.toFixed(5)}
                               </span>
                             ) : (
                               <span />

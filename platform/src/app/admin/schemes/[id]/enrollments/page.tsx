@@ -103,12 +103,17 @@ export default function EnrollmentsPage({ params }: { params: Promise<{ id: stri
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { setPage(1); }, [status, programName, zone, stateF, outletTypeId, from, to]);
 
-  // Auto-dismiss the undo toast after 8s.
+  // Auto-dismiss the undo toast after 8s — but NEVER while a restore is in flight, and
+  // NEVER while a restore error is showing (ENR-L1). Auto-dismissing mid-restore would yank
+  // the toast out from under the user; auto-dismissing with an error would vanish the very
+  // message the admin needs to read (on failure `restoring` flips back to false, which would
+  // otherwise restart the 8s timer). The error toast persists until the admin dismisses it
+  // (the X / next action).
   useEffect(() => {
-    if (!undoToast) return;
+    if (!undoToast || restoring || restoreError) return;
     const t = setTimeout(() => setUndoToast(null), 8000);
     return () => clearTimeout(t);
-  }, [undoToast]);
+  }, [undoToast, restoring, restoreError]);
 
   const handleDeleted = useCallback((enrollmentId: string) => {
     setOpenId(null);

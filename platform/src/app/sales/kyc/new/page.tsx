@@ -308,6 +308,11 @@ export default function NewKYCPage() {
   /* Phone conflict check (no inline OTP — OTP happens post-submit) */
   const [mobileCheck,    setMobileCheck]    = useState<MobileCheckState>('idle');
   const [mobileCheckMsg, setMobileCheckMsg] = useState('');
+  /* KYC-L1: monotonic sequence stamp for the availability check. Fast typing can fire
+   * overlapping checks whose async fetches resolve OUT OF ORDER; each run claims the next
+   * number and an async result is applied ONLY while it is still the latest, so a stale
+   * verdict can never overwrite a newer one. */
+  const mobileCheckSeqRef = useRef(0);
 
   /* Geo capture #1 — board photo (taken when store board photo is captured) */
   const [boardPhotoGeo,        setBoardPhotoGeo]        = useState<GeoCapture | null>(null);
@@ -870,11 +875,14 @@ export default function NewKYCPage() {
   const handleMobileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value.replace(/\D/g, '').slice(0, 10);
     setForm((f) => ({ ...f, mobile: val }));
+    // KYC-L1: claim the next sequence number so any older in-flight check becomes stale.
+    // The trigger below is already gated to a complete 10-digit number, so no debounce is
+    // needed — the only cosmetic delay (a fake 400ms setTimeout) is removed for snappiness.
+    const seq = ++mobileCheckSeqRef.current;
     setMobileCheck('idle'); setMobileCheckMsg('');
 
     if (val.length === 10) {
       setMobileCheck('checking');
-      await new Promise((r) => setTimeout(r, 400));
       const existingOutlet = registeredPhones.get(val);
       // GROUP-AWARE exemption (the same same-group rule the backend assertPhoneAvailable applies):
       // a phone shared with a SAME-GROUP sibling is NOT a conflict — an owner group legitimately
@@ -899,6 +907,7 @@ export default function NewKYCPage() {
       try {
         const res = await fetch(`/api/kyc/phone-available?phone=${val}`);
         const body = await res.json().catch(() => ({}));
+        if (seq !== mobileCheckSeqRef.current) return; // superseded by a newer keystroke → drop this verdict
         if (res.ok && body.success && body.data?.available === false && body.data?.conflictType === 'EMPLOYEE') {
           setMobileCheck('employee_conflict');
           setMobileCheckMsg("This number is registered to a team member and can't be used for an outlet.");
@@ -907,6 +916,7 @@ export default function NewKYCPage() {
       } catch {
         // Fail open — ignore; do not block submit or assert an employee conflict.
       }
+      if (seq !== mobileCheckSeqRef.current) return; // superseded while the fetch was in flight
       setMobileCheck('ok');
     }
   };
@@ -1667,7 +1677,9 @@ export default function NewKYCPage() {
               <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${isActive ? 'bg-[var(--brand-primary)] text-white' : isDone ? 'bg-emerald-500 text-white' : 'bg-gray-200 text-gray-500'}`}>
                 {isDone ? '✓' : i + 1}
               </div>
-              <span className="hidden sm:inline">{STEP_LABELS[s]}</span>
+              {/* KYC-L3: desktop shows every step name; on mobile the icons are name-less,
+                  so at least the ACTIVE step's name is shown so the rep knows where they are. */}
+              <span className={isActive ? 'inline' : 'hidden sm:inline'}>{STEP_LABELS[s]}</span>
             </div>
             {i < STEPS.length - 1 && <div className="flex-1 h-px bg-gray-200" />}
           </React.Fragment>
@@ -2507,9 +2519,9 @@ export default function NewKYCPage() {
       {cameraDocKey && (
         <div className="fixed inset-0 z-50 bg-black flex flex-col">
           <div className="flex items-center justify-between px-4 py-3 bg-black/60 shrink-0">
-            <button onClick={closeCamera} className="p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"><X className="h-5 w-5" /></button>
+            <button onClick={closeCamera} aria-label="Close camera" className="p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"><X className="h-5 w-5" /></button>
             <p className="text-sm font-semibold text-white">{cameraDocKey === 'ownerPhoto' ? 'Owner Photo' : 'Store Board Photo'}</p>
-            <button onClick={flipCamera} className="p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"><RefreshCw className="h-5 w-5" /></button>
+            <button onClick={flipCamera} aria-label="Flip camera" className="p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"><RefreshCw className="h-5 w-5" /></button>
           </div>
           <div className="flex-1 relative overflow-hidden bg-black flex items-center justify-center">
             {cameraErr ? (
@@ -2520,7 +2532,7 @@ export default function NewKYCPage() {
                 <button onClick={closeCamera} className="mt-2 px-4 py-2 bg-white/10 text-white text-sm rounded-xl hover:bg-white/20 transition-colors">Close</button>
               </div>
             ) : (
-              <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover"
+              <video ref={videoRef} autoPlay playsInline muted aria-label="Camera preview" className="w-full h-full object-cover"
                 style={cameraFacing === 'user' ? { transform: 'scaleX(-1)' } : undefined} />
             )}
             {!cameraErr && (
@@ -2540,7 +2552,7 @@ export default function NewKYCPage() {
           </div>
           {!cameraErr && (
             <div className="shrink-0 flex items-center justify-center px-4 py-6 bg-black/60">
-              <button onClick={capturePhoto} disabled={capturing}
+              <button onClick={capturePhoto} disabled={capturing} aria-label="Capture photo"
                 className="w-16 h-16 rounded-full bg-white flex items-center justify-center shadow-lg active:scale-95 transition-transform disabled:opacity-50">
                 <div className="w-12 h-12 rounded-full border-2 border-gray-300 bg-white flex items-center justify-center">
                   {capturing ? <Loader2 className="h-5 w-5 text-gray-500 animate-spin" /> : <Camera className="h-6 w-6 text-gray-700" />}
@@ -2765,6 +2777,8 @@ export default function NewKYCPage() {
                   ref={signatureCanvasRef}
                   width={600}
                   height={120}
+                  role="img"
+                  aria-label="Signature pad — draw your signature here"
                   className="w-full touch-none bg-white cursor-crosshair"
                   style={{ height: '120px' }}
                   onMouseDown={startDraw}

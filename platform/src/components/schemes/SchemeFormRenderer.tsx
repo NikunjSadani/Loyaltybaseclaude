@@ -140,7 +140,10 @@ export function SchemeFormRenderer({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<string[]>([]);
-  const [errorFieldId, setErrorFieldId] = useState<string | null>(null);
+  // ENR-L2: highlight EVERY invalid field on a multi-error submit (not just the first).
+  // Holds the ids of all fields the last failed submit flagged; the view still scrolls to
+  // the first one.
+  const [errorFieldIds, setErrorFieldIds] = useState<Set<string>>(() => new Set());
   const [uploading, setUploading] = useState<Record<string, boolean>>({});
   // ENR-M2: per-field upload error, keyed by field id. An upload failure surfaces on the
   // failing field (in addition to the global summary) so the rep knows WHICH field failed
@@ -256,7 +259,7 @@ export function SchemeFormRenderer({
   const handleSubmit = useCallback(async () => {
     setSubmitError(null);
     setFieldErrors([]);
-    setErrorFieldId(null);
+    setErrorFieldIds(new Set());
 
     // ENR-M1: never submit while a media/camera/signature upload is still in flight — the
     // file could be dropped or a just-captured field wrongly read as empty. The button is
@@ -290,7 +293,7 @@ export function SchemeFormRenderer({
       const msg = `Tap "Save signature" to save "${pendingSig.label}" before submitting.`;
       setFieldErrors([msg]);
       onError?.(msg);
-      setErrorFieldId(pendingSig.id);
+      setErrorFieldIds(new Set([pendingSig.id]));
       if (typeof document !== 'undefined') {
         requestAnimationFrame(() =>
           document
@@ -309,16 +312,23 @@ export function SchemeFormRenderer({
     if (errs.length > 0) {
       setFieldErrors(errs);
       onError?.(errs[0]);
-      // Scroll to / highlight the first field the errors point at. Field-level messages
-      // embed the field label in quotes ("<label>" is required.) — map that back to a
-      // rendered field id so the user lands on the exact input that needs attention.
+      // ENR-L2: resolve EVERY error to a field id so all invalid fields get an attention ring
+      // (not only the first). Field-level messages embed the field label in quotes
+      // ("<label>" is required.) — map each back to a rendered field id.
+      const invalidIds = new Set<string>();
+      for (const e of errs) {
+        const mm = /"([^"]+)"/.exec(e);
+        const f = mm ? fields.find((ff) => ff.label === mm[1]) : undefined;
+        if (f) invalidIds.add(f.id);
+      }
+      // ENR-M3: the OTP "not verified" message carries no quoted label, so it resolves to no
+      // field above. Fall back to the PHONE_OTP field so that error also highlights.
+      if (otpRequired && !otpVerified && phoneOtpField) invalidIds.add(phoneOtpField.id);
+      setErrorFieldIds(invalidIds);
+      // Scroll to the FIRST invalid field (from the first error message).
       const m = /"([^"]+)"/.exec(errs[0]);
       const firstField = m ? fields.find((f) => f.label === m[1]) : undefined;
-      // ENR-M3: the OTP "not verified" message carries no quoted label, so the regex above
-      // never resolves a field for it. Fall back to the PHONE_OTP field so that error also
-      // scrolls/highlights like every other field error, instead of only showing in the box.
       const targetId = firstField?.id ?? (otpRequired && !otpVerified ? phoneOtpField?.id ?? null : null);
-      setErrorFieldId(targetId);
       if (targetId && typeof document !== 'undefined') {
         requestAnimationFrame(() =>
           document
@@ -392,7 +402,7 @@ export function SchemeFormRenderer({
             setOtpVerified={setOtpVerified}
             setSignatureUnsaved={setSignatureUnsaved}
             ownerPhoneMasked={ownerPhoneMasked}
-            errorFieldId={errorFieldId}
+            errorFieldIds={errorFieldIds}
           />
         );
       })}
@@ -466,8 +476,9 @@ interface FieldRendererProps {
   /** SIG-2: report whether this (signature) field has drawn-but-unsaved strokes. */
   setSignatureUnsaved?: (id: string, v: boolean) => void;
   ownerPhoneMasked?: string;
-  /** Field id the last failed submit pointed at — highlighted + scrolled into view. */
-  errorFieldId?: string | null;
+  /** ENR-L2: ids of ALL fields the last failed submit flagged — each gets an attention ring
+   * (the view scrolls to the first). */
+  errorFieldIds?: Set<string>;
 }
 
 /**
@@ -487,7 +498,7 @@ function resolvePrefillValue(
 }
 
 function FieldRenderer(props: FieldRendererProps) {
-  const { field, values, setValue, prefill, errorFieldId } = props;
+  const { field, values, setValue, prefill, errorFieldIds } = props;
   const val = values[field.id];
   const req = isFieldRequired(field, values);
   // A LOCKED field disables its input ONLY when a prefill value actually exists for it
@@ -498,7 +509,7 @@ function FieldRenderer(props: FieldRendererProps) {
   const prefillVal = resolvePrefillValue(field, prefill);
   const hasPrefill = prefillVal !== undefined && prefillVal !== null && prefillVal !== '';
   const locked = Boolean(field.locked) && hasPrefill;
-  const highlight = errorFieldId != null && field.id === errorFieldId;
+  const highlight = Boolean(errorFieldIds?.has(field.id));
 
   switch (field.type) {
     // ── Structural / display ──────────────────────────────────────────────────
@@ -754,7 +765,7 @@ function Labeled({
 // ── Media field (CAMERA / IMAGE / DOCUMENT / UPI_QR_SCAN) ──────────────────────
 
 function MediaField({
-  field, values, uploading, uploadError, uploadFile, req, accept, capture, icon, errorFieldId,
+  field, values, uploading, uploadError, uploadFile, req, accept, capture, icon, errorFieldIds,
 }: FieldRendererProps & {
   req: boolean;
   accept: string;
@@ -765,7 +776,7 @@ function MediaField({
   // ENR-M2: keep the last picked file so a failed upload can be retried without re-picking.
   const lastFileRef = useRef<File | null>(null);
   const key = typeof values[field.id] === 'string' ? (values[field.id] as string) : '';
-  const highlight = errorFieldId != null && field.id === errorFieldId;
+  const highlight = Boolean(errorFieldIds?.has(field.id));
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -793,7 +804,7 @@ function MediaField({
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
-            className="ml-auto text-[10px] text-green-600 underline"
+            className="ml-auto text-xs text-green-600 underline px-2 py-1 -my-1"
           >
             Replace
           </button>
@@ -854,7 +865,7 @@ function MediaField({
 // NOTE: getUserMedia requires a SECURE CONTEXT (HTTPS or localhost). Staging and prod
 // are both served over HTTPS, so this is satisfied there and in local dev on localhost.
 function CameraField({
-  field, values, setValue, uploading, uploadError, uploadFile, captureGps, req, errorFieldId,
+  field, values, setValue, uploading, uploadError, uploadFile, captureGps, req, errorFieldIds,
 }: FieldRendererProps & { req: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -876,7 +887,7 @@ function CameraField({
   const media = readMediaValue(values[field.id]);
   const key = media.key;
   const geo = media.geo;
-  const highlight = errorFieldId != null && field.id === errorFieldId;
+  const highlight = Boolean(errorFieldIds?.has(field.id));
 
   // Stop every track so the camera indicator light turns off promptly.
   const stopStream = useCallback(() => {
@@ -1024,7 +1035,7 @@ function CameraField({
             <button
               type="button"
               onClick={openCamera}
-              className="ml-auto text-[10px] text-green-600 underline"
+              className="ml-auto text-xs text-green-600 underline px-2 py-1 -my-1"
             >
               Retake
             </button>
@@ -1133,7 +1144,7 @@ function CameraField({
 
 // ── Signature field (canvas draw → upload PNG → media key) ─────────────────────
 
-function SignatureField({ field, values, uploading, uploadError, uploadFile, req, errorFieldId, setSignatureUnsaved }: FieldRendererProps & { req: boolean }) {
+function SignatureField({ field, values, uploading, uploadError, uploadFile, req, errorFieldIds, setSignatureUnsaved }: FieldRendererProps & { req: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
   const dirty = useRef(false);
@@ -1141,7 +1152,7 @@ function SignatureField({ field, values, uploading, uploadError, uploadFile, req
   // must NOT read as a silent success.
   const [emptyHint, setEmptyHint] = useState(false);
   const key = typeof values[field.id] === 'string' ? (values[field.id] as string) : '';
-  const highlight = errorFieldId != null && field.id === errorFieldId;
+  const highlight = Boolean(errorFieldIds?.has(field.id));
 
   // H6: the canvas is drawn at a fixed bitmap size (320×120) but stretched by CSS
   // (`w-full`). Map the pointer from CSS pixels into bitmap pixels by scaling on each
@@ -1215,7 +1226,7 @@ function SignatureField({ field, values, uploading, uploadError, uploadFile, req
         <div className="flex items-center gap-2 px-3 py-2.5 bg-green-50 border border-green-200 rounded-xl">
           <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
           <span className="text-xs text-green-700 font-medium">Signature captured</span>
-          <button type="button" onClick={clear} className="ml-auto text-[10px] text-green-600 underline">
+          <button type="button" onClick={clear} className="ml-auto text-xs text-green-600 underline px-2 py-1 -my-1">
             Re-sign
           </button>
         </div>
@@ -1267,12 +1278,12 @@ function SignatureField({ field, values, uploading, uploadError, uploadFile, req
 
 // ── GPS field ─────────────────────────────────────────────────────────────────
 
-function GpsField({ field, values, setValue, captureGps, req, errorFieldId }: FieldRendererProps & { req: boolean }) {
+function GpsField({ field, values, setValue, captureGps, req, errorFieldIds }: FieldRendererProps & { req: boolean }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const v = values[field.id] as GpsCapture | undefined;
   const auto = (field.captureTrigger ?? 'MANUAL') === 'ON_SUBMIT';
-  const highlight = errorFieldId != null && field.id === errorFieldId;
+  const highlight = Boolean(errorFieldIds?.has(field.id));
 
   const capture = async () => {
     setLoading(true);
@@ -1292,7 +1303,7 @@ function GpsField({ field, values, setValue, captureGps, req, errorFieldId }: Fi
             {v.lat.toFixed(6)}, {v.lng.toFixed(6)}
           </span>
           {v.accuracy != null && <span className="ml-auto text-[10px] text-green-500">±{v.accuracy}m</span>}
-          <button type="button" onClick={capture} className="text-[10px] text-green-600 underline ml-1">
+          <button type="button" onClick={capture} className="text-xs text-green-600 underline ml-1 px-2 py-1 -my-1">
             Re-capture
           </button>
         </div>
@@ -1321,10 +1332,10 @@ const OTP_RESEND_COOLDOWN_S = 30;
 const OTP_TTL_S = 300;
 
 function PhoneOtpField({
-  field, values, setValue, context, subject, otpVerified, setOtpVerified, ownerPhoneMasked, req, prefill, errorFieldId,
+  field, values, setValue, context, subject, otpVerified, setOtpVerified, ownerPhoneMasked, req, prefill, errorFieldIds,
 }: FieldRendererProps & { req: boolean }) {
   const { schemeId, outletApproved } = context;
-  const highlight = errorFieldId != null && field.id === errorFieldId;
+  const highlight = Boolean(errorFieldIds?.has(field.id));
   const [otp, setOtp] = useState('');
   const [sending, setSending] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -1427,11 +1438,18 @@ function PhoneOtpField({
       {outletApproved || locked ? (
         // ENR-M3: carry the field id here too so a failed-submit scroll/focus lands on the
         // pinned-owner OTP block (this branch renders no input to hold the id otherwise).
-        <div id={field.id} className="flex items-center gap-2 px-3 py-2.5 bg-blue-50 border border-blue-200 rounded-xl">
-          <Lock className="h-3.5 w-3.5 text-blue-500 shrink-0" />
-          <span className="text-xs text-blue-700 font-medium">
-            OTP to owner on file{phoneMasked ? ` (${phoneMasked})` : ''}
-          </span>
+        <div id={field.id}>
+          <div className="flex items-center gap-2 px-3 py-2.5 bg-blue-50 border border-blue-200 rounded-xl">
+            <Lock className="h-3.5 w-3.5 text-blue-500 shrink-0" />
+            <span className="text-xs text-blue-700 font-medium">
+              OTP to owner on file{phoneMasked ? ` (${phoneMasked})` : ''}
+            </span>
+          </div>
+          {/* ENR-L6: make it explicit the code goes to the OUTLET OWNER's phone (not the
+              rep's) so the rep has the owner ready to read it out. */}
+          <p className="text-[11px] text-gray-500 mt-1">
+            This code is sent to the outlet owner&apos;s phone (not yours) — have the owner ready to share it.
+          </p>
         </div>
       ) : fieldLocked ? (
         // Locked, roster-prefilled number — read-only. Backend OTPs this number on send.

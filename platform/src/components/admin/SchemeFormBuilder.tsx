@@ -477,14 +477,35 @@ export function SchemeFormBuilder({
           </label>
         </div>
 
-        {/* Validation */}
+        {/* Validation — each field-scoped error is clickable to expand + scroll to that field (BLD-M5). */}
         {errors.length > 0 && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-3 space-y-1">
-            {errors.map((e, i) => (
-              <p key={i} className="text-xs text-red-600 flex items-start gap-1.5">
-                <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /> {e}
-              </p>
-            ))}
+            {errors.map((e, i) => {
+              // Errors are prefixed "Field N: …" by validateSchemeFormSchema — map N back to the field id.
+              const m = /^Field (\d+)/.exec(e);
+              const idx = m ? Number(m[1]) - 1 : -1;
+              const targetId = idx >= 0 ? fields[idx]?.id : undefined;
+              if (!targetId) {
+                return (
+                  <p key={i} className="text-xs text-red-600 flex items-start gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /> {e}
+                  </p>
+                );
+              }
+              const jumpToField = () => {
+                setExpandedId(targetId);
+                // Wait a frame so the field body has expanded before scrolling it into view.
+                requestAnimationFrame(() =>
+                  document.getElementById(`scheme-field-${targetId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }),
+                );
+              };
+              return (
+                <button key={i} type="button" onClick={jumpToField}
+                  className="w-full text-left text-xs text-red-600 flex items-start gap-1.5 hover:text-red-800 hover:underline">
+                  <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /> {e}
+                </button>
+              );
+            })}
           </div>
         )}
 
@@ -504,7 +525,7 @@ export function SchemeFormBuilder({
           const dropdownFields = otherFields.filter((f) => f.type === 'DROPDOWN');
           const isDisplayOnly = DISPLAY_ONLY_FIELD_TYPES.has(field.type);
           return (
-            <div key={field.id} className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+            <div key={field.id} id={`scheme-field-${field.id}`} className="bg-white border border-gray-200 rounded-xl overflow-hidden">
               <div className="flex items-center gap-2 px-3 py-2.5">
                 <div className="flex flex-col gap-0.5">
                   <button onClick={() => move(idx, -1)} disabled={idx === 0} className="p-0.5 text-gray-300 hover:text-gray-500 disabled:opacity-20"><ChevronUp className="w-3.5 h-3.5" /></button>
@@ -752,6 +773,14 @@ export function SchemeFormBuilder({
                             {outletFields.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
                           </select>
                         </div>
+                        {/* Precedence gloss (BLD-M3): when both sources are bound the backend prefers the
+                            Outlet field for matched loyalty outlets, so make that ordering explicit here. */}
+                        {field.prefillKey && field.outletField && (
+                          <p className="text-[10px] text-amber-600 flex items-start gap-1">
+                            <Info className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                            Both sources set — the Outlet field wins for matched outlets; the Excel column is the fallback (and fills standalone rows).
+                          </p>
+                        )}
                         {hasBinding && (
                           <div className="space-y-1.5">
                             <label className="flex items-start gap-2 cursor-pointer text-[11px] text-gray-600">

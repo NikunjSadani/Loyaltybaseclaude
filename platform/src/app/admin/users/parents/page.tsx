@@ -139,10 +139,12 @@ const BLANK_FORM: CreateForm = {
 };
 
 function CreateParentModal({
-  onClose, onCreated,
+  onClose, onCreated, isGifsy,
 }: {
   onClose:   () => void;
   onCreated: (result: { pendingGifsyApproval: boolean }) => void;
+  /** GIFSY creators skip the approval step; a CLIENT_ADMIN's group starts Pending. */
+  isGifsy:   boolean;
 }) {
   const [form, setForm] = useState<CreateForm>(BLANK_FORM);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -211,6 +213,16 @@ function CreateParentModal({
               <strong> Parent ID column</strong> of the outlet-master upload to attach child outlets to it.
             </span>
           </div>
+
+          {!isGifsy && (
+            <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 text-xs text-amber-800">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <span>
+                New owner groups need <strong>Gifsy approval</strong> before they go active. Once created, this
+                group shows as <strong>Pending Gifsy approval</strong> until a Gifsy admin approves it.
+              </span>
+            </div>
+          )}
 
           <div className="space-y-1">
             <label className="block text-xs font-medium text-gray-600">Parent code *</label>
@@ -521,8 +533,8 @@ function ChildOutletsPanel({
           No child outlets in this group yet. Attach outlets by setting this group&apos;s code as their Parent ID in the outlet-master upload.
         </p>
       ) : (
-        <div className="border border-gray-100 rounded-xl overflow-hidden bg-white">
-          <table className="w-full text-sm">
+        <div className="border border-gray-100 rounded-xl overflow-x-auto bg-white">
+          <table className="w-full min-w-[560px] text-sm">
             <thead>
               <tr className="border-b border-gray-100 bg-gray-50 text-left text-xs text-gray-500">
                 <th className="px-4 py-2.5 font-medium">Outlet Code</th>
@@ -558,8 +570,10 @@ function ChildOutletsPanel({
                           : <Unlink className="w-3.5 h-3.5" />}
                         Un-group
                       </button>
-                      {!c.canUngroup && c.ungroupBlockReason && (
-                        <span className="text-[10px] text-gray-400 max-w-[220px] text-right">{c.ungroupBlockReason}</span>
+                      {!c.canUngroup && (
+                        <span className="text-[10px] text-gray-400 max-w-[220px] text-right">
+                          {c.ungroupBlockReason ?? 'Cannot un-group this outlet'}
+                        </span>
                       )}
                     </div>
                   </td>
@@ -608,6 +622,9 @@ export default function AdminParentsPage() {
   const [childReloadKey, setChildReloadKey] = useState(0);
 
   const [approvingId, setApprovingId] = useState<string | null>(null);
+  // Persistent inline approve-error banner (per parent row). A long backend message
+  // must not vanish with the ~3.5s toast, so it stays until dismissed / next action. M5.
+  const [approveError, setApproveError] = useState<{ id: string; msg: string } | null>(null);
   const [deactivateTarget, setDeactivateTarget] = useState<ParentRow | null>(null);
   const [deactivating, setDeactivating] = useState(false);
   const [deactivateError, setDeactivateError] = useState('');
@@ -619,7 +636,9 @@ export default function AdminParentsPage() {
   };
 
   const load = useCallback(async () => {
-    setLoading(true); setError('');
+    // Clear any stale per-row approve error (L3): a refresh (successful approve on another
+    // row, or a search clear) must not leave a dead banner pinned to an unrelated row.
+    setLoading(true); setError(''); setApproveError(null);
     try {
       const data = await apiJson<{ parents: ParentRow[] }>('/api/admin/parents');
       setParents(data.parents ?? []);
@@ -643,13 +662,15 @@ export default function AdminParentsPage() {
   }, [parents, search]);
 
   const approve = async (parent: ParentRow) => {
-    setApprovingId(parent.id);
+    setApprovingId(parent.id); setApproveError(null);
     try {
       await apiJson(`/api/admin/parents/${parent.id}/approve`, { method: 'POST' });
       showToast(`Approved ${parent.businessName || parent.partnerCode}.`);
       await load();
     } catch (e) {
-      showToast(e instanceof Error ? e.message : 'Could not approve owner group.');
+      // Persist the (possibly long) backend message in an inline banner — the toast
+      // alone auto-dismisses before an admin can read it. M5.
+      setApproveError({ id: parent.id, msg: e instanceof Error ? e.message : 'Could not approve owner group.' });
     } finally {
       setApprovingId(null);
     }
@@ -810,7 +831,7 @@ export default function AdminParentsPage() {
                                 the backend re-checks and 400s otherwise. */}
                             {p.isActive && !p.pendingApproval && (
                               <button
-                                onClick={() => { setDeactivateError(''); setDeactivateTarget(p); }}
+                                onClick={() => { setApproveError(null); setDeactivateError(''); setDeactivateTarget(p); }}
                                 disabled={p.childOutletCount > 0}
                                 title={p.childOutletCount > 0
                                   ? 'Un-group all child outlets before deactivating'
@@ -823,6 +844,22 @@ export default function AdminParentsPage() {
                           </div>
                         </td>
                       </tr>
+                      {approveError && approveError.id === p.id && (
+                        <tr>
+                          <td colSpan={8} className="px-4 pb-3 pt-0 bg-white">
+                            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700">
+                              <XCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                              <span className="flex-1">{approveError.msg}</span>
+                              <button
+                                onClick={() => setApproveError(null)}
+                                className="shrink-0 text-xs font-medium underline hover:no-underline"
+                              >
+                                Dismiss
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
                       {expanded && (
                         <tr>
                           <td colSpan={8} className="bg-gray-50/70 p-0">
@@ -845,6 +882,7 @@ export default function AdminParentsPage() {
 
       {showCreate && (
         <CreateParentModal
+          isGifsy={isGifsy}
           onClose={() => setShowCreate(false)}
           onCreated={({ pendingGifsyApproval }) => {
             setShowCreate(false);

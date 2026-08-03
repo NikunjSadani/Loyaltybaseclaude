@@ -1,6 +1,6 @@
 ﻿'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins, Lock, Fingerprint } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -91,6 +91,101 @@ function SettingRow({ label, description, value, onChange, type = 'number', min,
 }
 
 /**
+ * Segmented pill control with full radiogroup keyboard semantics (SET-L7 a11y):
+ *   • role="radiogroup" on the container + role="radio"/aria-checked per option
+ *   • roving tabIndex — exactly one option is in the tab order (the roving-focus option);
+ *     Arrow/Home/End move keyboard FOCUS among the options (Left/Up = previous,
+ *     Right/Down = next, both directions wrap) WITHOUT committing.
+ * SELECTION ON ACTIVATION (SET-M1): every consumer of this control auto-saves on change
+ * (an optimistic backend write — uniqueness checks, Visibility master, capture mode, UPI).
+ * "Selection follows focus" would let a keyboard admin silently flip + persist a money-path
+ * toggle just by arrowing to "look". So onChange fires ONLY on activation — click, or
+ * Enter/Space on the focused option (native <button> activation) — never on arrow/Home/End.
+ * aria-checked reflects the actual COMMITTED value; the roving-focus option may differ from
+ * the checked option until activated (the valid ARIA variant for side-effecting controls).
+ * Styling, sizes, labels, testIds, and the disabled guard are unchanged. Generic over the
+ * option value so it drives both the boolean ON/OFF toggles and the string capture-mode control.
+ */
+function SegmentedControl<T>({
+  options, value, onChange, ariaLabel, disabled = false, size = 'md', testIdFor,
+}: {
+  options: readonly (readonly [string, T])[]
+  value: T
+  onChange: (v: T) => void
+  ariaLabel: string
+  disabled?: boolean
+  size?: 'sm' | 'md'
+  testIdFor?: (label: string) => string | undefined
+}) {
+  const btnRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const pad = size === 'sm' ? 'px-3.5 py-1.5 text-xs' : 'px-4 py-2 text-sm'
+
+  // Roving-focus index — which option is keyboard-tabbable / focused. Starts on the
+  // committed option and moves with the arrows WITHOUT committing (selection on activation).
+  const checkedIndex = Math.max(0, options.findIndex(([, v]) => v === value))
+  const [focusIndex, setFocusIndex] = useState(checkedIndex)
+
+  // Move keyboard FOCUS to option `index` (wrapping). Does NOT commit / fire onChange.
+  function moveFocus(index: number) {
+    const n = options.length
+    const i = ((index % n) + n) % n
+    setFocusIndex(i)
+    btnRefs.current[i]?.focus()
+  }
+
+  // Commit option `index` — fires onChange if it changed. Activation only (click / Enter /
+  // Space via native <button>). Respects `disabled` (no commit when disabled).
+  function commit(index: number) {
+    if (disabled) return
+    const [, v] = options[index]
+    setFocusIndex(index)
+    if (v !== value) onChange(v)
+  }
+
+  function handleKeyDown(e: ReactKeyboardEvent, index: number) {
+    if (disabled) return
+    switch (e.key) {
+      // Arrow / Home / End move focus only — activation (Enter/Space) commits via onClick.
+      case 'ArrowRight':
+      case 'ArrowDown': e.preventDefault(); moveFocus(index + 1); break
+      case 'ArrowLeft':
+      case 'ArrowUp':   e.preventDefault(); moveFocus(index - 1); break
+      case 'Home':      e.preventDefault(); moveFocus(0); break
+      case 'End':       e.preventDefault(); moveFocus(options.length - 1); break
+    }
+  }
+
+  return (
+    <div className="flex bg-gray-100 rounded-lg p-1 gap-1 shrink-0" role="radiogroup" aria-label={ariaLabel}>
+      {options.map(([label, val], i) => {
+        const checked = value === val
+        return (
+          <button
+            key={label}
+            ref={(el) => { btnRefs.current[i] = el }}
+            type="button"
+            role="radio"
+            aria-checked={checked}
+            tabIndex={i === focusIndex ? 0 : -1}
+            data-testid={testIdFor?.(label)}
+            disabled={disabled}
+            onClick={() => commit(i)}
+            onKeyDown={(e) => handleKeyDown(e, i)}
+            className={`${pad} rounded-md font-medium transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
+              checked
+                ? 'bg-white text-gray-900 shadow-sm border border-gray-200'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            {label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
  * One row in the Identity & Payout Uniqueness card. `locked` fields (PAN/GST) are DB-enforced
  * golden keys that can never be turned off — they render an "Always on" pill instead of a toggle.
  * Editable fields render a segmented OFF/ON control matching the other toggles on this page.
@@ -116,26 +211,15 @@ function UniquenessToggleRow({ label, description, value, onChange, locked = fal
           Always on
         </span>
       ) : (
-        <div className="flex bg-gray-100 rounded-lg p-1 gap-1 shrink-0" role="radiogroup" aria-label={label}>
-          {([['OFF', false], ['ON', true]] as const).map(([lbl, val]) => (
-            <button
-              key={lbl}
-              type="button"
-              role="radio"
-              aria-checked={value === val}
-              data-testid={testId ? `${testId}-${lbl.toLowerCase()}` : undefined}
-              disabled={disabled}
-              onClick={() => value !== val && onChange?.(val)}
-              className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
-                value === val
-                  ? 'bg-white text-gray-900 shadow-sm border border-gray-200'
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              {lbl}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          options={[['OFF', false], ['ON', true]] as const}
+          value={value}
+          onChange={(v) => onChange?.(v)}
+          disabled={disabled}
+          ariaLabel={label}
+          size="sm"
+          testIdFor={(lbl) => (testId ? `${testId}-${lbl.toLowerCase()}` : undefined)}
+        />
       )}
     </div>
   )
@@ -795,24 +879,13 @@ export default function SettingsPage() {
         <CardContent>
           <div className="flex items-center gap-3">
             {/* Segmented ON/OFF control */}
-            <div className="flex bg-gray-100 rounded-lg p-1 gap-1" role="radiogroup" aria-label="Visibility module">
-              {([['OFF', false], ['ON', true]] as const).map(([label, val]) => (
-                <button
-                  key={label}
-                  role="radio"
-                  aria-checked={visibilityEnabled === val}
-                  disabled={!isGifsyAdmin}
-                  onClick={() => visibilityEnabled !== val && handleVisibilityEnabledChange(val)}
-                  className={`px-4 py-2 rounded-md text-sm font-medium transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
-                    visibilityEnabled === val
-                      ? 'bg-white text-gray-900 shadow-sm border border-gray-200'
-                      : 'text-gray-500 hover:text-gray-700'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              options={[['OFF', false], ['ON', true]] as const}
+              value={visibilityEnabled}
+              onChange={handleVisibilityEnabledChange}
+              disabled={!isGifsyAdmin}
+              ariaLabel="Visibility module"
+            />
           </div>
           {!isGifsyAdmin && (
             <p className="text-xs text-gray-400 mt-2">
@@ -853,24 +926,13 @@ export default function SettingsPage() {
           <CardContent>
             <div className="flex items-center gap-3">
               {/* Segmented control */}
-              <div className="flex bg-gray-100 rounded-lg p-1 gap-1" role="radiogroup" aria-label="Visibility capture mode">
-                {(['PHOTO_APPROVAL', 'AMOUNT_UPLOAD'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    role="radio"
-                    aria-checked={captureMode === mode}
-                    disabled={captureModeLoading}
-                    onClick={() => captureMode !== mode && handleCaptureModeChange(mode)}
-                    className={`px-4 py-2 rounded-md text-sm font-medium transition-all disabled:opacity-60 ${
-                      captureMode === mode
-                        ? 'bg-white text-gray-900 shadow-sm border border-gray-200'
-                        : 'text-gray-500 hover:text-gray-700'
-                    }`}
-                  >
-                    {mode === 'PHOTO_APPROVAL' ? 'Photo Approval' : 'Amount Upload'}
-                  </button>
-                ))}
-              </div>
+              <SegmentedControl
+                options={[['Photo Approval', 'PHOTO_APPROVAL'], ['Amount Upload', 'AMOUNT_UPLOAD']] as const}
+                value={captureMode}
+                onChange={handleCaptureModeChange}
+                disabled={captureModeLoading}
+                ariaLabel="Visibility capture mode"
+              />
               {captureModeLoading && (
                 <RefreshCw className="h-4 w-4 animate-spin text-gray-400" aria-label="Saving" />
               )}
@@ -918,24 +980,13 @@ export default function SettingsPage() {
         <CardContent>
           <div className="flex items-center gap-3">
             {/* Segmented ON/OFF control */}
-            <div className="flex bg-gray-100 rounded-lg p-1 gap-1" role="radiogroup" aria-label="UPI collection">
-              {([['OFF', false], ['ON', true]] as const).map(([label, val]) => (
-                <button
-                  key={label}
-                  role="radio"
-                  aria-checked={upiEnabled === val}
-                  disabled={!isGifsyAdmin}
-                  onClick={() => upiEnabled !== val && handleUpiEnabledChange(val)}
-                  className={`px-4 py-2 rounded-md text-sm font-medium transition-all disabled:opacity-60 disabled:cursor-not-allowed ${
-                    upiEnabled === val
-                      ? 'bg-white text-gray-900 shadow-sm border border-gray-200'
-                      : 'text-gray-500 hover:text-gray-700'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              options={[['OFF', false], ['ON', true]] as const}
+              value={upiEnabled}
+              onChange={handleUpiEnabledChange}
+              disabled={!isGifsyAdmin}
+              ariaLabel="UPI collection"
+            />
           </div>
           {!isGifsyAdmin && (
             <p className="text-xs text-gray-400 mt-2">
@@ -949,7 +1000,9 @@ export default function SettingsPage() {
       </Card>
 
       {/* ── Identity & Payout Uniqueness (per-tenant; GIFSY_ADMIN only) ── */}
-      <Card data-testid="uniqueness-policy-card">
+      {/* SET-L10: stable anchor id + scroll-margin so this low-in-the-page card can be
+          deep-linked/signposted (e.g. #identity-payout-uniqueness) and lands below the header. */}
+      <Card id="identity-payout-uniqueness" data-testid="uniqueness-policy-card" className="scroll-mt-6">
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
@@ -970,6 +1023,16 @@ export default function SettingsPage() {
           </div>
         </CardHeader>
         <CardContent>
+          {/* SET-H1: state the consequence of enabling a check — it gates NEW submissions and
+              is not retroactive — since the toggles alone don't convey what turning one On does. */}
+          <div
+            data-testid="uniqueness-consequence-banner"
+            className="mb-3 rounded-lg bg-amber-50 border border-amber-100 px-3 py-2 text-xs text-amber-800"
+          >
+            Turning a check <strong>On</strong> rejects any <strong>new</strong> KYC submission that reuses that detail
+            across a different owner group. It is <strong>not applied retroactively</strong> — partners already approved
+            are not re-checked.
+          </div>
           <UniquenessToggleRow
             label="PAN" locked
             description="Always enforced (golden key). One PAN per owner group; two different owners can never share a PAN."

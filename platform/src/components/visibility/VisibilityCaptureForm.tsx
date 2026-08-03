@@ -589,14 +589,14 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
           {geo ? (
             // Neutral tone — a captured fix is NOT "inside the fence" (the client can't know the
             // verdict); avoid a green ✓ that reads as approval.
-            <p className="flex items-center gap-1 text-[10px] text-gray-500 font-medium">
+            <p className="flex items-center gap-1 text-xs text-gray-500 font-medium">
               <MapPin className="h-3 w-3 shrink-0" />
               location captured{geo.accuracy != null ? ` · ±${Math.round(geo.accuracy)}m` : ''}
             </p>
           ) : field.geotag ? (
             // Geotag requested but no fix obtained — tell the rep, since a fence-required photo
             // with no location gets flagged for review.
-            <p className="flex items-center gap-1 text-[10px] text-amber-600 font-medium">
+            <p className="flex items-center gap-1 text-xs text-amber-600 font-medium">
               <AlertCircle className="h-3 w-3 shrink-0" />
               saved without location — Retake to add it
             </p>
