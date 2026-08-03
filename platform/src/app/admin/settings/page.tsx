@@ -5,7 +5,7 @@ import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags,
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
-import { getGifsySettings, saveGifsySettings } from '@/lib/gifsy-settings'
+import { getGifsySettings, saveGifsySettings, useGifsySettings, refreshGifsySettings } from '@/lib/gifsy-settings'
 import { fetchPointsExpiry, savePointsExpiry } from '@/lib/points-expiry'
 import {
   fetchKycSlaHours,
@@ -442,33 +442,42 @@ export default function SettingsPage() {
   // their defaults. `gst` is kept true on every save: PAN + GST are hard DB-enforced golden keys
   // regardless of the flag (backend isFieldEnforced), so the flag is informational and the UI
   // shows them locked. Only phone/bank/upi are the real, policy-gated toggles.
+  //
+  // SET-H2 FIX: the card is driven from the REACTIVE settings source (useGifsySettings), and each
+  // toggle MERGES its one changed field onto the FRESHEST known policy (getGifsySettings() = the
+  // synchronous write-through cache) — never a one-time local snapshot copied at mount. On a
+  // KYC-enforcement path a stale snapshot could otherwise wholesale-overwrite the server policy and
+  // silently flip a sibling field's uniqueness check OFF. A `savingUniq` in-flight guard prevents
+  // two rapid toggles from racing two overlapping wholesale saves that clobber each other.
   const UNIQ_DEFAULT = { gst: true, phone: true, bank: false, upi: false }
-  const [uniqPolicy,      setUniqPolicy]      = useState<{ gst: boolean; phone: boolean; bank: boolean; upi: boolean }>(
-    () => ({ ...UNIQ_DEFAULT, ...getGifsySettings().uniquenessPolicy }),
-  )
+  const gifsySettings = useGifsySettings()
+  const uniqPolicy = { ...UNIQ_DEFAULT, ...gifsySettings.uniquenessPolicy }
   const [uniqPolicySaved, setUniqPolicySaved] = useState(false)
   const [uniqPolicyError, setUniqPolicyError] = useState<string | null>(null)
-
-  // Keep the displayed policy in sync once server settings hydrate (/me → cache).
-  useEffect(() => {
-    setUniqPolicy({ ...UNIQ_DEFAULT, ...getGifsySettings().uniquenessPolicy })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  const [savingUniq,      setSavingUniq]      = useState(false)
 
   async function handleUniqPolicyChange(field: 'phone' | 'bank' | 'upi', next: boolean) {
+    if (savingUniq) return // in-flight guard: no overlapping wholesale saves
     setUniqPolicyError(null)
-    const previous = uniqPolicy
-    // REPLACE-WHOLE: send the complete object; gst stays true (DB-enforced regardless).
-    const updated = { ...previous, [field]: next, gst: true }
-    setUniqPolicy(updated) // optimistic
-    const ok = await saveGifsySettings({ uniquenessPolicy: updated })
-    if (!ok) {
-      setUniqPolicy(previous) // revert
-      setUniqPolicyError('Could not save — the uniqueness policy can only be changed by a Gifsy Admin.')
-      return
+    // Merge the single changed field onto the FRESHEST known policy (the synchronous cache), never
+    // a stale local snapshot — so a sibling field's setting can never be silently reverted. gst
+    // stays true (PAN + GST are DB-enforced golden keys regardless of the flag). REPLACE-WHOLE.
+    const freshest = { ...UNIQ_DEFAULT, ...getGifsySettings().uniquenessPolicy }
+    const updated = { ...freshest, [field]: next, gst: true }
+    setSavingUniq(true)
+    try {
+      const ok = await saveGifsySettings({ uniquenessPolicy: updated })
+      if (!ok) {
+        setUniqPolicyError('Could not save — the uniqueness policy can only be changed by a Gifsy Admin.')
+        return
+      }
+      // Revalidate the reactive source so the UI + the next merge both see the new server truth.
+      await refreshGifsySettings().catch(() => { /* cache already holds the saved value */ })
+      setUniqPolicySaved(true)
+      setTimeout(() => setUniqPolicySaved(false), 3000)
+    } finally {
+      setSavingUniq(false)
     }
-    setUniqPolicySaved(true)
-    setTimeout(() => setUniqPolicySaved(false), 3000)
   }
 
   // ── Outlet Programs & Categories allow-lists (per-tenant; saved via GifsySettings) ──
@@ -952,7 +961,10 @@ export default function SettingsPage() {
                 groups — outlets of the SAME owner (one parent group) may still share these.
               </CardDescription>
             </div>
-            {uniqPolicySaved && (
+            {savingUniq && (
+              <RefreshCw className="h-4 w-4 animate-spin text-gray-400 shrink-0" aria-label="Saving" />
+            )}
+            {uniqPolicySaved && !savingUniq && (
               <span className="text-xs text-green-600 font-medium shrink-0">Saved</span>
             )}
           </div>
@@ -971,17 +983,17 @@ export default function SettingsPage() {
           <UniquenessToggleRow
             label="Mobile number" value={uniqPolicy.phone}
             description="When ON, a mobile number can't be reused by a different owner."
-            onChange={(v) => handleUniqPolicyChange('phone', v)} disabled={!isGifsyAdmin} testId="uniq-phone"
+            onChange={(v) => handleUniqPolicyChange('phone', v)} disabled={!isGifsyAdmin || savingUniq} testId="uniq-phone"
           />
           <UniquenessToggleRow
             label="Bank account" value={uniqPolicy.bank}
             description="When ON, a bank account can't be shared by outlets of DIFFERENT owners (same-group siblings still can)."
-            onChange={(v) => handleUniqPolicyChange('bank', v)} disabled={!isGifsyAdmin} testId="uniq-bank"
+            onChange={(v) => handleUniqPolicyChange('bank', v)} disabled={!isGifsyAdmin || savingUniq} testId="uniq-bank"
           />
           <UniquenessToggleRow
             label="UPI ID" value={uniqPolicy.upi}
             description="When ON, a UPI ID can't be shared by outlets of DIFFERENT owners (same-group siblings still can)."
-            onChange={(v) => handleUniqPolicyChange('upi', v)} disabled={!isGifsyAdmin} testId="uniq-upi"
+            onChange={(v) => handleUniqPolicyChange('upi', v)} disabled={!isGifsyAdmin || savingUniq} testId="uniq-upi"
           />
           {!isGifsyAdmin && (
             <p className="text-xs text-gray-500 mt-3">

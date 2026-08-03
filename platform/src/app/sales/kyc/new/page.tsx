@@ -191,6 +191,23 @@ const DOC_TYPE_TO_KEY: Record<string, DocKey> = Object.fromEntries(
 /** Statuses for which the SAME outlet's KYC is re-opened pre-filled. */
 const RE_ENTRY_STATUSES = new Set(['REJECTED', 'RE_UPLOAD_REQUIRED', 'RESUBMISSION_REQUIRED', 'RE_KYC_REQUIRED', 'DRAFT']);
 
+/* ─── Geolocation failure messaging ──────────────────────────────────────────────
+ * KYC-H2: geo capture stays a HARD block (owner decision). Turn a raw
+ * GeolocationPositionError into plain, recovery-oriented guidance and DISTINGUISH the
+ * cause so the rep knows what to change before tapping Retry. */
+function geoErrorMessage(err: GeolocationPositionError): string {
+  switch (err.code) {
+    case err.PERMISSION_DENIED:
+      return 'Location permission is blocked. Allow location access for this site in your browser settings, then tap Retry location.';
+    case err.POSITION_UNAVAILABLE:
+      return "Couldn't get a location fix. Turn on device location (GPS), go near a window or step outside, then tap Retry location.";
+    case err.TIMEOUT:
+      return 'Getting your location took too long. Make sure device location is on and you have signal, then tap Retry location.';
+    default:
+      return "Couldn't capture your location. Turn on location and tap Retry location.";
+  }
+}
+
 /* ─── GCS upload helper ───────────────────────────────────────────────────────── */
 
 interface GcsUploadResult {
@@ -220,6 +237,36 @@ async function uploadDocToGCS(
     throw new Error(body.message ?? body.error ?? `Upload failed (${res.status})`);
   }
   return body.data as GcsUploadResult;
+}
+
+/** Advisory checklist rendered above a disabled Continue/Submit so the rep always sees
+ *  WHY they can't proceed (KYC-H1) and whether something is still uploading (KYC-up).
+ *  Hoisted to module scope (LOW-4) so its `role="status"`/`aria-live` region keeps a
+ *  stable identity across renders and isn't remounted (and re-announced) on every keystroke. */
+function StepGate({ missing, busy }: { missing: string[]; busy: string | null }) {
+  if (missing.length === 0 && !busy) return null;
+  return (
+    <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 space-y-1.5" role="status" aria-live="polite" data-testid="step-gate">
+      {busy && (
+        <p className="flex items-center gap-1.5 text-xs font-medium text-blue-700">
+          <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" /> {busy}
+        </p>
+      )}
+      {missing.length > 0 && (
+        <>
+          <p className="text-xs font-semibold text-amber-800">To continue, complete:</p>
+          <ul className="space-y-0.5">
+            {missing.map((m) => (
+              <li key={m} className="flex items-start gap-1.5 text-[11px] text-amber-700">
+                <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0" />
+                <span>{m}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
 }
 
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
@@ -591,8 +638,8 @@ export default function NewKYCPage() {
     if (lastOutletIdRef.current === oid) return; // same outlet → keep the rep's edits
     lastOutletIdRef.current = oid;
     setDocs({ businessDoc: null, ownerPhoto: null, shopAddressDoc: null, storeBoardPhoto: null, cheque: null, selfDeclaration: null });
-    setBoardPhotoGeo(null); setBoardPhotoGeoError(''); setBoardPhotoGeoLoading(false);
-    setPaymentGeo(null); setPaymentGeoError(''); setPaymentGeoLoading(false);
+    setBoardPhotoGeo(null); setBoardPhotoGeoError(''); setBoardPhotoGeoLoading(false); boardPhotoGeoLoadingRef.current = false;
+    setPaymentGeo(null); setPaymentGeoError(''); setPaymentGeoLoading(false); paymentGeoLoadingRef.current = false;
     setPendingSignature(null); setSignatureCarriedOver(false); setHasSigned(false);
     const canvas = signatureCanvasRef.current;
     canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
@@ -709,33 +756,47 @@ export default function NewKYCPage() {
     img.src = pendingSignature;
   }, [step, pendingSignature, hasSigned]);
 
-  /* ── Geo capture helpers ── */
+  /* ── Geo capture helpers ──
+   *  KYC-H2: each fires an async getCurrentPosition; the caller (auto-trigger on capture +
+   *  the Retry button) is disabled for the WHOLE duration via the *GeoLoading flag, and we
+   *  also guard here so an in-flight request can't be double-fired. On failure we set a
+   *  cause-specific, recovery-oriented message and clear the busy flag on BOTH paths. */
+  const boardPhotoGeoLoadingRef = useRef(false);
   const captureBoardPhotoGeo = useCallback(() => {
-    if (!navigator.geolocation) { setBoardPhotoGeoError('Geolocation not supported on this device.'); return; }
+    if (boardPhotoGeoLoadingRef.current) return; // already getting a fix — don't double-fire
+    if (!navigator.geolocation) { setBoardPhotoGeoError('Location isn’t supported on this device.'); return; }
+    boardPhotoGeoLoadingRef.current = true;
     setBoardPhotoGeoLoading(true); setBoardPhotoGeoError('');
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         setBoardPhotoGeo({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy), ts: new Date().toISOString() });
+        boardPhotoGeoLoadingRef.current = false;
         setBoardPhotoGeoLoading(false);
       },
-      () => {
-        setBoardPhotoGeoError('Location access denied — please enable location and retake the store board photo.');
+      (err) => {
+        setBoardPhotoGeoError(geoErrorMessage(err));
+        boardPhotoGeoLoadingRef.current = false;
         setBoardPhotoGeoLoading(false);
       },
       { timeout: 12000, maximumAge: 0 },
     );
   }, []);
 
+  const paymentGeoLoadingRef = useRef(false);
   const capturePaymentGeo = useCallback(() => {
-    if (!navigator.geolocation) { setPaymentGeoError('Geolocation not supported on this device.'); return; }
+    if (paymentGeoLoadingRef.current) return; // already getting a fix — don't double-fire
+    if (!navigator.geolocation) { setPaymentGeoError('Location isn’t supported on this device.'); return; }
+    paymentGeoLoadingRef.current = true;
     setPaymentGeoLoading(true); setPaymentGeoError('');
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         setPaymentGeo({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy), ts: new Date().toISOString() });
+        paymentGeoLoadingRef.current = false;
         setPaymentGeoLoading(false);
       },
-      () => {
-        setPaymentGeoError('Location access denied — please enable location to continue.');
+      (err) => {
+        setPaymentGeoError(geoErrorMessage(err));
+        paymentGeoLoadingRef.current = false;
         setPaymentGeoLoading(false);
       },
       { timeout: 12000, maximumAge: 0 },
@@ -956,10 +1017,10 @@ export default function NewKYCPage() {
     setFileError('');
     // Reset the associated geo capture when the triggering document is removed
     if (docKey === 'storeBoardPhoto') {
-      setBoardPhotoGeo(null); setBoardPhotoGeoLoading(false); setBoardPhotoGeoError('');
+      setBoardPhotoGeo(null); setBoardPhotoGeoLoading(false); setBoardPhotoGeoError(''); boardPhotoGeoLoadingRef.current = false;
     }
     if (docKey === 'cheque') {
-      setPaymentGeo(null); setPaymentGeoLoading(false); setPaymentGeoError('');
+      setPaymentGeo(null); setPaymentGeoLoading(false); setPaymentGeoError(''); paymentGeoLoadingRef.current = false;
     }
   };
 
@@ -1077,12 +1138,28 @@ export default function NewKYCPage() {
   };
 
   /* ── C: Signature pad handlers ── */
+  /* SIG-1: the pad is drawn at a FIXED 600×120 bitmap but stretched by CSS (`w-full`),
+   * so a raw `clientX - rect.left` lands offset from the finger at any CSS width ≠ 600.
+   * Map the pointer from CSS pixels into bitmap pixels by scaling on each axis
+   * (`canvas.width / rect.width`, `canvas.height / rect.height`). The canvas has no
+   * devicePixelRatio backing store (its width/height are fixed literals), so we scale the
+   * COORDINATES only — never also the context — mirroring the scheme-enroll signature pad
+   * (components/schemes/SchemeFormRenderer.tsx). */
   const getSigPos = (canvas: HTMLCanvasElement, e: React.MouseEvent | React.TouchEvent) => {
     const rect = canvas.getBoundingClientRect();
+    const scaleX = rect.width  ? canvas.width  / rect.width  : 1;
+    const scaleY = rect.height ? canvas.height / rect.height : 1;
     if ('touches' in e && e.touches.length > 0) {
-      return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+      return {
+        x: (e.touches[0].clientX - rect.left) * scaleX,
+        y: (e.touches[0].clientY - rect.top)  * scaleY,
+      };
     }
-    return { x: (e as React.MouseEvent).clientX - rect.left, y: (e as React.MouseEvent).clientY - rect.top };
+    const me = e as React.MouseEvent;
+    return {
+      x: (me.clientX - rect.left) * scaleX,
+      y: (me.clientY - rect.top)  * scaleY,
+    };
   };
 
   const startDraw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
@@ -1667,6 +1744,78 @@ export default function NewKYCPage() {
     );
   }
 
+  /* ── KYC-H1 / KYC-up: per-step "why is Continue disabled?" derivation ──
+   *  Instead of a silently-disabled button, each step surfaces (a) the specific required
+   *  fields still missing and (b) any async work in flight (upload / location). The button's
+   *  `disabled` is driven by THESE SAME values (`missing.length > 0 || busy !== null`), so the
+   *  checklist can never disagree with the gate. `busy` covers KYC-up (upload mid-flight) and
+   *  the geo capture, so tapping Continue/Submit while a photo is still uploading shows
+   *  "Waiting for upload…" rather than proceeding without the file or wrongly reporting it
+   *  missing. Only the CURRENT step's uploads are considered — an unrelated other-step upload
+   *  never blocks. Kept equivalent to the previous inline `disabled` expressions. */
+
+  // Step 2 — Basic details
+  const basicBusy: string | null =
+    (mobileCheck === 'checking' || (form.mobile.length === 10 && mobileCheck === 'idle'))
+      ? 'Checking mobile number…'
+      : (isDocUploading(docs.businessDoc) || isDocUploading(docs.ownerPhoto))
+        ? 'Waiting for upload to finish…'
+        : null;
+  const basicMissing: string[] = [];
+  if (!form.partnerName) basicMissing.push('Owner / contact name');
+  if (form.mobile.length !== 10) basicMissing.push('10-digit mobile number');
+  else if (mobileCheck === 'outlet_conflict' || mobileCheck === 'employee_conflict')
+    basicMissing.push('A different, available mobile number');
+  if (!docs.businessDoc && !gstCertInherited) basicMissing.push('GST Certificate');
+  if (!docs.ownerPhoto) basicMissing.push('Owner photo');
+  const basicBlocked = basicMissing.length > 0 || basicBusy !== null;
+
+  // Step 3 — Address
+  const addressBusy: string | null =
+    boardPhotoGeoLoading
+      ? 'Getting location…'
+      : (isDocUploading(docs.shopAddressDoc) || isDocUploading(docs.storeBoardPhoto) || isDocUploading(docs.selfDeclaration))
+        ? 'Waiting for upload to finish…'
+        : null;
+  const addressMissing: string[] = [];
+  if (!form.address) addressMissing.push('Street address');
+  if (!form.city) addressMissing.push('City');
+  if (!form.pincode) addressMissing.push('Pincode');
+  if (addressProofRequired && !docs.shopAddressDoc) addressMissing.push('Address proof');
+  if (!docs.storeBoardPhoto) addressMissing.push('Store board photo');
+  if (selfDeclarationRequired && !docs.selfDeclaration) addressMissing.push('Signed self-declaration');
+  // Board location: only actionable once a photo exists (no photo → already blocked above).
+  if (docs.storeBoardPhoto && !boardPhotoGeo && !boardPhotoGeoLoading)
+    addressMissing.push('Store board location (retake photo or tap Retry location)');
+  const addressBlocked = addressMissing.length > 0 || addressBusy !== null;
+
+  // Step 4 — Bank + consent + signature
+  const bankBusy: string | null =
+    paymentGeoLoading
+      ? 'Getting location…'
+      : isDocUploading(docs.cheque)
+        ? 'Waiting for upload to finish…'
+        : null;
+  const bankMissing: string[] = [];
+  if (paymentMode === 'bank') {
+    if (!form.bankName) bankMissing.push('Bank name');
+    if (!form.accountNumber) bankMissing.push('Account number');
+    if (!form.ifscCode) bankMissing.push('IFSC code');
+    if (!docs.cheque && !chequeInherited) bankMissing.push('Cancelled cheque');
+  } else {
+    if (!form.upiId) bankMissing.push('UPI ID');
+    else if (!isValidUpiId(form.upiId)) bankMissing.push('A valid UPI ID');
+  }
+  if (!agreedToTerms) bankMissing.push('Agree to the Terms & Conditions');
+  if (!agreedToComms) bankMissing.push('Agree to SMS / WhatsApp communications');
+  if (!hasSigned) bankMissing.push('Digital signature');
+  // Payment location is required in BOTH modes; only actionable once a cheque/UPI (or an
+  // inherited cheque) exists — otherwise the cheque/UPI item above already blocks. Keeping it
+  // unconditional-when-actionable preserves the old `!paymentGeo` gate exactly.
+  if ((docs.cheque || form.upiId || chequeInherited) && !paymentGeo && !paymentGeoLoading)
+    bankMissing.push('Payment location (upload cheque / scan UPI, then tap Retry location if needed)');
+  const bankBlocked = bankMissing.length > 0 || bankBusy !== null;
+
   /* ── Page shell ── */
   return (
     <div className="space-y-5 fade-in">
@@ -2082,21 +2231,11 @@ export default function NewKYCPage() {
               </div>
             </div>
 
+            <StepGate missing={basicMissing} busy={basicBusy} />
             <div className="flex gap-3">
               <Button variant="outline" className="flex-1" onClick={() => setStep('outlet')}>← Back</Button>
               <Button variant="primary" className="flex-1" onClick={() => setStep('address')}
-                disabled={
-                  !form.partnerName ||
-                  form.mobile.length !== 10 ||
-                  mobileCheck === 'outlet_conflict' ||
-                  mobileCheck === 'employee_conflict' ||
-                  mobileCheck === 'idle' ||
-                  mobileCheck === 'checking' ||
-                  (!docs.businessDoc && !gstCertInherited) ||
-                  !docs.ownerPhoto ||
-                  isDocUploading(docs.businessDoc) ||
-                  isDocUploading(docs.ownerPhoto)
-                }>
+                disabled={basicBlocked}>
                 Continue →
               </Button>
             </div>
@@ -2225,44 +2364,56 @@ export default function NewKYCPage() {
 
               {/* Board photo geo status — shown after photo is taken */}
               {docs.storeBoardPhoto && (
-                <div className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-xs ${
-                  boardPhotoGeo
-                    ? 'bg-emerald-50 border-emerald-200'
-                    : boardPhotoGeoError
-                    ? 'bg-red-50 border-red-200'
-                    : 'bg-blue-50 border-blue-200'
-                }`}>
-                  {boardPhotoGeoLoading && <Loader2 className="h-4 w-4 text-blue-500 animate-spin shrink-0" />}
-                  {boardPhotoGeo        && <Navigation className="h-4 w-4 text-emerald-600 shrink-0" />}
-                  {boardPhotoGeoError   && <AlertCircle data-testid="board-photo-geo-error" className="h-4 w-4 text-red-500 shrink-0" />}
-                  {!boardPhotoGeoLoading && !boardPhotoGeo && !boardPhotoGeoError && <Navigation className="h-4 w-4 text-blue-500 shrink-0" />}
-                  <div className="flex-1 min-w-0">
-                    {boardPhotoGeoLoading && <p className="text-blue-700 font-medium">Capturing location…</p>}
-                    {boardPhotoGeo        && <p className="text-emerald-700 font-medium">Location captured · {boardPhotoGeo.lat.toFixed(5)}, {boardPhotoGeo.lng.toFixed(5)} <span className="font-normal text-emerald-500">(±{boardPhotoGeo.accuracy}m)</span></p>}
-                    {boardPhotoGeoError   && (
-                      <div>
-                        <p data-testid="board-photo-geo-error" className="text-red-700 font-medium">Location required</p>
-                        <p className="text-red-600 mt-0.5">{boardPhotoGeoError}</p>
-                      </div>
-                    )}
+                <div className="space-y-2">
+                  <div className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-xs ${
+                    boardPhotoGeo
+                      ? 'bg-emerald-50 border-emerald-200'
+                      : boardPhotoGeoError
+                      ? 'bg-red-50 border-red-200'
+                      : 'bg-blue-50 border-blue-200'
+                  }`}>
+                    {boardPhotoGeoLoading && <Loader2 className="h-4 w-4 text-blue-500 animate-spin shrink-0" />}
+                    {boardPhotoGeo        && <Navigation className="h-4 w-4 text-emerald-600 shrink-0" />}
+                    {boardPhotoGeoError   && <AlertCircle data-testid="board-photo-geo-error" className="h-4 w-4 text-red-500 shrink-0" />}
+                    {!boardPhotoGeoLoading && !boardPhotoGeo && !boardPhotoGeoError && <Navigation className="h-4 w-4 text-blue-500 shrink-0" />}
+                    <div className="flex-1 min-w-0">
+                      {boardPhotoGeoLoading && <p className="text-blue-700 font-medium">Getting location…</p>}
+                      {boardPhotoGeo        && <p className="text-emerald-700 font-medium">Location captured · {boardPhotoGeo.lat.toFixed(5)}, {boardPhotoGeo.lng.toFixed(5)} <span className="font-normal text-emerald-500">(±{boardPhotoGeo.accuracy}m)</span></p>}
+                      {boardPhotoGeoError   && (
+                        <div>
+                          <p data-testid="board-photo-geo-error" className="text-red-700 font-medium">Location required</p>
+                          <p className="text-red-600 mt-0.5">{boardPhotoGeoError}</p>
+                        </div>
+                      )}
+                      {!boardPhotoGeoLoading && !boardPhotoGeo && !boardPhotoGeoError && (
+                        <p className="text-blue-700 font-medium">Location needed — tap Retry location below.</p>
+                      )}
+                    </div>
                   </div>
+                  {/* KYC-H2: recovery — hard block stays, but the rep can re-attempt the fix.
+                      Disabled for the whole in-flight duration so it can't be double-fired. */}
+                  {!boardPhotoGeo && (
+                    <button
+                      type="button"
+                      data-testid="board-photo-geo-retry"
+                      onClick={captureBoardPhotoGeo}
+                      disabled={boardPhotoGeoLoading}
+                      className="w-full flex items-center justify-center gap-1.5 rounded-xl border border-[var(--brand-primary)]/40 bg-white px-3 py-2 text-xs font-semibold text-[var(--brand-primary)] hover:bg-green-50/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {boardPhotoGeoLoading
+                        ? (<><Loader2 className="h-3.5 w-3.5 animate-spin" /> Getting location…</>)
+                        : (<><Navigation className="h-3.5 w-3.5" /> Retry location</>)}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
 
+            <StepGate missing={addressMissing} busy={addressBusy} />
             <div className="flex gap-3">
               <Button variant="outline" className="flex-1" onClick={() => setStep('basic')}>← Back</Button>
               <Button variant="primary" className="flex-1" onClick={() => setStep('bank')}
-                disabled={
-                  !form.address || !form.city || !form.pincode ||
-                  (addressProofRequired && !docs.shopAddressDoc) || !docs.storeBoardPhoto ||
-                  (selfDeclarationRequired && !docs.selfDeclaration) ||
-                  boardPhotoGeoLoading ||
-                  !boardPhotoGeo ||
-                  isDocUploading(docs.shopAddressDoc) ||
-                  isDocUploading(docs.storeBoardPhoto) ||
-                  isDocUploading(docs.selfDeclaration)
-                }>
+                disabled={addressBlocked}>
                 Continue →
               </Button>
             </div>
@@ -2356,7 +2507,7 @@ export default function NewKYCPage() {
                 setForm((f) => ({ ...f, upiId: val }));
                 // Clearing a scanned UPI resets the payment geo (user must re-scan)
                 if (!val) {
-                  setPaymentGeo(null); setPaymentGeoLoading(false); setPaymentGeoError('');
+                  setPaymentGeo(null); setPaymentGeoLoading(false); setPaymentGeoError(''); paymentGeoLoadingRef.current = false;
                 }
               }}
               onPaymentGeoTrigger={capturePaymentGeo}
@@ -2382,27 +2533,47 @@ export default function NewKYCPage() {
 
             {/* Payment geo status — shown after cheque upload or QR scan */}
             {(docs.cheque || form.upiId) && (
-              <div className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-xs ${
-                paymentGeo
-                  ? 'bg-emerald-50 border-emerald-200'
-                  : paymentGeoError
-                  ? 'bg-red-50 border-red-200'
-                  : 'bg-blue-50 border-blue-200'
-              }`}>
-                {paymentGeoLoading && <Loader2 className="h-4 w-4 text-blue-500 animate-spin shrink-0" />}
-                {paymentGeo        && <Navigation className="h-4 w-4 text-emerald-600 shrink-0" />}
-                {paymentGeoError   && <AlertCircle className="h-4 w-4 text-red-500 shrink-0" />}
-                {!paymentGeoLoading && !paymentGeo && !paymentGeoError && <Navigation className="h-4 w-4 text-blue-500 shrink-0" />}
-                <div data-testid="payment-geo-tag" className="flex-1 min-w-0">
-                  {paymentGeoLoading && <p className="text-blue-700 font-medium">Capturing payment location…</p>}
-                  {paymentGeo        && <p className="text-emerald-700 font-medium">Location captured · {paymentGeo.lat.toFixed(5)}, {paymentGeo.lng.toFixed(5)} <span className="font-normal text-emerald-500">(±{paymentGeo.accuracy}m)</span></p>}
-                  {paymentGeoError   && (
-                    <div>
-                      <p data-testid="payment-geo-error" className="text-red-700 font-medium">Location required</p>
-                      <p className="text-red-600 mt-0.5">{paymentGeoError}</p>
-                    </div>
-                  )}
+              <div className="space-y-2">
+                <div className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-xs ${
+                  paymentGeo
+                    ? 'bg-emerald-50 border-emerald-200'
+                    : paymentGeoError
+                    ? 'bg-red-50 border-red-200'
+                    : 'bg-blue-50 border-blue-200'
+                }`}>
+                  {paymentGeoLoading && <Loader2 className="h-4 w-4 text-blue-500 animate-spin shrink-0" />}
+                  {paymentGeo        && <Navigation className="h-4 w-4 text-emerald-600 shrink-0" />}
+                  {paymentGeoError   && <AlertCircle className="h-4 w-4 text-red-500 shrink-0" />}
+                  {!paymentGeoLoading && !paymentGeo && !paymentGeoError && <Navigation className="h-4 w-4 text-blue-500 shrink-0" />}
+                  <div data-testid="payment-geo-tag" className="flex-1 min-w-0">
+                    {paymentGeoLoading && <p className="text-blue-700 font-medium">Getting location…</p>}
+                    {paymentGeo        && <p className="text-emerald-700 font-medium">Location captured · {paymentGeo.lat.toFixed(5)}, {paymentGeo.lng.toFixed(5)} <span className="font-normal text-emerald-500">(±{paymentGeo.accuracy}m)</span></p>}
+                    {paymentGeoError   && (
+                      <div>
+                        <p data-testid="payment-geo-error" className="text-red-700 font-medium">Location required</p>
+                        <p className="text-red-600 mt-0.5">{paymentGeoError}</p>
+                      </div>
+                    )}
+                    {!paymentGeoLoading && !paymentGeo && !paymentGeoError && (
+                      <p className="text-blue-700 font-medium">Location needed — tap Retry location below.</p>
+                    )}
+                  </div>
                 </div>
+                {/* KYC-H2: recovery — hard block stays, but the rep can re-attempt the fix.
+                    Disabled for the whole in-flight duration so it can't be double-fired. */}
+                {!paymentGeo && (
+                  <button
+                    type="button"
+                    data-testid="payment-geo-retry"
+                    onClick={capturePaymentGeo}
+                    disabled={paymentGeoLoading}
+                    className="w-full flex items-center justify-center gap-1.5 rounded-xl border border-[var(--brand-primary)]/40 bg-white px-3 py-2 text-xs font-semibold text-[var(--brand-primary)] hover:bg-green-50/40 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {paymentGeoLoading
+                      ? (<><Loader2 className="h-3.5 w-3.5 animate-spin" /> Getting location…</>)
+                      : (<><Navigation className="h-3.5 w-3.5" /> Retry location</>)}
+                  </button>
+                )}
               </div>
             )}
 
@@ -2410,33 +2581,54 @@ export default function NewKYCPage() {
             <div className="border-t border-gray-100 pt-4 space-y-3">
               <p className="text-xs font-semibold text-gray-700">Programme Consent</p>
 
-              <label className="flex items-start gap-3 cursor-pointer group">
+              {/* KYC-H4: real, accessible checkbox controls. The WHOLE row is the tap target
+                  and toggles via click / Space / Enter; screen readers announce role + state.
+                  A nested "Terms and Conditions" button stops propagation so it doesn't toggle. */}
+              <div
+                role="checkbox"
+                aria-checked={agreedToTerms}
+                aria-labelledby="consent-terms-label"
+                tabIndex={0}
+                onClick={() => setAgreedToTerms((v) => !v)}
+                onKeyDown={(e) => {
+                  if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setAgreedToTerms((v) => !v); }
+                }}
+                className="flex items-start gap-3 cursor-pointer group rounded-lg -mx-1 px-1 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)]/40"
+              >
                 <div className={`mt-0.5 w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-colors ${
                   agreedToTerms ? 'bg-[var(--brand-primary)] border-[var(--brand-primary)]' : 'border-gray-300 group-hover:border-[var(--brand-primary)]/60'
-                }`}
-                  onClick={() => setAgreedToTerms((v) => !v)}>
+                }`}>
                   {agreedToTerms && <Check className="h-3 w-3 text-white" strokeWidth={3} />}
                 </div>
-                <span className="text-sm text-gray-700 leading-snug">
+                <span id="consent-terms-label" className="text-sm text-gray-700 leading-snug">
                   I agree to the{' '}
-                  <button type="button" className="text-[var(--brand-primary)] font-semibold hover:underline" onClick={(e) => e.stopPropagation()}>
+                  <button type="button" className="text-[var(--brand-primary)] font-semibold hover:underline" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                     Terms and Conditions of the Programme
                   </button>
                 </span>
-              </label>
+              </div>
 
-              <label className="flex items-start gap-3 cursor-pointer group">
+              <div
+                role="checkbox"
+                aria-checked={agreedToComms}
+                aria-labelledby="consent-comms-label"
+                tabIndex={0}
+                onClick={() => setAgreedToComms((v) => !v)}
+                onKeyDown={(e) => {
+                  if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setAgreedToComms((v) => !v); }
+                }}
+                className="flex items-start gap-3 cursor-pointer group rounded-lg -mx-1 px-1 py-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)]/40"
+              >
                 <div className={`mt-0.5 w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 transition-colors ${
                   agreedToComms ? 'bg-[var(--brand-primary)] border-[var(--brand-primary)]' : 'border-gray-300 group-hover:border-[var(--brand-primary)]/60'
-                }`}
-                  onClick={() => setAgreedToComms((v) => !v)}>
+                }`}>
                   {agreedToComms && <Check className="h-3 w-3 text-white" strokeWidth={3} />}
                 </div>
-                <span className="text-sm text-gray-700 leading-snug">
+                <span id="consent-comms-label" className="text-sm text-gray-700 leading-snug">
                   I agree to receive programme communications over{' '}
                   <span className="font-semibold">SMS and WhatsApp</span>
                 </span>
-              </label>
+              </div>
             </div>
 
             {/* ── C: Digital Signature ── */}
@@ -2505,18 +2697,11 @@ export default function NewKYCPage() {
                 a consent OTP to the outlet owner; the KYC is only submitted for review
                 AFTER that OTP is verified. Label reflects that so reps/owners don't think
                 it's already enrolled at this step. */}
+            <StepGate missing={bankMissing} busy={bankBusy} />
             <div className="flex gap-3 pt-1">
               <Button variant="outline" className="flex-1" onClick={() => setStep('address')}>← Back</Button>
               <Button variant="primary" className="flex-1" loading={submitting} onClick={handleSubmit}
-                disabled={
-                  (paymentMode === 'bank'
-                    ? (!form.bankName || !form.accountNumber || !form.ifscCode || (!docs.cheque && !chequeInherited))
-                    : (!form.upiId || !isValidUpiId(form.upiId))
-                  ) || !agreedToTerms || !agreedToComms || !hasSigned ||
-                  paymentGeoLoading ||
-                  !paymentGeo ||
-                  isDocUploading(docs.cheque)
-                }>
+                disabled={bankBlocked}>
                 Send OTP to Outlet Owner
               </Button>
             </div>

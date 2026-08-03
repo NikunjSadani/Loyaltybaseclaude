@@ -52,7 +52,7 @@ per batch). "d" = ideal engineer-day.
 | KYC-H4 | HIGH | `page.tsx:2157,2413` | Consent checkboxes are non-semantic divs — 20px-only tap target, not kb/SR operable | Real inputs or role=checkbox+aria+full-row tap | 0.25d |
 | ENR-M1 | HIGH* | `SchemeFormRenderer.tsx:338` | Submit not blocked while a media upload is in flight → silent loss / false "required" | `disabled` on any uploading; show "waiting for upload…" | 0.15d |
 | KYC-up | HIGH* | `page.tsx:2076+` | Same submit/continue-while-uploading race on the KYC wizard | Reflect in-flight upload in the Continue gate | 0.15d |
-| KYC-H2 | HIGH | `page.tsx:2256-2264` | Geo capture is a hard block, no Retry, no fallback → location-off rep can't submit | Add "Retry location"; **see D1 for the block-vs-flag policy** | 0.2d |
+| KYC-H2 | HIGH | `page.tsx:2256-2264` | Geo capture is a hard block, no Retry, no fallback → location-off rep can't submit | **D1 DECIDED: keep hard-block + add "Retry location" button + guidance** (no flag-and-allow) | 0.2d |
 
 \* filed HIGH-adjacent (MED severity, HIGH impact — data loss).
 
@@ -96,10 +96,12 @@ per batch). "d" = ideal engineer-day.
 | SET-L7/L10 | LOW | Settings | Segmented toggles no arrow-key nav; uniqueness card hard to discover | radiogroup keys / section nav | 0.35d |
 | GRP-L8/L9/L11 | LOW | Grouping | Modals no Escape/focus-trap; child table no overflow wrapper; blocked un-group null-reason invisible | Escape+trap, wrapper, fallback text | 0.35d |
 
-## D1 — Geo hard-block POLICY (owner decision, then ~0.25d)
-KYC board-photo + payment geo are a **hard block** — a rep with device location off / no indoor fix cannot submit. Options:
-(a) keep hard-block + add a "Retry location" button (KYC-H2); (b) switch to **flag-and-allow** (capture unverifiable, let the
-approver judge) to match the per-photo-geotag `GEO_UNVERIFIABLE` direction. **Decision needed before P2 finalizes KYC-H2.**
+## D1 — Geo hard-block POLICY — ✅ OWNER-DECIDED 2026-08-02: **KEEP HARD-BLOCK + add "Retry location"** (option a)
+KYC board-photo + payment geo are a **hard block** — a rep with device location off / no indoor fix cannot submit. Owner
+chose **(a) keep the hard block + add a "Retry location" button + guidance** (KYC-H2), NOT (b) flag-and-allow. This is a
+**deliberate divergence** from the per-photo-geotag `GEO_UNVERIFIABLE` flag-and-allow direction: KYC keeps strongest
+at-source geo integrity (every KYC photo genuinely geo-verified) even though a rep in a true no-fix spot still cannot onboard
+that outlet. So KYC-H2 = add Retry + clear guidance ONLY; the hard block stays.
 
 ## G1 — Geotag optional polish (`GEOTAG`, on develop `ee00dd2`)
 | ID | Sev | Bug | Fix | Est. |

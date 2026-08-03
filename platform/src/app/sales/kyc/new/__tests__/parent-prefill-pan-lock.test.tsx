@@ -237,8 +237,10 @@ describe('PPL4 — re-entry child: submit sends the group PAN, not the stale exi
     fireEvent.mouseDown(canvas, { clientX: 5, clientY: 5 });
     fireEvent.mouseMove(canvas, { clientX: 30, clientY: 30 });
     fireEvent.mouseUp(canvas);
-    fireEvent.click(screen.getByText(/I agree to the/i).closest('label')!.querySelector('div')!);
-    fireEvent.click(screen.getByText(/programme communications/i).closest('label')!.querySelector('div')!);
+    // KYC-H4: consent controls are now accessible role="checkbox" rows (whole row toggles);
+    // query by the accessible name rather than the old <label><div> DOM structure.
+    fireEvent.click(screen.getByRole('checkbox', { name: /I agree to the/i }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /programme communications/i }));
 
     const submit = await screen.findByRole('button', { name: /send otp to outlet owner/i });
     await waitFor(() => expect(submit).not.toBeDisabled());

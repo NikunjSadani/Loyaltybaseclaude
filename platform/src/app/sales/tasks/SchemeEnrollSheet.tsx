@@ -33,7 +33,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   X, ChevronLeft, CheckCircle2, UserCheck, Search, Loader2, AlertTriangle, Store,
 } from 'lucide-react';
-import { api } from '@/lib/api-client';
 import { schemeApi } from '@/lib/schemes';
 import type {
   AudienceConfig, EligibleScheme, EnrollmentFormSchema, EnrollResult, SalesTarget,
@@ -58,6 +57,19 @@ function targetKind(t: SalesTarget): string {
 
 type View = 'pick' | 'form' | 'formless' | 'success';
 
+/**
+ * ENR-H4: the outcome of loading the scheme's enrollment form, tracked as an
+ * explicit state machine so a transient fetch FAILURE is never mistaken for a
+ * legitimately form-LESS scheme.
+ *   loading → request in flight
+ *   ok      → a real form with ≥1 field was returned (render the renderer)
+ *   empty   → authoritative "no form" (HTTP 404, or 200 with an empty/undefined
+ *             form definition) → the intentional formless enroll path
+ *   error   → network / 5xx / timeout / JSON-parse failure → show Retry, and do
+ *             NOT let the rep submit a zero-field enrollment
+ */
+type SchemaState = 'loading' | 'ok' | 'empty' | 'error';
+
 export function SchemeEnrollSheet({
   scheme,
   enrolled,
@@ -80,7 +92,10 @@ export function SchemeEnrollSheet({
   // The scheme's form schema — fetched lazily when a target is chosen. `null` = no
   // form configured (formless enroll); `undefined` = not yet loaded.
   const [schema, setSchema] = useState<EnrollmentFormSchema | null | undefined>(undefined);
-  const [schemaLoading, setSchemaLoading] = useState(false);
+  // ENR-H4: the form-fetch outcome (see SchemaState). `error` here is a transient
+  // fetch failure — distinct from `empty`, which is a valid formless scheme.
+  const [schemaState, setSchemaState] = useState<SchemaState>('loading');
+  const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -146,29 +161,88 @@ export function SchemeEnrollSheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targets, search, enrolled]);
 
+  /**
+   * ENR-H4: load the scheme's enrollment form, branching on the ACTUAL HTTP
+   * status/shape so a transient failure can never masquerade as an empty form.
+   *
+   * We use a raw `fetch` (not `api.get`, which discards the status) purely to READ
+   * `res.status` — no endpoint/payload change. The backend
+   * (`GET /v1/schemes/:id/enrollment-form`) throws `NotFoundException` → HTTP 404
+   * when no form is configured, and the Next `beforeFiles` proxy forwards that
+   * status unchanged. So:
+   *   - 404                              → authoritative "no form" → formless enroll
+   *   - 200 with empty/undefined schema  → also "no form"          → formless enroll
+   *   - 200 with ≥1 field                → real form               → render it
+   *   - any other non-2xx / thrown / bad JSON → transient ERROR    → Retry, no submit
+   */
+  async function loadSchema() {
+    setSchema(undefined);
+    setSchemaState('loading');
+    setError(null);
+    try {
+      const res = await fetch(`/api/schemes/${scheme.id}/enrollment-form`, {
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json' },
+      });
+      if (res.status === 404) {
+        // Backend says there is genuinely no form → the intentional formless path.
+        setSchema(null);
+        setSchemaState('empty');
+        setView('formless');
+        return;
+      }
+      if (!res.ok) {
+        // 5xx / 408 / 401 / etc. — a fetch failure, NOT "no form". Never fall
+        // through to a zero-field enroll; keep the rep on the form screen.
+        setSchemaState('error');
+        return;
+      }
+      // The global TransformInterceptor wraps every success as { success, data: <return> },
+      // and the controller returns { enrollmentForm }. api.get unwrapped `.data` for us; the
+      // raw fetch gets the FULL envelope, so we must read `data.enrollmentForm` (mirrors
+      // SchemeManager/portal-api). Reading it top-level made every form-bearing scheme go formless.
+      const body = (await res.json()) as {
+        data?: { enrollmentForm?: { formSchema?: EnrollmentFormSchema | null } };
+      };
+      const fetched = body?.data?.enrollmentForm?.formSchema ?? null;
+      if (fetched && Array.isArray(fetched.fields) && fetched.fields.length > 0) {
+        setSchema(fetched);
+        setSchemaState('ok');
+      } else {
+        // 200 with an explicitly empty/undefined form definition → formless enroll.
+        setSchema(null);
+        setSchemaState('empty');
+        setView('formless');
+      }
+    } catch {
+      // Network failure, timeout, or JSON-parse failure → transient error, not empty.
+      setSchemaState('error');
+    }
+  }
+
+  /** Retry the form fetch; the button is busy-disabled while its own fetch is in flight. */
+  async function retryLoad() {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      await loadSchema();
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   async function pickTarget(t: SalesTarget) {
     setSelected(t);
     setError(null);
     if (!hasForm) {
+      // Summary already says this scheme has no form — skip the fetch entirely.
       setSchema(null);
+      setSchemaState('empty');
       setView('formless');
       return;
     }
     setView('form');
-    setSchema(undefined);
-    setSchemaLoading(true);
-    const res = await api.get<{ enrollmentForm: { formSchema: EnrollmentFormSchema } }>(
-      `/api/schemes/${scheme.id}/enrollment-form`,
-    );
-    setSchemaLoading(false);
-    const fetched = res.success ? (res.data.enrollmentForm?.formSchema ?? null) : null;
-    if (fetched && Array.isArray(fetched.fields) && fetched.fields.length > 0) {
-      setSchema(fetched);
-    } else {
-      // No form (404) or an empty form → a formless enroll rather than a blank screen.
-      setSchema(null);
-      setView('formless');
-    }
+    await loadSchema();
   }
 
   /** The enroll subject for the chosen target — roster row vs live-rule outlet. */
@@ -340,11 +414,34 @@ export function SchemeEnrollSheet({
         {/* ── VIEW: form (SchemeFormRenderer, mode SALES) ─────────────────────── */}
         {view === 'form' && selected && (
           <div className="overflow-y-auto flex-1 px-5 pt-4 pb-8">
-            {schemaLoading || schema === undefined ? (
+            {schemaState === 'loading' ? (
               <div className="flex items-center justify-center py-16">
                 <Loader2 className="h-6 w-6 animate-spin text-[var(--brand-primary)]" />
               </div>
-            ) : schema ? (
+            ) : schemaState === 'error' ? (
+              /* ENR-H4: transient fetch failure — NO formless enroll. Rep stays put
+                 and can Retry; the button busy-disables during its own re-fetch. */
+              <div className="flex flex-col items-center gap-3 py-14 text-center">
+                <div className="w-14 h-14 rounded-full bg-red-50 flex items-center justify-center">
+                  <AlertTriangle className="h-7 w-7 text-red-500" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-gray-800">Couldn&apos;t load the form</p>
+                  <p className="text-[12px] text-gray-400 mt-1 max-w-[16rem] mx-auto">
+                    Something went wrong loading this scheme&apos;s form. Check your connection
+                    and try again — nothing has been enrolled yet.
+                  </p>
+                </div>
+                <button
+                  onClick={retryLoad}
+                  disabled={retrying}
+                  className="mt-1 px-5 py-2.5 rounded-xl text-sm font-bold bg-[var(--brand-primary)] text-white disabled:opacity-40 flex items-center justify-center gap-2"
+                >
+                  {retrying ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  {retrying ? 'Retrying…' : 'Retry'}
+                </button>
+              </div>
+            ) : schemaState === 'ok' && schema ? (
               <SchemeFormRenderer
                 schema={schema}
                 // Dual-source prefill (D13 + outletField): the matched-outlet master-field
@@ -370,7 +467,7 @@ export function SchemeEnrollSheet({
                 onError={(msg) => setError(msg)}
               />
             ) : null}
-            {error && (
+            {error && schemaState === 'ok' && (
               <p className="text-center text-[12px] text-red-500 font-medium mt-3">{error}</p>
             )}
           </div>

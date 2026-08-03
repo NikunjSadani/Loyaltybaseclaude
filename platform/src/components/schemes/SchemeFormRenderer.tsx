@@ -143,12 +143,23 @@ export function SchemeFormRenderer({
   const [errorFieldId, setErrorFieldId] = useState<string | null>(null);
   const [uploading, setUploading] = useState<Record<string, boolean>>({});
   const [otpVerified, setOtpVerified] = useState(false);
+  // SIG-2: signature fields that have strokes but whose PNG hasn't been saved/uploaded
+  // yet. Tracked so Submit can block (with a clear message) instead of silently dropping
+  // a signature the rep drew but never tapped "Save signature" for.
+  const [unsavedSignatures, setUnsavedSignatures] = useState<Record<string, boolean>>({});
 
   const fields = useMemo(() => orderedFields(schema), [schema]);
 
   const setValue = useCallback((id: string, value: unknown) => {
     setValues((prev) => ({ ...prev, [id]: value }));
   }, []);
+
+  const setSignatureUnsaved = useCallback((id: string, v: boolean) => {
+    setUnsavedSignatures((prev) => (Boolean(prev[id]) === v ? prev : { ...prev, [id]: v }));
+  }, []);
+
+  // ENR-M1: true while ANY field's media upload is in flight → Submit is blocked.
+  const anyUploading = useMemo(() => Object.values(uploading).some(Boolean), [uploading]);
 
   const reportError = useCallback(
     (msg: string) => {
@@ -171,14 +182,18 @@ export function SchemeFormRenderer({
       opts?: { store?: boolean },
     ): Promise<string | null> => {
       setUploading((u) => ({ ...u, [fieldId]: true }));
-      const res = await schemeApi.uploadMedia(schemeId, file, filename);
-      setUploading((u) => ({ ...u, [fieldId]: false }));
-      if (res.success) {
-        if (opts?.store !== false) setValue(fieldId, res.data.key);
-        return res.data.key;
+      try {
+        const res = await schemeApi.uploadMedia(schemeId, file, filename);
+        if (res.success) {
+          if (opts?.store !== false) setValue(fieldId, res.data.key);
+          return res.data.key;
+        }
+        reportError(res.error);
+        return null;
+      } finally {
+        // Reset in finally so a throw/reject can never leave Submit stuck disabled (ENR-M1).
+        setUploading((u) => ({ ...u, [fieldId]: false }));
       }
-      reportError(res.error);
-      return null;
     },
     [schemeId, setValue, reportError],
   );
@@ -229,6 +244,11 @@ export function SchemeFormRenderer({
     setFieldErrors([]);
     setErrorFieldId(null);
 
+    // ENR-M1: never submit while a media/camera/signature upload is still in flight — the
+    // file could be dropped or a just-captured field wrongly read as empty. The button is
+    // also disabled on `anyUploading`; this guards a programmatic / racy invocation.
+    if (Object.values(uploading).some(Boolean)) return;
+
     // 1) capture GPS at submit. Two triggers land a single fix into empty GPS fields:
     //    - a field whose own captureTrigger === 'ON_SUBMIT', and
     //    - the top-level schema.captureGpsOnSubmit flag, which fills EVERY empty
@@ -244,6 +264,27 @@ export function SchemeFormRenderer({
       if (fix) {
         for (const f of gpsToFill) if (working[f.id] == null) working[f.id] = fix;
       }
+    }
+
+    // SIG-2: a signature that was drawn but never saved would be silently lost here (its
+    // value is still empty). Block Submit with a clear, field-pointed message so the rep
+    // taps "Save signature" first — a drawn signature can never vanish without being told.
+    const pendingSig = fields.find(
+      (f) => f.type === 'SIGNATURE' && isFieldVisible(f, working) && unsavedSignatures[f.id],
+    );
+    if (pendingSig) {
+      const msg = `Tap "Save signature" to save "${pendingSig.label}" before submitting.`;
+      setFieldErrors([msg]);
+      onError?.(msg);
+      setErrorFieldId(pendingSig.id);
+      if (typeof document !== 'undefined') {
+        requestAnimationFrame(() =>
+          document
+            .getElementById(pendingSig.id)
+            ?.scrollIntoView({ behavior: 'smooth', block: 'center' }),
+        );
+      }
+      return;
     }
 
     // 2) client-side validation (mirrors backend)
@@ -308,6 +349,7 @@ export function SchemeFormRenderer({
   }, [
     values, fields, schema, otpRequired, otpVerified, mode, context, phoneOtpField,
     outletApproved, schemeId, captureGps, onSubmitted, onError, reportError,
+    uploading, unsavedSignatures,
   ]);
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -329,6 +371,7 @@ export function SchemeFormRenderer({
             subject={subject}
             otpVerified={otpVerified}
             setOtpVerified={setOtpVerified}
+            setSignatureUnsaved={setSignatureUnsaved}
             ownerPhoneMasked={ownerPhoneMasked}
             errorFieldId={errorFieldId}
           />
@@ -338,7 +381,7 @@ export function SchemeFormRenderer({
       <button
         type="button"
         onClick={handleSubmit}
-        disabled={submitting}
+        disabled={submitting || anyUploading}
         className="w-full py-3 rounded-xl text-sm font-bold transition-all
           disabled:opacity-40 disabled:cursor-not-allowed
           bg-[var(--brand-primary)] text-white hover:bg-[var(--brand-primary-dark)]
@@ -347,6 +390,10 @@ export function SchemeFormRenderer({
         {submitting ? (
           <>
             <Loader2 className="h-4 w-4 animate-spin" /> Submitting…
+          </>
+        ) : anyUploading ? (
+          <>
+            <Loader2 className="h-4 w-4 animate-spin" /> Waiting for upload to finish…
           </>
         ) : (
           'Submit'
@@ -395,6 +442,8 @@ interface FieldRendererProps {
   subject: { enrollmentMode: 'SELF' | 'SALES'; targetSchemeOutletId?: string; targetOutletRef?: string };
   otpVerified: boolean;
   setOtpVerified: (v: boolean) => void;
+  /** SIG-2: report whether this (signature) field has drawn-but-unsaved strokes. */
+  setSignatureUnsaved?: (id: string, v: boolean) => void;
   ownerPhoneMasked?: string;
   /** Field id the last failed submit pointed at — highlighted + scrolled into view. */
   errorFieldId?: string | null;
@@ -969,10 +1018,13 @@ function CameraField({
 
 // ── Signature field (canvas draw → upload PNG → media key) ─────────────────────
 
-function SignatureField({ field, values, uploading, uploadFile, req, errorFieldId }: FieldRendererProps & { req: boolean }) {
+function SignatureField({ field, values, uploading, uploadFile, req, errorFieldId, setSignatureUnsaved }: FieldRendererProps & { req: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
   const dirty = useRef(false);
+  // SIG-2: hint shown when "Save signature" is tapped on an empty canvas — a no-op that
+  // must NOT read as a silent success.
+  const [emptyHint, setEmptyHint] = useState(false);
   const key = typeof values[field.id] === 'string' ? (values[field.id] as string) : '';
   const highlight = errorFieldId != null && field.id === errorFieldId;
 
@@ -1004,7 +1056,13 @@ function SignatureField({ field, values, uploading, uploadFile, req, errorFieldI
     ctx.strokeStyle = '#111';
     ctx.lineWidth = 2;
     ctx.stroke();
-    dirty.current = true;
+    if (!dirty.current) {
+      // First stroke: mark the field as having drawn-but-unsaved ink so Submit blocks
+      // until it's saved (SIG-2).
+      dirty.current = true;
+      setEmptyHint(false);
+      setSignatureUnsaved?.(field.id, true);
+    }
   };
   const end = () => {
     drawing.current = false;
@@ -1013,12 +1071,26 @@ function SignatureField({ field, values, uploading, uploadFile, req, errorFieldI
     const c = canvasRef.current;
     c?.getContext('2d')?.clearRect(0, 0, c.width, c.height);
     dirty.current = false;
+    setEmptyHint(false);
+    // Nothing to lose once cleared → Submit is no longer blocked on this field.
+    setSignatureUnsaved?.(field.id, false);
   };
   const save = () => {
     const c = canvasRef.current;
-    if (!c || !dirty.current) return;
+    if (!c || !dirty.current) {
+      // Empty canvas → surface a hint instead of a confusing silent no-op (SIG-2b).
+      setEmptyHint(true);
+      return;
+    }
+    setEmptyHint(false);
     c.toBlob((blob) => {
-      if (blob) void uploadFile(field.id, blob, 'signature.png');
+      if (!blob) return;
+      void (async () => {
+        const uploadedKey = await uploadFile(field.id, blob, 'signature.png');
+        // Only clear the unsaved flag once the PNG is actually stored — a failed upload
+        // must keep Submit blocked so the signature can't be silently lost (SIG-2c).
+        if (uploadedKey) setSignatureUnsaved?.(field.id, false);
+      })();
     }, 'image/png');
   };
 
@@ -1035,6 +1107,7 @@ function SignatureField({ field, values, uploading, uploadFile, req, errorFieldI
       ) : (
         <div className="space-y-2">
           <canvas
+            id={field.id}
             ref={canvasRef}
             width={320}
             height={120}
@@ -1058,6 +1131,11 @@ function SignatureField({ field, values, uploading, uploadFile, req, errorFieldI
               Clear
             </button>
           </div>
+          {emptyHint && (
+            <p className="text-[11px] text-amber-600 flex items-center gap-1">
+              <AlertCircle className="h-3 w-3 shrink-0" /> Draw your signature above first.
+            </p>
+          )}
         </div>
       )}
     </Labeled>
@@ -1156,6 +1234,15 @@ function PhoneOtpField({
     }
   };
 
+  // ENR-H3: reset the whole OTP flow so a NEW number forces a fresh Send OTP. Clears the
+  // sent/verified state + the entered code and re-enables the phone input.
+  const changeNumber = () => {
+    setSent(false);
+    setOtp('');
+    setError('');
+    setOtpVerified(false);
+  };
+
   const verify = async () => {
     setVerifying(true);
     setError('');
@@ -1202,7 +1289,10 @@ function PhoneOtpField({
           inputMode="numeric"
           className={inputCls}
           value={typed}
-          disabled={otpVerified}
+          // ENR-H3: once the OTP is sent, LOCK the number until the rep explicitly taps
+          // "Change number" — otherwise they could verify number A's code against an
+          // edited number B, so the recorded consent phone would diverge from the code.
+          disabled={otpVerified || sent}
           placeholder={field.placeholder ?? '10-digit mobile'}
           aria-label={field.label}
           onChange={(e) => setValue(field.id, e.target.value)}
@@ -1225,27 +1315,34 @@ function PhoneOtpField({
               {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Send OTP
             </button>
           ) : (
-            <div className="flex items-center gap-2">
-              <input
-                type="tel"
-                inputMode="numeric"
-                className={inputCls + ' flex-1'}
-                value={otp}
-                placeholder="Enter OTP"
-                aria-label="Enter OTP"
-                onChange={(e) => setOtp(e.target.value)}
-              />
-              <button
-                type="button"
-                onClick={verify}
-                disabled={verifying || otp.length < 4}
-                className="px-3 py-2.5 rounded-xl text-sm font-semibold bg-[var(--brand-primary)] text-white disabled:opacity-40 flex items-center gap-1.5"
-              >
-                {verifying ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Verify
-              </button>
-              <button type="button" onClick={send} disabled={sending} className="text-[10px] text-gray-500 underline">
-                Resend
-              </button>
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2">
+                <input
+                  type="tel"
+                  inputMode="numeric"
+                  className={inputCls + ' flex-1'}
+                  value={otp}
+                  placeholder="Enter OTP"
+                  aria-label="Enter OTP"
+                  onChange={(e) => setOtp(e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={verify}
+                  disabled={verifying || otp.length < 4}
+                  className="px-3 py-2.5 rounded-xl text-sm font-semibold bg-[var(--brand-primary)] text-white disabled:opacity-40 flex items-center gap-1.5"
+                >
+                  {verifying ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Verify
+                </button>
+                <button type="button" onClick={send} disabled={sending} className="text-xs text-gray-500 underline px-2 py-2">
+                  Resend
+                </button>
+              </div>
+              {editable && (
+                <button type="button" onClick={changeNumber} className="text-xs text-gray-500 underline py-1">
+                  Change number
+                </button>
+              )}
             </div>
           )}
         </div>
