@@ -371,6 +371,15 @@ export function SchemeEnrollSheet({
                           {status === 'REJECTED' && t.rejectionReason && (
                             <p className="text-[10px] text-red-500 mt-0.5 truncate">{t.rejectionReason}</p>
                           )}
+                          {/* ENR-M6: an already-submitted target is READ-ONLY for a sales rep
+                              (self-edit is server-disabled; allowEnrollerEdit is false). Say so
+                              plainly + point to the recourse, so the rep doesn't think they can
+                              change it here. No edit control is offered. */}
+                          {status === 'SUBMITTED' && !allowEnrollerEdit && (
+                            <p className="text-[11px] text-gray-500 mt-0.5">
+                              Submitted — contact your admin to correct this enrollment.
+                            </p>
+                          )}
                         </div>
                         {status === 'SUBMITTED' ? (
                           <div className="shrink-0 flex items-center gap-2">

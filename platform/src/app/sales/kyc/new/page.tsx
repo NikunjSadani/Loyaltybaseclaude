@@ -8,7 +8,7 @@ import {
   FileText, Upload, X, AlertCircle, ImageIcon,
   Search, Building2, ChevronDown, Phone,
   Camera, Navigation, Loader2, RefreshCw,
-  PenLine, ShieldCheck, FileDown,
+  PenLine, ShieldCheck, FileDown, Lock,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -122,6 +122,15 @@ const COMPRESS_MAX_DIM  = 1920;
 const TYPE_LABEL: Record<AssignedOutlet['type'], string> = {
   SSS: 'SSS', WHOLESALER: 'Wholesaler', SUB_STOCKIST: 'Sub-Stockist',
 };
+
+/* ─── Field-format validation (mirrors isValidGstin — blank is NOT valid here; the
+ *     caller decides whether blank is "optional/no-error" or "required/missing") ── */
+/** Indian PIN code — exactly 6 digits. */
+const PINCODE_REGEX = /^\d{6}$/;
+/** IFSC — 4 bank letters, a fixed 0, then 6 alphanumerics (e.g. HDFC0001234). */
+const IFSC_REGEX = /^[A-Z]{4}0[A-Z0-9]{6}$/;
+const isValidPincode = (s: string | null | undefined) => !!s && PINCODE_REGEX.test(s.trim());
+const isValidIfsc = (s: string | null | undefined) => !!s && IFSC_REGEX.test(s.trim().toUpperCase());
 
 
 type MobileCheckState = 'idle' | 'checking' | 'ok' | 'outlet_conflict' | 'employee_conflict';
@@ -284,6 +293,10 @@ export default function NewKYCPage() {
 
   /* Assigned outlets (from API) */
   const [assignedOutlets, setAssignedOutlets] = useState<AssignedOutlet[]>([]);
+  /* KYC-M4: track the initial /api/sales/outlets fetch so the picker shows a spinner
+   * while loading and only shows the "no outlets" empty state AFTER it resolves empty
+   * (avoids the false "no outlets" flash on first paint). */
+  const [outletsLoading, setOutletsLoading] = useState(true);
   const [registeredPhones, setRegisteredPhones] = useState<Map<string, { name: string; outletCode: string; parentId: string | null }>>(new Map());
 
   /* Not Interested flow */
@@ -429,7 +442,8 @@ export default function NewKYCPage() {
           setRegisteredPhones(phones);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setOutletsLoading(false));
   }, []);
 
   /* ── Deep-link: ?outletId=<id> auto-selects that assigned outlet once loaded ── */
@@ -480,10 +494,17 @@ export default function NewKYCPage() {
    *  keys (fixes the old mobile/GST-cert/shop-doc mismatches). */
   const isReKYCFlagged = (wizardKey: string) => isWizardFieldFlagged(selectedOutlet?.reKycFlags, wizardKey);
 
+  /** True once the KYC has been submitted (a submissionId exists). After this point the
+   *  form fields must NOT be edited: handleSubmit short-circuits to the OTP step and never
+   *  re-POSTs, so any edit the rep makes after hitting Back from OTP would be silently
+   *  dropped (KYC-M5). We LOCK every editable field in this state instead. */
+  const isSubmitted = submissionId != null;
+
   /** On re-entry with specific field flags, every NON-flagged mapped field/doc is
    *  LOCKED (disabled but pre-filled). A blanket re-KYC (no field flags) or a
-   *  first-time KYC keeps everything editable. */
-  const isFieldLocked = (wizardKey: string) => !isWizardFieldEditable(selectedOutlet?.reKycFlags, wizardKey);
+   *  first-time KYC keeps everything editable — UNTIL the KYC is submitted, after which
+   *  everything locks (KYC-M5: post-submit edits would be silently discarded). */
+  const isFieldLocked = (wizardKey: string) => isSubmitted || !isWizardFieldEditable(selectedOutlet?.reKycFlags, wizardKey);
 
   /* ── Pre-fill partner class from outlet ── */
   useEffect(() => {
@@ -1224,6 +1245,11 @@ export default function NewKYCPage() {
 
   /* ── D: Submit → OTP step ── */
   const handleSubmit = async () => {
+    // KYC-M5: never POST /api/kyc twice for the same completed submission. Once the first
+    // POST has succeeded a submissionId exists; pressing Back from the OTP screen and hitting
+    // submit again must NOT create a second submission — just return to the OTP step (which
+    // has its own Resend). Guards the duplicate-submit path.
+    if (submissionId) { setStep('otp'); return; }
     setSubmitting(true);
     setSubmitError('');
     try {
@@ -1463,18 +1489,27 @@ export default function NewKYCPage() {
         Re-enter required
       </span>
     ) : isFieldLocked(field) ? (
-      <span className="ml-1.5 text-[10px] font-semibold text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded-full border border-gray-200 align-middle">
-        Locked
+      // KYC-M6: unified locked pill (matches the group-PAN lock) + a one-line reason.
+      // Post-submit (KYC-M5) the reason is "Submitted", not re-KYC.
+      <span className="ml-1.5 text-[10px] font-semibold text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded-full border border-gray-200 align-middle">
+        {isSubmitted ? 'Locked — submitted' : 'Locked during re-KYC'}
       </span>
     ) : null;
 
   /* ── FileUploadCard ── */
   const FileUploadCard = ({
-    docKey, label, required, hint, inputRef,
+    docKey, label, required, hint, inputRef, inherited = false, inheritedTestId,
     accept = 'image/*,application/pdf',
   }: {
     docKey: keyof typeof docs; label: string; required?: boolean;
     hint: string; inputRef: React.RefObject<HTMLInputElement | null>; accept?: string;
+    /** KYC-M3: the group's approved document will be attached authoritatively by the
+     *  backend, so this slot isn't required. Soften the `*` and, when nothing has been
+     *  uploaded, show the inherited state instead of an empty required dropzone. */
+    inherited?: boolean;
+    /** KYC-M2: testid stamped on the single inherited-state panel (was on a now-removed
+     *  external note) so the inherited-doc-gate tests still anchor on it. */
+    inheritedTestId?: string;
   }) => {
     const file = docs[docKey];
     // On a field-level re-KYC, a non-flagged doc slot is LOCKED: it stays visible /
@@ -1482,9 +1517,29 @@ export default function NewKYCPage() {
     const locked = isFieldLocked(docKey);
     return (
       <div>
-        <label className={labelCls}>{label} {required && <span className="text-[var(--brand-primary)]">*</span>}</label>
+        <label className={labelCls}>
+          {label}{' '}
+          {required && !inherited && <span className="text-[var(--brand-primary)]">*</span>}
+          {/* KYC-M2: once a file exists (an override upload) this optional marker + the
+              inherited panel below both drop, so the card reads as a normal upload. The
+              inherited fact is stated ONCE, on the panel — not restated here. */}
+          {inherited && !file && <span className="text-[10px] font-medium text-emerald-600">Optional</span>}
+        </label>
         <input ref={inputRef} type="file" accept={accept} className="hidden" disabled={locked} onChange={(e) => handleFileSelect(docKey, e)} />
-        {!file ? (
+        {file ? (
+          <FilePreview file={file} locked={locked} onRemove={() => removeDoc(docKey)} onReplace={() => inputRef.current?.click()} />
+        ) : inherited ? (
+          <button type="button" data-testid={inheritedTestId} disabled={locked} onClick={() => inputRef.current?.click()}
+            className="w-full border-2 border-emerald-200 bg-emerald-50/50 rounded-xl p-4 flex items-center gap-3 text-left hover:bg-emerald-50 transition-colors active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100">
+            <div className="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center shrink-0">
+              <Check className="h-5 w-5 text-emerald-600" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-emerald-700">Using the group&apos;s approved document</p>
+              <p className="text-[11px] text-emerald-600">Tap to upload a different one</p>
+            </div>
+          </button>
+        ) : (
           <button type="button" disabled={locked} onClick={() => inputRef.current?.click()}
             className="w-full border-2 border-dashed border-gray-200 rounded-xl p-4 flex flex-col items-center gap-2 hover:border-[var(--brand-primary)]/40 hover:bg-green-50/30 transition-colors active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-gray-200 disabled:hover:bg-transparent disabled:active:scale-100">
             <div className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center">
@@ -1493,8 +1548,6 @@ export default function NewKYCPage() {
             <p className="text-xs font-medium text-gray-700">Tap to upload</p>
             <p className="text-[11px] text-gray-400">{hint}</p>
           </button>
-        ) : (
-          <FilePreview file={file} locked={locked} onRemove={() => removeDoc(docKey)} onReplace={() => inputRef.current?.click()} />
         )}
       </div>
     );
@@ -1780,7 +1833,12 @@ export default function NewKYCPage() {
   const addressMissing: string[] = [];
   if (!form.address) addressMissing.push('Street address');
   if (!form.city) addressMissing.push('City');
+  // KYC-M2: pincode must be a valid 6-digit code (mirrors the GST format gate) —
+  // empty blocks as "Pincode", a malformed value blocks as "A valid 6-digit pincode".
   if (!form.pincode) addressMissing.push('Pincode');
+  else if (!isValidPincode(form.pincode)) addressMissing.push('A valid 6-digit pincode');
+  // KYC-M1: State is a required `*` field but was never in the gate.
+  if (!form.state) addressMissing.push('State');
   if (addressProofRequired && !docs.shopAddressDoc) addressMissing.push('Address proof');
   if (!docs.storeBoardPhoto) addressMissing.push('Store board photo');
   if (selfDeclarationRequired && !docs.selfDeclaration) addressMissing.push('Signed self-declaration');
@@ -1799,8 +1857,13 @@ export default function NewKYCPage() {
   const bankMissing: string[] = [];
   if (paymentMode === 'bank') {
     if (!form.bankName) bankMissing.push('Bank name');
+    // KYC-M1: Account Holder Name is a required `*` field but was never in the gate.
+    if (!form.accountHolderName) bankMissing.push('Account holder name');
     if (!form.accountNumber) bankMissing.push('Account number');
+    // KYC-M2: IFSC must match the standard format (mirrors the GST format gate) —
+    // empty blocks as "IFSC code", a malformed value blocks as "A valid IFSC code".
     if (!form.ifscCode) bankMissing.push('IFSC code');
+    else if (!isValidIfsc(form.ifscCode)) bankMissing.push('A valid IFSC code');
     if (!docs.cheque && !chequeInherited) bankMissing.push('Cancelled cheque');
   } else {
     if (!form.upiId) bankMissing.push('UPI ID');
@@ -1933,7 +1996,11 @@ export default function NewKYCPage() {
                     </div>
                   </div>
                   <div className="max-h-60 overflow-y-auto divide-y divide-gray-50">
-                    {filteredOutlets.length === 0 ? (
+                    {outletsLoading ? (
+                      <div className="px-4 py-8 flex items-center justify-center gap-2 text-xs text-gray-400">
+                        <Loader2 className="h-4 w-4 animate-spin shrink-0" /> Loading your outlets…
+                      </div>
+                    ) : filteredOutlets.length === 0 ? (
                       <div className="px-4 py-8 text-center text-xs text-gray-400">
                         {startableOutlets.length === 0
                           ? 'No outlets pending KYC — all your assigned outlets are already enrolled or in progress.'
@@ -1974,7 +2041,7 @@ export default function NewKYCPage() {
                     ))}
                   </div>
                   <div className="px-4 py-2 border-t border-gray-100 bg-gray-50">
-                    <p className="text-[11px] text-gray-400">{filteredOutlets.length} of {startableOutlets.length} outlets shown</p>
+                    <p className="text-[11px] text-gray-400">{outletsLoading ? 'Loading outlets…' : `${filteredOutlets.length} of ${startableOutlets.length} outlets shown`}</p>
                   </div>
                 </div>
               )}
@@ -2185,16 +2252,26 @@ export default function NewKYCPage() {
                     claim it was auto-filled from GST (the group PAN is authoritative). */}
                 {form.gstNumber.length >= 12 && !groupPanLocked && <span className="ml-1.5 text-[11px] text-emerald-600 font-normal">● Auto-filled from GST</span>}
                 {groupPanLocked && (
+                  // KYC-M6: unified locked pill (same grey style as the re-KYC lock) + reason.
                   <span
                     data-testid="group-pan-locked-badge"
                     className="ml-1.5 text-[10px] font-semibold text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded-full border border-gray-200 align-middle"
                   >
-                    Group PAN — locked
+                    Locked to the group PAN
                   </span>
                 )}
                 <FlagBadge field="panNumber" />
               </label>
-              <input className={`${inputCls} ${(form.gstNumber.length >= 12 || groupPanLocked) ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : ''} ${flagCls('panNumber')}`}
+              {/* KYC-M6: a locked PAN uses the SAME muted grey look as every other locked
+                  field (re-KYC / bank locks); the emerald tint is reserved for the
+                  non-locked "auto-filled from GST" affordance. */}
+              <input className={`${inputCls} ${
+                groupPanLocked
+                  ? 'bg-gray-50 text-gray-500 cursor-not-allowed'
+                  : form.gstNumber.length >= 12
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : ''
+              } ${flagCls('panNumber')}`}
                 placeholder="AAPFU0939F" value={groupPan ?? form.panNumber} onChange={set('panNumber')}
                 disabled={isFieldLocked('panNumber') || groupPanLocked}
                 readOnly={isFieldLocked('panNumber') || form.gstNumber.length >= 12 || groupPanLocked} />
@@ -2212,13 +2289,11 @@ export default function NewKYCPage() {
                     <RefreshCw className="h-2.5 w-2.5" /> Re-upload required
                   </p>
                 )}
-                <FileUploadCard docKey="businessDoc" label="GST Certificate" required
+                <FileUploadCard docKey="businessDoc" label="GST Certificate" required inherited={gstCertInherited}
+                  inheritedTestId="gst-cert-inherited-note"
                   hint="PDF or image · Max 5 MB · Auto-compressed" inputRef={businessDocRef} />
-                {gstCertInherited && (
-                  <p data-testid="gst-cert-inherited-note" className="text-[11px] text-emerald-600 flex items-center gap-1 mt-1.5">
-                    <Check className="h-3 w-3 shrink-0" /> Inherited from group (approved) — upload only if different.
-                  </p>
-                )}
+                {/* KYC-M2: the standalone "Inherited from group" note was removed — the
+                    inherited state is now shown ONCE, on the FileUploadCard panel. */}
               </div>
               <div className={isReKYCFlagged('ownerPhoto') ? 'rounded-xl border border-amber-300 p-2 bg-amber-50/40' : ''}>
                 {isReKYCFlagged('ownerPhoto') && (
@@ -2264,8 +2339,15 @@ export default function NewKYCPage() {
               </div>
               <div>
                 <label className={labelCls}>Pincode *<FlagBadge field="pincode" /></label>
-                <input className={`${inputCls} ${flagCls('pincode')}`} placeholder="400001" maxLength={6} value={form.pincode} onChange={set('pincode')} inputMode="numeric"
+                <input className={`${inputCls} ${flagCls('pincode')} ${
+                  form.pincode.length > 0 && !isValidPincode(form.pincode)
+                    ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-200/40'
+                    : ''
+                }`} placeholder="400001" maxLength={6} value={form.pincode} onChange={set('pincode')} inputMode="numeric"
                   disabled={isFieldLocked('pincode')} readOnly={isFieldLocked('pincode')} />
+                {form.pincode.length > 0 && !isValidPincode(form.pincode) && (
+                  <p className="text-[11px] text-red-600 mt-1 flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Enter a valid 6-digit pincode</p>
+                )}
               </div>
             </div>
             <div>
@@ -2477,6 +2559,15 @@ export default function NewKYCPage() {
           </CardHeader>
           <CardContent className="space-y-4">
 
+            {/* KYC-M5: the rep hit Back from the OTP screen after submitting. Fields are locked
+                because a re-submit would be silently discarded — tell them why + the recourse. */}
+            {isSubmitted && (
+              <div className="flex items-start gap-2 p-3 rounded-xl bg-gray-50 border border-gray-200 text-xs text-gray-600">
+                <Lock className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                <span>Submitted — details are locked. To change anything, ask an admin to request re-KYC.</span>
+              </div>
+            )}
+
             {/* Re-KYC bank flag notice */}
             {(isReKYCFlagged('bankName') || isReKYCFlagged('accountHolderName') || isReKYCFlagged('accountNumber') || isReKYCFlagged('ifscCode') || isReKYCFlagged('upiId') || isReKYCFlagged('cheque')) && (
               <div className="flex items-start gap-2 p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-700">
@@ -2494,7 +2585,14 @@ export default function NewKYCPage() {
               accountHolderName={form.accountHolderName}
               accountNumber={form.accountNumber}
               ifscCode={form.ifscCode}
-              onFieldChange={(field) => set(field as keyof typeof form)}
+              // KYC-M2: uppercase-normalize IFSC as it's typed (mirrors the GST field) so
+              // the inline error, the gate, and the submitted value all agree on case.
+              onFieldChange={(field) => (e) =>
+                setForm((f) => ({
+                  ...f,
+                  [field]: field === 'ifscCode' ? e.target.value.toUpperCase() : e.target.value,
+                }))
+              }
               disabledFields={{
                 bankName:          isFieldLocked('bankName'),
                 accountHolderName: isFieldLocked('accountHolderName'),
@@ -2519,17 +2617,21 @@ export default function NewKYCPage() {
                     <RefreshCw className="h-2.5 w-2.5" /> Re-upload required
                   </p>
                 )}
-                <FileUploadCard docKey="cheque" label="Cancelled Cheque" required
+                <FileUploadCard docKey="cheque" label="Cancelled Cheque" required inherited={chequeInherited}
+                  inheritedTestId="cheque-inherited-note"
                   hint="Upload a cancelled cheque leaf · PDF or image · Max 5 MB · Auto-compressed"
                   inputRef={chequeRef} />
-                {chequeInherited && (
-                  <p data-testid="cheque-inherited-note" className="text-[11px] text-emerald-600 flex items-center gap-1 mt-1.5">
-                    <Check className="h-3 w-3 shrink-0" /> Inherited from group (approved) — upload only if different.
-                  </p>
-                )}
+                {/* KYC-M2: standalone inherited note removed — stated once on the panel. */}
               </div>
               <p className="text-xs text-gray-400 -mt-1">Used to verify bank account details before payout.</p>
             </BankOrUpiSection>
+
+            {/* KYC-M2: IFSC format hint. The IFSC input lives inside BankOrUpiSection, so the
+                inline error renders here (same style as the GST field); the Continue gate
+                also blocks on a malformed IFSC via bankMissing above. */}
+            {paymentMode === 'bank' && form.ifscCode.length > 0 && !isValidIfsc(form.ifscCode) && (
+              <p className="text-[11px] text-red-600 -mt-2 flex items-center gap-1"><AlertCircle className="h-3 w-3 shrink-0" /> Enter a valid IFSC code (e.g. HDFC0001234)</p>
+            )}
 
             {/* Payment geo status — shown after cheque upload or QR scan */}
             {(docs.cheque || form.upiId) && (
@@ -2701,8 +2803,10 @@ export default function NewKYCPage() {
             <div className="flex gap-3 pt-1">
               <Button variant="outline" className="flex-1" onClick={() => setStep('address')}>← Back</Button>
               <Button variant="primary" className="flex-1" loading={submitting} onClick={handleSubmit}
-                disabled={bankBlocked}>
-                Send OTP to Outlet Owner
+                disabled={!isSubmitted && bankBlocked}>
+                {/* KYC-M5: once submitted the handler only navigates to the OTP step (it never
+                    re-POSTs), so the label reads as navigation, not a re-submit. */}
+                {isSubmitted ? 'Continue to verification →' : 'Send OTP to Outlet Owner'}
               </Button>
             </div>
             <p className="text-[11px] text-gray-400 text-center pt-1">

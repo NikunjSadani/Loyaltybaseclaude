@@ -142,6 +142,10 @@ export function SchemeFormRenderer({
   const [fieldErrors, setFieldErrors] = useState<string[]>([]);
   const [errorFieldId, setErrorFieldId] = useState<string | null>(null);
   const [uploading, setUploading] = useState<Record<string, boolean>>({});
+  // ENR-M2: per-field upload error, keyed by field id. An upload failure surfaces on the
+  // failing field (in addition to the global summary) so the rep knows WHICH field failed
+  // and can retry that field's upload.
+  const [uploadErrors, setUploadErrors] = useState<Record<string, string>>({});
   const [otpVerified, setOtpVerified] = useState(false);
   // SIG-2: signature fields that have strokes but whose PNG hasn't been saved/uploaded
   // yet. Tracked so Submit can block (with a clear message) instead of silently dropping
@@ -182,12 +186,22 @@ export function SchemeFormRenderer({
       opts?: { store?: boolean },
     ): Promise<string | null> => {
       setUploading((u) => ({ ...u, [fieldId]: true }));
+      // ENR-M2: clear any stale per-field error the moment a fresh attempt starts.
+      setUploadErrors((m) => {
+        if (m[fieldId] === undefined) return m;
+        const next = { ...m };
+        delete next[fieldId];
+        return next;
+      });
       try {
         const res = await schemeApi.uploadMedia(schemeId, file, filename);
         if (res.success) {
           if (opts?.store !== false) setValue(fieldId, res.data.key);
           return res.data.key;
         }
+        // ENR-M2: tie the failure to THIS field so the rep sees which upload failed and can
+        // retry it — keep the global summary too (reportError).
+        setUploadErrors((m) => ({ ...m, [fieldId]: res.error }));
         reportError(res.error);
         return null;
       } finally {
@@ -300,11 +314,15 @@ export function SchemeFormRenderer({
       // rendered field id so the user lands on the exact input that needs attention.
       const m = /"([^"]+)"/.exec(errs[0]);
       const firstField = m ? fields.find((f) => f.label === m[1]) : undefined;
-      setErrorFieldId(firstField?.id ?? null);
-      if (firstField && typeof document !== 'undefined') {
+      // ENR-M3: the OTP "not verified" message carries no quoted label, so the regex above
+      // never resolves a field for it. Fall back to the PHONE_OTP field so that error also
+      // scrolls/highlights like every other field error, instead of only showing in the box.
+      const targetId = firstField?.id ?? (otpRequired && !otpVerified ? phoneOtpField?.id ?? null : null);
+      setErrorFieldId(targetId);
+      if (targetId && typeof document !== 'undefined') {
         requestAnimationFrame(() =>
           document
-            .getElementById(firstField.id)
+            .getElementById(targetId)
             ?.scrollIntoView({ behavior: 'smooth', block: 'center' }),
         );
       }
@@ -365,6 +383,7 @@ export function SchemeFormRenderer({
             setValue={setValue}
             prefill={prefill}
             uploading={Boolean(uploading[field.id])}
+            uploadError={uploadErrors[field.id]}
             uploadFile={uploadFile}
             captureGps={captureGps}
             context={context}
@@ -431,6 +450,8 @@ interface FieldRendererProps {
   setValue: (id: string, v: unknown) => void;
   prefill?: Record<string, unknown>;
   uploading: boolean;
+  /** ENR-M2: this field's own upload error (if its last media upload failed). */
+  uploadError?: string;
   uploadFile: (
     fieldId: string,
     file: File | Blob,
@@ -733,7 +754,7 @@ function Labeled({
 // ── Media field (CAMERA / IMAGE / DOCUMENT / UPI_QR_SCAN) ──────────────────────
 
 function MediaField({
-  field, values, uploading, uploadFile, req, accept, capture, icon, errorFieldId,
+  field, values, uploading, uploadError, uploadFile, req, accept, capture, icon, errorFieldId,
 }: FieldRendererProps & {
   req: boolean;
   accept: string;
@@ -741,14 +762,24 @@ function MediaField({
   icon: 'camera' | 'doc';
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  // ENR-M2: keep the last picked file so a failed upload can be retried without re-picking.
+  const lastFileRef = useRef<File | null>(null);
   const key = typeof values[field.id] === 'string' ? (values[field.id] as string) : '';
   const highlight = errorFieldId != null && field.id === errorFieldId;
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) await uploadFile(field.id, file);
+    if (file) {
+      lastFileRef.current = file;
+      await uploadFile(field.id, file);
+    }
     // Allow re-selecting the same file.
     if (inputRef.current) inputRef.current.value = '';
+  };
+
+  // ENR-M2: re-upload the last picked file after a failure (no re-pick needed).
+  const retryUpload = () => {
+    if (lastFileRef.current) void uploadFile(field.id, lastFileRef.current);
   };
 
   const Icon = icon === 'camera' ? Camera : FileText;
@@ -778,6 +809,25 @@ function MediaField({
           {uploading ? 'Uploading…' : icon === 'camera' ? 'Capture photo' : 'Upload file'}
         </button>
       )}
+      {/* ENR-M2: per-field upload error + same-file retry (shown only when nothing stored yet). */}
+      {uploadError && !key && (
+        <div className="mt-2 space-y-1.5">
+          <p className="text-xs text-red-600 flex items-start gap-1.5 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
+            <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
+            Upload failed: {uploadError}
+          </p>
+          {lastFileRef.current && (
+            <button
+              type="button"
+              onClick={retryUpload}
+              disabled={uploading}
+              className="w-full flex items-center justify-center gap-2 py-2 rounded-xl text-sm font-semibold bg-[var(--brand-primary)] text-white disabled:opacity-50"
+            >
+              {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} Retry upload
+            </button>
+          )}
+        </div>
+      )}
       <input
         ref={inputRef}
         type="file"
@@ -804,13 +854,20 @@ function MediaField({
 // NOTE: getUserMedia requires a SECURE CONTEXT (HTTPS or localhost). Staging and prod
 // are both served over HTTPS, so this is satisfied there and in local dev on localhost.
 function CameraField({
-  field, values, setValue, uploading, uploadFile, captureGps, req, errorFieldId,
+  field, values, setValue, uploading, uploadError, uploadFile, captureGps, req, errorFieldId,
 }: FieldRendererProps & { req: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // ENR-M5: re-entrancy guard for openCamera. A ref (not just state) so a synchronous
+  // second tap in the same tick — before React re-renders — is still ignored.
+  const openingRef = useRef(false);
+  // ENR-M2: the last captured frame, kept so a failed upload can be retried without
+  // forcing the rep to re-shoot the photo.
+  const lastBlobRef = useRef<Blob | null>(null);
 
   const [live, setLive] = useState(false);
+  const [opening, setOpening] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -839,11 +896,19 @@ function CameraField({
   }, [live]);
 
   const openCamera = useCallback(async () => {
+    // ENR-M5: ignore repeat taps while an open is already in flight (or the stream is
+    // already live) so we never start a second getUserMedia over the first → orphaned
+    // streams / a stuck camera light.
+    if (openingRef.current || live) return;
     setError(null);
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
       setError('Camera access is required for this field — allow the camera and try again.');
       return;
     }
+    openingRef.current = true;
+    setOpening(true);
+    // Defensively stop any previously-acquired stream before acquiring a new one.
+    stopStream();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' } },
@@ -858,35 +923,25 @@ function CameraField({
       } else {
         setError('Camera access is required for this field — allow the camera and try again.');
       }
+    } finally {
+      openingRef.current = false;
+      setOpening(false);
     }
-  }, []);
+  }, [live, stopStream]);
 
   const cancel = useCallback(() => {
     stopStream();
     setLive(false);
   }, [stopStream]);
 
-  const capture = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return;
-    // Size the canvas to the video's intrinsic frame so the stored image is full-res.
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    // Frame is captured synchronously above — release the camera immediately.
-    stopStream();
-    setLive(false);
-    setCapturing(true);
-    setError(null);
-    canvas.toBlob(
-      async (blob) => {
-        if (!blob) {
-          setCapturing(false);
-          return;
-        }
+  // Upload (+ optional geotag) a captured frame. Extracted so a failed upload can be
+  // retried against the SAME blob (ENR-M2) instead of forcing a re-shoot.
+  const processBlob = useCallback(
+    async (blob: Blob) => {
+      lastBlobRef.current = blob;
+      setCapturing(true);
+      setError(null);
+      try {
         if (field.geotag) {
           // Per-photo geotag: fetch a GPS fix AT SHUTTER TIME, concurrently with the
           // upload. `store: false` — this caller owns the stored shape (`{ key, geo }`).
@@ -894,8 +949,7 @@ function CameraField({
             uploadFile(field.id, blob, 'capture.jpg', { store: false }),
             captureGps(),
           ]);
-          setCapturing(false);
-          if (!uploadedKey) return; // upload failed — error already surfaced (submitError)
+          if (!uploadedKey) return; // upload failed — surfaced per-field (uploadError) + globally
           // D2 accuracy cap: a PRESENT-but-too-imprecise fix rejects the shot. A missing
           // fix (denied / timed out) does NOT block — store `{ key }` and let the backend
           // flag it (geo-fence unverifiable).
@@ -912,17 +966,51 @@ function CameraField({
           }
           setValue(field.id, fix ? { key: uploadedKey, geo: fix } : { key: uploadedKey });
         } else {
-          // Non-geotag CAMERA: unchanged — uploadFile stores the bare key string.
+          // Non-geotag CAMERA: uploadFile stores the bare key string.
           await uploadFile(field.id, blob, 'capture.jpg');
-          setCapturing(false);
         }
+      } finally {
+        setCapturing(false);
+      }
+    },
+    [field.id, field.geotag, field.gpsMaxAccuracy, uploadFile, captureGps, setValue],
+  );
+
+  const capture = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    // Size the canvas to the video's intrinsic frame so the stored image is full-res.
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // Frame is captured synchronously above — release the camera immediately and enter the
+    // busy state SYNCHRONOUSLY (ENR-M1). `processBlob` also sets `capturing` (for the
+    // retry-upload path), but setting it here first closes the shutter→encode gap where
+    // `live` is already false and the fallback "Capture photo" button would otherwise
+    // re-enable and re-open the camera mid-encode.
+    stopStream();
+    setLive(false);
+    setCapturing(true);
+    canvas.toBlob(
+      (blob) => {
+        // Encode failed → nothing to upload; clear the busy state we just set.
+        if (!blob) { setCapturing(false); return; }
+        void processBlob(blob);
       },
       'image/jpeg',
       0.9,
     );
-  }, [field.id, field.geotag, field.gpsMaxAccuracy, stopStream, uploadFile, captureGps, setValue]);
+  }, [stopStream, processBlob]);
 
-  const busy = uploading || capturing;
+  // ENR-M2: re-upload the last captured frame after a failed upload — no re-shoot needed.
+  const retryUpload = useCallback(() => {
+    if (lastBlobRef.current) void processBlob(lastBlobRef.current);
+  }, [processBlob]);
+
+  const busy = uploading || capturing || opening;
 
   return (
     <Labeled field={field} req={req} highlight={highlight}>
@@ -999,6 +1087,33 @@ function CameraField({
             <Camera className="h-4 w-4" /> Retry
           </button>
         </div>
+      ) : uploadError ? (
+        // ENR-M2: the upload of the just-captured frame failed — show it on THIS field and
+        // offer a same-frame retry (re-uploads without re-shooting) or a fresh Retake.
+        <div className="space-y-2">
+          <p className="text-xs text-red-600 flex items-start gap-1.5 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5">
+            <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />
+            Upload failed: {uploadError}
+          </p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={retryUpload}
+              disabled={busy || !lastBlobRef.current}
+              className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold bg-[var(--brand-primary)] text-white disabled:opacity-50"
+            >
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} Retry upload
+            </button>
+            <button
+              type="button"
+              onClick={openCamera}
+              disabled={busy}
+              className="px-4 py-2.5 rounded-xl text-sm bg-gray-100 text-gray-600 flex items-center gap-1.5 disabled:opacity-50"
+            >
+              <Camera className="h-3.5 w-3.5" /> Retake
+            </button>
+          </div>
+        </div>
       ) : (
         <button
           type="button"
@@ -1007,7 +1122,7 @@ function CameraField({
           className="w-full flex items-center justify-center gap-2 py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-500 hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:opacity-50 transition-colors"
         >
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
-          {capturing && !uploading ? 'Tagging location…' : busy ? 'Uploading…' : 'Capture photo'}
+          {opening ? 'Opening camera…' : capturing && !uploading ? 'Tagging location…' : busy ? 'Uploading…' : 'Capture photo'}
         </button>
       )}
       {/* Off-screen canvas — the capture target; never shown to the user. */}
@@ -1018,7 +1133,7 @@ function CameraField({
 
 // ── Signature field (canvas draw → upload PNG → media key) ─────────────────────
 
-function SignatureField({ field, values, uploading, uploadFile, req, errorFieldId, setSignatureUnsaved }: FieldRendererProps & { req: boolean }) {
+function SignatureField({ field, values, uploading, uploadError, uploadFile, req, errorFieldId, setSignatureUnsaved }: FieldRendererProps & { req: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
   const dirty = useRef(false);
@@ -1136,6 +1251,14 @@ function SignatureField({ field, values, uploading, uploadFile, req, errorFieldI
               <AlertCircle className="h-3 w-3 shrink-0" /> Draw your signature above first.
             </p>
           )}
+          {/* ENR-M2: the signature PNG upload failed — surface it here and let "Save signature"
+              (still enabled, canvas intact) retry the same drawing. */}
+          {uploadError && (
+            <p className="text-[11px] text-red-600 flex items-start gap-1 bg-red-50 border border-red-200 rounded-lg px-2 py-1.5">
+              <AlertCircle className="h-3 w-3 shrink-0 mt-0.5" />
+              Upload failed: {uploadError} — tap “Save signature” to retry.
+            </p>
+          )}
         </div>
       )}
     </Labeled>
@@ -1191,6 +1314,12 @@ function GpsField({ field, values, setValue, captureGps, req, errorFieldId }: Fi
 
 // ── Phone-OTP field (D16) ─────────────────────────────────────────────────────
 
+// ENR-M4: resend throttle + code lifetime. 30s between resends (stop spamming the send
+// endpoint); 5-min code TTL after which the field flips to an expired state that only
+// Resend clears. Kept FE-only — the backend still authoritatively validates the code.
+const OTP_RESEND_COOLDOWN_S = 30;
+const OTP_TTL_S = 300;
+
 function PhoneOtpField({
   field, values, setValue, context, subject, otpVerified, setOtpVerified, ownerPhoneMasked, req, prefill, errorFieldId,
 }: FieldRendererProps & { req: boolean }) {
@@ -1203,6 +1332,24 @@ function PhoneOtpField({
   const [locked, setLocked] = useState(outletApproved);
   const [phoneMasked, setPhoneMasked] = useState(ownerPhoneMasked ?? '');
   const [error, setError] = useState('');
+  // ENR-M4: send timestamp drives both the resend cooldown countdown and the code-expiry
+  // state. A single 1s interval (below) derives `cooldown`/`expired` from it and is torn
+  // down on unmount / once verified.
+  const [sentAt, setSentAt] = useState<number | null>(null);
+  const [cooldown, setCooldown] = useState(0);
+  const [expired, setExpired] = useState(false);
+
+  useEffect(() => {
+    if (sentAt == null || otpVerified) return;
+    const tick = () => {
+      const elapsed = Math.floor((Date.now() - sentAt) / 1000);
+      setCooldown(Math.max(0, OTP_RESEND_COOLDOWN_S - elapsed));
+      if (elapsed >= OTP_TTL_S) setExpired(true);
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t); // cleans up on unmount and whenever sentAt/otpVerified changes
+  }, [sentAt, otpVerified]);
   // A per-field LOCKED phone is enforced ONLY when a roster number actually exists for
   // this row (matches the backend: no roster value → falls back to an editable typed
   // number, never a disabled empty input that would dead-end the OTP send).
@@ -1216,6 +1363,11 @@ function PhoneOtpField({
   // read-only. The backend authoritatively OTPs that number on send, so the filler must
   // not be able to type a different one.
   const fieldLocked = !outletApproved && Boolean(field.locked) && hasPrefill;
+  // ENR-M4: the number to echo in the "Code sent to …" confirmation — the server's masked
+  // number when pinned/returned, else the typed number. L1: mask the typed number too
+  // (last 4 only, matching the "••••1234" pinned-owner format) so a rep-typed number is
+  // never echoed back in full.
+  const confirmTo = phoneMasked || (editable && typed ? `••••${typed.slice(-4)}` : '');
 
   const send = async () => {
     setSending(true);
@@ -1229,6 +1381,11 @@ function PhoneOtpField({
       setSent(true);
       setLocked(res.data.locked);
       setPhoneMasked(res.data.phoneMasked);
+      // ENR-M4: (re)start the cooldown + code-lifetime clock and clear any stale entered code.
+      setSentAt(Date.now());
+      setCooldown(OTP_RESEND_COOLDOWN_S);
+      setExpired(false);
+      setOtp('');
     } else {
       setError(res.error);
     }
@@ -1241,6 +1398,10 @@ function PhoneOtpField({
     setOtp('');
     setError('');
     setOtpVerified(false);
+    // ENR-M4: drop the cooldown/expiry clock too — a new number starts fresh.
+    setSentAt(null);
+    setCooldown(0);
+    setExpired(false);
   };
 
   const verify = async () => {
@@ -1264,7 +1425,9 @@ function PhoneOtpField({
   return (
     <Labeled field={field} req={req} locked={Boolean(field.locked) && hasPrefill} highlight={highlight}>
       {outletApproved || locked ? (
-        <div className="flex items-center gap-2 px-3 py-2.5 bg-blue-50 border border-blue-200 rounded-xl">
+        // ENR-M3: carry the field id here too so a failed-submit scroll/focus lands on the
+        // pinned-owner OTP block (this branch renders no input to hold the id otherwise).
+        <div id={field.id} className="flex items-center gap-2 px-3 py-2.5 bg-blue-50 border border-blue-200 rounded-xl">
           <Lock className="h-3.5 w-3.5 text-blue-500 shrink-0" />
           <span className="text-xs text-blue-700 font-medium">
             OTP to owner on file{phoneMasked ? ` (${phoneMasked})` : ''}
@@ -1316,6 +1479,16 @@ function PhoneOtpField({
             </button>
           ) : (
             <div className="space-y-1.5">
+              {/* ENR-M4: confirm the code was sent (and to which number), or that it expired. */}
+              {expired ? (
+                <p className="text-[11px] text-amber-600 flex items-center gap-1">
+                  <AlertCircle className="h-3 w-3 shrink-0" /> Code expired — tap Resend for a new one.
+                </p>
+              ) : (
+                <p className="text-[11px] text-gray-500">
+                  Code sent{confirmTo ? ` to ${confirmTo}` : ''}.
+                </p>
+              )}
               <div className="flex items-center gap-2">
                 <input
                   type="tel"
@@ -1329,13 +1502,21 @@ function PhoneOtpField({
                 <button
                   type="button"
                   onClick={verify}
-                  disabled={verifying || otp.length < 4}
+                  // ENR-M4: an expired code can't be verified — force a Resend first.
+                  disabled={verifying || otp.length < 4 || expired}
                   className="px-3 py-2.5 rounded-xl text-sm font-semibold bg-[var(--brand-primary)] text-white disabled:opacity-40 flex items-center gap-1.5"
                 >
                   {verifying ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Verify
                 </button>
-                <button type="button" onClick={send} disabled={sending} className="text-xs text-gray-500 underline px-2 py-2">
-                  Resend
+                <button
+                  type="button"
+                  onClick={send}
+                  // ENR-M4: throttle resends behind a 30s countdown so the send endpoint
+                  // can't be spammed. Expiry does NOT block resend (only the cooldown does).
+                  disabled={sending || cooldown > 0}
+                  className="text-xs text-gray-500 underline px-2 py-2 disabled:opacity-40 disabled:no-underline whitespace-nowrap"
+                >
+                  {cooldown > 0 ? `Resend in ${cooldown}s` : 'Resend'}
                 </button>
               </div>
               {editable && (

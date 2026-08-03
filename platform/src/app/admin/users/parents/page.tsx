@@ -27,7 +27,7 @@
  * VERBATIM (duplicate code, uniqueness collisions, still-has-children, shared-detail).
  */
 
-import { useState, useEffect, useCallback, useMemo, Fragment } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from 'react';
 import {
   Users2, Plus, Search, X, ChevronDown, ChevronRight, AlertTriangle,
   XCircle, CheckCircle2, BadgeCheck, Building2, Info, Unlink, Loader2,
@@ -301,6 +301,17 @@ function DeactivateModal({
   onClose:   () => void;
 }) {
   const hasChildren = parent.childOutletCount > 0;
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  // Focus the Cancel button on open (a11y: keyboard lands inside the dialog). L4.
+  useEffect(() => { cancelRef.current?.focus(); }, []);
+  // Escape-to-close, guarded so it never cancels a deactivation already in flight. Mirrors the
+  // RST-L4 idiom in SchemeAudienceEditor; kept separate from focus so a `busy` flip can't re-steal
+  // focus. L4.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [busy, onClose]);
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -336,6 +347,7 @@ function DeactivateModal({
           )}
           <div className="flex items-center justify-end gap-2">
             <button
+              ref={cancelRef}
               onClick={() => { if (!busy) onClose(); }}
               disabled={busy}
               className="px-4 py-2 text-sm font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-50"
@@ -348,6 +360,83 @@ function DeactivateModal({
               className="px-4 py-2 text-sm font-semibold bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
             >
               {busy ? 'Deactivating…' : 'Deactivate'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   Un-group confirm modal (mirrors DeactivateModal — un-grouping reverts a child
+   to a standalone partner with its own identity/uniqueness, so it deserves the
+   same friction as Deactivate).
+   ════════════════════════════════════════════════════════════════════════════ */
+
+function UngroupModal({
+  child, busy, error, onConfirm, onClose,
+}: {
+  child:     ChildOutlet;
+  busy:      boolean;
+  error:     string;
+  onConfirm: () => void;
+  onClose:   () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  // Focus the Cancel button on open (a11y: keyboard lands inside the dialog). L4.
+  useEffect(() => { cancelRef.current?.focus(); }, []);
+  // Escape-to-close, guarded so it never cancels an un-group already in flight. Mirrors the
+  // RST-L4 idiom in SchemeAudienceEditor; kept separate from focus so a `busy` flip can't re-steal
+  // focus. L4.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [busy, onClose]);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      role="dialog"
+      aria-modal="true"
+      onClick={() => { if (!busy) onClose(); }}
+    >
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <h2 className="text-base font-semibold text-gray-900">Un-group this outlet?</h2>
+          <button onClick={() => { if (!busy) onClose(); }} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600" aria-label="Close">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="px-6 py-5 space-y-4">
+          <p className="text-sm text-gray-600">
+            This removes <strong className="text-gray-900">{child.name || child.outletCode}</strong> from the group.
+          </p>
+          <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 text-xs text-amber-800">
+            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>This reverts the outlet to a standalone partner (its own identity/uniqueness).</span>
+          </div>
+          {error && (
+            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5 text-xs text-red-700">
+              <XCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <button
+              ref={cancelRef}
+              onClick={() => { if (!busy) onClose(); }}
+              disabled={busy}
+              className="px-4 py-2 text-sm font-medium border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={onConfirm}
+              disabled={busy}
+              className="px-4 py-2 text-sm font-semibold bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+            >
+              {busy ? 'Un-grouping…' : 'Un-group'}
             </button>
           </div>
         </div>
@@ -373,6 +462,9 @@ function ChildOutletsPanel({
   const [error, setError] = useState('');
   const [ungrouping, setUngrouping] = useState<string | null>(null);
   const [rowError, setRowError] = useState('');
+  // Confirm gate — un-grouping reverts a child to a standalone partner, so it is
+  // confirmed (mirrors the Deactivate flow) rather than firing on a single click.
+  const [ungroupTarget, setUngroupTarget] = useState<ChildOutlet | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true); setError('');
@@ -392,10 +484,11 @@ function ChildOutletsPanel({
     setUngrouping(child.outletCode); setRowError('');
     try {
       await apiJson(`/api/admin/outlets/${encodeURIComponent(child.outletCode)}/ungroup`, { method: 'POST' });
+      setUngroupTarget(null);   // close the confirm on success
       await load();       // refresh this group's children
       onUngrouped();      // refresh the parent list (childOutletCount)
     } catch (e) {
-      // Surface the 400 verbatim (child still shares a detail).
+      // Surface the 400 verbatim (child still shares a detail) — keep the modal open.
       setRowError(e instanceof Error ? e.message : 'Could not un-group outlet');
     } finally {
       setUngrouping(null);
@@ -423,11 +516,6 @@ function ChildOutletsPanel({
 
   return (
     <div className="px-4 py-4 space-y-3">
-      {rowError && (
-        <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700">
-          <XCircle className="w-4 h-4 shrink-0" /> {rowError}
-        </div>
-      )}
       {children.length === 0 ? (
         <p className="text-sm text-gray-400 py-2">
           No child outlets in this group yet. Attach outlets by setting this group&apos;s code as their Parent ID in the outlet-master upload.
@@ -460,7 +548,7 @@ function ChildOutletsPanel({
                   <td className="px-4 py-2.5 text-right">
                     <div className="flex flex-col items-end gap-0.5">
                       <button
-                        onClick={() => ungroup(c)}
+                        onClick={() => { setRowError(''); setUngroupTarget(c); }}
                         disabled={!c.canUngroup || ungrouping === c.outletCode}
                         title={c.canUngroup ? 'Remove this outlet from the group' : (c.ungroupBlockReason ?? 'Cannot un-group this outlet')}
                         className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -480,6 +568,20 @@ function ChildOutletsPanel({
             </tbody>
           </table>
         </div>
+      )}
+
+      {ungroupTarget && (
+        <UngroupModal
+          child={ungroupTarget}
+          busy={ungrouping === ungroupTarget.outletCode}
+          error={rowError}
+          onConfirm={() => ungroup(ungroupTarget)}
+          onClose={() => {
+            if (ungrouping) return;   // don't dismiss mid-request
+            setUngroupTarget(null);
+            setRowError('');
+          }}
+        />
       )}
     </div>
   );

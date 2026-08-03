@@ -310,7 +310,7 @@ export interface AdminEnrollmentDetail extends SchemeEnrollment {
    * (H5). Lets the admin drawer render human labels for captured values instead of raw
    * field ids. Optional — absent when captured against a form with no snapshot.
    */
-  formFields?: Array<{ id: string; label: string; type: string }>;
+  formFields?: Array<{ id: string; label: string; type: string; options?: string[] | null; required?: boolean }>;
 }
 
 /** GET :id/prefill-sources — the form-builder "Prefill from" dropdown options (H1). */

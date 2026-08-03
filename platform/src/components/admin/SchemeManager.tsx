@@ -352,13 +352,11 @@ function FormTab({
         showPrefill={showPrefill}
       />
       {errors.length > 0 && (
-        <div className="border border-red-200 bg-red-50 rounded-lg px-3 py-2 space-y-1">
+        <div className="border border-red-200 bg-red-50 rounded-lg px-3 py-2">
           <p className="text-xs font-semibold text-red-600 flex items-center gap-1.5">
-            <AlertCircle className="w-3.5 h-3.5" /> Fix {errors.length === 1 ? 'this' : 'these'} before saving:
+            <AlertCircle className="w-3.5 h-3.5" />
+            {errors.length === 1 ? '1 issue to fix' : `${errors.length} issues to fix`} before saving — see the errors listed above.
           </p>
-          <ul className="list-disc list-inside text-xs text-red-600 space-y-0.5">
-            {errors.map((e, i) => <li key={i}>{e}</li>)}
-          </ul>
         </div>
       )}
       {msg && (

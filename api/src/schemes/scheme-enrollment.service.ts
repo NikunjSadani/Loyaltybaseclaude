@@ -1789,7 +1789,7 @@ export class SchemeEnrollmentService {
         // ids (and can hide display/structural + media/geo fields). Ordered for display.
         formFields: [...(formSnapshot?.fields ?? [])]
           .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-          .map((f) => ({ id: f.id, label: f.label, type: f.type })),
+          .map((f) => ({ id: f.id, label: f.label, type: f.type, options: f.options ?? null, required: f.required ?? false })),
       },
     };
   }

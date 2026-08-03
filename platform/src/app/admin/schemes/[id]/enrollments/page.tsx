@@ -633,7 +633,7 @@ function EnrollmentEditForm({
   onSaved: () => void | Promise<void>;
   onCancel: () => void;
 }) {
-  const fields = useMemo(
+  const fields = useMemo<NonNullable<AdminEnrollmentDetail['formFields']>>(
     () =>
       detail.formFields ??
       Object.keys((detail.formValues ?? {}) as Record<string, unknown>).map((id) => ({ id, label: id, type: 'TEXT' })),
@@ -668,7 +668,11 @@ function EnrollmentEditForm({
           // Any object-valued field (media key, GPS fix) is uneditable regardless of type — this
           // also covers the `formFields`-absent fallback where every field is typed TEXT (B-LOW-1),
           // so a captured media/GPS object never renders as an editable "[object Object]" text box.
-          const isObjectVal = v != null && typeof v === 'object';
+          // EXCEPTION (H2): a MULTI_SELECT value is a `string[]`, which is also `typeof 'object'`.
+          // Left unqualified, every non-empty MULTI_SELECT would be caught here and shown as
+          // uneditable, so the ENR-M7 checkbox editor below would never render for real data. Exempt
+          // ONLY a MULTI_SELECT array — a plain object `{}` / media / GPS object is still caught.
+          const isObjectVal = v != null && typeof v === 'object' && !(f.type === 'MULTI_SELECT' && Array.isArray(v));
           if (UNEDITABLE_FIELD_TYPES.has(f.type) || isObjectVal) {
             const isObj = isObjectVal;
             return (
@@ -692,12 +696,46 @@ function EnrollmentEditForm({
             );
           }
           if (f.type === 'MULTI_SELECT') {
+            // ENR-M7: render options as real checkboxes (mirrors SchemeFormRenderer's
+            // MULTI_SELECT), writing the SAME string[] shape the backend expects — never a
+            // hand-typed comma string. Legacy comma-string values are read tolerantly.
+            //
+            // The H5 formFields snapshot on the wire now carries the declared `options` list
+            // (typed, additive) alongside {id,label,type}. We union any declared options with
+            // the values already selected so nothing captured is lost, and fall back to the
+            // prior comma input only when NO option set can be derived at all (empty enrollment
+            // + no declared options) — no regression.
+            const selected = Array.isArray(v)
+              ? (v as string[])
+              : typeof v === 'string' && v
+                ? v.split(',').map((s) => s.trim()).filter(Boolean)
+                : [];
+            const declared = f.options ?? [];
+            const options = Array.from(new Set([...declared, ...selected]));
+            const toggle = (opt: string) =>
+              set(f.id, selected.includes(opt) ? selected.filter((o) => o !== opt) : [...selected, opt]);
+            if (options.length === 0) {
+              return (
+                <div key={f.id}>
+                  <label htmlFor={`edit-${f.id}`} className="block text-xs font-medium text-gray-700 mb-1">{f.label}</label>
+                  <input id={`edit-${f.id}`} type="text" className={editInputCls} placeholder="comma-separated"
+                    value={selected.join(', ')}
+                    onChange={(e) => set(f.id, e.target.value.split(',').map((s) => s.trim()).filter(Boolean))} />
+                </div>
+              );
+            }
             return (
               <div key={f.id}>
-                <label htmlFor={`edit-${f.id}`} className="block text-xs font-medium text-gray-700 mb-1">{f.label}</label>
-                <input id={`edit-${f.id}`} type="text" className={editInputCls} placeholder="comma-separated"
-                  value={Array.isArray(v) ? (v as string[]).join(', ') : String(v ?? '')}
-                  onChange={(e) => set(f.id, e.target.value.split(',').map((s) => s.trim()).filter(Boolean))} />
+                <label className="block text-xs font-medium text-gray-700 mb-1">{f.label}</label>
+                <div className="space-y-1.5">
+                  {options.map((opt) => (
+                    <label key={opt} className="flex items-center gap-2 text-sm text-gray-700">
+                      <input type="checkbox" checked={selected.includes(opt)}
+                        onChange={() => toggle(opt)} aria-label={`${f.label}: ${opt}`} />
+                      {opt}
+                    </label>
+                  ))}
+                </div>
               </div>
             );
           }
