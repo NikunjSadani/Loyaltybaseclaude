@@ -729,7 +729,7 @@ export function SchemeFormBuilder({
                       </label>
                       <div className="flex items-start gap-2 bg-pink-50 border border-pink-100 rounded-lg px-3 py-2">
                         <Info className="w-3.5 h-3.5 text-pink-400 flex-shrink-0 mt-0.5" />
-                        <p className="text-[11px] text-pink-600">Opens the rear camera on field phones. A server-side watermark (time, geo, outlet code) is applied on capture. When &ldquo;Capture location with this photo&rdquo; is on, each photo also embeds its own GPS fix taken at the moment it is shot.</p>
+                        <p className="text-[11px] text-pink-600">Opens the rear camera on field phones. When &ldquo;Capture location with this photo&rdquo; is on, each photo embeds its own GPS fix taken at the moment it is shot &mdash; the coordinates appear as a &ldquo;(Geo)&rdquo; column in the enrollment report.</p>
                       </div>
                     </div>
                   )}
