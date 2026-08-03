@@ -14,7 +14,7 @@
  * scheme) and re-fetches it after a save.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Filter, Upload, X, AlertCircle, AlertTriangle, Check, CheckCircle, Users,
   FileSpreadsheet, Loader2, Info, Download, RefreshCw, ChevronLeft, ChevronRight, Table2,
@@ -376,6 +376,10 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [removeNotice, setRemoveNotice] = useState<string | null>(null);
+  // One-line note surfaced when a page change clears the page-local bulk selection (RST-L2).
+  const [selectionNote, setSelectionNote] = useState<string | null>(null);
+  // The destructive remove-confirm banner takes keyboard focus on open + binds Escape-to-cancel (RST-L4).
+  const confirmRef = useRef<HTMLDivElement>(null);
 
   // "Show removed" recovery sub-panel — the durable path back for a soft-deleted row.
   const [showRemoved, setShowRemoved] = useState(false);
@@ -383,10 +387,20 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
   const [removedLoading, setRemovedLoading] = useState(false);
   const [removedError, setRemovedError] = useState<string | null>(null);
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  // The removed sub-panel pages independently of the current roster (RST-M1) — mirrors the main pager.
+  const [removedPage, setRemovedPage] = useState(1);
+  const [removedPages, setRemovedPages] = useState(1);
 
   const LIMIT = 25;
 
   const load = async (p: number) => {
+    // Any roster reload (pager, Refresh, or an upload-driven refreshKey bump) moves the
+    // rows out from under an open remove-confirm, which would make confirmStats silently
+    // undercount (H1/M2). Clear the confirm here so a stale confirmIds can never survive a
+    // page change / refresh / upload. Safe in the mount/refreshKey effect: on mount there is
+    // no confirm, and an upload SHOULD dismiss any open confirm.
+    setConfirmIds(null);
+    setRemoveError(null);
     setLoading(true);
     setError(null);
     const res = await schemeApi.getRoster(schemeId, { page: p, limit: LIMIT });
@@ -404,13 +418,18 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
     }
   };
 
-  const loadRemoved = async () => {
+  const loadRemoved = async (p = 1) => {
     setRemovedLoading(true);
     setRemovedError(null);
-    const res = await schemeApi.getRemovedRoster(schemeId, { page: 1, limit: LIMIT });
+    const res = await schemeApi.getRemovedRoster(schemeId, { page: p, limit: LIMIT });
     setRemovedLoading(false);
-    if (res.success) setRemovedRows(res.data.roster);
-    else setRemovedError(res.error);
+    if (res.success) {
+      setRemovedRows(res.data.roster);
+      setRemovedPage(res.data.pagination.page);
+      setRemovedPages(res.data.pagination.pages);
+    } else {
+      setRemovedError(res.error);
+    }
   };
 
   // Refetch on mount, on scheme change, and after each upload (refreshKey bumps).
@@ -428,20 +447,65 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
     if (!res.success) setDownloadError(res.error);
   };
 
-  const toggleRow = (id: string) =>
+  const toggleRow = (id: string) => {
+    setSelectionNote(null);
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  };
   const allOnPageSelected = rows.length > 0 && rows.every((r) => selected.has(r.id));
-  const toggleAll = () =>
+  const toggleAll = () => {
+    setSelectionNote(null);
     setSelected((prev) => {
       const next = new Set(prev);
       if (allOnPageSelected) rows.forEach((r) => next.delete(r.id));
       else rows.forEach((r) => next.add(r.id));
       return next;
     });
+  };
+
+  // Roster-page navigation clears the page-local bulk selection with an explicit note,
+  // rather than silently dropping it (RST-L2).
+  const goToPage = (p: number) => {
+    if (selected.size > 0) {
+      setSelected(new Set());
+      setSelectionNote('Bulk selection was cleared — it applies to one page at a time.');
+    }
+    void load(p);
+  };
+
+  // How many of the rows queued for removal carry a filled enrollment (RST-H1).
+  // A non-null `enrollment` is exactly what the backend counts as `removedWithEnrollment`.
+  // Confirmed ids are always drawn from the current page (per-row or page-local bulk),
+  // so the current `rows` are the authoritative source for the cross-reference.
+  const confirmStats = useMemo(() => {
+    if (!confirmIds) return { total: 0, filled: 0 };
+    const idSet = new Set(confirmIds);
+    const inView = rows.filter((r) => idSet.has(r.id));
+    const filled = inView.filter((r) => r.enrollment != null).length;
+    return { total: confirmIds.length, filled };
+  }, [confirmIds, rows]);
+
+  // On open, move focus to the destructive confirm (RST-L4). Keyed on `confirmIds` ONLY so
+  // it fires once when the banner opens — not again when `removing` flips (which would yank
+  // focus off the Remove button, or away from a freshly-shown removeError, mid-action — M4).
+  useEffect(() => {
+    if (confirmIds) confirmRef.current?.focus();
+  }, [confirmIds]);
+
+  // Bind Escape-to-cancel while a confirm is open. Separate from the focus effect so its
+  // teardown/rebind on the `removing` flip never re-steals focus. The `!removing` guard keeps
+  // Escape from cancelling a remove that is already in flight (RST-L4).
+  useEffect(() => {
+    if (!confirmIds) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !removing) { setConfirmIds(null); setRemoveError(null); }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [confirmIds, removing]);
 
   const toggleRemoved = () => {
     setShowRemoved((prev) => {
@@ -474,7 +538,8 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
       // removed — step back a page in that case.
       const nextPage = rows.length === ids.length && page > 1 ? page - 1 : page;
       await load(nextPage);
-      if (showRemoved) void loadRemoved();
+      // Newly removed rows land on page 1 of the removed view — jump there so they are visible.
+      if (showRemoved) void loadRemoved(1);
     } else {
       setRemoveError(res.error);
     }
@@ -486,8 +551,12 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
     setRemovedError(null);
     const res = await schemeApi.restoreRosterRows(schemeId, [id]);
     setRestoringId(null);
-    if (res.success) { await loadRemoved(); void load(page); }
-    else setRemovedError(res.error);
+    if (res.success) {
+      // Restoring the last row on a removed page leaves it empty — step back a page.
+      const nextRemovedPage = removedRows.length === 1 && removedPage > 1 ? removedPage - 1 : removedPage;
+      await loadRemoved(nextRemovedPage);
+      void load(page);
+    } else setRemovedError(res.error);
   };
 
   return (
@@ -502,7 +571,7 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
             className={`inline-flex items-center gap-1.5 text-xs font-medium rounded-lg px-2.5 py-1 border transition-colors ${showRemoved ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}>
             <Trash2 className="w-3.5 h-3.5" /> {showRemoved ? 'Hide removed' : 'Show removed'}
           </button>
-          <button type="button" onClick={() => void load(page)} disabled={loading}
+          <button type="button" onClick={() => void load(page)} disabled={loading || confirmIds != null}
             className="inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 disabled:opacity-60">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh
           </button>
@@ -527,14 +596,22 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
           <button type="button" onClick={() => setRemoveNotice(null)} className="text-gray-400 hover:text-gray-600"><X className="w-3.5 h-3.5" /></button>
         </p>
       )}
+      {selectionNote && (
+        <p className="text-xs text-gray-600 flex items-start gap-1.5 bg-gray-50 border border-gray-100 rounded-lg px-3 py-2">
+          <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-gray-400" />
+          <span className="flex-1">{selectionNote}</span>
+          <button type="button" onClick={() => setSelectionNote(null)} className="text-gray-400 hover:text-gray-600"><X className="w-3.5 h-3.5" /></button>
+        </p>
+      )}
 
       {/* Removed (recovery) sub-panel — the durable path back for any soft-deleted row */}
       {showRemoved && (
         <div className="border border-gray-200 rounded-xl overflow-hidden">
-          <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center gap-2">
+          <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex flex-wrap items-center gap-x-2 gap-y-0.5">
             <Trash2 className="w-3.5 h-3.5 text-gray-400" />
             <span className="text-xs font-semibold text-gray-700">Removed rows</span>
             <span className="text-xs text-gray-400">— restore to bring the outlet (and any hidden enrollment) back</span>
+            <span className="w-full text-[11px] text-gray-400">Removed stays removed: re-uploading the roster will not bring a removed row back — only Restore does.</span>
           </div>
           {removedError && <p className="text-xs text-red-500 flex items-center gap-1 px-3 py-2"><AlertCircle className="w-3.5 h-3.5" />{removedError}</p>}
           {removedLoading ? (
@@ -542,31 +619,50 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
           ) : removedRows.length === 0 ? (
             <p className="px-3 py-5 text-center text-xs text-gray-400">No removed rows.</p>
           ) : (
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="bg-white text-gray-500 text-left border-b border-gray-100">
-                  <th className="px-3 py-2 font-medium">Outlet ID</th>
-                  <th className="px-3 py-2 font-medium">Outlet Name</th>
-                  <th className="px-3 py-2 font-medium">Removed at</th>
-                  <th className="px-3 py-2 font-medium"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {removedRows.map((r) => (
-                  <tr key={r.id} className="text-gray-700">
-                    <td className="px-3 py-2 font-mono text-[11px]">{r.outletRef}</td>
-                    <td className="px-3 py-2">{r.outletName}</td>
-                    <td className="px-3 py-2 text-gray-500">{r.deletedAt ? new Date(r.deletedAt).toLocaleString('en-IN') : '—'}</td>
-                    <td className="px-3 py-2 text-right">
-                      <button type="button" onClick={() => void doRestore(r.id)} disabled={restoringId === r.id}
-                        className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--brand-primary)] hover:underline disabled:opacity-60">
-                        {restoringId === r.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Undo2 className="w-3.5 h-3.5" />} Restore
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-white text-gray-500 text-left border-b border-gray-100">
+                      <th className="px-3 py-2 font-medium">Outlet ID</th>
+                      <th className="px-3 py-2 font-medium">Outlet Name</th>
+                      <th className="px-3 py-2 font-medium">Removed at</th>
+                      <th className="px-3 py-2 font-medium"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {removedRows.map((r) => (
+                      <tr key={r.id} className="text-gray-700">
+                        <td className="px-3 py-2 font-mono text-[11px]">{r.outletRef}</td>
+                        <td className="px-3 py-2">{r.outletName}</td>
+                        <td className="px-3 py-2 text-gray-500">{r.deletedAt ? new Date(r.deletedAt).toLocaleString('en-IN') : '—'}</td>
+                        <td className="px-3 py-2 text-right">
+                          <button type="button" onClick={() => void doRestore(r.id)} disabled={restoringId != null}
+                            className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--brand-primary)] hover:underline disabled:opacity-60">
+                            {restoringId === r.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Undo2 className="w-3.5 h-3.5" />} Restore
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {removedPages > 1 && (
+                <div className="flex items-center justify-between text-xs text-gray-500 px-3 py-2 border-t border-gray-100">
+                  <span>Page {removedPage} of {removedPages}</span>
+                  <div className="flex items-center gap-2">
+                    <button type="button" onClick={() => void loadRemoved(removedPage - 1)} disabled={removedLoading || removedPage <= 1}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+                      <ChevronLeft className="w-3.5 h-3.5" /> Prev
+                    </button>
+                    <button type="button" onClick={() => void loadRemoved(removedPage + 1)} disabled={removedLoading || removedPage >= removedPages}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+                      Next <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -577,8 +673,8 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
         </p>
       )}
 
-      {/* Bulk-remove action bar (appears with a selection) */}
-      {selected.size > 0 && (
+      {/* Bulk-remove action bar (appears with a selection; hidden while the confirm is up — RST-L1) */}
+      {selected.size > 0 && !confirmIds && (
         <div className="flex items-center justify-between gap-3 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
           <span className="text-xs text-red-700 font-medium">{selected.size} selected</span>
           <div className="flex items-center gap-2">
@@ -594,14 +690,31 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
 
       {/* Remove confirm banner (per-row or bulk) */}
       {confirmIds && (
-        <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3.5">
+        <div ref={confirmRef} tabIndex={-1} role="alertdialog" aria-label="Confirm roster removal"
+          aria-describedby="roster-remove-confirm-desc"
+          className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3.5 focus:outline-none focus:ring-2 focus:ring-amber-300">
           <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
           <div className="flex-1">
             <p className="text-sm font-semibold text-amber-800">
               Remove {confirmIds.length} outlet{confirmIds.length === 1 ? '' : 's'} from the roster?
             </p>
-            <p className="text-xs text-amber-700 mt-0.5">
+            {/* RST-H1 — the actual affected-enrollment count, emphasised red when any are filled. */}
+            {confirmStats.filled > 0 ? (
+              <p className="text-xs font-semibold text-red-600 flex items-start gap-1.5 mt-1 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                {confirmStats.filled} of {confirmStats.total} selected row{confirmStats.total === 1 ? '' : 's'} {confirmStats.filled === 1 ? 'has' : 'have'} a filled enrollment — it will be hidden too.
+              </p>
+            ) : (
+              <p className="text-xs text-amber-700 mt-1">
+                None of the {confirmStats.total} selected row{confirmStats.total === 1 ? '' : 's'} {confirmStats.total === 1 ? 'has' : 'have'} a filled enrollment.
+              </p>
+            )}
+            <p id="roster-remove-confirm-desc" className="text-xs text-amber-700 mt-0.5">
               The row is hidden from every list, export, report and enrollment reach. Any filled enrollment on it is hidden too. This is recoverable — use “Show removed” to restore.
+            </p>
+            {/* RST-H2 — removed stays removed. */}
+            <p className="text-xs text-amber-700 mt-0.5">
+              Removed stays removed: re-uploading the roster will not bring a removed row back — only Restore does.
             </p>
             {removeError && <p className="text-xs text-red-500 flex items-start gap-1.5 mt-1.5"><AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />{removeError}</p>}
             <div className="flex gap-2 mt-2">
@@ -652,7 +765,7 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
                     <td className="px-3 py-2 text-gray-500">{r.taggedSalesUser?.employeeCode ?? '—'}</td>
                     <td className="px-3 py-2">{r.enrollment?.status ?? 'NOT_ENROLLED'}</td>
                     <td className="px-3 py-2 text-right">
-                      <button type="button" onClick={() => { setConfirmIds([r.id]); setRemoveError(null); }} disabled={removing}
+                      <button type="button" onClick={() => { setConfirmIds([r.id]); setRemoveError(null); }} disabled={removing || confirmIds != null}
                         title="Remove from roster"
                         className="inline-flex items-center gap-1 text-gray-400 hover:text-red-500 disabled:opacity-60">
                         <Trash2 className="w-3.5 h-3.5" />
@@ -670,11 +783,11 @@ function CurrentRosterPanel({ schemeId, refreshKey }: { schemeId: string; refres
         <div className="flex items-center justify-between text-xs text-gray-500">
           <span>Page {page} of {pages}</span>
           <div className="flex items-center gap-2">
-            <button type="button" onClick={() => void load(page - 1)} disabled={loading || page <= 1}
+            <button type="button" onClick={() => goToPage(page - 1)} disabled={loading || page <= 1 || confirmIds != null}
               className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
               <ChevronLeft className="w-3.5 h-3.5" /> Prev
             </button>
-            <button type="button" onClick={() => void load(page + 1)} disabled={loading || page >= pages}
+            <button type="button" onClick={() => goToPage(page + 1)} disabled={loading || page >= pages || confirmIds != null}
               className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
               Next <ChevronRight className="w-3.5 h-3.5" />
             </button>
@@ -699,17 +812,23 @@ function RosterUploadPanel({ schemeId, schemeName, onUploaded }: { schemeId: str
   const [taggedEmployeeColumn, setTaggedEmployeeColumn] = useState('');
 
   const doUpload = async (file: File) => {
+    // Re-entrancy guard (RST-M2): a second drop/click while a upload is in flight
+    // must not start an overlapping upload.
+    if (uploading) return;
     setError(null);
     setResult(null);
     setUploading(true);
-    const res = await schemeApi.uploadRoster(schemeId, file, {
-      idColumn: idColumn.trim() || undefined,
-      nameColumn: nameColumn.trim() || undefined,
-      taggedEmployeeColumn: taggedEmployeeColumn.trim() || undefined,
-    });
-    setUploading(false);
-    if (res.success) { setResult(res.data); onUploaded?.(); }
-    else setError(res.error);
+    try {
+      const res = await schemeApi.uploadRoster(schemeId, file, {
+        idColumn: idColumn.trim() || undefined,
+        nameColumn: nameColumn.trim() || undefined,
+        taggedEmployeeColumn: taggedEmployeeColumn.trim() || undefined,
+      });
+      if (res.success) { setResult(res.data); onUploaded?.(); }
+      else setError(res.error);
+    } finally {
+      setUploading(false);
+    }
   };
 
   return (
@@ -743,11 +862,12 @@ function RosterUploadPanel({ schemeId, schemeName, onUploaded }: { schemeId: str
       )}
 
       <div
-        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragOver={(e) => { e.preventDefault(); if (!uploading) setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files[0]; if (f) void doUpload(f); }}
-        onClick={() => fileInputRef.current?.click()}
-        className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors ${dragOver ? 'border-[var(--brand-primary)] bg-green-50' : 'border-gray-300 hover:border-gray-400 bg-gray-50'}`}
+        onDrop={(e) => { e.preventDefault(); setDragOver(false); if (uploading) return; const f = e.dataTransfer.files[0]; if (f) void doUpload(f); }}
+        onClick={() => { if (uploading) return; fileInputRef.current?.click(); }}
+        aria-disabled={uploading}
+        className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors ${uploading ? 'pointer-events-none opacity-60 cursor-default border-gray-300 bg-gray-50' : dragOver ? 'border-[var(--brand-primary)] bg-green-50 cursor-pointer' : 'border-gray-300 hover:border-gray-400 bg-gray-50 cursor-pointer'}`}
       >
         {uploading ? <Loader2 className="w-6 h-6 text-[var(--brand-primary)] mx-auto mb-2 animate-spin" /> : <Upload className="w-6 h-6 text-gray-400 mx-auto mb-2" />}
         <p className="text-sm font-medium text-gray-700">{uploading ? 'Uploading roster…' : 'Drop the roster Excel here'}</p>
