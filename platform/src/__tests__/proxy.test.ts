@@ -162,6 +162,31 @@ describe('proxy — Step 2: passthroughs before auth', () => {
     expect(isNext(res)).toBe(true);
   });
 
+  // Tokenized media/document view endpoints are @Public at the backend (the signed query
+  // token is the sole authority) and are opened from a DOWNLOADED .xlsx with NO session
+  // cookie — the edge auth gate must let them through, else every report image/doc link 401s.
+  it('PUBLIC_PATHS (/api/schemes/media/view) passes through without a token cookie', async () => {
+    const res = await run(makeReq('/api/schemes/media/view?token=t'));
+    expect(isNext(res)).toBe(true);
+    expect(res.status).not.toBe(401);
+    // auth never ran → no injected Bearer (the query token is the authority, not the cookie)
+    expect(fwd(res, 'authorization')).toBeNull();
+  });
+
+  it('PUBLIC_PATHS (/api/kyc/documents/view) passes through without a token cookie', async () => {
+    const res = await run(makeReq('/api/kyc/documents/view?token=t'));
+    expect(isNext(res)).toBe(true);
+    expect(res.status).not.toBe(401);
+    expect(fwd(res, 'authorization')).toBeNull();
+  });
+
+  // Guard against an over-broad startsWith: the LIST/other kyc-documents routes must STILL
+  // require auth — only the exact `/documents/view` public leaf is exempt.
+  it('/api/kyc/documents (list, no /view) is NOT public → 401 without a token', async () => {
+    const res = await run(makeReq('/api/kyc/documents'));
+    expect(res.status).toBe(401);
+  });
+
   it('"/" redirects to /auth/login', async () => {
     const res = await run(makeReq('/'));
     expect(res.status).toBe(307);

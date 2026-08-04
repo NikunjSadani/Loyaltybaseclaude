@@ -34,6 +34,15 @@ const PUBLIC_PATHS = [
   '/auth/login',
   '/api/auth/send-otp',
   '/api/auth/verify-otp',
+  // Tokenized media/document view endpoints (backend @Public — the signed, tenant-scoped,
+  // single-object, expiring `token` query param is the SOLE authority; see
+  // scheme-report.controller `viewMedia` + kyc.controller `viewDocument`). These links are
+  // clicked from a DOWNLOADED .xlsx report (scheme enrollment media; outlet-master KYC docs),
+  // which carries NO session cookie — so the edge auth gate below would 401 them before they
+  // ever reach the @Public backend. They MUST bypass it. (startsWith is safe: the only routes
+  // under either prefix are the two @Public GETs; nothing sensitive shares them.)
+  '/api/schemes/media/view',
+  '/api/kyc/documents/view',
   '/_next',
   '/favicon.ico',
 ]
