@@ -113,15 +113,15 @@ describe('Sales Tasks — real sales-assisted scheme enrollment', () => {
     fireEvent.click(group);
     expect(await screen.findByText('Summer Activation')).toBeInTheDocument();
 
-    // Open the enrollment sheet for the scheme.
-    fireEvent.click(screen.getByRole('button', { name: 'Enroll' }));
+    // Open the enrollment sheet for the scheme (the card button "Select" opens the picker).
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }));
     // The target picker (getSalesTargets) opens.
     expect(await screen.findByText(/Pick the outlet/i)).toBeInTheDocument();
     expect(getSalesTargets).toHaveBeenCalledWith('s1');
     expect(screen.getByText('Sharma Traders')).toBeInTheDocument();
 
-    // Choose the target → formless confirm → enroll.
-    const enrollButtons = screen.getAllByRole('button', { name: 'Enroll' });
+    // Choose the target → formless confirm → enroll (the row button "Select" picks the outlet).
+    const enrollButtons = screen.getAllByRole('button', { name: 'Select' });
     fireEvent.click(enrollButtons[enrollButtons.length - 1]); // the target-row button
 
     const confirm = await screen.findByText('Confirm enrollment');
