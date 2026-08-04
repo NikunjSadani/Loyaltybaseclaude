@@ -1,8 +1,8 @@
 # UI/UX audit — consolidated fix plan (recently-shipped frontend)
 
-> ## ✅ FULLY IMPLEMENTED + ON STAGING (2026-08-03) — ALL 52 findings shipped to `develop`, awaiting owner UAT + cutover
-> Built orchestrated (multi-agent) + **dual-audited (correctness + UI/UX) per phase** + full-gate-green + pushed to `develop`→staging. Commits:
-> **P1** roster-remove `3661a55` · **P2** prod-live HIGH `0e14bdb` · **P3** prod-live MED `6491f0f` · **P4+G1** LOW/a11y+geotag `c9d0f1e`. Gate at each: FE tsc 0 · vitest 2066 · api jest 2195 · nest 0. FE-only + one additive backend projection field (`formFields[].options`, ENR-M7) — **NO migration**.
+> ## ✅ LIVE IN PROD (cutover #23 `ce5267a`, 2026-08-03) — ALL 52 findings shipped + verified in prod
+> Built orchestrated (multi-agent) + **dual-audited (correctness + UI/UX) per phase** + full-gate-green + cut over to prod. Commits:
+> **P1** roster-remove `3661a55` · **P2** prod-live HIGH `0e14bdb` · **P3** prod-live MED `6491f0f` · **P4+G1** LOW/a11y+geotag `c9d0f1e` (rode cutover #23 `ce5267a`; the Enroll→Select rename rode #24 `078c404`). Gate at each: FE tsc 0 · vitest 2066 · api jest 2195 · nest 0. FE-only + one additive backend projection field (`formFields[].options`, ENR-M7) — **NO migration**. The dual audit caught **4 HIGH defects a green gate would have hidden** (ENR-H4 envelope→formless, ENR-M7 dead editor, KYC-M5 post-Back edit-loss, SegmentedControl auto-commit) — all fixed. Owner decisions: D1 = KYC geo HARD block + Retry; H1 = post-submit KYC form locks (corrections via re-KYC).
 >
 > **The dual audit caught 3 HIGH defects a green gate would have hidden** (proof the UI/UX lane is mandatory): (1) P2 ENR-H4 raw-fetch dropped the `{data:{…}}` envelope → every form-bearing scheme would render formless; (2) P3 ENR-M7 checkbox editor was DEAD behind a pre-existing `isObjectVal` guard; (3) P3 KYC-M5 dup-submit guard silently DROPPED post-Back edits on the payout path. Plus a MED money-path a11y footgun (P4 SegmentedControl arrow-key auto-commit of the uniqueness toggle). All fixed + re-gated.
 >

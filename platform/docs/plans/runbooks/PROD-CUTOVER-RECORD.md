@@ -1,5 +1,9 @@
 # Production Cutover — Record (A-9)
 
+> ⚠️ **STALE — as-run entries below STOP at cutover #6 (`c36f6c8`, 2026-07-06).** Cutovers **#7–#24** were not
+> logged here. The **canonical cutover record** (SHAs · payloads · migrations · verification) is now memory
+> **`[[deoleo-go-live-bundle]]`** + the **CUTOVER LEDGER table in `RESUME.md`**. Current prod = **`078c404`** (cutover #24, 2026-08-03).
+>
 > Executed 2026-06-20. This is the **as-run record** of the Deoleo production cutover. The cutover was
 > performed directly (each step gated by an independent adversarial audit) rather than handed off as a
 > runbook; this doc captures exactly what was done so it's reproducible/auditable. Companions:
