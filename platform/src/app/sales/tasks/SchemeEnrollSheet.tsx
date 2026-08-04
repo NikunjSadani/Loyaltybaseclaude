@@ -408,7 +408,7 @@ export function SchemeEnrollSheet({
                             onClick={() => pickTarget(t)}
                             className="shrink-0 text-[12px] font-semibold px-3.5 py-1.5 rounded-xl bg-[var(--brand-primary)] text-white active:opacity-90 transition-opacity"
                           >
-                            Enroll
+                            Select
                           </button>
                         )}
                       </div>

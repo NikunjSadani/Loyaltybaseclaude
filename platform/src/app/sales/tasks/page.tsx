@@ -243,7 +243,7 @@ function SchemeEnrollmentGroup({
                       className="shrink-0 flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-xl bg-emerald-600 text-white active:bg-emerald-700 transition-colors"
                     >
                       <UserCheck className="h-3.5 w-3.5" />
-                      Enroll
+                      Select
                     </button>
                   </div>
                 </div>
