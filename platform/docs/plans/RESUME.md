@@ -11,7 +11,7 @@ Multi-tenant FMCG **trade-loyalty** platform (operator Gifsy; live client Deoleo
 ---
 
 ## 🟢 CURRENT STATE
-> ✅ **prod = main = develop = `078c404` (all in sync). Cutovers #23 (`ce5267a`) + #24 (`078c404`) LIVE + VERIFIED (2026-08-03).** The whole UI/UX audit fix plan (52 findings, P1–P4+G1) + roster-remove + Auth Option B + KYC grouped-child phone fix + per-photo geotag + copy fixes are all LIVE in prod. Migration `20260801120000_scheme_outlet_soft_delete` (additive `scheme_outlets.deletedAt`) applied+verified on prod. **Nothing pending on develop.** Verify HEADs via `git log` — never trust a hardcoded SHA. Full per-cutover detail: memory `[[deoleo-go-live-bundle]]` + the CUTOVER LEDGER table below.
+> ✅ **prod = main = develop = `2a88436` (all in sync). Cutover #25 (`2a88436`) LIVE + VERIFIED (2026-08-04)** — edge fix: the `@Public` tokenized report-link endpoints (`/api/schemes/media/view`, `/api/kyc/documents/view`) were 401'd by the Next.js edge auth gate (`proxy.ts` `PUBLIC_PATHS`) before reaching the backend, so scheme-report image links + outlet-master KYC-doc links only worked in-session; added both to `PUBLIC_PATHS` (FE-only, no migration). Prior: cutovers #23 (`ce5267a`) + #24 (`078c404`) LIVE — the whole UI/UX audit fix plan (52 findings) + roster-remove + Auth Option B + KYC grouped-child phone fix + per-photo geotag; migration `20260801120000_scheme_outlet_soft_delete` applied+verified on prod. **Nothing pending on develop.** Verify HEADs via `git log` — never trust a hardcoded SHA. Full per-cutover detail: memory `[[deoleo-go-live-bundle]]` + the CUTOVER LEDGER table below.
 
 ## ▶▶ WHAT'S NEXT
 - **Only open item = owner-side on-device smoke** (nothing blocks Deoleo): KYC submit-lock behavior + camera/GPS/signature on a real phone + a form-bearing scheme enroll. Everything remotely-verifiable is green.
@@ -29,7 +29,7 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 
 ## GATES (full suites before every push — a red suite SILENTLY skips the staging deploy via `needs: test`)
 `cd api && npx jest --no-coverage` · `cd api && npx nest build` · `cd platform && npx vitest run` ·
-`cd platform && npx tsc --noEmit`. **Latest green (prod/develop `078c404`): FE tsc 0 · vitest 2066 · api jest 2195 · nest 0.**
+`cd platform && npx tsc --noEmit`. **Latest green (prod/develop `2a88436`): FE tsc 0 · vitest 2069 · api jest 2195 · nest 0.**
 - **Deploy ≠ pushed** (a docs-only commit re-tags the image) — verify the serving SHA:
   `gcloud run services describe gifsy-api-staging|gifsy-frontend-staging --region asia-south1 --project gifsy-platform --format='value(spec.template.spec.containers[0].image)'`.
 - FE tsc gotcha: a stale `.next/types` surfaces a phantom `RejectionModal` error (pre-existing,
@@ -81,6 +81,14 @@ done. Own doc + memory consistency in the same pass. The 5 working agreements ar
 - **(17)** a static asset under a NEW `public/` subdir needs the `platform/src/proxy.ts` auth-middleware
   `config.matcher` exclusion — else a no-token page 307's the asset to `/auth/login` (broken image).
   **Local `npm run dev` does NOT reproduce the edge 307 — curl the REAL staging edge.**
+- **(18)** a backend `@Public` `/api/*` endpoint is NOT reachable session-less until its path is ALSO in
+  `platform/src/proxy.ts` `PUBLIC_PATHS` — the edge auth gate 401s any `/api/*` without a `token` cookie
+  BEFORE the request reaches the `@Public` backend. This bit the tokenized report-link endpoints
+  (`/api/schemes/media/view`, `/api/kyc/documents/view`): backend-direct 404 (public, bad token) but
+  through-edge 401, so Excel report image/doc links only worked in-session (fixed #25 `2a88436`). Rule:
+  ANY endpoint meant to be hit from a downloaded file / email / no-session context needs BOTH `@Public`
+  (backend) AND a `PUBLIC_PATHS` entry (edge). `startsWith` matches — keep the entry the exact leaf so a
+  sibling LIST route stays gated. Prove it by curling the REAL edge host (401→404 flip), not the backend.
 - **(IST)** server-local `Date` getters read **UTC in prod** (no TZ in the image) — user-facing IST
   dates MUST go through `api/src/common/ist-date.ts` (`monthYearIST`/`formatDateIST`), or shift by
   `IST_OFFSET_MIN` then read `getUTC*`.
@@ -173,7 +181,8 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[audit
 
 | # | prod SHA | payload (one line) | migration | rollback |
 |---|---|---|---|---|
-| **24** | `078c404` | **CURRENT PROD** (2026-08-03) — scheme "Enroll"→"Select" button rename (Tasks card + outlet-picker row open selection, not enroll); FE-only | none | `ce5267a` |
+| **25** | `2a88436` | **CURRENT PROD** (2026-08-04) — edge fix: add `@Public` tokenized report-link paths (`/api/schemes/media/view`, `/api/kyc/documents/view`) to `proxy.ts` `PUBLIC_PATHS` so scheme-report image + outlet-master KYC-doc links resolve from a downloaded .xlsx with no session (were edge-401'd before reaching the @Public backend); FE-only, +4 proxy tests | none | `078c404` |
+| 24 | `078c404` | (2026-08-03) — scheme "Enroll"→"Select" button rename (Tasks card + outlet-picker row open selection, not enroll); FE-only | none | `ce5267a` |
 | 23 | `ce5267a` | (2026-08-03) — the WHOLE UI/UX audit fix plan (52 findings, P1–P4+G1) + roster-row soft-delete + Auth Option B check-first login OTP + KYC grouped-child shared-phone fix + per-photo geotag + camera-copy correction; dual audit caught 4 HIGH | `20260801120000_scheme_outlet_soft_delete` (additive `scheme_outlets.deletedAt`; applied+verified prod) | `fb996d8` |
 | 22 | `fb996d8` | (2026-07-31) — reactivate pending-outlet leak fix + enrollment Excel report rebuild (public tokenized `/v1/schemes/media/view`) + PARKED remove-from-KYC-queue outlet state + grouped-child GST-cert/cheque doc carry-forward + "Activations/Tasks" rename | `20260731170000_outlet_kyc_intent_parked` (`ADD VALUE 'PARKED'`, additive; applied) | `a83b2f4` |
 | 21 | `a83b2f4` | (2026-07-31) — scheme UAT batches (downline reach, camera-only capture, edit/delete filled enrollment + consent carry-forward, roster export) + child-KYC group-identity prefill + Identity/Payout Uniqueness toggle | `20260730160000_scheme_enrollment_soft_delete` (additive; applied) | `8c08af3` |
