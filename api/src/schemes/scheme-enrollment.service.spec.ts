@@ -73,6 +73,8 @@ const mockMsg91 = { sendOtp: jest.fn() };
 const partnerUser: JwtPayload = { sub: 'u-partner', role: 'SSS', clientId: 'deoleo', phone: '9990001111', name: '' };
 const salesUser: JwtPayload = { sub: 'u-sales', role: 'SALES_SO', clientId: 'deoleo', phone: '', name: '' };
 const adminUser: JwtPayload = { sub: 'u-admin', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: '' };
+// A tenant admin (read-only captured-data access to their OWN tenant, D26).
+const tenantAdminUser: JwtPayload = { sub: 'u-cadmin', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 
 describe('SchemeEnrollmentService', () => {
   let service: SchemeEnrollmentService;
@@ -669,6 +671,10 @@ describe('SchemeEnrollmentService', () => {
     await expect(service.adminListEnrollments(partnerUser, 's1', {})).rejects.toBeInstanceOf(ForbiddenException);
   });
 
+  it('forbids a SALES role from the admin enrollments list (read is admin-only)', async () => {
+    await expect(service.adminListEnrollments(salesUser, 's1', {})).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
   it('adminListEnrollments scopes the roster where with deletedAt: null (removed rows excluded)', async () => {
     mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
     mockPrisma.schemeOutlet.findMany.mockResolvedValue([]);
@@ -676,6 +682,36 @@ describe('SchemeEnrollmentService', () => {
     await service.adminListEnrollments(adminUser, 's1', {});
     const where = mockPrisma.schemeOutlet.findMany.mock.calls[0][0].where;
     expect(where).toMatchObject({ schemeId: 's1', clientId: 'deoleo', deletedAt: null });
+  });
+
+  // ── D26: tenant CLIENT_ADMIN read-only access is ALLOWED but HARD-SCOPED to own tenant ──
+  it('ALLOWS a tenant CLIENT_ADMIN to list — and pins the scheme lookup to their own clientId', async () => {
+    mockPrisma.scheme.findFirst.mockResolvedValue(makeScheme());
+    mockPrisma.schemeOutlet.findMany.mockResolvedValue([]);
+    mockPrisma.schemeOutlet.count.mockResolvedValue(0);
+    await expect(service.adminListEnrollments(tenantAdminUser, 's1', {})).resolves.toBeDefined();
+    // The scheme (hence the whole roster) is loaded ONLY within the caller's tenant.
+    expect(mockPrisma.scheme.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: 's1', clientId: 'deoleo' }) }),
+    );
+  });
+
+  it('cross-tenant isolation: a CLIENT_ADMIN requesting a scheme outside their tenant → NotFound (list)', async () => {
+    // loadScheme applies { clientId: 'deoleo' }; a foreign scheme does not match → null → NotFound.
+    mockPrisma.scheme.findFirst.mockResolvedValue(null);
+    await expect(service.adminListEnrollments(tenantAdminUser, 'foreign-scheme', {})).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('cross-tenant isolation: a CLIENT_ADMIN requesting a foreign scheme detail → NotFound (detail)', async () => {
+    mockPrisma.scheme.findFirst.mockResolvedValue(null);
+    await expect(service.adminGetEnrollment(tenantAdminUser, 'foreign-scheme', 'enr1')).rejects.toBeInstanceOf(NotFoundException);
+    // The detail lookup never runs once the tenant-scoped scheme fails to load.
+    expect(mockPrisma.schemeEnrollment.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('forbids a SALES / partner role from the enrollment DETAIL (read is admin-only)', async () => {
+    await expect(service.adminGetEnrollment(salesUser, 's1', 'enr1')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.adminGetEnrollment(partnerUser, 's1', 'enr1')).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   // ── getEligibleSchemes: mySchemeOutletId (frozen roster vs live-rule) ───────
@@ -918,6 +954,9 @@ describe('SchemeEnrollmentService', () => {
 
     it('CLIENT_ADMIN / tenant user → pinned to own clientId', () => {
       expect(schemeTenant(partnerUser)).toEqual({ clientId: 'deoleo' });
+      // The read-only tenant admin is a non-platformWide caller → pinned like any tenant user,
+      // so their captured-data reads can never cross into another tenant.
+      expect(schemeTenant(tenantAdminUser)).toEqual({ clientId: 'deoleo' });
     });
   });
 

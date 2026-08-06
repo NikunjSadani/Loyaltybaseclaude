@@ -125,6 +125,16 @@ export class SchemeEnrollmentService {
     return user.role === 'GIFSY_ADMIN';
   }
 
+  /**
+   * READ-ONLY captured-data access: the cross-tenant GIFSY operator OR a tenant
+   * CLIENT_ADMIN (read-only view of their OWN tenant's enrollments — schemeTenant()
+   * pins every non-GIFSY caller to their clientId). WRITE gates keep using the
+   * stricter isGifsyAdmin: reject/edit/delete/restore stay Gifsy-only.
+   */
+  private canReadEnrollments(user: JwtPayload): boolean {
+    return user.role === 'GIFSY_ADMIN' || user.role === 'CLIENT_ADMIN';
+  }
+
   // ───────────────────────────────────────────────────────────────────────────
   // Scheme / audience helpers
   // ───────────────────────────────────────────────────────────────────────────
@@ -1681,7 +1691,9 @@ export class SchemeEnrollmentService {
   // ───────────────────────────────────────────────────────────────────────────
 
   async adminListEnrollments(user: JwtPayload, schemeId: string, q: AdminListEnrollmentsQueryDto) {
-    if (!this.isGifsyAdmin(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    // GIFSY_ADMIN or a tenant CLIENT_ADMIN (read-only). loadScheme + the clientId
+    // filter below hard-scope a CLIENT_ADMIN to their OWN tenant's roster.
+    if (!this.canReadEnrollments(user)) throw new ForbiddenException('Forbidden');
     const scheme = await this.loadScheme(user, schemeId);
 
     const page = q.page ?? 1;
@@ -1754,7 +1766,10 @@ export class SchemeEnrollmentService {
   }
 
   async adminGetEnrollment(user: JwtPayload, schemeId: string, enrollmentId: string) {
-    if (!this.isGifsyAdmin(user)) throw new ForbiddenException('Forbidden - Gifsy Admin only');
+    // GIFSY_ADMIN or a tenant CLIENT_ADMIN (read-only). The enrollment lookup is
+    // pinned to a scheme loaded in the caller's tenant → a CLIENT_ADMIN cannot read
+    // another tenant's enrollment (foreign id 404s).
+    if (!this.canReadEnrollments(user)) throw new ForbiddenException('Forbidden');
     const scheme = await this.loadScheme(user, schemeId);
     const enrollment = await this.prisma.schemeEnrollment.findFirst({
       // A soft-deleted enrollment — or one whose roster row was REMOVED — reads as absent

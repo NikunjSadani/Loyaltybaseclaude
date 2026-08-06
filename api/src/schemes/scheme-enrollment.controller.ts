@@ -152,7 +152,7 @@ export class SchemeEnrollmentController {
   // ── Admin: auth-gated media stream (declared BEFORE the :enrollmentId GET so
   //          `media` is not swallowed by the param route). ─────────────────────
   @Get(':id/enrollments/media')
-  @Roles('GIFSY_ADMIN', ...ENROLLER_ROLES)
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN', ...ENROLLER_ROLES)
   @RequirePermission('schemes:read')
   async viewMedia(
     @CurrentUser() user: JwtPayload,
@@ -169,8 +169,11 @@ export class SchemeEnrollmentController {
   }
 
   // ── Admin: captured-data list (D25) ────────────────────────────────────────
+  // GIFSY_ADMIN (cross-tenant) OR a tenant CLIENT_ADMIN read-only. The service
+  // HARD-SCOPES a non-GIFSY caller to their own tenant (loadScheme + clientId
+  // filter), so a CLIENT_ADMIN only ever lists their own tenant's enrollments.
   @Get(':id/enrollments')
-  @Roles('GIFSY_ADMIN')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('schemes:read')
   adminList(
     @CurrentUser() user: JwtPayload,
@@ -193,8 +196,11 @@ export class SchemeEnrollmentController {
   }
 
   // ── Admin: single enrollment detail (values + media + geo + history) ───────
+  // GIFSY_ADMIN OR a tenant CLIENT_ADMIN read-only. The detail lookup is pinned to
+  // a scheme loaded in the caller's tenant, so a CLIENT_ADMIN cannot read another
+  // tenant's enrollment (foreign id → 404). WRITE actions below stay GIFSY-only.
   @Get(':id/enrollments/:enrollmentId')
-  @Roles('GIFSY_ADMIN')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('schemes:read')
   adminGet(
     @CurrentUser() user: JwtPayload,

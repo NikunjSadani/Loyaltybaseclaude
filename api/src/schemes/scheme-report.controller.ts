@@ -116,12 +116,16 @@ export class SchemeReportController {
    * GET /v1/schemes/:id/report/export — xlsx with auth-gated media links (D30).
    *
    * Mounted under `:id/report/...` (NOT `:id/enrollments/...`) so it never shadows
-   * the enrollment stream's `:id/enrollments/:enrollmentId` param route. GIFSY-only:
-   * this export surfaces raw captured values + media links; tenant admins use the
-   * aggregate `:id/report/tenant` (no raw media/formValues).
+   * the enrollment stream's `:id/enrollments/:enrollmentId` param route. Surfaces raw
+   * captured values + media links. GIFSY_ADMIN OR a tenant CLIENT_ADMIN — but the
+   * service HARD-SCOPES a non-GIFSY caller to their OWN tenant (the scheme lookup adds
+   * `clientId: user.clientId`, so a foreign schemeId 404s and the export can only ever
+   * contain the caller's own tenant's enrollments). CLIENT_ADMIN already holds
+   * `schemes:export` (see rbac/can.ts). Tenants also have the aggregate
+   * `:id/report/tenant` for the coverage-only view.
    */
   @Get(':id/report/export')
-  @Roles('GIFSY_ADMIN')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('schemes:export')
   exportEnrollments(
     @CurrentUser() user: JwtPayload,
