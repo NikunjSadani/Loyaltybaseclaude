@@ -22,6 +22,7 @@ import {
   hasReKycFlags, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags,
 } from '@/lib/rekyc-fields';
 import type { EntityType, GSTRegistrationType } from '@/lib/invoice';
+import { kycAgeHrs } from '@/lib/kyc-sla';
 
 // ─── 7-field verification types (shared with approvals page) ─────────────────
 
@@ -90,6 +91,10 @@ interface ApiKycDetail {
   status: string;
   submittedAt?: string | null;
   createdAt?: string;
+  // Decision timestamps — the SLA clock stops at the decision, not "now" (see kycAgeHrs).
+  reviewedAt?: string | null;
+  approvedAt?: string | null;
+  updatedAt?: string | null;
   rejectionReason?: string | null;
   reviewerNotes?: string | null;
   // Rep-declared mismatch between the shop board name and the address-proof name
@@ -307,9 +312,8 @@ function parseGeo(lat: unknown, lng: unknown): { lat: number; lng: number } | nu
 
 function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
   const submittedAt = s.submittedAt ?? s.createdAt ?? '';
-  const ageHrs = submittedAt
-    ? Math.round((Date.now() - new Date(submittedAt).getTime()) / (1000 * 60 * 60))
-    : 0;
+  // SLA clock freezes at the decision once an action is taken (see kycAgeHrs).
+  const ageHrs = kycAgeHrs(submittedAt, s.status, s);
   const docStatusMap: Record<string, 'pending' | 'verified' | 'rejected'> = {
     SUBMITTED: 'pending', APPROVED: 'verified', REJECTED: 'rejected',
   };

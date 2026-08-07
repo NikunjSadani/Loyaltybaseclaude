@@ -16,6 +16,7 @@ import Link from 'next/link';
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
 import { useAdminSession } from '@/lib/admin-session';
+import { kycAgeHrs, KYC_SLA_DEFAULT_HOURS } from '@/lib/kyc-sla';
 import { downloadBlob } from '@/lib/download';
 
 type KYCStatusType = 'PENDING' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
@@ -39,6 +40,10 @@ interface ApiKycSub {
   status: string;
   submittedAt?: string | null;
   createdAt?: string;
+  // Decision timestamps — the SLA clock STOPS at the decision, not at "now".
+  reviewedAt?: string | null; // set when a reviewer acts (reject / request-resubmit / forward)
+  approvedAt?: string | null; // set only on final approval
+  updatedAt?: string | null;  // last-write fallback for a decided row missing the above
   user: { id: string; name: string; phone: string };
   partner?: {
     id: string;
@@ -60,9 +65,9 @@ const DB_STATUS_MAP: Record<string, KYCStatusType> = {
 
 function mapApiKyc(s: ApiKycSub): KYCEntry {
   const submittedAt = s.submittedAt ?? s.createdAt ?? '';
-  const ageMs = submittedAt ? Date.now() - new Date(submittedAt).getTime() : 0;
-  const ageHrs = Math.round(ageMs / (1000 * 60 * 60));
-  const slaBreached = ageHrs > 48;
+  // SLA clock freezes at the decision once an action is taken (see kycAgeHrs).
+  const ageHrs = kycAgeHrs(submittedAt, s.status, s);
+  const slaBreached = ageHrs > KYC_SLA_DEFAULT_HOURS;
   return {
     id:            s.id,
     outletName:    s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
@@ -287,7 +292,7 @@ export default function KYCPage() {
                 </tr>
               ) : (
                 filtered.map((k) => {
-                  const SLA_HRS = 48;
+                  const SLA_HRS = KYC_SLA_DEFAULT_HOURS;
                   const slaPct = Math.min(Math.round((k.ageHrs / SLA_HRS) * 100), 100);
                   const slaBarColor = k.slaBreached ? 'bg-red-400' : k.ageHrs > 36 ? 'bg-amber-400' : 'bg-emerald-400';
                   return (

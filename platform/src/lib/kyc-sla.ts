@@ -53,3 +53,38 @@ export async function saveKycSlaHours(hours: number): Promise<boolean> {
   });
   return res.success;
 }
+
+/* ─── KYC review-SLA AGE ───────────────────────────────────────────────────────
+   The SLA clock measures how long a submission waited for a reviewer decision, so
+   it STOPS once an action has been taken against the line item — a decided row's
+   age is frozen at the decision, never counted forward to "now" (otherwise an
+   Approved/Rejected row keeps climbing for days and falsely reads SLA-breached).
+
+   A still-pending multi-level row can carry a `reviewedAt` (a lower approval level
+   already forwarded it) yet is NOT decided — so we key on the terminal STATUS, not
+   on reviewedAt being present.
+──────────────────────────────────────────────────────────────────────────────── */
+
+// Raw backend statuses where a reviewer action has been taken (clock frozen). Includes
+// the list's RE_KYC_REQUIRED display-override (an approved row re-flagged for re-KYC).
+const DECIDED_STATUSES = new Set([
+  'APPROVED',
+  'REJECTED',
+  'RESUBMISSION_REQUIRED',
+  'RE_KYC_REQUIRED',
+]);
+
+export function kycAgeHrs(
+  submittedAt: string | null | undefined,
+  status: string,
+  decision: { reviewedAt?: string | null; approvedAt?: string | null; updatedAt?: string | null } = {},
+): number {
+  if (!submittedAt) return 0;
+  // Freeze at the decision (approvedAt for an approval; reviewedAt for a reject/resubmit;
+  // updatedAt = last-write fallback for a decided row missing both). Pending → live to now.
+  const decidedAt = DECIDED_STATUSES.has(status)
+    ? decision.approvedAt ?? decision.reviewedAt ?? decision.updatedAt ?? null
+    : null;
+  const endMs = decidedAt ? new Date(decidedAt).getTime() : Date.now();
+  return Math.round(Math.max(0, endMs - new Date(submittedAt).getTime()) / (1000 * 60 * 60));
+}
