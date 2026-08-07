@@ -16,7 +16,7 @@ import Link from 'next/link';
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
 import { useAdminSession } from '@/lib/admin-session';
-import { kycAgeHrs, KYC_SLA_DEFAULT_HOURS } from '@/lib/kyc-sla';
+import { kycAgeHrs, KYC_SLA_DEFAULT_HOURS, fetchKycSlaHours } from '@/lib/kyc-sla';
 import { downloadBlob } from '@/lib/download';
 
 type KYCStatusType = 'PENDING' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
@@ -30,7 +30,6 @@ interface KYCEntry {
   status: KYCStatusType;
   submittedDate: string;
   ageHrs: number;
-  slaBreached: boolean;
 }
 
 /* ─── API mapping ────────────────────────────────────────────────────────────── */
@@ -65,9 +64,9 @@ const DB_STATUS_MAP: Record<string, KYCStatusType> = {
 
 function mapApiKyc(s: ApiKycSub): KYCEntry {
   const submittedAt = s.submittedAt ?? s.createdAt ?? '';
-  // SLA clock freezes at the decision once an action is taken (see kycAgeHrs).
+  // SLA clock freezes at the decision once an action is taken (see kycAgeHrs). The
+  // breach itself is computed at render against the tenant's configured SLA target.
   const ageHrs = kycAgeHrs(submittedAt, s.status, s);
-  const slaBreached = ageHrs > KYC_SLA_DEFAULT_HOURS;
   return {
     id:            s.id,
     outletName:    s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
@@ -77,7 +76,6 @@ function mapApiKyc(s: ApiKycSub): KYCEntry {
     status:        DB_STATUS_MAP[s.status] ?? 'PENDING',
     submittedDate: submittedAt.slice(0, 10),
     ageHrs,
-    slaBreached,
   };
 }
 
@@ -114,6 +112,10 @@ export default function KYCPage() {
   const [statusFilter, setStatusFilter] = useState<KYCStatusType | 'ALL'>('ALL');
   const [exportLoading, setExportLoading] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
+  // The tenant's configured KYC SLA target (working hours); the breach badge/bar key
+  // off this, not a hardcoded 48. Starts at the 48h default and updates once fetched
+  // (fetchKycSlaHours falls back to 48 on any error, so the UI is never blocked).
+  const [slaHours, setSlaHours] = useState<number>(KYC_SLA_DEFAULT_HOURS);
 
   useEffect(() => {
     fetch('/api/kyc?limit=500', { headers: { ...authHeader() } })
@@ -127,6 +129,11 @@ export default function KYCPage() {
       })
       .catch(() => setError('Failed to load KYC submissions'))
       .finally(() => setLoading(false));
+  }, []);
+
+  // Load the tenant's configured KYC SLA target (after the list; falls back to 48h).
+  useEffect(() => {
+    fetchKycSlaHours().then(setSlaHours).catch(() => { /* keep the default */ });
   }, []);
 
   const stats = useMemo(() => ({
@@ -292,11 +299,15 @@ export default function KYCPage() {
                 </tr>
               ) : (
                 filtered.map((k) => {
-                  const SLA_HRS = KYC_SLA_DEFAULT_HOURS;
+                  // Breach against THIS tenant's configured SLA target (slaTargetHours),
+                  // not a hardcoded 48 — falls back to the 48h default while it loads / if unset.
+                  const SLA_HRS = slaHours;
+                  const breached = k.ageHrs > SLA_HRS;
+                  const amber = !breached && k.ageHrs > SLA_HRS * 0.75; // warning band = last 25%
                   const slaPct = Math.min(Math.round((k.ageHrs / SLA_HRS) * 100), 100);
-                  const slaBarColor = k.slaBreached ? 'bg-red-400' : k.ageHrs > 36 ? 'bg-amber-400' : 'bg-emerald-400';
+                  const slaBarColor = breached ? 'bg-red-400' : amber ? 'bg-amber-400' : 'bg-emerald-400';
                   return (
-                  <tr key={k.id} className={`hover:bg-gray-50 transition-colors ${k.slaBreached ? 'border-l-2 border-l-red-400' : ''}`}>
+                  <tr key={k.id} className={`hover:bg-gray-50 transition-colors ${breached ? 'border-l-2 border-l-red-400' : ''}`}>
                     <td className="px-4 py-3">
                       <p className="text-sm font-medium text-gray-900">{k.outletName}</p>
                       {k.ownerName && <p className="text-xs text-gray-400">Owner: {k.ownerName}</p>}
@@ -312,10 +323,10 @@ export default function KYCPage() {
                     <td className="px-4 py-3">
                       <div className="space-y-1 min-w-[72px]">
                         <div className="flex items-center gap-1.5">
-                          <span className={`text-sm font-bold ${k.slaBreached ? 'text-red-600' : k.ageHrs > 36 ? 'text-amber-600' : 'text-gray-700'}`}>
+                          <span className={`text-sm font-bold ${breached ? 'text-red-600' : amber ? 'text-amber-600' : 'text-gray-700'}`}>
                             {k.ageHrs}h
                           </span>
-                          {k.slaBreached && (
+                          {breached && (
                             <span className="text-[9px] font-bold bg-red-100 text-red-600 px-1 py-0.5 rounded">SLA!</span>
                           )}
                         </div>
