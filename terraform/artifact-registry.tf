@@ -9,11 +9,39 @@ resource "google_artifact_registry_repository" "gifsy_images" {
   format        = "DOCKER"
   description   = "Gifsy platform Docker images (api + frontend)"
 
+  # Cleanup policies — MATCHES the live repo (applied out-of-band 2026-07-22 via
+  # gcloud; see [[infra-cost-reduction]]). KEEP rules override DELETE rules. Do NOT
+  # collapse these to a single keep-last-10 — that has no DELETE rule (bloat returns)
+  # and no prod-latest anchor (a >30d prod image could be pruned). Order: keeps first.
   cleanup_policies {
-    id     = "keep-last-10"
+    id     = "keep-prod-latest" # anchor current prod (tag `latest`) unconditionally
+    action = "KEEP"
+    condition {
+      tag_state    = "TAGGED"
+      tag_prefixes = ["latest"]
+    }
+  }
+  cleanup_policies {
+    id     = "keep-recent-30" # rollback floor + current staging (newest 30)
     action = "KEEP"
     most_recent_versions {
-      keep_count = 10
+      keep_count = 30
+    }
+  }
+  cleanup_policies {
+    id     = "delete-untagged" # drop untagged layers older than 7d
+    action = "DELETE"
+    condition {
+      tag_state  = "UNTAGGED"
+      older_than = "604800s"
+    }
+  }
+  cleanup_policies {
+    id     = "delete-old" # 30-day retention window (self-adapting)
+    action = "DELETE"
+    condition {
+      tag_state  = "ANY"
+      older_than = "2592000s"
     }
   }
 

@@ -10,14 +10,14 @@ resource "google_storage_bucket" "uploads" {
   uniform_bucket_level_access = true
 
   cors {
-    # Explicit domains required — wildcard certs/origins are not used after LB removal.
-    # Add new client subdomain here when onboarding: "https://<slug>.gifsy.in"
-    origin = [
-      "https://platform.gifsy.in",
-      "https://api.gifsy.in",
-      "https://deoleo.gifsy.in",
-      "https://clientb.gifsy.in",
-    ]
+    # MATCHES the live bucket (verified 2026-08-04 via `gcloud storage buckets
+    # describe`). Media is served through the API (StreamableFile proxy), not
+    # browser→bucket, so this CORS is effectively vestigial today. An earlier
+    # explicit-origins list was authored here but NEVER applied (live stayed
+    # wildcard + working). If you ever want explicit origins, apply it deliberately
+    # AND include the real tenant host(s) (e.g. deoleoloyalty.gifsy.in), not just
+    # <slug>.gifsy.in.
+    origin          = ["https://*.gifsy.in"]
     method          = ["GET", "PUT", "POST", "DELETE", "HEAD"]
     response_header = ["Content-Type", "x-goog-resumable"]
     max_age_seconds = 3600
