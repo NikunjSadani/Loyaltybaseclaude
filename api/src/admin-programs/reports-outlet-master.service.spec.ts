@@ -1,9 +1,10 @@
 // Unit tests for ReportsService.outletMaster — the 57-column Outlet Master export.
 // Run: npx jest src/admin-programs/reports-outlet-master.service.spec.ts
 //
-// Asserts: the 57 header strings in exact order; the hierarchy-rung mapping by
-// hierarchyLevel.code (a skipped level leaves blanks, not a shift); Profile Status
-// Active/Deactivated; and that a doc cell carries a /api/kyc/documents/view link.
+// Asserts: the 57 header strings in exact order (leading columns mirror the upload
+// template's order); the hierarchy-rung mapping by hierarchyLevel.code (a skipped level
+// leaves blanks, not a shift); the derived Profile Status (real lifecycle stage); and that
+// a doc cell carries a /api/kyc/documents/view link.
 
 import { Test, TestingModule } from '@nestjs/testing';
 import { StreamableFile } from '@nestjs/common';
@@ -15,16 +16,19 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const admin: JwtPayload = { sub: 'a1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 
+// Leading columns mirror the outlet upload template's order (OUTLET_UPLOAD_HEADERS);
+// the hierarchy block + master-only columns follow.
 const EXPECTED_HEADERS = [
-  'Zone', 'Outlet Code', 'Outlet Name', 'Outlet Type', 'Program Name', 'Program Category',
-  'Distributor Code', 'Distributor Name', 'Metro', 'Beat', 'Parent ID',
+  'Outlet Code', 'Outlet Name', 'Program Name', 'Program Category', 'Outlet Type',
+  'Beat', 'Distributor Code', 'Distributor Name', 'Metro', 'City', 'State', 'Zone',
   'XSR ID', 'XSR Name', 'XSR Phone Number',
   'SO ID', 'SO Name', 'SO Phone Number',
   'ASM ID', 'ASM Name', 'ASM Phone Number',
   'RSM ID', 'RSM Name', 'RSM Phone Number',
   'ZNM ID', 'ZNM Name', 'ZNM Phone Number',
   'NSM ID', 'NSM Name', 'NSM Phone Number',
-  'Owner Name', 'Phone Number', 'Address', 'City', 'State', 'Pincode',
+  'Parent ID',
+  'Owner Name', 'Phone Number', 'Address', 'Pincode',
   'Latitude of Outlet Board', 'Longitude of Outlet Board',
   'Enrollment by Employee ID', 'Enrollment by Employee Name', 'Enrollment by Employee Phone Number',
   'Enrollment Date', 'Enrollment Status', 'Profile Status',
@@ -110,7 +114,7 @@ describe('ReportsService.outletMaster (57 columns)', () => {
         outletType: { name: 'SSS' }, programName: 'Prog', programCategory: 'Cat',
         distributorCode: 'D1', distributorName: 'Dist One', metro: 'Metro', beat: 'Beat-7',
         addressLine1: 'A1', addressLine2: 'A2', city: 'Pune', state: 'MH', pincode: '411001',
-        phone: '8000000000', isActive: true, deactivatedAt: null,
+        phone: '8000000000', isActive: true, deactivatedAt: null, kycIntent: null, reKycFlags: null,
         partner: { ownerName: 'Owner One', phone: '7000000000', gstNumber: 'GST123', panNumber: 'PAN123' },
         parent: { partnerCode: 'CPP01' },
       },
@@ -120,6 +124,7 @@ describe('ReportsService.outletMaster (57 columns)', () => {
         distributorCode: null, distributorName: null, metro: null, beat: null,
         addressLine1: null, addressLine2: null, city: 'Pune', state: 'MH', pincode: null,
         phone: null, isActive: false, deactivatedAt: new Date('2026-06-01T00:00:00Z'),
+        kycIntent: null, reKycFlags: null,
         partner: null,
         parent: null,
       },
@@ -179,8 +184,9 @@ describe('ReportsService.outletMaster (57 columns)', () => {
     expect(r1[idx('Parent ID')]).toBe('CPP01');
     expect(r2[idx('Parent ID')]).toBe(''); // no parent group
 
-    // Profile status.
-    expect(r1[idx('Profile Status')]).toBe('Active');
+    // Profile status — o1's latest submission is APPROVED (was a bare "Active"); o2 is
+    // genuinely deactivated (deactivatedAt set), NOT merely never-approved.
+    expect(r1[idx('Profile Status')]).toBe('Approved');
     expect(r2[idx('Profile Status')]).toBe('Deactivated');
 
     // Enrollment + approval employee resolution.
@@ -210,5 +216,79 @@ describe('ReportsService.outletMaster (57 columns)', () => {
     expect(r2[idx('XSR ID')]).toBe('');
     expect(r2[idx('GST Certificate')]).toBe('');
     expect(r2[idx('Deactivated At')]).toBe('2026-06-01');
+  });
+
+  it('derives Profile Status from lifecycle stage (deactivated/parked/re-KYC/approval-level), not a bare active flag', async () => {
+    // Each outlet carries a distinct partner; each partner has ONE submission with the
+    // named status (except the two intent-only / no-submission cases). We then assert the
+    // derived Profile Status per row. Precedence: deactivatedAt > kycIntent > re-KYC > status.
+    type Case = {
+      code: string;
+      deactivatedAt?: Date | null;
+      kycIntent?: string | null;
+      reKycFlags?: unknown;
+      status?: string | null; // undefined = no submission
+      expected: string;
+    };
+    const cases: Case[] = [
+      // deactivatedAt wins even over an APPROVED submission (was active, then turned off).
+      { code: 'C_DEACT', deactivatedAt: new Date('2026-06-01T00:00:00Z'), status: 'APPROVED', expected: 'Deactivated' },
+      { code: 'C_PARK',  kycIntent: 'PARKED',         status: 'PENDING_SO_APPROVAL', expected: 'Parked' },
+      { code: 'C_NI',    kycIntent: 'NOT_INTERESTED', status: null,                  expected: 'Not Interested' },
+      // re-KYC flagged AND not under review → Re-KYC Required; flagged but a fresh
+      // submission is in-flight → the in-flight stage shows through (not Re-KYC Required).
+      { code: 'C_REKYC',    reKycFlags: { gstNumber: true }, status: 'APPROVED',            expected: 'Re-KYC Required' },
+      { code: 'C_REKYC_IF', reKycFlags: { gstNumber: true }, status: 'PENDING_ASM_APPROVAL', expected: 'Awaiting ASM Approval' },
+      { code: 'C_SO',    status: 'PENDING_SO_APPROVAL',  expected: 'Awaiting SO Approval' },
+      { code: 'C_SUB',   status: 'SUBMITTED',            expected: 'Awaiting SO Approval' },
+      { code: 'C_ASM',   status: 'PENDING_ASM_APPROVAL', expected: 'Awaiting ASM Approval' },
+      { code: 'C_RSM',   status: 'PENDING_RSM_APPROVAL', expected: 'Awaiting RSM Approval' },
+      { code: 'C_GIFSY', status: 'PENDING_GIFSY',        expected: 'Awaiting Gifsy Approval' },
+      { code: 'C_APPR',  status: 'APPROVED',             expected: 'Approved' },
+      { code: 'C_REJ',   status: 'REJECTED',             expected: 'Rejected' },
+      { code: 'C_RESUB', status: 'RESUBMISSION_REQUIRED', expected: 'Resubmission Required' },
+      { code: 'C_NONE',  status: null,                   expected: 'KYC Pending' },
+    ];
+
+    mockPrisma.outlet.findMany.mockResolvedValue(
+      cases.map((c, i) => ({
+        id: `id_${i}`, partnerId: c.status != null ? `pt_${i}` : null,
+        zone: 'Z', outletCode: c.code, name: c.code, outletType: null,
+        programName: null, programCategory: null, distributorCode: null, distributorName: null,
+        metro: null, beat: null, addressLine1: null, addressLine2: null, city: null, state: null,
+        pincode: null, phone: null,
+        isActive: c.deactivatedAt ? false : true,
+        deactivatedAt: c.deactivatedAt ?? null,
+        kycIntent: c.kycIntent ?? null,
+        reKycFlags: c.reKycFlags ?? null,
+        partner: null, parent: null,
+      })),
+    );
+    mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+    mockPrisma.salesUser.findMany.mockResolvedValue([]);
+    mockPrisma.kycSubmission.findMany.mockResolvedValue(
+      cases
+        .map((c, i) => ({ c, i }))
+        .filter(({ c }) => c.status != null)
+        .map(({ c, i }) => ({
+          id: `s_${i}`, partnerId: `pt_${i}`, status: c.status,
+          submittedAt: new Date('2026-05-01T00:00:00Z'), createdAt: new Date('2026-05-01T00:00:00Z'),
+          approvedAt: null, rejectionReason: null, reviewerNotes: null,
+          boardPhotoLat: null, boardPhotoLng: null, paymentLat: null, paymentLng: null,
+          user: null, documents: [], statusHistory: [],
+        })),
+    );
+
+    const file = await service.outletMaster(admin);
+    const aoa = await readSheet(file);
+    const headers = aoa[0] as string[];
+    const codeCol = headers.indexOf('Outlet Code');
+    const psCol = headers.indexOf('Profile Status');
+    const byCode = new Map<string, string>();
+    for (let r = 1; r < aoa.length; r++) byCode.set(String(aoa[r][codeCol]), String(aoa[r][psCol]));
+
+    for (const c of cases) {
+      expect(`${c.code}=${byCode.get(c.code)}`).toBe(`${c.code}=${c.expected}`);
+    }
   });
 });

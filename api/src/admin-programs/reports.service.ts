@@ -1,10 +1,11 @@
 import { BadRequestException, Injectable, StreamableFile } from '@nestjs/common';
 import type { Request } from 'express';
-import { Prisma, TicketCategory, TicketPriority, TicketStatus } from '@prisma/client';
+import { OutletKycIntent, Prisma, TicketCategory, TicketPriority, TicketStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { KycService } from '../kyc/kyc.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
+import { isKycInFlight, isReKycPending } from '../common/kyc-rekyc.helper';
 import { PointsLedgerQueryDto, TicketAgingQueryDto } from './dto/reports.dto';
 import {
   aggregateLedgerToRow,
@@ -47,12 +48,29 @@ function dateOnly(d: Date | null | undefined): string {
   return d ? new Date(d).toISOString().split('T')[0] : '';
 }
 
-/** The 57 header keys in exact order — used to seed an empty sheet so headers persist. */
+/**
+ * The 57 header keys in exact order — used to seed an empty sheet so headers persist
+ * AND to project every data row so the sheet's column order is deterministic.
+ *
+ * The LEADING columns mirror the outlet UPLOAD template's column order
+ * (`OUTLET_UPLOAD_HEADERS` in platform/src/lib/outlet-upload.ts) so an admin who fills
+ * the template reads the same left-to-right order back in this master. Only the ORDER is
+ * aligned, not the names: the master keeps its own established report headers where they
+ * differ from the template ("Outlet Code" ≡ template "Outlet ID"; "Distributor Code" ≡
+ * template "Distributor ID"). This is a read-only 57-column report, not a direct upload
+ * source, so renaming its long-standing columns to the template's field names would only
+ * churn the report contract for no gain. The template's single "XSR ID" expands here to the
+ * full XSR→NSM hierarchy block; the template's write-only "Payout Method" has no master
+ * counterpart. Master-only columns (hierarchy names/phones, owner, KYC, geo, docs) follow.
+ */
 const OUTLET_MASTER_HEADERS: string[] = [
-  'Zone', 'Outlet Code', 'Outlet Name', 'Outlet Type', 'Program Name', 'Program Category',
-  'Distributor Code', 'Distributor Name', 'Metro', 'Beat', 'Parent ID',
+  // ── mirror the upload template's order ──
+  'Outlet Code', 'Outlet Name', 'Program Name', 'Program Category', 'Outlet Type',
+  'Beat', 'Distributor Code', 'Distributor Name', 'Metro', 'City', 'State', 'Zone',
   ...RUNGS.flatMap((r) => [`${r} ID`, `${r} Name`, `${r} Phone Number`]),
-  'Owner Name', 'Phone Number', 'Address', 'City', 'State', 'Pincode',
+  'Parent ID',
+  // ── master-only columns ──
+  'Owner Name', 'Phone Number', 'Address', 'Pincode',
   'Latitude of Outlet Board', 'Longitude of Outlet Board',
   'Enrollment by Employee ID', 'Enrollment by Employee Name', 'Enrollment by Employee Phone Number',
   'Enrollment Date', 'Enrollment Status', 'Profile Status',
@@ -61,6 +79,53 @@ const OUTLET_MASTER_HEADERS: string[] = [
   'Latitude of Bank Details Collection', 'Longitude of Bank Details Collection',
   'Remarks', 'GST', 'PAN', 'GST Certificate', 'Address Proof', 'Self-Declaration', 'Deactivated At',
 ];
+
+/**
+ * Derive the outlet's real "Profile Status" for the master export.
+ *
+ * Precedence:
+ *   1. genuinely DEACTIVATED — keyed on `deactivatedAt`, NOT `isActive`. An outlet is created
+ *      `isActive=false` and only flips true at KYC approval, so `isActive`-alone mislabels every
+ *      not-yet-approved outlet as "Deactivated". `deactivatedAt` is set only on a real deactivation
+ *      and cleared on reactivation, so it cleanly separates the two.
+ *   2. outlet-level intent — admin PARKED / rep NOT_INTERESTED.
+ *   3. re-KYC flagged AND no fresh submission currently under review.
+ *   4. the latest KYC submission's pipeline stage (KYC Pending / Awaiting SO|ASM|RSM|Gifsy /
+ *      Approved / Rejected / Resubmission / Re-KYC / Suspended).
+ */
+function profileStatus(
+  outlet: {
+    deactivatedAt: Date | null;
+    kycIntent: OutletKycIntent | null;
+    reKycFlags: Prisma.JsonValue | null;
+  },
+  latest: string | undefined,
+): string {
+  if (outlet.deactivatedAt) return 'Deactivated';
+  if (outlet.kycIntent === OutletKycIntent.PARKED) return 'Parked';
+  if (outlet.kycIntent === OutletKycIntent.NOT_INTERESTED) return 'Not Interested';
+  if (isReKycPending(outlet.reKycFlags) && !isKycInFlight(latest)) return 'Re-KYC Required';
+  switch (latest) {
+    case 'APPROVED':              return 'Approved';
+    case 'REJECTED':              return 'Rejected';
+    case 'RE_KYC_REQUIRED':       return 'Re-KYC Required';
+    case 'RE_UPLOAD_REQUIRED':
+    case 'RESUBMISSION_REQUIRED': return 'Resubmission Required';
+    case 'PENDING_ASM_APPROVAL':  return 'Awaiting ASM Approval';
+    case 'PENDING_RSM_APPROVAL':  return 'Awaiting RSM Approval';
+    case 'PENDING_GIFSY':         return 'Awaiting Gifsy Approval';
+    case 'SUSPENDED':             return 'Suspended';
+    // Submitted / initial-review states (pre-SO routing) and PENDING_SO_APPROVAL all read as
+    // awaiting the first (SO) approval from the ops view.
+    case 'PENDING_SO_APPROVAL':
+    case 'SUBMITTED':
+    case 'UNDER_REVIEW':
+    case 'PENDING_PENNY_DROP':
+    case 'PENDING_AGREEMENT':     return 'Awaiting SO Approval';
+    // No submission / draft / not-interested-status → still pending from the ops view.
+    default:                      return 'KYC Pending';
+  }
+}
 
 /** A single all-empty row carrying every header key, so an empty export still has the 57 columns. */
 function emptyOutletMasterRow(): Record<string, unknown> {
@@ -127,6 +192,8 @@ export class ReportsService {
         phone: true,
         isActive: true,
         deactivatedAt: true,
+        kycIntent: true,
+        reKycFlags: true,
         partner: {
           select: {
             ownerName: true,
@@ -284,8 +351,9 @@ export class ReportsService {
       row['Enrollment Date'] = dateOnly(sub?.submittedAt ?? sub?.createdAt);
       row['Enrollment Status'] = sub?.status ?? '';
 
-      // 42 profile status.
-      row['Profile Status'] = o.isActive ? 'Active' : 'Deactivated';
+      // Profile status — the outlet's real lifecycle stage, not a bare active/inactive flag
+      // (see profileStatus: isActive-alone mislabels every not-yet-approved outlet as Deactivated).
+      row['Profile Status'] = profileStatus(o, sub?.status);
 
       // 43-45 sales approver (the actor who moved the submission to PENDING_GIFSY /
       // sales-side APPROVED). Resolved from KycStatusHistory.changedByUserId.
@@ -324,9 +392,12 @@ export class ReportsService {
       return row;
     });
 
-    // Guarantee the 57 headers exist (and in order) even when outlets is empty:
-    // buildXlsx derives the header row from the first object's keys.
-    const sheetRows = rows.length ? rows : [emptyOutletMasterRow()];
+    // Project every row through OUTLET_MASTER_HEADERS so the sheet's COLUMN ORDER is exactly
+    // that list regardless of the assignment order above (json_to_sheet derives the header row
+    // from the first object's key order). Also guarantees the 57 columns when outlets is empty.
+    const orderRow = (r: Record<string, unknown>): Record<string, unknown> =>
+      Object.fromEntries(OUTLET_MASTER_HEADERS.map((h) => [h, r[h] ?? '']));
+    const sheetRows = (rows.length ? rows : [emptyOutletMasterRow()]).map(orderRow);
 
     const buffer = buildXlsx([{ name: 'Outlet Master', rows: sheetRows }]);
     const today = new Date().toISOString().split('T')[0];
