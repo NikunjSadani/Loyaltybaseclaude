@@ -1099,9 +1099,13 @@ describe('AdminOutletsService', () => {
       );
     });
 
-    it('deactivate throws when no active outlets match', async () => {
+    it('deactivate returns { deactivated: 0, notFound } (benign no-op, not a throw) when no active outlets match', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([]);
-      await expect(service.deactivate(admin, { outletCodes: ['OUT-X'] })).rejects.toBeInstanceOf(BadRequestException);
+      const res = await service.deactivate(admin, { outletCodes: ['OUT-X'] });
+      expect(res.deactivated).toBe(0);
+      expect(res.notFound).toEqual(['OUT-X']);
+      // No transaction/write runs on the zero-match path.
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     });
 
     it('revokes the live sessions of a partner whose LAST active outlet is deactivated', async () => {

@@ -1271,7 +1271,14 @@ export class AdminOutletsService {
     });
 
     if (outlets.length === 0) {
-      throw new BadRequestException('No active outlets found for the given outlet codes');
+      // Benign no-op (nothing active among these codes) — return zero + notFound rather than a 400,
+      // consistent with park()/unpark(), so a multi-batch deactivate isn't aborted (and earlier
+      // batches discarded) by an all-no-op tail. No write happens.
+      return {
+        deactivated: 0,
+        notFound: outletCodes,
+        message: `0 outlet(s) deactivated. ${outletCodes.length} code(s) not found or already inactive.`,
+      };
     }
 
     const activeIds = outlets.map((o) => o.id);
