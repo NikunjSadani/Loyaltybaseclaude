@@ -178,7 +178,7 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
 `GO-LIVE-ISSUE-LIST.md` (⭐ master tracker) · memories **[[deoleo-go-live-bundle]]** (FIRST for any
 launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[audit-every-build-item]] ·
 [[scheme-data-collection]] · [[visibility-posm]] · [[partner-multi-outlet]] · [[staging-deploy-gate]] ·
-[[migration-model]] · [[e2e-harness]]. Full cutover as-run record = `runbooks/PROD-CUTOVER-RECORD.md`.
+[[migration-model]] · [[e2e-harness]]. **Authoritative cutover record = the CUTOVER LEDGER below (#14–#27) + `[[deoleo-go-live-bundle]]` (#1–13 + per-cutover detail).** (`runbooks/PROD-CUTOVER-RECORD.md` is a historical as-run log, detailed only through ~#6 — not maintained since; the ledger + memory are the source of truth.)
 
 ## CUTOVER LEDGER (compact — full detail in `[[deoleo-go-live-bundle]]`)
 
@@ -199,4 +199,4 @@ launch/UAT/staging/cutover work — holds the full NEWEST chronology) · [[audit
 | 15 | `bda9bf3` | (2026-07-27) — SCHEME data-collection instrument live (Gifsy-admin roster + form-builder + immutable versioned submissions; no reward engine) | `20260725120000_scheme_data_collection` (destructive-but-guarded, 0-row abort-guard) | `eca351e` |
 | 14 | `eca351e` | (2026-07-24) — PARTNER→MULTI-OUTLET Waves 1–4 (uniqueness engine + parent entity + admin grouping + re-KYC-at-approval + login picker + child-KYC prefill; opt-in DORMANT) | 4 additive migrations (all applied+verified) | `2187498` |
 
-Earlier cutovers #1–#13: see `[[deoleo-go-live-bundle]]` + `runbooks/PROD-CUTOVER-RECORD.md`.
+Earlier cutovers #1–#13: see `[[deoleo-go-live-bundle]]` (`runbooks/PROD-CUTOVER-RECORD.md` covers only ~#1–6, deprecated).
