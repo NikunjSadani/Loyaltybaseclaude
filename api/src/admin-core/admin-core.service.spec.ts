@@ -534,7 +534,7 @@ describe('AdminCoreService', () => {
       // Values come from auth.constants (single source of truth) + env JWT TTL.
       expect(res.settings).toMatchObject({
         refreshTtlDays: 30,
-        assumedSessionTtlHours: 24,
+        assumedSessionTtlHours: 168,
         otpExpiryMinutes: 10,
         maxOtpAttempts: 3,
         otpResendWindowHours: 1,
