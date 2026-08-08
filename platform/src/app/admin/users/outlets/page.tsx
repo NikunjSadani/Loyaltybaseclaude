@@ -69,6 +69,54 @@ interface Pagination {
 
 const PAGE_SIZE = 50;
 
+// The backend caps every outlet bulk endpoint at 500 rows/request (a transaction-scale safety
+// valve, not a real limit). We hide that entirely: any upload is POSTed in sequential 500-row
+// batches, so no row cap ever surfaces in the UI. Outlet Master already did this inline; this
+// shared helper gives Re-KYC / Deactivate / Park / Un-park (and the master's un-park step) the same.
+const UPLOAD_BATCH_SIZE = 500;
+
+async function postInBatches<T>(
+  url: string,
+  items: T[],
+  buildBody: (batch: T[]) => unknown,
+  onProgress?: (done: number, total: number) => void,
+): Promise<
+  | { ok: true; data: Record<string, unknown>[] }
+  | { ok: false; message: string; appliedBatches: number; totalBatches: number }
+> {
+  const batches = chunkArray(items, UPLOAD_BATCH_SIZE);
+  const data: Record<string, unknown>[] = [];
+  for (let b = 0; b < batches.length; b++) {
+    onProgress?.(b, batches.length);
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildBody(batches[b])),
+      });
+    } catch {
+      return { ok: false, message: 'Network error — please try again', appliedBatches: b, totalBatches: batches.length };
+    }
+    if (!res.ok) {
+      let message = `Request failed (${res.status})`;
+      try { const j = await res.json(); message = j?.error ?? j?.message ?? message; } catch { /* non-JSON body */ }
+      return { ok: false, message, appliedBatches: b, totalBatches: batches.length };
+    }
+    const j = await res.json().catch(() => null);
+    data.push((j?.data ?? j ?? {}) as Record<string, unknown>);
+  }
+  return { ok: true, data };
+}
+
+/** Suffix appended to a batched-upload error when some batches already succeeded, so the admin
+ *  knows to re-upload only the remainder rather than the whole file. */
+function batchRemainderNote(appliedBatches: number): string {
+  return appliedBatches > 0
+    ? ` (${appliedBatches} batch${appliedBatches > 1 ? 'es' : ''} of 500 already applied — re-upload the remaining rows.)`
+    : '';
+}
+
 interface MockOutlet {
   outletId:        string;
   outletName:      string;
@@ -368,7 +416,7 @@ function UploadSection({
           <Upload className="w-8 h-8 text-gray-300" />
           <div className="text-center">
             <p className="text-sm font-medium text-gray-700">Drop your XLSX file here or click to browse</p>
-            <p className="text-xs text-gray-400 mt-1">Only .xlsx format accepted · Max 500 rows</p>
+            <p className="text-xs text-gray-400 mt-1">Only .xlsx format accepted · Large files upload automatically in batches</p>
           </div>
         </button>
       )}
@@ -475,6 +523,24 @@ export default function OutletsPage() {
   // "Download Outlet Master" (server export) state — surfaced so a failure is
   // visible instead of the button silently doing nothing.
   const [masterDownloadState, setMasterDownloadState] = useState<'idle' | 'loading' | 'error'>('idle');
+  // "Download Parked Outlets" (Parked/Removed tab) state.
+  const [parkedDownloadState, setParkedDownloadState] = useState<'idle' | 'loading' | 'error'>('idle');
+
+  // The tenant's owner-group parent codes (partnerCode), for validating the Outlet Master
+  // upload's Parent ID column upfront. `null` = not yet loaded (validation skips Parent ID and
+  // lets the backend catch it); a Set (possibly empty) = loaded and enforced.
+  const [parentCodes, setParentCodes] = useState<Set<string> | null>(null);
+
+  // When the Outlet Master upload targets PARKED outlets, the admin can opt (explicitly, default
+  // OFF) to un-park them as part of applying the upload — otherwise they stay hidden.
+  const [unparkOnApply, setUnparkOnApply] = useState(false);
+
+  // Batched-upload progress notes for the non-master uploads (null = idle). Shown on the confirm
+  // button as "Uploading batch X of Y…" so a large multi-batch upload doesn't look frozen.
+  const [rekycProgress,      setRekycProgress]      = useState<string | null>(null);
+  const [deactivateProgress, setDeactivateProgress] = useState<string | null>(null);
+  const [parkProgress,       setParkProgress]       = useState<string | null>(null);
+  const [unparkProgress,     setUnparkProgress]     = useState<string | null>(null);
 
   // Tenant-config load status. The upload validators key on outletTypes (+ the
   // employee hierarchy); validating BEFORE these load — or when the config fetch
@@ -549,6 +615,19 @@ export default function OutletsPage() {
       .then(j => { if (j.success && Array.isArray(j.data.employees)) setEmployees(j.data.employees); })
       .catch(() => {})
       .finally(() => setEmployeesLoaded(true));
+    // Owner-group parent codes — used to validate the Outlet Master Parent ID column upfront.
+    // On failure `parentCodes` stays null, so Parent ID validation is skipped (backend still checks)
+    // rather than false-rejecting a legitimate code.
+    fetch('/api/admin/parents')
+      .then(r => r.json())
+      .then(j => {
+        if (j.success && Array.isArray(j.data?.parents)) {
+          setParentCodes(new Set<string>(
+            j.data.parents.map((p: { partnerCode?: string }) => (p.partnerCode ?? '').trim()).filter(Boolean),
+          ));
+        }
+      })
+      .catch(() => { /* leave null → skip Parent ID validation, backend still enforces */ });
   }, [loadAllOutlets]);
 
   // ── Debounced page load on search / filter / page change ──
@@ -592,14 +671,21 @@ export default function OutletsPage() {
     rekyc:       allOutlets.filter(o => o.kycStatus === 'RE_KYC_REQUIRED').length,
   }), [allOutlets]);
 
+  // Count of OK rows in the master upload that target a PARKED outlet — drives the parked
+  // warning banner + the explicit "un-park these & apply" toggle.
+  const parkedOkCount = useMemo(
+    () => outletValidation?.rows.filter(r => r.status === 'OK' && r.parked).length ?? 0,
+    [outletValidation],
+  );
+
   // ── Tab switch — resets upload state to prevent stale panels ──
   const handleTabSwitch = useCallback((tabId: TabId) => {
     setActiveTab(tabId);
-    setOutletValidation(null);    setOutletParsedRows([]); setOutletUploadState('idle');     setOutletSubmitError(null); setOutletUploadProgress(null);
-    setRekycValidation(null);     setRekycParsedRows([]); setRekycUploadState('idle');         setRekycSubmitError(null);
-    setDeactivateValidation(null); setDeactivateUploadState('idle');                          setDeactivateSubmitError(null);
-    setParkValidation(null);   setParkUploadState('idle');   setParkSubmitError(null);   setParkResult(null);
-    setUnparkValidation(null); setUnparkUploadState('idle'); setUnparkSubmitError(null); setUnparkResult(null);
+    setOutletValidation(null);    setOutletParsedRows([]); setOutletUploadState('idle');     setOutletSubmitError(null); setOutletUploadProgress(null); setUnparkOnApply(false);
+    setRekycValidation(null);     setRekycParsedRows([]); setRekycUploadState('idle');         setRekycSubmitError(null); setRekycProgress(null);
+    setDeactivateValidation(null); setDeactivateUploadState('idle');                          setDeactivateSubmitError(null); setDeactivateProgress(null);
+    setParkValidation(null);   setParkUploadState('idle');   setParkSubmitError(null);   setParkResult(null);   setParkProgress(null);
+    setUnparkValidation(null); setUnparkUploadState('idle'); setUnparkSubmitError(null); setUnparkResult(null); setUnparkProgress(null);
   }, []);
 
   // The server now applies search + KYC filter + pagination, so the table renders
@@ -658,7 +744,10 @@ export default function OutletsPage() {
       const parsed   = parseOutletUploadRows(rows as Record<string, string>[]);
       // Validate against the FULL tenant list (not the current page).
       const existing = allOutlets.map(o => ({ outletId: o.outletId, isActive: o.isActive }));
-      const result   = validateOutletUpload(parsed, existing, validPrograms, validCategories, outletTypes, employees, LEAF_ROLE_CODE);
+      // PARKED outlet IDs (from the full tenant list) — a row targeting one is flagged so the
+      // upload never silently "succeeds" on a hidden outlet. Parent codes validate the Parent ID.
+      const parkedIds = new Set(allOutlets.filter(o => o.kycStatus === 'PARKED').map(o => o.outletId));
+      const result   = validateOutletUpload(parsed, existing, validPrograms, validCategories, outletTypes, employees, LEAF_ROLE_CODE, parentCodes ?? undefined, parkedIds);
       setOutletParsedRows(parsed);
       setOutletValidation(result);
       setOutletUploadState('parsed');
@@ -666,7 +755,7 @@ export default function OutletsPage() {
       setOutletValidation({ headerError: 'Failed to read file — please ensure it is a valid XLSX file', rows: [], hasErrors: true, canProceed: false, summary: { total: 0, creates: 0, updates: 0, reactivates: 0, errors: 0 } });
       setOutletUploadState('parsed');
     }
-  }, [allOutlets, outletTypes, employees, parseXlsx, validPrograms, validCategories, outletUploadDisabledReason]);
+  }, [allOutlets, outletTypes, employees, parseXlsx, validPrograms, validCategories, outletUploadDisabledReason, parentCodes]);
 
   // ── Handle re-KYC upload ──
   const handleReKYCFile = useCallback(async (file: File) => {
@@ -824,6 +913,30 @@ export default function OutletsPage() {
     dataSheet['!cols'] = [{ wch: 22 }];
     XLSX.utils.book_append_sheet(wb, dataSheet, 'Un-park Upload');
     downloadXlsx(wb, 'outlet-unpark-template.xlsx');
+  }
+
+  // Export the tenant's currently-parked outlets. The data sheet leads with an "Outlet ID"
+  // column so the file re-uploads STRAIGHT into Un-park (that parser reads Outlet ID and
+  // ignores the extra Name/City columns) — download → trim → un-park in one loop.
+  async function downloadParkedOutlets() {
+    setParkedDownloadState('loading');
+    try {
+      const res = await fetch('/api/admin/outlets/parked');
+      if (!res.ok) { setParkedDownloadState('error'); return; }  // don't download an empty file on an API error
+      const j = await res.json().catch(() => null);
+      const list: { outletId?: string; name?: string; city?: string }[] =
+        j?.success && Array.isArray(j.data?.outlets) ? j.data.outlets : [];
+      const headers = ['Outlet ID', 'Outlet Name', 'City'];
+      const body = list.map(o => [o.outletId ?? '', o.name ?? '', o.city ?? '']);
+      const wb = XLSX.utils.book_new();
+      const ws = aoaToSheetSafe([headers, ...body]);
+      ws['!cols'] = [{ wch: 22 }, { wch: 28 }, { wch: 18 }];
+      XLSX.utils.book_append_sheet(wb, ws, 'Parked Outlets');
+      downloadXlsx(wb, 'parked-outlets.xlsx');
+      setParkedDownloadState('idle');
+    } catch {
+      setParkedDownloadState('error');
+    }
   }
 
   function downloadGuide() {
@@ -987,6 +1100,32 @@ export default function OutletsPage() {
               </ul>
             </div>
 
+            {/* Parked-target warning + explicit un-park opt-in (default OFF, so a routine
+                re-upload never un-parks by accident). Only shown once a file is validated. */}
+            {outletUploadState === 'parsed' && parkedOkCount > 0 && (
+              <div data-testid="parked-warning" className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-3">
+                <Archive className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-amber-800">
+                    {parkedOkCount} of these outlet{parkedOkCount > 1 ? 's are' : ' is'} currently parked (hidden from the sales team).
+                  </p>
+                  <p className="text-xs text-amber-700 mt-0.5">
+                    Your changes will be saved, but {parkedOkCount > 1 ? 'they' : 'it'} will stay hidden from reps unless un-parked.
+                  </p>
+                  <label className="flex items-center gap-2 mt-2 text-sm text-amber-800 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      data-testid="unpark-on-apply"
+                      checked={unparkOnApply}
+                      onChange={e => setUnparkOnApply(e.target.checked)}
+                      className="rounded border-amber-300 text-amber-600 focus:ring-amber-400"
+                    />
+                    Un-park {parkedOkCount > 1 ? 'these outlets' : 'this outlet'} and apply changes
+                  </label>
+                </div>
+              </div>
+            )}
+
             <UploadSection
               testIdInput="outlet-upload-input"
               testIdPanel="outlet-validation-panel"
@@ -1048,6 +1187,29 @@ export default function OutletsPage() {
                     setOutletSubmitError(`No outlets were saved. ${detail}`);
                     return;
                   }
+
+                  // Upsert wrote something. Only NOW (after the field update landed) do the explicit
+                  // un-park, if the admin opted in — so a failed upsert can never expose an outlet
+                  // (the visibility change happens strictly after a successful update). Default OFF.
+                  if (unparkOnApply) {
+                    const parkedCodes = (outletValidation?.rows ?? [])
+                      .filter(r => r.status === 'OK' && r.parked)
+                      .map(r => r.outletId);
+                    if (parkedCodes.length) {
+                      setOutletUploadProgress('Un-parking selected outlets…');
+                      const unparkRes = await postInBatches('/api/admin/outlets/unpark', parkedCodes, (batch) => ({ outletCodes: batch }));
+                      setOutletUploadProgress(null);
+                      if (!unparkRes.ok) {
+                        // Field changes DID save; only the un-park failed. Be honest + refresh, and
+                        // don't discard the successful upsert by pretending nothing happened.
+                        setOutletSubmitError(`Field changes were saved, but un-parking failed: ${unparkRes.message} Un-park them from the Parked / Removed tab.${batchRemainderNote(unparkRes.appliedBatches)}`);
+                        void loadOutlets();
+                        void loadAllOutlets();
+                        return;
+                      }
+                    }
+                  }
+
                   setOutletUploadState('confirmed');
                   // Reflect the new/updated rows: refresh the current page AND the
                   // full validation list (stats + create/update detection).
@@ -1058,7 +1220,7 @@ export default function OutletsPage() {
                   setOutletSubmitError('Network error — please try again');
                 }
               }}
-              onClear={() => { setOutletValidation(null); setOutletParsedRows([]); setOutletUploadState('idle'); setOutletSubmitError(null); setOutletUploadProgress(null); }}
+              onClear={() => { setOutletValidation(null); setOutletParsedRows([]); setOutletUploadState('idle'); setOutletSubmitError(null); setOutletUploadProgress(null); setUnparkOnApply(false); }}
               confirmLabel="Apply Changes"
               submitError={outletSubmitError}
               submitting={outletUploadProgress !== null}
@@ -1277,26 +1439,21 @@ export default function OutletsPage() {
                   (rekycValidation?.rows ?? []).filter(r => r.status === 'OK').map(r => r.outletId),
                 );
                 const rows = rekycParsedRows.filter(r => okOutletIds.has(r.outletId));
-                try {
-                  const res = await fetch('/api/admin/outlets/rekyc-flag', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ rows }),
-                  });
-                  if (!res.ok) {
-                    let msg = `Re-KYC flagging failed (${res.status})`;
-                    try { const j = await res.json(); msg = j?.error ?? j?.message ?? msg; } catch { /* non-JSON body */ }
-                    setRekycSubmitError(msg);
-                    return;
-                  }
-                  setRekycUploadState('confirmed');
-                } catch {
-                  setRekycSubmitError('Network error — please try again');
+                setRekycProgress('Saving…');
+                const result = await postInBatches('/api/admin/outlets/rekyc-flag', rows, (batch) => ({ rows: batch }),
+                  (done, total) => { if (total > 1) setRekycProgress(`Uploading batch ${done + 1} of ${total}…`); });
+                setRekycProgress(null);
+                if (!result.ok) {
+                  setRekycSubmitError(`Re-KYC flagging failed: ${result.message}${batchRemainderNote(result.appliedBatches)}`);
+                  return;
                 }
+                setRekycUploadState('confirmed');
               }}
-              onClear={() => { setRekycValidation(null); setRekycUploadState('idle'); setRekycSubmitError(null); }}
+              onClear={() => { setRekycValidation(null); setRekycUploadState('idle'); setRekycSubmitError(null); setRekycProgress(null); }}
               confirmLabel="Flag for Re-KYC"
               submitError={rekycSubmitError}
+              submitting={rekycProgress !== null}
+              submitNote={rekycProgress}
             />
           </div>
 
@@ -1377,28 +1534,21 @@ export default function OutletsPage() {
               onConfirm={async () => {
                 setDeactivateSubmitError(null);
                 const codes = deactivateValidation?.rows.filter(r => r.status === 'OK').map(r => r.outletId) ?? [];
-                try {
-                  const res = await fetch('/api/admin/outlets/deactivate', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ outletCodes: codes }),
-                  });
-                  if (!res.ok) {
-                    // Surface the API error (e.g. all-invalid 400) instead of a
-                    // false success — the swallowed `.catch(()=>{})` hid this.
-                    let msg = `Deactivation failed (${res.status})`;
-                    try { const j = await res.json(); msg = j?.error ?? j?.message ?? msg; } catch { /* non-JSON body */ }
-                    setDeactivateSubmitError(msg);
-                    return;
-                  }
-                  setDeactivateUploadState('confirmed');
-                } catch {
-                  setDeactivateSubmitError('Network error — please try again');
+                setDeactivateProgress('Saving…');
+                const result = await postInBatches('/api/admin/outlets/deactivate', codes, (batch) => ({ outletCodes: batch }),
+                  (done, total) => { if (total > 1) setDeactivateProgress(`Uploading batch ${done + 1} of ${total}…`); });
+                setDeactivateProgress(null);
+                if (!result.ok) {
+                  setDeactivateSubmitError(`Deactivation failed: ${result.message}${batchRemainderNote(result.appliedBatches)}`);
+                  return;
                 }
+                setDeactivateUploadState('confirmed');
               }}
-              onClear={() => { setDeactivateValidation(null); setDeactivateUploadState('idle'); setDeactivateSubmitError(null); }}
+              onClear={() => { setDeactivateValidation(null); setDeactivateUploadState('idle'); setDeactivateSubmitError(null); setDeactivateProgress(null); }}
               confirmLabel="Deactivate Outlets"
               submitError={deactivateSubmitError}
+              submitting={deactivateProgress !== null}
+              submitNote={deactivateProgress}
             />
           </div>
 
@@ -1436,15 +1586,32 @@ export default function OutletsPage() {
       {activeTab === 'parked' && (
         <div data-testid="parked-upload-section" className="space-y-5">
 
-          {/* Explainer */}
+          {/* Explainer + parked-outlets export */}
           <div className="bg-white border border-gray-200 rounded-xl p-5">
-            <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
-              <Archive className="w-4 h-4 text-slate-500" />
-              Parked / Removed Outlets
-            </h2>
-            <p className="text-sm text-gray-500 mt-1">
-              Parked outlets are fully removed from the sales team&apos;s KYC queue and hidden from reps. Use this to bulk-remove KYC-pending outlets you&apos;re not pursuing. Un-park to return them to the queue.
-            </p>
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                  <Archive className="w-4 h-4 text-slate-500" />
+                  Parked / Removed Outlets
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  Parked outlets are fully removed from the sales team&apos;s KYC queue and hidden from reps. Use this to bulk-remove KYC-pending outlets you&apos;re not pursuing. Un-park to return them to the queue.
+                </p>
+              </div>
+              <button
+                data-testid="download-parked-outlets"
+                onClick={downloadParkedOutlets}
+                disabled={parkedDownloadState === 'loading'}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm font-semibold rounded-lg hover:bg-emerald-700 disabled:opacity-60 transition-colors shrink-0"
+              >
+                <Download className="w-4 h-4" /> {parkedDownloadState === 'loading' ? 'Preparing…' : 'Download Parked Outlets'}
+              </button>
+            </div>
+            {parkedDownloadState === 'error' && (
+              <p data-testid="download-parked-error" className="text-xs text-red-600 mt-2 flex items-center gap-1">
+                <AlertCircle className="w-3.5 h-3.5" /> Could not download the parked outlets. Please try again.
+              </p>
+            )}
           </div>
 
           {/* Park block */}
@@ -1486,32 +1653,28 @@ export default function OutletsPage() {
               onConfirm={async () => {
                 setParkSubmitError(null);
                 const codes = parkValidation?.rows.filter(r => r.status === 'OK').map(r => r.outletId) ?? [];
-                try {
-                  const res = await fetch('/api/admin/outlets/park', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ outletCodes: codes }),
-                  });
-                  if (!res.ok) {
-                    let msg = `Parking failed (${res.status})`;
-                    try { const j = await res.json(); msg = j?.error ?? j?.message ?? msg; } catch { /* non-JSON body */ }
-                    setParkSubmitError(msg);
-                    return;
-                  }
-                  const j = await res.json().catch(() => null);
-                  const d = j?.data ?? j ?? {};
-                  setParkResult({ count: Number(d.parked ?? 0), notFound: Array.isArray(d.notFound) ? d.notFound : [] });
-                  setParkUploadState('confirmed');
-                  // Refresh so the parked reference list + stats reflect the change.
-                  void loadOutlets();
-                  void loadAllOutlets();
-                } catch {
-                  setParkSubmitError('Network error — please try again');
+                setParkProgress('Saving…');
+                const result = await postInBatches('/api/admin/outlets/park', codes, (batch) => ({ outletCodes: batch }),
+                  (done, total) => { if (total > 1) setParkProgress(`Uploading batch ${done + 1} of ${total}…`); });
+                setParkProgress(null);
+                if (!result.ok) {
+                  setParkSubmitError(`Parking failed: ${result.message}${batchRemainderNote(result.appliedBatches)}`);
+                  return;
                 }
+                // Aggregate the per-batch { parked, notFound } into one result for the success panel.
+                const parked = result.data.reduce((s, d) => s + Number(d.parked ?? 0), 0);
+                const notFound = result.data.flatMap(d => Array.isArray(d.notFound) ? (d.notFound as string[]) : []);
+                setParkResult({ count: parked, notFound });
+                setParkUploadState('confirmed');
+                // Refresh so the parked reference list + stats reflect the change.
+                void loadOutlets();
+                void loadAllOutlets();
               }}
-              onClear={() => { setParkValidation(null); setParkUploadState('idle'); setParkSubmitError(null); setParkResult(null); }}
+              onClear={() => { setParkValidation(null); setParkUploadState('idle'); setParkSubmitError(null); setParkResult(null); setParkProgress(null); }}
               confirmLabel="Park Outlets"
               submitError={parkSubmitError}
+              submitting={parkProgress !== null}
+              submitNote={parkProgress}
             />
           </div>
 
@@ -1554,31 +1717,26 @@ export default function OutletsPage() {
               onConfirm={async () => {
                 setUnparkSubmitError(null);
                 const codes = unparkValidation?.rows.filter(r => r.status === 'OK').map(r => r.outletId) ?? [];
-                try {
-                  const res = await fetch('/api/admin/outlets/unpark', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ outletCodes: codes }),
-                  });
-                  if (!res.ok) {
-                    let msg = `Un-parking failed (${res.status})`;
-                    try { const j = await res.json(); msg = j?.error ?? j?.message ?? msg; } catch { /* non-JSON body */ }
-                    setUnparkSubmitError(msg);
-                    return;
-                  }
-                  const j = await res.json().catch(() => null);
-                  const d = j?.data ?? j ?? {};
-                  setUnparkResult({ count: Number(d.unparked ?? 0), notFound: Array.isArray(d.notFound) ? d.notFound : [] });
-                  setUnparkUploadState('confirmed');
-                  void loadOutlets();
-                  void loadAllOutlets();
-                } catch {
-                  setUnparkSubmitError('Network error — please try again');
+                setUnparkProgress('Saving…');
+                const result = await postInBatches('/api/admin/outlets/unpark', codes, (batch) => ({ outletCodes: batch }),
+                  (done, total) => { if (total > 1) setUnparkProgress(`Uploading batch ${done + 1} of ${total}…`); });
+                setUnparkProgress(null);
+                if (!result.ok) {
+                  setUnparkSubmitError(`Un-parking failed: ${result.message}${batchRemainderNote(result.appliedBatches)}`);
+                  return;
                 }
+                const unparked = result.data.reduce((s, d) => s + Number(d.unparked ?? 0), 0);
+                const notFound = result.data.flatMap(d => Array.isArray(d.notFound) ? (d.notFound as string[]) : []);
+                setUnparkResult({ count: unparked, notFound });
+                setUnparkUploadState('confirmed');
+                void loadOutlets();
+                void loadAllOutlets();
               }}
-              onClear={() => { setUnparkValidation(null); setUnparkUploadState('idle'); setUnparkSubmitError(null); setUnparkResult(null); }}
+              onClear={() => { setUnparkValidation(null); setUnparkUploadState('idle'); setUnparkSubmitError(null); setUnparkResult(null); setUnparkProgress(null); }}
               confirmLabel="Un-park Outlets"
               submitError={unparkSubmitError}
+              submitting={unparkProgress !== null}
+              submitNote={unparkProgress}
             />
           </div>
 

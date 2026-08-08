@@ -730,6 +730,25 @@ export class AdminOutletsService {
   }
 
   /**
+   * GET /v1/admin/outlets/parked — the tenant's currently PARKED outlets, UNPAGINATED,
+   * projected to only the fields the FE "Download Parked Outlets" export needs
+   * (outletId, name, city). PARKED is the same intent Park sets: kycIntent PARKED on a
+   * non-deleted outlet, tenant-scoped by clientId (never cross-tenant).
+   * Envelope is applied globally by TransformInterceptor: { success, data:{ outlets } }.
+   */
+  async listParked(user: JwtPayload) {
+    const rows = await this.prisma.outlet.findMany({
+      where: { clientId: user.clientId, deletedAt: null, kycIntent: OutletKycIntent.PARKED },
+      select: { outletCode: true, name: true, city: true },
+      orderBy: { outletCode: 'asc' },
+    });
+
+    return {
+      outlets: rows.map((o) => ({ outletId: o.outletCode, name: o.name ?? '', city: o.city ?? '' })),
+    };
+  }
+
+  /**
    * POST /v1/admin/outlets/upsert — persists the Outlet Master upload.
    * Enforces the two write-time invariants (OutletType-by-code + XSR-by-employeeCode,
    * both tenant-scoped), upserts each Outlet on (clientId, outletCode), and (re)tags
@@ -1416,7 +1435,11 @@ export class AdminOutletsService {
     });
 
     if (outlets.length === 0) {
-      throw new BadRequestException('No pending outlets found for the given outlet codes');
+      // Benign no-op (all codes already parked / not pending) — return zero + report every code
+      // as notFound rather than a 400, and never write (can't hide a live outlet). This keeps a
+      // multi-batch upload from aborting and discarding earlier successful batches on an
+      // all-no-op tail batch (the batched FE treats any non-2xx as a hard, work-discarding failure).
+      return { parked: 0, notFound: outletCodes };
     }
 
     const ids = outlets.map((o) => o.id);
@@ -1445,7 +1468,10 @@ export class AdminOutletsService {
     });
 
     if (outlets.length === 0) {
-      throw new BadRequestException('No parked outlets found for the given outlet codes');
+      // Benign no-op (nothing currently parked among these codes) — return zero + notFound rather
+      // than a 400, so a multi-batch un-park (or the master upload's un-park step) isn't aborted
+      // and earlier successful batches aren't discarded.
+      return { unparked: 0, notFound: outletCodes };
     }
 
     const ids = outlets.map((o) => o.id);

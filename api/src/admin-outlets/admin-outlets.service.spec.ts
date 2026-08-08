@@ -461,6 +461,44 @@ describe('AdminOutletsService', () => {
     });
   });
 
+  describe('listParked', () => {
+    it('filters by kycIntent PARKED + clientId + deletedAt null, ordered by outletCode', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      await service.listParked(admin);
+
+      const args = mockPrisma.outlet.findMany.mock.calls[0][0];
+      // (a) tenant-scoped to the PARKED, non-deleted rows only — never cross-tenant.
+      expect(args.where).toEqual({
+        clientId: TENANT_A,
+        deletedAt: null,
+        kycIntent: 'PARKED',
+      });
+      // Projection is only the fields the FE export consumes; ordered for a stable download.
+      expect(args.select).toEqual({ outletCode: true, name: true, city: true });
+      expect(args.orderBy).toEqual({ outletCode: 'asc' });
+    });
+
+    it('maps outletCode→outletId and carries name + city', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'OUT-1', name: 'Alpha Store', city: 'Pune' },
+        { outletCode: 'OUT-2', name: 'Beta Store', city: 'Mumbai' },
+      ]);
+      const res = await service.listParked(admin);
+      expect(res.outlets).toEqual([
+        { outletId: 'OUT-1', name: 'Alpha Store', city: 'Pune' },
+        { outletId: 'OUT-2', name: 'Beta Store', city: 'Mumbai' },
+      ]);
+    });
+
+    it('coerces null name/city to empty strings', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'OUT-3', name: null, city: null },
+      ]);
+      const res = await service.listParked(admin);
+      expect(res.outlets[0]).toEqual({ outletId: 'OUT-3', name: '', city: '' });
+    });
+  });
+
   describe('upsert', () => {
     it('marks a row ERROR when the outlet type is not enabled for the tenant', async () => {
       mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]); // no enabled types
@@ -1174,21 +1212,20 @@ describe('AdminOutletsService', () => {
       expect(res).toEqual({ parked: 1, notFound: ['OUT-X'] });
     });
 
-    it('SKIPS an approved/active outlet (isActive:true) — the isActive:false filter excludes it → BadRequest, no write', async () => {
-      // An active (approved) outlet never satisfies isActive:false, so findMany returns []
-      // and park throws WITHOUT writing — proving Park cannot hide a live outlet (use Deactivate).
+    it('SKIPS an approved/active outlet (isActive:true) — the isActive:false filter excludes it → zero matched, no write', async () => {
+      // An active (approved) outlet never satisfies isActive:false, so findMany returns [] and park
+      // returns { parked:0 } WITHOUT writing — proving Park cannot hide a live outlet (use Deactivate).
       mockPrisma.outlet.findMany.mockResolvedValue([]);
-      await expect(service.park(admin, { outletCodes: ['ACTIVE-1'] })).rejects.toBeInstanceOf(
-        BadRequestException,
-      );
+      const res = await service.park(admin, { outletCodes: ['ACTIVE-1'] });
+      expect(res).toEqual({ parked: 0, notFound: ['ACTIVE-1'] });
       expect(mockPrisma.outlet.updateMany).not.toHaveBeenCalled();
     });
 
-    it('throws BadRequest with the frozen message when zero outlets match', async () => {
+    it('returns { parked: 0, notFound } (a benign no-op, not a throw) when zero outlets match — so a batched upload is not aborted', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([]);
-      await expect(service.park(admin, { outletCodes: ['NOPE'] })).rejects.toThrow(
-        'No pending outlets found for the given outlet codes',
-      );
+      const res = await service.park(admin, { outletCodes: ['NOPE'] });
+      expect(res).toEqual({ parked: 0, notFound: ['NOPE'] });
+      expect(mockPrisma.outlet.updateMany).not.toHaveBeenCalled();
     });
   });
 
@@ -1206,11 +1243,10 @@ describe('AdminOutletsService', () => {
       expect(res).toEqual({ unparked: 1, notFound: ['OUT-Z'] });
     });
 
-    it('throws BadRequest with the frozen message when no parked outlets match', async () => {
+    it('returns { unparked: 0, notFound } (a benign no-op, not a throw) when no parked outlets match', async () => {
       mockPrisma.outlet.findMany.mockResolvedValue([]);
-      await expect(service.unpark(admin, { outletCodes: ['NOPE'] })).rejects.toThrow(
-        'No parked outlets found for the given outlet codes',
-      );
+      const res = await service.unpark(admin, { outletCodes: ['NOPE'] });
+      expect(res).toEqual({ unparked: 0, notFound: ['NOPE'] });
       expect(mockPrisma.outlet.updateMany).not.toHaveBeenCalled();
     });
   });

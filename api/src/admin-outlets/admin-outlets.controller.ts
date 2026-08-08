@@ -35,6 +35,17 @@ export class AdminOutletsController {
     return this.outlets.listIds(user);
   }
 
+  /**
+   * GET /parked — the tenant's currently PARKED outlets ({ outletId, name, city }) for the
+   * FE "Download Parked Outlets" export. Registered BEFORE @Get() so the static 'parked'
+   * segment can never be shadowed. (source: partners:manage_outlets — same read gate as /ids.)
+   */
+  @Get('parked')
+  @RequirePermission('partners:manage_outlets')
+  listParked(@CurrentUser() user: JwtPayload) {
+    return this.outlets.listParked(user);
+  }
+
   /** GET / — server-paginated + filtered tenant outlet list (source: partners:manage_outlets). */
   @Get()
   @RequirePermission('partners:manage_outlets')

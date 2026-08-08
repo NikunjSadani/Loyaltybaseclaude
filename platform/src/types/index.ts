@@ -805,6 +805,10 @@ export interface OutletUploadRowResult {
   status:    'OK' | 'ERROR';
   errors:    string[];
   action:    'CREATE' | 'UPDATE' | 'REACTIVATE';
+  /** True when the target outlet is currently PARKED (hidden from reps). Not an error —
+   *  the upsert still applies field changes — but the outlet stays hidden unless un-parked,
+   *  so the UI surfaces it instead of a silent "OK". */
+  parked?:   boolean;
 }
 
 /** Full result of validating an outlet addition upload file */

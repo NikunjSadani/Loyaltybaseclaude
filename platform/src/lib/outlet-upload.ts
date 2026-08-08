@@ -237,6 +237,17 @@ export function validateOutletUpload(
   validOutletTypes:  string[],
   employees:         HierarchyEmployee[],
   leafRoleCode:      string,
+  /** The tenant's existing owner-group parent codes (partnerCode). When provided, a non-blank
+   *  Parent ID that isn't in this set is flagged HERE (upfront) instead of silently passing the
+   *  preview and failing on the backend — the exact silent failure that let the outlet's own name
+   *  be typed into Parent ID unnoticed. `undefined` = list not loaded ⇒ skip (backend still checks);
+   *  an EMPTY set (tenant has no groups) still enforces (any Parent ID is then invalid). Matched
+   *  case-sensitively, exactly like the backend `parentByCode` lookup, so a case/space typo is caught. */
+  validParentCodes?: Set<string>,
+  /** Outlet IDs currently PARKED (hidden from reps). A row targeting one is marked `parked` (a
+   *  warning, not an error): the upsert applies field changes but the outlet stays hidden until
+   *  un-parked. Lets the master upload surface it instead of a silent "OK". */
+  parkedOutletIds?:  Set<string>,
 ): OutletUploadValidationResult {
   const existingMap  = new Map(existingOutlets.map(o => [o.outletId, o]));
   const seenInUpload = new Map<string, number>(); // outletId → first rowNum
@@ -423,12 +434,27 @@ export function validateOutletUpload(
       }
     }
 
+    // Parent ID (owner-group link) — validate EXISTENCE upfront when the parent list is loaded.
+    // Applies to every action (the backend links the group on CREATE, UPDATE, and REACTIVATE).
+    // Blank = no grouping change (fine). Matched exactly (case-sensitive) like the backend, so a
+    // wrong code — e.g. the outlet's own name typed here — is caught in the preview, not silently
+    // after Confirm. Skipped when the list didn't load (undefined); enforced even for an empty set.
+    if (row.parentId && validParentCodes && !validParentCodes.has(row.parentId)) {
+      errors.push(`Parent ID "${row.parentId}" is not an existing owner group. Create it under Owner Groups first, or leave the Parent ID column blank.`);
+    }
+
+    // Parked target — a WARNING, not an error: the upsert still applies field changes, but the
+    // outlet stays hidden from reps until it is un-parked. Surfaced so the master upload never
+    // silently "succeeds" on a parked outlet.
+    const parked = !!(row.outletId && parkedOutletIds?.has(row.outletId));
+
     rowResults.push({
       rowNum:   row.rowNum,
       outletId: row.outletId,
       status:   errors.length > 0 ? 'ERROR' : 'OK',
       errors,
       action,
+      parked,
     });
   }
 
