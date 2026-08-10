@@ -11,13 +11,26 @@ import { SalesNotificationsService } from '../notifications/sales-notifications.
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { businessHoursBetween, isValidIsoDate } from '../common/business-hours';
+import {
+  HOLIDAY_CLIENT_ID,
+  Holiday,
+  NATIONAL_HOLIDAYS_KEY,
+  loadHolidaySet,
+  normalizeHolidays,
+} from '../common/holiday-calendar';
 import {
   BulkEditUsersDto,
   CreateUserDto,
   ListUsersQueryDto,
   UpdateUserDto,
 } from './dto/users.dto';
-import { SetPointsExpiryDto, SetVisibilityCaptureModeDto, UpsertSettingDto } from './dto/settings.dto';
+import {
+  SetHolidaysDto,
+  SetPointsExpiryDto,
+  SetVisibilityCaptureModeDto,
+  UpsertSettingDto,
+} from './dto/settings.dto';
 import { HierarchyConfigDto, TaskConfigDto } from './dto/config.dto';
 import {
   DEOLEO_HIERARCHY,
@@ -552,6 +565,65 @@ export class AdminCoreService {
     supportPhone: '1800-XXX-XXXX',
   };
 
+  // ── National holiday calendar (platform-global) ────────────────────────────
+  // The KYC review-SLA counts only business hours (Mon–Fri) and PAUSES on this calendar
+  // (owner decision 2026-08-10). Storage + defaults + the SLA date-set live in the shared
+  // common/holiday-calendar module (used identically by kyc.service slaMetrics), so nothing
+  // drifts between the two SLA engines. GIFSY_ADMIN edits it; CLIENT_ADMIN can read it (their
+  // KYC list ages rows against it).
+
+  /**
+   * The platform national holiday calendar, for the settings UI. Returns the stored override
+   * (an array of { date, label }) if present, else the gazetted-national code default. Sorted.
+   */
+  async getNationalHolidays(): Promise<{ holidays: Holiday[] }> {
+    const row = await this.prisma.programSetting.findFirst({
+      where: { clientId: HOLIDAY_CLIENT_ID, settingKey: NATIONAL_HOLIDAYS_KEY },
+      select: { settingValue: true },
+    });
+    return { holidays: normalizeHolidays(row?.settingValue) };
+  }
+
+  /**
+   * Replace the platform national holiday calendar. GIFSY_ADMIN only (role-enforced on the
+   * controller; re-checked here). Validates every entry (strict real YYYY-MM-DD + non-empty
+   * label), de-dups by date, sorts, and upserts the single platform row.
+   */
+  async setNationalHolidays(user: JwtPayload, dto: SetHolidaysDto): Promise<{ holidays: Holiday[] }> {
+    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
+
+    const byDate = new Map<string, string>();
+    for (const h of dto.holidays ?? []) {
+      const date = (h?.date ?? '').trim();
+      const label = (h?.label ?? '').trim();
+      if (!isValidIsoDate(date)) {
+        throw new BadRequestException(`Invalid holiday date "${h?.date}" — expected a real YYYY-MM-DD.`);
+      }
+      if (!label) {
+        throw new BadRequestException(`Holiday ${date} is missing a label.`);
+      }
+      byDate.set(date, label); // last write wins on a duplicate date
+    }
+    const holidays: Holiday[] = [...byDate.entries()]
+      .map(([date, label]) => ({ date, label }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    // Holiday[] is a plain JSON array; cast to Prisma's JSON input type (the object element
+    // type lacks the index signature Prisma's InputJsonValue expects).
+    const settingValue = holidays as unknown as Prisma.InputJsonValue;
+    await this.prisma.programSetting.upsert({
+      where: { clientId_settingKey: { clientId: HOLIDAY_CLIENT_ID, settingKey: NATIONAL_HOLIDAYS_KEY } },
+      create: {
+        clientId: HOLIDAY_CLIENT_ID,
+        settingKey: NATIONAL_HOLIDAYS_KEY,
+        settingValue,
+        category: 'kyc',
+      },
+      update: { settingValue },
+    });
+    return { holidays };
+  }
+
   async getSettings(user: JwtPayload) {
     const rows = await this.prisma.programSetting.findMany({ where: { clientId: user.clientId } });
 
@@ -1033,6 +1105,9 @@ export class AdminCoreService {
   async kycDashboard(user: JwtPayload) {
     const clientId = user.clientId;
     const now = Date.now();
+    // KYC SLA ages count BUSINESS hours only (Mon–Fri, minus the national holiday
+    // calendar) — the stage targets below (24h/96h) are business hours, not calendar.
+    const holidays = await loadHolidaySet(this.prisma);
 
     // ── Addressable universe + the canonical per-outlet status derivation ──────
     // ONE findMany with latest-submission include (mirrors buildOutlets): no N+1.
@@ -1198,39 +1273,36 @@ export class AdminCoreService {
       // ── Per-stage SLA detail ──
       if (status !== 'NOT_STARTED' && sub) {
         if (AdminCoreService.KYC_PENDING_FIELD_STATUSES.has(status)) {
-          // age = now - submittedAt (fall back to createdAt if submittedAt null)
+          // age = business hours since submittedAt (fall back to createdAt if null)
           const startTs = (sub.submittedAt ?? sub.createdAt).getTime();
-          const ageH = (now - startTs) / AdminCoreService.KYC_HOUR_MS;
+          const ageH = businessHoursBetween(startTs, now, holidays);
           if (ageH <= AdminCoreService.KYC_SLA_FIELD_HOURS) pendingFieldWithin += 1;
           else pendingFieldBreached += 1;
         } else if (status === 'PENDING_GIFSY') {
-          // clock = now - (entered PENDING_GIFSY); fall back submittedAt → createdAt
+          // clock = business hours since entering PENDING_GIFSY; fall back submittedAt → createdAt
           const enteredAt = enteredPendingGifsyAt(sub.statusHistory);
           const startTs = (enteredAt ?? sub.submittedAt ?? sub.createdAt).getTime();
-          const ageH = (now - startTs) / AdminCoreService.KYC_HOUR_MS;
+          const ageH = businessHoursBetween(startTs, now, holidays);
           if (ageH <= AdminCoreService.KYC_SLA_GIFSY_HOURS) pendingGifsyWithin += 1;
           else pendingGifsyBreached += 1;
         }
       }
 
       // ── SLA distributions over APPROVED submissions (submittedAt present) ──
+      // Business hours (Mon–Fri minus holidays) so the turnaround tiles match the SLA clock.
       if (isApproved && sub && sub.submittedAt) {
         const submittedTs = sub.submittedAt.getTime();
         const enteredAt = enteredPendingGifsyAt(sub.statusHistory);
         if (enteredAt) {
-          fieldChainHours.push(
-            (enteredAt.getTime() - submittedTs) / AdminCoreService.KYC_HOUR_MS,
-          );
+          fieldChainHours.push(businessHoursBetween(submittedTs, enteredAt.getTime(), holidays));
           if (sub.approvedAt) {
             gifsyReviewHours.push(
-              (sub.approvedAt.getTime() - enteredAt.getTime()) / AdminCoreService.KYC_HOUR_MS,
+              businessHoursBetween(enteredAt.getTime(), sub.approvedAt.getTime(), holidays),
             );
           }
         }
         if (sub.approvedAt) {
-          endToEndHours.push(
-            (sub.approvedAt.getTime() - submittedTs) / AdminCoreService.KYC_HOUR_MS,
-          );
+          endToEndHours.push(businessHoursBetween(submittedTs, sub.approvedAt.getTime(), holidays));
         }
       }
     }

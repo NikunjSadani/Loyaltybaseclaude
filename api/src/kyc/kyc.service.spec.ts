@@ -462,9 +462,11 @@ describe('KycService', () => {
   describe('rejectedExport (Rejected outlets export)', () => {
     const rejectedSub = () => ({
       id: 'KYC-R1',
-      createdAt: new Date('2026-06-20T00:00:00Z'),
-      submittedAt: new Date('2026-06-20T00:00:00Z'),
-      reviewedAt: new Date('2026-06-21T00:00:00Z'),
+      // Mon 22 Jun → Tue 23 Jun 2026 = 24 BUSINESS hours (weekday span, no weekend to exclude),
+      // so the "SLA Age (hrs)" column still reads 24 under the business-hours clock.
+      createdAt: new Date('2026-06-22T00:00:00Z'),
+      submittedAt: new Date('2026-06-22T00:00:00Z'),
+      reviewedAt: new Date('2026-06-23T00:00:00Z'),
       rejectionReason: 'GST mismatch',
       user: { name: 'Rep A', phone: '9820100001' },
       partner: {
@@ -497,7 +499,7 @@ describe('KycService', () => {
         { fieldKey: 'GST_DOCUMENT', decision: 'REJECTED', remark: 'illegible', source: 'PORTAL' },
         { fieldKey: 'PAYMENT', decision: 'APPROVED', remark: null, source: 'PORTAL' },
       ],
-      statusHistory: [{ createdAt: new Date('2026-06-21T00:00:00Z'), changedByUserId: 'admin1' }],
+      statusHistory: [{ createdAt: new Date('2026-06-23T00:00:00Z'), changedByUserId: 'admin1' }],
     });
 
     const parseSheet = (buf: Buffer) => {
@@ -4545,10 +4547,12 @@ describe('KycService', () => {
     });
 
     // ── SLA target now driven by the persisted `slaTargetHours` setting ──
-    // Two APPROVED submissions: one approved in 30h, one in 60h.
+    // The SLA clock counts BUSINESS hours (Mon–Fri, weekends excluded). Two APPROVED
+    // submissions from Thu 01 Jan 2026: one decided in 30 business hours (Thu→Fri, no weekend),
+    // one in 72 business hours (Thu→Tue 06 Jan — the Sat/Sun between are excluded, so 72 not 120).
     const twoApprovals = [
-      { createdAt: new Date('2026-01-01T00:00:00Z'), statusHistory: [{ createdAt: new Date('2026-01-02T06:00:00Z') }] }, // 30h
-      { createdAt: new Date('2026-01-01T00:00:00Z'), statusHistory: [{ createdAt: new Date('2026-01-03T12:00:00Z') }] }, // 60h
+      { createdAt: new Date('2026-01-01T00:00:00Z'), statusHistory: [{ createdAt: new Date('2026-01-02T06:00:00Z') }] }, // 30 business h
+      { createdAt: new Date('2026-01-01T00:00:00Z'), statusHistory: [{ createdAt: new Date('2026-01-06T00:00:00Z') }] }, // 72 business h
     ];
 
     it('uses the stored slaTargetHours setting (96) — no breach when both are under it', async () => {
@@ -4559,7 +4563,7 @@ describe('KycService', () => {
       mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
 
       const res = await service.slaMetrics(gifsy);
-      // Both 30h and 60h are ≤ 96h → zero breaches, 100% compliance.
+      // Both 30h and 72h (business hours) are ≤ 96h → zero breaches, 100% compliance.
       expect(res.slaTargetHours).toBe(96);
       expect(res.slaBreachCount).toBe(0);
       expect(res.slaComplianceRate).toBe(100);
@@ -4569,7 +4573,7 @@ describe('KycService', () => {
       );
     });
 
-    it('falls back to 48 when no slaTargetHours row exists — the 60h approval breaches', async () => {
+    it('falls back to 48 when no slaTargetHours row exists — the 72h approval breaches', async () => {
       mockPrisma.programSetting.findFirst.mockResolvedValue(null);
       mockPrisma.kycSubmission.findMany
         .mockResolvedValueOnce(twoApprovals)
@@ -4577,7 +4581,7 @@ describe('KycService', () => {
       mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
 
       const res = await service.slaMetrics(gifsy);
-      // Default 48h → the 60h approval breaches, the 30h one does not.
+      // Default 48h → the 72h (business-hours) approval breaches, the 30h one does not.
       expect(res.slaTargetHours).toBe(48);
       expect(res.slaBreachCount).toBe(1);
     });

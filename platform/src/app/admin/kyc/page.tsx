@@ -17,6 +17,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
 import { useAdminSession } from '@/lib/admin-session';
 import { kycAgeHrs, KYC_SLA_DEFAULT_HOURS, fetchKycSlaHours } from '@/lib/kyc-sla';
+import { fetchHolidayDateSet } from '@/lib/holidays';
 import { downloadBlob } from '@/lib/download';
 
 type KYCStatusType = 'PENDING' | 'UNDER_REVIEW' | 'APPROVED' | 'REJECTED' | 'RESUBMISSION_REQUIRED';
@@ -62,11 +63,12 @@ const DB_STATUS_MAP: Record<string, KYCStatusType> = {
   RESUBMISSION_REQUIRED: 'RESUBMISSION_REQUIRED', DRAFT: 'PENDING',
 };
 
-function mapApiKyc(s: ApiKycSub): KYCEntry {
+function mapApiKyc(s: ApiKycSub, holidays: Set<string>): KYCEntry {
   const submittedAt = s.submittedAt ?? s.createdAt ?? '';
-  // SLA clock freezes at the decision once an action is taken (see kycAgeHrs). The
-  // breach itself is computed at render against the tenant's configured SLA target.
-  const ageHrs = kycAgeHrs(submittedAt, s.status, s);
+  // SLA clock freezes at the decision once an action is taken (see kycAgeHrs) and counts
+  // only business hours (Mon–Fri minus the national holiday calendar). The breach itself is
+  // computed at render against the tenant's configured SLA target.
+  const ageHrs = kycAgeHrs(submittedAt, s.status, s, holidays);
   return {
     id:            s.id,
     outletName:    s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
@@ -118,11 +120,16 @@ export default function KYCPage() {
   const [slaHours, setSlaHours] = useState<number>(KYC_SLA_DEFAULT_HOURS);
 
   useEffect(() => {
-    fetch('/api/kyc?limit=500', { headers: { ...authHeader() } })
-      .then(r => r.json())
-      .then((json: { success: boolean; data?: { submissions: ApiKycSub[] }; error?: string }) => {
+    // Fetch the holiday calendar alongside the list so ages are computed in business hours
+    // from the first render (fetchHolidayDateSet falls back to an empty set on any error →
+    // still weekend-aware, never blocks the list).
+    Promise.all([
+      fetch('/api/kyc?limit=500', { headers: { ...authHeader() } }).then((r) => r.json()),
+      fetchHolidayDateSet().catch(() => new Set<string>()),
+    ])
+      .then(([json, holidays]: [{ success: boolean; data?: { submissions: ApiKycSub[] }; error?: string }, Set<string>]) => {
         if (json.success && json.data) {
-          setKycList(json.data.submissions.map(mapApiKyc));
+          setKycList(json.data.submissions.map((s) => mapApiKyc(s, holidays)));
         } else {
           setError(json.error ?? 'Failed to load KYC submissions');
         }

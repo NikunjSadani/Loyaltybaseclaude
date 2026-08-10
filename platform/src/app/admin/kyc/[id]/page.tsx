@@ -22,7 +22,6 @@ import {
   hasReKycFlags, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags,
 } from '@/lib/rekyc-fields';
 import type { EntityType, GSTRegistrationType } from '@/lib/invoice';
-import { kycAgeHrs } from '@/lib/kyc-sla';
 
 // ─── 7-field verification types (shared with approvals page) ─────────────────
 
@@ -149,7 +148,7 @@ type KycDetailShape = {
   boardGeo: { lat: number; lng: number } | null;
   paymentGeo: { lat: number; lng: number } | null;
   salesUser: string; territory: string; region: string;
-  submittedDate: string; ageHrs: number; status: string;
+  submittedDate: string; status: string;
   bankName: string; accountNumber: string; ifscCode: string; upiId: string;
   // Outlet-master mandated payout method (primary outlet); '' when unset.
   requiredPaymentType: '' | 'BANK' | 'UPI' | 'ANY';
@@ -312,8 +311,6 @@ function parseGeo(lat: unknown, lng: unknown): { lat: number; lng: number } | nu
 
 function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
   const submittedAt = s.submittedAt ?? s.createdAt ?? '';
-  // SLA clock freezes at the decision once an action is taken (see kycAgeHrs).
-  const ageHrs = kycAgeHrs(submittedAt, s.status, s);
   const docStatusMap: Record<string, 'pending' | 'verified' | 'rejected'> = {
     SUBMITTED: 'pending', APPROVED: 'verified', REJECTED: 'rejected',
   };
@@ -361,7 +358,6 @@ function mapApiKycDetail(s: ApiKycDetail): KycDetailShape {
     territory:        '',
     region:           '',
     submittedDate:    submittedAt.slice(0, 10),
-    ageHrs,
     status:           s.status,
     bankName:         s.partner?.bankName ?? '',
     accountNumber:    s.partner?.bankAccountNumber ?? '',

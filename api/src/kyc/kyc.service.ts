@@ -22,6 +22,8 @@ import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { generateNumericOtp } from '../common/otp';
 import { sniffFileType } from '../common/file-signature';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
+import { businessHoursBetween } from '../common/business-hours';
+import { loadHolidaySet } from '../common/holiday-calendar';
 import { resolveCreditFieldNames } from '../common/credit-field-name.helper';
 import { buildPayoutStatement } from '../common/payout-statement.helper';
 import {
@@ -3181,6 +3183,9 @@ export class KycService {
 
     const slaTargetHours = await this.resolveSlaTargetHours(user);
     const now = new Date();
+    // Business-hours SLA clock: count only Mon–Fri minus the national holiday calendar,
+    // so the breach count + aging buckets never inflate over a weekend/holiday.
+    const holidays = await loadHolidaySet(this.prisma);
 
     const approved = await this.prisma.kycSubmission.findMany({
       // A1 cross-tenant filter: GIFSY → {} (aggregate over all tenants), else
@@ -3200,7 +3205,7 @@ export class KycService {
       .filter((s) => s.statusHistory.length > 0)
       .map((s) => {
         const approvedAt = s.statusHistory[0].createdAt;
-        return (approvedAt.getTime() - s.createdAt.getTime()) / (1000 * 60 * 60);
+        return businessHoursBetween(s.createdAt.getTime(), approvedAt.getTime(), holidays);
       });
 
     const avgApprovalTimeHours =
@@ -3225,7 +3230,7 @@ export class KycService {
     const pendingAging = { '0-24h': 0, '24-48h': 0, '48-72h': 0, '72h+': 0 };
 
     for (const p of pending) {
-      const hours = (now.getTime() - p.createdAt.getTime()) / (1000 * 60 * 60);
+      const hours = businessHoursBetween(p.createdAt.getTime(), now.getTime(), holidays);
       if (hours <= 24) pendingAging['0-24h']++;
       else if (hours <= 48) pendingAging['24-48h']++;
       else if (hours <= 72) pendingAging['48-72h']++;
@@ -4404,6 +4409,11 @@ export class KycService {
   async rejectedExport(user: JwtPayload): Promise<Buffer> {
     if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
+    // The "SLA Age (hrs)" column counts BUSINESS hours (Mon–Fri minus the national holiday
+    // calendar), matching the KYC list badge + slaMetrics — otherwise the export would disagree
+    // with every other SLA surface by the excluded weekend.
+    const holidays = await loadHolidaySet(this.prisma);
+
     const submissions = await this.prisma.kycSubmission.findMany({
       where: { status: 'REJECTED', ...this.kycTenantFilter(user) },
       include: {
@@ -4469,10 +4479,11 @@ export class KycService {
       const hist = s.statusHistory[0];
       const rejectedAt = hist?.createdAt ?? s.reviewedAt ?? null;
       const submittedAt = s.submittedAt ?? s.createdAt;
-      // SLA age = submitted → rejected, in whole hours (omit when either is missing).
+      // SLA age = submitted → rejected, in whole BUSINESS hours (Mon–Fri minus holidays);
+      // omit when either is missing. Matches the KYC list badge + slaMetrics clock.
       const slaAgeHrs =
         submittedAt && rejectedAt
-          ? Math.max(0, Math.round((rejectedAt.getTime() - submittedAt.getTime()) / 3_600_000))
+          ? Math.max(0, Math.round(businessHoursBetween(submittedAt.getTime(), rejectedAt.getTime(), holidays)))
           : undefined;
       const fieldStates = this.dumpFieldStates(s.verificationItems);
       const fields = {} as RejectedKycRow['fields'];

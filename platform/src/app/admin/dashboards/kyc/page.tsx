@@ -373,7 +373,7 @@ export default function AdminKycDashboardPage() {
         <Card className="lg:col-span-2 border border-gray-100 shadow-sm rounded-2xl">
           <CardHeader>
             <CardTitle>Approval Bottlenecks</CardTitle>
-            <p className="text-xs text-gray-400 mt-0.5">Within-SLA vs breached, per approval stage</p>
+            <p className="text-xs text-gray-400 mt-0.5">Within-SLA vs breached, per approval stage · business hours (Mon–Fri)</p>
           </CardHeader>
           <CardContent className="pb-5 space-y-4">
             <BucketCard title="Pending Field Approval" bucket={buckets.pendingFieldApproval} />
@@ -386,7 +386,7 @@ export default function AdminKycDashboardPage() {
           <CardHeader>
             <CardTitle>Processing SLA</CardTitle>
             <p className="text-xs text-gray-400 mt-0.5">
-              Average turnaround across {fmtInt(sla.sampleSize)} processed submissions · field target 24h · Gifsy target 96h
+              Average turnaround across {fmtInt(sla.sampleSize)} processed submissions · field target 24h · Gifsy target 96h · business hours (Mon–Fri)
             </p>
           </CardHeader>
           <CardContent className="pb-6">
@@ -403,19 +403,19 @@ export default function AdminKycDashboardPage() {
                 avg={sla.fieldChainAvgHours}
                 target={24}
                 compliancePct={sla.fieldCompliancePct}
-                footer="target 24h"
+                footer="target 24 business hrs"
               />
               <SlaTile
                 label="Gifsy-review avg"
                 avg={sla.gifsyReviewAvgHours}
                 target={96}
                 compliancePct={sla.gifsyCompliancePct}
-                footer="target 96h"
+                footer="target 96 business hrs"
               />
             </div>
             <div className="flex items-center gap-1.5 mt-4 text-[11px] text-gray-400">
               <TrendingUp className="w-3.5 h-3.5" />
-              Green ≤ target · amber ≤ 1.5× target · red otherwise
+              Green ≤ target · amber ≤ 1.5× target · red otherwise · targets are business hours (Mon–Fri, excl. national holidays)
             </div>
           </CardContent>
         </Card>

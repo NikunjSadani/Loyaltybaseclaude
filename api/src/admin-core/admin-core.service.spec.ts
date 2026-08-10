@@ -836,9 +836,95 @@ describe('AdminCoreService', () => {
   // ────────────────────────────────────────────────────────────────────────────
   // kycDashboard — GET /v1/admin/dashboard/kyc (KYC program-health aggregation)
   // ────────────────────────────────────────────────────────────────────────────
+  describe('nationalHolidays (platform calendar)', () => {
+    it('getNationalHolidays returns the gazetted-national defaults when no row exists', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue(null);
+      const { holidays } = await service.getNationalHolidays();
+      expect(holidays).toEqual([
+        { date: '2026-01-26', label: 'Republic Day' },
+        { date: '2026-08-15', label: 'Independence Day' },
+        { date: '2026-10-02', label: 'Gandhi Jayanti' },
+      ]);
+      // Read from the platform (gifsy) row, not the caller's tenant.
+      expect(mockPrisma.programSetting.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { clientId: 'gifsy', settingKey: 'nationalHolidays' } }),
+      );
+    });
+
+    it('getNationalHolidays normalizes, de-dups and sorts a stored override', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue({
+        settingValue: [
+          { date: '2026-03-21', label: 'Holi' },
+          { date: '2026-01-01', label: 'New Year' },
+          { date: '2026-01-01', label: 'New Year (dupe)' }, // de-duped: last wins
+          { date: 'not-a-date', label: 'junk' }, // dropped
+        ],
+      });
+      const { holidays } = await service.getNationalHolidays();
+      expect(holidays).toEqual([
+        { date: '2026-01-01', label: 'New Year (dupe)' },
+        { date: '2026-03-21', label: 'Holi' },
+      ]);
+    });
+
+    it('setNationalHolidays (GIFSY) validates, de-dups, sorts, and upserts the platform row', async () => {
+      mockPrisma.programSetting.upsert.mockResolvedValue({ id: 'ps' });
+      const { holidays } = await service.setNationalHolidays(gifsy, {
+        holidays: [
+          { date: '2026-03-21', label: '  Holi  ' },
+          { date: '2026-01-26', label: 'Republic Day' },
+          { date: '2026-01-26', label: 'Republic Day (dupe)' },
+        ],
+      });
+      expect(holidays).toEqual([
+        { date: '2026-01-26', label: 'Republic Day (dupe)' },
+        { date: '2026-03-21', label: 'Holi' },
+      ]);
+      const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
+      expect(call.where).toEqual({ clientId_settingKey: { clientId: 'gifsy', settingKey: 'nationalHolidays' } });
+      expect(call.create.settingValue).toEqual(holidays);
+      expect(call.update.settingValue).toEqual(holidays);
+    });
+
+    it('setNationalHolidays rejects an impossible calendar date', async () => {
+      await expect(
+        service.setNationalHolidays(gifsy, { holidays: [{ date: '2026-02-30', label: 'X' }] }),
+      ).rejects.toThrow(/Invalid holiday date/);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    it('setNationalHolidays rejects a blank label', async () => {
+      await expect(
+        service.setNationalHolidays(gifsy, { holidays: [{ date: '2026-01-26', label: '   ' }] }),
+      ).rejects.toThrow(/missing a label/);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    it('setNationalHolidays forbids a non-GIFSY caller', async () => {
+      await expect(
+        service.setNationalHolidays(clientAdmin, { holidays: [{ date: '2026-01-26', label: 'X' }] }),
+      ).rejects.toThrow(/Gifsy Admin only/);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+  });
+
   describe('kycDashboard', () => {
     const HOUR = 60 * 60 * 1000;
-    const now = Date.now();
+    // Fixed Friday so the business-hours SLA clock is DETERMINISTIC: every fixture below looks
+    // back at most 100h, which from Fri 09 Jan 2026 reaches only to Mon 05 Jan — no weekend or
+    // national holiday in that window, so business hours == calendar hours and the within/breached
+    // expectations are unchanged by the business-day switch. (Relative-to-real-now fixtures would
+    // flip buckets depending on the day the suite runs.)
+    const now = new Date('2026-01-09T12:00:00Z').getTime();
+    let nowSpy: jest.SpyInstance;
+    beforeEach(() => {
+      // Mock Date.now() only (not the Date constructor) so kycDashboard's internal `now`
+      // matches the fixed `now` above; businessHoursBetween still runs on real Date math.
+      nowSpy = jest.spyOn(Date, 'now').mockReturnValue(now);
+    });
+    afterEach(() => {
+      nowSpy.mockRestore();
+    });
 
     /** Build an addressable-outlet fixture in the shape kycDashboard selects. */
     type Hist = { toStatus: string; createdAt: Date };

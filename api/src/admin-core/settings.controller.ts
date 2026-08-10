@@ -3,7 +3,12 @@ import { AdminCoreService } from './admin-core.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { SetPointsExpiryDto, SetVisibilityCaptureModeDto, UpsertSettingDto } from './dto/settings.dto';
+import {
+  SetHolidaysDto,
+  SetPointsExpiryDto,
+  SetVisibilityCaptureModeDto,
+  UpsertSettingDto,
+} from './dto/settings.dto';
 
 /**
  * Tenant program settings + non-secret tenant config — re-homed from
@@ -90,5 +95,30 @@ export class AdminSettingsController {
   @RequirePermission('tenancy:write')
   setPointsExpiry(@CurrentUser() user: JwtPayload, @Body() dto: SetPointsExpiryDto) {
     return this.svc.setPointsExpiry(user, dto);
+  }
+
+  /**
+   * GET /v1/admin/settings/holidays — the PLATFORM-global national holiday calendar the KYC
+   * business-hours SLA clock pauses on. GIFSY_ADMIN or CLIENT_ADMIN may read (a tenant admin's
+   * KYC list needs it to age rows correctly). Returns { holidays: [{ date, label }] } — the
+   * stored override, else the code default (gazetted national holidays).
+   */
+  @Get('holidays')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('tenancy:read')
+  getHolidays() {
+    return this.svc.getNationalHolidays();
+  }
+
+  /**
+   * PUT /v1/admin/settings/holidays — replace the platform national holiday calendar.
+   * GIFSY_ADMIN only (it is platform-level operator config, not per-tenant). Body:
+   * { holidays: [{ date: 'YYYY-MM-DD', label }] }. Returns the saved, de-duped, sorted list.
+   */
+  @Put('holidays')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('tenancy:write')
+  setHolidays(@CurrentUser() user: JwtPayload, @Body() dto: SetHolidaysDto) {
+    return this.svc.setNationalHolidays(user, dto);
   }
 }

@@ -14,6 +14,7 @@
 ──────────────────────────────────────────────────────────────────────────────── */
 
 import { api } from '@/lib/api-client';
+import { businessHoursBetween } from '@/lib/business-hours';
 
 /** The programSetting key the backend stores/reads/enforces the SLA target under. */
 export const KYC_SLA_SETTING_KEY = 'slaTargetHours';
@@ -78,6 +79,7 @@ export function kycAgeHrs(
   submittedAt: string | null | undefined,
   status: string,
   decision: { reviewedAt?: string | null; approvedAt?: string | null; updatedAt?: string | null } = {},
+  holidays: Set<string> = new Set(),
 ): number {
   if (!submittedAt) return 0;
   // Freeze at the decision (approvedAt for an approval; reviewedAt for a reject/resubmit;
@@ -86,5 +88,7 @@ export function kycAgeHrs(
     ? decision.approvedAt ?? decision.reviewedAt ?? decision.updatedAt ?? null
     : null;
   const endMs = decidedAt ? new Date(decidedAt).getTime() : Date.now();
-  return Math.round(Math.max(0, endMs - new Date(submittedAt).getTime()) / (1000 * 60 * 60));
+  // Business hours only: Mon–Fri, excluding the national holiday calendar (weekends never
+  // count toward the SLA). An empty holiday set still excludes weekends.
+  return Math.round(businessHoursBetween(new Date(submittedAt).getTime(), endMs, holidays));
 }

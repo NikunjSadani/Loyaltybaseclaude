@@ -1,7 +1,7 @@
 ﻿'use client'
 
 import { useState, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins, Lock, Fingerprint } from 'lucide-react'
+import { Save, RefreshCw, Plus, Trash2, ListTodo, Layers, TrendingUp, Eye, Tags, X, Smartphone, Clock, Coins, Lock, Fingerprint, CalendarDays } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
@@ -20,6 +20,7 @@ import {
   type VisibilityCaptureMode,
 } from '@/lib/visibility-capture-mode'
 import { useAdminSession } from '@/lib/admin-session'
+import { fetchHolidays, saveHolidays, type Holiday } from '@/lib/holidays'
 
 interface Settings {
   holdingPeriodDays: number
@@ -415,7 +416,7 @@ export default function SettingsPage() {
     setKycSlaError(null)
     const n = Number(kycSlaHours.trim())
     if (!Number.isInteger(n) || n < KYC_SLA_MIN_HOURS || n > KYC_SLA_MAX_HOURS) {
-      setKycSlaError(`Enter a whole number of working hours between ${KYC_SLA_MIN_HOURS} and ${KYC_SLA_MAX_HOURS}.`)
+      setKycSlaError(`Enter a whole number of business hours between ${KYC_SLA_MIN_HOURS} and ${KYC_SLA_MAX_HOURS}.`)
       return
     }
     const ok = await saveKycSlaHours(n)
@@ -425,6 +426,76 @@ export default function SettingsPage() {
     }
     setKycSlaSaved(true)
     setTimeout(() => setKycSlaSaved(false), 3000)
+  }
+
+  // ── National holiday calendar (PLATFORM-global; drives the KYC business-hours SLA clock) ──
+  // Round-trips via GET/PUT /api/admin/settings/holidays through the fetchHolidays/saveHolidays
+  // client. GET is allowed for GIFSY_ADMIN + CLIENT_ADMIN (a tenant admin's KYC list needs the
+  // dates to age rows correctly); the WRITE is GIFSY_ADMIN-only (the backend 403s others), so the
+  // add/remove/edit/Save affordances render only for a Gifsy Admin — a tenant admin sees the list
+  // READ-ONLY. `holidaysLoaded` gates the Save so we can never PUT the placeholder before the fetch
+  // resolves. Client-side niceties mirror the backend rules (real YYYY-MM-DD date + non-empty label
+  // per row, ≤ 366 rows) so a save can't surprise the user with a 400.
+  const HOLIDAY_MAX = 366
+  const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
+  function isValidYmd(s: string): boolean {
+    if (!YMD_RE.test(s)) return false
+    const d = new Date(`${s}T00:00:00Z`)
+    // Guard against JS date rollover (e.g. 2026-02-30 → Mar 2): round-trip must be identical.
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s
+  }
+  const sortHolidays = (list: Holiday[]): Holiday[] =>
+    [...list].sort((a, b) => a.date.localeCompare(b.date))
+
+  const [holidays,       setHolidays]       = useState<Holiday[]>([])
+  const [holidaysLoaded, setHolidaysLoaded] = useState(false)
+  const [holidaysSaved,  setHolidaysSaved]  = useState(false)
+  const [holidaysError,  setHolidaysError]  = useState<string | null>(null)
+
+  useEffect(() => {
+    fetchHolidays()
+      .then((list) => setHolidays([...list].sort((a, b) => a.date.localeCompare(b.date))))
+      .finally(() => setHolidaysLoaded(true))
+  }, [])
+
+  // Every row must have a valid date and a non-empty (trimmed) label; the list is capped.
+  const holidaysValid =
+    holidays.length <= HOLIDAY_MAX &&
+    holidays.every((h) => isValidYmd(h.date.trim()) && h.label.trim() !== '')
+
+  function updateHoliday(index: number, field: keyof Holiday, value: string) {
+    setHolidays((prev) => prev.map((h, i) => (i === index ? { ...h, [field]: value } : h)))
+  }
+  function addHolidayRow() {
+    setHolidays((prev) => (prev.length >= HOLIDAY_MAX ? prev : [...prev, { date: '', label: '' }]))
+  }
+  function removeHolidayRow(index: number) {
+    setHolidays((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  async function handleHolidaysSave() {
+    setHolidaysError(null)
+    const cleaned = holidays.map((h) => ({ date: h.date.trim(), label: h.label.trim() }))
+    if (cleaned.some((h) => !isValidYmd(h.date) || h.label === '')) {
+      setHolidaysError('Every holiday needs a valid date and a non-empty label.')
+      return
+    }
+    if (cleaned.length > HOLIDAY_MAX) {
+      setHolidaysError(`At most ${HOLIDAY_MAX} holidays can be saved.`)
+      return
+    }
+    const ok = await saveHolidays(cleaned)
+    if (!ok) {
+      setHolidaysError('Could not save — the holiday calendar can only be changed by a Gifsy Admin.')
+      return
+    }
+    // Reflect the server's normalisation locally: de-dupe by date (last wins) + sort by date.
+    const deduped = Array.from(
+      cleaned.reduce((m, h) => m.set(h.date, h), new Map<string, Holiday>()).values(),
+    )
+    setHolidays(sortHolidays(deduped))
+    setHolidaysSaved(true)
+    setTimeout(() => setHolidaysSaved(false), 3000)
   }
 
   // ── Conversion rate (per-tenant; Points→₹). saveGifsySettings PUTs /v1/admin/settings
@@ -800,8 +871,11 @@ export default function SettingsPage() {
             <div>
               <CardTitle className="text-base">KYC SLA Configuration</CardTitle>
               <CardDescription className="mt-1">
-                Turnaround time target for KYC approvals (Gifsy KPI). Breaches are flagged on the
-                KPI dashboard. This is a Gifsy-operated setting — only a Gifsy Admin can change it.
+                Turnaround time target for KYC approvals (Gifsy KPI). The clock counts{' '}
+                <strong>business hours (Mon–Fri, excluding the national holiday calendar)</strong> —
+                weekends and national holidays don&apos;t count against the target. Breaches are
+                flagged on the KPI dashboard. This is a Gifsy-operated setting — only a Gifsy Admin
+                can change it.
               </CardDescription>
             </div>
             {isGifsyAdmin && (
@@ -822,8 +896,8 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent>
           <SettingRow
-            label="KYC SLA Target (working hours)"
-            description="Maximum working hours from KYC submission to approval/rejection. Breaches are flagged in the KPI dashboard."
+            label="KYC SLA Target (business hours)"
+            description="Maximum business hours (Mon–Fri, excluding the national holiday calendar) from KYC submission to approval/rejection. Weekends and national holidays are excluded automatically. Breaches are flagged in the KPI dashboard."
             type="number"
             value={kycSlaHours}
             onChange={(v) => setKycSlaHours(v)}
@@ -839,6 +913,109 @@ export default function SettingsPage() {
           )}
           {kycSlaError && (
             <p className="text-xs text-red-600 mt-2">{kycSlaError}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── National Holiday Calendar (platform-global; GIFSY_ADMIN edits, tenant admin reads) ── */}
+      <Card data-testid="holiday-calendar-card">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <CalendarDays className="h-4 w-4 text-[var(--brand-primary)]" /> National Holiday Calendar
+              </CardTitle>
+              <CardDescription className="mt-1">
+                Dates on this calendar pause the KYC review-SLA clock. Weekends (Sat/Sun) are always
+                excluded automatically; this calendar adds national holidays on top. This is a
+                Gifsy-operated setting — only a Gifsy Admin can change it.
+              </CardDescription>
+            </div>
+            {isGifsyAdmin && (
+              <button
+                data-testid="holiday-save"
+                onClick={handleHolidaysSave}
+                disabled={!holidaysLoaded || !holidaysValid}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 ${
+                  holidaysSaved
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-[var(--brand-primary)] text-white hover:bg-[var(--brand-primary-dark)] disabled:opacity-50 disabled:cursor-not-allowed'
+                }`}
+              >
+                {holidaysSaved ? '✓ Saved' : <><Save className="h-3.5 w-3.5" /> Save</>}
+              </button>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          {!holidaysLoaded ? (
+            <p className="text-sm text-gray-400">Loading holidays…</p>
+          ) : isGifsyAdmin ? (
+            <>
+              {holidays.length === 0 ? (
+                <p className="text-xs text-gray-400 italic mb-3">No holidays yet — add one below.</p>
+              ) : (
+                <div className="space-y-2 mb-3">
+                  {holidays.map((h, i) => (
+                    <div key={i} data-testid="holiday-row" className="flex items-center gap-2">
+                      <input
+                        type="date"
+                        data-testid="holiday-date-input"
+                        aria-label="Holiday date"
+                        value={h.date}
+                        onChange={(e) => updateHoliday(i, 'date', e.target.value)}
+                        className="text-sm border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)]"
+                      />
+                      <input
+                        type="text"
+                        data-testid="holiday-label-input"
+                        aria-label="Holiday name"
+                        value={h.label}
+                        onChange={(e) => updateHoliday(i, 'label', e.target.value)}
+                        placeholder="Holiday name (e.g. Republic Day)"
+                        className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-[var(--brand-primary)]"
+                      />
+                      <button
+                        type="button"
+                        aria-label={`Remove ${h.label || 'holiday'}`}
+                        onClick={() => removeHolidayRow(i)}
+                        className="text-gray-400 hover:text-red-500 transition-colors shrink-0"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <button
+                data-testid="holiday-add"
+                type="button"
+                onClick={addHolidayRow}
+                disabled={holidays.length >= HOLIDAY_MAX}
+                className="flex items-center gap-1 px-3 py-1.5 bg-[var(--brand-primary)] text-white text-xs font-semibold rounded-lg hover:bg-[var(--brand-primary-dark)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                <Plus className="h-3.5 w-3.5" /> Add holiday
+              </button>
+              {holidaysError && (
+                <p className="text-xs text-red-600 mt-2">{holidaysError}</p>
+              )}
+            </>
+          ) : holidays.length === 0 ? (
+            <p className="text-xs text-gray-400 italic">No national holidays configured.</p>
+          ) : (
+            <>
+              <div className="divide-y divide-gray-100">
+                {sortHolidays(holidays).map((h, i) => (
+                  <div key={`${h.date}-${i}`} data-testid="holiday-row" className="flex items-center justify-between gap-4 py-2.5">
+                    <span className="text-sm font-medium text-gray-900">{h.label}</span>
+                    <span className="text-xs font-mono text-gray-500">{h.date}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-gray-400 mt-3">
+                The national holiday calendar is a Gifsy-operated setting — only a Gifsy Admin can change it.
+              </p>
+            </>
           )}
         </CardContent>
       </Card>

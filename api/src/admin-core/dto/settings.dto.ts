@@ -1,4 +1,20 @@
-import { Allow, IsEnum, IsInt, IsOptional, IsString, Max, Min, MinLength, ValidateIf } from 'class-validator';
+import {
+  Allow,
+  ArrayMaxSize,
+  IsArray,
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  Matches,
+  Max,
+  MaxLength,
+  Min,
+  MinLength,
+  ValidateIf,
+  ValidateNested,
+} from 'class-validator';
+import { Type } from 'class-transformer';
 import type { VisibilityCaptureMode } from '../../tenant/tenant.service';
 
 /**
@@ -53,4 +69,31 @@ export class SetPointsExpiryDto {
   @Min(1)
   @Max(36500) // ~100 years; guards against Int4 overflow / absurd values
   pointsExpiryDays!: number | null;
+}
+
+/**
+ * One national-holiday entry: a strict `YYYY-MM-DD` date + a human label. The service also
+ * re-validates that the date is a REAL calendar day (rejects 2026-02-30) and de-dups by date.
+ */
+export class HolidayItemDto {
+  @IsString()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'date must be YYYY-MM-DD' })
+  date!: string;
+
+  @IsString()
+  @MinLength(1)
+  @MaxLength(120)
+  label!: string;
+}
+
+/**
+ * DTO for PUT /v1/admin/settings/holidays — the platform national holiday calendar (GIFSY_ADMIN
+ * only). Replaces the whole list. Capped at 366 entries (one year's worth) as a sanity bound.
+ */
+export class SetHolidaysDto {
+  @IsArray()
+  @ArrayMaxSize(366)
+  @ValidateNested({ each: true })
+  @Type(() => HolidayItemDto)
+  holidays!: HolidayItemDto[];
 }
