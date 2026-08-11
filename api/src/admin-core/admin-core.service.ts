@@ -26,6 +26,14 @@ import {
   normalizeReportRecipients,
 } from '../common/report-recipients';
 import {
+  KYC_FIELD_SLA_KEY,
+  KYC_GIFSY_SLA_KEY,
+  KYC_FIELD_SLA_DEFAULT,
+  KYC_GIFSY_SLA_DEFAULT,
+  KYC_SLA_MIN_HOURS,
+  KYC_SLA_MAX_HOURS,
+} from '../common/kyc-sla-stage';
+import {
   BulkEditUsersDto,
   CreateUserDto,
   ListUsersQueryDto,
@@ -558,7 +566,11 @@ export class AdminCoreService {
   private static readonly SETTINGS_DEFAULTS: Record<string, unknown> = {
     holdingPeriodDays: 30,
     conversionRate: 1,
-    slaTargetHours: 48,
+    // Two-stage KYC review SLA (replaces the old single slaTargetHours). Each is a
+    // per-tenant configurable business-hours target: field stage (submitted → reached
+    // Gifsy) and Gifsy stage (latest PENDING_GIFSY entry → decision).
+    fieldSlaTargetHours: KYC_FIELD_SLA_DEFAULT,
+    gifsySlaTargetHours: KYC_GIFSY_SLA_DEFAULT,
     // OTP knobs are sourced from the enforced auth constants (single source of truth)
     // so this default can never drift from what auth.service.ts actually enforces.
     maxOtpAttempts: OTP_MAX_ATTEMPTS,
@@ -571,6 +583,15 @@ export class AdminCoreService {
     supportEmail: 'support@platform.com',
     supportPhone: '1800-XXX-XXXX',
   };
+
+  /**
+   * Setting keys that were removed and must never surface from getSettings, even if a stale
+   * programSetting row still exists in a tenant DB (e.g. deoleo prod's pre-two-stage
+   * `slaTargetHours`). Nothing reads these; skipping them keeps the payload honest.
+   */
+  private static readonly RETIRED_SETTING_KEYS: ReadonlySet<string> = new Set<string>([
+    'slaTargetHours',
+  ]);
 
   // ── National holiday calendar (platform-global) ────────────────────────────
   // The KYC review-SLA counts only business hours (Mon–Fri) and PAUSES on this calendar
@@ -689,6 +710,10 @@ export class AdminCoreService {
       conversionRate: TenantSettingsService.envConversionRate(),
     };
     for (const row of rows) {
+      // Skip retired keys: the single `slaTargetHours` was replaced by the two-stage
+      // field/gifsySlaTargetHours. A leftover DB row (e.g. deoleo prod, pre-migration) must
+      // not surface a dead knob in the settings payload — nothing reads it any more.
+      if (AdminCoreService.RETIRED_SETTING_KEYS.has(row.settingKey)) continue;
       settings[row.settingKey] = row.settingValue;
     }
 
@@ -715,14 +740,16 @@ export class AdminCoreService {
   async upsertSetting(user: JwtPayload, dto: UpsertSettingDto) {
     const clientId = user.clientId;
 
-    // Key-specific guard: the KYC SLA target drives the breach count on the SLA KPI
-    // dashboard (kyc.service.ts slaMetrics()). A non-integer / out-of-range value would
-    // poison that metric, so reject anything outside 1–168 working hours here (the FE
-    // SettingRow also enforces the same min/max — defence in depth).
-    if (dto.key === 'slaTargetHours') {
+    // Key-specific guard: the two KYC review-SLA targets drive the breach buckets on the
+    // KYC dashboard (kycDashboard()). A non-integer / out-of-range value would poison those
+    // metrics, so reject anything outside KYC_SLA_MIN_HOURS–KYC_SLA_MAX_HOURS business hours
+    // here (the FE SettingRow also enforces the same min/max — defence in depth).
+    if (dto.key === KYC_FIELD_SLA_KEY || dto.key === KYC_GIFSY_SLA_KEY) {
       const n = typeof dto.value === 'string' ? parseInt(dto.value, 10) : Number(dto.value);
-      if (!Number.isInteger(n) || n < 1 || n > 168) {
-        throw new BadRequestException('slaTargetHours must be a whole number between 1 and 168.');
+      if (!Number.isInteger(n) || n < KYC_SLA_MIN_HOURS || n > KYC_SLA_MAX_HOURS) {
+        throw new BadRequestException(
+          `${dto.key} must be a whole number between ${KYC_SLA_MIN_HOURS} and ${KYC_SLA_MAX_HOURS}.`,
+        );
       }
       // Persist a normalised integer so the stored value never carries a stray string/float.
       dto.value = n;
@@ -1127,9 +1154,33 @@ export class AdminCoreService {
     'SUSPENDED',
   ]);
 
-  private static readonly KYC_SLA_FIELD_HOURS = 24;
-  private static readonly KYC_SLA_GIFSY_HOURS = 96;
   private static readonly KYC_HOUR_MS = 1000 * 60 * 60;
+
+  /**
+   * Resolve the tenant's two configurable KYC review-SLA targets (business hours): the
+   * field-stage target (submitted → reached Gifsy) and the Gifsy-stage target (latest
+   * PENDING_GIFSY entry → decision). Reads the two per-tenant programSetting rows; each is
+   * bounds-checked to KYC_SLA_MIN_HOURS–KYC_SLA_MAX_HOURS and falls back to KYC_FIELD_SLA_DEFAULT
+   * (24) / KYC_GIFSY_SLA_DEFAULT (96) when the row is absent or holds an out-of-range value.
+   */
+  private async resolveKycSlaTargets(
+    clientId: string,
+  ): Promise<{ fieldHrs: number; gifsyHrs: number }> {
+    const rows = await this.prisma.programSetting.findMany({
+      where: { clientId, settingKey: { in: [KYC_FIELD_SLA_KEY, KYC_GIFSY_SLA_KEY] } },
+      select: { settingKey: true, settingValue: true },
+    });
+    const resolve = (key: string, fallback: number): number => {
+      const raw = rows.find((r) => r.settingKey === key)?.settingValue;
+      const n = typeof raw === 'string' ? parseInt(raw, 10) : Number(raw);
+      if (!Number.isInteger(n) || n < KYC_SLA_MIN_HOURS || n > KYC_SLA_MAX_HOURS) return fallback;
+      return n;
+    };
+    return {
+      fieldHrs: resolve(KYC_FIELD_SLA_KEY, KYC_FIELD_SLA_DEFAULT),
+      gifsyHrs: resolve(KYC_GIFSY_SLA_KEY, KYC_GIFSY_SLA_DEFAULT),
+    };
+  }
 
   /** mean of a numeric array; 0 for an empty array (no NaN). */
   private static mean(xs: number[]): number {
@@ -1160,8 +1211,10 @@ export class AdminCoreService {
     const clientId = user.clientId;
     const now = Date.now();
     // KYC SLA ages count BUSINESS hours only (Mon–Fri, minus the national holiday
-    // calendar) — the stage targets below (24h/96h) are business hours, not calendar.
+    // calendar) — the stage targets are business hours, not calendar. The two targets are
+    // per-tenant configurable (field 24h / gifsy 96h defaults), resolved once here.
     const holidays = await loadHolidaySet(this.prisma);
+    const { fieldHrs, gifsyHrs } = await this.resolveKycSlaTargets(clientId);
 
     // ── Addressable universe + the canonical per-outlet status derivation ──────
     // ONE findMany with latest-submission include (mirrors buildOutlets): no N+1.
@@ -1280,18 +1333,36 @@ export class AdminCoreService {
       m.set(key, e);
     };
 
-    // earliest KycStatusHistory.createdAt where toStatus === 'PENDING_GIFSY'
+    // LATEST KycStatusHistory.createdAt where toStatus === 'PENDING_GIFSY'. The Gifsy clock
+    // "restarts on re-entry": a bounced KYC that re-enters the Gifsy queue is timed from its
+    // most-recent arrival, not its first. Used for the LIVE Gifsy bucket + the Gifsy-review tile.
     const enteredPendingGifsyAt = (
       history: { toStatus: KycStatus; createdAt: Date }[],
     ): Date | null => {
-      let earliest: Date | null = null;
+      let latest: Date | null = null;
       for (const h of history) {
         if (h.toStatus !== 'PENDING_GIFSY') continue;
-        if (earliest === null || h.createdAt.getTime() < earliest.getTime()) {
-          earliest = h.createdAt;
+        if (latest === null || h.createdAt.getTime() > latest.getTime()) {
+          latest = h.createdAt;
         }
       }
-      return earliest;
+      return latest;
+    };
+
+    // FIRST (earliest) entry into PENDING_GIFSY — the field chain's initial hand-off to Gifsy.
+    // The field-chain tile must measure submitted → FIRST hand-off (pure field time); using the
+    // LATEST entry would wrongly absorb a bounced KYC's first Gifsy review + rework into "field".
+    const firstEnteredPendingGifsyAt = (
+      history: { toStatus: KycStatus; createdAt: Date }[],
+    ): Date | null => {
+      let first: Date | null = null;
+      for (const h of history) {
+        if (h.toStatus !== 'PENDING_GIFSY') continue;
+        if (first === null || h.createdAt.getTime() < first.getTime()) {
+          first = h.createdAt;
+        }
+      }
+      return first;
     };
 
     for (const o of addressableOutlets) {
@@ -1330,30 +1401,37 @@ export class AdminCoreService {
           // age = business hours since submittedAt (fall back to createdAt if null)
           const startTs = (sub.submittedAt ?? sub.createdAt).getTime();
           const ageH = businessHoursBetween(startTs, now, holidays);
-          if (ageH <= AdminCoreService.KYC_SLA_FIELD_HOURS) pendingFieldWithin += 1;
+          if (ageH <= fieldHrs) pendingFieldWithin += 1;
           else pendingFieldBreached += 1;
         } else if (status === 'PENDING_GIFSY') {
           // clock = business hours since entering PENDING_GIFSY; fall back submittedAt → createdAt
           const enteredAt = enteredPendingGifsyAt(sub.statusHistory);
           const startTs = (enteredAt ?? sub.submittedAt ?? sub.createdAt).getTime();
           const ageH = businessHoursBetween(startTs, now, holidays);
-          if (ageH <= AdminCoreService.KYC_SLA_GIFSY_HOURS) pendingGifsyWithin += 1;
+          if (ageH <= gifsyHrs) pendingGifsyWithin += 1;
           else pendingGifsyBreached += 1;
         }
       }
 
       // ── SLA distributions over APPROVED submissions (submittedAt present) ──
       // Business hours (Mon–Fri minus holidays) so the turnaround tiles match the SLA clock.
+      // Field chain = submitted → FIRST hand-off to Gifsy (pure field time, matching the field
+      // SLA). Gifsy review = LATEST Gifsy entry → approval (restart-on-re-entry, matching the
+      // Gifsy SLA). For a clean (never-bounced) KYC first === latest, so both are unchanged; for
+      // a bounced KYC this keeps the first Gifsy review + rework out of the "field" tile.
       if (isApproved && sub && sub.submittedAt) {
         const submittedTs = sub.submittedAt.getTime();
-        const enteredAt = enteredPendingGifsyAt(sub.statusHistory);
-        if (enteredAt) {
-          fieldChainHours.push(businessHoursBetween(submittedTs, enteredAt.getTime(), holidays));
-          if (sub.approvedAt) {
-            gifsyReviewHours.push(
-              businessHoursBetween(enteredAt.getTime(), sub.approvedAt.getTime(), holidays),
-            );
-          }
+        const firstEnteredAt = firstEnteredPendingGifsyAt(sub.statusHistory);
+        const lastEnteredAt = enteredPendingGifsyAt(sub.statusHistory);
+        if (firstEnteredAt) {
+          fieldChainHours.push(
+            businessHoursBetween(submittedTs, firstEnteredAt.getTime(), holidays),
+          );
+        }
+        if (lastEnteredAt && sub.approvedAt) {
+          gifsyReviewHours.push(
+            businessHoursBetween(lastEnteredAt.getTime(), sub.approvedAt.getTime(), holidays),
+          );
         }
         if (sub.approvedAt) {
           endToEndHours.push(businessHoursBetween(submittedTs, sub.approvedAt.getTime(), holidays));
@@ -1440,13 +1518,13 @@ export class AdminCoreService {
           count: pendingField,
           withinSla: pendingFieldWithin,
           breached: pendingFieldBreached,
-          slaHours: AdminCoreService.KYC_SLA_FIELD_HOURS,
+          slaHours: fieldHrs,
         },
         pendingGifsyApproval: {
           count: awaitingGifsy,
           withinSla: pendingGifsyWithin,
           breached: pendingGifsyBreached,
-          slaHours: AdminCoreService.KYC_SLA_GIFSY_HOURS,
+          slaHours: gifsyHrs,
         },
       },
       sla: {
@@ -1454,10 +1532,10 @@ export class AdminCoreService {
         gifsyReviewAvgHours: AdminCoreService.round1(AdminCoreService.mean(gifsyReviewHours)),
         endToEndAvgHours: AdminCoreService.round1(AdminCoreService.mean(endToEndHours)),
         fieldCompliancePct: AdminCoreService.round1(
-          AdminCoreService.compliancePct(fieldChainHours, AdminCoreService.KYC_SLA_FIELD_HOURS),
+          AdminCoreService.compliancePct(fieldChainHours, fieldHrs),
         ),
         gifsyCompliancePct: AdminCoreService.round1(
-          AdminCoreService.compliancePct(gifsyReviewHours, AdminCoreService.KYC_SLA_GIFSY_HOURS),
+          AdminCoreService.compliancePct(gifsyReviewHours, gifsyHrs),
         ),
         sampleSize: endToEndHours.length,
       },

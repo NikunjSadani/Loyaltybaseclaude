@@ -10,6 +10,7 @@
  */
 
 import type { PrismaService } from '../../prisma/prisma.service';
+import type { KycSlaTargets } from '../../common/kyc-sla-stage';
 
 /** Stable report keys — also the keys under which recipient lists are stored (reportRecipients). */
 export type ReportKey = 'creditsPayouts' | 'kycActionables';
@@ -57,5 +58,6 @@ export type KycActionablesBuilder = (
   prisma: PrismaService,
   ctx: ReportContext,
   holidays: Set<string>,
-  slaTargetHours: Map<string, number>,
+  /** clientId → { fieldHrs, gifsyHrs } — the two-stage SLA targets; missing tenants default to 24/96. */
+  slaTargets: Map<string, KycSlaTargets>,
 ) => Promise<ReportResult>;

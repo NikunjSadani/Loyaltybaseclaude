@@ -185,14 +185,21 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   sent from a **`notify.gifsy.in` subdomain** (own SPF/DKIM/MX/CNAME/DMARC → no Zoho-Mail conflict; Zoho MX on root untouched). Scope = **two
   INTERNAL Gifsy reports** (recipients configurable from a Gifsy-admin page): **①Credits/Payouts summary (all-tenant)** + **③KYC actionables
   digest (all-tenant, daily Mon–Sat, with SLA)** — two SEPARATE scheduled reports (Cloud Scheduler → internal endpoint). Framework built to
-  add tenant-specific scheduled reports later. Partners are NOT an email audience (phone-first). **Workstream B = business-day KYC SLA
-  ✅ LIVE STAGING `e1c809d`.** **Workstreams A/C/D/E = BUILT on develop, gate-green (jest 2254 / vitest 2109), adversarial-audited, FAIL-CLOSED**
-  (`Msg91Service.sendEmail` reusing `MSG91_AUTH_KEY` · `POST /v1/reports/run` secret-gated · report framework + 2 all-tenant reports
-  #1 Credits/Payouts + #3 KYC-actionables daily Mon–Sat · platform recipients store GIFSY-only + Gifsy-admin recipients UI). MSG91 Email Free 5k/mo,
-  domain `notify.gifsy.in` VERIFIED (DNS on Cloudflare). ▶ **owner to activate** (nothing sends until then): confirm the MSG91 v5 email payload vs the
-  dashboard API-Integration tab (`msg91.service.sendEmail` flagged block) → create `REPORTS_RUN_SECRET` + set recipients + Cloud Scheduler — runbook
-  `runbooks/email-reports-activation.md`. ⚠️ owner decision open: KYC PENDING_GIFSY SLA clock uses the EARLIEST queue-entry (report matches the LIVE
-  dashboard) — "restart on bounce-back" = latest is a shared-semantic change to BOTH. Detail: memory [[email-reports-business-day-sla]].
+  add tenant-specific scheduled reports later. Partners are NOT an email audience (phone-first).
+  **📧 EMAIL REPORTS (A/C/D/E) = ✅ PUSHED staging `7190ed6`, gate-green, FAIL-CLOSED** (`Msg91Service.sendEmail` reusing `MSG91_AUTH_KEY` ·
+  `POST /v1/reports/run` secret-gated · framework + #1 Credits/Payouts + #3 KYC-actionables daily Mon–Sat · platform recipients store GIFSY-only +
+  Gifsy-admin recipients UI). Domain `notify.gifsy.in` VERIFIED (DNS Cloudflare). ▶ **owner to activate** (nothing sends until then): confirm the MSG91
+  v5 email payload vs the dashboard API-Integration tab (`msg91.service.sendEmail` flagged block) → create `REPORTS_RUN_SECRET` + set recipients +
+  Cloud Scheduler — runbook `runbooks/email-reports-activation.md`.
+- **🗓️ KYC SLA → TWO-STAGE (owner 2026-08-11) — 🏗️ BUILT on `develop`, UNCOMMITTED, gate-green (api jest 2274 · nest 0 · FE tsc 0 · FE vitest 2113),
+  DUAL-AUDITED.** Field SLA (submitted→reaching Gifsy, default **24h**) + Gifsy SLA (**LATEST** PENDING_GIFSY entry→decision, default **96h**,
+  restart-on-re-entry) — two per-tenant `field/gifsySlaTargetHours` settings REPLACING the single 48 (owner: 48 was wrong, Gifsy=96). Shared engine
+  `common/kyc-sla-stage.ts` (mirrored `platform/src/lib`); rewired the FE list (stage-tagged Field/Gifsy badge), `kycDashboard`, `slaMetrics`, the
+  rejected-export, and the email KYC report. **DRAFT** hidden from every approver queue + all SLA, visible ONLY to its creator (`kyc.service.list()`
+  `draftNot`). Security audit CLEAN; fixed the `statusCounts` tab-count to also carry `draftNot`. ▶ **NEXT (to decide + finish):** the OPEN correctness
+  findings are metric-fidelity on BOUNCED/re-entered KYCs (M1 no-history PENDING_GIFSY reads 3 ways; M2 dashboard `fieldChainHours` over-attributes a
+  re-entered approval's field time; L3 field-decided-after-bounce shows Gifsy badge; L4 legacy `slaMetrics` createdAt-anchored; INFO stale `slaTargetHours`
+  in getSettings) — rare in launch state; then COMMIT + push develop→staging + staging-verify. Detail: memory [[email-reports-business-day-sla]].
 - **(context) queue drainer still PUSH-only** — the dead SMS legs (KYC UNDER_REVIEW SMS, redemption SMS) each have a paired PUSH/WhatsApp leg that
   DOES fire; the dead credit-batch EMAIL is now SUPERSEDED by the new Credits/Payouts report. Reviving the SMS legs is out of the email-only scope.
 - **#74 owner-ops residual:** optional cred/secret rotation + real prod MSG91 (monitoring + backups/PITR already ON).

@@ -8,7 +8,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource } from '@prisma/client';
+import { Prisma, KycFieldKey, KycDocumentType, KycFieldSource, KycStatus } from '@prisma/client';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as XLSX from 'xlsx';
@@ -24,6 +24,18 @@ import { sniffFileType } from '../common/file-signature';
 import { isReKycPending, isKycInFlight } from '../common/kyc-rekyc.helper';
 import { businessHoursBetween } from '../common/business-hours';
 import { loadHolidaySet } from '../common/holiday-calendar';
+import {
+  kycStageOf,
+  latestGifsyEntryMs,
+  KYC_FIELD_SLA_KEY,
+  KYC_GIFSY_SLA_KEY,
+  KYC_FIELD_SLA_DEFAULT,
+  KYC_GIFSY_SLA_DEFAULT,
+  KYC_SLA_MIN_HOURS,
+  KYC_SLA_MAX_HOURS,
+  KYC_FIELD_STATUSES,
+  KYC_GIFSY_STATUS,
+} from '../common/kyc-sla-stage';
 import { resolveCreditFieldNames } from '../common/credit-field-name.helper';
 import { buildPayoutStatement } from '../common/payout-statement.helper';
 import {
@@ -1998,6 +2010,17 @@ export class KycService {
 
     const where: Prisma.KycSubmissionWhereInput = { ...this.kycTenantFilter(user) };
 
+    // DRAFT visibility (owner 2026-08-11): a DRAFT KYC is a work-in-progress owned by the
+    // rep who started it — visible ONLY to its creator so they can continue it, and hidden
+    // from EVERY approver/manager/admin queue. Exclude any DRAFT whose submitter is not the
+    // caller. This layers on top of the tenant/subtree scoping below (a tenant-wide admin has
+    // no own-drafts → sees none; a rep sees only their own DRAFT alongside their scoped rows).
+    // Reused for the tab-count groupBy below so the counts never tally hidden drafts.
+    const draftNot: Prisma.KycSubmissionWhereInput = {
+      AND: [{ status: 'DRAFT' }, { userId: { not: user.sub } }],
+    };
+    where.NOT = draftNot;
+
     // Sales hierarchy scoping (Q4 + owner 2026-06-24): a sales manager sees their
     // WHOLE downline's KYC (every status — the FE "Approval Pending" tab filters to
     // the caller's level); a leaf rep sees their own. The old per-level tenant-wide
@@ -2045,6 +2068,14 @@ export class KycService {
             },
           },
           documents: { select: { id: true, documentType: true, status: true } },
+          // Every PENDING_GIFSY entry for this submission — the LATEST one is the start of the
+          // Gifsy-stage SLA clock (a bounced KYC that re-enters restarts it). Used ONLY to derive
+          // the per-row `gifsyEnteredAt` below; the raw history never leaves the response.
+          // toStatus is selected (not just createdAt) because latestGifsyEntryMs re-checks it.
+          statusHistory: {
+            where: { toStatus: 'PENDING_GIFSY' },
+            select: { toStatus: true, createdAt: true },
+          },
         },
         skip,
         take: limit,
@@ -2056,8 +2087,8 @@ export class KycService {
     const statusCounts = await this.prisma.kycSubmission.groupBy({
       by: ['status'],
       where: this.canReadTenantWide(user.role)
-        ? { ...this.kycTenantFilter(user) }
-        : { userId: { in: submitterScope ?? [user.sub] }, ...this.kycTenantFilter(user) },
+        ? { ...this.kycTenantFilter(user), NOT: draftNot }
+        : { userId: { in: submitterScope ?? [user.sub] }, ...this.kycTenantFilter(user), NOT: draftNot },
       _count: { status: true },
     });
 
@@ -2068,11 +2099,20 @@ export class KycService {
     // BUT once the rep has RESUBMITTED (this submission is in-flight / under review), the
     // in-flight status must show through — else a just-resubmitted re-KYC keeps reading as
     // "Re-KYC Required" instead of "Under Review" (the flags stay set until approval).
-    const mapped = submissions.map((s) =>
-      !isKycInFlight(s.status) && s.partner?.outlets?.some((o) => isReKycPending(o.reKycFlags))
-        ? { ...s, status: 'RE_KYC_REQUIRED' as (typeof s)['status'] }
-        : s,
-    );
+    const mapped = submissions.map((s) => {
+      // Strip the raw statusHistory out of the response — it is an internal detail; the FE
+      // only needs the derived `gifsyEnteredAt` (latest PENDING_GIFSY entry, ISO or null) to
+      // compute the Gifsy-stage SLA badge. submittedAt/approvedAt/reviewedAt/updatedAt/status
+      // stay on `rest` (the FE computes the field-stage clock + freeze from those).
+      const { statusHistory, ...rest } = s;
+      const gifsyMs = latestGifsyEntryMs(statusHistory);
+      const gifsyEnteredAt = gifsyMs !== null ? new Date(gifsyMs).toISOString() : null;
+      const status =
+        !isKycInFlight(s.status) && s.partner?.outlets?.some((o) => isReKycPending(o.reKycFlags))
+          ? ('RE_KYC_REQUIRED' as (typeof s)['status'])
+          : s.status;
+      return { ...rest, status, gifsyEnteredAt };
+    });
 
     return {
       submissions: mapped,
@@ -3145,35 +3185,41 @@ export class KycService {
   }
 
   /**
-   * Resolve the KYC SLA target (working hours) for the caller's tenant.
+   * Resolve the TWO per-tenant KYC review-SLA targets (business hours) — the two-stage model
+   * (owner 2026-08-11) that replaced the single `slaTargetHours`:
+   *   • field  — submitted → reached Gifsy   (default KYC_FIELD_SLA_DEFAULT = 24)
+   *   • gifsy  — latest PENDING_GIFSY → decision (default KYC_GIFSY_SLA_DEFAULT = 96)
    *
-   * Precedence: the persisted `slaTargetHours` programSetting → SLA_TARGET_HOURS env
-   * → 48 (the SETTINGS_DEFAULTS default). Fully defensive — never throws and never
-   * lets a bad stored/env value poison the metric: a non-integer or out-of-range
-   * (1–168) value at any layer falls through to the next source. The admin settings
-   * page persists this via the `slaTargetHours` upsert key, which is itself guarded.
+   * Each reads its own per-tenant programSetting row (`fieldSlaTargetHours`/`gifsySlaTargetHours`,
+   * the keys the admin settings page persists). Fully defensive — never throws and never lets a
+   * bad stored value poison the metric: a non-integer or out-of-range (1–168) value falls back to
+   * the stage default. A single settings read covers both keys.
    */
-  private async resolveSlaTargetHours(user: JwtPayload): Promise<number> {
-    const inRange = (n: number) => Number.isInteger(n) && n >= 1 && n <= 168;
+  private async resolveTwoStageSlaTargets(
+    user: JwtPayload,
+  ): Promise<{ fieldHrs: number; gifsyHrs: number }> {
+    const inRange = (n: number) =>
+      Number.isInteger(n) && n >= KYC_SLA_MIN_HOURS && n <= KYC_SLA_MAX_HOURS;
+    const coerce = (raw: unknown): number =>
+      typeof raw === 'string' ? parseInt(raw, 10) : typeof raw === 'number' ? raw : NaN;
 
-    // 1) Stored per-tenant programSetting (the admin-set value).
+    let fieldHrs = KYC_FIELD_SLA_DEFAULT;
+    let gifsyHrs = KYC_GIFSY_SLA_DEFAULT;
     try {
-      const row = await this.prisma.programSetting.findFirst({
-        where: { clientId: user.clientId, settingKey: 'slaTargetHours' },
-        select: { settingValue: true },
+      const rows = await this.prisma.programSetting.findMany({
+        where: { clientId: user.clientId, settingKey: { in: [KYC_FIELD_SLA_KEY, KYC_GIFSY_SLA_KEY] } },
+        select: { settingKey: true, settingValue: true },
       });
-      const raw = row?.settingValue;
-      const stored =
-        typeof raw === 'string' ? parseInt(raw, 10) : typeof raw === 'number' ? raw : NaN;
-      if (inRange(stored)) return stored;
+      for (const r of rows) {
+        const v = coerce(r.settingValue);
+        if (!inRange(v)) continue;
+        if (r.settingKey === KYC_FIELD_SLA_KEY) fieldHrs = v;
+        else if (r.settingKey === KYC_GIFSY_SLA_KEY) gifsyHrs = v;
+      }
     } catch {
-      // Never let a settings read failure break the metric — fall through to env/default.
+      // Never let a settings read failure break the metric — keep the stage defaults.
     }
-
-    // 2) Deployment env override, then 3) the hard default of 48.
-    const envVal = parseInt(process.env.SLA_TARGET_HOURS ?? '', 10);
-    if (inRange(envVal)) return envVal;
-    return 48;
+    return { fieldHrs, gifsyHrs };
   }
 
   // ─── GET /v1/kyc/sla-metrics ─────────────────────────────────────────────────
@@ -3181,7 +3227,9 @@ export class KycService {
     // GIFSY-only is enforced by @Roles on the controller; re-checked logically here.
     if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Forbidden - Gifsy Admin only');
 
-    const slaTargetHours = await this.resolveSlaTargetHours(user);
+    // Two per-tenant SLA targets (business hours): field stage + Gifsy stage.
+    const { fieldHrs: fieldTarget, gifsyHrs: gifsyTarget } =
+      await this.resolveTwoStageSlaTargets(user);
     const now = new Date();
     // Business-hours SLA clock: count only Mon–Fri minus the national holiday calendar,
     // so the breach count + aging buckets never inflate over a weekend/holiday.
@@ -3205,7 +3253,11 @@ export class KycService {
       .filter((s) => s.statusHistory.length > 0)
       .map((s) => {
         const approvedAt = s.statusHistory[0].createdAt;
-        return businessHoursBetween(s.createdAt.getTime(), approvedAt.getTime(), holidays);
+        // Anchor at consent (submittedAt) — leaving DRAFT — not draft-creation, so the turnaround
+        // excludes draft dwell time and matches every other SLA clock. Fall back to createdAt for
+        // legacy rows with no submittedAt.
+        const startTs = (s.submittedAt ?? s.createdAt).getTime();
+        return businessHoursBetween(startTs, approvedAt.getTime(), holidays);
       });
 
     const avgApprovalTimeHours =
@@ -3213,28 +3265,73 @@ export class KycService {
         ? approvalTimes.reduce((a, b) => a + b, 0) / approvalTimes.length
         : 0;
 
-    const slaBreachCount = approvalTimes.filter((t) => t > slaTargetHours).length;
+    // End-to-end approval turnaround: breach is measured against the GIFSY target (the stage
+    // that owns the final decision), per the two-stage model.
+    const slaBreachCount = approvalTimes.filter((t) => t > gifsyTarget).length;
     const slaComplianceRate =
       approvalTimes.length > 0
         ? ((approvalTimes.length - slaBreachCount) / approvalTimes.length) * 100
         : 100;
 
+    // Pending rows across BOTH live stages (DRAFT dropped — a draft has no active SLA):
+    //   • field stage  (KYC_FIELD_STATUSES: SUBMITTED … PENDING_RSM_APPROVAL) — ages from
+    //     submittedAt (consent) ?? createdAt vs the FIELD target.
+    //   • gifsy stage  (KYC_GIFSY_STATUS = PENDING_GIFSY) — ages from the LATEST PENDING_GIFSY
+    //     entry (statusHistory) vs the GIFSY target.
+    // Querying the union of both status sets both drops DRAFT and covers the gifsy stage (the
+    // old query only saw SUBMITTED/UNDER_REVIEW, so the Gifsy queue never aged here).
     const pending = await this.prisma.kycSubmission.findMany({
       where: {
-        status: { in: ['SUBMITTED', 'UNDER_REVIEW', 'DRAFT'] },
+        status: { in: [...KYC_FIELD_STATUSES, KYC_GIFSY_STATUS] as KycStatus[] },
         ...this.kycTenantFilter(user),
       },
-      select: { createdAt: true },
+      select: {
+        status: true,
+        submittedAt: true,
+        createdAt: true,
+        // toStatus selected alongside createdAt because latestGifsyEntryMs re-checks it.
+        statusHistory: { where: { toStatus: 'PENDING_GIFSY' }, select: { toStatus: true, createdAt: true } },
+      },
     });
 
-    const pendingAging = { '0-24h': 0, '24-48h': 0, '48-72h': 0, '72h+': 0 };
+    const emptyAging = () => ({ '0-24h': 0, '24-48h': 0, '48-72h': 0, '72h+': 0 });
+    const bucket = (aging: ReturnType<typeof emptyAging>, hours: number) => {
+      if (hours <= 24) aging['0-24h']++;
+      else if (hours <= 48) aging['24-48h']++;
+      else if (hours <= 72) aging['48-72h']++;
+      else aging['72h+']++;
+    };
+
+    // Combined (legacy shape) + per-stage aging/breach.
+    const pendingAging = emptyAging();
+    const fieldAging = emptyAging();
+    const gifsyAging = emptyAging();
+    let fieldPending = 0;
+    let gifsyPending = 0;
+    let fieldBreachCount = 0;
+    let gifsyBreachCount = 0;
 
     for (const p of pending) {
-      const hours = businessHoursBetween(p.createdAt.getTime(), now.getTime(), holidays);
-      if (hours <= 24) pendingAging['0-24h']++;
-      else if (hours <= 48) pendingAging['24-48h']++;
-      else if (hours <= 72) pendingAging['48-72h']++;
-      else pendingAging['72h+']++;
+      const stage = kycStageOf(p.status); // 'field' | 'gifsy' for this status set
+      if (stage === 'gifsy') {
+        // Gifsy clock starts at the LATEST PENDING_GIFSY entry; when that history entry is missing
+        // (legacy/imported/direct-set row) fall back to submittedAt → createdAt rather than dropping
+        // the row, so a stuck Gifsy row still ages + surfaces here exactly as it does on the
+        // dashboard and in the digest report (all three now share the same fallback).
+        const startMs = latestGifsyEntryMs(p.statusHistory) ?? (p.submittedAt ?? p.createdAt).getTime();
+        const hours = businessHoursBetween(startMs, now.getTime(), holidays);
+        bucket(gifsyAging, hours);
+        bucket(pendingAging, hours);
+        gifsyPending++;
+        if (hours > gifsyTarget) gifsyBreachCount++;
+      } else {
+        const startMs = (p.submittedAt ?? p.createdAt).getTime();
+        const hours = businessHoursBetween(startMs, now.getTime(), holidays);
+        bucket(fieldAging, hours);
+        bucket(pendingAging, hours);
+        fieldPending++;
+        if (hours > fieldTarget) fieldBreachCount++;
+      }
     }
 
     // Defense-in-depth (GLm-3): scope to the caller's tenant via the related
@@ -3266,13 +3363,30 @@ export class KycService {
     const reUploadRate = totalCount > 0 ? (reUploadCount / totalCount) * 100 : 0;
 
     return {
-      // The resolved target the breach count was computed against (admin-set setting →
-      // env → 48). Surfaced so the dashboard can display the SLA it is measuring against.
-      slaTargetHours,
+      // Legacy top-level field: the approval-turnaround breach is measured against the GIFSY
+      // target (the decision-owning stage), so surface that as `slaTargetHours` for any older
+      // consumer. The two resolved stage targets are also exposed explicitly below.
+      slaTargetHours: gifsyTarget,
+      fieldSlaTargetHours: fieldTarget,
+      gifsySlaTargetHours: gifsyTarget,
       avgApprovalTimeHours: Math.round(avgApprovalTimeHours * 10) / 10,
       slaComplianceRate: Math.round(slaComplianceRate * 10) / 10,
       slaBreachCount,
+      // Combined pending aging (legacy shape) — every pending row across both stages.
       pendingAging,
+      // Two-stage detail: each stage's target, live-pending count, breach count, and aging.
+      field: {
+        target: fieldTarget,
+        pending: fieldPending,
+        breachCount: fieldBreachCount,
+        aging: fieldAging,
+      },
+      gifsy: {
+        target: gifsyTarget,
+        pending: gifsyPending,
+        breachCount: gifsyBreachCount,
+        aging: gifsyAging,
+      },
       rejectionByReason,
       reUploadRate: Math.round(reUploadRate * 10) / 10,
     };

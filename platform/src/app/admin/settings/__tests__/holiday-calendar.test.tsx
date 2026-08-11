@@ -45,8 +45,8 @@ vi.mock('@/lib/kyc-sla', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/kyc-sla')>();
   return {
     ...actual,
-    fetchKycSlaHours: vi.fn().mockResolvedValue(96),
-    saveKycSlaHours: vi.fn().mockResolvedValue(true),
+    fetchKycSlaTargets: vi.fn().mockResolvedValue({ fieldHrs: 24, gifsyHrs: 96 }),
+    saveKycSlaTargets: vi.fn().mockResolvedValue(true),
   };
 });
 

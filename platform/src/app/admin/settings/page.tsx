@@ -7,13 +7,13 @@ import { Button } from '@/components/ui/button'
 import { fetchTaskConfig, updateTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig, type CustomTaskItem } from '@/lib/task-config'
 import { getGifsySettings, saveGifsySettings, useGifsySettings, refreshGifsySettings } from '@/lib/gifsy-settings'
 import { fetchPointsExpiry, savePointsExpiry } from '@/lib/points-expiry'
+import { fetchKycSlaTargets, saveKycSlaTargets } from '@/lib/kyc-sla'
 import {
-  fetchKycSlaHours,
-  saveKycSlaHours,
-  KYC_SLA_DEFAULT_HOURS,
+  KYC_FIELD_SLA_DEFAULT,
+  KYC_GIFSY_SLA_DEFAULT,
   KYC_SLA_MIN_HOURS,
   KYC_SLA_MAX_HOURS,
-} from '@/lib/kyc-sla'
+} from '@/lib/kyc-sla-stage'
 import {
   fetchVisibilityCaptureMode,
   saveVisibilityCaptureMode,
@@ -394,35 +394,42 @@ export default function SettingsPage() {
     setTimeout(() => setPointsExpirySaved(false), 3000)
   }
 
-  // ── KYC SLA target (per-tenant; programSetting `slaTargetHours`) ──
-  // Round-trips via GET/PUT /api/admin/settings (the generic settings upsert). The WRITE
-  // is GIFSY_ADMIN-only (settings PUT enforces tenancy:write + Gifsy-Admin), so the input +
-  // save are editable only for GIFSY_ADMIN; CLIENT_ADMIN/MIS_USER may VIEW (the GET is
-  // tenancy:read) but the control is disabled and the save is hidden. The saved value drives
-  // the breach count on the KYC SLA KPI dashboard (backend slaMetrics()). Held as a STRING so
-  // typing works; parsed + bound-checked on save. `kycSlaLoaded` gates the input + save so we
-  // can never persist the placeholder default over the real stored value before the fetch.
-  const [kycSlaHours,       setKycSlaHours]       = useState<string>(String(KYC_SLA_DEFAULT_HOURS))
+  // ── KYC SLA targets (per-tenant; two business-hours clocks) ──
+  // The single `slaTargetHours` (48) is REPLACED by two per-tenant targets:
+  //   • FIELD SLA (`fieldSlaTargetHours`, default 24) — submission → the KYC reaching Gifsy
+  //     (owned by the sales chain).
+  //   • GIFSY SLA (`gifsySlaTargetHours`, default 96) — latest PENDING_GIFSY entry → decision
+  //     (owned by Gifsy final approval).
+  // Both round-trip via GET/PUT /api/admin/settings (the generic settings upsert). The WRITE is
+  // GIFSY_ADMIN-only (settings PUT enforces tenancy:write + Gifsy-Admin), so the inputs + save are
+  // editable only for GIFSY_ADMIN; CLIENT_ADMIN/MIS_USER may VIEW (the GET is tenancy:read) but the
+  // controls are disabled and the save is hidden. Held as STRINGs so typing works; parsed +
+  // bound-checked on save. `kycSlaLoaded` gates the inputs + save so we can never persist the
+  // placeholder defaults over the real stored values before the fetch resolves.
+  const [fieldSlaHours,     setFieldSlaHours]     = useState<string>(String(KYC_FIELD_SLA_DEFAULT))
+  const [gifsySlaHours,     setGifsySlaHours]     = useState<string>(String(KYC_GIFSY_SLA_DEFAULT))
   const [kycSlaLoaded,      setKycSlaLoaded]      = useState(false)
   const [kycSlaSaved,       setKycSlaSaved]       = useState(false)
   const [kycSlaError,       setKycSlaError]       = useState<string | null>(null)
 
   useEffect(() => {
-    fetchKycSlaHours()
-      .then((hours) => setKycSlaHours(String(hours)))
+    fetchKycSlaTargets()
+      .then((t) => { setFieldSlaHours(String(t.fieldHrs)); setGifsySlaHours(String(t.gifsyHrs)) })
       .finally(() => setKycSlaLoaded(true))
   }, [])
 
   async function handleKycSlaSave() {
     setKycSlaError(null)
-    const n = Number(kycSlaHours.trim())
-    if (!Number.isInteger(n) || n < KYC_SLA_MIN_HOURS || n > KYC_SLA_MAX_HOURS) {
-      setKycSlaError(`Enter a whole number of business hours between ${KYC_SLA_MIN_HOURS} and ${KYC_SLA_MAX_HOURS}.`)
+    const field = Number(fieldSlaHours.trim())
+    const gifsy = Number(gifsySlaHours.trim())
+    const inBounds = (n: number) => Number.isInteger(n) && n >= KYC_SLA_MIN_HOURS && n <= KYC_SLA_MAX_HOURS
+    if (!inBounds(field) || !inBounds(gifsy)) {
+      setKycSlaError(`Enter a whole number of business hours between ${KYC_SLA_MIN_HOURS} and ${KYC_SLA_MAX_HOURS} for each SLA.`)
       return
     }
-    const ok = await saveKycSlaHours(n)
+    const ok = await saveKycSlaTargets({ fieldHrs: field, gifsyHrs: gifsy })
     if (!ok) {
-      setKycSlaError('Could not save — the KYC SLA target can only be changed by a Gifsy Admin.')
+      setKycSlaError('Could not save — the KYC SLA targets can only be changed by a Gifsy Admin.')
       return
     }
     setKycSlaSaved(true)
@@ -941,7 +948,10 @@ export default function SettingsPage() {
             <div>
               <CardTitle className="text-base">KYC SLA Configuration</CardTitle>
               <CardDescription className="mt-1">
-                Turnaround time target for KYC approvals (Gifsy KPI). The clock counts{' '}
+                KYC turnaround is tracked as <strong>two</strong> business-hours clocks (Gifsy KPI).
+                The <strong>Field SLA</strong> covers submission until the KYC reaches Gifsy (the
+                sales chain&apos;s stage); the <strong>Gifsy SLA</strong> covers Gifsy&apos;s final
+                approval, restarting from the latest time the KYC enters the Gifsy queue. Both count{' '}
                 <strong>business hours (Mon–Fri, excluding the national holiday calendar)</strong> —
                 weekends and national holidays don&apos;t count against the target. Breaches are
                 flagged on the KPI dashboard. This is a Gifsy-operated setting — only a Gifsy Admin
@@ -966,19 +976,30 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent>
           <SettingRow
-            label="KYC SLA Target (business hours)"
-            description="Maximum business hours (Mon–Fri, excluding the national holiday calendar) from KYC submission to approval/rejection. Weekends and national holidays are excluded automatically. Breaches are flagged in the KPI dashboard."
+            label="Field SLA (business hours)"
+            description="Maximum business hours from KYC submission until it reaches Gifsy — the sales chain's stage (SO/ASM/RSM approvals). Weekends and national holidays are excluded automatically. Breaches are flagged in the KPI dashboard."
             type="number"
-            value={kycSlaHours}
-            onChange={(v) => setKycSlaHours(v)}
+            value={fieldSlaHours}
+            onChange={(v) => setFieldSlaHours(v)}
             min={KYC_SLA_MIN_HOURS}
             max={KYC_SLA_MAX_HOURS}
             disabled={!isGifsyAdmin || !kycSlaLoaded}
-            testId="kyc-sla-input"
+            testId="kyc-sla-field-input"
+          />
+          <SettingRow
+            label="Gifsy SLA (business hours)"
+            description="Maximum business hours for Gifsy's final approval, measured from the latest time the KYC entered the Gifsy queue (the clock restarts on re-entry). Weekends and national holidays are excluded automatically. Breaches are flagged in the KPI dashboard."
+            type="number"
+            value={gifsySlaHours}
+            onChange={(v) => setGifsySlaHours(v)}
+            min={KYC_SLA_MIN_HOURS}
+            max={KYC_SLA_MAX_HOURS}
+            disabled={!isGifsyAdmin || !kycSlaLoaded}
+            testId="kyc-sla-gifsy-input"
           />
           {!isGifsyAdmin && (
             <p className="text-xs text-gray-400 mt-2">
-              The KYC SLA target is a Gifsy-operated setting — only a Gifsy Admin can change it.
+              The KYC SLA targets are a Gifsy-operated setting — only a Gifsy Admin can change them.
             </p>
           )}
           {kycSlaError && (

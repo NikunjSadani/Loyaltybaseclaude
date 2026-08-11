@@ -16,7 +16,14 @@ import Link from 'next/link';
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
 import { useAdminSession } from '@/lib/admin-session';
-import { kycAgeHrs, KYC_SLA_DEFAULT_HOURS, fetchKycSlaHours } from '@/lib/kyc-sla';
+import { fetchKycSlaTargets } from '@/lib/kyc-sla';
+import {
+  kycStageSla,
+  KYC_FIELD_SLA_DEFAULT,
+  KYC_GIFSY_SLA_DEFAULT,
+  type KycSlaTargets,
+  type KycSlaResult,
+} from '@/lib/kyc-sla-stage';
 import { fetchHolidayDateSet } from '@/lib/holidays';
 import { downloadBlob } from '@/lib/download';
 
@@ -30,7 +37,9 @@ interface KYCEntry {
   salesUser: string;
   status: KYCStatusType;
   submittedDate: string;
-  ageHrs: number;
+  // Stage-aware SLA result — which clock (field/gifsy/none), the business-hours age,
+  // the per-stage target, and whether it has breached. Drives the list's SLA badge.
+  sla: KycSlaResult;
 }
 
 /* ─── API mapping ────────────────────────────────────────────────────────────── */
@@ -44,6 +53,7 @@ interface ApiKycSub {
   reviewedAt?: string | null; // set when a reviewer acts (reject / request-resubmit / forward)
   approvedAt?: string | null; // set only on final approval
   updatedAt?: string | null;  // last-write fallback for a decided row missing the above
+  gifsyEnteredAt?: string | null; // ISO of the LATEST PENDING_GIFSY entry (null when never reached Gifsy)
   user: { id: string; name: string; phone: string };
   partner?: {
     id: string;
@@ -60,15 +70,28 @@ const DB_STATUS_MAP: Record<string, KYCStatusType> = {
   PENDING_ASM_APPROVAL: 'PENDING', PENDING_RSM_APPROVAL: 'PENDING',
   PENDING_GIFSY: 'PENDING', UNDER_REVIEW: 'UNDER_REVIEW',
   APPROVED: 'APPROVED', REJECTED: 'REJECTED',
-  RESUBMISSION_REQUIRED: 'RESUBMISSION_REQUIRED', DRAFT: 'PENDING',
+  RESUBMISSION_REQUIRED: 'RESUBMISSION_REQUIRED',
 };
 
-function mapApiKyc(s: ApiKycSub, holidays: Set<string>): KYCEntry {
+function mapApiKyc(s: ApiKycSub, targets: KycSlaTargets, holidays: Set<string>): KYCEntry {
   const submittedAt = s.submittedAt ?? s.createdAt ?? '';
-  // SLA clock freezes at the decision once an action is taken (see kycAgeHrs) and counts
-  // only business hours (Mon–Fri minus the national holiday calendar). The breach itself is
-  // computed at render against the tenant's configured SLA target.
-  const ageHrs = kycAgeHrs(submittedAt, s.status, s, holidays);
+  // Two-stage, business-hours SLA (kycStageSla): a row sits on the FIELD clock
+  // (submission → reaching Gifsy) or the GIFSY clock (latest PENDING_GIFSY entry →
+  // decision), frozen once decided, or 'none' for a draft/terminal row. Pass the RAW
+  // backend status so the stage is resolved correctly (not the mapped KYCStatusType).
+  const sla = kycStageSla(
+    {
+      status: s.status,
+      submittedAt,
+      gifsyEnteredAt: s.gifsyEnteredAt ?? null,
+      approvedAt: s.approvedAt ?? null,
+      reviewedAt: s.reviewedAt ?? null,
+      updatedAt: s.updatedAt ?? null,
+      nowMs: Date.now(),
+    },
+    targets,
+    holidays,
+  );
   return {
     id:            s.id,
     outletName:    s.partner?.outlets?.[0]?.name ?? s.partner?.businessName ?? '',
@@ -77,7 +100,7 @@ function mapApiKyc(s: ApiKycSub, holidays: Set<string>): KYCEntry {
     salesUser:     s.user.name,
     status:        DB_STATUS_MAP[s.status] ?? 'PENDING',
     submittedDate: submittedAt.slice(0, 10),
-    ageHrs,
+    sla,
   };
 }
 
@@ -114,33 +137,31 @@ export default function KYCPage() {
   const [statusFilter, setStatusFilter] = useState<KYCStatusType | 'ALL'>('ALL');
   const [exportLoading, setExportLoading] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
-  // The tenant's configured KYC SLA target (working hours); the breach badge/bar key
-  // off this, not a hardcoded 48. Starts at the 48h default and updates once fetched
-  // (fetchKycSlaHours falls back to 48 on any error, so the UI is never blocked).
-  const [slaHours, setSlaHours] = useState<number>(KYC_SLA_DEFAULT_HOURS);
 
   useEffect(() => {
-    // Fetch the holiday calendar alongside the list so ages are computed in business hours
-    // from the first render (fetchHolidayDateSet falls back to an empty set on any error →
-    // still weekend-aware, never blocks the list).
+    // Fetch the SLA targets + holiday calendar alongside the list so the stage-aware
+    // badge is computed in business hours from the first render. Both fall back to
+    // safe defaults on any error (fieldHrs/gifsyHrs → 24/96, holidays → empty set —
+    // still weekend-aware), so a config read never blocks the list.
+    const DEFAULT_TARGETS: KycSlaTargets = { fieldHrs: KYC_FIELD_SLA_DEFAULT, gifsyHrs: KYC_GIFSY_SLA_DEFAULT };
     Promise.all([
       fetch('/api/kyc?limit=500', { headers: { ...authHeader() } }).then((r) => r.json()),
       fetchHolidayDateSet().catch(() => new Set<string>()),
+      fetchKycSlaTargets().catch(() => DEFAULT_TARGETS),
     ])
-      .then(([json, holidays]: [{ success: boolean; data?: { submissions: ApiKycSub[] }; error?: string }, Set<string>]) => {
+      .then(([json, holidays, targets]: [
+        { success: boolean; data?: { submissions: ApiKycSub[] }; error?: string },
+        Set<string>,
+        KycSlaTargets,
+      ]) => {
         if (json.success && json.data) {
-          setKycList(json.data.submissions.map((s) => mapApiKyc(s, holidays)));
+          setKycList(json.data.submissions.map((s) => mapApiKyc(s, targets, holidays)));
         } else {
           setError(json.error ?? 'Failed to load KYC submissions');
         }
       })
       .catch(() => setError('Failed to load KYC submissions'))
       .finally(() => setLoading(false));
-  }, []);
-
-  // Load the tenant's configured KYC SLA target (after the list; falls back to 48h).
-  useEffect(() => {
-    fetchKycSlaHours().then(setSlaHours).catch(() => { /* keep the default */ });
   }, []);
 
   const stats = useMemo(() => ({
@@ -306,13 +327,17 @@ export default function KYCPage() {
                 </tr>
               ) : (
                 filtered.map((k) => {
-                  // Breach against THIS tenant's configured SLA target (slaTargetHours),
-                  // not a hardcoded 48 — falls back to the 48h default while it loads / if unset.
-                  const SLA_HRS = slaHours;
-                  const breached = k.ageHrs > SLA_HRS;
-                  const amber = !breached && k.ageHrs > SLA_HRS * 0.75; // warning band = last 25%
-                  const slaPct = Math.min(Math.round((k.ageHrs / SLA_HRS) * 100), 100);
+                  // Stage-aware SLA badge: which clock the row is on (Field = sales chain,
+                  // Gifsy = final approval), its business-hours age, and breach vs THIS stage's
+                  // configured target. A 'none' row (draft/terminal-without-Gifsy) shows no badge.
+                  const sla = k.sla;
+                  const showSla = sla.clock !== 'none' && sla.targetHrs != null;
+                  const target = sla.targetHrs ?? 0;
+                  const breached = sla.breached;
+                  const amber = !breached && target > 0 && sla.ageHrs > target * 0.75; // warning band = last 25%
+                  const slaPct = target > 0 ? Math.min(Math.round((sla.ageHrs / target) * 100), 100) : 0;
                   const slaBarColor = breached ? 'bg-red-400' : amber ? 'bg-amber-400' : 'bg-emerald-400';
+                  const stageTag = sla.clock === 'gifsy' ? 'Gifsy' : 'Field';
                   return (
                   <tr key={k.id} className={`hover:bg-gray-50 transition-colors ${breached ? 'border-l-2 border-l-red-400' : ''}`}>
                     <td className="px-4 py-3">
@@ -328,20 +353,32 @@ export default function KYCPage() {
                     </td>
                     <td className="px-4 py-3 text-sm text-gray-600">{k.submittedDate}</td>
                     <td className="px-4 py-3">
-                      <div className="space-y-1 min-w-[72px]">
-                        <div className="flex items-center gap-1.5">
-                          <span className={`text-sm font-bold ${breached ? 'text-red-600' : amber ? 'text-amber-600' : 'text-gray-700'}`}>
-                            {k.ageHrs}h
-                          </span>
-                          {breached && (
-                            <span className="text-[9px] font-bold bg-red-100 text-red-600 px-1 py-0.5 rounded">SLA!</span>
-                          )}
+                      {showSla ? (
+                        <div className="space-y-1 min-w-[72px]">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`text-sm font-bold ${breached ? 'text-red-600' : amber ? 'text-amber-600' : 'text-gray-700'}`}>
+                              {sla.ageHrs}h
+                            </span>
+                            <span
+                              className={`text-[9px] font-semibold px-1 py-0.5 rounded ${
+                                sla.clock === 'gifsy' ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-600'
+                              }`}
+                              title={sla.clock === 'gifsy' ? 'Gifsy SLA — final approval clock' : 'Field SLA — sales-chain clock'}
+                            >
+                              {stageTag}
+                            </span>
+                            {breached && (
+                              <span className="text-[9px] font-bold bg-red-100 text-red-600 px-1 py-0.5 rounded">SLA!</span>
+                            )}
+                          </div>
+                          <div className="h-1 bg-gray-100 rounded-full overflow-hidden w-16">
+                            <div className={`h-full rounded-full ${slaBarColor}`} style={{ width: `${slaPct}%` }} />
+                          </div>
+                          <p className="text-[9px] text-gray-400">{slaPct}% of {target}h SLA</p>
                         </div>
-                        <div className="h-1 bg-gray-100 rounded-full overflow-hidden w-16">
-                          <div className={`h-full rounded-full ${slaBarColor}`} style={{ width: `${slaPct}%` }} />
-                        </div>
-                        <p className="text-[9px] text-gray-400">{slaPct}% of {SLA_HRS}h SLA</p>
-                      </div>
+                      ) : (
+                        <span className="text-xs text-gray-300">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <Link

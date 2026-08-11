@@ -90,7 +90,7 @@ interface ApiKycDetail {
   status: string;
   submittedAt?: string | null;
   createdAt?: string;
-  // Decision timestamps — the SLA clock stops at the decision, not "now" (see kycAgeHrs).
+  // Decision timestamps — the SLA clock stops at the decision, not "now" (see kycStageSla).
   reviewedAt?: string | null;
   approvedAt?: string | null;
   updatedAt?: string | null;

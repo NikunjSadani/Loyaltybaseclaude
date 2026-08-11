@@ -5,6 +5,15 @@ import { istStartOfDay } from '../../common/business-hours';
 import { loadHolidaySet } from '../../common/holiday-calendar';
 import { loadReportRecipients } from '../../common/report-recipients';
 import { formatDateIST } from '../../common/ist-date';
+import {
+  KYC_FIELD_SLA_KEY,
+  KYC_GIFSY_SLA_KEY,
+  KYC_FIELD_SLA_DEFAULT,
+  KYC_GIFSY_SLA_DEFAULT,
+  KYC_SLA_MIN_HOURS,
+  KYC_SLA_MAX_HOURS,
+  KycSlaTargets,
+} from '../../common/kyc-sla-stage';
 import { buildCreditsPayoutsReport } from './credits-payouts-report';
 import { buildKycActionablesReport } from './kyc-actionables-report';
 import { ReportContext, ReportKey, ReportResult } from './report.types';
@@ -52,7 +61,7 @@ export class ScheduledReportsService {
 
     // Shared inputs loaded once for the whole run.
     const holidays = await loadHolidaySet(this.prisma);
-    const slaTargetHours = await this.loadSlaTargets();
+    const slaTargets = await this.loadSlaTargets();
     const recipients = await loadReportRecipients(this.prisma);
 
     const reports: ReportOutcome[] = [];
@@ -63,7 +72,7 @@ export class ScheduledReportsService {
     );
     reports.push(
       await this.runOne('kycActionables', recipients.kycActionables, false, () =>
-        buildKycActionablesReport(this.prisma, ctx, holidays, slaTargetHours),
+        buildKycActionablesReport(this.prisma, ctx, holidays, slaTargets),
       ),
     );
 
@@ -106,17 +115,23 @@ export class ScheduledReportsService {
     return map;
   }
 
-  /** clientId → per-tenant KYC SLA target hours (validated 1–168); tenants without a row default to 48 in the builder. */
-  private async loadSlaTargets(): Promise<Map<string, number>> {
+  /** clientId → the two-stage KYC SLA targets { fieldHrs, gifsyHrs } (validated 1–168); tenants
+   *  without a row default to 24/96 in the builder. */
+  private async loadSlaTargets(): Promise<Map<string, KycSlaTargets>> {
     const rows = await this.prisma.programSetting.findMany({
-      where: { settingKey: 'slaTargetHours' },
-      select: { clientId: true, settingValue: true },
+      where: { settingKey: { in: [KYC_FIELD_SLA_KEY, KYC_GIFSY_SLA_KEY] } },
+      select: { clientId: true, settingKey: true, settingValue: true },
     });
-    const map = new Map<string, number>();
-    for (const r of rows) {
-      const raw = r.settingValue;
+    const bound = (raw: unknown, def: number): number => {
       const n = typeof raw === 'number' ? raw : parseInt(String(raw), 10);
-      if (Number.isInteger(n) && n >= 1 && n <= 168) map.set(r.clientId, n);
+      return Number.isInteger(n) && n >= KYC_SLA_MIN_HOURS && n <= KYC_SLA_MAX_HOURS ? n : def;
+    };
+    const map = new Map<string, KycSlaTargets>();
+    for (const r of rows) {
+      const cur = map.get(r.clientId) ?? { fieldHrs: KYC_FIELD_SLA_DEFAULT, gifsyHrs: KYC_GIFSY_SLA_DEFAULT };
+      if (r.settingKey === KYC_FIELD_SLA_KEY) cur.fieldHrs = bound(r.settingValue, KYC_FIELD_SLA_DEFAULT);
+      else if (r.settingKey === KYC_GIFSY_SLA_KEY) cur.gifsyHrs = bound(r.settingValue, KYC_GIFSY_SLA_DEFAULT);
+      map.set(r.clientId, cur);
     }
     return map;
   }

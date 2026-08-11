@@ -1,23 +1,21 @@
 /**
  * Scheduled INTERNAL report #3 — KYC actionables digest (all tenants).
  *
- * Rolls up every pending KYC submission across all tenants by stage, ages each on the
- * BUSINESS-hours SLA clock (weekends + the holiday set frozen), and flags SLA breaches per
- * tenant (`slaTargetHours.get(clientId) ?? 48`). A submission at stage PENDING_GIFSY is
- * "Gifsy-actionable" — the number the Gifsy ops team acts on directly. Always sent (the runner
- * does not suppress this), but `empty` is true when nothing is pending.
+ * Rolls up every pending KYC submission across all tenants and ages each on the TWO-STAGE
+ * business-hours SLA (owner decision 2026-08-11), reusing the shared `kycStageSla`:
+ *   • FIELD SLA  — submitted → reaching Gifsy (default 24 business hrs), owned by the sales chain.
+ *   • GIFSY SLA  — the LATEST PENDING_GIFSY entry → now (default 96), owned by Gifsy. Restarts on re-entry.
+ * A PENDING_GIFSY row is "Gifsy-actionable" — the number the Gifsy ops team acts on directly; its
+ * breach is the headline. Field breaches are surfaced too (the field team's SLA). DRAFT is never
+ * included (not in PENDING_STATUSES). Always sent; `empty` when nothing is pending.
  *
- * SLA clock start: submittedAt ?? createdAt. For a PENDING_GIFSY row the clock instead starts at
- * the EARLIEST statusHistory entry whose toStatus is PENDING_GIFSY (when present) — the moment it
- * actually landed in the Gifsy queue — else it falls back to the submitted/created start.
- *
- * Pure-ish + deterministic: "now" is ctx.nowMs (never Date.now()); every dynamic value is
- * HTML-escaped. Defensive — junk rows are skipped, never thrown.
+ * Deterministic ("now" is ctx.nowMs, never Date.now()); every dynamic value is HTML-escaped;
+ * defensive — junk rows skipped, never thrown.
  */
 
 import type { PrismaService } from '../../prisma/prisma.service';
 import type { KycActionablesBuilder } from './report.types';
-import { businessHoursBetween } from '../../common/business-hours';
+import { kycStageSla, latestGifsyEntryMs, KycSlaTargets, KYC_FIELD_SLA_DEFAULT, KYC_GIFSY_SLA_DEFAULT } from '../../common/kyc-sla-stage';
 import { emailShell, esc, intIN, statRow, table } from './email-html';
 
 const PENDING_STATUSES = [
@@ -31,7 +29,7 @@ const PENDING_STATUSES = [
   'PENDING_GIFSY',
 ] as const;
 
-const DEFAULT_SLA_HOURS = 48;
+const DEFAULT_TARGETS: KycSlaTargets = { fieldHrs: KYC_FIELD_SLA_DEFAULT, gifsyHrs: KYC_GIFSY_SLA_DEFAULT };
 
 /** Best-effort epoch-ms from a Date | string | number (NaN → null). */
 function ms(v: unknown): number | null {
@@ -50,27 +48,25 @@ function ms(v: unknown): number | null {
 interface TenantAgg {
   pending: number;
   awaitingGifsy: number;
-  withinSla: number;
-  breached: number;
+  gifsyBreached: number;
+  fieldBreached: number;
   oldestHrs: number;
 }
 
-function emptyAgg(): TenantAgg {
-  return { pending: 0, awaitingGifsy: 0, withinSla: 0, breached: 0, oldestHrs: 0 };
-}
+const emptyAgg = (): TenantAgg => ({ pending: 0, awaitingGifsy: 0, gifsyBreached: 0, fieldBreached: 0, oldestHrs: 0 });
 
 export const buildKycActionablesReport: KycActionablesBuilder = async (
   prisma: PrismaService,
   ctx,
   holidays,
-  slaTargetHours,
+  slaTargets,
 ) => {
   let subs: Array<{
     status?: unknown;
     submittedAt?: unknown;
     createdAt?: unknown;
     user?: { clientId?: unknown } | null;
-    statusHistory?: Array<{ createdAt?: unknown }> | null;
+    statusHistory?: Array<{ toStatus?: unknown; createdAt?: unknown }> | null;
   }> = [];
   try {
     const rows = await prisma.kycSubmission.findMany({
@@ -80,7 +76,7 @@ export const buildKycActionablesReport: KycActionablesBuilder = async (
         submittedAt: true,
         createdAt: true,
         user: { select: { clientId: true } },
-        statusHistory: { where: { toStatus: 'PENDING_GIFSY' }, select: { createdAt: true } },
+        statusHistory: { where: { toStatus: 'PENDING_GIFSY' }, select: { toStatus: true, createdAt: true } },
       },
     });
     if (Array.isArray(rows)) subs = rows as typeof subs;
@@ -112,7 +108,8 @@ export const buildKycActionablesReport: KycActionablesBuilder = async (
 
   let totalPending = 0;
   let totalAwaitingGifsy = 0;
-  let totalBreached = 0;
+  let totalGifsyBreached = 0;
+  let totalFieldBreached = 0;
 
   for (const s of subs) {
     if (!s || typeof s !== 'object') continue;
@@ -120,39 +117,43 @@ export const buildKycActionablesReport: KycActionablesBuilder = async (
       s.user && typeof s.user === 'object' && typeof s.user.clientId === 'string' && s.user.clientId
         ? s.user.clientId
         : 'unknown';
-    const isGifsy = s.status === 'PENDING_GIFSY';
+    const targets = slaTargets.get(clientId) ?? DEFAULT_TARGETS;
 
-    // SLA clock start.
-    let startTs = ms(s.submittedAt) ?? ms(s.createdAt) ?? ctx.nowMs;
-    if (isGifsy && Array.isArray(s.statusHistory) && s.statusHistory.length > 0) {
-      let earliest: number | null = null;
-      for (const h of s.statusHistory) {
-        const t = h && typeof h === 'object' ? ms(h.createdAt) : null;
-        if (t !== null && (earliest === null || t < earliest)) earliest = t;
-      }
-      if (earliest !== null) startTs = earliest;
-    }
-
-    const ageHrs = businessHoursBetween(startTs, ctx.nowMs, holidays);
-    const target = slaTargetHours.get(clientId) ?? DEFAULT_SLA_HOURS;
-    const breached = ageHrs > target;
+    // Two-stage SLA via the shared helper: field rows age from submission, Gifsy rows from the
+    // LATEST PENDING_GIFSY entry, each vs its own target.
+    const sla = kycStageSla(
+      {
+        status: typeof s.status === 'string' ? s.status : '',
+        submittedAt: ms(s.submittedAt) ?? ms(s.createdAt),
+        gifsyEnteredAt: latestGifsyEntryMs(s.statusHistory as never),
+        nowMs: ctx.nowMs,
+      },
+      targets,
+      holidays,
+    );
 
     const a = get(clientId);
     a.pending += 1;
-    if (isGifsy) a.awaitingGifsy += 1;
-    if (breached) a.breached += 1;
-    else a.withinSla += 1;
-    if (ageHrs > a.oldestHrs) a.oldestHrs = ageHrs;
-
     totalPending += 1;
-    if (isGifsy) totalAwaitingGifsy += 1;
-    if (breached) totalBreached += 1;
+    if (sla.clock === 'gifsy') {
+      a.awaitingGifsy += 1;
+      totalAwaitingGifsy += 1;
+      if (sla.breached) {
+        a.gifsyBreached += 1;
+        totalGifsyBreached += 1;
+      }
+    } else if (sla.clock === 'field' && sla.breached) {
+      a.fieldBreached += 1;
+      totalFieldBreached += 1;
+    }
+    if (sla.ageHrs > a.oldestHrs) a.oldestHrs = sla.ageHrs;
   }
 
   const stats = statRow([
     { label: 'Total pending', value: intIN(totalPending) },
     { label: 'Awaiting Gifsy', value: intIN(totalAwaitingGifsy), accent: 'amber' },
-    { label: 'Breached SLA', value: intIN(totalBreached), accent: 'red' },
+    { label: 'Gifsy SLA breached', value: intIN(totalGifsyBreached), accent: 'red' },
+    { label: 'Field SLA breached', value: intIN(totalFieldBreached), accent: 'amber' },
   ]);
 
   const rows = [...byTenant.entries()]
@@ -161,10 +162,9 @@ export const buildKycActionablesReport: KycActionablesBuilder = async (
     .map(({ name, a }) => [
       esc(name),
       esc(intIN(a.pending)),
-      // Emphasize awaiting-Gifsy (amber) + breached (red) numbers.
       `<span style="font-weight:700;color:${a.awaitingGifsy > 0 ? '#b45309' : '#374151'};">${esc(intIN(a.awaitingGifsy))}</span>`,
-      esc(intIN(a.withinSla)),
-      `<span style="font-weight:700;color:${a.breached > 0 ? '#b91c1c' : '#374151'};">${esc(intIN(a.breached))}</span>`,
+      `<span style="font-weight:700;color:${a.gifsyBreached > 0 ? '#b91c1c' : '#374151'};">${esc(intIN(a.gifsyBreached))}</span>`,
+      esc(intIN(a.fieldBreached)),
       esc(intIN(a.oldestHrs)),
     ]);
 
@@ -173,10 +173,10 @@ export const buildKycActionablesReport: KycActionablesBuilder = async (
     table(
       [
         { label: 'Tenant' },
-        { label: 'Pending' },
+        { label: 'Pending', align: 'right' },
         { label: 'Awaiting Gifsy', align: 'right' },
-        { label: 'Within SLA', align: 'right' },
-        { label: 'Breached', align: 'right' },
+        { label: 'Gifsy breached', align: 'right' },
+        { label: 'Field breached', align: 'right' },
         { label: 'Oldest (business hrs)', align: 'right' },
       ],
       rows,
@@ -185,7 +185,7 @@ export const buildKycActionablesReport: KycActionablesBuilder = async (
 
   const html = emailShell({
     title: 'KYC actionables',
-    intro: `All pending KYC across tenants, aged on the business-hours SLA clock.`,
+    intro: `All pending KYC across tenants — Field SLA (submission → Gifsy) and Gifsy SLA (Gifsy queue → decision), business hours.`,
     body,
     dateLabel: ctx.dateLabel,
   });

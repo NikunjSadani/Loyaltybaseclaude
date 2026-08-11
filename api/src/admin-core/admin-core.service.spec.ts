@@ -553,18 +553,21 @@ describe('AdminCoreService', () => {
       expect(res.settings.otpExpiryMinutes).toBe(10); // constant wins (set after the DB loop)
     });
 
-    it('returns a stored slaTargetHours row, overlaying the 48 default', async () => {
+    it('returns stored fieldSlaTargetHours / gifsySlaTargetHours rows, overlaying the defaults', async () => {
       mockPrisma.programSetting.findMany.mockResolvedValue([
-        { settingKey: 'slaTargetHours', settingValue: 96 },
+        { settingKey: 'fieldSlaTargetHours', settingValue: 12 },
+        { settingKey: 'gifsySlaTargetHours', settingValue: 120 },
       ]);
       const res = await service.getSettings(clientAdmin);
-      expect(res.settings.slaTargetHours).toBe(96);
+      expect(res.settings.fieldSlaTargetHours).toBe(12);
+      expect(res.settings.gifsySlaTargetHours).toBe(120);
     });
 
-    it('falls back to the 48 slaTargetHours default when no row exists', async () => {
+    it('falls back to the 24 / 96 SLA defaults when no rows exist', async () => {
       mockPrisma.programSetting.findMany.mockResolvedValue([]);
       const res = await service.getSettings(clientAdmin);
-      expect(res.settings.slaTargetHours).toBe(48);
+      expect(res.settings.fieldSlaTargetHours).toBe(24);
+      expect(res.settings.gifsySlaTargetHours).toBe(96);
     });
   });
 
@@ -574,29 +577,54 @@ describe('AdminCoreService', () => {
       mockPrisma.auditLog.create.mockResolvedValue({ id: 'al1' });
     });
 
-    it('persists slaTargetHours as a normalised integer, tenant-scoped', async () => {
-      await service.upsertSetting(gifsy, { key: 'slaTargetHours', value: '96' });
+    it('persists fieldSlaTargetHours as a normalised integer, tenant-scoped', async () => {
+      await service.upsertSetting(gifsy, { key: 'fieldSlaTargetHours', value: '12' });
       const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
       expect(call.where).toEqual({
-        clientId_settingKey: { clientId: 'deoleo', settingKey: 'slaTargetHours' },
+        clientId_settingKey: { clientId: 'deoleo', settingKey: 'fieldSlaTargetHours' },
       });
-      // '96' string was normalised to the integer 96 on both update + create paths.
-      expect(call.update.settingValue).toBe(96);
-      expect(call.create.settingValue).toBe(96);
+      // '12' string was normalised to the integer 12 on both update + create paths.
+      expect(call.update.settingValue).toBe(12);
+      expect(call.create.settingValue).toBe(12);
       // Cache bust so the new value is visible immediately.
       expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
     });
 
-    it('rejects an out-of-range slaTargetHours (169) and does not persist', async () => {
+    it('persists gifsySlaTargetHours as a normalised integer, tenant-scoped', async () => {
+      await service.upsertSetting(gifsy, { key: 'gifsySlaTargetHours', value: '120' });
+      const call = mockPrisma.programSetting.upsert.mock.calls[0][0];
+      expect(call.where).toEqual({
+        clientId_settingKey: { clientId: 'deoleo', settingKey: 'gifsySlaTargetHours' },
+      });
+      expect(call.update.settingValue).toBe(120);
+      expect(call.create.settingValue).toBe(120);
+    });
+
+    it('accepts the SLA boundary values 1 and 168', async () => {
+      await service.upsertSetting(gifsy, { key: 'fieldSlaTargetHours', value: 1 });
+      await service.upsertSetting(gifsy, { key: 'gifsySlaTargetHours', value: 168 });
+      const calls = mockPrisma.programSetting.upsert.mock.calls;
+      expect(calls[0][0].update.settingValue).toBe(1);
+      expect(calls[1][0].update.settingValue).toBe(168);
+    });
+
+    it('rejects an out-of-range fieldSlaTargetHours (169) and does not persist', async () => {
       await expect(
-        service.upsertSetting(gifsy, { key: 'slaTargetHours', value: 169 }),
+        service.upsertSetting(gifsy, { key: 'fieldSlaTargetHours', value: 169 }),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
     });
 
-    it('rejects a non-integer slaTargetHours and does not persist', async () => {
+    it('rejects an out-of-range gifsySlaTargetHours (0) and does not persist', async () => {
       await expect(
-        service.upsertSetting(gifsy, { key: 'slaTargetHours', value: 'abc' }),
+        service.upsertSetting(gifsy, { key: 'gifsySlaTargetHours', value: 0 }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-integer gifsySlaTargetHours and does not persist', async () => {
+      await expect(
+        service.upsertSetting(gifsy, { key: 'gifsySlaTargetHours', value: 'abc' }),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
     });
@@ -976,6 +1004,10 @@ describe('AdminCoreService', () => {
       // Mock Date.now() only (not the Date constructor) so kycDashboard's internal `now`
       // matches the fixed `now` above; businessHoursBetween still runs on real Date math.
       nowSpy = jest.spyOn(Date, 'now').mockReturnValue(now);
+      // resolveKycSlaTargets() reads the two SLA-target programSetting rows. No rows → the
+      // 24h/96h defaults apply, which is what these fixtures expect. Individual tests may
+      // override this to exercise a configured target.
+      mockPrisma.programSetting.findMany.mockResolvedValue([]);
     });
     afterEach(() => {
       nowSpy.mockRestore();
@@ -1127,6 +1159,57 @@ describe('AdminCoreService', () => {
       expect(res.buckets.pendingGifsyApproval).toMatchObject({ count: 2, withinSla: 1, breached: 1, slaHours: 96 });
     });
 
+    it('uses the per-tenant configured field/gifsy SLA targets (not the defaults)', async () => {
+      // field target 12h, gifsy target 48h — the bucket comparisons + echoed slaHours follow them.
+      mockPrisma.programSetting.findMany.mockResolvedValue([
+        { settingKey: 'fieldSlaTargetHours', settingValue: 12 },
+        { settingKey: 'gifsySlaTargetHours', settingValue: 48 },
+      ]);
+      wire({
+        outlets: [
+          // field-pending 18h → within default 24 but BREACHES the configured 12
+          outlet({ status: 'SUBMITTED', submittedAt: new Date(now - 18 * HOUR) }),
+          // gifsy-pending 60h → within default 96 but BREACHES the configured 48
+          outlet({
+            status: 'PENDING_GIFSY',
+            history: [{ toStatus: 'PENDING_GIFSY', createdAt: new Date(now - 60 * HOUR) }],
+          }),
+          // gifsy-pending 20h → within the configured 48
+          outlet({
+            status: 'PENDING_GIFSY',
+            history: [{ toStatus: 'PENDING_GIFSY', createdAt: new Date(now - 20 * HOUR) }],
+          }),
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      // resolveKycSlaTargets read the SLA rows for this tenant.
+      expect(mockPrisma.programSetting.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { clientId: 'deoleo', settingKey: { in: ['fieldSlaTargetHours', 'gifsySlaTargetHours'] } },
+        }),
+      );
+      expect(res.buckets.pendingFieldApproval).toMatchObject({ count: 1, withinSla: 0, breached: 1, slaHours: 12 });
+      expect(res.buckets.pendingGifsyApproval).toMatchObject({ count: 2, withinSla: 1, breached: 1, slaHours: 48 });
+    });
+
+    it('gifsy clock RESTARTS on re-entry — timed from the LATEST PENDING_GIFSY entry, not the earliest', async () => {
+      wire({
+        outlets: [
+          // Bounced then re-entered Gifsy: first entry 100h ago (would breach 96), re-entry 10h ago.
+          // Latest-entry logic times from 10h ago → within the 96h default (would breach under earliest).
+          outlet({
+            status: 'PENDING_GIFSY',
+            history: [
+              { toStatus: 'PENDING_GIFSY', createdAt: new Date(now - 100 * HOUR) },
+              { toStatus: 'PENDING_GIFSY', createdAt: new Date(now - 10 * HOUR) },
+            ],
+          }),
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.buckets.pendingGifsyApproval).toMatchObject({ count: 1, withinSla: 1, breached: 0 });
+    });
+
     it('sla block computes field/gifsy/end-to-end over APPROVED submissions with history', async () => {
       const submittedAt = new Date(now - 50 * HOUR);
       const enteredGifsy = new Date(now - 40 * HOUR); // fieldChain = 10h (<=24 → compliant)
@@ -1148,6 +1231,33 @@ describe('AdminCoreService', () => {
       expect(res.sla.fieldCompliancePct).toBe(100);
       expect(res.sla.gifsyCompliancePct).toBe(100);
       expect(res.sla.sampleSize).toBe(1);
+    });
+
+    it('M2: bounced-then-approved — field chain = submitted→FIRST entry, gifsy review = LATEST entry→approval', async () => {
+      // A KYC that reached Gifsy, was bounced back to field, reworked, re-entered Gifsy, then
+      // approved. The field-chain tile must measure submitted → FIRST hand-off (pure field time),
+      // NOT submitted → latest entry (which would wrongly absorb the first Gifsy review + rework).
+      const submittedAt = new Date(now - 100 * HOUR);
+      const firstEntry = new Date(now - 90 * HOUR); // field chain = 10h (submitted → first hand-off)
+      const secondEntry = new Date(now - 30 * HOUR); // re-entry after a bounce (the LATEST)
+      const approvedAt = new Date(now - 10 * HOUR); // gifsy review = 20h (latest entry → approval)
+      wire({
+        outlets: [
+          outlet({
+            status: 'APPROVED',
+            submittedAt,
+            approvedAt,
+            history: [
+              { toStatus: 'PENDING_GIFSY', createdAt: firstEntry },
+              { toStatus: 'PENDING_GIFSY', createdAt: secondEntry },
+            ],
+          }),
+        ],
+      });
+      const res = await service.kycDashboard(clientAdmin);
+      expect(res.sla.fieldChainAvgHours).toBe(10); // submitted → FIRST entry (not 70h to latest)
+      expect(res.sla.gifsyReviewAvgHours).toBe(20); // LATEST entry → approval
+      expect(res.sla.endToEndAvgHours).toBe(90); // submitted → approval, unchanged
     });
 
     it('rejection reasons are tenant-filtered in the query and grouped (null→Unspecified, top 8)', async () => {

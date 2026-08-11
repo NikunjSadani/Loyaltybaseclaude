@@ -83,8 +83,9 @@ const mockPrisma = {
   creditPayoutEntry: { findMany: jest.fn().mockResolvedValue([]) },
   consentRecord: { create: jest.fn() },
   kycVerificationItem: { upsert: jest.fn() },
-  // slaMetrics resolves the SLA target from the tenant's stored `slaTargetHours` row.
-  programSetting: { findFirst: jest.fn() },
+  // slaMetrics resolves the TWO per-tenant SLA targets (field/gifsy) via findMany; the holiday
+  // calendar loader (loadHolidaySet) reads the single national-holidays row via findFirst.
+  programSetting: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
 };
 
@@ -2279,7 +2280,16 @@ describe('KycService', () => {
       mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
       await service.list(partner, {});
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ user: { clientId: 'deoleo' }, userId: { in: ['user1'] } });
+      expect(where).toEqual({
+        user: { clientId: 'deoleo' },
+        // DRAFT-visibility guard: hide any DRAFT not created by the caller.
+        NOT: { AND: [{ status: 'DRAFT' }, { userId: { not: 'user1' } }] },
+        userId: { in: ['user1'] },
+      });
+      // Security: the tab-count groupBy must ALSO carry the DRAFT guard, else the status-tab
+      // counts would tally hidden drafts the caller can't see (audit-fixed, two-stage SLA).
+      const groupWhere = mockPrisma.kycSubmission.groupBy.mock.calls[0][0].where;
+      expect(groupWhere.NOT).toEqual({ AND: [{ status: 'DRAFT' }, { userId: { not: 'user1' } }] });
     });
 
     it('scopes a SALES_SO to their whole downline by submitter (Q4), not a tenant-wide status', async () => {
@@ -2293,7 +2303,11 @@ describe('KycService', () => {
       mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
       await service.list(so, {});
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ user: { clientId: 'deoleo' }, userId: { in: ['so1', 'xsr1'] } });
+      expect(where).toEqual({
+        user: { clientId: 'deoleo' },
+        NOT: { AND: [{ status: 'DRAFT' }, { userId: { not: 'so1' } }] },
+        userId: { in: ['so1', 'xsr1'] },
+      });
     });
 
     it('lets a GIFSY admin filter by status', async () => {
@@ -2303,7 +2317,11 @@ describe('KycService', () => {
       await service.list(gifsy, { status: 'APPROVED' as never });
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
       // GIFSY is the cross-tenant operator (#38) — no caller-tenant filter, all brands.
-      expect(where).toEqual({ status: 'APPROVED' });
+      // The DRAFT guard still applies (a tenant-wide admin has no own-drafts → sees none).
+      expect(where).toEqual({
+        status: 'APPROVED',
+        NOT: { AND: [{ status: 'DRAFT' }, { userId: { not: 'admin1' } }] },
+      });
     });
 
     it('keeps MIS_USER tenant-wide (NOT sales-subtree scoped) — read-only observer', async () => {
@@ -2312,7 +2330,10 @@ describe('KycService', () => {
       mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
       await service.list(mis, {});
       const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
-      expect(where).toEqual({ user: { clientId: 'deoleo' } }); // no userId scoping
+      expect(where).toEqual({
+        user: { clientId: 'deoleo' },
+        NOT: { AND: [{ status: 'DRAFT' }, { userId: { not: 'mis1' } }] },
+      }); // no userId scoping
       expect(mockPrisma.salesUser.findFirst).not.toHaveBeenCalled(); // never resolves a subtree
     });
 
@@ -2329,6 +2350,54 @@ describe('KycService', () => {
       const res = await service.list(partner, {});
       expect(res.submissions[0].status).toBe('RE_KYC_REQUIRED'); // reKycFlags → override
       expect(res.submissions[1].status).toBe('APPROVED');        // no flags → unchanged
+    });
+
+    it('hides a DRAFT from another user but returns the caller’s OWN DRAFT (owner 2026-08-11)', async () => {
+      // DRAFT is a WIP owned by its creator: the where-clause NOT guard excludes any DRAFT
+      // whose submitter is not the caller, so an approver/manager queue never sees a foreign
+      // draft, while the rep who started one still sees theirs (their userId matches user.sub).
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null); // partner → own only
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+      mockPrisma.kycSubmission.count.mockResolvedValue(0);
+      mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+      await service.list(partner, {}); // partner.sub === 'user1'
+      const where = mockPrisma.kycSubmission.findMany.mock.calls[0][0].where;
+      // The guard: a DRAFT AND submitted by someone other than the caller → excluded. A DRAFT
+      // whose userId === 'user1' does NOT match (userId is NOT { not: user1 }) → returned.
+      expect(where.NOT).toEqual({ AND: [{ status: 'DRAFT' }, { userId: { not: 'user1' } }] });
+    });
+
+    it('derives per-row gifsyEnteredAt = latest PENDING_GIFSY entry (ISO) and never leaks statusHistory', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue(null); // partner → own only
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([
+        {
+          id: 's1',
+          status: 'PENDING_GIFSY',
+          partner: null,
+          // Two Gifsy entries (a bounce + re-entry): the LATEST wins. Rows carry toStatus
+          // (the query selects it) so latestGifsyEntryMs's re-check passes.
+          statusHistory: [
+            { toStatus: 'PENDING_GIFSY', createdAt: new Date('2026-01-05T00:00:00Z') },
+            { toStatus: 'PENDING_GIFSY', createdAt: new Date('2026-01-08T00:00:00Z') },
+          ],
+        },
+        { id: 's2', status: 'SUBMITTED', partner: null, statusHistory: [] }, // never reached Gifsy
+      ]);
+      mockPrisma.kycSubmission.count.mockResolvedValue(2);
+      mockPrisma.kycSubmission.groupBy.mockResolvedValue([]);
+
+      const res = await service.list(partner, {});
+      // s1: latest PENDING_GIFSY entry → ISO; s2: no entry → null.
+      expect(res.submissions[0].gifsyEnteredAt).toBe('2026-01-08T00:00:00.000Z');
+      expect(res.submissions[1].gifsyEnteredAt).toBeNull();
+      // The raw history is an internal detail — it must NOT be surfaced on the response rows.
+      expect((res.submissions[0] as Record<string, unknown>).statusHistory).toBeUndefined();
+      // The Gifsy-stage query is included on the list read.
+      const include = mockPrisma.kycSubmission.findMany.mock.calls[0][0].include;
+      expect(include.statusHistory).toEqual({
+        where: { toStatus: 'PENDING_GIFSY' },
+        select: { toStatus: true, createdAt: true },
+      });
     });
   });
 
@@ -4546,56 +4615,157 @@ describe('KycService', () => {
       expect(approvedWhere.user).toBeUndefined();
     });
 
-    // ── SLA target now driven by the persisted `slaTargetHours` setting ──
-    // The SLA clock counts BUSINESS hours (Mon–Fri, weekends excluded). Two APPROVED
-    // submissions from Thu 01 Jan 2026: one decided in 30 business hours (Thu→Fri, no weekend),
-    // one in 72 business hours (Thu→Tue 06 Jan — the Sat/Sun between are excluded, so 72 not 120).
+    // ── Two-stage SLA (owner 2026-08-11): field + gifsy targets, business-hours clock ──
+    // The clock counts BUSINESS hours (Mon–Fri, weekends excluded). Two APPROVED submissions
+    // from Thu 01 Jan 2026: one decided in 30 business hours (Thu→Fri, no weekend), one in 72
+    // (Thu→Tue 06 Jan — the Sat/Sun are excluded, so 72 not 120). The END-TO-END approval
+    // turnaround breach is measured against the GIFSY target (the decision-owning stage).
     const twoApprovals = [
       { createdAt: new Date('2026-01-01T00:00:00Z'), statusHistory: [{ createdAt: new Date('2026-01-02T06:00:00Z') }] }, // 30 business h
       { createdAt: new Date('2026-01-01T00:00:00Z'), statusHistory: [{ createdAt: new Date('2026-01-06T00:00:00Z') }] }, // 72 business h
     ];
 
-    it('uses the stored slaTargetHours setting (96) — no breach when both are under it', async () => {
-      mockPrisma.programSetting.findFirst.mockResolvedValue({ settingValue: 96 });
+    // Set both per-tenant targets via the single findMany the resolver issues.
+    const setTargets = (fieldHrs: number, gifsyHrs: number) =>
+      mockPrisma.programSetting.findMany.mockResolvedValue([
+        { settingKey: 'fieldSlaTargetHours', settingValue: fieldHrs },
+        { settingKey: 'gifsySlaTargetHours', settingValue: gifsyHrs },
+      ]);
+
+    it('resolves both per-tenant targets; approval turnaround breaches against the GIFSY target', async () => {
+      setTargets(24, 96);
       mockPrisma.kycSubmission.findMany
         .mockResolvedValueOnce(twoApprovals) // APPROVED query
         .mockResolvedValueOnce([]); // pending query
       mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
 
       const res = await service.slaMetrics(gifsy);
-      // Both 30h and 72h (business hours) are ≤ 96h → zero breaches, 100% compliance.
-      expect(res.slaTargetHours).toBe(96);
+      expect(res.fieldSlaTargetHours).toBe(24);
+      expect(res.gifsySlaTargetHours).toBe(96);
+      expect(res.slaTargetHours).toBe(96); // legacy field mirrors the gifsy target
+      // 30h + 72h both ≤ 96 → no approval breach, 100% compliance.
       expect(res.slaBreachCount).toBe(0);
       expect(res.slaComplianceRate).toBe(100);
-      // Resolved for the caller's tenant.
-      expect(mockPrisma.programSetting.findFirst).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { clientId: 'deoleo', settingKey: 'slaTargetHours' } }),
+      // Both targets read in ONE round-trip, tenant-scoped.
+      expect(mockPrisma.programSetting.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            clientId: 'deoleo',
+            settingKey: { in: ['fieldSlaTargetHours', 'gifsySlaTargetHours'] },
+          },
+        }),
       );
     });
 
-    it('falls back to 48 when no slaTargetHours row exists — the 72h approval breaches', async () => {
-      mockPrisma.programSetting.findFirst.mockResolvedValue(null);
+    it('breaches the approval turnaround when the 72h decision exceeds a 48h gifsy target', async () => {
+      setTargets(24, 48);
       mockPrisma.kycSubmission.findMany
         .mockResolvedValueOnce(twoApprovals)
         .mockResolvedValueOnce([]);
       mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
 
       const res = await service.slaMetrics(gifsy);
-      // Default 48h → the 72h (business-hours) approval breaches, the 30h one does not.
-      expect(res.slaTargetHours).toBe(48);
+      // 72h > 48h gifsy target → 1 breach; the 30h one is fine.
+      expect(res.gifsySlaTargetHours).toBe(48);
       expect(res.slaBreachCount).toBe(1);
     });
 
-    it('ignores an out-of-range stored value and falls back to 48', async () => {
-      mockPrisma.programSetting.findFirst.mockResolvedValue({ settingValue: 9999 });
-      mockPrisma.kycSubmission.findMany
-        .mockResolvedValueOnce(twoApprovals)
-        .mockResolvedValueOnce([]);
-      mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
+    it('falls back to the stage defaults (24/96) when no rows exist, and ignores out-of-range values', async () => {
+      // No rows → defaults; and an out-of-range pair (9999 / 0) is rejected → defaults kept.
+      for (const rows of [[] as unknown[], [
+        { settingKey: 'fieldSlaTargetHours', settingValue: 9999 },
+        { settingKey: 'gifsySlaTargetHours', settingValue: 0 },
+      ]]) {
+        mockPrisma.programSetting.findMany.mockResolvedValueOnce(rows);
+        mockPrisma.kycSubmission.findMany
+          .mockResolvedValueOnce(twoApprovals)
+          .mockResolvedValueOnce([]);
+        mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
 
-      const res = await service.slaMetrics(gifsy);
-      expect(res.slaTargetHours).toBe(48);
-      expect(res.slaBreachCount).toBe(1);
+        const res = await service.slaMetrics(gifsy);
+        expect(res.fieldSlaTargetHours).toBe(24);
+        expect(res.gifsySlaTargetHours).toBe(96);
+        // 72h ≤ 96 default gifsy target → no approval breach.
+        expect(res.slaBreachCount).toBe(0);
+      }
+    });
+
+    it('drops DRAFT from the pending query and buckets pending rows by stage (field vs gifsy)', async () => {
+      jest.useFakeTimers();
+      // Fixed "now" = Fri 02 Jan 2026 06:00 UTC (a business day) so the pending ages are
+      // deterministic — never anchored to real `now` (that would go flaky over time/weekends).
+      jest.setSystemTime(new Date('2026-01-02T06:00:00Z'));
+      try {
+        setTargets(24, 96);
+        const pending = [
+          // Field stage: submitted Thu 01 00:00 → 24 (Thu) + 6 (Fri 00–06) = 30 business h → >24 field breach.
+          {
+            status: 'SUBMITTED',
+            submittedAt: new Date('2026-01-01T00:00:00Z'),
+            createdAt: new Date('2025-12-01T00:00:00Z'),
+            statusHistory: [],
+          },
+          // Gifsy stage: LATEST PENDING_GIFSY entry Thu 01 00:00 (a bounce Dec 15 is older) → 30 business h → ≤96, no breach.
+          {
+            status: 'PENDING_GIFSY',
+            submittedAt: new Date('2025-12-01T00:00:00Z'),
+            createdAt: new Date('2025-12-01T00:00:00Z'),
+            statusHistory: [
+              { toStatus: 'PENDING_GIFSY', createdAt: new Date('2025-12-15T00:00:00Z') },
+              { toStatus: 'PENDING_GIFSY', createdAt: new Date('2026-01-01T00:00:00Z') },
+            ],
+          },
+        ];
+        mockPrisma.kycSubmission.findMany
+          .mockResolvedValueOnce([]) // APPROVED query (none)
+          .mockResolvedValueOnce(pending); // pending query
+        mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
+
+        const res = await service.slaMetrics(gifsy);
+
+        // DRAFT is NOT in the pending status filter; the field statuses + PENDING_GIFSY are.
+        const pendingWhere = mockPrisma.kycSubmission.findMany.mock.calls[1][0].where;
+        expect(pendingWhere.status.in).not.toContain('DRAFT');
+        expect(pendingWhere.status.in).toEqual(
+          expect.arrayContaining(['SUBMITTED', 'PENDING_GIFSY']),
+        );
+
+        // Field stage: 1 pending, 30h > 24h target → breached, bucket 24-48h.
+        expect(res.field.target).toBe(24);
+        expect(res.field.pending).toBe(1);
+        expect(res.field.breachCount).toBe(1);
+        expect(res.field.aging['24-48h']).toBe(1);
+        // Gifsy stage: 1 pending, 30h ≤ 96h → no breach, bucket 24-48h (aged from the LATEST entry).
+        expect(res.gifsy.target).toBe(96);
+        expect(res.gifsy.pending).toBe(1);
+        expect(res.gifsy.breachCount).toBe(0);
+        expect(res.gifsy.aging['24-48h']).toBe(1);
+        // Combined (legacy) aging = both rows.
+        expect(res.pendingAging['24-48h']).toBe(2);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('ages a field-stage pending row from createdAt when submittedAt is null', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2026-01-02T06:00:00Z'));
+      try {
+        setTargets(24, 96);
+        const pending = [
+          { status: 'UNDER_REVIEW', submittedAt: null, createdAt: new Date('2026-01-01T00:00:00Z'), statusHistory: [] }, // 30h
+        ];
+        mockPrisma.kycSubmission.findMany
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce(pending);
+        mockPrisma.kycStatusHistory.findMany.mockResolvedValue([]);
+
+        const res = await service.slaMetrics(gifsy);
+        expect(res.field.pending).toBe(1);
+        expect(res.field.breachCount).toBe(1); // 30h > 24h, aged from the createdAt fallback
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 
