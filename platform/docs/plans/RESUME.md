@@ -191,15 +191,17 @@ then `/v1/auth/verify-otp` {phone,otp:'123456',clientId}; operator cross-tenant 
   Gifsy-admin recipients UI). Domain `notify.gifsy.in` VERIFIED (DNS Cloudflare). ▶ **owner to activate** (nothing sends until then): confirm the MSG91
   v5 email payload vs the dashboard API-Integration tab (`msg91.service.sendEmail` flagged block) → create `REPORTS_RUN_SECRET` + set recipients +
   Cloud Scheduler — runbook `runbooks/email-reports-activation.md`.
-- **🗓️ KYC SLA → TWO-STAGE (owner 2026-08-11) — 🏗️ BUILT on `develop`, UNCOMMITTED, gate-green (api jest 2274 · nest 0 · FE tsc 0 · FE vitest 2113),
-  DUAL-AUDITED.** Field SLA (submitted→reaching Gifsy, default **24h**) + Gifsy SLA (**LATEST** PENDING_GIFSY entry→decision, default **96h**,
-  restart-on-re-entry) — two per-tenant `field/gifsySlaTargetHours` settings REPLACING the single 48 (owner: 48 was wrong, Gifsy=96). Shared engine
-  `common/kyc-sla-stage.ts` (mirrored `platform/src/lib`); rewired the FE list (stage-tagged Field/Gifsy badge), `kycDashboard`, `slaMetrics`, the
-  rejected-export, and the email KYC report. **DRAFT** hidden from every approver queue + all SLA, visible ONLY to its creator (`kyc.service.list()`
-  `draftNot`). Security audit CLEAN; fixed the `statusCounts` tab-count to also carry `draftNot`. ▶ **NEXT (to decide + finish):** the OPEN correctness
-  findings are metric-fidelity on BOUNCED/re-entered KYCs (M1 no-history PENDING_GIFSY reads 3 ways; M2 dashboard `fieldChainHours` over-attributes a
-  re-entered approval's field time; L3 field-decided-after-bounce shows Gifsy badge; L4 legacy `slaMetrics` createdAt-anchored; INFO stale `slaTargetHours`
-  in getSettings) — rare in launch state; then COMMIT + push develop→staging + staging-verify. Detail: memory [[email-reports-business-day-sla]].
+- **🗓️ KYC SLA → TWO-STAGE (owner 2026-08-11) — ✅ PUSHED staging `5961d96` (`7190ed6..5961d96`), gate-green (api jest 2276 · nest 0 · FE tsc 0 ·
+  FE vitest 2114), DUAL-AUDITED + all fixable findings FIXED.** Field SLA (submitted→reaching Gifsy, default **24h**) + Gifsy SLA (**LATEST**
+  PENDING_GIFSY entry→decision, default **96h**, restart-on-re-entry) — two per-tenant `field/gifsySlaTargetHours` settings REPLACING the single 48
+  (owner: 48 was wrong, Gifsy=96). Shared engine `common/kyc-sla-stage.ts` (mirrored `platform/src/lib`); rewired the FE list (stage-tagged Field/Gifsy
+  badge), `kycDashboard`, `slaMetrics`, the rejected-export, and the email KYC report. **DRAFT** hidden from every approver queue + all SLA, visible ONLY
+  to its creator (`kyc.service.list()` `draftNot`; the `statusCounts` tab-count groupBy carries the same guard). **Correctness fixes:** M1 — a
+  PENDING_GIFSY row with no PENDING_GIFSY history entry now ages from `submittedAt` on EVERY surface (helper + slaMetrics fall back, matching the
+  dashboard); M2 — dashboard field-chain tile = submitted→FIRST hand-off (pure field time), Gifsy-review keeps LATEST entry→approval (bounced KYCs no
+  longer fold rework into "field"); L4 — legacy slaMetrics anchors at submittedAt; INFO — getSettings skips the retired `slaTargetHours`. **L3**
+  (field-decided-after-bounce shows Gifsy badge) documented as a low-value limitation (inline comment). ▶ **NEXT:** owner on-device UAT on staging; a
+  future prod cutover carries it (NOT in prod). Detail: memory [[email-reports-business-day-sla]].
 - **(context) queue drainer still PUSH-only** — the dead SMS legs (KYC UNDER_REVIEW SMS, redemption SMS) each have a paired PUSH/WhatsApp leg that
   DOES fire; the dead credit-batch EMAIL is now SUPERSEDED by the new Credits/Payouts report. Reviving the SMS legs is out of the email-only scope.
 - **#74 owner-ops residual:** optional cred/secret rotation + real prod MSG91 (monitoring + backups/PITR already ON).
